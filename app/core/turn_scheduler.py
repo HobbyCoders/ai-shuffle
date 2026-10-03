@@ -74,7 +74,7 @@ logger = logging.getLogger(__name__)
 # same attribution the original turn had.
 _CONTEXT_PAYLOAD_KEYS = (
     "api_user_id", "user_id", "orchestration_root", "orchestration_depth",
-    "_assistant_proactive",
+    "orchestration_remote_origin", "_assistant_proactive",
 )
 
 # Turn sources authored by a human (directly or via the send-queue). Used by

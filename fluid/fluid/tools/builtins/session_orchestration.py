@@ -91,10 +91,19 @@ SPECS = (
         "ask it to report back with MessageSession. Use a stable request_id and reuse it on retries. "
         "Autonomous chains are bounded to 4 new sessions, 32 total actions and 8 hops; "
         "only new user input starts a fresh budget. "
+        "Omit worker to start on this worker. Pass worker (an exact worker name or device id) "
+        "only when the user wants the work run on another online worker of this account, for "
+        "example one with the platform or files the task needs. That chat runs there with your "
+        "agent, model and permission mode in the same project's checkout on that worker (refused "
+        "when the project is not checked out there), never your worktree or branch, and receives "
+        "no private-access grants. It cannot start further chats or MessageSession you back; "
+        "the user sees it in the sidebar. An offline or unknown worker is refused, never "
+        "replaced by this one. "
         + _COMMON), input_schema={"type": "object", "properties": {
             "title": {"type": "string", "maxLength": 160},
             "prompt": {"type": "string", "maxLength": 8000},
-            "request_id": {"type": "string", "maxLength": 120}},
+            "request_id": {"type": "string", "maxLength": 120},
+            "worker": {"type": "string", "minLength": 1, "maxLength": 200}},
             "required": ["title", "prompt", "request_id"], "additionalProperties": False},
         risk="write", requires_extra=("session_orchestration",)), _handler("start")),
     _management_tool("SettleSession", "settle",
