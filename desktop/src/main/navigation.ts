@@ -5,6 +5,12 @@
  *   status page (that exact file, not any file: URL). Links elsewhere, and
  *   server redirects that would leave those two, go to the system browser
  *   when they are plain http(s) URLs and are dropped otherwise.
+ * - On the worker origin the main frame shows the app, never a raw API
+ *   response. A link to the worker's `/api/` (a chat file link the page did
+ *   not handle itself) is fetched as a download instead, so a refused or
+ *   missing file can no longer replace the app with a bare JSON page that has
+ *   no way back. A redirect onto `/api/` is stopped outright. Pop-ups at a
+ *   worker `/api/` URL (a modified click on a file link) download too.
  * - `window.open` from the worker page is allowed as a child window in the
  *   app's own session when the page needs it back: pop-ups that start on
  *   `about:blank` (the account sign-in window, the Google connector's OAuth
@@ -78,9 +84,32 @@ export function permissionAllowed(
 	return true;
 }
 
-/** Whether the main frame may show `url`: the worker origin or the bundled status page. */
+/**
+ * Whether `url` is one of the worker's non-document endpoints: its API
+ * (`/api/...`, JSON and file responses) or its WebSocket paths. These are
+ * fetched by the app, never shown as the window's page.
+ */
+export function workerEndpoint(url: string, workerOrigin: string | null): boolean {
+	if (!workerOrigin || !/^https?:/i.test(url)) return false;
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return false;
+	}
+	if (parsed.origin !== originOf(workerOrigin)) return false;
+	const path = parsed.pathname;
+	return path === '/api' || path.startsWith('/api/') || path === '/ws' || path.startsWith('/ws/');
+}
+
+/**
+ * Whether the main frame may show `url`: the bundled status page, or the
+ * worker origin's app pages (not its API or WebSocket endpoints).
+ */
 export function mainFrameAllowed(url: string, workerOrigin: string | null, bundledPageUrl: string): boolean {
-	return trustedPage(url, workerOrigin, bundledPageUrl) !== null;
+	const page = trustedPage(url, workerOrigin, bundledPageUrl);
+	if (page === 'worker') return !workerEndpoint(url, workerOrigin);
+	return page !== null;
 }
 
 function openExternally(url: string): void {
@@ -141,6 +170,13 @@ export function attachNavigationPolicy(
 	contents.on('will-navigate', (event, url) => {
 		if (mainFrameAllowed(url, currentOrigin(), bundledPageUrl)) return;
 		event.preventDefault();
+		// A file link the page left to the browser: keep the app and fetch it
+		// as a download (an attachment did that anyway; an error or an inline
+		// type would have replaced the app). Other endpoints are just stopped.
+		if (workerEndpoint(url, currentOrigin())) {
+			if (isApiUrl(url)) contents.downloadURL(url);
+			return;
+		}
 		openExternally(url);
 	});
 	// A server redirect does not fire will-navigate: a worker URL that 3xx's
@@ -148,10 +184,18 @@ export function attachNavigationPolicy(
 	contents.on('will-redirect', (details) => {
 		if (!details.isMainFrame || mainFrameAllowed(details.url, currentOrigin(), bundledPageUrl)) return;
 		details.preventDefault();
+		// Nothing the app loads redirects its page onto the API: stop it there.
+		if (workerEndpoint(details.url, currentOrigin())) return;
 		openExternally(details.url);
 	});
 
 	contents.setWindowOpenHandler(({ url, disposition }) => {
+		// A worker file opened in a new window (Ctrl+click, a `_blank` link):
+		// download it rather than showing the raw response in a child window.
+		if (workerEndpoint(url, currentOrigin())) {
+			if (isApiUrl(url)) contents.downloadURL(url);
+			return { action: 'deny' };
+		}
 		const placement = popupPlacement(url, disposition, currentOrigin());
 		if (placement === 'isolated') {
 			// Electron keeps a native window.open child in its opener's session,
@@ -200,6 +244,14 @@ export function attachNavigationPolicy(
 		if (details.reason === 'clean-exit') return;
 		onLoadFailure(`The page stopped unexpectedly (${details.reason}).`);
 	});
+}
+
+function isApiUrl(url: string): boolean {
+	try {
+		return new URL(url).pathname.startsWith('/api/');
+	} catch {
+		return false;
+	}
 }
 
 function hardenChild(child: WebContents): void {

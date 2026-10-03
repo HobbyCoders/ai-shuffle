@@ -106,6 +106,8 @@ test('NC-3: the request and check handlers both apply the worker-origin rule', (
 function fakeWindow() {
 	const contents = new EventEmitter();
 	contents.setWindowOpenHandler = (fn) => { contents.openHandler = fn; };
+	contents.downloaded = [];
+	contents.downloadURL = (url) => { contents.downloaded.push(url); };
 	return { webContents: contents };
 }
 
@@ -152,6 +154,66 @@ test('NC-4: the main frame stays on the worker origin or the bundled page, redir
 	origin = null;
 	assert.equal(navigate(contents, 'will-navigate', `${WORKER}/`), true);
 	assert.equal(navigate(contents, 'will-navigate', PAGE), false);
+});
+
+test('NC-4: the main frame never lands on a worker API response; file links download instead', () => {
+	const { nav, opened } = loadNavigation();
+	const win = fakeWindow();
+	let origin = WORKER;
+	nav.attachNavigationPolicy(win, () => origin, () => {}, PAGE);
+	const contents = win.webContents;
+	const refused = `${WORKER}/api/files/by-path?path=%2Fhome%2Fuser%2Fsecret.txt`;
+	const image = `${WORKER}/api/generated-images/by-path?path=%2Fwork%2Fa.png`;
+
+	// The owner's report: a refused chat file link replaced the whole app with its JSON.
+	assert.equal(navigate(contents, 'will-navigate', refused), true, 'the app stays put');
+	assert.equal(navigate(contents, 'will-navigate', image), true, 'an inline type would have replaced it too');
+	assert.deepEqual(contents.downloaded, [refused, image], 'the link is fetched as a download instead');
+	assert.deepEqual(opened, [], 'worker files never go to the system browser');
+
+	// WebSocket endpoints are not pages either, and are not downloaded.
+	assert.equal(navigate(contents, 'will-navigate', `${WORKER}/ws/chat`), true);
+	assert.equal(contents.downloaded.length, 2);
+
+	// App routes, including ones that merely start with the same letters, still load.
+	for (const path of ['/', '/?session=abc', '/settings', '/workspace', '/apis', '/mobile/', '/plaid-link']) {
+		assert.equal(navigate(contents, 'will-navigate', `${WORKER}${path}`), false, path);
+	}
+	// Another origin's /api/ is an external link, as before.
+	assert.equal(navigate(contents, 'will-navigate', 'https://example.com/api/x'), true);
+	assert.deepEqual(opened, ['https://example.com/api/x']);
+
+	// A redirect onto the API is stopped without a download or a browser hand-off.
+	assert.equal(redirect(contents, `${WORKER}/api/v1/auth/status`), true);
+	assert.equal(contents.downloaded.length, 2);
+	assert.equal(opened.length, 1);
+	assert.equal(redirect(contents, `${WORKER}/`), false, 'sign-in redirects to the app still land');
+
+	// Pop-ups at a worker file (Ctrl+click, a _blank link) download, never a raw child window.
+	assert.deepEqual(plain(openWindow(contents, refused, 'foreground-tab')), { action: 'deny' });
+	assert.equal(contents.downloaded.at(-1), refused);
+	// The pop-ups the page needs are unchanged.
+	assert.equal(openWindow(contents, 'about:blank').action, 'allow');
+	assert.equal(openWindow(contents, `${WORKER}/plaid-link`).action, 'allow');
+
+	// The bundled status page has no worker to protect: a worker URL is simply refused there.
+	origin = null;
+	assert.equal(navigate(contents, 'will-navigate', refused), true);
+	assert.equal(contents.downloaded.length, 3);
+});
+
+test('NC-4: workerEndpoint and mainFrameAllowed agree on what is a page', () => {
+	const { nav } = loadNavigation();
+	assert.equal(nav.workerEndpoint(`${WORKER}/api/files/by-path?path=x`, WORKER), true);
+	assert.equal(nav.workerEndpoint(`${WORKER}/api`, WORKER), true);
+	assert.equal(nav.workerEndpoint(`${WORKER}/ws`, WORKER), true);
+	assert.equal(nav.workerEndpoint(`${WORKER}/apix`, WORKER), false);
+	assert.equal(nav.workerEndpoint('http://127.0.0.1:8001/api/x', WORKER), false, 'another port is another origin');
+	assert.equal(nav.workerEndpoint(`${WORKER}/api/x`, null), false);
+	assert.equal(nav.workerEndpoint('not a url', WORKER), false);
+	assert.equal(nav.mainFrameAllowed(`${WORKER}/api/x`, WORKER, PAGE), false);
+	assert.equal(nav.mainFrameAllowed(`${WORKER}/chat`, WORKER, PAGE), true);
+	assert.equal(nav.mainFrameAllowed(PAGE, WORKER, PAGE), true);
 });
 
 test('NC-4: the bundled page is matched by its exact path, whatever the query or encoding', () => {

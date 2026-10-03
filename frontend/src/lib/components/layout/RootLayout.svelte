@@ -32,6 +32,7 @@
 	import { bindVisualViewport } from '$lib/utils/visual-viewport';
 	import { startLiveSync } from '$lib/services/live-sync';
 	import { initDesktop } from '$lib/services/desktop';
+	import { installFileLinkGuard } from '$lib/utils/file-link-guard';
 	let teardownLiveSync: (() => void) | undefined;
 	let teardownDesktop: (() => void) | null = null;
 
@@ -48,6 +49,7 @@
 	let bootstrapPreparation: Promise<unknown> | undefined;
 	let teardownErrorHandlers: (() => void) | null = null;
 	let teardownVisualViewport: (() => void) | null = null;
+	let teardownFileLinks: (() => void) | null = null;
 
 	// When a new build activates while THIS tab is visible, the PWA store defers
 	// the reload (so it can't wipe an in-progress composer draft) and flips
@@ -153,6 +155,9 @@
 		// Desktop shell bridge (no-op in a browser): title-bar colours, menu commands.
 		teardownDesktop = initDesktop();
 		teardownLiveSync = startLiveSync();
+		// File links in chat download in place; a refused one shows an error
+		// instead of replacing the app with the API's JSON.
+		teardownFileLinks = installFileLinkGuard();
 
 		// PWA features are the web UI's. The phone UI (served at /mobile/ and
 		// shown by the phone apps) gets no service worker and drops a stale one.
@@ -181,6 +186,8 @@
 		teardownErrorHandlers = null;
 		teardownVisualViewport?.();
 		teardownVisualViewport = null;
+		teardownFileLinks?.();
+		teardownFileLinks = null;
 	});
 </script>
 
