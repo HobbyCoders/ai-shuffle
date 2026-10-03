@@ -20,9 +20,17 @@ export type VoiceStreamEndReason =
  | 'provider-error'
  | 'server-closed'
  | 'connection-dropped'
- | 'playback-backlog'
- | 'upload-backlog'
  | 'invalid-response';
+/**
+ * Audio already scheduled ahead of the listener, in seconds. Speech that would
+ * start later than this is stale: it is dropped and the call stays up (#1671).
+ * A main-thread stall (opening a large session, a busy render) holds incoming
+ * frames in the socket; they then arrive together, and ending the call over
+ * that burst made switching sessions mid-reply hang up.
+ */
+export const MAX_PLAYBACK_AHEAD_S = 2;
+/** Unsent microphone audio (bytes) beyond which new frames are dropped. 4 s at 24 kHz. */
+export const MAX_UPLOAD_BUFFER = 192000;
 import workletUrl from './voicePcm.worklet.js?url&no-inline';
 
 /** One bidirectional PCM stream; the server owns provider auth and delegation. */
@@ -35,6 +43,8 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
  let source: MediaStreamAudioSourceNode | null = null;
  let stopped = false;
  let nextPlay = 0;
+ // Counted per stall so the console names it once, not per dropped frame.
+ let droppedPlayback = 0, droppedUpload = 0;
  let error: string | null = null;
  let endReason: VoiceStreamEndReason | null = null;
  const fail = (reason: VoiceStreamEndReason, message: string) => { endReason ??= reason; error ??= message; };
@@ -79,10 +89,11 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
      const buffer = context.createBuffer(1, pcm.length, 24000);
      const samples = buffer.getChannelData(0);
      for (let i = 0; i < pcm.length; i++) samples[i] = pcm[i] / 32768;
-     if (nextPlay - context.currentTime > 2) {
-      fail('playback-backlog', 'Voice playback fell behind. Start the call again.');
-      ws.close(); return;
+     if (nextPlay - context.currentTime > MAX_PLAYBACK_AHEAD_S) {
+      if (!droppedPlayback++) console.info('[voice] playback fell behind; dropping stale speech to catch up');
+      return;
      }
+     droppedPlayback = 0;
      const node = context.createBufferSource();
      node.buffer = buffer; node.connect(output);
      nextPlay = Math.max(nextPlay, context.currentTime + .02);
@@ -132,7 +143,13 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    // Dropping frames here is independent of MediaStreamTrack.enabled. Epochs
    // reject queued pre-mute frames even after a quick mute/unmute.
    if (socket?.readyState !== WebSocket.OPEN || stopped || micMuted || event.data.generation !== micGeneration) return;
-   if (socket.bufferedAmount > 192000) { fail('upload-backlog', 'Voice upload fell behind. Start the call again.'); socket.close(); return; }
+   // A stalled connection is caught by its close; a burst after a stall only
+   // loses the microphone audio that could not be sent in time.
+   if (socket.bufferedAmount > MAX_UPLOAD_BUFFER) {
+    if (!droppedUpload++) console.info('[voice] upload fell behind; dropping microphone audio to catch up');
+    return;
+   }
+   droppedUpload = 0;
    socket.send(event.data.pcm);
   };
   return {

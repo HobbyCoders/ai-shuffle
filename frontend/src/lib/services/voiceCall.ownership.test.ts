@@ -172,10 +172,10 @@ describe('voice owner lifecycle', () => {
 	it('reports a client-side shutdown as an error with its own reason', async () => {
 		vi.spyOn(console, 'info').mockImplementation(() => {});
 		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
-		streamHandlers.current!.closed('Voice playback fell behind. Start the call again.', 'playback-backlog');
-		await vi.waitFor(() => expect(get(voiceCallState).error).toBe('Voice playback fell behind. Start the call again.'));
-		expect(get(voiceCallState)).toMatchObject({ status: 'error', endReason: 'playback-backlog' });
-		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'playback-backlog');
+		streamHandlers.current!.closed('The voice connection dropped.', 'connection-dropped');
+		await vi.waitFor(() => expect(get(voiceCallState).error).toBe('The voice connection dropped.'));
+		expect(get(voiceCallState)).toMatchObject({ status: 'error', endReason: 'connection-dropped' });
+		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'connection-dropped');
 	});
 	it('labels the End button hangup as the user ending the call', async () => {
 		vi.spyOn(console, 'info').mockImplementation(() => {});
