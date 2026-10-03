@@ -23,6 +23,10 @@ code-mode's Python ``SkillStore`` files, even though both use the same default
 global root. Plugin skills/commands join discovery namespaced
 ``<plugin>:<name>`` when the caller opts in (``include_plugins``).
 
+Built-in skills ship inside this package (``fluid/builtin_skills/<name>/
+SKILL.md``, scope ``builtin``). They rank below every user and project skill,
+so a skill of the same name in ``~/.fluid/skills`` or a project replaces one.
+
 Every instruction block carries a ``# From: <path>`` provenance header. Global
 entries come first, followed by project entries from git root to cwd.
 """
@@ -97,7 +101,7 @@ class Skill:
     name: str
     description: str
     path: str
-    scope: str = "project"  # "global" | "project" | "plugin"
+    scope: str = "project"  # "global" | "project" | "plugin" | "builtin"
     body_loaded: bool = False  # progressive disclosure: body read on demand
 
 
@@ -600,11 +604,20 @@ def _commands_in(base: Path, scope: str) -> dict[str, Command]:
     return out
 
 
+def builtin_skills_dir() -> Path:
+    """The skills shipped with the package (``fluid/builtin_skills``)."""
+    return Path(__file__).resolve().parent.parent / "builtin_skills"
+
+
 def skill_search_roots(
     cwd: str | os.PathLike[str], *, include_global: bool = True,
-    include_project: bool = True,
+    include_project: bool = True, include_builtin: bool = True,
 ) -> list[tuple[Path, str]]:
-    """Skill directories in discovery order, paired with their setting scope."""
+    """Skill directories in discovery order, paired with their setting scope.
+
+    The built-in root comes last (scope ``builtin``), so it never shadows a
+    user or project skill of the same name.
+    """
     roots: list[tuple[Path, str]] = []
     if include_project:
         for directory in _walk_up_dirs(Path(cwd)):
@@ -614,6 +627,8 @@ def skill_search_roots(
             ))
     if include_global:
         roots.append((Path.home() / ".fluid" / "skills", "global"))
+    if include_builtin:
+        roots.append((builtin_skills_dir(), "builtin"))
     return roots
 
 
@@ -624,6 +639,7 @@ def discover_skills(
     include_project: bool = True,
     include_plugins: bool = False,
     plugins: list[Any] | None = None,
+    include_builtin: bool = True,
 ) -> list[Skill]:
     """Discover ``<skills-dir>/*/SKILL.md`` and parse name+description only.
 
@@ -631,6 +647,8 @@ def discover_skills(
     :func:`fluid.context.agents.discover_agents`: a project skill beats a
     global one of the same name, the project directory nearest the cwd beats an
     outer one, and in one directory ``.fluid/skills`` beats ``.agents/skills``.
+    Built-in skills (``include_builtin``) come last: any user or project skill
+    of the same name replaces one.
 
     Bodies are left unread (``body_loaded=False``) — progressive disclosure:
     the ``Skill`` builtin loads a body on demand. ``include_plugins`` appends
@@ -640,6 +658,7 @@ def discover_skills(
     by_name: dict[str, Skill] = {}
     for root, scope in skill_search_roots(
         cwd, include_global=include_global, include_project=include_project,
+        include_builtin=include_builtin,
     ):
         found = _skills_in(root, scope)
         if scope == "project":

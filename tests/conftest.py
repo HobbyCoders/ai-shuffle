@@ -144,6 +144,15 @@ def _isolated_computer_use_halt_state(monkeypatch):
         monkeypatch.setattr(abort, "_GENERATIONS", {})
 
 @pytest.fixture(autouse=True)
+def _no_builtin_skills(tmp_path_factory, monkeypatch):
+    """Keep fluid's built-in skills (``fluid/builtin_skills``) out of the skill
+    and slash-command listings tests assert on. Tests of a built-in skill
+    point ``builtin_skills_dir`` back at the package folder themselves."""
+    empty = tmp_path_factory.mktemp("no-builtin-skills")
+    monkeypatch.setattr("fluid.context.instructions.builtin_skills_dir", lambda: empty)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_connector_package_store(tmp_path, monkeypatch):
     from app.core import connector_packages
     monkeypatch.setattr(connector_packages, "root", lambda: tmp_path / "connector-packages")

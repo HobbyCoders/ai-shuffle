@@ -74,6 +74,8 @@ These fields are absent from workers that predate them.
 
 This is the format for plugins made for AI Shuffle. Check a folder with `python -m fluid.context.plugin_check <folder>`, which lists every problem it finds. It follows the Agent Plugins layout (a root `plugin.json`), with the parts only AI Shuffle reads kept under `extensions["ai.shuffle"]`.
 
+Agents learn this format from the built-in `build-plugin` skill, which ships with AI Shuffle and is listed with your other skills. It covers when a plugin is worth making instead of a plain skill, the layout, declaring services, running the validator and saving the result for your review. A skill named `build-plugin` in `~/.fluid/skills` or in a project replaces it.
+
 ```
 my-plugin/
 ├── plugin.json               # required

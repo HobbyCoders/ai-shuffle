@@ -846,12 +846,20 @@ def skill_store_tool_specs() -> dict[str, ToolSpec]:
                     },
                     "agents": {
                         "type": "array",
-                        "description": "[{name, description, body}] — subagent system prompts",
+                        "description": "[{name, description, tools?, body}] — subagent system prompts",
                         "items": {"type": "object"},
                     },
                     "mcp_servers": {
                         "type": "object",
                         "description": "{name: {command, args?, env?} | {url}}",
+                    },
+                    "services": {
+                        "type": "array",
+                        "description": (
+                            "[{name, provider, url?, access, purpose}] — outside services "
+                            "the plugin asks access to; never a credential"
+                        ),
+                        "items": {"type": "object"},
                     },
                 },
                 "required": ["name"],

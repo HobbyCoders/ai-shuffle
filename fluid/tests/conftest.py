@@ -89,3 +89,12 @@ def isolate_home(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     return home
+
+
+@pytest.fixture(autouse=True)
+def _no_builtin_skills(tmp_path_factory, monkeypatch):
+    """Keep the package's built-in skills (``fluid/builtin_skills``) out of the
+    skill listings tests assert on. Tests of a built-in skill point
+    ``builtin_skills_dir`` back at the package folder themselves."""
+    empty = tmp_path_factory.mktemp("no-builtin-skills")
+    monkeypatch.setattr("fluid.context.instructions.builtin_skills_dir", lambda: empty)

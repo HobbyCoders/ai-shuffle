@@ -123,6 +123,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         known = ", ".join(sorted(s.name for s in skills)) or "(none discovered)"
         roots = [str(root) for root, _ in skill_search_roots(
             ctx.cwd, include_global=user_on, include_project=project_on,
+            include_builtin=False,
         )]
         if user_on:
             roots.append(str(Path.home() / ".fluid" / "plugins"))
