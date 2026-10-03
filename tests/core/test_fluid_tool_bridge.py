@@ -60,7 +60,15 @@ def test_real_chat_access_tools_have_serializable_provider_schemas():
     register_recorded_sdk_servers(registry, {"chat-access": create_chat_access_server("schema-test")})
     request = registry.get("mcp__chat-access__RequestChatAccess")
     assert request.input_schema == {
-        "type": "object", "properties": {"kind": {"type": "string"}, "purpose": {"type": "string"}},
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["machine", "folder", "service"]},
+            "purpose": {"type": "string"},
+            "suggested_path": {
+                "type": "string",
+                "description": "Folder only: known absolute path on the owning worker, prefilled for user review. Omit when unknown.",
+            },
+        },
         "required": ["kind", "purpose"],
     }
     wire = build_request_body(ProviderRequest(
@@ -70,6 +78,7 @@ def test_real_chat_access_tools_have_serializable_provider_schemas():
     ))
     encoded = json.dumps(wire)
     assert "RequestChatAccess" in encoded and "ChatWriteFile" in encoded
+    assert "suggested_path" in encoded
     # The broker's one-shot card is the approval; the generic gate would ask twice.
     for name in ("ChatRunCommand", "ChatWriteFile"):
         assert registry.get(f"mcp__chat-access__{name}").risk == "safe"

@@ -23,8 +23,8 @@ function mount(overrides: Record<string, unknown> = {}) {
 		onComplete,
 		...overrides
 	};
-	render(PrivateAccessRequest, props);
-	return { onComplete };
+	const rendered = render(PrivateAccessRequest, props);
+	return { onComplete, ...rendered };
 }
 const endpoint = '/chat-access/s%201/requests/r%2F1';
 const field = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
@@ -119,6 +119,26 @@ describe('PrivateAccessRequest', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 		expect(m.post.mock.calls[0][1]).toMatchObject({ saved_id: '', save_connection: false, connection: { kind: 'folder', label: 'Folder', path: '/home/me/notes', writable: true } });
+	});
+
+	it('prefills a proposed folder but preserves edits across refreshes and a failed approval', async () => {
+		const request = { id: 'r/1', kind: 'folder', purpose: 'Test a folder', expires_at: inAnHour(), suggested_path: '/workspace/test' };
+		const { rerender, onComplete } = mount({ owner: 'Unraid', request });
+		expect(field('Folder on Unraid').value).toBe('/workspace/test');
+		expect(m.post).not.toHaveBeenCalled();
+		expect(screen.getByText(/mounted container path/)).toBeTruthy();
+		await fireEvent.input(field('Folder on Unraid'), { target: { value: '/workspace/private-choice' } });
+		await rerender({ request: { ...request } });
+		expect(field('Folder on Unraid').value).toBe('/workspace/private-choice');
+		m.post.mockRejectedValueOnce({ detail: 'Folder not found on the worker that runs this chat.' });
+		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
+		await waitFor(() => expect(screen.getByText(/Folder not found/)).toBeTruthy());
+		expect(onComplete).not.toHaveBeenCalled();
+		expect(field('Folder on Unraid').value).toBe('/workspace/private-choice');
+		await fireEvent.input(field('Folder on Unraid'), { target: { value: '/workspace/corrected' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Grant access' }));
+		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+		expect(m.post.mock.calls[1][1].connection).toMatchObject({ path: '/workspace/corrected', writable: false });
 	});
 
 	it('names the owning device for a mirrored conversation and posts to this worker', async () => {

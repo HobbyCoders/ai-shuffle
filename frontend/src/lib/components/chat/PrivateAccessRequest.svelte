@@ -4,7 +4,7 @@
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { onMount, untrack } from 'svelte';
 	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
-	let { sessionId, request, savedConnections, vaultAvailable, owner = null, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number }; savedConnections: Saved[]; vaultAvailable: boolean; owner?: string | null; onComplete: () => void } = $props();
+	let { sessionId, request, savedConnections, vaultAvailable, owner = null, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string }; savedConnections: Saved[]; vaultAvailable: boolean; owner?: string | null; onComplete: () => void } = $props();
 	// A mirrored conversation's access lives on the device that runs it; this worker only relays.
 	const where = $derived(owner ?? 'this worker');
 	const sentTo = $derived(owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker');
@@ -34,7 +34,7 @@
 	let saveConnection = $state(false);
 	let label = $state(machine ? 'SSH server' : service ? 'API service' : 'Folder');
 	let minutes = $state(60);
-	let path = $state('');
+	let path = $state(untrack(() => request.kind === 'folder' ? request.suggested_path ?? '' : ''));
 	let writable = $state(false);
 	let host = $state('');
 	let port = $state(22);
@@ -180,6 +180,7 @@
 				<label class="pa-option"><input type="checkbox" bind:checked={writable} /><strong>Allow changes</strong><small>POST, PUT, PATCH and DELETE follow this session’s permission mode; otherwise only GET and HEAD.</small></label>
 			{:else}
 				<label class="pa-field"><span>Folder on {where}</span><input class="card-form-input card-form-input--mono" required placeholder="/home/me/documents" spellcheck="false" bind:value={path} /></label>
+				<p class="pa-hint">Review or change the proposed path before granting access. The folder must already exist on {where}. For Docker or Unraid, use its mounted container path, not an unmounted host path.</p>
 				<label class="pa-option"><input type="checkbox" bind:checked={writable} /><strong>Allow text writes</strong><small>Writes follow this session’s permission mode; bypass skips repeat approvals.</small></label>
 			{/if}
 

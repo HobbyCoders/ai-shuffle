@@ -12,7 +12,7 @@
 	let { sessionId, trigger = 'button' }: { sessionId: string; trigger?: 'button' | 'none' } = $props();
 	type Grant = { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean; fingerprint?: string };
 	type Action = { id: string; grant_id: string; operation: string; arguments: Record<string, string>; expires_at: number };
-	type Request = { id: string; kind: string; purpose: string; expires_at: number };
+	type Request = { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string };
 	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
 	let data = $state<{grants: Grant[]; actions: Action[]; requests: Request[]; saved_connections: Saved[]; vault_available: boolean}>({grants: [], actions: [], requests: [], saved_connections: [], vault_available: false});
 	let confirmingDelete = $state<string | null>(null);

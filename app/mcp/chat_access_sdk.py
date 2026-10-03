@@ -22,6 +22,11 @@ user to post addresses, passwords, private keys, API keys, tokens or other
 connection details as chat text. The card sends those inputs directly to the
 worker; you receive only a temporary handle, resource kind, permissions and
 expiry. Never try to reveal private inputs.
+For folder access, include suggested_path with the absolute folder path you want
+on the worker that runs this chat. The user can edit it before approving. Use a
+known path, not a guessed one; in Docker/Unraid this is the container path, not
+an unmounted host path. The suggestion grants no access and does not create a
+folder. If the path is unknown, let the user choose privately in the card.
 Grants expire and are lost on restart. Supported resources are SSH machines,
 Linux or macOS folders and HTTPS API services. A service grant holds one API key or token
 which ChatHttpRequest attaches for you; you never see it, and responses are
@@ -58,7 +63,8 @@ def create_chat_access_server(session_id: str):
     async def invoke(operation, args):
         try:
             if operation == "request":
-                result = await broker.request(session_id, args.get("kind", ""), args.get("purpose", ""))
+                result = await broker.request(session_id, args.get("kind", ""), args.get("purpose", ""),
+                                              suggested_path=args.get("suggested_path", ""))
             elif operation == "resources":
                 # Grant metadata only: pending command/write contents belong to
                 # the approval UI, saved connections to the access panel.
@@ -73,7 +79,15 @@ def create_chat_access_server(session_id: str):
             message = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
         return {"isError": True, "content": [{"type": "text", "text": message}]}
 
-    @tool("RequestChatAccess", "Show a private input card in this conversation for an SSH machine (kind=machine), a Linux or macOS folder (kind=folder) or an HTTPS API service credential (kind=service). Explain why access is needed. The user enters connection details privately; returns only an opaque temporary handle, never credentials or the address. Waits up to four minutes. Do not request arbitrary secrets without a supported private consumer.", {"kind": str, "purpose": str})
+    @tool("RequestChatAccess", "Show a private input card in this conversation for an SSH machine (kind=machine), a Linux or macOS folder (kind=folder) or an HTTPS API service credential (kind=service). Explain why access is needed. The user enters connection details privately; returns only an opaque temporary handle, never credentials or the address. For folders, include suggested_path with a known absolute path on the owning worker; the user can edit it before approving. It grants no access and creates no folder. Waits up to four minutes. Do not request arbitrary secrets without a supported private consumer.", {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["machine", "folder", "service"]},
+            "purpose": {"type": "string"},
+            "suggested_path": {"type": "string", "description": "Folder only: known absolute path on the owning worker, prefilled for user review. Omit when unknown."},
+        },
+        "required": ["kind", "purpose"],
+    })
     async def request(args):
         return await invoke("request", args)
 

@@ -128,9 +128,13 @@ class AccessRequest:
     expires_at: float
     result: asyncio.Future
     claiming: bool = False
+    suggested_path: str = ""
 
     def public(self):
-        return {key: getattr(self, key) for key in ("id", "kind", "purpose", "expires_at")}
+        result = {key: getattr(self, key) for key in ("id", "kind", "purpose", "expires_at")}
+        if self.suggested_path:
+            result["suggested_path"] = self.suggested_path
+        return result
 
 
 logger = logging.getLogger(__name__)
@@ -264,16 +268,22 @@ class Broker:
         from app.network import chat_access_routing
         chat_access_routing.notify_watchers(session_id, saved=saved)
 
-    async def request(self, session_id: str, kind: str, purpose: str):
+    async def request(self, session_id: str, kind: str, purpose: str, suggested_path: str = ""):
         owner = await session_owner(session_id)
         if kind not in {"machine", "folder", "service"} or not isinstance(purpose, str) or not purpose.strip() or len(purpose) > 2000:
             raise AccessDenied("Specify machine, folder or service and a short explanation of the requested access.")
+        if not isinstance(suggested_path, str) or (suggested_path and (
+            kind != "folder" or not suggested_path.startswith("/") or len(suggested_path) > 4096
+            or any(c in suggested_path for c in "\0\r\n")
+        )):
+            raise AccessDenied("A suggested path must be an absolute folder path on the owning worker.")
         if kind == "folder" and not chat_files.available():
             raise AccessDenied("This worker cannot safely grant folders. Do not ask for a path or use a shell workaround.")
         if any(r.session_id == session_id for r in self.requests.values()):
             raise AccessDenied("A private access request is already awaiting the user.")
         request = AccessRequest(uuid.uuid4().hex, session_id, owner, kind, purpose.strip(),
-                                time.time() + 240, asyncio.get_running_loop().create_future())
+                                time.time() + 240, asyncio.get_running_loop().create_future(),
+                                suggested_path=suggested_path)
         self.requests[request.id] = request
         self._notify(session_id, owner)
         try:
@@ -442,7 +452,17 @@ class Broker:
                 private = settings.effective_data_dir.resolve()
                 if root == private or root in private.parents or private in root.parents:
                     raise AccessDenied("The worker's private data and credential storage cannot be granted.")
-                grant.root = chat_files.open_root(spec.path)
+                try:
+                    grant.root = chat_files.open_root(spec.path)
+                except FileNotFoundError:
+                    raise AccessDenied(
+                        "Folder not found on the worker that runs this chat. Choose an existing folder. "
+                        "For Docker or Unraid, use a mounted container path, not an unmounted host path."
+                    ) from None
+                except NotADirectoryError:
+                    raise AccessDenied("Choose a folder, not a file or symbolic link.") from None
+                except PermissionError:
+                    raise AccessDenied("The worker cannot read this folder. Choose a folder its account can access.") from None
             elif spec.kind == "service":
                 origin = chat_services.parse_origin(spec.url.strip())
                 header = chat_services.credential_header(
