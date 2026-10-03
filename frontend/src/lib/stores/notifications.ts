@@ -21,6 +21,8 @@ export interface AppNotification {
 	title?: string;
 	message: string;
 	action?: NotificationAction;
+	/** A second, quieter action next to `action`. */
+	secondaryAction?: NotificationAction;
 	/** Whether this item is saved remotely; notifications always appear in the bell. */
 	persist: boolean;
 	read: boolean;
@@ -60,6 +62,7 @@ interface NotifyOptions {
 	category?: string;
 	title?: string;
 	action?: NotificationAction;
+	secondaryAction?: NotificationAction;
 	/** Override the default remote persistence. */
 	persist?: boolean;
 	/** Banner auto-dismiss in ms. Pass 0 for a sticky banner. */
@@ -151,6 +154,7 @@ function _emit(
 		title: opts.title,
 		message: opts.message ?? '',
 		action: opts.action,
+		secondaryAction: opts.secondaryAction,
 		persist,
 		read: opts.read ?? false,
 		dismissed: false,
@@ -221,7 +225,8 @@ export const notify = Object.assign(
 				persist?: boolean;
 				created_at?: number;
 			},
-			action?: NotificationAction
+			action?: NotificationAction,
+			secondaryAction?: NotificationAction
 		): string =>
 			_emit({
 				...payload,
@@ -229,6 +234,7 @@ export const notify = Object.assign(
 				source: 'server',
 				persist: payload.persist ?? payload.surface !== 'banner',
 				action,
+				secondaryAction,
 			}),
 
 		/** Reconcile the server snapshot while retaining changes made during its fetch. */
@@ -242,7 +248,7 @@ export const notify = Object.assign(
 					if (before.has(item.id) && !local) continue; // dismissed during fetch
 					if (local && before.get(item.id) !== local) { merged.set(item.id, local); continue; }
 					if (!item.dismissed) merged.set(item.id, { ...item, surface: 'notification',
-						action: local?.action, session_id: item.session_id ?? local?.session_id });
+						action: local?.action, secondaryAction: local?.secondaryAction, session_id: item.session_id ?? local?.session_id });
 				}
 				for (const local of s.history) {
 					if (!local.persist || before.get(local.id) !== local) merged.set(local.id, local);

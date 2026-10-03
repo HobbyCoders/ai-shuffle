@@ -38,4 +38,20 @@ describe('NotificationCenter', () => {
 
 		expect(screen.getByRole('img', { name: 'Warning' })).toBeTruthy();
 	});
+
+	it('renders both an action and a second action on one item', async () => {
+		const report = vi.fn();
+		const fix = vi.fn();
+		notify.ingest(
+			{ id: 'srv-1', severity: 'error', category: 'api_error', message: 'API error: HTTP 500' },
+			{ label: 'Send report to support', onClick: report },
+			{ label: 'Fix with AI', onClick: fix }
+		);
+		render(NotificationCenter);
+		await fireEvent.click(screen.getByRole('button', { name: /Notifications/ }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Send report to support' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Fix with AI' }));
+		expect(report).toHaveBeenCalledTimes(1);
+		expect(fix).toHaveBeenCalledTimes(1);
+	});
 });

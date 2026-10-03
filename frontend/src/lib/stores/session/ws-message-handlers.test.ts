@@ -24,6 +24,12 @@ import type { ActiveSessionState } from '../active-session';
 // have their own dedicated tests (error-reporter.test.ts, fix-with-ai.test.ts).
 vi.mock('$lib/services/error-reporter', () => ({ reportClientError: vi.fn() }));
 vi.mock('$lib/services/fix-with-ai', () => ({ startFixChat: vi.fn() }));
+// Error actions read the support capabilities; drive them per test.
+vi.mock('$lib/stores/support-report.svelte', () => ({
+	canSendSupportReport: vi.fn(() => true),
+	canFixWithAi: vi.fn(() => false),
+	openSupportReport: vi.fn(),
+}));
 // The unified notification funnel: assert the handler feeds server events into
 // the store via `notify.ingest`, rather than rendering them itself. `notify.error`
 // is used by the failed-answer-relay path to toast the user.
@@ -48,6 +54,7 @@ vi.mock('./v2/feed-controller', () => ({
 
 import { notify } from '../notifications';
 import { startFixChat } from '$lib/services/fix-with-ai';
+import { canFixWithAi, openSupportReport } from '$lib/stores/support-report.svelte';
 import { feedController } from './v2/feed-controller';
 import { pendingQueue } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
@@ -333,6 +340,8 @@ describe('ws-message-handlers', () => {
 		beforeEach(() => {
 			(notify.ingest as ReturnType<typeof vi.fn>).mockClear();
 			(startFixChat as ReturnType<typeof vi.fn>).mockClear();
+			(openSupportReport as ReturnType<typeof vi.fn>).mockClear();
+			(canFixWithAi as ReturnType<typeof vi.fn>).mockReturnValue(false);
 		});
 
 		it('feeds a server notification into the store via notify.ingest', () => {
@@ -373,7 +382,32 @@ describe('ws-message-handlers', () => {
 			expect(payload.action).toBeUndefined();
 		});
 
-		it('rebuilds a Fix-with-AI action for api_error (non-429) and wires startFixChat', () => {
+		it('offers only "Send report to support" for api_error when Fix with AI is off', () => {
+			handlers.handleMessage({
+				type: 'notification',
+				notification: {
+					id: 'srv-3a',
+					severity: 'error',
+					category: 'api_error',
+					message: 'API error: HTTP 500',
+					session_id: 'session-9',
+					action: { kind: 'fix_with_ai', payload: { status_code: 500, session_id: 'session-9' } },
+				},
+			});
+
+			const [payload, action, secondary] = (notify.ingest as ReturnType<typeof vi.fn>).mock.calls[0];
+			expect(payload.duration_ms).toBe(10000);
+			expect(action.label).toBe('Send report to support');
+			expect(secondary).toBeUndefined();
+			action.onClick();
+			expect(openSupportReport).toHaveBeenCalledWith({
+				error: { source: 'ws', message: 'API error: HTTP 500', status_code: 500 },
+			});
+			expect(startFixChat).not.toHaveBeenCalled();
+		});
+
+		it('adds Fix with AI as a second action on a source checkout and wires startFixChat', () => {
+			(canFixWithAi as ReturnType<typeof vi.fn>).mockReturnValue(true);
 			handlers.handleMessage({
 				type: 'notification',
 				notification: {
@@ -386,8 +420,9 @@ describe('ws-message-handlers', () => {
 				},
 			});
 
-			const [payload, action] = (notify.ingest as ReturnType<typeof vi.fn>).mock.calls[0];
+			const [payload, report, action] = (notify.ingest as ReturnType<typeof vi.fn>).mock.calls[0];
 			expect(payload.duration_ms).toBe(10000);
+			expect(report.label).toBe('Send report to support');
 			expect(action).toBeTruthy();
 			expect(action.label).toBe('Fix with AI');
 

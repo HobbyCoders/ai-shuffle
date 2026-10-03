@@ -25,6 +25,7 @@
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
 	import BannerHost from '$lib/components/BannerHost.svelte';
 	import ComputerUseBanner from '$lib/components/ComputerUseBanner.svelte';
+	import SupportReportHost from '$lib/components/support/SupportReportHost.svelte';
 	import OwnerAccessGate from '$lib/components/OwnerAccessGate.svelte';
 	import { ownerAccess } from '$lib/stores/owner-access.svelte';
 	import { notify } from '$lib/stores/notifications';
@@ -245,7 +246,7 @@
 	<!-- PWA Components -->
 	{#if !mobileApp}<InstallPrompt />{/if}
 	<BannerHost />
-	{#if $isAuthenticated}<ComputerUseBanner />{/if}
+	{#if $isAuthenticated}<ComputerUseBanner /><SupportReportHost />{/if}
 
 	{@render children?.()}
 {/if}

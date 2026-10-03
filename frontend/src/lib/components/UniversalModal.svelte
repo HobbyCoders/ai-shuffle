@@ -27,6 +27,7 @@
 		onClose: () => void;
 		onSave?: () => void;
 		saveLabel?: string;
+		cancelLabel?: string;
 		saveDisabled?: boolean;
 		saving?: boolean;
 		showFooter?: boolean;
@@ -47,6 +48,7 @@
 		onClose,
 		onSave,
 		saveLabel = 'Save',
+		cancelLabel = 'Cancel',
 		saveDisabled = false,
 		saving = false,
 		showFooter = true,
@@ -177,7 +179,7 @@
 						onclick={onClose}
 						class="modal-secondary-btn px-6 py-2.5 rounded-xl text-sm font-medium bg-muted text-foreground border border-border transition-colors"
 					>
-						Cancel
+						{cancelLabel}
 					</button>
 
 					{#if onSave}

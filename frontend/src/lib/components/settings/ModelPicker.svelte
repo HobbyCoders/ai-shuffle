@@ -133,7 +133,11 @@
 		if (rootEl && !rootEl.contains(e.target as Node)) open = false;
 	}
 	function onKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape') open = false;
+		if (e.key !== 'Escape') return;
+		open = false;
+		// This Escape closed the panel; keep it from also closing a dialog the
+		// picker sits in (those listen on window, after this document listener).
+		e.stopPropagation();
 	}
 
 	$effect(() => {

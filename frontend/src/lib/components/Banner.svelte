@@ -24,6 +24,7 @@
 		dismissible = false,
 		onDismiss,
 		action,
+		secondaryAction,
 		icon = true,
 		children,
 	}: {
@@ -34,6 +35,8 @@
 		dismissible?: boolean;
 		onDismiss?: () => void;
 		action?: { label: string; onClick: () => void };
+		/** A second, quieter action after `action`. */
+		secondaryAction?: { label: string; onClick: () => void };
 		icon?: boolean;
 		/** Optional rich content; overrides `message` when provided. */
 		children?: Snippet;
@@ -67,6 +70,9 @@
 	</div>
 	{#if action}
 		<button type="button" class="banner-action" onclick={action.onClick}>{action.label}</button>
+	{/if}
+	{#if secondaryAction}
+		<button type="button" class="banner-action secondary" onclick={secondaryAction.onClick}>{secondaryAction.label}</button>
 	{/if}
 	{#if dismissible}
 		<button type="button" class="banner-close" onclick={() => onDismiss?.()} aria-label="Dismiss" title="Dismiss">
@@ -159,6 +165,9 @@
 	}
 	.banner-action:hover {
 		opacity: 0.88;
+	}
+	.banner-action.secondary {
+		background: transparent;
 	}
 
 	.banner-close {

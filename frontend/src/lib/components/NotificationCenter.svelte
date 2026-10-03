@@ -161,14 +161,21 @@
 									<span class="item-time">{relativeTime(n.created_at)}</span>
 								</span>
 							</button>
-							{#if n.action}
-								<button
-									class="item-action"
-									onclick={(e) => {
-										e.stopPropagation();
-										n.action?.onClick();
-									}}>{n.action.label}</button
-								>
+							{#if n.action || n.secondaryAction}
+								<div class="item-actions">
+									{#each [n.action, n.secondaryAction] as act, i (i)}
+										{#if act}
+											<button
+												class="item-action"
+												class:secondary={i === 1}
+												onclick={(e) => {
+													e.stopPropagation();
+													act.onClick();
+												}}>{act.label}</button
+											>
+										{/if}
+									{/each}
+								</div>
 							{/if}
 							<button
 								class="item-dismiss"
@@ -432,9 +439,20 @@
 		margin-top: 1px;
 	}
 
-	.item-action {
+	.item-actions {
 		flex-shrink: 0;
 		align-self: center;
+		display: flex;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 4px;
+		max-width: 9.5rem;
+	}
+
+	.item-action {
+		flex-shrink: 0;
+		text-align: center;
+		white-space: normal;
 		padding: 4px 9px;
 		font-size: 0.6875rem;
 		font-weight: 600;
@@ -443,12 +461,22 @@
 		border: none;
 		border-radius: 6px;
 		cursor: pointer;
-		white-space: nowrap;
 		transition: background-color 120ms ease;
 	}
 
 	.item-action:hover {
 		background: color-mix(in oklch, var(--primary) 20%, transparent);
+	}
+
+	.item-action.secondary {
+		color: var(--muted-foreground);
+		background: transparent;
+		box-shadow: inset 0 0 0 1px var(--border);
+	}
+
+	.item-action.secondary:hover {
+		color: var(--foreground);
+		background: var(--hover-overlay);
 	}
 
 	.item-dismiss {

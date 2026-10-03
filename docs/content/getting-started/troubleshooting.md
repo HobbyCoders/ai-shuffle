@@ -118,6 +118,10 @@ Pages crash or the browser closes when the container has too little shared memor
 
 ## Sending logs to support
 
+**From the app:** when an error notification appears, press **Send report to support**. The dialog shows the exact text that will be sent, with recognised secrets replaced by `***`, and nothing leaves the worker until you press **Send**. It also checks whether HobbyCoders already knows about the error or has fixed it. **Add AI diagnosis** is optional: it runs one request on a model you pick and counts against your own AI usage or subscription. Sending needs the worker signed in to a Shuffle account (**Settings → Devices → Shuffle account**).
+
+When the app does not start or you cannot open it, send the container log by email instead:
+
 ```bash
 docker compose logs --tail 500 ai-shuffle > ai-shuffle.log
 ```

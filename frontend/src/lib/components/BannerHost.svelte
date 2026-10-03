@@ -13,9 +13,9 @@
 
 	const banners = $derived($liveBanners);
 
-	function actionFor(b: AppNotification) {
-		if (!b.action) return undefined;
-		const a = b.action;
+	function actionFor(b: AppNotification, which: 'action' | 'secondaryAction' = 'action') {
+		const a = b[which];
+		if (!a) return undefined;
 		return {
 			label: a.label,
 			onClick: () => {
@@ -35,6 +35,7 @@
 				title={b.title ?? ''}
 				message={b.message}
 				action={actionFor(b)}
+				secondaryAction={actionFor(b, 'secondaryAction')}
 				dismissible
 				onDismiss={() => notify.dismissLive(b.id)}
 			/>

@@ -17,7 +17,7 @@ import type { ActiveSessionState, StreamingSessionInfo } from '../active-session
 import { notify, type NotificationAction, type NotificationSeverity, type NotificationSurface } from '../notifications';
 import { rateLimit } from '../rate-limit';
 import { reportClientError } from '$lib/services/error-reporter';
-import { startFixChat } from '$lib/services/fix-with-ai';
+import { errorActions } from '$lib/services/error-actions';
 // The SSE-fed reducer store — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
@@ -597,7 +597,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		// app/services/notification_service.emit_notification. Already persisted
 		// server-side — feed it to the store for live render + the bell. Actions
 		// can't cross the wire as closures, so we rebuild interactive ones
-		// (e.g. "Fix with AI") here, keyed on `category`.
+		// ("Send report to support", and "Fix with AI" on source checkouts)
+		// here, keyed on `category`.
 		if (msgType === 'notification') {
 			const n = data.notification as
 				| {
@@ -616,31 +617,29 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			if (!n) return;
 
 			let action: NotificationAction | undefined;
+			let secondaryAction: NotificationAction | undefined;
 			let duration_ms: number | undefined;
 			if (n.category === 'api_error') {
-				// Mirror the legacy api_error UX: 429 is transient (5s, no fix),
-				// other errors get 10s + a one-click "Fix with AI".
+				// Mirror the legacy api_error UX: 429 is transient (5s, no action),
+				// other errors get 10s + "Send report to support" (and "Fix with
+				// AI" only when the capabilities say this is a source checkout).
 				duration_ms = n.severity === 'warning' ? 5000 : 10000;
 				if (n.severity !== 'warning') {
 					const payload = n.action?.payload ?? {};
-					action = {
-						label: 'Fix with AI',
-						onClick: () =>
-							startFixChat({
-								source: 'ws',
-								message: n.message,
-								status_code:
-									typeof payload.status_code === 'number' ? payload.status_code : undefined,
-								session_id: n.session_id ?? (payload.session_id as string | undefined),
-							}),
-					};
+					({ action, secondaryAction } = errorActions({
+						source: 'ws',
+						message: n.message,
+						status_code:
+							typeof payload.status_code === 'number' ? payload.status_code : undefined,
+						session_id: n.session_id ?? (payload.session_id as string | undefined),
+					}));
 				}
 			}
 
 			// Drop the server-side `{kind, payload}` action descriptor — it can't be
 			// rendered directly; the rebuilt closure (if any) is passed separately.
 			const { action: _serverAction, ...payload } = n;
-			notify.ingest({ ...payload, duration_ms }, action);
+			notify.ingest({ ...payload, duration_ms }, action, secondaryAction);
 			return;
 		}
 
@@ -990,7 +989,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// API-level errors (e.g. Anthropic 429/5xx) are now surfaced through
 				// the unified notification funnel: the backend emits a `notification`
 				// event (persisted + the bell + every device) which the handler above
-				// renders — including the "Fix with AI" action. We no longer toast
+				// renders — including the report / "Fix with AI" actions. We no longer toast
 				// here (that would double up). We DO still log to the durable
 				// error_log for observability (GetAppErrors), keyed off `status`.
 				const status = Number(data.status ?? 0);
