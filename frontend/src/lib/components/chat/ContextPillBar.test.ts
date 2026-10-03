@@ -4,6 +4,7 @@ import { tick } from 'svelte';
 import { writable } from 'svelte/store';
 import ContextPillBar from './ContextPillBar.svelte';
 import { adoptSession, moveSession } from '$lib/api/sessions';
+import { notify } from '$lib/stores/notifications';
 
 const { session, execution, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
 	session: { store: null as any },
@@ -183,6 +184,57 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
 		await view.findByRole('menuitem', { name: 'Other worker' });
 		expect(view.queryByRole('alert')).toBeNull();
+	});
+
+	async function confirmContinueHere() {
+		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner',
+			device_name: 'Other worker', device_online: true, is_remote: true, controllable: true }]);
+		const view = render(ContextPillBar, { sheetMode });
+		await fireEvent.click(view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!);
+		await fireEvent.click(await view.findByRole('menuitem', { name: 'Continue here' }));
+		await fireEvent.click(view.getByRole('button', { name: 'Commit, push and continue' }));
+		return view;
+	}
+
+	it('shows Continue here as busy and blocks a second submit until it settles', async () => {
+		let finish!: (value: unknown) => void;
+		vi.mocked(adoptSession).mockReturnValueOnce(new Promise((resolve) => (finish = resolve)) as never);
+		const success = vi.spyOn(notify, 'success');
+		const view = await confirmContinueHere();
+		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
+		await waitFor(() => expect(chip.textContent).toContain('Continuing here…'));
+		expect(chip.disabled).toBe(true);
+		expect(chip.getAttribute('aria-busy')).toBe('true');
+		expect(chip.querySelector('.spin')).not.toBeNull();
+		expect(view.queryByRole('menu')).toBeNull();
+		await fireEvent.click(chip);
+		expect(view.queryByRole('menu')).toBeNull();
+		expect(adoptSession).toHaveBeenCalledOnce();
+
+		finish({ session_id: 'remote', adopted: true, status: 'adopted' });
+		await waitFor(() => expect(chip.textContent).toContain('Now runs here'));
+		expect(chip.classList.contains('done')).toBe(true);
+		expect(chip.disabled).toBe(false);
+		expect(chip.getAttribute('aria-busy')).toBeNull();
+		expect(success).toHaveBeenCalledWith('This session now runs on this worker.');
+		success.mockRestore();
+	});
+
+	it('shows why Continue here failed and restores the chip', async () => {
+		const reason = "Branch main in the receiving worker's checkout C:/repo has 1 commit (newest: abc1234 fix) that is not on origin. Push them from that worker, or move them to another branch there, then try again. Nothing was changed.";
+		vi.mocked(adoptSession).mockRejectedValueOnce({ status: 409, detail: reason });
+		const error = vi.spyOn(notify, 'error');
+		const view = await confirmContinueHere();
+		const alert = await view.findByRole('alert');
+		expect(alert.textContent).toBe(reason);
+		expect(error).toHaveBeenCalledWith(reason);
+		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
+		expect(chip.disabled).toBe(false);
+		expect(chip.getAttribute('aria-busy')).toBeNull();
+		expect(chip.textContent).toContain('Other worker');
+		expect(chip.classList.contains('done')).toBe(false);
+		error.mockRestore();
 	});
 
 	it('explains empty and failed local worker discovery and supports retry', async () => {

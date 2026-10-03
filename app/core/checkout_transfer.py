@@ -13,18 +13,125 @@ import subprocess
 from urllib.parse import urlsplit
 
 
-def git(cwd, *args):
+def _run(cwd, *args):
     try:
-        result = subprocess.run(
+        return subprocess.run(
             ["git", *args], cwd=cwd, capture_output=True, timeout=120,
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git timed out during resume. Check the remote and retry; ownership has not moved.") from exc
+
+
+def git(cwd, *args):
+    result = _run(cwd, *args)
     if result.returncode:
         # Remote URLs and credential-helper output can contain secrets.
         raise ValueError(f"Git {args[0]} failed during resume. Check Git credentials, hooks and branch conflicts on that worker; ownership has not moved.")
     return result.stdout
+
+
+def _is_ancestor(cwd, older, newer):
+    """True when commit ``older`` is ``newer`` or reachable from it.
+
+    A commit this repository does not have is not an ancestor of anything here.
+    """
+    if older == newer:
+        return True
+    if _run(cwd, "cat-file", "-e", older + "^{commit}").returncode:
+        return False
+    result = _run(cwd, "merge-base", "--is-ancestor", older, newer)
+    if result.returncode not in (0, 1):
+        git(cwd, "merge-base", "--is-ancestor", older, newer)  # raises the generic error
+    return result.returncode == 0
+
+
+def _contains_changes(cwd, published, tip):
+    """True when merging ``tip`` into ``published`` would change nothing.
+
+    This recognises a branch that was squash-merged or rebased upstream: its
+    commits are not ancestors of the published tip, but their content is
+    already there. Git older than 2.38 has no ``merge-tree --write-tree``;
+    then this answers False and the commits count as unpublished.
+    """
+    result = _run(cwd, "merge-tree", "--write-tree", published, tip)
+    if result.returncode:
+        return False
+    merged = result.stdout.decode().split("\n", 1)[0].strip()
+    return merged == git(cwd, "rev-parse", published + "^{tree}").decode().strip()
+
+
+def _unpublished(cwd, tip, published):
+    """Commits on ``tip`` that exist nowhere on origin, newest first.
+
+    ``published`` lists commits just confirmed on origin (the handed-off head
+    and the freshly fetched branch tip), so a stale or missing remote-tracking
+    ref cannot make published work look local. A commit counts as published
+    when it is reachable from one of them, has a patch-equivalent commit there
+    (rebased or cherry-picked), or the whole branch is already contained in one
+    of them (squash-merged).
+    """
+    extra = git(cwd, "rev-list", tip, "--not", *published).decode().split()
+    if not extra:
+        return []
+    equivalent = {line[2:].strip() for line in git(cwd, "cherry", published[0], tip).decode().splitlines()
+                  if line.startswith("- ")}
+    pending = [sha for sha in extra if sha not in equivalent]
+    if pending and any(_contains_changes(cwd, ref, tip) for ref in published):
+        return []
+    return pending
+
+
+def _plural(count, noun):
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def _describe_commits(cwd, shas):
+    subject = git(cwd, "log", "-1", "--format=%h %s", shas[0]).decode().strip()
+    return f"{_plural(len(shas), 'commit')} (newest: {subject})"
+
+
+def _require_clean(cwd, branch, where):
+    """Refuse a checkout with uncommitted work, naming what is uncommitted."""
+    entries = _status(cwd).decode(errors="replace").split("\0")
+    changed, untracked, skip = [], 0, False
+    for entry in entries:
+        if skip or not entry:
+            skip = False
+            continue
+        code, name = entry[:2], entry[3:]
+        # A rename or copy is followed by its source path.
+        skip = code[0] in "RC"
+        changed.append(name)
+        untracked += code == "??"
+    if not changed:
+        return
+    tracked = len(changed) - untracked
+    parts = [_plural(tracked, "modified file")] if tracked else []
+    parts += [_plural(untracked, "untracked file")] if untracked else []
+    sample = ", ".join(changed[:3]) + (", ..." if len(changed) > 3 else "")
+    raise ValueError(
+        f"The receiving checkout has local changes: {where} on branch {branch} has "
+        f"{' and '.join(parts)} ({sample}). Commit and push, stash or discard them on "
+        "that worker, then try again. Nothing was changed."
+    )
+
+
+def _require_published(cwd, branch, current, head, published, where):
+    """Refuse to move ``branch`` off ``current`` if that strands local commits.
+
+    Only commits that exist nowhere on origin count. Commits that were pushed,
+    merged, squash-merged or rebased upstream are safe to move past.
+    """
+    if _is_ancestor(cwd, current, head):
+        return
+    pending = _unpublished(cwd, current, published)
+    if pending:
+        raise ValueError(
+            f"Branch {branch} in {where} has {_describe_commits(cwd, pending)} that "
+            f"{'is' if len(pending) == 1 else 'are'} not on origin. Push them from that worker, "
+            "or move them to another branch there, then try again. Nothing was changed."
+        )
 
 
 def _remote_key(url):
@@ -130,12 +237,39 @@ def export_checkout(cwd, branch, expected_remote=None):
         _preflight(cwd)
         git(cwd, "commit", "-m", "Save work before resuming on another worker")
     head = fingerprint(cwd)
-    # Push this exact commit, not a moving HEAD, and never force-update a branch.
-    git(cwd, "push", "origin", head + ":refs/heads/" + branch)
+    # Compare with origin as it is now, not a remote-tracking ref from the
+    # last fetch: a checkout that is clean and already on origin (in sync, or
+    # behind because others pushed since) has nothing to publish.
+    upstream = _fetch_branch(cwd, branch)
+    if upstream is None or not _is_ancestor(cwd, head, upstream):
+        if upstream is not None and not _is_ancestor(cwd, upstream, head):
+            ahead = git(cwd, "rev-list", head, "--not", upstream).decode().split()
+            behind = git(cwd, "rev-list", upstream, "--not", head).decode().split()
+            raise ValueError(
+                f"Branch {branch} in the owning worker's checkout {cwd} has "
+                f"{_describe_commits(cwd, ahead)} that {'is' if len(ahead) == 1 else 'are'} "
+                f"not on origin/{branch}, and "
+                f"origin/{branch} has {_plural(len(behind), 'commit')} that it does not have. "
+                f"Pull or rebase {branch} on that worker so it can be pushed without force, "
+                "then try again. Ownership has not moved."
+            )
+        # Push this exact commit, not a moving HEAD, and never force-update a branch.
+        git(cwd, "push", "origin", head + ":refs/heads/" + branch)
+        upstream = head
     published = git(cwd, "ls-remote", "--exit-code", "origin", "refs/heads/" + branch).decode().split()
-    if not published or published[0] != head or fingerprint(cwd) != head:
+    if not published or published[0] != upstream or fingerprint(cwd) != head:
         raise ValueError("The branch changed during resume. Retry when both workers are idle.")
     return dict(protocol="git-origin-v1", branch=branch, head=head, fingerprint=head, remote=remote)
+
+
+def _fetch_branch(cwd, branch):
+    """Fetch ``branch`` from origin; return its tip, or None when origin lacks it."""
+    listed = git(cwd, "ls-remote", "origin", "refs/heads/" + branch).decode().split()
+    if not listed:
+        return None
+    # Forced: a remote-tracking ref is only a cache of origin.
+    git(cwd, "fetch", "--no-tags", "origin", "+refs/heads/" + branch + ":refs/remotes/origin/" + branch)
+    return git(cwd, "rev-parse", "FETCH_HEAD").decode().strip()
 
 
 def receiving_checkout(base, destination, branch):
@@ -161,23 +295,34 @@ def import_checkout(base, destination, state):
         raise ValueError("Invalid resume commit.")
     if remote_identity(base) != state["remote"]:
         raise ValueError("The workers' origin remotes refer to different repositories.")
-    git(base, "fetch", "--no-tags", "origin", "refs/heads/" + branch + ":refs/remotes/origin/" + branch)
-    if git(base, "rev-parse", "FETCH_HEAD").decode().strip() != head:
+    # Forced: a remote-tracking ref is only a cache of origin, and a rebased
+    # branch must not fail the fetch.
+    git(base, "fetch", "--no-tags", "origin", "+refs/heads/" + branch + ":refs/remotes/origin/" + branch)
+    fetched = git(base, "rev-parse", "FETCH_HEAD").decode().strip()
+    # Origin may be ahead when the owner was clean but behind (nothing to push).
+    if not _is_ancestor(base, head, fetched):
         raise ValueError("The remote branch changed during resume. Retry from the owning worker.")
+    published = [head] + ([fetched] if fetched != head else [])
     dest = receiving_checkout(base, destination, branch)
     if dest.exists() or dest.is_symlink():
         known = [line.removeprefix("worktree ") for line in git(base, "worktree", "list", "--porcelain").decode().splitlines() if line.startswith("worktree ")]
         if not any(Path(p).resolve() == dest.resolve() for p in known) or dest.is_symlink():
             raise ValueError("A local checkout already exists at the destination; its files were not changed.")
         _branch(dest, branch)
-        if _status(dest):
-            raise ValueError("The receiving checkout has local changes. Commit or move them before resuming here.")
+        _require_clean(dest, branch, f"the receiving worker's checkout {dest}")
         _preflight(dest)
-        git(dest, "merge", "--ff-only", "--no-overwrite-ignore", head)
+        current = git(dest, "rev-parse", "HEAD").decode().strip()
+        _require_published(dest, branch, current, head, published, f"the receiving worker's checkout {dest}")
+        if _is_ancestor(dest, current, head):
+            git(dest, "merge", "--ff-only", "--no-overwrite-ignore", head)
+        else:
+            # Every local commit is already on origin, so moving the branch
+            # strands nothing. Ignored files are still never overwritten.
+            git(dest, "checkout", "--no-overwrite-ignore", "-B", branch, head)
     else:
         old = git(base, "for-each-ref", "--format=%(objectname)", "refs/heads/" + branch).decode().strip()
         if old:
-            git(base, "merge-base", "--is-ancestor", old, head)
+            _require_published(base, branch, old, head, published, f"the receiving worker's repository {base}")
             git(base, "update-ref", "refs/heads/" + branch, head, old)
             git(base, "worktree", "add", str(dest), branch)
         else:

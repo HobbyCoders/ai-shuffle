@@ -145,10 +145,27 @@
 	let runnerEligibility = $state<EligibilityMap>(null);
 	let runnerMenuLoading = $state(false);
 	let runnerMenuError = $state('');
-	let runnerActionPending = $state(false);
+	/**
+	 * The move/continue in flight. It commits, pushes, fetches and syncs
+	 * context, which can take a minute, so the runner chip shows it as busy.
+	 */
+	let runnerAction = $state<{ sessionId: string; label: string } | null>(null);
+	const runnerActionPending = $derived(runnerAction !== null);
+	/** Brief confirmation on the chip after a move/continue succeeded. */
+	let runnerActionDone = $state<{ sessionId: string; label: string } | null>(null);
+	let runnerDoneTimer: ReturnType<typeof setTimeout> | null = null;
 	/** Why the last move/continue was refused, shown inside the reopened menu. */
 	let runnerActionError = $state('');
 	let pendingResume = $state<{ item: RunnerBadgeMenuItem; sessionId: string } | null>(null);
+
+	const runnerBusy = $derived(
+		runnerAction && runnerAction.sessionId === $activeSession.sessionId ? runnerAction : null
+	);
+	const runnerDone = $derived(
+		!runnerBusy && runnerActionDone && runnerActionDone.sessionId === $activeSession.sessionId
+			? runnerActionDone
+			: null
+	);
 
 	const sessionHasProject = $derived(!!(sessionRow?.project_id || sessionRow?.project_v2_id));
 	const runnerMenu = $derived(
@@ -191,6 +208,8 @@
 	}
 
 	function toggleRunnerMenu() {
+		// The chip is disabled while a move runs; never start a second one.
+		if (runnerActionPending) return;
 		runnerActionError = '';
 		if (showRunnerMenu) {
 			closeDropdown('runner');
@@ -210,16 +229,20 @@
 			closeDropdown('runner');
 			return;
 		}
-		runnerActionPending = true;
+		const adopt = item.action.kind === 'adopt';
+		runnerAction = { sessionId, label: adopt ? 'Continuing here…' : `Moving to ${item.label}…` };
+		runnerActionDone = null;
 		runnerActionError = '';
+		closeDropdown('runner');
 		try {
 			if (item.action.kind === 'adopt') {
 				await adoptSession(sessionId);
-
 			} else {
 				await moveSession(sessionId, item.action.targetInstanceId);
 			}
-			closeDropdown('runner');
+			const done = adopt ? 'Now runs here' : `Moved to ${item.label}`;
+			showRunnerDone(sessionId, done);
+			notify.success(adopt ? 'This session now runs on this worker.' : `This session now runs on ${item.label}.`);
 			await appData.loadSessions();
 		} catch (e) {
 			const detail =
@@ -236,14 +259,23 @@
 				void loadRunnerMenu();
 			}
 		} finally {
-			runnerActionPending = false;
+			runnerAction = null;
 		}
+	}
+
+	function showRunnerDone(sessionId: string, label: string) {
+		if (runnerDoneTimer) clearTimeout(runnerDoneTimer);
+		runnerActionDone = { sessionId, label };
+		runnerDoneTimer = setTimeout(() => {
+			runnerActionDone = null;
+			runnerDoneTimer = null;
+		}, 4000);
 	}
 
 	function confirmResume() {
 		const pending = pendingResume;
 		pendingResume = null;
-		if (pending && pending.sessionId === $activeSession.sessionId) {
+		if (pending && !runnerActionPending && pending.sessionId === $activeSession.sessionId) {
 			void runMenuAction(pending.item, true);
 		}
 	}
@@ -258,7 +290,10 @@
 		if (e.key === 'Escape' && showRunnerMenu) closeDropdown('runner');
 	}
 
-	onDestroy(() => closeDropdown('runner'));
+	onDestroy(() => {
+		closeDropdown('runner');
+		if (runnerDoneTimer) clearTimeout(runnerDoneTimer);
+	});
 
 	// The voice-call start affordance no longer lives here (ruling VM19): it is
 	// an action button in the composer's controls row (VoiceCallButton).
@@ -316,20 +351,36 @@
 					type="button"
 					class="ctx-chip runner"
 					class:open={showRunnerMenu}
-					title={badge?.title || 'Runs on this device — move this session to another worker'}
-					aria-label="Runner: {badge?.runner?.deviceName ?? 'Local'}{badge?.runner && !badge.runner.online ? ' (offline)' : ''}"
+					class:busy={!!runnerBusy}
+					class:done={!!runnerDone}
+					title={runnerBusy
+						? 'Committing, pushing and syncing this session. This can take a minute.'
+						: badge?.title || 'Runs on this device — move this session to another worker'}
+					aria-label={runnerBusy
+						? runnerBusy.label
+						: `Runner: ${badge?.runner?.deviceName ?? 'Local'}${badge?.runner && !badge.runner.online ? ' (offline)' : ''}`}
+					aria-busy={runnerBusy ? 'true' : undefined}
 					disabled={runnerActionPending}
 					aria-haspopup="menu"
 					aria-expanded={showRunnerMenu}
 					onclick={toggleRunnerMenu}
 				>
-					{#if !badge?.runner || badge.runner.online}
-						<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
+					{#if runnerBusy}
+						<Loader2 size={12} strokeWidth={1.8} class="spin" aria-hidden="true" />
+						<span class="ctx-chip-label">{runnerBusy.label}</span>
+					{:else if runnerDone}
+						<Check size={12} strokeWidth={2.2} aria-hidden="true" />
+						<span class="ctx-chip-label">{runnerDone.label}</span>
 					{:else}
-						<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
+						{#if !badge?.runner || badge.runner.online}
+							<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
+						{:else}
+							<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
+						{/if}
+						<span class="ctx-chip-label">{badge?.runner?.deviceName ?? 'Local'}</span>
 					{/if}
-					<span class="ctx-chip-label">{badge?.runner?.deviceName ?? 'Local'}</span>
 				</button>
+				<span class="sr-only" aria-live="polite">{runnerBusy?.label ?? runnerDone?.label ?? ''}</span>
 				{#if showRunnerMenu}
 					<div class="runner-dropdown" role="menu" aria-label="Move this session">
 						{#if runnerActionError}
@@ -584,6 +635,29 @@
 
 	.ctx-chip.runner :global(svg) {
 		color: var(--primary);
+	}
+
+	/* A move/continue in flight: the chip carries the progress label and
+	   cannot be clicked again until the request settles. */
+	.ctx-chip.runner.busy {
+		cursor: progress;
+		color: var(--foreground);
+	}
+
+	/* Brief confirmation once the session runs on the new worker. */
+	.ctx-chip.runner.done {
+		color: var(--success);
+		background: color-mix(in oklch, var(--success) 14%, var(--muted));
+	}
+
+	.ctx-chip.runner.done :global(svg) {
+		color: var(--success);
+	}
+
+	/* Long device names in the progress label must not push the row wider
+	   than a phone screen. */
+	.ctx-chip.runner .ctx-chip-label {
+		max-width: min(240px, 60vw);
 	}
 
 	/* V2 Q7 degraded session: read-only, no runner online. Warning accent so it

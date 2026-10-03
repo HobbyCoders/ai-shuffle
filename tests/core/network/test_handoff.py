@@ -278,6 +278,66 @@ async def test_base_session_without_branch_metadata_resolves_after_resume(pair, 
         assert database.get_session("handoff-test")["branch"] == (None if reuse_base else "feature/only-on-worker")
 
 
+def _base_session_on_clean_main(pair, monkeypatch):
+    """The owner's base-checkout session on a clean main that matches origin."""
+    a, b, source, _target = pair
+    git(source, "checkout", "main")
+    with a.active():
+        project_id = database.get_session("handoff-test")["project_v2_id"]
+        checkouts.upsert_checkout(project_id, settings.effective_instance_id, str(source), branch="")
+    for worker in (a, b):
+        with worker.active(), get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET branch=NULL WHERE id=%s", ("handoff-test",))
+
+    async def call(device, action, body, **kwargs):
+        with a.active():
+            return await control.handle(action, body, from_device=b.device_id)
+    monkeypatch.setattr(control, "call", call)
+
+
+@pytest.mark.asyncio
+async def test_continue_here_clean_main_with_receiver_work_already_merged(pair, monkeypatch):
+    """Owner report 2026-10-03: Continue here on a session bound to a clean,
+    in-sync main refused. The owner had nothing to publish; the receiving
+    worker's main held a commit that origin already has through a squash merge."""
+    _a, b, source, target = pair
+    (target / "fix.txt").write_text("fixed on the receiver")
+    git(target, "add", ".")
+    git(target, "commit", "-m", "receiver fix")
+    (source / "fix.txt").write_text("fixed on the receiver")
+    (source / "review.txt").write_text("review follow-up")
+    git(source, "checkout", "main")
+    git(source, "add", ".")
+    git(source, "commit", "-m", "Squash-merge the receiver fix (#1)")
+    git(source, "push", "origin", "main")
+    _base_session_on_clean_main(pair, monkeypatch)
+    head = git(source, "rev-parse", "HEAD").decode().strip()
+    with b.active():
+        cwd = await handoff.receive(database.get_session("handoff-test"))
+        assert cwd == str(target)
+        assert checkout_transfer.fingerprint(target) == head
+        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
+    assert git(source, "rev-parse", "HEAD").decode().strip() == head
+
+
+@pytest.mark.asyncio
+async def test_continue_here_names_unpublished_receiver_commit_and_keeps_owner(pair, monkeypatch):
+    a, b, source, target = pair
+    (target / "mine.txt").write_text("only on the receiver")
+    git(target, "add", ".")
+    git(target, "commit", "-m", "receiver only")
+    git(source, "checkout", "main")
+    git(source, "push", "origin", "main")
+    _base_session_on_clean_main(pair, monkeypatch)
+    with b.active():
+        with pytest.raises(ValueError, match=r"Branch main in the receiving worker's checkout .* has 1 commit .* not on origin"):
+            await handoff.receive(database.get_session("handoff-test"))
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+    with a.active():
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+    assert (target / "mine.txt").exists()
+
+
 @pytest.mark.asyncio
 async def test_source_branch_switch_at_same_commit_refuses_ownership(pair, monkeypatch):
     a, b, source, target = pair
