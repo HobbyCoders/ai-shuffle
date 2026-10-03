@@ -14,9 +14,15 @@ approved again. The tool never writes that file.
 
 What the tool refuses, so a draft cannot do more than a reviewer can see:
 hooks (they run automatically), MCP server ``env`` values other than
-``${VAR}`` references (no literal secrets on disk), paths outside the plugin
-folder, oversized drafts, and rewriting a version that already exists with
-different content.
+``${VAR}`` references (no literal secrets on disk), text that looks like a
+credential, paths outside the plugin folder, oversized drafts, and rewriting
+a version that already exists with different content.
+
+A plugin that needs an outside service declares it under
+``extensions["ai.shuffle"].services`` by name, provider, API address and
+read/write access. That is a declaration for the reviewer and the agent: the
+credential itself is entered by the owner in the private access card
+(``RequestChatAccess``) and never appears in the plugin.
 """
 
 from __future__ import annotations
@@ -53,6 +59,20 @@ _ENV_REF_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 
 MAX_COMPONENTS = 20
 MAX_SERVERS = 10
+MAX_SERVICES = 10
+SERVICE_PROVIDERS = ("cloudflare", "custom")
+SERVICE_ACCESS = ("read", "write")
+
+# Text that is almost certainly a credential. A plugin never holds one.
+_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("a private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("an API key (sk-...)", re.compile(r"\bsk-[A-Za-z0-9_-]{20,}")),
+    ("a GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})")),
+    ("a Slack token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
+    ("an AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("a Google API key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+    ("a bearer token", re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{24,}")),
+)
 MAX_TEXT = 50_000
 MAX_DESCRIPTION = 500
 MAX_TOTAL_BYTES = 256 * 1024
@@ -205,6 +225,95 @@ def _server(name: str, cfg: Any) -> dict[str, Any]:
     return out
 
 
+def secret_findings(text: str) -> list[str]:
+    """What kinds of credential ``text`` appears to contain (empty when none)."""
+    return [label for label, pattern in _SECRET_PATTERNS if pattern.search(text)]
+
+
+def _no_secrets(text: str, what: str) -> None:
+    found = secret_findings(text)
+    if found:
+        raise PluginDraftError(
+            f"{what} looks like it contains {found[0]}; a plugin never holds a credential. "
+            "Ask for access with the private access card instead"
+        )
+
+
+_MCP_TOOL_RE = re.compile(r"^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_*-]+$")
+
+
+def _tools(value: Any, what: str) -> list[str]:
+    """An agent's ``tools`` list: this app's tool names only."""
+    from fluid.context.plugin_import import NATIVE_TOOL_NAMES, map_tool
+
+    if value is None or value == [] or value == "":
+        return []
+    items = value.split(",") if isinstance(value, str) else value
+    if not isinstance(items, list) or not all(isinstance(t, str) for t in items):
+        raise PluginDraftError(f"{what} must be a list of tool names")
+    out: list[str] = []
+    for raw in (t.strip() for t in items):
+        if not raw:
+            continue
+        if raw in NATIVE_TOOL_NAMES or _MCP_TOOL_RE.match(raw):
+            if raw not in out:
+                out.append(raw)
+            continue
+        native, _ = map_tool(raw)
+        hint = f"; use {native}" if native else ""
+        raise PluginDraftError(f"{what}: {raw!r} is not a tool here{hint}")
+    return out
+
+
+_SERVICE_KEYS = {"name", "provider", "url", "access", "purpose"}
+
+
+def check_services(value: Any) -> list[dict[str, str]]:
+    """Validate ``extensions["ai.shuffle"].services``: which outside services
+    the plugin needs access to, never how to sign in to them.
+
+    Raises :class:`PluginDraftError`. Returns the entries in the exact shape
+    ``build_files`` writes.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(v, dict) for v in value):
+        raise PluginDraftError("services must be a list of objects")
+    if len(value) > MAX_SERVICES:
+        raise PluginDraftError(f"at most {MAX_SERVICES} services per plugin")
+    out: list[dict[str, str]] = []
+    for entry in value:
+        extra = sorted(set(entry) - _SERVICE_KEYS)
+        if extra:
+            raise PluginDraftError(
+                f"service entries take only {sorted(_SERVICE_KEYS)}; remove {extra}. "
+                "Credentials are entered by the owner in the private access card"
+            )
+        sname = _name(entry.get("name"), "service name")
+        provider = entry.get("provider", "custom")
+        if provider not in SERVICE_PROVIDERS:
+            raise PluginDraftError(f"service {sname}: provider must be one of {list(SERVICE_PROVIDERS)}")
+        url = _text(entry.get("url"), f"service {sname} url", 500, required=provider == "custom")
+        if url and (not url.startswith("https://") or any(c in url for c in "?#@ ")):
+            raise PluginDraftError(
+                f"service {sname}: url must be a public https:// API address with no query, "
+                "fragment or credentials"
+            )
+        access = entry.get("access", "read")
+        if access not in SERVICE_ACCESS:
+            raise PluginDraftError(f"service {sname}: access must be 'read' or 'write'")
+        purpose = _oneline(_text(entry.get("purpose"), f"service {sname} purpose", 300, required=True))
+        item = {"name": sname, "provider": str(provider)}
+        if url:
+            item["url"] = url
+        item["access"] = str(access)
+        item["purpose"] = purpose
+        out.append(item)
+    if len({v["name"] for v in out}) != len(out):
+        raise PluginDraftError("service names must be unique")
+    return out
+
+
 def _host_secret_refs(value: Any) -> set[str]:
     """``${VAR}`` names in ``value`` that are the host app's own secrets."""
     if isinstance(value, str):
@@ -242,6 +351,7 @@ def build_files(spec: dict[str, Any]) -> tuple[str, str, dict[str, str], list[st
         raise PluginDraftError("hooks are not supported in authored plugins")
     unknown = sorted(set(spec) - {
         "name", "version", "description", "skills", "commands", "agents", "mcp_servers",
+        "services",
     })
     if unknown:
         raise PluginDraftError(f"unsupported fields {unknown}")
@@ -269,8 +379,13 @@ def build_files(spec: dict[str, Any]) -> tuple[str, str, dict[str, str], list[st
         aname = _name(agent.get("name"), "agent name")
         body = _text(agent.get("body"), f"agent {aname} body", MAX_TEXT, required=True)
         adesc = _text(agent.get("description"), f"agent {aname} description", MAX_DESCRIPTION, required=True)
-        files[f"agents/{aname}.md"] = _frontmatter({"name": aname, "description": adesc}) + body
+        tools = _tools(agent.get("tools"), f"agent {aname} tools")
+        front = {"name": aname, "description": adesc}
+        if tools:
+            front["tools"] = ", ".join(tools)
+        files[f"agents/{aname}.md"] = _frontmatter(front) + body
         components.append(f"agent {aname}")
+    services = check_services(spec.get("services"))
 
     raw_servers = spec.get("mcp_servers") or {}
     if not isinstance(raw_servers, dict):
@@ -302,8 +417,12 @@ def build_files(spec: dict[str, Any]) -> tuple[str, str, dict[str, str], list[st
         shuffle["commands"] = "./commands/"
     if any(k.startswith("agents/") for k in files):
         shuffle["agents"] = "./agents/"
+    if services:
+        shuffle["services"] = services
     manifest["extensions"] = {SHUFFLE_EXTENSION: shuffle}
     files["plugin.json"] = json.dumps(manifest, indent=2) + "\n"
+    for rel, text in files.items():
+        _no_secrets(text, rel)
 
     total = sum(len(v.encode("utf-8")) for v in files.values())
     if total > MAX_TOTAL_BYTES:
@@ -450,9 +569,14 @@ def check_draft_files(name: str, version: str, files: Any) -> None:
         raise PluginDraftError("plugin.json has extensions save_plugin never writes")
     shuffle = extensions.get(SHUFFLE_EXTENSION, {})
     if not isinstance(shuffle, dict) or any(
-        key not in _SHUFFLE_KEYS or value != _SHUFFLE_KEYS[key] for key, value in shuffle.items()
+        key != "services" and (key not in _SHUFFLE_KEYS or value != _SHUFFLE_KEYS[key])
+        for key, value in shuffle.items()
     ):
         raise PluginDraftError("plugin.json has extension settings save_plugin never writes")
+    if "services" in shuffle and check_services(shuffle["services"]) != shuffle["services"]:
+        raise PluginDraftError("plugin.json lists services save_plugin would not write")
+    for rel, text in files.items():
+        _no_secrets(text, rel)
     if "mcp.json" in files:
         try:
             servers = json.loads(files["mcp.json"]).get("mcpServers")

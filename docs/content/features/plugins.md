@@ -36,7 +36,7 @@ When you ask an agent for a plugin in a code session, it can save one with the `
 - It stays off until you open it, check what it adds (each skill, command, agent and MCP server, with the server's command line or URL), and choose **Approve and enable**. That approval covers only the version you reviewed, identified by a hash of its files.
 - Any later edit or new version stops it loading until you review it again. Disabling it withdraws the approval.
 - If the session ran on another device of your network, the draft reaches every device's Settings, the same way saved skills do. Approving, disabling or uninstalling it on one device applies on all of them. A device turns the plugin on only when its own copy has the hash you approved.
-- Authored plugins can contain skills, slash commands, subagents and MCP servers. They cannot contain hooks, and MCP server `env` values must be `${VAR}` references, so no secret is written into a plugin.
+- Authored plugins can contain skills, slash commands, subagents, MCP servers and service declarations. They cannot contain hooks, MCP server `env` values must be `${VAR}` references, and text that looks like a credential (a private key, an API key, a bearer token) is refused, so no secret is written into a plugin.
 
 Through the API, enabling an authored plugin needs the reviewed hash: `POST /api/v1/plugins/{plugin_id}/enable` with `{"content_hash": "<content_hash from the plugin's details>"}`. A plugin that changed since returns 409.
 
@@ -69,6 +69,55 @@ Responses also carry:
 - `components`: every component the plugin declares, each with `kind`, `name`, `support` (`loaded`, `unsupported` or `needs_config`) and a `reason` when it does not load. LSP servers, output styles, ChatGPT-hosted apps (`.app.json`), plugin dependencies and SSE MCP servers are listed as unsupported; a `userConfig` block is listed as `needs_config`.
 
 These fields are absent from workers that predate them.
+
+## Plugin format
+
+This is the format for plugins made for AI Shuffle. Check a folder with `python -m fluid.context.plugin_check <folder>`, which lists every problem it finds. It follows the Agent Plugins layout (a root `plugin.json`), with the parts only AI Shuffle reads kept under `extensions["ai.shuffle"]`.
+
+```
+my-plugin/
+├── plugin.json               # required
+├── skills/<name>/SKILL.md    # frontmatter: name (= folder name), description
+├── commands/<name>.md        # frontmatter: description (optional)
+├── agents/<name>.md          # frontmatter: name (= file name), description, tools (optional)
+├── mcp.json                  # {"mcpServers": {...}} (optional)
+└── README.md                 # optional, not installed
+```
+
+```json
+{
+  "name": "cloudflare-dns",
+  "version": "0.1.0",
+  "description": "Read and explain DNS records for the owner's Cloudflare zones",
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json",
+  "extensions": {
+    "ai.shuffle": {
+      "commands": "./commands/",
+      "agents": "./agents/",
+      "services": [
+        {"name": "cloudflare", "provider": "cloudflare", "access": "read",
+         "purpose": "Read DNS records"}
+      ]
+    }
+  }
+}
+```
+
+Rules the validator enforces:
+
+- `name`, skill, command and agent names: lowercase letters, digits and hyphens. `version` looks like `1.2.3`. `description` is required.
+- No other files: no hooks, scripts, binaries or another tool's manifest folder. A plugin installed from a chat carries only what you can review in Settings.
+- Skill, command and agent frontmatter holds only the fields listed above. `model`, `effort`, `permissionMode` and `hooks` are refused: the model is chosen per chat (defaults are under **Settings > Default models**) and permissions come from the chat.
+- An agent's `tools` uses this app's tool names (Read, Write, Edit, Bash, Grep, Glob, WebFetch, WebSearch, Task, Monitor, Skill, AskUser, or `mcp__<server>__<tool>`). Leaving it out gives the agent the calling chat's tools.
+- MCP servers are a `command` with `args` and `env`, or an `https://` `url`. `env` values must be `${VAR}` references.
+- No credentials anywhere in the folder.
+
+### Services
+
+A plugin that talks to an outside API declares it under `services`: `name`, `provider` (`cloudflare` or `custom`), `url` (the public `https://` API address; required for `custom`), `access` (`read` or `write`) and `purpose`. No other keys are accepted. The declaration shows a reviewer what the plugin will ask for. It holds no credential.
+
+The plugin's skill tells the agent to call `ChatResources`, and, when there is no grant yet, `RequestChatAccess` with the provider and purpose. You enter the key in the private access card; the agent then calls `ChatHttpRequest`, and the worker attaches the key. No model sees it. Plugins cannot sign in with OAuth yet.
 
 ## Plugin Structure
 
