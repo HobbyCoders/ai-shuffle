@@ -6,7 +6,11 @@ later each came back as "worker failed to start: Server is at capacity —
 session pool at hard cap (8/8)". The parent then re-dispatched and failed the
 same way. The receipt is a promise the parent will be woken, and a worker that
 never started keeps no promises, so admission is now decided synchronously in
-the dispatch path: brief wait for a slot, then a real ``ok=False`` error.
+the dispatch path: brief wait for capacity, then a real ``ok=False`` error.
+
+The session-count hard cap itself is gone (2026-10-03): only real resource
+guards (host memory, descendant processes, tree RSS) and the configured
+per-parent / per-tree / per-provider worker limits can refuse a dispatch.
 """
 
 import asyncio
@@ -43,20 +47,19 @@ def _clean_admission_state():
 class _FakePool:
     """A pool whose occupancy the test drives directly.
 
-    ``in_pool`` is the DELEGATED (subprocess) occupancy — the number the hard
-    cap actually counts. Native occupancy is passed separately because it gates
-    nothing: a native dispatch is refused only by ``refusal`` (the real resource
-    guards), which is what ``admission_check`` would have returned for that lane.
+    ``in_pool`` is the DELEGATED (subprocess) occupancy and ``native_in_pool``
+    the native one. Neither gates on its own: a dispatch is refused only by
+    ``refusal`` / ``native_refusal`` (the real resource guards), which is what
+    ``admission_check`` would have returned for that lane.
 
     ``peek`` answers "is this session really pooled yet" — the signal that
     retires an admission reservation — and stays empty here, so a reservation
     only ever ages out or is released by the dispatch itself.
     """
 
-    def __init__(self, in_pool=0, hard_cap=8, refusal=None, native_in_pool=0,
+    def __init__(self, in_pool=0, refusal=None, native_in_pool=0,
                  native_refusal=None):
         self.in_pool = in_pool
-        self.hard_cap = hard_cap
         self.refusal = refusal
         self.native_in_pool = native_in_pool
         self.native_refusal = native_refusal
@@ -70,7 +73,6 @@ class _FakePool:
         return AdmissionSnapshot(
             refusal=self.native_refusal if native else self.refusal,
             in_pool=self.in_pool + self.native_in_pool,
-            hard_cap=self.hard_cap,
             delegated_in_pool=self.in_pool,
             native_in_pool=self.native_in_pool,
             lane=lane,
@@ -94,8 +96,8 @@ async def _dispatch(args, session_id="s-root"):
 # ── at the ceiling: a real error, never a receipt ────────────────────────────
 
 
-async def test_background_dispatch_at_hard_cap_is_refused(agents, monkeypatch):
-    _install_pool(monkeypatch, _FakePool(in_pool=8, hard_cap=8))
+async def test_background_dispatch_at_a_resource_ceiling_is_refused(agents, monkeypatch):
+    _install_pool(monkeypatch, _FakePool(in_pool=8, refusal="server busy: tree RSS 9000MB >= ceiling 8000MB"))
     monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
     started = []
 
@@ -111,15 +113,15 @@ async def test_background_dispatch_at_hard_cap_is_refused(agents, monkeypatch):
     assert payload["ok"] is False
     assert payload["reason"] == "capacity"
     assert payload["retryable"] is True
-    assert "8/8" in payload["error"]
+    assert "tree RSS 9000MB" in payload["error"]
     assert "NOT" in payload["error"]
     assert "task_id" not in payload and "note" not in payload
     assert started == [], "no worker may be launched at the ceiling"
     assert td._PENDING_ADMISSIONS == {}
 
 
-async def test_sync_dispatch_at_hard_cap_is_refused(agents, monkeypatch):
-    _install_pool(monkeypatch, _FakePool(in_pool=8, hard_cap=8))
+async def test_sync_dispatch_at_a_resource_ceiling_is_refused(agents, monkeypatch):
+    _install_pool(monkeypatch, _FakePool(in_pool=8, refusal="server busy: tree RSS 9000MB >= ceiling 8000MB"))
     monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
     started = []
 
@@ -138,7 +140,7 @@ async def test_non_pool_refusal_is_surfaced_verbatim(agents, monkeypatch):
     """A memory/process ceiling refuses with its own reason, not a cap count."""
     _install_pool(
         monkeypatch,
-        _FakePool(in_pool=1, hard_cap=8, refusal="host low on memory: 400MB available"),
+        _FakePool(in_pool=1, refusal="host low on memory: 400MB available"),
     )
     monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
 
@@ -149,17 +151,17 @@ async def test_non_pool_refusal_is_surfaced_verbatim(agents, monkeypatch):
     assert "host low on memory: 400MB available" in payload["error"]
 
 
-# ── a transient cap costs seconds, not a failed dispatch ─────────────────────
+# ── a transient ceiling costs seconds, not a failed dispatch ─────────────────
 
 
-async def test_dispatch_waits_for_a_slot_and_then_starts(agents, monkeypatch):
-    pool = _install_pool(monkeypatch, _FakePool(in_pool=8, hard_cap=8))
+async def test_dispatch_waits_for_capacity_and_then_starts(agents, monkeypatch):
+    pool = _install_pool(monkeypatch, _FakePool(in_pool=8, refusal="server busy: tree RSS 9000MB >= ceiling 8000MB"))
     monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 5.0)
     monkeypatch.setattr(td, "_ADMISSION_POLL_SECONDS", 0.01)
 
     async def free_a_slot():
         await asyncio.sleep(0.05)
-        pool.in_pool = 7
+        pool.refusal = None
 
     async def fake_worker(**kwargs):
         return WorkerOutcome(ok=True, session_id=kwargs["worker_session_id"],
@@ -174,47 +176,47 @@ async def test_dispatch_waits_for_a_slot_and_then_starts(agents, monkeypatch):
     assert pool.snapshots > 1, "the dispatch never re-checked while waiting"
 
 
-# ── the reservation is what stops a fan-out overshooting the cap ─────────────
+# ── no session-count ceiling: a big delegated fan-out is all admitted ────────
 
 
-async def test_concurrent_dispatches_do_not_all_take_the_same_slot(
+async def test_many_concurrent_delegated_dispatches_are_all_admitted(
     agents, monkeypatch
 ):
-    """One free slot, two simultaneous dispatches: one starts, one is refused.
-
-    Without the reservation both see ``in_pool < hard_cap`` (a worker joins the
-    pool only when its turn connects, long after this check) and both return a
-    receipt — which is exactly how seven receipts turned into seven capacity
-    failures.
-    """
-    _install_pool(monkeypatch, _FakePool(in_pool=7, hard_cap=8))
+    """The 2026-10-03 incident: six workers from one chat filled the old 8-slot
+    cap, readiness failed, and the container was stopped mid-work. With 20
+    subprocess sessions already pooled, a dozen simultaneous delegated
+    dispatches must all start — nothing counts sessions any more."""
+    _install_pool(monkeypatch, _FakePool(in_pool=20))
     monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
     monkeypatch.setattr(td, "_ADMISSION_POLL_SECONDS", 0.01)
     running = asyncio.Event()
+    started = []
 
     async def fake_worker(**kwargs):
+        started.append(kwargs["worker_session_id"])
         await running.wait()
         return WorkerOutcome(ok=True, session_id=kwargs["worker_session_id"])
 
     with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker), \
          patch.object(td, "_await_worker_registration", return_value=None):
-        first, second = await asyncio.gather(
-            _dispatch({"agent": "helper", "prompt": "a", "mode": "background"}),
-            _dispatch({"agent": "helper", "prompt": "b", "mode": "background"}),
-        )
+        payloads = await asyncio.gather(*(
+            _dispatch({"agent": "helper", "prompt": f"w{i}", "mode": "background"})
+            for i in range(12)
+        ))
+    for _ in range(50):
+        if len(started) == 12:
+            break
+        await asyncio.sleep(0.01)
     running.set()
     await asyncio.sleep(0)
 
-    outcomes = sorted([bool(first["ok"]), bool(second["ok"])])
-    assert outcomes == [False, True], (first, second)
-    refused = first if not first["ok"] else second
-    assert refused["reason"] == "capacity"
-    assert "already admitted" in refused["error"]
+    assert all(p["ok"] for p in payloads), payloads
+    assert len(started) == 12
 
 
 async def test_reservation_is_released_when_a_dispatch_dies(agents, monkeypatch):
     """A worker that never reaches the pool must not hold its slot forever."""
-    _install_pool(monkeypatch, _FakePool(in_pool=0, hard_cap=8))
+    _install_pool(monkeypatch, _FakePool(in_pool=0))
 
     async def fake_worker(**kwargs):
         return WorkerOutcome(
@@ -236,7 +238,7 @@ async def test_reservation_is_released_when_a_dispatch_dies(agents, monkeypatch)
 
 
 async def test_sync_dispatch_releases_its_reservation(agents, monkeypatch):
-    _install_pool(monkeypatch, _FakePool(in_pool=0, hard_cap=8))
+    _install_pool(monkeypatch, _FakePool(in_pool=0))
 
     async def fake_worker(**kwargs):
         assert td._PENDING_ADMISSIONS, "the slot must be held while starting"
@@ -288,7 +290,7 @@ async def test_reservations_are_counted_per_lane_and_per_parent(monkeypatch):
 # ── an unconfigured / empty pool never blocks a dispatch ─────────────────────
 
 
-# ── lanes: the subprocess cap only gates the lane that owns a subprocess ─────
+# ── lanes ─────────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture()
@@ -298,18 +300,17 @@ def native_agent(agents):
     return agents
 
 
-async def test_native_worker_is_admitted_past_the_subprocess_hard_cap(
+async def test_native_workers_are_admitted_with_many_subprocess_sessions(
     native_agent, monkeypatch
 ):
-    """The 2026-09-04 audit case: a native fan-out refused by a cap it cannot fill.
+    """The 2026-09-04 audit case: a native fan-out alongside a busy CLI pool.
 
-    The pool is wedged at 8/8 SUBPROCESS sessions and the parent dispatches more
-    native workers than that cap has slots. Each is coroutines in this process,
-    so each must be admitted.
+    Eight SUBPROCESS sessions are pooled and the parent dispatches ten native
+    workers. Each is coroutines in this process, so each must be admitted.
     """
     from app.core import config as cfg
 
-    _install_pool(monkeypatch, _FakePool(in_pool=8, hard_cap=8))
+    _install_pool(monkeypatch, _FakePool(in_pool=8))
     monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
     monkeypatch.setattr(
         cfg.settings, "subagent_max_concurrent_per_session", 0, raising=False
@@ -338,28 +339,29 @@ async def test_native_worker_is_admitted_past_the_subprocess_hard_cap(
     assert len(started) == 10
 
 
-async def test_delegated_worker_is_still_refused_at_the_delegated_cap(
+async def test_delegated_worker_is_admitted_past_the_old_cap(
     native_agent, monkeypatch
 ):
-    """Exempting natives must not soften the lane that does cost a subprocess."""
+    """8 delegated sessions used to be the hard cap; it no longer exists."""
     _install_pool(
-        monkeypatch, _FakePool(in_pool=8, hard_cap=8, native_in_pool=12)
+        monkeypatch, _FakePool(in_pool=8, native_in_pool=12)
     )
-    monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
 
-    with patch("app.core.provider_agent.dispatch_worker") as worker:
-        payload = await _dispatch({"agent": "helper", "prompt": "go"})
+    async def fake_worker(**kwargs):
+        return WorkerOutcome(ok=True, session_id=kwargs["worker_session_id"],
+                             report="done")
 
-    assert payload["ok"] is False and payload["reason"] == "capacity"
-    assert "8/8" in payload["error"]
-    worker.assert_not_called()
+    with patch("app.core.provider_agent.dispatch_worker", side_effect=fake_worker):
+        payload = await _dispatch({"agent": "helper", "prompt": "go", "mode": "sync"})
+
+    assert payload["ok"] is True
 
 
 async def test_natives_in_the_pool_do_not_block_a_delegated_worker(
     native_agent, monkeypatch
 ):
-    """Only the delegated occupancy is compared against the cap."""
-    _install_pool(monkeypatch, _FakePool(in_pool=2, hard_cap=8, native_in_pool=30))
+    """Native occupancy never blocks a delegated worker."""
+    _install_pool(monkeypatch, _FakePool(in_pool=2, native_in_pool=30))
 
     async def fake_worker(**kwargs):
         return WorkerOutcome(ok=True, session_id=kwargs["worker_session_id"],
@@ -377,7 +379,6 @@ async def test_rss_guard_still_refuses_a_native_worker(native_agent, monkeypatch
         monkeypatch,
         _FakePool(
             in_pool=0,
-            hard_cap=8,
             native_refusal="server busy: tree RSS 9000MB >= ceiling 8000MB",
         ),
     )
@@ -399,7 +400,7 @@ async def test_per_parent_fanout_limit_refuses_with_the_capacity_shape(
 ):
     from app.core import config as cfg, provider_agent_supervisor as sup
 
-    _install_pool(monkeypatch, _FakePool(in_pool=0, hard_cap=8))
+    _install_pool(monkeypatch, _FakePool(in_pool=0))
     monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
     monkeypatch.setattr(
         cfg.settings, "subagent_max_concurrent_per_session", 2, raising=False
@@ -428,7 +429,7 @@ async def test_per_parent_fanout_limit_counts_unregistered_dispatches(
     """
     from app.core import config as cfg, provider_agent_supervisor as sup
 
-    _install_pool(monkeypatch, _FakePool(in_pool=0, hard_cap=8))
+    _install_pool(monkeypatch, _FakePool(in_pool=0))
     monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
     monkeypatch.setattr(td, "_ADMISSION_POLL_SECONDS", 0.01)
     monkeypatch.setattr(

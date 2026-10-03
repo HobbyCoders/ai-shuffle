@@ -7,8 +7,7 @@ live store — there is no in-memory message buffer to purge (render state lives
 in the durable event log, busy truth in the runs table). The force/error
 teardown duty moved WHOLESALE to
 ``resource_monitor._cleanup_evicted_sessions(session_ids, cleaned, reason)``:
-for ``reason in ("lru_force", "dead")`` (hard-cap eviction of a busy session /
-subprocess died) the pooled SDK client was just destroyed, so any work tracked
+for ``reason == "dead"`` (subprocess died) the pooled SDK client was just destroyed, so any work tracked
 for the session can never complete. The pre-V2 leak this file pins:
 
   * orphaned "running" task_registry rows surfaced as PHANTOM active tasks — a

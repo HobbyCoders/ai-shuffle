@@ -135,8 +135,8 @@ def provider_env_requires_reconnect(
 # ─── Lanes: what a pooled session actually costs ──────────────────────────
 #
 # The pool started life when every entry was a Claude Code CLI subprocess — a
-# node process at 100-300MB RSS — which is what the size bound and the hard cap
-# were sized against. That is still true of the DELEGATED lane, and only of it.
+# node process at 100-300MB RSS — which is what the warm pool size was sized
+# against. That is still true of the DELEGATED lane, and only of it.
 # A NATIVE-lane session (fluid's openai_responses / anthropic / openrouter
 # engines) is a set of coroutines inside THIS process: it owns no subprocess, so
 # counting it against a subprocess ceiling refuses work that costs nothing.
@@ -700,18 +700,13 @@ class AdmissionSnapshot:
     ``refusal`` is exactly what :meth:`SessionPool.admission_check` returns
     (``None`` == admit) for ``lane``.
 
-    The counts are split because only ONE of them gates: ``hard_cap`` bounds
-    SUBPROCESSES, so ``delegated_in_pool`` is the number it is compared
-    against. ``native_in_pool`` sessions cost no process and are reported for
-    observability only — a caller that adds its own not-yet-connected
-    admissions must add them to the delegated count, and only when it is
-    dispatching onto the delegated lane. ``in_pool`` stays the whole pool's
-    live size (what the readiness probe and logs report).
+    There is no session-count ceiling: a refusal only ever comes from a real
+    resource guard (host memory, descendant processes, tree RSS, the native
+    safety valve). The lane counts are reported for logs and observability.
     """
 
     refusal: Optional[str]
     in_pool: int
-    hard_cap: int
     delegated_in_pool: int = 0
     native_in_pool: int = 0
     lane: str = DELEGATED_LANE
@@ -722,24 +717,25 @@ class SessionPool:
     Bounded LRU pool of provider adapter sessions.
 
     - OrderedDict for O(1) LRU tracking (move_to_end on access)
-    - Configurable max_size (``settings.sdk_session_pool_size``)
-    - Hard cap at max_size * 2 to prevent unbounded growth when all sessions stream
-    - Eviction on insertion when full (LRU) AND on the tiered idle policy's
-      deadlines (see :class:`IdlePolicy` and :meth:`start_idle_watchdog`)
+    - Configurable max_size (``settings.sdk_session_pool_size``): how many
+      IDLE subprocess sessions stay warm. It is not a concurrency limit.
+    - Eviction on insertion when full (LRU, idle sessions only) AND on the
+      tiered idle policy's deadlines (see :class:`IdlePolicy` and
+      :meth:`start_idle_watchdog`)
     - Thread-safe within a single asyncio event loop
 
-    BOTH bounds — ``max_size`` and the hard cap — count DELEGATED-lane sessions
-    only (see :data:`DELEGATED_LANE`). They exist to bound long-lived node CLI
-    subprocesses; a native in-process session owns no subprocess, so counting it
-    here would refuse and evict work that costs nothing. Native sessions are
-    bounded by the real resource guards in :meth:`admission_check` (host memory,
-    descendant processes, tree RSS, and the optional native soft cap) and are
-    reclaimed by the tiered idle policy like everything else.
-    """
+    There is NO ceiling on how many sessions may run at once. A busy session
+    (streaming, held by the idle reader, or running background work) is never
+    evicted to make room; when every pooled session is busy the pool simply
+    grows past ``max_size``. What bounds the box is real resources, checked by
+    :meth:`admission_check` (host memory floor, descendant processes, tree RSS,
+    and the generous native safety valve).
 
-    # Hard cap multiplier — even with every DELEGATED session streaming, never
-    # exceed this many subprocess sessions.
-    _HARD_CAP_MULTIPLIER = 2
+    ``max_size`` counts DELEGATED-lane sessions only (see
+    :data:`DELEGATED_LANE`): it reclaims idle node CLI subprocesses, and a
+    native in-process session owns none. Native sessions are reclaimed by the
+    tiered idle policy like everything else.
+    """
 
     def __init__(
         self, max_size: int = 3, idle_policy: Optional[IdlePolicy] = None
@@ -786,7 +782,7 @@ class SessionPool:
         """Register the async hook fired after a session is evicted via _do_evict.
 
         The callback receives ``(session_id, reason)`` where reason ∈
-        {"lru", "lru_force", "idle"}. Injected at startup so the pool need not
+        {"lru", "idle", "evicted"}. Injected at startup so the pool need not
         import the live store or task registry. Passing ``None`` clears it.
         """
         self._eviction_callback = callback
@@ -899,15 +895,6 @@ class SessionPool:
         state.detached_since = None
         self._wake_idle_watchdog()
 
-    @property
-    def hard_cap(self) -> int:
-        """Absolute maximum number of DELEGATED (subprocess) pooled sessions.
-
-        Native in-process sessions are not counted against it — see the class
-        docstring and :meth:`lane_counts`.
-        """
-        return self._max_size * self._HARD_CAP_MULTIPLIER
-
     def lane_counts(self) -> tuple[int, int]:
         """``(delegated, native)`` pooled-session counts, in one pass.
 
@@ -933,15 +920,6 @@ class SessionPool:
         """Pooled in-process sessions. Cost no subprocess, gate nothing."""
         return self.lane_counts()[1]
 
-    def is_at_hard_cap(self) -> bool:
-        """Check if the SUBPROCESS half of the pool is at its maximum size.
-
-        Callers should check this before starting a new DELEGATED session and
-        reject with a "server busy" error if True. A native session is never
-        blocked by this — it has no subprocess to bound.
-        """
-        return self.delegated_size >= self.hard_cap
-
     def admission_snapshot(self, lane: str = DELEGATED_LANE) -> "AdmissionSnapshot":
         """:func:`admission_check` plus the occupancy numbers behind it.
 
@@ -952,13 +930,12 @@ class SessionPool:
         admitted but not yet connected. Pure read; same refusal string.
 
         ``lane`` is the lane the CALLER is about to admit onto: it decides
-        whether the subprocess cap is part of the verdict at all.
+        whether the native safety valve is part of the verdict.
         """
         delegated, native = self.lane_counts()
         return AdmissionSnapshot(
             refusal=self.admission_check(lane),
             in_pool=len(self._pool),
-            hard_cap=self.hard_cap,
             delegated_in_pool=delegated,
             native_in_pool=native,
             lane=lane,
@@ -968,36 +945,25 @@ class SessionPool:
         """Admission backpressure: decide whether a NEW session may be admitted.
 
         This is the non-destructive alternative to a watchdog that reaps
-        in-flight work. When the box is at a ceiling (subprocess pool cap, too
-        many descendant processes from subagent fan-out, or RAM), we REFUSE to
-        admit a new session rather than killing a running one.
+        in-flight work. When the box is short of a REAL resource (host memory,
+        descendant processes from subagent fan-out, tree RSS), we REFUSE to
+        admit a new session rather than killing a running one. There is
+        deliberately no session-count ceiling: running many agents at once is
+        the point of the app, so only actual resource pressure refuses.
 
-        ``lane`` says what the new session will cost. On the DEFAULT delegated
-        lane every check applies. On the native lane the
-        subprocess cap is skipped — a native session is coroutines in this
-        process — while every REAL resource guard below still applies: host
-        memory, descendant processes, tree RSS, and the optional native soft
-        cap. The default stays ``delegated`` so a caller that has not been
-        taught about lanes keeps today's (conservative) behaviour.
+        ``lane`` says what the new session will cost. Every resource guard
+        applies to both lanes; the native lane additionally has its generous
+        in-process safety valve (``sdk_native_session_soft_cap``).
 
         Returns None if admission is allowed, or a human-readable refusal reason
         string if the new session should be rejected. Never terminates anything.
         """
         native_lane = lane == NATIVE_LANE
 
-        # 1) Subprocess pool hard cap. DELEGATED sessions only: it bounds node
-        #    CLI subprocesses, and a native session spawns none.
-        if not native_lane:
-            delegated = self.delegated_size
-            if delegated >= self.hard_cap:
-                return (
-                    f"server busy: session pool at hard cap "
-                    f"({delegated}/{self.hard_cap} subprocess sessions)"
-                )
-        else:
-            # Native safety valve: a generous ceiling on in-process sessions so
-            # a runaway fan-out still meets a bound before the RSS guard has to
-            # catch it. 0 (or unset) disables it.
+        # 1) Native safety valve: a generous ceiling on in-process sessions so
+        #    a runaway fan-out still meets a bound before the RSS guard has to
+        #    catch it. 0 (or unset) disables it.
+        if native_lane:
             try:
                 from app.core.config import settings
                 soft_cap = getattr(settings, "sdk_native_session_soft_cap", 0) or 0
@@ -1084,10 +1050,12 @@ class SessionPool:
 
         Returns the evicted session_id, or None if no eviction was needed/possible.
 
-        IMPORTANT: Prefers non-streaming sessions for eviction. If all sessions
-        are streaming, allows temporary over-capacity up to the hard cap
-        (max_size * 2). Beyond the hard cap, forcibly evicts the LRU streaming
-        session to prevent unbounded memory growth.
+        IMPORTANT: Only IDLE sessions are ever evicted here. If every pooled
+        subprocess session is busy (streaming, held by the idle reader, or
+        running background work), nothing is evicted and the pool grows past
+        ``max_size``: live work is never torn down to make room. Resource
+        pressure is handled by :meth:`admission_check`, which refuses NEW work
+        instead.
 
         LANES: this whole path counts and evicts DELEGATED sessions only. It
         exists to reclaim a node CLI subprocess, and evicting a native
@@ -1138,43 +1106,13 @@ class SessionPool:
 
             if victim is None:
                 # Every subprocess session is busy (streaming, held by an idle
-                # reader, or running a background sub-agent) — allow temporary
-                # over-capacity up to the hard cap.
-                hard_cap = self.hard_cap
-                if delegated_size < hard_cap:
-                    logger.warning(
-                        f"[Pool] At capacity ({self._max_size}) with all subprocess "
-                        f"sessions busy (streaming or background work). Allowing "
-                        f"temporary over-capacity ({delegated_size}/{hard_cap} "
-                        f"subprocess sessions)."
-                    )
-                    return None
-
-                # Hard cap reached — forcibly evict the LRU DELEGATED session even
-                # if busy, to prevent unbounded memory/subprocess growth. This is
-                # the ultimate bound: it CAN kill a parked background sub-agent, but
-                # only when the box is already over 2x capacity with every
-                # subprocess session busy.
-                forced = next(
-                    (
-                        (sid, st)
-                        for sid, st in self._pool.items()
-                        if st.lane != NATIVE_LANE
-                    ),
-                    None,
+                # reader, or running a background sub-agent). Grow past the warm
+                # size rather than tear down live work.
+                logger.info(
+                    f"[Pool] All {delegated_size} subprocess sessions are busy; "
+                    f"growing past the warm pool size ({self._max_size})."
                 )
-                if forced is None:
-                    # Only native sessions are left. Nothing here can free a
-                    # subprocess, so there is nothing to force — the native lane's
-                    # bounds are the RSS/soft-cap guards in admission_check.
-                    return None
-                lru_session_id, lru_state = forced
-                logger.error(
-                    f"[Pool] Hard cap reached ({hard_cap} subprocess sessions). "
-                    f"Force-evicting LRU busy session {lru_session_id} to prevent "
-                    f"resource exhaustion."
-                )
-                victim = (lru_session_id, lru_state, "lru_force")
+                return None
 
             # Remove the entry while still holding the lock so concurrent
             # evict_if_needed callers immediately see the freed slot.
@@ -1976,7 +1914,7 @@ def admission_snapshot(lane: str = DELEGATED_LANE) -> AdmissionSnapshot:
     session yet cannot be at any ceiling, so "no pool" answers "admit", and a
     measurement error does the same (admission has always failed open).
     """
-    empty = AdmissionSnapshot(refusal=None, in_pool=0, hard_cap=0, lane=lane)
+    empty = AdmissionSnapshot(refusal=None, in_pool=0, lane=lane)
     pool = _session_pool
     if pool is None:
         return empty

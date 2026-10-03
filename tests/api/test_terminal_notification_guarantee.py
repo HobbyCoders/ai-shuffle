@@ -26,7 +26,7 @@
 
 V2 (Phase-1 deletion): ``LiveSessionStore.cleanup_ended_session`` — the old
 force-reap entry point — is deleted with the live store; the force reap now
-lives in ``resource_monitor._cleanup_evicted_sessions`` (reason "lru_force" /
+lives in ``resource_monitor._cleanup_evicted_sessions`` (reason
 "dead"), and that is what the force-reap tests here drive.
 
 Tests drive the REAL paths: real ``complete_task`` transitions, the real

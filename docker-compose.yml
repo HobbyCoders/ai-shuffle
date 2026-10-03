@@ -107,9 +107,10 @@ services:
     ports:
       - "${BIND_HOST:-127.0.0.1}:${PORT:-8000}:8000"
 
-    # Health check — readiness probe (DB SELECT 1 + session-pool headroom).
-    # /health/ready returns 503 until the DB is reachable, so give a generous
-    # start_period for first-boot migrations/DB connect before failures count.
+    # Health check — readiness probe (DB SELECT 1). A busy worker running many
+    # agents stays healthy; /health/ready returns 503 only until the DB is
+    # reachable, so give a generous start_period for first-boot migrations/DB
+    # connect before failures count.
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health/ready"]
       interval: 30s

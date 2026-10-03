@@ -2,8 +2,9 @@
 
 The readiness endpoint must:
   * require NO auth (probes are unauthenticated)
-  * return 200 + a small JSON body when the DB answers and the pool has headroom
-  * return 503 + reasons when the DB is down or the pool is wedged at hard cap
+  * return 200 + a small JSON body when the DB answers, however busy the
+    session pool is (the container healthcheck probes it; busy != unhealthy)
+  * return 503 + reasons when the DB is down
 
 These use FastAPI's TestClient against a bare app mounting only the system
 router (matching the pattern in tests/api/test_system.py::TestValidateWorkspaceAuth).
@@ -25,20 +26,13 @@ def _client():
 class _FakePool:
     """Minimal stand-in for SessionPool exposing the accessors the probe reads."""
 
-    def __init__(self, size=0, max_size=3, at_hard_cap=False):
+    def __init__(self, size=0, max_size=3):
         self._size = size
         self.max_size = max_size
-        self._at_hard_cap = at_hard_cap
+        self.delegated_size = size
 
     def __len__(self):
         return self._size
-
-    @property
-    def hard_cap(self):
-        return self.max_size * 2
-
-    def is_at_hard_cap(self):
-        return self._at_hard_cap
 
 
 class TestReadinessReady:
@@ -53,7 +47,7 @@ class TestReadinessReady:
         assert body["status"] == "ready"
         assert body["checks"]["database"] == "ok"
         assert body["checks"]["session_pool"]["size"] == 1
-        assert body["checks"]["session_pool"]["hard_cap"] == 6
+        assert body["checks"]["session_pool"]["warm_size"] == 3
         assert "reasons" not in body
 
     def test_api_prefixed_alias_works(self):
@@ -101,23 +95,29 @@ class TestReadinessNotReady:
         assert body["checks"]["database"] == "error"
         assert any("database unreachable" in r for r in body["reasons"])
 
-    def test_pool_at_hard_cap_returns_503(self):
-        client = _client()
-        with patch("app.api.system._probe_db", return_value=None), \
-             patch("app.core.session_pool.get_session_pool",
-                   return_value=_FakePool(size=6, max_size=3, at_hard_cap=True)):
-            resp = client.get("/health/ready")
-        assert resp.status_code == 503
-        body = resp.json()
-        assert body["status"] == "not_ready"
-        assert any("hard cap" in r for r in body["reasons"])
-
-    def test_both_failing_lists_both_reasons(self):
+    def test_db_down_with_busy_pool_reports_only_the_database(self):
         client = _client()
         with patch("app.api.system._probe_db",
                    side_effect=Exception("db gone")), \
              patch("app.core.session_pool.get_session_pool",
-                   return_value=_FakePool(size=6, max_size=3, at_hard_cap=True)):
+                   return_value=_FakePool(size=40, max_size=3)):
             resp = client.get("/health/ready")
         assert resp.status_code == 503
-        assert len(resp.json()["reasons"]) == 2
+        assert resp.json()["reasons"] == ["database unreachable"]
+
+
+class TestBusyPoolStaysReady:
+    """#1690: a worker running many agents is busy, not unhealthy."""
+
+    def test_pool_far_past_warm_size_is_still_ready(self):
+        client = _client()
+        with patch("app.api.system._probe_db", return_value=None), \
+             patch("app.core.session_pool.get_session_pool",
+                   return_value=_FakePool(size=40, max_size=4)):
+            for path in ("/health/ready", "/api/v1/health/ready"):
+                resp = client.get(path)
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["status"] == "ready"
+                assert body["checks"]["session_pool"]["delegated_size"] == 40
+                assert "reasons" not in body

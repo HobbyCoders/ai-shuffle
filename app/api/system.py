@@ -80,10 +80,9 @@ async def api_health_check():
 async def _readiness_report() -> tuple[bool, dict]:
     """Build the readiness report: (ready, body).
 
-    Checks the two things a probe must know before routing traffic to this
-    instance:
-      * the database answers ``SELECT 1`` (the pool is up and the DB reachable)
-      * the session pool has admission headroom (not wedged at its hard cap)
+    Readiness is decided by the database alone: it answers ``SELECT 1`` (the
+    pool is up and the DB reachable). Session-pool occupancy is reported in
+    ``checks`` for observability but never makes the instance unready.
 
     Returns a plain dict so both the route and its tests can assert on the body
     without a live server. Never raises — every failure is folded into a reason
@@ -101,27 +100,20 @@ async def _readiness_report() -> tuple[bool, dict]:
         # This probe is public. Connection exceptions may contain a complete DSN.
         reasons.append("database unreachable")
 
-    # 2) Session pool headroom: reject only when wedged at the hard cap
-    #    (no new top-level session could be admitted right now).
+    # 2) Session pool: occupancy is reported, never a reason to be unready.
+    #    The container healthcheck probes this route, and a worker running
+    #    many agents at once is busy, not broken — failing on occupancy got a
+    #    busy worker marked unhealthy and stopped mid-work (#1690). A pool
+    #    that cannot be reached at all is a genuine fault and still fails.
     try:
         from app.core.session_pool import get_session_pool
         pool = get_session_pool()
         pool_size = len(pool)
-        hard_cap = pool.hard_cap
-        # The cap counts SUBPROCESS (delegated-lane) sessions only, so the
-        # readiness reason has to report that number rather than the whole
-        # pool's — native in-process sessions never make the box unready.
-        delegated = getattr(pool, "delegated_size", pool_size)
         checks["session_pool"] = {
             "size": pool_size,
-            "delegated_size": delegated,
-            "max_size": pool.max_size,
-            "hard_cap": hard_cap,
+            "delegated_size": getattr(pool, "delegated_size", pool_size),
+            "warm_size": pool.max_size,
         }
-        if pool.is_at_hard_cap():
-            reasons.append(
-                f"session pool at hard cap ({delegated}/{hard_cap})"
-            )
     except Exception as e:  # noqa: BLE001
         checks["session_pool"] = "error"
         reasons.append(f"session pool unavailable: {e}")
@@ -151,10 +143,11 @@ def _probe_db() -> None:
 async def readiness_check():
     """Kubernetes/Docker-style readiness probe (no auth — probes are unauthenticated).
 
-    200 with a small JSON body when the DB answers and the session pool has
-    admission headroom; 503 with ``reasons`` when not ready. Distinct from
-    ``/health`` (liveness): a live process can still be *not ready* (DB down,
-    pool wedged), and orchestrators must not route traffic to it.
+    200 with a small JSON body when the DB answers; 503 with ``reasons`` when
+    it does not. A full session pool never makes it fail: the container
+    healthcheck probes this route, and busy is not unhealthy. Distinct from
+    ``/health`` (liveness): a live process can still be *not ready* (DB down),
+    and orchestrators must not route traffic to it.
     """
     ready, body = await _readiness_report()
     if not ready:

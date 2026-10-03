@@ -35,7 +35,7 @@ class WorkerBarrier:
         # A native parent plus its children; zero CLI processes. Pool/resource
         # guards have their own tests, while this exercises real app admission.
         return AdmissionSnapshot(
-            refusal=None, in_pool=1 + len(self.active), hard_cap=8,
+            refusal=None, in_pool=1 + len(self.active),
             delegated_in_pool=0, native_in_pool=1 + len(self.active), lane=lane,
         )
 

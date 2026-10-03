@@ -92,9 +92,9 @@ async def test_evict_if_needed_skips_busy_session_prefers_idle():
 
 @pytest.mark.asyncio
 async def test_evict_if_needed_allows_overcapacity_when_only_busy():
-    """When every candidate is busy and we're under the hard cap, eviction
-    refuses (temporary over-capacity) rather than killing a parked agent."""
-    pool = SessionPool(max_size=1)  # hard cap = 2
+    """When every candidate is busy, eviction refuses (the pool grows past its
+    warm size) rather than killing a parked agent."""
+    pool = SessionPool(max_size=1)
     pool.put("busy", _make_state())
     _mark_busy("busy")
 
@@ -105,30 +105,30 @@ async def test_evict_if_needed_allows_overcapacity_when_only_busy():
 
 
 @pytest.mark.asyncio
-async def test_evict_if_needed_force_evicts_busy_at_hard_cap():
-    """At the hard cap with every session busy, the ultimate memory bound still
-    force-evicts the LRU session (reason 'lru_force') and fires the callback."""
+async def test_evict_if_needed_never_force_evicts_busy_sessions():
+    """However far past the warm size, busy sessions are never torn down.
+
+    The old hard cap (2x warm size) force-evicted the LRU busy session, killing
+    live agent work to make room. Now the pool just grows.
+    """
     seen: list[tuple[str, str]] = []
 
     async def _cb(sid: str, reason: str) -> None:
         seen.append((sid, reason))
 
-    pool = SessionPool(max_size=1)  # hard cap = 2
+    pool = SessionPool(max_size=1)
     pool.set_eviction_callback(_cb)
-    pool.put("busy-old", _make_state())  # LRU
-    pool.put("busy-new", _make_state())
-    _mark_busy("busy-old")
-    _mark_busy("busy-new")
+    for i in range(10):
+        pool.put(f"busy-{i}", _make_state())
+        _mark_busy(f"busy-{i}")
 
-    evicted = await pool.evict_if_needed()
-
-    assert evicted == "busy-old"            # LRU force-evicted
-    assert "busy-old" not in pool
-    assert seen == [("busy-old", "lru_force")]
+    assert await pool.evict_if_needed() is None
+    assert len(pool) == 10
+    assert seen == []
 
 
 @pytest.mark.asyncio
-async def test_native_admission_at_busy_delegated_hard_cap_never_evicts():
+async def test_native_admission_with_busy_delegated_sessions_never_evicts():
     pool = SessionPool(max_size=1)
     pool.put("busy-old", _make_state())
     pool.put("busy-new", _make_state())
@@ -176,10 +176,9 @@ async def test_lru_eviction_picks_the_delegated_session():
 
 
 @pytest.mark.asyncio
-async def test_hard_cap_force_evict_never_takes_a_native_session():
-    """The ultimate bound is still a subprocess bound: with only native
-    sessions left there is nothing it can usefully force."""
-    pool = SessionPool(max_size=1)  # hard cap = 2
+async def test_busy_native_sessions_are_never_evicted():
+    """With only busy native sessions pooled there is nothing to evict."""
+    pool = SessionPool(max_size=1)
     pool.put("native-old", _native_state())
     pool.put("native-new", _native_state())
     _mark_busy("native-old")

@@ -104,16 +104,15 @@ _EFFORT_UNSET = object()
 # rather than receipted, because a worker refused inside its own turn would
 # leave that promise unkept.
 #
-# WHICH CEILING applies depends on the worker's LANE. The pool's hard cap
-# counts CLI subprocesses; a DELEGATED worker is one, so it is gated by the
-# cap. A NATIVE worker (openai_responses / anthropic / openrouter) is
-# coroutines in this process and never contributes to that cap, so it is gated
-# by what actually costs something: the pool's host-memory /
-# descendant-process / tree-RSS guards, and the per-parent fan-out limit below.
+# There is no session-count ceiling. Every worker, on either lane, is gated
+# only by what actually costs something: the pool's host-memory /
+# descendant-process / tree-RSS guards (plus the generous native safety valve
+# on the native lane), and the per-parent / per-tree / per-provider worker
+# limits below.
 
-#: How long a dispatch waits for a pool slot before refusing. Covers the common
-#: case — a fan-out that is only transiently over the cap because a sibling is
-#: about to settle — without turning a full box into an unbounded stall.
+#: How long a dispatch waits for capacity before refusing. Covers the common
+#: case — a fan-out that is only transiently over a ceiling because a sibling
+#: is about to settle — without turning a full box into an unbounded stall.
 _ADMISSION_WAIT_SECONDS = 90.0
 
 #: Re-check cadence while waiting for a slot.
@@ -468,11 +467,9 @@ async def _reserve_admission(
 
     Which ceilings apply depends on ``lane``:
 
-    * DELEGATED — the pool's subprocess hard cap (plus this module's own
-      reservations for delegated workers, which the pool cannot see yet), and
-      every resource guard in ``admission_check``.
-    * NATIVE — no subprocess cap; the resource guards (host memory, descendant
-      processes, tree RSS, native soft cap) and the per-parent fan-out limit.
+    * DELEGATED — every resource guard in ``admission_check`` (host memory,
+      descendant processes, tree RSS). There is no session-count cap.
+    * NATIVE — the same resource guards plus the native safety valve.
 
     The per-parent limit applies to BOTH lanes, as does an explicitly configured
     provider-row limit. These are Shuffle policies, not provider token quotas.
@@ -539,13 +536,7 @@ async def _reserve_admission(
                     "Swarm cancelled before admission; the worker was NOT started.",
                     time.monotonic() - started,
                 )
-            # Only DELEGATED reservations hold a subprocess slot.
             pending = _pending_admission_count(lane=DELEGATED_LANE)
-            at_cap = (
-                lane == DELEGATED_LANE
-                and snapshot.hard_cap > 0
-                and (snapshot.delegated_in_pool + pending) >= snapshot.hard_cap
-            )
             siblings = 0
             over_fanout = False
             if fanout_limit > 0 and parent_session_id:
@@ -569,7 +560,6 @@ async def _reserve_admission(
                 over_provider = on_provider >= provider_limit
             if (
                 snapshot.refusal is None
-                and not at_cap
                 and not over_fanout
                 and not over_root
                 and not over_provider
@@ -585,10 +575,10 @@ async def _reserve_admission(
                 if waited:
                     logger.info(
                         "task_dispatch: %s worker %s admitted after waiting "
-                        "%.1fs (%d/%d subprocess sessions, %d reserved, %d "
+                        "%.1fs (%d subprocess sessions, %d reserved, %d "
                         "sibling worker(s), %d on provider %s)",
                         lane, worker_session_id, queued_for,
-                        snapshot.delegated_in_pool, snapshot.hard_cap, pending,
+                        snapshot.delegated_in_pool, pending,
                         siblings, on_provider, provider_id,
                     )
                 return None, queued_for
@@ -598,19 +588,12 @@ async def _reserve_admission(
             only_provider = (
                 over_provider
                 and snapshot.refusal is None
-                and not at_cap
                 and not over_fanout
                 and not over_root
             )
             deadline_budget = provider_budget if only_provider else budget
             if snapshot.refusal is not None:
                 reason = snapshot.refusal
-            elif at_cap:
-                reason = (
-                    f"session pool at hard cap ({snapshot.delegated_in_pool}/"
-                    f"{snapshot.hard_cap} subprocess sessions) with {pending} "
-                    "worker(s) already admitted and starting"
-                )
             elif over_fanout:
                 reason = (
                     f"{siblings} worker(s) already running for this session "

@@ -468,18 +468,18 @@ class Settings(BaseSettings):
     # floor. All of it is configurable; see app.core.session_pool.IdlePolicy,
     # which is the single place the policy is expressed.
 
-    # Max concurrent SUBPROCESS sessions kept alive between queries. 4 covers
-    # the realistic concurrent working set (the chat you are in, the one you
-    # just left, and a running automation or two) while capping the worst case
-    # at ~4 subprocesses. The hard cap is still 2x this (see
-    # SessionPool._HARD_CAP_MULTIPLIER), so bursts still get headroom; only the
-    # steady state shrinks. Raise it on a big box via SDK_SESSION_POOL_SIZE.
+    # How many IDLE subprocess sessions stay warm between queries. 4 covers the
+    # realistic idle working set (the chat you are in, the one you just left,
+    # and a running automation or two). It is NOT a concurrency limit: busy
+    # sessions are never evicted, so any number can run at once and the pool
+    # grows past this while they do. Only real resource pressure (the memory /
+    # process guards below) refuses new work. Raise it on a big box via
+    # SDK_SESSION_POOL_SIZE to keep more idle sessions warm.
     #
-    # SUBPROCESS ONLY, both this and the hard cap. It is sized against the
+    # SUBPROCESS ONLY. It is sized against the
     # 100-300MB node CLI a DELEGATED session owns. A session on a native leg
     # (openai_responses / anthropic / openrouter) is coroutines inside this
-    # process and is not counted here at all, so the cap never refuses native
-    # workers that cost no process. What governs native sessions and native
+    # process and is not counted here at all. What governs native sessions and native
     # subagent workers instead: the real resource guards
     # (sdk_admission_min_available_mb, sdk_max_child_processes,
     # sdk_admission_rss_mb), the per-parent fan-out limit

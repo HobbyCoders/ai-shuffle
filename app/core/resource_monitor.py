@@ -366,15 +366,14 @@ async def _cleanup_evicted_sessions(session_ids: list[str], cleaned: dict, reaso
     NOTE: this is NEVER called for live/streaming sessions — the monitor no
     longer force-evicts streaming sessions on a timer (see report_long_streaming).
     """
-    # ``lru_force`` (hard-cap eviction of a busy session) and ``dead`` (subprocess
-    # died) are the only reasons that can remove a session PARKED on in-flight
-    # background work — normal ``lru``/``idle`` eviction skip parked sessions. In
-    # those two cases the pooled adapter was just destroyed, so the parked
-    # work can never deliver its terminal notification: the background-work
-    # guard below would refuse teardown FOREVER, leaking the registry and
-    # stranding the UI's task strip. Force the teardown so the orphaned tasks
-    # are reaped to killed.
-    force = reason in ("lru_force", "dead")
+    # ``dead`` (subprocess died) is the only reason that can remove a session
+    # PARKED on in-flight background work — normal ``lru``/``idle`` eviction
+    # skip parked sessions, and the pool never force-evicts a busy one. Here
+    # the pooled adapter is already gone, so the parked work can never deliver
+    # its terminal notification: the background-work guard below would refuse
+    # teardown FOREVER, leaking the registry and stranding the UI's task strip.
+    # Force the teardown so the orphaned tasks are reaped to killed.
+    force = reason == "dead"
     for session_id in session_ids:
         try:
             from app.core import streaming_status

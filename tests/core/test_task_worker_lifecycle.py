@@ -46,7 +46,7 @@ class _FakePool:
 
     def admission_snapshot(self, lane="delegated"):
         return AdmissionSnapshot(
-            refusal=None, in_pool=0, hard_cap=8, delegated_in_pool=0,
+            refusal=None, in_pool=0, delegated_in_pool=0,
             native_in_pool=0, lane=lane,
         )
 
