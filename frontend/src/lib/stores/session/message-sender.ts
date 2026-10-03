@@ -21,6 +21,7 @@ import { pendingQueue, newLocalPendingId } from './pending-queue';
 import { contextWindowForChoice } from '$lib/constants/model-context';
 import { getDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
+import { effortToSend } from '../assistant';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -192,7 +193,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		if (_state.mode !== 'chat') overrides.workspace_project_ids = [...(_state.workspaceProjectIds ?? [])];
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
 		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
-		if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
+		const effort = effortToSend(_state.sessionId, _state.effortLevelOverride);
+		if (effort) overrides.effort = effort;
 		// Always an explicit boolean. Omitting the key when fast mode is OFF made
 		// the backend fall back to the session row, which still held the earlier
 		// `true` — so turning fast mode off never reached the CLI. `false` is a

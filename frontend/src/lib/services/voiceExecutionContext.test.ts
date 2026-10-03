@@ -3,6 +3,8 @@ const update = vi.hoisted(() => vi.fn(async (_owner: string, _context: unknown) 
 vi.mock('$lib/api/voice', () => ({ updateVoiceContext: update }));
 import { persistVoiceContext, voiceContextFor } from './voiceExecutionContext';
 import type { ActiveSessionState } from '$lib/stores/active-session';
+import { assistantState } from '$lib/stores/assistant';
+import type { AssistantState } from '$lib/api/assistant';
 
 describe('voice execution context', () => {
 	it('does not replace inherited agent permissions with default', () => {
@@ -18,6 +20,16 @@ describe('voice execution context', () => {
 		const context = voiceContextFor({ modelOverride: 'unknown-model', effortLevelOverride: null, contextWindowChoice: '1m' } as unknown as ActiveSessionState);
 		expect(context.effort).toBeNull();
 		expect(context.context_window).toBeNull();
+	});
+	it('carries no effort from the assistant home', () => {
+		assistantState.set({ home_session_id: 'home' } as AssistantState);
+		try {
+			const state = { sessionId: 'home', modelOverride: 'opus', effortLevelOverride: 'low' } as unknown as ActiveSessionState;
+			expect(voiceContextFor(state)).not.toHaveProperty('effort');
+			expect(voiceContextFor({ ...state, sessionId: 'ordinary' }).effort).toBe('low');
+		} finally {
+			assistantState.set(null);
+		}
 	});
 	it('deduplicates identical settings', async () => {
 		const before = update.mock.calls.length;

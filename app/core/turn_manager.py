@@ -152,6 +152,28 @@ VOICE_DELEGATION = "voice_delegation"
 _BINDING_SOURCES = ("user", "queue", "api", "worktree", "connector")
 
 
+def _without_home_effort(
+    session_id: str, overrides: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """``overrides`` minus any effort when ``session_id`` is the assistant's home.
+
+    The home always runs at its model's own default effort (query_options
+    resolves it), so a pick from a client, a voice call or a replayed turn is
+    neither stored on the session nor carried on the turn.
+    """
+    if not overrides or "effort" not in overrides:
+        return overrides
+    try:
+        from app.core.assistant_service import is_primary_session
+
+        if not is_primary_session(session_id):
+            return overrides
+    except Exception:  # noqa: BLE001 — the build-time rule still applies.
+        logger.exception("assistant home check failed for session %s", session_id)
+        return overrides
+    return {key: value for key, value in overrides.items() if key != "effort"}
+
+
 def _submit_blocking(
     session_id: str,
     source: str,
@@ -189,6 +211,7 @@ def _submit_blocking(
     next turn. Without this a parked session with an armed wake would take the
     user's turn and then a second, stale one on top of it.
     """
+    overrides = _without_home_effort(session_id, overrides)
     if source in _BINDING_SOURCES and overrides:
         try:
             from app.db import database

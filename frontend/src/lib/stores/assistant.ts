@@ -1,5 +1,5 @@
 /** Presentation state only. The backend owns configuration, admission and identity. */
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { getAssistant, getAgentIdentities, type AssistantState, type AgentIdentity } from '$lib/api/assistant';
 import { sessionOwnerBoundary, sessionOwnerEpoch } from './session-owner';
 
@@ -20,6 +20,13 @@ sessionOwnerBoundary.subscribe(() => {
  */
 export function isAssistantHome(sessionId: string | null | undefined, state: AssistantState | null | undefined): boolean {
  return !!sessionId && !!state?.home_session_id && state.home_session_id === sessionId;
+}
+/**
+ * The effort a send from `sessionId` carries. The assistant's home always runs
+ * at its model's default, so it sends none, whatever the composer remembers.
+ */
+export function effortToSend(sessionId: string | null | undefined, effort: string | null | undefined): string | null {
+ return isAssistantHome(sessionId, get(assistantState)) ? null : effort || null;
 }
 export function acceptAssistant(state: AssistantState) {
  revision++;

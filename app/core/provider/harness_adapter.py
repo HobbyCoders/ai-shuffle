@@ -4428,11 +4428,28 @@ def _fluid_setting_sources(options: Any) -> Optional[tuple]:
 def _effective_effort(options: SessionOptions, value: Any, route: Optional[str] = None) -> Optional[str]:
     from app.core.model_effort import normalize_effort
 
+    # The assistant's home always runs at its model's own default effort,
+    # whatever was asked for.
+    if (options.extra or {}).get("assistant_home"):
+        return model_default_effort(options, route)
     provider_id = (options.extra or {}).get("provider_id")
     row = _lookup_provider_row(provider_id) if provider_id else None
     if provider_id and row is None:
         return None
     return normalize_effort(value, options.model, row, route=route or _decide_provider_kind(options))
+
+
+def model_default_effort(options: SessionOptions, route: Optional[str] = None) -> Optional[str]:
+    """The selected model's own default effort; None when it has no effort levels."""
+    from app.core.model_effort import effort_capabilities
+
+    provider_id = (options.extra or {}).get("provider_id")
+    row = _lookup_provider_row(provider_id) if provider_id else None
+    if provider_id and row is None:
+        return None
+    return effort_capabilities(
+        options.model, row, route=route or _decide_provider_kind(options)
+    )["default_effort"]
 
 
 def _valid_effort(value: Any) -> Optional[str]:

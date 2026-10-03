@@ -580,6 +580,11 @@ def open_home(model=None):
         if model and not session.get("model") and session.get("profile_id") == AGENT_ID:
             database.set_session_run_binding(session["id"], model=model)
             session = database.get_session(session["id"]) or session
+        if session.get("effort"):
+            # The home runs at its model's default effort (query_options); an
+            # effort stored by an older build has no effect, so clear it.
+            database.set_session_run_binding(session["id"], clear_effort=True)
+            session = database.get_session(session["id"]) or session
         return session
     # Session construction may consult runner state using its own connection.
     # Mint before the binding transaction, then compare under the account lock;

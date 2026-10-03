@@ -6,6 +6,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
+import { get } from 'svelte/store';
 import { activeSession } from '$lib/stores/active-session';
 import { appMode } from '$lib/stores/sessionMode.svelte';
 import ControlsDock from './ControlsDock.svelte';
@@ -49,6 +50,19 @@ describe('ControlsDock assistant mode', () => {
 		expect(screen.getAllByRole('button', { name: /^Context and usage/ }).length).toBeGreaterThan(0);
 		expect(screen.getByRole('button', { name: 'Toggle live browser view' })).toBeTruthy();
 		expect(screen.getByRole('button', { name: 'Attach file' })).toBeTruthy();
+	});
+
+	it('never rewrites the remembered effort from the assistant\'s home', async () => {
+		activeSession.setModelOverride('opus');
+		await activeSession.setEffortLevelOverride('ultra');
+		const { unmount } = renderDock(true);
+		await screen.findByRole('button', { name: /^Model:/ });
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect(get(activeSession).effortLevelOverride).toBe('ultra');
+		unmount();
+		// Control: an ordinary chat pulls the same pick back into the model's range.
+		renderDock(false);
+		await waitFor(() => expect(get(activeSession).effortLevelOverride).not.toBe('ultra'));
 	});
 
 	it('keeps voice, attach and a working model picker in the assistant\'s home', async () => {

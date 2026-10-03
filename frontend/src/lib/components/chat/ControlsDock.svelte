@@ -435,6 +435,8 @@
 	const effortCapability = $derived(resolveModelEffort(effortModel));
 	const effortLevels = $derived(effortCapability.options);
 	$effect(() => {
+		// The assistant's home has no effort pick to keep in range.
+		if (assistantMode) return;
 		const reconciled = reconcileModelEffort(effortValue, effortCapability);
 		if (reconciled !== effortValue) activeSession.setEffortLevelOverride(reconciled);
 	});

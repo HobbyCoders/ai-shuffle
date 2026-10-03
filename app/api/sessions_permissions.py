@@ -32,19 +32,25 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate) -> dict:
     from app.core.provider.types import SessionOptions
     from app.db.model_providers import get_model_provider
 
+    from app.core.assistant_service import is_primary_session
+
     changes = body.model_dump(exclude_unset=True)
     if not changes or ("fast" in changes and changes["fast"] is None):
         raise ValueError("Provide effort and/or a boolean fast setting")
     lock = _locks.setdefault(session_id, asyncio.Lock())
     async with lock:
         session = await run_sync(control._require_owned, session_id)
+        # The assistant's home always runs at its model's default effort.
+        home = await run_sync(is_primary_session, session_id)
+        if home and "effort" in changes:
+            raise ValueError("The assistant always uses its model's default effort")
         state = get_session_pool().peek(session_id)
         runtime = get_live_runtime(session_id)
         connected = state is not None and state.is_connected
         if runtime is not None and not connected:
             raise ValueError("The session is still connecting. Try again in a moment.")
         options = getattr(state.adapter, "_options", None) if connected else None
-        old = {"effort": options.effort if options else session.get("effort"),
+        old = {"effort": options.effort if options else None if home else session.get("effort"),
                "fast": bool(options.fast if options else session.get("fast"))}
         selected = {**old, **changes}
         if connected:
@@ -65,16 +71,21 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate) -> dict:
             if selected["fast"] and route not in ("delegated", "openai_responses"):
                 raise ValueError("Fast mode is not supported by this provider")
             selected["effort"] = effort
+        # The home never stores an effort; its turns carry none either.
+        stored = {**selected, "effort": None} if home else selected
         try:
-            await run_sync(database.set_session_run_binding, session_id, **selected,
-                           clear_effort=selected["effort"] is None)
+            await run_sync(database.set_session_run_binding, session_id, **stored,
+                           clear_effort=stored["effort"] is None)
         except Exception:
             if connected:
                 await state.adapter.set_run_settings(**old)
             raise
         runtime = get_live_runtime(session_id)
         if runtime is not None:
-            runtime.turn["overrides"] = {**(runtime.turn.get("overrides") or {}), **selected}
+            turn_overrides = {**(runtime.turn.get("overrides") or {}), **selected}
+            if home:
+                turn_overrides.pop("effort", None)
+            runtime.turn["overrides"] = turn_overrides
         if connected and state.connect_options is not None:
             state.connect_options.effort = selected["effort"]
             state.connect_options.aih_fast = selected["fast"]

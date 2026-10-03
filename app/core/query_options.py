@@ -621,6 +621,32 @@ def _build_thinking_config(
     return result
 
 
+def _assistant_home_effort(
+    model: Optional[str],
+    provider_id: Optional[str],
+    provider_row: Any,
+) -> Optional[str]:
+    """The effort the assistant's home runs at: its model's own default.
+
+    The owner cannot pick one there, so a client override, the session row and
+    the agent config are all ignored. None when the model has no effort levels.
+    Resolved on the same route the harness adapter will use for the model.
+    """
+    from app.core.provider.harness_adapter import model_default_effort
+    from app.core.provider.types import SessionOptions
+
+    extra: Dict[str, Any] = {}
+    row = provider_row or {}
+    if provider_id:
+        extra["provider_id"] = provider_id
+        for key, field in (("provider_type", "provider_type"),
+                           ("provider_auth_mode", "auth_mode"),
+                           ("provider_dialect", "api_dialect")):
+            if row.get(field):
+                extra[key] = row[field]
+    return model_default_effort(SessionOptions(model=model or "", extra=extra))
+
+
 def _resolve_thinking_display(
     config: Dict[str, Any],
     overrides: Optional[Dict[str, Any]] = None,
@@ -1657,12 +1683,20 @@ def build_options_from_profile(
         # For Opus 4.6+: use effort-based adaptive thinking
         # For Sonnet/Haiku: use token budget-based thinking
         **_build_thinking_config(
-            config, model_to_use, overrides, session_effort=_session_effort,
+            config, model_to_use,
+            # The assistant's home ignores every effort pick (this turn's, the
+            # row's, the agent's) and runs at its model's own default.
+            {k: v for k, v in overrides.items() if k != "effort"} if assistant_home else overrides,
+            session_effort=(
+                _assistant_home_effort(model_to_use, provider_id, main_provider_row)
+                if assistant_home else _session_effort
+            ),
             # A model-bound session owns its effort choice, including an
             # explicit model default (NULL). Do not resurrect a legacy agent's
             # effort after a live reset. Unbound pre-migration sessions retain
             # their old fallback; workers never inherit a saved role default.
-            allow_profile_effort=not bool((_binding_row or {}).get("is_worker"))
+            allow_profile_effort=not assistant_home
+            and not bool((_binding_row or {}).get("is_worker"))
             and not bool((_binding_row or {}).get("model")),
         ),
     )

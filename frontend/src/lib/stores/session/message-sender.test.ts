@@ -1,5 +1,7 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { createMessageSender, type MessageSenderDeps } from './message-sender';
+import { assistantState } from '../assistant';
+import type { AssistantState } from '$lib/api/assistant';
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import { reopenWorktree } from '$lib/api/git';
@@ -372,6 +374,29 @@ describe('message-sender fast-mode override', () => {
 		// which still holds the earlier `true` — so "off" must be explicit.
 		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
 		expect(frame.overrides).toMatchObject({ model: 'opus', fast: false });
+	});
+});
+
+describe('message-sender effort in the assistant home', () => {
+	afterEach(() => assistantState.set(null));
+
+	async function sentOverrides(sessionId: string) {
+		const { deps, wsConn } = makeDeps(baseState({ sessionId, modelOverride: 'opus', effortLevelOverride: 'low' }));
+		await createMessageSender(deps).sendMessage('hello');
+		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
+		return frame.overrides;
+	}
+
+	it('omits the effort a home send would otherwise carry', async () => {
+		assistantState.set({ home_session_id: 'home' } as AssistantState);
+		const overrides = await sentOverrides('home');
+		expect(overrides).toMatchObject({ model: 'opus' });
+		expect(overrides).not.toHaveProperty('effort');
+	});
+
+	it('keeps the picked effort in an ordinary chat', async () => {
+		assistantState.set({ home_session_id: 'home' } as AssistantState);
+		expect(await sentOverrides('ordinary')).toMatchObject({ model: 'opus', effort: 'low' });
 	});
 });
 
