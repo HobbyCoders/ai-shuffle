@@ -28,9 +28,19 @@ Key concepts:
 
 In the app, plugins are managed in **Settings > Plugins**. Older "Manage plugins" links open that section.
 
+## Plugins found or made in a chat
+
+Ask an agent in a code session for a plugin ("make me a plugin that reads my Cloudflare DNS records") and it follows the built-in `build-plugin` skill, using three tools that call the same code as **Settings > Plugins**:
+
+- `FindPlugins` searches the plugins you have installed and the ones your plugin sources offer.
+- `CheckPlugin` reports, for a plugin from your sources or a folder the agent wrote, what would load, what is adapted or left out for AI Shuffle and why, which hooks and MCP servers run code, and which outside services it asks for. For a folder it also runs the format check and lists every problem. Literal MCP `env` values are never shown.
+- `InstallPlugin` installs one, always switched off. A folder the agent wrote becomes an [authored plugin](#ai-authored-plugins). A plugin from your sources is marked **Needs your review** in Settings, with the session and agent that asked recorded on this device; it stays off, and its hooks and MCP servers do not run, until you enable it there. An update while it waits keeps it waiting.
+
+No tool enables a plugin. `InstallPlugin` asks for permission in Ask mode and is refused in sessions that are not yours (API keys). It only installs from the plugin sources you added, and only entries whose files come from inside the source or over HTTPS; an entry fetched over SSH or plain HTTP, an official connector runtime, or anything from an unknown source is refused. Agents never add sources. An install waiting for your review is not copied to your other devices until you enable it. Chat-mode sessions and background research do not have these tools.
+
 ## AI-authored plugins
 
-When you ask an agent for a plugin in a code session, it can save one with the `save_plugin` tool. Like `save_skill`, the tool asks for permission in Ask mode and is not available in chat sessions or background research.
+A plugin folder an agent installs with `InstallPlugin`, or saves with the `save_plugin` tool in a code-mode session, is an authored plugin. Like `save_skill`, these tools ask for permission in Ask mode and are not available in chat sessions or background research.
 
 - The plugin is written in the Agent Plugins layout to `~/.fluid/plugins/cache/authored/<name>/<version>/` and appears at once in **Settings > Plugins** as `<name>@authored`, marked **Needs review**.
 - It stays off until you open it, check what it adds (each skill, command, agent and MCP server, with the server's command line or URL), and choose **Approve and enable**. That approval covers only the version you reviewed, identified by a hash of its files.

@@ -415,9 +415,30 @@ def _copy_tree_resolving_symlinks(
         active.discard(real_src)
 
 
+def _agent_request(
+    previous: Any, requested_by: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """The review fields an install record carries.
+
+    An agent's install (``requested_by``) waits for the owner: ``approval``
+    is ``"pending"`` until the owner enables it in Settings
+    (:meth:`PluginService.enable_plugin` clears it). A re-install or update
+    of a plugin still waiting keeps the marker and who asked.
+    """
+    if requested_by:
+        return {"approval": "pending", "requestedBy": dict(requested_by)}
+    prev = previous[0] if isinstance(previous, list) and previous else previous
+    if isinstance(prev, dict) and prev.get("approval") == "pending":
+        out: Dict[str, Any] = {"approval": "pending"}
+        if isinstance(prev.get("requestedBy"), dict):
+            out["requestedBy"] = prev["requestedBy"]
+        return out
+    return {}
+
+
 def _install_implicit_plugin(
     svc, plugin_id: str, marketplace_id: str, mp_path: Path, implicit: Dict[str, Any], scope: str,
-    enable: bool = True,
+    enable: bool = True, requested_by: Optional[Dict[str, Any]] = None,
 ) -> PluginInfo:
     """Install a marketplace-less repo as a single implicit plugin.
 
@@ -450,6 +471,7 @@ def _install_implicit_plugin(
     if "plugins" not in installed:
         installed["plugins"] = {}
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    review = _agent_request(installed["plugins"].get(plugin_id), requested_by)
     installed["plugins"][plugin_id] = [{
         "scope": scope,
         "installPath": str(cache_path),
@@ -460,10 +482,13 @@ def _install_implicit_plugin(
         # Marks a repo installed as an implicit plugin (no marketplace.json entry).
         # Update checks skip these; see plugin_updates.check_for_updates.
         "implicit": True,
+        **review,
     }]
     svc._write_json_file(svc.INSTALLED_FILE, installed)
 
-    if enable:
+    # Still waiting for the owner (an agent's install, or an update of one):
+    # stay off, so enabling remains the owner's own action.
+    if enable and not review:
         svc.enable_plugin(plugin_id)
     else:
         svc.disable_plugin(plugin_id)
@@ -474,7 +499,10 @@ def _install_implicit_plugin(
     return svc.get_installed_plugins()[-1]
 
 
-def install_plugin(svc, plugin_id: str, scope: str = "user", enable: bool = True) -> PluginInfo:
+def install_plugin(
+    svc, plugin_id: str, scope: str = "user", enable: bool = True,
+    requested_by: Optional[Dict[str, Any]] = None,
+) -> PluginInfo:
     """
     Install a plugin from a marketplace.
 
@@ -488,6 +516,9 @@ def install_plugin(svc, plugin_id: str, scope: str = "user", enable: bool = True
         enable: Turn the plugin on (the owner's own install). An agent's
             install passes False: the files land, nothing loads until the
             owner enables it in Settings.
+        requested_by: Set for an agent's install (session and agent that
+            asked). The plugin is installed off and marked ``approval:
+            "pending"`` whatever ``enable`` says.
 
     Returns:
         PluginInfo for the installed plugin
@@ -499,6 +530,8 @@ def install_plugin(svc, plugin_id: str, scope: str = "user", enable: bool = True
     plugin_name, marketplace_id = parts
     _safe_path_component(plugin_name, "name")
     _safe_path_component(marketplace_id, "marketplace")
+    if requested_by:
+        enable = False
 
     # Refuse (409) before copying anything if a file this install writes
     # cannot be read back; otherwise the files land and the request fails.
@@ -522,7 +555,7 @@ def install_plugin(svc, plugin_id: str, scope: str = "user", enable: bool = True
             implicit = discover_implicit_components(svc, mp_path)
             if implicit["any"]:
                 return _install_implicit_plugin(
-                    svc, plugin_id, marketplace_id, mp_path, implicit, scope, enable
+                    svc, plugin_id, marketplace_id, mp_path, implicit, scope, enable, requested_by
                 )
         raise ValueError(f"Plugin not found in marketplace: {plugin_name}")
 
@@ -632,11 +665,14 @@ def install_plugin(svc, plugin_id: str, scope: str = "user", enable: bool = True
     # against the marketplace entry's SHA without cloning.
     if isinstance(source, dict) and source.get("sha"):
         install_record["sourceSha"] = source["sha"][:7]
+    review = _agent_request(installed["plugins"].get(plugin_id), requested_by)
+    install_record.update(review)
     installed["plugins"][plugin_id] = [install_record]
     svc._write_json_file(svc.INSTALLED_FILE, installed)
 
-    # Enable by default; an agent-requested install waits for the owner.
-    if enable:
+    # Enable by default; an agent-requested install (or an update of one
+    # still waiting) stays off until the owner enables it.
+    if enable and not review:
         svc.enable_plugin(plugin_id)
     else:
         svc.disable_plugin(plugin_id)

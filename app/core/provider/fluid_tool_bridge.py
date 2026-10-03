@@ -138,6 +138,12 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "GetAppLogs": "safe",
     "GetUsage": "safe",
     "DeployStatus": "safe",
+    # Plugins (app/mcp/plugin_tools.py). An install lands switched off and
+    # pending; the owner enables it in Settings, so this gate is the first
+    # of two.
+    "FindPlugins": "safe",
+    "CheckPlugin": "safe",
+    "InstallPlugin": "write",
     "WorktreeReport": "safe",
     "ToolSearch": "safe",
     "RemoteTrigger": "write",

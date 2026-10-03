@@ -418,6 +418,13 @@ def _command_rule(data, scope):
     return _command_level(data.get("command"), scope)
 
 
+def _check_plugin_rule(data, scope):
+    """Checking a plugin reads a folder (a path) or the owner's plugin
+    sources (a plugin id); a folder is judged like any other read."""
+    path = data.get("path")
+    return _read_level(path, scope) if path not in (None, "") else LOW
+
+
 def _start_session_rule(data, scope):
     """Starting a chat here, or in a named registered project, is ordinary
     work. A chat on another worker with no project could land anywhere."""
@@ -457,6 +464,9 @@ TOOL_LEVELS: Dict[str, Level] = {
     "GetUsage": LOW, "DeployStatus": LOW, "WorktreeReport": LOW, "GetAppErrors": LOW, "GetAppLogs": LOW,
     "NotifyDevices": LOW, "PushNotification": LOW, "AndroidDevices": LOW, "AndroidAction": HIGH,
     "DesignSync": HIGH,
+    # Plugins (app/mcp/plugin_tools.py): searching and checking read; an
+    # install puts files on the worker (switched off, pending review), so it asks.
+    "FindPlugins": LOW, "CheckPlugin": _check_plugin_rule, "InstallPlugin": HIGH,
     # Private access: folders, machines and service credentials.
     "mcp__chat-access__ChatResources": LOW,
     "mcp__chat-access__RequestChatAccess": HIGH, "mcp__chat-access__ChatListFiles": HIGH,

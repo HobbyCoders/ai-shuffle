@@ -247,6 +247,24 @@ async function truth(viewport, touch) {
 	check(await page.getByText('Added by an agent. Review first.').isVisible(), 'agent install banner');
 	check((await noOverflow()) <= 0, 'no overflow, agent install', await noOverflow());
 	await shot('3-agent-install');
+	// InstallPlugin's marketplace install (approval "pending", switched off):
+	// listed under Needs your review, apart from a plugin the owner turned off,
+	// with no switch, and approving it is a plain enable (no content hash).
+	check(await detailPane().getByRole('switch', { name: 'Enabled' }).count() === 0, 'agent install has no switch until approved');
+	if (!touch) {
+		const groupOf = (id) => page.evaluate((id) => {
+			let el = document.querySelector(`[data-settings-item="${id}"]`);
+			while (el && !el.classList?.contains('st-lg')) el = el.previousElementSibling;
+			return el?.textContent?.trim() ?? null;
+		}, id);
+		check((await groupOf(`plugin:${agentInstall.id}`)) === 'Needs your review', 'agent install under Needs your review', await groupOf(`plugin:${agentInstall.id}`));
+		check((await groupOf(`plugin:${hooked.id}`)) !== 'Needs your review', 'owner-disabled plugin not under Needs your review', await groupOf(`plugin:${hooked.id}`));
+	}
+	await review.getByRole('button', { name: 'Approve and enable' }).click();
+	await review.getByRole('button', { name: 'Approve', exact: true }).click();
+	await page.waitForTimeout(300);
+	const approval = sent.find((s) => s.path === `/plugins/${agentInstall.id}/enable`);
+	check(!!approval && !approval.body?.content_hash, 'approving an agent install is a plain enable', approval);
 
 	// An imported plugin: what was adapted, what is left out, outside services.
 	await open({ installed: [imported] }, `plugin:${imported.id}`);

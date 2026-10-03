@@ -88,7 +88,8 @@ class PluginResponse(BaseModel):
     format: Optional[str] = None
     trust: Optional[str] = None
     components: List[PluginComponentResponse] = Field(default_factory=list)
-    # Authored plugins only: review state and the hash an approval pins.
+    # Review state: "pending" for an agent-authored draft or an agent's
+    # install waiting for the owner; the hash an authored approval pins.
     approval: Optional[str] = None
     content_hash: Optional[str] = None
 

@@ -51,7 +51,11 @@ def _installed() -> Dict[str, dict]:
                 continue
             if _authored(plugin.id):
                 continue
-            out[plugin.id] = {"version": plugin.version, "enabled": bool(enabled.get(plugin.id, plugin.enabled))}
+            if getattr(plugin, "approval", None) == "pending":
+                # An agent asked for it here; it waits for the owner's review
+                # on this worker and is not shared until they enable it.
+                continue
+            out[plugin.id] ={"version": plugin.version, "enabled": bool(enabled.get(plugin.id, plugin.enabled))}
         return out
     except Exception:  # noqa: BLE001
         logger.debug("Plugin inventory unavailable", exc_info=True)

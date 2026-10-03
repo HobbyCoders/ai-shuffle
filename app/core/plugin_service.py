@@ -145,6 +145,12 @@ def _read_readme(directory: Path) -> Optional[str]:
         return None
 
 
+def _pending(install: Any) -> Optional[str]:
+    """``"pending"`` while an agent-installed plugin waits for the owner's
+    review (``app.core.plugin_install._agent_request``), else None."""
+    return "pending" if isinstance(install, dict) and install.get("approval") == "pending" else None
+
+
 def _trust_for(marketplace: str) -> str:
     return "authored" if marketplace == "authored" else "marketplace"
 
@@ -750,6 +756,7 @@ class PluginService:
                 installed_at=installed_at,
                 enabled=enabled_plugins.get(plugin_id, False),
                 trust=_trust_for(marketplace),
+                approval=_pending(install),
                 **summary,
             ))
 
@@ -816,6 +823,7 @@ class PluginService:
             installed_at=installed_at,
             enabled=enabled_plugins.get(plugin_id, False),
             trust=_trust_for(marketplace),
+            approval=_pending(install),
             **summary,
             commands=commands,
             agents=agents,
@@ -922,7 +930,10 @@ class PluginService:
         """Clone a git repo and extract a specific subdirectory."""
         return _inst_mod._clone_git_subdir_source(self, source, dest)
 
-    def install_plugin(self, plugin_id: str, scope: str = "user", enable: bool = True) -> PluginInfo:
+    def install_plugin(
+        self, plugin_id: str, scope: str = "user", enable: bool = True,
+        requested_by: Optional[Dict[str, Any]] = None,
+    ) -> PluginInfo:
         """
         Install a plugin from a marketplace.
 
@@ -938,7 +949,7 @@ class PluginService:
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.install(kind, scope)
-        return _inst_mod.install_plugin(self, plugin_id, scope, enable)
+        return _inst_mod.install_plugin(self, plugin_id, scope, enable, requested_by)
 
     def install_plugins_batch(
         self, plugin_ids: List[str], scope: str = "user", enable: bool = True
@@ -995,7 +1006,24 @@ class PluginService:
         if "enabledPlugins" not in settings:
             settings["enabledPlugins"] = {}
         settings["enabledPlugins"][plugin_id] = True
-        return self._write_json_file(self.SETTINGS_FILE, settings)
+        written = self._write_json_file(self.SETTINGS_FILE, settings)
+        self._clear_pending(plugin_id)
+        return written
+
+    def _clear_pending(self, plugin_id: str) -> None:
+        """The owner enabled an agent-installed plugin: it no longer waits
+        for review. Who asked stays in the record."""
+        if not self.INSTALLED_FILE.exists():
+            return
+        installed = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}}, for_update=True)
+        data = installed.get("plugins", {}).get(plugin_id)
+        records = data if isinstance(data, list) else [data]
+        changed = False
+        for record in records:
+            if isinstance(record, dict) and record.pop("approval", None) is not None:
+                changed = True
+        if changed:
+            self._write_json_file(self.INSTALLED_FILE, installed)
 
     def disable_plugin(self, plugin_id: str) -> bool:
         """Disable a plugin globally"""

@@ -2666,6 +2666,17 @@ def create_builtin_tools_server(
 
     all_tools.append(hand_off_session_tool)
 
+    # Plugins: find one, check one, install one switched off for the owner
+    # to review and enable in Settings (app/mcp/plugin_tools.py).
+    try:
+        from app.mcp.plugin_tools import build_plugin_tools
+
+        all_tools.extend(build_plugin_tools(
+            tool, is_admin=is_admin, cwd=cwd, session_id=session_id, profile_id=profile_id,
+        ))
+    except Exception:  # noqa: BLE001 — plugin tools never block a session
+        logger.warning("plugin tool registration failed", exc_info=True)
+
     # ------------------------------------------------------------------
     # App-memory bridge — Remember / Recall / SessionSearch / SessionView.
     # These exist for the DELEGATED (claude CLI) leg, which otherwise sees
@@ -2746,6 +2757,9 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__GetAppLogs",
         "mcp__builtins__GetUsage",
         "mcp__builtins__DeployStatus",
+        "mcp__builtins__FindPlugins",
+        "mcp__builtins__CheckPlugin",
+        "mcp__builtins__InstallPlugin",
         # The app-memory bridge (delegated leg; shadowed on native legs where
         # fluid's bare-named builtins serve the same stores). Allow-listed
         # unconditionally — per-session registration gates real availability.

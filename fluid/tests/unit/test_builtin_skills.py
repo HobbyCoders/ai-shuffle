@@ -65,6 +65,10 @@ async def test_the_skill_tool_loads_the_builtin_body(builtins_on, project) -> No
     assert not outcome.is_error, outcome.text
     assert "# Build a plugin" in outcome.text
     assert "python -m fluid.context.plugin_check" in outcome.text
+    # The chat tools carry the search, the check and the install.
+    for name in ("FindPlugins", "CheckPlugin", "InstallPlugin"):
+        assert f"`{name}`" in outcome.text, name
+    assert "save_plugin" not in outcome.text
 
 
 def _example_files() -> dict[str, str]:
@@ -94,6 +98,6 @@ def test_the_example_in_the_skill_passes_the_validator(tmp_path) -> None:
         "skill zone-report", "command dns", "agent record-auditor",
     }, result.components
 
-    # The step after the check: save_plugin takes the same content.
+    # The step after the check: InstallPlugin saves the checked spec this way.
     saved = save_authored_plugin(result.spec, home=tmp_path / "plugins")
     assert saved.id == "zone-report@authored" and saved.version == "0.1.0"

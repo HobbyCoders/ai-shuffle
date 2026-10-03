@@ -1,11 +1,14 @@
 ---
 name: build-plugin
-description: Build an AI Shuffle plugin from scratch (skills, slash commands, subagents, MCP servers and outside-service declarations in one reviewed package). Use when the owner wants a reusable capability in every chat and no existing plugin fits.
+description: Find, install or build an AI Shuffle plugin (skills, slash commands, subagents, MCP servers and outside-service declarations in one reviewed package). Use when the owner wants a reusable capability in every chat, or asks for a plugin.
 ---
 
 # Build a plugin
 
 Work through the steps in order. The owner switches the plugin on; you never do.
+You need the tools `FindPlugins`, `CheckPlugin` and `InstallPlugin`. If this
+chat does not have them, say so and ask the owner to continue in a code
+session.
 
 ## 1. Plugin or plain skill?
 
@@ -19,7 +22,19 @@ owner wants one of these:
 - one versioned package that they review and enable as a unit.
 
 Do not build a plugin for a one-off task or to hold a password, key or token.
-If the owner has not ruled out an existing plugin, ask before you start.
+
+Look for an existing plugin first: call `FindPlugins` with two or three
+keywords.
+
+- Installed and on: tell the owner it is already there. Stop.
+- Installed but off, or waiting for review: tell the owner to turn it on in
+  Settings > Plugins. Stop.
+- Available: call `CheckPlugin` with its `plugin_id` and tell the owner what it
+  would load, what was adapted or left out, what runs code, and which
+  services it asks for. If it fits, call `InstallPlugin` with the same
+  `plugin_id` and go to step 8.
+- Nothing fits: build one (steps 2 to 8). Never add a plugin source yourself;
+  if the owner names a repository, ask them to add it in Settings > Plugins.
 
 ## 2. Make the folder
 
@@ -109,46 +124,36 @@ The skill that uses the service then tells the agent to:
 
 Plugins cannot sign in with OAuth. Do not promise it.
 
-## 6. Run the validator and fix what it reports
+## 6. Check it and fix what it reports
 
-```
-python -m fluid.context.plugin_check ~/.fluid/plugin-drafts/<name>
-```
+Call `CheckPlugin` with `path` set to the folder. It reports
+`OK: <name> <version> is a valid plugin` with what will load and the services
+it asks for, or a list of problems. Fix each problem in the files, then check
+again. Repeat until it says OK. Do not install a plugin that has not passed.
 
-In a code session without a shell, run the same check in Python:
-`from fluid.context.plugin_check import check_plugin_folder` and print
-`check_plugin_folder(path).render()`.
+The same check runs from a shell:
+`python -m fluid.context.plugin_check ~/.fluid/plugin-drafts/<name>`.
 
-It prints `OK: <name> <version> is a valid plugin (...)` or a list of
-problems. Fix each problem in the files, then run it again. Repeat until it
-says OK. Do not save a plugin that has not passed.
+## 7. Install it, switched off
 
-## 7. Save it, switched off
+Call `InstallPlugin` with `path` set to the checked folder. It runs the same
+check again and installs the plugin as `<name>@authored`, switched off.
 
-Call `save_plugin` with the content you checked: `name`, `version`,
-`description`, `skills` (`[{name, description, body}]`), `commands`
-(`[{name, description, body}]`), `agents` (`[{name, description, tools,
-body}]`), `mcp_servers` (the object inside `mcpServers`) and `services`.
-Each `body` is the file's text after its frontmatter.
-
-`save_plugin` is available in code sessions only. If you do not have it, stop
-here and tell the owner where the checked folder is.
-
-The plugin is saved as `<name>@authored` and stays off. Never enable it
-yourself: no enable API call, no edit to plugin settings files. To change a
-saved plugin, raise `version`, check again and save again. Each version needs
-a new review.
+Never enable it yourself: no enable API call, no edit to plugin settings
+files. To change an installed plugin, raise `version`, check again and install
+again. Each version needs a new review.
 
 ## 8. Hand over to the owner
 
 Tell the owner:
 
-1. The plugin id (`<name>@authored`) and version.
+1. The plugin id (`<name>@authored`, or `name@source` for one from a plugin
+   source) and version.
 2. What it adds: each skill, command, subagent and MCP server, one line each.
 3. Each service it will ask access to, and why.
-4. What to do: open Settings > Plugins, review the plugin, and choose
-   **Approve and enable**. Then finish the private access card the first time
-   a skill asks for a service.
+4. What to do: open Settings > Plugins, where it shows as waiting for review,
+   check what it adds, and choose **Approve and enable**. Then finish the
+   private access card the first time a skill asks for a service.
 
 ## Example
 
