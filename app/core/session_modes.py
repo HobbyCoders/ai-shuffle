@@ -197,6 +197,31 @@ def effective_permission_mode(permission_mode: Any, *, delegated: bool) -> Any:
     return permission_mode
 
 
+#: Permission modes from the strictest to the most permissive, the order
+#: :func:`mode_approves_without_prompt` implies: Ask approves nothing on its
+#: own, Accept Edits only the edit tools, the classifier mode ``auto`` all but
+#: the computer-use request, Bypass everything.
+PERMISSION_MODE_STRICTNESS: tuple[str, ...] = (
+    "default", "acceptEdits", "auto", "bypassPermissions",
+)
+
+
+def strictest_permission_mode(*modes: Any) -> str:
+    """The strictest of ``modes``, for a ceiling that may only lower a mode.
+
+    ``None`` and ``""`` mean "no limit from this side" and are skipped. The
+    retired ``plan`` and any unknown value count as ``default`` (fail closed).
+    With nothing to compare the answer is ``default``.
+    """
+    ranks = []
+    for mode in modes:
+        if mode in (None, ""):
+            continue
+        ranks.append(PERMISSION_MODE_STRICTNESS.index(mode)
+                     if mode in PERMISSION_MODE_STRICTNESS else 0)
+    return PERMISSION_MODE_STRICTNESS[min(ranks)] if ranks else "default"
+
+
 def mode_approves_without_prompt(permission_mode: Any, tool_name: str) -> bool:
     """Whether a session in ``permission_mode`` approves ``tool_name`` on its own.
 

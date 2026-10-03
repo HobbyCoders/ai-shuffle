@@ -560,11 +560,15 @@ def task_worker_property() -> dict[str, Any] | None:
         "maxLength": 200,
         "description": (
             "Optional: another of the owner's workers to run this subagent "
-            f"on, by exact name or device id. Other workers: {listed}. Omit "
-            "it, or name this worker, to run here. An unknown or offline "
-            "worker is refused, never replaced by this one. Running a "
-            "subagent on another worker is not supported yet; such a call is "
-            "refused."
+            f"on, by exact name or device id. Other workers: {listed}. Name "
+            "this worker to run here; omitted, it runs here unless the owner "
+            "set a default worker for the assistant. An unknown or offline "
+            "worker is refused, never replaced by this one. There it runs in "
+            "its own checkout of this project (committed work only), with that "
+            "worker's own logins and no private-access grants, and approvals "
+            "it needs are held back, not granted. Its report does not come "
+            "back to you automatically yet. Agents defined in files or plugins "
+            "run only here."
         ),
     }
 

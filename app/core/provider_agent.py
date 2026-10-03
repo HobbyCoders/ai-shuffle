@@ -778,6 +778,119 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
     return mode
 
 
+def worker_session_fields(
+    *,
+    worker_session_id: str,
+    profile_id: str,
+    title: str,
+    parent_session_id: Optional[str],
+    provider_id: Optional[str],
+    model_id: Optional[str],
+    effort: Optional[str],
+    api_user_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    project_v2_id: Optional[str] = None,
+    target_instance_id: Optional[str] = None,
+    worktree_id: Optional[str] = None,
+    worktree_branch: Optional[str] = None,
+    worktree_path: Optional[str] = None,
+    permission_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    """``database.create_session`` keywords for a Task worker's own row.
+
+    One shape for a worker this process dispatches and one another worker
+    asks it to run (:mod:`app.core.remote_task`): hidden, flagged as a worker,
+    and bound to an explicit provider (``None`` is native Claude, never the
+    profile's provider). ``permission_mode`` is stamped only when given.
+    """
+    fields: Dict[str, Any] = dict(
+        session_id=worker_session_id,
+        profile_id=profile_id,
+        api_user_id=api_user_id,
+        project_id=project_id,
+        project_v2_id=project_v2_id,
+        target_instance_id=target_instance_id,
+        title=title,
+        parent_session_id=parent_session_id,
+        worktree_id=worktree_id,
+        worktree_branch=worktree_branch,
+        worktree_path=worktree_path,
+        provider_id=provider_id,
+        derive_provider_from_profile=False,
+        model=model_id,
+        effort=effort,
+        hidden=True,
+        # Materialized flag backing the sidebar's worker filter. `hidden`
+        # alone still hides this row, but stamping it here keeps the column
+        # self-maintaining instead of relying on the one-shot backfill.
+        is_worker=True,
+    )
+    if permission_mode:
+        fields["permission_mode"] = permission_mode
+    return fields
+
+
+def worker_turn_overrides(
+    *,
+    provider_id: Optional[str],
+    model_id: Optional[str],
+    effort: Optional[str],
+    cwd: Optional[str],
+    permission_mode: Optional[str],
+    system_prompt_append: Optional[str] = None,
+    checkout: Any = None,
+    tool_allowlist: Optional[List[str]] = None,
+    tool_denylist: Optional[List[str]] = None,
+    voice_row: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """The overrides a Task worker's turn is submitted with, local or remote.
+
+    ``checkout`` is a :class:`app.core.worker_checkout.WorkerCheckout`; its
+    instructions follow ``system_prompt_append``. ``voice_row`` is a voice
+    caller, whose context window and fast mode the worker keeps.
+    """
+    overrides: Dict[str, Any] = {}
+    if provider_id:
+        overrides["provider"] = provider_id
+    if model_id:
+        overrides["model"] = model_id
+    if effort is not None:
+        overrides["effort"] = effort
+    if cwd:
+        overrides["cwd"] = cwd
+    if permission_mode:
+        overrides["permission_mode"] = permission_mode
+    if voice_row:
+        for key in ("context_window", "fast"):
+            value = voice_row.get(key)
+            if value is not None:
+                overrides[key] = value
+    # A role definition the worker's profile does not carry — today: an agent
+    # defined in a ``.fluid/agents`` markdown file or a plugin, dispatched on
+    # the caller's profile because it has no ``agents`` row of its own (ruling
+    # CE6, see app/core/task_dispatch). Rides the same append seam the
+    # connectors use, so it lands after the profile's own instructions.
+    append_parts = [system_prompt_append] if system_prompt_append else []
+    if checkout:
+        append_parts.append(checkout.instructions())
+    if append_parts:
+        overrides["system_prompt_append"] = "\n\n".join(append_parts)
+    # Tool-surface restriction for this worker (ruling CE12). Today's only
+    # source is a file/plugin agent definition's ``tools:`` frontmatter, which
+    # the caller's profile knows nothing about — so it rides the turn rather
+    # than the profile row. Non-empty = the worker's ENTIRE tool surface; absent
+    # = inherit the profile's. See app/core/query_options (stamping) and
+    # app/core/provider/harness_adapter (per-leg enforcement).
+    if tool_allowlist:
+        overrides["tool_allowlist"] = list(tool_allowlist)
+    # A file/plugin agent's ``disallowedTools``: never callable by this
+    # worker, whatever it inherits (added to ``disallowed_tools`` in
+    # app/core/query_options, which both legs enforce).
+    if tool_denylist:
+        overrides["tool_denylist"] = list(tool_denylist)
+    return overrides
+
+
 async def _await_worker_idle(
     worker_session_id: str,
     provider_id: Optional[str],
@@ -1882,8 +1995,8 @@ async def dispatch_worker(
                 worktree_id = None  # v2 checkout, not the caller's legacy row
                 worktree_branch = branch
                 worktree_path = worker_checkout.path
-            database.create_session(
-                session_id=worker_session_id,
+            database.create_session(**worker_session_fields(
+                worker_session_id=worker_session_id,
                 profile_id=profile_id,
                 api_user_id=api_user_id,
                 project_id=project_id,
@@ -1895,16 +2008,9 @@ async def dispatch_worker(
                 worktree_branch=worktree_branch,
                 worktree_path=worktree_path,
                 provider_id=provider_id,
-                derive_provider_from_profile=False,
-                model=model_id,
+                model_id=model_id,
                 effort=selected_effort,
-                hidden=True,
-                # Materialized flag backing the sidebar's worker filter.
-                # `hidden` alone still hides this row, but stamping it here
-                # keeps the column self-maintaining instead of relying on the
-                # one-shot backfill.
-                is_worker=True,
-            )
+            ))
             from app.core.assistant_service import home_for_session, link_job
             home = home_for_session(context_session_id or parent_session_id)
             if home:
@@ -1967,50 +2073,21 @@ async def dispatch_worker(
     )
     # --- end approval routing ----------------------------------------------
 
-    overrides: Dict[str, Any] = {}
-    if provider_id:
-        overrides["provider"] = provider_id
-    if model_id:
-        overrides["model"] = model_id
-    if selected_effort is not None:
-        overrides["effort"] = selected_effort
-    cwd = worker_checkout.path if worker_checkout else _parent_cwd(parent_row)
-    if cwd:
-        overrides["cwd"] = cwd
     # Permission inheritance: the worker runs at the CALLER's effective
     # permission level, so a bypassPermissions parent (e.g. a voice call on a
     # bypass profile) never has its workers stall on approval prompts.
-    inherited_mode = _caller_permission_mode(parent_row)
-    if inherited_mode:
-        overrides["permission_mode"] = inherited_mode
-    if (parent_row or {}).get("mode") == "voice":
-        for key in ("context_window", "fast"):
-            value = parent_row.get(key)
-            if value is not None:
-                overrides[key] = value
-    # A role definition the worker's profile does not carry — today: an agent
-    # defined in a ``.fluid/agents`` markdown file or a plugin, dispatched on
-    # the caller's profile because it has no ``agents`` row of its own (ruling
-    # CE6, see app/core/task_dispatch). Rides the same append seam the
-    # connectors use, so it lands after the profile's own instructions.
-    append_parts = [system_prompt_append] if system_prompt_append else []
-    if worker_checkout:
-        append_parts.append(worker_checkout.instructions())
-    if append_parts:
-        overrides["system_prompt_append"] = "\n\n".join(append_parts)
-    # Tool-surface restriction for this worker (ruling CE12). Today's only
-    # source is a file/plugin agent definition's ``tools:`` frontmatter, which
-    # the caller's profile knows nothing about — so it rides the turn rather
-    # than the profile row. Non-empty = the worker's ENTIRE tool surface; absent
-    # = inherit the profile's. See app/core/query_options (stamping) and
-    # app/core/provider/harness_adapter (per-leg enforcement).
-    if tool_allowlist:
-        overrides["tool_allowlist"] = list(tool_allowlist)
-    # A file/plugin agent's ``disallowedTools``: never callable by this
-    # worker, whatever it inherits (added to ``disallowed_tools`` in
-    # app/core/query_options, which both legs enforce).
-    if tool_denylist:
-        overrides["tool_denylist"] = list(tool_denylist)
+    overrides = worker_turn_overrides(
+        provider_id=provider_id,
+        model_id=model_id,
+        effort=selected_effort,
+        cwd=worker_checkout.path if worker_checkout else _parent_cwd(parent_row),
+        permission_mode=_caller_permission_mode(parent_row),
+        system_prompt_append=system_prompt_append,
+        checkout=worker_checkout,
+        tool_allowlist=tool_allowlist,
+        tool_denylist=tool_denylist,
+        voice_row=parent_row if (parent_row or {}).get("mode") == "voice" else None,
+    )
 
     # ONE join key for the whole surface: the worker's session id is the
     # registry task id, the registry's ``tool_use_id`` AND the ``task_id`` on

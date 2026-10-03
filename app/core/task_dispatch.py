@@ -210,6 +210,10 @@ def caller_chain(session_id: str) -> Tuple[List[SessionRow], str, int]:
     is the number of worker sessions in the chain INCLUDING ``session_id``
     itself (0 for a top-level human session), and ``root_session_id`` is the
     top non-worker session (falls back to the highest reachable ancestor).
+
+    A Task child another worker started here (``remote_task.report_owed``)
+    is the root on this worker: its parent lives on that other worker, and its
+    recorded depth there continues the count.
     """
     rows: List[SessionRow] = []
     depth = 0
@@ -222,6 +226,14 @@ def caller_chain(session_id: str) -> Tuple[List[SessionRow], str, int]:
         if current_id != session_id:
             rows.append(row)
         if _is_worker_session(current_id):
+            from app.core.remote_task import report_owed
+
+            owed = report_owed(current_id)
+            if owed is not None:
+                recorded = owed.get("depth")
+                depth += recorded if type(recorded) is int and recorded > 0 else 1
+                root_id = current_id
+                break
             depth += 1
             parent = row.get("parent_session_id")
             if parent:
@@ -1261,12 +1273,6 @@ def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
     return None
 
 
-REMOTE_TASK_UNSUPPORTED = (
-    "Running a subagent on another worker is not supported yet; nothing was "
-    "dispatched. Omit worker to run it here."
-)
-
-
 def _remote_dispatch_owner_refusal(
     caller_session_id: str, caller_row: Mapping[str, Any]
 ) -> Optional[str]:
@@ -1292,16 +1298,17 @@ def _remote_dispatch_owner_refusal(
     return None
 
 
-def _remote_worker_refusal(
+def _remote_worker_pick(
     value: Any, caller_session_id: str, caller_row: Mapping[str, Any]
-) -> Optional[str]:
-    """None when Task's ``worker`` names this worker; otherwise the refusal.
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """``(directory row, None)`` for another worker Task may run on, ``(None,
+    None)`` when ``worker`` names this worker, else ``(None, refusal)``.
 
     Resolution is the one StartSession and HandOffSession use: unknown,
     inactive or offline workers are refused by name and never replaced by this
     worker. A worker whose release lacks the ``remote_task`` capability is
-    refused as older. A valid remote pick is refused until remote subagents
-    exist (design slice S5).
+    refused as older. A chain another worker started here dispatches only
+    locally (no second cross-worker hop).
     """
     from app.network import runners
 
@@ -1310,23 +1317,30 @@ def _remote_worker_refusal(
             value, instead="omit worker to run it here", refused="nothing was dispatched"
         )
     except ValueError as exc:
-        return str(exc)
+        return None, str(exc)
     if row.get("is_self"):
-        return None
+        return None, None
     owner_error = _remote_dispatch_owner_refusal(caller_session_id, caller_row)
     if owner_error:
-        return owner_error
+        return None, owner_error
+    from app.core.remote_task import remote_child_in_chain
+
+    if remote_child_in_chain(caller_session_id):
+        return None, (
+            "This subagent was started by another worker, so its own subagents run "
+            "only here; omit worker; nothing was dispatched."
+        )
     try:
         version = int((row.get("capabilities") or {}).get("remote_task") or 0)
     except (TypeError, ValueError):
         version = 0
     if version < 1:
-        return (
+        return None, (
             f"{row['device_name']} runs an older release that cannot run remote "
             "subagents; nothing was dispatched. Ask the owner to update it, or "
             "omit worker to run it here."
         )
-    return REMOTE_TASK_UNSUPPORTED
+    return row, None
 
 
 def _file_agent_model_id(
@@ -1651,14 +1665,21 @@ async def _dispatch_task_tool(
     if scope_error:
         return {"ok": False, "error": scope_error}
 
-    # ``worker``: omitted or this worker runs here exactly as before; any
-    # other pick is validated and refused before admission or a receipt.
+    # ``worker``: omitted or this worker runs here exactly as before; another
+    # worker is validated here and started below, before any local admission.
+    remote_worker: Optional[Dict[str, Any]] = None
     if args.get("worker") is not None:
-        worker_error = await asyncio.to_thread(
-            _remote_worker_refusal, args.get("worker"), caller_session_id, caller_row
+        remote_worker, worker_error = await asyncio.to_thread(
+            _remote_worker_pick, args.get("worker"), caller_session_id, caller_row
         )
         if worker_error:
             return {"ok": False, "error": worker_error}
+        if remote_worker is not None and definition is not None:
+            return {"ok": False, "error": (
+                f"'{result_agent}' is defined in a file or plugin on this worker, so it "
+                "cannot run on another worker; nothing was dispatched. Pick an agent "
+                "from the Agents page, or omit worker to run it here."
+            )}
 
     mode, ignored_mode = _effective_task_mode(
         requested_mode,
@@ -1687,15 +1708,41 @@ async def _dispatch_task_tool(
             ),
         }
 
-    credential_error = _credential_gap(effective_provider_id)
-    if credential_error:
-        return {"ok": False, "error": credential_error}
-
     label = (args.get("label") or "").strip() or f"Task · {target_name}"
     # fluid's Task hands over ``name``: a short slug derived from the task
     # ("fix-flaky-login") that the worker is listed and addressed by, so
     # SendMessage can find it by name.
     roster_name = str(args.get("name") or "").strip()[:60] or None
+
+    if remote_worker is not None:
+        # The target checks its own credentials, model, depth and checkout and
+        # runs the child in its own pool: no local admission or credential gate.
+        from app.core import remote_task
+
+        return await remote_task.dispatch_remote(
+            worker=remote_worker,
+            caller_row=caller_row,
+            caller_session_id=caller_session_id,
+            root_session_id=root_session_id,
+            depth=caller_depth + 1,
+            profile_id=str(profile_id),
+            agent_name=target_name,
+            result_agent=str(result_agent),
+            provider_id=effective_provider_id,
+            model_id=model_id,
+            effort=selected_effort,
+            prompt=prompt,
+            label=label,
+            roster_name=roster_name,
+            mode=mode,
+            launch_tool_use_id=launch_tool_use_id,
+            tool_allowlist=tool_allowlist,
+            stop_generation=stop_generation,
+        )
+
+    credential_error = _credential_gap(effective_provider_id)
+    if credential_error:
+        return {"ok": False, "error": credential_error}
     kwargs: Dict[str, Any] = dict(
         parent_session_id=root_session_id,
         context_session_id=caller_session_id,

@@ -12,7 +12,7 @@ from app.network import membership, runners
 
 SELF = {"device_id": "dev-gaming", "device_name": "DesktopWorker", "online": True, "is_self": True,
         "capabilities": {"os": "windows", "remote_task": 1}}
-UNRAID = {"device_id": "dev-serverworker", "device_name": "Unraid", "online": True, "is_self": False,
+UNRAID = {"device_id": "dev-unraid", "device_name": "Unraid", "online": True, "is_self": False,
           "platform": "linux", "capabilities": {"os": "linux", "has_display": False, "docker": True,
                                                 "claude_cli_signed_in": True, "remote_task": 1}}
 OLD = {"device_id": "dev-old", "device_name": "OldBox", "online": True, "is_self": False,
@@ -84,12 +84,48 @@ def test_naming_this_worker_runs_here(caller, network, pick):
                "worker to run it here."),
     ("OldBox", "OldBox runs an older release that cannot run remote subagents; nothing was dispatched. "
                "Ask the owner to update it, or omit worker to run it here."),
-    ("Unraid", td.REMOTE_TASK_UNSUPPORTED),
-    ("dev-serverworker", td.REMOTE_TASK_UNSUPPORTED),
 ])
 def test_other_picks_are_refused_by_name_before_any_worker(caller, network, pick, error):
     payload, calls = _dispatch({"worker": pick})
     assert payload == {"ok": False, "error": error}
+    assert calls == []
+
+
+@pytest.mark.parametrize("pick", ["Unraid", "dev-unraid"])
+def test_a_valid_remote_pick_goes_to_the_remote_dispatch_not_the_local_one(caller, network, monkeypatch, pick):
+    from app.core import remote_task
+
+    seen = []
+
+    async def fake_remote(**kwargs):
+        seen.append(kwargs)
+        return {"ok": True, "mode": "remote", "task_id": "w-remote"}
+    monkeypatch.setattr(remote_task, "dispatch_remote", fake_remote)
+    payload, calls = _dispatch({"worker": pick})
+    assert payload == {"ok": True, "mode": "remote", "task_id": "w-remote"}
+    assert calls == []
+    [kwargs] = seen
+    assert kwargs["worker"]["device_id"] == "dev-unraid"
+    assert kwargs["profile_id"] == "helper" and kwargs["caller_session_id"] == "s-root"
+    assert kwargs["root_session_id"] == "s-root" and kwargs["depth"] == 1
+    assert kwargs["prompt"] == "go" and kwargs["mode"] == "sync"
+
+
+def test_file_agents_cannot_run_on_another_worker(caller, network):
+    registry = {"reviewer": {"name": "reviewer", "prompt": "Review.", "tools": ["Read"]}}
+    with patch("app.core.provider_agent.dispatch_worker") as local:
+        payload = asyncio.run(td.dispatch_task_tool(
+            {"agent": "reviewer", "prompt": "go", "worker": "Unraid"},
+            caller_session_id="s-root", agent_registry=registry))
+    assert payload["ok"] is False and "defined in a file or plugin" in payload["error"]
+    local.assert_not_called()
+
+
+def test_a_remote_child_cannot_hop_to_another_worker(caller, network, monkeypatch):
+    from app.core import remote_task
+    monkeypatch.setattr(remote_task, "remote_child_in_chain", lambda sid: True)
+    payload, calls = _dispatch({"worker": "Unraid"})
+    assert payload["ok"] is False and "its own subagents run only here" in payload["error"]
     assert calls == []
 
 

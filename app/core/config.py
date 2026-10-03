@@ -650,6 +650,12 @@ class Settings(BaseSettings):
     task_tool_max_depth: int = 5
     task_tool_max_workers: int = 64
 
+    # The most permissive mode a subagent another worker of this account starts
+    # here may run in (default, acceptEdits, auto or bypassPermissions). It is
+    # a ceiling only: the child also stays at or below the mode its parent
+    # asked for and its own agent's mode. Set via REMOTE_TASK_MAX_PERMISSION_MODE.
+    remote_task_max_permission_mode: str = "bypassPermissions"
+
     # Per-parent concurrent subagent workers, enforced in the dispatch admission
     # gate (app/core/task_dispatch.py). This is the NATIVE lane's backpressure:
     # native workers are coroutines, so the subprocess pool cap does not bound
