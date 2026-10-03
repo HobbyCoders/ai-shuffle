@@ -128,6 +128,7 @@ The `session_id` is sent in the message body (e.g. `{"type": "query", "prompt": 
 | [Model Providers](/docs/api-reference/model-providers) | `/model-providers`, `/models` | Other model providers, sign-in, usage tracking, model registry |
 | [Devices & Network](/docs/api-reference/devices) | `/network`, `/cluster`, `/pairing`, `/mobile/hub` | Worker network, installs, pairing codes, paired devices, Shuffle account |
 | [Notes](/docs/api-reference/notes) | `/notes` | Notes and attachments |
+| [Support Reports](/docs/api-reference/support-reports) | `/support` | Error reports to HobbyCoders support, known-issue check, AI diagnosis |
 | [Voice](/docs/api-reference/voice) | `/voice`, `/settings/voice` | Voice settings and voice calls |
 | [Miscellaneous](/docs/api-reference/miscellaneous) | Various | Tags, analytics, git (including Ship It and worktrees), GitHub pull requests and actions, settings, loop guard, computer use, license, files |
 

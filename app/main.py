@@ -588,6 +588,8 @@ app.include_router(workspace_files.router)
 app.include_router(documentation.router)
 app.include_router(catalog.router)
 app.include_router(logs.router)
+from app.api import support_reports
+app.include_router(support_reports.router)
 app.include_router(model_registry.router)
 app.include_router(computer_use.router)
 app.include_router(cluster.router)
