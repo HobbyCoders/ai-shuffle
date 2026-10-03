@@ -142,3 +142,26 @@ def test_hub_device_routes_approve_and_reject_through_the_api(workers, fake):
         assert client.post("/api/v1/network/hub/devices/dev_nobody/reject", json={}).status_code == 200
         status = client.get("/api/v1/network/status").json()
         assert status["hub"]["linked"] and status["hub"]["registered"]
+
+
+def test_an_account_join_records_the_joiners_instance_id(workers, fake):
+    """Invite-code joins always carried the joiner's instance id; account joins
+    dropped it, so peers could not map that worker's instance-keyed rows."""
+    from unittest.mock import patch
+
+    from app.core.config import settings
+
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        _signed_in(fake, a)
+        hub.register()
+    with b.active(), patch.object(settings, "instance_id", "ai-shuffle-joiner"):
+        _signed_in(fake, b)
+        hub.register()
+    assert fake.devices[b.device_id]["legacy_instance_id"] == "ai-shuffle-joiner"
+    with a.active():
+        _signed_in(fake, a)
+        hub.approve_device(b.device_id)
+        assert store.get_member(b.device_id)["legacy_instance_id"] == "ai-shuffle-joiner"
+        assert engine.context().legacy_instance_map["ai-shuffle-joiner"] == b.device_id

@@ -75,6 +75,10 @@ def _device_description(ident: identity_mod.DeviceIdentity, name: Optional[str] 
         "platform": identity_mod.platform_name(),
         "kind": membership.KIND_WORKER,
         "version": settings.version,
+        # The admitting member writes it into this device's certificate, so
+        # peers can map rows this install keyed by instance id to its device.
+        # Invite-code joins always sent it; account joins did not.
+        "legacy_instance_id": settings.effective_instance_id,
     }
     # ``proof`` lets the admitting member check that the encryption key the
     # hub relays belongs to the device that owns the signing key; the hub

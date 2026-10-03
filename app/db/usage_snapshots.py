@@ -126,6 +126,28 @@ def get_all_usage_snapshots() -> List[Dict[str, Any]]:
     return rows
 
 
+def get_usage_snapshot_publishers() -> Dict[str, str]:
+    """``{instance_id: device_id}`` of the network device that last wrote each row.
+
+    On a worker network every usage row arrives as an op signed by the device
+    that published it, and the sync layer records that device per row. It
+    names the row's device even when the publisher's membership carries no
+    legacy instance id, and on any publisher version, because the publisher
+    sends nothing new. Raises when the sync tables are absent (no network);
+    callers treat that as "no publishers known".
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT record_id, origin_device_id FROM sync_records "
+            "WHERE collection = %s AND deleted = FALSE",
+            ("usage_snapshots",),
+        )
+        rows = rows_to_list(cursor.fetchall())
+    return {r["record_id"]: r["origin_device_id"] for r in rows
+            if r.get("record_id") and r.get("origin_device_id")}
+
+
 def delete_usage_snapshot(instance_id: str) -> bool:
     """Delete an install's usage snapshot row."""
     with get_db() as conn:

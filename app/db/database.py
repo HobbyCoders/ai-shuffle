@@ -3576,6 +3576,7 @@ from app.db.usage_snapshots import (  # noqa: F401
     upsert_usage_snapshot,
     touch_usage_snapshot_observed,
     get_all_usage_snapshots,
+    get_usage_snapshot_publishers,
     delete_usage_snapshot,
 )
 

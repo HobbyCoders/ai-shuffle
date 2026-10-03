@@ -331,6 +331,11 @@ class UsageLimitsMonitor:
         except Exception as e:  # noqa: BLE001 — cluster read is best-effort
             logger.debug("Usage cluster snapshot read skipped: %s", e)
             return None
+        try:
+            publishers = db.get_usage_snapshot_publishers()
+        except Exception as e:  # noqa: BLE001 — no sync tables off a network
+            logger.debug("Usage publisher lookup skipped: %s", e)
+            publishers = {}
 
         own_install = installs_map.get(self_id)
         if own_install is None:
@@ -347,7 +352,21 @@ class UsageLimitsMonitor:
         snapshots: List[Dict[str, Any]] = []
         for row in rows:
             iid = row.get("instance_id")
-            install = own_install if iid == self_id else installs_map.get(iid)
+            if iid == self_id:
+                install = own_install
+            else:
+                # The device that signed and published the row names it first:
+                # a member whose join recorded no legacy instance id has no
+                # instance-id alias in the registry, so its row would
+                # otherwise be dropped as a departed install.
+                publisher = publishers.get(iid) if iid else None
+                if publisher and publisher == self._self_device_id:
+                    # A row this device published under an earlier instance
+                    # id is stale, not a second device: leave it to the
+                    # legacy lookup, which drops it as before.
+                    publisher = None
+                install =(installs_map.get(publisher) if publisher else None) or \
+                    (installs_map.get(iid) if iid else None)
             if install is None and iid != self_id:
                 # An install that has left the registry — drop its stale row.
                 continue
