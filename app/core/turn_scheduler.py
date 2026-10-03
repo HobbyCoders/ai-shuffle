@@ -401,6 +401,10 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
         from app.core.session_orchestration import report_settled_start
 
         await report_settled_start(session_id, settled, outcome)
+        # A Task child another worker started here owes that worker a report.
+        from app.core.remote_task import on_child_settled
+
+        await on_child_settled(session_id)
 
     # Ephemeral UI assistance is last: never compete with successor work or
     # delay settlement on a generation provider.
@@ -1717,6 +1721,19 @@ async def on_started_session_terminal(session_id: str, frame: Dict[str, Any]) ->
     registry task of the home, so it is admitted to the OWN lane here; the
     merge, mid-turn steer, Stop latch and one-wake-per-completion latch are the
     ones Task completions use.
+    """
+    async with _terminal_delivery_lock(session_id):
+        return await _on_task_terminal_locked(session_id, frame, started_session=True)
+
+
+async def on_remote_task_terminal(session_id: str, frame: Dict[str, Any]) -> None:
+    """A Task child this session sent to another worker reported back.
+
+    The child has no registry row here (it ran on the other worker), so it is
+    admitted to the OWN lane like a started session; the merge, mid-turn
+    steer, Stop latch and one-wake-per-task latch are the ones local Task
+    completions use. ``app.core.remote_task.handle_task_report`` deduplicates
+    retried deliveries durably before calling this.
     """
     async with _terminal_delivery_lock(session_id):
         return await _on_task_terminal_locked(session_id, frame, started_session=True)

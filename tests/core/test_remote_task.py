@@ -185,7 +185,7 @@ def test_child_starts_on_the_target_in_its_own_checkout_and_owes_its_report(worl
     assert result["ok"] is True, result
     assert result["mode"] == "remote" and result["worker"] == {"device_id": TARGET, "name": "Unraid"}
     child_id = result["worker_session_id"]
-    assert "report does not come back to you automatically yet" in result["note"]
+    assert "you will be woken with its report when it finishes" in result["note"]
     assert "held back there (never granted)" in result["note"]
     [(_, action, body)] = calls
     assert action == remote_task.TASK_START_ACTION and body["worker_session_id"] == child_id
@@ -215,6 +215,14 @@ def test_child_starts_on_the_target_in_its_own_checkout_and_owes_its_report(worl
     assert world.kicks == [child_id]
     # A started child keeps the branch it was given.
     assert remote_tip(world.parent, f"task/{child_id}") == world.tip
+    # Both sides remember it: the parent for the report it expects, the
+    # target for the report it owes.
+    from app.db import remote_tasks
+    record = remote_tasks.get_dispatch(child_id)
+    assert record["target_device_id"] == TARGET and record["owner_session_id"] == "parent"
+    assert record["mode"] == "background" and record["completion_id"] is None
+    assert remote_tasks.get_child(child_id)["parent_device_id"] == PARENT
+    assert "you will be woken with its report" in result["note"]
 
 
 def test_the_request_carries_identifiers_only(world, monkeypatch):
@@ -286,6 +294,12 @@ def test_an_unreachable_or_refusing_target_releases_the_pushed_branch(world, mon
     # The assistant's default-worker fallback keys on this wording.
     assert (remote_task.NOT_DISPATCHED in result["error"]) is started_nothing
     assert "worker_session_id" not in result
+    # The parent keeps its record only when the child may exist, so a late
+    # report from it is still accepted.
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM remote_tasks")
+        assert cursor.fetchone()["n"] == (0 if started_nothing else 1)
     [branch] = pushed
     assert remote_tip(world.parent, branch) is None
     assert world.kicks == []

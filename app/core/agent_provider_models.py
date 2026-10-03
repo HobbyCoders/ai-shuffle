@@ -566,8 +566,8 @@ def task_worker_property() -> dict[str, Any] | None:
             "worker is refused, never replaced by this one. There it runs in "
             "its own checkout of this project (committed work only), with that "
             "worker's own logins and no private-access grants, and approvals "
-            "it needs are held back, not granted. Its report does not come "
-            "back to you automatically yet. Agents defined in files or plugins "
+            "it needs are held back, not granted. Its report comes back to you "
+            "automatically when it finishes. Agents defined in files or plugins "
             "run only here."
         ),
     }

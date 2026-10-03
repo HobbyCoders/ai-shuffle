@@ -219,9 +219,10 @@ def init_core() -> None:
         init_database()
         run_migrations()
 
-        from app.db import mobile_tools, mobile_tool_identity
+        from app.db import mobile_tools, mobile_tool_identity, remote_tasks
         mobile_tools.init_schema()
         mobile_tool_identity.init_schema()
+        remote_tasks.init_schema()
 
         # Adopt orphaned projects/sessions from previous Docker containers.
         # Before this fix, instance_id fell back to socket.gethostname() which
@@ -617,6 +618,11 @@ def start_background_tasks() -> List[asyncio.Task]:
         )
     else:
         logger.info("Idle-at-edge watchdog disabled (IDLE_WATCHDOG_ENABLED=false)")
+
+    # Reports owed by Task children other workers started here: delivered
+    # at boot and retried until their parent acknowledges them.
+    from app.core import remote_task
+    tasks.append(asyncio.create_task(remote_task.delivery_loop(), name="remote-task-reports"))
 
     # License lease renewal (daily, jittered backoff). Idle in beta mode.
     from app.core import license as licensing
