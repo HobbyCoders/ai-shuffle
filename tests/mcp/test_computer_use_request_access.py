@@ -54,6 +54,8 @@ def server(monkeypatch):
     monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=Capture))
     monkeypatch.setattr("app.mcp.sdk_compat.patch_sdk_server",
                         lambda cfg, tools: {t.name: t.handler for t in tools})
+    # A person shares this desktop unless a test says otherwise.
+    monkeypatch.setattr("app.api.computer_use.is_dedicated_desktop", lambda: False)
 
     def build(permission_mode):
         return sdk.create_computer_use_server(
@@ -179,6 +181,43 @@ async def test_stop_drops_the_first_use_confirmation(server):
 
 async def test_actions_in_bypass_need_a_grant(server):
     result = await server("bypassPermissions")["screenshot"]({})
+    assert result["isError"]
+    assert not access.is_granted(SID)
+
+
+@pytest.fixture
+def dedicated(monkeypatch):
+    """Only agents use this worker's desktop (Settings > Security)."""
+    monkeypatch.setattr("app.api.computer_use.is_dedicated_desktop", lambda: True)
+
+
+async def test_dedicated_desktop_bypass_grants_the_first_use_unattended(server, dedicated):
+    """Nobody is at a dedicated desktop to ask, so Bypass needs no approver."""
+    result = payload(await server("bypassPermissions")["request_access"](
+        {"apps": ["Notepad"], "reason": "r"}))
+    assert result["granted_apps"] == ["Notepad"]
+    assert access.is_granted(SID)
+
+
+async def test_dedicated_desktop_first_use_follows_the_gate_decision(server, dedicated):
+    """Outside Bypass the gate's allow (prompt, rule or hook) is enough."""
+    access.approve_request(SID)
+    result = payload(await server("default")["request_access"](
+        {"apps": ["Notepad"], "reason": "r"}))
+    assert result["granted_apps"] == ["Notepad"]
+
+
+async def test_dedicated_desktop_still_refuses_an_unapproved_call(server, dedicated):
+    result = await server("default")["request_access"]({"apps": ["Notepad"], "reason": "r"})
+    assert result["isError"]
+    assert "not approved" in payload(result)["error"]
+    assert not access.is_granted(SID)
+
+
+async def test_dedicated_desktop_still_honours_stop(server, dedicated):
+    abort.request_stop(SID, reason="user")
+    result = await server("bypassPermissions")["request_access"](
+        {"apps": ["Notepad"], "reason": "r"})
     assert result["isError"]
     assert not access.is_granted(SID)
 

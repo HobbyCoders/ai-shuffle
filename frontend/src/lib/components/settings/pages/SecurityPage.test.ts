@@ -12,7 +12,7 @@ const transport = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), post: vi.fn(),
 const refresh = vi.hoisted(() => vi.fn());
 const layout = vi.hoisted(() => ({ openFeaturePage: vi.fn() }));
 const host = vi.hoisted(() => ({ desktop: null as unknown, status: { available: true, reason: 'ok', enabled: false } }));
-const computer = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), stop: vi.fn() }));
+const computer = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), setMode: vi.fn(), stop: vi.fn() }));
 
 vi.mock('$lib/api/owner', () => owner);
 vi.mock('$lib/stores/owner-access.svelte', () => ({ ownerAccess: { refresh } }));
@@ -29,6 +29,7 @@ vi.mock('$lib/services/desktop', () => ({
 vi.mock('$lib/api/computerUse', () => ({
 	getComputerUseStatus: computer.get,
 	setComputerUseEnabled: computer.set,
+	setComputerUseInputMode: computer.setMode,
 	stopComputerUse: computer.stop
 }));
 
@@ -81,6 +82,7 @@ beforeEach(() => {
 	transport.delete.mockResolvedValue({});
 	computer.get.mockImplementation(async () => ({ display: null, display_label: null, active: false, ...host.status }));
 	computer.set.mockImplementation(async (on: boolean) => ({ enabled: on }));
+	computer.setMode.mockImplementation(async (mode: string) => ({ input_mode: mode }));
 });
 afterEach(() => {
 	cleanup();
@@ -223,6 +225,25 @@ describe('computer use', () => {
 		await waitFor(() => expect(computer.get).toHaveBeenCalled());
 		await fireEvent.click(toggle);
 		await waitFor(() => expect(computer.set).toHaveBeenCalledWith(true));
+	});
+
+	it('marks this computer as agents-only, which skips the first-use prompt', async () => {
+		render(SecurityPage);
+		const toggle = screen.getByRole('switch', { name: 'Only agents use this computer' });
+		expect(screen.getByText('Skips the first-use prompt')).toBeTruthy();
+		await waitFor(() => expect(computer.get).toHaveBeenCalled());
+		await waitFor(() => expect((toggle as HTMLButtonElement).disabled).toBe(false));
+		expect(toggle.getAttribute('aria-checked')).toBe('false');
+		await fireEvent.click(toggle);
+		await waitFor(() => expect(computer.setMode).toHaveBeenCalledWith('dedicated_desktop'));
+	});
+
+	it('cannot mark an agents-only computer when the host has no computer use', async () => {
+		host.status = { available: false, reason: 'docker', enabled: false };
+		render(SecurityPage);
+		await screen.findByText('Unavailable in Docker');
+		const toggle = screen.getByRole('switch', { name: 'Only agents use this computer' }) as HTMLButtonElement;
+		expect(toggle.disabled).toBe(true);
 	});
 });
 

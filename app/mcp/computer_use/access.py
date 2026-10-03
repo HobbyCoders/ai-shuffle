@@ -15,6 +15,9 @@ Approval policy by permission mode (decided in the callback, not here):
   The callback records that answer (``confirm_first_use``) and the tool spends
   it before it grants; when no prompt ran (Bypass, a hook or rule allow), the
   tool raises the prompt itself through the session's approver.
+  A worker whose desktop only agents use (Settings > Security, computer-use
+  input mode "dedicated_desktop") skips that first-use rule; its first grant
+  follows the mode like the rest.
 - bypassPermissions -> after that first grant, later requests need no prompt
 - default/ask/auto/acceptEdits -> every request_access surfaces a prompt
 """

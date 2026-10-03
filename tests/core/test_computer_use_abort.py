@@ -70,8 +70,10 @@ def _toggle_off():
     from app.db.settings import set_system_setting
 
     set_system_setting("computer_use_enabled", "false")
+    set_system_setting("computer_use_input_mode", "shared_desktop")
     yield
     set_system_setting("computer_use_enabled", "false")
+    set_system_setting("computer_use_input_mode", "shared_desktop")
 
 
 class TestEndpoints:
@@ -120,6 +122,40 @@ class TestEndpoints:
         assert abort.is_stopped("active")
         assert not activity.snapshot()["active"]
         abort.resume("active")
+
+    def test_input_mode_defaults_to_shared_and_roundtrips(self, api):
+        from app.api import computer_use as cu_api
+
+        assert api.get("/api/v1/computer-use/input-mode").json() == {"input_mode": "shared_desktop"}
+        r = api.put("/api/v1/computer-use/input-mode", json={"input_mode": "dedicated_desktop"})
+        assert r.status_code == 200
+        assert r.json() == {"input_mode": "dedicated_desktop"}
+        assert cu_api.is_dedicated_desktop() is True
+        with patch.object(cu_api, "computer_use_available", return_value=(True, "ok")):
+            assert api.get("/api/v1/computer-use/status").json()["input_mode"] == "dedicated_desktop"
+        api.put("/api/v1/computer-use/input-mode", json={"input_mode": "shared_desktop"})
+        assert cu_api.is_dedicated_desktop() is False
+
+    def test_input_mode_rejects_unknown_values(self, api):
+        r = api.put("/api/v1/computer-use/input-mode", json={"input_mode": "anything"})
+        assert r.status_code == 422
+
+    def test_unknown_or_unreadable_mode_reads_as_shared(self):
+        from app.api import computer_use as cu_api
+        from app.db.settings import set_system_setting
+
+        set_system_setting("computer_use_input_mode", "garbage")
+        assert cu_api.is_dedicated_desktop() is False
+        with patch.object(cu_api, "get_system_setting", side_effect=RuntimeError("db down")):
+            assert cu_api.is_dedicated_desktop() is False
+
+    def test_input_mode_change_is_owner_only(self):
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[require_auth] = lambda: "test-session-token"
+        with TestClient(app) as client:
+            r = client.put("/api/v1/computer-use/input-mode", json={"input_mode": "dedicated_desktop"})
+        assert r.status_code in (401, 403)
 
     def test_stop_requires_authentication(self):
         app = FastAPI()

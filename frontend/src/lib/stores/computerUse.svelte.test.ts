@@ -8,9 +8,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 const getStatus = vi.fn();
 const setEnabled = vi.fn();
 const stopControl = vi.fn();
+const setInputMode = vi.fn();
 vi.mock('$lib/api/computerUse', () => ({
 	getComputerUseStatus: (...args: unknown[]) => getStatus(...args),
 	setComputerUseEnabled: (...args: unknown[]) => setEnabled(...args),
+	setComputerUseInputMode: (...args: unknown[]) => setInputMode(...args),
 	stopComputerUse: (...args: unknown[]) => stopControl(...args)
 }));
 vi.mock('$lib/stores/notifications', () => ({ notify: vi.fn() }));
@@ -39,6 +41,7 @@ beforeEach(() => {
 	vi.useFakeTimers();
 	getStatus.mockReset();
 	setEnabled.mockReset();
+	setInputMode.mockReset();
 	stopControl.mockReset();
 	visibility = 'visible';
 	Object.defineProperty(document, 'visibilityState', {
@@ -245,5 +248,52 @@ describe('computerUse toggle', () => {
 
 		await computerUse.setEnabled(true);
 		expect(computerUse.enabled).toBe(false);
+	});
+});
+
+describe('computerUse input mode', () => {
+	it('reads the mode from status and treats anything unknown as shared', async () => {
+		getStatus.mockResolvedValue({ ...status(true), input_mode: 'dedicated_desktop' });
+		await computerUse.refresh();
+		expect(computerUse.inputMode).toBe('dedicated_desktop');
+		getStatus.mockResolvedValue({ ...status(true), input_mode: 'something_new' });
+		await computerUse.refresh();
+		expect(computerUse.inputMode).toBe('shared_desktop');
+		getStatus.mockResolvedValue(status(true));
+		await computerUse.refresh();
+		expect(computerUse.inputMode).toBe('shared_desktop');
+	});
+
+	it('switches optimistically and keeps the server answer', async () => {
+		getStatus.mockResolvedValue(status(true));
+		await computerUse.refresh();
+		setInputMode.mockResolvedValue({ input_mode: 'dedicated_desktop' });
+		const change = computerUse.setInputMode('dedicated_desktop');
+		expect(computerUse.inputMode).toBe('dedicated_desktop');
+		getStatus.mockResolvedValue({ ...status(true), input_mode: 'dedicated_desktop' });
+		await change;
+		expect(setInputMode).toHaveBeenCalledWith('dedicated_desktop');
+		expect(computerUse.inputMode).toBe('dedicated_desktop');
+	});
+
+	it('rolls back when the server rejects the change', async () => {
+		getStatus.mockResolvedValue(status(true));
+		await computerUse.refresh();
+		setInputMode.mockRejectedValue(new Error('forbidden'));
+		await computerUse.setInputMode('dedicated_desktop');
+		expect(computerUse.inputMode).toBe('shared_desktop');
+	});
+
+	it('ignores an in-flight poll that still carries the old mode', async () => {
+		getStatus.mockResolvedValue(status(true));
+		await computerUse.refresh();
+		let finishPoll!: (value: unknown) => void;
+		getStatus.mockImplementationOnce(() => new Promise(resolve => { finishPoll = resolve; }));
+		const poll = computerUse.refresh();
+		setInputMode.mockResolvedValue({ input_mode: 'dedicated_desktop' });
+		await computerUse.setInputMode('dedicated_desktop');
+		finishPoll(status(true));
+		await poll;
+		expect(computerUse.inputMode).toBe('dedicated_desktop');
 	});
 });

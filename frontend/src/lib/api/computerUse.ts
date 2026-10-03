@@ -28,8 +28,11 @@ export interface ComputerUseStatus {
 	stop_reason?: string | null;
 	escape_available?: boolean;
 	overlay_available?: boolean;
-	input_mode?: 'shared_desktop';
+	/** "dedicated_desktop" when only agents use this computer (skips the first-use prompt). */
+	input_mode?: ComputerUseInputMode;
 }
+
+export type ComputerUseInputMode = 'shared_desktop' | 'dedicated_desktop';
 
 export async function stopComputerUse(): Promise<{ stopped: number }> {
 	return api.post<{ stopped: number }>('/computer-use/stop', {});
@@ -41,4 +44,10 @@ export async function getComputerUseStatus(): Promise<ComputerUseStatus> {
 
 export async function setComputerUseEnabled(enabled: boolean): Promise<{ enabled: boolean }> {
 	return api.put<{ enabled: boolean }>('/computer-use/enabled', { enabled });
+}
+
+export async function setComputerUseInputMode(
+	input_mode: ComputerUseInputMode
+): Promise<{ input_mode: ComputerUseInputMode }> {
+	return api.put<{ input_mode: ComputerUseInputMode }>('/computer-use/input-mode', { input_mode });
 }

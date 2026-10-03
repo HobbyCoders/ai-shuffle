@@ -989,7 +989,7 @@ Lets agents see and control this computer's screen. Available only where AI Shuf
 }
 ```
 
-`available` and `reason` say whether this host supports it (`reason` explains why not). `active` is `true` while an agent is controlling the screen; `display_label` then names the display. The response also has live details (`action`, `busy`, `cursor`, `geometry`, `seconds_since`, `stop_reason`, `escape_available`, `overlay_available`).
+`available` and `reason` say whether this host supports it (`reason` explains why not). `active` is `true` while an agent is controlling the screen; `display_label` then names the display. The response also has live details (`action`, `busy`, `cursor`, `geometry`, `seconds_since`, `stop_reason`, `escape_available`, `overlay_available`). `input_mode` is `shared_desktop` or `dedicated_desktop`; see the input mode endpoints below.
 
 ### GET /api/v1/computer-use/enabled
 
@@ -1008,6 +1008,25 @@ curl -X PUT http://localhost:8000/api/v1/computer-use/enabled \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"enabled": true}'
+```
+
+### GET /api/v1/computer-use/input-mode
+
+Returns `{"input_mode": "shared_desktop"}`, the default. `dedicated_desktop` means only agents use this computer.
+
+**Auth:** Required
+
+### PUT /api/v1/computer-use/input-mode
+
+Say whether a person shares this computer with the agents. With `shared_desktop`, the first screen-control request in every session asks a person, even in Bypass. With `dedicated_desktop`, that first request follows the session's permission mode, so a Bypass session or automation can take the screen with nobody there. Any other value returns `422`.
+
+**Auth:** Owner only
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/computer-use/input-mode \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"input_mode": "dedicated_desktop"}'
 ```
 
 ### POST /api/v1/computer-use/stop

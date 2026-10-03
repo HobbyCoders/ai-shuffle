@@ -148,6 +148,18 @@
 		}
 	}
 
+	async function setDedicatedDesktop(on: boolean) {
+		if (computerBusy || !computerUse.available) return;
+		const mode = on ? 'dedicated_desktop' : 'shared_desktop';
+		computerBusy = true;
+		try {
+			await computerUse.setInputMode(mode);
+			if (computerUse.inputMode === mode) flashSaved();
+		} finally {
+			computerBusy = false;
+		}
+	}
+
 	$effect(() => {
 		computerUse.start();
 		return () => computerUse.stop();
@@ -361,6 +373,18 @@
 				checked={computerUse.enabled}
 				disabled={!computerUse.available || computerBusy}
 				onchange={(on) => void setComputerUse(on)}
+			/>
+		</SettingRow>
+		<SettingRow
+			id="security.computerUseDedicated"
+			dim={!computerUse.available}
+			value={computerUse.available ? computerUse.inputMode === 'dedicated_desktop' : undefined}
+			onReset={() => void setDedicatedDesktop(false)}
+		>
+			<Switch
+				checked={computerUse.inputMode === 'dedicated_desktop'}
+				disabled={!computerUse.available || computerBusy}
+				onchange={(on) => void setDedicatedDesktop(on)}
 			/>
 		</SettingRow>
 		<SettingRow id="security.sandbox" hint="bubblewrap" hintMono help={sandboxHelp}>

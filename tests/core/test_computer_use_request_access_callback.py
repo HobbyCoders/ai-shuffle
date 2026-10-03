@@ -44,10 +44,35 @@ async def _callback(tmp_path, permission_mode):
 
 
 @pytest.fixture(autouse=True)
-def _clean():
+def _clean(monkeypatch):
     access.revoke(SID)
+    # A person shares this desktop unless a test says otherwise.
+    monkeypatch.setattr("app.api.computer_use.is_dedicated_desktop", lambda: False)
     yield
     access.revoke(SID)
+
+
+async def test_dedicated_desktop_bypass_allows_the_first_use_without_prompting(tmp_path, monkeypatch):
+    """Only agents use a dedicated desktop: nobody to protect, nobody to ask."""
+    monkeypatch.setattr("app.api.computer_use.is_dedicated_desktop", lambda: True)
+    callback = await _callback(tmp_path, "bypassPermissions")
+    prompt = AsyncMock(side_effect=AssertionError("dedicated bypass must not prompt"))
+    with patch("app.core.provider_agent_approvals.route_permission", new=prompt):
+        result = await callback(TOOL, {"apps": ["Notepad"]},
+                                SimpleNamespace(tool_use_id="t", agent_id=None))
+    assert type(result).__name__ == "PermissionResultAllow"
+    assert not access.consume_first_use_confirmation(SID)
+
+
+async def test_dedicated_desktop_first_use_outside_bypass_may_use_saved_rules(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.api.computer_use.is_dedicated_desktop", lambda: True)
+    callback = await _callback(tmp_path, "default")
+    prompt = AsyncMock(return_value=PermissionResultAllow())
+    with patch("app.core.provider_agent_approvals.route_permission", new=prompt):
+        await callback(TOOL, {"apps": ["Notepad"]},
+                       SimpleNamespace(tool_use_id="t", agent_id=None))
+    prompt.assert_awaited_once()
+    assert prompt.await_args.args[0]["skip_saved_rules"] is False
 
 
 @pytest.mark.parametrize("answer,allowed", [

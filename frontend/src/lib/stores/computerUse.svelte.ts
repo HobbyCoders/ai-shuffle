@@ -17,7 +17,14 @@
  * this endpoint was hit 78 times in ten minutes from a single device while the
  * backend was already struggling, every call slow.
  */
-import { getComputerUseStatus, setComputerUseEnabled, stopComputerUse, type ComputerUseStatus } from '$lib/api/computerUse';
+import {
+	getComputerUseStatus,
+	setComputerUseEnabled,
+	setComputerUseInputMode,
+	stopComputerUse,
+	type ComputerUseInputMode,
+	type ComputerUseStatus
+} from '$lib/api/computerUse';
 import { notify } from '$lib/stores/notifications';
 
 export const POLL_AVAILABLE_MS = 2_000;
@@ -31,6 +38,7 @@ class ComputerUseStore {
 	available = $state(true);
 	reason = $state('ok');
 	enabled = $state(false);
+	inputMode = $state<ComputerUseInputMode>('shared_desktop');
 	active = $state(false);
 	display = $state<number | null>(null);
 	displayLabel = $state<string | null>(null);
@@ -76,6 +84,7 @@ class ComputerUseStore {
 			this.available = s.available;
 			this.reason = s.reason;
 			this.enabled = s.enabled;
+			this.inputMode = s.input_mode === 'dedicated_desktop' ? 'dedicated_desktop' : 'shared_desktop';
 			this.active = s.active;
 			this.display = s.display;
 			this.displayLabel = s.display_label;
@@ -156,6 +165,22 @@ class ComputerUseStore {
 		} catch (e) {
 			console.warn('computer-use toggle failed', e);
 			this.enabled = prev;
+		}
+		await this.refresh();
+	}
+
+	/** Say whether only agents use this computer (persisted server-side). */
+	async setInputMode(mode: ComputerUseInputMode) {
+		const prev = this.inputMode;
+		// A poll already in flight carries the old mode; drop its answer.
+		this.#revision++;
+		this.inputMode = mode;
+		try {
+			const res = await setComputerUseInputMode(mode);
+			this.inputMode = res.input_mode;
+		} catch (e) {
+			console.warn('computer-use input mode change failed', e);
+			this.inputMode = prev;
 		}
 		await this.refresh();
 	}

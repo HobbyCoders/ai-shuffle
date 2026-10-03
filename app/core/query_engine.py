@@ -2300,10 +2300,16 @@ async def _stream_to_websocket_impl(
                         # The session's FIRST grant is different: it always
                         # goes to a person, in every mode and past any saved
                         # rule, and the person's allow is recorded here for
-                        # the tool to spend (see computer_use.access).
+                        # the tool to spend (see computer_use.access). A worker
+                        # whose desktop only agents use opts out: nobody is at
+                        # that screen to protect or to answer.
+                        from app.api.computer_use import is_dedicated_desktop
                         from app.mcp.computer_use import access as cu_access
 
-                        first_use = not cu_access.is_granted(_sid)
+                        first_use = (
+                            not cu_access.is_granted(_sid)
+                            and not await run_sync(is_dedicated_desktop)
+                        )
                         if _perm_mode == "bypassPermissions" and not first_use:
                             return PermissionResultAllow()
                         apps = tool_input.get("apps") or []

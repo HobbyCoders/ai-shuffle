@@ -81,6 +81,8 @@ Runs where nobody can answer a prompt (the one-shot and streaming REST endpoints
 
 Screen control (computer use) runs only after the agent's access request was allowed. The first request in each session always asks you, in every mode including Bypass, and a remembered rule cannot answer it. After you allow it, later requests in that session follow the mode: Bypass grants them without a prompt, and the other modes ask as for any other tool. Stopping the session, or restarting the worker, clears the grant, so the next request asks again. A run where nobody can answer a prompt, such as the one-shot REST endpoints, cannot start screen control.
 
+On a computer nobody works at, such as a virtual machine set aside for agents, turn on **Only agents use this computer** in **Settings > Security**. The first request in a session then follows the mode like later ones: Bypass sessions, automations and one-shot runs in Bypass take the screen without asking, and the other modes ask as for any other tool. Stop still takes the screen back. Leave it off on a computer you use yourself.
+
 #### Effort
 
 Available on current Sonnet, Opus and Fable models (not Haiku). Pick it per session from the composer, which only lists the levels the selected model supports:

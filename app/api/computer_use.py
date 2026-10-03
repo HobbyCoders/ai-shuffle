@@ -7,7 +7,7 @@ switch is driven by chat Stop, physical Escape, and the host stop endpoint.
 """
 
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
@@ -26,6 +26,12 @@ router = APIRouter(prefix="/api/v1/computer-use", tags=["Computer Use"])
 # query-options path via get_system_setting_cached, so writes here take
 # effect immediately in this process (and within its short TTL elsewhere).
 ENABLED_SETTING_KEY = "computer_use_enabled"
+# Who else uses this worker's desktop. "shared_desktop" (the default): a person
+# works at this screen too, so each session's first access request asks them.
+# "dedicated_desktop": only agents use it (a VM, a spare machine), so access
+# follows the session's permission mode like any other tool.
+INPUT_MODE_SETTING_KEY = "computer_use_input_mode"
+InputMode = Literal["shared_desktop", "dedicated_desktop"]
 
 
 class EnabledStateResponse(BaseModel):
@@ -56,12 +62,35 @@ class StatusResponse(BaseModel):
     stop_reason: Optional[str] = None
     escape_available: bool = False
     overlay_available: bool = False
-    input_mode: str = "shared_desktop"
+    input_mode: InputMode = "shared_desktop"
+
+
+class InputModeState(BaseModel):
+    """Whether a person shares this worker's desktop with the agents."""
+    input_mode: InputMode
 
 
 def get_computer_use_enabled() -> bool:
     """Read the persisted global toggle (the hot-path seam query_options uses)."""
     return get_system_setting(ENABLED_SETTING_KEY) == "true"
+
+
+def get_computer_use_input_mode() -> InputMode:
+    """Read the persisted desktop mode; anything unexpected reads as shared."""
+    value = get_system_setting(INPUT_MODE_SETTING_KEY)
+    return "dedicated_desktop" if value == "dedicated_desktop" else "shared_desktop"
+
+
+def is_dedicated_desktop() -> bool:
+    """True when only agents use this desktop, so no first-use prompt is needed.
+
+    Fails closed: a read error means shared, which keeps the prompt.
+    """
+    try:
+        return get_computer_use_input_mode() == "dedicated_desktop"
+    except Exception:
+        logger.warning("computer-use: desktop mode read failed; treating as shared", exc_info=True)
+        return False
 
 
 def _display_label(index: int) -> str:
@@ -102,6 +131,7 @@ async def get_status(token: str = Depends(require_auth)) -> StatusResponse:
         action=snap["action"], busy=snap["busy"], cursor=snap["cursor"], geometry=snap["geometry"],
         seconds_since=snap["seconds_since"], stop_reason=snap["stop_reason"],
         escape_available=safety.escape_available(), overlay_available=overlay.status()["available"],
+        input_mode=await run_sync(get_computer_use_input_mode),
     )
 
 
@@ -129,3 +159,19 @@ async def set_enabled(
         abort.stop_active("disabled")
     logger.info("computer-use global toggle set to %s via API", payload.enabled)
     return EnabledStateResponse(enabled=payload.enabled)
+
+
+@router.get("/input-mode", response_model=InputModeState)
+async def get_input_mode(token: str = Depends(require_auth)) -> InputModeState:
+    """Report whether a person shares this worker's desktop with the agents."""
+    return InputModeState(input_mode=await run_sync(get_computer_use_input_mode))
+
+
+@router.put("/input-mode", response_model=InputModeState)
+async def set_input_mode(
+    payload: InputModeState, token: str = Depends(require_admin)
+) -> InputModeState:
+    """Set the desktop mode (admin: dedicated skips the first-use prompt)."""
+    await run_sync(set_system_setting, INPUT_MODE_SETTING_KEY, payload.input_mode)
+    logger.info("computer-use desktop mode set to %s via API", payload.input_mode)
+    return payload

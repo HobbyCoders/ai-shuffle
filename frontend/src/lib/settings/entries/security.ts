@@ -43,6 +43,16 @@ export const entries: SettingEntry[] = [
 		default: false
 	},
 	{
+		id: 'security.computerUseDedicated',
+		category: 'security',
+		section: 'Agent safety',
+		label: 'Only agents use this computer',
+		hint: 'Skips the first-use prompt',
+		help: 'Normally the first time a chat asks to control the screen, a person must approve it, even in Bypass. Turn this on for a machine nobody works at, such as a VM for agents: the first request then follows the chat’s permission mode, so Bypass chats and automations use the screen without asking. Stop still works.',
+		keywords: ['unattended', 'vm', 'virtual machine', 'dedicated', 'first use', 'computer use prompt'],
+		default: false
+	},
+	{
 		id: 'security.sandbox',
 		category: 'security',
 		section: 'Agent safety',

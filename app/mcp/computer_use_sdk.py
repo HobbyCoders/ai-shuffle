@@ -472,6 +472,19 @@ def create_computer_use_server(
         # an allow that did not come from a prompt cannot stand in for one.
         return bool(allowed) and access.consume_first_use_confirmation(session_id)
 
+    async def _dedicated_desktop() -> bool:
+        """True when only agents use this worker's desktop (Settings > Security).
+
+        Then the first grant needs no person's allow: the session's permission
+        mode decides, as for later grants. A read error keeps the prompt.
+        """
+        try:
+            from app.api.computer_use import is_dedicated_desktop
+            return await asyncio.to_thread(is_dedicated_desktop)
+        except Exception:
+            logger.debug("computer-use: desktop mode lookup failed", exc_info=True)
+            return False
+
     # ----- access tools ------------------------------------------------------
     @tool(
         "request_access",
@@ -504,7 +517,7 @@ def create_computer_use_server(
         if not approved:
             return _err("request_access was not approved for this session. "
                         "The user must approve the request before access is granted.")
-        if not access.is_granted(session_id):
+        if not access.is_granted(session_id) and not await _dedicated_desktop():
             if not await _confirm_first_use(args):
                 return _err("The user did not approve computer use for this session. "
                             "The first request in every session needs their approval; "
