@@ -596,6 +596,9 @@ class HarnessAdapter(ProviderAdapter):
                 tool_policy=self._delegated_policy_with_saved_rules(
                     _delegated_tool_policy(options, permissions, delegated_blocked)
                 ),
+                # AI Shuffle's Claude Code mod (--plugin-dir on CLI 2.1.287+);
+                # FLUID_CLAUDE_MOD=false turns it off.
+                claude_mod=settings.fluid_claude_mod,
             )
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)

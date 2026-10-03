@@ -428,6 +428,21 @@ What the child CLI is given, and what it is not:
   applied after `--settings` and still can. After each CLI process's first turn, Fluid checks the CLI's
   transcript for a bash-first steer it attached anyway; a hit is logged as a
   warning and stored as a `DelegatedDiagnostic` event.
+- On Claude Code 2.1.287 and newer the child also loads AI Shuffle's Claude
+  Code mod (`fluid/engine/claude_mod`), a plugin of function hooks, which is
+  Claude Code's documented "mods" format, passed with `--plugin-dir`. It leaves
+  the bash-first steer (the `auto_mode` reminder) out of what the model reads,
+  and when the CLI has trimmed the Bash tool description it adds a line
+  pointing file reads, searches and edits back to Read, Grep, Glob, Edit and
+  Write. The CLI writes type files into any folder it loads a mod from, so
+  each session loads a copy in its temp directory, removed when the session
+  closes. An older CLI, or one whose version is unknown, gets no flag, and
+  `FLUID_CLAUDE_MOD=false` turns the mod off. The override above stays on
+  either way: with it, 2.1.287 sends the same request with or without the mod,
+  and the mod takes over if a later CLI ignores the variable. A CLI that
+  cannot load the mod still runs the turn; the init frame's plugin list says
+  whether it loaded, and a steer the transcript check finds says whether the
+  mod kept it from the model. `--setting-sources` does not affect the mod.
 - A `tool_policy` that raises (or returns an awaitable that raises) denies the
   call.
 
@@ -539,6 +554,7 @@ Read outside the config loader:
 |---|---|
 | `FLUID_SHELL` | Windows only: path to the shell for `Bash`, `Monitor`, and hook commands. Otherwise fluid finds Git Bash itself and falls back to `cmd.exe`. |
 | `FLUID_TRACE_REQUESTS` | Directory that receives a JSON dump of every outbound model request. Unset means no tracing. |
+| `FLUID_CLAUDE_MOD` | `delegated_claude` only: whether the child CLI loads AI Shuffle's Claude Code mod (see the provider section). Unset means on; otherwise `1`, `true`, `yes`, `on` are on and anything else is off. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY` | Default key sources for the matching provider kinds, and the defaults for `api_key_env`. |
 | `XDG_DATA_HOME` | Base for the default session store (`<base>/fluid/sessions`). |
 

@@ -481,6 +481,11 @@ class StreamJsonMapper:
         # the permission mode and model it runs, and where its credentials
         # come from (``apiKeySource``). Empty until an init frame arrives.
         self.cli_init: dict[str, str | None] = {}
+        # The plugins the init frame lists, by ``source`` (``name@inline`` for
+        # a --plugin-dir folder), and the load errors it reports. None until
+        # an init frame carries a ``plugins`` list.
+        self.cli_plugins: tuple[str, ...] | None = None
+        self.cli_plugin_errors: tuple[dict[str, Any], ...] = ()
 
         self._tool_names: dict[str, str] = {}  # tool_use_id → tool name
         # tool_use_id → input, kept so a tool_result can be journaled with
@@ -786,6 +791,16 @@ class StreamJsonMapper:
             "model": text("model"),
             "api_key_source": text("apiKeySource"),
         }
+        plugins = frame.get("plugins")
+        if isinstance(plugins, list):
+            self.cli_plugins = tuple(
+                str(p.get("source") or p.get("name"))
+                for p in plugins if isinstance(p, dict) and (p.get("source") or p.get("name"))
+            )
+        errors = frame.get("plugin_errors")
+        self.cli_plugin_errors = tuple(
+            e for e in (errors if isinstance(errors, list) else ()) if isinstance(e, dict)
+        )
         tools = frame.get("tools")
         if not isinstance(tools, list):
             # No tool list announced: leave the surface unknown (None) rather

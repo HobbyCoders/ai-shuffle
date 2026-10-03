@@ -1,0 +1,6 @@
+{
+  "name": "ai-shuffle",
+  "version": "0.1.0",
+  "description": "AI Shuffle's Claude Code mod: keeps the dedicated file tools in front on the delegated Claude leg",
+  "author": { "name": "HobbyCoders" }
+}

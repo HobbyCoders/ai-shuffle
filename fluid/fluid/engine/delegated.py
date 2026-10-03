@@ -70,6 +70,7 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import signal
 import socket
 import tempfile
@@ -318,6 +319,46 @@ def _cli_permission_mode(mode: str, cli_version: str | None) -> str:
 # both. A known older CLI keeps the old argv.
 _CLI_FLAGS_SINCE = "2.1.0"
 
+# AI Shuffle's Claude Code mod (``claude_mod/``, a plugin of function hooks,
+# Claude Code's documented "mods"): it keeps the bash-first steer from reaching
+# the model and gives a trimmed Bash description its pointer to the dedicated
+# file tools back (``claude_mod/hooks/steer.ts``). Claude Code runs mods from
+# 2.1.287, so an older CLI, or one whose version is unknown, keeps the old
+# argv. ``FORCED_CHILD_ENV`` stays on either way: on 2.1.287 it already keeps
+# the steer off and the mod changes nothing the model reads; the mod takes
+# over if a later CLI ignores that undocumented variable.
+CLAUDE_MOD_SINCE = "2.1.287"
+CLAUDE_MOD_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude_mod")
+# How the CLI's init frame lists a --plugin-dir plugin: ``<name>@inline``.
+CLAUDE_MOD_PLUGIN = "ai-shuffle@inline"
+# Unset leaves the mod on; otherwise only 1, true, yes or on keep it on.
+CLAUDE_MOD_ENV = "FLUID_CLAUDE_MOD"
+
+
+def claude_mod_enabled(env: dict[str, str] | None = None) -> bool:
+    """The ``FLUID_CLAUDE_MOD`` switch: on unless set to a false value."""
+    raw = (os.environ if env is None else env).get(CLAUDE_MOD_ENV)
+    return raw is None or raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _stage_claude_mod(tmpdir: str) -> str:
+    """Copy the shipped mod into ``tmpdir`` (once) and return the copy's path.
+
+    Claude Code writes type declarations and a ``tsconfig.json`` into every
+    --plugin-dir folder it loads, ``-p`` included, so it is never handed the
+    shipped folder: that lives in site-packages or in a signed source update
+    whose file digest is checked again before every launch. The mod's tests
+    stay behind; only the files the CLI loads are copied.
+    """
+    dest = os.path.join(tmpdir, "claude-mod")
+    if not os.path.isfile(os.path.join(dest, ".claude-plugin", "plugin.json")):
+        shutil.copytree(
+            CLAUDE_MOD_SOURCE, dest, dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns("tests", "types", "tsconfig.json", "__pycache__"),
+        )
+    return dest
+
+
 _ON_WINDOWS = os.name == "nt"
 
 
@@ -490,6 +531,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             [str, dict[str, Any]], str | None | Awaitable[str | None]
         ] | None = None,
         journal: Any | None = None,
+        claude_mod: bool | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -619,6 +661,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # names its transcript before the turn's end records it on the loop.
         self._surface_cli_session_id: str | None = None
         self._surface_cli_version: str | None = None
+        # AI Shuffle's Claude Code mod (see ``CLAUDE_MOD_SINCE``): None reads
+        # the ``FLUID_CLAUDE_MOD`` switch. Per spawn: the staged copy handed
+        # to --plugin-dir (None when the spawn went without it), what the
+        # startup log says about it, and whether that process's init frame
+        # listed it (None until checked).
+        self.claude_mod = claude_mod_enabled() if claude_mod is None else bool(claude_mod)
+        self._claude_mod_dir: str | None = None
+        self._claude_mod_state = "off"
+        self._claude_mod_listed: bool | None = None
 
         self._session: SessionMeta | None = None
         self._session_id = session_id
@@ -895,6 +946,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     pass
         self._prompt_file = self._prompt_file_text = None
         if self._tmpdir is not None:
+            # The mod copy is this loop's own (``_stage_claude_mod``), with
+            # whatever the CLI wrote into it; nothing else is removed as a tree.
+            staged = os.path.join(self._tmpdir, "claude-mod")
+            if os.path.isdir(staged):
+                shutil.rmtree(staged, ignore_errors=True)
+            self._claude_mod_dir = None
             try:
                 os.rmdir(self._tmpdir)  # only once empty; never a tree delete
             except OSError:
@@ -1126,9 +1183,75 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         argv += ["--settings", self._settings_arg()]
         if self.setting_sources is not None:
             argv += ["--setting-sources", ",".join(self.setting_sources)]
+        argv += self._claude_mod_argv()
         if self.partial:
             argv += ["--include-partial-messages"]
         return argv
+
+    def _claude_mod_argv(self) -> list[str]:
+        """``--plugin-dir`` with this session's copy of the mod, or nothing.
+
+        Nothing when the switch is off, when the CLI's version is unknown or
+        older than ``CLAUDE_MOD_SINCE``, or when the copy cannot be made; the
+        spawn then runs exactly as it did before the mod existed. A CLI that
+        cannot load the mod still runs the turn: it lists the failure in its
+        init frame (see ``_check_claude_mod``) and goes on without it.
+        ``--setting-sources`` does not affect a --plugin-dir mod (checked on
+        2.1.287 with an empty list, ``project`` and all three).
+        """
+        self._claude_mod_dir = None
+        if not getattr(self, "claude_mod", False):
+            self._claude_mod_state = "off"
+            return []
+        version = getattr(self, "cli_version", None)
+        if not _version_at_least(version, CLAUDE_MOD_SINCE):
+            self._claude_mod_state = (
+                f"skipped: CLI {version} is older than {CLAUDE_MOD_SINCE}"
+                if _version_key(version) is not None else "skipped: CLI version unknown"
+            )
+            return []
+        try:
+            path = _stage_claude_mod(self._ensure_tmpdir())
+        except OSError as exc:
+            logger.warning(
+                "could not copy AI Shuffle's Claude Code mod into the session "
+                "directory (%s); this CLI runs without it", exc,
+            )
+            self._claude_mod_state = "skipped: copy failed"
+            return []
+        self._claude_mod_dir = path
+        self._claude_mod_state = "requested"
+        return ["--plugin-dir", path]
+
+    def _check_claude_mod(self, mapper: StreamJsonMapper) -> None:
+        """Once per process: say whether the CLI loaded the mod it was given.
+
+        The init frame lists every plugin the CLI loaded and every folder it
+        could not read. A hooks module that fails inside a listed plugin is
+        reported only in the CLI's debug log; its hooks are skipped and the
+        CLI's own text goes out, as without the mod.
+        """
+        staged: str | None = getattr(self, "_claude_mod_dir", None)
+        if staged is None:
+            return
+        if getattr(self, "_claude_mod_listed", None) is not None:
+            return
+        if mapper.cli_plugins is None:
+            return
+        self._claude_mod_listed = CLAUDE_MOD_PLUGIN in mapper.cli_plugins
+        if self._claude_mod_listed:
+            logger.info("claude CLI loaded AI Shuffle's mod (%s)", CLAUDE_MOD_PLUGIN)
+            return
+        errors = [
+            str(e.get("message") or e.get("type") or e)
+            for e in mapper.cli_plugin_errors
+            if staged in str(e.get("path") or e.get("message") or "")
+        ]
+        logger.warning(
+            "claude CLI did not list AI Shuffle's mod (%s)%s; the session runs "
+            "without it", CLAUDE_MOD_PLUGIN,
+            f": {'; '.join(errors)}" if errors else "",
+        )
 
     def _ensure_tmpdir(self) -> str:
         """The per-session scratch directory, created on first use."""
@@ -1229,6 +1352,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._spawn_resume = self.cli_session_id
         self._proc_results = 0
         self._cli_cost_total = None if self._spawn_resume else 0.0
+        self._claude_mod_listed = None
         self._proc = await asyncio.create_subprocess_exec(
             *self._build_argv(),
             stdin=asyncio.subprocess.PIPE,
@@ -1253,12 +1377,14 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # forced env says whether the bash-first steer override was in force.
         logger.info(
             "claude CLI started: version=%s leg=delegated session=%s model=%s "
-            "permission_mode=%s resume=%s pid=%s forced_env=%s settings_env=%s",
+            "permission_mode=%s resume=%s pid=%s forced_env=%s settings_env=%s "
+            "claude_mod=%s",
             self.cli_version or "unknown",
             self._session.session_id if self._session else None,
             self.model, self.permission_mode, bool(self._spawn_resume), self._proc.pid,
             ",".join(f"{k}={v}" for k, v in sorted(FORCED_CHILD_ENV.items())),
             "forced" if self._settings_object() is not None else "not-json",
+            self._claude_mod_state,
         )
         if self._cli_hook_events():
             async with self._stdout_lock:
@@ -1333,6 +1459,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             )
             return
         variant = str(steer.get("bashFirstSteer") or "unknown")
+        # The transcript keeps the CLI's own record of an attachment even when
+        # the mod left it out of the request, so a hit says which happened.
+        mod_loaded = getattr(self, "_claude_mod_listed", None) is True
         message = (
             f"claude CLI {cli_version or 'unknown'} attached its bash-first steer "
             f"({variant}) to session {cli_session_id} although "
@@ -1343,6 +1472,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 if resumed else
                 "; the CLI may have renamed the override or a settings layer beat it"
             )
+            + (
+                "; AI Shuffle's Claude Code mod was loaded and leaves the steer out "
+                "of what the model reads"
+                if mod_loaded else ""
+            )
         )
         logger.warning(message)
         try:
@@ -1351,6 +1485,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 data={
                     "cli_version": cli_version, "variant": variant,
                     "resumed": resumed, "cli_session_id": cli_session_id,
+                    "claude_mod_loaded": mod_loaded,
                 },
             ))
         except Exception:  # noqa: BLE001 — the log line already reported it
@@ -2128,6 +2263,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if mapper.cli_tools is not None and mapper.cli_tools != self.cli_tools:
                 self.cli_tools = mapper.cli_tools
                 self.cli_mcp_servers = mapper.cli_mcp_servers
+            self._check_claude_mod(mapper)
             # An earlier "allow always" covers this request: answer it without
             # surfacing a prompt the host already answered.
             auto_allow = mapped.permission is not None and self._session_allows(

@@ -412,6 +412,11 @@ class Settings(BaseSettings):
     #   - fluid_skills_dir: where saved skills + the episodic journal live.
     #     None = <data_dir>/fluid/skills (never fluid's ~/.fluid default).
     fluid_code_mode: bool = True
+    # AI Shuffle's Claude Code mod on the delegated Claude leg (Claude Code
+    # 2.1.287 and newer; fluid/fluid/engine/claude_mod). It keeps the CLI's
+    # bash-first steer from reaching the model. FLUID_CLAUDE_MOD=false turns it
+    # off; the CLAUDE_CODE_THRIFTY_SONIC override stays on either way.
+    fluid_claude_mod: bool = True
     fluid_continual: bool = True
     fluid_memory_enabled: bool = True
     fluid_continual_model: Optional[str] = None

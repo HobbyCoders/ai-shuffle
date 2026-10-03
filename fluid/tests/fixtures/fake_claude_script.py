@@ -21,7 +21,8 @@ Script shape::
     "version": "2.1.280 (Claude Code)",       # ``claude --version`` text
     "spawn_exit": {"code": 1, "stderr": "."}, # exit before any frame
     "init": {"tools": [...], "model": "...", "session_id": "...",
-             "claude_code_version": "...", "apiKeySource": "..."},
+             "claude_code_version": "...", "apiKeySource": "...",
+             "drop_plugins": true},           # list no --plugin-dir plugin
     "context_usage": "answer" | "error" | "mute",   # get_context_usage replies
     "controls": {"<subtype>": "error" | "mute" | {"late": s}},
                                               # how other control requests
@@ -431,7 +432,7 @@ class Fake:
             sys.stderr.write(spawn_exit.get("stderr", "") + "\n")
             return int(spawn_exit.get("code", 1))
         init = self.script.get("init") or {}
-        self.emit({
+        frame = {
             "type": "system", "subtype": "init", "session_id": self.sid,
             "model": init.get("model", "claude-fake"),
             "tools": init.get("tools", ["Bash", "Read", "Edit", "mcp__fluid_bundled__Recall"]),
@@ -439,7 +440,23 @@ class Fake:
             "permissionMode": self.mode, "cwd": os.getcwd(),
             "claude_code_version": init.get("claude_code_version", "2.1.280"),
             "apiKeySource": init.get("apiKeySource", "none"),
-        })
+        }
+        plugin_dir = _flag("--plugin-dir")
+        if plugin_dir is not None:
+            # As CLI 2.1.287 reports a --plugin-dir folder: listed as
+            # ``<name>@inline`` when its manifest reads, else a load error.
+            manifest = os.path.join(plugin_dir, ".claude-plugin", "plugin.json")
+            if os.path.isfile(manifest) and not init.get("drop_plugins"):
+                with open(manifest, encoding="utf-8") as fh:
+                    name = json.load(fh)["name"]
+                frame["plugins"] = [{"name": name, "path": plugin_dir, "source": f"{name}@inline"}]
+            else:
+                frame["plugins"] = []
+                frame["plugin_errors"] = [{
+                    "plugin": "inline[0]", "type": "path-not-found",
+                    "message": f"Path not found: {plugin_dir} (commands)", "path": plugin_dir,
+                }]
+        self.emit(frame)
         turns = self.script.get("turns") or []
         if _flag("--resume") is not None and "resume_turns" in self.script:
             turns = self.script["resume_turns"]

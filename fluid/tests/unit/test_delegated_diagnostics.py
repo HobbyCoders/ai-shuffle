@@ -156,11 +156,13 @@ async def _run_with_transcript(tmp_path, caplog, entries: list[dict] | None, **k
     config = tmp_path / "claude-config"
     config.mkdir()
     cli_id = kwargs.pop("cli_id", CLI_ID)
+    version = kwargs.pop("version", "2.1.285")
     if entries is not None:
         _transcript(config, cli_id, entries)
     caplog.set_level(logging.DEBUG, logger="fluid.engine.delegated")
     loop, _record = _loop(
-        tmp_path, {"init": {"session_id": CLI_ID, "claude_code_version": "2.1.285"}},
+        tmp_path, {"version": f"{version} (Claude Code)",
+                   "init": {"session_id": CLI_ID, "claude_code_version": version}},
         env={"CLAUDE_CONFIG_DIR": str(config)}, permission_mode="bypassPermissions", **kwargs,
     )
     try:
@@ -183,7 +185,23 @@ async def test_a_steer_in_the_transcript_is_reported_once(tmp_path, caplog) -> N
     [diagnostic] = diagnostics
     assert diagnostic.kind == "bash_first_steer"
     assert diagnostic.data == {"cli_version": "2.1.285", "variant": "relaxed",
-                               "resumed": False, "cli_session_id": CLI_ID}
+                               "resumed": False, "cli_session_id": CLI_ID,
+                               "claude_mod_loaded": False}
+    assert "mod" not in warning
+
+
+async def test_a_steer_recorded_while_the_mod_ran_says_the_model_did_not_read_it(
+    tmp_path, caplog,
+) -> None:
+    # The CLI's transcript keeps its own record of an attachment the mod left
+    # out of the request, so the check still finds it and must say so.
+    diagnostics, warnings = await _run_with_transcript(
+        tmp_path, caplog, [_USER, _STEER_ENTRY], version="2.1.287", claude_mod=True,
+    )
+    [warning] = warnings
+    assert "mod was loaded" in warning
+    [diagnostic] = diagnostics
+    assert diagnostic.data["claude_mod_loaded"] is True
 
 
 async def test_a_resumed_process_says_the_steer_may_predate_the_fix(tmp_path, caplog) -> None:
