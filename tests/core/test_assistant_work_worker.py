@@ -175,12 +175,22 @@ def test_without_a_choice_nothing_changes(callers, network):
 
 
 @pytest.mark.parametrize("role", ["home", "job"])
-def test_assistant_work_falls_back_here_while_remote_dispatch_is_missing(callers, network, role):
+def test_assistant_work_goes_to_the_default_worker(callers, network, monkeypatch, role):
+    """The real pick and the real dispatch path hand the work to the default."""
+    from app.core import remote_task
+
     save("dev-serverworker")
+    seen = []
+
+    async def remote(**kwargs):
+        seen.append(kwargs)
+        return {"ok": True, "mode": "background", "task_id": "t1"}
+
+    monkeypatch.setattr(remote_task, "dispatch_remote", remote)
     payload, calls = dispatch(callers[role])
-    assert payload["ok"] is True and len(calls) == 1
-    assert payload["worker_note"] == ("Ran on this worker instead of Unraid: running a subagent on "
-                                      "another worker is not supported yet.")
+    assert payload == {"ok": True, "mode": "background", "task_id": "t1"}
+    assert calls == [] and seen[0]["worker"]["device_id"] == "dev-serverworker"
+    assert seen[0]["caller_session_id"] == callers[role]
 
 
 def test_offline_default_falls_back_with_a_note(callers, network):
@@ -222,7 +232,7 @@ def test_explicit_worker_wins_and_never_falls_back(callers, network):
 def test_a_reachable_default_is_dispatched_there(callers, network, monkeypatch):
     """Once remote dispatch exists, the default goes through it unchanged."""
     save("dev-serverworker")
-    monkeypatch.setattr(td, "_remote_worker_refusal", lambda value, sid, row: None)
+    monkeypatch.setattr(td, "_remote_worker_pick", lambda value, sid, row: (UNRAID, None))
     seen = []
 
     async def remote(args, **kwargs):
@@ -239,7 +249,7 @@ def test_a_reachable_default_is_dispatched_there(callers, network, monkeypatch):
 
 def test_a_late_refusal_that_ran_nothing_still_falls_back(callers, network, monkeypatch):
     save("dev-serverworker")
-    monkeypatch.setattr(td, "_remote_worker_refusal", lambda value, sid, row: None)
+    monkeypatch.setattr(td, "_remote_worker_pick", lambda value, sid, row: (UNRAID, None))
     real = td._dispatch_task_tool
 
     async def remote_refuses(args, **kwargs):
@@ -254,7 +264,7 @@ def test_a_late_refusal_that_ran_nothing_still_falls_back(callers, network, monk
 
 def test_a_remote_failure_after_dispatch_is_not_rerun_here(callers, network, monkeypatch):
     save("dev-serverworker")
-    monkeypatch.setattr(td, "_remote_worker_refusal", lambda value, sid, row: None)
+    monkeypatch.setattr(td, "_remote_worker_pick", lambda value, sid, row: (UNRAID, None))
     real = td._dispatch_task_tool
 
     async def remote_fails(args, **kwargs):

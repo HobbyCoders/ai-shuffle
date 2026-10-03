@@ -1480,8 +1480,8 @@ async def dispatch_task_tool(
     if default is None:
         return await _dispatch_task_tool(args, caller_session_id=caller_session_id, **kwargs)
     caller_row = _session_row(caller_session_id) or {}
-    refusal = await asyncio.to_thread(
-        _remote_worker_refusal, default["device_id"], caller_session_id, caller_row
+    _, refusal = await asyncio.to_thread(
+        _remote_worker_pick, default["device_id"], caller_session_id, caller_row
     )
     if refusal is None:
         payload = await _dispatch_task_tool(
