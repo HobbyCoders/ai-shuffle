@@ -1422,8 +1422,9 @@ class AutomationCreate(BaseModel):
     enabled: bool = False
     # The model its runs use: the model picker's value (a native Claude id such
     # as ``sonnet``, or ``prov:<providerId>:<modelId>``), or a bare model id
-    # with ``provider_id``. Omitted = use the agent's saved model, then the app
-    # default. Validated against the providers and their model lists.
+    # with ``provider_id``. Omitted = use the app default, the model a new chat
+    # uses when none is picked. Validated against the providers and their
+    # model lists.
     model: Optional[str] = None
     provider_id: Optional[str] = None
 
@@ -1487,10 +1488,10 @@ class Automation(BaseModel):
     model: Optional[str] = None
     provider_id: Optional[str] = None
     # What a run would use right now. ``model_source`` is ``automation`` for an
-    # explicit choice, or the fallback: ``agent`` (the agent's saved model) or
-    # ``default`` (the app default). ``effective_model`` may be null for an
-    # agent bound to a provider with no saved model (the provider's default
-    # applies). ``model_error`` is set when the stored choice is no longer
+    # explicit choice, ``default`` for the app default, or ``agent`` when the
+    # agent row still carries a legacy saved model, which runs keep using.
+    # ``effective_model`` may be null for an agent with a legacy provider and
+    # no model (the provider's default applies). ``model_error`` is set when the stored choice is no longer
     # available; runs fail with it instead of switching models.
     effective_model: Optional[str] = None
     effective_provider_id: Optional[str] = None

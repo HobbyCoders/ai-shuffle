@@ -14,7 +14,7 @@ vi.mock('$lib/api/claude-auth', () => ({
 }));
 
 import { encodeProviderModel, hydrateModelRegistry } from '$lib/constants/models';
-import { automationModelLabel, type Automation } from '$lib/api/automations';
+import { automationFallbackModel, automationModelLabel, type Automation } from '$lib/api/automations';
 import AutomationForm from './AutomationForm.svelte';
 
 beforeAll(async () => {
@@ -108,6 +108,7 @@ function renderForm(overrides: Record<string, unknown> = {}) {
 function saved(fields: Partial<Automation>): Automation {
 	return {
 		id: 'auto-1',
+		profile_id: 'agent-1',
 		model: null,
 		provider_id: null,
 		effective_model: 'sonnet',
@@ -119,12 +120,13 @@ function saved(fields: Partial<Automation>): Automation {
 }
 
 describe('AutomationForm model picker', () => {
-	it('starts on the agent default and emits the picked model', async () => {
+	it('starts on the app default and emits the picked model', async () => {
 		const { getByTestId, onUpdateFormModel } = renderForm();
 		const row = within(getByTestId('automation-model-row'));
-		expect(row.getByText("Runs use the agent's saved model, or the app default.")).toBeTruthy();
+		expect(row.getByText('Uses Sonnet, the app default.')).toBeTruthy();
+		expect(row.queryByText(/agent/i)).toBeNull();
 
-		await fireEvent.click(row.getByRole('button', { name: 'Agent default' }));
+		await fireEvent.click(row.getByRole('button', { name: 'App default' }));
 		await fireEvent.click(row.getByRole('tab', { name: /^Claude/ }));
 		await fireEvent.click(row.getByRole('option', { name: /Haiku/ }));
 		expect(onUpdateFormModel).toHaveBeenCalledWith('haiku');
@@ -133,7 +135,7 @@ describe('AutomationForm model picker', () => {
 	it('emits a provider model as its picker value', async () => {
 		const { getByTestId, onUpdateFormModel } = renderForm();
 		const row = within(getByTestId('automation-model-row'));
-		await fireEvent.click(row.getByRole('button', { name: 'Agent default' }));
+		await fireEvent.click(row.getByRole('button', { name: 'App default' }));
 		await fireEvent.click(row.getByRole('tab', { name: /OpenAI/ }));
 		await fireEvent.click(row.getByRole('option', { name: /GPT-5\.6/ }));
 		expect(onUpdateFormModel).toHaveBeenCalledWith(encodeProviderModel('openai-row', 'gpt-5.6'));
@@ -154,10 +156,44 @@ describe('AutomationForm model picker', () => {
 		expect(queryByText('Custom…')).toBeNull();
 	});
 
-	it('names the fallback an existing automation runs on', () => {
+	it('names the app default an existing automation runs on', () => {
 		const { getByTestId } = renderForm({ currentView: 'edit', savedAutomation: saved({}) });
+		const row = within(getByTestId('automation-model-row'));
+		expect(row.getByText('Uses Sonnet, the app default.')).toBeTruthy();
+		expect(row.getByRole('button', { name: 'App default' })).toBeTruthy();
+	});
+
+	it('says so when the agent still carries a legacy saved model', () => {
+		const { getByTestId } = renderForm({
+			profiles: [{ id: 'agent-1', name: 'Agent One', config: { model: 'gpt-5.6', provider: 'openai-row' } }]
+		});
+		const row = within(getByTestId('automation-model-row'));
+		expect(row.getByText('Uses GPT-5.6, saved on this agent (legacy).')).toBeTruthy();
+		expect(row.getByRole('button', { name: 'Saved on agent (legacy)' })).toBeTruthy();
+	});
+
+	it("takes the server's report for a saved automation on its own agent", () => {
+		const { getByTestId } = renderForm({
+			currentView: 'edit',
+			savedAutomation: saved({ effective_model: 'haiku', model_source: 'agent' })
+		});
 		expect(
-			within(getByTestId('automation-model-row')).getByText('Runs use Sonnet (default).')
+			within(getByTestId('automation-model-row')).getByText('Uses Haiku, saved on this agent (legacy).')
+		).toBeTruthy();
+	});
+
+	it('re-reads the fallback when the agent changes', () => {
+		const { getByTestId } = renderForm({
+			currentView: 'edit',
+			formProfileId: 'agent-2',
+			profiles: [
+				{ id: 'agent-1', name: 'Agent One', config: {} },
+				{ id: 'agent-2', name: 'Agent Two', config: { model: 'haiku' } }
+			],
+			savedAutomation: saved({})
+		});
+		expect(
+			within(getByTestId('automation-model-row')).getByText('Uses Haiku, saved on this agent (legacy).')
 		).toBeTruthy();
 	});
 
@@ -194,15 +230,26 @@ describe('AutomationForm model picker', () => {
 describe('automationModelLabel', () => {
 	it('labels the choice, the fallback and a gone model', () => {
 		expect(automationModelLabel(saved({ model: 'haiku', model_source: 'automation' }))).toBe('Haiku');
-		expect(automationModelLabel(saved({}))).toBe('Sonnet (default)');
+		expect(automationModelLabel(saved({}))).toBe('Sonnet (app default)');
 		expect(
 			automationModelLabel(
 				saved({ effective_model: 'gpt-5.6', effective_provider_id: 'openai-row', model_source: 'agent' })
 			)
-		).toBe('GPT-5.6 (agent)');
+		).toBe('GPT-5.6 (saved on agent)');
 		expect(
 			automationModelLabel(saved({ effective_model: null, effective_provider_id: 'openai-row', model_source: 'agent' }))
-		).toBe('Provider default (agent)');
+		).toBe('Provider default (saved on agent)');
 		expect(automationModelLabel(saved({ model: 'prov:x:y', model_error: 'gone' }))).toBe('Model unavailable');
+	});
+});
+
+describe('automationFallbackModel', () => {
+	it('is the app default unless the agent carries a legacy model or provider', () => {
+		expect(automationFallbackModel(undefined)).toEqual({ label: 'Sonnet', legacy: false });
+		expect(automationFallbackModel({})).toEqual({ label: 'Sonnet', legacy: false });
+		expect(automationFallbackModel({ model: 'haiku' })).toEqual({ label: 'Haiku', legacy: true });
+		// A provider with no model runs on that provider's default.
+		expect(automationFallbackModel({ provider: 'openai-row' })).toEqual({ label: 'GPT-5.6', legacy: true });
+		expect(automationFallbackModel({ provider: 'gone-row' })).toEqual({ label: 'Provider default', legacy: true });
 	});
 });

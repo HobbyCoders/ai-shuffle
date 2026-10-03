@@ -4,9 +4,10 @@ An automation's own model choice.
 Agents do not pin a model; a session gets one when it is created. An
 automation mints its run sessions itself, so it stores the choice (``model`` /
 ``provider_id``) and its runs stamp it on the session row exactly like the
-composer's pick on a new session. Without a choice, runs keep the old fallback
-(the agent's saved model, then the app default) and the API says so. A choice
-that is no longer available fails the run with a clear reason.
+composer's pick on a new session. Without a choice, runs use the app default,
+like a new chat with no pick; an agent row that still carries a legacy saved
+model keeps it, and the API reports that as ``agent``. A choice that is no
+longer available fails the run with a clear reason.
 """
 
 import json
@@ -17,6 +18,7 @@ from unittest.mock import patch
 from app.core.automation_manager import AutomationManager
 from app.core import automation_service
 from app.core.automation_service import (
+    describe_automation_model,
     model_choice_errors_for_run,
     normalize_model_choice,
     resolve_automation_model,
@@ -199,6 +201,28 @@ class TestResolve:
         assert resolved["provider_id"] is None
         assert resolved["source"] == "default"
 
+    def test_no_agent_or_missing_agent_is_the_app_default(self, mock_db):
+        from app.core.model_registry import DEFAULT_MODEL
+
+        for automation in ({}, {"profile_id": "deleted-agent"}):
+            resolved = resolve_automation_model(automation)
+            assert (resolved["model"], resolved["provider_id"], resolved["source"]) == (
+                DEFAULT_MODEL, None, "default")
+
+    def test_description_names_the_model_and_why(self, mock_db):
+        from app.core.model_registry import DEFAULT_MODEL
+        from app.db import database
+
+        database.create_profile(profile_id="bare", name="Bare", description=None, config={})
+        database.create_profile(
+            profile_id="legacy", name="Legacy", description=None, config={"model": "opus"},
+        )
+        assert describe_automation_model({"profile_id": "bare"}) == f"{DEFAULT_MODEL}, the app default"
+        assert describe_automation_model({"profile_id": "legacy"}) == "opus, saved on this agent (legacy)"
+        assert describe_automation_model(
+            {"profile_id": "legacy", "model": "haiku"}) == "haiku, chosen for this automation"
+        assert "no longer available" in describe_automation_model({"model": "prov:p-gone:gpt-x"})
+
     def test_removed_provider_reports_error(self, mock_db):
         resolved = resolve_automation_model({"model": "prov:p-gone:gpt-x"})
         assert resolved["selection"] == "prov:p-gone:gpt-x"
@@ -306,6 +330,43 @@ class TestRunPath:
         assert options.model == "gpt-x"
 
     @pytest.mark.asyncio
+    async def test_unbound_run_on_a_plain_agent_runs_the_app_default(self, mock_db):
+        """The real create_session + query resolution, as a new chat with no pick."""
+        from app.core.model_registry import DEFAULT_MODEL
+        from app.core.query_options import build_options_from_profile
+        from app.db import database
+
+        database.create_profile(profile_id="bare", name="Bare", description=None, config={})
+        database.create_session(session_id="s-plain", profile_id="bare", automation_id=None)
+        assert database.get_session("s-plain")["provider_id"] is None
+        options, _ = build_options_from_profile(
+            database.get_profile("bare"), overrides={"max_turns": 2}, session_id="s-plain",
+        )
+        assert options.model == DEFAULT_MODEL
+
+    @pytest.mark.asyncio
+    async def test_unbound_run_keeps_a_legacy_agent_model(self, mock_db):
+        """No silent change: an agent row that still carries a saved model and
+        provider keeps binding unbound runs, and the report says so."""
+        from app.core.query_options import build_options_from_profile
+        from app.db import database
+
+        _provider(database)
+        database.create_profile(
+            profile_id="legacy", name="Legacy", description=None,
+            config={"model": "gpt-y", "provider": "p-open"},
+        )
+        database.create_session(session_id="s-legacy", profile_id="legacy", automation_id=None)
+        assert database.get_session("s-legacy")["provider_id"] == "p-open"
+        options, _ = build_options_from_profile(
+            database.get_profile("legacy"), overrides={"max_turns": 2}, session_id="s-legacy",
+        )
+        assert options.model == "gpt-y"
+        resolved = resolve_automation_model({"profile_id": "legacy"})
+        assert (resolved["model"], resolved["provider_id"], resolved["source"]) == (
+            "gpt-y", "p-open", "agent")
+
+    @pytest.mark.asyncio
     async def test_unavailable_choice_fails_the_run_with_a_clear_error(self, mock_db, mock_encryption):
         from app.db import database
 
@@ -378,8 +439,9 @@ class TestApi:
         from app.db import database
 
         _provider(database)
+        database.create_profile(profile_id="bare", name="Bare", description=None, config={})
         created = authenticated_client.post(
-            "/api/v1/automations", json=self._body(model="prov:p-open:gpt-x"),
+            "/api/v1/automations", json=self._body(model="prov:p-open:gpt-x", profile_id="bare"),
         ).json()
         auto_id = created["id"]
 
@@ -402,7 +464,7 @@ class TestApi:
         cleared = authenticated_client.patch(f"/api/v1/automations/{auto_id}", json={"model": None})
         assert cleared.status_code == 200
         assert cleared.json()["model"] is None
-        assert cleared.json()["model_source"] in ("agent", "default")
+        assert cleared.json()["model_source"] == "default"
 
     def test_step_model_is_validated(self, authenticated_client, mock_encryption):
         response = authenticated_client.post(
@@ -435,23 +497,50 @@ class TestConfigTools:
         from app.db import database
 
         _provider(database)
+        database.create_profile(profile_id="bare", name="Bare", description=None, config={})
         tools = _create_automation_tools(is_admin=True, project_id=None)
         create = _get_tool(tools, "createAutomation")
         with patch.object(automation_service, "logger"):
             result = await create.handler({
                 "name": "T", "trigger_type": "webhook", "prompt": "hi",
-                "profile_id": "default", "model": "gpt-x", "provider_id": "p-open",
+                "profile_id": "bare", "model": "gpt-x", "provider_id": "p-open",
                 "enabled": False,
             })
         payload = json.loads(_text(result))
         assert payload["model"] == "prov:p-open:gpt-x"
+        assert payload["runs_on"] == "gpt-x on provider 'p-open', chosen for this automation"
         auto_id = payload["automation_id"]
 
         update = _get_tool(tools, "updateAutomation")
         bad = await update.handler({"automation_id": auto_id, "model": "gpt-x"})
         assert "not a Claude model" in _text(bad)
-        await update.handler({"automation_id": auto_id, "model": ""})
+        cleared = json.loads(_text(await update.handler({"automation_id": auto_id, "model": ""})))
         assert database.get_automation(auto_id)["model"] is None
+        assert cleared["runs_on"].endswith(", the app default")
+
+    @pytest.mark.asyncio
+    async def test_create_automation_without_a_model_reports_the_app_default(self, mock_db, mock_encryption):
+        from app.core.model_registry import DEFAULT_MODEL
+        from app.db import database
+
+        database.create_profile(profile_id="bare", name="Bare", description=None, config={})
+        tools = _create_automation_tools(is_admin=True, project_id=None)
+        create = _get_tool(tools, "createAutomation")
+        result = await create.handler({
+            "name": "T", "trigger_type": "webhook", "prompt": "hi",
+            "profile_id": "bare", "enabled": False,
+        })
+        payload = json.loads(_text(result))
+        assert payload["model"] is None
+        assert payload["runs_on"] == f"{DEFAULT_MODEL}, the app default"
+
+        # The test fixture's "default" agent still carries a legacy saved model:
+        # the result names it instead of calling it the app default.
+        legacy = json.loads(_text(await create.handler({
+            "name": "L", "trigger_type": "webhook", "prompt": "hi",
+            "profile_id": "default", "enabled": False,
+        })))
+        assert legacy["runs_on"].endswith(", saved on this agent (legacy)")
 
     @pytest.mark.asyncio
     async def test_cron_create_takes_a_model(self, mock_db):
@@ -467,9 +556,12 @@ class TestConfigTools:
             captured["tools"] = tools
             return real(name=name, version=version, tools=tools)
 
+        from app.db import database
+
+        database.create_profile(profile_id="bare", name="Bare", description=None, config={})
         with patch.object(sdk, "create_tool_server", side_effect=spy):
             builtin_tools.create_builtin_tools_server(
-                session_id="s-cron", profile_id="default", is_admin=True, cwd="/tmp",
+                session_id="s-cron", profile_id="bare", is_admin=True, cwd="/tmp",
             )
         cron_create = {t.name: t for t in captured["tools"]}["CronCreate"]
 
@@ -479,6 +571,10 @@ class TestConfigTools:
             assert bad.get("isError") is True
             ok = await cron_create.handler(
                 {"name": "c", "expression": "0 9 * * *", "prompt": "p", "model": "opus"})
+            plain = await cron_create.handler(
+                {"name": "d", "expression": "0 9 * * *", "prompt": "p"})
         assert not ok.get("isError")
+        assert json.loads(_text(ok))["runs_on"] == "opus, chosen for this automation"
+        assert json.loads(_text(plain))["runs_on"].endswith(", the app default")
         rows = auto_db.get_all_automations()
-        assert [r["model"] for r in rows] == ["opus"]
+        assert sorted(r["model"] or "" for r in rows) == ["", "opus"]

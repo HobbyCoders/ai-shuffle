@@ -20,6 +20,20 @@ from app.mcp.config_helpers import (
 logger = logging.getLogger(__name__)
 
 
+def _describe_model(automation: Dict[str, Any]) -> Optional[str]:
+    """The model its runs use, in one line; ``None`` if it cannot be read.
+
+    Blocking — call through ``run_sync``.
+    """
+    from app.core.automation_service import describe_automation_model
+
+    try:
+        return describe_automation_model(automation)
+    except Exception:  # noqa: BLE001 — a report only; the save already landed
+        logger.debug("Could not describe the automation's model", exc_info=True)
+        return None
+
+
 def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
     """Create automation management tools."""
     from app.mcp.inproc import tool
@@ -192,7 +206,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                     "description": "Model its runs use: a Claude model (e.g. 'sonnet', 'opus') or "
                                    "'prov:<providerId>:<modelId>' for a provider model. With "
                                    "provider_id, a bare model id from that provider's list. "
-                                   "Omit to use the agent's saved model (or the app default).",
+                                   "Omit to use the app default, the model a new chat uses.",
                 },
                 "provider_id": {
                     "type": "string",
@@ -213,6 +227,8 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             return _error("App configuration tools require admin access.")
 
         trigger_type = args["trigger_type"]
+
+        report: Dict[str, Any] = {}
 
         def _validate_and_create():
             """Profile lookup → trigger validation → INSERT, in ONE hop.
@@ -294,6 +310,9 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 model=model,
                 provider_id=provider_id,
             )
+            # The model report reads the agent and provider: same hop.
+            if created:
+                report["runs_on"] = _describe_model(created)
             return None, created, auto_id, max_cost
 
         error, auto, automation_id, max_cost_per_run = await run_sync(_validate_and_create)
@@ -328,6 +347,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             "scheduled": scheduled,
             "max_cost_per_run": max_cost_per_run,
             "model": auto.get("model"),
+            "runs_on": report.get("runs_on"),
         }
 
         if trigger_type == "cron":
@@ -371,7 +391,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
     @tool(
         "updateAutomation",
         "Update properties of an existing automation. Pass model='' to clear its "
-        "model choice so runs use the agent's saved model again.",
+        "model choice so runs use the app default again.",
         {
             "type": "object",
             "properties": {
@@ -391,7 +411,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                     "description": "Model its runs use: a Claude model (e.g. 'sonnet', 'opus') or "
                                    "'prov:<providerId>:<modelId>' for a provider model. With "
                                    "provider_id, a bare model id from that provider's list. "
-                                   "Omit to use the agent's saved model (or the app default).",
+                                   "Omit to use the app default, the model a new chat uses.",
                 },
                 "provider_id": {
                     "type": "string",
@@ -406,6 +426,8 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             return _error("App configuration tools require admin access.")
 
         auto_id = args["automation_id"]
+
+        report: Dict[str, Any] = {}
 
         def _read_validate_write():
             """READ-MODIFY-WRITE — must stay in ONE hop.
@@ -457,7 +479,11 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 if not profile:
                     return f"Profile '{kwargs['profile_id']}' not found.", None, None
 
-            return None, database.update_automation(auto_id, **kwargs), kwargs
+            updated = database.update_automation(auto_id, **kwargs)
+            # The model report reads the agent and provider: same hop.
+            if updated:
+                report["runs_on"] = _describe_model(updated)
+            return None, updated, kwargs
 
         error, updated, kwargs = await run_sync(_read_validate_write)
         if error:
@@ -469,6 +495,7 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
             "success": True,
             "automation_id": auto_id,
             "updated_fields": list(kwargs.keys()),
+            "runs_on": report.get("runs_on"),
             "message": f"Automation '{updated.get('name')}' updated.",
         })
 

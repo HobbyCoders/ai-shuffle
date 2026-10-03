@@ -1,6 +1,7 @@
 <script lang="ts">
 	import {
-		automationModelLabel,
+		automationFallbackModel,
+		savedFallbackModel,
 		type Automation,
 		type TriggerItem,
 		type ActionStep,
@@ -160,15 +161,31 @@
 		return 'Claude Code is in subscription mode, so this automation runs on your Claude plan while you are away. Use an API key for scheduled runs (Settings > Providers > Claude). The loop guard holds unattended turns past its budget until you confirm them.';
 	});
 
-	// What the Model row says under the picker. With no choice of its own, an
-	// edited automation shows what its runs use now (the server reports it); an
-	// unchanged choice that is gone shows why runs fail.
+	// What runs use with no model of their own: the app default, unless the
+	// selected agent still carries a legacy saved model. An edited automation on
+	// its saved agent takes the server's report; otherwise it is read from the
+	// selected agent.
+	const fallbackModel = $derived.by(() => {
+		if (
+			savedAutomation?.model_source &&
+			!savedAutomation.model &&
+			savedAutomation.profile_id === formProfileId
+		) {
+			return savedFallbackModel(savedAutomation);
+		}
+		return automationFallbackModel(profiles.find((p) => p.id === formProfileId)?.config);
+	});
+	const modelEmptyLabel = $derived(fallbackModel.legacy ? 'Saved on agent (legacy)' : 'App default');
+
+	// What the Model row says under the picker; an unchanged choice that is
+	// gone shows why runs fail.
 	const modelHint = $derived.by(() => {
 		const unchanged = savedAutomation && (savedAutomation.model || '') === formModel;
 		if (unchanged && savedAutomation?.model_error) return savedAutomation.model_error;
 		if (formModel) return 'Every run uses this model.';
-		if (unchanged && savedAutomation) return `Runs use ${automationModelLabel(savedAutomation)}.`;
-		return "Runs use the agent's saved model, or the app default.";
+		return fallbackModel.legacy
+			? `Uses ${fallbackModel.label}, saved on this agent (legacy).`
+			: `Uses ${fallbackModel.label}, the app default.`;
 	});
 	const modelHintIsError = $derived(
 		!!savedAutomation?.model_error && (savedAutomation.model || '') === formModel
@@ -497,7 +514,7 @@
 					id="automation-model"
 					value={formModel}
 					allowEmpty
-					emptyLabel="Agent default"
+					emptyLabel={modelEmptyLabel}
 					allowCustom={false}
 					onSelect={onUpdateFormModel}
 				/>

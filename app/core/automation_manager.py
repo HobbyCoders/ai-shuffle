@@ -1153,8 +1153,8 @@ class AutomationManager:
         # stamped on the session row at birth, exactly like the composer's
         # pick on a new session (``create_session(model=...)``), so this turn
         # and every later one (failover retry, auto-continue) resolve from the
-        # row. No choice leaves the row unbound: the agent's saved model, then
-        # the app default, as before.
+        # row. No choice leaves the row unbound, like a new chat with no pick:
+        # the app default (or a legacy model still saved on the agent row).
         model_resolution = await run_sync(resolve_automation_model, automation)
         if model_resolution["error"]:
             raise ValueError(model_resolution["error"])
@@ -1398,8 +1398,8 @@ class AutomationManager:
                         raise ValueError(step_model["error"])
                     step_overrides: Dict[str, Any] = {"max_turns": max_turns}
                     # The step's own model, else the automation's. No explicit
-                    # choice leaves the override out, so resolution falls back
-                    # to the agent's saved model as before.
+                    # choice leaves the override out, so the step runs on the
+                    # app default (or a legacy model saved on the agent).
                     if step_model["selection"]:
                         step_overrides["model"] = step_model["selection"]
 

@@ -4,7 +4,7 @@
 
 import { api } from './client';
 import { apiOrigin } from './runtime';
-import { encodeProviderModel, getModelLabel } from '$lib/constants/models';
+import { encodeProviderModel, getDefaultModel, getModelLabel, getProviders } from '$lib/constants/models';
 
 // ============================================================================
 // Types
@@ -82,7 +82,7 @@ export interface AutomationCreate {
 	/**
 	 * Model its runs use: the model picker's value (a Claude id such as
 	 * `sonnet`, or `prov:<providerId>:<modelId>`). null = no choice of its own;
-	 * runs use the agent's saved model, then the app default.
+	 * runs use the app default, like a new chat with no pick.
 	 */
 	model?: string | null;
 	provider_id?: string | null;
@@ -113,9 +113,9 @@ export interface AutomationUpdate {
 }
 
 /**
- * Where a run's model comes from: the automation's (or step's) own choice, or
- * the fallback for automations without one (the agent's saved model, then the
- * app default).
+ * Where a run's model comes from: the automation's (or step's) own choice,
+ * `default` (the app default), or `agent` when the agent still carries a model
+ * saved by an older version, which runs without a choice keep using.
  */
 export type AutomationModelSource = 'automation' | 'step' | 'agent' | 'default';
 
@@ -160,10 +160,16 @@ export interface Automation {
 	notices?: string[];
 }
 
+function modelName(model: string | null | undefined, providerId: string | null | undefined): string {
+	if (!model) return 'Provider default';
+	return getModelLabel(providerId ? encodeProviderModel(providerId, model) : model);
+}
+
 /**
  * Short label for the model an automation's runs use, e.g. `Opus` for its own
- * choice, `Sonnet (agent)` / `Sonnet (default)` for the fallback, and
- * `Model unavailable` when the stored choice is gone.
+ * choice, `Sonnet (app default)` without one, `GPT-5 (saved on agent)` when
+ * the agent still carries a legacy model, and `Model unavailable` when the
+ * stored choice is gone.
  */
 export function automationModelLabel(automation: Pick<
 	Automation,
@@ -171,17 +177,48 @@ export function automationModelLabel(automation: Pick<
 >): string {
 	if (automation.model_error) return 'Model unavailable';
 	if (automation.model) return getModelLabel(automation.model);
-	const effective = automation.effective_model;
-	const name = effective
-		? getModelLabel(
-				automation.effective_provider_id
-					? encodeProviderModel(automation.effective_provider_id, effective)
-					: effective
-			)
-		: 'Provider default';
-	if (automation.model_source === 'agent') return `${name} (agent)`;
-	if (automation.model_source === 'default') return `${name} (default)`;
+	const name = modelName(automation.effective_model, automation.effective_provider_id);
+	if (automation.model_source === 'agent') return `${name} (saved on agent)`;
+	if (automation.model_source === 'default') return `${name} (app default)`;
 	return name;
+}
+
+/** What runs use when an automation has no model of its own. */
+export interface AutomationFallbackModel {
+	/** Display name of the model, e.g. `Sonnet`. */
+	label: string;
+	/** True when it is a legacy model saved on the agent, not the app default. */
+	legacy: boolean;
+}
+
+/**
+ * The model a run without its own choice uses, read from the agent the form
+ * has selected. Mirrors `resolve_automation_model` in
+ * app/core/automation_service.py: the app default (the model a new chat shows
+ * when none is picked), unless the agent still carries a legacy saved model or
+ * provider from an older version.
+ */
+export function automationFallbackModel(
+	agentConfig: { model?: string | null; provider?: string | null } | null | undefined
+): AutomationFallbackModel {
+	const model = agentConfig?.model?.trim() || null;
+	const provider = agentConfig?.provider?.trim() || null;
+	if (model) return { label: modelName(model, provider), legacy: true };
+	if (provider) {
+		const fallback = getProviders().find((p) => p.id === provider)?.default_model ?? null;
+		return { label: modelName(fallback, provider), legacy: true };
+	}
+	return { label: getModelLabel(getDefaultModel()), legacy: false };
+}
+
+/** The same answer from a saved automation's server report. */
+export function savedFallbackModel(
+	automation: Pick<Automation, 'effective_model' | 'effective_provider_id' | 'model_source'>
+): AutomationFallbackModel {
+	return {
+		label: modelName(automation.effective_model, automation.effective_provider_id),
+		legacy: automation.model_source === 'agent'
+	};
 }
 
 /**

@@ -1657,8 +1657,8 @@ def create_builtin_tools_server(
                 "model": {
                     "type": "string",
                     "description": "Model each run uses: a Claude model (e.g. 'sonnet') or "
-                                   "'prov:<providerId>:<modelId>'. Omit to use the agent's "
-                                   "saved model (or the app default).",
+                                   "'prov:<providerId>:<modelId>'. Omit to use the app "
+                                   "default, the model a new chat uses.",
                 },
             },
             "required": ["name", "expression", "prompt"],
@@ -1711,7 +1711,14 @@ def create_builtin_tools_server(
                 await automation_manager.schedule_automation(automation_id)
             except Exception:
                 logger.exception("Failed to register cron with scheduler")
-            return _ok({"automation_id": automation_id, "name": name, "expression": expression})
+            result = {"automation_id": automation_id, "name": name, "expression": expression}
+            try:
+                from app.core.automation_service import describe_automation_model
+
+                result["runs_on"] = await asyncio.to_thread(describe_automation_model, row)
+            except Exception:  # noqa: BLE001 — a report only; the cron exists
+                logger.debug("Could not describe the cron's model", exc_info=True)
+            return _ok(result)
         except Exception as e:
             logger.exception("CronCreate failed")
             return _err(f"create failed: {e}")

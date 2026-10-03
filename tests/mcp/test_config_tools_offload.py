@@ -341,7 +341,8 @@ class TestReadModifyWriteIsAtomic:
     async def test_update_automation_reads_validates_and_writes_in_one_hop(
         self, loop_thread, hops
     ):
-        """Three queries — existence read, profile validation, UPDATE — one hop."""
+        """Existence read, profile validation, UPDATE — one hop. The result's
+        model report then reads the agent again in that same hop."""
         order: list[str] = []
         read = _ThreadSpy(return_value=_automation(), log=order, label="read")
         prof = _ThreadSpy(return_value=_profile(), log=order, label="profile")
@@ -358,8 +359,9 @@ class TestReadModifyWriteIsAtomic:
 
         assert body["success"] is True
         assert hops.hops == 1
-        assert order == ["read", "profile", "write"]
-        assert read.threads == prof.threads == write.threads
+        assert order == ["read", "profile", "write", "profile"]
+        assert read.threads == write.threads
+        assert set(prof.threads) == set(read.threads)
         assert loop_thread not in read.threads
 
     async def test_toggle_automation_reads_and_writes_in_one_hop(

@@ -15,7 +15,7 @@ An automation consists of:
 - One or more **triggers** that determine when it runs (cron schedule, interval, webhook, connector event or connector trigger)
 - A **prompt template** that defines what the agent should do, and optional **action steps**
 - An **agent** that controls the behavior (prompt, tools). API fields still say `profile_id`.
-- An optional **model** for its runs. Without one, runs use the agent's saved model, then the app default. The automation list and editor show which model runs use. If the chosen model stops being available, runs fail with a message saying so instead of using another model.
+- An optional **model** for its runs. Without one, runs use the app default, the same model a new chat uses when you pick none. An agent saved by an older version may still carry its own model; runs then use that, and the editor says so. The automation list and editor show which model runs use. If the chosen model stops being available, runs fail with a message saying so instead of using another model.
 - **Budget controls** that cap cost and usage
 - An optional **approval workflow** for human-in-the-loop oversight
 - **Output configuration** that routes results to a connector, webhook, session, or nowhere

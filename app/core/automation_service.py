@@ -281,13 +281,20 @@ def reveal_webhook_secrets(automation: Any) -> Any:
 # composer's new-session path does, so every turn of the run resolves from the
 # session row.
 #
-# An automation with no stored choice keeps running the way it always has: the
-# session is created unbound and resolution falls back to the agent's legacy
-# ``config.model`` / ``config.provider``, then to ``DEFAULT_MODEL``.
+# An automation with no stored choice runs on the app default: the session is
+# created unbound, exactly like a new chat whose composer has no pick, and
+# resolves to ``DEFAULT_MODEL`` (the registry default the composer's picker
+# shows). One exception is kept so no existing automation silently changes
+# model: an agent row that still carries a legacy ``config.model`` /
+# ``config.provider`` (written before agents stopped pinning a model, by an
+# old export file, or for the persistent assistant's own agent) still binds an
+# unbound session, as it does for a new chat. The API reports that case as
+# ``agent`` so the UI can say so instead of calling it the app default.
 # :func:`resolve_automation_model` reports which of those a run would use.
 
 #: ``model_source`` values. ``automation`` / ``step`` are explicit choices;
-#: ``agent`` and ``default`` are the legacy fallbacks.
+#: ``default`` is the app default; ``agent`` is a legacy model saved on the
+#: agent row (only reported when one is actually there).
 MODEL_SOURCE_STEP = "step"
 MODEL_SOURCE_AUTOMATION = "automation"
 MODEL_SOURCE_AGENT = "agent"
@@ -436,10 +443,10 @@ def resolve_automation_model(
       or ``None`` when there is no explicit choice (fallback);
     - ``model`` / ``provider_id``: the effective model id and provider
       (``provider_id`` ``None`` = native Claude; ``model`` may be ``None`` for
-      a provider-bound agent with no saved model, which then runs on the
+      an agent with a legacy provider but no model, which then runs on the
       provider's own default);
-    - ``source``: ``step`` / ``automation`` (explicit) or ``agent`` /
-      ``default`` (fallback);
+    - ``source``: ``step`` / ``automation`` (explicit), ``default`` (the app
+      default) or ``agent`` (a legacy model saved on the agent);
     - ``error``: a plain-language reason when an explicit choice is no longer
       available, else ``None``. A run with an error must fail rather than fall
       through to another model.
@@ -471,10 +478,10 @@ def resolve_automation_model(
             ) if problem else None,
         }
 
-    # Fallback: mirror what an unbound session resolves to
-    # (query_options.build_options_from_profile): the agent's legacy
-    # config.provider (stamped by create_session) and config.model, then the
-    # app default for a native agent with nothing saved.
+    # No choice: mirror what an unbound session resolves to
+    # (query_options.build_options_from_profile). That is the app default,
+    # unless the agent row still carries a legacy config.provider (stamped by
+    # create_session) or config.model, which an unbound session keeps using.
     profile_id = step.get("profile_id") or automation.get("profile_id")
     config: Dict[str, Any] = {}
     if profile_id:
@@ -520,6 +527,28 @@ def with_model_resolution(automation: Any, lookups: Optional[ModelLookups] = Non
         "model_source": resolved["source"],
         "model_error": resolved["error"],
     }
+
+
+_MODEL_SOURCE_PHRASES = {
+    MODEL_SOURCE_STEP: "chosen for this step",
+    MODEL_SOURCE_AUTOMATION: "chosen for this automation",
+    MODEL_SOURCE_DEFAULT: "the app default",
+    MODEL_SOURCE_AGENT: "saved on this agent (legacy)",
+}
+
+
+def describe_automation_model(automation: Dict[str, Any]) -> str:
+    """One plain line naming the model a run would use and why, for tool results.
+
+    Blocking (profile/provider reads) — call off the event loop.
+    """
+    resolved = resolve_automation_model(automation)
+    if resolved["error"]:
+        return resolved["error"]
+    name = resolved["model"] or "the provider's default model"
+    if resolved["provider_id"]:
+        name = f"{name} on provider '{resolved['provider_id']}'"
+    return f"{name}, {_MODEL_SOURCE_PHRASES.get(resolved['source'], resolved['source'])}"
 
 
 def _normalize_step_models(
@@ -602,8 +631,8 @@ async def create_automation(
     """Create a new automation.
 
     ``model`` / ``provider_id`` are the optional model choice for its runs (see
-    :func:`normalize_model_choice`); omitted, runs fall back to the agent's
-    saved model or the app default.
+    :func:`normalize_model_choice`); omitted, runs use the app default (see
+    :func:`resolve_automation_model` for the legacy agent exception).
 
     ``enabled`` sets the initial ``is_enabled`` state (default ``False`` to
     preserve the create-then-enable UI flow). When ``True`` and the automation

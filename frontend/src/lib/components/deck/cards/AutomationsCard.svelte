@@ -116,7 +116,7 @@
 	let formMaxTurns = $state('1');
 	let formTimeoutSeconds = $state('300');
 	let formRequiresApproval = $state(false);
-	// The model picker's value; '' = no choice (agent's saved model / app default).
+	// The model picker's value; '' = no choice of its own (the app default).
 	let formModel = $state('');
 	let formActionSteps: ActionStep[] = $state([]);
 
