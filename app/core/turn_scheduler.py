@@ -1928,6 +1928,77 @@ async def _on_task_terminal_locked(session_id: str, frame: Dict[str, Any]) -> No
         )
 
 
+async def on_tasks_interrupted_by_restart(
+    session_id: str, frames: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Tell ``session_id`` ONCE which of its background tasks a restart cut off.
+
+    The boot reconcile settles every task the previous process left running,
+    but the in-memory ownership marks that admit a terminal to
+    :func:`on_task_terminal` died with that process, so the parent heard
+    nothing and sat parked on work that no longer existed. This is the same
+    push path a normal completion takes (a context-carrying ``unpark`` wake,
+    so a parked parent wakes), carrying every interrupted task in one turn.
+
+    A queued unpark left over from the previous run absorbs the frames
+    instead of a second wake being added. The Stop latch and per-task wake
+    suppression still apply. Returns the wake turn's id, or None when nothing
+    was queued. Never raises.
+    """
+    from app.core.task_registry import task_registry
+
+    try:
+        if task_registry.is_user_stopped(session_id):
+            return None
+        frames = [
+            frame for frame in _dedupe_frames_by_task_id(list(frames or []))
+            if frame.get("task_id")
+            and not task_registry.is_wake_suppressed(session_id, frame["task_id"])
+        ]
+        if not frames:
+            return None
+        task_ids = [frame["task_id"] for frame in frames]
+        async with _terminal_delivery_lock(session_id):
+            existing = await asyncio.to_thread(_queued_unpark_turn, session_id)
+            turn_id: Optional[str] = None
+            if existing is not None:
+                payload = dict(existing.get("payload") or {})
+                pending = _dedupe_frames_by_task_id(
+                    list(payload.get("pending_frames") or []) + frames
+                )
+                payload["pending_frames"] = pending
+                payload["task_ids"] = list(dict.fromkeys(
+                    list(payload.get("task_ids") or []) + task_ids
+                ))
+                prompt = await asyncio.to_thread(_unpark_prompt, pending, payload)
+                updated = await asyncio.to_thread(
+                    turns_db.update_queued_turn_prompt, existing["id"], prompt, payload,
+                )
+                turn_id = (updated or {}).get("id")
+            if not turn_id:
+                prompt = await asyncio.to_thread(_build_task_notification_prompt, frames)
+                turn = await _enqueue_context_wake(
+                    session_id, "unpark", frames, task_ids, prompt,
+                )
+                turn_id = turn.get("id")
+            if not turn_id:
+                return None
+            for task_id in task_ids:
+                task_registry.mark_woken(session_id, task_id)
+        logger.info(
+            "turn_scheduler: %d task(s) of %s were interrupted by a restart; "
+            "wake turn %s", len(task_ids), session_id, turn_id,
+        )
+        _kick_after_batch_window(session_id)
+        return turn_id
+    except Exception:  # noqa: BLE001 — a failed notice must never block boot
+        logger.warning(
+            "turn_scheduler: restart notice failed for %s", session_id,
+            exc_info=True,
+        )
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Wiring
 # ---------------------------------------------------------------------------

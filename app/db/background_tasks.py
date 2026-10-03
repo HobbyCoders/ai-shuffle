@@ -75,8 +75,9 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
             f"""INSERT INTO background_tasks (
                     task_id, session_id, instance_id, kind, is_sdk_background,
                     tool_use_id, title, status, terminal_notified,
-                    started_at, updated_at, summary, reason, report_path, report_chars
-                ) VALUES ({", ".join([_ph] * 15)})
+                    started_at, updated_at, summary, reason, report_path, report_chars,
+                    agent, roster_name, model
+                ) VALUES ({", ".join([_ph] * 18)})
                 ON CONFLICT (task_id, session_id) DO UPDATE SET
                     instance_id = EXCLUDED.instance_id,
                     kind = EXCLUDED.kind,
@@ -90,7 +91,10 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                     summary = EXCLUDED.summary,
                     reason = EXCLUDED.reason,
                     report_path = EXCLUDED.report_path,
-                    report_chars = EXCLUDED.report_chars""",
+                    report_chars = EXCLUDED.report_chars,
+                    agent = EXCLUDED.agent,
+                    roster_name = EXCLUDED.roster_name,
+                    model = EXCLUDED.model""",
             [(
                 snapshot.get("task_id"),
                 snapshot.get("session_id"),
@@ -107,6 +111,9 @@ def upsert_background_tasks(snapshots: List[Dict[str, Any]]) -> None:
                 (_task_text(snapshot.get("reason")) or "")[:256] or None,
                 (_task_text(snapshot.get("report_path")) or "")[:4096] or None,
                 snapshot.get("report_chars"),
+                (_task_text(snapshot.get("agent")) or "")[:256] or None,
+                (_task_text(snapshot.get("name")) or "")[:256] or None,
+                (_task_text(snapshot.get("model")) or "")[:256] or None,
             ) for snapshot in snapshots],
         )
 
@@ -138,15 +145,26 @@ def get_running_task_presence(session_ids: List[str]) -> Dict[str, Dict[str, Any
         }
 
 
-def mark_stale_background_tasks_killed() -> List[Dict[str, Any]]:
+#: Kill attribution the boot reconcile stamps on a row the restart stranded.
+#: ``task_registry`` reads a ``killed`` row carrying it back as "interrupted".
+SERVER_RESTART_REASON = "server_restart"
+
+
+def mark_stale_background_tasks_killed(
+    summary: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """Boot reconcile: mark THIS install's non-terminal rows killed.
 
     Background work never survives a server restart, so any own-instance row
     still "running" at boot was stranded by the previous process. Mirrors
     ``startup_reconcile._clear_stale_parked_markers`` (instance-scoped; peer
-    installs' rows are never touched). Returns the flipped rows (dicts with
-    ``task_id``, ``session_id``, ``tool_use_id``, ``title``) so the caller can
-    emit a terminal ``task.updated`` frame per row and settle the UI chip.
+    installs' rows are never touched). Each flipped row is stamped with reason
+    ``server_restart`` (and ``summary`` when given) so a later read can tell a
+    restart casualty from an ordinary kill. Returns the flipped rows (dicts with
+    ``task_id``, ``session_id``, ``tool_use_id``, ``title``, ``kind``, ``agent``,
+    ``roster_name``, ``model``, ``started_at``) so the caller can emit a terminal
+    ``task.updated`` frame per row, settle the UI chip, rebuild the registry
+    and tell each parent what was interrupted.
     """
     _ph = ph()
     instance_id = settings.effective_instance_id
@@ -157,11 +175,42 @@ def mark_stale_background_tasks_killed() -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             f"""UPDATE background_tasks
-                   SET status = 'killed', updated_at = CURRENT_TIMESTAMP
+                   SET status = 'killed', updated_at = CURRENT_TIMESTAMP,
+                       reason = {_ph}, summary = COALESCE({_ph}, summary)
                  WHERE instance_id = {_ph}
                    AND status NOT IN ({terminal_list})
-             RETURNING task_id, session_id, tool_use_id, title""",
-            (instance_id,),
+             RETURNING task_id, session_id, tool_use_id, title, kind, agent,
+                       roster_name, model, started_at""",
+            (SERVER_RESTART_REASON, summary, instance_id),
+        )
+        return rows_to_list(cursor.fetchall())
+
+
+def list_session_terminal_background_tasks(
+    session_id: str, limit: int = 200,
+) -> List[Dict[str, Any]]:
+    """A session's finished task rows, newest first, for rebuilding its registry.
+
+    After a restart the in-memory registry is empty, so a parent asking for its
+    workers (``TaskList``, ``ListAgents``, ``SendMessage``) has only these rows
+    left. Only terminal rows: a non-terminal one belongs to live work (another
+    install's, or this process's own, which is already in memory). Bounded so a
+    long-lived session cannot pull its whole history into memory.
+    """
+    _ph = ph()
+    terminal_list = ", ".join(f"'{s}'" for s in TERMINAL_STATUSES)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
+                       started_at, updated_at, summary, reason, report_path,
+                       report_chars, agent, roster_name, model
+                  FROM background_tasks
+                 WHERE session_id = {_ph}
+                   AND status IN ({terminal_list})
+                 ORDER BY updated_at DESC
+                 LIMIT {_ph}""",
+            (session_id, int(limit)),
         )
         return rows_to_list(cursor.fetchall())
 
@@ -243,7 +292,8 @@ def get_background_task(task_id: str, session_id: str) -> Optional[Dict[str, Any
         cursor = conn.cursor()
         cursor.execute(
             f"""SELECT task_id, session_id, kind, tool_use_id, title, status,
-                       started_at, updated_at, summary, reason, report_path, report_chars
+                       started_at, updated_at, summary, reason, report_path, report_chars,
+                       agent, roster_name, model
                   FROM background_tasks
                  WHERE task_id = {_ph} AND session_id = {_ph}""",
             (task_id, session_id),

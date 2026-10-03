@@ -118,6 +118,11 @@ def _clear_stale_parked_markers() -> int:
     return len(rows)
 
 
+#: What the durable row (and so TaskList/TaskGet) says about a task the
+#: restart cut off. The chip text the UI shows is the settle frame's summary.
+RESTART_INTERRUPTED_SUMMARY = "Interrupted by an app restart before it finished."
+
+
 async def _mark_stale_background_task_rows() -> int:
     """Mark this install's non-terminal durable task rows killed.
 
@@ -137,7 +142,9 @@ async def _mark_stale_background_task_rows() -> int:
     from app.db.background_tasks import mark_stale_background_tasks_killed
     from app.core.turn_recorder import record_task_settle_frame
 
-    rows = await asyncio.to_thread(mark_stale_background_tasks_killed)
+    rows = await asyncio.to_thread(
+        mark_stale_background_tasks_killed, RESTART_INTERRUPTED_SUMMARY,
+    )
     if not rows:
         return 0
 
@@ -179,7 +186,120 @@ async def _mark_stale_background_task_rows() -> int:
         level="WARNING",
         context={"reconcile": "background_tasks", "rows": count},
     )
+    try:
+        await _announce_interrupted_tasks(rows)
+    except Exception:  # noqa: BLE001 — the rows are settled; a notice failure is not fatal
+        logger.exception("Boot reconcile: announcing interrupted tasks failed")
     return count
+
+
+def _interrupted_summary(row: Dict[str, Any], stranded: int) -> str:
+    """Plain-language notice line for one interrupted task, by kind."""
+    task_id = _row_value(row, "task_id", 0)
+    if (_row_value(row, "kind", 4) or "") == "agent":
+        text = (
+            "Interrupted: the app restarted while this worker was running, so "
+            "it stopped before finishing and is not running now. Its saved "
+            f"transcript is kept: SendMessage to {task_id} continues it, or "
+            "dispatch the work again."
+        )
+        if stranded:
+            text += (
+                f" It had {stranded} background task(s) of its own "
+                "running, which were stopped too."
+            )
+        return text
+    return (
+        "Interrupted: the app restarted while this background command was "
+        "running, so it was stopped before it finished. Run it again if you "
+        "still need it."
+    )
+
+
+async def _announce_interrupted_tasks(rows: list) -> int:
+    """Rebuild the registry for, and wake once, every parent the restart hit.
+
+    The settle frames above fix the UI, but the parent itself was never told:
+    the ownership marks that admit a terminal to the scheduler lived in the
+    dead process, so a parent parked on its workers stayed parked and its
+    ``TaskList``/``ListAgents`` came back empty. Here each affected session's
+    registry is rebuilt from the rows (interrupted tasks read "interrupted")
+    and each parent gets ONE wake listing its interrupted tasks.
+
+    Not woken: a session that is itself an interrupted worker (its parent is
+    told, and resuming it is the parent's call), and the routing copy a
+    nested dispatch writes on the root session (the direct owner is told,
+    the same rule ``agent_messaging.peer_rows`` applies). Returns the number
+    of sessions woken.
+    """
+    from app.core import turn_scheduler
+    from app.core.task_registry import (
+        INTERRUPTED_STATUS, SERVER_RESTART_REASON, task_registry,
+    )
+    from app.db import sessions as sessions_db
+
+    by_session: Dict[str, list] = {}
+    for row in rows:
+        session_id = _row_value(row, "session_id", 1)
+        if session_id:
+            by_session.setdefault(session_id, []).append(row)
+
+    for session_id in by_session:
+        await task_registry.ensure_hydrated(session_id)
+
+    interrupted_workers = {
+        _row_value(row, "task_id", 0)
+        for row in rows
+        if (_row_value(row, "kind", 4) or "") == "agent"
+    }
+
+    def _is_direct_owner(owner: str, task_id: str) -> bool:
+        # A worker nested under another worker is recorded on the root too;
+        # the root is not its owner when another holder is the root's worker.
+        holders = [
+            sid for sid, sid_rows in by_session.items()
+            if any(_row_value(r, "task_id", 0) == task_id for r in sid_rows)
+        ]
+        return not any(
+            other != owner
+            and (task_registry.get_task(owner, other) or {}).get("kind") == "agent"
+            for other in holders
+        )
+
+    woken = 0
+    for session_id, session_rows in by_session.items():
+        if session_id in interrupted_workers:
+            continue
+        frames = []
+        for row in session_rows:
+            task_id = _row_value(row, "task_id", 0)
+            if not task_id or not _is_direct_owner(session_id, task_id):
+                continue
+            stranded = len(by_session.get(task_id, ())) if task_id in interrupted_workers else 0
+            frames.append({
+                "task_id": task_id,
+                "tool_use_id": _row_value(row, "tool_use_id", 2),
+                "status": INTERRUPTED_STATUS,
+                "reason": SERVER_RESTART_REASON,
+                "kind": _row_value(row, "kind", 4) or "shell",
+                "summary": _interrupted_summary(row, stranded),
+            })
+        if not frames:
+            continue
+        try:
+            session = await asyncio.to_thread(sessions_db.get_session, session_id)
+        except Exception:  # noqa: BLE001 — fail open: a lookup blip must not lose the notice
+            session = True
+        if not session:
+            continue
+        if await turn_scheduler.on_tasks_interrupted_by_restart(session_id, frames):
+            woken += 1
+    if woken:
+        logger.info(
+            "Boot reconcile: told %d session(s) which background tasks the "
+            "restart interrupted", woken,
+        )
+    return woken
 
 
 # Grace before the periodic sweep settles a non-terminal durable task row the
@@ -745,6 +865,7 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
         "background_task_rows_killed": 0,
         "turns_reaped": 0,
         "engine_pending_repaired": 0,
+        "orphan_processes_reaped": 0,
     }
 
     # V2 turns boot sweep: settle/requeue the previous process's dead-lease live
@@ -833,6 +954,26 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
                 f"Boot reconcile failed while sweeping stray CLI processes: {exc}",
                 detail=traceback.format_exc(),
                 context={"reconcile": "stray_cli"},
+            )
+
+        # Processes the previous run recorded itself as starting (agent CLIs,
+        # Monitor shells and what they started), verified by pid + start time
+        # + command line. Catches what the marker sweep above deliberately
+        # leaves alone, e.g. a dev server orphaned when the server died.
+        try:
+            from app.core import process_ledger
+
+            counts["orphan_processes_reaped"] = len(
+                await asyncio.to_thread(process_ledger.reap_previous_run)
+            )
+        except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
+            logger.exception("Boot reconcile: process-ledger sweep failed")
+            await run_sync(
+                record_error,
+                "backend",
+                f"Boot reconcile failed while stopping the previous run's processes: {exc}",
+                detail=traceback.format_exc(),
+                context={"reconcile": "process_ledger"},
             )
 
     if any(counts.values()):

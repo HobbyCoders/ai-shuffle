@@ -52,6 +52,7 @@ from app.core.config import settings
 from app.core.session_pool import (
     SessionState, get_session_pool, is_subprocess_alive,
     requires_reconnect, reconnect_option_names, mark_subprocess_oom_killable,
+    subprocess_pid,
 )
 from app.core.session_title import derive_session_title
 from app.core.profiles import get_profile
@@ -2667,6 +2668,17 @@ async def _stream_to_websocket_impl(
                 # instead of the orchestrator or the database. Best-effort; a
                 # no-op for native sessions or when disabled.
                 mark_subprocess_oom_killable(state)
+                # Remember the CLI on disk, so a restart after an abrupt
+                # server death stops it (and what it started) rather than
+                # leaving orphans. Idempotent per process; a native session
+                # has no subprocess and records nothing.
+                _cli_pid = subprocess_pid(state)
+                if _cli_pid:
+                    from app.core import process_ledger
+                    await asyncio.to_thread(
+                        process_ledger.record_process, _cli_pid, "agent_cli",
+                        session_id=session_id,
+                    )
 
             # Drain stderr queue and yield any plugin messages
             for stderr_msg in await drain_stderr_queue():

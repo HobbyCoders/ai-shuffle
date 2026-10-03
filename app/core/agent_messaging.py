@@ -108,8 +108,14 @@ def sender_label(receiver: str | None, sender: str) -> str | None:
 
 
 def make_roster(supplier):
-    def roster(data, ctx):
-        rows = peer_rows(supplier())
+    async def roster(data, ctx):
+        from app.core.task_registry import task_registry
+
+        session_id = supplier()
+        # After a restart the registry starts empty; the session's finished
+        # and interrupted workers come back from the durable rows first.
+        await task_registry.ensure_hydrated(session_id)
+        rows = peer_rows(session_id)
         return [
             r for r in rows if not data.get("running_only") or r["status"] == "running"
         ]
@@ -125,6 +131,10 @@ def make_message(supplier):
 
         session_id = supplier()
         address = str(data.get("to") or "").strip()
+        # A worker interrupted by (or finished before) a restart is only in
+        # the durable rows until this rebuilds it; without it its task id
+        # answered "Unknown agent" although its transcript could be resumed.
+        await task_registry.ensure_hydrated(session_id)
         rows = peer_rows(session_id)
         # Exact first: the task id (== worker session id), the name, or
         # "name [ref]". Then case-insensitive on the name — models retype a

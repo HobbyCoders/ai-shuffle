@@ -40,7 +40,7 @@ def worker(runtime, owner, worker_id, name="Helper", roster_name=None):
 @pytest.mark.parametrize("address", ["Helper", "worker", "Helper [worker]"])
 async def test_task_roster_and_delivery(runtime, address):
     engine = worker(runtime, "parent", "worker")
-    rows = messaging.make_roster(lambda: "parent")({}, ToolCtx())
+    rows = await messaging.make_roster(lambda: "parent")({}, ToolCtx())
     assert [(r["name"], r["ref"]) for r in rows] == [("Helper", "worker")]
     result = await messaging.make_message(lambda: "parent")(
         {"to": address, "message": "Check the failure", "sender": "forged"}, ToolCtx()
@@ -129,7 +129,7 @@ async def test_unavailable_targets_report_errors(runtime, state):
     engine.submit.assert_not_awaited()
     if state == "completed":
         assert (
-            messaging.make_roster(lambda: "parent")({"running_only": True}, ToolCtx())
+            await messaging.make_roster(lambda: "parent")({"running_only": True}, ToolCtx())
             == []
         )
         assert messaging.peer_rows("parent")[0]["status"] == "completed"
@@ -252,7 +252,7 @@ async def test_worker_is_listed_and_addressed_by_its_task_name_or_task_id(runtim
     so a parent addressing one by what it was doing got "Unknown agent". The
     roster now carries fluid's derived name; the task id always resolves."""
     engine = worker(runtime, "parent", "worker-a", name="General Purpose", roster_name="fix-flaky-login")
-    rows = messaging.make_roster(lambda: "parent")({}, ToolCtx())
+    rows = await messaging.make_roster(lambda: "parent")({}, ToolCtx())
     assert [(r["name"], r["task_id"]) for r in rows] == [("fix-flaky-login", "worker-a")]
     result = await messaging.make_message(lambda: "parent")(
         {"to": address, "message": "status?"}, ToolCtx()

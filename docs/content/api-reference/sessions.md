@@ -355,6 +355,8 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/tasks/task_123/st
 
 A task that had already finished returns `"ok": true` with `"detail": "already finished"`, so a stale row in the UI clears. A task the app can no longer reach is marked stopped and also returns `"ok": true`. `"ok": false` (still `200`, with a `detail` message) means the stop did not fully work: a background shell whose child processes outlived it, or a task the app cannot find (`detail` is `session not active`, `session not connected` or `task not found`).
 
+Background tasks do not survive a worker restart. When the worker starts again it marks every task the previous run left running as stopped (`status` `killed`, `reason` `server_restart`), so `activeTasks` and the sidebar no longer show it as running. The session that started those tasks gets one automatic turn listing which ones were interrupted. Processes the previous run started for agents and background shells (and the processes those started) are stopped at startup when the worker can confirm by process id, start time and command line that they are its own.
+
 ## Rewind
 
 ### GET /api/v1/commands/rewind/checkpoints/{session_id}

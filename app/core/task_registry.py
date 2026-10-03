@@ -11,7 +11,8 @@ the agent can query what it has running and the UI can surface it on every poll:
 
 Key principles:
 1. In-memory first; ``_persist_task_state`` mirrors state into the
-   ``background_tasks`` table.
+   ``background_tasks`` table, and ``ensure_hydrated`` reads a session's
+   finished rows back after a restart (interrupted work reads "interrupted").
 2. Keyed by AI Shuffle ``session_id`` then ``task_id``.
 3. Tasks intentionally OUTLIVE a single turn — the registry is only cleared when
    the session itself is torn down (clear, eviction, worktree termination).
@@ -130,6 +131,31 @@ DELIBERATE_STOP_REASONS = frozenset({
     "user_stopped_all",
     "parent_turn_ended",
 })
+
+
+# A task the app restart cut off. The boot reconcile flips its durable row to
+# ``killed`` with this reason (the frontend chip vocabulary has no other
+# terminal word for it), and the registry reads such a row back as
+# ``INTERRUPTED_STATUS`` so the agent-facing tools say what happened and the
+# SendMessage resume path accepts it. Never sent to the frontend: rebuilt
+# records stay out of the ``/live`` view (see ``hydrate_rows``).
+SERVER_RESTART_REASON = "server_restart"
+INTERRUPTED_STATUS = "interrupted"
+
+
+def restored_status(status: Optional[str], reason: Optional[str]) -> Optional[str]:
+    """The registry status for a durable row read back after a restart."""
+    if status == "killed" and reason == SERVER_RESTART_REASON:
+        return INTERRUPTED_STATUS
+    return status
+
+
+def _iso(value: Any) -> Optional[str]:
+    """A durable timestamp (timestamptz or test-shim string) as ISO-8601."""
+    if value is None or isinstance(value, str):
+        return value
+    iso = getattr(value, "isoformat", None)
+    return str(iso()) if callable(iso) else str(value)
 
 
 def chip_status(status: Optional[str], reason: Optional[str]) -> str:
@@ -352,6 +378,10 @@ class TaskRegistry:
         self._terminal_notification_callback: Optional[Any] = None
         # session_id -> set of task_ids whose terminal callback already fired.
         self._terminal_notified: Dict[str, set] = {}
+        # Sessions whose finished tasks were already rebuilt from the durable
+        # mirror in this process (``ensure_hydrated``). Cleared with the
+        # session so a later read after an eviction rebuilds them again.
+        self._hydrated: set = set()
 
     def _prune_recent_terminal(self, session_id: str, *, now: Optional[float] = None) -> None:
         """Drop expired terminal-retention entries for a session; drop the bucket
@@ -1113,8 +1143,9 @@ class TaskRegistry:
         inside streaming loops) must never gain latency or a failure mode from
         persistence. A missing record is a no-op (nothing to mirror). The
         snapshot is COALESCED downstream (latest per (session, task) wins);
-        see ``app.core.task_persistence``. WRITE-ONLY: nothing reads the rows
-        back into the registry.
+        see ``app.core.task_persistence``. After a restart the finished rows
+        are read back into the registry (``ensure_hydrated``) so the task
+        tools still find the session's workers.
         """
         try:
             record = self._tasks.get(session_id, {}).get(task_id)
@@ -1142,10 +1173,93 @@ class TaskRegistry:
                     "reason": record.get("reason"),
                     "report_path": record.get("report_path"),
                     "report_chars": record.get("report_chars"),
+                    "agent": record.get("agent"),
+                    "name": record.get("name"),
+                    "model": record.get("model"),
                 },
             )
         except Exception:
             logger.debug("task persistence snapshot failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Rebuild from the durable mirror after a restart
+    # ------------------------------------------------------------------
+
+    def hydrate_rows(self, session_id: str, rows: List[Dict[str, Any]]) -> int:
+        """Load finished durable task rows into ``session_id``'s live map.
+
+        The registry is memory-only and starts empty, so after a restart a
+        parent's ``TaskList`` answered an empty list, ``ListAgents`` said it had
+        no agents, and ``SendMessage`` to a worker's task id answered "Unknown
+        agent" although the worker's transcript was intact. These rows put the
+        records back so the same tools find them again.
+
+        Only terminal rows are loaded and a record already in memory always
+        wins. A row the boot reconcile stamped ``server_restart`` comes back as
+        ``interrupted`` (``restored_status``), which the resume path accepts.
+        Nothing is persisted, chipped or announced from here: the rows already
+        hold this truth. Returns the number of records added.
+        """
+        if not session_id:
+            return 0
+        bucket = self._tasks.setdefault(session_id, {})
+        added = 0
+        for row in rows or []:
+            task_id = row.get("task_id")
+            status = restored_status(row.get("status"), row.get("reason"))
+            if not task_id or task_id in bucket or status == "running":
+                continue
+            bucket[task_id] = {
+                "task_id": task_id,
+                "kind": row.get("kind"),
+                "title": row.get("title"),
+                "status": status,
+                "summary": row.get("summary"),
+                "reason": row.get("reason"),
+                "tool_use_id": row.get("tool_use_id"),
+                "agent": row.get("agent"),
+                "name": row.get("roster_name") or row.get("name"),
+                "model": row.get("model"),
+                "report_path": row.get("report_path"),
+                "report_chars": row.get("report_chars"),
+                "started_at": _iso(row.get("started_at")),
+                "updated_at": _iso(row.get("updated_at")),
+                "restored": True,
+            }
+            added += 1
+        if not bucket:
+            self._tasks.pop(session_id, None)
+        return added
+
+    @staticmethod
+    def _read_durable_rows(session_id: str) -> Optional[List[Dict[str, Any]]]:
+        """The session's finished durable rows, or None when the read failed."""
+        try:
+            from app.db import background_tasks as background_tasks_db
+
+            return background_tasks_db.list_session_terminal_background_tasks(session_id)
+        except Exception:  # noqa: BLE001 — a failed read leaves the registry as it was
+            logger.debug("durable task hydrate failed for %s", session_id, exc_info=True)
+            return None
+
+    async def ensure_hydrated(self, session_id: Optional[str]) -> int:
+        """Rebuild ``session_id``'s finished tasks from the durable mirror, once.
+
+        The DB read runs in a worker thread; the records are added back on the
+        event loop, which is the only place the registry is mutated. Repeated
+        calls are free until ``clear_session`` forgets the session. Called by
+        the task tools (TaskList, TaskGet, ListAgents, SendMessage) before they
+        read, and by the boot reconcile. Never raises; returns records added.
+        """
+        if not session_id or session_id in self._hydrated:
+            return 0
+        import asyncio
+
+        rows = await asyncio.to_thread(self._read_durable_rows, session_id)
+        if rows is None or session_id in self._hydrated:
+            return 0
+        self._hydrated.add(session_id)
+        return self.hydrate_rows(session_id, rows)
 
     def active_session_ids(self) -> list[str]:
         """Sessions with running tasks owned by this process, including parked work."""
@@ -1456,26 +1570,23 @@ class TaskRegistry:
             return None
         if not row:
             return None
-        def _stamp(value: Any) -> Optional[str]:
-            # The column is a timestamptz on Postgres and a string on the test
-            # shim; the wire contract is an ISO-8601 string either way.
-            if value is None or isinstance(value, str):
-                return value
-            iso = getattr(value, "isoformat", None)
-            return iso() if callable(iso) else str(value)
-
+        # The timestamp columns are timestamptz on Postgres and strings on the
+        # test shim; the wire contract is an ISO-8601 string either way.
         return to_wire({
             "task_id": row.get("task_id"),
             "title": row.get("title"),
-            "status": row.get("status"),
+            "status": restored_status(row.get("status"), row.get("reason")),
             "kind": row.get("kind"),
             "tool_use_id": row.get("tool_use_id"),
-            "started_at": _stamp(row.get("started_at")),
-            "updated_at": _stamp(row.get("updated_at")),
+            "started_at": _iso(row.get("started_at")),
+            "updated_at": _iso(row.get("updated_at")),
             "summary": row.get("summary"),
             "reason": row.get("reason"),
             "report_path": row.get("report_path"),
             "report_chars": row.get("report_chars"),
+            "agent": row.get("agent"),
+            "name": row.get("roster_name"),
+            "model": row.get("model"),
         })
 
     def get_task_tool_use_id(self, session_id: str, task_id: str) -> Optional[str]:
@@ -1563,6 +1674,7 @@ class TaskRegistry:
         # must not un-stop a session the user stopped (see mark_user_stopped).
         self._child_owner.pop(session_id, None)
         self._terminal_notified.pop(session_id, None)
+        self._hydrated.discard(session_id)
         self._prune_recent_terminal(session_id)
 
     def reset_all(self) -> None:
@@ -1583,6 +1695,7 @@ class TaskRegistry:
         self._stop_supervisors.clear()
         self._child_owner.clear()
         self._terminal_notified.clear()
+        self._hydrated.clear()
         self._terminal_notification_callback = None
         self._recent_terminal.clear()
 

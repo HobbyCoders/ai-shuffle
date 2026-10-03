@@ -34,6 +34,16 @@ File/plugin agents use the caller's provider. Native Claude targets without a
 configured provider list retain their assigned model and do not accept this
 override. This does not change the parent chat's model or save a new default.
 
+## Task workers across an app restart
+
+Background Task workers and Monitor commands stop when the app restarts. On the
+next start, the chat that dispatched them gets one automatic turn listing which
+tasks were interrupted. An interrupted worker keeps its task id and transcript:
+`TaskList`, `TaskGet` and `ListAgents` show it as `interrupted`, and
+`SendMessage` to its task id or name continues it from its saved transcript.
+Interrupted Monitor commands are not restarted; run them again if they are still
+needed.
+
 ## Independent top-level orchestration
 
 Agents can coordinate relevant work without a parent/subagent relationship:

@@ -1497,6 +1497,9 @@ def _run_column_migrations(cursor):
                 reason TEXT,
                 report_path TEXT,
                 report_chars BIGINT,
+                agent TEXT,
+                roster_name TEXT,
+                model TEXT,
                 started_at TIMESTAMP WITH TIME ZONE,
                 updated_at TIMESTAMP WITH TIME ZONE,
                 PRIMARY KEY (task_id, session_id)
@@ -1508,9 +1511,12 @@ def _run_column_migrations(cursor):
         "ON background_tasks(instance_id, status)"
     )
     # Preserve bounded terminal evidence across restart, not just its status.
+    # agent/roster_name/model keep a Task worker addressable by the name its
+    # parent knew it by after a restart rebuilds the registry from these rows.
     for name, sql_type in (
         ("summary", "TEXT"), ("reason", "TEXT"),
         ("report_path", "TEXT"), ("report_chars", "BIGINT"),
+        ("agent", "TEXT"), ("roster_name", "TEXT"), ("model", "TEXT"),
     ):
         if not column_exists(cursor, "background_tasks", name):
             cursor.execute(f"ALTER TABLE background_tasks ADD COLUMN {name} {sql_type}")

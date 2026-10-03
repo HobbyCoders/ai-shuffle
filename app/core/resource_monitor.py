@@ -506,6 +506,15 @@ async def _periodic_cleanup() -> dict:
     except Exception as e:
         logger.debug(f"{_PREFIX} Stale background-task sweep failed: {e}")
 
+    # Keep the on-disk process ledger current: drop exited processes and
+    # remember what the live ones started, so a restart after an abrupt
+    # server death can stop a dev server whose shell already exited.
+    try:
+        from app.core import process_ledger
+        await asyncio.to_thread(process_ledger.refresh)
+    except Exception as e:
+        logger.debug(f"{_PREFIX} Process ledger refresh failed: {e}")
+
     # Park watchdog: a session parked on background work that never woke. The
     # sibling sweep above settles ORPHANED rows; this one bounds the PARK
     # itself — report it past the warn threshold, and past the hard ceiling

@@ -974,6 +974,9 @@ def create_postgres_schema(cursor) -> None:
             reason TEXT,
             report_path TEXT,
             report_chars BIGINT,
+            agent TEXT,
+            roster_name TEXT,
+            model TEXT,
             started_at TIMESTAMP WITH TIME ZONE,
             updated_at TIMESTAMP WITH TIME ZONE,
             PRIMARY KEY (task_id, session_id)

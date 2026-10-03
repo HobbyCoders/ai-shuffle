@@ -1026,6 +1026,13 @@ async def _spawn_background(
     )
     task.process = proc
     task.own_process_group = True
+    # On disk, so a restart after an abrupt server death can find this shell
+    # (and the dev server it may start) again instead of leaving it orphaned.
+    from app.core import process_ledger
+    await asyncio.to_thread(
+        process_ledger.record_process, proc.pid, "monitor",
+        session_id=session_id, task_id=task_id,
+    )
 
     # Register the shell task so TaskList / /live can surface it. Keyed by the
     # AI Shuffle session that spawned it; module-level spawns (no session) skip
@@ -2055,6 +2062,9 @@ def create_builtin_tools_server(
             return _err("TaskList requires an active session context.")
         from app.core.task_registry import task_registry
 
+        # After a restart the registry starts empty; without this a parent
+        # whose workers were interrupted got an empty list back.
+        await task_registry.ensure_hydrated(session_id)
         include_finished = args.get("include_finished", True)
         if include_finished:
             tasks = task_registry.get_all(session_id)
@@ -2113,6 +2123,9 @@ def create_builtin_tools_server(
             return _err("task_id is required.")
         from app.core.task_registry import task_registry
 
+        # After a restart the registry starts empty: rebuild this session's
+        # finished and interrupted tasks before the scope check reads it.
+        await task_registry.ensure_hydrated(session_id)
         # SCOPED. ``_background_tasks`` is process-global, and a parent that
         # names an id from a WORKER's report must not be told "you will be
         # woken on completion" by a task nothing subscribed it to. A

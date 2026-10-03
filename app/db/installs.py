@@ -187,11 +187,20 @@ def get_install(install_id: str) -> Optional[InstallRow]:
     """Get one install row by id (= instance_id), with derived ``online``.
 
     In a network the id may be a device id or a member's legacy instance id.
+    This install's own instance id always names its own member row, even when
+    its membership recorded no legacy instance id: without that, startup's
+    ``cluster.register_self`` found no row for itself, quarantined the worker,
+    and skipped the boot reconcile and every periodic recovery sweep.
     """
     directory = _network_directory()
     if directory is not None:
+        from app.core.config import settings
+
+        is_own_id = install_id == settings.effective_instance_id
         for row in directory:
             if row["id"] == install_id or row.get("legacy_instance_id") == install_id:
+                return row
+            if is_own_id and row.get("is_self"):
                 return row
         return None
     with get_db() as conn:
