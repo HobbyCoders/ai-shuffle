@@ -66,6 +66,22 @@ const SESSIONS_PAGE_SIZE = 100;
  * `loadMoreSessions()` and appends the next cursor page.
  */
 const INITIAL_SESSION_PAGES = 1;
+
+/**
+ * Upper bound on pages a background refresh re-fetches to keep what the user
+ * already loaded with "Load older sessions". A refresh used to drop back to
+ * one page, which threw the older rows away and brought the shelf back after
+ * the user had reached the end.
+ */
+const MAX_RELOAD_SESSION_PAGES = 10;
+
+/**
+ * Every sidebar list request. Archived chats live in Settings, never in the
+ * sidebar, so they are excluded on the server: otherwise `has_more` counts
+ * rows the sidebar will drop and "Load older sessions" fetches pages that
+ * add nothing visible.
+ */
+const SESSION_LIST_BASE = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true&exclude_archived=true`;
 const SEARCH_PAGE_SIZE = 20;
 
 // ─── Reactive State ──────────────────────────────────────────────────────────
@@ -295,7 +311,7 @@ function commitSessions(rows: Session[], meta: SessionsPageMeta): void {
  * PARALLEL with the first page, and filtered server-side) keeps it complete.
  */
 async function fetchActiveSessions(tagId?: string | null): Promise<Session[]> {
-	let url = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true&active_only=true`;
+	let url = `${SESSION_LIST_BASE}&active_only=true`;
 	if (tagId) url += `&tag_id=${encodeURIComponent(tagId)}`;
 	try {
 		const result = await api.get<CursorPaginatedSessions>(url);
@@ -311,9 +327,23 @@ async function fetchActiveSessions(tagId?: string | null): Promise<Session[]> {
 // in the same turn share the first request; later invalidations retain one trailing
 // refresh. A changed filter fences the old response before it can publish.
 let sessionLoad: Promise<void> | null = null;
-let pendingSessionLoad: { tagId: string | null; pages: number } | null = null;
+let pendingSessionLoad: { tagId: string | null; pages: number | undefined } | null = null;
 let runningSessionTag: string | null = null;
-function loadSessionsInternal(tagId?: string | null, pages: number = INITIAL_SESSION_PAGES): Promise<void> {
+
+/**
+ * Cursor pages the committed list currently holds: the capped initial load
+ * plus every page "Load older sessions" appended. A refresh for the same tag
+ * re-fetches this many (bounded), so it never truncates the list the user
+ * paged through.
+ */
+let _loadedSessionPages = INITIAL_SESSION_PAGES;
+
+function refreshPageCount(tagId: string | null): number {
+	if (tagId !== _state.sessionsTagFilter) return INITIAL_SESSION_PAGES;
+	return Math.min(MAX_RELOAD_SESSION_PAGES, Math.max(INITIAL_SESSION_PAGES, _loadedSessionPages));
+}
+
+function loadSessionsInternal(tagId?: string | null, pages?: number): Promise<void> {
 	const tag = tagId ?? null;
 	pendingSessionLoad = { tagId: tag, pages };
 	if (sessionLoad) {
@@ -333,8 +363,11 @@ function loadSessionsInternal(tagId?: string | null, pages: number = INITIAL_SES
 	return sessionLoad;
 }
 
-async function fetchSessionList(tagId?: string | null, pages: number = INITIAL_SESSION_PAGES) {
+async function fetchSessionList(tagId?: string | null, requestedPages?: number) {
 	const requestId = ++_loadSessionsRequestId;
+	// Resolved when the fetch starts, not when it was queued, so a page the
+	// user appended in between is included.
+	const pages = requestedPages ?? refreshPageCount(tagId ?? null);
 	_update(s => ({ ...s, sessionsLoading: true }));
 	try {
 		const activeRowsPromise = fetchActiveSessions(tagId);
@@ -342,9 +375,10 @@ async function fetchSessionList(tagId?: string | null, pages: number = INITIAL_S
 		let cursor: string | null = null;
 		let cursorId: string | null = null;
 		let hasMore = true;
+		let pagesFetched = 0;
 
 		for (let page = 0; page < Math.max(1, pages) && hasMore; page++) {
-			let url = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true`;
+			let url = SESSION_LIST_BASE;
 			if (tagId) {
 				url += `&tag_id=${encodeURIComponent(tagId)}`;
 			}
@@ -361,6 +395,7 @@ async function fetchSessionList(tagId?: string | null, pages: number = INITIAL_S
 			if (requestId !== _loadSessionsRequestId) return;
 
 			all.push(...result.items);
+			pagesFetched++;
 			hasMore = result.has_more;
 			cursor = result.next_cursor;
 			cursorId = result.next_cursor_id;
@@ -389,6 +424,7 @@ async function fetchSessionList(tagId?: string | null, pages: number = INITIAL_S
 		const rows = applyPendingEdits(all);
 		retireSupersededEdits(requestId);
 
+		_loadedSessionPages = Math.max(INITIAL_SESSION_PAGES, pagesFetched);
 		commitSessions(rows, {
 			total: rows.length + (hasMore ? 1 : 0),
 			offset: rows.length,
@@ -422,7 +458,7 @@ async function loadMoreSessionsInternal() {
 	const requestId = _loadSessionsRequestId;
 	_update(s => ({ ...s, sessionsLoadingMore: true }));
 	try {
-		let url = `/sessions/cursor?limit=${SESSIONS_PAGE_SIZE}&admin_only=true`;
+		let url = SESSION_LIST_BASE;
 		if (capturedCursor) {
 			url += `&cursor=${encodeURIComponent(capturedCursor)}`;
 		}
@@ -450,13 +486,19 @@ async function loadMoreSessionsInternal() {
 		// duplicate ids would break the sidebar's keyed lists.
 		const existingIds = new Set(_state.sessions.map(row => row.id));
 		const appended = applyPendingEdits(result.items.filter(row => !existingIds.has(row.id)));
+		_loadedSessionPages++;
+		// Same guard as the full load: a has_more without a cursor that moves
+		// would leave the shelf asking for the same page forever.
+		const advanced = !!(result.next_cursor || result.next_cursor_id) &&
+			(result.next_cursor !== capturedCursor || result.next_cursor_id !== capturedCursorId);
+		const hasMore = result.has_more && advanced;
 
 		_update(s => ({
 			...s,
 			sessions: [...s.sessions, ...appended],
 			sessionsOffset: s.sessionsOffset + appended.length,
-			sessionsTotal: s.sessionsOffset + appended.length + (result.has_more ? 1 : 0),
-			sessionsHasMore: result.has_more,
+			sessionsTotal: s.sessionsOffset + appended.length + (hasMore ? 1 : 0),
+			sessionsHasMore: hasMore,
 			sessionsLoadingMore: false,
 			sessionsCursor: result.next_cursor,
 			sessionsCursorId: result.next_cursor_id,

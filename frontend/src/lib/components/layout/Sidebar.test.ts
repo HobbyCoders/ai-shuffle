@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
 import { sidebarGroups } from '$lib/stores/expansion-preferences';
@@ -242,7 +242,7 @@ beforeEach(() => {
 	vi.mocked(sessionTimestamp).mockClear();
 	mocks.sessionsHasMore.set(false);
 	mocks.sessionsLoadingMore.set(false);
-	mocks.loadMoreSessions.mockClear();
+	mocks.loadMoreSessions.mockReset().mockResolvedValue(undefined);
 	mocks.activeSession.set({ sessionId: null, isStreaming: false, activeTasks: [] });
 	mocks.streamingSessions.set(new Set());
 	mocks.backgroundPermissions.set(new Map());
@@ -962,15 +962,45 @@ describe('Sidebar multi-select (R15)', () => {
 	});
 });
 
-describe('Sidebar load-more shelf (W1)', () => {
-	it('offers the next page when the server holds more than the capped load', async () => {
-		mocks.sessionsHasMore.set(true);
+// Each test renders the full sidebar and clicks through a multi-page run; the
+// default 5 s budget is too tight when the whole suite shares the CPU.
+describe('Sidebar load-more shelf (W1)', { timeout: 20_000 }, () => {
+	const older = (n: number, extra: Record<string, unknown> = {}) =>
+		session(`old-${n}`, `Older chat ${n}`, 'visible-project', false, false, {
+			updated_at: `2026-07-${String(10 + (n % 18)).padStart(2, '0')}T12:00:00Z`,
+			...extra,
+		});
 
+	/** Make the mocked store append `rows` per call, ending after `pages`. */
+	function serverPages(pages: unknown[][]) {
+		let served = 0;
+		mocks.loadMoreSessions.mockImplementation(async () => {
+			const rows = pages[served++] ?? [];
+			mocks.sessions.set([...(mocks.sessions.current as unknown[]), ...rows]);
+			mocks.sessionsHasMore.set(served < pages.length);
+		});
+	}
+
+	const shelf = (name: RegExp) => screen.queryByRole('button', { name });
+	/** Let a click's whole multi-page run finish (it awaits once per page). */
+	const settle = async () => {
+		await new Promise((done) => setTimeout(done, 0));
+		await tick();
+	};
+
+	it('loads the next page, shows it, and goes away once the server has no more', async () => {
+		mocks.sessionsHasMore.set(true);
+		serverPages([[older(1), older(2)]]);
 		render(Sidebar, { props: sidebarProps });
 
-		const shelf = screen.getByRole('button', { name: /Load older sessions/ });
-		await fireEvent.click(shelf);
+		await fireEvent.click(screen.getByRole('button', { name: /Load older sessions/ }));
+		await settle();
+
 		expect(mocks.loadMoreSessions).toHaveBeenCalledTimes(1);
+		expect(screen.getByText('Older chat 1')).toBeTruthy();
+		expect(shelf(/Load older sessions/)).toBeNull();
+		// Nothing would collapse: three settled rows fit under the cap.
+		expect(shelf(/Show fewer/)).toBeNull();
 	});
 
 	it('hides the shelf when everything is loaded', () => {
@@ -978,7 +1008,106 @@ describe('Sidebar load-more shelf (W1)', () => {
 
 		render(Sidebar, { props: sidebarProps });
 
-		expect(screen.queryByRole('button', { name: /Load older sessions/ })).toBeNull();
+		expect(shelf(/Load older sessions/)).toBeNull();
+	});
+
+	it('keeps paging past rows this list drops instead of leaving an endless button', async () => {
+		// Pages of rows from a deleted project: nothing the sidebar can show.
+		const gone = (n: number) => older(n, { project_id: 'deleted-project', project_name: null });
+		mocks.sessionsHasMore.set(true);
+		serverPages([[gone(1)], [gone(2)], [older(3)]]);
+		render(Sidebar, { props: sidebarProps });
+
+		await fireEvent.click(screen.getByRole('button', { name: /Load older sessions/ }));
+		await settle();
+
+		// One click walked to the first page with a visible row.
+		expect(mocks.loadMoreSessions).toHaveBeenCalledTimes(3);
+		expect(screen.getByText('Older chat 3')).toBeTruthy();
+		expect(shelf(/Load older sessions/)).toBeNull();
+		expect(shelf(/Show fewer/)).toBeNull();
+	});
+
+	it('stops after a bounded run of empty pages and never turns into "Show fewer"', async () => {
+		mocks.sessionsHasMore.set(true);
+		// The store reports more but every page adds nothing visible.
+		mocks.loadMoreSessions.mockImplementation(async () => {});
+		render(Sidebar, { props: sidebarProps });
+
+		await fireEvent.click(screen.getByRole('button', { name: /Load older sessions/ }));
+		await settle();
+
+		expect(mocks.loadMoreSessions).toHaveBeenCalledTimes(5);
+		expect(shelf(/Load older sessions/)).toBeTruthy();
+		expect(shelf(/Show fewer/)).toBeNull();
+
+		// Once the server runs out, the shelf leaves for good.
+		mocks.sessionsHasMore.set(false);
+		await tick();
+		expect(shelf(/Load older sessions|Show fewer|more/)).toBeNull();
+	});
+
+	it('runs one load per burst of clicks and keeps a stable loading label', async () => {
+		// Freeze the clock: "the same instant as the load" must not depend on
+		// how fast the machine renders.
+		vi.useFakeTimers({ toFake: ['Date'] });
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+		mocks.sessionsHasMore.set(true);
+		let release!: () => void;
+		mocks.loadMoreSessions.mockImplementation(
+			() =>
+				new Promise<void>((done) => {
+					release = () => {
+						mocks.sessions.set([
+							...(mocks.sessions.current as unknown[]),
+							...Array.from({ length: 40 }, (_, i) => older(i + 1)),
+						]);
+						mocks.sessionsHasMore.set(false);
+						done();
+					};
+				})
+		);
+		render(Sidebar, { props: sidebarProps });
+
+		const button = screen.getByRole('button', { name: /Load older sessions/ });
+		await fireEvent.click(button);
+		await tick();
+		const loading = screen.getByRole('button', { name: /Loading older sessions/ });
+		expect((loading as HTMLButtonElement).disabled).toBe(true);
+		for (let i = 0; i < 5; i++) await fireEvent.click(loading);
+		expect(mocks.loadMoreSessions).toHaveBeenCalledTimes(1);
+
+		release();
+		await settle();
+
+		// 41 settled rows are all on screen, so the shelf offers to collapse…
+		const fewer = screen.getByRole('button', { name: /Show fewer/ });
+		// …but a click landing in the same instant as the load is ignored.
+		await fireEvent.click(fewer);
+		expect(screen.getByText('Older chat 40')).toBeTruthy();
+		expect(shelf(/Show fewer/)).toBeTruthy();
+		expect(mocks.loadMoreSessions).toHaveBeenCalledTimes(1);
+	});
+
+	it('collapses on a deliberate "Show fewer" and offers the rest again', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		try {
+			mocks.sessionsHasMore.set(true);
+			serverPages([Array.from({ length: 40 }, (_, i) => older(i + 1))]);
+			render(Sidebar, { props: sidebarProps });
+
+			await fireEvent.click(screen.getByRole('button', { name: /Load older sessions/ }));
+			await tick();
+			vi.setSystemTime(Date.now() + 1000);
+
+			await fireEvent.click(screen.getByRole('button', { name: /Show fewer/ }));
+			expect(screen.getByRole('button', { name: /Show 11 more/ })).toBeTruthy();
+			expect(shelf(/Load older sessions/)).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 

@@ -266,3 +266,62 @@ describe('optimistic edits vs in-flight loads (S12)', () => {
 		expect(appData.current.sessions.find((s) => s.id === 's3')?.is_active).toBe(true);
 	});
 });
+
+describe('"Load older sessions" paging', () => {
+	it('asks the server to leave archived chats out of every sidebar request', async () => {
+		await appData.loadSessions(null);
+		await appData.loadMoreSessions();
+
+		const listUrls = mocks.get.mock.calls
+			.map(([url]) => url as string)
+			.filter((url) => url.startsWith('/sessions/cursor'));
+		expect(listUrls.length).toBeGreaterThan(0);
+		// Otherwise has_more counts rows the sidebar drops, and the shelf keeps
+		// fetching pages that add nothing visible.
+		expect(listUrls.every((url) => url.includes('exclude_archived=true'))).toBe(true);
+	});
+
+	it('a background refresh keeps the older pages the user already loaded', async () => {
+		await appData.loadSessions(null);
+		await appData.loadMoreSessions();
+		expect(appData.current.sessions).toHaveLength(140);
+		expect(appData.current.sessionsHasMore).toBe(false);
+
+		mocks.get.mockClear();
+		await appData.loadSessions();
+
+		// Re-fetches both pages instead of dropping back to one, which used to
+		// bring "Load older sessions" back after the user reached the end.
+		expect(mocks.get.mock.calls.some(([url]) => (url as string).includes('cursor=c1'))).toBe(true);
+		expect(appData.current.sessions).toHaveLength(140);
+		expect(appData.current.sessionsHasMore).toBe(false);
+	});
+
+	it('a tag change starts again from one page', async () => {
+		await appData.loadSessions(null);
+		await appData.loadMoreSessions();
+
+		mocks.get.mockClear();
+		await appData.loadSessions('some-tag');
+
+		expect(mocks.get.mock.calls.some(([url]) => (url as string).includes('cursor=c1'))).toBe(false);
+		await appData.loadSessions(null);
+	});
+
+	it('stops reporting more when the server repeats the same cursor', async () => {
+		mocks.get.mockImplementation(async (url: string) => {
+			if (url.includes('active_only=true')) return { items: [], next_cursor: null, next_cursor_id: null, has_more: false };
+			if (url.includes('cursor=stuck')) {
+				return { items: [], next_cursor: 'stuck', next_cursor_id: 'stuck-id', has_more: true };
+			}
+			return { items: rowsFor(page1), next_cursor: 'stuck', next_cursor_id: 'stuck-id', has_more: true };
+		});
+		await appData.loadSessions('stuck-tag');
+		expect(appData.current.sessionsHasMore).toBe(true);
+
+		await appData.loadMoreSessions();
+
+		expect(appData.current.sessionsHasMore).toBe(false);
+		await appData.loadSessions(null);
+	});
+});

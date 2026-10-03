@@ -8,13 +8,18 @@ import '../src/app.css';
 const params = new URLSearchParams(location.search);
 const phone = params.get('ui') === 'mobile';
 const assistantReady = params.get('assistant') === 'ready';
+// `?older=1`: the server also holds older history behind the first page:
+// settled chats, a long run of archived ones (Settings owns those), a page and
+// a half of chats from a deleted project (the sidebar drops them), and a last
+// few settled ones. Exercises the "Load older sessions" shelf.
+const olderHistory = params.get('older') === '1';
 
 declare global {
 	interface Window {
-		fixture: { updateRequests: unknown[]; patches: { id: string; body: unknown }[] };
+		fixture: { updateRequests: unknown[]; patches: { id: string; body: unknown }[]; cursorRequests: string[] };
 	}
 }
-window.fixture = { updateRequests: [], patches: [] };
+window.fixture = { updateRequests: [], patches: [], cursorRequests: [] };
 
 const hour = 3_600_000;
 const day = 24 * hour;
@@ -38,6 +43,37 @@ let rows: Record<string, unknown>[] = [
 	turn_count: 3, tags: [], work_ms: Math.round(((ago as number) % 7 + 1) * 97_000), created_at: iso((ago as number) + hour), updated_at: iso(ago as number),
 	is_remote: false, mode: 'code', ...(extra as object),
 })).filter((row) => assistantReady || row.id !== 'home');
+const olderRows: Record<string, unknown>[] = olderHistory
+	? [
+		...Array.from({ length: 90 }, (_, i) => ({ id: `older${i}`, title: `Older settled chat ${i + 1}`, status: 'idle', project: 'shuffle' })),
+		...Array.from({ length: 150 }, (_, i) => ({ id: `ar${i}`, title: `Archived chat ${i + 1}`, status: 'archived', project: 'shuffle' })),
+		...Array.from({ length: 150 }, (_, i) => ({ id: `gone${i}`, title: `Deleted project chat ${i + 1}`, status: 'idle', project: 'deleted' })),
+		...Array.from({ length: 3 }, (_, i) => ({ id: `oldest${i}`, title: `Oldest settled chat ${i + 1}`, status: 'idle', project: 'notes' })),
+	].map(({ id, title, status, project }, i) => ({
+		...rows[rows.length - 1], id, title, status, is_active: false,
+		project_id: project, project_name: project === 'shuffle' ? 'ai-shuffle' : project,
+		created_at: iso(10 * day + i * hour + hour), updated_at: iso(10 * day + i * hour),
+	}))
+	: [];
+
+/** Keyset paging over the fixture rows, honouring the sidebar's filters. */
+function cursorPage(url: URL) {
+	window.fixture.cursorRequests.push(url.search);
+	let pool = [...rows, ...olderRows];
+	if (url.searchParams.get('exclude_archived') === 'true') pool = pool.filter((r) => r.status !== 'archived');
+	if (url.searchParams.get('active_only') === 'true') pool = pool.filter((r) => r.is_active);
+	if (!olderHistory) return { items: pool, has_more: false, next_cursor: null, next_cursor_id: null };
+	const limit = Number(url.searchParams.get('limit') || 50);
+	const start = Number(url.searchParams.get('cursor') || 0);
+	const items = pool.slice(start, start + limit);
+	const hasMore = start + limit < pool.length;
+	return {
+		items,
+		has_more: hasMore,
+		next_cursor: hasMore ? String(start + limit) : null,
+		next_cursor_id: hasMore ? String(items[items.length - 1].id) : null,
+	};
+}
 const projects = [
 	{ id: 'shuffle', name: 'ai-shuffle' },
 	{ id: 'notes', name: 'notes' },
@@ -62,7 +98,7 @@ window.fetch = async (input, init) => {
 		row.is_active = request.is_active;
 		if (request.archived !== undefined) row.status = request.archived ? 'archived' : 'idle';
 		body = row;
-	} else if (path.startsWith('/sessions/cursor')) body = { items: rows, has_more: false, next_cursor: null };
+	} else if (path.startsWith('/sessions/cursor')) body = cursorPage(url);
 	else if (path === '/sessions') body = rows;
 	else if (path === '/projects') body = projects;
 	else if (path === '/assistant') body = assistant;
@@ -91,5 +127,8 @@ const [{ appData }, { acceptAssistant }, { default: Fixture }] = await Promise.a
 	import('./SidePanelFixture.svelte'),
 ]);
 Object.assign(appData.current, { sessions: rows.map((r) => ({ ...r })), projects, clusterProjects: [] });
+// The older-history mode needs the store's real cursor state, so it loads the
+// first page the way the app does on boot.
+if (olderHistory) await appData.loadSessions(null);
 if (assistantReady) acceptAssistant(assistant as never);
 mount(Fixture, { target: document.getElementById('app')!, props: { phone } });

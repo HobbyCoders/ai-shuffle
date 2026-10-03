@@ -24,6 +24,7 @@
 		ListFilter,
 		ChevronDown,
 		ChevronRight,
+		Loader2,
 		SlidersHorizontal,
 		RefreshCw,
 		X,
@@ -47,8 +48,7 @@
 		sessions,
 		projects,
 		clusterProjects,
-		sessionsHasMore,
-		sessionsLoadingMore
+		sessionsHasMore
 	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { activeView } from '$lib/stores/layout.svelte';
@@ -116,6 +116,13 @@
 	// The list starts capped; "All sessions" grows it in place (the board is gone).
 	const SETTLED_LIMIT = 30;
 	const SHOW_MORE_STEP = 50;
+	// Pages one "Load older sessions" click may fetch while looking for a row
+	// this list can show. Rows from removed projects or devices, or outside the
+	// project/device filter, are dropped here, so one page can add nothing.
+	const OLDER_PAGES_PER_CLICK = 5;
+	// "Show fewer" can appear under the pointer the moment the last page lands.
+	// A click that fast belongs to the load, not to a request to collapse.
+	const SHELF_SETTLE_MS = 500;
 
 	const collapsedGroups = $derived($sidebarGroups);
 	function toggleGroup(name: string) {
@@ -361,7 +368,14 @@
 	let settledLimit = $state(SETTLED_LIMIT);
 	const visibleSettledRows = $derived(settledRows.slice(0, settledLimit));
 	const hiddenSettled = $derived(Math.max(0, settledRows.length - visibleSettledRows.length));
-	const fullyExpanded = $derived(hiddenSettled === 0 && settledLimit > SETTLED_LIMIT);
+	// Only offer "Show fewer" when collapsing would actually hide something.
+	const fullyExpanded = $derived(
+		hiddenSettled === 0 && settledLimit > SETTLED_LIMIT && settledRows.length > SETTLED_LIMIT
+	);
+	// One older-sessions load at a time, covering every page a click fetches,
+	// so the shelf reads "Loading" for the whole run instead of flickering.
+	let loadingOlder = $state(false);
+	let shelfSettledAt = 0;
 
 	// Archived chats are browsed in Settings, not in the session sidebar.
 
@@ -599,10 +613,33 @@
 		onOpenFeature(type);
 	}
 
-	/** Pull the next cursor page and reveal it in place. */
-	function loadMoreSessions() {
-		settledLimit += SHOW_MORE_STEP;
-		void appData.loadMoreSessions();
+	/**
+	 * Pull older pages until one adds a settled row this list shows, or the
+	 * server runs out, then reveal the new rows in place. The visible limit only
+	 * grows once rows actually arrived; growing it up front (the old behaviour)
+	 * turned an empty page into a "Show fewer" that collapsed nothing.
+	 */
+	async function loadMoreSessions() {
+		if (loadingOlder) return;
+		loadingOlder = true;
+		const before = settledRows.length;
+		try {
+			for (let page = 0; page < OLDER_PAGES_PER_CLICK && $sessionsHasMore; page++) {
+				await appData.loadMoreSessions();
+				if (settledRows.length > before) break;
+			}
+			if (settledRows.length > before) {
+				settledLimit = Math.max(settledLimit, before + SHOW_MORE_STEP);
+			}
+		} finally {
+			loadingOlder = false;
+			shelfSettledAt = Date.now();
+		}
+	}
+
+	function showFewerSettled() {
+		if (Date.now() - shelfSettledAt < SHELF_SETTLE_MS) return;
+		settledLimit = SETTLED_LIMIT;
 	}
 </script>
 
@@ -790,7 +827,14 @@
 					{/each}
 				{/if}
 
-				{#if hiddenSettled > 0}
+				{#if loadingOlder}
+					<!-- Held for the whole multi-page run so the label cannot flip
+					     between "Load older", "Show N more" and "Show fewer" mid-load. -->
+					<button class="shelf" disabled aria-busy="true">
+						<Loader2 class="shelf-spin" size={14} strokeWidth={2} />
+						Loading older sessions…
+					</button>
+				{:else if hiddenSettled > 0}
 					<button class="shelf" onclick={() => (settledLimit += SHOW_MORE_STEP)}>
 						Show {Math.min(hiddenSettled, SHOW_MORE_STEP)} more
 						<ChevronDown size={14} strokeWidth={2} />
@@ -798,13 +842,14 @@
 				{:else if $sessionsHasMore}
 					<!-- Everything loaded is on screen and the server holds more: the
 					     initial load is capped at one page (W1), so fetch the next one
-					     on demand instead of paging through the whole history up front. -->
-					<button class="shelf" onclick={loadMoreSessions} disabled={$sessionsLoadingMore}>
-						{$sessionsLoadingMore ? 'Loading…' : 'Load older sessions'}
+					     on demand instead of paging through the whole history up front.
+					     `has_more` already excludes archived chats (server-side). -->
+					<button class="shelf" onclick={loadMoreSessions}>
+						Load older sessions
 						<ChevronDown size={14} strokeWidth={2} />
 					</button>
 				{:else if fullyExpanded}
-					<button class="shelf" onclick={() => (settledLimit = SETTLED_LIMIT)}>
+					<button class="shelf" onclick={showFewerSettled}>
 						Show fewer
 						<ChevronRight size={14} strokeWidth={2} />
 					</button>
@@ -1285,6 +1330,8 @@
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
 	@keyframes ping { 50% { opacity: 0.5; transform: scale(0.8); } }
+	.shelf :global(.shelf-spin) { animation: shelf-spin 0.9s linear infinite; }
+	@keyframes shelf-spin { to { transform: rotate(360deg); } }
 
 	/* Touch sizing on any touch-only pointer, not just the mobile shell. */
 	@media (hover: none) {
@@ -1297,5 +1344,6 @@
 	@media (prefers-reduced-motion: reduce) {
 		.selbar, .sect .chev, .asst, .search { transition: none; }
 		.live.working { animation: none; }
+		.shelf :global(.shelf-spin) { animation: none; }
 	}
 </style>

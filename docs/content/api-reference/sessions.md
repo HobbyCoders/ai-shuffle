@@ -78,6 +78,7 @@ List sessions a page at a time using a cursor instead of an offset. Use this for
 | `limit` | integer | Page size (default: 50, max: 100) |
 | `cursor` | string | `next_cursor` from the previous page (omit for the first page) |
 | `cursor_id` | string | `next_cursor_id` from the previous page |
+| `exclude_archived` | boolean | Leave out archived sessions (default: `false`). `has_more` then counts only the sessions you will get back |
 
 ```bash
 curl "http://localhost:8000/api/v1/sessions/cursor?limit=50" \

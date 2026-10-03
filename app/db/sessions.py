@@ -409,6 +409,7 @@ def get_sessions_cursor(
     cursor: Optional[str] = None,
     cursor_id: Optional[str] = None,
     include_hidden: bool = False,
+    exclude_archived: bool = False,
 ) -> tuple[List[Dict[str, Any]], Optional[str], Optional[str], bool]:
     """Get sessions using cursor-based pagination (keyset pagination).
 
@@ -416,7 +417,9 @@ def get_sessions_cursor(
 
     Hidden sessions are excluded unless ``include_hidden`` is True —
     the filter is part of the shared WHERE clause, so the limit+1 has_more
-    probe never counts hidden rows.
+    probe never counts hidden rows. ``exclude_archived`` works the same way
+    for archived sessions: a list that never shows them (the sidebar) must
+    not be told more rows exist when only archived ones remain.
 
     Returns:
         Tuple of (sessions, next_cursor, next_cursor_id, has_more)
@@ -446,6 +449,9 @@ def get_sessions_cursor(
         params.append(status)
     if active_only:
         base_query += f" AND {col_prefix}is_active = TRUE"
+    if exclude_archived:
+        # NULL status is a live row, so it must survive the inequality.
+        base_query += f" AND ({col_prefix}status IS NULL OR {col_prefix}status <> 'archived')"
     if api_users_only:
         base_query += f" AND {col_prefix}api_user_id IS NOT NULL"
     elif api_user_id is not None:
