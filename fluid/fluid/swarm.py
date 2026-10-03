@@ -62,6 +62,11 @@ def validate(data):
             not isinstance(task["model"], str) or not task["model"].strip()
         ):
             raise ValueError(f"{key}: model must be a non-empty model ID string")
+        if task.get("worker") is not None and (
+            not isinstance(task["worker"], str) or not task["worker"].strip()
+            or len(task["worker"]) > 200
+        ):
+            raise ValueError(f"{key}: worker must be a worker name or device id of at most 200 characters")
         if len(task["prompt"]) > 100000:
             raise ValueError("task prompt exceeds 100000 characters")
         deps = task.get("depends_on", [])
@@ -179,6 +184,7 @@ class SwarmCoordinator:
         rows = {t["id"]: t for t in swarm["tasks"]}
         prompts = {t["id"]: t["prompt"] for t in specs}
         models = {t["id"]: t.get("model") for t in specs}
+        placements = {t["id"]: t.get("worker") for t in specs}
         try:
             swarm["status"] = "running"
             await self.emit(key)
@@ -196,7 +202,7 @@ class SwarmCoordinator:
                         await self.emit(key)
                         job = asyncio.create_task(self._task(
                             key, task, prompts[task["id"]], rows, ctx,
-                            model=models[task["id"]]))
+                            model=models[task["id"]], worker=placements[task["id"]]))
                         running[job] = task
                 if not running:
                     break
@@ -235,7 +241,7 @@ class SwarmCoordinator:
         finally:
             await self.finished(key, self.swarms[key]["status"], json.dumps({"swarm": self.snapshot(key)}))
 
-    async def _task(self, key, task, prompt, rows, ctx, *, model=None):
+    async def _task(self, key, task, prompt, rows, ctx, *, model=None, worker=None):
         future = asyncio.get_running_loop().create_future()
         launch = Launch(self, key, task["id"], future)
         token = current_launch.set(launch)
@@ -251,6 +257,9 @@ class SwarmCoordinator:
                         label=task["title"], mode="background")
             if model:
                 args["model"] = model
+            if worker:
+                # The host's Task dispatcher resolves and validates the pick.
+                args["worker"] = worker
             dispatch = asyncio.create_task(self.dispatch(args, ctx))
             outcome = _background_outcome(await asyncio.shield(dispatch), {})
             receipt = outcome.background_task

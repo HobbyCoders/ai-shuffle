@@ -48,18 +48,15 @@ def _workers() -> Dict[str, Any]:
 
 def resolve_worker(worker: str) -> Dict[str, Any]:
     """The online worker named by label or device id. Raises ``ValueError``."""
+    from app.network import runners
+
     wanted = (worker or "").strip()
     if not wanted:
         raise ValueError("Name the worker to hand off to (its name as shown in the app, or its device id).")
-    listing = _workers()
-    rows = [row for row in listing.get("runners", []) if not row.get("is_self")]
-    match = [row for row in rows if row["device_id"] == wanted or str(row.get("device_name", "")).casefold() == wanted.casefold()]
-    names = ", ".join(f"{row.get('device_name')} ({'online' if row.get('online') else 'offline'})" for row in rows) or "none"
-    if not match:
-        raise ValueError(f"No other worker named '{wanted}'. Workers: {names}.")
-    row = match[0]
-    if not row.get("online"):
-        raise ValueError(f"{row.get('device_name')} is offline. Bring it online first, or pick another worker ({names}).")
+    row = runners.resolve_worker(wanted, instead="pick another worker", refused="nothing was queued",
+                                 listing=_workers())
+    if row.get("is_self"):
+        raise ValueError(f"{row.get('device_name')} is this worker; name another worker to hand off to.")
     return row
 
 

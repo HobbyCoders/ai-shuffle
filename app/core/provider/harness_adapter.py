@@ -6388,6 +6388,16 @@ def _install_task_contract(registry: ToolRegistry, contract: Any) -> None:
         ),
         _task_handler,
     )
+    # Swarm items reach the same dispatcher, so they offer ``worker`` exactly
+    # when Task does. A no-op when this session has no Swarm tool.
+    from fluid.tools.builtins.swarm import input_schema as _swarm_schema
+
+    registry.amend_spec(
+        "Swarm",
+        input_schema=_swarm_schema(
+            (contract.input_schema.get("properties") or {}).get("worker")
+        ),
+    )
 
 
 def _amend_native_task_spec(

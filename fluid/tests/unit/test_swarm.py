@@ -35,6 +35,40 @@ def test_invalid_model_choice_rejected(model):
         validate({"tasks": [{**spec("a"), "model": model}]})
 
 
+@pytest.mark.parametrize("worker", [None, "Unraid"])
+async def test_task_worker_choice_reaches_dispatch(worker):
+    calls = []
+
+    async def dispatch(data, ctx):
+        calls.append(data)
+        return ToolOutcome(text="done")
+
+    c = SwarmCoordinator("main", dispatch, AsyncMock(), AsyncMock(), AsyncMock())
+    task = spec("a")
+    if worker is not None:
+        task["worker"] = worker
+    _, receipt = await c.start({"tasks": [task]}, ToolCtx())
+    await asyncio.wait_for(c.jobs[receipt.task_id], 5)
+    assert calls[0].get("worker") == worker
+    assert ("worker" in calls[0]) is (worker is not None)
+
+
+@pytest.mark.parametrize("worker", [False, 3, [], "", " ", "x" * 201])
+def test_invalid_worker_choice_rejected(worker):
+    with pytest.raises(ValueError, match="worker must be"):
+        validate({"tasks": [{**spec("a"), "worker": worker}]})
+
+
+def test_swarm_schema_offers_worker_only_when_the_host_passes_it():
+    from fluid.tools.builtins.swarm import SPEC, input_schema
+    items = lambda schema: schema["properties"]["tasks"]["items"]["properties"]
+    assert "worker" not in items(SPEC.input_schema)
+    assert input_schema() == SPEC.input_schema
+    offered = {"type": "string", "description": "Other workers: Unraid."}
+    assert items(input_schema(offered))["worker"] == offered
+    assert {k: v for k, v in items(input_schema(offered)).items() if k != "worker"} == items(SPEC.input_schema)
+
+
 def test_swarm_schema_documents_task_model_validation():
     from fluid.tools.builtins.swarm import SPEC
     prop = SPEC.input_schema["properties"]["tasks"]["items"]["properties"]["model"]

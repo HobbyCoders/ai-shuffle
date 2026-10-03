@@ -8,6 +8,7 @@ picker keep working unchanged.
 """
 from __future__ import annotations
 
+import logging
 from typing import Dict, Optional
 
 from app.core.config import settings
@@ -15,6 +16,8 @@ from app.db import network as store
 from app.db.base import utc_now_iso as _now_iso
 from app.network import engine, membership, transport
 from app.network.endpoints import peer_endpoints
+
+logger = logging.getLogger(__name__)
 
 
 def directory() -> dict:
@@ -98,6 +101,73 @@ def resolve_runner_id(runner_id: Optional[str]) -> Optional[str]:
     if runner_id == ctx.device_id or ctx.member(runner_id) is not None:
         return runner_id
     return device_for_instance(runner_id) or runner_id
+
+
+def _active_worker(ctx, device_id: str) -> bool:
+    member = ctx.member(device_id)
+    return (member is not None and member.kind == membership.KIND_WORKER
+            and member.status == membership.STATUS_ACTIVE)
+
+
+def resolve_worker(value, *, instead: str, refused: str, listing: Optional[dict] = None) -> dict:
+    """The directory row of the worker ``value`` names. Raises ``ValueError``.
+
+    One resolver for every tool that names a worker (StartSession,
+    HandOffSession, Task and Swarm ``worker``). ``value`` is an exact device
+    id, else a case-insensitive worker name. The row of THIS worker is
+    returned too (``is_self``); each caller decides what naming itself means.
+    Any other pick must be an online, active worker member of this account.
+    Everything else is refused by name with the choices listed; a bad pick is
+    never replaced by this worker.
+
+    ``instead`` and ``refused`` finish the refusals, e.g. "omit worker to
+    start here" and "nothing was started". ``listing`` reuses a directory the
+    caller already read.
+    """
+    if not isinstance(value, str) or not value.strip() or len(value) > 200:
+        raise ValueError("worker must be a worker name or device id of at most 200 characters")
+    wanted = value.strip()
+    ctx = engine.context()
+    if listing is None:
+        if ctx is None:
+            raise ValueError(f"This worker is not part of a worker network; {instead}.")
+        listing = directory()
+    rows = listing.get("runners") or []
+    matches = [row for row in rows if row["device_id"] == wanted]
+    if not matches:
+        matches = [row for row in rows if (row.get("device_name") or "").casefold() == wanted.casefold()]
+    names = ", ".join(f"{row['device_name']} ({'this worker' if row.get('is_self') else 'online' if row.get('online') else 'offline'})"
+                      for row in rows) or "none"
+    if not matches:
+        raise ValueError(f"Unknown worker {wanted!r}. Workers on this account: {names}.")
+    if len(matches) > 1:
+        raise ValueError(f"More than one worker is named {wanted!r}; pass its device id instead.")
+    row = matches[0]
+    if row.get("is_self"):
+        return row
+    if ctx is not None and not _active_worker(ctx, row["device_id"]):
+        raise ValueError(f"{row['device_name']} is not an active worker of this account.")
+    if not row.get("online"):
+        raise ValueError(f"{row['device_name']} is offline; {refused}. Ask the user to bring it "
+                         f"online, or {instead}.")
+    return row
+
+
+def other_workers() -> list:
+    """The directory rows of this account's other active workers, online or not.
+
+    Empty when this worker is not networked. Never raises: a tool schema asks
+    this on every build and must not break over a directory read.
+    """
+    try:
+        ctx = engine.context()
+        if ctx is None:
+            return []
+        return [row for row in directory()["runners"]
+                if not row["is_self"] and _active_worker(ctx, row["device_id"])]
+    except Exception:  # noqa: BLE001 — no peers is the safe answer
+        logger.debug("Could not list the other workers", exc_info=True)
+        return []
 
 
 def find(device_id: str) -> Optional[dict]:

@@ -18,12 +18,15 @@ from app.core import runner_capabilities as rc
 
 def test_shape_has_all_keys_and_types():
     caps = rc.detect_capabilities()
-    assert set(caps.keys()) == {"os", "has_display", "has_chrome", "docker", "claude_cli_signed_in"}
+    assert set(caps.keys()) == {"os", "has_display", "has_chrome", "docker", "claude_cli_signed_in",
+                                "provider_kinds", "remote_task"}
     assert caps["os"] in ("windows", "linux", "darwin")
     assert isinstance(caps["has_display"], bool)
     assert isinstance(caps["has_chrome"], bool)
     assert isinstance(caps["docker"], bool)
     assert isinstance(caps["claude_cli_signed_in"], bool)
+    assert isinstance(caps["provider_kinds"], list)
+    assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 1
 
 
 def test_os_matches_platform():
@@ -83,6 +86,14 @@ def test_detect_capabilities_never_raises_on_total_failure():
         assert caps["has_chrome"] is False
         assert caps["docker"] is False
         assert caps["claude_cli_signed_in"] is False
+
+
+def test_provider_kinds_default_empty_when_the_database_fails():
+    def _boom(*a, **k):
+        raise RuntimeError("no database")
+
+    with patch("app.db.base.get_db", side_effect=_boom):
+        assert rc._detect_provider_kinds() == []
 
 
 # ---------------------------------------------------------------------------

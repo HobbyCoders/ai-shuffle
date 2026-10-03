@@ -39,22 +39,31 @@ def describe(tools: frozenset[str] | None = None) -> str:
     )
 
 
-SPEC = ToolSpec(name="Swarm", description=describe(),
-    input_schema={"type": "object", "properties": {
+def input_schema(worker: dict | None = None) -> dict:
+    """Swarm's schema; ``worker`` joins each task item only when the host
+    passes the Task schema's ``worker`` property (it has other workers)."""
+    item = {
+        "id": {"type": "string"}, "title": {"type": "string"},
+        "agent": {"type": "string"}, "prompt": {"type": "string"},
+        "model": {"type": "string", "description": (
+            "Optional model override only when the host's Task schema offers it. "
+            "Use a Task-listed model on this agent's provider; omit for its default. "
+            "The Task dispatcher validates this choice and cannot switch providers.")},
+        "depends_on": {"type": "array", "items": {"type": "string"}}}
+    if worker is not None:
+        item["worker"] = dict(worker)
+    return {"type": "object", "properties": {
         "action": {"type": "string", "enum": ["start", "status", "cancel"]},
         "title": {"type": "string"}, "swarm_id": {"type": "string"},
         "max_parallel": {"type": "integer", "minimum": 1, "maximum": 64,
             "description": "Optional limit on simultaneous tasks. Omit to run all dependency-ready tasks, subject to host resource limits."},
         "tasks": {"type": "array", "minItems": 1, "maxItems": 64, "items": {
-            "type": "object", "properties": {
-                "id": {"type": "string"}, "title": {"type": "string"},
-                "agent": {"type": "string"}, "prompt": {"type": "string"},
-                "model": {"type": "string", "description": (
-                    "Optional model override only when the host's Task schema offers it. "
-                    "Use a Task-listed model on this agent's provider; omit for its default. "
-                    "The Task dispatcher validates this choice and cannot switch providers.")},
-                "depends_on": {"type": "array", "items": {"type": "string"}}},
-            "required": ["id", "agent", "prompt"]}}}, "required": ["action"]},
+            "type": "object", "properties": item,
+            "required": ["id", "agent", "prompt"]}}}, "required": ["action"]}
+
+
+SPEC = ToolSpec(name="Swarm", description=describe(),
+    input_schema=input_schema(),
     risk="write", classify_risk=lambda data: "safe" if data.get("action") == "status" else "write",
     requires_extra=("swarm", "task_dispatch"))
 

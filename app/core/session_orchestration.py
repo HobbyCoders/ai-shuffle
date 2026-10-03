@@ -171,7 +171,7 @@ def _delivery_status(turn):
     return "begun"
 
 
-def _remote_worker(value):
+def _remote_worker(value, listing=None):
     """The StartSession ``worker`` pick: None for this worker, else its directory row.
 
     Only an online, active worker of this account network qualifies. Anything
@@ -179,33 +179,11 @@ def _remote_worker(value):
     """
     if value is None:
         return None
-    if not isinstance(value, str) or not value.strip() or len(value) > 200:
-        raise ValueError("worker must be a worker name or device id of at most 200 characters")
-    wanted = value.strip()
-    from app.network import engine, membership, runners
-    ctx = engine.context()
-    if ctx is None:
-        raise ValueError("This worker is not part of a worker network; omit worker to start here.")
-    rows = runners.directory()["runners"]
-    matches = [row for row in rows if row["device_id"] == wanted]
-    if not matches:
-        matches = [row for row in rows if (row.get("device_name") or "").casefold() == wanted.casefold()]
-    names = ", ".join(f"{row['device_name']} ({'this worker' if row['is_self'] else 'online' if row['online'] else 'offline'})"
-                      for row in rows) or "none"
-    if not matches:
-        raise ValueError(f"Unknown worker {wanted!r}. Workers on this account: {names}.")
-    if len(matches) > 1:
-        raise ValueError(f"More than one worker is named {wanted!r}; pass its device id instead.")
-    row = matches[0]
+    from app.network import runners
+    row = runners.resolve_worker(value, instead="omit worker to start here",
+                                 refused="nothing was started", listing=listing)
     if row["is_self"]:
         return None
-    member = ctx.member(row["device_id"])
-    if (member is None or member.kind != membership.KIND_WORKER
-            or member.status != membership.STATUS_ACTIVE):
-        raise ValueError(f"{row['device_name']} is not an active worker of this account.")
-    if not row["online"]:
-        raise ValueError(f"{row['device_name']} is offline; nothing was started. Ask the user to bring it "
-                         "online, or omit worker to start here.")
     return {"device_id": row["device_id"], "device_name": row["device_name"]}
 
 
@@ -305,14 +283,15 @@ async def _project_placement(sender_id, data):
         raise ValueError(f"{name} is not checked out on this worker; nothing was started. "
                          "Ask the owner to open or clone it here first.")
     checked = ["this worker (not checked out)"]
-    for row in (await asyncio.to_thread(runners.directory))["runners"]:
+    listing = await asyncio.to_thread(runners.directory)
+    for row in listing["runners"]:
         if row["is_self"]:
             continue
         if not row["online"]:
             checked.append(f"{row['device_name']} (offline)")
             continue
         try:
-            remote = await asyncio.to_thread(_remote_worker, row["device_id"])
+            remote = await asyncio.to_thread(_remote_worker, row["device_id"], listing)
             eligible = remote is not None and await network_git.eligible(row["device_id"], project["id"])
         except Exception:  # noqa: BLE001 — one unreachable worker never blocks the others
             log.info("Could not check %s for project %s", row["device_id"], project["id"], exc_info=True)

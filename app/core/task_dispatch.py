@@ -1261,6 +1261,74 @@ def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
     return None
 
 
+REMOTE_TASK_UNSUPPORTED = (
+    "Running a subagent on another worker is not supported yet; nothing was "
+    "dispatched. Omit worker to run it here."
+)
+
+
+def _remote_dispatch_owner_refusal(
+    caller_session_id: str, caller_row: Mapping[str, Any]
+) -> Optional[str]:
+    """Why this caller may not name another worker, or None (an owner chat).
+
+    A key's session or a non-owner principal holds credentials of THIS install
+    that cannot travel, and background observation may not delegate at all.
+    """
+    from app.core import api_user_scope
+    from app.db import mobile_tool_identity, turns as turns_db
+
+    refusal = "Only the owner's chats can run a subagent on another worker."
+    if api_user_scope.session_api_user_id(caller_row):
+        return refusal
+    principal = mobile_tool_identity.read(caller_session_id)
+    if principal and principal.get("kind") != "admin":
+        return refusal
+    turn = (turns_db.get_live_turn(caller_session_id)
+            or turns_db.get_latest_turn(caller_session_id) or {})
+    if ((turn.get("payload") or {}).get("_assistant_proactive") is not None
+            or (turn.get("overrides") or {}).get("_assistant_proactive") is not None):
+        return "Background observation cannot run a subagent on another worker."
+    return None
+
+
+def _remote_worker_refusal(
+    value: Any, caller_session_id: str, caller_row: Mapping[str, Any]
+) -> Optional[str]:
+    """None when Task's ``worker`` names this worker; otherwise the refusal.
+
+    Resolution is the one StartSession and HandOffSession use: unknown,
+    inactive or offline workers are refused by name and never replaced by this
+    worker. A worker whose release lacks the ``remote_task`` capability is
+    refused as older. A valid remote pick is refused until remote subagents
+    exist (design slice S5).
+    """
+    from app.network import runners
+
+    try:
+        row = runners.resolve_worker(
+            value, instead="omit worker to run it here", refused="nothing was dispatched"
+        )
+    except ValueError as exc:
+        return str(exc)
+    if row.get("is_self"):
+        return None
+    owner_error = _remote_dispatch_owner_refusal(caller_session_id, caller_row)
+    if owner_error:
+        return owner_error
+    try:
+        version = int((row.get("capabilities") or {}).get("remote_task") or 0)
+    except (TypeError, ValueError):
+        version = 0
+    if version < 1:
+        return (
+            f"{row['device_name']} runs an older release that cannot run remote "
+            "subagents; nothing was dispatched. Ask the owner to update it, or "
+            "omit worker to run it here."
+        )
+    return REMOTE_TASK_UNSUPPORTED
+
+
 def _file_agent_model_id(
     caller_row: Mapping[str, Any],
     caller_profile_id: str,
@@ -1523,6 +1591,15 @@ async def dispatch_task_tool(
     )
     if scope_error:
         return {"ok": False, "error": scope_error}
+
+    # ``worker``: omitted or this worker runs here exactly as before; any
+    # other pick is validated and refused before admission or a receipt.
+    if args.get("worker") is not None:
+        worker_error = await asyncio.to_thread(
+            _remote_worker_refusal, args.get("worker"), caller_session_id, caller_row
+        )
+        if worker_error:
+            return {"ok": False, "error": worker_error}
 
     mode, ignored_mode = _effective_task_mode(
         requested_mode,

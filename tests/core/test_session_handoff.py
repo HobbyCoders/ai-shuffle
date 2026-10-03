@@ -27,8 +27,10 @@ def test_resolves_by_name_or_device_id_and_refuses_offline_or_self():
     assert sh.resolve_worker("dev-gaming")["device_name"] == "DesktopWorker"
     with pytest.raises(ValueError, match="offline"):
         sh.resolve_worker("Laptop")
-    with pytest.raises(ValueError, match="No other worker named 'Unraid'"):
+    with pytest.raises(ValueError, match="Unraid is this worker"):
         sh.resolve_worker("Unraid")
+    with pytest.raises(ValueError, match=r"Unknown worker 'Desktop'.*DesktopWorker \(online\)"):
+        sh.resolve_worker("Desktop")
     with pytest.raises(ValueError, match="Name the worker"):
         sh.resolve_worker("  ")
 

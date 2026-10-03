@@ -520,6 +520,55 @@ class TaskContract:
     targets: tuple[SubagentTarget, ...]
 
 
+def _worker_traits(row: Mapping[str, Any]) -> str:
+    caps = row.get("capabilities") or {}
+    traits = [str(caps.get("os") or row.get("platform") or "unknown OS")]
+    traits.append("display" if caps.get("has_display") else "no display")
+    if caps.get("has_chrome"):
+        traits.append("Chrome")
+    if caps.get("claude_cli_signed_in"):
+        traits.append("Claude CLI signed in")
+    if not caps.get("remote_task"):
+        traits.append("older release that cannot run remote subagents")
+    return ", ".join(traits)
+
+
+def task_worker_property() -> dict[str, Any] | None:
+    """The optional ``worker`` property of Task and Swarm items, or None.
+
+    Offered only when the account has at least one other active worker. Each
+    worker is listed once with the traits that matter for routing. Online state
+    is deliberately left out, as in the environment block's worker line: it
+    flips far more often than the worker set, and every flip would rewrite the
+    cached tool prefix. An offline pick is refused by name at dispatch.
+    """
+    from app.network import runners
+
+    peers = runners.other_workers()
+    if not peers:
+        return None
+    peers = sorted(peers, key=lambda row: (str(row.get("device_name") or "").casefold(), row["device_id"]))
+    names = [str(row.get("device_name") or row["device_id"]) for row in peers]
+    listed = "; ".join(
+        (f"{name} [{row['device_id']}]" if names.count(name) > 1 else name)
+        + f" ({_worker_traits(row)})"
+        for name, row in zip(names, peers)
+    )
+    return {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 200,
+        "description": (
+            "Optional: another of the owner's workers to run this subagent "
+            f"on, by exact name or device id. Other workers: {listed}. Omit "
+            "it, or name this worker, to run here. An unknown or offline "
+            "worker is refused, never replaced by this one. Running a "
+            "subagent on another worker is not supported yet; such a call is "
+            "refused."
+        ),
+    }
+
+
 def build_task_contract(
     caller_profile_id: str | None,
     provider_id: str | None,
@@ -723,6 +772,9 @@ def build_task_contract(
         "type": "string",
         "description": "Optional short progress label.",
     }
+    worker_property = task_worker_property()
+    if worker_property is not None:
+        properties["worker"] = worker_property
 
     return TaskContract(
         description=description,

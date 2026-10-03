@@ -20,12 +20,20 @@ Shape::
         "has_chrome": bool,
         "docker": bool,
         "claude_cli_signed_in": bool,
+        "provider_kinds": ["openai", ...],
+        "remote_task": int,
     }
 
 ``claude_cli_signed_in`` is whether this runner's own Claude Code CLI reports
 a login, from the last ``claude auth status`` probe (no subprocess here). Each
 worker signs in to its CLI separately, so placement can require it with a
 ``{"claude_cli_signed_in": True}`` constraint.
+
+``provider_kinds`` lists the provider TYPES of this worker's enabled model
+providers that hold a credential (presence only, never an identity, account
+name or token). ``remote_task`` is the version of remote subagent dispatch this
+release can run (0 or absent: none), so a parent refuses an older worker by
+name before any round trip.
 """
 
 from __future__ import annotations
@@ -34,7 +42,7 @@ import logging
 import os
 import shutil
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +133,32 @@ def _detect_claude_cli_signed_in() -> bool:
         return False
 
 
+# The remote subagent wire this release understands; raised only when the
+# wire changes incompatibly (version 2 adds fields only).
+REMOTE_TASK_VERSION = 1
+
+
+def _detect_provider_kinds() -> List[str]:
+    """Sorted provider types with an enabled, credentialed row (no decryption)."""
+    try:
+        from app.db.base import get_db
+
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT DISTINCT provider_type FROM model_providers
+                WHERE enabled = TRUE
+                  AND ((auth_token IS NOT NULL AND auth_token <> '')
+                    OR (codex_access_token IS NOT NULL AND codex_access_token <> ''))
+                """
+            )
+            return sorted({str(row["provider_type"]) for row in cursor.fetchall()
+                           if row.get("provider_type")})
+    except Exception:  # noqa: BLE001 — detection must never raise
+        return []
+
+
 def detect_capabilities() -> Dict[str, Any]:
     """Best-effort snapshot of this runner's placement capabilities.
 
@@ -137,4 +171,6 @@ def detect_capabilities() -> Dict[str, Any]:
         "has_chrome": _detect_has_chrome(),
         "docker": _detect_docker(),
         "claude_cli_signed_in": _detect_claude_cli_signed_in(),
+        "provider_kinds": _detect_provider_kinds(),
+        "remote_task": REMOTE_TASK_VERSION,
     }
