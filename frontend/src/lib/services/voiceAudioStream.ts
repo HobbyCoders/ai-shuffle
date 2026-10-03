@@ -70,8 +70,12 @@ export function createInputGate(thresholdDb = DEFAULT_MIC_THRESHOLD_DB): (pcm: I
  };
 }
 
-/** One bidirectional PCM stream; the server owns provider auth and delegation. */
-export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, handlers: Handlers, signal: AbortSignal, micThresholdDb = DEFAULT_MIC_THRESHOLD_DB): Promise<VoiceAudioStream> {
+/**
+ * One bidirectional PCM stream; the server owns provider auth and delegation.
+ * `resume` reopens a dropped call: the server replaces the session's leftover
+ * audio connection instead of refusing a second one.
+ */
+export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, handlers: Handlers, signal: AbortSignal, micThresholdDb = DEFAULT_MIC_THRESHOLD_DB, resume = false): Promise<VoiceAudioStream> {
  const context = new AudioContext();
  const output = context.createGain();
  output.connect(context.destination);
@@ -109,7 +113,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
   await context.resume();
   await context.audioWorklet.addModule(workletUrl);
   if (stopped) throw new Error('Voice connection cancelled.');
-  socket = new WebSocket(wsUrl(`/api/v1/voice/sessions/${encodeURIComponent(sessionId)}/audio`));
+  socket = new WebSocket(wsUrl(`/api/v1/voice/sessions/${encodeURIComponent(sessionId)}/audio`, { resume: resume ? '1' : null }));
   socket.binaryType = 'arraybuffer';
   const ws = socket;
   await new Promise<void>((resolve, reject) => {

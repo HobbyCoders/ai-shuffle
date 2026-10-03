@@ -136,6 +136,17 @@ const RECONNECT_AFTER_MS = 50 * 60 * 1000;
 /** How long to wait for the new peer connection during a re-handshake. */
 const CONNECT_TIMEOUT_MS = 20_000;
 
+/**
+ * Pauses before each attempt to reopen a streamed call's audio socket after it
+ * drops without a close (network change, server restart). The call ends with
+ * STREAM_DROPPED_MESSAGE when every attempt fails.
+ */
+export const STREAM_RECONNECT_DELAYS_MS: readonly number[] = [500, 2000, 5000];
+/** Upper bound on restored audio connections in one call. */
+export const STREAM_MAX_RESTORES = 5;
+export const STREAM_DROPPED_MESSAGE =
+	'The connection to the voice server dropped and could not be restored. Your conversation is saved; start the call again to keep talking.';
+
 /** Captions are ephemeral UI — keep the tail only. */
 const MAX_CAPTIONS = 60;
 
@@ -715,23 +726,66 @@ export async function startCall(
 		if (usesAudioStream(cred.model)) {
 			const { openVoiceAudioStream } = await import('./voiceAudioStream');
 			if (myGeneration !== generation) return;
-			audioAbort = new AbortController();
-			const stream = await openVoiceAudioStream(sessionIdIn, acquired, {
+			const abort = new AbortController();
+			audioAbort = abort;
+			const endStream = (message: string | null, reason: VoiceStreamEndReason) => {
+				// The far end hanging up is an ending, not a failure; it
+				// still says so, so it never looks like the End button.
+				const quiet = reason === 'provider-closed' || reason === 'server-closed';
+				const ending = teardown({ notifyBackend: true, status: quiet ? 'ended' : 'error', reason });
+				const endedGeneration = generation;
+				void ending.then(() => {
+					if (endedGeneration !== generation) return;
+					patch(quiet ? { sessionId: sessionIdIn, notice: message } : { sessionId: sessionIdIn, error: message });
+				});
+			};
+			const open = (resume: boolean) => openVoiceAudioStream(sessionIdIn, acquired, {
 				caption: (id, role, delta) => { if (myGeneration === generation) appendCaption(id, role, delta, false); },
 				speaking: active => { if (myGeneration === generation) patch({ agentSpeaking: active }); },
 				closed: (message, reason) => {
 					if (myGeneration !== generation) return;
-					// The far end hanging up is an ending, not a failure; it
-					// still says so, so it never looks like the End button.
-					const quiet = reason === 'provider-closed' || reason === 'server-closed';
-					const ending = teardown({ notifyBackend: true, status: quiet ? 'ended' : 'error', reason });
-					const endedGeneration = generation;
-					void ending.then(() => {
-						if (endedGeneration !== generation) return;
-						patch(quiet ? { sessionId: sessionIdIn, notice: message } : { sessionId: sessionIdIn, error: message });
-					});
+					// Only the socket to this server dropped; the server ends the
+					// call explicitly (an error or ended message) otherwise.
+					// GPT Live resumes from the saved conversation; PersonaPlex
+					// would start over, so its call ends as before.
+					if (reason === 'connection-dropped' && cred.model === 'gpt-live-1') void restoreStream();
+					else endStream(message, reason);
 				},
-			}, audioAbort.signal, cred.options?.mic_threshold_db);
+			}, abort.signal, cred.options?.mic_threshold_db, resume);
+			// Reopen the audio socket on the same session. The server replaces
+			// any leftover connection and seeds the new provider session with
+			// the saved conversation; chat work started by the call carries on.
+			let restores = 0;
+			const restoreStream = async () => {
+				if (++restores > STREAM_MAX_RESTORES) {
+					endStream(STREAM_DROPPED_MESSAGE, 'connection-dropped');
+					return;
+				}
+				const dropped = audioStream;
+				audioStream = null;
+				patch({ status: 'reconnecting', agentSpeaking: false });
+				console.info('[voice] audio connection dropped; reconnecting');
+				await dropped?.close();
+				for (const [index, delay] of STREAM_RECONNECT_DELAYS_MS.entries()) {
+					await new Promise(resolve => setTimeout(resolve, delay));
+					if (myGeneration !== generation) return;
+					try {
+						const stream = await open(true);
+						if (myGeneration !== generation) { await stream.close(); return; }
+						audioStream = stream;
+						applyMicMuted(get(voiceCallState).micMuted);
+						stream.muteOutput(get(voiceCallState).agentMuted);
+						patch({ status: 'live' });
+						console.info('[voice] audio connection restored on attempt', index + 1);
+						return;
+					} catch (e) {
+						if (myGeneration !== generation) return;
+						console.warn('[voice] audio reconnect attempt', index + 1, 'failed:', e);
+					}
+				}
+				endStream(STREAM_DROPPED_MESSAGE, 'connection-dropped');
+			};
+			const stream = await open(false);
 			if (myGeneration !== generation) { await stream.close(); return; }
 			audioStream = stream;
 			applyMicMuted(get(voiceCallState).micMuted);

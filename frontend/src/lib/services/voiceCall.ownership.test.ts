@@ -10,7 +10,7 @@ vi.mock('./voiceAudioStream', () => ({
 		return streamed;
 	}),
 }));
-import { startCall, startCallForSession, hangup, voiceCallState, sendVoiceText, reconcileVoiceCall, confirmCallReplacement, toggleMic } from './voiceCall';
+import { startCall, startCallForSession, hangup, voiceCallState, sendVoiceText, reconcileVoiceCall, confirmCallReplacement, toggleMic, STREAM_DROPPED_MESSAGE, STREAM_RECONNECT_DELAYS_MS } from './voiceCall';
 
 let channel: EventTarget & { send: ReturnType<typeof vi.fn>; readyState: string; close: ReturnType<typeof vi.fn> };
 let track: { enabled: boolean; stop: ReturnType<typeof vi.fn> };
@@ -169,13 +169,59 @@ describe('voice owner lifecycle', () => {
 		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'provider-closed');
 		expect(console.info).toHaveBeenCalledWith('[voice] call ended:', 'provider-closed');
 	});
-	it('reports a client-side shutdown as an error with its own reason', async () => {
+	it('reopens a dropped audio connection on the same call', async () => {
 		vi.spyOn(console, 'info').mockImplementation(() => {});
 		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		const { openVoiceAudioStream } = await import('./voiceAudioStream');
+		toggleMic();
 		streamHandlers.current!.closed('The voice connection dropped.', 'connection-dropped');
-		await vi.waitFor(() => expect(get(voiceCallState).error).toBe('The voice connection dropped.'));
+		expect(get(voiceCallState).status).toBe('reconnecting');
+		await vi.waitFor(() => expect(get(voiceCallState).status).toBe('live'));
+		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(2);
+		expect(vi.mocked(openVoiceAudioStream).mock.calls[0][5]).toBe(false);
+		expect(vi.mocked(openVoiceAudioStream).mock.calls[1][5]).toBe(true);
+		expect(streamed.close).toHaveBeenCalledTimes(1); // The dropped stream's audio graph.
+		expect(streamed.muteInput).toHaveBeenLastCalledWith(true); // Mute survives the reconnect.
+		expect(api.hangupVoiceCall).not.toHaveBeenCalled();
+		expect(get(voiceCallState)).toMatchObject({ sessionId: 'owner', error: null, endReason: null });
+	});
+	it('ends the call with a plain message when the audio connection cannot be restored', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		const { openVoiceAudioStream } = await import('./voiceAudioStream');
+		for (const _ of STREAM_RECONNECT_DELAYS_MS) vi.mocked(openVoiceAudioStream).mockRejectedValueOnce(new Error('no close frame received or sent'));
+		vi.useFakeTimers();
+		try {
+			streamHandlers.current!.closed('The voice connection dropped.', 'connection-dropped');
+			await vi.advanceTimersByTimeAsync(STREAM_RECONNECT_DELAYS_MS.reduce((a, b) => a + b, 0) + 100);
+		} finally {
+			vi.useRealTimers();
+		}
+		await vi.waitFor(() => expect(get(voiceCallState).error).toBe(STREAM_DROPPED_MESSAGE));
+		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1 + STREAM_RECONNECT_DELAYS_MS.length);
 		expect(get(voiceCallState)).toMatchObject({ status: 'error', endReason: 'connection-dropped' });
+		expect(STREAM_DROPPED_MESSAGE).not.toContain('close frame');
 		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'connection-dropped');
+	});
+	it('stops reconnecting when the caller hangs up meanwhile', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		const { openVoiceAudioStream } = await import('./voiceAudioStream');
+		streamHandlers.current!.closed('The voice connection dropped.', 'connection-dropped');
+		await hangup();
+		await new Promise(resolve => setTimeout(resolve, STREAM_RECONNECT_DELAYS_MS[0] + 50));
+		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1);
+		expect(get(voiceCallState)).toMatchObject({ status: 'ended', endReason: 'user', error: null });
+	});
+	it('reports a server error on a streamed call without reconnecting', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		const { openVoiceAudioStream } = await import('./voiceAudioStream');
+		streamHandlers.current!.closed('The voice connection dropped and could not be restored.', 'provider-error');
+		await vi.waitFor(() => expect(get(voiceCallState).error).toBe('The voice connection dropped and could not be restored.'));
+		expect(get(voiceCallState)).toMatchObject({ status: 'error', endReason: 'provider-error' });
+		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1);
+		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'provider-error');
 	});
 	it('labels the End button hangup as the user ending the call', async () => {
 		vi.spyOn(console, 'info').mockImplementation(() => {});

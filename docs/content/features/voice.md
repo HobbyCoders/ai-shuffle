@@ -77,7 +77,7 @@ Voice audio and delegated tasks can use different accounts: OpenAI funds GPT Liv
 
 The Realtime cost display is an **estimate based on reported token usage**, including audio and text, not a flat per-minute conversation charge. It is not a combined bill for delegated work. GPT Live and PersonaPlex do not provide that Realtime estimate in the call dock; no displayed estimate does not mean the call is free. Check the provider's usage and pricing for actual charges. Generating voice previews also uses your OpenAI API account.
 
-**Max call minutes** limits call duration, not spending. Realtime's browser connection is renewed during longer calls while retaining the total call limit; that renewal behavior is not shared by the server-stream engines.
+**Max call minutes** limits call duration, not spending. Realtime's browser connection is renewed during longer calls while retaining the total call limit. GPT Live's connection is also kept going: the server opens a fresh provider session shortly before the current one expires, and reconnects on its own if the connection drops. The new session gets the saved conversation, so the call picks up where it left off. If the connection cannot be restored after a few tries, the call ends with a message saying so, and you can start it again. The same applies to the app's own connection to the server: if it drops during a GPT Live call, the call shows **reconnecting** while the app tries a few times to reopen it, and the new connection picks up from the saved conversation. PersonaPlex calls are not reconnected.
 
 ## API
 
@@ -87,6 +87,6 @@ The Realtime cost display is an **estimate based on reported token usage**, incl
 - `POST /api/v1/voice/sessions` — create a voice session. Realtime uses a short-lived browser credential; stream engines do not send the upstream API key to the browser.
 - `GET /api/v1/voice/sessions/{id}/config` — the session's saved voice binding.
 - `POST /api/v1/voice/sessions/{id}/secret`, `/call`, `/hangup`, `GET .../state` — the call lifecycle. Only Realtime needs a short-lived provider credential for the browser.
-- `WS /api/v1/voice/sessions/{id}/audio` — server-owned GPT Live and PersonaPlex audio transport.
+- `WS /api/v1/voice/sessions/{id}/audio` — server-owned GPT Live and PersonaPlex audio transport. `?resume=1` reopens a dropped call and replaces its leftover connection.
 
 The session routes above and the audio socket apply the same access check as other session requests: an API key can use only the voice sessions it started (and only within its project and agents), while the owner can use any. Workers the call hands work to run as the same key, on the key's agents only.

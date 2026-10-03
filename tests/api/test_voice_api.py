@@ -1704,6 +1704,56 @@ class TestVoiceFalKeyPolicy:
         assert fal_streams == [OWNER_FAL_KEY]
 
 
+class TestAudioResume:
+    """A browser reopening a dropped call replaces the leftover connection."""
+
+    @pytest.fixture
+    def leftover(self, monkeypatch):
+        import asyncio
+        from app.core import voice_stream
+
+        class _Leftover:
+            """A call whose browser socket died without the server noticing."""
+            def __init__(self):
+                self.closed = False
+                self.finished = asyncio.Event()
+
+            async def close(self):
+                self.closed = True
+                voice_stream.calls.pop(FAL_SESSION, None)  # run()'s cleanup
+                self.finished.set()
+
+        call = _Leftover()
+        monkeypatch.setitem(voice_stream.calls, FAL_SESSION, call)
+        return call
+
+    def test_plain_second_connection_is_still_refused(self, client, mock_db, fal_streams, leftover):
+        from starlette.websockets import WebSocketDisconnect
+
+        _fal_voice_setup(mock_db, policy="user_provided", user_key=USER_FAL_KEY)
+        with pytest.raises(WebSocketDisconnect) as refused:
+            with client.websocket_connect(f"{VOICE_ROOT}/sessions/{FAL_SESSION}/audio?token=aih_voice_key_a"):
+                pass
+        assert refused.value.code == 4409
+        assert not leftover.closed and fal_streams == []
+
+    def test_resume_replaces_the_leftover_connection(self, client, mock_db, fal_streams, leftover):
+        _fal_voice_setup(mock_db, policy="user_provided", user_key=USER_FAL_KEY)
+        with client.websocket_connect(f"{VOICE_ROOT}/sessions/{FAL_SESSION}/audio?token=aih_voice_key_a&resume=1"):
+            pass
+        assert leftover.closed
+        assert fal_streams == [USER_FAL_KEY]
+
+    def test_resume_cannot_end_another_users_call(self, client, mock_db, fal_streams, leftover):
+        from starlette.websockets import WebSocketDisconnect
+
+        _fal_voice_setup(mock_db, policy="user_provided", user_key=USER_FAL_KEY, api_user_id="key-b")
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(f"{VOICE_ROOT}/sessions/{FAL_SESSION}/audio?token=aih_voice_key_a&resume=1"):
+                pass
+        assert not leftover.closed and fal_streams == []
+
+
 
 
 class TestConversationAttachment:

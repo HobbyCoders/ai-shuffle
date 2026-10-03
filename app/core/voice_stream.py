@@ -15,6 +15,7 @@ from collections import deque
 
 from fastapi import WebSocket, WebSocketDisconnect
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -203,6 +204,53 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     return await run_sync(_turn_reply, session_id, turn_id) or "The chat task finished without a spoken result."
 
 
+LIVE_URL = "wss://api.openai.com/v1/live/sessions"
+# A dropped GPT Live connection is retried after each of these pauses before
+# the call ends. Every attempt (connect plus session start) has its own limit.
+RECONNECT_DELAYS = (0.5, 2.0, 5.0)
+RECONNECT_ATTEMPT_S = 25
+# Upper bound on restored connections in one call, so a provider that keeps
+# dropping cannot hold a call in a reconnect loop.
+MAX_RECONNECTS = 12
+# Renew a Live session this long before the expires_at it reports, at a quiet
+# moment if one comes, and no later than RENEW_LAST_S before expiry.
+RENEW_LEAD_S = 120
+RENEW_LAST_S = 15
+RENEW_QUIET_S = 1.5
+RENEW_MIN_AGE_S = 60
+# Delegation results and progress notes sent while the connection is being
+# restored wait for the new session. Microphone audio is never held.
+MAX_HELD_EVENTS = 64
+PROVIDER_CLOSE_RECONNECT = frozenset({"expired", "connection_lost"})
+RESUME_NOTE = ("The voice connection was renewed in the middle of this call. Continue the "
+               "conversation from where it left off. Do not greet the caller again.")
+DROPPED_MESSAGE = ("The voice connection dropped and could not be restored. "
+                   "Your conversation is saved; start the call again to keep talking.")
+CONNECT_FAILED_MESSAGE = "Could not connect to the voice provider. Try starting the call again."
+
+
+class VoiceConnectionLost(Exception):
+    """The provider connection dropped and every reconnect attempt failed."""
+
+
+def describe_close(exc: BaseException | None) -> str:
+    """Name a failure for the log, with the WebSocket close codes and reasons.
+
+    A dropped socket reads like "ConnectionClosedError: no close frame
+    received or sent" (the TCP connection ended without a WebSocket close
+    from either side) or "sent 1011 (internal error) keepalive ping timeout;
+    no close frame received" (our keepalive gave up), which is what tells the
+    causes apart afterwards.
+    """
+    if exc is None:
+        return "no error"
+    cause = exc.__cause__
+    if isinstance(exc, VoiceConnectionLost) and cause is not None:
+        return f"{exc} Last failure: {describe_close(cause)}"
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text[:200]}" if text else type(exc).__name__
+
+
 class VoiceStream:
     def __init__(self, websocket: WebSocket, row: dict, config: dict, api_key: str, max_minutes: int):
         self.websocket = websocket
@@ -217,6 +265,20 @@ class VoiceStream:
         self.upstream = None
         self.first_frame = None
         self.opening_event_id: str | None = None
+        # Provider connection lifecycle: GPT Live reconnects and renewals.
+        self.closed_event = asyncio.Event()
+        self.restoring = False
+        self.reconnects = 0
+        self.held: deque[dict] = deque()
+        self.stale_delegations: set[str] = set()
+        self.expires_at: float | None = None
+        self.provider_close_reason: str | None = None
+        self.last_drop: BaseException | None = None
+        # The browser's close code, logged when the browser leg ends the call.
+        self.browser_close: str | None = None
+        # Set once run() has cleaned up, so a reconnecting browser can wait
+        # for this call's last words to be stored (take_over).
+        self.finished = asyncio.Event()
         self.transcript: deque[dict] = deque(maxlen=200)
         self.pending = {"user": "", "assistant": ""}
         self.last_caption_at = 0.0
@@ -239,8 +301,41 @@ class VoiceStream:
         return self.config["model"] == LIVE_MODEL
 
     async def send(self, event: dict):
-        if not self.closed and self.upstream:
+        if self.closed:
+            return
+        if self.is_live and (self.upstream is None or (self.restoring and event.get("type") != "session.start")):
+            self.hold(event)
+            return
+        if not self.upstream:
+            return
+        did = event.get("delegation_id")
+        if did is not None and did in self.stale_delegations:
+            # The delegation belonged to a provider session that has since been
+            # replaced, so its result goes to the new session as plain commentary.
+            event = {**event, "delegation_id": None}
+        try:
             await self.upstream.send(json.dumps(event))
+        except ConnectionClosed:
+            if not self.is_live:
+                raise
+            # The reader sees the same closure and restores the connection.
+            self.hold(event)
+
+    def hold(self, event: dict):
+        """Keep a non-audio event for the next provider session."""
+        if event.get("type") in ("session.input_audio.append", "session.start"):
+            return
+        if len(self.held) >= MAX_HELD_EVENTS:
+            self.held.popleft()
+            logger.warning("Voice %s dropped a held provider event while reconnecting", self.session_id)
+        self.held.append(event)
+
+    async def send_held(self):
+        # Drain a snapshot: an event that fails again is held for the next session.
+        pending = list(self.held)
+        self.held.clear()
+        for event in pending:
+            await self.send(event)
 
     async def emit(self, event: dict):
         if not self.closed:
@@ -252,8 +347,13 @@ class VoiceStream:
             return
         self.closed = True
         self.connected = False
+        self.closed_event.set()
+        self.api_key = ""
         if self.upstream:
-            await self.upstream.close()
+            try:
+                await self.upstream.close()
+            except Exception:  # A dead provider socket must not block hang-up.
+                logger.debug("Voice %s: provider socket close failed", self.session_id, exc_info=True)
         try:
             await self.websocket.close()
         except (RuntimeError, WebSocketDisconnect):
@@ -460,6 +560,7 @@ class VoiceStream:
                 elif kind in ("error", "session.error"):
                     raise ValueError(str((event.get("error") or {}).get("message") or "The Live API rejected an event."))
                 elif kind == "session.closed":
+                    self.provider_close_reason = str(event.get("reason") or (event.get("session") or {}).get("reason") or "")
                     return
             else:
                 event = msgpack.unpackb(raw, raw=False) if isinstance(raw, bytes) else json.loads(raw)
@@ -519,6 +620,8 @@ class VoiceStream:
         while True:
             message = await self.websocket.receive()
             if message["type"] == "websocket.disconnect":
+                reason = message.get("reason")
+                self.browser_close = f"code {message.get('code')}" + (f", reason {reason!r}" if reason else "")
                 return
             data = message.get("bytes")
             if data is None:
@@ -562,12 +665,139 @@ class VoiceStream:
         event = json.loads(await asyncio.wait_for(self.upstream.recv(), 20))
         if event.get("type") != "session.started":
             raise ValueError(str((event.get("error") or {}).get("message") or "GPT Live did not start."))
+        expires_at = (event.get("session") or {}).get("expires_at")
+        self.expires_at = float(expires_at) if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool) else None
+        logger.info("Voice %s: GPT Live session started (expires in %s s)", self.session_id,
+                    int(self.expires_at - time.time()) if self.expires_at else "unknown")
+        if self.restoring:
+            return  # Never greet again after a reconnect.
         if self.options["opening"] and not history and self.config.get("greet", True):
             # Provider rejection is surfaced by receive_upstream, not silently
             # treated as spoken audio. Never greet again after conversation replay.
             event = live_opening_event(self.options["opening"])
             self.opening_event_id = event["event_id"]
             await self.send(event)
+
+    async def live_history(self, resumed: bool = False) -> list[dict]:
+        """The saved conversation as GPT Live start-up history.
+
+        A reconnect rebuilds it from everything stored so far, including this
+        call's own exchanges, so the new provider session carries on the talk.
+        """
+        from app.core.voice_bridge import build_context_seed
+        seed = await run_sync(build_context_seed, self.session_id)
+        if resumed:
+            seed = (seed + "\n\n" if seed else "") + RESUME_NOTE
+        return [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": seed}]}] if seed else []
+
+    async def renew_when_due(self):
+        """Return when the Live session should be replaced before it expires."""
+        expires_at = self.expires_at or 0.0
+        if expires_at - time.time() < RENEW_MIN_AGE_S + RENEW_LAST_S:
+            await self.closed_event.wait()  # Implausibly short; never churn sessions.
+            return
+        await asyncio.sleep(max(RENEW_MIN_AGE_S, expires_at - RENEW_LEAD_S - time.time()))
+        # Prefer a pause in the conversation over cutting off a sentence.
+        while time.time() < expires_at - RENEW_LAST_S and time.monotonic() - self.last_caption_at < RENEW_QUIET_S:
+            await asyncio.sleep(0.25)
+
+    def reconnect_reason(self, reader: asyncio.Task, done: set) -> str | None:
+        """Why the provider connection should be restored, or None to end the call."""
+        if self.closed or not self.is_live:
+            return None
+        if reader not in done:
+            return "renew"
+        if reader.cancelled():
+            return None
+        exc = reader.exception()
+        if isinstance(exc, ConnectionClosed) and not isinstance(exc, ConnectionClosedOK):
+            return "dropped"
+        if isinstance(exc, OSError) and not isinstance(exc, TimeoutError):
+            return "dropped"
+        if exc is None and self.provider_close_reason in PROVIDER_CLOSE_RECONNECT:
+            return self.provider_close_reason
+        return None
+
+    async def wait_closed(self, delay: float) -> bool:
+        try:
+            await asyncio.wait_for(self.closed_event.wait(), delay)
+        except TimeoutError:
+            pass
+        return self.closed
+
+    async def discard_upstream(self, old, graceful: bool):
+        try:
+            async with asyncio.timeout(3):
+                if graceful:
+                    await old.send(json.dumps({"type": "session.close"}))
+                await old.close()
+        except Exception:  # The old session is being replaced either way.
+            logger.debug("Voice %s: closing the replaced provider socket failed", self.session_id, exc_info=True)
+
+    async def restore_session(self, history: list[dict]):
+        upstream = await connect(LIVE_URL, additional_headers={"Authorization": "Bearer " + self.api_key},
+                                 open_timeout=RECONNECT_ATTEMPT_S, max_size=2_000_000)
+        if self.closed:
+            await upstream.close()
+            return
+        self.upstream = upstream
+        try:
+            await self.start_live(history)  # self.restoring: no greeting
+        except BaseException:
+            self.upstream = None
+            await self.discard_upstream(upstream, graceful=False)
+            raise
+
+    async def reconnect(self, reason: str, reader: asyncio.Task | None = None) -> None:
+        """Replace the GPT Live session and carry the call on.
+
+        Raises VoiceConnectionLost when every attempt fails. Returns early,
+        without a new session, when the call is hung up meanwhile.
+        """
+        old, self.upstream = self.upstream, None
+        self.connected = False
+        self.restoring = True
+        self.reconnects += 1
+        # Delegations of the old session do not exist in the new one; their
+        # results are delivered as plain commentary instead.
+        self.stale_delegations |= self.delegations
+        detail = ""
+        if reader is not None and reader.done() and not reader.cancelled() and reader.exception() is not None:
+            detail = f" ({describe_close(reader.exception())})"
+        elif reason in PROVIDER_CLOSE_RECONNECT:
+            detail = f" (provider session.closed, reason {reason})"
+        logger.warning("Voice %s: GPT Live connection %s after %d s%s; reconnecting (%d this call)",
+                       self.session_id, reason, int(time.time() - self.started_at), detail, self.reconnects)
+        self.provider_close_reason = None
+        self.expires_at = None
+        try:
+            if old is not None:
+                await self.discard_upstream(old, graceful=reason == "renew")
+            if self.reconnects > MAX_RECONNECTS:
+                raise VoiceConnectionLost("Too many reconnects in one call.")
+            await self.flush()  # The rebuilt history includes everything said so far.
+            history = await self.live_history(resumed=True)
+            for attempt, delay in enumerate(RECONNECT_DELAYS, 1):
+                if await self.wait_closed(delay):
+                    return
+                try:
+                    async with asyncio.timeout(RECONNECT_ATTEMPT_S):
+                        await self.restore_session(history)
+                except Exception as exc:  # noqa: BLE001 - every failure is retried, bounded
+                    self.last_drop = exc
+                    logger.warning("Voice %s: reconnect attempt %d of %d failed: %s", self.session_id,
+                                   attempt, len(RECONNECT_DELAYS), describe_close(exc))
+                    continue
+                if self.closed:
+                    return
+                self.restoring = False
+                self.connected = True
+                logger.info("Voice %s: GPT Live connection restored on attempt %d", self.session_id, attempt)
+                await self.send_held()
+                return
+            raise VoiceConnectionLost("Every reconnect attempt failed.") from self.last_drop
+        finally:
+            self.restoring = False
 
     async def report_quiet_end(self, *, upstream_ended: bool) -> None:
         """Say who ended a call that stopped without an error (#1671).
@@ -583,45 +813,69 @@ class VoiceStream:
             except (RuntimeError, WebSocketDisconnect):
                 pass
         else:
-            logger.info("Voice %s: the browser closed the audio connection", self.session_id)
+            logger.info("Voice %s: the browser closed the audio connection (%s)", self.session_id,
+                        self.browser_close or "no close code")
 
     async def run(self):
         tasks = []
-        url = "wss://api.openai.com/v1/live/sessions" if self.is_live else "wss://fal.run/fal-ai/personaplex/realtime"
+        provider = []
+        url = LIVE_URL if self.is_live else "wss://fal.run/fal-ai/personaplex/realtime"
         auth = ("Bearer " if self.is_live else "Key ") + self.api_key
+        if not self.is_live:
+            self.api_key = ""  # PersonaPlex is never reconnected; Live keeps it to reconnect.
         budget = asyncio.timeout(self.max_seconds)
         try:
             async with budget:
-                async with connect(url, additional_headers={"Authorization": auth}, open_timeout=45, max_size=2_000_000) as upstream:
-                    self.upstream = upstream
-                    self.api_key = ""
-                    if self.closed:
-                        return
-                    if self.is_live:
-                        from app.core.voice_bridge import build_context_seed
-                        seed = await run_sync(build_context_seed, self.session_id)
-                        history = ([{"type": "message", "role": "user", "content": [{"type": "input_text", "text": seed}]}] if seed else [])
-                        if seed:
-                            self.transcript.append({"role": "history", "text": seed, "offset_ms": 0})
-                        if self.options["delegation_type"] != "responses" or self.config.get("conversation_surface"):
-                            from app.core.voice_progress import VoiceProgress
-                            self.progress = VoiceProgress(self.session_id, self.send)
-                            await self.progress.open()
-                        await self.start_live(history)
-                    else:
-                        await self.prime_fal()
-                    self.connected = True
-                    if not self.config.get("conversation_surface"):
-                        await run_sync(database.update_session, self.session_id, launched_model=self.config["model"])
-                    await run_sync(database.set_session_active, self.session_id, True)
-                    await self.emit({"type": "ready", "model": self.config["model"], "sample_rate": 24000})
-                    tasks = [asyncio.create_task(self.receive_browser()), asyncio.create_task(self.receive_upstream()), asyncio.create_task(self.checkpoint())]
-                    if self.progress is not None:
-                        tasks.append(asyncio.create_task(self.progress.run()))
-                    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                upstream = await connect(url, additional_headers={"Authorization": auth}, open_timeout=45, max_size=2_000_000)
+                if self.closed:
+                    await upstream.close()
+                    return
+                self.upstream = upstream
+                if self.is_live:
+                    history = await self.live_history()
+                    if history:
+                        self.transcript.append({"role": "history", "text": history[0]["content"][0]["text"], "offset_ms": 0})
+                    if self.options["delegation_type"] != "responses" or self.config.get("conversation_surface"):
+                        from app.core.voice_progress import VoiceProgress
+                        self.progress = VoiceProgress(self.session_id, self.send)
+                        await self.progress.open()
+                    await self.start_live(history)
+                else:
+                    await self.prime_fal()
+                self.connected = True
+                if not self.config.get("conversation_surface"):
+                    await run_sync(database.update_session, self.session_id, launched_model=self.config["model"])
+                await run_sync(database.set_session_active, self.session_id, True)
+                await self.emit({"type": "ready", "model": self.config["model"], "sample_rate": 24000})
+                tasks = [asyncio.create_task(self.receive_browser()), asyncio.create_task(self.checkpoint())]
+                if self.progress is not None:
+                    tasks.append(asyncio.create_task(self.progress.run()))
+                while True:
+                    reader = asyncio.create_task(self.receive_upstream())
+                    provider = [reader]
+                    if self.is_live and self.expires_at:
+                        provider.append(asyncio.create_task(self.renew_when_due()))
+                    done, _ = await asyncio.wait(tasks + provider, return_when=asyncio.FIRST_COMPLETED)
+                    for task in provider:
+                        if task not in done:
+                            task.cancel()
+                    await asyncio.gather(*provider, return_exceptions=True)
+                    reason = None if done & set(tasks) else self.reconnect_reason(reader, done)
+                    if reason:
+                        restore = asyncio.create_task(self.reconnect(reason, reader))
+                        provider = [restore]
+                        done, _ = await asyncio.wait(tasks + provider, return_when=asyncio.FIRST_COMPLETED)
+                        if restore in done:
+                            restore.result()  # VoiceConnectionLost when every attempt failed.
+                            if self.closed:
+                                return  # Hung up while reconnecting.
+                            continue
+                        restore.cancel()
+                        await asyncio.gather(restore, return_exceptions=True)
                     for task in done:
                         task.result()
-                    await self.report_quiet_end(upstream_ended=tasks[1] in done)
+                    await self.report_quiet_end(upstream_ended=reader in done)
+                    return
         except TimeoutError:
             if budget.expired():
                 from app.core.voice_bridge import registry
@@ -633,23 +887,34 @@ class VoiceStream:
         except (WebSocketDisconnect, asyncio.CancelledError):
             pass
         except Exception as exc:
-            logger.warning("Voice audio stream failed for %s: %s", self.session_id, type(exc).__name__)
+            # The close codes and reasons say which side ended the socket and
+            # why ("no close frame received or sent" is a TCP-level drop).
+            logger.warning("Voice audio stream failed for %s after %d s: %s", self.session_id,
+                           int(time.time() - self.started_at), describe_close(exc))
+            # A dropped socket's library text ("no close frame received or
+            # sent") means nothing to a caller; name what happened instead.
+            message = str(exc)[:300]
+            if isinstance(exc, (VoiceConnectionLost, ConnectionClosed, OSError)):
+                message = DROPPED_MESSAGE if tasks else CONNECT_FAILED_MESSAGE
             try:
-                await self.emit({"type": "error", "message": str(exc)[:300]})
-            except (RuntimeError, WebSocketDisconnect):
-                pass
+                await self.emit({"type": "error", "message": message})
+            except (RuntimeError, WebSocketDisconnect, OSError):
+                pass  # The browser leg is gone as well; nobody is left to tell.
         finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            if self.progress is not None:
-                self.progress.close()
-            await self.close()
-            await self.flush()
-            if calls.get(self.session_id) is self:
-                calls.pop(self.session_id, None)
-                if not self.config.get("conversation_surface"):
-                    await run_sync(database.set_session_active, self.session_id, False)
+            try:
+                for task in tasks + provider:
+                    task.cancel()
+                await asyncio.gather(*tasks, *provider, return_exceptions=True)
+                if self.progress is not None:
+                    self.progress.close()
+                await self.close()
+                await self.flush()
+                if calls.get(self.session_id) is self:
+                    calls.pop(self.session_id, None)
+                    if not self.config.get("conversation_surface"):
+                        await run_sync(database.set_session_active, self.session_id, False)
+            finally:
+                self.finished.set()
 
 
 async def stop(session_id: str) -> bool:
@@ -657,6 +922,33 @@ async def stop(session_id: str) -> bool:
     if call:
         await call.close()
     return bool(call)
+
+
+TAKE_OVER_WAIT_S = 10
+_closing: set[asyncio.Task] = set()
+
+
+async def take_over(session_id: str) -> None:
+    """End a session's leftover call so a reconnecting browser can replace it.
+
+    A browser whose audio socket dropped reopens it with ``resume``. The
+    server may not have noticed the drop yet (a dead TCP connection can look
+    open for minutes, and the browser socket has no keepalive pings), so the
+    old call would refuse the new socket and keep its provider session open.
+    Waits, bounded, for the old call to store its last words so the new
+    provider session's history includes them.
+    """
+    call = calls.get(session_id)
+    if call is None:
+        return
+    logger.info("Voice %s: a reconnecting browser replaces the previous audio connection", session_id)
+    closing = asyncio.create_task(call.close())
+    _closing.add(closing)
+    closing.add_done_callback(_closing.discard)
+    try:
+        await asyncio.wait_for(call.finished.wait(), TAKE_OVER_WAIT_S)
+    except TimeoutError:
+        logger.warning("Voice %s: the previous audio connection did not finish within %d s", session_id, TAKE_OVER_WAIT_S)
 
 
 def state(session_id: str) -> dict | None:

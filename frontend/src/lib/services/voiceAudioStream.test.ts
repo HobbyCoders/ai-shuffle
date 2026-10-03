@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./voicePcm.worklet.js?url&no-inline', () => ({ default: '/voice-pcm.js' }));
-vi.mock('$lib/api/runtime', () => ({ wsUrl: (path: string) => 'ws://localhost' + path }));
+vi.mock('$lib/api/runtime', () => ({
+ wsUrl: (path: string, params: Record<string, string | null> = {}) => {
+  const query = new URLSearchParams(Object.entries(params).filter((entry): entry is [string, string] => entry[1] != null)).toString();
+  return 'ws://localhost' + path + (query ? '?' + query : '');
+ },
+}));
 import { DEFAULT_MIC_THRESHOLD_DB, MAX_PLAYBACK_AHEAD_S, MAX_UPLOAD_BUFFER, createInputGate, openVoiceAudioStream } from './voiceAudioStream';
 
 const nodes: any[] = [];
@@ -42,6 +47,13 @@ afterEach(() => vi.unstubAllGlobals());
 const handlers = () => ({ caption: vi.fn(), speaking: vi.fn(), closed: vi.fn() });
 
 describe('voice PCM stream', () => {
+ it('asks the server to replace a leftover connection only when reopening a dropped call', async () => {
+  const first = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
+  const reopened = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal, undefined, true);
+  expect(sockets[0].url).toBe('ws://localhost/api/v1/voice/sessions/owner/audio');
+  expect(sockets[1].url).toBe('ws://localhost/api/v1/voice/sessions/owner/audio?resume=1');
+  await first.close(); await reopened.close();
+ });
  it('admits typed attachment references only after the server acknowledges them', async () => {
   const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
   const sent = stream.sendText('Inspect /workspace/uploads/report.pdf');

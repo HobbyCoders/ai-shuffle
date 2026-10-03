@@ -1366,7 +1366,10 @@ async def get_voice_session_config(
 
 
 @router.websocket("/sessions/{session_id}/audio")
-async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optional[str] = Query(None)):
+async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optional[str] = Query(None),
+                             resume: Optional[str] = Query(None)):
+    """Stream a call's audio. ``resume=1`` reopens a dropped call: it replaces
+    the session's leftover audio connection instead of being refused."""
     from app.api.ws_auth import authenticate_websocket
     from app.api.ws_key_watch import watch_api_key
     from app.core import voice_stream
@@ -1385,6 +1388,10 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
             raise HTTPException(400, "This voice model uses WebRTC.")
         provider = await run_sync(_resolve_provider_row, config["provider_id"], None, api_user)
         key = await _provider_api_key(provider, api_user=api_user)
+        if resume == "1":
+            # The caller already has access to this session, which is all the
+            # hangup endpoint asks to end the same call.
+            await voice_stream.take_over(session_id)
         if session_id in voice_stream.calls:
             raise HTTPException(409, "This voice session already has an audio connection.")
         if len(voice_stream.calls) >= voice_stream.MAX_CONNECTIONS:
