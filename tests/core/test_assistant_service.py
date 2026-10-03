@@ -2,8 +2,155 @@
 import pytest
 
 from app.core import assistant_service as service, task_registry
+from app.core.config import settings
 from app.db import assistant as store, database, turns
-from tests.db.test_assistant_store import assistant_fixture, events
+from app.db import session_events as events_db
+from app.db.base import get_db
+from tests.db.test_assistant_store import assistant_fixture, events, lose_agent
+
+
+# ---------------------------------------------------------------------------
+# Moving an older assistant onto the built-in agent
+# ---------------------------------------------------------------------------
+
+TEXT_MODEL_AGENT = {"model": "gen-model", "provider": "gen-provider", "effort": "low", "avatar_id": "owl",
+                    "tool_selection_mode": "all", service.DEDICATED_KEY: True}
+
+
+def legacy_assistant(monkeypatch, agent_config, *, launched=None, home_model=None, account_agent="juniper"):
+    """An assistant saved by an older release: it ran on its own agent row."""
+    monkeypatch.setattr(settings, "instance_id", "assistant-test")
+    database.create_profile("juniper", "Juniper", None, agent_config)
+    home = database.create_session("legacy-home", "juniper", title=service.HOME_TITLE, is_active=True, hidden=True)
+    if launched:
+        database.update_session(session_id=home["id"], launched_model=launched)
+    if home_model:
+        database.set_session_run_binding(home["id"], model=home_model)
+    events_db.append_events(home["id"], [{"type": "message.user", "payload": {
+        "type": "message.user", "content": "Earlier conversation"}}])
+    with get_db() as conn:
+        store.write_account(conn, {"agent_id": account_agent, "introduction": {"preferred_name": "Ada"},
+                                   "sources": {"conn-elsewhere": True}})
+    store.configure(service.assistant_id(), {"agent_id": "juniper", "home_session_id": home["id"]})
+    return database.get_session(home["id"])
+
+
+@pytest.mark.parametrize("launched,home_model", [
+    ("gen-model", None),                         # Ran on the text model setup gave it.
+    (None, "prov:gen-provider:gen-model"),       # The composer echoed that same default.
+])
+def test_text_model_assistant_moves_to_the_builtin_agent_and_the_main_default(monkeypatch, launched, home_model):
+    home = legacy_assistant(monkeypatch, TEXT_MODEL_AGENT, launched=launched, home_model=home_model)
+    state = service.get_state()
+    assert state["agent_id"] == service.AGENT_ID and state["openable"]
+    assert (state["assistant_name"], state["avatar_id"]) == ("Juniper", "owl")
+    assert state["home_session_id"] == home["id"]
+    assert state["introduction"]["preferred_name"] == "Ada"
+    assert store.get_account()["sources"] == {"conn-elsewhere": True}
+    row = database.get_session(home["id"])
+    assert row["profile_id"] == service.AGENT_ID
+    assert (row["model"], row["provider_id"], row["launched_model"]) == (None, None, None)
+    assert [e["payload"]["content"] for e in events_db.get_events(home["id"], 0)] == ["Earlier conversation"]
+    # The old agent stays an ordinary agent; sessions may still use it.
+    assert database.get_profile("juniper") is not None
+    assert service.open_home()["id"] == home["id"]
+
+
+def test_a_model_the_owner_picked_survives_the_move(monkeypatch):
+    home = legacy_assistant(monkeypatch, TEXT_MODEL_AGENT, launched="gen-model", home_model="opus")
+    service.get_state()
+    row = database.get_session(home["id"])
+    assert (row["profile_id"], row["model"], row["provider_id"]) == (service.AGENT_ID, "opus", home["provider_id"])
+
+
+def test_a_custom_agents_model_survives_the_move(monkeypatch):
+    home = legacy_assistant(monkeypatch, {"model": "custom-model", "provider": "custom-provider", "avatar_id": "fox"},
+                            launched="custom-model")
+    state = service.get_state()
+    assert (state["assistant_name"], state["avatar_id"]) == ("Juniper", "fox")
+    row = database.get_session(home["id"])
+    assert (row["profile_id"], row["model"], row["provider_id"]) == (service.AGENT_ID, "custom-model", "custom-provider")
+    assert database.get_profile("juniper")["config"]["model"] == "custom-model"  # Untouched.
+
+
+def test_the_move_waits_for_a_live_home_turn(monkeypatch):
+    home = legacy_assistant(monkeypatch, TEXT_MODEL_AGENT, launched="gen-model")
+    turn = turns.enqueue_turn(home["id"], "user", prompt="In flight")
+    assert service.get_state()["agent_id"] == service.AGENT_ID
+    assert database.get_session(home["id"])["profile_id"] == "juniper"
+    turns.settle_turn(turn["id"], "completed")
+    service.reconcile()
+    row = database.get_session(home["id"])
+    assert (row["profile_id"], row["model"]) == (service.AGENT_ID, None)
+
+
+def test_a_peer_moved_account_takes_its_identity_from_this_workers_home(monkeypatch):
+    # Another worker moved the account first, without the old agent row.
+    home = legacy_assistant(monkeypatch, TEXT_MODEL_AGENT, launched="gen-model", account_agent=service.AGENT_ID)
+    state = service.get_state()
+    assert (state["assistant_name"], state["avatar_id"]) == ("Juniper", "owl")
+    assert database.get_session(home["id"])["profile_id"] == service.AGENT_ID
+
+
+def test_a_changed_builtin_agent_row_is_restored(assistant_fixture):
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE agents SET name='Edited', config=%s WHERE id=%s",
+                              ('{"model": "pinned", "system_prompt": "x"}', service.AGENT_ID))
+    service.reconcile()
+    agent = database.get_profile(service.AGENT_ID)
+    assert agent["name"] == service.AGENT_NAME and agent["config"] == service.AGENT_CONFIG and agent["is_builtin"]
+
+
+# ---------------------------------------------------------------------------
+# Prompt assembly: the home's instructions and delegation default
+# ---------------------------------------------------------------------------
+
+async def _assemble(session_id, profile_id):
+    from unittest.mock import AsyncMock
+    from app.core.provider import harness_adapter as ha
+    from app.core.query_options import build_options_from_profile
+    options, _ = build_options_from_profile(database.get_profile(profile_id), session_id=session_id)
+    adapter = ha.HarnessAdapter()
+    adapter.connect = AsyncMock()
+    await adapter.connect_with_sdk_options(options)
+    projected = adapter.connect.await_args.args[0]
+    return options, projected, "\n\n".join(ha._workflow_prompt_blocks(projected, None))
+
+
+@pytest.mark.asyncio
+async def test_home_prompt_has_the_assistant_block_and_delegates_by_default(assistant_fixture):
+    from app.core.agent_provider_models import DELEGATE_BY_DEFAULT, DELEGATE_WHEN_AUTHORIZED
+    from app.core.model_registry import DEFAULT_MODEL
+    database.set_system_setting("text_generation_model", "haiku")
+    service.configure({"assistant_name": "Juniper"})
+    options, projected, workflow = await _assemble(assistant_fixture["id"], service.AGENT_ID)
+    prompt = str(options.system_prompt)
+    assert service.HOME_INSTRUCTIONS in prompt and "Your name: Juniper." in prompt
+    for section in ("## Talk", "## Act", "## Report", "## Interrupts", "## Approvals", "## Corrections", "## Trust"):
+        assert section in prompt
+    assert projected.extra.get("assistant_home") is True
+    assert DELEGATE_BY_DEFAULT in workflow
+    assert "authorizes subagents" not in prompt + workflow
+    # The home runs on the main chat default, never the text-generation model.
+    assert options.model == DEFAULT_MODEL
+
+
+@pytest.mark.asyncio
+async def test_ordinary_session_prompt_is_unchanged(assistant_fixture):
+    from app.core.agent_provider_models import DELEGATE_BY_DEFAULT, DELEGATE_WHEN_AUTHORIZED
+    ordinary = database.create_session("ordinary-chat", "assistant-agent", is_active=True)
+    options, projected, workflow = await _assemble(ordinary["id"], "assistant-agent")
+    assert "# Personal assistant" not in str(options.system_prompt)
+    assert "assistant_home" not in projected.extra
+    assert DELEGATE_WHEN_AUTHORIZED in workflow and DELEGATE_BY_DEFAULT not in workflow
+    # A session started from the home is linked, not given the home's block.
+    child = database.create_session("linked-job", service.AGENT_ID, is_active=True)
+    service.link_job(assistant_fixture["id"], child["id"])
+    options, projected, workflow = await _assemble(child["id"], service.AGENT_ID)
+    assert "# Personal assistant" not in str(options.system_prompt)
+    assert "assistant_home" not in projected.extra and DELEGATE_WHEN_AUTHORIZED in workflow
+    # Its reply reaches the home on its own; it is not told to message it.
+    assert "session messaging" not in service.build_role_context(child["id"])
 
 
 def test_unconfigured_safe_empty():
@@ -11,22 +158,24 @@ def test_unconfigured_safe_empty():
     assert state["status"] == "unconfigured"
     assert state["agent_id"] is None and not state["enabled"]
     assert service.source_catalog() == []
-    with pytest.raises(ValueError, match="Choose"):
+    with pytest.raises(ValueError, match="Set up"):
         service.open_home()
+    assert not state["openable"] and state["home_session_id"] is None
 
 
 def test_stable_home_identity_and_onboarding_preserve_agent(assistant_fixture):
     assert service.open_home()["id"] == assistant_fixture["id"]
     assert service.is_primary_session(assistant_fixture["id"])
-    before = database.get_profile("assistant-agent")
+    before = database.get_profile(service.AGENT_ID)
     service.configure({"assistant_name": "Overseer", "avatar_id": "robot", "introduction": {"preferred_name": "Ada", "github_username": "ada", "repository_refs": ["ada/project"]}})
     service.configure({"introduction": {"notes": "Likes concise updates"}})
-    after = database.get_profile("assistant-agent")
-    assert after["name"] == "Overseer"
-    assert after["mcp_tools"] == before["mcp_tools"]
-    assert {k: v for k, v in after["config"].items() if k != "avatar_id"} == before["config"]
+    # The name and avatar are the assistant's own; the built-in agent is untouched.
+    assert database.get_profile(service.AGENT_ID) == before
+    state = service.get_state()
+    assert (state["assistant_name"], state["avatar_id"]) == ("Overseer", "robot")
     context = service.build_role_context(assistant_fixture["id"])
     assert "Ada" in context and "ada/project" in context and "not access grants" in context
+    assert "Your name: Overseer." in context
     assert service.get_state()["introduction"]["preferred_name"] == "Ada"
     assert service.open_home()["id"] == assistant_fixture["id"]
     service.configure({"introduction": {"github_username": "", "repository_refs": []}})
@@ -41,21 +190,14 @@ def test_persistent_home_cannot_settle_but_regular_sessions_can(assistant_fixtur
     assert not database.set_session_active(ordinary["id"], False)["is_active"]
 
 
-def test_changing_agent_preserves_home_not_prompt(assistant_fixture):
+def test_an_older_clients_agent_choice_is_accepted_and_ignored(assistant_fixture):
     database.create_profile("specialist", "Specialist", None, {"prompt": "Other prompt"})
-    service.configure({"agent_id": "specialist"})
+    state = service.configure({"agent_id": "specialist"})
+    assert state["agent_id"] == service.AGENT_ID
     home = service.open_home()
-    assert home["id"] == assistant_fixture["id"]
-    assert home["profile_id"] == "specialist"
+    assert home["id"] == assistant_fixture["id"] and home["profile_id"] == service.AGENT_ID
     assert database.get_profile("assistant-agent")["config"]["prompt"] == "Keep custom prompt"
-
-
-def test_live_home_agent_switch_refused(assistant_fixture):
-    database.create_profile("other", "Other", None, {})
-    turns.enqueue_turn(assistant_fixture["id"], "user", prompt="In flight")
-    with pytest.raises(ValueError, match="settle"):
-        service.configure({"agent_id": "other"})
-    assert service.get_state()["agent_id"] == "assistant-agent"
+    assert service.configure({"create_agent": True})["agent_id"] == service.AGENT_ID
 
 
 def test_proactive_provenance_revoke_and_forgery(assistant_fixture):
@@ -72,10 +214,10 @@ def test_proactive_provenance_revoke_and_forgery(assistant_fixture):
     store.configure(service.assistant_id(), {"paused": True, "enabled": False})
     service.reconcile()  # Sets enabled where the home is and ignores paused.
     assert service.assert_proactive_allowed(marker)["id"] == run["id"]
-    service.configure({"agent_id": None})
+    lose_agent()
     with pytest.raises(ValueError, match="missing its agent"):
         service.assert_proactive_allowed(marker)
-    service.configure({"agent_id": "assistant-agent"})
+    service.reconcile()  # The built-in agent is still there: projection restores it.
     assert service.assert_proactive_allowed(marker)["id"] == run["id"]
     database.update_connector("conn-mail", is_active=False)
     with pytest.raises(ValueError, match="grant"):
@@ -140,7 +282,7 @@ def test_dedicated_connector_credential_revocation_and_agent_scope(assistant_fix
     assert events(message_id="wrong-agent") == []
     with pytest.raises(ValueError, match="grant"):
         service.assert_proactive_allowed(marker)
-    database.update_api_user("mail-user", profile_ids=["assistant-agent"])
+    database.update_api_user("mail-user", profile_ids=[service.AGENT_ID])
     assert service.assert_proactive_allowed(marker)["id"] == run["id"]
     assert events(message_id="allowed-agent")
 

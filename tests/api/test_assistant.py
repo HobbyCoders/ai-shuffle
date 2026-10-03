@@ -3,7 +3,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api import assistant, auth, connectors, sessions
+from app.api import agents, assistant, auth, connectors, sessions
 from app.core import assistant_service as service, owner_auth
 from app.core.config import settings
 from app.db import assistant as store, database
@@ -28,6 +28,7 @@ def client(monkeypatch):
     app.include_router(assistant.router)
     app.include_router(connectors.router)
     app.include_router(sessions.router)
+    app.include_router(agents.router)
     with TestClient(LocalListener(app), base_url="http://127.0.0.1:8000", client=("127.0.0.1", 43210), headers={"Origin": "http://127.0.0.1:8000"}) as value:
         yield value
 
@@ -40,10 +41,12 @@ def test_safe_unconfigured_http_and_stable_open(client):
     assert client.get("/api/v1/assistant/activity").json() == []
     assert client.post("/api/v1/assistant/open").status_code == 409
     database.create_profile("assistant-agent", "Helper", None, {"prompt": "Retain custom instructions"})
+    # An older client still names an agent; it is accepted and ignored.
     updated = client.patch("/api/v1/assistant", json={"agent_id": "assistant-agent", "assistant_name": "Overseer", "avatar_id": "robot", "introduction": {"preferred_name": "Ada", "github_username": "", "repository_refs": []}})
     assert updated.status_code == 200
-    assert updated.json()["assistant_name"] == "Overseer"
+    assert updated.json()["assistant_name"] == "Overseer" and updated.json()["agent_id"] == service.AGENT_ID
     assert not updated.json()["enabled"]
+    assert database.get_profile("assistant-agent")["name"] == "Helper"
     first = client.post("/api/v1/assistant/open")
     second = client.post("/api/v1/assistant/open")
     assert first.status_code == 200
@@ -112,22 +115,6 @@ def test_identity_endpoint_rejects_unknown_agents_and_blank_names(client, assist
     assert renamed.status_code == 200 and renamed.json()["name"] == "Trimmed"
 
 
-@pytest.mark.parametrize("home_model,kept", [
-    (None, None), ("old-model", None), ("prov:old-provider:m", None), ("prov:new-provider:m", "prov:new-provider:m"),
-])
-def test_agent_switch_drops_the_old_agents_model(client, assistant_fixture, home_model, kept):
-    """The next home turn must not send the old provider's model to the new one."""
-    home_id = assistant_fixture["id"]
-    database.update_session(session_id=home_id, launched_model="old-model")
-    if home_model:
-        database.set_session_run_binding(home_id, model=home_model)
-    assert database.get_session(home_id)["model"] == home_model
-    database.create_profile("specialist", "Specialist", None, {"provider": "new-provider"})
-    assert client.patch("/api/v1/assistant", json={"agent_id": "specialist"}).status_code == 200
-    home = database.get_session(home_id)
-    assert (home["profile_id"], home["provider_id"]) == ("specialist", "new-provider")
-    assert home["model"] == kept and home["launched_model"] is None
-
 def test_owner_only_reads_writes_and_csrf(client, assistant_fixture):
     database.create_api_user("foreign", "Limited user", auth.hash_api_key("limited-key"))
     for path in ("", "/sources", "/activity"):
@@ -136,46 +123,103 @@ def test_owner_only_reads_writes_and_csrf(client, assistant_fixture):
     assert client.post("/api/v1/assistant/pause", headers={"Origin": "http://evil.example"}).status_code == 403
     client.headers.pop("Origin")
     assert client.post("/api/v1/assistant/pause").status_code == 403
-    assert service.get_state()["agent_id"] == "assistant-agent" and not service.get_state()["paused"]
+    assert service.get_state()["agent_id"] == service.AGENT_ID and not service.get_state()["paused"]
 
 
 def test_invalid_config_does_not_partially_change_identity(client, assistant_fixture):
-    response = client.patch("/api/v1/assistant", json={"assistant_name": "Must not stick", "agent_id": "no-such-agent"})
-    assert response.status_code == 404
-    assert database.get_profile("assistant-agent")["name"] == "Helper"
-    assert service.get_state()["agent_id"] == "assistant-agent"
+    before = service.get_state()["assistant_name"]
+    response = client.patch("/api/v1/assistant", json={"assistant_name": "Must not stick", "introduction": {"project_ids": ["no-such-project"]}})
+    assert response.status_code == 409
+    assert service.get_state()["assistant_name"] == before
+    assert service.get_state()["agent_id"] == service.AGENT_ID
 
 
-def test_minimal_setup_creates_a_dedicated_agent_on_the_text_generation_model(client):
+def test_minimal_setup_runs_on_the_builtin_agent_not_the_text_generation_model(client):
     database.set_system_setting("text_generation_model", "prov:gen-provider:gen-model")
     database.set_system_setting("text_generation_effort", "low")
     created = client.patch("/api/v1/assistant", json={"create_agent": True})
     assert created.status_code == 200
     state = created.json()
     assert state["configured"] and state["assistant_name"] == "Assistant"
-    assert state["avatar_id"] in service.AVATAR_PRESETS and state["agent"]["dedicated"]
-    agent = database.get_profile(state["agent_id"])
-    assert not agent["is_builtin"]
-    assert {k: agent["config"][k] for k in ("model", "provider", "effort", "tool_selection_mode")} == {
-        "model": "gen-model", "provider": "gen-provider", "effort": "low", "tool_selection_mode": "all"}
-    # A built-in guard does not apply: identity edits work on the new agent.
+    assert state["agent_id"] == service.AGENT_ID and state["agent"]["builtin"]
+    assert state["avatar_id"] in service.AVATAR_PRESETS
+    agent = database.get_profile(service.AGENT_ID)
+    assert agent["is_builtin"]
+    # Every tool and every subagent; no pinned model, provider or effort.
+    assert agent["config"] == {"tool_selection_mode": "all", "agent_invoke_mode": "all"}
     renamed = client.patch("/api/v1/assistant", json={"assistant_name": "Juniper", "avatar_id": "owl"})
-    assert renamed.status_code == 200 and renamed.json()["assistant_name"] == "Juniper"
-    assert renamed.json()["avatar_id"] == "owl"
-    # Asking again reuses the same agent rather than making a second one.
-    again = client.patch("/api/v1/assistant", json={"create_agent": True, "assistant_name": "Juniper"})
-    assert again.json()["agent_id"] == state["agent_id"]
-    assert sum(1 for a in client.get("/api/v1/assistant/agents").json() if a["dedicated"]) == 1
-    assert client.post("/api/v1/assistant/open").status_code == 200
-    assert client.patch("/api/v1/assistant", json={"create_agent": True, "agent_id": state["agent_id"]}).status_code == 409
+    assert renamed.status_code == 200
+    assert (renamed.json()["assistant_name"], renamed.json()["avatar_id"]) == ("Juniper", "owl")
+    assert database.get_profile(service.AGENT_ID)["name"] == service.AGENT_NAME
+    # Asking again keeps the name the owner chose.
+    again = client.patch("/api/v1/assistant", json={"create_agent": True})
+    assert again.json()["assistant_name"] == "Juniper" and again.json()["agent_id"] == service.AGENT_ID
+    # The home exists already and runs on the main chat default, not the text model.
+    home = database.get_session(state["home_session_id"])
+    assert home["profile_id"] == service.AGENT_ID
+    assert (home["model"], home["provider_id"], home["effort"]) == (None, None, None)
+    assert client.post("/api/v1/assistant/open").json()["session_id"] == home["id"]
 
 
-def test_new_agent_takes_the_chosen_name_and_avatar(client):
+def test_new_assistant_takes_the_chosen_name_and_avatar(client):
     created = client.patch("/api/v1/assistant", json={"create_agent": True, "assistant_name": "Pip", "avatar_id": "fox"})
     assert created.status_code == 200
-    agent = database.get_profile(created.json()["agent_id"])
-    assert agent["name"] == "Pip" and agent["config"]["avatar_id"] == "fox"
-    assert agent["id"] == "pip"
+    assert (created.json()["assistant_name"], created.json()["avatar_id"]) == ("Pip", "fox")
+    assert created.json()["agent"]["name"] == "Pip"
+    account = store.get_account()
+    assert (account["assistant_name"], account["avatar_id"]) == ("Pip", "fox")
+
+
+def test_builtin_agent_is_hidden_from_agent_lists_and_locked(client, assistant_fixture):
+    agent_id = service.AGENT_ID
+    assert agent_id not in {row["id"] for row in client.get("/api/v1/agents").json()}
+    assert agent_id not in {row["id"] for row in client.get("/api/v1/assistant/agents").json()}
+    assert agent_id not in {row["id"] for row in database.get_all_profiles()}
+    assert client.get(f"/api/v1/agents/{agent_id}").status_code == 200  # Readable by id.
+    assert client.put(f"/api/v1/agents/{agent_id}", json={"name": "Hijacked"}).status_code == 403
+    assert client.delete(f"/api/v1/agents/{agent_id}").status_code == 403
+    assert client.put(f"/api/v1/agents/{agent_id}/enabled-agents", json={"enabled_agents": []}).status_code == 403
+    assert client.patch(f"/api/v1/assistant/agents/{agent_id}/identity", json={"name": "Hijacked"}).status_code == 409
+    with pytest.raises(PermissionError):
+        database.update_profile(agent_id, name="Hijacked", allow_builtin=True)
+    with pytest.raises(PermissionError):
+        database.delete_profile(agent_id)
+    assert database.get_profile(agent_id)["name"] == service.AGENT_NAME
+    # Ordinary agents keep working as before.
+    assert client.put("/api/v1/agents/assistant-agent", json={"name": "Renamed"}).status_code == 200
+
+
+def test_state_is_openable_without_research_sources_and_creates_the_home(client, monkeypatch):
+    monkeypatch.setattr(service, "_guard_version", 1)
+    client.patch("/api/v1/assistant", json={"assistant_name": "Pip"})
+    # Simulate a home lost since setup: the next state read makes a new one.
+    store.configure(service.assistant_id(), {"home_session_id": None})
+    state = client.get("/api/v1/assistant").json()
+    assert state["status"] == "no_sources" and not state["enabled"]
+    assert state["openable"] and state["home_session_id"]
+    assert database.get_session(state["home_session_id"])["hidden"]
+    assert client.post("/api/v1/assistant/open").json()["session_id"] == state["home_session_id"]
+    assert client.get("/api/v1/assistant").json()["home_session_id"] == state["home_session_id"]
+
+
+def test_open_seeds_the_main_chat_model_once_and_keeps_the_owners_pick(client):
+    client.patch("/api/v1/assistant", json={"create_agent": True})
+    home_id = client.get("/api/v1/assistant").json()["home_session_id"]
+    # An unusable model is ignored rather than failing the open.
+    assert client.post("/api/v1/assistant/open", json={"model": "prov:no-such-provider:m"}).status_code == 200
+    assert client.post("/api/v1/assistant/open", json={"model": "made-up-model"}).status_code == 200
+    assert database.get_session(home_id)["model"] is None
+    opened = client.post("/api/v1/assistant/open", json={"model": "opus"})
+    assert opened.status_code == 200 and opened.json()["session"]["model"] == "opus"
+    # Later opens never override it; the composer's pick is what changes it.
+    client.post("/api/v1/assistant/open", json={"model": "haiku"})
+    assert database.get_session(home_id)["model"] == "opus"
+    database.set_session_run_binding(home_id, model="fable")
+    client.get("/api/v1/assistant")
+    client.post("/api/v1/assistant/open", json={"model": "haiku"})
+    assert database.get_session(home_id)["model"] == "fable"
+    assert service.home_model() == ("fable", None)
+    assert client.post("/api/v1/assistant/open", json={"unexpected": True}).status_code == 422
 
 
 def test_switches_and_limits_are_accepted_but_ignored(client, assistant_fixture, monkeypatch):

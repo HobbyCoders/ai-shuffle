@@ -230,6 +230,9 @@ def _create_profile_tools(is_admin: bool) -> list:
     async def update_profile(args: dict) -> dict:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
+        from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
+        if args.get("profile_id") == ASSISTANT_AGENT_ID:
+            return _error("The assistant's built-in agent cannot be changed or deleted.")
 
         def _read_merge_write():
             """READ-MODIFY-WRITE — must stay in ONE hop.
@@ -335,6 +338,9 @@ def _create_profile_tools(is_admin: bool) -> list:
     async def delete_profile(args: dict) -> dict:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
+        from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
+        if args.get("profile_id") == ASSISTANT_AGENT_ID:
+            return _error("The assistant's built-in agent cannot be changed or deleted.")
 
         if not args.get("confirm"):
             return _error("Deletion requires confirm=true.")

@@ -22,9 +22,9 @@ def test_start_links_normal_session_without_replacing_agent(assistant_fixture):
     turns.settle_turn(turn["id"], "completed")
     created = orch._queue(home, {"title": "Independent job", "prompt": "Research", "request_id": "job"}, "start")
     row = database.get_session(created["session_id"])
-    assert row["profile_id"] == "assistant-agent" and not row["is_worker"]
+    assert row["profile_id"] == service.AGENT_ID and not row["is_worker"]
     assert service.home_for_session(row["id"]) == home
-    assert service.build_role_context(home).startswith("Owner introduction")
+    assert service.build_role_context(home).startswith("# Personal assistant")
     assert home in service.build_role_context(row["id"])
     turns.settle_turn(created["turn_id"], "completed")
     reply = orch._queue(row["id"], {"session_id": home, "message": "Research complete", "request_id": "return"}, "message")

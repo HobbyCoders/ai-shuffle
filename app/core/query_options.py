@@ -1202,11 +1202,14 @@ def build_options_from_profile(
     if context_window not in context_window_choices(model_to_use, main_provider_row):
         context_window = None
 
-    from app.core.assistant_service import assert_proactive_allowed, build_role_context
+    from app.core.assistant_service import assert_proactive_allowed, build_role_context, is_primary_session
     from app.core.session_modes import narrow_tool_access_for_proactive
     assistant_proactive = overrides.get("_assistant_proactive")
     if assistant_proactive is not None:
         assert_proactive_allowed(assistant_proactive, session_id)
+    # The owner's persistent assistant home delegates by default; every other
+    # session keeps the authorize-first delegation line.
+    assistant_home = is_primary_session(session_id)
     final_system_prompt = _append_system_block(
         final_system_prompt, build_role_context(session_id),
     )
@@ -1781,6 +1784,7 @@ def build_options_from_profile(
     options.aih_session_id = session_id
     options.aih_profile_id = profile.get("id")
     options.aih_assistant_proactive = assistant_proactive
+    options.aih_assistant_home = assistant_home
     # Durable turn provenance must also survive SDK option rebuilding.
 
     # The volatile half of the app's <env> block — execution mode and the

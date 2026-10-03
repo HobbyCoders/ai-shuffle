@@ -58,9 +58,10 @@ def test_identity_syncs_but_each_worker_opens_its_own_hidden_home(workers, monke
     with b.active():
         state = service.get_state()
         assert state["configured"] and state["assistant_name"] == "Ada" and state["avatar_id"] == "fox"
-        assert state["home_session_id"] is None and state["runs_here"]
+        # Reading the state makes this worker's own home; it never adopts A's.
+        assert state["home_session_id"] not in (None, first["id"]) and state["runs_here"] and state["openable"]
         second = service.open_home()
-        assert second["id"] != first["id"] and service._owned_here(second)
+        assert second["id"] == state["home_session_id"] and service._owned_here(second)
         assert control.owner_of(second) is None
         assert service.open_home()["id"] == second["id"]
         assert service.brief_destination() == (second["id"], None)
@@ -228,7 +229,10 @@ def test_account_collection_keeps_wire_compatibility():
     from app.network import policy
     coll = policy.collection("assistant")
     assert coll.table == "assistant_account" and coll.mode == policy.MODE_SHARED
+    # The name and avatar were added later; peers on an older release ignore
+    # fields they do not know, and their records leave these columns alone.
     assert set(coll.hash_fields) == {"id", "agent_id", "enabled", "paused", "sources", "introduction",
-                                     "home_session_id", "home_device_id", "home_created_at"}
+                                     "home_session_id", "home_device_id", "home_created_at",
+                                     "assistant_name", "avatar_id"}
     assert not {"assistant_state", "assistant_sources", "assistant_runs", "assistant_events"} & {
         c.table for c in policy.COLLECTIONS.values()}

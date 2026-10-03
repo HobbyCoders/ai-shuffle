@@ -39,7 +39,9 @@ def provider_blocker(agent_id):
     if not profile:
         return "Assistant agent is unavailable"
     config = profile.get("config") or {}
-    provider_id = config.get("provider")
+    # The built-in assistant agent pins no provider; research runs on the
+    # home's model, so its provider is the one to check.
+    provider_id = service.home_model()[1] if agent_id == service.AGENT_ID else config.get("provider")
     if not provider_id:
         return credential_gate.turn_refusal("delegated")
     provider = database.get_model_provider(provider_id, include_token=True)
@@ -400,7 +402,10 @@ class AssistantManager:
         if not await run_sync(store.begin_dispatch, run["id"]):
             return
         if not run["session_id"]:
-            session = await run_sync(database.create_session, str(uuid.uuid4()), state["agent_id"], title="Assistant research", target_instance_id=state["runner_id"])
+            # Research runs on the model the owner chose for the assistant.
+            model = (await run_sync(service.home_model))[0] if state["agent_id"] == service.AGENT_ID else None
+            session = await run_sync(database.create_session, str(uuid.uuid4()), state["agent_id"], title="Assistant research",
+                                     target_instance_id=state["runner_id"], model=model)
             bound = await run_sync(store.bind_run_session, run["id"], session["id"])
             if not bound:
                 await run_sync(database.delete_session, session["id"])

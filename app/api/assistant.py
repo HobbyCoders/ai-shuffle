@@ -5,7 +5,7 @@ import asyncio
 import re
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.api.auth import require_admin
@@ -69,8 +69,9 @@ class Introduction(BaseModel):
 
 class Configuration(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # Older clients chose which agent runs the assistant. It always runs on
+    # its built-in agent now: either field only means "set the assistant up".
     agent_id: Optional[str] = Field(None, min_length=1, max_length=128)
-    # Create (or reuse) the dedicated assistant agent instead of naming one.
     create_agent: Optional[bool] = None
     enabled: Optional[bool] = None
     paused: Optional[bool] = None
@@ -94,6 +95,13 @@ class Configuration(BaseModel):
         if value is not None and value not in service.AVATAR_PRESETS:
             raise ValueError("Unknown avatar preset")
         return value
+
+
+class OpenRequest(BaseModel):
+    """``model`` is the client's main chat model (the composer's pick for new
+    chats). It seeds a home that has no model yet and is ignored otherwise."""
+    model_config = ConfigDict(extra="forbid")
+    model: Optional[str] = Field(None, max_length=300)
 
 
 class LimitsUpdate(BaseModel):
@@ -177,15 +185,15 @@ async def configure_assistant(body: Configuration):
     state = await _value_error_call(service.configure, changes)
     await assistant_manager.cancel_invalid_runs()
     assistant_manager.notify()
-    if "agent_id" in changes or "create_agent" in changes:
-        # A new or changed assistant learns about its owner right away.
+    if changes.keys() & {"agent_id", "create_agent", "assistant_name", "avatar_id"}:
+        # A new assistant learns about its owner right away.
         assistant_manager.detect_owner()
     return state
 
 
 @router.post("/open")
-async def open_assistant():
-    session = await _value_error_call(service.open_home)
+async def open_assistant(body: Optional[OpenRequest] = Body(None)):
+    session = await _value_error_call(service.open_home, body.model if body else None)
     return {"session_id": session["id"], "home_session_id": session["id"], "session": session}
 
 

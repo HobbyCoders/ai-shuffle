@@ -204,6 +204,7 @@ def delete_subagent(subagent_id: str) -> bool:
 
 def set_subagent_builtin(subagent_id: str, is_builtin: bool) -> bool:
     """Set the is_builtin flag on the agent row"""
+    _agents_db._refuse_assistant_agent(subagent_id)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(

@@ -79,6 +79,17 @@ class UnifiedSubagentItem(BaseModel):
     source_name: Optional[str] = Field(None, description="Name of the source (e.g., plugin name)")
 
 
+def _refuse_assistant_agent(*agent_ids: str) -> None:
+    """403 for the assistant's built-in agent: the app defines it, owners do not edit it."""
+    from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
+
+    if ASSISTANT_AGENT_ID in agent_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The assistant's built-in agent cannot be changed or deleted",
+        )
+
+
 def _check_profile_modified(profile: dict) -> None:
     """Set is_modified on a built-in agent by comparing to its defaults.
 
@@ -483,6 +494,7 @@ async def create_profile_agent(
     Create a new subagent and enable it for the profile.
     This creates a global subagent and adds it to the profile's enabled_agents.
     """
+    _refuse_assistant_agent(profile_id)
     def _load() -> SubagentResponse:
         """Existence check, insert and the profile update in ONE hop.
 
@@ -563,6 +575,7 @@ async def update_profile_agent(
     """
     Update a subagent. The agent_name can be the subagent ID or name.
     """
+    _refuse_assistant_agent(profile_id, agent_name)
     def _load() -> SubagentResponse:
         """Profile read, id/name resolution and the update in ONE hop.
 
@@ -631,6 +644,7 @@ async def delete_profile_agent(
     Delete a subagent and remove it from the profile's enabled agents.
     The agent_name can be the subagent ID or name.
     """
+    _refuse_assistant_agent(profile_id, agent_name)
     def _load() -> None:
         """Lookup, automation guard, profile update and delete in ONE hop.
 
@@ -741,6 +755,7 @@ async def update_profile(
     raw_config = None
     if http_request is not None:
         raw_config = (await http_request.json()).get("config")
+    _refuse_assistant_agent(profile_id)
     def _load() -> dict:
         """Existence check + update in ONE hop (the check gates the write).
         """
@@ -778,6 +793,7 @@ async def update_profile(
 @router.delete("/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_profile(profile_id: str, token: str = Depends(require_admin)):
     """Delete a profile - Admin only. Built-in profiles cannot be deleted."""
+    _refuse_assistant_agent(profile_id)
     def _load() -> None:
         """Existence check, built-in guard, automation guard and delete in ONE hop.
 
@@ -819,6 +835,7 @@ async def restore_profile_defaults(
     Only built-in subagents (defined in BUILTIN_SUBAGENTS) can be restored.
     Custom profiles cannot be restored (they have no defaults to restore to).
     """
+    _refuse_assistant_agent(profile_id)
     def _load() -> dict:
         """Existence/built-in checks and the restoring update in ONE hop."""
         existing = database.get_profile(profile_id)
@@ -891,6 +908,7 @@ async def update_enabled_agents(
     token: str = Depends(require_admin)
 ):
     """Update the list of enabled subagent IDs for a profile - Admin only"""
+    _refuse_assistant_agent(profile_id)
     def _load() -> list[str]:
         """Profile read, subagent-id validation and the write in ONE hop.
 
@@ -934,6 +952,7 @@ async def enable_subagent(
     token: str = Depends(require_admin)
 ):
     """Enable a subagent for a profile - Admin only"""
+    _refuse_assistant_agent(profile_id)
     def _load() -> dict:
         """Profile read, subagent existence check and the write in ONE hop.
 
@@ -976,6 +995,7 @@ async def disable_subagent(
     token: str = Depends(require_admin)
 ):
     """Disable a subagent for a profile - Admin only"""
+    _refuse_assistant_agent(profile_id)
     def _load() -> dict:
         """Profile read plus the read-modify-write of enabled_agents in ONE hop.
         """

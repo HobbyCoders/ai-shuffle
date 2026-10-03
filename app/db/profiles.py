@@ -42,15 +42,35 @@ def get_profile(profile_id: str) -> Optional[ProfileRow]:
 
 
 def get_all_profiles() -> List[ProfileRow]:
-    """Get all profiles"""
+    """Get all profiles.
+
+    The persistent assistant's built-in agent is left out: it runs only the
+    assistant's home and research, so it never appears in agent pickers,
+    the Agents page, Task rosters or "first agent" fallbacks. Look it up by
+    id with ``get_profile``.
+    """
+    from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
+
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM agents ORDER BY is_builtin DESC, name ASC")
+        cursor.execute("SELECT * FROM agents WHERE id <> %s ORDER BY is_builtin DESC, name ASC",
+                       (ASSISTANT_AGENT_ID,))
         rows = rows_to_list(cursor.fetchall())
         for row in rows:
             row["config"] = json.loads(row["config"]) if isinstance(row["config"], str) else (row["config"] if row["config"] is not None else {})
             row["mcp_tools"] = json.loads(row["mcp_tools"]) if isinstance(row["mcp_tools"], str) else (row["mcp_tools"] if row["mcp_tools"] is not None else [])
         return rows
+
+
+def _refuse_assistant_agent(profile_id: str) -> None:
+    """The assistant's built-in agent is app-defined: no owner edits or deletes.
+
+    ``assistant_service.ensure_agent`` writes it directly, outside these helpers.
+    """
+    from app.db.assistant import AGENT_ID as ASSISTANT_AGENT_ID
+
+    if profile_id == ASSISTANT_AGENT_ID:
+        raise PermissionError("The assistant's built-in agent cannot be changed or deleted")
 
 
 def create_profile(
@@ -96,6 +116,7 @@ def update_profile(
         config: Optional new config
         allow_builtin: If True, allows updating builtin profiles (for migrations)
     """
+    _refuse_assistant_agent(profile_id)
     existing = get_profile(profile_id)
     if not existing:
         return None
@@ -139,6 +160,7 @@ def delete_profile(profile_id: str) -> bool:
     Sessions are preserved when a profile is deleted - their profile_id is set to NULL.
     This allows users to keep their chat history even after deleting a profile.
     """
+    _refuse_assistant_agent(profile_id)
     existing = get_profile(profile_id)
     if not existing:
         return False
@@ -178,6 +200,7 @@ def get_all_profile_session_counts() -> Dict[str, int]:
 
 def set_profile_builtin(profile_id: str, is_builtin: bool) -> bool:
     """Set the is_builtin flag for a profile"""
+    _refuse_assistant_agent(profile_id)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(

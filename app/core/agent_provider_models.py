@@ -775,11 +775,25 @@ def file_subagent_targets(
     return tuple(targets)
 
 
+# The owner's persistent assistant hands work off without waiting to be told;
+# every other session waits for the user to authorize subagents.
+DELEGATE_WHEN_AUTHORIZED = "Delegate only when the user authorizes subagents. "
+DELEGATE_BY_DEFAULT = (
+    "Delegate by default: hand work that will take more than a few minutes, "
+    "or that needs a checkout, to a subagent without asking first. "
+)
+
+
 def parent_subagent_guidance(
     *, task_available: bool = True, swarm_available: bool = True,
     monitor_available: bool = True, browser_available: bool = True,
+    delegate_by_default: bool = False,
 ) -> str:
-    """Describe only workflows exposed by this session's effective surface."""
+    """Describe only workflows exposed by this session's effective surface.
+
+    ``delegate_by_default`` is for the assistant's home only: it replaces the
+    authorize-first delegation line.
+    """
     from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_SUMMARY, SWARM_ROUTING
 
     parts = []
@@ -796,7 +810,7 @@ def parent_subagent_guidance(
             "scope and expected result. Choose the role that matches the work: "
             "rendered UI belongs to the frontend role when present, not a "
             "backend-only worker. Handle quick direct work yourself. "
-            "Delegate only when the user authorizes subagents. "
+            + (DELEGATE_BY_DEFAULT if delegate_by_default else DELEGATE_WHEN_AUTHORIZED)
             # The full checkout contract rides the Task/Swarm descriptions;
             # repeating it here would resend it every turn.
             + SUBAGENT_WORKTREE_SUMMARY + "\n"

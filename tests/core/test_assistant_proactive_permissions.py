@@ -11,7 +11,7 @@ from app.core.provider import harness_adapter as ha
 from app.core.provider.types import SessionOptions
 from app.db import assistant as store, database, turns
 from fluid.tools.registry import ToolRegistry, ToolSpec, ToolOutcome
-from tests.db.test_assistant_store import assistant_fixture  # noqa: F401 — producer dependency
+from tests.db.test_assistant_store import assistant_fixture, lose_agent  # noqa: F401 — producer dependency
 from tests.core.test_assistant_manager import producer  # noqa: F401 — fixture with real connector callbacks
 
 
@@ -62,7 +62,7 @@ async def test_dispatch_ceiling_ignores_bypass_safe_risk_and_registry_escape(adm
     assert "Ignore permissions" in data["events"][0]["payload"]["data"]
     denied = await registry.dispatch("AssistantReadSource", {"source_id": "ungranted"})
     assert denied.is_error and "opted-in" in denied.text
-    service.configure({"agent_id": None})
+    lose_agent()
     revoked = await registry.dispatch("WebSearch", {"query": "test"})
     assert revoked.is_error and "missing its agent" in revoked.text
 
@@ -98,7 +98,7 @@ async def test_running_registry_rechecks_live_source_and_session_scope(admitted,
     })
     registry = await ha.HarnessAdapter()._build_registry(options, native=True)
     if change == "agent":
-        service.configure({"agent_id": None})
+        lose_agent()
     elif change == "optout":
         service.set_source("conn-mail", False)
     elif change == "credential":
@@ -160,7 +160,7 @@ async def test_native_connect_builds_no_kernel_or_learning_surface(admitted, mon
     })
     await adapter.connect(opts)
     assert adapter._engine._codemode is None
-    service.configure({"agent_id": None})
+    lose_agent()
     with pytest.raises(ValueError, match="missing its agent"):
         await adapter.send_query("Continue")
     await adapter.disconnect()

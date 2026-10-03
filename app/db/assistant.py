@@ -61,8 +61,14 @@ SCRUBBED_PAYLOAD = json.dumps({"retention_scrubbed": True})
 # The owner's single assistant row. Every worker uses the same key, so the
 # synced row is one record across the network.
 ACCOUNT_ID = "owner"
+# The built-in agent the assistant always runs on (assistant_service owns its
+# definition). The underscore keeps it out of the id space agent creation
+# uses ([a-z0-9-]), so no owner agent can already hold it. Agent lists leave
+# it out and agent editors refuse it: it is not a chat agent.
+AGENT_ID = "builtin_assistant"
 ACCOUNT_DEFAULTS = dict(agent_id=None, enabled=False, paused=False, sources={}, introduction={},
-                        home_session_id=None, home_device_id=None, home_created_at=None)
+                        home_session_id=None, home_device_id=None, home_created_at=None,
+                        assistant_name=None, avatar_id=None)
 
 
 def now():
@@ -128,6 +134,12 @@ def create_schema(cursor):
         home_session_id TEXT, home_device_id TEXT, home_created_at TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
+    # The assistant's own name and avatar. They used to live on the agent it
+    # ran on; it now runs on a built-in agent nobody edits. NULL on an account
+    # saved before this until reconcile copies them from the old agent.
+    for column in ("assistant_name", "avatar_id"):
+        if not column_exists(cursor, "assistant_account", column):
+            cursor.execute(f"ALTER TABLE assistant_account ADD COLUMN {column} TEXT")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_events_pending ON assistant_events(assistant_id, status, observed_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_runs_status ON assistant_runs(assistant_id, status, created_at)")
 

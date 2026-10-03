@@ -9,7 +9,7 @@ from app.core.connectors.gmail import GmailConnector
 from app.core.connectors.manager import connector_manager
 from app.core.automation_manager import automation_manager
 from app.db import assistant as store, database, turns
-from tests.db.test_assistant_store import assistant_fixture, events
+from tests.db.test_assistant_store import assistant_fixture, events, lose_agent
 
 
 class MailSDK:
@@ -478,7 +478,7 @@ async def test_cancel_after_completion_preserves_outcome_and_reported_cost(produ
         await manager.shutdown()
     else:
         if revocation == "agent":
-            service.configure({"agent_id": None})
+            lose_agent()
         else:
             service.set_source("conn-mail", False)
         await manager.cancel_invalid_runs()

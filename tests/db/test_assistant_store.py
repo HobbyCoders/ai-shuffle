@@ -33,6 +33,15 @@ def assistant_fixture(monkeypatch):
     return home
 
 
+def lose_agent():
+    """The runner row as it is once its agent row is gone (ON DELETE SET NULL).
+
+    Owners cannot remove the built-in assistant agent any more, so tests that
+    check revocation on a missing agent put the runner row in that state.
+    """
+    store.configure(service.assistant_id(), {"agent_id": None})
+
+
 def tune(monkeypatch, **limits):
     """Research limits are fixed in code, so tests change them there."""
     for key, value in limits.items():

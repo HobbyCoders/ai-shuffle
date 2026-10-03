@@ -1173,6 +1173,10 @@ class HarnessAdapter(ProviderAdapter):
         proactive = getattr(sdk_options, "aih_assistant_proactive", None)
         if proactive is not None:
             opts.extra["assistant_proactive"] = proactive
+        # The owner's persistent assistant home: it delegates by default
+        # (see _workflow_prompt_blocks). Only stamped when true.
+        if getattr(sdk_options, "aih_assistant_home", False):
+            opts.extra["assistant_home"] = True
         # Whether the install's gh CLI is present and signed in (stamped by
         # query_options as ``aih_github_connected``, behind a TTL cache). Only
         # forwarded when true — the prompt's "# GitHub" section exists solely to
@@ -4122,6 +4126,7 @@ def _workflow_prompt_blocks(
             "browser_navigate", "browser_snapshot", "browser_eval", "browser_act",
             "browser_screenshot", "browser_resize",
         )),
+        delegate_by_default=bool(extra.get("assistant_home")),
     )
     worker = subagent_system_prompt(
         extra.get("app_session_id"), task_available=available("Task")
