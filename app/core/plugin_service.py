@@ -95,9 +95,10 @@ def _service_components(record) -> List[Dict[str, Any]]:
     """The outside services a plugin declares (``extensions["ai.shuffle"].services``),
     one ``service`` component per name, so Settings can show what it will ask
     access to. A declared OAuth sign-in (``auth``) is shown in ``detail`` as
-    where the owner signs in and which scopes it asks for; one the validator
-    refuses is marked unsupported with the reason. A declaration holds no
-    credential and grants nothing."""
+    where the owner signs in, which scopes it asks for and which client it
+    uses (the plugin's shipped public client ID, automatic registration);
+    one the validator refuses is marked unsupported with the reason. A
+    declaration holds no credential and grants nothing."""
     from fluid.context.plugin_authoring import (
         PluginDraftError,
         check_service_auth,
@@ -123,7 +124,7 @@ def _service_components(record) -> List[Dict[str, Any]]:
             url = item.get("url") if isinstance(item.get("url"), str) else ""
             try:
                 component["detail"] = describe_service_auth(
-                    check_service_auth(component["name"], url, item["auth"]))[:500]
+                    check_service_auth(component["name"], url, item["auth"]))[:1200]
             except PluginDraftError as exc:
                 component["support"] = "unsupported"
                 component["reason"] = f"sign-in declaration refused: {exc}"[:500]

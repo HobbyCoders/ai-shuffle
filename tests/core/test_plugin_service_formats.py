@@ -224,6 +224,9 @@ def test_a_declared_sign_in_shows_its_host_and_scopes(svc):
              "auth": {**auth, "token_url": "https://evil.net/token"}},
             {"name": "leaky", "url": "https://api.example.com", "access": "read", "purpose": "DNS",
              "auth": {**auth, "client_secret": "never-shown-secret"}},
+            {"name": "shipped", "url": "https://api.example.com", "access": "read", "purpose": "DNS",
+             "auth": {**auth, "client_id": "public-client-1",
+                      "registration_url": "https://dash.example.com/oauth2/register"}},
         ]}},
     })
     _write(root / "skills" / "dns" / "SKILL.md", "---\nname: dns\ndescription: d\n---\n")
@@ -235,6 +238,10 @@ def test_a_declared_sign_in_shows_its_host_and_scopes(svc):
         "kind": "service", "name": "example", "support": "loaded", "reason": "",
         "detail": "signs in with OAuth at dash.example.com; scopes: zone:read",
     }
+    # What the owner approves includes the shipped client and the registration address.
+    assert services["shipped"]["detail"] == (
+        "signs in with OAuth at dash.example.com; scopes: zone:read; uses the plugin's public client ID "
+        "public-client-1; registers its own client at https://dash.example.com/oauth2/register")
     assert services["elsewhere"]["support"] == "unsupported"
     assert "token_url must be on example.com" in services["elsewhere"]["reason"]
     assert services["leaky"]["support"] == "unsupported"

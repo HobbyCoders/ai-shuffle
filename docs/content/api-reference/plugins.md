@@ -483,11 +483,15 @@ Returns `409` if there is no previous version, if any connection of this type is
 
 ## Service sign-in (OAuth)
 
-A plugin can declare an outside service it needs and how the owner signs in to it: `extensions["ai.shuffle"].services[].auth` with OAuth 2.0 authorization code and PKCE, public endpoints and scope names only (see [Plugin format](/docs/features/plugins)). The owner supplies the OAuth client and signs in through these endpoints. The client and the tokens are stored encrypted on this worker and are never copied to other devices; each worker signs in on its own. No endpoint returns a client secret, an authorization code or a token.
+A plugin can declare an outside service it needs and how the owner signs in to it: `extensions["ai.shuffle"].services[].auth` with OAuth 2.0 authorization code and PKCE, public endpoints and scope names only (see [Plugin format](/docs/features/plugins)). The owner signs in through these endpoints.
+
+**Which OAuth client.** A sign-in uses, in order: the client the owner saved with `PUT /client`; else the public `client_id` the plugin ships; else a public client the worker registers at the plugin's `registration_url` (RFC 7591: `token_endpoint_auth_method` `none`, the return address in use, the `authorization_code` and `refresh_token` grants, the declared scopes). A client is registered the first time a sign-in starts from a return address it has not been registered for, and is kept for that address. If the provider refuses a registration, `/start` returns `409` and the service shows `not_configured` with `reason` `registration_failed` for an hour before registering is tried again; entering a client works at once. A provider that cannot be reached returns `502` and is tried again on the next start.
+
+The owner's client, registered clients and the tokens are stored encrypted on this worker and are never copied to other devices; each worker signs in on its own. No endpoint returns a client secret, an authorization code or a token.
 
 Only a plugin that is switched on and approved can start a sign-in. An agent cannot sign in, enter a client or read a token; it asks with `RequestChatAccess(kind="service", plugin, service)` and receives a grant handle (see [Private Access](/docs/api-reference/sessions#private-access)).
 
-**Return address.** The sign-in returns to `<address>/api/v1/plugins/oauth/callback`, where `<address>` is the address your browser uses to reach this worker, the same way the Gmail connector forms its redirect URI. Register that exact URL as a redirect URI in the provider's OAuth app. It must be `https://` or `http://localhost` (or `127.0.0.1`); a plain `http://` LAN address is refused. Each address you sign in from (for example the desktop app on `http://localhost:8000` and the worker's HTTPS remote access address) is a separate redirect URI, and the sign-in fails at the provider for an address you did not register. `GET /status` shows the address for the current connection in `redirect_uri`.
+**Return address.** The sign-in returns to `<address>/api/v1/plugins/oauth/callback`, where `<address>` is the address your browser uses to reach this worker, the same way the Gmail connector forms its redirect URI. It must be `https://` or `http://localhost` (or `127.0.0.1`); a plain `http://` LAN address is refused. Each address you sign in from (for example the desktop app on `http://127.0.0.1:8000` and the worker's HTTPS remote access address) is a separate redirect URI, and the sign-in fails at the provider for an address the client was not registered for. With a client you entered, register each exact URL in the provider's OAuth app. A plugin's shipped `client_id` works only from the addresses its author registered, typically `http://127.0.0.1:8000/api/v1/plugins/oauth/callback` for the desktop app. A registered client is registered for each address automatically. `GET /status` shows the address for the current connection in `redirect_uri`.
 
 **Auth:** Owner only. `PUT /client` additionally needs the desktop app window, the worker's HTTPS address or a browser on the worker's own machine, as for private access inputs; other connections get `403`.
 
@@ -507,6 +511,7 @@ Query: `plugin` (the plugin ID) and optionally `service`. Without `service`, lis
       "state": "signed_in",
       "reason": "",
       "client_configured": true,
+      "client_source": "owner",
       "client_id": "abc123",
       "requested_scopes": ["zone:read"],
       "scopes": ["zone:read"],
@@ -514,13 +519,23 @@ Query: `plugin` (the plugin ID) and optionally `service`. Without `service`, lis
       "expires_at": 1790000000.0,
       "can_refresh": true,
       "access": "read",
-      "authorize_host": "dash.cloudflare.com"
+      "authorize_host": "dash.cloudflare.com",
+      "plugin_client_id": "",
+      "registration_url": ""
     }
   ]
 }
 ```
 
-`enabled` is true when the plugin is switched on and approved. `state` is `not_configured` (no OAuth client yet), `signed_out`, `signed_in`, `needs_sign_in` or `invalid` (the plugin's declaration fails validation and cannot be used). For `needs_sign_in`, `reason` is `scopes_widened`, `endpoint_changed`, `client_changed`, `expired` or `unreadable`. `access` is the declared access, `read` (GET and HEAD) or `write`. Returns `404` for a plugin that is not installed or a service it does not declare a sign-in for.
+`enabled` is true when the plugin is switched on and approved. `state` is one of:
+
+- `not_configured`: there is no client, so the owner must enter one with `PUT /client`. `reason` is `registration_failed` when the plugin has a `registration_url` but the provider refused the registration.
+- `signed_out`: ready to sign in. With `client_source` `plugin` or `registered` this needs no setup; with `owner` it uses the owner's client.
+- `signed_in`.
+- `needs_sign_in`: sign in again. `reason` is `scopes_widened`, `endpoint_changed` (an authorize, token, revocation or registration address changed), `client_changed` (the shipped `client_id` changed, or the client that issued the sign-in is no longer the one in use), `expired` or `unreadable`.
+- `invalid`: the plugin's declaration fails validation and cannot be used.
+
+`client_source` says where the client comes from: `owner` (entered by the owner; it wins), `plugin` (the plugin's shipped `client_id`), `registered` (registered automatically at the plugin's `registration_url`; also shown before the first registration) or `none`. `client_configured` is true when the owner saved a client, and `client_id` is that client's ID (empty otherwise). `plugin_client_id` and `registration_url` are what the plugin declares (empty when not declared). `access` is the declared access, `read` (GET and HEAD) or `write`. Returns `404` for a plugin that is not installed or a service it does not declare a sign-in for.
 
 ### PUT /api/v1/plugins/oauth/client
 
@@ -528,11 +543,11 @@ Save the OAuth client for a plugin service: `{"plugin": "...", "service": "...",
 
 ### DELETE /api/v1/plugins/oauth/client
 
-Query: `plugin` and `service`. Removes the client and its sign-in, also for a plugin that has been uninstalled. Returns `{"deleted": true}` when a client was saved.
+Query: `plugin` and `service`. Removes the owner's client, the clients registered automatically (and a remembered registration refusal) and the sign-in, also for a plugin that has been uninstalled. The plugin's shipped client, if any, is used again. Returns `{"deleted": true}` when an owner client was saved.
 
 ### POST /api/v1/plugins/oauth/start
 
-Body: `{"plugin": "...", "service": "..."}`. Returns `authorization_url` (open it in the same browser), `flow_id`, `redirect_uri` and `expires_in` (600 seconds). Sets an HttpOnly cookie scoped to the callback path that ties the sign-in to this browser. The pending sign-in is also tied to the owner session that started it, can be used once, and expires after 10 minutes. Returns `409` when the plugin is off or not approved, or when no client is saved, `400` for a return address that is not HTTPS or localhost, and `429` when 64 sign-ins are already waiting.
+Body: `{"plugin": "...", "service": "..."}`. Returns `authorization_url` (open it in the same browser), `flow_id`, `redirect_uri` and `expires_in` (600 seconds). Sets an HttpOnly cookie scoped to the callback path that ties the sign-in to this browser. The pending sign-in is also tied to the owner session that started it, can be used once, and expires after 10 minutes. When the sign-in needs a registered client for this return address, the worker registers it first. Returns `409` when the plugin is off or not approved, when there is no client (`not_configured`) or when the provider refused a registration, `502` when the provider could not be reached for a registration, `400` for a return address that is not HTTPS or localhost, and `429` when 64 sign-ins are already waiting.
 
 ### GET /api/v1/plugins/oauth/callback
 

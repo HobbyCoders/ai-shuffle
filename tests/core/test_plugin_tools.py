@@ -138,6 +138,14 @@ async def test_check_shows_where_a_service_signs_in_and_its_scopes(svc, tmp_path
     assert ("github (read): Read merged pull requests; signs in with OAuth at github.com; "
             "scopes: read:org, repo") in text
 
+    # A shipped public client and a registration address are part of the review.
+    manifest["extensions"]["ai.shuffle"]["services"][0]["auth"].update(
+        client_id="Iv1.publicclient", registration_url="https://github.com/login/oauth/register")
+    _write(root / "plugin.json", json.dumps(manifest))
+    text = _out(await _tools(tmp_path / "work")["CheckPlugin"].handler({"path": "notes-helper"}))
+    assert ("uses the plugin's public client ID Iv1.publicclient; registers its own client at "
+            "https://github.com/login/oauth/register") in text
+
     manifest["extensions"]["ai.shuffle"]["services"][0]["auth"]["client_secret"] = "s3cr3t-value"
     _write(root / "plugin.json", json.dumps(manifest))
     checked = await _tools(tmp_path / "work")["CheckPlugin"].handler({"path": "notes-helper"})

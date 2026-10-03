@@ -76,7 +76,7 @@ Responses also carry:
 
 - `format`: `claude` (Claude Code), `agent-plugins` (Agent Plugins / OpenAI) or `shuffle` (official connector runtimes).
 - `trust`: `official`, `marketplace` or `authored`.
-- `components`: every component the plugin declares, each with `kind`, `name`, `support` (`loaded`, `unsupported` or `needs_config`) and a `reason`: why it does not load, or, for a loaded component, what was adapted for this app (see [Plugins from Claude Code and Codex](#plugins-from-claude-code-and-codex)). LSP servers, output styles, ChatGPT-hosted apps (`.app.json`), plugin dependencies and SSE MCP servers are listed as unsupported; a `userConfig` block is listed as `needs_config`.
+- `components`: every component the plugin declares, each with `kind`, `name`, `support` (`loaded`, `unsupported` or `needs_config`) and a `reason`: why it does not load, or, for a loaded component, what was adapted for this app (see [Plugins from Claude Code and Codex](#plugins-from-claude-code-and-codex)). LSP servers, output styles, ChatGPT-hosted apps (`.app.json`), plugin dependencies and SSE MCP servers are listed as unsupported; a `userConfig` block is listed as `needs_config`. Each declared [service](#services) is a `service` component; one with an `auth` sign-in has a `detail` line saying where it signs in, its scopes, its shipped `client_id` and its `registration_url`.
 
 These fields are absent from workers that predate them.
 
@@ -129,9 +129,18 @@ Rules the validator enforces:
 
 A plugin that talks to an outside API declares it under `services`: `name`, `provider` (`cloudflare` or `custom`), `url` (the public `https://` API address; required for `custom`), `access` (`read` or `write`), `purpose`, and optionally `auth`. No other keys are accepted. The declaration shows a reviewer what the plugin will ask for. It holds no credential.
 
-`auth` declares an OAuth 2.0 sign-in: `{"type": "oauth2", "authorize_url": ..., "token_url": ..., "scopes": [...], "pkce": true}`, with an optional `revoke_url`. Every address must be plain `https://` with no query, fragment or credentials, on the same domain as the service `url` (`dash.example.com` and `api.example.com` match; `example.net` does not). Scopes are single words, at most 20. A client secret is never accepted in a plugin, under any key name. The plugin list and `CheckPlugin` show where the plugin signs in and which scopes it asks for, and a plugin update that asks for more scopes needs a new sign-in.
+`auth` declares an OAuth 2.0 sign-in: `{"type": "oauth2", "authorize_url": ..., "token_url": ..., "scopes": [...], "pkce": true}`, with an optional `revoke_url`. Every address must be plain `https://` with no query, fragment or credentials, on the same domain as the service `url` (`dash.example.com` and `api.example.com` match; `example.net` does not). Scopes are single words, at most 20. A client secret is never accepted in a plugin, under any key name.
 
-The plugin's skill tells the agent to call `ChatResources`, and, when there is no grant yet, `RequestChatAccess` with the provider and purpose. You enter the key in the private access card; the agent then calls `ChatHttpRequest`, and the worker attaches the key. No model sees it. Signing in to a declared `auth` service from a chat or Settings is not available yet; for now the declaration is checked and shown for review.
+Two optional keys let the owner sign in without registering an OAuth app first:
+
+- `client_id`: a public OAuth client the plugin author registered with the provider. It needs `"pkce": true`, is never paired with a secret, and is refused if it looks like a key or token. The provider only accepts it from the return addresses the author registered for it (see [Service sign-in](/docs/api-reference/plugins#service-sign-in-oauth)).
+- `registration_url`: the provider's dynamic client registration endpoint (RFC 7591), under the same address rules as the other endpoints. On the first sign-in from a return address, the worker registers its own public client there for that address and keeps it encrypted on the worker.
+
+The client a sign-in uses is, in order: one the owner entered, else the plugin's `client_id`, else a registered one. With none of these, the owner enters a client before signing in.
+
+The plugin list and `CheckPlugin` show where the plugin signs in, which scopes it asks for, its shipped `client_id` and its `registration_url`, so they are part of what the owner approves. A plugin update that asks for more scopes, changes an endpoint, the `registration_url` or the `client_id` needs a new sign-in.
+
+The plugin's skill tells the agent to call `ChatResources`, and, when there is no grant yet, `RequestChatAccess`. For a service with a key, that names the provider and purpose; you enter the key in the private access card. For a service with `auth`, it names the plugin and the service, and you sign in. The agent then calls `ChatHttpRequest`, and the worker attaches the key or token. No model sees it.
 
 ## Plugins from Claude Code and Codex
 

@@ -28,6 +28,8 @@ ACCESS = "access-token-never-shown"
 REFRESH = "refresh-token-never-shown"
 BASE = "https://shuffle.test"
 CALLBACK = BASE + api.CALLBACK
+REGISTER = "https://dash.example.com/oauth2/register"
+REG_SECRET = "registered-secret-never-shown"
 
 
 def _manifest(**auth_changes) -> dict:
@@ -54,12 +56,20 @@ class Provider:
     def __init__(self):
         self.responses: list = []
         self.calls: list[tuple[str, dict]] = []
+        self.registered = 0
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
-        form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+        if request.headers.get("content-type", "").startswith("application/json"):
+            form = json.loads(request.content.decode())
+        else:
+            form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
         self.calls.append((str(request.url), form))
         if self.responses:
             return self.responses.pop(0)
+        if str(request.url) == REGISTER:
+            self.registered += 1
+            return httpx.Response(201, json={"client_id": f"reg-{self.registered}",
+                                             "client_secret": REG_SECRET})
         return httpx.Response(200, json={"access_token": ACCESS, "token_type": "Bearer",
                                          "expires_in": 3600, "refresh_token": REFRESH})
 
@@ -95,13 +105,18 @@ def store(monkeypatch):
 @pytest.fixture
 def provider(monkeypatch):
     fake = Provider()
-    real_post = plugin_oauth._post
+    real_post, real_post_json = plugin_oauth._post, plugin_oauth._post_json
 
     async def post(url, data, http):
         async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as client:
             return await real_post(url, data, client)
 
+    async def post_json(url, body, http):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(fake)) as client:
+            return await real_post_json(url, body, client)
+
     monkeypatch.setattr(plugin_oauth, "_post", post)
+    monkeypatch.setattr(plugin_oauth, "_post_json", post_json)
     return fake
 
 
@@ -382,3 +397,144 @@ def test_an_installed_plugin_declaration_is_read_from_disk(monkeypatch, tmp_path
     with pytest.raises(PluginOAuthError) as caught:
         plugin_oauth.installed_config("other@mp", SERVICE)
     assert caught.value.reason == "not_installed"
+
+
+# ─── sign-in with no setup: a shipped client or automatic registration ──────
+
+
+async def _status(client) -> dict:
+    response = await client.get("/api/v1/plugins/oauth/status", params={"plugin": PLUGIN, "service": SERVICE})
+    assert response.status_code == 200, response.text
+    return response.json()["services"][0]
+
+
+async def _sign_in(client) -> dict:
+    started, state = await _start(client)
+    page = await client.get("/api/v1/plugins/oauth/callback", params={"state": state, "code": CODE})
+    assert page.status_code == 200 and "Signed in to example" in page.text, page.text
+    return started
+
+
+async def test_a_shipped_client_signs_in_without_entering_a_client(app, store, plugin, provider, caplog):
+    caplog.set_level(logging.DEBUG)
+    plugin.manifest = _manifest(client_id="shipped-1")
+    async with _client(app) as client:
+        entry = await _status(client)
+        assert (entry["state"], entry["client_source"], entry["client_configured"], entry["client_id"]) == (
+            "signed_out", "plugin", False, "")
+        assert (entry["plugin_client_id"], entry["registration_url"]) == ("shipped-1", "")
+        started = await _sign_in(client)
+        query = {k: v[0] for k, v in parse_qs(urlsplit(started["authorization_url"]).query).items()}
+        assert query["client_id"] == "shipped-1" and query["code_challenge_method"] == "S256"
+        _, form = provider.calls[0]
+        assert form["client_id"] == "shipped-1" and "client_secret" not in form
+        entry = await _status(client)
+        assert (entry["state"], entry["client_source"]) == ("signed_in", "plugin")
+        assert all(secret not in json.dumps(entry) for secret in (ACCESS, REFRESH, CODE))
+    assert not any(k.endswith(":client") for k in store)
+    worker_logs = "\n".join(r.getMessage() for r in caplog.records if BASE not in r.getMessage())
+    for secret in (CODE, ACCESS, REFRESH):
+        assert secret not in worker_logs
+
+
+async def test_an_owner_client_overrides_the_shipped_one(app, store, plugin, provider):
+    plugin.manifest = _manifest(client_id="shipped-1")
+    async with _client(app) as client:
+        await _sign_in(client)
+        saved = (await _configure(client)).json()
+        # The sign-in was issued to the shipped client; the owner's now wins.
+        assert (saved["state"], saved["client_source"], saved["client_id"]) == ("signed_out", "owner", "client-1")
+        started = await _sign_in(client)
+        assert "client_id=client-1" in started["authorization_url"]
+        assert provider.calls[-1][1]["client_id"] == "client-1"
+        assert provider.calls[-1][1]["client_secret"] == CLIENT_SECRET
+        assert (await _status(client))["client_source"] == "owner"
+        await client.delete("/api/v1/plugins/oauth/client", params={"plugin": PLUGIN, "service": SERVICE})
+        entry = await _status(client)
+        assert (entry["state"], entry["client_source"]) == ("signed_out", "plugin")
+
+
+async def test_registration_happens_on_the_first_sign_in_from_each_address(app, store, plugin, provider,
+                                                                           caplog):
+    caplog.set_level(logging.DEBUG)
+    plugin.manifest = _manifest(registration_url=REGISTER)
+    async with _client(app) as client:
+        entry = await _status(client)
+        assert (entry["state"], entry["client_source"]) == ("signed_out", "registered")
+        assert (entry["plugin_client_id"], entry["registration_url"]) == ("", REGISTER)
+        started = await _sign_in(client)
+        assert "client_id=reg-1" in started["authorization_url"]
+        assert provider.calls[0] == (REGISTER, {
+            "client_name": "AI Shuffle", "redirect_uris": [CALLBACK], "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+            "scope": "zone:read"})
+        # The provider issued a secret anyway: it is used, never shown.
+        assert provider.calls[1][1]["client_id"] == "reg-1"
+        assert provider.calls[1][1]["client_secret"] == REG_SECRET
+        entry = await _status(client)
+        assert (entry["state"], entry["client_source"]) == ("signed_in", "registered")
+        # The same address reuses its registration.
+        await _start(client)
+        assert provider.registered == 1
+    async with _client(app, "http://localhost:8000") as local:
+        started, _ = await _start(local)
+        assert "client_id=reg-2" in started["authorization_url"] and provider.registered == 2
+        assert provider.calls[-1][1]["redirect_uris"] == ["http://localhost:8000" + api.CALLBACK]
+        status = await local.get("/api/v1/plugins/oauth/status", params={"plugin": PLUGIN})
+        assert status.json()["services"][0]["state"] == "signed_in"
+        for secret in (REG_SECRET, ACCESS, REFRESH):
+            assert secret not in status.text and secret not in json.dumps(started)
+    worker_logs = "\n".join(r.getMessage() for r in caplog.records if BASE not in r.getMessage())
+    for secret in (REG_SECRET, CODE, ACCESS, REFRESH):
+        assert secret not in worker_logs
+
+
+async def test_a_refused_registration_asks_for_an_owner_client(app, store, plugin, provider):
+    plugin.manifest = _manifest(registration_url=REGISTER)
+    provider.responses.append(httpx.Response(400, json={"error": "invalid_redirect_uri",
+                                                        "error_description": REG_SECRET}))
+    async with _client(app) as client:
+        response = await client.post("/api/v1/plugins/oauth/start", json={"plugin": PLUGIN, "service": SERVICE})
+        assert response.status_code == 409
+        assert response.json()["detail"] == plugin_oauth._MESSAGES["registration_failed"]
+        assert REG_SECRET not in response.text
+        entry = await _status(client)
+        assert (entry["state"], entry["reason"], entry["client_source"]) == (
+            "not_configured", "registration_failed", "none")
+        # Entering a client works at once.
+        await _configure(client)
+        await _sign_in(client)
+        assert (await _status(client))["client_source"] == "owner"
+
+
+async def test_status_tells_each_state_apart(app, store, plugin, provider):
+    async with _client(app) as client:
+        plugin.manifest = _manifest()
+        entry = await _status(client)
+        assert (entry["state"], entry["client_source"]) == ("not_configured", "none")
+        plugin.manifest = _manifest(client_id="shipped-1")
+        assert ((await _status(client))["state"], (await _status(client))["client_source"]) == (
+            "signed_out", "plugin")
+        await _sign_in(client)
+        assert (await _status(client))["state"] == "signed_in"
+        # A plugin update that ships another client needs a new sign-in.
+        plugin.manifest = _manifest(client_id="shipped-2")
+        entry = await _status(client)
+        assert (entry["state"], entry["reason"], entry["client_source"]) == (
+            "needs_sign_in", "client_changed", "plugin")
+        # So does one that adds a registration address.
+        plugin.manifest = _manifest(client_id="shipped-1", registration_url=REGISTER)
+        entry = await _status(client)
+        assert (entry["state"], entry["reason"]) == ("needs_sign_in", "endpoint_changed")
+        plugin.manifest = _manifest(client_id="shipped-1", client_secret="x")
+        entry = await _status(client)
+        assert (entry["state"], entry["client_source"]) == ("invalid", "none")
+
+
+async def test_a_changed_shipped_client_between_start_and_callback_saves_nothing(app, store, plugin, provider):
+    plugin.manifest = _manifest(client_id="shipped-1")
+    async with _client(app) as client:
+        _, state = await _start(client)
+        plugin.manifest = _manifest(client_id="shipped-2")
+        page = await client.get("/api/v1/plugins/oauth/callback", params={"state": state, "code": CODE})
+        assert "did not complete" in page.text and provider.calls == []

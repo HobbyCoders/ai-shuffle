@@ -267,8 +267,13 @@ def _tools(value: Any, what: str) -> list[str]:
 
 
 _SERVICE_KEYS = {"name", "provider", "url", "access", "purpose", "auth"}
-_AUTH_KEYS = {"type", "authorize_url", "token_url", "scopes", "pkce", "revoke_url"}
-_AUTH_URL_KEYS = ("authorize_url", "token_url", "revoke_url")
+_AUTH_KEYS = {"type", "authorize_url", "token_url", "scopes", "pkce", "revoke_url", "client_id", "registration_url"}
+_AUTH_URL_KEYS = ("authorize_url", "token_url", "revoke_url", "registration_url")
+_AUTH_OPTIONAL_URLS = ("revoke_url", "registration_url")
+_AUTH_ORDER = ("type", "authorize_url", "token_url", "scopes", "pkce", "revoke_url", "client_id", "registration_url")
+# A public OAuth client ID: printable ASCII without spaces, as the sign-in
+# routes accept for an owner-entered client.
+_CLIENT_ID_RE = re.compile(r"^[\x21-\x7e]{1,512}$")
 MAX_SCOPES = 20
 # RFC 6749 section 3.3 scope-token: printable ASCII without space, '"' or '\'.
 _SCOPE_RE = re.compile(r'^[\x21\x23-\x5b\x5d-\x7e]{1,200}$')
@@ -322,10 +327,17 @@ def check_service_auth(sname: str, service_url: str, auth: Any) -> dict[str, Any
     """Validate a service's ``auth`` block: how the owner signs in to it.
 
     Only ``{"type": "oauth2", "authorize_url", "token_url", "scopes": [...],
-    "pkce": true}`` and an optional ``revoke_url``. Every URL is plain
-    ``https://`` with no credentials, query or fragment, on the same
-    registrable domain as the service ``url``. A client secret is refused by
-    name: the owner enters the client on their own device, never in a plugin.
+    "pkce": true}`` and the optional ``revoke_url``, ``client_id`` and
+    ``registration_url``. Every URL is plain ``https://`` with no
+    credentials, query or fragment, on the same registrable domain as the
+    service ``url``.
+
+    ``client_id`` is a public client the plugin author registered, so the
+    owner signs in without entering a client: it needs ``"pkce": true`` and is
+    never paired with a secret. ``registration_url`` is the provider's RFC
+    7591 dynamic client registration endpoint, where the worker registers its
+    own public client on the first sign-in. A client secret is refused by
+    name, and a ``client_id`` that looks like a credential is refused.
 
     Raises :class:`PluginDraftError`; returns the block in the exact shape
     ``build_files`` writes.
@@ -343,6 +355,22 @@ def check_service_auth(sname: str, service_url: str, auth: Any) -> dict[str, Any
         raise PluginDraftError(f"service {sname}: auth takes only {sorted(_AUTH_KEYS)}; remove {extra}")
     if auth.get("type") != "oauth2":
         raise PluginDraftError(f"service {sname}: auth type must be 'oauth2'")
+    client_id = auth.get("client_id")
+    if client_id is not None:
+        if not isinstance(client_id, str) or not _CLIENT_ID_RE.match(client_id):
+            raise PluginDraftError(
+                f"service {sname}: auth client_id must be the public client ID as plain text "
+                "(no spaces, at most 512 characters)"
+            )
+        if secret_findings(client_id):
+            raise PluginDraftError(
+                f"service {sname}: auth client_id looks like a credential; a plugin ships only a "
+                "public client ID, never a secret or token"
+            )
+        if auth.get("pkce") is not True:
+            raise PluginDraftError(
+                f"service {sname}: a shipped client_id is a public client and needs \"pkce\": true"
+            )
     if auth.get("pkce") is not True:
         raise PluginDraftError(f"service {sname}: auth must set \"pkce\": true")
     service_host = _https_host(service_url) if service_url else None
@@ -355,7 +383,7 @@ def check_service_auth(sname: str, service_url: str, auth: Any) -> dict[str, Any
     out: dict[str, Any] = {"type": "oauth2"}
     for key in _AUTH_URL_KEYS:
         value = auth.get(key)
-        if value is None and key == "revoke_url":
+        if value is None and key in _AUTH_OPTIONAL_URLS:
             continue
         _text(value, f"service {sname} auth {key}", 500, required=True)
         host = _https_host(value)
@@ -383,14 +411,23 @@ def check_service_auth(sname: str, service_url: str, auth: Any) -> dict[str, Any
         raise PluginDraftError(f"service {sname}: auth scopes must be unique")
     out["scopes"] = list(scopes)
     out["pkce"] = True
-    return {k: out[k] for k in ("type", "authorize_url", "token_url", "scopes", "pkce", "revoke_url") if k in out}
+    if client_id is not None:
+        out["client_id"] = client_id
+    return {k: out[k] for k in _AUTH_ORDER if k in out}
 
 
 def describe_service_auth(auth: dict[str, Any]) -> str:
-    """One plain line for a reviewer: where the owner signs in and what for."""
+    """One plain line for a reviewer: where the owner signs in, what for, and
+    which OAuth client the sign-in uses (the plugin's shipped public client,
+    one registered automatically, or one the owner enters)."""
     host = _https_host(auth.get("authorize_url", "")) or "an unknown address"
     scopes = auth.get("scopes") or []
-    return f"signs in with OAuth at {host}; scopes: {', '.join(scopes) if scopes else 'none'}"
+    line = f"signs in with OAuth at {host}; scopes: {', '.join(scopes) if scopes else 'none'}"
+    if auth.get("client_id"):
+        line += f"; uses the plugin's public client ID {auth['client_id']}"
+    if auth.get("registration_url"):
+        line += f"; registers its own client at {auth['registration_url']}"
+    return line
 
 
 def check_services(value: Any) -> list[dict[str, Any]]:

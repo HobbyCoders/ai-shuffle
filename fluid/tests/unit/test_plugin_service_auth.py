@@ -57,7 +57,17 @@ def test_a_declared_sign_in_is_kept_in_a_stable_shape() -> None:
     (_service(client_secret="s3cr3t"), "never carries an OAuth client secret"),
     (_service(clientSecret="s3cr3t"), "never carries an OAuth client secret"),
     ({**_service(), "client_secret": "s3cr3t"}, "never hold a secret such as 'client_secret'"),
-    (_service(client_id="abc"), "remove ['client_id']"),
+    (_service(client_id="has space"), "auth client_id must be the public client ID"),
+    (_service(client_id=42), "auth client_id must be the public client ID"),
+    (_service(client_id="ghp_" + "a" * 36), "client_id looks like a credential"),
+    (_service(client_id="abc", pkce=False), "a shipped client_id is a public client and needs \"pkce\": true"),
+    (_service(client_id="abc", pkce=None), "a shipped client_id is a public client and needs \"pkce\": true"),
+    (_service(client_id="abc", client_secret="s3cr3t"), "never carries an OAuth client secret"),
+    (_service(registration_url="http://dash.example.com/register"), "registration_url must be an https:// address"),
+    (_service(registration_url="https://dash.example.com/register?x=1"),
+     "registration_url must be an https:// address"),
+    (_service(registration_url="https://register.other.net/x"), "registration_url must be on example.com"),
+    (_service(registration_token="x"), "remove ['registration_token']"),
     (_service(type="oauth1"), "auth type must be 'oauth2'"),
     (_service(pkce=False), '"pkce": true'),
     (_service(pkce=None), '"pkce": true'),
@@ -79,7 +89,9 @@ def test_a_declared_sign_in_is_kept_in_a_stable_shape() -> None:
     (_service(scopes=[""]), "each auth scope is one word"),
     (_service(scopes=["read", "read"]), "auth scopes must be unique"),
 ], ids=[
-    "not-object", "client-secret", "camel-secret", "secret-on-service", "client-id", "type", "pkce-false",
+    "not-object", "client-secret", "camel-secret", "secret-on-service", "client-id-space", "client-id-number",
+    "client-id-token", "client-id-pkce-false", "client-id-pkce-missing", "client-id-with-secret",
+    "registration-http", "registration-query", "registration-domain", "unknown-key", "type", "pkce-false",
     "pkce-missing", "no-service-url", "http", "query", "fragment", "credentials", "bad-port",
     "missing-token-url", "lookalike-domain", "other-domain", "revoke-domain", "scopes-string",
     "too-many-scopes", "scope-space", "scope-quote", "scope-empty", "duplicate-scopes",
@@ -88,6 +100,20 @@ def test_each_bad_declaration_is_refused_in_plain_words(entry, expected) -> None
     if entry.get("url") is None:
         entry.pop("url", None)
     assert expected in _refusal(entry)
+
+
+def test_a_shipped_public_client_and_a_registration_url_are_kept_and_shown() -> None:
+    entry = _service(client_id="public-client.apps.example",
+                     registration_url="https://dash.example.com/oauth2/register")
+    [checked] = check_services([entry])
+    assert checked["auth"] == {**AUTH, "client_id": "public-client.apps.example",
+                               "registration_url": "https://dash.example.com/oauth2/register"}
+    assert check_services([checked]) == [checked]
+    assert describe_service_auth(checked["auth"]) == (
+        "signs in with OAuth at dash.example.com; scopes: zone:read, dns.records:read; "
+        "uses the plugin's public client ID public-client.apps.example; "
+        "registers its own client at https://dash.example.com/oauth2/register"
+    )
 
 
 def test_the_refusal_names_a_secret_field_but_never_its_value() -> None:

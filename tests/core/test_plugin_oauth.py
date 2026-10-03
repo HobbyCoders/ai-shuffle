@@ -63,7 +63,10 @@ class Provider:
         self.calls: list[tuple[str, dict]] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
-        form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+        if request.headers.get("content-type", "").startswith("application/json"):
+            form = json.loads(request.content.decode())
+        else:
+            form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
         self.calls.append((str(request.url), form))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
@@ -322,7 +325,8 @@ def test_status_reports_a_sign_in_without_secrets(store):
     report = plugin_oauth.status(config, now=100.0)
     assert report == {
         "plugin_id": PLUGIN, "service": "example", "state": "signed_in", "reason": "",
-        "client_configured": True, "requested_scopes": ["zone:read"], "scopes": ["zone:read"],
+        "client_configured": True, "client_source": "owner",
+        "requested_scopes": ["zone:read"], "scopes": ["zone:read"],
         "missing_scopes": [], "expires_at": 4000.0, "can_refresh": True,
     }
     text = json.dumps(report)
@@ -443,3 +447,215 @@ async def test_sign_out_removes_tokens_first_and_revokes(store):
     provider = Provider(httpx.Response(200))
     async with provider.client() as http:
         assert await plugin_oauth.sign_out(config, http=http) == {"signed_out": True, "revoked": True}
+
+
+# ─── a client with no setup: shipped by the plugin, or registered ───────────
+
+REGISTER = "https://dash.example.com/oauth2/register"
+CB = "https://shuffle.example/cb"
+CB_LOCAL = "http://127.0.0.1:8000/cb"
+REG_SECRET = "registered-secret-never-shown"
+
+
+def _registered(client_id="reg-1", **extra) -> httpx.Response:
+    return httpx.Response(201, json={"client_id": client_id, "token_endpoint_auth_method": "none", **extra})
+
+
+def _tokens_for(config, client):
+    plugin_oauth.save_tokens(config, client, TokenSet(
+        access_token=ACCESS, refresh_token=REFRESH, expires_at=None, scopes=config.scopes), now=5.0)
+
+
+async def test_a_shipped_client_signs_in_with_no_setup_and_no_secret(store):
+    config = _config(client_id="shipped-1")
+    report = plugin_oauth.status(config)
+    assert (report["state"], report["client_source"], report["client_configured"]) == (
+        "signed_out", "plugin", False)
+    client, source = await plugin_oauth.client_for_sign_in(config, CB)
+    assert (client, source) == (OAuthClient("shipped-1"), "plugin")
+    request = plugin_oauth.start_sign_in(config, client, CB)
+    assert parse_qs(urlsplit(request.url).query)["client_id"] == ["shipped-1"]
+    provider = Provider(_tokens())
+    async with provider.client() as http:
+        report = await plugin_oauth.complete_sign_in(config, request, "the-code", http=http, now=0.0)
+    assert (report["state"], report["client_source"]) == ("signed_in", "plugin")
+    form = provider.calls[0][1]
+    assert form["client_id"] == "shipped-1" and "client_secret" not in form
+    assert not any(k.endswith(":client") for k in store)
+    # The refresh uses the shipped client too, still without a secret.
+    provider = Provider(httpx.Response(200, json={"access_token": "fresh"}))
+    async with provider.client() as http:
+        assert await plugin_oauth.access_token_for_use(config, http=http, force_refresh=True) == "fresh"
+    assert provider.calls[0][1]["client_id"] == "shipped-1" and "client_secret" not in provider.calls[0][1]
+
+
+async def test_an_owner_client_wins_over_the_shipped_one(store):
+    config = _config(client_id="shipped-1")
+    _tokens_for(config, OAuthClient("shipped-1"))
+    assert plugin_oauth.status(config)["state"] == "signed_in"
+    plugin_oauth.save_client(PLUGIN, "example", "owner-1", SECRET)
+    report = plugin_oauth.status(config)
+    assert (report["state"], report["client_source"], report["client_configured"]) == (
+        "signed_out", "owner", True)
+    assert await plugin_oauth.client_for_sign_in(config, CB) == (OAuthClient("owner-1", SECRET), "owner")
+    # A sign-in started with the shipped client cannot finish once the owner's is in effect.
+    request = plugin_oauth.start_sign_in(config, OAuthClient("shipped-1"), CB)
+    async with Provider().client() as http:
+        with pytest.raises(PluginOAuthError) as caught:
+            await plugin_oauth.complete_sign_in(config, request, "code", http=http)
+    assert caught.value.reason == "not_configured"
+    # Removing the owner's client falls back to the shipped one.
+    plugin_oauth.delete_client(PLUGIN, "example")
+    assert plugin_oauth.status(config)["client_source"] == "plugin"
+
+
+async def test_registration_registers_a_public_client_once_per_address(store, caplog):
+    caplog.set_level("DEBUG")
+    config = _config(registration_url=REGISTER)
+    report = plugin_oauth.status(config)
+    assert (report["state"], report["client_source"]) == ("signed_out", "registered")
+    provider = Provider(_registered("reg-1", client_secret=REG_SECRET), _registered("reg-2"))
+    async with provider.client() as http:
+        first = await plugin_oauth.client_for_sign_in(config, CB, http=http)
+        again = await plugin_oauth.client_for_sign_in(config, CB, http=http)
+        local = await plugin_oauth.client_for_sign_in(config, CB_LOCAL, http=http)
+    assert first == again == (OAuthClient("reg-1", REG_SECRET), "registered")
+    assert local == (OAuthClient("reg-2"), "registered")
+    assert len(provider.calls) == 2
+    url, body = provider.calls[0]
+    assert url == REGISTER
+    assert body == {
+        "client_name": "AI Shuffle", "redirect_uris": [CB], "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+        "scope": "zone:read",
+    }
+    assert provider.calls[1][1]["redirect_uris"] == [CB_LOCAL]
+    # Kept encrypted, with nothing readable in the row.
+    [row] = [v for k, v in store.items() if k.endswith(":registered")]
+    assert row.startswith("enc:") and "reg-1" not in row and REG_SECRET not in row
+
+    # Signed in from the local address; the sign-in is usable from any chat.
+    request = plugin_oauth.start_sign_in(config, local[0], CB_LOCAL)
+    provider = Provider(_tokens(), httpx.Response(200, json={"access_token": "renewed-access-never-shown"}))
+    async with provider.client() as http:
+        report = await plugin_oauth.complete_sign_in(config, request, "the-code", http=http, now=0.0)
+        assert (report["state"], report["client_source"]) == ("signed_in", "registered")
+        assert await plugin_oauth.access_token_for_use(
+            config, http=http, force_refresh=True) == "renewed-access-never-shown"
+    assert provider.calls[0][1]["client_id"] == "reg-2" and provider.calls[1][1]["client_id"] == "reg-2"
+    text = json.dumps(plugin_oauth.status(config)) + "\n".join(r.getMessage() for r in caplog.records)
+    for secret in (REG_SECRET, ACCESS, REFRESH, "renewed-access-never-shown"):
+        assert secret not in text
+
+
+@pytest.mark.parametrize("response", [
+    httpx.Response(400, json={"error": "invalid_client_metadata", "error_description": REG_SECRET}),
+    httpx.Response(201, json={"client_secret": REG_SECRET}),
+    httpx.Response(201, json={"client_id": "has space"}),
+    httpx.Response(201, json={"client_id": "reg-1", "redirect_uris": ["https://elsewhere.example/cb"]}),
+    httpx.Response(201, text="not json"),
+], ids=["refused", "no-client-id", "bad-client-id", "other-redirect", "not-json"])
+async def test_a_refused_registration_falls_back_to_an_owner_client(store, caplog, response):
+    caplog.set_level("DEBUG")
+    config = _config(registration_url=REGISTER)
+    provider = Provider(response, _registered("reg-1"))
+    async with provider.client() as http:
+        with pytest.raises(PluginOAuthError) as caught:
+            await plugin_oauth.client_for_sign_in(config, CB, http=http, now=1000.0)
+        assert caught.value.reason == "registration_failed"
+        assert str(caught.value) == plugin_oauth._MESSAGES["registration_failed"]
+        report = plugin_oauth.status(config, now=1000.0)
+        assert (report["state"], report["reason"], report["client_source"]) == (
+            "not_configured", "registration_failed", "none")
+        # Not tried again for a while: the owner can enter a client meanwhile.
+        with pytest.raises(PluginOAuthError):
+            await plugin_oauth.client_for_sign_in(config, CB, http=http, now=1000.0 + 60)
+        assert len(provider.calls) == 1
+        # Later it is tried again.
+        later = 1000.0 + plugin_oauth.REGISTRATION_RETRY + 1
+        assert plugin_oauth.status(config, now=later)["state"] == "signed_out"
+        assert await plugin_oauth.client_for_sign_in(config, CB, http=http, now=later) == (
+            OAuthClient("reg-1"), "registered")
+    # An owner client works at once, whatever the registration did.
+    plugin_oauth.save_client(PLUGIN, "example", "owner-1")
+    assert plugin_oauth.status(config)["client_source"] == "owner"
+    logs = "\n".join(r.getMessage() for r in caplog.records)
+    assert REG_SECRET not in logs and REG_SECRET not in str(caught.value)
+
+
+async def test_an_unreachable_registration_is_not_remembered(store):
+    config = _config(registration_url=REGISTER)
+    provider = Provider(httpx.ConnectError("down"), httpx.Response(503))
+    async with provider.client() as http:
+        for _ in range(2):
+            with pytest.raises(PluginOAuthError) as caught:
+                await plugin_oauth.client_for_sign_in(config, CB, http=http)
+            assert caught.value.reason == "unavailable"
+    assert plugin_oauth.status(config)["state"] == "signed_out"
+
+
+async def test_no_client_anywhere_needs_an_owner_client(store):
+    config = _config()
+    report = plugin_oauth.status(config)
+    assert (report["state"], report["client_source"]) == ("not_configured", "none")
+    with pytest.raises(PluginOAuthError) as caught:
+        await plugin_oauth.client_for_sign_in(config, CB)
+    assert caught.value.reason == "not_configured"
+    with pytest.raises(PluginOAuthError) as caught:
+        await plugin_oauth.access_token_for_use(config)
+    assert caught.value.reason == "not_configured"
+    with pytest.raises(PluginOAuthError) as caught:
+        await plugin_oauth.client_for_sign_in(_config(client_id="shipped-1"), "http://192.168.1.5/cb")
+    assert caught.value.reason == "invalid_redirect"
+
+
+@pytest.mark.parametrize(("change", "reason"), [
+    ({"client_id": "shipped-2"}, "client_changed"),
+    ({"registration_url": "https://dash.example.com/oauth2/register-v2"}, "endpoint_changed"),
+    ({"authorize_url": "https://dash.example.com/oauth2/authorize"}, "endpoint_changed"),
+    ({"revoke_url": None}, "endpoint_changed"),
+    ({"token_url": "https://dash.example.com/oauth2/token-v2"}, "endpoint_changed"),
+    ({"scopes": ["zone:read", "zone:edit"]}, "scopes_widened"),
+])
+async def test_a_changed_declaration_needs_a_new_sign_in(store, change, reason):
+    declared = {"client_id": "shipped-1", "registration_url": REGISTER}
+    config = _config(**declared)
+    _tokens_for(config, OAuthClient("shipped-1"))
+    assert plugin_oauth.status(config)["state"] == "signed_in"
+    updated = _config(**{**declared, **change})
+    report = plugin_oauth.status(updated)
+    assert (report["state"], report["reason"]) == ("needs_sign_in", reason)
+    with pytest.raises(PluginOAuthError) as caught:
+        await plugin_oauth.access_token_for_use(updated)
+    assert caught.value.reason == "needs_sign_in"
+
+
+def test_an_owner_sign_in_also_ends_when_the_shipped_client_changes(store):
+    config = _config(client_id="shipped-1")
+    _sign_in(config)  # with the owner's client-1
+    assert plugin_oauth.status(config)["state"] == "signed_in"
+    report = plugin_oauth.status(_config(client_id="shipped-2"))
+    assert (report["state"], report["reason"]) == ("needs_sign_in", "client_changed")
+
+
+async def test_a_registered_sign_in_ends_when_its_registration_is_gone(store):
+    config = _config(registration_url=REGISTER)
+    async with Provider(_registered("reg-1")).client() as http:
+        client, _ = await plugin_oauth.client_for_sign_in(config, CB, http=http)
+    _tokens_for(config, client)
+    assert plugin_oauth.status(config)["state"] == "signed_in"
+    store.pop(plugin_oauth._key(PLUGIN, "example", "registered"))
+    report = plugin_oauth.status(config)
+    assert (report["state"], report["reason"]) == ("needs_sign_in", "client_changed")
+
+
+def test_a_sign_in_saved_before_declarations_were_recorded_still_works(store):
+    config = _config()
+    _sign_in(config)
+    key = plugin_oauth._key(PLUGIN, "example", "tokens")
+    data = plugin_oauth._open(key)
+    data.pop("declaration")
+    data.pop("binding")
+    plugin_oauth._seal(key, data)
+    assert plugin_oauth.load_tokens(PLUGIN, "example").declaration == {}
+    assert plugin_oauth.status(config)["state"] == "signed_in"

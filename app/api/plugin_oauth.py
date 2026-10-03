@@ -11,9 +11,12 @@ on, approved and declare the same sign-in.
 The return address is derived from the address the owner's browser used to
 reach this worker (``request.base_url``) plus :data:`CALLBACK`, exactly as the
 Gmail connector derives and checks its redirect URI. It must be ``https://``
-or ``http://localhost``; the owner registers that address with the provider.
+or ``http://localhost``. With an owner-entered client the owner registers that
+address with the provider; a plugin's shipped client works only from the
+addresses its author registered; a client registered automatically
+(``registration_url``) is registered for each address on its first sign-in.
 
-The owner's OAuth client and the tokens are stored by
+The owner's OAuth client, registered clients and the tokens are stored by
 :mod:`app.core.plugin_oauth`, encrypted and worker-local. No route returns a
 client secret, a code or a token.
 """
@@ -47,7 +50,7 @@ MAX_PENDING = 64
 
 _STATUS = {
     "not_installed": 404, "not_declared": 404, "plugin_off": 409, "invalid_declaration": 409,
-    "not_configured": 409, "invalid_client": 400, "invalid_redirect": 400,
+    "not_configured": 409, "registration_failed": 409, "invalid_client": 400, "invalid_redirect": 400,
     "storage_locked": 409, "storage": 409,
 }
 
@@ -126,7 +129,8 @@ def _service_status(plugin_id: str, service: str) -> dict:
         if exc.reason != "invalid_declaration":
             raise
         return {"plugin_id": plugin_id, "service": service, "state": "invalid", "reason": exc.reason,
-                "client_configured": False, "client_id": ""}
+                "client_configured": False, "client_source": "none", "client_id": "",
+                "plugin_client_id": "", "registration_url": ""}
     result = core.status(config)
     try:
         client = core.load_client(plugin_id, service)
@@ -135,6 +139,10 @@ def _service_status(plugin_id: str, service: str) -> dict:
     result["client_id"] = client.client_id if client else ""
     result["access"] = config.access
     result["authorize_host"] = urlsplit(config.authorize_url).hostname or ""
+    # What the plugin declares, as the owner approved it: its shipped public
+    # client and its registration endpoint ("" when not declared).
+    result["plugin_client_id"] = config.client_id
+    result["registration_url"] = config.registration_url
     return result
 
 
@@ -195,15 +203,12 @@ async def start(data: ServiceRef, request: Request, token: str = Depends(require
     owner's browser; the flow expires after :data:`TTL` seconds."""
     address = redirect_uri(request)
 
-    def prepare() -> tuple[OAuthConfig, AuthorizationRequest]:
-        config = core.installed_config(data.plugin, data.service, require_on=True)
-        client = core.load_client(data.plugin, data.service)
-        if client is None:
-            raise PluginOAuthError("not_configured")
-        return config, core.start_sign_in(config, client, address)
-
     try:
-        config, auth = await run_sync(prepare)
+        config = await run_sync(core.installed_config, data.plugin, data.service, require_on=True)
+        # The owner's client, else the plugin's shipped public client, else one
+        # registered for this return address (registered now when needed).
+        client, _source = await core.client_for_sign_in(config, address)
+        auth = core.start_sign_in(config, client, address)
     except PluginOAuthError as exc:
         raise _refuse(exc) from None
     now = time.monotonic()

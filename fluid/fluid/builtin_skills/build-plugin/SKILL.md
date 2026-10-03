@@ -122,7 +122,13 @@ The skill that uses the service then tells the agent to:
 3. Call `ChatHttpRequest` with that grant. The worker attaches the credential;
    no model sees it.
 
-Plugins cannot sign in with OAuth. Do not promise it.
+A service can also declare an OAuth sign-in under `auth` (see the Plugin
+format page): `type` `oauth2`, `authorize_url`, `token_url`, `scopes`,
+`"pkce": true`, and optionally `revoke_url`. Add `client_id` only for a
+public client already registered with the provider for this plugin (the
+owner gives you its ID), and `registration_url` only when the service
+documents dynamic client registration. Never a client secret. Then the agent asks with
+`RequestChatAccess` naming the plugin and service, and the owner signs in.
 
 ## 6. Check it and fix what it reports
 
