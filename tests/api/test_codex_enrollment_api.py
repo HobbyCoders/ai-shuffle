@@ -163,6 +163,58 @@ class TestDevicePoll:
         assert stored["codex_refresh_token"].startswith("enc:")
         assert encryption.decrypt_value(stored["codex_access_token"]) == SECRET_ACCESS
         assert encryption.decrypt_value(stored["codex_refresh_token"]) == SECRET_REFRESH
+        # An opaque token carries no identity claims.
+        assert prov["account_email"] is None
+        assert prov["account_plan"] is None
+
+    def test_signed_in_account_email_and_plan_reach_the_row(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        import base64
+        import json
+
+        def _seg(obj):
+            return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
+
+        access = ".".join([
+            _seg({"alg": "none"}),
+            _seg({
+                "https://api.openai.com/profile": {"email": "owner@example.com"},
+                "https://api.openai.com/auth": {
+                    "chatgpt_plan_type": "plus", "chatgpt_account_id": "acct-xyz",
+                },
+            }),
+            "sig",
+        ])
+        unlock_encryption(mock_db)
+        _make_provider()
+        self._start(authenticated_client, monkeypatch)
+
+        async def _fake_poll(device_code, code_verifier, user_code, *, client=None):
+            return codex_oauth.TokenBundle(
+                access_token=access, refresh_token="refresh-secret",
+                id_token=None, account_id="acct-xyz",
+            )
+
+        monkeypatch.setattr(codex_oauth, "poll_device_code", _fake_poll)
+        resp = authenticated_client.post(
+            f"{ROOT}/{PROVIDER_ID}/codex/device/poll", json={}
+        )
+        assert resp.status_code == 200, resp.text
+        prov = resp.json()["provider"]
+        assert prov["account_email"] == "owner@example.com"
+        assert prov["account_plan"] == "plus"
+
+        listed = authenticated_client.get(ROOT)
+        assert listed.status_code == 200, listed.text
+        row = next(p for p in listed.json()["providers"] if p["id"] == PROVIDER_ID)
+        assert row["account_email"] == "owner@example.com"
+        assert row["account_plan"] == "plus"
+        # Only the two display strings leave the backend, never the token.
+        for text in (resp.text, listed.text):
+            assert access not in text
+            assert access.split(".")[1] not in text
+            assert "refresh-secret" not in text
 
     def test_poll_terminal_error_400(self, authenticated_client, mock_db, monkeypatch):
         unlock_encryption(mock_db)

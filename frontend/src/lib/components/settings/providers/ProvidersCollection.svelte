@@ -35,6 +35,7 @@
 			claude: s.claude,
 			anthropicKeyMasked: s.anthropicKeyMasked,
 			fal: { keySet: s.falKeySet, masked: s.falKeyMasked, enabled: s.falEnabled },
+			usage: s.usage?.providers,
 			drafts: providerDrafts.list,
 			draftGateways: providerDrafts.gateways
 		})
@@ -64,6 +65,8 @@
 
 	onMount(() => {
 		void providers.refreshAll();
+		// Subscription rows name their plan; the stored snapshot has the freshest one.
+		void providers.loadUsage();
 	});
 	watchResources(['settings'], () => providers.refreshAll());
 	onDestroy(() => providerDrafts.discardAll());

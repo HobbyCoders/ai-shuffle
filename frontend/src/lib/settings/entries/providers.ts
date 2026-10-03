@@ -128,7 +128,8 @@ function currentViews(): ProviderView[] {
 		rows: s.providers,
 		claude: s.claude,
 		anthropicKeyMasked: s.anthropicKeyMasked,
-		fal: { keySet: s.falKeySet, masked: s.falKeyMasked, enabled: s.falEnabled }
+		fal: { keySet: s.falKeySet, masked: s.falKeyMasked, enabled: s.falEnabled },
+		usage: s.usage?.providers
 	});
 }
 

@@ -119,6 +119,10 @@ class ModelProviderResponse(BaseModel):
     needs_reauth: bool = False
     codex_access_token_set: bool = False
     codex_refresh_token_set: bool = False
+    # Subscription sign-in identity for display, read from the stored token's
+    # claims. Only these two strings leave the backend, never the token.
+    account_email: Optional[str] = None
+    account_plan: Optional[str] = None
     openai_billing_org_id: Optional[str] = None
     openai_billing_instance_id: Optional[str] = None
     created_at: Optional[str] = None
@@ -316,6 +320,8 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         needs_reauth=bool(row.get("needs_reauth")),
         codex_access_token_set=bool(row.get("_codex_access_token_set")),
         codex_refresh_token_set=bool(row.get("_codex_refresh_token_set")),
+        account_email=row.get("_account_email"),
+        account_plan=row.get("_account_plan"),
         openai_billing_org_id=row.get("openai_billing_org_id"),
         openai_billing_instance_id=row.get("openai_billing_instance_id"),
         created_at=_iso(row.get("created_at")),
@@ -340,7 +346,22 @@ def _apply_token_flags(row: Dict[str, Any]) -> Dict[str, Any]:
     codex_refresh = row.pop("codex_refresh_token", None)
     row["_codex_access_token_set"] = bool(codex_access)
     row["_codex_refresh_token_set"] = bool(codex_refresh)
+    row["_account_email"], row["_account_plan"] = _account_profile(codex_access)
     return row
+
+
+def _account_profile(encrypted_access: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """``(email, plan)`` of a subscription sign-in, read from its stored access
+    token's claims. Best effort: a missing key, a corrupt blob or a token
+    without the claims yields ``(None, None)``; nothing about the failure or
+    the token is logged."""
+    if not encrypted_access:
+        return None, None
+    try:
+        access = encryption.decrypt_value(encrypted_access)
+    except Exception:  # noqa: BLE001 — display-only; never expose credential failures
+        return None, None
+    return codex_oauth.extract_account_profile(access)
 
 
 # Upstream catalog fetch (D.1) — cap so a pathological gateway can't return an

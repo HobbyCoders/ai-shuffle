@@ -116,6 +116,72 @@ describe('grouping', () => {
 	});
 });
 
+describe('ChatGPT and SuperGrok subscriptions', () => {
+	const openaiSub = (views: ReturnType<typeof buildProviders>) => byId(views, 'openai').credentials[0];
+
+	it('names the plan and shows the account like the Claude row', () => {
+		const sub = openaiSub(
+			buildProviders(input({ rows: [chatgptRow({ account_email: 'owner@example.com', account_plan: 'plus' })] }))
+		);
+		expect(sub.name).toBe('OpenAI Plus subscription');
+		expect(sub.summary).toBe('owner@example.com, Plus plan');
+	});
+
+	it('prefers the usage snapshot plan over the sign-in one', () => {
+		const sub = openaiSub(
+			buildProviders(
+				input({
+					rows: [chatgptRow({ account_email: 'owner@example.com', account_plan: 'plus' })],
+					usage: [{ provider_id: 'chatgpt-1', plan_type: 'pro' }]
+				})
+			)
+		);
+		expect(sub.name).toBe('OpenAI Pro subscription');
+		expect(sub.summary).toBe('owner@example.com, Pro plan');
+	});
+
+	it('maps plan ids to display names', () => {
+		const name = (plan: string) =>
+			openaiSub(buildProviders(input({ rows: [chatgptRow({ account_plan: plan })] }))).name;
+		expect(name('team')).toBe('OpenAI Team subscription');
+		expect(name('business')).toBe('OpenAI Business subscription');
+		expect(name('enterprise')).toBe('OpenAI Enterprise subscription');
+		expect(name('free')).toBe('OpenAI Free subscription');
+		expect(name('unknown')).toBe('OpenAI subscription');
+	});
+
+	it('falls back without an empty comma when the email or plan is unknown', () => {
+		const only = (over: Parameters<typeof chatgptRow>[0]) => openaiSub(buildProviders(input({ rows: [chatgptRow(over)] })));
+		expect(only({ account_email: 'owner@example.com' })).toMatchObject({
+			name: 'OpenAI subscription',
+			summary: 'owner@example.com'
+		});
+		expect(only({ account_plan: 'plus' }).summary).toBe('Plus plan');
+		expect(only({})).toMatchObject({ name: 'OpenAI subscription', summary: '1 model' });
+		expect(only({ enabled: false })).toMatchObject({ summary: 'Off' });
+		expect(only({ account_email: 'owner@example.com', enabled: false }).summary).toBe('owner@example.com, off');
+		expect(only({ account_email: 'owner@example.com', needs_reauth: true }).summary).toBe('Reconnect needed');
+	});
+
+	it('titles a SuperGrok subscription by its tier', () => {
+		const grok = (plan?: string) =>
+			byId(
+				buildProviders(
+					input({
+						rows: [grokRow({ needs_reauth: false, account_email: 'me@x.com' })],
+						usage: plan ? [{ provider_id: 'grok-1', plan_type: plan }] : []
+					})
+				),
+				'grok'
+			).credentials[0];
+		expect(grok('SuperGrok Heavy')).toMatchObject({
+			name: 'SuperGrok Heavy subscription',
+			summary: 'me@x.com, SuperGrok Heavy plan'
+		});
+		expect(grok().name).toBe('SuperGrok subscription');
+	});
+});
+
 describe('Claude', () => {
 	it('subscription mode: the subscription is active, the key on standby, no switches', () => {
 		const claude = byId(buildProviders(input()), 'claude');
@@ -232,6 +298,8 @@ describe('plan label', () => {
 	it('capitalizes the plan the worker reports', () => {
 		expect(planLabel('pro')).toBe('Pro');
 		expect(planLabel('supergrok_heavy')).toBe('SuperGrok Heavy');
+		expect(planLabel('prolite')).toBe('Pro Lite');
+		expect(planLabel('unknown')).toBeNull();
 		expect(planLabel('')).toBeNull();
 		expect(planLabel(null)).toBeNull();
 	});

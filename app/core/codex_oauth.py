@@ -42,7 +42,7 @@ import os
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -203,6 +203,33 @@ def extract_account_id(id_token: Optional[str]) -> Optional[str]:
         if isinstance(val, str) and val:
             return val
     return None
+
+
+def extract_account_profile(token: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(email, plan_type)`` from a ChatGPT id_token or access token.
+
+    The id_token carries ``email`` top-level; the access token carries it under
+    the ``https://api.openai.com/profile`` claim. The plan is
+    ``chatgpt_plan_type`` under ``https://api.openai.com/auth`` (top-level on
+    simple tokens). Either value is ``None`` when absent. Only these two
+    display values are returned; the token itself never leaves this function.
+    """
+    if not token:
+        return None, None
+    claims = _decode_jwt_payload(token)
+
+    def _str(value: Any) -> Optional[str]:
+        return value.strip() if isinstance(value, str) and value.strip() else None
+
+    profile = claims.get("https://api.openai.com/profile")
+    auth = claims.get("https://api.openai.com/auth")
+    email = _str(claims.get("email")) or (
+        _str(profile.get("email")) if isinstance(profile, dict) else None
+    )
+    plan = (_str(auth.get("chatgpt_plan_type")) if isinstance(auth, dict) else None) or _str(
+        claims.get("chatgpt_plan_type")
+    )
+    return email, plan
 
 
 # ---------------------------------------------------------------------------

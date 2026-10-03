@@ -203,6 +203,8 @@ export interface ProvidersInput {
 	claude: ClaudeAuthSummary | null;
 	anthropicKeyMasked?: string | null;
 	fal: { keySet: boolean; masked: string; enabled: boolean };
+	/** The usage snapshot's provider entries: their plan is fresher than the sign-in's. */
+	usage?: { provider_id: string; plan_type?: string | null }[] | null;
 	drafts?: DraftCredential[];
 	/** New gateways being set up: provider id → name. */
 	draftGateways?: { id: `gw:${string}`; name: string }[];
@@ -300,20 +302,34 @@ export function claudePlan(plan: string | null | undefined): string | null {
 	return known[value] ?? plan!.trim();
 }
 
+/** Plan words that read better than plain capitalization. */
+const PLAN_WORDS: Record<string, string> = { supergrok: 'SuperGrok', prolite: 'Pro Lite' };
+
 /** A subscription plan as the worker reports it ("pro", "supergrok_heavy") for display: "Pro", "SuperGrok Heavy". */
 export function planLabel(plan: string | null | undefined): string | null {
 	const words = (plan ?? '')
 		.trim()
 		.split(/[\s_-]+/)
 		.filter(Boolean);
-	if (!words.length) return null;
+	if (!words.length || (words.length === 1 && words[0].toLowerCase() === 'unknown')) return null;
 	return words
-		.map((w) => (w.toLowerCase() === 'supergrok' ? 'SuperGrok' : w.charAt(0).toUpperCase() + w.slice(1)))
+		.map((w) => PLAN_WORDS[w.toLowerCase()] ?? w.charAt(0).toUpperCase() + w.slice(1))
 		.join(' ');
 }
 
-/** One model_providers row as a credential. */
-export function rowCredential(row: ModelProvider): CredentialView {
+/**
+ * Title of a ChatGPT or SuperGrok subscription, in the Claude row's pattern:
+ * "OpenAI Plus subscription", "SuperGrok Heavy subscription". Without a plan:
+ * "OpenAI subscription", "SuperGrok subscription".
+ */
+export function subscriptionName(cls: RowClass, plan: string | null): string {
+	const brand = cls === 'grok' ? 'SuperGrok' : 'OpenAI';
+	if (!plan) return `${brand} subscription`;
+	return plan.startsWith(brand) ? `${plan} subscription` : `${brand} ${plan} subscription`;
+}
+
+/** One model_providers row as a credential. `usagePlan` is the usage snapshot's plan, when loaded. */
+export function rowCredential(row: ModelProvider, usagePlan?: string | null): CredentialView {
 	const flavor = flavorOfRow(row);
 	const cls = classifyRow(row);
 	const models = row.models?.length ?? 0;
@@ -328,13 +344,22 @@ export function rowCredential(row: ModelProvider): CredentialView {
 				: row.enabled
 					? 'On'
 					: 'Off';
+		const plan = planLabel(usagePlan) ?? planLabel(row.account_plan);
+		const email = row.account_email?.trim() || null;
+		const account = [email, plan ? `${plan} plan` : null].filter(Boolean).join(', ');
 		return {
 			item: rowItem(row.id),
 			providerId,
 			flavor,
-			name: row.name || (cls === 'grok' ? 'SuperGrok' : 'ChatGPT'),
+			name: subscriptionName(cls, plan),
 			kind: 'Subscription',
-			summary: !signedIn ? statusText : row.enabled ? plural(models, 'model') : 'Off',
+			summary: !signedIn
+				? statusText
+				: account
+					? `${account}${row.enabled ? '' : ', off'}`
+					: row.enabled
+						? plural(models, 'model')
+						: 'Off',
 			status,
 			statusText: !signedIn ? statusText : row.enabled ? 'On' : 'Off',
 			on: row.enabled && signedIn,
@@ -418,7 +443,8 @@ export function buildProviders(input: ProvidersInput): ProviderView[] {
 	for (const c of claudeCredentials(input.claude, input.anthropicKeyMasked)) push('claude', c);
 	// Subscriptions first, then keys, in the order the worker returns them.
 	const ordered = [...rows].sort((a, b) => Number(flavorOfRow(a) !== 'device') - Number(flavorOfRow(b) !== 'device'));
-	for (const row of ordered) push(providerOfRow(row), rowCredential(row));
+	const usagePlans = new Map((input.usage ?? []).map((u) => [u.provider_id, u.plan_type ?? null]));
+	for (const row of ordered) push(providerOfRow(row), rowCredential(row, usagePlans.get(row.id)));
 	for (const c of falCredential(input.fal)) push('fal', c);
 	for (const d of drafts) push(d.providerId, draftCredential(d));
 

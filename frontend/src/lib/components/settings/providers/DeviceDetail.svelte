@@ -49,7 +49,7 @@
 	);
 
 	const facts = $derived([
-		{ label: 'Plan', value: planLabel(usageEntry?.plan_type) },
+		{ label: 'Plan', value: planLabel(usageEntry?.plan_type) ?? planLabel(row.account_plan) },
 		{ label: 'Weekly use', value: weekly ? `${Math.round(weekly.utilization)}%` : null },
 		{ label: 'Models', value: `${row.models.length} in picker` },
 		{ label: 'Resets', value: banked.hasLoaded ? `${banked.availableCount} banked` : null }

@@ -30,7 +30,7 @@ let worker: ReturnType<typeof fakeWorker>;
 
 function start(init: Parameters<typeof fakeWorker>[0] = {}) {
 	worker = fakeWorker({
-		rows: [chatgptRow(), row(), grokRow(), gatewayRow()],
+		rows: [chatgptRow({ account_email: 'owner@example.com', account_plan: 'plus' }), row(), grokRow(), gatewayRow()],
 		...init
 	});
 	vi.stubGlobal('fetch', worker.fetch);
@@ -80,8 +80,9 @@ describe('the list', () => {
 			'Claude Max subscription, Active for Claude',
 			'Anthropic API key, Standby'
 		]);
-		expect(credentialNames('OpenAI')).toEqual(['ChatGPT, On', 'OpenAI API key, On']);
-		expect(credentialNames('xAI Grok')).toEqual(['SuperGrok, Reconnect needed']);
+		expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, On', 'OpenAI API key, On']);
+		expect(within(group('OpenAI')).getByText('owner@example.com, Plus plan')).toBeTruthy();
+		expect(credentialNames('xAI Grok')).toEqual(['SuperGrok subscription, Reconnect needed']);
 		expect(credentialNames('fal.ai')).toEqual(['Media key, On']);
 		expect(credentialNames('Homelab vLLM')).toEqual(['Gateway key, On']);
 		expect(within(group('OpenAI')).getByText('2 on')).toBeTruthy();
@@ -226,7 +227,7 @@ describe('adding', () => {
 		});
 		expect(settingsNav.selectedItem('providers')).toBe(draft.item);
 		await waitFor(() =>
-			expect(credentialNames('OpenAI')).toEqual(['ChatGPT, On', 'OpenAI API key, On', 'OpenAI API key 2, Setting up'])
+			expect(credentialNames('OpenAI')).toEqual(['OpenAI Plus subscription, On', 'OpenAI API key, On', 'OpenAI API key 2, Setting up'])
 		);
 		expect(screen.getByLabelText('API key')).toBeTruthy();
 		expect(worker.sent('POST', '/model-providers')).toHaveLength(0);

@@ -79,6 +79,30 @@ class TestAccountIdExtraction:
         assert codex_oauth.extract_account_id("not-a-jwt") is None
 
 
+class TestAccountProfileExtraction:
+    def test_access_token_namespaced_claims(self):
+        tok = _make_id_token({
+            "https://api.openai.com/profile": {"email": "owner@example.com"},
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        })
+        assert codex_oauth.extract_account_profile(tok) == ("owner@example.com", "plus")
+
+    def test_id_token_top_level_claims(self):
+        tok = _make_id_token({"email": "owner@example.com", "chatgpt_plan_type": "pro"})
+        assert codex_oauth.extract_account_profile(tok) == ("owner@example.com", "pro")
+
+    def test_missing_or_blank_claims_are_none(self):
+        tok = _make_id_token({
+            "email": "  ",
+            "https://api.openai.com/auth": {"chatgpt_plan_type": 7},
+        })
+        assert codex_oauth.extract_account_profile(tok) == (None, None)
+
+    def test_none_and_garbage(self):
+        assert codex_oauth.extract_account_profile(None) == (None, None)
+        assert codex_oauth.extract_account_profile("not-a-jwt") == (None, None)
+
+
 # ---------------------------------------------------------------------------
 # Device start
 # ---------------------------------------------------------------------------

@@ -37,6 +37,8 @@ Every endpoint that returns a provider returns this shape. Stored secrets are ne
   "needs_reauth": false,
   "codex_access_token_set": false,
   "codex_refresh_token_set": false,
+  "account_email": null,
+  "account_plan": null,
   "openai_billing_org_id": null,
   "openai_billing_instance_id": null,
   "created_at": "2026-09-01T10:00:00+00:00",
@@ -44,7 +46,7 @@ Every endpoint that returns a provider returns this shape. Stored secrets are ne
 }
 ```
 
-`auth_mode` cannot be set through the API. It becomes `chatgpt` after a [ChatGPT sign-in](#post-apiv1model-providersprovider_idcodexdevicestart) and `grok` after a [Grok sign-in](#post-apiv1model-providersprovider_idxaidevicestart). `needs_reauth` is `true` when a stored sign-in has stopped working and must be done again.
+`auth_mode` cannot be set through the API. It becomes `chatgpt` after a [ChatGPT sign-in](#post-apiv1model-providersprovider_idcodexdevicestart) and `grok` after a [Grok sign-in](#post-apiv1model-providersprovider_idxaidevicestart). `needs_reauth` is `true` when a stored sign-in has stopped working and must be done again. `account_email` and `account_plan` are the email and plan id (such as `plus` or `pro`) read from a stored ChatGPT sign-in, for display; each is `null` when the sign-in does not carry it, and the token itself is never returned.
 
 ### GET /api/v1/model-providers
 

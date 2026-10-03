@@ -109,6 +109,10 @@ export interface ModelProvider {
 	needs_reauth?: boolean;
 	codex_access_token_set?: boolean;
 	codex_refresh_token_set?: boolean;
+	/** Subscription sign-in email, read from the stored token's claims (never the token). */
+	account_email?: string | null;
+	/** Subscription plan id from the sign-in ("plus", "pro"); null when unknown. */
+	account_plan?: string | null;
 	created_at: string | null;
 	updated_at: string | null;
 }
