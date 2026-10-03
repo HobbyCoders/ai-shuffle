@@ -204,15 +204,21 @@ async def service(pki):
         await server.wait_closed()
 
 
-@pytest.fixture
-def broker(monkeypatch):
+@pytest_asyncio.fixture
+async def broker(monkeypatch):
     monkeypatch.setattr(
         chat_access, "session_owner", AsyncMock(return_value=("local", "worker"))
     )
     from app.core import chat_vault
 
     monkeypatch.setattr(chat_vault, "catalog", lambda owner, **kwargs: [])
-    return Broker()
+    value = Broker()
+    yield value
+    for request in list(value.requests.values()):
+        value._finish_request(request)
+    for grant in list(value.grants.values()):
+        value.revoke(grant.session_id, grant.id)
+    await asyncio.gather(*value._notifications)
 
 
 def spec(service, *, writable=False, prefix="/api", **overrides):
@@ -420,7 +426,8 @@ async def test_self_signed_owner_pin_grants_without_sending_credentials_and_read
             await asyncio.sleep(0.001)
     request = next(iter(broker.requests.values()))
     await broker.fulfill("chat", request.id, GrantSubmission(connection=spec(target, fingerprint=formatted)))
-    handle = await request_task
+    assert (await request_task)["status"] == "awaiting_user"
+    handle = (await broker.resources("chat"))["grants"][0]
     assert "fingerprint" not in handle and SECRET not in json.dumps(handle)
     assert target.requests == []
     assert broker.grants[handle["id"]].fingerprint == pins[0]
@@ -499,7 +506,8 @@ async def test_fresh_session_has_no_service_access_and_grant_returns_only_a_hand
     await broker.fulfill(
         "chat", pending_request.id, GrantSubmission(connection=spec(service))
     )
-    handle = await request
+    assert (await request)["status"] == "awaiting_user"
+    handle = (await broker.resources("chat"))["grants"][0]
     assert (
         set(handle) == {"id", "kind", "expires_at", "writable"}
         and handle["kind"] == "service"
@@ -805,7 +813,8 @@ async def test_saved_service_needs_a_new_request_and_keeps_its_scope(
         request.id,
         GrantSubmission(connection=spec(service), save_connection=True),
     )
-    handle = await first
+    assert (await first)["status"] == "awaiting_user"
+    handle = (await broker.resources("chat"))["grants"][0]
     assert saved["d" * 32].secret.get_secret_value() == SECRET
     broker.revoke("chat", handle["id"])
     # A saved credential is never usable without the owner answering a new request.
@@ -817,7 +826,8 @@ async def test_saved_service_needs_a_new_request_and_keeps_its_scope(
     await broker.fulfill(
         "chat", request.id, GrantSubmission(saved_id="d" * 32, minutes=15)
     )
-    reused = await second
+    assert (await second)["status"] == "awaiting_user"
+    reused = (await broker.resources("chat"))["grants"][0]
     assert reused["id"] != handle["id"] and reused["writable"] is False
     with pytest.raises(AccessDenied, match="read-only"):
         await broker.run(
@@ -829,6 +839,224 @@ async def test_saved_service_needs_a_new_request_and_keeps_its_scope(
     assert result["status"] == 200 and SECRET not in json.dumps(result)
     assert service.requests[0]["headers"]["authorization"] == f"Bearer {SECRET}"
     broker.revoke("chat", reused["id"])
+
+
+# --- Resumable service preparation -------------------------------------------------
+
+
+@pytest.mark.parametrize("bypass", [False, True])
+async def test_service_sdk_prefills_public_context_without_granting(broker, monkeypatch, bypass):
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+
+    monkeypatch.setattr(sdk, "broker", broker)
+    mode = AsyncMock(return_value=bypass)
+    monkeypatch.setattr(chat_access, "session_bypasses_confirmation", mode)
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    response = await tools["RequestChatAccess"].handler({
+        "kind": "service", "purpose": "Read DNS inventory", "service_provider": "cloudflare",
+    })
+    pending = json.loads(response["content"][0]["text"])
+    assert set(pending) == {"request_id", "status", "kind", "expires_at"}
+    assert pending["status"] == "awaiting_user" and not broker.grants
+    mode.assert_not_called()  # Bypass never supplies initial consent.
+    snapshot = await broker.snapshot("chat")
+    card = snapshot["requests"][0]
+    assert card["id"] == pending["request_id"]
+    assert card["service_provider"] == "cloudflare"
+    assert card["suggested_url"] == chat_access.CLOUDFLARE_API_URL
+    resources = await broker.resources("chat")
+    assert resources["pending_requests"] == [pending] and not resources["grants"]
+    assert "cloudflare.com" not in json.dumps(response) + json.dumps(resources)
+    await broker.decline("chat", pending["request_id"])
+
+
+async def test_preparation_resumes_after_four_minutes_and_submission_drives_real_reads(
+    broker, service, trust, monkeypatch
+):
+    import time
+    from types import SimpleNamespace
+
+    now = time.time()
+    clock = [now]
+    monkeypatch.setattr(chat_access, "time", SimpleNamespace(time=lambda: clock[0], monotonic=time.monotonic))
+    hints = {"service_provider": "custom", "suggested_url": "https://api.example.com/v1/"}
+    pending = await broker.request("chat", "service", "Read inventory", **hints)
+    clock[0] += 301
+    # Reopening the panel or retrying the tool preserves the original preparation,
+    # not an extended lease. The broker has never received a token at this point.
+    again = await broker.request("chat", "service", "Read inventory", **hints)
+    assert again == pending
+    assert (await broker.snapshot("chat"))["requests"][0]["suggested_url"] == "https://api.example.com/v1"
+    assert not broker.grants and service.connections == 0
+    assert SECRET not in repr(broker.requests) + json.dumps(await broker.resources("chat"))
+    # The owner privately chooses a different endpoint; hints are not authority.
+    submitted = await broker.fulfill("chat", pending["request_id"], GrantSubmission(connection=spec(service), minutes=7))
+    assert submitted == {"granted": True, "saved": False}
+    assert not broker.requests and service.requests == []
+    handle = (await broker.resources("chat"))["grants"][0]
+    assert handle["expires_at"] == clock[0] + 7 * 60
+    for method in ("GET", "HEAD"):
+        result = await broker.run("chat", handle["id"], "http", {"method": method, "path": "/echo"})
+        assert result["status"] == 200 and SECRET not in json.dumps(result)
+    assert [r["method"] for r in service.requests] == ["GET", "HEAD"] and not broker.actions
+    with pytest.raises(AccessDenied, match="read-only"):
+        await broker.run("chat", handle["id"], "http", {"method": "POST", "path": "/items"})
+    with pytest.raises(chat_access.RequestUnavailable):
+        await broker.fulfill("chat", pending["request_id"], GrantSubmission(connection=spec(service)))
+    broker.revoke("chat", handle["id"])
+
+
+@pytest.mark.parametrize("state", ["expired", "cancelled", "ownership", "restart"])
+async def test_stale_preparation_never_grants_and_retry_uses_fresh_id(broker, monkeypatch, state):
+    pending = await broker.request("chat", "service", "Read inventory")
+    request = broker.requests[pending["request_id"]]
+    if state == "expired":
+        request.expires_at = 0
+    elif state == "cancelled":
+        await broker.decline("chat", request.id)
+    elif state == "ownership":
+        monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("different", "owner")))
+    else:
+        broker = Broker()  # Restart retains neither preparation nor grants.
+    create = AsyncMock()
+    monkeypatch.setattr(broker, "create", create)
+    submission = GrantSubmission(connection=GrantInput(kind="service", label="API", url="https://api.example.com", secret=SECRET))
+    with pytest.raises(chat_access.RequestUnavailable):
+        await broker.fulfill("chat", request.id, submission)
+    create.assert_not_called()
+    assert not broker.grants
+    # Expired/cancelled request IDs cannot be revived, even with the same hints.
+    fresh = await broker.request("chat", "service", "Read inventory")
+    assert fresh["request_id"] != pending["request_id"]
+    await broker.decline("chat", fresh["request_id"])
+
+
+@pytest.mark.parametrize("end", ["cancelled", "expired", "ownership"])
+async def test_preparation_ending_during_tls_never_publishes_a_grant(broker, monkeypatch, end):
+    pending = await broker.request("chat", "service", "Read inventory")
+    request = broker.requests[pending["request_id"]]
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def handshake(origin):
+        started.set()
+        await release.wait()
+
+    monkeypatch.setattr(chat_services, "verify_origin", handshake)
+    submission = GrantSubmission(connection=GrantInput(kind="service", label="API", url="https://api.example.com", secret=SECRET))
+    connecting = asyncio.create_task(broker.fulfill("chat", request.id, submission))
+    await started.wait()
+    if end == "cancelled":
+        await broker.decline("chat", request.id)
+    elif end == "expired":
+        request.expires_at = 0
+    else:
+        monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("different", "owner")))
+    release.set()
+    with pytest.raises(chat_access.RequestUnavailable):
+        await connecting
+    assert not broker.grants
+
+
+async def test_retryable_service_failure_keeps_preparation_but_not_private_inputs(broker, service, trust, monkeypatch, caplog):
+    pending = await broker.request("chat", "service", "Read inventory")
+    submission = GrantSubmission(connection=spec(service))
+    real_verify = chat_services.verify_origin
+    monkeypatch.setattr(chat_services, "verify_origin", AsyncMock(side_effect=AccessDenied("Certificate could not be verified.")))
+    with pytest.raises(AccessDenied):
+        await broker.fulfill("chat", pending["request_id"], submission)
+    assert not broker.grants and not broker.requests[pending["request_id"]].claiming
+    assert SECRET not in repr(broker.requests) + json.dumps(await broker.snapshot("chat")) + caplog.text
+    assert await broker.request("chat", "service", "Read inventory") == pending
+    monkeypatch.setattr(chat_services, "verify_origin", real_verify)
+    await broker.fulfill("chat", pending["request_id"], submission)
+    handle = (await broker.resources("chat"))["grants"][0]
+    assert service.requests == []
+    broker.revoke("chat", handle["id"])
+
+
+@pytest.mark.parametrize("hints", [
+    {"service_provider": "unknown"},
+    {"suggested_url": "http://api.example.com"},
+    {"suggested_url": "https://user:secret@example.com"},
+    {"suggested_url": "https://api.example.com?token=secret"},
+    {"suggested_url": "https://api.example.com#secret"},
+    {"suggested_url": "https://127.0.0.1"},
+    {"suggested_url": "https://10.0.0.5"},
+    {"suggested_url": "https://localhost"},
+    {"service_provider": "cloudflare", "suggested_url": "https://wrong.example"},
+])
+async def test_invalid_service_hints_open_no_card(broker, hints):
+    with pytest.raises(AccessDenied):
+        await broker.request("chat", "service", "Read inventory", **hints)
+    assert not broker.requests and not broker.grants
+
+
+async def test_terminal_service_submissions_have_stable_api_status(broker, monkeypatch):
+    from app.api import chat_access as api
+
+    monkeypatch.setattr(api, "broker", broker)
+    monkeypatch.setattr(api, "checked", AsyncMock(return_value=None))
+    app = FastAPI()
+    app.include_router(api.router)
+    app.dependency_overrides[api.require_admin] = lambda: "owner"
+    connection = {"kind": "service", "label": "API", "url": "https://api.example.com", "secret": SECRET}
+    async with AsyncClient(transport=ASGITransport(app), base_url="https://test") as client:
+        for state in ("cancelled", "expired", "wrong-session"):
+            pending = await broker.request("chat", "service", "Read inventory")
+            endpoint = f"/api/v1/chat-access/chat/requests/{pending['request_id']}"
+            if state == "cancelled":
+                cancelled = await client.delete(endpoint)
+                assert cancelled.status_code == 200
+            elif state == "expired":
+                broker.requests[pending["request_id"]].expires_at = 0
+            else:
+                endpoint = endpoint.replace("/chat/", "/other/")
+            failed = await client.post(endpoint, json={"connection": connection})
+            assert failed.status_code == 409 and SECRET not in failed.text
+            assert not broker.grants
+            if state == "wrong-session":
+                await broker.decline("chat", pending["request_id"])
+
+
+async def test_pending_grant_is_not_visible_or_consumable_while_saving(broker, monkeypatch):
+    from app.core import chat_vault
+
+    pending = await broker.request("chat", "service", "Read inventory")
+    monkeypatch.setattr(chat_services, "verify_origin", AsyncMock())
+    started, release = asyncio.Event(), asyncio.Event()
+    from app.db import async_database
+    real_run_sync = async_database.run_sync
+
+    async def run_sync(function, *args, **kwargs):
+        if function is chat_vault.save:
+            started.set()
+            await release.wait()
+            return "d" * 32
+        return await real_run_sync(function, *args, **kwargs)
+
+    monkeypatch.setattr(async_database, "run_sync", run_sync)
+    submitted = GrantSubmission(connection=GrantInput(kind="service", label="API", url="https://api.example.com", secret=SECRET), save_connection=True)
+    granting = asyncio.create_task(broker.fulfill("chat", pending["request_id"], submitted))
+    await started.wait()
+    grant_id = next(iter(broker.grants))
+    assert (await broker.resources("chat"))["grants"] == []
+    with pytest.raises(AccessDenied):
+        await broker.run("chat", grant_id, "http", {"method": "GET", "path": "/"})
+    await broker.decline("chat", pending["request_id"])
+    release.set()
+    with pytest.raises(chat_access.RequestUnavailable):
+        await granting
+    assert not broker.grants
+
+
+async def test_service_preparation_timer_removes_card_and_does_not_touch_grants(broker, monkeypatch):
+    monkeypatch.setattr(chat_access, "SERVICE_PREPARATION_SECONDS", 0)
+    pending = await broker.request("chat", "service", "Read inventory")
+    # A zero-duration lease exercises the scheduled expiry callback, not a sleep.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert pending["status"] == "awaiting_user" and not broker.requests and not broker.grants
 
 
 # --- Owner API, SDK tool and tool surface -------------------------------------------
@@ -867,7 +1095,8 @@ async def test_owner_api_grants_service_without_echoing_the_secret(
         body["url"] = f"https://127.0.0.1:{service.port}/api"
         response = await client.post(endpoint, json={"connection": body})
         assert response.status_code == 200, response.text
-        handle = await requested
+        assert (await requested)["status"] == "awaiting_user"
+        handle = (await broker.resources("chat"))["grants"][0]
         snapshot = await client.get("/api/v1/chat-access/chat")
         assert SECRET not in snapshot.text
         assert (

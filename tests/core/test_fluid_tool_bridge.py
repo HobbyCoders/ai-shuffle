@@ -68,6 +68,14 @@ def test_real_chat_access_tools_have_serializable_provider_schemas():
                 "type": "string",
                 "description": "Folder only: known absolute path on the owning worker, prefilled for user review. Omit when unknown.",
             },
+            "service_provider": {
+                "type": "string", "enum": ["cloudflare", "custom"],
+                "description": "Service only: known provider preset, or custom. Omit for other kinds.",
+            },
+            "suggested_url": {
+                "type": "string",
+                "description": "Service only: known public HTTPS API base, without credentials, query or fragment. Never private connection details; omit when unknown.",
+            },
         },
         "required": ["kind", "purpose"],
     }

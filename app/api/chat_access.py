@@ -100,8 +100,12 @@ async def grant(session_id: str, request_id: str, request: Request, body: dict, 
     owner = await owning_device(row)
     if owner is not None:
         # Relayed in memory only; private inputs go to the owner over HTTPS or not at all.
-        return await forward(owner, session_id, "grant", {"request_id": request_id, "submission": body},
-                             secure=routing.carries_secret(spec), timeout=routing.GRANT_TIMEOUT)
+        result = await forward(owner, session_id, "grant", {"request_id": request_id, "submission": body},
+                               secure=routing.carries_secret(spec), timeout=routing.GRANT_TIMEOUT)
+        if "grant_error" in result:
+            error = result["grant_error"]
+            raise HTTPException(error["status"], error["detail"])
+        return result
     try:
         return await broker.fulfill(session_id, request_id, spec)
     except Exception as exc:  # noqa: BLE001 — never echo private inputs from any failure

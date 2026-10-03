@@ -153,71 +153,12 @@ describe('PrivateAccessRequest', () => {
 		expect(screen.getByText(/Encrypted on Owner PC for future requests/)).toBeTruthy();
 	});
 
-	it('collects an HTTPS service credential privately and only offers saved services', async () => {
-		let finish!: () => void;
-		m.post.mockReturnValue(new Promise<void>(resolve => { finish = resolve; }));
-		const { onComplete } = mount({ request: { id: 'r/1', kind: 'service', purpose: 'Query the inventory API', expires_at: inAnHour() } });
-		// Saved SSH machines are not credentials for an API service.
-		expect(screen.queryByLabelText('Connection')).toBeNull();
-		expect(screen.getByText('API access')).toBeTruthy();
-		await fireEvent.input(field('Service address'), { target: { value: ' https://api.example.com/v1 ' } });
-		await fireEvent.input(field('Credential header'), { target: { value: 'X-API-Key' } });
-		await fireEvent.input(field('Scheme'), { target: { value: '' } });
-		await fireEvent.input(field('API key or token'), { target: { value: 'api-key-0123456789' } });
-		await fireEvent.click(screen.getByRole('checkbox', { name: /Allow changes/ }));
-		await fireEvent.click(screen.getByRole('checkbox', { name: /Save this connection/ }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
-		expect(m.post).toHaveBeenCalledWith(endpoint, {
-			connection: {
-				kind: 'service', label: 'API service', minutes: 60, url: 'https://api.example.com/v1',
-				auth_header: 'X-API-Key', auth_scheme: '', secret: 'api-key-0123456789', writable: true, fingerprint: ''
-			},
-			saved_id: '', minutes: 60, save_connection: true
-		});
-		expect(field('API key or token').value).toBe('');
-		finish();
-		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
-		expect(m.post.mock.calls[0][1].connection.secret).toBe('');
-	});
-
-	it('requires an explicit certificate fingerprint and saves it with a private service', async () => {
-		const { onComplete } = mount({ request: { id: 'r/1', kind: 'service', purpose: 'Check home server', expires_at: inAnHour() } });
-		expect(screen.queryByLabelText('Certificate SHA-256 fingerprint')).toBeNull();
-		await fireEvent.click(screen.getByRole('checkbox', { name: /Trust a specific certificate/ }));
-		const pinField = field('Certificate SHA-256 fingerprint');
-		expect(pinField.required).toBe(true);
-		await fireEvent.input(pinField, { target: { value: 'not-a-fingerprint' } });
-		expect(pinField.checkValidity()).toBe(false);
-		const pin = 'AB'.repeat(32);
-		await fireEvent.input(pinField, { target: { value: pin } });
-		expect(pinField.checkValidity()).toBe(true);
-		await fireEvent.input(field('Service address'), { target: { value: 'https://home.example/api' } });
-		await fireEvent.input(field('API key or token'), { target: { value: 'test-only-api-token' } });
-		await fireEvent.click(screen.getByRole('checkbox', { name: /Save this connection/ }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
-		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
-		expect(m.post.mock.calls[0][1].connection.fingerprint).toBe(pin);
-		expect(m.post.mock.calls[0][1].save_connection).toBe(true);
-		expect(field('API key or token').value).toBe('');
-	});
-
-	it('reuses a saved service named in the request without resending the credential', async () => {
-		const services = [
-			...saved,
-			{ id: 'grafana', label: 'Grafana', target: 'https://grafana.lan.example/api', fingerprint: '', kind: 'service', writable: false },
-			{ id: 'stock', label: 'Stock', target: 'https://stock.example.com', fingerprint: '', kind: 'service', writable: true }
-		];
-		const { onComplete } = mount({
-			request: { id: 'r/1', kind: 'service', purpose: 'Check stock.example.com levels', expires_at: inAnHour() },
-			savedConnections: services
-		});
-		const select = screen.getByLabelText('Connection') as HTMLSelectElement;
-		expect(select.value).toBe('stock');
-		expect([...select.options].map(o => o.value)).toEqual(['', 'grafana', 'stock']);
-		expect(screen.getByText('Allows changes after approval')).toBeTruthy();
-		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
-		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
-		expect(m.post).toHaveBeenCalledWith(endpoint, { connection: null, saved_id: 'stock', minutes: 60, save_connection: false });
+	it('routes service requests into guided preparation, not the credential form', () => {
+		mount({ request: { id: 'r/1', kind: 'service', purpose: 'Read Cloudflare inventory', expires_at: inAnHour(), service_provider: 'cloudflare', suggested_url: 'https://api.cloudflare.com/client/v4' } });
+		expect(screen.getByRole('region', { name: 'Private service connection' })).toBeTruthy();
+		expect(field('Service address').value).toBe('https://api.cloudflare.com/client/v4');
+		expect(screen.queryByLabelText('API key or token')).toBeNull();
+		expect(m.post).not.toHaveBeenCalled();
 	});
 
 	it('declines through DELETE and shows a failure without completing', async () => {

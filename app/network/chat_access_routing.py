@@ -143,10 +143,9 @@ async def handle(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
                 raise PermissionError(INSECURE_INPUTS)
             try:
                 return await broker.fulfill(session_id, request_id, submission)
-            except AccessDenied:
-                raise
-            except Exception as exc:  # noqa: BLE001 - a fixed message, as the local API gives
-                raise PermissionError(grant_failure(exc)[1]) from None
+            except Exception as exc:  # noqa: BLE001 - same sanitized status as the local API
+                status, message = grant_failure(exc)
+                return {"grant_error": {"status": status, "detail": message}}
         if operation == "decline":
             await broker.decline(session_id, _identifier(body, "request_id"))
             return {"declined": True}

@@ -27,6 +27,7 @@ from app.network import chat_access_routing as routing
 from app.network import control, engine
 from tests.core.network.harness import converge, join
 from tests.core.test_chat_access import pending, ssh_target  # noqa: F401 - ssh_target is a fixture
+from tests.core.test_chat_services import pki, service, spec, trust  # noqa: F401 - shared TLS fixtures
 
 pytestmark = pytest.mark.asyncio
 
@@ -202,6 +203,42 @@ async def test_viewer_card_grant_approval_and_revocation_run_on_the_owner(pair, 
                 if row["key"].startswith("chat_connection:")]
 
 
+async def test_resumable_service_setup_routes_to_owner_with_retryable_and_terminal_statuses(pair, service, trust, monkeypatch):
+    from app.core import chat_services
+
+    network = Network(monkeypatch, {A_URL: pair.a})
+    _reach(pair.b, pair.a, A_URL)
+    with pair.a.active():
+        prepared = await pair.broker.request(SESSION, "service", "Read inventory", service_provider="cloudflare")
+    assert prepared["status"] == "awaiting_user" and not pair.broker.grants
+    connection = {"kind": "service", "label": "Test", "url": spec(service).url, "secret": PASSWORD}
+    with pair.b.active():
+        async with network.ui() as ui:
+            snapshot = (await ui.get(BASE)).json()
+            card = snapshot["requests"][0]
+            assert card["id"] == prepared["request_id"]
+            assert card["suggested_url"] == chat_access.CLOUDFLARE_API_URL
+            endpoint = f"{BASE}/requests/{card['id']}"
+            real_verify = chat_services.verify_origin
+            monkeypatch.setattr(chat_services, "verify_origin", AsyncMock(side_effect=chat_access.AccessDenied("Certificate could not be verified.")))
+            failed = await ui.post(endpoint, json={"connection": connection})
+            assert failed.status_code == 400 and PASSWORD not in failed.text
+            assert not pair.broker.grants and card["id"] in pair.broker.requests
+            monkeypatch.setattr(chat_services, "verify_origin", real_verify)
+            granted = await ui.post(endpoint, json={"connection": connection})
+            assert granted.status_code == 200 and granted.json()["granted"]
+            assert not pair.broker.requests and len(pair.broker.grants) == 1
+            replay = await ui.post(endpoint, json={"connection": connection})
+            assert replay.status_code == 409 and PASSWORD not in replay.text
+            grant_id = next(iter(pair.broker.grants))
+            assert pair.broker.grants[grant_id].owner[0] == pair.a.device_id
+            await ui.delete(f"{BASE}/grants/{grant_id}")
+    assert [base for base, _, body in network.seen if PASSWORD.encode() in body] == [A_URL, A_URL, A_URL]
+    assert service.requests == []
+    assert not [row for row in pair.b.sql("SELECT key FROM system_settings")
+                if row["key"].startswith("chat_connection:")]
+
+
 async def test_private_inputs_never_cross_plain_http_but_answers_do(pair, ssh_target, monkeypatch):
     spec, commands, _ = ssh_target
     plain = "http://a.local:8000"
@@ -235,9 +272,11 @@ async def test_owner_refuses_private_inputs_that_arrived_without_https(pair, ssh
         token = control.inbound_https.set(True)
         try:
             wrong = {**_connection(spec), "password": "wrong-" + PASSWORD}
-            with pytest.raises(PermissionError) as rejected:
-                await routing.handle({**body, "submission": {"connection": wrong}}, pair.b.device_id)
-            assert str(rejected.value).startswith("SSH sign-in was rejected") and PASSWORD not in str(rejected.value)
+            rejected = await routing.handle({**body, "submission": {"connection": wrong}}, pair.b.device_id)
+            assert rejected["grant_error"]["status"] == 400
+            assert rejected["grant_error"]["detail"].startswith("SSH sign-in was rejected")
+            assert PASSWORD not in str(rejected) and not pair.broker.grants
+            assert request_id in pair.broker.requests
             granted = await routing.handle({**body, "submission": {"connection": _connection(spec)}},
                                            pair.b.device_id)
         finally:

@@ -431,9 +431,20 @@ When an agent asks for access to a folder on this worker, a machine over SSH, or
 
 Returns `requests` (open asks: `id`, `kind` (`folder`, `machine` or `service`), `purpose`, `expires_at`), `grants` (`id`, `label`, `kind`, `target`, `expires_at`, `writable`, `fingerprint`), `actions` (actions waiting for approval: `id`, `grant_id`, `operation` (`write`, `command` or `http`), `arguments`, `expires_at`), `saved_connections` (`id`, `kind`, `label`, `target`, `fingerprint`; never a secret), `vault_available`, `folder_available` and `restart_revokes`.
 
+
+Service setup does not hold an agent tool open while the owner creates a token. `RequestChatAccess(kind="service")` returns immediately with `status: "awaiting_user"`, `request_id`, `kind` and a preparation `expires_at`. The private card can be reopened for 24 hours on the same running worker. Identical tool retries reuse the request without extending that deadline; cancellation, expiry, ownership change and worker restart invalidate it. Preparation grants no access. After the owner submits and confirms readiness in the conversation, the agent uses `ChatResources` to obtain the approved handle. While preparation is pending, that tool can return `pending_requests` containing only request IDs, status, kind and expiry, never setup details or tokens.
+
+Service requests in the owner snapshot also include `status: "awaiting_user"`, `service_provider` (`cloudflare` or `custom`) and `suggested_url`. These are non-secret preparation hints, not approved scope. The model can supply a known public HTTPS API base; credentials, query strings, fragments and private addresses are not allowed as endpoint hints. The Cloudflare preset supplies `https://api.cloudflare.com/client/v4`. Unknown or private endpoints must be entered in the private card, not the conversation. Folder requests can include an editable `suggested_path`; machine and folder requests still wait up to four minutes.
+
+Keep tokens in the private submission only. Preparation stores no credential draft, and no token belongs in chat, tool arguments, URLs, logs or browser storage. Saved connections remain a separate, explicit opt-in in the encrypted vault and require a fresh owner grant for each session. Closing a card does not grant or cancel its preparation. The grant's selected 1–480 minute lifetime starts with submission, independently of the preparation deadline; one-shot action approvals retain their own expiry.
+
+For Cloudflare, use a [scoped API token](https://developers.cloudflare.com/fundamentals/api/get-started/create-token/), not the Global API Key. Select only the Read permissions and account/zone resources needed for the requested inventory, with an appropriate provider token expiry. The broker's read-only setting restricts its requests to GET/HEAD; it does not reduce the token's permissions at Cloudflare. Other services need their own documented API base and credential header.
+
+Cloudflare [supports Authorization Code OAuth, including PKCE for public clients](https://developers.cloudflare.com/fundamentals/oauth/create-an-oauth-client/). That requires a registered client, configured redirect URLs and scopes; a publicly authorizable client also requires publisher domain verification. AI Shuffle does not ship a registered Cloudflare OAuth integration here. The guided private-token path is the available option, not generic OAuth for arbitrary services.
+
 ### POST /api/v1/chat-access/{session_id}/requests/{request_id}
 
-Grant a request, with a new connection or a saved one (`saved_id`), not both.
+Explicitly grant a current request, with a new connection or a saved one (`saved_id`), not both. Failed validation or connection checks leave preparation available for correction. No private input is returned or stored as a preparation draft.
 
 ```json
 {
@@ -452,7 +463,7 @@ Grant a request, with a new connection or a saved one (`saved_id`), not both.
 }
 ```
 
-`connection.kind` must match the request. For `folder`, send `path` instead of the SSH fields. For `service`, send `url` (an `https://` address, optionally with a path prefix), `secret` (the API key or token, 8 to 8,192 visible characters), `auth_header` (default `Authorization`), `auth_scheme` (default `Bearer`; empty sends the secret alone, for headers such as `X-API-Key`) and `writable` (allow POST, PUT, PATCH and DELETE). The worker completes a verified TLS handshake before granting; self-signed certificates are refused and no request or credential is sent at grant time. `label` is 1 to 80 characters; `minutes` is 1 to 480 (default 60); `fingerprint` (`SHA256:...`) is optional; without it the server's key is pinned on first connect. `password`, `private_key`, `passphrase` and `secret` are never returned. Returns `{"granted": true, "saved": false}`. Connection failures return `400` with a message; secrets are never echoed.
+`connection.kind` must match the request. For `folder`, send `path` instead of the SSH fields. For `service`, send `url` (an `https://` address, optionally with a path prefix), `secret` (the API key or token, 8 to 8,192 visible characters), `auth_header` (default `Authorization`), `auth_scheme` (default `Bearer`; empty sends the secret alone, for headers such as `X-API-Key`) and `writable` (allow POST, PUT, PATCH and DELETE). The worker completes a verified TLS handshake before granting; no request or credential is sent at grant time. Self-signed certificates are refused unless the owner explicitly supplies their SHA-256 certificate fingerprint in `fingerprint` through the private card. That exact certificate must still be valid and match the host; no global TLS check is disabled. `label` is 1 to 80 characters; `minutes` is 1 to 480 (default 60); `fingerprint` (`SHA256:...`) is optional; without it the server's key is pinned on first connect. `password`, `private_key`, `passphrase` and `secret` are never returned. Returns `{"granted": true, "saved": false}`. Connection failures return `400` with a message; secrets are never echoed.
 
 ### DELETE /api/v1/chat-access/{session_id}/requests/{request_id}
 
@@ -470,7 +481,7 @@ Approve or refuse one pending write, command or API request. Body: exactly `{"al
 
 Forget a saved connection and end any grant that uses it. Returns `{"deleted": true}`.
 
-A request, grant or action that no longer exists returns `409` (`400` when granting).
+A cancelled, expired, answered, restarted or ownership-invalidated request cannot grant access and returns `409`, including late or duplicate submissions. A grant or action that no longer exists also returns `409`. Correctable connection/input failures return `400`, validation failures return `422`, and worker faults return `500`; retryable errors do not extend preparation. The same grant error statuses are preserved when forwarding between updated workers.
 
 For a session that runs on another device, these endpoints forward to that device over the worker network, and grants, approvals and saved connections stay there. A new connection with a password, key or API secret is sent only when the other device is reached over HTTPS; otherwise the grant returns `409` and you can choose a saved connection or enter it on that device. While the other device is unreachable, `GET` returns an empty snapshot and changes return `503`.
 

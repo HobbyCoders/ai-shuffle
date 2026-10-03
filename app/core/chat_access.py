@@ -58,6 +58,10 @@ class GrantInput(BaseModel):
 SECRET_FIELDS = frozenset({"password", "private_key", "passphrase", "secret"})
 
 
+class RequestUnavailable(AccessDenied):
+    """A terminal request failure, distinct from correctable private inputs."""
+
+
 class GrantSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid")
     connection: GrantInput | None = None
@@ -88,6 +92,7 @@ class Grant:
     header: tuple[str, str] | None = None
     secret: str = ""
     revoked: bool = False
+    ready: bool = True
     saved_id: str = ""
     timer: asyncio.TimerHandle | None = None
     tasks: set = field(default_factory=set)
@@ -129,15 +134,29 @@ class AccessRequest:
     result: asyncio.Future
     claiming: bool = False
     suggested_path: str = ""
+    service_provider: str = ""
+    suggested_url: str = ""
+    timer: asyncio.TimerHandle | None = None
+
+    def model_pending(self):
+        return {"status": "awaiting_user", "request_id": self.id,
+                "kind": self.kind, "expires_at": self.expires_at}
 
     def public(self):
         result = {key: getattr(self, key) for key in ("id", "kind", "purpose", "expires_at")}
         if self.suggested_path:
             result["suggested_path"] = self.suggested_path
+        if self.kind == "service":
+            result.update(status="awaiting_user", service_provider=self.service_provider,
+                          suggested_url=self.suggested_url)
         return result
 
 
 logger = logging.getLogger(__name__)
+
+# Preparation is a resumable card, not a blocked model/tool call or a grant.
+SERVICE_PREPARATION_SECONDS = 24 * 3600
+CLOUDFLARE_API_URL = "https://api.cloudflare.com/client/v4"
 
 # ChatResources is a read-only listing that must answer promptly. Its one
 # database read runs on this small pool instead of asyncio's shared default
@@ -234,6 +253,8 @@ async def publish_change(session_id: str, api_user_id: str | None, *, saved: boo
 
 def grant_failure(exc: BaseException) -> tuple[int, str]:
     """Status and fixed message for a failed grant. Never echoes private inputs."""
+    if isinstance(exc, RequestUnavailable):
+        return 409, str(exc)
     if isinstance(exc, AccessDenied):
         return 400, str(exc)
     if isinstance(exc, asyncssh.PermissionDenied):
@@ -268,7 +289,39 @@ class Broker:
         from app.network import chat_access_routing
         chat_access_routing.notify_watchers(session_id, saved=saved)
 
-    async def request(self, session_id: str, kind: str, purpose: str, suggested_path: str = ""):
+    def _finish_request(self, request: AccessRequest) -> None:
+        if self.requests.get(request.id) is not request:
+            return
+        self.requests.pop(request.id)
+        if request.timer:
+            request.timer.cancel()
+        if not request.result.done():
+            request.result.set_result(None)
+        self._notify(request.session_id, request.owner)
+
+    def _live_requests(self, session_id: str, owner: tuple):
+        for request in list(self.requests.values()):
+            if request.session_id != session_id:
+                continue
+            if request.owner != owner or request.expires_at <= time.time() or request.result.done():
+                self._finish_request(request)
+            else:
+                yield request
+
+    async def _check_request(self, request: AccessRequest) -> None:
+        self._ensure_request(request, await session_owner(request.session_id))
+
+    def _ensure_request(self, request: AccessRequest, owner: tuple) -> None:
+        if (self.requests.get(request.id) is not request or request.result.done()
+                or request.expires_at <= time.time()):
+            self._finish_request(request)
+            raise RequestUnavailable("This private access request is no longer available.")
+        if owner != request.owner:
+            self._finish_request(request)
+            raise RequestUnavailable("Session ownership changed.")
+
+    async def request(self, session_id: str, kind: str, purpose: str, suggested_path: str = "",
+                      service_provider: str = "", suggested_url: str = ""):
         owner = await session_owner(session_id)
         if kind not in {"machine", "folder", "service"} or not isinstance(purpose, str) or not purpose.strip() or len(purpose) > 2000:
             raise AccessDenied("Specify machine, folder or service and a short explanation of the requested access.")
@@ -279,13 +332,43 @@ class Broker:
             raise AccessDenied("A suggested path must be an absolute folder path on the owning worker.")
         if kind == "folder" and not chat_files.available():
             raise AccessDenied("This worker cannot safely grant folders. Do not ask for a path or use a shell workaround.")
-        if any(r.session_id == session_id for r in self.requests.values()):
+        if not isinstance(service_provider, str) or not isinstance(suggested_url, str):
+            raise AccessDenied("Specify a service provider and a public HTTPS API base address.")
+        if (service_provider or suggested_url) and kind != "service":
+            raise AccessDenied("Service setup hints are only available for service requests.")
+        if kind == "service":
+            service_provider = service_provider or ("cloudflare" if suggested_url.rstrip("/") == CLOUDFLARE_API_URL else "custom")
+            if service_provider not in {"cloudflare", "custom"}:
+                raise AccessDenied("Choose cloudflare or custom for the service provider.")
+            if suggested_url:
+                origin = chat_services.parse_origin(suggested_url)
+                try:
+                    address = ipaddress.ip_address(origin.host)
+                except ValueError:
+                    address = None
+                if ((address is not None and not address.is_global)
+                        or origin.host == "localhost" or origin.host.endswith((".localhost", ".local"))):
+                    raise AccessDenied("Only public service endpoints may be suggested; choose private addresses in the card.")
+                suggested_url = origin.url
+            if service_provider == "cloudflare":
+                if suggested_url and suggested_url != CLOUDFLARE_API_URL:
+                    raise AccessDenied("The Cloudflare preset uses its official API base address.")
+                suggested_url = CLOUDFLARE_API_URL
+        for pending in self._live_requests(session_id, owner):
+            if (kind == "service" and pending.kind == kind and pending.purpose == purpose.strip()
+                    and pending.service_provider == service_provider and pending.suggested_url == suggested_url):
+                return pending.model_pending()
             raise AccessDenied("A private access request is already awaiting the user.")
+        duration = SERVICE_PREPARATION_SECONDS if kind == "service" else 240
         request = AccessRequest(uuid.uuid4().hex, session_id, owner, kind, purpose.strip(),
-                                time.time() + 240, asyncio.get_running_loop().create_future(),
-                                suggested_path=suggested_path)
+                                time.time() + duration, asyncio.get_running_loop().create_future(),
+                                suggested_path=suggested_path, service_provider=service_provider,
+                                suggested_url=suggested_url)
         self.requests[request.id] = request
         self._notify(session_id, owner)
+        if kind == "service":
+            request.timer = asyncio.get_running_loop().call_later(duration, self._finish_request, request)
+            return request.model_pending()
         try:
             grant_id = await asyncio.wait_for(request.result, 240)
             if not grant_id:
@@ -302,9 +385,11 @@ class Broker:
         request = self.requests.get(request_id)
         if (not request or request.session_id != session_id or request.result.done()
                 or request.expires_at <= time.time() or request.claiming):
-            raise AccessDenied("This private access request is no longer available.")
-        if request.owner != await session_owner(session_id):
-            raise AccessDenied("Session ownership changed.")
+            raise RequestUnavailable("This private access request is no longer available.")
+        await self._check_request(request)
+        # Ownership lookup above yields: a concurrent submission may have claimed it.
+        if request.claiming:
+            raise RequestUnavailable("This private access request is no longer available.")
         request.claiming = True
         grant = None
         try:
@@ -319,7 +404,8 @@ class Broker:
             if spec is None or request.kind != spec.kind:
                 raise AccessDenied("The requested resource type changed.")
             spec = spec.model_copy(update={"minutes": submission.minutes})
-            grant = await self.create(session_id, spec)
+            grant = await self.create(session_id, spec, request=request)
+            await self._check_request(request)
             saved_id = submission.saved_id
             if submission.save_connection:
                 # Save the key actually pinned, so later uses verify against it
@@ -327,19 +413,21 @@ class Broker:
                 pinned = spec.model_copy(update={"fingerprint": grant["fingerprint"]})
                 saved_id = await run_sync(chat_vault.save, request.owner, pinned)
                 self._notify(session_id, request.owner, saved=True)
-            if request.result.done() or request.expires_at <= time.time():
-                raise AccessDenied("The request expired while connecting. Session access was not retained.")
-            current = await self.get(session_id, grant["id"])
+            await self._check_request(request)
+            current = await self.get(session_id, grant["id"], preparing=True)
             current.saved_id = saved_id
             if saved_id:
                 # Deletion may race the SSH handshake or the save. Attach the
                 # binding before rechecking storage so deletion either revokes
                 # this grant or makes this lookup fail; it cannot be resurrected.
                 await run_sync(chat_vault.load, request.owner, saved_id)
-                await self.get(session_id, grant["id"])
-            if request.result.done() or request.expires_at <= time.time():
-                raise AccessDenied("The private request expired before access was granted.")
+                await self.get(session_id, grant["id"], preparing=True)
+            await self._check_request(request)
+            current.ready = True
             request.result.set_result(grant["id"])
+            self._notify(session_id, request.owner)
+            if request.kind == "service":
+                self._finish_request(request)
             return {"granted": True, "saved": bool(saved_id)}
         except BaseException:
             if grant and grant["id"] in self.grants:
@@ -362,11 +450,13 @@ class Broker:
         self._notify(session_id, owner, saved=True)
 
     async def decline(self, session_id: str, request_id: str):
-        await session_owner(session_id)
         request = self.requests.get(request_id)
         if not request or request.session_id != session_id or request.result.done():
-            raise AccessDenied("This private access request is no longer available.")
+            raise RequestUnavailable("This private access request is no longer available.")
+        await self._check_request(request)
         request.result.set_result(None)
+        if request.kind == "service":
+            self._finish_request(request)
 
     async def host_key(self, host: str, port: int, alg: str) -> str | None:
         """The server's ``alg`` host-key fingerprint, read before any authentication.
@@ -437,13 +527,13 @@ class Broker:
             connect_timeout=10, login_timeout=10,
         )
 
-    async def create(self, session_id: str, spec: GrantInput) -> dict:
+    async def create(self, session_id: str, spec: GrantInput, *, request: AccessRequest | None = None) -> dict:
         owner = await session_owner(session_id)
         if sum(g.session_id == session_id for g in self.grants.values()) >= 8:
             raise AccessDenied("A session may have at most eight active grants.")
         grant = Grant(uuid.uuid4().hex, session_id, owner, spec.label.strip(),
                       spec.kind, spec.path, time.time() + spec.minutes * 60,
-                      writable=spec.writable)
+                      writable=spec.writable, ready=request is None)
         try:
             if spec.kind == "folder":
                 from pathlib import Path
@@ -498,7 +588,11 @@ class Broker:
                 async with await self.connection(grant):
                     pass  # Verify the pinned identity and credentials before saving the grant.
             if await session_owner(session_id) != owner:
-                raise AccessDenied("Session ownership changed; grant refused.")
+                raise RequestUnavailable("Session ownership changed; grant refused.")
+            if request is not None:
+                # Check without yielding before publication: cancelled preparation
+                # must never produce even a briefly usable handle.
+                self._ensure_request(request, owner)
             if sum(g.session_id == session_id for g in self.grants.values()) >= 8:
                 raise AccessDenied("A session may have at most eight active grants.")
         except BaseException:
@@ -507,7 +601,8 @@ class Broker:
             raise
         self.grants[grant.id] = grant
         grant.timer = asyncio.get_running_loop().call_later(spec.minutes * 60, self.revoke, session_id, grant.id)
-        self._notify(session_id, owner)
+        if grant.ready:
+            self._notify(session_id, owner)
         return grant.public()
 
     def revoke(self, session_id: str, grant_id: str):
@@ -530,9 +625,9 @@ class Broker:
         grant.header, grant.secret = None, ""
         self._notify(session_id, grant.owner)
 
-    async def get(self, session_id: str, grant_id: str) -> Grant:
+    async def get(self, session_id: str, grant_id: str, *, preparing: bool = False) -> Grant:
         grant = self.grants.get(grant_id)
-        if not grant or grant.session_id != session_id:
+        if not grant or grant.session_id != session_id or (not grant.ready and not preparing):
             raise AccessDenied("No such handle in this session. Use RequestChatAccess to ask privately.")
         try:
             owner = await session_owner(session_id)
@@ -551,7 +646,7 @@ class Broker:
             if grant.session_id == session_id:
                 if grant.revoked or grant.expires_at <= time.time() or grant.owner != owner:
                     self.revoke(session_id, grant.id)
-                else:
+                elif grant.ready:
                     live.append(grant)
         return live
 
@@ -596,7 +691,11 @@ class Broker:
         log("ChatResources listing: session=%s grants=%d owner_lookup=%.3fs grants_and_probe=%.3fs "
             "total=%.3fs default_executor=%s", session_id, len(grants), looked_up - started,
             finished - looked_up, total, _default_executor_load())
-        return {"grants": grants, "folder_available": folder_available}
+        result = {"grants": grants, "folder_available": folder_available}
+        pending = [r.model_pending() for r in self._live_requests(session_id, owner) if r.kind == "service"]
+        if pending:
+            result["pending_requests"] = pending
+        return result
 
     async def snapshot(self, session_id: str, row: dict | None = None):
         # The access API has just loaded and authorized this session row; reuse
@@ -613,8 +712,7 @@ class Broker:
             "grants": result,
             "actions": [a.public() for a in self.actions.values()
                         if a.session_id == session_id and not a.decision.done()],
-            "requests": [r.public() for r in self.requests.values()
-                         if r.session_id == session_id and not r.result.done()],
+            "requests": [r.public() for r in self._live_requests(session_id, owner)],
             "folder_available": chat_files.available(),
             "restart_revokes": True,
         }

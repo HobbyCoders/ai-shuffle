@@ -12,7 +12,7 @@
 	let { sessionId, trigger = 'button' }: { sessionId: string; trigger?: 'button' | 'none' } = $props();
 	type Grant = { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean; fingerprint?: string };
 	type Action = { id: string; grant_id: string; operation: string; arguments: Record<string, string>; expires_at: number };
-	type Request = { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string };
+	type Request = { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string; service_provider?: string; suggested_url?: string };
 	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
 	let data = $state<{grants: Grant[]; actions: Action[]; requests: Request[]; saved_connections: Saved[]; vault_available: boolean}>({grants: [], actions: [], requests: [], saved_connections: [], vault_available: false});
 	let confirmingDelete = $state<string | null>(null);
@@ -28,6 +28,7 @@
 	// Streaming/resource invalidations must never reopen either surface.
 	let accessExpanded = $state(false);
 	let dialog = $state<HTMLDialogElement>();
+	let clearSecretsKey = $state(0);
 	const pendingCount = $derived(data.requests.length + data.actions.length);
 	let error = $state('');
 	// The header reads the pending count for its button label and the git
@@ -230,7 +231,7 @@
 		</span>
 	</button>
 	{/if}
-	<dialog bind:this={dialog} class="access-dialog card-system" aria-label="Private access for this conversation">
+	<dialog bind:this={dialog} onclose={() => clearSecretsKey++} class="access-dialog card-system" aria-label="Private access for this conversation">
 		<header class="access-dialog-head">
 			<h2>Private access</h2>
 			<button class="access-close" aria-label="Close private access" onclick={() => dialog?.close()}>×</button>
@@ -238,7 +239,7 @@
 		<div class="private-access" aria-label="Temporary access in this conversation">
 		{#if error}<p class="pa-error" role="alert">{error}</p>{/if}
 		{#each data.requests as request (request.id)}
-			<PrivateAccessRequest {sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} {owner} onComplete={() => void refresh()} />
+			<PrivateAccessRequest {sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} {owner} {clearSecretsKey} onComplete={() => void refresh()} />
 		{/each}
 		{#each data.actions as action (action.id)}
 			{@const grant = data.grants.find(g => g.id === action.grant_id)}

@@ -34,6 +34,23 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); resourceSync.clear(); vi.useRealTimers(); });
 describe('private access header disclosure', () => {
+ it('resumes a service setup after dialog close without keeping its token or consent', async () => {
+  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+  snapshot = {...empty(), requests: [{id:'r1',kind:'service',purpose:'Read inventory',expires_at:9999999999,service_provider:'cloudflare',suggested_url:'https://api.cloudflare.com/client/v4'}]};
+  render(ChatAccess, {sessionId:'s1'}); await flush();
+  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
+  await fireEvent.click(screen.getByRole('button', {name:'Continue to setup'}));
+  await fireEvent.click(screen.getByRole('button', {name:'I have a token'}));
+  await fireEvent.input(screen.getByLabelText('API key or token'), {target:{value:'test-only-private-token'}});
+  await fireEvent.click(screen.getByRole('checkbox', {name:/I approve access/}));
+  await fireEvent.click(screen.getByRole('button', {name:'Close private access'}));
+  await flush();
+  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
+  expect((screen.getByLabelText('API key or token') as HTMLInputElement).value).toBe('');
+  expect((screen.getByRole('checkbox', {name:/I approve access/}) as HTMLInputElement).checked).toBe(false);
+  expect(screen.getByText('https://api.cloudflare.com/client/v4')).toBeTruthy();
+  expect(m.post).not.toHaveBeenCalled();
+ });
  it('keeps Escape inside the dialog instead of triggering global chat shortcuts', async () => {
   snapshot = {...empty(), actions:[{id:'a1',grant_id:'g1',operation:'command',arguments:{command:'pwd'},expires_at:9999999999}]};
   render(ChatAccess, {sessionId:'s1'}); await flush();

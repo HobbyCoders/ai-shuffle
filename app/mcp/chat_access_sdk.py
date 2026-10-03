@@ -27,6 +27,17 @@ on the worker that runs this chat. The user can edit it before approving. Use a
 known path, not a guessed one; in Docker/Unraid this is the container path, not
 an unmounted host path. The suggestion grants no access and does not create a
 folder. If the path is unknown, let the user choose privately in the card.
+For service access, set service_provider to cloudflare or custom and, when known,
+include suggested_url with the PUBLIC HTTPS API base address, never credentials,
+query strings or private connection details. Cloudflare supplies its official
+API endpoint automatically. Explain the task and required read-only resources
+in purpose so the user can scope a token. Service requests return awaiting_user
+immediately, NOT a grant: the preparation card remains available for 24 hours
+and can be reopened without rushing setup. Do not poll, re-request, or assume
+consent. Continue only after the user confirms readiness, then call ChatResources
+for the approved handle. Identical retries reuse pending preparation without
+extending it; cancelled or expired cards require a new request with user consent.
+No generic OAuth is available; do not promise it or collect OAuth client secrets.
 Grants expire and are lost on restart. Supported resources are SSH machines,
 Linux or macOS folders and HTTPS API services. A service grant holds one API key or token
 which ChatHttpRequest attaches for you; you never see it, and responses are
@@ -64,7 +75,9 @@ def create_chat_access_server(session_id: str):
         try:
             if operation == "request":
                 result = await broker.request(session_id, args.get("kind", ""), args.get("purpose", ""),
-                                              suggested_path=args.get("suggested_path", ""))
+                                              suggested_path=args.get("suggested_path", ""),
+                                              service_provider=args.get("service_provider", ""),
+                                              suggested_url=args.get("suggested_url", ""))
             elif operation == "resources":
                 # Grant metadata only: pending command/write contents belong to
                 # the approval UI, saved connections to the access panel.
@@ -79,19 +92,21 @@ def create_chat_access_server(session_id: str):
             message = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
         return {"isError": True, "content": [{"type": "text", "text": message}]}
 
-    @tool("RequestChatAccess", "Show a private input card in this conversation for an SSH machine (kind=machine), a Linux or macOS folder (kind=folder) or an HTTPS API service credential (kind=service). Explain why access is needed. The user enters connection details privately; returns only an opaque temporary handle, never credentials or the address. For folders, include suggested_path with a known absolute path on the owning worker; the user can edit it before approving. It grants no access and creates no folder. Waits up to four minutes. Do not request arbitrary secrets without a supported private consumer.", {
+    @tool("RequestChatAccess", "Show a private access card for an SSH machine, Linux or macOS folder, or HTTPS API service. Explain why access is needed. Machine/folder requests wait up to four minutes and return an opaque handle. Service requests return awaiting_user immediately, not access; preparation lasts 24 hours and identical retries resume it. The user explicitly submits private inputs when ready. After the user confirms readiness, call ChatResources for the approved handle; do not poll or assume consent. For folders, suggested_path is a known absolute path on the owning worker. For services, service_provider chooses cloudflare or custom; suggested_url is a known PUBLIC HTTPS API base without credentials/query/fragment. Cloudflare prefills its official endpoint. Hints grant no access. Never put secrets or private connection details in tool arguments, and do not promise generic OAuth.", {
         "type": "object",
         "properties": {
             "kind": {"type": "string", "enum": ["machine", "folder", "service"]},
             "purpose": {"type": "string"},
             "suggested_path": {"type": "string", "description": "Folder only: known absolute path on the owning worker, prefilled for user review. Omit when unknown."},
+            "service_provider": {"type": "string", "enum": ["cloudflare", "custom"], "description": "Service only: known provider preset, or custom. Omit for other kinds."},
+            "suggested_url": {"type": "string", "description": "Service only: known public HTTPS API base, without credentials, query or fragment. Never private connection details; omit when unknown."},
         },
         "required": ["kind", "purpose"],
     })
     async def request(args):
         return await invoke("request", args)
 
-    @tool("ChatResources", "List opaque resource handles granted to this session, without private connection details.", {})
+    @tool("ChatResources", "List opaque resource handles and pending service preparation IDs for this session, without private connection details. Pending preparation is not access.", {})
     async def resources(args):
         return await invoke("resources", args)
 

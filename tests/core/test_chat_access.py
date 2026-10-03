@@ -498,7 +498,7 @@ async def test_api_approval_produces_execution_and_validation_hides_secrets(brok
         handle = await requested
         assert set(handle) == {"id", "kind", "expires_at", "writable"}
         grant_id = handle["id"]
-        assert (await client.post(endpoint, json={"connection": body})).status_code == 400
+        assert (await client.post(endpoint, json={"connection": body})).status_code == 409
         task = asyncio.create_task(broker.run("chat", grant_id, "command", {"command": "inspect"}))
         action = await pending(broker)
         response = await client.post(f"/api/v1/chat-access/chat/actions/{action.id}", json={"allow": True})
