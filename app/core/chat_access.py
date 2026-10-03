@@ -370,6 +370,8 @@ class Broker:
             request.timer = asyncio.get_running_loop().call_later(duration, self._finish_request, request)
             return request.model_pending()
         try:
+            # Registered first so watchers see it; Away mode then refuses at once.
+            await _defer_if_away(session_id, f"private {kind} access request")
             grant_id = await asyncio.wait_for(request.result, 240)
             if not grant_id:
                 raise AccessDenied("The user declined the private access request.")
@@ -754,6 +756,7 @@ class Broker:
         self.actions[action.id] = action
         self._notify(grant.session_id, grant.owner)
         try:
+            await _defer_if_away(grant.session_id, f"private access action: {operation}")
             # A persisted-mode lookup can complete with an old snapshot after
             # a mode-change sweep already ran. Recheck with the action visible
             # so switching to Bypass cannot strand a newly queued confirmation.
@@ -888,3 +891,14 @@ class Broker:
 
 
 broker = Broker()
+
+
+async def _defer_if_away(session_id: str, action: str) -> None:
+    """Away mode never approves private access: refuse at once instead of waiting 4 minutes."""
+    try:
+        from app.core.away_mode import defer_if_away
+        deferred = await defer_if_away(session_id, action)
+    except Exception:  # noqa: BLE001 — fall back to asking as usual
+        return
+    if deferred:
+        raise AccessDenied(deferred)

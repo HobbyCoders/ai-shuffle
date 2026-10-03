@@ -492,7 +492,7 @@
 							</div>
 						{/if}
 					{:else if id === 'models'}
-						<p class="agx-intro">The model this agent runs on when a caller on that provider dispatches it. Leave a row empty to hide it there.</p>
+						<p class="agx-intro">The model this agent runs on when a caller on that provider dispatches it. Leave a row empty to hide it there. A caller can pick a different model per dispatch, but only from that same provider's list (Settings &gt; Providers); it cannot move the agent to another provider.</p>
 						<div class="set-group">
 							<div class="set-row">
 								<div class="lab"><h4>Claude</h4><p>Callers on native Claude.</p></div>

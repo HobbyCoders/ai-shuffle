@@ -27,7 +27,8 @@
 	import SwarmDropdown from '../chat/SwarmDropdown.svelte';
 	import ChatExportActions from '../layout/ChatExportActions.svelte';
 	import { buildShell } from '$lib/utils/platform';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, X } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, X, GitMerge } from 'lucide-svelte';
+	import { autoMerge } from '$lib/stores/auto-merge.svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
@@ -320,6 +321,11 @@
 	// 502 rather than an empty result. Either way the value shown is real but not
 	// freshly confirmed — say so, and never downgrade it to "Create PR".
 	const prIsLastKnown = $derived(snapshot.prStateStale && !!shownPr);
+	// Merge when green: the worker merges this PR once CI passes and the branch is idle.
+	const mergeWhenGreen = $derived(autoMerge.enabled(sessionId));
+	$effect(() => {
+		if (sessionId && shownPr?.number) void autoMerge.load(sessionId);
+	});
 	const lastKnownSuffix = $derived(prIsLastKnown ? ' (last known state — GitHub unreachable)' : '');
 
 	// Whether this folder is a *confirmed* git repo. Strict `=== true` (not the
@@ -733,6 +739,20 @@
 							<ExternalLink size={12} strokeWidth={1.5} class="row-trail" />
 						</a>
 					</div>
+					{#if sessionId}
+						<div class="row-group">
+							<button class="row" role="switch" aria-checked={mergeWhenGreen}
+								disabled={!!autoMerge.busy[sessionId]}
+								onclick={() => sessionId && autoMerge.toggle(sessionId)}
+								title="Merge this PR automatically once every CI check passes and no session is working in its branch">
+								<GitMerge size={14} strokeWidth={1.5} />
+								<span class="row-text">
+									<span class="row-title">Merge when green{mergeWhenGreen ? ': on' : ''}</span>
+									<span class="row-sub">{autoMerge.error[sessionId] || (mergeWhenGreen ? 'watching CI, merges when it passes' : 'merge after CI passes')}</span>
+								</span>
+							</button>
+						</div>
+					{/if}
 				{:else}
 					<div class="row-group off">
 						<button class="row" aria-label="Create PR" disabled>

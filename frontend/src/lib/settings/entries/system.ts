@@ -47,6 +47,15 @@ export const entries: SettingEntry[] = [
 		keywords: ['check now', 'new version', 'restart', 'worker results']
 	},
 	{
+		id: 'system.deployStatus',
+		category: 'system',
+		section: 'Updates',
+		label: 'Running revisions',
+		hint: 'Each worker versus main',
+		help: 'Shows each worker\'s running revision, update channel and how many commits it is behind main, so you can tell whether a merged change is live there. Android loads its UI from the worker; only android/ changes need a Play build.',
+		keywords: ['deploy', 'revision', 'behind', 'live', 'is it deployed', 'version drift']
+	},
+	{
 		id: 'system.version',
 		category: 'system',
 		section: 'Updates',

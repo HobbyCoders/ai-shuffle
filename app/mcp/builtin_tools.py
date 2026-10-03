@@ -2520,6 +2520,113 @@ def create_builtin_tools_server(
 
     all_tools.append(get_usage)
 
+    # Where a merged change is live: each worker's revision against origin/main.
+    @tool(
+        "DeployStatus",
+        "Report which paired workers run a change: per worker the running "
+        "revision, app version, update channel, commits behind origin/main, "
+        "whether it contains the given PR or commit, and the next action "
+        "(up to date / update this worker / publish edge first). Also says "
+        "whether Android needs a new Play build (only for android/ changes). "
+        "Read-only. Pass pr OR commit; with neither it reports drift from main.",
+        {
+            "type": "object",
+            "properties": {
+                "pr": {"type": "integer", "minimum": 1, "description": "Merged PR number."},
+                "commit": {"type": "string", "description": "Commit SHA (7-40 hex)."},
+            },
+            "additionalProperties": False,
+        },
+    )
+    async def deploy_status_tool(args: dict) -> dict:
+        if not is_admin:
+            return _err("DeployStatus reports the owner's workers; API-key sessions cannot read it")
+        pr, commit = args.get("pr"), args.get("commit")
+        if pr is not None and (type(pr) is not int or pr < 1):
+            return _err("pr must be a positive integer")
+        if commit is not None and not isinstance(commit, str):
+            return _err("commit must be a string")
+        if pr is not None and commit:
+            return _err("pass pr or commit, not both")
+        from app.core.deploy_status import deploy_status
+
+        report = await deploy_status(pr=pr, commit=(commit or "").strip() or None)
+        # Compact: drop empty fields so the model reads only what matters.
+        report["workers"] = [{k: v for k, v in row.items() if v is not None and k != "device_id"}
+                             for row in report["workers"]]
+        return _ok({k: v for k, v in report.items() if v is not None})
+
+    all_tools.append(deploy_status_tool)
+
+    # Report-only worktree janitor: what can be reclaimed, and why not.
+    @tool(
+        "WorktreeReport",
+        "List this worker's app-managed git worktrees per project with what "
+        "decides whether each can be removed: bound sessions (and whether one "
+        "is running), PR state, uncommitted changes, unpushed commits, merged "
+        "into the default branch. Read-only; it never deletes. Removal stays "
+        "with the app — never git worktree remove or rm -rf a worktree.",
+        {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "Optional project name, id or path."},
+                "reclaimable_only": {"type": "boolean", "description": "List only removable worktrees."},
+            },
+            "additionalProperties": False,
+        },
+    )
+    async def worktree_report_tool(args: dict) -> dict:
+        if not is_admin:
+            return _err("WorktreeReport reads the owner's checkouts; API-key sessions cannot read it")
+        from app.core.worktree_report import report
+        from app.db.async_database import run_sync
+
+        result = await run_sync(report, (args.get("project") or "").strip() or None)
+        if args.get("reclaimable_only"):
+            for project in result["projects"]:
+                project["worktrees"] = [row for row in project["worktrees"] if row["reclaimable"]]
+        return _ok(result)
+
+    all_tools.append(worktree_report_tool)
+
+    # Agent-requested hand-off to another worker, run when this turn ends.
+    @tool(
+        "HandOffSession",
+        "Queue moving THIS session to another of the owner's workers so they "
+        "can continue there (e.g. 'wrap up and hand off to DesktopWorker'). When "
+        "this turn and its background work end, the app commits and pushes the "
+        "branch, syncs the target's checkout and context, and moves the session; "
+        "the outcome is posted in the chat. Call it once, then finish the turn "
+        "with a short summary of where the work stands. Pass the worker's name "
+        "as shown in the app (or its device id) and an optional one-line note.",
+        {
+            "type": "object",
+            "properties": {
+                "worker": {"type": "string", "description": "Target worker name or device id."},
+                "note": {"type": "string", "description": "One line on where the work stands."},
+                "cancel": {"type": "boolean", "description": "Cancel a queued hand-off instead."},
+            },
+            "additionalProperties": False,
+        },
+    )
+    async def hand_off_session_tool(args: dict) -> dict:
+        if not session_id:
+            return _err("HandOffSession needs a chat session")
+        if not is_admin:
+            return _err("Only the owner's sessions can be handed off between workers")
+        from app.core import session_handoff
+
+        if args.get("cancel"):
+            return _ok({"cancelled": session_handoff.cancel(session_id)})
+        try:
+            from app.db.async_database import run_sync
+            return _ok(await run_sync(session_handoff.request, session_id,
+                                      str(args.get("worker") or ""), str(args.get("note") or "")))
+        except ValueError as exc:
+            return _err(str(exc))
+
+    all_tools.append(hand_off_session_tool)
+
     # ------------------------------------------------------------------
     # App-memory bridge — Remember / Recall / SessionSearch / SessionView.
     # These exist for the DELEGATED (claude CLI) leg, which otherwise sees
@@ -2581,6 +2688,8 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__SettleSession",
         "mcp__builtins__UnsettleSession",
         "mcp__builtins__ArchiveSession",
+        "mcp__builtins__HandOffSession",
+        "mcp__builtins__WorktreeReport",
         "mcp__builtins__ListAgents",
         "mcp__builtins__SendMessage",
         "mcp__builtins__NotifyDevices",
@@ -2597,6 +2706,7 @@ def get_builtin_tool_names() -> List[str]:
         "mcp__builtins__GetAppErrors",
         "mcp__builtins__GetAppLogs",
         "mcp__builtins__GetUsage",
+        "mcp__builtins__DeployStatus",
         # The app-memory bridge (delegated leg; shadowed on native legs where
         # fluid's bare-named builtins serve the same stores). Allow-listed
         # unconditionally — per-session registration gates real availability.

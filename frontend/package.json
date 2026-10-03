@@ -18,7 +18,8 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "contract:gen": "node scripts/generate-contract.mjs",
-    "contract:check": "node scripts/generate-contract.mjs --check"
+    "contract:check": "node scripts/generate-contract.mjs --check",
+    "test:visual": "node tests/visual-regression.mjs"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^3.0.6",

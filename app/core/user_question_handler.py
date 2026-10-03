@@ -274,6 +274,17 @@ class UserQuestionHandler:
         Returns:
             Dict with user's answers
         """
+        # Away mode: the owner is not watching, so answer with the recommended
+        # options at once instead of posting a card nobody will see.
+        try:
+            from app.core.away_mode import auto_answers, is_away_async, record_answers
+            if await is_away_async(session_id):
+                answers = auto_answers(questions)
+                if answers:
+                    await record_answers(session_id, questions, answers)
+                    return answers
+        except Exception:  # noqa: BLE001 — fall back to asking as usual
+            logger.warning("Away-mode answer failed for %s", session_id, exc_info=True)
         return await self._request_answers_v2(
             request_id=request_id,
             tool_use_id=tool_use_id,

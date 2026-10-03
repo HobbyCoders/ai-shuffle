@@ -87,13 +87,21 @@ def local_action(action, request_id):
     return result
 
 
+def _build():
+    """The source revision and app version this worker runs, for a peer's deploy status."""
+    from app.core.config import settings
+    from app.core.file_logging import source_revision
+    revision = source_revision()
+    return {"revision": None if revision == "unknown" else revision, "app_version": settings.version}
+
+
 async def peer_action(body, from_device):
     context = engine.context()
     member = context.member(from_device) if context else None
     if not member or member.kind != membership.KIND_WORKER or member.status != membership.STATUS_ACTIVE:
         raise PermissionError("Only active account workers may request application updates")
     if body.get("operation") == "status":
-        return await run_sync(updates.status)
+        return {**await run_sync(updates.status), **_build()}
     if body.get("operation") != "action":
         raise ValueError("Unknown update operation")
     if not isinstance(body.get("request_id"), str) or not body["request_id"]:
@@ -113,7 +121,8 @@ async def _remote(row, body):
         if not isinstance(result, dict):
             raise ValueError("Invalid peer update response")
         fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error",
-                  "request_pending", "checked_at", "channel", "release", "notes", "kind")
+                  "request_pending", "checked_at", "channel", "release", "notes", "kind",
+                  "revision", "app_version")
         return {key: result[key] for key in fields if key in result}
     except control.ControlRefused:
         # The peer answered and declined (an older build without the updater

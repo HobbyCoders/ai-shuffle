@@ -64,6 +64,7 @@
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance } from '$lib/stores/usage-target';
 	import { attachmentBlockReason } from './attach-disable';
+	import { awayMode } from '$lib/stores/away-mode.svelte';
 
 	interface Props {
 		isUploading: boolean;
@@ -395,6 +396,27 @@
 		}
 	}
 
+	// Away mode: the agent takes recommended defaults instead of asking and
+	// reports them at the end; approvals are deferred, never granted.
+	const awaySessionId = $derived($activeSession.sessionId);
+	const away = $derived(awayMode.isAway(awaySessionId));
+	$effect(() => {
+		void awayMode.load(awaySessionId);
+	});
+	async function toggleAway() {
+		if (!awaySessionId || awayMode.busy[awaySessionId]) return;
+		try {
+			const result = await awayMode.set(awaySessionId, !away);
+			if (result.released_questions) {
+				notify(`Answered ${result.released_questions} waiting question${result.released_questions === 1 ? '' : 's'} with recommended defaults`, { severity: 'info' });
+			}
+		} catch (error) {
+			notify(error instanceof Error ? error.message : 'Could not change Away mode', {
+				severity: 'error', title: 'Away mode'
+			});
+		}
+	}
+
 	const permissionModes = $derived([
 		{ value: 'default', label: 'Ask', description: 'Confirm before tools' },
 		...(autoPermission ? [{ value: 'auto', label: 'Auto', description: 'Claude Code evaluates tool calls automatically' }] : []),
@@ -455,8 +477,8 @@
 					title={`Tool access: ${permissionLabel} — ${permissionDescription}`}
 					aria-haspopup="menu"
 					aria-expanded={openPopover === 'permission'}
-					aria-label="Permission mode: {permissionLabel}"
-				>{permissionLabel}</button>
+					aria-label="Permission mode: {permissionLabel}{away ? ', Away mode on' : ''}"
+				>{permissionLabel}{#if away}<span class="away-badge" title="Away: agent decides with recommended defaults and reports them at the end">· Away</span>{/if}</button>
 
 				{#if openPopover === 'permission'}
 					<div
@@ -488,6 +510,28 @@
 									{/if}
 								</button>
 							{/each}
+						</div>
+						<div class="access-list away-list">
+							<button
+								type="button"
+								class="access-row away-row"
+								class:selected={away}
+								disabled={!awaySessionId || !!(awaySessionId && awayMode.busy[awaySessionId])}
+								onclick={toggleAway}
+								role="menuitemcheckbox"
+								aria-checked={away}
+								title={awaySessionId ? 'Away: agent decides with recommended defaults and reports them at the end' : 'Start the chat first'}
+							>
+								<span class="access-copy">
+									<strong>Away</strong>
+									<small>{awaySessionId ? 'Don\'t ask me; use recommended defaults and list them at the end' : 'Available once the chat has started'}</small>
+								</span>
+								{#if away}
+									<svg class="w-3.5 h-3.5 access-check" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+										<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+									</svg>
+								{/if}
+							</button>
 						</div>
 					</div>
 				{/if}
@@ -906,6 +950,15 @@
 		padding: 7px 10px;
 	}
 
+	.away-list {
+		border-top: 1px solid var(--border, rgba(127, 127, 127, 0.2));
+		margin-top: 4px;
+		padding-top: 4px;
+	}
+	.away-badge {
+		margin-left: 4px;
+		color: var(--warning, #d29922);
+	}
 	.access-row:last-child {
 		border-bottom: 0;
 	}

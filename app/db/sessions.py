@@ -931,6 +931,7 @@ def set_session_run_binding(
     workspace_project_ids: Optional[List[str]] = None,
     preserve_provider: bool = False,
     clear_effort: bool = False,
+    away_mode: Optional[bool] = None,
 ) -> None:
     """Persist the run binding a turn actually used onto its session.
 
@@ -989,6 +990,10 @@ def set_session_run_binding(
     if fast is not None:
         updates.append(f"fast = {_ph}")
         values.append(bool(fast))
+    # Away mode is boolean the same way: False is "the owner is back".
+    if away_mode is not None:
+        updates.append(f"away_mode = {_ph}")
+        values.append(bool(away_mode))
 
     # An empty list explicitly removes every additional folder.
     if workspace_project_ids is not None:

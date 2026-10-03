@@ -2211,6 +2211,14 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN workspace_facts JSONB")
         migrations_applied.append("sessions.workspace_facts")
 
+    # Per-session Away mode (app/core/away_mode.py). One nullable BOOLEAN like
+    # ``fast``: NULL/FALSE on every pre-existing row means the owner is present.
+    # Additive, no index, no SCHEMA_VERSION bump (the migrations fingerprint
+    # covers this block).
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "away_mode"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN away_mode BOOLEAN")
+        migrations_applied.append("sessions.away_mode")
+
     # API-user run configuration. ``model`` / ``effort`` are the preconfigured
     # selection every connector/API session created FOR this user binds at
     # create_session (and re-binds on each connector turn, since ``connector``

@@ -71,3 +71,16 @@ gh workflow run ci-instance-identity.yml --ref main
 
 The release workflow itself verifies the container image, the buyer install
 and the Windows installer (see [release-channels.md](release-channels.md)).
+
+## Visual regression screenshots (local, not a CI job)
+
+`cd frontend && npm run test:visual` renders the standalone fixtures (Git
+panel, turn navigator, side panel, composer, usage rows) at desktop
+(1440×900), phone (412×915) and the Galaxy Z Fold 6 inner (884×1104) and
+cover (360×882) screens, opens the panel or popover under test, and compares
+each with `frontend/tests/visual-baselines/`. Run it before and after chat UI
+work; accept intended changes with `node tests/visual-regression.mjs --update`
+and commit the new baselines. Pass a fixture name to run one
+(`node tests/visual-regression.mjs usage-rows`). It uses the browser runtime's
+playwright-core and Chromium, freezes the page clock, and is deliberately not a
+CI job to keep runner minutes down.

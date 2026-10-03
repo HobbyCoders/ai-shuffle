@@ -355,6 +355,17 @@ class PermissionHandler:
             else:
                 return PermissionResultDeny(message="Denied by saved rule")
 
+        # Away mode never grants anything: a prompt nobody is watching is
+        # deferred (denied with an explanation) instead of hanging the turn.
+        try:
+            from app.core.away_mode import defer_if_away
+            deferred = await defer_if_away(session_id, f"permission for {tool_name}")
+        except Exception:  # noqa: BLE001 — fall back to asking as usual
+            logger.warning("Away-mode check failed for %s", session_id, exc_info=True)
+            deferred = None
+        if deferred:
+            return PermissionResultDeny(message=deferred)
+
         payload = self._build_permission_payload(
             request_id, profile_id, tool_name, tool_input, tool_use_id,
             agent_id, title, display_name, description, decision_reason,

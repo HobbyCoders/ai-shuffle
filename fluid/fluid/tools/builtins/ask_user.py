@@ -30,7 +30,13 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "Usage notes:\n"
         f"- Ask 1–{MAX_QUESTIONS} questions per call. Batch independent "
         "questions into ONE call instead of a chain of single-question calls. "
-        "All questions in the call share one form and one submitted response.\n"
+        "All questions in the call share one form and one submitted response. "
+        "When a task needs several owner decisions, gather them up front into "
+        "that one call rather than stopping for each in turn.\n"
+        "- Write for a non-specialist: one plain-language sentence per "
+        "question (or option description) on what it changes, no internal "
+        "jargon. Check a gate or term against the current code before asking "
+        "about it; do not present retired features as blockers.\n"
         '- Each question is {"question": "...", "header": "Topic", '
         '"options": [{"label": "Choice A", "description": "What it means"}, '
         '{"label": "Choice B"}], "multiSelect": false}. '
@@ -147,6 +153,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     if error is not None:
         return ToolOutcome(text=error, is_error=True)
 
+    # A host may answer at once (an absent owner's recommended defaults)
+    # instead of posting; ``None`` means post as usual.
+    auto = ctx.extra.get("auto_answer_questions")
+    if auto is not None:
+        answered = await auto(questions)
+        if answered is not None:
+            return ToolOutcome(text=answered)
     post = ctx.extra.get("post_questions")
     if post is None:
         return ToolOutcome(text="AskUser requires a persistent question host.", is_error=True)

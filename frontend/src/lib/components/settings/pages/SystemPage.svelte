@@ -41,6 +41,7 @@
 	import LicenseKeyForm from './editors/LicenseKeyForm.svelte';
 	import LicenseSeats from './editors/LicenseSeats.svelte';
 	import { UpdatesState } from './updates-state.svelte';
+	import { deployRows, deploySummary, loadDeployStatus, type DeployReport } from './deploy-status';
 	import './editors/editors.css';
 
 	/* ---------- workspace ---------- */
@@ -98,6 +99,22 @@
 	function runCheck() {
 		resultsOpen = true;
 		void updates.check();
+	}
+
+	/* ---------- running revisions (deploy status) ---------- */
+
+	let deploy = $state<DeployReport | null>(null);
+	let deployError = $state('');
+	let deployOpen = $state(false);
+	let deployLoading = $state(false);
+
+	async function refreshDeploy() {
+		deployLoading = true;
+		const result = await loadDeployStatus();
+		deployLoading = false;
+		if (!alive) return;
+		deploy = result.report;
+		deployError = result.error;
 	}
 
 	/* ---------- license ---------- */
@@ -247,6 +264,7 @@
 	onMount(() => {
 		void loadWorkspace();
 		void loadLicense();
+		void refreshDeploy();
 		updates.start();
 	});
 	onDestroy(() => {
@@ -323,6 +341,9 @@
 				{updates.checking ? 'Checking…' : 'Check now'}
 			</button>
 		</SettingRow>
+		<SettingRow id="system.deployStatus" expanded={deployOpen ? deployList : undefined}>
+			<ExpandToggle value={deployError ? 'Unavailable' : deploySummary(deploy)} bind:open={deployOpen} />
+		</SettingRow>
 		<SettingRow id="system.version">
 			<ValueText value={__APP_VERSION__} mono />
 		</SettingRow>
@@ -379,6 +400,10 @@
 
 {#snippet results()}
 	<UpdateCheckResults rows={updates.rows ?? []} running={updates.checking} error={updates.checkError} />
+{/snippet}
+
+{#snippet deployList()}
+	<UpdateCheckResults rows={deploy ? deployRows(deploy) : []} running={deployLoading} error={deployError} />
 {/snippet}
 
 {#snippet keyForm()}

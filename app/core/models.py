@@ -392,6 +392,9 @@ class Session(SessionBase):
     # NULL (never picked) runs standard — left uncoalesced so the
     # client can tell "never picked" from an explicit off.
     fast: Optional[bool] = None
+    # Away mode (app/core/away_mode.py): questions get recommended defaults,
+    # approval prompts are deferred. NULL/False = the owner is present.
+    away_mode: Optional[bool] = None
     # Sidepanel mode: 'code' (the full agentic surface), 'chat' (web-only chat)
     # or 'voice' (an OpenAI Realtime call). The column is
     # nullable and NULL means 'code', so the validator below coalesces — that

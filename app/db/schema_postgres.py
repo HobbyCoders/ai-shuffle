@@ -277,6 +277,10 @@ def create_postgres_schema(cursor) -> None:
             -- database) reuses these exact bytes so the cached system prefix
             -- does not move. NULL until the first native connect.
             workspace_facts JSONB,
+            -- Away mode: TRUE while the owner is away. Questions are answered
+            -- with their recommended option instead of parking, and approval
+            -- prompts are deferred (never granted). NULL/FALSE = present.
+            away_mode BOOLEAN,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,

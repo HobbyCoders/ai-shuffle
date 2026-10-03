@@ -1178,6 +1178,15 @@ def _native_task_model(requested: str) -> Optional[str]:
     return alias if alias in model_values() else None
 
 
+def _task_target_label(target: Any, definition: Any, ref: str) -> str:
+    """The name a model refusal uses for the resolved Task target."""
+    if target is not None:
+        return str(getattr(target, "id", None) or ref)
+    if definition is not None:
+        return str(_def_field(definition, "name", ref) or ref)
+    return ref
+
+
 def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
     """A ready-to-return error when the resolved leg has no credentials.
 
@@ -1427,14 +1436,13 @@ async def dispatch_task_tool(
         # the registry's Claude aliases. The worker stays native: no provider.
         native_model = _native_task_model(requested_model)
         if native_model is None:
-            from app.core.model_registry import model_values
+            from app.core.agent_provider_models import task_model_unavailable_error
 
             return {
                 "ok": False,
-                "error": (
-                    f"Model '{requested_model.strip()}' is not a Claude model. "
-                    "This target runs on Claude; choose one of: "
-                    + ", ".join(model_values()) + "."
+                "error": task_model_unavailable_error(
+                    requested_model, _task_target_label(target, definition, ref),
+                    None, f"Model '{requested_model.strip()}' is not a Claude model.",
                 ),
             }
         requested_model = native_model
@@ -1443,7 +1451,15 @@ async def dispatch_task_tool(
             effective_provider_id, requested_model, require_servable=False
         )
         if not validation.ok:
-            return {"ok": False, "error": validation.reason}
+            error = validation.reason
+            if validation.code == provider_agent.MODEL_NOT_CURATED:
+                from app.core.agent_provider_models import task_model_unavailable_error
+
+                error = task_model_unavailable_error(
+                    requested_model, _task_target_label(target, definition, ref),
+                    effective_provider_id, validation.reason,
+                )
+            return {"ok": False, "error": error}
         requested_model = requested_model.strip()
 
     if definition is not None:

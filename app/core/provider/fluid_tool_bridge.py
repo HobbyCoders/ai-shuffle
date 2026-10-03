@@ -116,6 +116,7 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "MessageSession": "write",
     "StartSession": "write",
     "SettleSession": "write",
+    "HandOffSession": "write",
     "UnsettleSession": "write",
     "ArchiveSession": "write",
     # Agent messaging with this session's Task workers and its parent — the
@@ -136,6 +137,8 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "GetAppErrors": "safe",
     "GetAppLogs": "safe",
     "GetUsage": "safe",
+    "DeployStatus": "safe",
+    "WorktreeReport": "safe",
     "ToolSearch": "safe",
     "RemoteTrigger": "write",
     # Dispatching an agent spawns a session that can act — gated like a write.

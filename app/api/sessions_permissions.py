@@ -188,3 +188,80 @@ async def update_permission_mode(
     except Exception as exc:
         logger.exception("Could not change permission mode for %s", session_id)
         raise HTTPException(503, "Could not confirm the permission change. Retry when the session is connected.") from exc
+
+
+class AwayModeUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    away: StrictBool
+
+
+async def apply_away_mode(session_id: str, away: bool) -> dict:
+    """Persist Away mode on the owning worker; read per question, so no reconnect.
+
+    Turning it on also answers questions already waiting on the owner with their
+    recommended options, so a session parked before the owner left resumes.
+    """
+    await run_sync(control._require_owned, session_id)
+    await run_sync(database.set_session_run_binding, session_id, away_mode=away)
+    released = 0
+    if away:
+        try:
+            from app.core.away_mode import release_pending_questions
+            released = await release_pending_questions(session_id)
+        except Exception:
+            logger.warning("Away mode set but pending questions were not released for %s",
+                           session_id, exc_info=True)
+    return {"away": away, "released_questions": released}
+
+
+async def handle_away_mode(body: dict, from_device: str) -> dict:
+    session_id = body.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session_id is required")
+    return await apply_away_mode(session_id, AwayModeUpdate.model_validate(
+        {key: value for key, value in body.items() if key != "session_id"}).away)
+
+
+@router.put("/{session_id}/away-mode")
+async def update_away_mode(
+    request: Request, session_id: str, body: AwayModeUpdate,
+    token: str = Depends(require_auth),
+):
+    session = await require_session(request, session_id)
+    owner = await run_sync(control.owner_of, session)
+    try:
+        if owner is not None:
+            return await control.call(owner, "away-mode", {"session_id": session_id, "away": body.away})
+        return await apply_away_mode(session_id, body.away)
+    except control.RunnerUnreachable as exc:
+        raise HTTPException(503, "The session's device is unreachable; Away mode was not changed.") from exc
+    except (control.ControlRefused, ValueError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+class AutoMergeUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+    method: Literal["merge", "squash", "rebase"] = "squash"
+
+
+@router.get("/{session_id}/auto-merge")
+async def get_auto_merge(request: Request, session_id: str, token: str = Depends(require_auth)):
+    """Whether this worker is watching the session's PR to merge it when green."""
+    await require_session(request, session_id)
+    from app.core import auto_merge
+    return auto_merge.status(session_id)
+
+
+@router.put("/{session_id}/auto-merge")
+async def update_auto_merge(request: Request, session_id: str, body: AutoMergeUpdate,
+                            token: str = Depends(require_auth)):
+    """Turn 'Merge when green' on or off for the session's open PR."""
+    await require_session(request, session_id)
+    from app.core import auto_merge
+    try:
+        if body.enabled:
+            return await auto_merge.enable(session_id, body.method)
+        return await auto_merge.disable(session_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc

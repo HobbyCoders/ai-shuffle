@@ -2106,7 +2106,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 bridge = mapped.permission
                 questions = bridge.input.get("questions")
                 error = _validate(questions)
-                if error is None:
+                auto = self.ctx.extra.get("auto_answer_questions")
+                answered = await auto(questions) if error is None and auto is not None else None
+                if answered is not None:
+                    # The host answered at once (e.g. the owner is away).
+                    message = answered
+                elif error is None:
                     ids = await self._post_questions(questions, tool_use_id=bridge.tool_use_id)
                     message = json.dumps({
                         "status": "queued", "request_ids": ids,

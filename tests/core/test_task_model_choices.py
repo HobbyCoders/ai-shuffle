@@ -151,3 +151,16 @@ async def test_file_agent_choice_keeps_callers_provider(lane):
     assert result["ok"], result
     assert seen[0]["model_id"] == "sol"
     assert seen[0]["provider_id"] == "lane"
+
+
+async def test_uncurated_refusal_lists_the_providers_choices(lane):
+    _, seen = lane
+    result = await td.dispatch_task_tool(
+        {"agent": "helper", "prompt": "go", "model": "unlisted"},
+        caller_session_id="parent", caller_provider_id="lane",
+    )
+    assert not result["ok"]
+    assert "curated model list" in result["error"]
+    assert "runs on Lane. Choose one of: astra, sol" in result["error"]
+    assert "Settings > Providers" in result["error"]
+    assert not seen

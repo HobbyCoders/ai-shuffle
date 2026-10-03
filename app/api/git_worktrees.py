@@ -26,7 +26,7 @@ from app.core.worktree_manager import worktree_manager, WorktreeError
 from app.core.project_utils import get_worktree_working_dir
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.auth import require_auth
+from app.api.auth import require_admin, require_auth
 from app.api.common import check_project_access, format_file_size, get_file_extension
 from app.api.git_helpers import run_git, get_project_path, invalidate_working_dir_cache
 
@@ -472,6 +472,14 @@ def _require_worktree_for_project(
 # =============================================================================
 # Worktree Endpoints
 # =============================================================================
+
+@router.get("/worktree-report")
+async def worktree_report(project_id: str, _=Depends(require_admin)):
+    """Report-only: which of this project's worktrees can be removed safely, and why not."""
+    from app.core.worktree_report import report
+
+    return await run_sync(report, project_id)
+
 
 @router.get("/worktrees", response_model=WorktreeListResponse)
 async def list_worktrees(

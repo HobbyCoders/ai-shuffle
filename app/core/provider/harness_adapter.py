@@ -521,7 +521,9 @@ class HarnessAdapter(ProviderAdapter):
                 append_system_prompt=delegated_append,
                 permission_mode=options.permission_mode,
                 registry=self._registry,
-                ctx=ToolCtx(cwd=options.cwd or ".", session_id=fluid_session_id),
+                ctx=self._with_away_hook(
+                    ToolCtx(cwd=options.cwd or ".", session_id=fluid_session_id)
+                ),
                 session_id=fluid_session_id,
                 cli_session_id=cli_session_id,
                 # Honor the SDK-level streaming option (the app turns it on by
@@ -608,7 +610,9 @@ class HarnessAdapter(ProviderAdapter):
             # what made Task report itself "not available in this environment"
             # for every fresh native session. The supplier resolves the id at
             # dispatch time instead — see _resolve_app_session_id.
-            native_ctx = ToolCtx(cwd=options.cwd or ".", session_id=fluid_session_id)
+            native_ctx = self._with_away_hook(
+                ToolCtx(cwd=options.cwd or ".", session_id=fluid_session_id)
+            )
             # GetUsage is deliberately cache-only: the tool may inspect the
             # app's last observed snapshot, but a model call must never start
             # provider billing/subscription polling or touch credentials.
@@ -1647,13 +1651,22 @@ class HarnessAdapter(ProviderAdapter):
             logger.warning("[HarnessAdapter] task roster refresh failed", exc_info=True)
             return False
 
+    def _with_away_hook(self, ctx: Any) -> Any:
+        """Let AskUser answer at once with recommended defaults while away."""
+        from app.core.away_mode import make_question_auto_answer
+
+        ctx.extra["auto_answer_questions"] = make_question_auto_answer(
+            self._resolve_app_session_id
+        )
+        return ctx
+
     def _turn_context_note(self) -> Optional[str]:
-        """The turn's volatile context: environment facts, then memory.
+        """The turn's volatile context: environment facts, memory, Away mode.
 
         Blocking (a JSON read for the memory store), so callers hand it to a
         thread. Never raises: a turn is never worth losing over a reminder.
         """
-        blocks = [self._env_note(), self._memory_snapshot()]
+        blocks = [self._env_note(), self._memory_snapshot(), self._away_note()]
         present = [block for block in blocks if block]
         return "\n\n".join(present) if present else None
 
@@ -1675,6 +1688,16 @@ class HarnessAdapter(ProviderAdapter):
             )
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] turn env note failed", exc_info=True)
+            return None
+
+    def _away_note(self) -> Optional[str]:
+        """The Away-mode reminder while the owner is away, else ``None``."""
+        try:
+            from app.core.away_mode import CONTEXT_NOTE, is_away
+
+            return CONTEXT_NOTE if is_away(self._resolve_app_session_id()) else None
+        except Exception:  # noqa: BLE001 — a reminder never fails a turn
+            logger.warning("[HarnessAdapter] away note failed", exc_info=True)
             return None
 
     def _memory_snapshot(self) -> Optional[str]:
@@ -5506,7 +5529,11 @@ already. Leave worktree deletion to the app (its removal detaches the links \
 first). If you absolutely must remove one by hand, first delete each link \
 itself without recursing (`Remove-Item` on the link path in PowerShell, or \
 `fsutil reparsepoint delete`; never `rm -rf` on it), then remove the \
-worktree."""
+worktree.
+
+After reporting a merged change, call DeployStatus with its PR and end the \
+report with its summary line, e.g. `Live on: Unraid ✗ · DesktopWorker ✓ · \
+Android: no build needed`."""
 
 # What "verified" has to mean before a code session says it. Written against
 # six sessions in one day that shipped user-facing changes checked only against

@@ -395,6 +395,11 @@ def _run_settings_handler():
     return handle_run_settings
 
 
+def _away_mode_handler():
+    from app.api.sessions_permissions import handle_away_mode
+    return handle_away_mode
+
+
 def _chat_access_handler():
     from app.network.chat_access_routing import handle
     return handle
@@ -410,6 +415,7 @@ _LAZY_HANDLERS = {
     "chat-access-changed": _chat_access_changed_handler,
     "run-settings": _run_settings_handler,
     "permission-mode": _permission_mode_handler,
+    "away-mode": _away_mode_handler,
     "session-active": _session_active_handler,
     "handoff": _handoff_handler,
     "application-update": _application_update_handler,

@@ -255,6 +255,15 @@ async def persist_turn_end_state(session_id: str, *, resync_branch: bool = True)
     except Exception:
         logger.debug("scheduling PR reconcile failed", exc_info=True)
 
+    # 1c. An agent-queued hand-off to another worker runs once the session is
+    # idle. Scheduled, never awaited: it waits for the run to release.
+    try:
+        from app.core import session_handoff
+
+        session_handoff.schedule(session_id)
+    except Exception:
+        logger.debug("scheduling session hand-off failed", exc_info=True)
+
     # 2. Bring the coalesced session-summary fold current for this session.
     #
     # Deliberately LAST: every user-visible part of the turn is already done

@@ -440,6 +440,79 @@ def host_worker_limits_text() -> str:
     )
 
 
+# Where the owner changes what Task can dispatch. Named in the contract and in
+# every model refusal so neither the model nor the user has to guess.
+TASK_MODEL_SETTINGS_HINT = (
+    "An agent's subagent model for each caller provider is set in "
+    "Agents > (agent) > Models; each provider's model list is set in "
+    "Settings > Providers."
+)
+
+
+def task_model_choices(provider_id: str | None) -> tuple[str, tuple[str, ...]]:
+    """``(leg label, model ids)`` a Task ``model`` may name on one leg.
+
+    ``None`` is native Claude (the registry's aliases). A provider row offers
+    its curated list, and nothing when it is missing or disabled.
+    """
+    if not provider_id:
+        from app.core.model_registry import model_values
+
+        return "Claude", tuple(model_values())
+    from app.core.provider_agent import curated_model_ids
+
+    row = _load_provider_row(provider_id)
+    label = str((row or {}).get("name") or provider_id)
+    if not row or not row.get("enabled"):
+        return label, ()
+    return label, tuple(curated_model_ids(row))
+
+
+def task_model_unavailable_error(
+    requested: str, target_name: str, provider_id: str | None, reason: str = "",
+) -> str:
+    """A Task refusal for a model the target's leg does not offer.
+
+    Lists what the target CAN take, names any other enabled provider whose
+    list holds the requested model (an override never switches providers),
+    and says where the owner changes either.
+    """
+    value = (requested or "").strip()
+    label, ids = task_model_choices(provider_id)
+    parts = [reason.strip()] if reason.strip() else []
+    parts.append(
+        f"Model '{value}' is not available for subagent '{target_name}', "
+        f"which runs on {label}. "
+        + (f"Choose one of: {', '.join(ids)}" if ids else "That provider offers no models")
+        + ", or omit model to use the agent's default."
+    )
+    from app.core.query_options import decode_provider_model
+
+    decoded = decode_provider_model(value)
+    bare = decoded[1] if decoded else value
+    elsewhere: list[str] = []
+    try:
+        from app.db import database
+        from app.core.provider_agent import curated_model_ids
+
+        for row in database.get_enabled_model_providers() or []:
+            if row.get("id") == provider_id:
+                continue
+            if bare in curated_model_ids(row):
+                elsewhere.append(str(row.get("name") or row.get("id")))
+    except Exception:  # noqa: BLE001 — the hint is advisory
+        logger.debug("Could not list providers for a Task model hint", exc_info=True)
+    if elsewhere:
+        parts.append(
+            f"'{bare}' is configured on {', '.join(sorted(elsewhere))}, but a "
+            "Task model override cannot switch providers. To dispatch "
+            f"'{target_name}' on it, assign that agent a model from that "
+            "provider for this caller's provider."
+        )
+    parts.append(TASK_MODEL_SETTINGS_HINT)
+    return " ".join(parts)
+
+
 @dataclass(frozen=True)
 class TaskContract:
     description: str
@@ -487,23 +560,52 @@ def build_task_contract(
         reserved_names.add(target.name.casefold())
 
     resolved_targets = tuple(targets)
+    # The enum is a union for mixed-provider rosters. Dispatch revalidates the
+    # selected ID against the chosen target's effective provider, not this union.
+    # A target with no provider runs on native Claude (the Claude Code CLI on a
+    # subscription, or the Anthropic API with a key). Its list is the Claude
+    # model registry's aliases, so a Claude caller can send one Task to haiku
+    # and another to opus, the way a provider-row caller picks from its row.
+    choices: dict[str | None, tuple[str, tuple[str, ...]]] = {}
+    for target in resolved_targets:
+        leg = target.provider_id if target.provider_pinned else provider_id
+        if (leg or None) not in choices:
+            choices[leg or None] = task_model_choices(leg)
+    model_ids = {model for _, ids in choices.values() for model in ids}
+
     if resolved_targets:
         # IDs and models only — each agent's description already rides the
         # system prompt's "# Available agent types" index (built from the same
         # roster), and repeating it here doubled the tokens for every session.
+        def _leg_label(target: SubagentTarget) -> str:
+            leg = target.provider_id if target.provider_pinned else provider_id
+            return choices[leg or None][0]
+
         roster = "\n".join(
-            f"- {target.id} (default model: {target.model}) — {target.name}"
+            f"- {target.id} (default model: {target.model}; runs on "
+            f"{_leg_label(target)}) — {target.name}"
             for target in resolved_targets
+        )
+        # One line per leg, not per target: the user's configured list for
+        # each provider is what Task's ``model`` may pick from.
+        model_lines = "\n".join(
+            f"- {label}: {', '.join(ids)}"
+            for label, ids in choices.values() if ids
         )
         availability = (
             "Available subagents on this provider (descriptions are under "
             "'# Available agent types' in the system prompt):\n"
-            f"{roster}\nUse only these IDs; do not invent a model or provider."
+            f"{roster}\n"
+            + (f"Task model choices by the target's provider:\n{model_lines}\n"
+               if model_lines else "")
+            + "Use only these IDs; do not invent a model or provider. "
+            + TASK_MODEL_SETTINGS_HINT
         )
     else:
         availability = (
             "No subagents are configured and runnable on this provider. "
-            "Do not call Task until the configuration changes."
+            "Do not call Task until the configuration changes. "
+            + TASK_MODEL_SETTINGS_HINT
         )
 
     # A background-default target is dispatched in the background whatever the
@@ -586,27 +688,6 @@ def build_task_contract(
             ),
         },
     }
-    # The enum is a union for mixed-provider rosters. Dispatch revalidates the
-    # selected ID against the chosen target's effective provider, not this union.
-    # A target with no provider runs on native Claude (the Claude Code CLI on a
-    # subscription, or the Anthropic API with a key). Its list is the Claude
-    # model registry's aliases, so a Claude caller can send one Task to haiku
-    # and another to opus, the way a provider-row caller picks from its row.
-    from app.core.model_registry import model_values
-    from app.core.provider_agent import curated_model_ids
-
-    model_ids: set[str] = set()
-    provider_ids = {
-        target.provider_id if target.provider_pinned else provider_id
-        for target in resolved_targets
-    }
-    for target_provider in provider_ids:
-        if target_provider:
-            row = _load_provider_row(target_provider)
-            if row and row.get("enabled"):
-                model_ids.update(curated_model_ids(row))
-        else:
-            model_ids.update(model_values())
     if model_ids:
         properties["model"] = {
             "type": "string",

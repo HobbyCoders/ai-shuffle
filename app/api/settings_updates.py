@@ -1,6 +1,6 @@
 """Owner-controlled, account-synced application updates."""
 from typing import Literal
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, StrictBool
 from app.api.auth import require_admin, require_auth
 from app.core import application_updates, preview_access
@@ -57,3 +57,14 @@ async def application_update_action(body: UpdateAction, _=Depends(require_update
 async def application_update_workers(_=Depends(require_admin)):
     from app.core.update_workers import snapshot
     return await snapshot()
+
+
+@updates_router.get("/application-updates/deploy-status")
+async def application_deploy_status(pr: int | None = Query(default=None, ge=1),
+                                    commit: str | None = Query(default=None, max_length=64),
+                                    _=Depends(require_admin)):
+    """Each worker's revision against origin/main, and whether it has ``pr`` or ``commit``."""
+    if pr is not None and commit:
+        raise HTTPException(422, "Supply pr or commit, not both")
+    from app.core.deploy_status import deploy_status
+    return await deploy_status(pr=pr, commit=commit or None)

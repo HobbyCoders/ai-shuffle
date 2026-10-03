@@ -331,8 +331,15 @@ async def move_session_endpoint(
         ``false``.
     """
     session = await require_session(request, session_id)
+    return await move_session_to(session_id, session, body.target_instance_id)
 
-    target = (body.target_instance_id or "").strip()
+
+async def move_session_to(session_id: str, session: dict, target_instance_id: str) -> MoveSessionResponse:
+    """The move itself, shared by the endpoint and an agent's turn-end hand-off.
+
+    Raises ``HTTPException`` with the user-facing reason on every refusal.
+    """
+    target = (target_instance_id or "").strip()
     if not target:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
