@@ -338,9 +338,9 @@ def _check_browser_mcp_prereqs() -> None:
     """Log guidance (non-fatally) about the ``browser`` built-in.
 
     The browser built-in is a spawned STDIO MCP server that attaches to the
-    supervised Chromium over CDP (``CHROME_CDP_PORT``, default 9221). What it
+    supervised browser over CDP (``CHROME_CDP_PORT``, default 9221). What it
     CANNOT do on its own is provide that running browser — so we just remind
-    operators that a supervised Chromium must be up. This is a guidance log
+    operators that a supervised browser must be up. This is a guidance log
     only; it never blocks startup.
     """
     try:

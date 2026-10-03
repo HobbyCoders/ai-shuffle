@@ -76,6 +76,14 @@ class TestBuiltinShape:
             b = get_browser_server_config()
         assert b.args == ["/custom/browser.js"]
 
+    @pytest.mark.parametrize("label", ["Google Chrome", "Chromium", "Microsoft Edge"])
+    def test_description_names_the_browser_in_use(self, label):
+        with patch("app.core.native_chrome.browser_label", return_value=label):
+            b = get_browser_server_config()
+        assert f"drive the supervised {label} over CDP" in b.description
+        for other in {"Google Chrome", "Chromium", "Microsoft Edge"} - {label}:
+            assert other not in b.description
+
     def test_start_chrome_off_withdraws_the_browser_suite(self, monkeypatch):
         """START_CHROME=0 means no Chromium exists to drive, so sessions must not
         be offered mcp__browser__* tools that would only fail to connect."""

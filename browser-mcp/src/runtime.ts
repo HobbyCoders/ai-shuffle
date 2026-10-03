@@ -3,7 +3,7 @@
  * browser-mcp — STDIO MCP server for token-conservative browser control.
  *
  * One demand-started runtime actor per browsing session. Connects to the
- * supervised Chromium over CDP and exposes the full browser tool catalog.
+ * supervised browser (Chromium, Chrome or Edge) over CDP and exposes the full browser tool catalog.
  * The low-level Server is used
  * (not the high-level helper) so we emit our exact flat JSON schemas — no
  * anyOf/oneOf/$ref can leak in.

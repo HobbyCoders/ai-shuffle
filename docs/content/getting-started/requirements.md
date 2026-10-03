@@ -46,7 +46,7 @@ Nothing needs to reach the worker from the internet. Never forward its port from
 
 - Any current desktop browser: Chrome, Edge, Firefox or Safari.
 - The [Android app](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle), Android 8.0 or later. It connects to your workers; it does not run agents itself.
-- A desktop app for Windows is available in beta. It runs a worker on the PC itself, without Docker.
+- A desktop app for Windows is available in beta. It runs a worker on the PC itself, without Docker. Its built-in browser is your installed Google Chrome, or Microsoft Edge when Chrome is not installed.
 
 ## Where you can buy
 

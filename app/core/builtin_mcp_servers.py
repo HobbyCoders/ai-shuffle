@@ -46,8 +46,8 @@ blocked; private LAN and carrier-grade NAT addresses are refused unless listed i
 BROWSER_SSRF_ALLOW; this app enables loopback by default in every runtime
 (BROWSER_SSRF_ALLOW_LOOPBACK=false disables it), and the worker's own ports and
 the DevTools port stay closed on every internal
-address (BROWSER_SSRF_DENY_PORTS). BROWSER_SSRF_BLOCK/ALLOW configure the policy. The supervised Chromium is
-launched behind browser-mcp's egress proxy (app.core.browser_egress,
+address (BROWSER_SSRF_DENY_PORTS). BROWSER_SSRF_BLOCK/ALLOW configure the policy. The supervised browser
+(Chromium in Docker; Google Chrome, else Edge, on native installs) is launched behind browser-mcp's egress proxy (app.core.browser_egress,
 docker/start-chrome.sh), which sees every connection including WebSockets,
 resolves each host once and connects only to the checked address; it enforces
 the app's base policy, so a session-only allow entry does not widen it. Separate session pages
@@ -110,6 +110,8 @@ def get_browser_server_config() -> McpServerConfig:
     NOT a CLI-flag integration. It is surfaced in the admin MCP list and is
     always enabled (stale disable entries are ignored).
     """
+    from app.core.native_chrome import browser_label
+
     return McpServerConfig(
         name=BROWSER_SERVER_NAME,
         type=McpServerType.STDIO,
@@ -119,8 +121,8 @@ def get_browser_server_config() -> McpServerConfig:
         enabled=True,
         builtin=True,
         description=(
-            "Browser automation — drive the supervised Chromium over CDP with a "
-            "provider-agnostic Playwright tool suite. Exposes mcp__browser__* tools "
+            f"Browser automation — drive the supervised {browser_label()} over CDP "
+            "with a provider-agnostic Playwright tool suite. Exposes mcp__browser__* tools "
             "(navigate, snapshot, act, screenshot). Uses the persistent logged-in "
             "profile; no Claude account or browser extension required."
         ),

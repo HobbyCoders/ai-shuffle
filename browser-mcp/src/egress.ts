@@ -1,5 +1,5 @@
 /**
- * Egress proxy: the network boundary of the supervised Chromium.
+ * Egress proxy: the network boundary of the supervised browser.
  *
  * The CDP request guard in browser.ts cannot be the boundary on its own. CDP
  * Fetch never sees a WebSocket handshake, and the guard resolves a host name

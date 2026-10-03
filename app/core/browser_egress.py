@@ -1,6 +1,6 @@
 """Launch wiring for the browser's egress proxy.
 
-The supervised Chromium runs behind ``browser-mcp/dist/egress-launch.js``, a
+The supervised browser runs behind ``browser-mcp/dist/egress-launch.js``, a
 loopback-only proxy that sees every TCP connection the browser makes
 (WebSockets and loopback included), resolves each host once and connects only
 to addresses the SSRF policy allows. The CDP request guard inside browser-mcp

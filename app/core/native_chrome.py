@@ -1,5 +1,5 @@
 """
-Native Chromium supervisor for local (non-Docker) installs.
+Native browser supervisor for local (non-Docker) installs.
 
 In the Docker image a supervised Chromium is launched by
 ``docker/chrome-supervisor.sh`` on the loopback CDP port, and the built-in
@@ -129,6 +129,30 @@ def resolve_chrome_executable() -> Optional[str]:
                 return found
 
     return None
+
+
+def browser_label() -> str:
+    """Name of the browser this worker supervises, for agent- and user-facing text.
+
+    The Docker image installs Debian Chromium on every architecture and links it
+    as ``google-chrome-stable`` (see the Dockerfile), so a container always runs
+    Chromium whatever ``CHROME_EXECUTABLE`` is called. Native installs run what
+    ``resolve_chrome_executable`` finds: Google Chrome first, then Edge, then a
+    Chromium on PATH. Falls back to "browser" when nothing is found.
+    """
+    if _in_container():
+        return "Chromium"
+    exe = resolve_chrome_executable()
+    if not exe:
+        return "browser"
+    name = os.path.basename(os.path.realpath(exe)).lower()
+    if "msedge" in name or "microsoft-edge" in name:
+        return "Microsoft Edge"
+    if "chromium" in name:
+        return "Chromium"
+    if "chrome" in name:
+        return "Google Chrome"
+    return "browser"
 
 
 # ---------------------------------------------------------------------------

@@ -100,6 +100,45 @@ class TestResolveChromeExecutable:
 
 
 # =============================================================================
+# browser_label — names the browser that actually runs
+# =============================================================================
+class TestBrowserLabel:
+    def test_container_is_always_chromium(self):
+        # The image links Debian Chromium as google-chrome-stable; the
+        # executable name must not make the label claim Google Chrome.
+        with patch.object(nc, "_in_container", return_value=True), \
+             patch.object(nc, "resolve_chrome_executable",
+                          return_value="/usr/bin/google-chrome-stable"):
+            assert nc.browser_label() == "Chromium"
+
+    @pytest.mark.parametrize("exe,label", [
+        (r"C:\Program Files\Google\Chrome\Application\chrome.exe", "Google Chrome"),
+        (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "Microsoft Edge"),
+        ("/usr/bin/google-chrome-stable", "Google Chrome"),
+        ("/usr/bin/chromium-browser", "Chromium"),
+        ("/opt/other/browser-bin", "browser"),
+    ])
+    def test_native_label_follows_resolved_executable(self, exe, label):
+        with patch.object(nc, "_in_container", return_value=False), \
+             patch.object(nc, "resolve_chrome_executable", return_value=exe), \
+             patch("app.core.native_chrome.os.path.realpath", side_effect=lambda p: p):
+            assert nc.browser_label() == label
+
+    def test_native_symlink_to_chromium_is_reported_as_chromium(self):
+        with patch.object(nc, "_in_container", return_value=False), \
+             patch.object(nc, "resolve_chrome_executable",
+                          return_value="/usr/bin/google-chrome-stable"), \
+             patch("app.core.native_chrome.os.path.realpath",
+                   return_value="/usr/lib/chromium/chromium"):
+            assert nc.browser_label() == "Chromium"
+
+    def test_no_browser_found(self):
+        with patch.object(nc, "_in_container", return_value=False), \
+             patch.object(nc, "resolve_chrome_executable", return_value=None):
+            assert nc.browser_label() == "browser"
+
+
+# =============================================================================
 # ensure_started — no-op guards
 # =============================================================================
 class TestEnsureStartedNoOps:

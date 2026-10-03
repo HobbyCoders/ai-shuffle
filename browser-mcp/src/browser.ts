@@ -1,7 +1,7 @@
 /**
  * CDP connection management.
  *
- * Connects to the externally supervised Chromium over CDP (the supervisor keeps
+ * Connects to the externally supervised browser over CDP (the supervisor keeps
  * ownership of the profile / SingletonLock — we are only a thin client). We
  * reuse the persistent default context if one exists, else create one, and hand
  * out one Page per session. On an unexpected disconnect we reconnect with
