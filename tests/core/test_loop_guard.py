@@ -49,9 +49,81 @@ def test_install_budget_counts_every_session(mock_db):
     _subscription()
     loop_guard.update_config(install_turns_per_hour=2)
     assert loop_guard.check("a", "connector", "delegated", now=10.0) is None
-    assert loop_guard.check("b", "provider_agent", "delegated", now=11.0) is None
+    assert loop_guard.check("b", "provider_agent", "delegated", origin="automation", now=11.0) is None
     reason = loop_guard.check("c", "automation", "delegated", now=12.0)
     assert reason and "This worker already ran 2" in reason
+
+
+@pytest.mark.parametrize("origin", ["user", "queue", "resume", "api", "worktree", None])
+def test_a_worker_a_person_started_is_never_counted_or_held(mock_db, origin):
+    """A chat's subagents are the owner's own work, however many there are."""
+    _subscription()
+    loop_guard.update_config(session_turns_per_hour=1, install_turns_per_hour=1)
+    for _ in range(3):
+        assert loop_guard.check("w", "provider_agent", "delegated", origin=origin) is None
+    assert loop_guard.usage("w") == {"install_last_hour": 0, "session_last_hour": 0}
+
+
+@pytest.mark.parametrize("origin", ["automation", "wakeup", "connector"])
+def test_a_worker_unattended_work_started_is_counted_and_held(mock_db, origin):
+    _subscription()
+    loop_guard.update_config(session_turns_per_hour=1)
+    assert loop_guard.check("w", "provider_agent", "delegated", origin=origin) is None
+    assert loop_guard.usage("w")["session_last_hour"] == 1
+    reason = loop_guard.check("w", "provider_agent", "delegated", origin=origin)
+    assert reason and "background worker turn is waiting" in reason
+
+
+def test_budgets_read_the_current_setting_on_every_check(mock_db):
+    _subscription()
+    loop_guard.update_config(session_turns_per_hour=2)
+    assert loop_guard.check("s", "automation", "delegated", now=1.0) is None
+    loop_guard.update_config(session_turns_per_hour=1)  # lowered mid-run
+    assert loop_guard.check("s", "automation", "delegated", now=2.0)
+    loop_guard.update_config(session_turns_per_hour=5)  # raised mid-run
+    assert loop_guard.check("s", "automation", "delegated", now=3.0) is None
+    loop_guard.update_config(session_turns_per_hour=1)
+    loop_guard.update_config(enabled=False)  # switched off mid-run
+    assert loop_guard.check("s", "automation", "delegated", now=4.0) is None
+
+
+# ---------------------------------------------------------------------------
+# Origin: what started a worker's chain of work
+# ---------------------------------------------------------------------------
+
+def _turn(sid, source, parent=None, payload=None, running=False):
+    row = turns_db.enqueue_turn(sid, source, prompt="x", parent_turn_id=parent, payload=payload)
+    if running:
+        assert turns_db.start_turn(row["id"], "runner-1") is not None
+    return row
+
+
+def test_origin_follows_wakes_retries_and_peer_messages(mock_db):
+    database.create_profile("op", "Origin", None, {})
+    database.create_session(session_id="chat", profile_id="op", title="t")
+    user = _turn("chat", "user")
+    wake = _turn("chat", "unpark", parent=user["id"])
+    retry = _turn("chat", "failover", parent=wake["id"])
+    assert loop_guard.turn_origin(retry) == "user"
+    assert loop_guard.turn_origin(_turn("chat", "agent_message", parent=retry["id"])) == "user"
+    assert loop_guard.turn_origin(_turn("chat", "auto_continue", parent=_turn("chat", "wakeup")["id"])) == "wakeup"
+    # A worker's turn answers with what was stamped on it at dispatch.
+    stamped = {loop_guard.ORIGIN_KEY: "automation"}
+    assert loop_guard.turn_origin(_turn("chat", "provider_agent", payload=stamped)) == "automation"
+    # Unknown: a relay with nothing behind it, or an unstamped worker turn.
+    assert loop_guard.turn_origin(_turn("chat", "agent_message")) is None
+    assert loop_guard.turn_origin(_turn("chat", "provider_agent")) is None
+
+
+def test_session_origin_reads_the_turn_calling_task(mock_db):
+    database.create_profile("op", "Origin", None, {})
+    database.create_session(session_id="auto", profile_id="op", title="t")
+    _turn("auto", "automation", running=True)
+    # A later queued person message does not change what the running turn is.
+    _turn("auto", "queue")
+    assert loop_guard.session_origin("auto") == "automation"
+    assert loop_guard.session_origin(None) is None
+    assert loop_guard.session_origin("no-such-session") is None
 
 
 @pytest.mark.parametrize("source", ["user", "queue", "resume", "api", "worktree", "unpark"])
@@ -96,20 +168,43 @@ def test_update_config_validates(mock_db):
 # Worker wall-clock cap
 # ---------------------------------------------------------------------------
 
-def test_background_claude_worker_gets_the_default_cap_in_subscription_mode(mock_db):
+def test_unattended_claude_worker_gets_the_default_cap_in_subscription_mode(mock_db):
     _subscription()
-    assert provider_agent._worker_deadlines(True, None, None)[1] == 3600.0
-    # A worker on another provider, or in API key mode, keeps the lane default.
-    assert provider_agent._worker_deadlines(True, None, None, "prov-1")[1] == 0.0
+    assert provider_agent._worker_deadlines(True, None, None, None, "automation")[1:] == (3600.0, True)
+    # A worker on another provider keeps the lane default.
+    assert provider_agent._worker_deadlines(True, None, None, "prov-1", "automation")[1:] == (0.0, False)
+    # In API key mode it is still the guard's to time, but the guard is off.
     claude_auth_mode.set_mode("api_key")
-    assert provider_agent._worker_deadlines(True, None, None)[1] == 0.0
+    assert provider_agent._worker_deadlines(True, None, None, None, "wakeup")[1:] == (0.0, True)
+
+
+@pytest.mark.parametrize("origin", ["user", "queue", "resume", "api", "worktree", None])
+def test_a_worker_a_person_started_gets_no_loop_guard_cap(mock_db, origin):
+    _subscription()
+    assert provider_agent._worker_deadlines(True, None, None, None, origin)[1:] == (0.0, False)
+    # The synchronous lane's own cap is unchanged.
+    sync = provider_agent._worker_deadlines(False, None, None, None, origin)
+    assert sync[1] > 0 and sync[2] is False
 
 
 def test_explicit_worker_cap_wins(mock_db):
     _subscription()
-    assert provider_agent._worker_deadlines(True, None, 120.0)[1] == 120.0
+    assert provider_agent._worker_deadlines(True, None, 120.0, None, "automation")[1:] == (120.0, False)
     loop_guard.update_config(worker_max_minutes=0)
-    assert provider_agent._worker_deadlines(True, None, None)[1] == 0.0
+    assert provider_agent._worker_deadlines(True, None, None, None, "automation")[1] == 0.0
+
+
+def test_the_cap_failure_names_the_loop_guard_and_its_setting(mock_db):
+    text = loop_guard.worker_cap_error("w-1", 3600.0, "automation")
+    assert "per-worker time limit (60 minutes)" in text
+    assert "an automation" in text
+    assert "Settings > Providers > Claude > Policy" in text
+    assert "w-1" in text
+    assert "synchronous" not in text and "Re-dispatch" not in text
+    cap = provider_agent._WallCap(0.0, 3600.0, origin="wakeup", loop_guarded=True)
+    assert cap.error("w-1") == loop_guard.worker_cap_error("w-1", 3600.0, "wakeup")
+    # The synchronous lane keeps its own text.
+    assert "synchronous Task" in provider_agent._WallCap(0.0, 60.0).error("w-1")
 
 
 # ---------------------------------------------------------------------------

@@ -80,7 +80,10 @@ class _FakeTurnManager:
         self._waited = False
 
     def submit(self, session_id, source, **kwargs):
-        self.submitted.append({"session_id": session_id, "source": source})
+        self.submitted.append({
+            "session_id": session_id, "source": source,
+            "payload": kwargs.get("payload"),
+        })
         return "turn-1"
 
     async def wait_session_idle(self, session_id, timeout=300.0):
@@ -269,7 +272,7 @@ class TestFirstFrameWatchdog:
         # (tests/core/test_loop_guard.py covers it).
         from app.core import claude_auth_mode
         claude_auth_mode.set_mode("api_key")
-        first, hard = pa._worker_deadlines(True, None, None)
+        first, hard, _guarded = pa._worker_deadlines(True, None, None)
         assert first == 0.0 and hard == 0.0
 
 
@@ -582,12 +585,12 @@ class TestSyncCap:
         # default worker cap (tests/core/test_loop_guard.py).
         from app.core import claude_auth_mode
         claude_auth_mode.set_mode("api_key")
-        first, hard = pa._worker_deadlines(True, None, None)
+        first, hard, _guarded = pa._worker_deadlines(True, None, None)
         assert hard == 0.0, "a parked parent can be woken; it needs no ceiling"
         assert first > 0
 
     def test_sync_gets_one(self):
-        first, hard = pa._worker_deadlines(False, None, None)
+        first, hard, _guarded = pa._worker_deadlines(False, None, None)
         assert hard > 0
         assert first > 0
 
@@ -626,6 +629,130 @@ class TestSyncCap:
 
         assert outcome.ok is False
         assert len(calls) == 1, "the 30s backoff does not fit inside the cap"
+
+
+# ===========================================================================
+# The subscription loop guard's per-worker time limit
+# ===========================================================================
+
+class TestLoopGuardWorkerCap:
+    """Only work an unattended source started is timed by the loop guard, and
+    the limit it reads is the current setting, not the one at dispatch."""
+
+    @pytest.fixture
+    def guard(self, monkeypatch):
+        """A guard limit in seconds the test can change mid-run."""
+        from app.core import loop_guard
+
+        limit = {"seconds": 0.05}
+        monkeypatch.setattr(
+            loop_guard, "worker_max_seconds",
+            lambda provider_id, origin: (
+                limit["seconds"] if loop_guard.covers_worker(provider_id, origin) else 0.0
+            ),
+        )
+        monkeypatch.setattr(pa, "LOOP_GUARD_RECHECK_SECONDS", 0.02)
+        return limit
+
+    @staticmethod
+    def _origin(monkeypatch, origin):
+        from app.core import loop_guard
+
+        monkeypatch.setattr(loop_guard, "session_origin", lambda sid: origin)
+
+    @staticmethod
+    def _slow_worker(seconds):
+        async def _wait(session_id, timeout=300.0):
+            await asyncio.sleep(seconds)
+            return True
+        return _wait
+
+    @staticmethod
+    async def _dispatch(change=None, after=0.0):
+        if change is not None:
+            async def _later():
+                await asyncio.sleep(after)
+                change()
+            asyncio.get_running_loop().create_task(_later())
+        # Bounded, so a cap that never fires fails the test instead of hanging it.
+        return await asyncio.wait_for(pa.dispatch_worker(
+            parent_session_id="parent-1", profile_id="p1", prompt="go",
+            background=True, first_frame_seconds=0,
+        ), 10)
+
+    def test_a_worker_a_chat_started_runs_past_the_limit(
+        self, worker_env, mock_db, monkeypatch, guard
+    ):
+        from app.core import loop_guard
+        from app.core import turn_manager as tm_mod
+        from app.db import turns as turns_db
+
+        # The owner's chat turn is the one calling Task.
+        chat = turns_db.enqueue_turn("parent-1", "user", prompt="build it")
+        turns_db.start_turn(chat["id"], "run-1")
+
+        with patch.object(tm_mod, "wait_session_idle", self._slow_worker(0.3)):
+            outcome = _run(self._dispatch())
+
+        assert outcome.ok is True, outcome.error
+        assert worker_env.tm.interrupts == []
+        # Its turn carries the origin, so the hourly budget skips it too.
+        [submitted] = worker_env.tm.submitted
+        assert submitted["payload"] == {loop_guard.ORIGIN_KEY: "user"}
+        assert loop_guard.check(
+            outcome.session_id, "provider_agent", "delegated",
+            origin=submitted["payload"][loop_guard.ORIGIN_KEY],
+        ) is None
+
+    def test_a_worker_an_automation_started_is_stopped_with_the_guard_text(
+        self, worker_env, mock_db, monkeypatch, guard
+    ):
+        from app.core import loop_guard
+
+        self._origin(monkeypatch, "automation")
+        worker_env.tm.hang = True
+
+        outcome = _run(self._dispatch())
+
+        assert outcome.ok is False
+        assert outcome.error.startswith("Loop guard:")
+        assert "Settings > Providers > Claude > Policy" in outcome.error
+        assert "in the background" not in outcome.error
+        assert worker_env.tm.interrupts == [(outcome.session_id, "stop")]
+        [submitted] = worker_env.tm.submitted
+        assert submitted["payload"] == {loop_guard.ORIGIN_KEY: "automation"}
+
+    def test_lowering_the_limit_stops_a_running_worker(
+        self, worker_env, mock_db, monkeypatch, guard
+    ):
+        self._origin(monkeypatch, "wakeup")
+        guard["seconds"] = 100.0
+        worker_env.tm.hang = True
+
+        outcome = _run(self._dispatch(
+            change=lambda: guard.update(seconds=0.05), after=0.1,
+        ))
+
+        assert outcome.ok is False
+        assert outcome.error.startswith("Loop guard:")
+        assert worker_env.tm.interrupts == [(outcome.session_id, "stop")]
+
+    @pytest.mark.parametrize("raised_to", [100.0, 0.0], ids=["raised", "off"])
+    def test_raising_or_switching_off_the_limit_spares_a_running_worker(
+        self, worker_env, mock_db, monkeypatch, guard, raised_to
+    ):
+        from app.core import turn_manager as tm_mod
+
+        self._origin(monkeypatch, "automation")
+        guard["seconds"] = 0.25
+
+        with patch.object(tm_mod, "wait_session_idle", self._slow_worker(0.5)):
+            outcome = _run(self._dispatch(
+                change=lambda: guard.update(seconds=raised_to), after=0.05,
+            ))
+
+        assert outcome.ok is True, outcome.error
+        assert worker_env.tm.interrupts == []
 
 
 # ===========================================================================

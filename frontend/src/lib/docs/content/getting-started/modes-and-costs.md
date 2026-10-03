@@ -60,11 +60,11 @@ If you run much of this kind of work, API key mode is the safer choice. The setu
 
 In subscription mode, AI Shuffle protects your plan from runaway automation:
 
-- Turns that start without you (automations, wake-ups, connectors, background agents) count against an **unattended budget**: by default 12 per session and 60 per worker in any rolling hour. Past either budget, the next such turn does not start on its own. The session shows why, and the turn waits under **Settings → Providers → Claude subscription → Policy** until you choose **Confirm** (it runs now) or **Dismiss**.
-- Background agents on Claude get a default **time limit** of 60 minutes, so one that loops cannot run all night.
+- Turns that start without you (automations, wake-ups, connectors, and the background agents they start) count against an **unattended budget**: by default 12 per session and 60 per worker in any rolling hour. Past either budget, the next such turn does not start on its own. The session shows why, and the turn waits under **Settings → Providers → Claude subscription → Policy** until you choose **Confirm** (it runs now) or **Dismiss**.
+- Background agents on Claude that an automation, wake-up or connector started get a default **time limit** of 60 minutes, so one that loops cannot run all night.
 - Creating an automation or arming a wake-up in subscription mode shows a reminder to use an API key for scheduled runs.
 
-You can change the budgets and the time limit, or turn the guard off, under **Settings → Providers → Claude subscription → Policy**. The counts start again when the worker restarts. The loop guard does not apply in API key mode, where your Console spend limit is the control, or to agents on other providers. It never stops a turn you started yourself.
+You can change the budgets and the time limit, or turn the guard off, under **Settings → Providers → Claude subscription → Policy**. A change also applies to work that is already running: a lowered time limit stops an agent already past it within about a minute, and a raised one lets it keep going. The counts start again when the worker restarts. The loop guard does not apply in API key mode, where your Console spend limit is the control, or to agents on other providers. It never holds or times work you started yourself: a chat you are driving, and every agent that chat starts, has no loop guard budget or time limit.
 
 ## Other providers
 

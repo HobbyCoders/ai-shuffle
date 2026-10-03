@@ -25,7 +25,9 @@ import type { Attention, SearchItem, SettingEntry } from '../types';
 export const MODE_HELP =
 	'Claude models run through the Claude Code CLI on this worker. Subscription uses the CLI’s own sign-in; API key passes the stored Anthropic key. Every Claude session here uses the one you pick; nothing switches on its own. Off removes Claude models from the picker. Prefer to pay per use? An API key suits scheduled and unattended runs.';
 export const LOOP_HELP =
-	'While Claude runs on your subscription, turns that start without you (automations, wake-ups, background workers, connectors) count against an hourly budget. Past it, the next one waits for you under Waiting for you. A turn you start yourself is never held.';
+	'While Claude runs on your subscription, work that starts without you (automations, wake-ups, connectors, and the workers they start) counts against an hourly budget. Past it, the next turn waits for you under Waiting for you. Nothing you start yourself is held or timed, including the workers your chats start.';
+const LOOP_WORKER_LIMIT_HELP =
+	'Stops a worker that an automation, wake-up or connector started once it has run this long. Workers your own chats start have no limit. A change reaches running workers within a minute.';
 export const FAL_BALANCE_HELP =
 	'Read with the media key itself, at most once every five minutes. Usage shows the same reading.';
 export const NATIVE_IMAGE_HELP =
@@ -58,6 +60,7 @@ export const entries: SettingEntry[] = [
 		category: 'providers',
 		section: 'Loop guard',
 		label: 'Per session',
+		hint: 'Unattended turns only',
 		item: CLAUDE_SUB_ITEM,
 		tab: 'Policy',
 		keywords: ['loop guard', 'turns per hour', 'session budget'],
@@ -68,6 +71,7 @@ export const entries: SettingEntry[] = [
 		category: 'providers',
 		section: 'Loop guard',
 		label: 'Per worker',
+		hint: 'Unattended turns only',
 		item: CLAUDE_SUB_ITEM,
 		tab: 'Policy',
 		keywords: ['loop guard', 'turns per hour', 'worker budget'],
@@ -77,11 +81,12 @@ export const entries: SettingEntry[] = [
 		id: 'providers.loopBackground',
 		category: 'providers',
 		section: 'Loop guard',
-		label: 'Background worker limit',
+		label: 'Unattended worker limit',
 		hint: '0 turns it off',
+		help: LOOP_WORKER_LIMIT_HELP,
 		item: CLAUDE_SUB_ITEM,
 		tab: 'Policy',
-		keywords: ['background worker', 'time limit', 'minutes'],
+		keywords: ['background worker', 'unattended', 'time limit', 'minutes'],
 		default: 60
 	},
 	{

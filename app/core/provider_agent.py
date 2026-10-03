@@ -784,7 +784,7 @@ async def _await_worker_idle(
     *,
     feed: Any = None,
     first_frame_deadline: Optional[float] = None,
-    hard_deadline: Optional[float] = None,
+    wall_cap: Optional["_WallCap"] = None,
 ) -> Optional[str]:
     """Wait for a worker to go idle, bailing out early on a liveness verdict.
 
@@ -807,10 +807,12 @@ async def _await_worker_idle(
       liveness even though the parent card never shows them. What is left for
       the deadline is a request that never started. Once progress has been
       seen the deadline stops applying, permanently.
-    * ``hard_deadline`` — an absolute ``loop.time()`` ceiling for a dispatch
-      whose caller cannot survive an unbounded wait. Only the SYNCHRONOUS lane
-      passes one: it blocks the parent's turn, so "no timeout" would mean "no
-      steer, no park, no progress signal" for as long as the worker runs.
+    * ``wall_cap`` — a hard wall-clock ceiling (:class:`_WallCap`) for a
+      dispatch whose caller cannot survive an unbounded wait (the SYNCHRONOUS
+      lane: it blocks the parent's turn, so "no timeout" would mean "no steer,
+      no park, no progress signal" for as long as the worker runs), or for a
+      worker the subscription loop guard covers. The loop guard's limit is
+      re-read while waiting, so a changed setting reaches this worker.
 
     The wait is observed in :data:`WAIT_SLICE_SECONDS` slices so the provider's
     circuit breaker can be re-read between them — a worker whose provider is
@@ -830,6 +832,9 @@ async def _await_worker_idle(
     try:
         while True:
             now = loop.time()
+            if wall_cap is not None:
+                await wall_cap.refresh(now)
+            hard_deadline = wall_cap.deadline() if wall_cap is not None else None
             if hard_deadline is not None and now >= hard_deadline:
                 return WAIT_DEADLINE
             wait_seconds = WAIT_SLICE_SECONDS
@@ -941,8 +946,10 @@ def _worker_deadlines(
     first_frame_seconds: Optional[float],
     max_wall_seconds: Optional[float],
     provider_id: Optional[str] = None,
-) -> Tuple[float, float]:
-    """``(first_frame_seconds, max_wall_seconds)`` for one dispatch; 0 = off.
+    origin: Optional[str] = None,
+) -> Tuple[float, float, bool]:
+    """``(first_frame_seconds, max_wall_seconds, loop_guarded)`` for one
+    dispatch; 0 = off.
 
     ``None`` means "take the configured default", which differs by lane: BOTH
     lanes get the first-frame watchdog (a worker that never connects is dead in
@@ -950,11 +957,13 @@ def _worker_deadlines(
     only it is holding a parent turn hostage while it waits. A background
     parent has parked and can be woken; a sync parent can do nothing at all.
 
-    Exception: a worker on the Claude CLI (no ``provider_id``) while Claude Code
-    runs on the user's subscription gets the loop guard's default cap
-    (``loop_guard.worker_max_seconds``, 60 minutes unless changed in Settings)
-    whenever the lane default would leave it uncapped, so one looping worker
-    cannot spend a plan all night.
+    Exception: when the lane default would leave it uncapped, a worker the
+    subscription loop guard covers (``loop_guard.covers_worker``: on the Claude
+    CLI, and ``origin`` — what started its chain of work — is unattended) gets
+    the guard's per-worker limit (60 minutes unless changed in Settings), so one
+    looping automation worker cannot spend a plan all night. ``loop_guarded``
+    is then True, and the limit is re-read while the worker runs
+    (:class:`_WallCap`). A worker a person's turn started is never capped here.
     """
     from app.core.config import settings
 
@@ -969,14 +978,72 @@ def _worker_deadlines(
             else float(getattr(settings, "task_worker_sync_max_seconds", 0.0) or 0.0)
         )
     max_wall_seconds = max(0.0, float(max_wall_seconds))
+    loop_guarded = False
     if max_wall_seconds == 0.0:
         try:
             from app.core import loop_guard
 
-            max_wall_seconds = loop_guard.worker_max_seconds(provider_id)
+            loop_guarded = loop_guard.covers_worker(provider_id, origin)
+            if loop_guarded:
+                max_wall_seconds = loop_guard.worker_max_seconds(provider_id, origin)
         except Exception:  # noqa: BLE001 — a settings hiccup keeps the lane default
             logger.warning("Loop guard worker cap unavailable", exc_info=True)
-    return max(0.0, float(first_frame_seconds)), max_wall_seconds
+    return max(0.0, float(first_frame_seconds)), max_wall_seconds, loop_guarded
+
+
+#: How often a worker the loop guard covers re-reads its time limit, so a limit
+#: changed in Settings reaches workers already running.
+LOOP_GUARD_RECHECK_SECONDS = 30.0
+
+
+class _WallCap:
+    """One dispatch's hard wall-clock ceiling, measured from ``started``.
+
+    The lane's cap (the synchronous one, or an explicit ``max_wall_seconds``)
+    is fixed at dispatch. A worker the loop guard covers (``loop_guarded``)
+    re-reads the guard's per-worker limit every
+    :data:`LOOP_GUARD_RECHECK_SECONDS`: lowering it stops a worker already past
+    the new value, and raising or switching it off spares one.
+    """
+
+    def __init__(
+        self,
+        started: float,
+        seconds: float,
+        *,
+        provider_id: Optional[str] = None,
+        origin: Optional[str] = None,
+        loop_guarded: bool = False,
+    ) -> None:
+        self.started = started
+        self.seconds = seconds
+        self.provider_id = provider_id
+        self.origin = origin
+        self.loop_guarded = loop_guarded
+        self._checked = started
+
+    def deadline(self) -> Optional[float]:
+        return self.started + self.seconds if self.seconds > 0 else None
+
+    async def refresh(self, now: float) -> None:
+        if not self.loop_guarded or now - self._checked < LOOP_GUARD_RECHECK_SECONDS:
+            return
+        self._checked = now
+        try:
+            from app.core import loop_guard
+
+            self.seconds = await asyncio.to_thread(
+                loop_guard.worker_max_seconds, self.provider_id, self.origin
+            )
+        except Exception:  # noqa: BLE001 — keep the last value on a settings hiccup
+            logger.warning("Loop guard worker cap re-read failed", exc_info=True)
+
+    def error(self, worker_session_id: str) -> str:
+        if self.loop_guarded:
+            from app.core import loop_guard
+
+            return loop_guard.worker_cap_error(worker_session_id, self.seconds, self.origin)
+        return _hard_deadline_error(worker_session_id, self.seconds)
 
 
 def _no_first_frame_error(worker_session_id: str, seconds: float) -> str:
@@ -1659,7 +1726,10 @@ async def dispatch_worker(
     * ``first_frame_seconds`` — a worker that has streamed NOTHING by then is
       failed. No progress frame does not prove the provider request never began;
     * ``max_wall_seconds`` — a hard cap the SYNCHRONOUS lane passes, because a
-      sync dispatch blocks the parent's turn for as long as it waits.
+      sync dispatch blocks the parent's turn for as long as it waits. A worker
+      whose work an unattended source started (automation, wake-up, connector)
+      on the Claude subscription gets the loop guard's per-worker limit instead
+      when the lane sets none; a worker a person's turn started never does.
 
     Every failure path returns a :class:`WorkerOutcome` with ``ok=False``,
     ``frames_forwarded`` (0 = no parent progress) and ``killed`` (a teardown,
@@ -1723,8 +1793,19 @@ async def dispatch_worker(
         if await run_sync(proactive_caller):
             return WorkerOutcome(ok=False, session_id="", error="Background observation cannot delegate execution.")
     nested = bool(owner_session_id) and owner_session_id != parent_session_id
-    first_frame_seconds, max_wall_seconds = await asyncio.to_thread(
-        _worker_deadlines, background, first_frame_seconds, max_wall_seconds, provider_id
+    from app.core import loop_guard
+
+    def _limits() -> Tuple[Optional[str], Tuple[float, float, bool]]:
+        # What started this chain of work, read from the caller's own turn (the
+        # one calling Task). Stamped on the worker's turn so the loop guard's
+        # budget, and any worker it dispatches, see the same origin.
+        origin = loop_guard.session_origin(owner_session_id)
+        return origin, _worker_deadlines(
+            background, first_frame_seconds, max_wall_seconds, provider_id, origin
+        )
+
+    origin, (first_frame_seconds, max_wall_seconds, loop_guarded) = (
+        await asyncio.to_thread(_limits)
     )
 
     from app.core.worker_checkout import prepare_worker_checkout
@@ -2056,6 +2137,11 @@ async def dispatch_worker(
     #: Background work the worker left running; a checkout still in use by it
     #: is never reclaimed from under it.
     outstanding: List[Dict[str, Any]] = []
+    worker_payload: Dict[str, Any] = {}
+    if api_user_id:
+        worker_payload["api_user_id"] = api_user_id
+    if origin:
+        worker_payload[loop_guard.ORIGIN_KEY] = origin
     try:
         # Emit the card BEFORE the turn is submitted so a submit failure still
         # renders as a failed worker rather than as silence.
@@ -2073,28 +2159,32 @@ async def dispatch_worker(
             # worker parents, ``api_user_scope.turn_api_user_id``), and only as
             # the owner when no key owns it. Stamped explicitly anyway, so the
             # worker never depends on that fallback.
-            payload={"api_user_id": api_user_id} if api_user_id else None,
+            payload=worker_payload or None,
         )
 
         # Tail the worker's durable log from here on — its rows only start
         # existing once the turn is submitted.
         feed.start_following()
 
-        # Absolute deadlines, taken once so a park loop cannot reset them. The
-        # first-frame one catches a worker that never starts; the hard one is
-        # the synchronous lane's ceiling. 0 = disabled.
+        # Deadlines measured from one start, so a park loop cannot reset them.
+        # The first-frame one catches a worker that never starts; the hard one
+        # is the synchronous lane's ceiling, or the loop guard's per-worker
+        # limit (re-read as it runs). 0 = disabled.
         _clock = asyncio.get_event_loop().time()
         first_frame_deadline = (
             _clock + first_frame_seconds if first_frame_seconds > 0 else None
         )
-        hard_deadline = _clock + max_wall_seconds if max_wall_seconds > 0 else None
+        wall_cap = _WallCap(
+            _clock, max_wall_seconds, provider_id=provider_id, origin=origin,
+            loop_guarded=loop_guarded,
+        )
 
         wait_verdict = await _await_worker_idle(
             worker_session_id,
             provider_id,
             feed=feed,
             first_frame_deadline=first_frame_deadline,
-            hard_deadline=hard_deadline,
+            wall_cap=wall_cap,
         )
 
         # An idle worker is not necessarily a finished one. Two shapes:
@@ -2117,6 +2207,8 @@ async def dispatch_worker(
         settle_budget = _background_settle_seconds()
         outstanding: List[Dict[str, Any]] = []
         while not wait_verdict and not supervised.torn_down:
+            await wall_cap.refresh(asyncio.get_event_loop().time())
+            hard_deadline = wall_cap.deadline()
             if hard_deadline is not None and asyncio.get_event_loop().time() >= hard_deadline:
                 wait_verdict = WAIT_DEADLINE
                 break
@@ -2156,7 +2248,7 @@ async def dispatch_worker(
                 # A worker that reached this loop has streamed frames, so the
                 # first-frame watchdog is spent; the hard cap is not.
                 first_frame_deadline=None,
-                hard_deadline=hard_deadline,
+                wall_cap=wall_cap,
             )
 
         # torn_down FIRST, on every branch: the supervisor may have killed this
@@ -2182,7 +2274,7 @@ async def dispatch_worker(
             error = (
                 _no_first_frame_error(worker_session_id, first_frame_seconds)
                 if wait_verdict == WAIT_NO_FIRST_FRAME
-                else _hard_deadline_error(worker_session_id, max_wall_seconds)
+                else wall_cap.error(worker_session_id)
             )
             preview = error
             status = "error"

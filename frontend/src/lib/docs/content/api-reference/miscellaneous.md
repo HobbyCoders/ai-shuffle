@@ -870,7 +870,7 @@ curl -X PUT http://localhost:8000/api/v1/settings/claude-auth \
 
 ### GET /api/v1/settings/loop-guard
 
-The loop guard limits how many unattended turns (automations, scheduled wake-ups, background workers and connectors) run on a Claude subscription each hour. Past the budget, the next unattended turn is held until you confirm or dismiss it. It applies only in `subscription` mode, never to turns a person starts.
+The loop guard limits how many unattended turns (automations, scheduled wake-ups, connectors, and the background workers they start) run on a Claude subscription each hour. Past the budget, the next unattended turn is held until you confirm or dismiss it. It applies only in `subscription` mode, never to turns a person starts or to the workers those turns start.
 
 **Auth:** Required
 
@@ -888,7 +888,7 @@ The loop guard limits how many unattended turns (automations, scheduled wake-ups
 }
 ```
 
-`worker_max_minutes` is the default time limit for a background worker that has none of its own. `applies` is `true` when the guard is enabled and the subscription mode is in use. Counts reset when the worker restarts.
+`worker_max_minutes` is the default time limit for a worker that unattended work started and that has none of its own. A change reaches running workers within about a minute. `provider_agent` in `unattended_sources` counts only workers whose work an unattended source started. `applies` is `true` when the guard is enabled and the subscription mode is in use. Counts reset when the worker restarts.
 
 ### PUT /api/v1/settings/loop-guard
 

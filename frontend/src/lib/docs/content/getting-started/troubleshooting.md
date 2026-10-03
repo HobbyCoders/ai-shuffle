@@ -83,7 +83,7 @@ The message in the app says which of these it is.
 
 **An automation, wake-up, connector or background agent waits for confirmation** (subscription mode): the loop guard held it because unattended turns reached their hourly budget. Confirm or dismiss it under **Settings → Providers → Claude subscription → Policy**, raise the budget there, or switch to API key mode for unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
 
-**A background agent stopped after an hour** (subscription mode): the loop guard's default time limit ended it. Change the limit under **Settings → Providers → Claude subscription → Policy**, or use API key mode for long unattended work.
+**A background agent stopped after an hour** (subscription mode): an automation, wake-up or connector started it, and the loop guard's default time limit ended it. Change the limit (**Unattended worker limit**) under **Settings → Providers → Claude subscription → Policy**, or use API key mode for long unattended work. Agents started from your own chats have no such limit.
 
 **The API key is refused:** the key was deleted or the Console account has no credit or reached its spend limit. Check the Anthropic Console, then paste a new key in Settings.
 

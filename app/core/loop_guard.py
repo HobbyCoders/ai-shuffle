@@ -7,22 +7,30 @@ without anyone watching. The guard adds three things, all configurable in
 Settings > Providers > Claude (the subscription's Policy tab):
 
 1. **Unattended budget.** Turns from unattended sources (``automation``,
-   ``wakeup``, ``provider_agent`` workers, ``connector``) that run on the
-   Claude Code CLI in subscription mode are counted per session and per worker
-   over a rolling hour. Past either budget the next such turn does not start:
-   it is held, the session shows why, and it waits for the owner to confirm it
+   ``wakeup``, ``connector``, and ``provider_agent`` workers whose work an
+   unattended source started) that run on the Claude Code CLI in subscription
+   mode are counted per session and per worker over a rolling hour. Past
+   either budget the next such turn does not start: it is held, the session
+   shows why, and it waits for the owner to confirm it
    (``POST /api/v1/settings/loop-guard/held/{id}/confirm`` re-submits it) or
    dismiss it. Defaults: 12 per session, 60 per worker, per hour.
-2. **Worker time limit.** A background worker on the Claude CLI in
-   subscription mode gets a default wall-clock cap (60 minutes) when nothing
-   else set one.
+2. **Worker time limit.** A worker on the Claude CLI in subscription mode
+   whose work an unattended source started gets a default wall-clock cap
+   (60 minutes) when nothing else set one.
 3. **Guidance.** Creating an automation or arming a wake-up in subscription
    mode returns "use an API key for scheduled runs".
 
 Nothing here applies in API key mode (the Console spend limit is the control)
-or to turns a person started (chat, queue, resume, API, worktree). The counts
-live in memory and start again when the worker restarts; held turns are stored
-per worker (``loop_guard_held:<instance id>``).
+or to turns a person started (chat, queue, resume, API, worktree), including
+the Task workers those turns start, however deep. A worker's ORIGIN is the
+source that started its chain: :func:`session_origin` resolves it from the
+caller's turn when the worker is dispatched (following wakes, retries and peer
+messages back through ``parent_turn_id``, and a calling worker's own stamp),
+and the worker's turn carries it in its payload under :data:`ORIGIN_KEY`. A
+worker whose origin cannot be read is treated as attended: the guard must not
+cut off a person's work on a guess. The counts live in memory and start again
+when the worker restarts; held turns are stored per worker
+(``loop_guard_held:<instance id>``).
 """
 
 from __future__ import annotations
@@ -48,6 +56,24 @@ SOURCE_LABELS = {
     "provider_agent": "background worker",
     "connector": "connector",
 }
+_STARTED_BY = {
+    "automation": "an automation",
+    "wakeup": "a scheduled wake-up",
+    "connector": "a connector message",
+}
+
+#: The Task worker turn source (``provider_agent.WORKER_TURN_SOURCE``). Its
+#: turns count only when :data:`UNATTENDED_ORIGINS` started the work.
+WORKER_SOURCE = "provider_agent"
+#: Sources that start a chain of work nobody is watching.
+UNATTENDED_ORIGINS = tuple(s for s in UNATTENDED_SOURCES if s != WORKER_SOURCE)
+#: Sources that continue or relay an earlier turn (a wake, a retry, an
+#: auto-continue, a peer message). The chain's origin is that turn's, reached
+#: through ``parent_turn_id``.
+RELAY_SOURCES = ("unpark", "failover", "auto_continue", "agent_message")
+#: Turn payload key carrying a worker's origin, stamped at dispatch.
+ORIGIN_KEY = "loop_guard_origin"
+_MAX_ORIGIN_HOPS = 32
 
 WINDOW_SECONDS = 3600.0
 MAX_HELD = 50
@@ -179,14 +205,64 @@ def reset_counts() -> None:
         _install.clear()
 
 
+def is_unattended_origin(origin: Optional[str]) -> bool:
+    """True when ``origin`` (a chain's starting source) is unattended work."""
+    return origin in UNATTENDED_ORIGINS
+
+
+def turn_origin(turn: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The source that started ``turn``'s chain of work, or ``None`` if unknown.
+
+    A wake, retry, auto-continue or peer message (:data:`RELAY_SOURCES`)
+    follows ``parent_turn_id`` to the turn it continues; a worker's turn
+    answers with the origin stamped on it at dispatch (:data:`ORIGIN_KEY`).
+    Anything else is the origin itself. Blocking DB reads; call it off the
+    event loop.
+    """
+    from app.db import turns as turns_db
+
+    for _ in range(_MAX_ORIGIN_HOPS):
+        if not turn:
+            return None
+        source = turn.get("source")
+        if source == WORKER_SOURCE:
+            return (turn.get("payload") or {}).get(ORIGIN_KEY) or None
+        if source not in RELAY_SOURCES:
+            return source or None
+        parent_id = turn.get("parent_turn_id")
+        if not parent_id:
+            return None
+        turn = turns_db.get_turn(parent_id)
+    return None
+
+
+def session_origin(session_id: Optional[str]) -> Optional[str]:
+    """The origin of the work ``session_id`` is doing right now: its live turn
+    (the one calling Task), else its latest turn. ``None`` when unreadable.
+    Blocking; never raises."""
+    if not session_id:
+        return None
+    try:
+        from app.db import turns as turns_db
+
+        turn = turns_db.get_live_turn(session_id) or turns_db.get_latest_turn(session_id)
+        return turn_origin(turn)
+    except Exception:  # noqa: BLE001 — unknown origin is treated as attended
+        logger.warning("Loop guard: origin of session %s unreadable", session_id, exc_info=True)
+        return None
+
+
 def check(session_id: str, source: str, leg: Optional[str], *, confirmed: bool = False,
-          now: Optional[float] = None) -> Optional[str]:
+          origin: Optional[str] = None, now: Optional[float] = None) -> Optional[str]:
     """Count an unattended subscription turn, or return why it must wait.
 
     ``None`` lets the turn start (and counts it when it is unattended). A
-    string is the user-facing reason the turn is held instead.
+    string is the user-facing reason the turn is held instead. A worker's
+    turn (``provider_agent``) is unattended only when its ``origin`` is.
     """
     if source not in UNATTENDED_SOURCES or leg not in (None, "delegated"):
+        return None
+    if source == WORKER_SOURCE and not is_unattended_origin(origin):
         return None
     if not applies():
         return None
@@ -219,15 +295,37 @@ def check(session_id: str, source: str, leg: Optional[str], *, confirmed: bool =
     return None
 
 
-def worker_max_seconds(provider_id: Optional[str]) -> float:
-    """Default wall-clock cap for a worker on the Claude CLI in subscription
-    mode (0 = none). Workers bound to another provider are not capped here."""
-    if provider_id or not applies():
+def covers_worker(provider_id: Optional[str], origin: Optional[str]) -> bool:
+    """True when the per-worker time limit is this worker's to apply: a worker
+    on the Claude CLI (no ``provider_id``) whose work an unattended source
+    started. Whether the limit is on, and its value, is read separately by
+    :func:`worker_max_seconds` so a change in Settings reaches running work."""
+    return not provider_id and is_unattended_origin(origin)
+
+
+def worker_max_seconds(provider_id: Optional[str], origin: Optional[str]) -> float:
+    """The current wall-clock cap for a worker (0 = none): the Policy tab's
+    per-worker limit for a worker :func:`covers_worker` admits, while the guard
+    applies. Reads the setting on every call."""
+    if not covers_worker(provider_id, origin) or not applies():
         return 0.0
     try:
         return float(config().worker_max_minutes) * 60.0
     except Exception:  # noqa: BLE001
         return 0.0
+
+
+def worker_cap_error(worker_session_id: str, seconds: float, origin: Optional[str]) -> str:
+    """The failure text when the per-worker time limit stops a worker."""
+    started_by = _STARTED_BY.get(origin or "", "unattended work")
+    ran = f"{seconds / 60:.0f} minutes" if seconds >= 60 else f"{seconds:.0f} seconds"
+    return (
+        f"Loop guard: this worker reached its per-worker time limit ({ran}) and was "
+        f"stopped. The limit covers workers started by {started_by} on your Claude "
+        "subscription; change it in Settings > Providers > Claude > Policy "
+        "(Unattended worker limit), or use an API key for unattended runs. Its "
+        f"partial transcript is in session {worker_session_id}."
+    )
 
 
 def scheduled_run_guidance(profile: Optional[dict] = None) -> Optional[str]:

@@ -1821,12 +1821,15 @@ async def _stream_to_websocket_impl(
         return
 
     # Subscription loop guard: an unattended turn (automation, wake-up,
-    # background worker, connector) on the Claude CLI in subscription mode past
-    # its hourly budget waits for the owner's confirmation instead of starting.
+    # connector, or a worker one of those started) on the Claude CLI in
+    # subscription mode past its hourly budget waits for the owner's
+    # confirmation instead of starting.
     if turn_source in loop_guard.UNATTENDED_SOURCES:
-        _confirmed = bool(((loop_guard_turn or {}).get("payload") or {}).get(loop_guard.CONFIRMED_FLAG))
+        _guard_payload = (loop_guard_turn or {}).get("payload") or {}
+        _confirmed = bool(_guard_payload.get(loop_guard.CONFIRMED_FLAG))
         _held = await asyncio.to_thread(
-            loop_guard.check, session_id, turn_source, _leg, confirmed=_confirmed
+            loop_guard.check, session_id, turn_source, _leg, confirmed=_confirmed,
+            origin=_guard_payload.get(loop_guard.ORIGIN_KEY),
         )
         if _held:
             if loop_guard_turn:

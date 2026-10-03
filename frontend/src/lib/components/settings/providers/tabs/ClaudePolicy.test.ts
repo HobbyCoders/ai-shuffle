@@ -36,8 +36,10 @@ it('shows this hour’s unattended turns and the budgets at their defaults', asy
 	expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('true');
 	expect((screen.getByLabelText('Per session') as HTMLInputElement).value).toBe('12');
 	expect((screen.getByLabelText('Per worker') as HTMLInputElement).value).toBe('60');
-	expect((screen.getByLabelText('Background worker limit') as HTMLInputElement).value).toBe('60');
+	expect((screen.getByLabelText('Unattended worker limit') as HTMLInputElement).value).toBe('60');
 	expect(screen.getByText('0 turns it off')).toBeTruthy();
+	// The budgets say they cover unattended work only.
+	expect(screen.getAllByText('Unattended turns only')).toHaveLength(2);
 	// At the default no "Default N" hint shows.
 	expect(screen.queryByText(/^Default \d+$/)).toBeNull();
 });

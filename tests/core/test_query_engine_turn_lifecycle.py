@@ -232,9 +232,23 @@ async def test_loop_guard_holds_an_unattended_turn(tmp_path):
         events = await _turn(stack, turn_source="automation", loop_guard_turn=turn_row)
     assert events == [{"type": "error", "message": "Hourly budget reached",
                        "code": loop_guard.HOLD_CODE}]
-    assert check.call_args.kwargs == {"confirmed": False}
+    assert check.call_args.kwargs == {"confirmed": False, "origin": None}
     hold.assert_called_once_with(turn_row, "Hourly budget reached")
     b.make_adapter.assert_not_called()
+
+
+async def test_loop_guard_reads_a_worker_turns_origin(tmp_path):
+    """A worker's turn hands the guard the origin stamped on it at dispatch."""
+    from app.core import loop_guard
+
+    turn_row = {"id": "turn-1", "payload": {loop_guard.ORIGIN_KEY: "user"}}
+    with ExitStack() as stack:
+        engine_patches(stack, cwd=str(tmp_path))
+        check = stack.enter_context(patch.object(loop_guard, "check", return_value="held"))
+        stack.enter_context(patch.object(loop_guard, "hold", new=MagicMock()))
+        await _turn(stack, turn_source="provider_agent", loop_guard_turn=turn_row)
+    assert check.call_args.args[1] == "provider_agent"
+    assert check.call_args.kwargs == {"confirmed": False, "origin": "user"}
 
 
 async def test_assistant_limit_refuses_the_turn(tmp_path):
