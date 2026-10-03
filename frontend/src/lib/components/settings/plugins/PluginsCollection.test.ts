@@ -725,12 +725,39 @@ describe('telling the owner what a plugin does (plugin review 2026-10-03)', () =
 				{ kind: 'service', name: 'cloudflare', support: 'loaded', reason: '', detail: '' }
 			]
 		};
+		// No sign-in declared: the installed plugin's Connections list the name only.
+		m.get.mockRejectedValueOnce({ status: 404, detail: 'not declared' });
 		await show('plugin:toolkit@mp');
-		const block = await screen.findByTestId('plugin-services');
-		expect(within(block).getByText('cloudflare')).toBeTruthy();
+		const block = await screen.findByTestId('plugin-connections');
+		await waitFor(() => expect(within(block).getByText('cloudflare')).toBeTruthy());
+		expect(within(block).getByText('Asks you for access')).toBeTruthy();
 		// A declaration is not a part that loads or was adapted.
 		expect(screen.queryByTestId('plugin-adapted')).toBeNull();
 		expect(screen.queryByTestId('plugin-not-loaded')).toBeNull();
+	});
+
+	it('shows a declared sign-in in the plugin’s Connections with Sign out', async () => {
+		details['toolkit@mp'] = {
+			...installedDetails,
+			components: [{ kind: 'service', name: 'cloudflare', support: 'loaded', reason: '', detail: '' }]
+		};
+		m.get.mockImplementation(async (path: string) =>
+			path.startsWith('/plugins/oauth/status')
+				? {
+						plugin_id: 'toolkit@mp',
+						enabled: true,
+						redirect_uri: 'https://w.example/api/v1/plugins/oauth/callback',
+						services: [{ plugin_id: 'toolkit@mp', service: 'cloudflare', state: 'signed_in', reason: '', client_configured: true, client_id: 'cid', access: 'read', authorize_host: 'dash.cloudflare.com' }]
+					}
+				: undefined
+		);
+		await show('plugin:toolkit@mp');
+		const row = await screen.findByTestId('plugin-service-cloudflare');
+		expect(m.get).toHaveBeenCalledWith('/plugins/oauth/status?plugin=toolkit%40mp');
+		expect(within(detail()).getByText('Signed in · dash.cloudflare.com')).toBeTruthy();
+		expect(within(detail()).getByRole('button', { name: 'Sign out' })).toBeTruthy();
+		expect(row.dataset.step).toBe('signed_in');
+		m.get.mockReset();
 	});
 
 	it('reports catalog entries that cannot install here, with the reason', async () => {

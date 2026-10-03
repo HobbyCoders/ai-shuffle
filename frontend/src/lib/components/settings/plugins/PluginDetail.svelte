@@ -9,7 +9,8 @@
 <script lang="ts">
 	/**
 	 * PluginDetail: one agent plugin package. Installed: enable switch,
-	 * overview (what it includes, outside services it uses, what was adapted
+	 * overview (what it includes, outside services it uses with a sign-in per
+	 * Connections row, what was adapted
 	 * for this app, what does not load here, README, install location),
 	 * contents, uninstall. Not installed: Install, which leaves it switched off.
 	 *
@@ -43,6 +44,7 @@
 	import { renderReadme } from './readme';
 	import RunsCodeList from './RunsCodeList.svelte';
 	import PartNotes from './PartNotes.svelte';
+	import PluginConnections from './PluginConnections.svelte';
 
 	interface Props {
 		/** Plugin id, e.g. `toolkit@mp` or `release-notes@authored`. */
@@ -325,7 +327,11 @@
 					{#if plugin.has_hooks}<SettingRow label="Hooks"><ValueText value="Yes" /></SettingRow>{/if}
 				</RowGroup>
 			{/if}
-			{@render servicesGroup()}
+			{#if installed && services.length}
+				<PluginConnections pluginId={id} {services} {enabled} />
+			{:else}
+				{@render servicesGroup()}
+			{/if}
 			{#if adapted.length}
 				<div data-testid="plugin-adapted">
 					<RowGroup title="Adapted for AI Shuffle" count={adapted.length}>

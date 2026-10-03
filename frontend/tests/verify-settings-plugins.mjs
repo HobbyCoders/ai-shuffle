@@ -274,7 +274,7 @@ async function truth(viewport, touch) {
 	check(/model pin removed/i.test(adaptedText) && adaptedText.includes('MultiEdit became Edit'), 'adaptation notes shown', adaptedText);
 	const leftText = await page.getByTestId('plugin-not-loaded').innerText();
 	check(leftText.includes('Programs') && leftText.includes('Monitor') && !/executables|user_config/.test(leftText), 'left-out parts have readable kinds', leftText);
-	check((await page.getByTestId('plugin-services').innerText()).includes('linear'), 'declared services listed');
+	check((await page.getByTestId('plugin-connections').innerText()).includes('linear'), 'declared services listed under Connections');
 	check((await noOverflow()) <= 0, 'no overflow, imported', await noOverflow());
 	await shot('4-imported');
 

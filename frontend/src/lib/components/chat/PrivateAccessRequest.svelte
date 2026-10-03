@@ -4,8 +4,9 @@
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { onMount, untrack } from 'svelte';
 	import ServiceAccessRequest from './ServiceAccessRequest.svelte';
+	import PluginServiceAccess from './PluginServiceAccess.svelte';
 	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
-	let { sessionId, request, savedConnections, vaultAvailable, owner = null, clearSecretsKey = 0, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string; service_provider?: string; suggested_url?: string }; savedConnections: Saved[]; vaultAvailable: boolean; owner?: string | null; clearSecretsKey?: number; onComplete: () => void } = $props();
+	let { sessionId, request, savedConnections, vaultAvailable, owner = null, clearSecretsKey = 0, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string }; savedConnections: Saved[]; vaultAvailable: boolean; owner?: string | null; clearSecretsKey?: number; onComplete: () => void } = $props();
 	// A mirrored conversation's access lives on the device that runs it; this worker only relays.
 	const where = $derived(owner ?? 'this worker');
 	const sentTo = $derived(owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker');
@@ -81,7 +82,9 @@
 	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7" /></svg>
 {/snippet}
 
-{#if service}
+{#if service && request.plugin && request.service}
+	<PluginServiceAccess {sessionId} request={{ ...request, plugin: request.plugin, service: request.service }} {owner} {onComplete} />
+{:else if service}
 	<ServiceAccessRequest {sessionId} {request} {savedConnections} {vaultAvailable} {owner} {clearSecretsKey} {onComplete} />
 {:else}
 <section class="card-system pa-card" aria-label="Private access request">
