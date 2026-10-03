@@ -612,3 +612,30 @@ class TestNetworkCopy:
         assert by_id["dev_peer"]["online"] is False and by_id["dev_peer"]["available"] is True
         assert by_id[settings.effective_instance_id]["device_id"] == "dev_self"
         assert snap["self_device_id"] == "dev_self"
+
+    def test_self_device_id_without_a_legacy_instance_alias(self, monitor, mock_db):
+        """A member whose join recorded no legacy instance id is keyed only by
+        its device id; the self entry still names that device, so sessions it
+        owns resolve to its own usage instead of an unreported other device."""
+        from app.db import database as db
+        db.upsert_usage_snapshot(settings.effective_instance_id, [], True, 1, 1)
+        installs = {
+            "dev_self": {"id": "dev_self", "device_name": "DesktopWorker", "online": True},
+            "dev_peer": {"id": "dev_peer", "device_name": "Unraid", "online": True},
+            "ai-shuffle-peer": {"id": "dev_peer", "device_name": "Unraid", "online": True},
+        }
+        with patch.object(db, "get_installs_map", return_value=installs), \
+                patch("app.network.runners.self_device_id", return_value="dev_self"):
+            snap = monitor._cluster_snapshot()
+        own = next(s for s in snap["snapshots"] if s["instance_id"] == settings.effective_instance_id)
+        assert own["device_id"] == "dev_self"
+        assert own["device_name"] == "DesktopWorker"
+        assert snap["self_device_id"] == "dev_self"
+
+    def test_self_device_id_stays_empty_off_a_network(self, monitor, mock_db):
+        from app.db import database as db
+        with patch.object(db, "get_installs_map", return_value={}), \
+                patch("app.network.runners.self_device_id", return_value=None):
+            snap = monitor._cluster_snapshot()
+        assert snap["self_device_id"] is None
+        assert snap["snapshots"][-1]["instance_id"] == settings.effective_instance_id

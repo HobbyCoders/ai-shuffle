@@ -333,11 +333,21 @@ class UsageLimitsMonitor:
             return None
 
         own_install = installs_map.get(self_id)
+        if own_install is None:
+            # A network member's runner row is keyed by its device id; the
+            # instance-id alias exists only when its membership recorded a
+            # legacy instance id, which some joins left empty. Without this
+            # the self entry carried no device id and clients could not match
+            # sessions owned by this device to its own usage.
+            own_device = _network_self_device_id()
+            own_install = installs_map.get(own_device) if own_device else None
+            if own_install is None and own_device:
+                own_install = {"id": own_device, "device_name": None, "online": True}
         self._self_device_id = own_install.get("id") if own_install else None
         snapshots: List[Dict[str, Any]] = []
         for row in rows:
             iid = row.get("instance_id")
-            install = installs_map.get(iid)
+            install = own_install if iid == self_id else installs_map.get(iid)
             if install is None and iid != self_id:
                 # An install that has left the registry — drop its stale row.
                 continue
@@ -546,6 +556,16 @@ class UsageLimitsMonitor:
         """A network peer's usage row landed here: show it on every open client."""
         self._cluster_cache = None
         await self._broadcast(await run_sync(self._cluster_snapshot))
+
+
+def _network_self_device_id() -> Optional[str]:
+    """This worker's network device id, or None off a network (best-effort)."""
+    try:
+        from app.network import runners
+        return runners.self_device_id()
+    except Exception as e:  # noqa: BLE001 — a network fault must never break usage reads
+        logger.debug("Network device id unavailable: %s", e)
+        return None
 
 
 def _publish_to_network() -> None:
