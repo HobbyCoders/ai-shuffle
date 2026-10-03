@@ -203,6 +203,11 @@ def test_start_chrome_execs_chrome_through_the_egress_launcher(tmp_path, policy_
     assert lines[:3] == [str(entry), "--", "/fixture/chrome"]
     assert "--remote-debugging-port=9221" in lines
     assert "about:blank" in lines
+    # Pages must see a desktop-sized screen, not ozone headless's default 1x1.
+    assert "--ozone-override-screen-size=1920,1080" in lines
+    # WebGL must exist (software, via SwiftShader): no rasterizer opt-out.
+    assert "--enable-unsafe-swiftshader" in lines
+    assert "--disable-software-rasterizer" not in lines
     if policy_ok:
         assert "ALLOW=127.0.0.0/8" in lines
         assert "DENY=8000,8001" in lines

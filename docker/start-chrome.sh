@@ -95,8 +95,10 @@ fi
 #       cap on concurrent browser sessions.
 #   --disk-cache-size=33554432  bound the on-disk HTTP cache at 32MB (default is
 #       large and grows in the persisted profile volume).
-#   --disable-software-rasterizer  we already --disable-gpu; this also stops the
-#       SwiftShader fallback allocating a software raster path we never display.
+#   (--disable-software-rasterizer was here until 2026-10. With --disable-gpu it
+#       left pages with no WebGL context at all, which breaks WebGL sites and is
+#       a bot-detection signal; dropping it measured ~20MB PSS. See the WebGL
+#       note at the launch flags below.)
 #   --disable-features=Translate,BackForwardCache  Translate loads an unused
 #       model; BackForwardCache keeps whole pages alive in memory after
 #       navigation — both pure memory cost for this single-tab use.
@@ -110,7 +112,6 @@ MEM_ARGS=(
     --js-flags=--max-old-space-size=512
     --renderer-process-limit=4
     --disk-cache-size=33554432
-    --disable-software-rasterizer
     --disable-features=Translate,BackForwardCache,DBus,MediaSessionService
 )
 
@@ -132,10 +133,20 @@ MEM_ARGS=(
 # --ozone-platform=headless: full browser rendered offscreen — no X server /
 #   Xvfb required — while keeping full browser subsystems available for CDP
 #   automation (retained from the extension era; deliberately not changed here).
+# --ozone-override-screen-size=1920,1080: the headless ozone platform otherwise
+#   reports a 1x1 screen to pages (screen.width/height), an obvious "not a real
+#   desktop" signal. 1920x1080 is a common desktop size that fits the 1440x900
+#   window. Measured: no memory cost (docs/reviews/docker-browser-chrome-vs-chromium-2026-10-03.md).
 # --no-sandbox: Chrome's user-namespace sandbox is unavailable under Docker's
 #   default seccomp profile; the container provides isolation.
 # --disable-gpu: render via Chrome's bundled SwiftShader.
-#
+# --enable-unsafe-swiftshader: lets WebGL/WebGL2 run on SwiftShader (software)
+#   since there is no GPU. Without it pages get no WebGL context at all. The
+#   "unsafe" refers to running page shaders in a software GPU path; with
+#   --no-sandbox the container is already the isolation boundary. Pages see an
+#   "ANGLE (... SwiftShader ...)" renderer, which some detectors also flag
+#   (CreepJS rates it 50% "like headless" vs 44% with no WebGL), so this buys
+#   working WebGL sites, not a better bot score.
 # Egress proxy: Chromium runs behind browser-mcp's egress-launch.js, a
 # loopback-only proxy on a random port that receives EVERY connection the
 # browser makes (WebSockets and loopback included; the launcher adds
@@ -186,10 +197,12 @@ exec node "$EGRESS_ENTRY" -- "$CHROME_BIN" \
     --ozone-platform=headless \
     --no-sandbox \
     --disable-gpu \
+    --enable-unsafe-swiftshader \
     --disable-dev-shm-usage \
     --no-default-browser-check \
     --user-data-dir="$PROFILE" \
     --window-size=1440,900 \
+    --ozone-override-screen-size=1920,1080 \
     "${MEM_ARGS[@]}" \
     "${DEBUG_ARGS[@]}" \
     "$@" \
