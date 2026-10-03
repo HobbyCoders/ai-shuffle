@@ -29,6 +29,8 @@ const m = vi.hoisted(() => ({
 	getAutoUpdateSettings: vi.fn(),
 	updateAutoUpdateSettings: vi.fn(),
 	runAutoUpdate: vi.fn(),
+	getProjectPlugins: vi.fn(),
+	removeProjectPlugin: vi.fn(),
 	getConnectors: vi.fn(),
 	getConnectorTypes: vi.fn(),
 	get: vi.fn(),
@@ -168,7 +170,7 @@ describe('the list (from PluginsHub)', () => {
 		hub();
 		await show('explore');
 		await fireEvent.click(within(detail()).getByRole('button', { name: 'Install Review' }));
-		await waitFor(() => expect(m.installPlugin).toHaveBeenCalledWith('review@local'));
+		await waitFor(() => expect(m.installPlugin).toHaveBeenCalledWith('review@local', 'user', false));
 	});
 
 	it('opens an item from Explore', async () => {
@@ -265,7 +267,7 @@ describe('a plugin package (from PluginDetails)', () => {
 		await waitFor(() => expect(within(pane).getByText('Review helpers for pull requests.')).toBeTruthy());
 		expect(within(pane).getByRole('heading', { name: 'toolkit' })).toBeTruthy();
 		expect(within(pane).getByText('v1.2.0')).toBeTruthy();
-		expect(within(pane).getByText('Enabled')).toBeTruthy();
+		expect(within(pane).getByText('On')).toBeTruthy();
 		expect(within(pane).getByRole('switch', { name: 'Enabled' }).getAttribute('aria-checked')).toBe('true');
 		const installedOn = new Date(installedDetails.installed_at!).toLocaleDateString(undefined, {
 			year: 'numeric',
@@ -331,9 +333,9 @@ describe('a plugin package (from PluginDetails)', () => {
 		};
 		await show('plugin:toolkit@mp');
 		const block = await screen.findByTestId('plugin-not-loaded');
-		const text = (label: string) => within(block).getByText(label).closest('.st-row')?.textContent;
-		expect(text('App drive')).toContain('hosted by ChatGPT; it cannot run outside it');
-		expect(text('Settings api_token')).toContain('asks for settings this app does not collect yet');
+		const text = (label: string) => within(block).getByText(label).closest('li')?.textContent;
+		expect(text('ChatGPT app drive')).toContain('hosted by ChatGPT; it cannot run outside it');
+		expect(text('Plugin settings api_token')).toContain('asks for settings this app does not collect yet');
 		expect(block.textContent).not.toContain('lint');
 		expect(within(detail()).getByText('Agent plugin')).toBeTruthy();
 	});
@@ -348,7 +350,7 @@ describe('a plugin package (from PluginDetails)', () => {
 		expect(within(pane).getByText('Not installed')).toBeTruthy();
 		expect(within(pane).queryByRole('switch')).toBeNull();
 		await fireEvent.click(within(pane).getByRole('button', { name: 'Install' }));
-		await waitFor(() => expect(m.installPlugin).toHaveBeenCalledWith('extra@mp'));
+		await waitFor(() => expect(m.installPlugin).toHaveBeenCalledWith('extra@mp', 'user', false));
 	});
 
 	it('omits the install date for an installed record without one', async () => {
@@ -405,7 +407,7 @@ describe('an agent-authored draft (review)', () => {
 		m.getInstalledPlugins.mockResolvedValue([toolkit, draftInfo]);
 		await show();
 		const list = screen.getByRole('heading', { level: 1, name: 'Plugins' }).closest('.st-lcol') as HTMLElement;
-		expect(within(list).getByText('Needs review')).toBeTruthy();
+		expect(within(list).getByText('Needs your review')).toBeTruthy();
 		expect(within(list).getByRole('button', { name: /release-notes/ }).textContent).toContain('Agent draft, v0.1.0');
 		const { attention } = await import('$lib/settings/entries/plugins');
 		expect(attention()).toEqual({ count: 1, tone: 'warn' });
@@ -528,7 +530,7 @@ describe('ported from the hub manage view', () => {
 		expect(pick.getAttribute('aria-pressed')).toBe('true');
 		await fireEvent.click(within(pane).getByRole('button', { name: 'Select docs for batch install' }));
 		await fireEvent.click(within(pane).getByRole('button', { name: 'Install (2)' }));
-		await waitFor(() => expect(m.installPluginsBatch).toHaveBeenCalledWith(['extra@mp', 'docs@mp']));
+		await waitFor(() => expect(m.installPluginsBatch).toHaveBeenCalledWith(['extra@mp', 'docs@mp'], 'user', false));
 		await waitFor(() => expect(within(pane).queryByRole('button', { name: /^Install \(/ })).toBeNull());
 		expect(m.getInstalledPlugins.mock.calls.length).toBeGreaterThan(1);
 	});
@@ -592,6 +594,201 @@ describe('access and deep links', () => {
 		cleanup();
 		await show('work');
 		await waitFor(() => expect(settingsNav.selectedItem('plugins')).toBe('connection:gmail'));
+	});
+});
+
+describe('telling the owner what a plugin does (plugin review 2026-10-03)', () => {
+	const hooked: PluginDetails = {
+		...installedDetails,
+		enabled: false,
+		components: [
+			{ kind: 'skill', name: 'lint', support: 'loaded', reason: '' },
+			{ kind: 'hook', name: 'PreToolUse', support: 'loaded', reason: '', detail: 'Bash: ./guard.sh' },
+			{ kind: 'mcp_server', name: 'github', support: 'loaded', reason: '', detail: 'npx -y gh-mcp' },
+			{ kind: 'mcp_server', name: 'remote', support: 'unsupported', reason: 'SSE transport is not supported', detail: '' }
+		]
+	};
+
+	function installedOff(info: Partial<PluginInfo> = {}) {
+		m.getInstalledPlugins.mockResolvedValue([{ ...toolkit, enabled: false, ...info }]);
+	}
+
+	it('switching on a plugin that runs code shows what runs first, with one confirm', async () => {
+		installedOff({ components: hooked.components });
+		details['toolkit@mp'] = hooked;
+		await show('plugin:toolkit@mp');
+		const pane = detail();
+		const sw = within(pane).getByRole('switch', { name: 'Enabled' });
+		await fireEvent.click(sw);
+		const card = await screen.findByTestId('plugin-enable-review');
+		expect(m.enablePlugin).not.toHaveBeenCalled();
+		await waitFor(() => expect(sw.getAttribute('aria-checked')).toBe('false'));
+		expect(within(card).getByText('Before you turn it on')).toBeTruthy();
+		expect(within(card).getByText('Before a tool runs')).toBeTruthy();
+		expect(within(card).getByText('Bash: ./guard.sh')).toBeTruthy();
+		expect(within(card).getByText('Runs a program')).toBeTruthy();
+		expect(within(card).getByText('npx -y gh-mcp')).toBeTruthy();
+		// A server that does not load here runs nothing, so it is not listed.
+		expect(within(card).queryByText('remote')).toBeNull();
+
+		await fireEvent.click(within(card).getByRole('button', { name: 'Cancel' }));
+		expect(screen.queryByTestId('plugin-enable-review')).toBeNull();
+		expect(m.enablePlugin).not.toHaveBeenCalled();
+
+		await fireEvent.click(sw);
+		const again = await screen.findByTestId('plugin-enable-review');
+		await fireEvent.click(within(again).getByRole('button', { name: 'Turn on' }));
+		await waitFor(() => expect(m.enablePlugin).toHaveBeenCalledWith('toolkit@mp'));
+		await waitFor(() => expect(screen.queryByTestId('plugin-enable-review')).toBeNull());
+	});
+
+	it('a plugin that runs no code switches on at once', async () => {
+		installedOff();
+		details['toolkit@mp'] = { ...installedDetails, enabled: false };
+		await show('plugin:toolkit@mp');
+		await fireEvent.click(within(detail()).getByRole('switch', { name: 'Enabled' }));
+		await waitFor(() => expect(m.enablePlugin).toHaveBeenCalledWith('toolkit@mp'));
+		expect(screen.queryByTestId('plugin-enable-review')).toBeNull();
+	});
+
+	it('an agent install waiting for the owner says so, unlike one the owner switched off', async () => {
+		const agentInstall = { ...toolkit, id: 'gh@mp', name: 'gh', enabled: false, approval: 'pending' };
+		m.getInstalledPlugins.mockResolvedValue([{ ...toolkit, enabled: false }, agentInstall]);
+		details['gh@mp'] = { ...hooked, ...agentInstall, components: hooked.components };
+		await show();
+		const list = screen.getByRole('heading', { level: 1, name: 'Plugins' }).closest('.st-lcol') as HTMLElement;
+		expect(within(list).getByText('Needs your review')).toBeTruthy();
+		expect(within(list).getByRole('button', { name: /^gh/ }).textContent).toContain('Added by an agent');
+		const off = within(list).getByRole('button', { name: /^toolkit/ }).textContent ?? '';
+		expect(off).toContain('Off');
+		expect(off).not.toContain('agent');
+		expect(off.trim().endsWith('Off')).toBe(true);
+		cleanup();
+
+		await show('plugin:gh@mp');
+		const pane = detail();
+		const review = await screen.findByTestId('plugin-review');
+		expect(within(pane).getByText('Added by an agent. Review first.')).toBeTruthy();
+		expect(within(pane).getByText('Agent install')).toBeTruthy();
+		expect(within(review).getByText('npx -y gh-mcp')).toBeTruthy();
+		expect(within(pane).queryByRole('switch')).toBeNull();
+		await fireEvent.click(within(review).getByRole('button', { name: 'Approve and enable' }));
+		await fireEvent.click(within(review).getByRole('button', { name: 'Approve' }));
+		await waitFor(() => expect(m.enablePlugin).toHaveBeenCalledWith('gh@mp', null));
+	});
+
+	it('shows what was adapted on import, and nothing when no note came back', async () => {
+		details['toolkit@mp'] = {
+			...installedDetails,
+			components: [
+				{ kind: 'skill', name: 'lint', support: 'loaded', reason: '' },
+				{
+					kind: 'agent',
+					name: 'reviewer',
+					support: 'loaded',
+					reason: 'model pin removed: the model is chosen per chat here; MultiEdit became Edit'
+				},
+				{ kind: 'agent', name: 'shell-only', support: 'unsupported', reason: 'none of the tools it lists exist here' },
+				{ kind: 'executables', name: 'bin/', support: 'unsupported', reason: 'files in bin/ are not added to the PATH' },
+				{ kind: 'brand_new_kind', name: 'x', support: 'unsupported', reason: '' }
+			]
+		};
+		await show('plugin:toolkit@mp');
+		const adapted = await screen.findByTestId('plugin-adapted');
+		expect(within(adapted).getByText('Agent reviewer')).toBeTruthy();
+		expect(adapted.textContent).toContain('model pin removed');
+		expect(adapted.textContent).not.toContain('lint');
+		const left = screen.getByTestId('plugin-not-loaded');
+		expect(within(left).getByText('Agent shell-only')).toBeTruthy();
+		expect(within(left).getByText('Programs bin/')).toBeTruthy();
+		// An unknown kind is spelled out, and a missing reason still says something.
+		expect(within(left).getByText('Brand new kind x').closest('li')?.textContent).toContain('Not supported here');
+		expect(left.textContent).not.toContain('brand_new_kind');
+		cleanup();
+
+		details['toolkit@mp'] = installedDetails;
+		await show('plugin:toolkit@mp');
+		await waitFor(() => expect(within(detail()).getByText('Review helpers for pull requests.')).toBeTruthy());
+		expect(screen.queryByTestId('plugin-adapted')).toBeNull();
+	});
+
+	it('lists the outside services a plugin declares, by name', async () => {
+		details['toolkit@mp'] = {
+			...installedDetails,
+			components: [
+				...(installedDetails.components ?? []).map((c) => ({ ...c, reason: '' })),
+				{ kind: 'service', name: 'cloudflare', support: 'loaded', reason: '', detail: '' }
+			]
+		};
+		await show('plugin:toolkit@mp');
+		const block = await screen.findByTestId('plugin-services');
+		expect(within(block).getByText('cloudflare')).toBeTruthy();
+		// A declaration is not a part that loads or was adapted.
+		expect(screen.queryByTestId('plugin-adapted')).toBeNull();
+		expect(screen.queryByTestId('plugin-not-loaded')).toBeNull();
+	});
+
+	it('reports catalog entries that cannot install here, with the reason', async () => {
+		m.getMarketplaces.mockResolvedValue([
+			{
+				id: 'openai-mp',
+				source: 'git',
+				url: 'https://x/mp.git',
+				install_location: '',
+				last_updated: null,
+				skipped: [{ name: 'npm-only', reason: "packages from npm can't be installed here" }]
+			}
+		]);
+		await show('explore');
+		const block = await screen.findByTestId('plugins-skipped');
+		expect(within(block).getByText("Can't install here")).toBeTruthy();
+		expect(within(block).getByText('npm-only')).toBeTruthy();
+		expect(within(block).getByText("packages from npm can't be installed here")).toBeTruthy();
+		expect(within(block).getByText('openai-mp')).toBeTruthy();
+	});
+
+	it('fills the source name from the URL and lets the owner change it', async () => {
+		m.addMarketplace.mockResolvedValue({ id: 'team', url: 'https://x/team.git', last_updated: null });
+		await show('sources');
+		const pane = detail();
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Add source' }));
+		const name = within(pane).getByRole('textbox', { name: 'Name' }) as HTMLInputElement;
+		const url = within(pane).getByRole('textbox', { name: 'Git URL' }) as HTMLInputElement;
+		const add = within(pane).getByRole('button', { name: 'Add' }) as HTMLButtonElement;
+		expect(add.disabled).toBe(true);
+		await fireEvent.input(url, { target: { value: 'https://github.com/acme/team-plugins.git' } });
+		expect(name.value).toBe('team-plugins');
+		expect(add.disabled).toBe(false);
+		await fireEvent.input(name, { target: { value: 'team' } });
+		await fireEvent.input(url, { target: { value: 'https://github.com/acme/other.git' } });
+		expect(name.value).toBe('team');
+		await fireEvent.click(add);
+		await waitFor(() => expect(m.addMarketplace).toHaveBeenCalledWith('https://github.com/acme/other.git', 'team'));
+	});
+
+	it('shows plugins found in project folders, says they do not load yet, and removes one', async () => {
+		m.get.mockImplementation(async (path: string) =>
+			path === '/projects'
+				? [
+						{ id: 'p1', name: 'Website' },
+						{ id: 'p2', name: 'Empty repo' }
+					]
+				: []
+		);
+		m.getProjectPlugins.mockImplementation(async (id: string) =>
+			id === 'p1' ? [{ ...toolkit, id: 'lint@project-local', name: 'lint', scope: 'local', marketplace: 'project' }] : []
+		);
+		await show('projects');
+		const pane = detail();
+		await waitFor(() => expect(within(pane).getByText('Website')).toBeTruthy());
+		expect(within(pane).queryByText('Empty repo')).toBeNull();
+		expect(within(pane).getByText("Chats don't load these yet.")).toBeTruthy();
+		expect(within(pane).getByText('lint').closest('.st-row')?.textContent).toContain('Not loaded');
+		expect(within(pane).queryByRole('switch')).toBeNull();
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Remove' }));
+		await fireEvent.click(within(pane).getByRole('button', { name: 'Delete' }));
+		await waitFor(() => expect(m.removeProjectPlugin).toHaveBeenCalledWith('p1', 'lint@project-local'));
+		await waitFor(() => expect(within(pane).getByText('No project has plugins.')).toBeTruthy());
 	});
 });
 

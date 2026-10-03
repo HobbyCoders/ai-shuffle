@@ -18,8 +18,11 @@ import type {
 	MarketplaceInfo,
 	PluginDetails,
 	PluginInfo,
-	PluginUpdateInfo
+	PluginUpdateInfo,
+	ProjectPlugin
 } from '$lib/api/plugins';
+import type { Project } from '$lib/stores/types';
+import { NEEDS_REVIEW } from './plugin-parts';
 import { isForbidden } from '$lib/settings/access.svelte';
 import { CONNECTION_TYPES } from '$lib/settings/entries/plugins';
 import { publishPlugins, type PluginSearchRow } from '$lib/settings/entries/plugins-live.svelte';
@@ -46,7 +49,7 @@ export interface PluginEntry {
 	description: string;
 	installed: boolean;
 	enabled: boolean;
-	/** Agent-authored draft waiting for approval. */
+	/** An agent wrote or installed it and it waits for the owner (approval "pending"). */
 	review: boolean;
 	authored: boolean;
 	version?: string;
@@ -65,11 +68,15 @@ export const pluginItem = (id: string) => `plugin:${id}`;
 export const connectionItem = (type: string) => `connection:${type}`;
 
 export type ParsedItem =
-	{ kind: 'plugin'; id: string } | { kind: 'connection'; type: string } | { kind: 'explore' } | { kind: 'sources' };
+	| { kind: 'plugin'; id: string }
+	| { kind: 'connection'; type: string }
+	| { kind: 'explore' }
+	| { kind: 'sources' }
+	| { kind: 'projects' };
 
 export function parseItem(item: string | null | undefined): ParsedItem | null {
 	if (!item) return null;
-	if (item === 'explore' || item === 'sources') return { kind: item };
+	if (item === 'explore' || item === 'sources' || item === 'projects') return { kind: item };
 	if (item.startsWith('plugin:')) return { kind: 'plugin', id: item.slice(7) };
 	if (item.startsWith('connection:')) return { kind: 'connection', type: item.slice(11) };
 	return null;
@@ -99,6 +106,21 @@ export function capabilities(
 
 export function plural(n: number, word: string): string {
 	return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+/** A catalog entry a source lists but this app cannot install. */
+export interface SkippedRow {
+	key: string;
+	name: string;
+	reason: string;
+	marketplace: string;
+}
+
+/** Plugins found in one project's folders. */
+export interface ProjectPlugins {
+	project: Pick<Project, 'id' | 'name'>;
+	plugins: ProjectPlugin[];
+	error?: string;
 }
 
 export class PluginsModel {
@@ -131,6 +153,12 @@ export class PluginsModel {
 	updating = $state<Record<string, boolean>>({});
 	syncing = $state<Record<string, boolean>>({});
 	addingSource = $state(false);
+
+	/** Project-scope plugins, by project; loaded when that pane opens. */
+	projectPlugins = $state<ProjectPlugins[]>([]);
+	projectsLoading = $state(false);
+	projectsLoaded = $state(false);
+	projectsError = $state('');
 
 	#generation = 0;
 
@@ -197,6 +225,17 @@ export class PluginsModel {
 	readonly apps = $derived(this.connectionEntries.filter((e) => e.installed || e.count > 0));
 	readonly installedPackages = $derived(this.packageEntries.filter((e) => e.installed && !e.review));
 	readonly availableCount = $derived(this.entries.filter((e) => !e.installed && e.count === 0).length);
+	/** Catalog entries the sources list but this app cannot install, with why. */
+	readonly skipped: SkippedRow[] = $derived(
+		this.marketplaces.flatMap((m) =>
+			(m.skipped ?? []).map((s, i) => ({
+				key: `${m.id}:${i}`,
+				name: s.name,
+				reason: s.reason,
+				marketplace: m.id
+			}))
+		)
+	);
 
 	entryByItem(item: string | null | undefined): PluginEntry | undefined {
 		return item ? this.entries.find((e) => e.item === item) : undefined;
@@ -267,7 +306,7 @@ export class PluginsModel {
 				e.kind === 'connection'
 					? 'Plugins, Apps'
 					: e.review
-						? 'Plugins, Needs review'
+						? `Plugins, ${NEEDS_REVIEW}`
 						: e.installed
 							? 'Plugins, Installed'
 							: 'Plugins, Catalog',
@@ -304,11 +343,12 @@ export class PluginsModel {
 		}
 	}
 
+	/** Install switched off: the owner sees what it runs before turning it on. */
 	install(id: string): Promise<boolean> {
 		return this.#run(
 			id,
 			async () => {
-				await pluginsApi.installPlugin(id);
+				await pluginsApi.installPlugin(id, 'user', false);
 				await this.load();
 				await this.loadDetails(id);
 			},
@@ -322,7 +362,7 @@ export class PluginsModel {
 		return this.#run(
 			BATCH,
 			async () => {
-				await pluginsApi.installPluginsBatch(ids);
+				await pluginsApi.installPluginsBatch(ids, 'user', false);
 				await this.load();
 			},
 			'Could not install plugins.'
@@ -346,12 +386,15 @@ export class PluginsModel {
 	}
 
 	/**
-	 * Approve an agent-authored draft: enabling it pins the content hash of the
-	 * version that was reviewed, so a later change needs a new review.
+	 * Approve a plugin waiting for the owner. An agent-authored draft is
+	 * enabled pinned to the content hash of the version that was reviewed, so
+	 * a later change needs a new review; an agent install is simply enabled.
 	 */
 	async approve(id: string): Promise<boolean> {
 		const plugin = this.details[id];
-		if (!plugin?.content_hash) return false;
+		if (!plugin) return false;
+		const authored = plugin.trust === 'authored' || id.endsWith('@authored');
+		if (authored && !plugin.content_hash) return false;
 		this.approving = true;
 		this.actionError = '';
 		try {
@@ -460,12 +503,13 @@ export class PluginsModel {
 		}
 	}
 
-	async addSource(url: string, name: string): Promise<boolean> {
-		if (!url.trim() || !name.trim()) return false;
+	/** Add a git source. An empty name lets the backend derive one from the URL. */
+	async addSource(url: string, name = ''): Promise<boolean> {
+		if (!url.trim()) return false;
 		this.addingSource = true;
 		this.actionError = '';
 		try {
-			const source = await pluginsApi.addMarketplace(url.trim(), name.trim());
+			const source = await pluginsApi.addMarketplace(url.trim(), name.trim() || undefined);
 			this.marketplaces = [...this.marketplaces, source];
 			await this.load();
 			return true;
@@ -475,6 +519,48 @@ export class PluginsModel {
 		} finally {
 			this.addingSource = false;
 		}
+	}
+
+	/**
+	 * Plugins in each project's `.fluid/plugins` and `plugins` folders.
+	 * Projects without any are left out; one unreadable project shows its error.
+	 */
+	async loadProjectPlugins(): Promise<void> {
+		this.projectsLoading = true;
+		this.projectsError = '';
+		try {
+			const projects = await api.get<Project[]>('/projects');
+			const rows = await Promise.all(
+				(Array.isArray(projects) ? projects : []).map(async (p): Promise<ProjectPlugins> => {
+					const project = { id: p.id, name: p.name || p.id };
+					try {
+						return { project, plugins: await pluginsApi.getProjectPlugins(p.id) };
+					} catch (err) {
+						return { project, plugins: [], error: errorText(err, 'Could not read this project.') };
+					}
+				})
+			);
+			this.projectPlugins = rows.filter((r) => r.plugins.length || r.error);
+			this.projectsLoaded = true;
+		} catch (err) {
+			this.projectsError = errorText(err, 'Could not load projects.');
+		} finally {
+			this.projectsLoading = false;
+		}
+	}
+
+	/** Delete a plugin folder from a project. */
+	removeProjectPlugin(projectId: string, pluginId: string): Promise<boolean> {
+		return this.#run(
+			`project:${projectId}:${pluginId}`,
+			async () => {
+				await pluginsApi.removeProjectPlugin(projectId, pluginId);
+				this.projectPlugins = this.projectPlugins
+					.map((r) => (r.project.id === projectId ? { ...r, plugins: r.plugins.filter((p) => p.id !== pluginId) } : r))
+					.filter((r) => r.plugins.length || r.error);
+			},
+			'Could not remove plugin.'
+		);
 	}
 
 	async syncSource(id: string): Promise<void> {

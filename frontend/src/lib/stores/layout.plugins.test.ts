@@ -24,6 +24,8 @@ describe('Manage plugins links', () => {
 	it('map a bare plugin id onto its Settings item and open the list without one', () => {
 		expect(new URLSearchParams(pluginsSettingsTarget('superpowers@market')).get('item')).toBe('plugin:superpowers@market');
 		expect(new URLSearchParams(pluginsSettingsTarget('plugin:x')).get('item')).toBe('plugin:x');
+		expect(new URLSearchParams(pluginsSettingsTarget('projects')).get('item')).toBe('projects');
+		expect(new URLSearchParams(pluginsSettingsTarget('sources')).get('item')).toBe('sources');
 		expect(pluginsSettingsTarget(null)).toBe('category=plugins');
 		layout.openFeaturePage('plugins');
 		expect(get(activeView)).toMatchObject({ type: 'settings', itemId: 'category=plugins' });

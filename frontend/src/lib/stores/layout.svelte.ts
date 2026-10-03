@@ -257,7 +257,12 @@ preferenceSync.register('layout', {
 export function pluginsSettingsTarget(itemId?: string | null): string {
 	const params = new URLSearchParams({ category: 'plugins' });
 	if (itemId) {
-		const known = itemId.startsWith('connection:') || itemId.startsWith('plugin:') || itemId === 'explore';
+		const known =
+			itemId.startsWith('connection:') ||
+			itemId.startsWith('plugin:') ||
+			itemId === 'explore' ||
+			itemId === 'sources' ||
+			itemId === 'projects';
 		params.set('item', known ? itemId : `plugin:${itemId}`);
 	}
 	return params.toString();

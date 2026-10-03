@@ -5,6 +5,7 @@
 	 * and the auto-update schedule. Owner only.
 	 */
 	import { ArrowUpCircle, Plus, RefreshCw } from 'lucide-svelte';
+	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import DetailPane from '../shell/DetailPane.svelte';
 	import type { Fact } from '../shell/FactsStrip.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
@@ -16,6 +17,7 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import InlineConfirm from '../rows/InlineConfirm.svelte';
 	import { getPluginsModel, plural } from './plugins-model.svelte';
+	import { sourceNameFromUrl } from './plugin-parts';
 	import { SOURCES_ICON } from './icons';
 
 	const INTERVALS = [1, 3, 6, 12, 24].map((h) => ({ value: String(h), label: plural(h, 'hour') }));
@@ -25,6 +27,25 @@
 	let adding = $state(false);
 	let sourceName = $state('');
 	let sourceUrl = $state('');
+	/** The owner typed a name; stop following the URL. */
+	let nameEdited = $state(false);
+
+	function onUrl(value: string) {
+		sourceUrl = value;
+		if (!nameEdited) sourceName = sourceNameFromUrl(value);
+	}
+
+	function onName(value: string) {
+		sourceName = value;
+		nameEdited = value.trim() !== '';
+	}
+
+	function closeForm() {
+		adding = false;
+		sourceName = '';
+		sourceUrl = '';
+		nameEdited = false;
+	}
 
 	function synced(value: string | null): string {
 		if (!value) return 'Never synced';
@@ -44,11 +65,7 @@
 	}
 
 	async function add() {
-		if (await model.addSource(sourceUrl, sourceName)) {
-			adding = false;
-			sourceName = '';
-			sourceUrl = '';
-		}
+		if (await model.addSource(sourceUrl, sourceName)) closeForm();
 	}
 
 	const facts = $derived<Fact[]>([
@@ -61,21 +78,21 @@
 
 {#snippet addForm()}
 	<div class="add">
-		<TextField label="Name" placeholder="my-plugins" value={sourceName} oninput={(v) => (sourceName = v)} width={180} />
 		<TextField
 			label="Git URL"
 			placeholder="https://github.com/user/plugins.git"
 			value={sourceUrl}
-			oninput={(v) => (sourceUrl = v)}
+			oninput={onUrl}
 			mono
 			width={320}
 		/>
+		<TextField label="Name" placeholder="From the URL" value={sourceName} oninput={onName} width={180} />
 		<span class="acts">
-			<button type="button" class="st-btn ghost sm" onclick={() => (adding = false)}>Cancel</button>
+			<button type="button" class="st-btn ghost sm" onclick={closeForm}>Cancel</button>
 			<button
 				type="button"
 				class="st-btn primary sm"
-				disabled={!sourceName.trim() || !sourceUrl.trim() || model.addingSource}
+				disabled={!sourceUrl.trim() || model.addingSource}
 				onclick={add}
 			>
 				{model.addingSource ? 'Adding…' : 'Add'}
@@ -156,6 +173,16 @@
 		<RowGroup title="Sources" count={model.marketplaces.length}>
 			{#each model.marketplaces as m (m.id)}
 				<SettingRow label={m.id} hint={m.url} hintMono>
+					{#if m.skipped?.length}
+						<button
+							type="button"
+							class="st-btn ghost sm skip"
+							title="Some plugins can't install here"
+							onclick={() => settingsNav.selectItem('explore', 'plugins')}
+						>
+							{m.skipped.length} skipped
+						</button>
+					{/if}
 					<ValueText value={synced(m.last_updated)} />
 					<button
 						type="button"
@@ -198,5 +225,8 @@
 		display: flex;
 		gap: 6px;
 		margin-left: auto;
+	}
+	.skip {
+		color: var(--st-warning);
 	}
 </style>

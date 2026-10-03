@@ -586,7 +586,7 @@ class TestInstallPlugin:
         data = response.json()
         assert data["id"] == "test-plugin@test-marketplace"
         mock_plugin_service.install_plugin.assert_called_once_with(
-            "test-plugin@test-marketplace", "user"
+            "test-plugin@test-marketplace", "user", True
         )
 
     def test_install_plugin_with_scope(self, app, mock_plugin_service, sample_plugin):
@@ -602,7 +602,23 @@ class TestInstallPlugin:
 
         assert response.status_code == 201
         mock_plugin_service.install_plugin.assert_called_once_with(
-            "test-plugin@test-marketplace", "project"
+            "test-plugin@test-marketplace", "project", True
+        )
+
+    def test_install_plugin_switched_off(self, app, mock_plugin_service, sample_plugin):
+        """Settings installs with enable=false so the owner reviews before it runs."""
+        mock_plugin_service.install_plugin.return_value = sample_plugin
+
+        with patch("app.api.plugins.get_plugin_service", return_value=mock_plugin_service):
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/v1/plugins/install",
+                    json={"plugin_id": "test-plugin@test-marketplace", "enable": False}
+                )
+
+        assert response.status_code == 201
+        mock_plugin_service.install_plugin.assert_called_once_with(
+            "test-plugin@test-marketplace", "user", False
         )
 
     def test_install_plugin_value_error(self, app, mock_plugin_service):
@@ -697,7 +713,7 @@ class TestInstallPluginsBatch:
 
         assert response.status_code == 201
         mock_plugin_service.install_plugins_batch.assert_called_once_with(
-            ["test-plugin@test-marketplace"], "project"
+            ["test-plugin@test-marketplace"], "project", True
         )
 
 

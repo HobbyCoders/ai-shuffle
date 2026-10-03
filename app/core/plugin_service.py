@@ -87,8 +87,30 @@ def record_summary(record, install_path: Path) -> Dict[str, Any]:
         "has_hooks": record.has("hook") or legacy_hooks,
         "has_mcp": bool(record.mcp_servers),
         "format": record.format,
-        "components": [c.to_dict() for c in record.components],
+        "components": [c.to_dict() for c in record.components] + _service_components(record),
     }
+
+
+def _service_components(record) -> List[Dict[str, Any]]:
+    """The outside services a plugin declares (``extensions["ai.shuffle"].services``),
+    one ``service`` component per name, so Settings can show what it will ask
+    access to. Names only: a declaration holds no credential and grants nothing."""
+    manifest = getattr(record, "manifest", None)
+    extensions = manifest.get("extensions") if isinstance(manifest, dict) else None
+    shuffle = extensions.get("ai.shuffle") if isinstance(extensions, dict) else None
+    services = shuffle.get("services") if isinstance(shuffle, dict) else None
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for item in services if isinstance(services, list) else []:
+        name = item.get("name") if isinstance(item, dict) else None
+        if not isinstance(name, str) or not name.strip() or name.strip() in seen:
+            continue
+        seen.add(name.strip())
+        out.append({
+            "kind": "service", "name": name.strip()[:100], "support": "loaded",
+            "reason": "", "detail": "",
+        })
+    return out[:20]
 
 
 def record_description(record, install_path: Path) -> str:
@@ -900,13 +922,14 @@ class PluginService:
         """Clone a git repo and extract a specific subdirectory."""
         return _inst_mod._clone_git_subdir_source(self, source, dest)
 
-    def install_plugin(self, plugin_id: str, scope: str = "user") -> PluginInfo:
+    def install_plugin(self, plugin_id: str, scope: str = "user", enable: bool = True) -> PluginInfo:
         """
         Install a plugin from a marketplace.
 
         Args:
             plugin_id: Plugin ID in format "name@marketplace"
             scope: Installation scope ("user" or "project")
+            enable: False installs it switched off, for the owner to enable
 
         Returns:
             PluginInfo for the installed plugin
@@ -915,20 +938,23 @@ class PluginService:
         kind = connector_packages.kind_for(plugin_id)
         if kind:
             return connector_packages.install(kind, scope)
-        return _inst_mod.install_plugin(self, plugin_id, scope)
+        return _inst_mod.install_plugin(self, plugin_id, scope, enable)
 
-    def install_plugins_batch(self, plugin_ids: List[str], scope: str = "user") -> List[PluginInfo]:
+    def install_plugins_batch(
+        self, plugin_ids: List[str], scope: str = "user", enable: bool = True
+    ) -> List[PluginInfo]:
         """
         Install multiple plugins in batch.
 
         Args:
             plugin_ids: List of plugin IDs to install
             scope: Installation scope
+            enable: False installs them switched off, for the owner to enable
 
         Returns:
             List of installed plugin info
         """
-        return [self.install_plugin(plugin_id, scope) for plugin_id in plugin_ids]
+        return [self.install_plugin(plugin_id, scope, enable) for plugin_id in plugin_ids]
 
     def uninstall_plugin(self, plugin_id: str) -> bool:
         """

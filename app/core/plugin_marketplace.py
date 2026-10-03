@@ -295,3 +295,53 @@ def sync_all_marketplaces(svc) -> Dict[str, bool]:
             logger.error(f"Failed to sync marketplace {mp.id}: {e}")
             results[mp.id] = False
     return results
+
+
+def _skip_reason(source) -> str:
+    """Why a catalog entry's ``source`` cannot be installed here, in plain words."""
+    kind = source.get("source") if isinstance(source, dict) else None
+    if kind == "npm" or (isinstance(source, dict) and "package" in source):
+        return "packages from npm can't be installed here"
+    if kind == "pip":
+        return "packages from pip can't be installed here"
+    return "its source type isn't supported here"
+
+
+def skipped_entries(mp_path: Path) -> List[Dict[str, str]]:
+    """Catalog entries in the marketplace at ``mp_path`` that are not offered,
+    each ``{"name", "reason"}``, so Settings can say why instead of dropping
+    them. Covers sources the reader cannot install (Agent Plugins npm entries)
+    and names that are unsafe as a folder name. Never raises."""
+    import json as _json
+
+    from fluid.context.plugin_formats import read_marketplace
+    from app.core.plugin_install import _safe_path_component
+
+    try:
+        catalog = read_marketplace(mp_path)
+    except Exception:  # noqa: BLE001 — an unreadable catalog lists nothing
+        return []
+    if catalog is None:
+        return []
+    out: List[Dict[str, str]] = []
+    if catalog.skipped:
+        raw_sources: Dict[str, object] = {}
+        try:
+            raw = _json.loads(catalog.path.read_text(encoding="utf-8"))
+            for entry in raw.get("plugins") or []:
+                if isinstance(entry, dict):
+                    raw_sources.setdefault(str(entry.get("name") or "?")[:100], entry.get("source"))
+        except (OSError, ValueError, AttributeError):
+            pass
+        for name in catalog.skipped:
+            out.append({"name": name, "reason": _skip_reason(raw_sources.get(name))})
+    entries = catalog.data.get("plugins")
+    for entry in entries if isinstance(entries, list) else []:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not name:
+            continue
+        try:
+            _safe_path_component(name, "name")
+        except ValueError:
+            out.append({"name": name[:100], "reason": "its name can't be used as a folder name"})
+    return out

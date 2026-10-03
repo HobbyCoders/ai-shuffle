@@ -10,6 +10,7 @@ Provides REST endpoints for managing Claude Code plugins including:
 """
 
 import logging
+from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 
@@ -32,6 +33,12 @@ router = APIRouter(prefix="/api/v1/plugins", tags=["Plugins"])
 # Request/Response Models
 # ============================================================================
 
+class SkippedEntryResponse(BaseModel):
+    """A marketplace entry that cannot be installed here."""
+    name: str
+    reason: str
+
+
 class MarketplaceResponse(BaseModel):
     """Response model for marketplace info"""
     id: str
@@ -39,6 +46,9 @@ class MarketplaceResponse(BaseModel):
     url: str
     install_location: str
     last_updated: Optional[datetime] = None
+    # Catalog entries this app does not offer, each with the reason, so the
+    # owner sees them instead of them vanishing from Explore.
+    skipped: List[SkippedEntryResponse] = Field(default_factory=list)
 
 
 class MarketplaceAddRequest(BaseModel):
@@ -137,12 +147,18 @@ class PluginInstallRequest(BaseModel):
     """Request to install a plugin"""
     plugin_id: str = Field(..., description="Plugin ID in format 'name@marketplace'")
     scope: str = Field("user", description="Installation scope: 'user' or 'project'")
+    enable: bool = Field(
+        True,
+        description="Turn the plugin on after installing. Settings sends false so the owner "
+        "reviews what it runs before switching it on.",
+    )
 
 
 class PluginBatchInstallRequest(BaseModel):
     """Request to install multiple plugins"""
     plugin_ids: List[str] = Field(..., description="List of plugin IDs to install")
     scope: str = Field("user", description="Installation scope")
+    enable: bool = Field(True, description="Turn the plugins on after installing")
 
 
 class FileAgentResponse(BaseModel):
@@ -210,6 +226,8 @@ class AutoUpdateRunResponse(BaseModel):
 async def list_marketplaces(token: str = Depends(require_auth)):
     """List all registered plugin marketplaces"""
     async with api_error_handler("load marketplaces"):
+        from app.core.plugin_marketplace import skipped_entries
+
         service = get_plugin_service()
         marketplaces = service.get_marketplaces()
         return [
@@ -218,7 +236,11 @@ async def list_marketplaces(token: str = Depends(require_auth)):
                 source=mp.source,
                 url=mp.url,
                 install_location=mp.install_location,
-                last_updated=mp.last_updated
+                last_updated=mp.last_updated,
+                skipped=(
+                    await run_sync(skipped_entries, Path(mp.install_location))
+                    if mp.install_location else []
+                ),
             )
             for mp in marketplaces
         ]
@@ -623,7 +645,9 @@ async def install_plugin(
     """Install a plugin from a marketplace - Admin only"""
     service = get_plugin_service()
     try:
-        plugin = await run_sync(service.install_plugin, request.plugin_id, request.scope)
+        plugin = await run_sync(
+            service.install_plugin, request.plugin_id, request.scope, request.enable
+        )
         return PluginResponse(
             id=plugin.id,
             name=plugin.name,
@@ -670,7 +694,9 @@ async def install_plugins_batch(
     """
     service = get_plugin_service()
     try:
-        plugins = await run_sync(service.install_plugins_batch, request.plugin_ids, request.scope)
+        plugins = await run_sync(
+            service.install_plugins_batch, request.plugin_ids, request.scope, request.enable
+        )
     except ValueError as e:
         logger.warning(f"Batch plugin install failed: {e}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

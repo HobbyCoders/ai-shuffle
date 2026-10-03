@@ -198,7 +198,8 @@ describe('PluginsModel', () => {
 		const model = new PluginsModel();
 		await model.load();
 		expect(await model.install('extra@mp')).toBe(true);
-		expect(m.installPlugin).toHaveBeenCalledWith('extra@mp');
+		// Installs land switched off; the owner turns them on after a look.
+		expect(m.installPlugin).toHaveBeenCalledWith('extra@mp', 'user', false);
 		expect(m.getPluginDetails).toHaveBeenCalledWith('extra@mp');
 		m.installPlugin.mockRejectedValueOnce({ detail: 'No space left' });
 		expect(await model.install('extra@mp')).toBe(false);
@@ -285,6 +286,10 @@ describe('PluginsModel', () => {
 		expect(await model.addSource(' https://x/more.git ', ' more ')).toBe(true);
 		expect(m.addMarketplace).toHaveBeenCalledWith('https://x/more.git', 'more');
 		expect(await model.addSource('', 'x')).toBe(false);
+		// No name: the backend derives one from the URL.
+		m.addMarketplace.mockResolvedValueOnce({ id: 'team', url: 'https://x/team.git', last_updated: null });
+		expect(await model.addSource('https://x/team.git', '  ')).toBe(true);
+		expect(m.addMarketplace).toHaveBeenLastCalledWith('https://x/team.git', undefined);
 		await model.syncSource('mp');
 		expect(m.syncMarketplace).toHaveBeenCalledWith('mp');
 		await model.removeSource('mp');

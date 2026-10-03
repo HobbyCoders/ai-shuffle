@@ -112,7 +112,8 @@ class PluginComponent:
     reason: str = ""
     path: str | None = None
     # What a reviewer needs to see before it runs: an MCP server's command
-    # line or URL (never its env). Empty for other kinds.
+    # line or URL (never its env), or the commands a hook event runs. Empty
+    # for other kinds.
     detail: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -544,6 +545,29 @@ def _hook_events(value: Any) -> list[str]:
     return []
 
 
+def _hook_detail(data: Any, event: str, limit: int = 2000) -> str:
+    """What a ``hooks.json`` event runs, one line per hook (``matcher: command``),
+    so the owner can read it before turning the plugin on."""
+    hooks = data.get("hooks", data) if isinstance(data, dict) else None
+    groups = hooks.get(event) if isinstance(hooks, dict) else None
+    lines: list[str] = []
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict):
+            continue
+        matcher = str(group.get("matcher") or "").strip()
+        entries = group.get("hooks")
+        for hook in entries if isinstance(entries, list) else []:
+            if not isinstance(hook, dict):
+                continue
+            text = hook.get("command") if hook.get("type", "command") == "command" else hook.get("prompt")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            prefix = "" if hook.get("type", "command") == "command" else "prompt: "
+            line = f"{prefix}{text.strip()}"
+            lines.append(f"{matcher}: {line}" if matcher and matcher != "*" else line)
+    return "\n".join(lines)[:limit]
+
+
 def _hook_components(root: Path, manifest: dict[str, Any]) -> list[PluginComponent]:
     """Hooks: ``hooks/hooks.json`` runs through the app's hook service; hooks
     declared anywhere else are listed but not run."""
@@ -552,7 +576,9 @@ def _hook_components(root: Path, manifest: dict[str, Any]) -> list[PluginCompone
     if hooks_file.is_file():
         data = _read_json_object(hooks_file, "plugin hooks file")
         for event in _hook_events(data or {}):
-            out.append(PluginComponent(kind="hook", name=event, path=str(hooks_file)))
+            out.append(PluginComponent(
+                kind="hook", name=event, path=str(hooks_file), detail=_hook_detail(data or {}, event),
+            ))
     declared = manifest.get("hooks")
     if isinstance(declared, (dict, list)):
         for event in _hook_events(declared):

@@ -146,3 +146,63 @@ def test_project_plugins_read_either_format(svc, tmp_path):
     [plugin] = service.get_project_installed_plugins()
     assert plugin.id == "notes-helper@project-project"
     assert (plugin.version, plugin.format, plugin.has_mcp) == ("0.3.0", "agent-plugins", True)
+
+
+def test_install_switched_off_leaves_the_plugin_disabled(svc):
+    """Settings installs with enable=False: nothing runs until the owner turns it on."""
+    mp = svc.MARKETPLACES_DIR / "openai-mp"
+    _write(mp / ".agents" / "plugins" / "marketplace.json", {
+        "name": "openai-mp",
+        "plugins": [{"name": "notes-helper", "source": {"source": "local", "path": "plugins/notes-helper"}}],
+    })
+    _agent_plugin(mp / "plugins" / "notes-helper")
+    svc._write_json_file(svc.MARKETPLACES_FILE, {"openai-mp": {
+        "source": {"source": "git", "url": "https://example.invalid/mp.git"},
+        "installLocation": str(mp),
+    }})
+
+    installed = svc.install_plugin("notes-helper@openai-mp", "user", enable=False)
+    assert installed.enabled is False
+    assert svc.get_enabled_plugins().get("notes-helper@openai-mp") is False
+
+
+def test_skipped_marketplace_entries_are_reported_with_a_reason(svc):
+    from app.core.plugin_marketplace import skipped_entries
+
+    mp = svc.MARKETPLACES_DIR / "openai-mp"
+    _write(mp / ".agents" / "plugins" / "marketplace.json", {
+        "name": "openai-mp",
+        "plugins": [
+            {"name": "notes-helper", "source": {"source": "local", "path": "plugins/notes-helper"}},
+            {"name": "npm-only", "source": {"source": "npm", "package": "@acme/x"}},
+            {"name": "odd", "source": {"source": "ftp"}},
+            {"name": "../escape", "source": {"source": "local", "path": "plugins/x"}},
+        ],
+    })
+    assert skipped_entries(mp) == [
+        {"name": "npm-only", "reason": "packages from npm can't be installed here"},
+        {"name": "odd", "reason": "its source type isn't supported here"},
+        {"name": "../escape", "reason": "its name can't be used as a folder name"},
+    ]
+    assert skipped_entries(svc.MARKETPLACES_DIR / "missing") == []
+
+
+def test_declared_services_are_listed_by_name(svc):
+    root = svc.CACHE_DIR / "mp" / "cf-helper" / "1.0.0"
+    _write(root / "plugin.json", {
+        "name": "cf-helper",
+        "version": "1.0.0",
+        "extensions": {"ai.shuffle": {"services": [
+            {"name": "cloudflare", "provider": "cloudflare", "access": "read", "purpose": "DNS"},
+            {"name": "cloudflare"},
+            {"provider": "custom"},
+        ]}},
+    })
+    _write(root / "skills" / "dns" / "SKILL.md", "---\nname: dns\ndescription: d\n---\n")
+    _register(svc, "cf-helper@mp", root, "1.0.0")
+
+    [plugin] = [p for p in svc.get_installed_plugins() if p.id == "cf-helper@mp"]
+    services = [c for c in plugin.components if c["kind"] == "service"]
+    assert services == [
+        {"kind": "service", "name": "cloudflare", "support": "loaded", "reason": "", "detail": ""},
+    ]

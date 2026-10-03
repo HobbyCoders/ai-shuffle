@@ -25,19 +25,30 @@ export interface MarketplaceInfo {
 	url: string;
 	install_location: string;
 	last_updated: string | null;
+	/** Catalog entries this app does not offer, each with the reason. */
+	skipped?: SkippedEntry[];
+}
+
+/** A marketplace entry that cannot be installed here, and why. */
+export interface SkippedEntry {
+	name: string;
+	reason: string;
 }
 
 /**
  * One thing a plugin offers (skill, command, agent, mcp_server, hook, app,
- * connector_runtime, ...) and whether this app runs it: `support` is
- * "loaded", "unsupported" or "needs_config", with `reason` saying why not.
+ * service, connector_runtime, ...) and whether this app runs it: `support` is
+ * "loaded", "unsupported" or "needs_config". `reason` says why a part does not
+ * load, or, for a loaded part, what was adapted for this app (a model pin
+ * removed, a tool renamed); empty when nothing was. A `service` component is
+ * an outside service the plugin declares it needs (name only).
  */
 export interface PluginComponent {
 	kind: string;
 	name: string;
 	support: string;
 	reason: string;
-	/** An MCP server's command line or URL, so it can be reviewed before it runs. */
+	/** An MCP server's command line or URL, or a hook's commands, so it can be reviewed before it runs. */
 	detail?: string;
 }
 
@@ -63,7 +74,11 @@ export interface PluginInfo {
 	/** "official", "marketplace" or "authored". */
 	trust?: string | null;
 	components?: PluginComponent[];
-	/** Agent-authored plugins only: "pending" until the owner approves this exact content. */
+	/**
+	 * "pending" while a plugin an agent wrote or installed waits for the owner:
+	 * an authored draft until its exact content is approved, an agent install
+	 * until the owner turns it on.
+	 */
 	approval?: string | null;
 	/** Agent-authored plugins only: the hash an approval pins. */
 	content_hash?: string | null;
@@ -157,8 +172,9 @@ export async function getMarketplaces(): Promise<MarketplaceInfo[]> {
 /**
  * Add a new marketplace from a git URL
  */
-export async function addMarketplace(url: string, name: string): Promise<MarketplaceInfo> {
-	return api.post<MarketplaceInfo>('/plugins/marketplaces', { url, name });
+export async function addMarketplace(url: string, name?: string): Promise<MarketplaceInfo> {
+	// Without a name the backend derives one from the URL.
+	return api.post<MarketplaceInfo>('/plugins/marketplaces', name ? { url, name } : { url });
 }
 
 /**
@@ -208,15 +224,23 @@ export async function getPluginDetails(pluginId: string): Promise<PluginDetails>
 /**
  * Install a single plugin
  */
-export async function installPlugin(pluginId: string, scope: string = 'user'): Promise<PluginInfo> {
-	return api.post<PluginInfo>('/plugins/install', { plugin_id: pluginId, scope });
+export async function installPlugin(pluginId: string, scope: string = 'user', enable?: boolean): Promise<PluginInfo> {
+	const body: Record<string, unknown> = { plugin_id: pluginId, scope };
+	if (enable !== undefined) body.enable = enable;
+	return api.post<PluginInfo>('/plugins/install', body);
 }
 
 /**
  * Install multiple plugins at once
  */
-export async function installPluginsBatch(pluginIds: string[], scope: string = 'user'): Promise<PluginInfo[]> {
-	return api.post<PluginInfo[]>('/plugins/install/batch', { plugin_ids: pluginIds, scope });
+export async function installPluginsBatch(
+	pluginIds: string[],
+	scope: string = 'user',
+	enable?: boolean
+): Promise<PluginInfo[]> {
+	const body: Record<string, unknown> = { plugin_ids: pluginIds, scope };
+	if (enable !== undefined) body.enable = enable;
+	return api.post<PluginInfo[]>('/plugins/install/batch', body);
 }
 
 /**
@@ -309,4 +333,36 @@ export async function updateAutoUpdateSettings(
  */
 export async function runAutoUpdate(): Promise<AutoUpdateRunResult> {
 	return api.post<AutoUpdateRunResult>('/plugins/auto-update/run');
+}
+
+// ============================================================================
+// Project-scope plugins (<project>/.fluid/plugins and <project>/plugins)
+// ============================================================================
+
+/** GET /projects/{id}/plugins/installed: a plugin found in a project folder. */
+export interface ProjectPlugin {
+	/** `<name>@project-local` (.fluid/plugins) or `<name>@project-project` (plugins/). */
+	id: string;
+	name: string;
+	marketplace: string;
+	description: string;
+	version: string;
+	/** "local" or "project". */
+	scope: string;
+	install_path: string;
+	installed_at: string | null;
+	enabled: boolean;
+	has_commands: boolean;
+	has_agents: boolean;
+	has_skills: boolean;
+	has_hooks: boolean;
+	has_mcp: boolean;
+}
+
+export async function getProjectPlugins(projectId: string): Promise<ProjectPlugin[]> {
+	return api.get<ProjectPlugin[]>(`/projects/${encodeURIComponent(projectId)}/plugins/installed`);
+}
+
+export async function removeProjectPlugin(projectId: string, pluginId: string): Promise<void> {
+	await api.delete(`/projects/${encodeURIComponent(projectId)}/plugins/${encodeURIComponent(pluginId)}`);
 }

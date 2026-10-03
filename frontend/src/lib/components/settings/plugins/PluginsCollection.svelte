@@ -1,9 +1,10 @@
 <script lang="ts">
 	/**
-	 * Plugins: drafts an agent wrote (needing review), connected apps
-	 * (connector runtimes and their accounts) and installed agent plugins,
-	 * then the catalog and the plugin sources. Owner-only parts (apps,
-	 * sources, installs) follow Settings access.
+	 * Plugins: what agents wrote or installed (needing the owner's review),
+	 * connected apps (connector runtimes and their accounts) and installed
+	 * agent plugins, then the catalog, plugins found in project folders and
+	 * the plugin sources. Owner-only parts (apps, sources, installs) follow
+	 * Settings access.
 	 */
 	import { onMount, untrack } from 'svelte';
 	import { Puzzle } from 'lucide-svelte';
@@ -16,11 +17,13 @@
 	import ListGroupLabel from '../rows/ListGroupLabel.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import { PluginsModel, parseItem, plural, setPluginsModel, type PluginEntry } from './plugins-model.svelte';
-	import { EXPLORE_ICON, PACKAGE_ICON, REVIEW_ICON, SOURCES_ICON, connectionIcon } from './icons';
+	import { EXPLORE_ICON, PACKAGE_ICON, PROJECTS_ICON, REVIEW_ICON, SOURCES_ICON, connectionIcon } from './icons';
+	import { NEEDS_REVIEW } from './plugin-parts';
 	import PluginDetail from './PluginDetail.svelte';
 	import ConnectionDetail from './ConnectionDetail.svelte';
 	import ExploreDetail from './ExploreDetail.svelte';
 	import SourcesDetail from './SourcesDetail.svelte';
+	import ProjectsDetail from './ProjectsDetail.svelte';
 	import type { StatusTone } from '$lib/settings/types';
 
 	const CATEGORY = 'plugins' as const;
@@ -77,24 +80,26 @@
 	}
 
 	function packageRow(e: PluginEntry): Row {
-		if (e.review)
+		if (e.review) {
+			const what = e.authored ? 'Agent draft' : 'Added by an agent';
 			return {
 				entry: e,
-				summary: e.version ? `Agent draft, v${e.version}` : 'Agent draft',
+				summary: e.version ? `${what}, v${e.version}` : what,
 				status: 'warn',
 				meta: 'Review'
 			};
+		}
 		return {
 			entry: e,
-			summary: e.description || (e.enabled ? 'Enabled' : 'Disabled'),
+			summary: e.description || (e.enabled ? 'On' : 'Off'),
 			status: e.enabled ? 'ok' : 'off',
-			meta: e.update ? 'Update' : e.version ? `v${e.version}` : undefined
+			meta: e.update ? 'Update' : e.enabled ? (e.version ? `v${e.version}` : undefined) : 'Off'
 		};
 	}
 
 	const groups = $derived(
 		[
-			{ label: 'Needs review', rows: model.review.map(packageRow) },
+			{ label: NEEDS_REVIEW, rows: model.review.map(packageRow) },
 			{ label: 'Connected apps', rows: model.apps.map(appRow) },
 			{ label: 'Installed', rows: model.installedPackages.map(packageRow) }
 		]
@@ -112,6 +117,10 @@
 	);
 	const showExplore = $derived(matches('Explore plugins', 'catalog browse install', exploreSummary));
 	const showSources = $derived(!access.readOnly && matches('Sources and updates', 'marketplace', sourcesSummary));
+	const projectsSummary = $derived(
+		model.projectsLoaded ? plural(model.projectPlugins.reduce((n, r) => n + r.plugins.length, 0), 'plugin') : 'In project folders'
+	);
+	const showProjects = $derived(matches('Project plugins', 'project folder scope local', projectsSummary));
 </script>
 
 <CollectionPage category={CATEGORY} count={model.loading ? undefined : `${installedCount} added`} bind:filter>
@@ -148,10 +157,10 @@
 			<p class="st-empty" role="status">Loading plugins…</p>
 		{:else if !model.forbidden && !model.error && installedCount === 0 && !q}
 			<p class="st-empty">Nothing added yet.</p>
-		{:else if q && !groups.length && !showExplore && !showSources}
+		{:else if q && !groups.length && !showExplore && !showSources && !showProjects}
 			<p class="st-empty">No plugin matches “{filter.trim()}”.</p>
 		{/if}
-		{#if showExplore || showSources}
+		{#if showExplore || showSources || showProjects}
 			<ListGroupLabel label="More" />
 			{#if showExplore}
 				<ListItem
@@ -159,6 +168,15 @@
 					name="Explore plugins"
 					summary={exploreSummary}
 					icon={EXPLORE_ICON}
+					category={CATEGORY}
+				/>
+			{/if}
+			{#if showProjects}
+				<ListItem
+					id="projects"
+					name="Project plugins"
+					summary={projectsSummary}
+					icon={PROJECTS_ICON}
 					category={CATEGORY}
 				/>
 			{/if}
@@ -179,6 +197,8 @@
 			<ExploreDetail />
 		{:else if parsed?.kind === 'sources' && !access.readOnly}
 			<SourcesDetail />
+		{:else if parsed?.kind === 'projects'}
+			<ProjectsDetail />
 		{:else if parsed?.kind === 'plugin' && model.entryByItem(selected)}
 			{#key parsed.id}
 				<PluginDetail id={parsed.id} />

@@ -162,7 +162,7 @@ my-plugin/
 
 ## Marketplaces
 
-Plugins are distributed through marketplaces, which are git repositories containing one or more plugins. A marketplace lists its plugins in `.claude-plugin/marketplace.json` (Claude Code) or `.agents/plugins/marketplace.json` (Agent Plugins / OpenAI). In the second format, `source.path` and `source.url` entries are supported; npm (`source.package`) entries are skipped for now.
+Plugins are distributed through marketplaces, which are git repositories containing one or more plugins. A marketplace lists its plugins in `.claude-plugin/marketplace.json` (Claude Code) or `.agents/plugins/marketplace.json` (Agent Plugins / OpenAI). In the second format, `source.path` and `source.url` entries are supported; npm (`source.package`) entries are skipped for now. `GET /api/v1/plugins/marketplaces` lists each skipped entry under `skipped` with its `name` and `reason`, and Settings shows them in Explore.
 
 ### List Marketplaces
 
@@ -231,7 +231,7 @@ curl -X POST http://localhost:8000/api/v1/plugins/install \
   }'
 ```
 
-The `plugin_id` is in the format `name@marketplace`. `scope` defaults to `"user"`; the plugin is installed for the whole worker and enabled. To install a plugin into one project, use the [Project Plugins](/docs/api-reference/projects#project-plugins) endpoints.
+The `plugin_id` is in the format `name@marketplace`. `scope` defaults to `"user"`; the plugin is installed for the whole worker and enabled. Pass `"enable": false` to install it switched off; Settings does this, and shows the hooks and MCP servers a plugin runs before you turn it on. To install a plugin into one project, use the [Project Plugins](/docs/api-reference/projects#project-plugins) endpoints.
 
 A marketplace entry's `source` can be:
 

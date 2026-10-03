@@ -321,3 +321,20 @@ def test_mcp_server_detail_marks_cut_text_and_hides_literal_env():
     assert mcp_server_detail({"command": "x", "env": {"A": "${B}", "C": "sk-live"}}) == "x (env: A=${B}, C=…)"
     long = mcp_server_detail({"command": "x", "args": ["y" * 50]}, limit=20)
     assert len(long) == 20 and long.endswith("…")
+
+
+def test_hooks_json_component_shows_what_each_event_runs(tmp_path: Path) -> None:
+    """Settings shows a hook's commands before the owner turns the plugin on."""
+    root = tmp_path / "p"
+    _json(root / ".claude-plugin" / "plugin.json", {"name": "p"})
+    _json(root / "hooks" / "hooks.json", {"hooks": {
+        "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "./guard.sh"}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": "notify done"}, {"type": "prompt", "prompt": "Check it"}]}],
+        "SessionStart": [{"matcher": "*", "hooks": [{"command": "echo hi"}]}],
+    }})
+    details = {c.name: c.detail for c in read_plugin(root).components if c.kind == "hook"}
+    assert details == {
+        "PreToolUse": "Bash: ./guard.sh",
+        "Stop": "notify done\nprompt: Check it",
+        "SessionStart": "echo hi",
+    }

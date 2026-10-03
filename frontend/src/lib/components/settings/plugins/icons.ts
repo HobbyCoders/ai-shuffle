@@ -2,6 +2,7 @@ import {
 	Compass,
 	Database,
 	FileCheck,
+	FolderGit2,
 	House,
 	Lightbulb,
 	Mail,
@@ -28,3 +29,4 @@ export const PACKAGE_ICON: SettingsIcon = Package;
 export const REVIEW_ICON: SettingsIcon = FileCheck;
 export const EXPLORE_ICON: SettingsIcon = Compass;
 export const SOURCES_ICON: SettingsIcon = Database;
+export const PROJECTS_ICON: SettingsIcon = FolderGit2;

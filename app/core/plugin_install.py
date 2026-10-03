@@ -416,7 +416,8 @@ def _copy_tree_resolving_symlinks(
 
 
 def _install_implicit_plugin(
-    svc, plugin_id: str, marketplace_id: str, mp_path: Path, implicit: Dict[str, Any], scope: str
+    svc, plugin_id: str, marketplace_id: str, mp_path: Path, implicit: Dict[str, Any], scope: str,
+    enable: bool = True,
 ) -> PluginInfo:
     """Install a marketplace-less repo as a single implicit plugin.
 
@@ -462,7 +463,10 @@ def _install_implicit_plugin(
     }]
     svc._write_json_file(svc.INSTALLED_FILE, installed)
 
-    svc.enable_plugin(plugin_id)
+    if enable:
+        svc.enable_plugin(plugin_id)
+    else:
+        svc.disable_plugin(plugin_id)
 
     for p in svc.get_installed_plugins():
         if p.id == plugin_id:
@@ -470,7 +474,7 @@ def _install_implicit_plugin(
     return svc.get_installed_plugins()[-1]
 
 
-def install_plugin(svc, plugin_id: str, scope: str = "user") -> PluginInfo:
+def install_plugin(svc, plugin_id: str, scope: str = "user", enable: bool = True) -> PluginInfo:
     """
     Install a plugin from a marketplace.
 
@@ -481,6 +485,9 @@ def install_plugin(svc, plugin_id: str, scope: str = "user") -> PluginInfo:
         svc: PluginService instance
         plugin_id: Plugin ID in format "name@marketplace"
         scope: Installation scope ("user" or "project")
+        enable: Turn the plugin on (the owner's own install). An agent's
+            install passes False: the files land, nothing loads until the
+            owner enables it in Settings.
 
     Returns:
         PluginInfo for the installed plugin
@@ -515,7 +522,7 @@ def install_plugin(svc, plugin_id: str, scope: str = "user") -> PluginInfo:
             implicit = discover_implicit_components(svc, mp_path)
             if implicit["any"]:
                 return _install_implicit_plugin(
-                    svc, plugin_id, marketplace_id, mp_path, implicit, scope
+                    svc, plugin_id, marketplace_id, mp_path, implicit, scope, enable
                 )
         raise ValueError(f"Plugin not found in marketplace: {plugin_name}")
 
@@ -628,8 +635,11 @@ def install_plugin(svc, plugin_id: str, scope: str = "user") -> PluginInfo:
     installed["plugins"][plugin_id] = [install_record]
     svc._write_json_file(svc.INSTALLED_FILE, installed)
 
-    # Enable by default
-    svc.enable_plugin(plugin_id)
+    # Enable by default; an agent-requested install waits for the owner.
+    if enable:
+        svc.enable_plugin(plugin_id)
+    else:
+        svc.disable_plugin(plugin_id)
 
     # Return plugin info for the installed/updated plugin
     for p in svc.get_installed_plugins():
