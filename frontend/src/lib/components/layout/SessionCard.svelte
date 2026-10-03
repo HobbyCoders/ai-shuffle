@@ -1,13 +1,11 @@
 <script lang="ts">
 	/**
-	 * SessionCard — the ledger row for the Studio Noir sidebar.
+	 * SessionCard — one ledger row in the sidebar.
 	 *
 	 * Every row leads with ONE glyph in a fixed left column: where the branch
 	 * sits between edit and merge (see `deriveGitStage`). The session's own
-	 * runtime state moved off that slot and onto the title — a pulsing dot while
-	 * it works, an amber warning when it is parked on a prompt — so the two
-	 * questions ("what is the agent doing" / "what happened to the code") stop
-	 * competing for the same pixel.
+	 * runtime state rides on the title — a pulsing dot while it works, an amber
+	 * warning when it is parked on a prompt.
 	 *
 	 * Active card (three lines):
 	 *   L1  glyph · title · total working time
@@ -18,13 +16,16 @@
 	 *   L1  glyph · title · total working time (age in the hover title)
 	 *   L2  device icon · git-state word · branch
 	 *
-	 * Hover/swipe exposes the row's actions (see `cardActions`): Archive + Settle (active),
-	 * Move to Active + Archive (settled), or Restore (archived). On the swipe
-	 * layout a long swipe across the row commits the trailing action on
-	 * release. Settle and Archive offer Undo. Rename, Fork, and Delete live on
-	 * the header session-title menu.
+	 * Inbox gestures. A touch or pen swipe RIGHT settles an active row (or
+	 * moves a settled one back to Active); a swipe LEFT archives. Past 40% of
+	 * the row the lane goes solid and letting go commits; a fast flick commits
+	 * too. The row then slides out and folds away. A press-and-hold starts
+	 * selection, where a tap toggles the row's checkmark. A mouse never
+	 * swipes: on a pointer that hovers, the same actions sit at the row's right
+	 * edge on hover. Settle and Archive offer Undo. Rename, Fork, and Delete
+	 * live on the header session-title menu.
 	 */
-	import { onMount, untrack } from 'svelte';
+	import { untrack } from 'svelte';
 	import {
 		Archive,
 		ArchiveRestore,
@@ -88,14 +89,15 @@
 		 *  ticking card never re-parses its date (R15). Falls back to parsing the
 		 *  row when the card is used standalone. */
 		timestamp?: number;
-		/** Single-line dense row — used for the settled/archived groups. */
+		/** Two-line dense row — used for the settled/archived groups. */
 		compact?: boolean;
-		/** Id of the card whose swipe actions are currently revealed, owned by the
-		 *  parent list so ONE delegated listener can close them (R15). Leave it
-		 *  undefined to let the card manage its own reveal state (standalone use). */
-		openActionsId?: string | null;
-		/** Notifies the parent that this card opened (its id) or closed (null). */
-		onActionsOpenChange?: (sessionId: string | null) => void;
+		/** The list is in selection mode: the lead glyph becomes a checkmark and
+		 *  a tap toggles it instead of opening the session. */
+		selecting?: boolean;
+		selected?: boolean;
+		onSelectToggle?: (sessionId: string) => void;
+		/** Press-and-hold without moving. The sidebar starts selection with it. */
+		onLongPress?: (sessionId: string) => void;
 		onOpen: (sessionId: string) => void;
 		/** Desktop only: after settling the open session, let the shell move to a fresh chat. */
 		onSettled?: () => void;
@@ -110,8 +112,10 @@
 		now,
 		timestamp,
 		compact = false,
-		openActionsId,
-		onActionsOpenChange,
+		selecting = false,
+		selected = false,
+		onSelectToggle,
+		onLongPress,
 		onOpen,
 		onSettled
 	}: Props = $props();
@@ -250,63 +254,19 @@
 	// would read as "still to review".
 	const diff = $derived(gitStatus?.has_changes ? diffCounts(gitDiffStats) : null);
 
-	let cardRef = $state<HTMLElement | null>(null);
-	// Reveal state is parent-owned when `openActionsId` is supplied (the sidebar
-	// path); the local fallback keeps the card self-contained on its own.
-	let localActionsOpen = $state(false);
-	const controlledActions = $derived(openActionsId !== undefined);
-	const actionsOpen = $derived(controlledActions ? openActionsId === session.id : localActionsOpen);
-
-	function setActionsOpen(open: boolean) {
-		if (controlledActions) onActionsOpenChange?.(open ? session.id : null);
-		else localActionsOpen = open;
-	}
-
-	let swipeLayout = $state(false);
-	let dragOffset = $state<number | null>(null);
-	// True once the drag has travelled far enough that letting go commits the
-	// action itself: one long swipe settles a row, no second tap needed.
-	let swipeCommit = $state(false);
 
 	const actions = $derived(cardActions(session));
-	const primaryAction = $derived(actions[actions.length - 1]);
-	// Width of one swipe action; the rail is that times the action count and
-	// the styles read it back through `--reveal`.
-	const ACTION_WIDTH = 60;
-	const ACTION_REVEAL_WIDTH = $derived(ACTION_WIDTH * actions.length);
-	// A short swipe latches the rail open once it has come this far.
-	const SWIPE_COMMIT_DISTANCE = 24;
-	// Past the rail the card keeps following the finger, with a little drag.
-	const OVERSCROLL_RATIO = 0.85;
-	// A flick faster than this (px per ms) latches the rail open or shut
-	// whatever distance it covered, so a quick swipe is never "too short".
-	const FLICK_VELOCITY = 0.45;
-	// Ignore a flick reading older than this at release: the finger stopped.
-	const FLICK_MAX_AGE = 80;
-	// The click a touch commit leaves behind is swallowed for this long.
-	const COMMIT_CLICK_GUARD = 500;
-	let pointerId: number | null = null;
-	let pointerStartX = 0;
-	let pointerStartY = 0;
-	let pointerStartOffset = 0;
-	let fullSwipeDistance = Infinity;
-	let horizontalDrag = false;
-	let lastMoveX = 0;
-	let lastMoveTime = 0;
-	let velocity = 0;
-	let suppressNextClick = false;
-	let actionJustCommitted = false;
-	let lastCommitAt = -Infinity;
-
-	function closeActions() {
-		setActionsOpen(false);
-		dragOffset = null;
-		swipeCommit = false;
-	}
+	/** Hover order: Archive first, then the state toggle (or Restore). */
+	const hoverActions = $derived([...actions].sort((a, b) => (a === 'archive' ? -1 : b === 'archive' ? 1 : 0)));
+	/** What a right swipe does; a left swipe always archives. */
+	const rightAction = $derived<CardAction>(
+		actions.includes('restore') ? 'restore' : session.is_active ? 'settle' : 'activate'
+	);
+	const canArchive = $derived(actions.includes('archive'));
 
 	const ACTION_META: Record<CardAction, { title: string; aria: string; label: string }> = {
 		settle: { title: 'Settle session', aria: 'Settle session', label: 'Settle' },
-		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Active' },
+		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Move to Active' },
 		archive: { title: 'Archive session', aria: 'Archive session', label: 'Archive' },
 		restore: { title: 'Restore archived session', aria: 'Restore archived session', label: 'Restore' }
 	};
@@ -337,9 +297,8 @@
 		});
 	}
 
-	async function commitAction(action: CardAction = primaryAction) {
+	async function commitAction(action: CardAction) {
 		if (persistentAssistant) return;
-		setActionsOpen(false);
 		const id = session.id;
 		const wasActive = !!session.is_active;
 		try {
@@ -367,44 +326,188 @@
 		}
 	}
 
-	// Touch/pen: the synthetic click after a swipe is unreliable — pointer capture on
-	// the frame can reroute or drop it, which is why the first tap on a freshly
-	// revealed action was being lost. Commit straight from pointerup and mark the
-	// trailing click handled so it can't double-fire.
-	//
-	// Committing closes the rail at once, which makes the button inert before
-	// the browser dispatches that trailing click. The click then hit-tests the
-	// card sliding back underneath and used to OPEN the session. Arm the card's
-	// click guard as well so the click dies wherever it lands.
-	function handleActionPointerUp(event: PointerEvent, action: CardAction) {
-		if (event.pointerType === 'mouse') return;
-		event.stopPropagation();
-		actionJustCommitted = true;
-		suppressNextClick = true;
-		lastCommitAt = event.timeStamp;
-		void commitAction(action);
+	// ── Gestures ────────────────────────────────────────────────────────
+	/** Movement before a press picks an axis; less than this is still a tap. */
+	const AXIS_LOCK = 8;
+	/** Past this share of the row the lane arms and release commits. */
+	const ARM_RATIO = 0.4;
+	/** The row follows the finger 1:1 up to here, then with drag. */
+	const EASE_RATIO = 0.62;
+	/** A flick this fast (px/ms) over FLICK_MIN_DX commits short of the arm point. */
+	const FLICK_VELOCITY = 0.9;
+	const FLICK_MIN_DX = 60;
+	const LONG_PRESS_MS = 480;
+	/** Slide-out, then fold: the row height collapses at FOLD_AT and the
+	 *  action runs at COMMIT_AT, once the row is gone. */
+	const FOLD_AT = 170;
+	const COMMIT_AT = 420;
+	/** How long the lanes stay painted while a cancelled row springs back. */
+	const LANE_LINGER = 280;
+	/** jsdom has no layout; a 320px row stands in for the measured one. */
+	const FALLBACK_WIDTH = 320;
+
+	let frameRef = $state<HTMLElement | null>(null);
+	let dragX = $state<number | null>(null);
+	let lane = $state<'l' | 'r' | null>(null);
+	let armed = $state(false);
+	let pressing = $state(false);
+	/** Set while the row slides out and folds: the inner offset, then the fold. */
+	let slideX = $state<number | null>(null);
+	let foldHeight = $state<number | null>(null);
+	let folded = $state(false);
+
+	let pointerId: number | null = null;
+	let pointerType = '';
+	let startX = 0;
+	let startY = 0;
+	let axis: 'x' | null = null;
+	let rowWidth = FALLBACK_WIDTH;
+	let lastX = 0;
+	let lastT = 0;
+	let velocity = 0;
+	let longTimer: ReturnType<typeof setTimeout> | null = null;
+	let laneTimer: ReturnType<typeof setTimeout> | null = null;
+	let suppressNextClick = false;
+
+	const dragging = $derived(dragX !== null);
+
+	function clearLongPress() {
+		if (longTimer) clearTimeout(longTimer);
+		longTimer = null;
 	}
 
-	// Mouse and keyboard path; skips the work when pointerup already handled a tap.
-	function handleActionClick(event: MouseEvent, action: CardAction) {
-		event.stopPropagation();
-		if (actionJustCommitted) {
-			actionJustCommitted = false;
-			return;
+	function isControlTarget(target: EventTarget | null): boolean {
+		return target instanceof Element && !!target.closest('.hover-acts, button, input, a');
+	}
+
+	function handlePointerDown(event: PointerEvent) {
+		// Any fresh press clears the click guard the last gesture left behind.
+		suppressNextClick = false;
+		if (event.isPrimary === false || event.button !== 0 || isControlTarget(event.target)) return;
+		if (slideX !== null || persistentAssistant) return;
+		pointerId = event.pointerId;
+		pointerType = event.pointerType;
+		startX = lastX = event.clientX;
+		startY = event.clientY;
+		lastT = performance.now();
+		velocity = 0;
+		axis = null;
+		rowWidth = frameRef?.offsetWidth || FALLBACK_WIDTH;
+		if (pointerType !== 'mouse') pressing = true;
+		clearLongPress();
+		if (onLongPress) {
+			longTimer = setTimeout(() => {
+				longTimer = null;
+				if (pointerId === null || axis) return;
+				pressing = false;
+				suppressNextClick = true;
+				pointerId = null;
+				onLongPress?.(session.id);
+			}, LONG_PRESS_MS);
 		}
-		void commitAction(action);
 	}
 
-	function openCard(event?: Event) {
+	function handlePointerMove(event: PointerEvent) {
+		if (pointerId !== event.pointerId) return;
+		let dx = event.clientX - startX;
+		const dy = event.clientY - startY;
+		if (!axis) {
+			if (Math.max(Math.abs(dx), Math.abs(dy)) < AXIS_LOCK) return;
+			clearLongPress();
+			pressing = false;
+			const horizontal = Math.abs(dx) > Math.abs(dy);
+			const allowed = dx > 0 || canArchive;
+			if (!horizontal || pointerType === 'mouse' || selecting || !allowed) {
+				pointerId = null;
+				return;
+			}
+			axis = 'x';
+			if (laneTimer) clearTimeout(laneTimer);
+			frameRef?.setPointerCapture?.(event.pointerId);
+		}
+		event.preventDefault();
+		const t = performance.now();
+		const elapsed = t - lastT;
+		if (elapsed > 0) velocity = (event.clientX - lastX) / elapsed;
+		lastX = event.clientX;
+		lastT = t;
+		// A row that cannot archive only travels right.
+		if (!canArchive) dx = Math.max(0, dx);
+		const lim = rowWidth * EASE_RATIO;
+		dragX = Math.abs(dx) <= lim ? dx : Math.sign(dx) * (lim + (Math.abs(dx) - lim) * 0.35);
+		lane = dx > 0 ? 'l' : dx < 0 ? 'r' : null;
+		armed = Math.abs(dx) > rowWidth * ARM_RATIO;
+	}
+
+	function springBack() {
+		dragX = null;
+		if (laneTimer) clearTimeout(laneTimer);
+		laneTimer = setTimeout(() => {
+			laneTimer = null;
+			if (dragX === null) {
+				lane = null;
+				armed = false;
+			}
+		}, LANE_LINGER);
+	}
+
+	function finishPointer(event: PointerEvent) {
+		if (pointerId !== event.pointerId) return;
+		clearLongPress();
+		pressing = false;
+		pointerId = null;
+		if (axis !== 'x') return;
+		axis = null;
+		// The click this gesture leaves behind must not open the session.
+		suppressNextClick = true;
+		const dx = dragX ?? 0;
+		const flick = Math.abs(velocity) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
+		if (dx !== 0 && (armed || flick)) {
+			const dir = dx < 0 ? -1 : 1;
+			slideOut(dir, dir < 0 ? 'archive' : rightAction);
+		} else {
+			springBack();
+		}
+	}
+
+	function cancelPointer(event: PointerEvent) {
+		if (pointerId !== event.pointerId) return;
+		clearLongPress();
+		pressing = false;
+		pointerId = null;
+		if (axis === 'x') springBack();
+		axis = null;
+	}
+
+	/** Slide the row off in the swipe direction, fold it shut, then act. The
+	 *  timers are NOT cleared on destroy: the action must still run when the
+	 *  list re-renders mid-fold. */
+	function slideOut(dir: number, action: CardAction) {
+		armed = true;
+		lane = dir < 0 ? 'r' : 'l';
+		dragX = null;
+		slideX = dir * rowWidth;
+		foldHeight = frameRef?.offsetHeight ?? null;
+		setTimeout(() => (folded = true), FOLD_AT);
+		setTimeout(async () => {
+			await commitAction(action);
+			// Still mounted (a failed update rolled back, or this row stays in its
+			// group): put it back the way it was.
+			slideX = null;
+			foldHeight = null;
+			folded = false;
+			lane = null;
+			armed = false;
+		}, COMMIT_AT);
+	}
+
+	function openCard() {
 		if (suppressNextClick) {
 			suppressNextClick = false;
 			return;
 		}
-		// Belt and braces for the post-commit click: some engines deliver it
-		// after a fresh pointerdown has already cleared the one-shot guard.
-		if (event && event.timeStamp - lastCommitAt < COMMIT_CLICK_GUARD) return;
-		if (swipeLayout && actionsOpen) {
-			closeActions();
+		if (selecting) {
+			onSelectToggle?.(session.id);
 			return;
 		}
 		onOpen(session.id);
@@ -418,144 +521,32 @@
 		}
 	}
 
-	function isActionTarget(target: EventTarget | null): boolean {
-		return target instanceof Element && !!target.closest('.card-actions, button, input, a');
+	function handleActionClick(event: MouseEvent, action: CardAction) {
+		event.stopPropagation();
+		void commitAction(action);
 	}
 
-	function handlePointerDown(event: PointerEvent) {
-		// Any fresh press clears the one-shot click guards left by the last gesture.
-		suppressNextClick = false;
-		actionJustCommitted = false;
-		if (!swipeLayout || event.isPrimary === false || event.button !== 0 || isActionTarget(event.target)) return;
-		pointerId = event.pointerId;
-		pointerStartX = event.clientX;
-		pointerStartY = event.clientY;
-		pointerStartOffset = actionsOpen ? -ACTION_REVEAL_WIDTH : 0;
-		// A swipe across half the row commits outright. The floor keeps a
-		// narrow (or unmeasured) row from committing on what is really a reveal.
-		fullSwipeDistance = Math.max(ACTION_REVEAL_WIDTH + ACTION_WIDTH * 1.5, (cardRef?.clientWidth ?? 0) * 0.5);
-		horizontalDrag = false;
-		lastMoveX = event.clientX;
-		lastMoveTime = performance.now();
-		velocity = 0;
-		cardRef?.setPointerCapture?.(event.pointerId);
-	}
-
-	function handlePointerMove(event: PointerEvent) {
-		if (pointerId !== event.pointerId) return;
-		const dx = event.clientX - pointerStartX;
-		const dy = event.clientY - pointerStartY;
-
-		if (!horizontalDrag) {
-			if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
-			if (Math.abs(dy) >= Math.abs(dx)) {
-				pointerId = null;
-				dragOffset = null;
-				return;
-			}
-			horizontalDrag = true;
-		}
-
-		event.preventDefault();
-		// Timed off the wall clock rather than event.timeStamp: the two agree in
-		// browsers and the clock is the one a test can steer.
-		const moveTime = performance.now();
-		const elapsed = moveTime - lastMoveTime;
-		if (elapsed > 0) velocity = (event.clientX - lastMoveX) / elapsed;
-		lastMoveX = event.clientX;
-		lastMoveTime = moveTime;
-
-		const raw = Math.min(0, pointerStartOffset + dx);
-		// Inside the rail the card tracks the finger 1:1; past it the card
-		// keeps going with a touch of drag so the long swipe reads as a
-		// deliberate stretch rather than a wall.
-		dragOffset =
-			raw >= -ACTION_REVEAL_WIDTH
-				? raw
-				: -ACTION_REVEAL_WIDTH - (-raw - ACTION_REVEAL_WIDTH) * OVERSCROLL_RATIO;
-		swipeCommit = -dragOffset >= fullSwipeDistance;
-	}
-
-	function finishPointer(event: PointerEvent) {
-		if (pointerId !== event.pointerId) return;
-		const dx = event.clientX - pointerStartX;
-		if (horizontalDrag) {
-			const nextOffset = dragOffset ?? pointerStartOffset;
-			const flick = performance.now() - lastMoveTime <= FLICK_MAX_AGE && Math.abs(velocity) >= FLICK_VELOCITY;
-			if (swipeCommit) {
-				// The long swipe IS the tap on the trailing action.
-				lastCommitAt = event.timeStamp;
-				void commitAction(primaryAction);
-			} else if (flick) {
-				setActionsOpen(velocity < 0);
-			} else {
-				setActionsOpen(
-					actionsOpen
-						? nextOffset < -(ACTION_REVEAL_WIDTH - SWIPE_COMMIT_DISTANCE)
-						: nextOffset <= -SWIPE_COMMIT_DISTANCE
-				);
-			}
-			// Swallow the trailing click from this gesture; cleared on the next press.
-			suppressNextClick = true;
-		} else if (Math.abs(dx) > 6) {
-			suppressNextClick = true;
-		}
-		dragOffset = null;
-		swipeCommit = false;
-		pointerId = null;
-		horizontalDrag = false;
-	}
-
-	function cancelPointer(event: PointerEvent) {
-		if (pointerId !== event.pointerId) return;
-		dragOffset = null;
-		swipeCommit = false;
-		pointerId = null;
-		horizontalDrag = false;
-	}
-
-	// Swipe-to-reveal has two independent triggers, mirrored by the styles at the
-	// bottom of this file: the mobile shell (fixed for the life of the page), and
-	// a touch-only pointer anywhere else — a touch laptop still swipes.
-	onMount(() => {
-		if (platform.isMobile) {
-			swipeLayout = true;
-			return;
-		}
-		if (typeof window.matchMedia !== 'function') {
-			swipeLayout = false;
-			closeActions();
-			return;
-		}
-
-		const query = window.matchMedia('(hover: none)');
-		const syncLayout = () => {
-			swipeLayout = query.matches;
-			if (!swipeLayout) closeActions();
-		};
-		syncLayout();
-		query.addEventListener('change', syncLayout);
-		return () => query.removeEventListener('change', syncLayout);
-	});
+	const innerTransform = $derived(
+		slideX !== null ? `translateX(${slideX}px)` : dragX !== null ? `translateX(${dragX}px)` : undefined
+	);
 </script>
 
 <!-- No <svelte:window> here on purpose: with 60+ cards rendered, per-card
-     global click/keydown handlers ran 60+ times per document click (R15). The
-     sidebar closes the open card's actions from one delegated listener, keyed
-     on `data-session-card`. -->
+     global listeners ran 60+ times per document event (R15). -->
 <div
-	bind:this={cardRef}
+	bind:this={frameRef}
 	data-session-card={session.id}
 	class="scard-frame"
-	class:swipe-layout={swipeLayout}
+	class:phone={platform.isMobile}
 	class:compact
-	class:actions-open={actionsOpen}
-	class:dragging={dragOffset !== null}
-	class:swipe-commit={swipeCommit}
-	style:--reveal={`${ACTION_REVEAL_WIDTH}px`}
-	style:--action-w={`${ACTION_WIDTH}px`}
-	style:--action-count={actions.length}
-	style:--rail-shift={dragOffset === null ? undefined : `${Math.min(0, dragOffset + ACTION_REVEAL_WIDTH)}px`}
+	class:active
+	class:selected={selecting && selected}
+	class:dragging
+	class:armed
+	class:pressing
+	class:sliding={slideX !== null}
+	class:folded
+	style:height={foldHeight === null ? undefined : folded ? '0px' : `${foldHeight}px`}
 	role="group"
 	aria-label={`${title} session`}
 	onpointerdown={handlePointerDown}
@@ -563,6 +554,20 @@
 	onpointerup={finishPointer}
 	onpointercancel={cancelPointer}
 >
+	{#if lane}
+		<div class="lane l" aria-hidden="true" class:on={lane === 'l'}>
+			{#if rightAction === 'settle'}
+				<Check size={20} strokeWidth={2} /><span>Settle</span>
+			{:else if rightAction === 'activate'}
+				<Undo2 size={20} strokeWidth={2} /><span>Move to Active</span>
+			{:else}
+				<ArchiveRestore size={20} strokeWidth={2} /><span>Restore</span>
+			{/if}
+		</div>
+		<div class="lane r" aria-hidden="true" class:on={lane === 'r'}>
+			<span>Archive</span><Archive size={20} strokeWidth={2} />
+		</div>
+	{/if}
 	<div
 		class="scard"
 		class:active
@@ -571,11 +576,17 @@
 		role="button"
 		tabindex="0"
 		aria-current={active ? 'true' : undefined}
+		aria-pressed={selecting ? selected : undefined}
 		onclick={openCard}
 		onkeydown={handleCardKeydown}
 		title={title}
-		style:transform={dragOffset === null ? undefined : `translateX(${dragOffset}px)`}
+		style:transform={innerTransform}
 	>
+		{#if selecting}
+			<span class="check" aria-hidden="true">
+				{#if selected}<Check size={12} strokeWidth={3} />{/if}
+			</span>
+		{:else}
 		<span class="lead {stageTone}" role="img" title={stageTip} aria-label={stageTip}>
 			{#if stage === 'pr'}
 				<GitPullRequest size={14} strokeWidth={2} />
@@ -595,6 +606,7 @@
 				<span class="stage-dot"></span>
 			{/if}
 		</span>
+		{/if}
 
 		<span class="body">
 			<span class="l1">
@@ -605,24 +617,29 @@
 						<TriangleAlert size={12} strokeWidth={2.2} class="warn" aria-hidden="true" />
 					{/if}{#if compact && (status === 'working' || attention)}<span class="sr-only">{`${statusWord}: `}</span>{/if}{title}
 				</span>
-				<span class="timer" class:live={turnLive} title={timerTitle}>{timer}</span>
 			</span>
+
+			<!-- The working time sits at the end of the row that carries the
+			     session's state: the status line on active rows, the meta line
+			     on settled ones. The title keeps the full width. -->
+			{#snippet timerChip()}
+				<span class="timer" class:live={turnLive} title={timerTitle}>{timer}</span>
+			{/snippet}
 
 			{#if !compact}
 				<span class="l2">
-					<span class="seg"><span class="proj">{projectLabel}</span></span>
-					<span class="dot" aria-hidden="true"></span>
 					<span class="st {statusTone}">{statusWord}{#if status === 'working'}<span class="working-dots" aria-hidden="true">
 							<span></span><span></span><span></span>
 						</span>{/if}</span>
 					{#if showPr}
 						<span class="dot" aria-hidden="true"></span>
-						<span class="st" class:green={prState === 'open'} class:purple={prState === 'merged'}>{prText}</span>
+						<span class="st pr" title={prText} class:green={prState === 'open'} class:purple={prState === 'merged'}>{prText}</span>
 					{/if}
 					{#if diff}
 						<span class="dot" aria-hidden="true"></span>
 						<span class="diff"><span class="p">{diff.plus}</span> <span class="m">{diff.minus}</span></span>
 					{/if}
+					{@render timerChip()}
 				</span>
 			{/if}
 
@@ -634,6 +651,10 @@
 						<Monitor size={12} strokeWidth={1.9} />
 					{/if}
 				</span>
+				{#if !compact}
+					<span class="dot" aria-hidden="true"></span>
+					<span class="seg proj-seg"><span class="proj">{projectLabel}</span></span>
+				{/if}
 				{#if compact && stageWord}
 					<span class="dot" aria-hidden="true"></span>
 					<span class="st {stageTone}">{stageWord}</span>
@@ -642,107 +663,149 @@
 					<span class="dot" aria-hidden="true"></span>
 					<span class="seg branch-seg"><span class="branch">{branch}</span></span>
 				{/if}
+				{#if compact}{@render timerChip()}{/if}
 			</span>
 		</span>
 	</div>
 
-	<span
-		class="card-actions"
-		aria-label="Session actions"
-		aria-hidden={swipeLayout && !actionsOpen ? 'true' : undefined}
-		inert={swipeLayout && !actionsOpen}
-	>
-		{#if persistentAssistant}
-			<span title="Persistent assistant conversation">Persistent</span>
-		{:else}
-		{#each actions as action (action)}
-			<button
-				class="row-action state-toggle"
-				class:primary={action === primaryAction}
-				title={ACTION_META[action].title}
-				aria-label={ACTION_META[action].aria}
-				onpointerup={(e) => handleActionPointerUp(e, action)}
-				onclick={(e) => handleActionClick(e, action)}
-			>
-				{#if action === 'settle'}
-					<Check size={16} strokeWidth={1.8} />
-				{:else if action === 'activate'}
-					<Undo2 size={16} strokeWidth={1.8} />
-				{:else if action === 'archive'}
-					<Archive size={16} strokeWidth={1.8} />
-				{:else}
-					<ArchiveRestore size={16} strokeWidth={1.8} />
-				{/if}
-				{#if swipeLayout && (!compact || actions.length > 1)}<span class="row-action-label" aria-hidden="true">{ACTION_META[action].label}</span>{/if}
-			</button>
-		{/each}
-		{/if}
-	</span>
+	{#if persistentAssistant}
+		<span class="hover-acts persistent" title="Persistent assistant conversation">Persistent</span>
+	{:else if !selecting}
+		<!-- Hover actions on a pointer that hovers. On touch they stay in the
+		     DOM for assistive tech, visually hidden: the swipe is the gesture. -->
+		<span class="hover-acts" aria-label="Session actions">
+			{#each hoverActions as action (action)}
+				<button
+					type="button"
+					class="row-action"
+					title={ACTION_META[action].title}
+					aria-label={ACTION_META[action].aria}
+					onclick={(e) => handleActionClick(e, action)}
+				>
+					{#if action === 'settle'}
+						<Check size={15} strokeWidth={1.9} />
+					{:else if action === 'activate'}
+						<Undo2 size={15} strokeWidth={1.9} />
+					{:else if action === 'archive'}
+						<Archive size={15} strokeWidth={1.9} />
+					{:else}
+						<ArchiveRestore size={15} strokeWidth={1.9} />
+					{/if}
+				</button>
+			{/each}
+		</span>
+	{/if}
 </div>
 
 <style>
 	.scard-frame {
-		--ram-reveal: 0;
 		position: relative;
 		width: 100%;
-		border-radius: 9px;
+		margin-bottom: 2px;
+		border-radius: 12px;
+		overflow: hidden;
+		/* Vertical scroll stays native; a horizontal drag is the row's own. */
+		touch-action: pan-y;
+		transition:
+			height 260ms cubic-bezier(0.16, 1, 0.3, 1),
+			opacity 200ms ease,
+			margin 260ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
-	/* :has(:focus-visible), not :focus-within: a mouse click focuses the card
-	   (tabindex=0) and that focus persists, which used to stick the highlight +
-	   revealed action until the user clicked elsewhere. Keyboard focus still
-	   reveals everything. */
-	.scard-frame:hover,
-	.scard-frame:has(:focus-visible),
-	.scard-frame.actions-open {
-		--ram-reveal: 1;
+	.scard-frame.folded {
+		margin-bottom: 0;
+		opacity: 0;
 	}
-	/* Fixed 16px lead column so every glyph lines up down the list, however
-	   narrow the sidebar gets (it resizes to 220px). */
+
+	/* ── Swipe lanes, painted behind the row while it is dragged ───────── */
+	.lane {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		gap: 9px;
+		padding: 0 18px;
+		font-size: 13px;
+		font-weight: 600;
+		opacity: 0;
+		transition: background-color 150ms ease, color 150ms ease;
+	}
+	.lane.on { opacity: 1; }
+	.lane.l {
+		justify-content: flex-start;
+		background: color-mix(in oklch, var(--primary) 28%, var(--sidebar));
+		color: var(--primary);
+	}
+	.lane.r {
+		justify-content: flex-end;
+		background: color-mix(in oklch, var(--info) 22%, var(--sidebar));
+		color: var(--info);
+	}
+	.lane span { opacity: 0.55; transition: opacity 150ms ease; }
+	.lane :global(svg) { flex: none; transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1); }
+	.scard-frame.armed .lane.l { background: var(--primary); color: var(--primary-foreground); }
+	.scard-frame.armed .lane.r { background: var(--info); color: oklch(0.18 0.04 250); }
+	.scard-frame.armed .lane span { opacity: 1; }
+	.scard-frame.armed .lane :global(svg) { transform: scale(1.18); }
+
+	/* ── The row itself ─────────────────────────────────────────────────
+	   Opaque, so the lanes never bleed through. A fixed 18px lead column keeps
+	   every glyph (and the selection checkmark) lined up down the list. */
 	.scard {
+		position: relative;
+		z-index: 1;
 		display: grid;
-		grid-template-columns: 16px minmax(0, 1fr);
-		column-gap: 6px;
+		grid-template-columns: 18px minmax(0, 1fr);
+		column-gap: 8px;
 		align-items: start;
 		width: 100%;
-		text-align: left;
-		/* When the hover action reveals, grow the right padding so lines
-		   truncate short of the button instead of running underneath it. */
-		padding: 7px calc(8px + var(--ram-reveal) * (30px + (var(--action-count, 1) - 1) * 32px)) 8px 8px;
+		padding: 8px 10px 9px 9px;
 		border: none;
-		border-radius: 9px;
-		background: transparent;
+		border-radius: 12px;
+		background: var(--sidebar);
 		color: inherit;
+		text-align: left;
 		cursor: pointer;
-		transition: background-color 0.13s ease, padding 0.13s ease;
-		position: relative;
-		z-index: 2;
+		transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), background-color 150ms ease;
 	}
-	.scard-frame:hover .scard,
-	.scard-frame:has(:focus-visible) .scard,
-	.scard-frame.actions-open .scard {
-		background: var(--sidebar-accent);
-	}
-	.scard.active { background: var(--sidebar-accent-active); }
+	.scard-frame.phone .scard { column-gap: 10px; padding: 10px 10px 11px 9px; }
+	.scard-frame.dragging .scard { transition: background-color 150ms ease; }
+	.scard-frame:hover .scard { background: color-mix(in oklch, var(--sidebar-foreground) 5%, var(--sidebar)); }
+	.scard.active,
+	.scard-frame:hover .scard.active { background: color-mix(in oklch, var(--sidebar-foreground) 10%, var(--sidebar)); }
 	.scard.active::before {
 		content: '';
 		position: absolute;
 		left: 0;
-		top: 8px;
-		bottom: 8px;
-		width: 2px;
+		top: 10px;
+		bottom: 10px;
+		width: 2.5px;
 		border-radius: 2px;
 		background: var(--primary);
 		box-shadow: 0 0 8px -1px var(--glow);
 	}
+	.scard.compact.active::before { top: 8px; bottom: 8px; }
+	.scard-frame.pressing .scard {
+		background: color-mix(in oklch, var(--sidebar-foreground) 8%, var(--sidebar));
+		transform: scale(0.985);
+	}
+	.scard-frame.selected .scard,
+	.scard-frame.selected:hover .scard { background: color-mix(in oklch, var(--primary) 9%, var(--sidebar)); }
 	.scard:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
-	/* Compact two-line row for settled/archived sessions: title + age, then a
-	   muted meta line (device icon · git state · branch). Still denser than the
-	   three-line active cards. Hover reveals the quick action centered at the
-	   row's right edge; the mobile swipe strip is untouched. */
-	.scard.compact { padding: 6px calc(8px + var(--ram-reveal) * 30px) 7px 8px; }
-	.scard.compact .l3 { margin-top: 3px; font-size: 10.5px; }
-	.scard.compact.active::before { top: 6px; bottom: 6px; }
+	/* Selection checkmark, in the lead glyph's column. */
+	.check {
+		display: grid;
+		place-items: center;
+		width: 18px;
+		height: 18px;
+		margin-top: 1px;
+		border: 1.5px solid var(--border-strong);
+		border-radius: 50%;
+		color: var(--primary-foreground);
+	}
+	.scard-frame.selected .check { background: var(--primary); border-color: var(--primary); }
+
+	.scard.compact .l3 { margin-top: 3px; }
 
 	/* ── Leading git glyph ───────────────────────────────────────────── */
 	.lead {
@@ -826,8 +889,11 @@
 		50% { opacity: 1; }
 	}
 
+	/* Pinned to the right end of its line; the segments before it give way. */
 	.timer {
 		flex: none;
+		margin-left: auto;
+		padding-left: 6px;
 		font-family: var(--font-mono);
 		font-variant-numeric: tabular-nums;
 		font-size: 11px;
@@ -836,6 +902,12 @@
 		transition: opacity 120ms ease;
 	}
 	.timer.live { color: var(--primary); }
+	/* A long PR label ellipsizes before it can push the timer off the line. */
+	.l2 .st.pr { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+	/* On the meta line the project and the branch share the squeeze, so
+	   neither collapses to a stub. */
+	.seg.proj-seg { flex: 0 1 auto; min-width: 4.5em; }
+	.l3 .timer { font-size: 10.5px; }
 
 	/* Receded rows dim the title + meta line but keep the status line, glyph
 	   and timer lit; hover (desktop) restores the whole row. */
@@ -947,145 +1019,98 @@
 		font-size: 10px;
 	}
 
-	/* Rail fills the card's right side — full row height and the entire
-	   width the revealed padding reserves — so the button's hit area does
-	   too. */
-	.card-actions {
+	/* Phone type is a step larger: thumbs, arm's length. */
+	.scard-frame.phone .scard:not(.compact) .title { font-size: 14.5px; }
+	.scard-frame.phone .scard.compact .title { font-size: 14px; }
+	.scard-frame.phone .l2 { font-size: 12px; }
+	.scard-frame.phone .l3 { font-size: 11.5px; }
+	.scard-frame.phone .branch { font-size: 11px; }
+
+	/* ── Hover actions (pointer that hovers) ───────────────────────────── */
+	.hover-acts {
 		position: absolute;
-		top: 0;
-		right: 0;
-		bottom: 0;
-		width: calc(38px + (var(--action-count, 1) - 1) * 32px);
+		top: 50%;
+		right: 6px;
+		z-index: 2;
 		display: flex;
-		align-items: stretch;
-		gap: 1px;
-		opacity: var(--ram-reveal);
+		gap: 2px;
+		padding-left: 18px;
+		transform: translateY(-50%);
+		background: linear-gradient(
+			90deg,
+			transparent,
+			color-mix(in oklch, var(--sidebar-foreground) 5%, var(--sidebar)) 18px
+		);
+		opacity: 0;
 		transition: opacity 120ms ease;
-		z-index: 5;
 	}
-	.card-actions > * {
-		transition: color 120ms ease, background-color 120ms ease;
+	.scard-frame:hover .hover-acts,
+	.hover-acts:focus-within { opacity: 1; }
+	.scard-frame.active .hover-acts {
+		background: linear-gradient(
+			90deg,
+			transparent,
+			color-mix(in oklch, var(--sidebar-foreground) 10%, var(--sidebar)) 18px
+		);
+	}
+	.hover-acts.persistent {
+		padding: 0 6px 0 18px;
+		font-size: 11px;
+		color: var(--sidebar-muted);
 	}
 	.row-action {
-		flex: 1;
-		min-width: 0;
-		padding: 0;
-		border: none;
-		border-radius: 6px;
-		background: transparent;
-		color: var(--sidebar-muted);
 		display: grid;
 		place-items: center;
+		width: 28px;
+		height: 28px;
+		padding: 0;
+		border: 0;
+		border-radius: 7px;
+		background: transparent;
+		color: var(--muted-foreground);
 		cursor: pointer;
-		transition: color 0.12s ease, background-color 0.12s ease, opacity 0.12s ease;
+		transition: color 120ms ease, background-color 120ms ease;
 	}
-	.row-action:hover {
-		color: var(--foreground);
-		background: color-mix(in oklch, var(--sidebar-accent-active) 78%, transparent);
-	}
-	.row-action.state-toggle { color: var(--muted-foreground); }
-	.row-action:disabled { opacity: 0.45; cursor: not-allowed; }
+	.row-action:hover { background: var(--sidebar-accent-active); color: var(--foreground); }
 	.row-action:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 
-	/* One swipe stylesheet for touch browsers and the mobile shell. The
-	   class follows the same layout state as gesture handling and accessibility. */
-	.scard-frame.swipe-layout {
+	/* Touch: the swipe is the gesture, so the buttons leave the screen but
+	   stay for screen readers. */
+	.scard-frame.phone .hover-acts,
+	.scard-frame.dragging .hover-acts,
+	.scard-frame.sliding .hover-acts {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
 		overflow: hidden;
-		touch-action: pan-y;
-		background: color-mix(in oklch, var(--sidebar-accent-active) 84%, var(--sidebar));
+		clip: rect(0 0 0 0);
+		white-space: nowrap;
+		border: 0;
 	}
-	.scard-frame.swipe-layout .scard {
-		background: var(--sidebar);
-		padding: 7px 8px 8px;
-		transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), background-color 130ms ease;
-		will-change: transform;
+	@media (hover: none) {
+		.hover-acts {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			padding: 0;
+			margin: -1px;
+			overflow: hidden;
+			clip: rect(0 0 0 0);
+			white-space: nowrap;
+			border: 0;
+		}
 	}
-	/* The swipe track sits behind the card, so the card surface has to be
-	   opaque or the revealed actions bleed through the accent tint. */
-	.scard-frame.swipe-layout .scard.active {
-		background:
-			linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
-			var(--sidebar);
-	}
-	.scard-frame.swipe-layout.actions-open .scard { transform: translateX(calc(-1 * var(--reveal))); }
-	.scard-frame.swipe-layout.dragging .scard { transition: none; }
-	.scard-frame.swipe-layout:hover .scard { background: var(--sidebar); }
-	.scard-frame.swipe-layout:hover .scard.active {
-		background:
-			linear-gradient(var(--sidebar-accent-active), var(--sidebar-accent-active)),
-			var(--sidebar);
-	}
-	/* A long swipe arms the commit: the whole track goes solid so the
-	   release reads as "this will settle now", not "this reveals a button". */
-	.scard-frame.swipe-layout.swipe-commit { background: var(--primary); }
-
-	/* The rail hugs the card's trailing edge. Inside the reveal width it is
-	   pinned to the frame; once the finger drags past, `--rail-shift`
-	   carries it along with the card so the button never detaches. */
-	.scard-frame.swipe-layout .card-actions {
-		top: 0;
-		right: 0;
-		bottom: 0;
-		width: var(--reveal);
-		justify-content: flex-end;
-		gap: 0;
-		padding-left: 0;
-		background: none;
-		opacity: 1;
-		z-index: 1;
-		pointer-events: none;
-		transform: translateX(var(--rail-shift, 0px));
-		transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
-	}
-	.scard-frame.swipe-layout.dragging .card-actions { transition: none; }
-	.scard-frame.swipe-layout.actions-open .card-actions { pointer-events: auto; }
-	.scard-frame.swipe-layout .card-actions > * {
-		flex: none;
-		width: var(--action-w, var(--reveal));
-		height: 100%;
-		min-height: 44px;
-		border-radius: 0;
-		display: grid;
-		grid-auto-flow: row;
-		place-items: center;
-		align-content: center;
-		gap: 3px;
-		color: var(--foreground);
-		background: color-mix(in oklch, var(--foreground) 9%, var(--sidebar));
-		transition: color 120ms ease, background-color 120ms ease, transform 120ms ease;
-	}
-	.scard-frame.swipe-layout .card-actions > *:hover {
-		background: color-mix(in oklch, var(--foreground) 14%, var(--sidebar));
-	}
-	.scard-frame.swipe-layout .card-actions > *:active {
-		background: color-mix(in oklch, var(--foreground) 18%, var(--sidebar));
-	}
-	.scard-frame.swipe-layout .row-action-label {
-		font-size: 10px;
-		font-weight: 600;
-		line-height: 1;
-		letter-spacing: 0.02em;
-	}
-	.scard-frame.swipe-layout.swipe-commit .card-actions > .primary {
-		flex: 1;
-		color: var(--primary-foreground);
-		background: var(--primary);
-	}
-	/* A committing long swipe is about one action only. */
-	.scard-frame.swipe-layout.swipe-commit .card-actions > :not(.primary) { display: none; }
-	.scard-frame.swipe-layout .card-actions > * :global(svg) { transition: transform 120ms ease; }
-	.scard-frame.swipe-layout.swipe-commit .card-actions > .primary :global(svg) { transform: scale(1.18); }
 
 	@media (prefers-reduced-motion: reduce) {
 		.pip,
 		.working-dots > span,
 		.title :global(.warn) { animation: none; }
+		.scard-frame,
 		.scard,
-		.card-actions,
-		.card-actions > *,
-		.scard-frame.swipe-layout .scard,
-		.scard-frame.swipe-layout .card-actions,
-		.scard-frame.swipe-layout .card-actions > *,
-		.scard-frame.swipe-layout .card-actions > * :global(svg) { transition: none; }
+		.lane,
+		.lane :global(svg),
+		.hover-acts { transition: none; }
 	}
 </style>

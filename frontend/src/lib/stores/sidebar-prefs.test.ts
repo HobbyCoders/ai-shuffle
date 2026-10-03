@@ -34,15 +34,15 @@ beforeEach(() => {
 });
 
 describe('sidebar-prefs defaults', () => {
-	it('starts with every destination in canonical order and three shown', () => {
+	it('starts with every destination in canonical order and five shown', () => {
 		expect(sidebarWorkspace.current.order).toEqual([...WORKSPACE_ITEM_IDS]);
 		expect(sidebarWorkspace.current.shown).toEqual([...DEFAULT_WORKSPACE_SHOWN]);
 	});
 
 	it('splits the shown rows from the ones that fold into More', () => {
 		const { shown, hidden } = splitWorkspaceItems(ALL, sidebarWorkspace.current);
-		expect(shown.map((i) => i.id)).toEqual(['file-browser', 'build', 'project']);
-		expect(hidden.map((i) => i.id)).toEqual(['notes', 'automations', 'prs', 'stats', 'docs', 'settings']);
+		expect(shown.map((i) => i.id)).toEqual(['file-browser', 'notes', 'build', 'project', 'prs']);
+		expect(hidden.map((i) => i.id)).toEqual(['automations', 'stats', 'docs', 'settings']);
 	});
 
 	it('never surfaces a destination the caller did not offer (admin gating)', () => {
@@ -76,11 +76,11 @@ describe('sidebar-prefs defaults', () => {
 describe('sidebar-prefs editing', () => {
 	it('hides a shown row and shows a hidden one, keeping list order', () => {
 		sidebarWorkspace.toggle('build');
-		expect(sidebarWorkspace.current.shown).toEqual(['file-browser', 'project']);
+		expect(sidebarWorkspace.current.shown).toEqual(['file-browser', 'notes', 'project', 'prs']);
 
-		sidebarWorkspace.toggle('notes');
+		sidebarWorkspace.toggle('automations');
 		// Restored in ORDER position, not appended.
-		expect(sidebarWorkspace.current.shown).toEqual(['file-browser', 'notes', 'project']);
+		expect(sidebarWorkspace.current.shown).toEqual(['file-browser', 'notes', 'automations', 'project', 'prs']);
 	});
 
 	it('is a no-op when setShown asks for the state it is already in', () => {
@@ -93,10 +93,10 @@ describe('sidebar-prefs editing', () => {
 		sidebarWorkspace.reorder('docs', 'file-browser');
 		expect(sidebarWorkspace.current.order.slice(0, 3)).toEqual(['docs', 'file-browser', 'notes']);
 		// Shown follows the new order.
-		expect(sidebarWorkspace.current.shown).toEqual(['file-browser', 'build', 'project']);
+		expect(sidebarWorkspace.current.shown).toEqual(['file-browser', 'notes', 'build', 'project', 'prs']);
 
 		sidebarWorkspace.setShown('docs', true);
-		expect(sidebarWorkspace.current.shown).toEqual(['docs', 'file-browser', 'build', 'project']);
+		expect(sidebarWorkspace.current.shown).toEqual(['docs', 'file-browser', 'notes', 'build', 'project', 'prs']);
 	});
 
 	it('nudges a row with the keyboard and clamps at the ends', () => {
@@ -117,6 +117,22 @@ describe('sidebar-prefs editing', () => {
 		expect(sidebarWorkspace.current).toBe(before);
 	});
 
+	it('arranges the listed ids in sequence and leaves unlisted slots alone', () => {
+		// A member's Customize lists no Automations; its slot (index 3) must stay put.
+		sidebarWorkspace.arrange(['notes', 'file-browser', 'project', 'build', 'prs', 'stats', 'docs']);
+		expect(sidebarWorkspace.current.order).toEqual([
+			'notes', 'file-browser', 'project', 'automations', 'build', 'prs', 'stats', 'docs', 'settings',
+		]);
+		// The rail follows the new order.
+		expect(sidebarWorkspace.current.shown).toEqual(['notes', 'file-browser', 'project', 'build', 'prs']);
+	});
+
+	it('ignores an arrange that changes nothing or names unknown ids', () => {
+		const before = sidebarWorkspace.current;
+		sidebarWorkspace.arrange(['file-browser', 'notes', 'nope' as WorkspaceItemId]);
+		expect(sidebarWorkspace.current).toBe(before);
+	});
+
 	it('persists every edit under the versioned key', () => {
 		sidebarWorkspace.toggle('stats');
 		sidebarWorkspace.move('stats', -2);
@@ -132,7 +148,7 @@ describe('sidebar-prefs editing', () => {
 		const stop = sidebarWorkspace.subscribe((p) => seen.push(p.shown.length));
 		sidebarWorkspace.toggle('docs');
 		stop();
-		expect(seen).toEqual([3, 4]);
+		expect(seen).toEqual([5, 6]);
 	});
 });
 

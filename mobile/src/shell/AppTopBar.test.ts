@@ -63,6 +63,11 @@ function renderBar(extra: Record<string, unknown> = {}) {
 }
 
 const menuButton = () => screen.getByRole('button', { name: /^Open menu/ });
+/** The drawer stays mounted after first use; closed means absent or inert. */
+const drawerClosed = () => {
+	const drawer = document.getElementById('mobile-nav-drawer');
+	return !drawer || drawer.getAttribute('aria-hidden') === 'true';
+};
 
 beforeEach(() => {
 	activeView.set(null);
@@ -110,9 +115,13 @@ describe('AppTopBar title', () => {
 		activeView.set({ type: 'board' });
 		await tick();
 		expect(screen.getByText('Sessions')).toBeTruthy();
-		activeView.set({ type: 'mcp' });
+		activeView.set({ type: 'profile' });
 		await tick();
 		expect(screen.getByText('Build')).toBeTruthy();
+		// MCP servers moved into Settings (#1684).
+		activeView.set({ type: 'mcp' });
+		await tick();
+		expect(screen.getByText('Settings')).toBeTruthy();
 		activeView.set({ type: 'unknown-view' });
 		await tick();
 		expect(screen.getByText('AI Shuffle')).toBeTruthy();
@@ -163,7 +172,7 @@ describe('AppTopBar unread indicator', () => {
 describe('AppTopBar drawer', () => {
 	it('opens the drawer, marks the button expanded and moves focus to the close button', async () => {
 		renderBar({ isAdmin: true });
-		expect(screen.queryByTestId('sidebar')).toBeNull();
+		expect(drawerClosed()).toBe(true);
 		expect(menuButton().getAttribute('aria-expanded')).toBe('false');
 		await fireEvent.click(menuButton());
 		await tick();
@@ -181,7 +190,7 @@ describe('AppTopBar drawer', () => {
 		await tick();
 		const drawer = screen.getByRole('complementary', { name: 'Navigation' });
 		await fireEvent.click(drawer.querySelector('.drawer-close')!);
-		expect(screen.queryByTestId('sidebar')).toBeNull();
+		expect(drawerClosed()).toBe(true);
 		expect(document.activeElement).toBe(menuButton());
 	});
 
@@ -191,16 +200,16 @@ describe('AppTopBar drawer', () => {
 		const overlays = screen.getAllByRole('button', { name: 'Close menu' });
 		const overlay = overlays.find((el) => el.classList.contains('drawer-overlay'))!;
 		await fireEvent.click(overlay);
-		expect(screen.queryByTestId('sidebar')).toBeNull();
+		expect(drawerClosed()).toBe(true);
 
 		await fireEvent.click(menuButton());
 		const overlay2 = screen.getAllByRole('button', { name: 'Close menu' }).find((el) => el.classList.contains('drawer-overlay'))!;
 		await fireEvent.keyDown(overlay2, { key: 'Enter' });
-		expect(screen.queryByTestId('sidebar')).toBeNull();
+		expect(drawerClosed()).toBe(true);
 
 		await fireEvent.click(menuButton());
 		await fireEvent.keyDown(window, { key: 'Escape' });
-		expect(screen.queryByTestId('sidebar')).toBeNull();
+		expect(drawerClosed()).toBe(true);
 	});
 
 	it('leaves focus alone when Escape is pressed with the drawer closed', async () => {
@@ -226,7 +235,7 @@ describe('AppTopBar drawer', () => {
 		for (const [label, check] of cases) {
 			await fireEvent.click(menuButton());
 			await fireEvent.click(screen.getByRole('button', { name: label }));
-			expect(screen.queryByTestId('sidebar')).toBeNull();
+			expect(drawerClosed()).toBe(true);
 			check();
 		}
 	});
@@ -241,7 +250,7 @@ describe('AppTopBar drawer', () => {
 		renderBar();
 		await fireEvent.click(menuButton());
 		await fireEvent.click(screen.getByRole('button', { name: 'Stub notification' }));
-		expect(screen.queryByTestId('sidebar')).toBeNull();
+		expect(drawerClosed()).toBe(true);
 	});
 
 	it('returns focus to the menu button when a navigation action or a notification closes the drawer', async () => {
@@ -253,7 +262,7 @@ describe('AppTopBar drawer', () => {
 			item.focus();
 			await fireEvent.click(item);
 			await tick();
-			expect(screen.queryByTestId('sidebar')).toBeNull();
+			expect(drawerClosed()).toBe(true);
 			expect(document.activeElement).toBe(menuButton());
 		}
 	});
@@ -278,5 +287,138 @@ describe('AppTopBar drawer', () => {
 		unmount();
 		expect(remove.mock.calls.some(([type]) => type === 'open-session')).toBe(true);
 		remove.mockRestore();
+	});
+});
+
+describe('AppTopBar drawer lifecycle', () => {
+	it('mounts on first open and stays mounted, inert and hidden, once closed', async () => {
+		renderBar();
+		expect(document.getElementById('mobile-nav-drawer')).toBeNull();
+		await fireEvent.click(menuButton());
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		const drawer = document.getElementById('mobile-nav-drawer')!;
+		expect(drawer).toBeTruthy();
+		expect((drawer as HTMLElement & { inert?: boolean }).inert || drawer.hasAttribute('inert')).toBe(true);
+		expect(drawer.getAttribute('aria-hidden')).toBe('true');
+		expect(screen.getByTestId('sidebar')).toBeTruthy();
+	});
+
+	it('pushes a history entry on open, closes on Back, and pops its own entry when closed in the app', async () => {
+		const nav = await import('$app/navigation');
+		const { page } = await import('$app/state');
+		const push = vi.spyOn(nav, 'pushState').mockImplementation((_url, state) => {
+			page.state = state as Record<string, unknown>;
+		});
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {
+			page.state = {};
+		});
+		try {
+			renderBar();
+			await fireEvent.click(menuButton());
+			await tick();
+			expect(push).toHaveBeenCalledTimes(1);
+			expect(page.state.mobileDrawer).toBe(true);
+
+			// System Back: the router drops our entry and the drawer follows.
+			page.state = {};
+			await tick();
+			expect(drawerClosed()).toBe(true);
+			expect(back).not.toHaveBeenCalled();
+
+			// Closed from inside the app: our entry is popped exactly once.
+			await fireEvent.click(menuButton());
+			await tick();
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			await tick();
+			expect(back).toHaveBeenCalledTimes(1);
+			expect(drawerClosed()).toBe(true);
+		} finally {
+			push.mockRestore();
+			back.mockRestore();
+			page.state = {};
+		}
+	});
+});
+
+describe('AppTopBar drawer swipe', () => {
+	// Event time in ms; each swipe step advances it by `stepMs`.
+	let clock = 0;
+	let stepMs = 16;
+	function touch(target: Element, type: string, x: number, y = 100) {
+		const t = { identifier: 1, clientX: x, clientY: y, target } as unknown as Touch;
+		const list = type === 'touchend' ? [] : [t];
+		const event = new Event(type, { bubbles: true, cancelable: true }) as TouchEvent;
+		Object.defineProperty(event, 'touches', { value: list });
+		Object.defineProperty(event, 'changedTouches', { value: [t] });
+		Object.defineProperty(event, 'timeStamp', { value: (clock += stepMs) });
+		target.dispatchEvent(event);
+		return event;
+	}
+
+	function swipe(target: Element, from: number, to: number) {
+		touch(target, 'touchstart', from);
+		const steps = 6;
+		for (let i = 1; i <= steps; i++) touch(target, 'touchmove', from + ((to - from) * i) / steps);
+		touch(target, 'touchend', to);
+	}
+
+	beforeEach(() => {
+		Object.defineProperty(window, 'innerWidth', { configurable: true, value: 400 });
+		stepMs = 16;
+	});
+
+	it('opens on a long right swipe across the main screen', async () => {
+		renderBar();
+		const main = document.createElement('div');
+		document.body.append(main);
+		swipe(main, 20, 260);
+		await tick();
+		expect(drawerClosed()).toBe(false);
+		main.remove();
+	});
+
+	it('springs back on a short, slow right swipe and ignores a vertical one', async () => {
+		renderBar();
+		const main = document.createElement('div');
+		document.body.append(main);
+		stepMs = 120;
+		swipe(main, 20, 70);
+		await tick();
+		expect(drawerClosed()).toBe(true);
+
+		touch(main, 'touchstart', 20, 100);
+		touch(main, 'touchmove', 25, 160);
+		touch(main, 'touchmove', 200, 170);
+		touch(main, 'touchend', 200, 170);
+		await tick();
+		expect(drawerClosed()).toBe(true);
+		main.remove();
+	});
+
+	it('does not open from a text field', async () => {
+		renderBar();
+		const field = document.createElement('textarea');
+		document.body.append(field);
+		swipe(field, 20, 300);
+		await tick();
+		expect(drawerClosed()).toBe(true);
+		field.remove();
+	});
+
+	it('closes on a left swipe inside the drawer, but not from a session row', async () => {
+		renderBar();
+		await fireEvent.click(menuButton());
+		await tick();
+		const drawer = document.getElementById('mobile-nav-drawer')!;
+		const row = document.createElement('div');
+		row.setAttribute('data-session-card', '');
+		drawer.querySelector('[data-testid="sidebar"]')!.append(row);
+		swipe(row, 300, 40);
+		await tick();
+		expect(drawerClosed()).toBe(false);
+
+		swipe(screen.getByTestId('sidebar'), 300, 40);
+		await tick();
+		expect(drawerClosed()).toBe(true);
 	});
 });

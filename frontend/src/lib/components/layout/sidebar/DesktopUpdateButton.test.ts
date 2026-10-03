@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api, getErrorMessage: (error: Error) => error.message }));
 const updateAuth = vi.hoisted(() => ({current: {status: {preview_access: false}}}));
@@ -7,6 +7,7 @@ vi.mock('$lib/stores/auth.svelte', () => ({auth: updateAuth}));
 const notice = vi.hoisted(() => ({ info: vi.fn(), warning: vi.fn(), error: vi.fn() }));
 vi.mock('$lib/stores/notifications', () => ({ notify: notice }));
 import DesktopUpdateButton from './DesktopUpdateButton.svelte';
+import DesktopUpdateButtonHarness from '$lib/test-stubs/DesktopUpdateButtonHarness.svelte';
 const worker = { device_id:'local', device_name:'Current worker', online:true, supported:true, allow_updates:true, phase:'available', version:'abc123' };
 const state = { allow_updates:true, update_all_workers:false, workers:[worker] };
 beforeEach(() => { localStorage.clear(); updateAuth.current.status.preview_access = false; vi.resetAllMocks(); api.get.mockResolvedValue(state); api.post.mockResolvedValue({results:[{device_name:'Current worker',accepted:true,reason:'Request queued'}]}); });
@@ -444,4 +445,50 @@ it('uses the worker’s own role and label when the snapshot carries them', asyn
  expect(button.getAttribute('title')).toContain('Unraid: Not checked yet; will check and download');
  await fireEvent.click(button);
  await waitFor(() => expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates', { action:'download' }));
+});
+
+// #1623: the sidebar's More menu offers a manual check through the button.
+describe('manual check from the host', () => {
+ const idle = { ...state, workers:[{ ...worker, phase:'idle', version:null }] };
+ const canCheck = () => screen.getByTestId('can-check').textContent;
+ it('tells the host a check makes sense only while updates are allowed', async () => {
+  api.get.mockResolvedValue(idle);
+  render(DesktopUpdateButtonHarness);
+  await waitFor(() => expect(canCheck()).toBe('yes'));
+  cleanup();
+  api.get.mockResolvedValue({ ...idle, allow_updates:false });
+  render(DesktopUpdateButtonHarness);
+  await waitFor(() => expect(api.get).toHaveBeenCalledTimes(2));
+  expect(canCheck()).toBe('no');
+ });
+ it('never offers the check from an agent preview', async () => {
+  updateAuth.current.status.preview_access = true;
+  render(DesktopUpdateButtonHarness);
+  await Promise.resolve();
+  expect(canCheck()).toBe('no');
+  expect(api.get).not.toHaveBeenCalled();
+ });
+ it('asks every worker in scope to check and says so', async () => {
+  api.get.mockResolvedValue(idle);
+  render(DesktopUpdateButtonHarness);
+  await waitFor(() => expect(canCheck()).toBe('yes'));
+  await fireEvent.click(screen.getByRole('button', { name:'Manual check' }));
+  await waitFor(() => expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates', { action:'check' }));
+  expect(notice.info).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ title:'Checking for updates' }));
+ });
+ it('reports an update already on offer instead of checking again', async () => {
+  render(DesktopUpdateButtonHarness);
+  await screen.findByRole('button', { name:'Download update' });
+  await fireEvent.click(screen.getByRole('button', { name:'Manual check' }));
+  await waitFor(() => expect(notice.info).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ title:'Update available' })));
+  expect(api.post).not.toHaveBeenCalled();
+ });
+ it('names a refused check rather than claiming it started', async () => {
+  api.get.mockResolvedValue(idle);
+  api.post.mockResolvedValue({ results:[{ device_name:'Current worker', accepted:false, reason:'Updater offline' }] });
+  render(DesktopUpdateButtonHarness);
+  await waitFor(() => expect(canCheck()).toBe('yes'));
+  await fireEvent.click(screen.getByRole('button', { name:'Manual check' }));
+  await waitFor(() => expect(notice.warning).toHaveBeenCalledWith(expect.stringContaining('Updater offline'), expect.objectContaining({ title:'Update check needs attention' })));
+ });
 });

@@ -2,6 +2,11 @@
 	/**
 	 * ProfileSelector - Profile selection dropdown in the controls dock.
 	 * Uses GroupedSelector for group-aware profile selection.
+	 *
+	 * In the Assistant's own conversation the agent is fixed, so the chip turns
+	 * into the way to the Assistant's settings: its avatar, its name and a gear.
+	 * The conversation itself carries no header, so this chip (in the composer
+	 * on desktop, in the controls sheet on the phone) is that door.
 	 */
 	import { onMount } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
@@ -9,6 +14,10 @@
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { layout } from '$lib/stores/layout.svelte';
+	import { assistantState } from '$lib/stores/assistant';
+	import { isAdmin } from '$lib/stores/auth.svelte';
+	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
+	import { Settings2 } from 'lucide-svelte';
 
 	interface Props {
 		sheetMode?: boolean;
@@ -32,6 +41,17 @@
 		$profiles.find(p => p.id === $activeSession.profile)?.name
 			|| (hasNoAgents ? 'No agents' : 'Agent')
 	);
+
+	const assistant = $derived(
+		$isAdmin && $assistantState?.home_session_id && $assistantState.home_session_id === $activeSession.sessionId
+			? $assistantState
+			: null
+	);
+	const assistantName = $derived(assistant?.assistant_name?.trim() || 'Assistant');
+
+	function openAssistantSettings() {
+		if (assistant) layout.openFeaturePage('assistant', assistant.agent_id);
+	}
 
 	function createAgent() {
 		closeProfileDropdown();
@@ -81,6 +101,19 @@
 </script>
 
 <div class="selector-wrapper" class:sheet-mode={sheetMode} bind:this={profileDropdownRef}>
+	{#if assistant}
+	<button
+		type="button"
+		class="ctx-chip context-selector-btn assistant-chip"
+		onclick={openAssistantSettings}
+		title="Assistant settings"
+		aria-label="{assistantName} settings"
+	>
+		<AgentAvatar avatar={assistant.avatar_id} size={sheetMode ? 22 : 16} />
+		<span class="ctx-chip-label selector-text">{assistantName}</span>
+		<Settings2 class="assistant-gear" size={sheetMode ? 15 : 12} strokeWidth={2} aria-hidden="true" />
+	</button>
+	{:else}
 	<button
 		type="button"
 		class="ctx-chip context-selector-btn {$activeSession.profile ? '' : 'unset'}"
@@ -99,8 +132,9 @@
 			<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
 		</svg>
 	</button>
+	{/if}
 
-	{#if showProfileDropdown}
+	{#if showProfileDropdown && !assistant}
 		<div class="selector-dropdown" role="menu" aria-label="Agent selection">
 			<GroupedSelector
 				bind:this={groupedSelector}
@@ -182,6 +216,25 @@
 	.context-selector-btn.unset:hover {
 		background: color-mix(in oklch, var(--warning) 12%, var(--muted));
 		color: var(--warning);
+	}
+
+	/* The Assistant's chip: the avatar stands in for the person icon and a gear
+	   says the tap opens settings rather than a list. */
+	.assistant-chip {
+		gap: 6px;
+	}
+	.assistant-chip :global(.agent-avatar) {
+		border-radius: 30%;
+	}
+	.assistant-chip :global(.assistant-gear) {
+		flex: none;
+		color: var(--muted-foreground);
+	}
+	.assistant-chip:hover :global(.assistant-gear) {
+		color: var(--foreground);
+	}
+	.sheet-mode .assistant-chip :global(.assistant-gear) {
+		margin-left: auto;
 	}
 
 	.selector-icon {

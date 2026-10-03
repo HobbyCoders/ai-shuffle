@@ -426,50 +426,8 @@ html:root[data-platform='mobile'] .chat-view.is-empty .input-slot.empty-input-la
 html:root[data-platform='mobile'] .chat-view.is-empty .input-slot.empty-input-layout[data-panel-flow] { position: static;
 }
 
-/* SessionCard owns its swipe layout for both touch browsers and the mobile shell. */
-
-/* ── frontend/src/lib/components/layout/SessionModeSwitcher.svelte ─────────── */
-
-html:root[data-platform='mobile'] .mode { height: 40px;
-}
-
-/* ── frontend/src/lib/components/layout/Sidebar.svelte ─────────────────────── */
-
-html:root[data-platform='mobile'] .iconbtn { width: 40px; height: 40px;
-}
-
-html:root[data-platform='mobile'] .ghostrow { height: 44px;
-}
-
-html:root[data-platform='mobile'] .shortcut { display: none;
-}
-
-/* The drawer is fullscreen, so the brand row sits under the status bar /
-   notch unless it clears the inset itself. */
-html:root[data-platform='mobile'] .sb-top { padding-top: env(safe-area-inset-top, 0px);
-}
-
-html:root[data-platform='mobile'] .sb-head { height: 56px;
-}
-
-/* ── frontend/src/lib/components/layout/sidebar/WorkspaceCustomize.svelte ──── */
-
-html:root[data-platform='mobile'] .crow { height: 44px;
-}
-
-html:root[data-platform='mobile'] .cb { width: 20px; height: 20px;
-}
-
-html:root[data-platform='mobile'] .grip { padding: 10px 6px;
-}
-
-/* ── frontend/src/lib/components/layout/sidebar/WorkspaceNav.svelte ────────── */
-
-html:root[data-platform='mobile'] .ghostrow { height: 40px;
-}
-
-html:root[data-platform='mobile'] .mi { height: 40px;
-}
+/* SessionCard, Sidebar, SidebarRail, SidebarSheet and WorkspaceCustomize size
+   their own touch targets (class:phone and @media (hover: none)). */
 
 /* ── frontend/src/lib/components/settings/shell (Settings) ───────────────── */
 

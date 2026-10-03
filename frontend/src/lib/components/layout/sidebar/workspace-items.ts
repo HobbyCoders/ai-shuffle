@@ -2,7 +2,7 @@
  * The shape the sidebar hands to its Workspace nav and Customize dialog.
  *
  * Sidebar.svelte builds the list (it owns the admin gating and knows which
- * destination the main panel is currently showing); WorkspaceNav renders it and
+ * destination the main panel is currently showing); SidebarRail renders it and
  * WorkspaceCustomize edits its order and visibility. `id` doubles as the
  * `ViewType` the row opens, which is why neither of those components needs a
  * lookup table to call `onOpenFeature` or `preloadPanelForView`.

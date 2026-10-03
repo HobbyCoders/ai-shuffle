@@ -34,13 +34,13 @@ async function run(viewport, touch) {
 	const settle = async () => {
 		const card = page.locator('.scard').first();
 		if (touch) {
-			// A long swipe left across the row commits its one action on release.
+			// A long swipe right settles the row on release (left would archive).
 			const box = await card.boundingBox();
 			const y = box.y + box.height / 2;
 			const point = (x) => [{ x, y, id: 1 }];
-			await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: point(box.x + box.width - 20) });
+			await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: point(box.x + 20) });
 			for (let step = 1; step <= 12; step++) {
-				await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: point(box.x + box.width - 20 - step * 22) });
+				await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: point(box.x + 20 + step * 22) });
 				await page.waitForTimeout(16);
 			}
 			await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
@@ -48,7 +48,8 @@ async function run(viewport, touch) {
 			await card.hover();
 			await page.getByTitle(/Settle session|Move to Active/).first().click();
 		}
-		await page.waitForTimeout(400);
+		// The commit waits out the slide and fold before it calls the API.
+		await page.waitForTimeout(800);
 	};
 	const items = () => page.getByTestId('notifications').locator('li').allTextContents();
 	const membership = () => page.getByTestId('membership').textContent();

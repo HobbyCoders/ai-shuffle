@@ -8,7 +8,10 @@ declare global {
 		// interface Error {}
 		// interface Locals {}
 		// interface PageData {}
-		// interface PageState {}
+		interface PageState {
+			/** Set while the navigation drawer's Back entry is on the stack. */
+			mobileDrawer?: boolean;
+		}
 		// interface Platform {}
 	}
 }

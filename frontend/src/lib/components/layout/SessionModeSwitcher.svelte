@@ -1,5 +1,7 @@
 <script lang="ts">
-	/** Select the capabilities for a new conversation. History is never partitioned. */
+	/** Pick what a NEW conversation can do: a Workspace (code tools) or a plain
+	 *  Chat. Icon-only, so it fits the sidebar header beside the bell; the label
+	 *  rides on aria-label and the hover tooltip. History is never partitioned. */
 	import { Code2, MessagesSquare } from 'lucide-svelte';
 	import { type SessionMode } from '$lib/stores/sessionMode.svelte';
 
@@ -10,29 +12,29 @@
 
 	let { value, onSelect }: Props = $props();
 
-	const OPTIONS: { mode: SessionMode; label: string; icon: typeof Code2 }[] = [
-		{ mode: 'code', label: 'Workspace', icon: Code2 },
-		{ mode: 'chat', label: 'Chat', icon: MessagesSquare }
+	const OPTIONS: { mode: SessionMode; label: string; hint: string; icon: typeof Code2 }[] = [
+		{ mode: 'code', label: 'Workspace', hint: 'New sessions get workspace tools', icon: Code2 },
+		{ mode: 'chat', label: 'Chat', hint: 'New sessions are plain chats', icon: MessagesSquare }
 	];
 
 	let buttons = $state<(HTMLButtonElement | null)[]>([]);
 
-	/** Which column the thumb sits over. Clamped so an unknown value parks it
-	 *  on the first lane instead of sliding the thumb out of the trough. */
+	/** Which tab the thumb sits under. Clamped so an unknown value parks it on
+	 *  the first tab; a historical voice session reads as Chat. */
 	const index = $derived(Math.max(0, OPTIONS.findIndex((o) => o.mode === (value === 'voice' ? 'chat' : value))));
 
 	/** Arrow keys move the selection AND the focus, which is what a radiogroup
-	 *  promises — Home/End jump to the ends. */
-	function handleKeydown(e: KeyboardEvent, index: number) {
+	 *  promises; Home/End jump to the ends. */
+	function handleKeydown(e: KeyboardEvent, i: number) {
 		let next: number;
 		switch (e.key) {
 			case 'ArrowRight':
 			case 'ArrowDown':
-				next = (index + 1) % OPTIONS.length;
+				next = (i + 1) % OPTIONS.length;
 				break;
 			case 'ArrowLeft':
 			case 'ArrowUp':
-				next = (index - 1 + OPTIONS.length) % OPTIONS.length;
+				next = (i - 1 + OPTIONS.length) % OPTIONS.length;
 				break;
 			case 'Home':
 				next = 0;
@@ -49,104 +51,77 @@
 	}
 </script>
 
-<div class="modes" role="radiogroup" aria-label="New conversation capabilities" style="--mode-index:{index}">
+<div class="modetog" role="radiogroup" aria-label="New conversation capabilities" style="--i:{index}">
 	<span class="thumb" aria-hidden="true"></span>
 	{#each OPTIONS as opt, i (opt.mode)}
 		<button
 			bind:this={buttons[i]}
-			class="mode"
+			class="tab"
 			class:on={index === i}
 			type="button"
 			role="radio"
 			aria-checked={index === i}
 			aria-label={opt.label}
+			title={`${opt.label}: ${opt.hint.toLowerCase()}`}
 			tabindex={index === i ? 0 : -1}
 			onclick={() => onSelect(opt.mode)}
 			onkeydown={(e) => handleKeydown(e, i)}
 		>
-			<opt.icon size={14} strokeWidth={1.9} />
-			<span class="label">{opt.label}</span>
+			<opt.icon size={15} strokeWidth={1.9} />
 		</button>
 	{/each}
 </div>
 
 <style>
-	.modes {
+	.modetog {
 		position: relative;
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		margin: 0;
+		display: inline-grid;
+		grid-template-columns: repeat(2, 34px);
+		flex: none;
 		padding: 3px;
 		border: 1px solid var(--sidebar-border);
-		border-radius: 9px;
-		background: oklch(0 0 0 / 0.5);
-		box-shadow: inset 0 1px 2px oklch(0 0 0 / 0.6);
-		container-type: inline-size;
+		border-radius: 10px;
+		background: oklch(1 0 0 / 0.035);
 	}
 	.thumb {
 		position: absolute;
 		top: 3px;
 		bottom: 3px;
 		left: 3px;
-		width: calc((100% - 6px) / 2);
+		width: 34px;
 		border-radius: 7px;
-		background: linear-gradient(
-			180deg,
-			color-mix(in oklch, var(--sidebar-accent-active) 100%, var(--foreground) 6%),
-			var(--sidebar-accent)
-		);
-		box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.1), 0 2px 6px oklch(0 0 0 / 0.5);
-		transform: translateX(calc(var(--mode-index, 0) * 100%));
-		transition: transform 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+		background: var(--sidebar-accent-active);
+		box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.08), 0 1px 4px oklch(0 0 0 / 0.45);
+		transform: translateX(calc(var(--i, 0) * 100%));
+		transition: transform 0.24s cubic-bezier(0.16, 1, 0.3, 1);
 		pointer-events: none;
 	}
-	.mode {
+	.tab {
 		position: relative;
 		z-index: 1;
-		min-width: 0;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 6px;
-		height: 36px;
-		padding: 0 6px;
+		display: grid;
+		place-items: center;
+		height: 26px;
+		padding: 0;
 		border: none;
-		background: transparent;
 		border-radius: 7px;
+		background: transparent;
 		color: var(--sidebar-muted);
-		font-size: 11.5px;
-		font-weight: 500;
-		letter-spacing: 0.01em;
 		cursor: pointer;
-		transition: background-color 0.13s ease, color 0.13s ease;
+		transition: color 0.13s ease;
 	}
-	.mode :global(svg) { flex: none; color: currentColor; }
-	.mode .label {
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	.mode:hover { color: var(--foreground); }
-	/* The thumb carries the selection; the button only brightens. */
-	.mode.on { color: var(--foreground); }
-	.mode.on :global(svg) { color: var(--primary); }
-
-	/* The sidebar is user-resizable down to 220px; at that width three labels
-	   plus their icons stop fitting, so the icons carry the lane on their own. */
-	@container (max-width: 250px) {
-		.mode .label { display: none; }
-		.mode { gap: 0; }
-	}
-
-	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+	.tab:hover { color: var(--foreground); }
+	.tab.on { color: var(--primary); }
+	.tab:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
 	/* Touch sizing: the mobile shell, plus any touch-only pointer. */
 	@media (hover: none) {
-		.mode { height: 44px; }
+		.modetog { grid-template-columns: repeat(2, 40px); border-radius: 11px; }
+		.thumb { width: 40px; border-radius: 8px; }
+		.tab { height: 32px; border-radius: 8px; }
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.mode, .thumb { transition: none; }
+		.tab, .thumb { transition: none; }
 	}
 </style>

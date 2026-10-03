@@ -12,7 +12,6 @@
 	import { forkOfferedSessionHere } from '$lib/components/chat/fork-here';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
-	import AssistantConversationHeader from '$lib/components/assistant/AssistantConversationHeader.svelte';
 	import { assistantState } from '$lib/stores/assistant';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
@@ -222,7 +221,6 @@
 </script>
 
 <div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined} class:transitioning-from-empty={transitioningFromEmpty} class:is-empty={showEmptyHero}>
-	<AssistantConversationHeader sessionId={$activeSession.sessionId} thinking={$activeSession.isStreaming} />
 	{#if showEmptyHero}
 		<!-- Empty state hero: workspace selector / cleared hint. The ChatInput is
 		     NOT rendered here — it lives in the always-mounted .input-slot below so

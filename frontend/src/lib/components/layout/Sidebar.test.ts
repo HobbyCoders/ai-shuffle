@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
 import { sidebarGroups } from '$lib/stores/expansion-preferences';
 
@@ -35,6 +35,11 @@ const mocks = vi.hoisted(() => {
 		backgroundPermissions: store(new Map<string, { count: number; kind: 'permission' | 'question' }>()),
 		activeView: store<unknown>(null),
 		getPullRequests: vi.fn(),
+		setSessionActive: vi.fn(),
+		setSessionArchived: vi.fn(),
+		banner: vi.fn(),
+		apiGet: vi.fn(),
+		apiPost: vi.fn(),
 	};
 });
 
@@ -49,7 +54,8 @@ vi.mock('$lib/stores/app-data.svelte', () => ({
 	sessionsHasMore: mocks.sessionsHasMore,
 	sessionsLoadingMore: mocks.sessionsLoadingMore,
 	appData: {
-		setSessionActive: vi.fn(),
+		setSessionActive: mocks.setSessionActive,
+		setSessionArchived: mocks.setSessionArchived,
 		deleteSession: vi.fn(),
 		renameSession: vi.fn(),
 		loadSessions: vi.fn(),
@@ -79,12 +85,22 @@ vi.mock('$lib/stores/layout.svelte', () => ({
 
 vi.mock('$lib/api/client', () => ({
 	forkSession: vi.fn(),
+	// The update button in the header reads the update policy (#1623).
+	api: { get: mocks.apiGet, post: mocks.apiPost },
+	getErrorMessage: (error: Error, fallback: string) => error?.message || fallback,
 }));
 vi.mock('$lib/api/assistant', () => ({ getAssistant: vi.fn().mockResolvedValue(null), getAgentIdentities: vi.fn().mockResolvedValue([]) }));
 
 vi.mock('$lib/stores/notifications', async (importOriginal) => ({
 	...await importOriginal<typeof import('$lib/stores/notifications')>(),
-	notify: Object.assign(vi.fn(), { markAllRead: vi.fn() }),
+	notify: Object.assign(vi.fn(), {
+		markAllRead: vi.fn(),
+		banner: mocks.banner,
+		dismissLive: vi.fn(),
+		info: vi.fn(),
+		warning: vi.fn(),
+		error: vi.fn(),
+	}),
 }));
 
 vi.mock('$lib/api/github', () => ({
@@ -137,6 +153,8 @@ import { appMode } from '$lib/stores/sessionMode.svelte';
 import { sidebarWorkspace } from '$lib/stores/sidebar-prefs.svelte';
 import Sidebar from './Sidebar.svelte';
 import { platform } from '$lib/stores/platform.svelte';
+import { acceptAssistant, assistantState } from '$lib/stores/assistant';
+import type { AssistantState } from '$lib/api/assistant';
 
 function session(
 	id: string,
@@ -238,6 +256,11 @@ beforeEach(() => {
 	// Handles cache their resolved chunk forever by design; a fresh map per test
 	// keeps "fetched exactly once" meaningful instead of trivially true.
 	panelSpies.handles.clear();
+	mocks.setSessionActive.mockReset().mockResolvedValue(undefined);
+	mocks.setSessionArchived.mockReset().mockResolvedValue(undefined);
+	mocks.banner.mockReset().mockReturnValue('banner-id');
+	mocks.apiGet.mockReset().mockResolvedValue({ allow_updates: false, update_all_workers: false, workers: [] });
+	mocks.apiPost.mockReset();
 	mocks.projects.set([
 		{ id: 'visible-project', name: 'Visible Project' },
 		{ id: 'hidden-project', name: 'Hidden Project' },
@@ -252,12 +275,37 @@ beforeEach(() => {
 afterEach(() => {
 	cleanup();
 	platform.set('desktop');
+	assistantState.set(null);
 });
+
+// ── Filter sheet ────────────────────────────────────────────────────────────
+
+async function openFilter(): Promise<HTMLElement> {
+	await fireEvent.click(screen.getByRole('button', { name: 'Filter' }));
+	return screen.getByRole('dialog', { name: 'Filter sessions' });
+}
+
+function filterOption(label: string): HTMLElement {
+	const sheet = screen.getByRole('dialog', { name: 'Filter sessions' });
+	return within(sheet).getByRole('button', { name: label });
+}
+
+function filterLabels(): string[] {
+	const sheet = screen.getByRole('dialog', { name: 'Filter sessions' });
+	return within(sheet).getAllByRole('button').map((node) => node.textContent?.trim() ?? '');
+}
+
+/** Section headers, whitespace-normalized: "Active 1". */
+function sectLabels(): string[] {
+	return Array.from(document.querySelectorAll('.sect')).map((node) =>
+		node.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+	);
+}
 
 describe('Sidebar session groups', () => {
 	it('shares collapsed groups with a mounted sidebar and resets them on account change', async () => {
 		const { container } = render(Sidebar);
-		const header = () => Array.from(container.querySelectorAll<HTMLButtonElement>('.grouplabel'))
+		const header = () => Array.from(container.querySelectorAll<HTMLButtonElement>('.sect'))
 			.find(button => button.textContent?.includes('Settled'))!;
 		await fireEvent.click(header());
 		expect(sidebarGroups.current.settled).toBe(true);
@@ -282,10 +330,7 @@ describe('Sidebar session groups', () => {
 			},
 		});
 
-		const labels = Array.from(document.querySelectorAll('.grouplabel')).map((node) =>
-			node.textContent?.replace(/\s+/g, ' ').trim()
-		);
-		expect(labels).toEqual(['Active 1', 'Settled 1']);
+		expect(sectLabels()).toEqual(['Active 1', 'Settled 1']);
 		expect(screen.getByText('Active chat')).toBeTruthy();
 		expect(screen.getByText('Settled chat')).toBeTruthy();
 	});
@@ -301,9 +346,9 @@ describe('Sidebar session groups', () => {
 		});
 
 		expect(screen.queryByText('Hidden worker')).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
-		expect(screen.getByRole('menuitem', { name: /Visible Project/ })).toBeTruthy();
-		expect(screen.queryByRole('menuitem', { name: /Hidden Project/ })).toBeNull();
+		await openFilter();
+		expect(filterLabels()).toContain('Visible Project');
+		expect(filterLabels()).not.toContain('Hidden Project');
 	});
 
 	it('excludes chats from a deleted project and omits it from the project filter', async () => {
@@ -319,9 +364,9 @@ describe('Sidebar session groups', () => {
 
 		expect(screen.getByText('Active chat')).toBeTruthy();
 		expect(screen.queryByText('Orphan chat')).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
-		expect(screen.getByRole('menuitem', { name: /Visible Project/ })).toBeTruthy();
-		expect(screen.queryByRole('menuitem', { name: /Deleted Project/ })).toBeNull();
+		await openFilter();
+		expect(filterLabels()).toContain('Visible Project');
+		expect(filterLabels().join('|')).not.toMatch(/deleted/i);
 	});
 
 	it('keeps a remote-only catalog project in the list and filter', async () => {
@@ -344,8 +389,8 @@ describe('Sidebar session groups', () => {
 		render(Sidebar, { props: sidebarProps });
 
 		expect(screen.getByText('Remote chat')).toBeTruthy();
-		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
-		expect(screen.getByRole('menuitem', { name: /Other/ })).toBeTruthy();
+		await openFilter();
+		expect(filterLabels()).toContain('Other');
 	});
 
 	it('excludes chats from a deleted device and omits it from the device filter', async () => {
@@ -368,10 +413,9 @@ describe('Sidebar session groups', () => {
 		expect(screen.getByText('Local chat')).toBeTruthy();
 		expect(screen.getByText('Laptop chat')).toBeTruthy();
 		expect(screen.queryByText('Gone device chat')).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: /All devices/ }));
-		expect(screen.getByRole('menuitem', { name: /This device/ })).toBeTruthy();
-		expect(screen.getByRole('menuitem', { name: /Laptop/ })).toBeTruthy();
-		expect(screen.queryByRole('menuitem', { name: /Unknown device/ })).toBeNull();
+		await openFilter();
+		expect(filterLabels()).toEqual(expect.arrayContaining(['All devices', 'This device', 'Laptop']));
+		expect(filterLabels()).not.toContain('Unknown device');
 	});
 
 	it('shows Needs Permission while a permission prompt is pending', async () => {
@@ -463,24 +507,54 @@ describe('Sidebar session groups', () => {
 		expect(cardFrame('Active chat').textContent).toContain('Working');
 	});
 
-	it('marks the project ghost row active once a project filter is applied', async () => {
+	it('marks the filter button and shows a clearable chip once a filter is applied', async () => {
+		mocks.sessions.set([
+			session('active', 'Active chat', 'visible-project', true),
+			session('other', 'Other project chat', 'other-project', false, false, { project_name: 'Other Project' }),
+			session('peer', 'Laptop chat', 'visible-project', false, false, {
+				is_remote: true,
+				instance_id: 'laptop',
+				device_name: 'Laptop',
+			}),
+		]);
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
 		render(Sidebar, { props: sidebarProps });
 
-		expect(document.querySelector('.fbtn.set')).toBeNull();
+		expect(document.querySelector('.filter-btn.set')).toBeNull();
 
-		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
-		await fireEvent.click(screen.getByRole('menuitem', { name: /Visible Project/ }));
+		await openFilter();
+		await fireEvent.click(filterOption('Visible Project'));
+		expect(filterOption('Visible Project').getAttribute('aria-pressed')).toBe('true');
+		await fireEvent.click(filterOption('Laptop'));
 
-		const active = document.querySelector('.fbtn.set');
-		expect(active).toBeTruthy();
-		expect(active?.textContent).toContain('Visible Project');
+		expect(document.querySelector('.filter-btn.set')).toBeTruthy();
+		expect(cardIds()).toEqual(['peer']);
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Clear device filter Laptop' }));
+		expect(cardIds()).toEqual(['active', 'peer']);
+		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
+		expect(cardIds()).toEqual(['active', 'other', 'peer']);
+		expect(document.querySelector('.filter-btn.set')).toBeNull();
+	});
+
+	it('closes the filter sheet on Escape and on the scrim', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		await openFilter();
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(screen.queryByRole('dialog', { name: 'Filter sessions' })).toBeNull();
+
+		await openFilter();
+		await fireEvent.click(document.querySelector('.sheet-scrim.open') as HTMLElement);
+		expect(screen.queryByRole('dialog', { name: 'Filter sessions' })).toBeNull();
 	});
 });
 
 describe('Sidebar Needs you lane', () => {
-	const labels = () => Array.from(document.querySelectorAll('.grouplabel')).map((node) =>
-		node.textContent?.replace(/\s+/g, ' ').trim()
-	);
+	const labels = sectLabels;
 	const lane = () => document.querySelector('[data-group="needs-you"]');
 
 	it('lifts rows waiting on a prompt out of Active and Settled, and back when answered', async () => {
@@ -489,7 +563,7 @@ describe('Sidebar Needs you lane', () => {
 			['settled', { count: 1, kind: 'question' }],
 		]));
 		render(Sidebar, { props: sidebarProps });
-		expect(labels()).toEqual(['Needs you 2', 'Settled 0']);
+		expect(labels()).toEqual(['Needs you 2', 'Active 0', 'Settled 0']);
 		expect(lane()?.textContent).toContain('Active chat');
 		expect(lane()?.textContent).toContain('Settled chat');
 
@@ -782,19 +856,20 @@ describe('Sidebar open-PR refresh (R8)', () => {
 	});
 });
 
-describe('Sidebar delegated card menus (R15)', () => {
-	// Swipe-to-reveal is the mobile shell's gesture: the cards render their
-	// swipe layout because the platform is mobile, not because of a width.
+describe('Sidebar multi-select (R15)', () => {
+	// Long press is a touch gesture, so selection starts from the mobile shell.
 	beforeEach(() => platform.set('mobile'));
 
-	function openActions(id: string) {
+	async function longPress(id: string) {
 		const frame = document.querySelector(`[data-session-card="${id}"]`) as HTMLElement;
 		const card = frame.querySelector('.scard') as HTMLElement;
-		fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
-		fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 22 });
-		fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 22 });
-		return frame;
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		await vi.advanceTimersByTimeAsync(520);
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		return card;
 	}
+
+	const selbar = () => document.querySelector('.selbar') as HTMLElement;
 
 	it('does not attach a window click listener per rendered card', () => {
 		function countClickListeners(cards: number): number {
@@ -811,44 +886,79 @@ describe('Sidebar delegated card menus (R15)', () => {
 			return count;
 		}
 
-		// Every SessionCard used to attach its own pair, so a single click
-		// anywhere ran one handler per rendered card (60+). The sidebar owns the
-		// open-card id instead. The absolute count is not the point — it also
-		// covers the header's notification bell — so assert the invariant that
-		// actually matters: it is flat in the number of cards.
+		// Every SessionCard used to attach its own listener, so a single click
+		// anywhere ran one handler per rendered card. Assert the invariant that
+		// matters: the count is flat in the number of cards.
 		expect(countClickListeners(12)).toBe(countClickListeners(1));
 	});
 
-	it('closes the open card actions on an outside click', async () => {
-		render(Sidebar, { props: sidebarProps });
-		const frame = openActions('settled');
-		await tick();
-		expect(frame.classList.contains('actions-open')).toBe(true);
+	it('starts selecting on a long press, then settles the picked rows with Undo', async () => {
+		vi.useFakeTimers();
+		try {
+			const onOpenSession = vi.fn();
+			render(Sidebar, { props: { ...sidebarProps, onOpenSession } });
+			expect(selbar().getAttribute('aria-hidden')).toBe('true');
 
-		await fireEvent.click(document.body);
-		await tick();
-		expect(frame.classList.contains('actions-open')).toBe(false);
+			const card = await longPress('active');
+			await fireEvent.click(card);
+			expect(selbar().getAttribute('aria-hidden')).toBeNull();
+			expect(selbar().textContent).toContain('1 selected');
+			expect(onOpenSession).not.toHaveBeenCalled();
+
+			// Only an active row is picked: Settle is offered, Active is not.
+			expect(within(selbar()).queryByRole('button', { name: /Active/ })).toBeNull();
+			await fireEvent.click(within(selbar()).getByRole('button', { name: /Settle/ }));
+			await vi.advanceTimersByTimeAsync(0);
+
+			expect(mocks.setSessionActive).toHaveBeenCalledWith('active', false);
+			expect(mocks.banner).toHaveBeenCalledTimes(1);
+			const [, options] = mocks.banner.mock.calls[0] as [string, { action?: { label: string } }];
+			expect(options.action?.label).toBe('Undo');
+			expect(selbar().getAttribute('aria-hidden')).toBe('true');
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
-	it('leaves the open card alone when the click lands inside it', async () => {
-		render(Sidebar, { props: sidebarProps });
-		const frame = openActions('settled');
-		await tick();
+	it('adds rows with a tap while selecting and offers both moves for a mixed pick', async () => {
+		vi.useFakeTimers();
+		try {
+			const onOpenSession = vi.fn();
+			render(Sidebar, { props: { ...sidebarProps, onOpenSession } });
 
-		await fireEvent.click(frame.querySelector('.card-actions') as HTMLElement);
-		await tick();
-		expect(frame.classList.contains('actions-open')).toBe(true);
+			await longPress('active');
+			await fireEvent.click(document.querySelector('[data-session-card="settled"] .scard') as HTMLElement);
+
+			expect(selbar().textContent).toContain('2 selected');
+			expect(onOpenSession).not.toHaveBeenCalled();
+			expect(within(selbar()).getByRole('button', { name: /Active/ })).toBeTruthy();
+			expect(within(selbar()).getByRole('button', { name: /Settle/ })).toBeTruthy();
+
+			await fireEvent.click(within(selbar()).getByRole('button', { name: 'Archive' }));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(mocks.setSessionArchived).toHaveBeenCalledWith('active', true, true);
+			expect(mocks.setSessionArchived).toHaveBeenCalledWith('settled', true, false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
-	it('closes the open card actions on Escape', async () => {
-		render(Sidebar, { props: sidebarProps });
-		const frame = openActions('settled');
-		await tick();
-		expect(frame.classList.contains('actions-open')).toBe(true);
+	it('cancels selection on Escape and from the bar', async () => {
+		vi.useFakeTimers();
+		try {
+			render(Sidebar, { props: sidebarProps });
 
-		await fireEvent.keyDown(window, { key: 'Escape' });
-		await tick();
-		expect(frame.classList.contains('actions-open')).toBe(false);
+			await longPress('settled');
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			expect(selbar().getAttribute('aria-hidden')).toBe('true');
+
+			await longPress('settled');
+			await fireEvent.click(within(selbar()).getByRole('button', { name: 'Cancel selection' }));
+			expect(selbar().getAttribute('aria-hidden')).toBe('true');
+			expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
@@ -872,39 +982,46 @@ describe('Sidebar load-more shelf (W1)', () => {
 	});
 });
 
-// ── Workspace nav helpers (shared by the two blocks below) ──────────────────
+// ── Rail helpers (shared by the blocks below) ──────────────────────────────
 
-/** The inline Workspace rows, keyed by their visible label. */
-function wsrow(label: string): HTMLElement {
-	const row = Array.from(document.querySelectorAll('.wsrow')).find(
-		(node) => node.querySelector('.label')?.textContent?.trim() === label
-	);
-	if (!row) throw new Error(`no workspace row labelled ${label}`);
-	return row as HTMLElement;
+/** A rail destination button, by its label. */
+function railItem(label: string): HTMLElement {
+	const rail = screen.getByRole('navigation', { name: 'Workspace' });
+	return within(rail).getByRole('button', { name: label });
 }
 
-/** Labels of the inline rows, in order, excluding the More row itself. */
-function wsLabels(): string[] {
-	return Array.from(document.querySelectorAll('.wsrow:not(.morerow) .label')).map(
-		(node) => node.textContent?.trim() ?? ''
+/** Labels of the rail's destinations, in order (New, More and Settings excluded). */
+function railLabels(): string[] {
+	return Array.from(document.querySelectorAll('[data-rail-item]')).map(
+		(node) => node.getAttribute('aria-label') ?? ''
 	);
 }
 
-/** Open the More flyout and return its menu items. */
+/** Open the More menu and return its items. */
 async function openMore(): Promise<HTMLElement[]> {
-	await fireEvent.click(screen.getByRole('button', { name: /More/ }));
-	return screen.getAllByRole('menuitem') as HTMLElement[];
+	await fireEvent.click(railItem('More'));
+	const menu = screen.getByRole('menu', { name: 'More destinations' });
+	return within(menu).getAllByRole('menuitem') as HTMLElement[];
 }
 
-function flyoutItem(label: string): HTMLElement {
-	const item = screen
+function menuItem(label: string): HTMLElement {
+	const menu = screen.getByRole('menu', { name: 'More destinations' });
+	const item = within(menu)
 		.getAllByRole('menuitem')
-		.find((node) => node.textContent?.trim() === label);
-	if (!item) throw new Error(`no flyout item labelled ${label}`);
+		.find((node) => node.textContent?.trim().startsWith(label));
+	if (!item) throw new Error(`no More item labelled ${label}`);
 	return item as HTMLElement;
 }
 
-describe('Sidebar workspace nav prefetch', () => {
+const itemLabel = (node: HTMLElement) => node.querySelector('span')?.textContent?.trim();
+
+async function openCustomize(): Promise<HTMLElement> {
+	await openMore();
+	await fireEvent.click(menuItem('Customize the rail'));
+	return screen.getByRole('dialog', { name: 'Customize the rail' });
+}
+
+describe('Sidebar rail prefetch', () => {
 	it('does not prefetch anything just by rendering', () => {
 		render(Sidebar, { props: sidebarProps });
 
@@ -912,10 +1029,10 @@ describe('Sidebar workspace nav prefetch', () => {
 		expect(panelSpies.chunkFetches).toEqual([]);
 	});
 
-	it('prefetches the panel chunk when the pointer enters a row', async () => {
+	it('prefetches the panel chunk when the pointer enters a rail button', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		await fireEvent.pointerEnter(wsrow('Projects'));
+		await fireEvent.pointerEnter(railItem('Projects'));
 		await Promise.resolve();
 
 		expect(panelSpies.preloadCalls).toEqual(['project']);
@@ -925,42 +1042,35 @@ describe('Sidebar workspace nav prefetch', () => {
 	it('prefetches on focus, so keyboard navigation warms the same chunk', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		await fireEvent.focus(wsrow('Agents'));
+		await fireEvent.focus(railItem('Agents'));
 		await Promise.resolve();
 
 		expect(panelSpies.preloadCalls).toEqual(['build']);
 		expect(panelSpies.chunkFetches).toEqual(['build']);
 	});
 
-	it('maps every Build sub-view row onto the Build panel chunk', async () => {
-		render(Sidebar, { props: sidebarProps });
-
-		await fireEvent.pointerEnter(wsrow('Agents'));
-		await Promise.resolve();
-
-		expect(panelSpies.chunkFetches).toEqual(['build']);
-	});
-
-	it('prefetches from a flyout item too — a folded row is no less likely', async () => {
+	it('prefetches from a More item too — a folded destination is no less likely', async () => {
 		render(Sidebar, { props: sidebarProps });
 
 		await openMore();
-		await fireEvent.pointerEnter(flyoutItem('Notes'));
+		await fireEvent.pointerEnter(menuItem('Stats'));
 		await Promise.resolve();
 
-		expect(panelSpies.preloadCalls).toEqual(['notes']);
-		expect(panelSpies.chunkFetches).toEqual(['notes']);
+		// Opening the menu focuses its first item, and focus is intent too, so
+		// the preload may be asked twice; the chunk itself is fetched once.
+		expect(new Set(panelSpies.preloadCalls)).toEqual(new Set(['stats']));
+		expect(panelSpies.chunkFetches).toEqual(['stats']);
 	});
 
 	it('does not re-fetch a chunk on repeated hover or on a later focus', async () => {
 		render(Sidebar, { props: sidebarProps });
-		const row = wsrow('Files');
+		const button = railItem('Files');
 
-		await fireEvent.pointerEnter(row);
+		await fireEvent.pointerEnter(button);
 		await Promise.resolve();
-		await fireEvent.pointerLeave(row);
-		await fireEvent.pointerEnter(row);
-		await fireEvent.focus(row);
+		await fireEvent.pointerLeave(button);
+		await fireEvent.pointerEnter(button);
+		await fireEvent.focus(button);
 		await Promise.resolve();
 
 		// The component asked three times — the handle fetched once.
@@ -972,123 +1082,223 @@ describe('Sidebar workspace nav prefetch', () => {
 		const onOpenFeature = vi.fn();
 		render(Sidebar, { props: { ...sidebarProps, onOpenFeature } });
 
-		const row = wsrow('Files');
-		await fireEvent.pointerEnter(row);
-		await fireEvent.click(row);
+		const button = railItem('Files');
+		await fireEvent.pointerEnter(button);
+		await fireEvent.click(button);
 
 		expect(onOpenFeature).toHaveBeenCalledWith('file-browser');
 	});
 });
 
-describe('Sidebar workspace nav customization', () => {
-	it('shows the default three rows inline and folds the rest into More', async () => {
+describe('Sidebar rail customization', () => {
+	it('shows the default five destinations on the rail and folds the rest into More', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		expect(wsLabels()).toEqual(['Files', 'Agents', 'Projects']);
+		expect(railLabels()).toEqual(['Files', 'Notes', 'Agents', 'Projects', 'Pull requests']);
 
 		const items = await openMore();
-		expect(items.map((n) => n.textContent?.trim())).toEqual([
-			'Notes',
-			'Pull requests',
-			'Stats',
-			'Docs',
-			'Customize',
-		]);
+		expect(items.map((n) => itemLabel(n))).toEqual(['Stats', 'Docs', 'Customize the rail']);
+		expect(menuItem('Customize the rail').textContent).toContain('5 on the rail');
 	});
 
-	it('never offers an admin-only destination to a non-admin, inline or folded', async () => {
+	it('never offers an admin-only destination to a non-admin, on the rail or folded', async () => {
 		render(Sidebar, { props: sidebarProps });
 
 		const items = await openMore();
-		const labels = [...wsLabels(), ...items.map((n) => n.textContent?.trim())];
+		const labels = [...railLabels(), ...items.map((n) => itemLabel(n))];
 		expect(labels).not.toContain('Automations');
-		expect(labels).not.toContain('Settings');
+		expect(screen.queryByRole('button', { name: 'Settings' })).toBeNull();
 	});
 
-	it('lists the admin destinations for an admin', async () => {
-		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
+	it('pins Settings at the rail foot and folds Automations into More for an admin', async () => {
+		const onOpenFeature = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenFeature } });
 
+		await fireEvent.click(railItem('Settings'));
+		expect(onOpenFeature).toHaveBeenCalledWith('settings');
 		const items = await openMore();
-		const labels = items.map((n) => n.textContent?.trim());
-		expect(labels).toContain('Automations');
-		expect(labels).toContain('Settings');
+		expect(items.map((n) => itemLabel(n))).toContain('Automations');
 	});
 
-	it('opens a folded destination from the flyout and closes it behind itself', async () => {
+	it('opens a folded destination from More and closes the menu behind itself', async () => {
 		const onOpenFeature = vi.fn();
 		render(Sidebar, { props: { ...sidebarProps, onOpenFeature } });
 
 		await openMore();
-		await fireEvent.click(flyoutItem('Docs'));
+		expect(railItem('More').getAttribute('aria-expanded')).toBe('true');
+		await fireEvent.click(menuItem('Docs'));
 
 		expect(onOpenFeature).toHaveBeenCalledWith('docs');
-		expect(screen.queryByRole('menuitem', { name: 'Docs' })).toBeNull();
+		expect(screen.queryByRole('menu', { name: 'More destinations' })).toBeNull();
+		expect(railItem('More').getAttribute('aria-expanded')).toBe('false');
 	});
 
-	it('promotes a hidden destination to an inline row from Customize', async () => {
+	it('closes More on Escape', async () => {
 		render(Sidebar, { props: sidebarProps });
 
 		await openMore();
-		await fireEvent.click(flyoutItem('Customize'));
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(screen.queryByRole('menu', { name: 'More destinations' })).toBeNull();
+	});
 
-		const dialog = screen.getByRole('dialog', { name: /Customize workspace/ });
-		expect(dialog).toBeTruthy();
-		// "New session" is listed but pinned — it is not a Workspace destination.
+	it('puts a folded destination on the rail from Customize', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		const dialog = await openCustomize();
+		// New is listed but pinned: it is not a destination.
 		expect(dialog.textContent).toContain('Always first');
 
-		await fireEvent.click(screen.getByRole('checkbox', { name: 'Show Notes' }));
-		expect(wsLabels()).toEqual(['Files', 'Notes', 'Agents', 'Projects']);
+		await fireEvent.click(within(dialog).getByRole('checkbox', { name: 'Show Stats on the rail' }));
+		expect(railLabels()).toEqual(['Files', 'Notes', 'Agents', 'Projects', 'Pull requests', 'Stats']);
 
 		// And it survives the dialog, because the store wrote it.
-		await fireEvent.click(screen.getByRole('button', { name: 'Done' }));
-		expect(screen.queryByRole('dialog', { name: /Customize workspace/ })).toBeNull();
-		expect(wsLabels()).toEqual(['Files', 'Notes', 'Agents', 'Projects']);
+		await fireEvent.click(within(dialog).getByRole('button', { name: 'Done' }));
+		expect(screen.queryByRole('dialog', { name: 'Customize the rail' })).toBeNull();
+		expect(railLabels()).toEqual(['Files', 'Notes', 'Agents', 'Projects', 'Pull requests', 'Stats']);
 	});
 
-	it('reorders a row from the keyboard, so the feature is not pointer-only', async () => {
+	it('moves a destination off the rail into More', async () => {
 		render(Sidebar, { props: sidebarProps });
 
-		await openMore();
-		await fireEvent.click(flyoutItem('Customize'));
+		const dialog = await openCustomize();
+		const box = within(dialog).getByRole('checkbox', { name: 'Move Notes to More' });
+		expect(box.getAttribute('aria-checked')).toBe('true');
+		await fireEvent.click(box);
+		expect(railLabels()).not.toContain('Notes');
+	});
 
-		await fireEvent.keyDown(screen.getByRole('button', { name: 'Reorder Projects' }), {
-			key: 'ArrowUp',
-		});
-		await fireEvent.keyDown(screen.getByRole('button', { name: 'Reorder Projects' }), {
-			key: 'ArrowUp',
-		});
+	it('reorders a destination from the keyboard, so the feature is not pointer-only', async () => {
+		render(Sidebar, { props: sidebarProps });
 
-		expect(wsLabels()).toEqual(['Files', 'Projects', 'Agents']);
+		const dialog = await openCustomize();
+		const grip = within(dialog).getByRole('button', { name: 'Reorder Projects' });
+		await fireEvent.keyDown(grip, { key: 'ArrowUp' });
+		await fireEvent.keyDown(grip, { key: 'ArrowUp' });
+
+		expect(railLabels()).toEqual(['Files', 'Projects', 'Notes', 'Agents', 'Pull requests']);
+	});
+
+	it('lists the pinned Settings row only for an admin', async () => {
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
+
+		const dialog = await openCustomize();
+		expect(dialog.textContent).toContain('Always last');
+	});
+
+	it('closes Customize on Escape before anything else', async () => {
+		render(Sidebar, { props: sidebarProps });
+
+		await openCustomize();
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(screen.queryByRole('dialog', { name: 'Customize the rail' })).toBeNull();
+	});
+
+	it('opens Customize from a long press on a rail button, without opening it', async () => {
+		vi.useFakeTimers();
+		try {
+			platform.set('mobile');
+			const onOpenFeature = vi.fn();
+			render(Sidebar, { props: { ...sidebarProps, onOpenFeature } });
+			const button = railItem('Files');
+
+			await fireEvent.pointerDown(button, { pointerId: 1, isPrimary: true, pointerType: 'touch', clientX: 10, clientY: 10 });
+			await vi.advanceTimersByTimeAsync(600);
+			await fireEvent.pointerUp(button, { pointerId: 1, isPrimary: true, pointerType: 'touch' });
+			await fireEvent.click(button);
+
+			expect(screen.getByRole('dialog', { name: 'Customize the rail' })).toBeTruthy();
+			expect(onOpenFeature).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('does not long-press with a mouse', async () => {
+		vi.useFakeTimers();
+		try {
+			render(Sidebar, { props: sidebarProps });
+			await fireEvent.pointerDown(railItem('Files'), { pointerId: 1, isPrimary: true, pointerType: 'mouse' });
+			await vi.advanceTimersByTimeAsync(600);
+			expect(screen.queryByRole('dialog', { name: 'Customize the rail' })).toBeNull();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
-describe('Sidebar header and sticky block', () => {
-	it('puts New session first, as a row rather than a header icon', () => {
-		render(Sidebar, { props: sidebarProps });
+describe('Sidebar Check for updates (#1623)', () => {
+	it('offers a manual check under More for an admin while updates are allowed', async () => {
+		mocks.apiGet.mockResolvedValue({ allow_updates: true, update_all_workers: false, workers: [] });
+		mocks.apiPost.mockResolvedValue({ results: [{ device_name: 'This worker', accepted: true, reason: 'Request queued' }] });
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
 
-		const newRow = screen.getByRole('button', { name: /New session/ });
-		expect(newRow.classList.contains('newrow')).toBe(true);
-		// It sits in the sticky block, above the scroll region's workspace rows.
-		expect(newRow.closest('.sb-top')).toBeTruthy();
-		expect(newRow.compareDocumentPosition(wsrow('Files')) & Node.DOCUMENT_POSITION_FOLLOWING)
-			.toBeTruthy();
+		await vi.waitFor(() => expect(mocks.apiGet).toHaveBeenCalled());
+		await openMore();
+		await vi.waitFor(() => expect(menuItem('Check for updates')).toBeTruthy());
+		await fireEvent.click(menuItem('Check for updates'));
+
+		await vi.waitFor(() =>
+			expect(mocks.apiPost).toHaveBeenCalledWith('/settings/application-updates', { action: 'check' })
+		);
+		expect(screen.queryByRole('menu', { name: 'More destinations' })).toBeNull();
 	});
 
-	it('opens the spotlight from the header search button and drops the ghost row', async () => {
+	it('leaves it out while updates are disabled', async () => {
+		mocks.apiGet.mockResolvedValue({ allow_updates: false, update_all_workers: false, workers: [] });
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
+
+		await vi.waitFor(() => expect(mocks.apiGet).toHaveBeenCalled());
+		const items = await openMore();
+		expect(items.map((n) => itemLabel(n))).not.toContain('Check for updates');
+	});
+
+	it('never offers it to a non-admin', async () => {
+		mocks.apiGet.mockResolvedValue({ allow_updates: true, update_all_workers: false, workers: [] });
+		render(Sidebar, { props: sidebarProps });
+
+		await vi.waitFor(() => expect(mocks.apiGet).toHaveBeenCalled());
+		await tick();
+		const items = await openMore();
+		expect(items.map((n) => itemLabel(n))).not.toContain('Check for updates');
+	});
+});
+
+describe('Sidebar header', () => {
+	it('starts a new session from the rail, named for the selected capability', async () => {
+		const onNewSession = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
+
+		await fireEvent.click(railItem('New workspace session'));
+		expect(onNewSession).toHaveBeenCalledTimes(1);
+
+		appMode.set('chat');
+		await tick();
+		expect(railItem('New chat')).toBeTruthy();
+	});
+
+	it('opens the spotlight from the search field', async () => {
 		const onOpenSpotlight = vi.fn();
 		render(Sidebar, { props: { ...sidebarProps, onOpenSpotlight } });
 
-		await fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+		await fireEvent.click(screen.getByRole('button', { name: /Search/ }));
 
 		expect(onOpenSpotlight).toHaveBeenCalledTimes(1);
-		// The old full-width "Search" ghost row is gone.
-		expect(document.querySelector('.ghostrow .label')?.textContent).not.toBe('Search');
 	});
 
-	it('omits the search button when the host threads no spotlight', () => {
+	it('disables search when the host threads no spotlight', () => {
 		render(Sidebar, { props: sidebarProps });
 
-		expect(screen.queryByRole('button', { name: 'Search' })).toBeNull();
+		expect((screen.getByRole('button', { name: /Search/ }) as HTMLButtonElement).disabled).toBe(true);
+	});
+
+	it('shows the shortcut hint on desktop only', () => {
+		render(Sidebar, { props: sidebarProps });
+		expect(screen.getByRole('button', { name: /Search/ }).querySelector('kbd')).toBeTruthy();
+		cleanup();
+
+		platform.set('mobile');
+		render(Sidebar, { props: sidebarProps });
+		expect(screen.getByRole('button', { name: /Search/ }).querySelector('kbd')).toBeNull();
 	});
 
 	it('hosts the notification bell — its only home now', () => {
@@ -1097,120 +1307,137 @@ describe('Sidebar header and sticky block', () => {
 		expect(screen.getByRole('button', { name: /Notifications/ })).toBeTruthy();
 	});
 
-	it('fades the separator in only once the list has actually scrolled', async () => {
+	it('keeps the capability switcher in the header', () => {
 		render(Sidebar, { props: sidebarProps });
 
-		const top = document.querySelector('.sb-top') as HTMLElement;
-		const scroll = document.querySelector('.sb-scroll') as HTMLElement;
-		expect(top.classList.contains('scrolled')).toBe(false);
-
-		Object.defineProperty(scroll, 'scrollTop', { value: 40, configurable: true });
-		await fireEvent.scroll(scroll);
-		expect(top.classList.contains('scrolled')).toBe(true);
-	});
-
-	it('closes an open scope menu on scroll, since its anchor is a snapshot', async () => {
-		render(Sidebar, { props: sidebarProps });
-
-		await fireEvent.click(screen.getByRole('button', { name: /All devices/ }));
-		expect(screen.queryByRole('menuitem', { name: /This device/ })).toBeTruthy();
-
-		await fireEvent.scroll(document.querySelector('.sb-scroll') as HTMLElement);
-		expect(screen.queryByRole('menuitem', { name: /This device/ })).toBeNull();
-	});
-
-	it('clears both scopes from the single clear button on the row', async () => {
-		render(Sidebar, { props: sidebarProps });
-
-		expect(document.querySelector('.scope-clear')).toBeNull();
-
-		await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
-		await fireEvent.click(screen.getByRole('menuitem', { name: /Visible Project/ }));
-		await fireEvent.click(screen.getByRole('button', { name: /All devices/ }));
-		await fireEvent.click(screen.getByRole('menuitem', { name: /This device/ }));
-		expect(document.querySelectorAll('.fbtn.set').length).toBe(2);
-
-		await fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
-		expect(document.querySelectorAll('.fbtn.set').length).toBe(0);
-		expect(document.querySelector('.scope-clear')).toBeNull();
-	});
-
-	it('docks the lane switcher at the panel foot', () => {
-		render(Sidebar, { props: sidebarProps });
-
-		const dock = document.querySelector('.sb-dock');
-		expect(dock?.querySelector('[role="radiogroup"]')).toBeTruthy();
+		const head = document.querySelector('.p-head');
+		expect(head?.querySelector('[role="radiogroup"]')).toBeTruthy();
 	});
 });
 
 describe('Sidebar unified conversation history', () => {
- function fixture() {
-  return [
-   session('legacy', 'Legacy chat', 'visible-project', false),
-   session('coded', 'Code chat', 'visible-project', false, false, { mode: 'code' }),
-   session('chatty', 'Chat chat', null, false, false, { mode: 'chat' }),
-   session('spoken', 'Voice chat', null, false, false, { mode: 'voice' }),
-  ];
- }
- it.each(['code', 'chat', 'voice'] as const)('keeps every historical conversation visible while %s is selected', mode => {
-  appMode.set(mode); mocks.sessions.set(fixture());
-  render(Sidebar, { props: sidebarProps });
-  expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
-  expect(screen.getByRole('button', { name: /All projects/ })).toBeTruthy();
- });
- it('uses a single honest empty state', () => {
-  mocks.sessions.set([]); appMode.set('voice'); render(Sidebar, { props: sidebarProps });
-  expect(document.querySelector('.empty')?.textContent).toBe('No sessions yet');
- });
- it('retains explicit project scope when new-conversation capabilities change', async () => {
-  mocks.sessions.set(fixture()); render(Sidebar, { props: sidebarProps });
-  await fireEvent.click(screen.getByRole('button', { name: /All projects/ }));
-  await fireEvent.click(screen.getByRole('menuitem', { name: /Visible Project/ }));
-  await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
-  expect(cardIds()).toEqual(['legacy', 'coded']);
-  await fireEvent.click(screen.getByRole('button', { name: /Visible Project/ }));
-  await fireEvent.click(screen.getByRole('menuitem', { name: /All projects/ }));
-  expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
- });
- it('offers Workspace and narrow Chat capabilities, not a Voice history lane', () => {
-  render(Sidebar, { props: sidebarProps });
-  const radios = screen.getAllByRole('radio');
-  expect(radios.map(r => r.getAttribute('aria-label'))).toEqual(['Workspace', 'Chat']);
-  expect(radios.map(r => r.getAttribute('aria-checked'))).toEqual(['true', 'false']);
-  expect(screen.getByRole('radiogroup', { name: 'New conversation capabilities' })).toBeTruthy();
- });
- it('opens a new Chat without filtering any session out', async () => {
-  const onNewSession = vi.fn(); const onSelectMode = vi.fn(() => expect(appMode.current).toBe('chat'));
-  mocks.sessions.set(fixture()); render(Sidebar, { props: { ...sidebarProps, onNewSession, onSelectMode } });
-  await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
-  expect(onNewSession).toHaveBeenCalledTimes(1); expect(onSelectMode).toHaveBeenCalledWith('chat');
-  expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
- });
- it('does not discard the current conversation when its capability is reselected', async () => {
-  const onNewSession = vi.fn(); render(Sidebar, { props: { ...sidebarProps, onNewSession } });
-  await fireEvent.click(screen.getByRole('radio', { name: 'Workspace' }));
-  expect(onNewSession).not.toHaveBeenCalled();
- });
- it('treats Chat as already selected while a historical voice session is open', async () => {
-  appMode.set('voice', false); const onNewSession = vi.fn(); render(Sidebar, { props: { ...sidebarProps, onNewSession } });
-  expect(screen.getByRole('radio', { name: 'Chat' }).getAttribute('aria-checked')).toBe('true');
-  await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
-  expect(onNewSession).not.toHaveBeenCalled();
- });
- it('supports roving keyboard focus with no implicit microphone action', async () => {
-  render(Sidebar, { props: sidebarProps });
-  await fireEvent.keyDown(screen.getByRole('radio', { name: 'Workspace' }), { key: 'End' });
-  expect(appMode.current).toBe('chat');
-  await fireEvent.keyDown(screen.getByRole('radio', { name: 'Chat' }), { key: 'Home' });
-  expect(appMode.current).toBe('code');
- });
- it('pins the primary Assistant independently of customized workspace links', async () => {
-  const onOpenFeature = vi.fn(); render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenFeature } });
-  await fireEvent.click(screen.getByRole('button', { name: 'Assistant home' }));
-  expect(onOpenFeature).toHaveBeenCalledWith('assistant');
- });
- it('does not expose owner assistant management to non-admins', () => {
-  render(Sidebar, { props: { ...sidebarProps, isAdmin: false } });
-  expect(screen.queryByRole('button', { name: 'Assistant home' })).toBeNull();
- });
+	function fixture() {
+		return [
+			session('legacy', 'Legacy chat', 'visible-project', false),
+			session('coded', 'Code chat', 'visible-project', false, false, { mode: 'code' }),
+			session('chatty', 'Chat chat', null, false, false, { mode: 'chat' }),
+			session('spoken', 'Voice chat', null, false, false, { mode: 'voice' }),
+		];
+	}
+	it.each(['code', 'chat', 'voice'] as const)('keeps every historical conversation visible while %s is selected', (mode) => {
+		appMode.set(mode);
+		mocks.sessions.set(fixture());
+		render(Sidebar, { props: sidebarProps });
+		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+		expect(screen.getByRole('button', { name: 'Filter' })).toBeTruthy();
+	});
+	it('names the empty state of each lane', () => {
+		mocks.sessions.set([]);
+		appMode.set('voice');
+		render(Sidebar, { props: sidebarProps });
+		const empties = Array.from(document.querySelectorAll('.empty')).map((n) => n.textContent?.trim());
+		expect(empties).toEqual(['Nothing active. Swipe a settled session right to bring it back.', 'No sessions yet']);
+	});
+	it('retains explicit project scope when new-conversation capabilities change', async () => {
+		mocks.sessions.set(fixture());
+		render(Sidebar, { props: sidebarProps });
+		await openFilter();
+		await fireEvent.click(filterOption('Visible Project'));
+		await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
+		expect(cardIds()).toEqual(['legacy', 'coded']);
+		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
+		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+	});
+	it('offers Workspace and narrow Chat capabilities, not a Voice history lane', () => {
+		render(Sidebar, { props: sidebarProps });
+		const radios = screen.getAllByRole('radio');
+		expect(radios.map((r) => r.getAttribute('aria-label'))).toEqual(['Workspace', 'Chat']);
+		expect(radios.map((r) => r.getAttribute('aria-checked'))).toEqual(['true', 'false']);
+		expect(screen.getByRole('radiogroup', { name: 'New conversation capabilities' })).toBeTruthy();
+	});
+	it('opens a new Chat without filtering any session out', async () => {
+		const onNewSession = vi.fn();
+		const onSelectMode = vi.fn(() => expect(appMode.current).toBe('chat'));
+		mocks.sessions.set(fixture());
+		render(Sidebar, { props: { ...sidebarProps, onNewSession, onSelectMode } });
+		await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
+		expect(onNewSession).toHaveBeenCalledTimes(1);
+		expect(onSelectMode).toHaveBeenCalledWith('chat');
+		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+	});
+	it('does not discard the current conversation when its capability is reselected', async () => {
+		const onNewSession = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
+		await fireEvent.click(screen.getByRole('radio', { name: 'Workspace' }));
+		expect(onNewSession).not.toHaveBeenCalled();
+	});
+	it('treats Chat as already selected while a historical voice session is open', async () => {
+		appMode.set('voice', false);
+		const onNewSession = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, onNewSession } });
+		expect(screen.getByRole('radio', { name: 'Chat' }).getAttribute('aria-checked')).toBe('true');
+		await fireEvent.click(screen.getByRole('radio', { name: 'Chat' }));
+		expect(onNewSession).not.toHaveBeenCalled();
+	});
+	it('supports roving keyboard focus with no implicit microphone action', async () => {
+		render(Sidebar, { props: sidebarProps });
+		await fireEvent.keyDown(screen.getByRole('radio', { name: 'Workspace' }), { key: 'End' });
+		expect(appMode.current).toBe('chat');
+		await fireEvent.keyDown(screen.getByRole('radio', { name: 'Chat' }), { key: 'Home' });
+		expect(appMode.current).toBe('code');
+	});
+});
+
+describe('Sidebar assistant row', () => {
+	const ready = {
+		status: 'ready',
+		home_session_id: 'home',
+		assistant_name: 'Juniper',
+		avatar_id: 'robot',
+	} as unknown as AssistantState;
+
+	afterEach(() => assistantState.set(null));
+
+	it('opens the assistant settings while it is not set up', async () => {
+		const onOpenFeature = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenFeature } });
+		const row = screen.getByRole('button', { name: 'Open your assistant' });
+		expect(row.textContent).toContain('Set up your assistant');
+		await fireEvent.click(row);
+		expect(onOpenFeature).toHaveBeenCalledWith('assistant');
+	});
+
+	it('opens its one conversation once set up, and keeps it out of every lane', async () => {
+		mocks.sessions.set([
+			session('home', 'Assistant home chat', null, true),
+			session('active', 'Active chat', 'visible-project', true),
+		]);
+		const onOpenSession = vi.fn();
+		const onOpenFeature = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenSession, onOpenFeature } });
+		acceptAssistant(ready);
+		await tick();
+
+		const row = screen.getByRole('button', { name: 'Open your assistant' });
+		expect(row.textContent).toContain('Juniper');
+		expect(cardIds()).toEqual(['active']);
+		await fireEvent.keyDown(row, { key: 'Enter' });
+		expect(onOpenSession).toHaveBeenCalledWith('home');
+		expect(onOpenFeature).not.toHaveBeenCalled();
+	});
+
+	it('marks the row current while its conversation is on screen', async () => {
+		mocks.activeView.set({ type: 'session' });
+		mocks.activeSession.set({ sessionId: 'home', isStreaming: false, activeTasks: [] });
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
+		acceptAssistant(ready);
+		await tick();
+		expect(screen.getByRole('button', { name: 'Open your assistant' }).getAttribute('aria-current')).toBe('page');
+		mocks.activeView.set(null);
+	});
+
+	it('does not expose the assistant to non-admins', () => {
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: false } });
+		expect(screen.queryByRole('button', { name: 'Open your assistant' })).toBeNull();
+	});
 });

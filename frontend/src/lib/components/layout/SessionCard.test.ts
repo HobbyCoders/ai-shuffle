@@ -208,24 +208,6 @@ describe('SessionCard archive and undo', () => {
 		expect(mocks.setSessionArchived).toHaveBeenLastCalledWith('session-a', false, true);
 	});
 
-	it.each([true, false])('keeps both mobile actions exposed after release (active=%s)', async (is_active) => {
-		platform.set('mobile');
-		const { container } = renderCard({ is_active });
-		const frame = container.querySelector('.scard-frame') as HTMLElement;
-		const card = container.querySelector('.scard') as HTMLElement;
-		expect(frame.classList.contains('swipe-layout')).toBe(true);
-		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 22 });
-		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 22 });
-		expect(frame.classList.contains('actions-open')).toBe(true);
-		expect(frame.classList.contains('swipe-commit')).toBe(false);
-		expect(frame.style.getPropertyValue('--reveal')).toBe('120px');
-		expect(screen.getByTitle('Archive session')).toBeTruthy();
-		expect(screen.getByTitle(is_active ? 'Settle session' : 'Move to Active')).toBeTruthy();
-		expect(mocks.setSessionArchived).not.toHaveBeenCalled();
-		expect(mocks.setSessionActive).not.toHaveBeenCalled();
-	});
-
 	it('archives a settled session and Undo restores it where it was', async () => {
 		renderCard({ is_active: false });
 		await fireEvent.click(screen.getByTitle('Archive session'));
@@ -245,19 +227,6 @@ describe('SessionCard archive and undo', () => {
 		expect(mocks.banner).not.toHaveBeenCalled();
 	});
 
-	it('archives a settled row on a long swipe and widens the rail for two actions', async () => {
-		platform.set('mobile');
-		const { container } = renderCard({ is_active: false });
-		const frame = container.querySelector('.scard-frame') as HTMLElement;
-		const card = container.querySelector('.scard') as HTMLElement;
-		expect(frame.style.getPropertyValue('--reveal')).toBe('120px');
-		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 400, clientY: 20 });
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 100, clientY: 22 });
-		expect(frame.classList.contains('swipe-commit')).toBe(true);
-		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 100, clientY: 22 });
-		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
-		expect(mocks.setSessionActive).not.toHaveBeenCalled();
-	});
 });
 
 describe('SessionCard actions', () => {
@@ -309,6 +278,9 @@ describe('SessionCard actions', () => {
 		expect(meta?.textContent).not.toContain('This device');
 		expect(meta?.textContent).toContain('fix/thing');
 		expect(meta?.textContent).not.toContain('Project A');
+		// The working time closes the meta line, not the title line.
+		expect(meta?.lastElementChild?.classList.contains('timer')).toBe(true);
+		expect(container.querySelector('.l1 .timer')).toBeNull();
 		expect(screen.getByTitle('Move to Active')).toBeTruthy();
 	});
 
@@ -504,163 +476,205 @@ describe('SessionCard actions', () => {
 		expect(container.querySelector('.timer')?.textContent).toBe('40s');
 	});
 
-	it('follows the parent when the open-card id is controlled', async () => {
-		const { container, rerender } = renderCard({}, { openActionsId: null });
-		const frame = container.querySelector('.scard-frame') as HTMLElement;
-		expect(frame.classList.contains('actions-open')).toBe(false);
-		expect(frame.getAttribute('data-session-card')).toBe('session-a');
+});
 
-		await rerender({ openActionsId: 'session-a' } as never);
-		expect(frame.classList.contains('actions-open')).toBe(true);
-	});
+describe('SessionCard swipe gestures', () => {
+	// jsdom has no layout, so every row measures as the 320px fallback: the
+	// lane arms past 128px (40%) and a commit waits out the 420ms slide + fold.
+	type Pt = { x: number; y?: number; type?: string; id?: number };
+	const down = (el: Element, p: Pt) =>
+		fireEvent.pointerDown(el, { pointerId: p.id ?? 1, isPrimary: true, button: 0, pointerType: p.type ?? 'touch', clientX: p.x, clientY: p.y ?? 20 });
+	const move = (el: Element, p: Pt) =>
+		fireEvent.pointerMove(el, { pointerId: p.id ?? 1, isPrimary: true, pointerType: p.type ?? 'touch', clientX: p.x, clientY: p.y ?? 20 });
+	const up = (el: Element, p: Pt) =>
+		fireEvent.pointerUp(el, { pointerId: p.id ?? 1, isPrimary: true, button: 0, pointerType: p.type ?? 'touch', clientX: p.x, clientY: p.y ?? 20 });
 
-	it('reports its reveal to the parent instead of closing itself', async () => {
-		const onActionsOpenChange = vi.fn();
-		platform.set('mobile');
-		const { container } = renderCard({}, { openActionsId: null, onActionsOpenChange });
-		const frame = container.querySelector('.scard-frame') as HTMLElement;
-		const card = container.querySelector('.scard') as HTMLElement;
+	function parts(container: HTMLElement) {
+		return {
+			frame: container.querySelector('.scard-frame') as HTMLElement,
+			card: container.querySelector('.scard') as HTMLElement,
+		};
+	}
 
-		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 22 });
-		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 22 });
-
-		expect(onActionsOpenChange).toHaveBeenCalledWith('session-a');
-	});
-
-	it('keeps mobile actions hidden until a left swipe reveals them', async () => {
-		platform.set('mobile');
-		const { container, onOpen } = renderCard();
-		const frame = container.querySelector('.scard-frame') as HTMLElement;
-		const card = container.querySelector('.scard') as HTMLElement;
-		const actions = container.querySelector('.card-actions') as HTMLElement;
-
-		expect(actions.getAttribute('aria-hidden')).toBe('true');
-		expect(frame.classList.contains('actions-open')).toBe(false);
-
-		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 22 });
-		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 22 });
-
-		expect(frame.classList.contains('actions-open')).toBe(true);
-		expect(actions.getAttribute('aria-hidden')).toBeNull();
-		expect(onOpen).not.toHaveBeenCalled();
-	});
-
-	it('closes revealed mobile actions when the card is tapped', async () => {
-		platform.set('mobile');
-		const { container, onOpen } = renderCard();
-		const frame = container.querySelector('.scard-frame') as HTMLElement;
-		const card = container.querySelector('.scard') as HTMLElement;
-
-		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 20 });
-		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 20 });
-		await new Promise((resolve) => setTimeout(resolve, 0));
-
-		// A real tap is pointerdown → pointerup → click; the pointerdown is what
-		// clears the one-shot guard that swallowed the swipe's trailing click.
-		await fireEvent.pointerDown(card, { pointerId: 2, isPrimary: true, button: 0, clientX: 200, clientY: 20 });
-		await fireEvent.pointerUp(frame, { pointerId: 2, isPrimary: true, button: 0, clientX: 200, clientY: 20 });
-		await fireEvent.click(card);
-
-		expect(frame.classList.contains('actions-open')).toBe(false);
-		expect(onOpen).not.toHaveBeenCalled();
-	});
-
-	it('settles on release after a long swipe, without a second tap', async () => {
-		platform.set('mobile');
-		const { container, onOpen } = renderCard();
-		const frame = container.querySelector('.scard-frame') as HTMLElement;
-		const card = container.querySelector('.scard') as HTMLElement;
-		// jsdom has no layout, so the row is unmeasured and the commit distance
-		// falls back to its floor (2.5 rail widths).
-		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 300, clientY: 20 });
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 200, clientY: 22 });
-		expect(frame.classList.contains('swipe-commit')).toBe(false);
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 60, clientY: 22 });
-		expect(frame.classList.contains('swipe-commit')).toBe(true);
-		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 60, clientY: 22 });
-		await fireEvent.click(card);
-
-		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
-		expect(frame.classList.contains('actions-open')).toBe(false);
-		expect(frame.classList.contains('swipe-commit')).toBe(false);
-		expect(onOpen).not.toHaveBeenCalled();
-	});
-
-	it('keeps a long swipe that is let go inside the rail as a reveal', async () => {
-		platform.set('mobile');
-		// A slow, deliberate drag: no flick reading can decide the release.
+	/** A slow drag (400ms between samples), so no flick reading decides it. */
+	function slowClock() {
 		let clock = 1000;
-		const now = vi.spyOn(performance, 'now').mockImplementation(() => (clock += 400));
-		const { container } = renderCard();
-		const frame = container.querySelector('.scard-frame') as HTMLElement;
-		const card = container.querySelector('.scard') as HTMLElement;
-		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 300, clientY: 20 });
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 60, clientY: 22 });
-		expect(frame.classList.contains('swipe-commit')).toBe(true);
-		// Dragging back inside the rail disarms the commit before release.
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 240, clientY: 22 });
-		expect(frame.classList.contains('swipe-commit')).toBe(false);
-		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 240, clientY: 22 });
-		now.mockRestore();
+		return vi.spyOn(performance, 'now').mockImplementation(() => (clock += 400));
+	}
 
+	beforeEach(() => {
+		platform.set('mobile');
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	it('settles an active row on a long right swipe, then offers Undo', async () => {
+		const clock = slowClock();
+		const { container, onOpen } = renderCard({ is_active: true });
+		const { frame, card } = parts(container);
+		await down(card, { x: 20 });
+		await move(frame, { x: 100 });
+		expect(frame.classList.contains('dragging')).toBe(true);
+		expect(frame.classList.contains('armed')).toBe(false);
+		await move(frame, { x: 200 });
+		expect(frame.classList.contains('armed')).toBe(true);
+		expect(container.querySelector('.lane.l.on')?.textContent).toContain('Settle');
+		await up(frame, { x: 200 });
+		await fireEvent.click(card);
+		clock.mockRestore();
+
+		expect(frame.classList.contains('sliding')).toBe(true);
 		expect(mocks.setSessionActive).not.toHaveBeenCalled();
-		expect(frame.classList.contains('actions-open')).toBe(true);
-	});
-
-	it('does not open the session from the click a touch tap on Settle leaves behind', async () => {
-		platform.set('mobile');
-		const { container, onOpen } = renderCard();
-		const frame = container.querySelector('.scard-frame') as HTMLElement;
-		const card = container.querySelector('.scard') as HTMLElement;
-		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 180, clientY: 22 });
-		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 180, clientY: 22 });
-		expect(frame.classList.contains('actions-open')).toBe(true);
-
-		const settle = screen.getByTitle('Settle session');
-		await fireEvent.pointerDown(settle, { pointerId: 2, isPrimary: true, button: 0, pointerType: 'touch', clientX: 300, clientY: 20 });
-		await fireEvent.pointerUp(settle, { pointerId: 2, isPrimary: true, button: 0, pointerType: 'touch', clientX: 300, clientY: 20 });
-		// Committing closes the rail at once, so the browser's trailing click
-		// hit-tests the card that slid back underneath the (now inert) button.
-		await fireEvent.click(card);
-
-		expect(mocks.setSessionActive).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(450);
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+		expect(mocks.banner.mock.calls.at(-1)?.[0]).toBe('Settled “Sidebar work”');
 		expect(onOpen).not.toHaveBeenCalled();
 	});
 
-	it('latches the rail open on a quick short flick', async () => {
-		platform.set('mobile');
-		// 12px in 16ms: under the latch distance, but fast.
-		const ticks = [1000, 1016, 1020];
-		const now = vi.spyOn(performance, 'now').mockImplementation(() => ticks.shift() ?? 1020);
-		const { container } = renderCard();
-		const frame = container.querySelector('.scard-frame') as HTMLElement;
-		const card = container.querySelector('.scard') as HTMLElement;
-		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 248, clientY: 20 });
-		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 248, clientY: 20 });
-		now.mockRestore();
-
-		expect(frame.classList.contains('actions-open')).toBe(true);
+	it.each([true, false])('archives on a long left swipe (active=%s)', async (is_active) => {
+		const clock = slowClock();
+		const { container } = renderCard({ is_active });
+		const { frame, card } = parts(container);
+		await down(card, { x: 300 });
+		await move(frame, { x: 100 });
+		expect(container.querySelector('.lane.r.on')?.textContent).toContain('Archive');
+		await up(frame, { x: 100 });
+		clock.mockRestore();
+		await vi.advanceTimersByTimeAsync(450);
+		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
 	});
 
-	it('keeps a slow short drag shut, so a wobble is not a reveal', async () => {
-		platform.set('mobile');
-		let clock = 1000;
-		const now = vi.spyOn(performance, 'now').mockImplementation(() => (clock += 400));
-		const { container } = renderCard();
-		const frame = container.querySelector('.scard-frame') as HTMLElement;
-		const card = container.querySelector('.scard') as HTMLElement;
-		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, clientX: 260, clientY: 20 });
-		await fireEvent.pointerMove(frame, { pointerId: 1, isPrimary: true, clientX: 248, clientY: 20 });
-		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, clientX: 248, clientY: 20 });
-		now.mockRestore();
+	it('moves a settled row back to Active on a right swipe', async () => {
+		const clock = slowClock();
+		const { container } = renderCard({ is_active: false }, { compact: true });
+		const { frame, card } = parts(container);
+		await down(card, { x: 20 });
+		await move(frame, { x: 220 });
+		expect(container.querySelector('.lane.l.on')?.textContent).toContain('Move to Active');
+		await up(frame, { x: 220 });
+		clock.mockRestore();
+		await vi.advanceTimersByTimeAsync(450);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
+	});
 
-		expect(frame.classList.contains('actions-open')).toBe(false);
+	it('springs a short slow drag back and keeps the next tap working', async () => {
+		const clock = slowClock();
+		const { container, onOpen } = renderCard();
+		const { frame, card } = parts(container);
+		await down(card, { x: 100 });
+		await move(frame, { x: 160 });
+		await up(frame, { x: 160 });
+		// The click the drag leaves behind does not open the session…
+		await fireEvent.click(card);
+		clock.mockRestore();
+		expect(frame.classList.contains('dragging')).toBe(false);
+		expect(frame.classList.contains('sliding')).toBe(false);
+		await vi.advanceTimersByTimeAsync(450);
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		expect(onOpen).not.toHaveBeenCalled();
+
+		// …but a real tap afterwards does.
+		await down(card, { x: 100, id: 2 });
+		await up(frame, { x: 100, id: 2 });
+		await fireEvent.click(card);
+		expect(onOpen).toHaveBeenCalledWith('session-a');
+	});
+
+	it('commits a fast flick short of the arm point', async () => {
+		// 50px in 20ms: 2.5px/ms, well over the flick speed.
+		const ticks = [1000, 1020, 1040];
+		vi.spyOn(performance, 'now').mockImplementation(() => ticks.shift() ?? 1040);
+		const { container } = renderCard({ is_active: true });
+		const { frame, card } = parts(container);
+		await down(card, { x: 20 });
+		await move(frame, { x: 60 });
+		await move(frame, { x: 110 });
+		expect(frame.classList.contains('armed')).toBe(false);
+		await up(frame, { x: 110 });
+		await vi.advanceTimersByTimeAsync(450);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+	});
+
+	it('leaves a vertical move to the list scroll', async () => {
+		const { container } = renderCard();
+		const { frame, card } = parts(container);
+		await down(card, { x: 100, y: 20 });
+		await move(frame, { x: 104, y: 80 });
+		await move(frame, { x: 260, y: 90 });
+		expect(frame.classList.contains('dragging')).toBe(false);
+		await up(frame, { x: 260, y: 90 });
+		await vi.advanceTimersByTimeAsync(450);
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
+
+	it('never swipes with a mouse; the hover actions cover it', async () => {
+		platform.set('desktop');
+		const { container } = renderCard();
+		const { frame, card } = parts(container);
+		await down(card, { x: 20, type: 'mouse' });
+		await move(frame, { x: 260, type: 'mouse' });
+		expect(frame.classList.contains('dragging')).toBe(false);
+		await up(frame, { x: 260, type: 'mouse' });
+		await vi.advanceTimersByTimeAsync(450);
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		expect(screen.getByTitle('Settle session')).toBeTruthy();
+	});
+
+	it('does not swipe an archived row left, since it is archived already', async () => {
+		const { container } = renderCard({ is_active: false, status: 'archived' });
+		const { frame, card } = parts(container);
+		await down(card, { x: 300 });
+		await move(frame, { x: 100 });
+		expect(frame.classList.contains('dragging')).toBe(false);
+	});
+
+	it('starts selection on a long press without opening the row', async () => {
+		const onLongPress = vi.fn();
+		const { container, onOpen } = renderCard({}, { onLongPress });
+		const { frame, card } = parts(container);
+		await down(card, { x: 100 });
+		expect(frame.classList.contains('pressing')).toBe(true);
+		await vi.advanceTimersByTimeAsync(500);
+		expect(onLongPress).toHaveBeenCalledWith('session-a');
+		await up(frame, { x: 100 });
+		await fireEvent.click(card);
+		expect(onOpen).not.toHaveBeenCalled();
+	});
+
+	it('cancels the long press once the finger moves', async () => {
+		const onLongPress = vi.fn();
+		const { container } = renderCard({}, { onLongPress });
+		const { frame, card } = parts(container);
+		await down(card, { x: 100 });
+		await move(frame, { x: 100, y: 60 });
+		await vi.advanceTimersByTimeAsync(500);
+		expect(onLongPress).not.toHaveBeenCalled();
+	});
+
+	it('toggles the checkmark on tap while selecting, and does not swipe', async () => {
+		const onSelectToggle = vi.fn();
+		const { container, onOpen } = renderCard({}, { selecting: true, selected: true, onSelectToggle });
+		const { frame, card } = parts(container);
+		expect(card.getAttribute('aria-pressed')).toBe('true');
+		expect(container.querySelector('.check')).toBeTruthy();
+		expect(container.querySelector('.hover-acts')).toBeNull();
+		await fireEvent.click(card);
+		expect(onSelectToggle).toHaveBeenCalledWith('session-a');
+		expect(onOpen).not.toHaveBeenCalled();
+		await down(card, { x: 20 });
+		await move(frame, { x: 240 });
+		expect(frame.classList.contains('dragging')).toBe(false);
+	});
+
+	it('opens the row from the keyboard', async () => {
+		const { container, onOpen } = renderCard();
+		await fireEvent.keyDown(parts(container).card, { key: 'Enter' });
+		expect(onOpen).toHaveBeenCalledWith('session-a');
 	});
 });
 
@@ -793,19 +807,25 @@ describe('SessionCard git state', () => {
 
 		expect(container.querySelector('.title')?.textContent).toContain('Sidebar work');
 		const statusLine = container.querySelector('.l2');
-		// Project leads the middle row; runtime status follows.
-		expect(statusLine?.querySelector('.proj')?.textContent).toBe('Project A');
-		expect(statusLine?.firstElementChild?.querySelector('.proj')).toBeTruthy();
+		// Runtime status leads the middle row; the project moved to the meta line.
+		expect(statusLine?.firstElementChild?.textContent).toBe('Working');
+		expect(statusLine?.querySelector('.proj')).toBeNull();
 		expect(statusLine?.querySelector('.st')?.textContent).toBe('Working');
 		expect(statusLine?.querySelector('.st')?.classList.contains('accent')).toBe(true);
+		// The working time closes the status line; the title keeps the top row.
+		expect(statusLine?.lastElementChild?.classList.contains('timer')).toBe(true);
+		expect(container.querySelector('.l1 .timer')).toBeNull();
 		const meta = container.querySelector('.l3');
+		expect(meta?.querySelector('.timer')).toBeNull();
 		const deviceSeg = meta?.querySelector('.device-seg');
 		// Device icon leads the bottom meta line (same position as settled rows).
 		expect(meta?.firstElementChild).toBe(deviceSeg);
 		expect(deviceSeg?.getAttribute('aria-label')).toBe('This device');
 		expect(meta?.textContent).not.toContain('This device');
-		expect(meta?.textContent).not.toContain('Project A');
-		expect(meta?.textContent).toContain('feat/x');
+		// Device, then project, then branch.
+		const metaText = meta?.textContent ?? '';
+		expect(meta?.querySelector('.proj')?.textContent).toBe('Project A');
+		expect(metaText.indexOf('Project A')).toBeLessThan(metaText.indexOf('feat/x'));
 	});
 
 	it.each([true, false])('adds three decorative dots beside Working (selected: %s)', (active) => {

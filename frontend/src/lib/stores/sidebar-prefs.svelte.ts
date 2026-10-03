@@ -58,11 +58,13 @@ export const WORKSPACE_ITEM_IDS: readonly WorkspaceItemId[] = [
 	'settings'
 ];
 
-/** Shown inline on a fresh install; the rest start folded into More. */
+/** On the rail on a fresh install; the rest start folded into More. */
 export const DEFAULT_WORKSPACE_SHOWN: readonly WorkspaceItemId[] = [
 	'file-browser',
+	'notes',
 	'build',
-	'project'
+	'project',
+	'prs'
 ];
 
 export const WORKSPACE_PREFS_KEY = 'ai-shuffle.sidebar.workspace';
@@ -194,6 +196,21 @@ export const sidebarWorkspace = {
 		const at = order.indexOf(beforeId);
 		if (at < 0) return;
 		order.splice(at, 0, id);
+		commit({ ..._prefs, order, shown: order.filter((x) => _prefs.shown.includes(x)) });
+	},
+
+	/**
+	 * Put the listed ids in the given sequence. Ids not listed (destinations
+	 * this role cannot see) keep their slots, so a member's reorder never
+	 * shuffles an admin-only page they were never shown.
+	 */
+	arrange(ids: readonly WorkspaceItemId[]) {
+		const wanted = ids.filter((id, i) => isKnown(id) && _prefs.order.includes(id) && ids.indexOf(id) === i);
+		const set = new Set(wanted);
+		const slots = _prefs.order.map((id, i) => (set.has(id) ? i : -1)).filter((i) => i >= 0);
+		const order = [..._prefs.order];
+		slots.forEach((slot, n) => { order[slot] = wanted[n]; });
+		if (order.every((id, i) => id === _prefs.order[i])) return;
 		commit({ ..._prefs, order, shown: order.filter((x) => _prefs.shown.includes(x)) });
 	},
 

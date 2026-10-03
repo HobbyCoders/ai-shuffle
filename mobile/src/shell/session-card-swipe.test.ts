@@ -10,10 +10,10 @@ describe('shared session swipe styles', () => {
 		expect(mobileCss).not.toMatch(/\.(?:scard|scard-frame|card-actions)\b/);
 	});
 
-	it('uses gesture layout state and the complete action width after release', () => {
-		expect(card).toContain('class:swipe-layout={swipeLayout}');
-		expect(card).toMatch(/\.scard-frame\.swipe-layout\.actions-open \.scard\s*\{\s*transform: translateX\(calc\(-1 \* var\(--reveal\)\)\)/);
-		expect(card).toMatch(/\.scard-frame\.swipe-layout \.card-actions\s*\{[^}]*width: var\(--reveal\)/);
-		expect(card).toMatch(/\.scard-frame\.swipe-layout \.card-actions > \*\s*\{[^}]*width: var\(--action-w, var\(--reveal\)\)/);
+	it('keeps vertical scroll native and paints the inbox lanes behind the row', () => {
+		expect(card).toMatch(/\.scard-frame\s*\{[^}]*touch-action: pan-y/);
+		expect(card).toMatch(/\.lane\.l\s*\{[^}]*var\(--primary\)/);
+		expect(card).toMatch(/\.lane\.r\s*\{[^}]*var\(--info\)/);
+		expect(card).toContain('data-session-card={session.id}');
 	});
 });

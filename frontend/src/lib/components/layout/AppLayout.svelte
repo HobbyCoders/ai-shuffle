@@ -3,7 +3,7 @@
 	 * AppLayout - the desktop app shell (Studio Noir)
 	 *
 	 * The worker-served web UI renders this shell in every browser, at any
-	 * window width: a 256px sidebar on the black `--sidebar` plane holds the
+	 * window width: a 320px sidebar on the black `--sidebar` plane holds the
 	 * session navigator and the page rail; the main panel carries its own top
 	 * bar (StudioTopBar, rendered by MainPanel so it can host the existing git
 	 * actions). The sidebar collapses from that top bar and its collapsed state
@@ -47,9 +47,10 @@
 	let narrow = $state(false);
 
 	// --- resizable sidebar ---------------------------------------------------
-	const WIDTH_MIN = 220;
-	const WIDTH_MAX = 400;
-	const WIDTH_DEFAULT = 256;
+	// Matches the layout store's clamp: the icon rail takes 56px of this.
+	const WIDTH_MIN = 280;
+	const WIDTH_MAX = 440;
+	const WIDTH_DEFAULT = 320;
 	let sidebarWidth = $state(layout.current.sidebarWidth);
 	let resizing = $state(false);
 	$effect(() => { if (!resizing) sidebarWidth = $layout.sidebarWidth; });

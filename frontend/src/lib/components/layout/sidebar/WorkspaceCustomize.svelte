@@ -1,26 +1,25 @@
 <script lang="ts">
 	/**
-	 * WorkspaceCustomize — the in-panel dialog behind the More flyout's
-	 * "Customize" entry.
+	 * WorkspaceCustomize — "Customize the rail".
 	 *
-	 * Lists every Workspace destination the current role may open, each with a
-	 * checkbox (shown inline vs folded into More) and a drag handle. "New
-	 * session" is listed first and inert: it is not a Workspace destination and
-	 * never moves, but leaving it out would make the dialog disagree with the
-	 * panel it is describing.
+	 * Lists every destination the current role may open, each with a checkbox
+	 * (on the rail, or waiting under More) and a drag handle. New and Settings
+	 * are listed as pinned rows: they never move, but leaving them out would
+	 * make the dialog disagree with the rail it describes.
 	 *
-	 * REORDERING has two paths on purpose. HTML5 drag covers the mouse, and the
-	 * grip is a real button whose Up/Down arrows move the row one place — a
-	 * pointer-only reorder would put the feature out of reach of a keyboard.
-	 * Both call the same store action, and the keyed `{#each}` moves the
-	 * existing DOM node, so the grip that was moved keeps focus and can be
-	 * pressed again.
+	 * On the phone it is a full page that slides in over the panel, with a
+	 * Back button. On desktop it is a dialog over a dimmed veil inside the
+	 * sidebar plane, so it never covers the chat.
 	 *
-	 * The dialog draws over a dimmed veil inside the sidebar plane rather than
-	 * in a portal: it is a preference for THIS panel, and staying inside it
-	 * keeps the panel's own scroll and the mobile drawer intact.
+	 * REORDERING has two paths. Dragging a handle (mouse or touch) moves the
+	 * row live by comparing the pointer with the other rows' midpoints and
+	 * commits once on release. The handle is also a real button: Up/Down move
+	 * the row one place among the visible rows, so the feature is in reach of
+	 * a keyboard. The keyed `{#each}` moves the existing DOM node, so the
+	 * handle that was moved keeps focus.
 	 */
-	import { Check, GripVertical, SquarePen } from 'lucide-svelte';
+	import { tick } from 'svelte';
+	import { ArrowLeft, Check, GripVertical, Settings, SquarePen } from 'lucide-svelte';
 	import {
 		orderedWorkspaceItems,
 		sidebarWorkspace,
@@ -30,207 +29,269 @@
 	import type { WorkspaceNavItem } from './workspace-items';
 
 	interface Props {
-		/** Destinations the current role may open, in canonical order. */
+		/** Destinations the current role may open (Settings excluded). */
 		items: WorkspaceNavItem[];
+		/** Show the pinned Settings row (admins). */
+		showSettings?: boolean;
+		phone: boolean;
 		onClose: () => void;
 	}
 
-	let { items, onClose }: Props = $props();
+	let { items, showSettings = false, phone, onClose }: Props = $props();
 
-	const rows = $derived(orderedWorkspaceItems(items, $workspacePrefs));
+	const ordered = $derived(orderedWorkspaceItems(items, $workspacePrefs));
 	const shown = $derived(new Set($workspacePrefs.shown));
+	const onRail = $derived(ordered.filter((item) => shown.has(item.id)).length);
 
-	let dragId = $state<WorkspaceItemId | null>(null);
-	let overId = $state<WorkspaceItemId | null>(null);
-	let dialogRef = $state<HTMLDivElement | null>(null);
-
-	// Move focus into the dialog so Escape / Tab act on it, not on the row the
-	// flyout was opened from (which is now behind the veil).
-	$effect(() => {
-		dialogRef?.focus();
+	/** While a handle is held: the row order being previewed. */
+	let draft = $state<WorkspaceItemId[] | null>(null);
+	let liftId = $state<WorkspaceItemId | null>(null);
+	const rows = $derived.by(() => {
+		if (!draft) return ordered;
+		const byId = new Map(ordered.map((item) => [item.id, item]));
+		return draft.map((id) => byId.get(id)).filter((item): item is WorkspaceNavItem => !!item);
 	});
 
-	function onDragStart(e: DragEvent, id: WorkspaceItemId) {
-		dragId = id;
-		if (e.dataTransfer) {
-			e.dataTransfer.effectAllowed = 'move';
-			// Firefox refuses to start a drag without payload.
-			e.dataTransfer.setData('text/plain', id);
-		}
-	}
+	let listRef = $state<HTMLDivElement | null>(null);
+	let doneRef = $state<HTMLButtonElement | null>(null);
 
-	function onDragOver(e: DragEvent, id: WorkspaceItemId) {
-		if (!dragId || dragId === id) return;
+	// Focus moves into the dialog so Tab and Escape act on it, not on the
+	// rail behind the veil.
+	$effect(() => {
+		void tick().then(() => doneRef?.focus({ preventScroll: true }));
+	});
+
+	function onGripPointerDown(e: PointerEvent, id: WorkspaceItemId) {
+		if (!e.isPrimary || e.button !== 0) return;
 		e.preventDefault();
-		overId = id;
-	}
+		draft = ordered.map((item) => item.id);
+		liftId = id;
+		let moved = false;
+		const pointerId = e.pointerId;
 
-	function onDrop(e: DragEvent, id: WorkspaceItemId) {
-		if (!dragId) return;
-		e.preventDefault();
-		sidebarWorkspace.reorder(dragId, id);
-		dragId = null;
-		overId = null;
-	}
-
-	function onDragEnd() {
-		dragId = null;
-		overId = null;
+		const move = (ev: PointerEvent) => {
+			if (ev.pointerId !== pointerId || !draft || !listRef) return;
+			ev.preventDefault();
+			const others = [...listRef.querySelectorAll<HTMLElement>('[data-cid]')].filter((el) => el.dataset.cid !== id);
+			const next = others.find((el) => {
+				const r = el.getBoundingClientRect();
+				return ev.clientY < r.top + r.height / 2;
+			});
+			const without = draft.filter((x) => x !== id);
+			const at = next ? without.indexOf(next.dataset.cid as WorkspaceItemId) : without.length;
+			without.splice(at, 0, id);
+			if (without.some((x, i) => x !== draft![i])) {
+				draft = without;
+				moved = true;
+				navigator.vibrate?.(8);
+			}
+		};
+		const end = (ev: PointerEvent) => {
+			if (ev.pointerId !== pointerId) return;
+			window.removeEventListener('pointermove', move);
+			window.removeEventListener('pointerup', end);
+			window.removeEventListener('pointercancel', end);
+			if (moved && draft && ev.type === 'pointerup') sidebarWorkspace.arrange(draft);
+			draft = null;
+			liftId = null;
+		};
+		window.addEventListener('pointermove', move, { passive: false });
+		window.addEventListener('pointerup', end);
+		window.addEventListener('pointercancel', end);
 	}
 
 	function onGripKeydown(e: KeyboardEvent, id: WorkspaceItemId) {
 		const delta = e.key === 'ArrowUp' ? -1 : e.key === 'ArrowDown' ? 1 : 0;
 		if (!delta) return;
 		e.preventDefault();
-		sidebarWorkspace.move(id, delta);
+		const ids = ordered.map((item) => item.id);
+		const from = ids.indexOf(id);
+		const to = from + delta;
+		if (from < 0 || to < 0 || to >= ids.length) return;
+		ids.splice(to, 0, ...ids.splice(from, 1));
+		sidebarWorkspace.arrange(ids);
 	}
 </script>
 
-<div
-	class="veil"
-	role="presentation"
-	onclick={onClose}
-	onkeydown={(e) => { if (e.key === 'Escape') onClose(); }}
-></div>
+{#if !phone}
+	<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
+	<div class="cust-veil" onclick={onClose}></div>
+{/if}
 
-<div
-	class="custom"
-	role="dialog"
-	aria-modal="true"
-	aria-label="Customize workspace"
-	tabindex="-1"
-	bind:this={dialogRef}
->
-	<div class="ph">
-		<span class="ph-title">Customize workspace</span>
-		<button class="lk" onclick={onClose}>Done</button>
+<div class="cust" class:phone role="dialog" aria-modal="true" aria-label="Customize the rail">
+	<div class="cust-head">
+		{#if phone}
+			<button class="back" type="button" aria-label="Back" onclick={onClose}>
+				<ArrowLeft size={20} strokeWidth={1.85} />
+			</button>
+		{/if}
+		<b>Customize the rail</b>
+		<button class="done" type="button" bind:this={doneRef} onclick={onClose}>Done</button>
 	</div>
-	<p class="hint">
-		Checked rows show in the sidebar; the rest fold into More. Drag a handle, or move it with the
-		arrow keys, to reorder.
-	</p>
+	<p class="cust-hint">Checked items sit on the rail. The rest wait under More. Drag a handle to reorder.</p>
 
-	<div class="crows">
-		<div class="crow pinned">
-			<span class="cb on" aria-hidden="true"><Check size={11} strokeWidth={2.5} /></span>
-			<SquarePen size={15} strokeWidth={1.85} />
-			<span class="cl">New session</span>
+	<div class="cust-list" class:reordering={!!liftId}>
+		<div class="cust-label">On the rail <span>{onRail} of {ordered.length}</span></div>
+		<div class="crow2 pinned">
+			<span class="ckb on" aria-hidden="true"><Check size={phone ? 14 : 11} strokeWidth={3} /></span>
+			<SquarePen size={phone ? 18 : 15} strokeWidth={1.85} />
+			<span class="cl">New</span>
 			<span class="lock">Always first</span>
 		</div>
 
-		{#each rows as item (item.id)}
-			<div
-				class="crow"
-				class:dragging={dragId === item.id}
-				class:over={overId === item.id}
-				draggable="true"
-				role="presentation"
-				ondragstart={(e) => onDragStart(e, item.id)}
-				ondragover={(e) => onDragOver(e, item.id)}
-				ondrop={(e) => onDrop(e, item.id)}
-				ondragend={onDragEnd}
-			>
-				<button
-					class="cb"
-					class:on={shown.has(item.id)}
-					role="checkbox"
-					aria-checked={shown.has(item.id)}
-					aria-label={`${shown.has(item.id) ? 'Hide' : 'Show'} ${item.label}`}
-					onclick={() => sidebarWorkspace.toggle(item.id)}
-				>
-					<Check size={11} strokeWidth={2.5} />
-				</button>
-				<item.icon size={15} strokeWidth={1.85} />
-				<span class="cl">{item.label}</span>
-				<button
-					class="grip"
-					aria-label={`Reorder ${item.label}`}
-					title="Drag, or use the arrow keys, to reorder"
-					onkeydown={(e) => onGripKeydown(e, item.id)}
-				>
-					<GripVertical size={14} strokeWidth={1.85} />
-				</button>
+		<div bind:this={listRef}>
+			{#each rows as item (item.id)}
+				{@const on = shown.has(item.id)}
+				<div class="crow2" class:off={!on} class:lift={liftId === item.id} data-cid={item.id}>
+					<button
+						class="ckb"
+						class:on
+						type="button"
+						role="checkbox"
+						aria-checked={on}
+						aria-label={on ? `Move ${item.label} to More` : `Show ${item.label} on the rail`}
+						onclick={() => sidebarWorkspace.toggle(item.id)}
+					>
+						<Check size={phone ? 14 : 11} strokeWidth={3} />
+					</button>
+					<item.icon size={phone ? 18 : 15} strokeWidth={1.85} />
+					<span class="cl">{item.label}</span>
+					<button
+						class="grip"
+						type="button"
+						aria-label={`Reorder ${item.label}`}
+						title="Drag, or use the arrow keys, to reorder"
+						onpointerdown={(e) => onGripPointerDown(e, item.id)}
+						onkeydown={(e) => onGripKeydown(e, item.id)}
+					>
+						<GripVertical size={phone ? 18 : 14} strokeWidth={1.85} />
+					</button>
+				</div>
+			{/each}
+		</div>
+
+		{#if showSettings}
+			<div class="crow2 pinned">
+				<span class="ckb on" aria-hidden="true"><Check size={phone ? 14 : 11} strokeWidth={3} /></span>
+				<Settings size={phone ? 18 : 15} strokeWidth={1.85} />
+				<span class="cl">Settings</span>
+				<span class="lock">Always last</span>
 			</div>
-		{/each}
+		{/if}
 	</div>
 </div>
 
 <style>
-	.veil {
+	.cust-veil {
 		position: absolute;
 		inset: 0;
-		z-index: 130;
-		background: color-mix(in oklch, var(--background) 55%, transparent);
-		backdrop-filter: blur(2px);
-		-webkit-backdrop-filter: blur(2px);
+		z-index: 30;
+		background: oklch(0 0 0 / 0.45);
 		animation: veil-in 180ms ease;
 	}
 
-	/* One popover recipe: lit top edge, blur, cast shadow, short spring in. */
-	.custom {
+	.cust {
 		position: absolute;
-		z-index: 131;
-		left: 10px;
+		z-index: 31;
+		display: flex;
+		flex-direction: column;
+		left: 66px;
 		right: 10px;
-		top: 64px;
-		max-height: calc(100% - 96px);
-		overflow-y: auto;
-		padding: 8px;
-		border-radius: 12px;
-		background: color-mix(in oklch, var(--popover) 92%, transparent);
-		backdrop-filter: blur(16px) saturate(1.2);
-		-webkit-backdrop-filter: blur(16px) saturate(1.2);
+		top: 12px;
+		max-height: calc(100% - 24px);
+		border-radius: 14px;
+		background: var(--popover);
+		color: var(--popover-foreground, var(--foreground));
 		border: 1px solid var(--border);
-		box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.08), var(--shadow-l);
-		color: var(--popover-foreground);
+		box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.07), var(--shadow-l);
 		animation: pop-in 200ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
-
-	.ph {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 6px 4px 8px 8px;
+	/* Phone: a full page that slides in from the right. */
+	.cust.phone {
+		inset: 0;
+		max-height: none;
+		border: 0;
+		border-radius: 0;
+		box-shadow: none;
+		background: var(--sidebar);
+		padding-top: env(safe-area-inset-top, 0px);
+		animation: cust-in 300ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
-	.ph-title { font-size: 12.5px; font-weight: 600; }
-	.lk {
-		margin-left: auto;
-		padding: 4px 6px;
-		border: none;
+
+	.cust-head { display: flex; align-items: center; gap: 6px; padding: 8px 8px 4px; }
+	.cust-head b {
+		padding-left: 6px;
+		font-size: 13px;
+		font-weight: 600;
+		letter-spacing: -0.01em;
+		color: var(--foreground);
+	}
+	.phone .cust-head b { padding-left: 0; font-size: 15px; }
+	.back {
+		width: 44px;
+		height: 44px;
+		display: grid;
+		place-items: center;
+		padding: 0;
+		border: 0;
+		border-radius: 10px;
 		background: transparent;
-		border-radius: 6px;
+		color: var(--muted-foreground);
+		cursor: pointer;
+	}
+	.back:hover { background: var(--sidebar-accent); color: var(--foreground); }
+	.done {
+		margin-left: auto;
+		padding: 5px 8px;
+		border: 0;
+		border-radius: 8px;
+		background: transparent;
 		color: var(--primary);
-		font-size: 12px;
+		font: inherit;
+		font-size: 12.5px;
 		font-weight: 600;
 		cursor: pointer;
 	}
-	.lk:hover { background: color-mix(in oklch, var(--primary) 14%, transparent); }
+	.phone .done { padding: 8px 10px; font-size: 14px; }
+	.done:hover { background: color-mix(in oklch, var(--primary) 14%, transparent); }
 
-	.hint {
+	.cust-hint {
 		margin: 0;
-		padding: 0 8px 8px;
+		padding: 0 14px 8px;
 		font-size: 11.5px;
-		line-height: 1.4;
-		color: var(--subtle-foreground);
+		line-height: 1.45;
+		color: var(--muted-foreground);
 	}
+	.phone .cust-hint { padding: 2px 16px 12px; font-size: 13px; }
 
-	.crows { display: flex; flex-direction: column; }
-	.crow {
+	.cust-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 6px 8px; }
+	.phone .cust-list { padding: 0 8px calc(20px + env(safe-area-inset-bottom, 0px)); }
+	.cust-label {
+		display: flex;
+		align-items: baseline;
+		gap: 6px;
+		padding: 10px 10px 4px;
+		font-size: 12px;
+		font-weight: 600;
+		color: var(--muted-foreground);
+	}
+	.cust-label span { font-weight: 450; color: var(--subtle-foreground); }
+
+	.crow2 {
+		position: relative;
 		display: flex;
 		align-items: center;
 		gap: 10px;
 		height: 36px;
-		padding: 0 4px 0 8px;
+		padding: 0 4px 0 10px;
 		border-radius: 8px;
-		transition: background-color 0.13s ease, box-shadow 0.13s ease;
+		transition: background-color 120ms ease, box-shadow 160ms ease, transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
 	}
-	.crow:hover { background: var(--sidebar-accent); }
-	.crow.dragging { opacity: 0.4; }
-	.crow.over { box-shadow: inset 0 2px 0 var(--primary); }
-	.crow.pinned { color: var(--muted-foreground); }
-	.crow :global(svg) { flex: none; color: var(--subtle-foreground); }
+	.phone .crow2 { height: 52px; gap: 12px; border-radius: 12px; background: var(--sidebar); }
+	.crow2:not(.pinned):hover { background: var(--sidebar-accent); }
+	.crow2 > :global(svg) { flex: none; color: var(--muted-foreground); }
 	.cl {
-		flex: 1 1 auto;
+		flex: 1;
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
@@ -238,10 +299,19 @@
 		font-size: 12.5px;
 		color: var(--foreground);
 	}
-	.crow.pinned .cl { color: var(--muted-foreground); }
-	.lock { font-size: 11px; color: var(--subtle-foreground); }
+	.phone .cl { font-size: 15px; }
+	.crow2.off .cl { color: var(--muted-foreground); }
+	.crow2.pinned .cl { color: var(--muted-foreground); }
+	.lock { padding-right: 10px; font-size: 11px; color: var(--subtle-foreground); }
+	.phone .lock { font-size: 12px; }
+	.crow2.lift {
+		z-index: 2;
+		background: var(--popover);
+		box-shadow: 0 10px 28px -8px oklch(0 0 0 / 0.8), inset 0 0 0 1px var(--border);
+		transform: scale(1.02);
+	}
 
-	.cb {
+	.ckb {
 		width: 16px;
 		height: 16px;
 		flex: none;
@@ -250,44 +320,52 @@
 		padding: 0;
 		border: 1px solid var(--border-strong);
 		border-radius: 5px;
-		background: var(--sidebar-accent);
+		background: transparent;
 		color: var(--primary-foreground);
 		cursor: pointer;
 		transition: background-color 0.13s ease, border-color 0.13s ease;
 	}
-	.cb :global(svg) { color: currentColor; opacity: 0; }
-	.cb.on { background: var(--primary); border-color: var(--primary); }
-	.cb.on :global(svg) { opacity: 1; }
+	.phone .ckb { width: 22px; height: 22px; border-width: 1.5px; border-radius: 7px; }
+	.ckb :global(svg) { opacity: 0; }
+	.ckb.on { background: var(--primary); border-color: var(--primary); }
+	.ckb.on :global(svg) { opacity: 1; }
+	.crow2.pinned .ckb { opacity: 0.45; cursor: default; }
 
 	.grip {
+		width: 26px;
+		height: 28px;
+		flex: none;
 		display: grid;
 		place-items: center;
-		padding: 5px 3px;
-		border: none;
+		padding: 0;
+		border: 0;
+		border-radius: 6px;
 		background: transparent;
-		border-radius: 5px;
-		color: var(--subtle-foreground);
+		color: var(--muted-foreground);
 		cursor: grab;
+		touch-action: none;
 	}
-	.grip:hover { background: var(--sidebar-accent); color: var(--foreground); }
+	.phone .grip { width: 44px; height: 44px; border-radius: 10px; }
+	.grip:hover { background: var(--sidebar-accent-active); color: var(--foreground); }
+	.reordering .grip { cursor: grabbing; }
+
+	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+
+	@media (hover: none) {
+		.crow2 { height: 44px; }
+		.ckb { width: 20px; height: 20px; }
+		.grip { width: 40px; height: 40px; }
+	}
 
 	@keyframes veil-in { from { opacity: 0; } to { opacity: 1; } }
+	@keyframes cust-in { from { transform: translateX(100%); } to { transform: none; } }
 	@keyframes pop-in {
 		from { opacity: 0; transform: scale(0.96) translateY(-4px); }
 		to { opacity: 1; transform: none; }
 	}
 
-	:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
-
-	/* Touch sizing: the mobile shell, plus any touch-only pointer. */
-	@media (hover: none) {
-		.crow { height: 44px; }
-		.cb { width: 20px; height: 20px; }
-		.grip { padding: 10px 6px; }
-	}
-
 	@media (prefers-reduced-motion: reduce) {
-		.veil, .custom { animation: none; }
-		.crow, .cb { transition: none; }
+		.cust-veil, .cust { animation: none; }
+		.crow2, .ckb { transition: none; }
 	}
 </style>

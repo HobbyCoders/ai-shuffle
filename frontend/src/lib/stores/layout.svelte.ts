@@ -57,9 +57,12 @@ interface LayoutState {
 // ============================================
 
 const STORAGE_KEY = 'ai-shuffle-layout';
-const DEFAULT_SIDEBAR_WIDTH = 256;
-const MIN_SIDEBAR_WIDTH = 220;
-const MAX_SIDEBAR_WIDTH = 400;
+// The sidebar is an icon rail plus the session column; below 280px the
+// column beside a 56px rail is too narrow for a two-line row.
+const DEFAULT_SIDEBAR_WIDTH = 320;
+const MIN_SIDEBAR_WIDTH = 280;
+const MAX_SIDEBAR_WIDTH = 440;
+const clampSidebarWidth = (width: number) => Math.max(MIN_SIDEBAR_WIDTH, Math.min(MAX_SIDEBAR_WIDTH, width));
 
 // ============================================
 // Persistence
@@ -112,7 +115,7 @@ let _state = $state<LayoutState>({
 	sidebarCollapsed: persisted?.sidebarCollapsed ?? false,
 	activeView: persisted?.activeView ?? null,
 	sidebarOverlay: false,
-	sidebarWidth: (browser && Number(localStorage.getItem('sidebar-width'))) || persisted?.sidebarWidth || DEFAULT_SIDEBAR_WIDTH
+	sidebarWidth: clampSidebarWidth((browser && Number(localStorage.getItem('sidebar-width'))) || persisted?.sidebarWidth || DEFAULT_SIDEBAR_WIDTH)
 });
 
 // ============================================

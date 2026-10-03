@@ -27,8 +27,14 @@ export default defineConfig({
 			{ find: /^\$lib$/, replacement: lib },
 			{ find: /^\$app\/environment$/, replacement: `${stubs}/app-environment.ts` },
 			{ find: /^\$app\/stores$/, replacement: `${stubs}/app-stores.ts` },
-			{ find: /^\$app\/navigation$/, replacement: `${stubs}/app-navigation.ts` }
+			{ find: /^\$app\/navigation$/, replacement: `${stubs}/app-navigation.ts` },
+			{ find: /^\$app\/state$/, replacement: `${stubs}/app-state.svelte.ts` }
 		]
+	},
+	// Shared components import assets from ../frontend (avatar SVGs);
+	// mirrors server.fs.allow in vite.config.js.
+	server: {
+		fs: { allow: ['..'] }
 	},
 	resolve: {
 		conditions: ['browser']

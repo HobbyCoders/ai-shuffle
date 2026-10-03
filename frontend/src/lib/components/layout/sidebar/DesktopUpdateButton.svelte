@@ -15,6 +15,10 @@
 	// Older container supervisors leave "Application update is running." on an
 	// idle status after an install; a message like that does not fit idle.
 	const IN_PROGRESS = /\b(?:update is running|checking|downloading|building|preparing|installing)\b/i;
+	/** `canCheck` tells the host whether a manual "Check for updates" entry
+	 *  makes sense right now: updates are allowed and this is not an agent
+	 *  preview. The button itself only appears once there is something to show. */
+	let { canCheck = $bindable(false) }: { canCheck?: boolean } = $props();
 	const tooltipId = $props.id();
 	const completionKey = 'application-update-completed';
 	// Poll quickly only while something is moving: a request just sent, a
@@ -44,6 +48,11 @@
 	let hideTimer: ReturnType<typeof setTimeout> | undefined;
 	let pollTimer: ReturnType<typeof setTimeout> | undefined;
 	let watchUntil = 0;
+	// A manual check reports its outcome once: an offered update shows the
+	// button, and nothing found says so instead of leaving the user guessing.
+	let manualCheckAt = 0;
+	// A worker picks a check up within seconds; never call a check finished sooner.
+	const MANUAL_CHECK_SETTLE_MS = 5000;
 	const operation = $derived(snapshot?.operation);
 	const waiting = $derived(operation?.phase === 'waiting' || installRequested);
 	const celebrating = $derived(celebration !== 'none');
@@ -77,6 +86,7 @@
 	const progressNote = $derived(targets.length > 1 ? ` ${staged} of ${targets.length} staged.` : '');
 	const summary = $derived(error || (busy ? `Preparing updates…${progressNote}` : ready ? 'Update ready. Click to install and restart.' : 'Update available. Click to download.'));
 	const status = $derived(waiting || celebrating ? `${headline}. ${reports}` : `${scope}: ${summary}${receipt ? ` Last request: ${receipt}.` : ''} ${reports}`);
+	$effect(() => { canCheck = !!snapshot?.allow_updates; });
 
 	const same = (a?: string | null, b?: string | null) => !!a && !!b && (a.startsWith(b) || b.startsWith(a));
 	type Offer = { version: string; channel?: string | null; checked_at?: number | null };
@@ -135,6 +145,7 @@
 		if (!pending) installRequested = false;
 		const done = next.operation;
 		if (done?.phase === 'waiting') watched = done.id;
+		settleManualCheck(next);
 		if (done?.phase !== 'complete') return;
 		receipt = ''; requestError = ''; refusals = {};
 		if (acknowledged === done.id) return;
@@ -211,14 +222,62 @@
 		}
 		await activate(true);
 	}
-	async function activate(announce = false) {
-		if (busy || !snapshot?.allow_updates) return;
-		const requestedAction = ready ? 'install' : available ? 'download' : 'check';
+	function settleManualCheck(next: Snapshot) {
+		if (!manualCheckAt) return;
+		const elapsed = Date.now() - manualCheckAt;
+		const inScope = rows.filter(row => row.role !== 'excluded');
+		const checking = next.workers.some(w => w.phase === 'checking' || w.request_pending);
+		const found = available || staged > 0 || inScope.some(row => row.role === 'preparing' && row.worker.phase === 'downloading');
+		if (found) {
+			manualCheckAt = 0;
+			notify.info(summary, { title: ready ? 'Update ready' : 'Update found', persist: false });
+			return;
+		}
+		if (elapsed < MANUAL_CHECK_SETTLE_MS || (checking && elapsed < REQUEST_WATCH_MS)) return;
+		manualCheckAt = 0;
+		if (checking) notify.info('Still checking. The update button appears here if an update is found.', { title: 'Checking for updates', persist: false });
+		else if (error) notify.warning(error, { title: 'Update check needs attention', persist: false });
+		else notify.info(snapshot?.update_all_workers ? 'Every included worker is up to date.' : 'This worker is up to date.', { title: 'No updates found', persist: false });
+	}
+	/** The manual "Check for updates" entry (#1623). Asks every worker in scope
+	 *  to read its feed now instead of waiting for the daily check. */
+	export async function checkForUpdates() {
+		if (auth.current.status?.preview_access) {
+			notify.error('Application updates cannot be requested from an agent preview.');
+			return;
+		}
+		if (!snapshot?.allow_updates) {
+			notify.error('Application updates are disabled in Settings.');
+			return;
+		}
+		if (busy) {
+			notify.info(status, { title: 'Update in progress', persist: false });
+			return;
+		}
+		if (ready || available) {
+			notify.info(summary, { title: ready ? 'Update ready' : 'Update available', persist: false });
+			return;
+		}
+		const result = await activate(false, 'check');
+		if (!result) {
+			if (requestError) notify.error(requestError);
+			return;
+		}
+		if (result.results.some(w => w.accepted)) {
+			manualCheckAt = Date.now();
+			notify.info('Asking each worker in scope for its latest version.', { title: 'Checking for updates', persist: false });
+		} else {
+			notify.warning(receipt || 'No worker accepted the check.', { title: 'Update check needs attention', persist: false });
+		}
+	}
+	async function activate(announce = false, forced?: 'check'): Promise<Receipt | null> {
+		if (busy || !snapshot?.allow_updates) return null;
+		const requestedAction = forced ?? (ready ? 'install' : available ? 'download' : 'check');
 		watchUntil = Date.now() + REQUEST_WATCH_MS;
 		pending = true; installRequested = requestedAction === 'install'; requestError = ''; receipt = ''; refusals = {};
 		try {
 			const result = await api.post<Receipt>('/settings/application-updates', { action: requestedAction });
-			if (!active) return;
+			if (!active) return null;
 			// Keep only refusals: accepted work shows up in each worker's live phase.
 			const refused = result.results.filter(w => !w.accepted);
 			receipt = refused.map(w => `${w.device_name}: ${w.reason}`).join('; ');
@@ -229,11 +288,13 @@
 				if (result.results.some(w => !w.accepted)) notify.warning(message, { title: 'Update needs attention', persist: false });
 				else notify.info(message, { title: 'Update requested', persist: false });
 			}
+			return result;
 		} catch (cause) {
 			if (active) {
 				requestError = getErrorMessage(cause, 'Could not request application update');
 				if (announce) notify.error(requestError);
 			}
+			return null;
 		}
 		finally { if (active) { pending = false; void refresh(); } }
 	}
@@ -285,8 +346,8 @@
 {/if}
 
 <style>
-	.update-slot { width: 28px; height: 28px; position: relative; flex: none; -webkit-app-region: no-drag; }
-	.update-button { width: 100%; height: 100%; flex: none; display: grid; place-items: center; position: relative; border: none; border-radius: 8px; color: var(--primary); background: color-mix(in oklch, var(--primary) 12%, transparent); cursor: pointer; }
+	.update-slot { width: 32px; height: 32px; position: relative; flex: none; -webkit-app-region: no-drag; }
+	.update-button { width: 100%; height: 100%; flex: none; display: grid; place-items: center; position: relative; border: none; border-radius: 9px; color: var(--primary); background: color-mix(in oklch, var(--primary) 12%, transparent); cursor: pointer; }
 	.update-button:hover { background: color-mix(in oklch, var(--primary) 22%, transparent); }
 	.update-button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.update-button[aria-disabled='true'] { cursor: wait; }
@@ -322,9 +383,9 @@
 	@keyframes update-spark { 0% { opacity: 0; transform: rotate(var(--angle)) translateY(-12px) scale(.6); } 20% { opacity: 1; } 100% { opacity: 0; transform: rotate(var(--angle)) translateY(-26px) scale(.1); } }
 	@keyframes update-halo { from { opacity: .7; transform: scale(.95); } to { opacity: 0; transform: scale(1.7); } }
 	@keyframes update-leave { to { opacity: 0; transform: scale(.65); } }
-	@keyframes close-gap { to { width: 0; margin-left: -8px; } }
+	@keyframes close-gap { to { width: 0; margin-left: calc(-1 * var(--update-gap, 8px)); } }
 	.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-	@media (hover: none) { .update-slot { width: 44px; height: 44px; } }
+	@media (hover: none) { .update-slot { width: 40px; height: 40px; } .update-button { border-radius: 11px; } }
 	@media (prefers-reduced-motion: reduce) {
 		.update-button :global(.update-spinner), .completion-ring, .complete .update-button, .leaving { animation: none; }
 		.complete .completion-ring { animation: none; opacity: 0; }
