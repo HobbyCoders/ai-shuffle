@@ -84,6 +84,27 @@ Every pass, failed or not, writes a row to `.synthesis-log.jsonl` in the store
 and a line to the process log; a provider's error message is kept, not
 reported as an empty completion.
 
+## Self-maintenance
+
+`fluid/fluid/codemode/memory_health.py` checks each store without a model. The
+app's maintenance loop runs it once an hour per store and again after a
+curation pass (`app/core/fluid_memory.py`). It reports nine signals, each
+healthy or needing attention with one sentence: whether the learner produces
+facts given recent sessions, facts never recalled or shown, unconfirmed
+harvests and how often they are rewritten, duplicate groups, capacity, how much
+each project's snapshot leaves out, failed curation passes, user-saved facts
+lost without a Forget, and failed saves. The result is kept in
+`memory-health.json` beside the store; it is local to the worker and is not
+replicated.
+
+Repairs only retire unprotected facts into the archive: exact duplicates (every
+worker keeps the same copy, chosen from replicated fields) and harvested facts
+that nobody recalled or saw in a snapshot for 30 days and that have not changed
+for 14. Near-duplicates are reported, not merged. A user-saved fact is never
+repaired away. The owner sees the result under Settings, System, Memory health
+(`GET /api/v1/memory/health`), and gets one notification per stretch of
+attention, at most once a day per worker. The thresholds are first estimates.
+
 ## Replication and concurrency
 
 `app/network/memory_records.py` publishes the durable snapshot through the

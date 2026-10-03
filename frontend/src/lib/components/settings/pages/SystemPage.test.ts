@@ -41,6 +41,7 @@ let license: Record<string, unknown>;
 let policy: { allow_updates: boolean; update_all_workers: boolean };
 let workspace: string;
 let workers: Record<string, unknown>[];
+let memoryHealth: unknown;
 
 beforeEach(() => {
 	vi.resetAllMocks();
@@ -48,8 +49,13 @@ beforeEach(() => {
 	policy = { allow_updates: true, update_all_workers: false };
 	workspace = '/data/workspace';
 	workers = [{ device_id: 'self', device_name: 'Current worker', online: true, supported: true, phase: 'idle' }];
+	memoryHealth = { state: 'healthy', checked_at: 1, signals: [], repairs: [] };
 	transport.get.mockImplementation(async (path: string) => {
 		if (path === '/license') return { ...license };
+		if (path === '/memory/health') {
+			if (memoryHealth instanceof Error) throw memoryHealth;
+			return memoryHealth;
+		}
 		if (path === '/settings/application-updates') return { ...policy };
 		if (path === '/settings/application-updates/workers') return { ...policy, workers };
 		if (path === '/workspace/config') return { workspace_path: workspace, is_configured: true, is_local_mode: false, default_path: '', exists: true };
@@ -293,5 +299,43 @@ describe('license', () => {
 		await fireEvent.input(screen.getByRole('textbox', { name: 'License key' }), { target: { value: 'ASH-X' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Activate' }));
 		expect((await screen.findByRole('alert')).textContent).toBe('License key not recognised');
+	});
+});
+
+describe('memory health', () => {
+	it('shows a healthy store with one line when opened', async () => {
+		render(SystemPage);
+		const row = await screen.findByTestId('memory-health');
+		await waitFor(() => expect(row.textContent).toContain('Healthy'));
+		await fireEvent.click(within(row).getByRole('button'));
+		expect(await screen.findByText('Nothing needs attention')).toBeTruthy();
+	});
+
+	it('names what needs attention and what was repaired', async () => {
+		const at = Date.now() / 1000;
+		memoryHealth = {
+			state: 'attention',
+			checked_at: at,
+			signals: [
+				{ id: 'learner', label: 'Learning', state: 'attention', reason: 'Learning has not run despite recent sessions.' },
+				{ id: 'saves', label: 'Saving', state: 'healthy', reason: 'Saves are writing normally.' }
+			],
+			repairs: [{ kind: 'duplicates', count: 1, at, summary: 'Archived 1 exact duplicate.' }]
+		};
+		render(SystemPage);
+		const row = await screen.findByTestId('memory-health');
+		await waitFor(() => expect(row.textContent).toContain('Needs attention'));
+		await fireEvent.click(within(row).getByRole('button'));
+		expect(await screen.findByText('Learning has not run despite recent sessions.')).toBeTruthy();
+		expect(screen.getByText(/Archived 1 exact duplicate\./)).toBeTruthy();
+		expect(screen.queryByText('Saves are writing normally.')).toBeNull();
+	});
+
+	it('is owner only', async () => {
+		memoryHealth = Object.assign(new Error('Owner access required'), { status: 403 });
+		render(SystemPage);
+		const row = await screen.findByTestId('memory-health');
+		await waitFor(() => expect(row.textContent).toContain('Available after approval'));
+		expect(within(row).queryByRole('button')).toBeNull();
 	});
 });

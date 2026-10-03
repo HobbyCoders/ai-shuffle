@@ -217,20 +217,116 @@ def journal_diagnostics() -> dict:
     return result
 
 
+# The health check (fluid.codemode.memory_health) runs at most this often per
+# store, and sooner when a curation pass has run since the last check.
+HEALTH_INTERVAL_SECONDS = 3600
+
+
+def _learning_enabled() -> bool:
+    from app.core.config import settings
+    return bool(settings.fluid_continual)
+
+
+def health_due(store, now: float) -> bool:
+    from fluid.codemode import memory_health
+    checked = float(memory_health.load_state(store).get("checked_at") or 0)
+    if now - checked >= HEALTH_INTERVAL_SECONDS:
+        return True
+    meta = store._load_meta()
+    curated = max(float(meta.get("last_consolidated_at") or 0), float(meta.get("last_curated_at") or 0))
+    return curated > checked
+
+
+def check_health(store, now: float | None = None) -> dict:
+    """Repair, check and record one store (no model calls)."""
+    from fluid.codemode import memory_health
+    return memory_health.run(store, now=now, learning_enabled=_learning_enabled())
+
+
+def owner_health() -> dict:
+    """The installation owner's memory health in its owner-facing shape.
+
+    Read-only: the last recorded run, or a fresh check without repairs when
+    none was recorded within two intervals. Observing a missing store does
+    not create it.
+    """
+    import time
+    from fluid.codemode import memory_health
+    root = skills_root()
+    if not (root / "memories.json").exists():
+        return {"state": "healthy", "checked_at": None, "signals": [], "repairs": []}
+    store = store_for_owner("local")
+    state = memory_health.load_state(store)
+    if time.time() - float(state.get("checked_at") or 0) > 2 * HEALTH_INTERVAL_SECONDS:
+        fresh = memory_health.check(store, learning_enabled=_learning_enabled(), previous=state)
+        state = {**state, **fresh}
+    return memory_health.summary(state)
+
+
+def _health_notification(state: dict) -> str:
+    reasons = [s["reason"] for s in state.get("signals", []) if s.get("state") == "attention"]
+    text = " ".join(reasons[:2])
+    if len(reasons) > 2:
+        text += f" ({len(reasons) - 2} more.)"
+    return text + " Details are in Settings, System."
+
+
+async def _announce_health(owner: str, store, state: dict) -> None:
+    """One bell notification per stretch of attention; never raises."""
+    import logging
+    try:
+        from app.services.notification_service import emit_notification
+        from fluid.codemode import memory_health
+        user_id = "admin" if owner == "local" else owner.removeprefix("api:")
+        sent = await emit_notification(
+            user_id,
+            severity="warning",
+            title="Memory needs attention",
+            message=_health_notification(state),
+            category="memory_health",
+            surface="notification",
+            persist=True,
+        )
+        if sent is not None:
+            import asyncio
+            await asyncio.to_thread(memory_health.mark_notified, store)
+    except Exception:  # noqa: BLE001 — a notification never stops maintenance
+        logging.getLogger(__name__).warning("Memory health notification failed", exc_info=True)
+
+
+def sweep_memories(now: float | None = None) -> list[tuple[str, object, dict]]:
+    """One maintenance batch over every store: reap, purge, and the health
+    check when due. Returns ``(owner, store, state)`` for each store whose
+    health should be announced now."""
+    import logging
+    import time
+    now = time.time() if now is None else now
+    log = logging.getLogger(__name__)
+    announce = []
+    for store in stores():
+        try:
+            store.reap()
+            store.purge_forgotten_evidence()
+        except Exception:
+            log.exception("One memory store could not be maintained")
+        try:
+            if health_due(store, now):
+                state = check_health(store, now=now)
+                if state.get("notify"):
+                    announce.append((store._facts.owner, store, state))
+        except Exception:
+            log.exception("One memory store's health check failed")
+    return announce
+
+
 async def maintain_memories():
     """Finite maintenance batches, independent of chat or a learning model."""
     import asyncio
     import logging
     while True:
         try:
-            def sweep():
-                for store in stores():
-                    try:
-                        store.reap()
-                        store.purge_forgotten_evidence()
-                    except Exception:
-                        logging.getLogger(__name__).exception("One memory store could not be maintained")
-            await asyncio.to_thread(sweep)
+            for owner, store, state in await asyncio.to_thread(sweep_memories):
+                await _announce_health(owner, store, state)
         except Exception:
             logging.getLogger(__name__).exception("Memory maintenance failed")
         await asyncio.sleep(300)

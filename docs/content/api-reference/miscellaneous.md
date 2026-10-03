@@ -1287,6 +1287,33 @@ Every tool a session can be given, grouped and discovered live from the running 
 
 This route replaced `GET /api/v1/tools`, `/api/v1/tools/builtin` and `/api/v1/tools/discover`, which are gone.
 
+### GET /api/v1/memory/health
+
+Owner only. The state of the installation owner's long-term memory on this worker. The worker checks itself once an hour and after each curation pass, without model calls, and repairs what it safely can: it moves exact duplicates and unconfirmed harvested facts nobody recalled or saw for a month into the archive, where Recall still finds them. Facts the user asked to keep are never removed. This route only reads; with no recent check it computes one without repairs. A worker with no saved facts reports `healthy` with empty lists.
+
+**Response:**
+
+```json
+{
+  "state": "attention",
+  "checked_at": 1791054858.4,
+  "signals": [
+    {
+      "id": "snapshot",
+      "label": "Session snapshot",
+      "state": "attention",
+      "reason": "Sessions see 26 of 170 facts in one project; the rest need Recall.",
+      "detail": { "scopes": [{ "scope": "project:abc", "in_scope": 170, "shown": 26, "omitted": 144 }] }
+    }
+  ],
+  "repairs": [
+    { "kind": "duplicates", "count": 2, "at": 1791051258.0, "summary": "Archived 2 exact duplicates." }
+  ]
+}
+```
+
+`state` is `healthy` or `attention`. Signals that need attention come first. `id` is one of `learner`, `usage`, `unconfirmed`, `duplicates`, `capacity`, `snapshot`, `curation`, `protected` or `saves`; `detail` holds the counts behind `reason` and differs per signal. `repairs` lists the last 30 days, newest first; `kind` is `duplicates` or `unconfirmed`. When a check turns to `attention`, the owner gets one notification (category `memory_health`) for that stretch, at most once a day.
+
 ## Logs
 
 ### GET /api/v1/logs

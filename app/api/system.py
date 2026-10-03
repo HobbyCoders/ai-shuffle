@@ -330,6 +330,21 @@ async def get_diagnostics(request: Request, token: str = Depends(require_auth), 
     }
 
 
+@router.get("/api/v1/memory/health")
+async def get_memory_health(token: str = Depends(require_admin)):
+    """The installation owner's long-term memory health on this worker.
+
+    Read-only: the last scheduled check (repairs included), or a fresh
+    check without repairs when none ran recently. No model calls.
+    """
+    from app.core.fluid_memory import owner_health
+    try:
+        return await run_sync(owner_health)
+    except Exception:
+        logger.exception("Memory health check failed")
+        raise HTTPException(status_code=503, detail="Memory health is unavailable on this worker")
+
+
 # ============================================================================
 # Workspace Configuration (for local mode)
 # ============================================================================

@@ -1,7 +1,8 @@
 <script lang="ts">
 	/**
 	 * System: Workspace (folder, import from Claude Code and Codex), Updates
-	 * (policy, check for updates, version) and License.
+	 * (policy, check for updates, version), Memory (read-only health) and
+	 * License.
 	 *
 	 * The workspace path saves when "Check path" finds it valid. A path edited
 	 * here is never replaced by a change made elsewhere; a banner offers the
@@ -33,15 +34,18 @@
 	import Switch from '../rows/Switch.svelte';
 	import PathField, { type PathCheck } from '../rows/PathField.svelte';
 	import ValueText from '../rows/ValueText.svelte';
+	import StatusDot from '../rows/StatusDot.svelte';
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
 	import InlineConfirm from '../rows/InlineConfirm.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ImportWizard, { type ImportStep } from './editors/ImportWizard.svelte';
 	import UpdateCheckResults from './editors/UpdateCheckResults.svelte';
+	import MemoryHealthList from './editors/MemoryHealthList.svelte';
 	import LicenseKeyForm from './editors/LicenseKeyForm.svelte';
 	import LicenseSeats from './editors/LicenseSeats.svelte';
 	import { UpdatesState } from './updates-state.svelte';
 	import { deployRows, deploySummary, loadDeployStatus, type DeployReport } from './deploy-status';
+	import { fetchMemoryHealth, memoryRows, memorySummary, type MemoryHealth } from './memory-health';
 	import './editors/editors.css';
 
 	/* ---------- workspace ---------- */
@@ -116,6 +120,29 @@
 		deploy = result.report;
 		deployError = result.error;
 	}
+
+	/* ---------- memory health (read-only; the worker repairs by itself) ---------- */
+
+	let memory = $state<MemoryHealth | null>(null);
+	let memoryLoad = $state<'loading' | 'ok' | 'forbidden' | 'error'>('loading');
+	let memoryError = $state('');
+	let memoryOpen = $state(false);
+
+	async function loadMemory() {
+		const result = await loadState(fetchMemoryHealth);
+		if (!alive) return;
+		memoryLoad = result.status;
+		if (result.status === 'ok') {
+			memory = result.data;
+			memoryError = '';
+		} else if (result.status === 'error') {
+			memoryError = result.message;
+		}
+	}
+
+	const memoryValue = $derived(
+		memoryLoad === 'error' ? 'Unavailable' : memoryLoad === 'forbidden' ? FORBIDDEN_TEXT : memorySummary(memory)
+	);
 
 	/* ---------- license ---------- */
 
@@ -265,6 +292,7 @@
 		void loadWorkspace();
 		void loadLicense();
 		void refreshDeploy();
+		void loadMemory();
 		updates.start();
 	});
 	onDestroy(() => {
@@ -351,6 +379,19 @@
 	{#if updates.error}<p class="st-msg err" role="alert">{updates.error}</p>{/if}
 	{#if updates.status === 'forbidden'}<p class="st-msg">Update settings: {FORBIDDEN_TEXT.toLowerCase()}</p>{/if}
 
+	<RowGroup title="Memory">
+		<SettingRow id="system.memoryHealth" expanded={memoryOpen && memory ? memoryList : undefined}>
+			<span class="st-status" data-testid="memory-health">
+				{#if memoryLoad === 'ok' && memory}
+					<StatusDot tone={memory.state === 'healthy' ? 'ok' : 'warn'} /><ExpandToggle value={memoryValue} bind:open={memoryOpen} />
+				{:else}
+					<ValueText value={memoryValue} />
+				{/if}
+			</span>
+		</SettingRow>
+	</RowGroup>
+	{#if memoryError}<p class="st-msg err" role="alert">{memoryError}</p>{/if}
+
 	{#if license?.mode === 'licensed' && (license.banner || (!license.allowed && license.reason))}
 		<InlineBanner tone="warn">
 			{license.banner?.message ?? license.reason}
@@ -404,6 +445,10 @@
 
 {#snippet deployList()}
 	<UpdateCheckResults rows={deploy ? deployRows(deploy) : []} running={deployLoading} error={deployError} />
+{/snippet}
+
+{#snippet memoryList()}
+	<MemoryHealthList rows={memory ? memoryRows(memory) : []} />
 {/snippet}
 
 {#snippet keyForm()}

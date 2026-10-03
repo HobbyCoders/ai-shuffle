@@ -1,5 +1,5 @@
 /**
- * System: workspace folder, import from Claude Code and Codex, updates,
+ * System: workspace folder, import from Claude Code and Codex, updates, memory health,
  * license. The legacy 'license' tab and AccountPanel land on `system.license`.
  * SystemPage.svelte renders one `<SettingRow id>` per entry.
  */
@@ -62,6 +62,15 @@ export const entries: SettingEntry[] = [
 		label: 'Version',
 		hint: 'Restart from the sidebar',
 		keywords: ['about', 'release', 'build']
+	},
+	{
+		id: 'system.memoryHealth',
+		category: 'system',
+		section: 'Memory',
+		label: 'Memory health',
+		hint: 'Checks itself every hour',
+		help: 'This worker checks its saved facts without using a model: whether learning works, what sessions get to see, and whether anything was lost. It archives exact duplicates and unconfirmed facts nobody used; Recall still finds them there. Facts you asked to keep are never removed.',
+		keywords: ['long-term memory', 'saved facts', 'remember', 'recall', 'learner', 'duplicates', 'prune', 'archive']
 	},
 	{
 		id: 'system.license',
