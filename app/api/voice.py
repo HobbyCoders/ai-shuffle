@@ -1157,7 +1157,7 @@ async def attach_voice_call(
         request.client_tools,
         reserved_names={t["name"] for t in voice_bridge.VOICE_TOOLS}
         | {t["name"] for t in voice_bridge.VOICE_WEB_TOOLS}
-        | {"submit_to_chat"},
+        | {"submit_to_chat", "check_work"},
     )
     client_instructions = (request.client_instructions or "").strip() or None
     if client_instructions and len(client_instructions) > MAX_CLIENT_INSTRUCTIONS_CHARS:
@@ -1237,6 +1237,7 @@ async def attach_voice_call(
             app_tools=app_tools,
             conversation_surface=session_row.get("mode") != "voice",
             greet=greet,
+            api_user_id=(api_user or {}).get("id"),
         )
     except HTTPException:
         raise
@@ -1396,7 +1397,8 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
             raise HTTPException(409, "This voice session already has an audio connection.")
         if len(voice_stream.calls) >= voice_stream.MAX_CONNECTIONS:
             raise HTTPException(429, "Too many voice calls are connected.")
-        call = voice_stream.VoiceStream(websocket, row, config, key, settings["voice_max_call_minutes"])
+        call = voice_stream.VoiceStream(websocket, row, config, key, settings["voice_max_call_minutes"],
+                                        api_user_id=(api_user or {}).get("id"))
         # Reserve before accepting: there is no await between capacity check
         # and reservation, so concurrent handshakes cannot exceed the bound.
         voice_stream.calls[session_id] = call

@@ -30,6 +30,15 @@ During a GPT Live app call, you can send composer text and attachments to the sa
 
 Hanging up ends the audio connection. Realtime workers and GPT Live tasks already submitted to the chat can continue; stop the work separately if you want to cancel it.
 
+## Calling the assistant while it works
+
+You can call your personal assistant's conversation at any time, including while it is working, waiting on background jobs, or waiting for your decision. Other conversations still take a call only when they are ready or finished. A call never starts on its own: the app does not listen until you press the call button.
+
+- **Status.** Ask "what are you working on?" or "is it done yet?" and the assistant answers from the app's task list: whether the chat is working or waiting on background jobs, the running jobs by name, finished jobs with a report waiting, and decisions waiting for you. Answering does not start a chat turn. A call that starts in the middle of work gets the same summary when it begins.
+- **Finished jobs.** When a background job finishes during the call, the assistant mentions it in a sentence at the next pause, not in the middle of someone speaking.
+- **Approvals.** When work needs your permission, the assistant asks in one plain sentence and you answer out loud. Only a clear yes approves and a clear no declines. A hedged or off-topic answer ("I guess", "you decide", "maybe") counts as unclear: the assistant asks once more, and a second unclear answer declines. One answer settles one request. The app decides from your own speech after the question, never from the voice model's judgment, typed text, or text read from tool output, and it applies the same access checks as tapping the approval.
+- **What stays on screen.** Private access requests and anything that carries a secret are answered on screen; the assistant tells you when that is needed. Questions with options are also answered in the chat.
+
 ## How the engines differ
 
 ### GPT Live

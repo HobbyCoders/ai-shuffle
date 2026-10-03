@@ -207,7 +207,7 @@ def test_voice_audio_socket_and_its_upstream_close_when_the_key_is_revoked(keys)
     upstream_closed = threading.Event()
 
     class FakeCall:
-        def __init__(self, websocket, row, config, key, minutes):
+        def __init__(self, websocket, row, config, key, minutes, **_identity):
             self.websocket = websocket
             self.done = asyncio.Event()
 

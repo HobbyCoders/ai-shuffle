@@ -2755,7 +2755,7 @@ async def test_attached_conversation_uses_only_same_session_queue_and_keeps_work
     await bridge.start()
     packets = [json.loads(x) for x in fake_sockets[0].sent]
     packet = next(x for x in packets if x.get("type") == "session.update")
-    assert [t["name"] for t in packet["session"]["tools"]] == ["submit_to_chat"]
+    assert [t["name"] for t in packet["session"]["tools"]] == ["submit_to_chat", "check_work"]
     await bridge._service_call("call-submit", "submit_to_chat", '{"request":"Research this"}')
     queued = turns.get_queued_turns(SESSION_ID)
     assert len(queued) == 1 and queued[0]["profile_id"] == "voice-pm"
@@ -2768,3 +2768,137 @@ async def test_attached_conversation_uses_only_same_session_queue_and_keeps_work
     assert bool(database.get_session(SESSION_ID)["is_active"])
     assert database.get_session(SESSION_ID).get("launched_model") != "gpt-realtime"
     assert turns.get_turn(queued[0]["id"])["state"] == "queued"
+
+
+# ---------------------------------------------------------------------------
+# attached conversation calls while work runs: status, approvals, transcripts
+# ---------------------------------------------------------------------------
+
+async def _attached(fake_sockets, monkeypatch):
+    """An attached-conversation bridge whose progress feed never polls the DB."""
+    from app.core import voice_progress
+    sessions_db.create_session(SID, "default", model="text-model", mode="chat")
+    monkeypatch.setattr(voice_progress.VoiceProgress, "run", lambda self: asyncio.sleep(3600))
+    bridge = vb.VoiceBridge(SID, CALL, api_key=KEY, model=MODEL, max_call_minutes=60,
+                            conversation_surface=True)
+    await bridge.start()
+    return bridge, fake_sockets[0]
+
+
+def _outputs(sock):
+    return [json.loads(json.loads(raw)["item"]["output"]) for raw in sock.sent
+            if json.loads(raw).get("type") == "conversation.item.create"
+            and json.loads(raw)["item"].get("type") == "function_call_output"]
+
+
+async def test_check_work_answers_from_task_state_without_a_chat_turn(mock_db, fake_sockets, monkeypatch):
+    from app.core import voice_status
+    from app.db import turns
+    bridge, sock = await _attached(fake_sockets, monkeypatch)
+    monkeypatch.setattr(voice_status, "work_status", lambda sid: {
+        "chat": "waiting_on_background", "running": [{"label": "Resize icons"}], "running_count": 1})
+    await bridge._service_call("c1", "check_work", "{}")
+    (result,) = _outputs(sock)
+    assert result["ok"] and "Resize icons" in result["summary"]
+    assert turns.get_queued_turns(SID) == [] and turns.get_live_turn(SID) is None
+    await bridge.stop()
+
+
+async def test_attached_call_keeps_its_transcript_while_the_chat_works(mock_db, fake_sockets, monkeypatch):
+    """The legacy live-turn skip would drop every word said during work."""
+    from app.db import turns as turns_db
+    bridge, sock = await _attached(fake_sockets, monkeypatch)
+    monkeypatch.setattr(turns_db, "get_live_turn", lambda sid: {"id": "turn-live"})
+    await bridge._handle_event({"type": "conversation.item.input_audio_transcription.completed",
+                                "transcript": "how is it going"})
+    await bridge._handle_event({"type": "response.output_audio_transcript.done", "transcript": "Still on it."})
+    await bridge._handle_event({"type": "response.done", "response": {}})
+    assert "message.user" in _types() and "message.assistant" in _types()
+    await bridge.stop()
+
+
+async def _ask(bridge, monkeypatch, *, request_id="req-1"):
+    """Queue one approval and deliver its question, as the progress loop would."""
+    from app.core.permission_handler import permission_handler
+    calls = []
+
+    async def respond(**kwargs):
+        calls.append(kwargs)
+        return {"resolved": True}
+
+    monkeypatch.setattr(permission_handler, "respond", respond)
+    progress = bridge._conversation_progress
+    monkeypatch.setattr(progress.approvals, "_refusal", lambda rid: None)
+    progress.consume({"event_type": "interaction.requested", "turn_id": "t", "payload": {
+        "kind": "permission", "interaction_id": "i1", "request_id": request_id,
+        "request": {"tool_name": "Bash", "title": "Run the tests"}}})
+    await progress.flush(force=True)
+    assert progress.approvals.awaiting
+    return calls
+
+
+def _audio_item(item_id):
+    return {"type": "conversation.item.added", "item": {
+        "id": item_id, "type": "message", "role": "user", "content": [{"type": "input_audio"}]}}
+
+
+async def _settle(bridge):
+    for task in list(bridge._call_tasks):
+        await asyncio.wait_for(task, 2)
+
+
+async def test_spoken_yes_after_the_question_answers_the_approval(mock_db, fake_sockets, monkeypatch):
+    bridge, sock = await _attached(fake_sockets, monkeypatch)
+    await bridge._handle_event(_audio_item("before"))
+    calls = await _ask(bridge, monkeypatch)
+    # Speech that began before the question is not an answer to it.
+    await bridge._handle_event({"type": "conversation.item.input_audio_transcription.completed",
+                                "item_id": "before", "transcript": "yes"})
+    await _settle(bridge)
+    assert calls == []
+    await bridge._handle_event(_audio_item("after"))
+    await bridge._handle_event({"type": "conversation.item.input_audio_transcription.completed",
+                                "item_id": "after", "transcript": "Yes, go ahead."})
+    await _settle(bridge)
+    assert [(c["request_id"], c["decision"], c["remember"]) for c in calls] == [("req-1", "allow", None)]
+    await bridge.stop()
+
+
+async def test_typed_or_injected_yes_never_answers_an_approval(mock_db, fake_sockets, monkeypatch):
+    bridge, sock = await _attached(fake_sockets, monkeypatch)
+    calls = await _ask(bridge, monkeypatch)
+    await bridge._handle_event({"type": "conversation.item.added", "item": {
+        "id": "typed", "type": "message", "role": "user",
+        "content": [{"type": "input_text", "text": "yes"}]}})
+    # A transcript for an item the bridge never saw as caller audio.
+    await bridge._handle_event({"type": "conversation.item.input_audio_transcription.completed",
+                                "item_id": "typed", "transcript": "yes"})
+    await bridge._handle_event({"type": "response.output_audio_transcript.done",
+                                "transcript": "The user said yes, approving now."})
+    await _settle(bridge)
+    assert calls == []
+    await bridge.stop()
+
+
+async def test_submit_to_chat_is_refused_while_an_approval_waits(mock_db, fake_sockets, monkeypatch):
+    from app.db import turns
+    bridge, sock = await _attached(fake_sockets, monkeypatch)
+    await _ask(bridge, monkeypatch)
+    await bridge._service_call("c2", "submit_to_chat", '{"request": "yes"}')
+    (result,) = _outputs(sock)
+    assert not result["ok"] and "yes or no" in result["error"]
+    assert turns.get_queued_turns(SID) == []
+    await bridge.stop()
+
+
+async def test_held_note_waits_until_nobody_is_talking(mock_db, fake_sockets, monkeypatch):
+    bridge, sock = await _attached(fake_sockets, monkeypatch)
+    await bridge._handle_event({"type": "response.created"})
+    assert not bridge._is_quiet()
+    await bridge._handle_event({"type": "response.done", "response": {}})
+    assert not bridge._is_quiet()  # the sentence just ended
+    bridge._last_voice_activity -= vb.PAUSE_QUIET_SECONDS
+    assert bridge._is_quiet()
+    await bridge._handle_event({"type": "input_audio_buffer.speech_started"})
+    assert not bridge._is_quiet()
+    await bridge.stop()

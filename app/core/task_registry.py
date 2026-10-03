@@ -1428,6 +1428,24 @@ class TaskRegistry:
         if record is not None:
             record["notification_delivered"] = True
 
+    def finished_awaiting_report(self, session_id: str) -> List[Dict[str, Any]]:
+        """Finished tasks whose result the parent has not taken in yet.
+
+        Read-only view for a voice caller's "is it done yet": a task that has
+        settled but whose completion notification has not been delivered to
+        the parent turn is a report still waiting to be read. Only the parent's
+        own background work counts (a foreground task returned inline), and a
+        task whose wake was suppressed is not waiting on anyone. Newest first.
+        """
+        suppressed = self._wake_suppressed.get(session_id, set())
+        records = [
+            r for task_id, r in self._tasks.get(session_id, {}).items()
+            if r.get("status") != "running" and not r.get("notification_delivered")
+            and task_id not in suppressed and self.is_own_background_task(session_id, task_id)
+        ]
+        records.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
+        return [to_wire(r) for r in records]
+
     def has_pending_composer_work(self, session_id: str) -> bool:
         """Completion hand-offs still awaiting delivery, including missing rows.
 

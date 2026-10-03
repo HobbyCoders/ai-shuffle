@@ -58,16 +58,17 @@
  let corrections = $state<Record<AboutField, string>>({ preferred_name: '', email: '', github_username: '', repository_refs: '' });
  const suggestions = $derived(assistant?.suggested_connections ?? []);
 
- // Same gate as the composer's call button: a call starts only once the home
- // conversation is ready or finished. Without the transcript loaded, the
- // cross-device streaming marker and background prompts stand in for it.
+ // Same gate as the composer's call button. The home is always callable, even
+ // while it works or waits on background jobs; only a home run by another
+ // device blocks the call. Without the transcript loaded, the cross-device
+ // streaming marker and background prompts stand in for the live state.
  const callBlocked = $derived.by(() => {
   const homeId = assistant?.home_session_id;
   if (!homeId) return null;
   const attention = $backgroundPermissions.get(homeId);
   const state = $activeSession.sessionId === homeId ? $activeSession
    : { sessionId: homeId, isStreaming: $streamingSessions.has(homeId), activeTasks: [], pendingPermissions: attention?.count ? [attention] : [], pendingQuestions: [] };
-  return callBusyReason(state, $sessions.find(s => s.id === homeId));
+  return callBusyReason(state, $sessions.find(s => s.id === homeId), { alwaysAvailable: true });
  });
  let touch = $state(false);
 

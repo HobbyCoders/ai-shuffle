@@ -206,32 +206,31 @@ describe('Assistant home', () => {
 describe('Assistant home call gate', () => {
  const startCall = async () => await screen.findByRole('button', { name: 'Start call' }) as HTMLButtonElement;
  it.each([
-  ['reports running tasks', () => rows.set([{ id: 'home', status: 'active', has_running_tasks: true }]), /finishes working/],
-  ['is streaming on another device', () => streaming.set(new Map([['home', {}]])), /finishes working/],
-  ['waits on a permission or question', () => prompts.set(new Map([['home', { count: 1, kind: 'question' }]])), /finishes working/],
-  ['is the open session and streaming', () => active.set({ sessionId: 'home', isStreaming: true, activeTasks: [], pendingPermissions: [], pendingQuestions: [] }), /finishes working/],
-  ['is parked on background work', () => rows.set([{ id: 'home', status: 'active', parked_task_kind: 'shell' }]), /background tasks finish/],
- ])('disables Start call with a reason while the home %s', async (_label, arrange, reason) => {
+  ['reports running tasks', () => rows.set([{ id: 'home', status: 'active', has_running_tasks: true }])],
+  ['is streaming on another device', () => streaming.set(new Map([['home', {}]]))],
+  ['waits on a permission or question', () => prompts.set(new Map([['home', { count: 1, kind: 'question' }]]))],
+  ['is the open session and streaming', () => active.set({ sessionId: 'home', isStreaming: true, activeTasks: [], pendingPermissions: [], pendingQuestions: [] })],
+  ['is parked on background work', () => rows.set([{ id: 'home', status: 'active', parked_task_kind: 'shell' }])],
+ ])('keeps Start call available while the home %s', async (_label, arrange) => {
   configured(); arrange(); render(AssistantHome);
   const button = await startCall();
+  expect(button.disabled).toBe(false);
+  expect(button.getAttribute('aria-disabled')).toBeNull();
+  await fireEvent.click(button);
+  await waitFor(() => expect(mocks.startCallForSession).toHaveBeenCalledWith('home', { attach: true }));
+ });
+ it('disables Start call while another device runs the home', async () => {
+  configured(); rows.set([{ id: 'home', status: 'active', is_remote: true }]); render(AssistantHome);
+  const button = await startCall();
   expect(button.disabled).toBe(true);
-  expect(button.title).toMatch(reason);
+  expect(button.title).toMatch(/device that runs this conversation/);
   await fireEvent.click(button);
   expect(mocks.openAssistant).not.toHaveBeenCalled();
   expect(mocks.startCallForSession).not.toHaveBeenCalled();
  });
- it('re-enables Start call once the home finishes', async () => {
-  configured(); rows.set([{ id: 'home', status: 'active', has_running_tasks: true }]); render(AssistantHome);
-  const button = await startCall();
-  expect(button.disabled).toBe(true);
-  rows.set([{ id: 'home', status: 'active', has_running_tasks: false }]);
-  await waitFor(() => expect(button.disabled).toBe(false));
-  await fireEvent.click(button);
-  await waitFor(() => expect(mocks.startCallForSession).toHaveBeenCalledWith('home', { attach: true }));
- });
  it('explains a blocked Start call with a brief banner on a touch screen', async () => {
   vi.stubGlobal('matchMedia', (query: string) => ({ matches: query === '(hover: none)', media: query, addEventListener() {}, removeEventListener() {} }));
-  configured(); rows.set([{ id: 'home', status: 'active', parked_task_kind: 'agent' }]); render(AssistantHome);
+  configured(); rows.set([{ id: 'home', status: 'active', is_remote: true }]); render(AssistantHome);
   const button = await startCall();
   expect(button.disabled).toBe(false);
   expect(button.getAttribute('aria-disabled')).toBe('true');

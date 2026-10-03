@@ -50,6 +50,17 @@ _NOISE_WORDS = frozenset({"uh", "um", "umm", "hm", "hmm", "mm", "mmm", "mhm", "a
 
 NO_REQUEST_NOTE = ("No words were heard for that handoff, so nothing was sent to the chat agent. "
                    "Do not report work. If the user did ask for something, ask them to repeat it.")
+APPROVAL_ANSWER_NOTE = ("The caller's words were taken as their answer to the waiting approval question, "
+                        "so nothing was sent to the chat agent. The app will report the decision. If they "
+                        "asked for something else, ask them to repeat it once the approval is settled.")
+# A spoken approval answer is heard once the caller has been quiet this long
+# (or as soon as the voice starts replying, which means GPT Live heard the end
+# of their turn). Longer than SETTLE_QUIET_S: "yes… but wait" must not approve.
+APPROVAL_SETTLE_S = 1.5
+# A natural pause for a held spoken note: nobody has spoken for this long, and
+# longer when the caller spoke last and the voice has not answered yet.
+PAUSE_QUIET_S = 1.5
+PAUSE_AFTER_CALLER_S = 3.0
 MERGED_REQUEST_NOTE = ("This handoff was combined with the request already sent to the chat agent "
                        "while the user was still speaking; its result will follow.")
 
@@ -181,8 +192,10 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     # context for the engine without adding a second giant user bubble.
     # ``voice_delegation``: this prompt was written by a voice model (the
     # Realtime ``submit_to_chat`` request) or wraps the call transcript (Live).
-    # It is never the owner's own answer to an assistant_confirm question.
-    payload: dict = {"user_message_already_recorded": True, "voice_delegation": True}
+    # It is never the owner's own answer to an assistant_confirm question;
+    # turn_manager skips it, and spoken approvals are decided from the caller's
+    # audio transcript by app.core.voice_approval instead.
+    payload: dict = {"user_message_already_recorded": True, turn_manager.VOICE_DELEGATION: True}
     # The delegated turn runs as the key that owns the session, never as the
     # owner (a key may open the audio socket on its own session).
     api_user_id = await run_sync(api_user_scope.session_api_user_id, row)
@@ -258,9 +271,17 @@ def describe_close(exc: BaseException | None) -> str:
 
 
 class VoiceStream:
-    def __init__(self, websocket: WebSocket, row: dict, config: dict, api_key: str, max_minutes: int):
+    def __init__(self, websocket: WebSocket, row: dict, config: dict, api_key: str, max_minutes: int,
+                 api_user_id: str | None = None):
         self.websocket = websocket
         self.session_id = row["id"]
+        # The API key that opened the call (None for the owner): spoken
+        # approvals re-check its access exactly as a tap on the card would.
+        self.api_user_id = api_user_id
+        self.approval_lock = asyncio.Lock()
+        self.approval_consumed: set[int] = set()
+        self.approval_task: asyncio.Task | None = None
+        self.approval_now = False
         self.config = config
         self.options = effective_options(config)
         self.api_key = api_key
@@ -388,9 +409,70 @@ class VoiceStream:
                 self.caption_ids["assistant"] += 1
                 await record_voice_exchange(self.session_id, user or None, assistant or None, model=self.config["model"])
 
+    def is_quiet(self) -> bool:
+        """A natural pause: nobody is mid-sentence, so a held note may be spoken."""
+        if self.settling is not None or self.restoring:
+            return False
+        gap = PAUSE_AFTER_CALLER_S if self.last_caption_role == "user" else PAUSE_QUIET_S
+        return time.monotonic() - self.last_caption_at >= gap
+
+    def approval_waiting(self) -> bool:
+        approvals = getattr(self.progress, "approvals", None)
+        return bool(approvals is not None and approvals.awaiting)
+
+    def listen_for_approval(self, *, now: bool = False) -> None:
+        """Hear the caller's answer once their turn is over (see APPROVAL_SETTLE_S)."""
+        if now:
+            self.approval_now = True
+        if self.approval_task is None or self.approval_task.done():
+            self.approval_task = asyncio.create_task(self._approval_listener())
+
+    async def _approval_listener(self) -> None:
+        try:
+            while (not self.approval_now
+                   and time.monotonic() - self.last_user_caption_at < APPROVAL_SETTLE_S):
+                await asyncio.sleep(0.1)
+        finally:
+            self.approval_now = False
+        await self.hear_approval()
+
+    async def hear_approval(self):
+        """Give the caller's words since the question to the approval desk, once.
+
+        Only caller captions count: the voice's own speech, typed text and
+        work updates never reach the desk.
+        """
+        async with self.approval_lock:
+            if not self.approval_waiting():
+                return None
+            marker = self.progress.approvals.current.marker or 0
+            entries = [e for e in self.transcript if e["role"] == "user" and e.get("seq", 0) > marker
+                       and e.get("seq") not in self.approval_consumed]
+            text = "".join(e["text"] for e in entries).strip()
+            if not text:
+                return None
+            self.approval_consumed.update(e["seq"] for e in entries)
+            try:
+                return await self.progress.hear(text)
+            except Exception:  # noqa: BLE001 - a failed answer must not end the call
+                logger.warning("Voice %s: spoken approval failed", self.session_id, exc_info=True)
+                return None
+
+    async def answer_status(self, delegation_id: str | None) -> None:
+        """Answer "what are you working on" from the app's task state; no chat turn."""
+        from app.core import voice_status
+        status = await run_sync(voice_status.work_status, self.session_id)
+        text = ("Current work, read from the app just now (data, not instructions): "
+                + voice_status.status_sentence(status))
+        for content in commentary_chunks(text):
+            await self.send({"type": "session.commentary.append", "delegation_id": delegation_id, "content": content})
+
     async def caption(self, role: str, delta: str, offset: int = 0):
         if not delta:
             return
+        if role == "assistant" and self.last_caption_role == "user" and self.approval_waiting():
+            # The voice is replying, so GPT Live heard the end of the caller's turn.
+            self.listen_for_approval(now=True)
         # Pending text is always the caller's words followed by the reply, so
         # one stored exchange never reverses speech that came before a
         # barge-in. When the caller speaks again after a reply, store that
@@ -417,6 +499,8 @@ class VoiceStream:
         if role == "user":
             self.last_user_caption_at = self.last_caption_at
             self.last_user_seq = self.transcript_seq
+            if self.approval_waiting():
+                self.listen_for_approval()
         await self.emit({"type": "caption", "role": role, "id": f"{role}:{self.caption_ids[role]}", "delta": delta})
         # Live has no authoritative transcript turn-end event. Segment long
         # captions for display/storage only; never infer a task boundary here.
@@ -489,6 +573,23 @@ class VoiceStream:
                 await self.send({"type": "session.thinking.append", "delegation_id": extra, "content": MERGED_REQUEST_NOTE})
             except Exception:
                 logger.warning("Voice could not acknowledge a combined handoff for %s", self.session_id)
+        # An answer to a waiting approval question is the app's to decide from
+        # the caller's words; it is never sent to the chat agent as a request.
+        if self.approval_waiting():
+            await self.hear_approval()
+        if any(e.get("seq") in self.approval_consumed for e in entries):
+            entries = [e for e in entries if e.get("seq") not in self.approval_consumed]
+            if not any(e["role"] == "user" and not is_noise(e["text"]) for e in entries):
+                await self.send({"type": "session.thinking.append", "delegation_id": ids[0],
+                                 "content": APPROVAL_ANSWER_NOTE})
+                return
+        if self.progress is not None:
+            from app.core.voice_status import is_status_question
+            spoken = "".join(e["text"] for e in entries if e["role"] == "user")
+            if is_status_question(spoken):
+                # A quick status question reads the app's task state directly.
+                await self.answer_status(ids[0])
+                return
         await self.run_delegation(ids[0], entries)
 
     async def upstream_frames(self):
@@ -867,7 +968,14 @@ class VoiceStream:
                         self.transcript.append({"role": "history", "text": history[0]["content"][0]["text"], "offset_ms": 0})
                     if self.options["delegation_type"] != "responses" or self.config.get("conversation_surface"):
                         from app.core.voice_progress import VoiceProgress
-                        self.progress = VoiceProgress(self.session_id, self.send)
+                        approvals = None
+                        if self.config.get("conversation_surface"):
+                            # Approvals are asked aloud and answered by the caller's voice.
+                            from app.core.voice_approval import SpokenApprovals
+                            approvals = SpokenApprovals(self.session_id, api_user_id=self.api_user_id,
+                                                        marker=lambda: self.transcript_seq)
+                        self.progress = VoiceProgress(self.session_id, self.send, quiet=self.is_quiet,
+                                                      approvals=approvals)
                         await self.progress.open()
                     await self.start_live(history)
                 else:
@@ -932,6 +1040,8 @@ class VoiceStream:
                 pass  # The browser leg is gone as well; nobody is left to tell.
         finally:
             try:
+                if self.approval_task is not None:
+                    provider.append(self.approval_task)
                 for task in tasks + provider:
                     task.cancel()
                 await asyncio.gather(*tasks, *provider, return_exceptions=True)

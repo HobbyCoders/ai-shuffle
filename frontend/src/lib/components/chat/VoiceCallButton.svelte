@@ -7,6 +7,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { sessions } from '$lib/stores/app-data.svelte';
 	import { isVoiceEnabled } from '$lib/api/voice';
+	import { assistantState } from '$lib/stores/assistant';
 	import { confirmCallReplacement, startCallForSession, voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { callBusyReason, explainBlockedCall, freshCallReason, prefersTouch } from './call-gate';
 
@@ -29,10 +30,12 @@
 	const freshComposer = $derived(!$activeSession.sessionId);
 	const permittedSurface = $derived(freshComposer || (!sessionRow?.hidden && !sessionRow?.parent_session_id && sessionRow?.status !== 'archived' && !sessionRow?.is_remote));
 	const show = $derived(voiceEnabled && permittedSurface && !isCallSurfaceActive($voiceCallState, $activeSession.sessionId));
-	// Calls start only on a ready or finished conversation (see callBusyReason).
+	// The assistant's home takes a call at any time; other conversations only
+	// once they are ready or finished (see callBusyReason).
+	const assistantHome = $derived(!!$activeSession.sessionId && $assistantState?.home_session_id === $activeSession.sessionId);
 	const blockedReason = $derived(
 		(freshComposer ? freshCallReason($activeSession) : null)
-			?? callBusyReason($activeSession, sessionRow)
+			?? callBusyReason($activeSession, sessionRow, { alwaysAvailable: assistantHome })
 			?? (disabled ? (disabledReason || 'Unavailable right now') : null)
 	);
 	const label = $derived(freshComposer ? 'Start a call in a new conversation' : 'Start a call in this conversation');

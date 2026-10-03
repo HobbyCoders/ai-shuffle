@@ -10,13 +10,15 @@ vi.mock('$lib/services/voiceCall', async () => ({ startCallForSession: mocks.sta
 import { activeSession } from '$lib/stores/active-session';
 import { sessions } from '$lib/stores/app-data.svelte';
 import VoiceCallButton from './VoiceCallButton.svelte';
+import { assistantState } from '$lib/stores/assistant';
+import type { AssistantState } from '$lib/api/assistant';
 type State = { sessionId: string | null; mode: string; isStreaming: boolean; isCreatingWorktree?: boolean; deviceIntent?: { id: string; name: string } | null; activeTasks: { status: string }[]; pendingPermissions: unknown[]; pendingQuestions: unknown[] };
 const active = activeSession as unknown as Writable<State>;
 const rows = sessions as unknown as Writable<Record<string, unknown>[]>;
 const ready: State = { sessionId: 'home', mode: 'code', isStreaming: false, activeTasks: [], pendingPermissions: [], pendingQuestions: [] };
 const callButton = () => screen.findByRole('button', { name: 'Start a call in this conversation' });
 beforeEach(() => { vi.clearAllMocks(); mocks.isVoiceEnabled.mockResolvedValue(true); mocks.confirmCallReplacement.mockResolvedValue(true); active.set(ready); rows.set([]); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); assistantState.set(null); });
 /** A phone or tablet: no hover, so a tooltip never shows. */
 const touchScreen = () => vi.stubGlobal('matchMedia', (query: string) => ({ matches: query === '(hover: none)', media: query, addEventListener() {}, removeEventListener() {} }));
 describe('call action on a conversation', () => {
@@ -45,6 +47,38 @@ describe('call action on a conversation', () => {
   await callButton();
   rows.set([{ id: 'home', status: 'active', ...row }]);
   await vi.waitFor(() => expect(screen.queryByRole('button')).toBeNull());
+ });
+});
+describe('the assistant home takes a call at any time', () => {
+ const home = () => assistantState.set({ home_session_id: 'home' } as AssistantState);
+ it.each([
+  ['streaming', { isStreaming: true }, []],
+  ['running background tasks', { activeTasks: [{ status: 'running' }] }, []],
+  ['waiting on a permission prompt', { pendingPermissions: [{ request_id: 'p' }] }, []],
+  ['waiting on a question', { pendingQuestions: [{ request_id: 'q' }] }, []],
+  ['reporting running tasks on its row', {}, [{ id: 'home', status: 'active', has_running_tasks: true }]],
+  ['parked on background work', {}, [{ id: 'home', status: 'active', parked_task_kind: 'agent' }]],
+ ])('stays enabled while %s', async (_label, state, sessionRows) => {
+  home(); active.set({ ...ready, ...state }); rows.set(sessionRows); render(VoiceCallButton);
+  const button = await callButton() as HTMLButtonElement;
+  expect(button.disabled).toBe(false);
+  expect(button.title).toBe('Start a call in this conversation');
+  await fireEvent.click(button);
+  expect(mocks.startCallForSession).toHaveBeenCalledWith('home', { attach: true });
+ });
+ it('keeps the ready-or-finished gate on every other conversation', async () => {
+  assistantState.set({ home_session_id: 'another-home' } as AssistantState);
+  active.set({ ...ready, isStreaming: true }); render(VoiceCallButton);
+  const button = await callButton() as HTMLButtonElement;
+  expect(button.disabled).toBe(true);
+  expect(button.title).toMatch(/finishes working/);
+ });
+ it('follows the home when the assistant state arrives after the composer', async () => {
+  active.set({ ...ready, isStreaming: true }); render(VoiceCallButton);
+  const button = await callButton() as HTMLButtonElement;
+  expect(button.disabled).toBe(true);
+  home();
+  await vi.waitFor(() => expect(button.disabled).toBe(false));
  });
 });
 describe('call start gate while the session is busy', () => {

@@ -86,7 +86,7 @@ class FakeBrowser:
 class FakeProgress:
     active_count = 0
 
-    def __init__(self, session_id, send):
+    def __init__(self, session_id, send, **_transport):
         self.send = send
 
     async def open(self):

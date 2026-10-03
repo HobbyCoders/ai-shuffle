@@ -16,11 +16,33 @@ export interface CallGateState {
 
 type CallGateRow = Pick<Session, 'id' | 'is_remote' | 'controllable' | 'remote_runtime_state' | 'has_running_tasks' | 'parked_task_kind'>;
 
-/** Why a call cannot start on this session yet, or null when it can. Calls
- * start only on a ready or finished conversation. Busy is the Stop button's
- * signal (streaming, running tasks, has_running_tasks, remote runtime) plus an
- * unanswered permission or question; parked is the sidebar's Parked marker. */
-export function callBusyReason(state: CallGateState, row?: CallGateRow | null): string | null {
+export const CALL_ELSEWHERE_REASON = 'Calls run on the device that runs this conversation';
+
+export interface CallGateOptions {
+	/** The persistent assistant's home conversation. It can be called at any
+	 * time: while it works, while it waits on background jobs and while a
+	 * decision is pending, because the call reads its status and asks its
+	 * approvals aloud. */
+	alwaysAvailable?: boolean;
+}
+
+/** Why a call cannot start on this session yet, or null when it can.
+ *
+ * An ordinary conversation takes a call only when it is ready or finished
+ * (#1611). Busy is the Stop button's signal (streaming, running tasks,
+ * has_running_tasks, remote runtime) plus an unanswered permission or
+ * question; parked is the sidebar's Parked marker.
+ *
+ * The assistant's home is always callable, except when another device runs
+ * it: a call attaches only to a conversation this install runs. */
+export function callBusyReason(
+	state: CallGateState,
+	row?: CallGateRow | null,
+	options: CallGateOptions = {}
+): string | null {
+	if (options.alwaysAvailable) {
+		return row?.is_remote && row.id === state.sessionId ? CALL_ELSEWHERE_REASON : null;
+	}
 	const working = hasStoppableWork(state, row ?? undefined)
 		|| state.pendingPermissions.length > 0
 		|| state.pendingQuestions.length > 0;

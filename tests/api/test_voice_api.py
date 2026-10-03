@@ -1603,7 +1603,7 @@ def fal_streams(monkeypatch):
     seen = []
 
     class _FakeStream:
-        def __init__(self, websocket, row, config, key, max_minutes):
+        def __init__(self, websocket, row, config, key, max_minutes, **_identity):
             seen.append(key)
 
         async def run(self):
