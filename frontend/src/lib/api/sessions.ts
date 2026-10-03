@@ -69,6 +69,10 @@ export interface Session {
 	// Cross-install (cluster) annotation — populated server-side when sessions
 	// are shared across installs on a shared database.
 	instance_id?: string | null;  // Owning install (null = legacy/this install)
+	// Network device that runs the session. On a worker network this, not
+	// `instance_id` (which a mirrored or handed-off row may leave null or
+	// stale), names the owner whose Claude usage applies.
+	owner_device_id?: string | null;
 	device_name?: string | null;  // Human-friendly owning-device name
 	device_online?: boolean;  // Owning install seen recently (heartbeat)
 	is_remote?: boolean;  // Owned by another install (not this one)

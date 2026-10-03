@@ -79,18 +79,19 @@
 		isBucketStale,
 		windowObservedAtKnown,
 		BUCKET_STALE_MS,
-		parseResetMs,
 		providerStatusAt,
 		resolveBucket,
 		resolveBucketKey,
 		selfBucketKey,
+		isSelfTarget,
+		windowRolledOver,
 		claudeUsageSource,
 		type UsageBucket,
 		type ProviderUsageBucket,
 		type UsageSourceInfo,
 		type UsageWindow,
 	} from '$lib/stores/rate-limit';
-	import { usageTargetInstance } from '$lib/stores/usage-target';
+	import { usageTargetInstance, usageTargetDeviceName } from '$lib/stores/usage-target';
 	import { claudeAuthenticated } from '$lib/stores/auth.svelte';
 
 	const usageNumber = createUsageNumberAnimation();
@@ -381,8 +382,7 @@
 	}
 
 	function isRolledOver(usageWindow: UsageWindow, nowMs: number): boolean {
-		const resetMs = parseResetMs(usageWindow.resets_at);
-		return resetMs != null && resetMs <= nowMs;
+		return windowRolledOver(usageWindow, nowMs);
 	}
 
 	function itemsFor(bucket: UsageBucket): WindowItem[] {
@@ -408,6 +408,8 @@
 	 * Another window's report never re-dates this one.
 	 */
 	function windowAsOfText(usageWindow: UsageWindow, nowMs: number): string | null {
+		// Past its reset the row shows the refilled window, not the old report.
+		if (isRolledOver(usageWindow, nowMs)) return null;
 		if (!windowObservedAtKnown(usageWindow)) return 'age unknown';
 		if (nowMs - usageWindow.received_at <= BUCKET_STALE_MS) return null;
 		return `reported ${formatAsOf(usageWindow.received_at, nowMs)}`;
@@ -415,8 +417,8 @@
 
 	/** The plan header's "Last reported" text for a stale bucket. */
 	function planStaleText(bucket: UsageBucket, nowMs: number): string {
-		const observedAt = bucketObservedAt(bucket);
-		if (bucketHasUndatedWindow(bucket) || observedAt == null) return 'Last reported · age unknown';
+		const observedAt = bucketObservedAt(bucket, nowMs);
+		if (bucketHasUndatedWindow(bucket, nowMs) || observedAt == null) return 'Last reported · age unknown';
 		return `Last reported ${formatAsOf(observedAt, nowMs)}`;
 	}
 
@@ -466,15 +468,22 @@
 	//
 	// Without it the subtext falls back to the resolved install's device
 	// name / "Other device" hint rather than dropping that disambiguation.
-	const isSelf = $derived(target == null || target === $rateLimit.selfInstanceId ||
+	const isSelf = $derived(isSelfTarget($rateLimit, target) ||
 		(resolvedKey != null && resolvedKey === selfBucketKey($rateLimit)));
+	const selfClaude = $derived($claudeAuthenticated || getClaudeAuth().auth_kind === 'api');
 	// Empty usage buckets also exist on installs without Claude. Subscription
 	// display metadata defaults to "subscription", so it is not proof of a login.
+	// Once Claude is in use on any install, a session on a device whose usage
+	// has not reached this one keeps the row with a "nothing reported" state:
+	// hiding it read as "Claude usage is gone".
+	const claudeInUse = $derived(selfClaude || Object.values($rateLimit.buckets).some((b) => b.available));
 	const hasClaude = $derived(Boolean(
 		resolvedBucket?.available ||
-		(isSelf && ($claudeAuthenticated || getClaudeAuth().auth_kind === 'api'))
+		(isSelf ? selfClaude : claudeInUse)
 	));
-	const deviceLabel = $derived(resolvedBucket?.deviceName ?? null);
+	const deviceLabel = $derived(resolvedBucket?.deviceName ?? (isSelf ? null : $usageTargetDeviceName));
+	/** Another device owns the session and none of its usage has reached this one. */
+	const remoteUnreported = $derived(!isSelf && !resolvedBucket?.available && items.length === 0);
 	const claudeDisplay = $derived<ProviderDisplay>(
 		getClaudeDisplay({
 			planType: isSelf ? getClaudeAuth().plan_type : null,
@@ -556,6 +565,10 @@
 		nowMs: number,
 		showsRemaining: boolean
 	): PercentDisplay | null {
+		// A subscription's 5-hour window is the one a session works against
+		// right now (ChatGPT/Codex reports one, like Claude): summarize by it.
+		const fiveHour = showsRemaining ? windows.find((w) => w.type === 'five_hour') : undefined;
+		if (fiveHour) return providerWindowPercent(fiveHour, nowMs, showsRemaining);
 		const values = windows.map((usageWindow) =>
 			providerWindowPercent(usageWindow, nowMs, showsRemaining)
 		);
@@ -587,10 +600,13 @@
 
 	// Claude plan-usage collapse: the rows follow the 'plan' section toggle.
 	const planRowsVisible = $derived(isSectionOpen('plan'));
-	// The collapsed Claude summary surfaces the most constrained window: the
-	// smallest remaining percentage (null → omit for an empty bucket).
-	const planMinRemaining = $derived<number | null>(
-		items.length ? Math.min(...items.map((it) => it.pct)) : null
+	// The collapsed Claude summary is the 5-hour window, the one a session is
+	// working against right now; the expanded rows keep every limit. Without a
+	// 5-hour reading it falls back to the smallest remaining percentage (null →
+	// omit for an empty bucket).
+	const planSummaryRemaining = $derived<number | null>(
+		items.find((it) => it.type === 'five_hour')?.pct ??
+			(items.length ? Math.min(...items.map((it) => it.pct)) : null)
 	);
 
 	// ── Document-level click/tap-away + Escape ────────────────────────────
@@ -760,7 +776,7 @@
 				<!-- The configured account's header shows the "Claude" brand +
 				     its auth-kind subtext (plan / "API"), falling back to the resolved
 				     device name or "Other device". It is the collapse toggle for the window rows;
-				     collapsed shows the least quota remaining and hides the rows +
+				     collapsed shows the 5-hour window's remaining quota and hides the rows +
 				     "No usage data" line. No account naming; the expanded rows end with the
 				     source details (source, scope, last successful update). -->
 				<div class="popover-section">
@@ -774,16 +790,18 @@
 						>
 							<span class="sec-head-labels">
 								<span class="section-device">{claudeDisplay.name}</span>
-								{#if resolvedBucket && isBucketStale(resolvedBucket, now)}
+								{#if remoteUnreported}
+									<span class="section-account provider-status usage-as-of">Not reported from {deviceLabel ?? 'that device'} yet</span>
+								{:else if resolvedBucket && isBucketStale(resolvedBucket, now)}
 									<span class="section-account provider-status usage-as-of">{planStaleText(resolvedBucket, now)}</span>
 								{/if}
 								{#if claudeSubtext}
 									<span class="section-account">{claudeSubtext}</span>
 								{/if}
 							</span>
-							{#if !planRowsVisible && planMinRemaining != null}
-								<span class="row-pct {remainingSeverity(planMinRemaining)} sec-summary"
-									use:usageNumber={{ key: `plan:${resolvedKey}:summary`, text: `${planMinRemaining}% left` }}></span
+							{#if !planRowsVisible && planSummaryRemaining != null}
+								<span class="row-pct {remainingSeverity(planSummaryRemaining)} sec-summary"
+									use:usageNumber={{ key: `plan:${resolvedKey}:summary`, text: `${planSummaryRemaining}% left` }}></span
 								>
 							{/if}
 							<svg
@@ -828,6 +846,11 @@
 								</div>
 							</div>
 						{/each}
+					{:else if remoteUnreported}
+						<div class="row-reset no-data">
+							{deviceLabel ?? 'The device running this session'} has not shared its Claude usage with this
+							device yet. It appears after that device's next Claude turn.
+						</div>
 					{:else}
 						<div class="row-reset no-data">No usage data yet. Claude Code reports it while an agent runs.</div>
 					{/if}
@@ -845,7 +868,8 @@
 			<!-- ═══ Provider usage (non-Claude) ═══ -->
 			<!-- Each bucket's head is its collapse toggle (name + planType stay).
 			     ChatGPT/Codex and SuperGrok subscription windows show quota remaining;
-			     their collapsed summary uses the least remaining window. xAI API-key,
+			     their collapsed summary uses the 5-hour window when there is one, else
+			     the least remaining window. xAI API-key,
 			     other API-key and credit windows keep used-of-100 and summarize the
 			     highest-utilization window. -->
 			{#each providerRows.filter(pb => !$hiddenUsageProviders[`provider:${pb.providerId}`]) as pb (pb.providerId)}

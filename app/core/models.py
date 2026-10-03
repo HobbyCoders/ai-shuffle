@@ -409,6 +409,10 @@ class Session(SessionBase):
     # Cross-install (cluster) annotation — populated by the API enrichment layer
     # when sessions are shared across installs on a shared database.
     instance_id: Optional[str] = None  # Owning install (NULL = legacy/this install)
+    # Network device that executes the session. On a worker network a mirrored
+    # or handed-off session's ``instance_id`` can name another install or be
+    # NULL, so this is what names its owner (and whose usage applies).
+    owner_device_id: Optional[str] = None
     device_name: Optional[str] = None  # Human-friendly owning-device name
     device_online: bool = True  # Owning install seen recently (heartbeat)
     is_remote: bool = False  # Owned by another install (not this one)

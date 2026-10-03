@@ -9,7 +9,24 @@
 	const view = new URLSearchParams(location.search).get('view') ?? 'usage';
 	const now = Date.now();
 	const inAnHour = String(Math.floor(now / 1000) + 3600);
-	rateLimit.applySnapshot({
+	// view=claude-limits: the three Claude limits, the weekly Fable one past its
+	// reset and last reported six days ago (an Opus-only week never reports it).
+	if (view === 'claude-limits') rateLimit.applySnapshot({
+		available: true,
+		windows: [],
+		self_instance_id: 'self',
+		snapshots: [{
+			instance_id: 'self', available: true, fetched_at: now / 1000,
+			windows: [
+				{ type: 'five_hour', utilization: 88, resets_at: inAnHour, observed_at: now },
+				{ type: 'seven_day', utilization: 41, resets_at: String(Math.floor(now / 1000) + 5 * 86400), observed_at: now },
+				{ type: 'seven_day_overage_included', utilization: 19,
+					resets_at: String(Math.floor(now / 1000) - 86400), observed_at: now - 6 * 86_400_000 }
+			]
+		}],
+		providers: []
+	});
+	else rateLimit.applySnapshot({
 		available: true,
 		windows: [],
 		self_instance_id: 'self',

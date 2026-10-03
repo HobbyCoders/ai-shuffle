@@ -284,6 +284,19 @@ class TestEnrichSessionsWithTags:
         mock_tags.assert_not_called()
 
 
+def test_session_response_names_the_owner_device():
+    """The usage panel resolves whose Claude usage applies by the owning device.
+
+    On a worker network a mirrored row's ``instance_id`` is NULL and a
+    handed-off one can still name the install it came from.
+    """
+    from app.core.models import Session
+
+    row = {"id": "s1", "created_at": "2026-10-03T00:00:00", "updated_at": "2026-10-03T00:00:00",
+           "instance_id": None, "owner_device_id": "dev_unraid"}
+    assert Session.model_validate(row).model_dump()["owner_device_id"] == "dev_unraid"
+
+
 class TestControllableAnnotation:
     """Truth table for the cross-install ``controllable`` flag.
 

@@ -116,12 +116,15 @@ def _oldest_observation(fetched_at: Any, windows: Any) -> Any:
     section by its oldest window; the tool does the same. A window without its
     own ``observed_at`` (persisted before windows were dated) has an unknown
     age: it must not borrow ``fetched_at``, which any other window's report
-    advances, so the result is ``None`` (freshness "unknown").
+    advances, so the result is ``None`` (freshness "unknown"). A window whose
+    reset has passed reads as refilled, not as its old report, so its age does
+    not date the others.
     """
     # A row with neither a reading nor a stamp is junk, not an undated window.
     rows = [
         w for w in windows or ()
         if isinstance(w, dict) and ("observed_at" in w or _percent(w.get("utilization")) is not None)
+        and not _reset_passed(w.get("resets_at"))
     ]
     if not rows:
         return fetched_at

@@ -359,6 +359,13 @@ def _on_applied(touched) -> None:
             assistant_service.on_network_applied(touched)
         except Exception:  # noqa: BLE001
             logger.warning("Applying assistant state failed", exc_info=True)
+    if any(c == "usage_snapshots" for c, _r, _o in touched):
+        # A peer's Claude usage row landed: open usage panels show it now
+        # instead of on their next poll.
+        loop = getattr(global_events, "_loop", None)
+        if loop and not loop.is_closed():
+            from app.core.usage_limits import usage_limits_monitor
+            asyncio.run_coroutine_threadsafe(usage_limits_monitor.peer_changed_and_broadcast(), loop)
     presence_ids = [r for c, r, _ in touched if c == "presence"]
     if presence_ids:
         try:

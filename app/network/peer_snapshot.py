@@ -179,7 +179,7 @@ def apply(manifest: dict, directory: Path, publisher: str) -> int:
             finished.add(collection)
     # Pages for collections this build does not know (retired here, or newer)
     # are verified above and applied as nothing.
-    if not set(policy.COLLECTIONS) <= finished:
+    if not set(policy.COLLECTIONS) - policy.SNAPSHOT_OPTIONAL_COLLECTIONS <= finished:
         raise ValueError("Peer state does not include every collection")
     applied = 0
     with store.get_db() as conn:

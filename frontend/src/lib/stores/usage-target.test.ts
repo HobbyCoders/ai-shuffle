@@ -8,7 +8,7 @@
  *   3. row not found → self (null).
  */
 import { describe, expect, it } from 'vitest';
-import { resolveTargetInstance } from './usage-target';
+import { resolveTargetDeviceName, resolveTargetInstance } from './usage-target';
 
 type Active = Parameters<typeof resolveTargetInstance>[0];
 type Rows = Parameters<typeof resolveTargetInstance>[1];
@@ -42,5 +42,24 @@ describe('resolveTargetInstance', () => {
 		const a = active({ sessionId: 's1' });
 		// Viewing an existing local session → self, regardless of stale compose state.
 		expect(resolveTargetInstance(a, rows)).toBeNull();
+	});
+
+	it('names a network session by its owner device, whatever its instance_id says', () => {
+		// On a worker network a mirrored row's instance_id is null and a handed-off
+		// one can still name the install it came from; the owner device decides.
+		const rows: Rows = [
+			{ id: 'mirrored', instance_id: null, owner_device_id: 'dev_unraid' },
+			{ id: 'handed-off', instance_id: 'ai-shuffle-serverworker', owner_device_id: 'dev_desktopworker' },
+			{ id: 'legacy', instance_id: 'worker', owner_device_id: null },
+		];
+		expect(resolveTargetInstance(active({ sessionId: 'mirrored' }), rows)).toBe('dev_unraid');
+		expect(resolveTargetInstance(active({ sessionId: 'handed-off' }), rows)).toBe('dev_gamingpc');
+		expect(resolveTargetInstance(active({ sessionId: 'legacy' }), rows)).toBe('worker');
+	});
+
+	it('reads the owning device name for the unreported state', () => {
+		const rows = [{ id: 's1', device_name: 'Unraid' }];
+		expect(resolveTargetDeviceName(active({ sessionId: 's1' }), rows)).toBe('Unraid');
+		expect(resolveTargetDeviceName(active(), rows)).toBeNull();
 	});
 });

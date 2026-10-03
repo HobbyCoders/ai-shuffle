@@ -33,6 +33,8 @@ import {
 	displayWindows,
 	reportedRemainingPct,
 	remainingFromUsedPct,
+	effectivePct,
+	isSelfTarget,
 	SELF_BUCKET_KEY,
 	claudeUsageSource,
 	type ClaudeUsageSourceState,
@@ -850,11 +852,14 @@ describe('remaining quota helpers', () => {
 		expect(remainingFromUsedPct(win(0, new Date(now + 60_000).toISOString()), now)).toBe(100);
 	});
 
-	it('retains last reported percentages after a reset until observed again', () => {
+	it('reads a window past its reset as refilled, never as the pre-reset report', () => {
 		const now = Date.now();
 		const expired = win(12, new Date(now - 60_000).toISOString());
-		expect(reportedRemainingPct(expired, now)).toBe(12);
-		expect(remainingFromUsedPct(expired, now)).toBe(88);
+		expect(reportedRemainingPct(expired, now)).toBe(100);
+		expect(remainingFromUsedPct(expired, now)).toBe(100);
+		expect(effectivePct(expired, now)).toBe(0);
+		// Until the reset passes the last report stands.
+		expect(reportedRemainingPct(expired, now - 120_000)).toBe(12);
 	});
 });
 
@@ -986,5 +991,66 @@ describe('reset times and data-less live events', () => {
 		rateLimit.applyLiveEvent({ rate_limit_type: '', utilization: 0.5 });
 		expect(selfBucket()!.windows.five_hour).toEqual(before);
 		expect(Object.keys(selfBucket()!.windows)).toEqual(['five_hour']);
+	});
+});
+
+describe('network devices and refilled windows', () => {
+	beforeEach(() => {
+		localStorage.clear();
+		rateLimit.__resetForTests();
+	});
+
+	function networkSnapshot() {
+		const now = Date.now();
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'ai-shuffle-local',
+			self_device_id: 'dev_local',
+			snapshots: [
+				{ instance_id: 'ai-shuffle-local', device_id: 'dev_local', device_name: 'DesktopWorker', available: true,
+					windows: [{ type: 'five_hour', utilization: 70, resets_at: String(now + 3_600_000), observed_at: now }] },
+				{ instance_id: 'ai-shuffle-unraid', device_id: 'dev_unraid', device_name: 'Unraid', available: true,
+					windows: [{ type: 'five_hour', utilization: 99, resets_at: String(now + 3_600_000), observed_at: now }] },
+			],
+		});
+	}
+
+	it('resolves a session owner named by device id to that install bucket', () => {
+		networkSnapshot();
+		const state = rateLimit.current;
+		expect(resolveBucketKey(state, 'dev_unraid')).toBe('ai-shuffle-unraid');
+		expect(resolveBucket(state, 'dev_unraid')?.deviceName).toBe('Unraid');
+		expect(resolveBucketKey(state, 'dev_local')).toBe('ai-shuffle-local');
+		expect(isSelfTarget(state, 'dev_local')).toBe(true);
+		expect(isSelfTarget(state, 'dev_unraid')).toBe(false);
+		// An unknown device never borrows this install's numbers.
+		expect(resolveBucket(state, 'dev_ghost')).toBeNull();
+	});
+
+	it('a refilled Fable window no longer dates the bucket as stale', () => {
+		const now = Date.now();
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [{ instance_id: 'self', available: true, fetched_at: now, windows: [
+				{ type: 'five_hour', utilization: 99, resets_at: String(now + 3_600_000), observed_at: now },
+				{ type: 'seven_day_overage_included', utilization: 19,
+					resets_at: String(now - 86_400_000), observed_at: now - 6 * 86_400_000 },
+				// Persisted before windows were dated, and already reset.
+				{ type: 'seven_day_opus', utilization: 50, resets_at: String(now - 60_000) },
+			] }],
+		});
+		const bucket = resolveBucket(rateLimit.current, null)!;
+		expect(bucketObservedAt(bucket, now)).toBe(now);
+		expect(bucketHasUndatedWindow(bucket, now)).toBe(false);
+		expect(isBucketStale(bucket, now)).toBe(false);
+		expect(reportedRemainingPct(bucket.windows.seven_day_overage_included, now)).toBe(100);
+	});
+
+	it('keeps the self device id across a reload of the persisted store', () => {
+		networkSnapshot();
+		const saved = JSON.parse(localStorage.getItem('usage-limit-buckets-v3') ?? '{}');
+		expect(saved.selfDeviceId).toBe('dev_local');
+		expect(saved.buckets['ai-shuffle-unraid'].deviceId).toBe('dev_unraid');
 	});
 });

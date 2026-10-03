@@ -364,6 +364,18 @@ _register(Collection(
     notes="Content-addressed; bytes fetched from any holder."))
 
 
+_register(Collection(
+    name="usage_snapshots", table="usage_snapshots", keys=("instance_id",),
+    fields=("instance_id", "windows", "available", "generation", "fetched_at", "updated_at"),
+    json_fields=("windows",), priority=97,
+    notes="Each device's Claude subscription windows, as its own CLI reported them. Only that device "
+          "writes its row, so a peer can show the usage of the device that owns a session."))
+
+#: Collections a peer transfer may lack: a publisher on an older build does
+#: not serve them, and they refill from the next local report.
+SNAPSHOT_OPTIONAL_COLLECTIONS = frozenset({"usage_snapshots"})
+
+
 #: Collections this build no longer syncs but peers on older builds may still
 #: publish. Their ops are consumed without being stored or forwarded, their
 #: snapshot pages are skipped, and a publisher still serves an empty page for

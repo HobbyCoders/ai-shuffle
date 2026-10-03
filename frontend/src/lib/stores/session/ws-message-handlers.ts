@@ -515,6 +515,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				generation: (data.generation as number | null) ?? undefined,
 				snapshots: (data.snapshots as import('$lib/stores/rate-limit').SnapshotInstance[] | undefined) ?? undefined,
 				self_instance_id: (data.self_instance_id as string | null | undefined) ?? undefined,
+				self_device_id: (data.self_device_id as string | null | undefined) ?? undefined,
 			});
 			return;
 		}

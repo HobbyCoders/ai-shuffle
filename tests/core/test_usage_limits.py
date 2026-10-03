@@ -54,12 +54,14 @@ async def test_live_cli_unified_windows_reach_usage_snapshot(monitor):
     from fluid.engine.delegated_proto import StreamJsonMapper
 
     mapper = StreamJsonMapper(session_id="s", turn_id="t", model="sonnet", user_node_id="n")
+    # Resets still ahead: a passed reset is served as refilled (see TestRollOver).
+    five_hour_reset, weekly_reset = int(time.time()) + 3600, int(time.time()) + 4 * 86400
     events = mapper.feed({"type": "rate_limit_event", "rate_limit_info": {
-        "status": "allowed", "rateLimitType": "five_hour", "resetsAt": 1790754000,
+        "status": "allowed", "rateLimitType": "five_hour", "resetsAt": five_hour_reset,
         "unifiedWindows": {
-            "five_hour": {"utilization": 0.06, "resetsAt": 1790754000},
-            "seven_day": {"utilization": 0.4, "resetsAt": 1790978400},
-            "seven_day_overage_included": {"utilization": 0.83, "resetsAt": 1790978400},
+            "five_hour": {"utilization": 0.06, "resetsAt": five_hour_reset},
+            "seven_day": {"utilization": 0.4, "resetsAt": weekly_reset},
+            "seven_day_overage_included": {"utilization": 0.83, "resetsAt": weekly_reset},
         },
     }}).events
     for event in events:
@@ -405,3 +407,208 @@ class TestTouchObservedRow:
         assert row["windows"] == [windows[0], {**windows[1], "observed_at": 3000}]
         assert row["generation"] == 7 and row["available"] is True
         assert row["fetched_at"] == 3000
+
+
+# ---------------------------------------------------------------------------
+# Passed resets, the weekly Fable bucket, and the network copy
+# ---------------------------------------------------------------------------
+#
+# Sanitized ``rate_limit_event`` frames in the shape Claude Code 2.1.288 emits
+# (its stream schema: ``unifiedWindows`` with ``five_hour``, ``seven_day`` and
+# ``seven_day_overage_included``, the last "present only for accounts whose
+# responses carry that window"). The Fable limit is that per-model bucket, so
+# an Opus turn's frame has no ``seven_day_overage_included`` at all.
+
+HOUR, DAY = 3600, 86400
+
+
+def _opus_frame(now, five_hour_used=0.01, weekly_used=0.05):
+    return {"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed", "rateLimitType": "five_hour", "resetsAt": int(now) + 4 * HOUR,
+        "unifiedWindows": {
+            "five_hour": {"utilization": five_hour_used, "resetsAt": int(now) + 4 * HOUR},
+            "seven_day": {"utilization": weekly_used, "resetsAt": int(now) + 6 * DAY},
+        },
+    }}
+
+
+def _fable_frame(now, fable_used, fable_reset):
+    frame = _opus_frame(now)
+    frame["rate_limit_info"]["unifiedWindows"]["seven_day_overage_included"] = {
+        "utilization": fable_used, "resetsAt": fable_reset,
+    }
+    return frame
+
+
+def _feed(monitor, frame):
+    from fluid.engine.delegated_proto import StreamJsonMapper
+
+    mapper = StreamJsonMapper(session_id="s", turn_id="t", model="opus", user_node_id="n")
+    for event in mapper.feed(frame).events:
+        monitor.apply_live_event(event.kind, event.utilization, event.resets_at, status=event.status)
+
+
+def _by_type(windows):
+    return {w["type"]: w for w in windows}
+
+
+class TestRollOver:
+    @pytest.mark.parametrize("resets_at,expected", [
+        (1_790_000_000, 1_790_000_000.0),
+        (1_790_000_000_000, 1_790_000_000.0),
+        ("1790000000", 1_790_000_000.0),
+        ("2026-09-21T14:13:20Z", 1_790_000_000.0),
+        ("2026-09-21T14:13:20", 1_790_000_000.0),  # zone-less is UTC
+        (None, None), ("", None), ("soon", None), (True, None), (0, None),
+    ])
+    def test_reset_epoch_seconds(self, resets_at, expected):
+        assert usage_limits.reset_epoch_seconds(resets_at) == expected
+
+    @pytest.mark.asyncio
+    async def test_opus_frames_keep_fable_until_its_reset_then_serve_it_refilled(self, monitor):
+        now = time.time()
+        _feed(monitor, _fable_frame(now, 0.19, int(now) + 2 * DAY))
+        assert _by_type((await monitor.get_snapshot())["windows"])["seven_day_overage_included"][
+            "utilization"] == 81.0
+
+        # Opus turns only: their frames carry no Fable window, so the last
+        # Fable reading stands while its week is still running.
+        _feed(monitor, _opus_frame(now))
+        fable = _by_type((await monitor.get_snapshot())["windows"])["seven_day_overage_included"]
+        assert fable["utilization"] == 81.0
+
+        # The weekly reset passes with no Fable turn: 100% left, not 81%.
+        with patch.object(usage_limits.time, "time", return_value=now + 3 * DAY):
+            windows = _by_type((await monitor.get_snapshot())["windows"])
+        fable = windows["seven_day_overage_included"]
+        assert fable["utilization"] == 100.0
+        # The reset stays so clients can say it awaits the next report, and the
+        # observation time stays the last real report.
+        assert fable["resets_at"] == int(now) + 2 * DAY
+        assert fable["observed_at"] <= int(now * 1000) + 1000
+        # The cache itself no longer holds the pre-reset reading.
+        assert _by_type(monitor._windows)["seven_day_overage_included"]["utilization"] == 100.0
+
+    @pytest.mark.asyncio
+    async def test_post_reset_fable_report_of_zero_reads_full(self, monitor):
+        now = time.time()
+        _feed(monitor, _fable_frame(now, 0.19, int(now) - HOUR))
+        _feed(monitor, _fable_frame(now, 0.0, int(now) + 7 * DAY))
+        fable = _by_type((await monitor.get_snapshot())["windows"])["seven_day_overage_included"]
+        assert fable["utilization"] == 100.0 and fable["resets_at"] == int(now) + 7 * DAY
+
+    @pytest.mark.asyncio
+    async def test_post_reset_fable_window_without_utilization_never_resurrects_old_value(self, monitor):
+        now = time.time()
+        _feed(monitor, _fable_frame(now, 0.19, int(now) - HOUR))
+        # A frame whose Fable window carries no utilization is not a reading.
+        _feed(monitor, _fable_frame(now, None, int(now) + 7 * DAY))
+        fable = _by_type((await monitor.get_snapshot())["windows"])["seven_day_overage_included"]
+        assert fable["utilization"] == 100.0
+
+    @pytest.mark.asyncio
+    async def test_persisted_row_drops_expired_values(self, monitor, mock_db):
+        from app.db import database as db
+        now = time.time()
+        monitor._broadcast = AsyncMock()
+        await monitor.apply_live_event_and_broadcast(
+            "seven_day_overage_included", 0.19, int(now) + 60)
+        with patch.object(usage_limits.time, "time", return_value=now + 120):
+            await monitor.fetch()
+        row = next(r for r in db.get_all_usage_snapshots()
+                   if r["instance_id"] == settings.effective_instance_id)
+        assert _by_type(row["windows"])["seven_day_overage_included"]["utilization"] == 100.0
+
+    def test_cluster_read_serves_a_stored_expired_value_as_refilled(self, monitor, mock_db):
+        from app.db import database as db
+        now = time.time()
+        # A row persisted by an older build (or a peer) before the reset.
+        db.register_install("peer-1", "DesktopWorker", "http://p:1", "docker", "1.0", {})
+        db.upsert_usage_snapshot("peer-1", [
+            {"type": "five_hour", "utilization": 40.0, "resets_at": int(now) + HOUR, "observed_at": 1},
+            {"type": "seven_day_overage_included", "utilization": 19.0,
+             "resets_at": int(now) - DAY, "observed_at": 1},
+        ], True, 5, 1)
+        peer = next(s for s in monitor._cluster_snapshot()["snapshots"] if s["instance_id"] == "peer-1")
+        windows = _by_type(peer["windows"])
+        assert windows["five_hour"]["utilization"] == 40.0
+        assert windows["seven_day_overage_included"]["utilization"] == 100.0
+
+
+class TestSeedBeforeLiveEvent:
+    @pytest.mark.asyncio
+    async def test_first_event_after_restart_keeps_the_stored_fable_window(self, mock_db):
+        from app.db import database as db
+        now = time.time()
+        before = UsageLimitsMonitor()
+        before._broadcast = AsyncMock()
+        await before.apply_live_event_and_broadcast(
+            "seven_day_overage_included", 0.30, int(now) + 2 * DAY)
+
+        # Restart, then an Opus turn reports first: its frame has no Fable window.
+        after = UsageLimitsMonitor()
+        after._broadcast = AsyncMock()
+        await after.apply_live_event_and_broadcast("five_hour", 0.02, int(now) + 4 * HOUR)
+
+        row = next(r for r in db.get_all_usage_snapshots()
+                   if r["instance_id"] == settings.effective_instance_id)
+        windows = _by_type(row["windows"])
+        assert windows["seven_day_overage_included"]["utilization"] == 70.0
+        assert windows["five_hour"]["utilization"] == 98.0
+
+
+class TestNetworkCopy:
+    def test_usage_row_is_a_shared_collection_that_a_transfer_may_lack(self):
+        from app.network import policy
+
+        coll = policy.collection("usage_snapshots")
+        assert coll.mode == policy.MODE_SHARED and coll.keys == ("instance_id",)
+        assert "windows" in coll.json_fields and coll.shared_row is None
+        # A publisher on an older build serves no page for it.
+        assert "usage_snapshots" in policy.SNAPSHOT_OPTIONAL_COLLECTIONS
+        assert "usage_snapshots" in policy.SCANNED_COLLECTIONS
+
+    @pytest.mark.asyncio
+    async def test_persisting_asks_the_network_to_publish(self, monitor, mock_db):
+        monitor._broadcast = AsyncMock()
+        with patch("app.network.transport.request_scan") as scan:
+            await monitor.apply_live_event_and_broadcast("five_hour", 0.25, None)
+        scan.assert_called_with(["usage_snapshots"])
+
+    @pytest.mark.asyncio
+    async def test_a_peer_row_landing_rebroadcasts(self, monitor):
+        monitor._broadcast = AsyncMock()
+        monitor._cluster_cache = (time.time() + 60, [])
+        with patch.object(monitor, "_cluster_snapshot", return_value={"windows": []}):
+            await monitor.peer_changed_and_broadcast()
+        assert monitor._cluster_cache is None
+        monitor._broadcast.assert_awaited_once_with({"windows": []})
+
+    def test_applied_peer_row_schedules_the_broadcast(self):
+        from app.core.global_events import global_events
+        from app.network import startup
+
+        loop = MagicMock()
+        loop.is_closed.return_value = False
+        with patch.object(global_events, "_loop", loop, create=True), \
+                patch("asyncio.run_coroutine_threadsafe") as run:
+            startup._on_applied([("usage_snapshots", "peer-1", "upsert")])
+        assert run.call_count == 1
+        run.call_args.args[0].close()  # never awaited in this test
+
+    def test_cluster_entries_carry_device_ids(self, monitor, mock_db):
+        from app.db import database as db
+        db.register_install("dev_peer", "DesktopWorker", "http://p:1", "docker", "1.0", {})
+        db.upsert_usage_snapshot("dev_peer", [], True, 1, 1)
+        installs = {
+            "dev_peer": {"id": "dev_peer", "device_name": "DesktopWorker", "online": False},
+            settings.effective_instance_id: {"id": "dev_self", "device_name": "Unraid", "online": True},
+        }
+        with patch.object(db, "get_installs_map", return_value=installs):
+            snap = monitor._cluster_snapshot()
+        by_id = {s["instance_id"]: s for s in snap["snapshots"]}
+        assert by_id["dev_peer"]["device_id"] == "dev_peer"
+        # An offline peer's row is still served (with its age), never dropped.
+        assert by_id["dev_peer"]["online"] is False and by_id["dev_peer"]["available"] is True
+        assert by_id[settings.effective_instance_id]["device_id"] == "dev_self"
+        assert snap["self_device_id"] == "dev_self"

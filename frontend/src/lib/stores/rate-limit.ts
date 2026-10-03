@@ -63,6 +63,8 @@ export interface UsageBucket {
 	fetchedAt: number | null;
 	/** Whether this install's CLI has reported any usage window yet. */
 	available: boolean;
+	/** Network device id of this install; sessions name their owner by it. */
+	deviceId?: string | null;
 	deviceName?: string | null;
 	/** Owning install seen recently (heartbeat). null = unknown. */
 	online?: boolean | null;
@@ -144,6 +146,8 @@ interface RateLimitState {
 	/** The local install's instance id, when the backend reports it. null in the
 	 *  legacy path — the self bucket is then keyed `'__self__'`. */
 	selfInstanceId: string | null;
+	/** The local install's network device id, when it has one. */
+	selfDeviceId?: string | null;
 	/**
 	 * Per-install "stale between an account switch and the fresh snapshot" flag.
 	 * The indicator dims the pill for the shown install so we never present the
@@ -180,6 +184,8 @@ export interface SnapshotWindow {
 /** One install's entry in the modern `snapshots` array. */
 export interface SnapshotInstance {
 	instance_id: string;
+	/** Network device id of the install (absent off a network / on old backends). */
+	device_id?: string | null;
 	device_name?: string | null;
 	online?: boolean | null;
 	windows: SnapshotWindow[];
@@ -238,6 +244,8 @@ export interface UsageSnapshot {
 	snapshots?: SnapshotInstance[];
 	/** The local install's instance id (which entry in `snapshots` is "us"). */
 	self_instance_id?: string | null;
+	/** The local install's network device id. */
+	self_device_id?: string | null;
 	/** Non-Claude provider usage. Full-replaces `providerBuckets` when present;
 	 *  when the key is ABSENT the store leaves the existing map untouched (so a
 	 *  WS-only payload without providers can't wipe it). Additive; empty for old
@@ -347,18 +355,32 @@ function _displayPct(value: number): number {
 	return rounded;
 }
 
-/** Last reported utilization. A reset time is not a fresh observation. */
-export function effectivePct(w: UsageWindow, _nowMs: number): number {
+/**
+ * Whether the window's reset time has passed. Its last report then describes
+ * the previous period: the window has refilled, and the next report (which may
+ * never come — Claude's weekly Fable bucket is reported only on Fable turns)
+ * describes the new one.
+ */
+export function windowRolledOver(w: Pick<UsageWindow, 'resets_at'>, nowMs: number): boolean {
+	const resetMs = parseResetMs(w.resets_at);
+	return resetMs != null && resetMs <= nowMs;
+}
+
+/** Used quota as last reported; 0 once the window has reset. */
+export function effectivePct(w: UsageWindow, nowMs: number): number {
+	if (windowRolledOver(w, nowMs)) return 0;
 	return _displayPct(w.utilization);
 }
 
-/** Last reported remaining quota; retain it until the provider reports again. */
-export function reportedRemainingPct(w: UsageWindow, _nowMs: number): number {
+/** Remaining quota as last reported; full once the window has reset. */
+export function reportedRemainingPct(w: UsageWindow, nowMs: number): number {
+	if (windowRolledOver(w, nowMs)) return 100;
 	return _displayPct(w.utilization);
 }
 
-/** Convert last reported used quota to remaining, without inventing a refill. */
-export function remainingFromUsedPct(w: UsageWindow, _nowMs: number): number {
+/** Remaining quota from a used-quota report; full once the window has reset. */
+export function remainingFromUsedPct(w: UsageWindow, nowMs: number): number {
+	if (windowRolledOver(w, nowMs)) return 100;
 	return _displayPct(100 - _clampPct(w.utilization));
 }
 
@@ -431,21 +453,24 @@ export function selfBucketKey(state: RateLimitState): string {
  *     LOCAL account's numbers, which would be a lie.
  */
 export function resolveBucket(state: RateLimitState, instanceId: string | null): UsageBucket | null {
-	if (instanceId != null) {
-		const exact = state.buckets[instanceId];
-		if (exact) return exact;
-		if (state.selfInstanceId == null && state.buckets[SELF_BUCKET_KEY]) {
-			return state.buckets[SELF_BUCKET_KEY];
-		}
-		return null;
-	}
-	return state.buckets[selfBucketKey(state)] ?? null;
+	const key = resolveBucketKey(state, instanceId);
+	return key != null ? state.buckets[key] : null;
 }
 
-/** The bucket key `resolveBucket` would return (for staleness lookup), or null. */
+/**
+ * The bucket key `resolveBucket` would return (for staleness lookup), or null.
+ * A target may be an install id or a network device id (sessions name their
+ * owner by device id; buckets are keyed by install id and carry `deviceId`).
+ */
 export function resolveBucketKey(state: RateLimitState, instanceId: string | null): string | null {
 	if (instanceId != null) {
 		if (state.buckets[instanceId]) return instanceId;
+		const byDevice = Object.keys(state.buckets).find((k) => state.buckets[k]?.deviceId === instanceId);
+		if (byDevice) return byDevice;
+		if (instanceId === state.selfDeviceId) {
+			const key = selfBucketKey(state);
+			return state.buckets[key] ? key : null;
+		}
 		if (state.selfInstanceId == null && state.buckets[SELF_BUCKET_KEY]) return SELF_BUCKET_KEY;
 		return null;
 	}
@@ -453,28 +478,47 @@ export function resolveBucketKey(state: RateLimitState, instanceId: string | nul
 	return state.buckets[key] ? key : null;
 }
 
+/** Whether a usage target (install or device id; null = local) is this install. */
+export function isSelfTarget(state: RateLimitState, target: string | null): boolean {
+	return target == null || target === state.selfInstanceId || (target != null && target === state.selfDeviceId);
+}
+
 /** Whether a window's observation time is known (a finite epoch ms). */
 export function windowObservedAtKnown<W extends Pick<UsageWindow, 'received_at'>>(w: W): w is W & { received_at: number } {
 	return typeof w.received_at === 'number' && Number.isFinite(w.received_at);
 }
 
-/** Whether any of the bucket's windows has an unknown observation time. */
-export function bucketHasUndatedWindow(bucket: UsageBucket): boolean {
-	return Object.values(bucket.windows ?? {}).some((w) => !windowObservedAtKnown(w));
+/**
+ * Windows whose shown value depends on their last report. A window past its
+ * reset shows as refilled whatever it last reported, so its age (often days
+ * for the weekly Fable bucket) says nothing about the bucket's freshness.
+ * Without `nowMs` every window counts.
+ */
+function reportedWindows(bucket: UsageBucket, nowMs?: number): UsageWindow[] {
+	const all = Object.values(bucket.windows ?? {});
+	return nowMs == null ? all : all.filter((w) => !windowRolledOver(w, nowMs));
+}
+
+/** Whether any of the bucket's reported windows has an unknown observation time. */
+export function bucketHasUndatedWindow(bucket: UsageBucket, nowMs?: number): boolean {
+	return reportedWindows(bucket, nowMs).some((w) => !windowObservedAtKnown(w));
 }
 
 /**
- * When the bucket's OLDEST dated window was last observed (epoch ms), or the
- * bucket's `fetchedAt` when it has no dated windows. A live event dates only
- * its own window, so the other windows keep their age. Undated windows are
- * reported by `bucketHasUndatedWindow`, never by borrowing `fetchedAt`.
+ * When the bucket's OLDEST dated reported window was last observed (epoch ms),
+ * or the bucket's `fetchedAt` when it has no dated windows. A live event dates
+ * only its own window, so the other windows keep their age. Undated windows
+ * are reported by `bucketHasUndatedWindow`, never by borrowing `fetchedAt`.
  */
-export function bucketObservedAt(bucket: UsageBucket): number | null {
-	const times = Object.values(bucket.windows ?? {})
+export function bucketObservedAt(bucket: UsageBucket, nowMs?: number): number | null {
+	const times = reportedWindows(bucket, nowMs)
 		.filter(windowObservedAtKnown)
 		.map((w) => w.received_at);
 	if (times.length > 0) return Math.min(...times);
-	return bucketHasUndatedWindow(bucket) ? null : bucket.fetchedAt;
+	if (bucketHasUndatedWindow(bucket, nowMs)) return null;
+	// Only refilled windows remain: date the bucket by its newest report.
+	const all = Object.values(bucket.windows ?? {}).filter(windowObservedAtKnown).map((w) => w.received_at);
+	return all.length > 0 ? Math.max(...all) : bucket.fetchedAt;
 }
 
 /**
@@ -495,8 +539,8 @@ export function providerStatusAt(
 /** Whether any of a bucket's windows has aged past `BUCKET_STALE_MS` (needs a refresh). */
 export function isBucketStale(bucket: UsageBucket, now: number): boolean {
 	// An undated window's reading is of unknown age: never present it as fresh.
-	if (bucketHasUndatedWindow(bucket)) return true;
-	const observedAt = bucketObservedAt(bucket);
+	if (bucketHasUndatedWindow(bucket, now)) return true;
+	const observedAt = bucketObservedAt(bucket, now);
 	return observedAt != null && now - observedAt > BUCKET_STALE_MS;
 }
 
@@ -505,12 +549,14 @@ export function isBucketStale(bucket: UsageBucket, now: number): boolean {
 interface PersistedShape {
 	buckets: Record<string, UsageBucket>;
 	selfInstanceId: string | null;
+	selfDeviceId?: string | null;
 	providerBuckets?: Record<string, ProviderUsageBucket>;
 }
 
 interface LoadedShape {
 	buckets: Record<string, UsageBucket>;
 	selfInstanceId: string | null;
+	selfDeviceId?: string | null;
 	providerBuckets: Record<string, ProviderUsageBucket>;
 }
 
@@ -523,6 +569,7 @@ function _load(): LoadedShape {
 				return {
 					buckets: parsed.buckets,
 					selfInstanceId: parsed.selfInstanceId ?? null,
+					selfDeviceId: parsed.selfDeviceId ?? null,
 					providerBuckets: parsed.providerBuckets ?? {},
 				};
 			}
@@ -553,6 +600,7 @@ function _save(state: RateLimitState) {
 		const payload: PersistedShape = {
 			buckets: state.buckets,
 			selfInstanceId: state.selfInstanceId,
+			selfDeviceId: state.selfDeviceId ?? null,
 			providerBuckets: state.providerBuckets,
 		};
 		localStorage.setItem(STORAGE_KEY_V3, JSON.stringify(payload));
@@ -573,6 +621,7 @@ const _loaded = _load();
 const _store = createStore<RateLimitState>({
 	buckets: _loaded.buckets,
 	selfInstanceId: _loaded.selfInstanceId,
+	selfDeviceId: _loaded.selfDeviceId ?? null,
 	providerBuckets: _loaded.providerBuckets,
 	staleByInstance: {},
 });
@@ -772,6 +821,7 @@ export const rateLimit = {
 					staleByInstance[key] = false;
 
 					const meta = {
+						deviceId: entry.device_id ?? null,
 						deviceName: entry.device_name ?? null,
 						online: entry.online ?? null,
 						generation: gen ?? null,
@@ -818,6 +868,7 @@ export const rateLimit = {
 					buckets,
 					providerBuckets: s.providerBuckets,
 					selfInstanceId: snapshot.self_instance_id ?? null,
+					selfDeviceId: snapshot.self_device_id ?? null,
 					staleByInstance,
 				};
 				_save(next);
@@ -875,6 +926,7 @@ export const rateLimit = {
 				buckets: { ...s.buckets, [key]: bucket },
 				providerBuckets: s.providerBuckets,
 				selfInstanceId: s.selfInstanceId,
+				selfDeviceId: s.selfDeviceId ?? null,
 				staleByInstance,
 			};
 			_save(next);
@@ -891,7 +943,7 @@ export const rateLimit = {
 	 */
 	__resetForTests(): void {
 		for (const k of Object.keys(_lastGenByInstance)) delete _lastGenByInstance[k];
-		_store.set({ buckets: {}, providerBuckets: {}, selfInstanceId: null, staleByInstance: {} });
+		_store.set({ buckets: {}, providerBuckets: {}, selfInstanceId: null, selfDeviceId: null, staleByInstance: {} });
 		_claudeSource.set({ source: null, attemptedAt: null, lastErrorKind: null });
 		_save(_store.current);
 	},

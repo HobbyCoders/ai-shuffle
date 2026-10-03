@@ -307,13 +307,17 @@ class TestRouteStatusAndCooldown:
 # ---------------------------------------------------------------------------
 
 
+# Resets still ahead: a passed reset is served as refilled.
+_FUTURE_RESET = 4_000_000_000
+
+
 @pytest.mark.parametrize("used,remaining", [(0.0, 100.0), (1.0, 0.0), (1.4, 0.0), (0.004, 99.6), (-0.2, 100.0)])
 def test_claude_live_event_edges(used, remaining):
     monitor = UsageLimitsMonitor()
-    snapshot = monitor.apply_live_event("five_hour", used, 1_790_000_000)
+    snapshot = monitor.apply_live_event("five_hour", used, _FUTURE_RESET)
     window = snapshot["windows"][0]
     assert window["utilization"] == pytest.approx(remaining)
-    assert window["resets_at"] == 1_790_000_000
+    assert window["resets_at"] == _FUTURE_RESET
     assert isinstance(window["observed_at"], int)
 
 
@@ -329,10 +333,10 @@ def test_claude_event_without_utilization_or_type_is_ignored():
 def test_claude_rejected_event_reads_exhausted(used):
     """The CLI cut the window off: 100% used / 0% left even with no utilization."""
     monitor = UsageLimitsMonitor()
-    snapshot = monitor.apply_live_event("five_hour", used, 1_790_000_000, status="rejected")
+    snapshot = monitor.apply_live_event("five_hour", used, _FUTURE_RESET, status="rejected")
     window = snapshot["windows"][0]
     assert window["utilization"] == 0.0
-    assert window["resets_at"] == 1_790_000_000
+    assert window["resets_at"] == _FUTURE_RESET
     assert isinstance(window["observed_at"], int)
 
 async def test_official_openai_model_account_is_explicitly_unavailable_before_any_poll(mock_db):

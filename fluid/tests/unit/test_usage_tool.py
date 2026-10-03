@@ -186,6 +186,25 @@ def test_claude_freshness_follows_the_oldest_window_like_the_panel() -> None:
     assert legacy["windows"][0]["freshness"] == "unknown"
 
 
+def test_a_fable_window_past_its_reset_does_not_date_the_reading() -> None:
+    """An Opus-only week never reports the Fable bucket again. Once its reset
+    passes it reads as refilled, so its old report no longer makes the whole
+    Claude reading stale, matching the panel."""
+    now = time.time()
+    out = _payload({
+        "available": True,
+        "fetched_at": now - 5,
+        "windows": [
+            {"type": "five_hour", "utilization": 99, "observed_at": int((now - 5) * 1000)},
+            {"type": "seven_day_overage_included", "utilization": 19,
+             "resets_at": int(now - 86400), "observed_at": int((now - 6 * 86400) * 1000)},
+        ],
+    })
+    fable = next(w for w in out["windows"] if w["type"] == "seven_day_overage_included")
+    assert fable["rolled_over"] is True and fable["remaining_percent"] == 100.0
+    assert out["claude_freshness"] == "fresh"
+
+
 def test_unrelated_reports_never_freshen_an_undated_fable_window() -> None:
     """#1661: a persisted Fable window without observed_at keeps an unknown
     age while repeated five_hour reports advance fetched_at, until a real

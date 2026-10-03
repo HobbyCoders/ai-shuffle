@@ -238,7 +238,9 @@ describe('Claude rows', () => {
 		// Zone-less reset is UTC: one hour from T0 in every browser zone.
 		expect(text).toContain('resets in 1h 0m');
 		expect(text).toContain('reset · awaiting next report');
-		expect(text).toContain('30% left');
+		// The weekly window reset: refilled, not its pre-reset 30%.
+		expect(text).toContain('100% left');
+		expect(text).not.toContain('30% left');
 		expect(text).not.toContain('resets in -');
 	});
 

@@ -136,6 +136,85 @@ describe('ContextUsageBar — Fable remaining quota', () => {
 	});
 });
 
+describe('ContextUsageBar — collapsed Claude row and passed resets', () => {
+	function threeLimits(fableReset: string) {
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [
+				{ type: 'five_hour', utilization: 90, resets_at: future(), observed_at: Date.now() },
+				{ type: 'seven_day', utilization: 60, resets_at: future(), observed_at: Date.now() },
+				{ type: 'seven_day_overage_included', utilization: 19, resets_at: fableReset,
+					observed_at: Date.now() - 6 * 86_400_000 },
+			],
+		});
+	}
+
+	function rowFor(container: HTMLElement, label: string) {
+		return Array.from(container.querySelectorAll('.popover-row')).find(
+			(el) => el.querySelector('.row-label')?.textContent === label,
+		) as HTMLElement | undefined;
+	}
+
+	it('collapsed summary is the 5-hour window, not the lowest limit; expanded keeps all three', async () => {
+		threeLimits(new Date(Date.now() + 2 * 86_400_000).toISOString());
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(rowFor(container, '5-hour limit')?.querySelector('.row-pct')?.textContent).toBe('90% left');
+		expect(rowFor(container, 'Weekly (all models)')?.querySelector('.row-pct')?.textContent).toBe('60% left');
+		expect(rowFor(container, 'Fable 5 limit')?.querySelector('.row-pct')?.textContent).toBe('19% left');
+		await fireEvent.click(container.querySelector('[aria-label="Plan usage limits — collapse"]')!);
+		expect(container.querySelector('.sec-summary')?.textContent).toBe('90% left');
+	});
+
+	it('shows a Fable limit past its weekly reset as refilled, without an old age', async () => {
+		threeLimits(past());
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const fable = rowFor(container, 'Fable 5 limit')!;
+		expect(fable.querySelector('.row-pct')?.textContent).toBe('100% left');
+		expect((fable.querySelector('.row-fill') as HTMLElement).style.width).toBe('100%');
+		expect(fable.querySelector('.row-reset-inline')?.textContent?.trim()).toBe('reset · awaiting next report');
+		expect(fable.querySelector('.row-as-of')).toBeNull();
+		// The other windows are current, so the header claims no staleness.
+		expect(container.querySelector('.usage-as-of')).toBeNull();
+		expect(container.textContent).not.toContain('19% left');
+	});
+
+	it('keeps the Claude row with a "Last reported" age when its reports have gone stale', async () => {
+		const twoHoursAgo = Date.now() - 2 * 3_600_000;
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [{ instance_id: 'self', available: true, fetched_at: twoHoursAgo, windows: [
+				{ type: 'five_hour', utilization: 55, resets_at: future(), observed_at: twoHoursAgo },
+			] }],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 2h ago');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('55% left');
+	});
+
+	it('summarizes a collapsed ChatGPT subscription by its 5-hour window too', async () => {
+		usageSections.set({ 'provider:codex-5h': false });
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			providers: [{
+				provider_id: 'codex-5h', provider_name: 'ChatGPT', provider_type: 'chatgpt', plan_type: 'pro',
+				windows: [
+					{ type: 'five_hour', utilization: 40, resets_at: future() },
+					{ type: 'seven_day', utilization: 90, resets_at: future() },
+				],
+				credits: null,
+			}],
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.row-pct.sec-summary')?.textContent).toBe('60% left');
+	});
+});
+
 describe('ContextUsageBar — updates while closed', () => {
 	it.each([false, true])('animates snapshot balances and live quota on reopen (expanded=%s)', async (expanded) => {
 		let callbacks = new Map<number, FrameRequestCallback>();
@@ -990,14 +1069,14 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('75% left');
 	});
 
-	it('retains the last Claude reading while a reset awaits another report', async () => {
+	it('shows a Claude window past its reset as refilled while it awaits another report', async () => {
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [{ type: 'five_hour', utilization: 42, resets_at: past(), observed_at: Date.now() }],
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('42% left');
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('100% left');
 		expect(container.textContent).not.toContain('resets in now');
 		expect(container.querySelector('.popover-row .row-reset-inline')?.textContent?.trim()).toBe(
 			'reset · awaiting next report'

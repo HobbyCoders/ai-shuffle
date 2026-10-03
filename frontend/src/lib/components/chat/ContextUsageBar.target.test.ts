@@ -18,6 +18,7 @@ function setTarget(v: string | null) {
 	_target = v;
 	for (const fn of _subs) fn(v);
 }
+let _deviceName: string | null = null;
 vi.mock('$lib/stores/usage-target', () => ({
 	usageTargetInstance: {
 		get current() {
@@ -27,6 +28,15 @@ vi.mock('$lib/stores/usage-target', () => ({
 			_subs.add(fn);
 			fn(_target);
 			return () => _subs.delete(fn);
+		},
+	},
+	usageTargetDeviceName: {
+		get current() {
+			return _deviceName;
+		},
+		subscribe(fn: (v: string | null) => void) {
+			fn(_deviceName);
+			return () => {};
 		},
 	},
 }));
@@ -65,6 +75,7 @@ function twoInstallSnapshot() {
 
 beforeEach(() => {
 	setTarget(null);
+	_deviceName = null;
 	localStorage.clear();
 	rateLimit.__resetForTests();
 });
@@ -122,9 +133,10 @@ describe('ContextUsageBar — resolved target', () => {
 		expect(container.textContent).not.toContain('88%');
 	});
 
-	it('hides Claude for a remote target with no account snapshot', async () => {
+	it('keeps Claude visible, unreported, for a remote target with no account snapshot', async () => {
 		// Only the self install is known; the viewed session runs on an install we
-		// have no bucket for → the limits section must NOT fall back to self numbers.
+		// have no bucket for → the limits section must NOT fall back to self numbers,
+		// and must not vanish either: it says that device has not reported.
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -139,14 +151,18 @@ describe('ContextUsageBar — resolved target', () => {
 			],
 		});
 		setTarget('ghost-worker');
+		_deviceName = 'Unraid';
 		const { container } = render(ContextUsageBar);
 		// The pill is always present now.
 		expect(container.querySelector('.usage-indicator')).not.toBeNull();
 		await openPopover(container);
-		expect(container.querySelector('.popover-section')).toBeNull();
+		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
+		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Not reported from Unraid yet');
+		expect(container.textContent).toContain('Unraid has not shared its Claude usage with this');
 		expect(container.querySelectorAll('.popover-row').length).toBe(0);
 		// Never borrow the self install's window/label.
 		expect(container.textContent).not.toContain('Studio');
+		expect(container.textContent).not.toContain('12%');
 		expect(container.textContent).not.toContain('88%');
 	});
 

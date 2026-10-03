@@ -13,12 +13,25 @@ Windows key on the CLI's ``rate_limit_type`` strings (``five_hour``,
 ``seven_day``, ``seven_day_opus``, ``seven_day_sonnet``,
 ``seven_day_overage_included``, ``overage``). Snapshot utilization is quota
 REMAINING, 0-100.
+
+``seven_day_overage_included`` is the weekly Fable limit: a per-model bucket
+the CLI reports only on responses that carry it (Fable turns), so an
+Opus-only week never reports it again. Every window whose ``resets_at`` has
+passed is therefore served as refilled (100% remaining, the past reset kept so
+clients can say it awaits the next report) instead of as its pre-reset
+reading.
+
+On a worker network each device keeps its own database. The ``usage_snapshots``
+row is a shared network collection (``app.network.policy``), so a peer serves
+the windows of the device that owns a session; ``device_id`` on each cluster
+entry lets clients match a session's ``owner_device_id``.
 """
 
 import asyncio
 import logging
 import math
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.db.async_database import run_sync
@@ -39,6 +52,56 @@ _OBSERVED_PERSIST_INTERVAL_SECONDS = 60.0
 # The CLI's verdict on a window it has cut off. Such an event may carry no
 # utilization; the window is exhausted either way.
 _REJECTED = "rejected"
+
+# Network collection carrying each device's ``usage_snapshots`` row.
+NETWORK_COLLECTION = "usage_snapshots"
+
+
+def reset_epoch_seconds(resets_at: Any) -> Optional[float]:
+    """``resets_at`` (epoch s, epoch ms, numeric string or ISO 8601) as epoch seconds."""
+    if resets_at is None or isinstance(resets_at, bool):
+        return None
+    if isinstance(resets_at, (int, float)):
+        stamp = float(resets_at)
+    elif isinstance(resets_at, str):
+        text = resets_at.strip()
+        if not text:
+            return None
+        try:
+            stamp = float(text)
+        except ValueError:
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            # Backend timestamps are UTC; a zone-less one is not local time.
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+    else:
+        return None
+    if not math.isfinite(stamp) or stamp <= 0:
+        return None
+    return stamp / 1000.0 if stamp >= 1e12 else stamp
+
+
+def roll_over_windows(windows: List[Dict[str, Any]], now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Windows with every passed reset shown as refilled (100% remaining).
+
+    A reading taken before its window reset is not the current value. The
+    reset time stays so a client can say the window awaits its next report;
+    ``observed_at`` stays the time of the last real report. Returns new dicts
+    only for the windows that changed.
+    """
+    current = time.time() if now is None else now
+    out: List[Dict[str, Any]] = []
+    for w in windows:
+        if isinstance(w, dict):
+            reset = reset_epoch_seconds(w.get("resets_at"))
+            if reset is not None and reset <= current and w.get("utilization") != 100.0:
+                w = {**w, "utilization": 100.0}
+        out.append(w)
+    return out
 
 
 class UsageLimitsMonitor:
@@ -72,11 +135,18 @@ class UsageLimitsMonitor:
         # Window type whose unchanged repeat is due an observed-only write, set
         # by ``apply_live_event`` for the async wrapper to carry out.
         self._observed_due: Optional[str] = None
+        # This install's network device id (installs registry), when known.
+        self._self_device_id: Optional[str] = None
 
     def current_generation(self) -> int:
         return self._generation
 
+    def _roll_over(self) -> None:
+        """Drop pre-reset readings from the cache once their reset has passed."""
+        self._windows = roll_over_windows(self._windows)
+
     def _snapshot(self) -> Dict[str, Any]:
+        self._roll_over()
         return {
             "windows": list(self._windows),
             "fetched_at": self._fetched_at or None,
@@ -125,6 +195,7 @@ class UsageLimitsMonitor:
         live-event application. Synchronous psycopg2 — async callers MUST run
         this through ``run_sync`` so it never blocks the event loop.
         """
+        self._roll_over()
         try:
             from app.core.config import settings
             from app.db import database as db
@@ -145,6 +216,8 @@ class UsageLimitsMonitor:
                     self._observed_persisted[w["type"]] = now
         except Exception as e:  # noqa: BLE001 — persistence must never break the poll
             logger.debug("Usage-snapshot persist skipped: %s", e)
+            return
+        _publish_to_network()
 
     def _persist_observed(self, window_type: str, observed_at: int) -> bool:
         """Write only one window's newer ``observed_at`` to this install's row.
@@ -163,6 +236,7 @@ class UsageLimitsMonitor:
             return False
         if touched:
             self._cluster_cache = None
+            _publish_to_network()
         return bool(touched)
 
     def _seed(self, rows: List[Dict[str, Any]], self_id: str) -> None:
@@ -258,6 +332,8 @@ class UsageLimitsMonitor:
             logger.debug("Usage cluster snapshot read skipped: %s", e)
             return None
 
+        own_install = installs_map.get(self_id)
+        self._self_device_id = own_install.get("id") if own_install else None
         snapshots: List[Dict[str, Any]] = []
         for row in rows:
             iid = row.get("instance_id")
@@ -267,9 +343,12 @@ class UsageLimitsMonitor:
                 continue
             snapshots.append({
                 "instance_id": iid,
+                # The registry keys a network device by its device id AND its
+                # legacy instance id; sessions name their owner by device id.
+                "device_id": install.get("id") if install else None,
                 "device_name": install.get("device_name") if install else None,
                 "online": bool(install.get("online")) if install else False,
-                "windows": row.get("windows") or [],
+                "windows": roll_over_windows(row.get("windows") or [], now),
                 "fetched_at": row.get("fetched_at"),
                 "available": bool(row.get("available")),
                 "generation": row.get("generation"),
@@ -303,6 +382,7 @@ class UsageLimitsMonitor:
         own = next((s for s in snapshots if s["instance_id"] == self_id), None)
         own = {
             "instance_id": self_id,
+            "device_id": (own or {}).get("device_id") or self._self_device_id,
             "device_name": own["device_name"] if own else None,
             "online": own["online"] if own else False,
             "windows": base["windows"],
@@ -312,6 +392,7 @@ class UsageLimitsMonitor:
         }
         base["snapshots"] = [s for s in snapshots if s["instance_id"] != self_id] + [own]
         base["self_instance_id"] = self_id
+        base["self_device_id"] = own["device_id"]
         return base
 
     def apply_live_event(
@@ -420,6 +501,10 @@ class UsageLimitsMonitor:
         under the same generation, so every device shows the latest
         observation time.
         """
+        # Adopt the persisted row first: after a restart the first event would
+        # otherwise persist only its own windows over the stored ones (the
+        # weekly Fable reading among them), and they vanish from every client.
+        await run_sync(self._seed_from_db)
         snapshot = self.apply_live_event(rate_limit_type, utilization, resets_at, status=status)
         if snapshot is not None:
             # Persist (so peers see the live change) then broadcast the enriched
@@ -456,6 +541,24 @@ class UsageLimitsMonitor:
             else:
                 at = None if window_type == "five_hour" else current.get("resets_at")
             await self.apply_live_event_and_broadcast(window_type, 0.0, at, status="allowed")
+
+    async def peer_changed_and_broadcast(self) -> None:
+        """A network peer's usage row landed here: show it on every open client."""
+        self._cluster_cache = None
+        await self._broadcast(await run_sync(self._cluster_snapshot))
+
+
+def _publish_to_network() -> None:
+    """Ask the network scanner to publish this device's usage row (best-effort).
+
+    A no-op off a worker network; the scanner compares content hashes, so an
+    unchanged row publishes nothing.
+    """
+    try:
+        from app.network import transport
+        transport.request_scan([NETWORK_COLLECTION])
+    except Exception as e:  # noqa: BLE001 — publishing must never break the stream
+        logger.debug("Usage-snapshot network publish skipped: %s", e)
 
 
 # Global singleton.

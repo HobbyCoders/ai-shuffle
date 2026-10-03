@@ -84,6 +84,8 @@ class InstallUsageSnapshot(BaseModel):
     installs registry for ``device_name``/``online``. No account identity.
     """
     instance_id: str
+    # Network device id of this install (sessions name their owner by it).
+    device_id: Optional[str] = None
     device_name: Optional[str] = None
     online: bool = False
     windows: List[UsageWindow] = []
@@ -194,6 +196,7 @@ class UsageSnapshot(BaseModel):
     # Per-install cluster view. Absent from very old clients.
     snapshots: List[InstallUsageSnapshot] = []
     self_instance_id: Optional[str] = None
+    self_device_id: Optional[str] = None
     # Non-Claude provider usage (Codex/ChatGPT, OpenRouter, OpenAI credits,
     # fal.ai credits, SuperGrok, ...). Additive. Null when the cached rows could
     # not be read, so clients keep their last-good rows instead of blanking.
