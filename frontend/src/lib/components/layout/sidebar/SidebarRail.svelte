@@ -205,13 +205,10 @@
 	.r-btn.pressing { transform: scale(0.92); }
 	.r-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
-	.r-new {
-		margin-bottom: 6px;
-		background: var(--primary);
-		color: var(--primary-foreground);
-		box-shadow: 0 6px 18px -6px var(--glow);
-	}
-	.r-new:hover { background: var(--primary); color: var(--primary-foreground); filter: brightness(1.08); }
+	/* New keeps the accent as glyph colour only: a filled tile with a glow read
+	   as a bigger button than the bare icons below it. */
+	.r-new { color: var(--primary); }
+	.r-new:hover { background: color-mix(in oklch, var(--primary) 16%, transparent); color: var(--primary); }
 
 	.r-sep { flex: none; width: 24px; height: 1px; margin: 4px 0; background: var(--sidebar-border); }
 	.grow { flex: 1 0 8px; }
