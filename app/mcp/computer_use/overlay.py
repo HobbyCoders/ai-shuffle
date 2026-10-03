@@ -185,7 +185,9 @@ class _OverlayManager:
         labels = {"screenshot": "Looking at screen", "zoom": "Reading detail",
                   "type": "Typing", "key": "Pressing keys", "hold_key": "Holding keys",
                   "mouse_move": "Moving", "left_click_drag": "Dragging", "scroll": "Scrolling",
-                  "switch_display": "Screen selected", "wait": "Waiting"}
+                  "switch_display": "Screen selected", "wait": "Waiting",
+                  "list_windows": "Listing windows", "focus_window": "Switching windows",
+                  "window_control": "Arranging a window", "open_application": "Opening an app"}
         detail = labels.get(action, "Clicking" if "click" in action else "Using computer")
         if not snap.get("busy") and time.monotonic() - snap["at"] > 2:
             detail = "Thinking · control active"

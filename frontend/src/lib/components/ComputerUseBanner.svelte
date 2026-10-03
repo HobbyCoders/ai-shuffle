@@ -27,6 +27,7 @@
 		left_mouse_down: 'Holding mouse button', left_mouse_up: 'Releasing mouse button',
 		type: 'Typing', key: 'Pressing keys', hold_key: 'Holding keys', scroll: 'Scrolling',
 		wait: 'Waiting', open_application: 'Opening an app', switch_display: 'Screen selected',
+		list_windows: 'Listing windows', focus_window: 'Switching windows', window_control: 'Arranging a window',
 		read_clipboard: 'Reading clipboard', write_clipboard: 'Writing clipboard'
 	};
 	const detail = $derived(computerUse.connectionLost ? 'Connection lost — status may be out of date'

@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.mcp import computer_use_sdk as sdk
-from app.mcp.computer_use import abort, access, activity, scaling, safety
+from app.mcp.computer_use import abort, access, activity, scaling, safety, windows
 
 # Pillow ships only in requirements-native.txt; skip, not error, without it.
 Image = pytest.importorskip("PIL.Image")
@@ -65,12 +65,38 @@ def desktop(monkeypatch):
     read, write = MagicMock(return_value="clipboard text"), MagicMock()
     monkeypatch.setattr(sdk, "_clipboard_read", read)
     monkeypatch.setattr(sdk, "_clipboard_write", write)
+    # Fake native windows: tests never enumerate, focus or move real windows.
+    open_windows = [
+        windows.WindowInfo(id=101, title="notes.txt - Notepad", app="Notepad", process="Notepad.exe",
+                           pid=1, state="normal", foreground=False, bounds=(10, 10, 100, 50),
+                           display=1, names=("Notepad", "Notepad.exe", "Notepad")),
+        windows.WindowInfo(id=202, title="Docs - Microsoft Edge", app="Microsoft Edge",
+                           process="msedge.exe", pid=2, state="maximized", foreground=True,
+                           bounds=(-290, -90, 200, 150), display=2,
+                           names=("msedge", "Microsoft Edge", "Microsoft Edge")),
+        windows.WindowInfo(id=303, title="Calculator", app="Calculator", process="CalculatorApp.exe",
+                           pid=3, state="minimized", foreground=False, bounds=None, display=None,
+                           names=("CalculatorApp", "Calculator")),
+    ]
+    native = SimpleNamespace(focused=[], states=[], moves=[], focus_result=True, nudge=False)
+    def fake_focus(window_id, sleep, nudge=None):
+        native.focused.append(window_id)
+        if native.nudge and nudge:
+            nudge()
+        return native.focus_result
+    monkeypatch.setattr(windows, "list_windows", lambda displays: list(open_windows))
+    monkeypatch.setattr(windows, "focus", fake_focus)
+    monkeypatch.setattr(windows, "set_state",
+                        lambda wid, op, sleep: native.states.append((wid, op)) or op)
+    monkeypatch.setattr(windows, "move_resize",
+                        lambda wid, bounds, displays, sleep: native.moves.append((wid, bounds)) or bounds)
     tools = sdk.create_computer_use_server(enabled=True, permission_mode="bypassPermissions",
                                            session_id="test", virtual_size=(150, 100))
     # The session's first request was approved: these tests drive the actions.
     access.grant("test")
     yield SimpleNamespace(tools=tools, mouse=mouse, keyboard=keyboard, captures=captures,
-                          monitors=monitors, read=read, write=write)
+                          monitors=monitors, read=read, write=write, windows=open_windows,
+                          native=native)
     abort.request_stop("test")
     assert safety.DESKTOP_LOCK.acquire(timeout=1), "worker did not exit after Stop"
     safety.DESKTOP_LOCK.release()
@@ -108,6 +134,11 @@ async def test_zoom_intersects_both_corners_and_preserves_full_image_coordinates
     result = await t["zoom"]({"region": [-10, -10, 50, 30]})
     assert payload(result)["region"] == [-300, -100, 100, 60]
     assert payload(result)["coordinate_space"] == "full_screenshot"
+    # A 100x60 physical crop is upscaled 4x so small text stays legible.
+    image = Image.open(io.BytesIO(base64.b64decode(result["content"][1]["data"])))
+    assert image.size == (400, 240)
+    assert payload(result)["zoom_factor"] == 8.0
+    assert "last full screenshot" in payload(result)["note"]
     await t["mouse_move"]({"coordinate": [75, 50]})
     assert desktop.mouse.position == (-150, 0)
     assert (await t["zoom"]({"region": [200, 200, 250, 250]}))["isError"]
@@ -162,7 +193,16 @@ async def test_clipboard_grants_and_open_application(desktop, monkeypatch):
     assert payload(await desktop.tools["type"]({"text": "x" * 50}))["method"] == "clipboard"
     monkeypatch.setattr(safety.SafeInput, "sleep", lambda self, seconds: self.check())
     monkeypatch.setattr(sdk.sys, "platform", "win32")
-    assert payload(await desktop.tools["open_application"]({"app": "Notepad"}))["success"]
+    # Notepad is open and granted: focus it instead of launching another.
+    result = payload(await desktop.tools["open_application"]({"app": "Notepad"}))
+    assert result["method"] == "focused_existing_window"
+    assert desktop.native.focused == [101]
+    assert result["window"]["id"] == 101
+    # Edge is open but not granted, Paint is not open: both launch via Start.
+    for app in ("Microsoft Edge", "Paint"):
+        assert payload(await desktop.tools["open_application"]({"app": app}))["method"] == "start_menu"
+    assert desktop.native.focused == [101]
+    desktop.keyboard.press.assert_any_call("cmd")
 
 
 async def test_cursor_reports_actual_display_without_fabricated_coordinates(desktop):
@@ -272,3 +312,154 @@ async def test_manual_mouse_movement_cancels_click(desktop, monkeypatch):
     assert result["isError"]
     desktop.mouse.press.assert_not_called()
     assert activity.snapshot()["stop_reason"] == "pointer_moved"
+
+
+# ----- windows ----------------------------------------------------------------
+
+async def test_list_windows_reports_grant_and_screenshot_bounds(desktop):
+    await desktop.tools["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    await desktop.tools["screenshot"]({})
+    listed = payload(await desktop.tools["list_windows"]({}))
+    by_id = {w["id"]: w for w in listed["windows"]}
+    assert [w["id"] for w in listed["windows"]] == [101, 202, 303]
+    assert by_id[101]["granted"] and not by_id[202]["granted"]
+    assert by_id[101]["bounds"] == [10, 10, 100, 50]
+    # Display 1 (200x100) is shown at 150x75: scale 0.75.
+    assert by_id[101]["screenshot_bounds"] == [7, 7, 83, 45]
+    assert "screenshot_bounds" not in by_id[202]  # on the other display
+    assert by_id[303]["state"] == "minimized" and by_id[303]["bounds"] is None
+    assert listed["selected_display"] == 1
+
+
+async def test_window_tools_need_access(desktop):
+    access.revoke("test")
+    for name, args in [("list_windows", {}), ("focus_window", {"window_id": 101}),
+                       ("window_control", {"window_id": 101, "operation": "maximize"})]:
+        assert "request_access" in payload(await desktop.tools[name](args))["error"]
+    assert desktop.native.focused == [] and desktop.native.states == []
+
+
+async def test_focus_window_enforces_grant_and_reports_display(desktop):
+    result = await desktop.tools["focus_window"]({"window_id": 202})
+    assert result["isError"]
+    assert "request_access" in payload(result)["error"]
+    assert desktop.native.focused == []
+    await desktop.tools["request_access"]({"apps": ["Edge"], "reason": "test"})
+    result = payload(await desktop.tools["focus_window"]({"window_id": 202}))
+    assert desktop.native.focused == [202]
+    assert result["window"]["granted"]
+    assert "switch_display('Display 2')" in result["note"]
+
+
+async def test_focus_window_refuses_unlisted_ids_and_reports_failure(desktop):
+    await desktop.tools["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    for bad in (999, "x", None):
+        result = await desktop.tools["focus_window"]({"window_id": bad})
+        assert result["isError"]
+    assert desktop.native.focused == []
+    desktop.native.focus_result = False
+    desktop.native.nudge = True
+    result = await desktop.tools["focus_window"]({"window_id": 101})
+    assert "taskbar" in payload(result)["error"]
+    # The foreground-lock nudge goes through SafeInput and releases its keys.
+    assert desktop.keyboard.press.call_count == desktop.keyboard.release.call_count == 2
+
+
+async def test_window_control_operations_and_grant(desktop):
+    t = desktop.tools
+    assert (await t["window_control"]({"window_id": 101, "operation": "maximize"}))["isError"]
+    await t["request_access"]({"apps": ["notepad.exe"], "reason": "test"})
+    for op in ("maximize", "minimize", "restore"):
+        assert payload(await t["window_control"]({"window_id": 101, "operation": op}))["operation"] == op
+    assert desktop.native.states == [(101, "maximize"), (101, "minimize"), (101, "restore")]
+    await t["window_control"]({"window_id": 101, "operation": "move_resize", "bounds": [0, 0, 120, 80]})
+    assert desktop.native.moves == [(101, [0, 0, 120, 80])]
+    result = await t["window_control"]({"window_id": 101, "operation": "close"})
+    assert "operation must be" in payload(result)["error"]
+
+
+async def test_zoom_window_captures_physical_rect_with_mapping(desktop):
+    t = desktop.tools
+    await t["screenshot"]({})
+    info = payload(await t["zoom"]({"window_id": 101}))
+    assert desktop.captures[-1] == {"left": 10, "top": 10, "width": 100, "height": 50}
+    assert info["screenshot_region"] == [7, 7, 83, 45]
+    assert info["zoom_factor"] == pytest.approx(400 / 76, abs=0.001)
+    assert info["window_id"] == 101
+    # Reading a window never changes the click mapping.
+    await t["mouse_move"]({"coordinate": [75, 50]})
+    assert desktop.mouse.position == (100, 67)
+    # A window on another display: captured, but flagged as off the screenshot.
+    info = payload(await t["zoom"]({"window_id": 202}))
+    assert desktop.captures[-1] == {"left": -290, "top": -90, "width": 200, "height": 150}
+    assert info["screenshot_region"] is None and "zoom_factor" not in info
+    assert "switch_display" in info["note"]
+    assert "minimized" in payload(await t["zoom"]({"window_id": 303}))["error"]
+    assert "either region or window_id" in payload(await t["zoom"]({}))["error"]
+    assert (await t["zoom"]({"window_id": 101, "region": [0, 0, 5, 5]}))["isError"]
+
+
+async def test_batch_supports_window_actions_and_zoom(desktop):
+    await desktop.tools["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    result = await desktop.tools["computer_batch"]({"actions": [
+        {"action": "focus_window", "window_id": 101},
+        {"action": "window_control", "window_id": 101, "operation": "maximize"},
+        {"action": "screenshot"},
+        {"action": "zoom", "region": [0, 0, 30, 20]},
+        {"action": "zoom", "window_id": 101},
+        {"action": "type", "text": "hi"},
+    ]})
+    assert not result.get("isError")
+    assert [c["type"] for c in result["content"]] == ["text", "text", "text", "image",
+                                                      "text", "image", "text", "image", "text"]
+    assert desktop.native.focused == [101] and desktop.native.states == [(101, "maximize")]
+    result = await desktop.tools["computer_batch"]({"actions": [
+        {"action": "focus_window", "window_id": 202}, {"action": "type", "text": "no"}]})
+    assert result["isError"]
+    assert json.loads(result["content"][-1]["text"])["action_index"] == 0
+    assert desktop.keyboard.type.call_count == 2
+
+
+@pytest.mark.parametrize("grant,names,expected", [
+    ("Notepad", ("Notepad", "Notepad.exe"), True),
+    ("notepad.exe", ("Notepad",), True),
+    ("Edge", ("msedge", "Microsoft Edge"), True),
+    ("Microsoft Edge", ("msedge", "Microsoft Edge"), True),
+    ("Windows Terminal", ("WindowsTerminal",), True),
+    ("File Explorer", ("explorer", "Windows Explorer", "File Explorer"), True),
+    ("Chrome", ("chrome", "Google Chrome"), True),
+    ("Microsoft", ("msedge", "Microsoft Edge"), False),
+    ("Note", ("Notepad",), False),
+    ("", ("Notepad",), False),
+])
+def test_grant_names_match_windows(grant, names, expected):
+    assert windows.name_matches(grant, names) is expected
+
+
+def test_window_functions_refuse_other_platforms(monkeypatch):
+    monkeypatch.setattr(windows.sys, "platform", "linux")
+    for call in (lambda: windows.list_windows([]), lambda: windows.focus(1, lambda s: None),
+                 lambda: windows.set_state(1, "maximize", lambda s: None),
+                 lambda: windows.move_resize(1, [0, 0, 100, 100], [], lambda s: None)):
+        with pytest.raises(ValueError, match="Windows only"):
+            call()
+
+
+def test_move_resize_validates_bounds_before_touching_windows(monkeypatch):
+    monkeypatch.setattr(windows.sys, "platform", "win32")
+    monkeypatch.setattr(scaling, "_ensure_dpi_awareness", lambda: None)
+    monkeypatch.setattr(windows, "_api", MagicMock(side_effect=AssertionError("no Win32 call")))
+    displays = [scaling.DisplayInfo(1, 0, 0, 1920, 1080, True)]
+    for bounds, error in [([0, 0, 10, 10], "at least"), ([5000, 5000, 400, 300], "off every display"),
+                          ([0, 0, float("nan"), 10], "finite"), ([0, 0], "bounds must be")]:
+        with pytest.raises(ValueError, match=error):
+            windows.move_resize(1, bounds, displays, lambda s: None)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="enumerates real windows")
+def test_real_window_enumeration_is_read_only_and_well_formed():
+    # Read-only: lists the host's windows without focusing or moving any.
+    for win in windows.list_windows(scaling.enumerate_displays()):
+        assert isinstance(win.id, int) and win.id
+        assert win.state in ("normal", "minimized", "maximized")
+        assert (win.bounds is None) == (win.state == "minimized")

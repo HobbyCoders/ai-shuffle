@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 # so the actual image is letterboxed within this box, never stretched.
 DEFAULT_VIRTUAL_SIZE = (1280, 800)
 
+# Zoom images: native pixels, fit to ZOOM_MAX_SIDE, small crops upscaled (at
+# most ZOOM_MAX_UPSCALE) so their long side reaches ZOOM_MIN_SIDE and text
+# stays legible to the model.
+ZOOM_MAX_SIDE = 1600
+ZOOM_MIN_SIDE = 800
+ZOOM_MAX_UPSCALE = 4.0
+
 _dpi_lock = threading.Lock()
 _dpi_done = False
 
@@ -309,17 +316,78 @@ class DisplayManager:
             raise ValueError("display layout changed; take a fresh screenshot before acting")
         return m
 
-    def capture_region(self, region: "list[float]", max_w: int = 1600) -> tuple[bytes, dict]:
-        """Capture a sub-region of the selected display at higher detail (zoom).
-
-        ``region`` is ``[x0, y0, x1, y1]`` in the selected display's most-recent
-        screenshot (virtual) coordinates. Returns the cropped area at close to
-        physical resolution (capped to ``max_w`` wide), so the model can read
-        small text. Requires a prior ``capture()`` of this display.
-        """
+    @staticmethod
+    def _grab_zoomed(left: int, top: int, width: int, height: int):
+        """Grab a physical rect and size it for reading: native pixels, scaled
+        down to fit ZOOM_MAX_SIDE or up (at most ZOOM_MAX_UPSCALE) so small
+        crops reach ZOOM_MIN_SIDE on their long side."""
         import mss as _mss
         from PIL import Image
 
+        with _mss.mss() as sct:
+            raw = sct.grab({"left": left, "top": top, "width": width, "height": height})
+        img = Image.frombytes("RGB", (raw.width, raw.height), raw.rgb)
+        long_side = max(img.width, img.height)
+        if long_side > ZOOM_MAX_SIDE:
+            ratio = ZOOM_MAX_SIDE / long_side
+        elif long_side < ZOOM_MIN_SIDE:
+            ratio = min(ZOOM_MAX_UPSCALE, ZOOM_MIN_SIDE / long_side)
+        else:
+            ratio = 1.0
+        if ratio != 1.0:
+            img = img.resize((max(1, round(img.width * ratio)), max(1, round(img.height * ratio))),
+                             Image.Resampling.LANCZOS)
+        import io
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue(), img.width, img.height
+
+    def screenshot_rect(self, left: int, top: int, right: int, bottom: int) -> "Optional[list[int]]":
+        """Map a physical rect into the last screenshot of the selected display
+        as ``[x0, y0, x1, y1]`` (clipped). None without a current screenshot of
+        that display or when the rect is not on it."""
+        m = self._map.get(self.selected_index)
+        if not m:
+            return None
+        s = m["scale"] or 1.0
+        x0 = max(0, math.floor((left - m["left"]) * s))
+        y0 = max(0, math.floor((top - m["top"]) * s))
+        x1 = min(m["vw"], math.ceil((right - m["left"]) * s))
+        y1 = min(m["vh"], math.ceil((bottom - m["top"]) * s))
+        return [x0, y0, x1, y1] if x1 > x0 and y1 > y0 else None
+
+    def capture_rect(self, left: int, top: int, width: int, height: int) -> tuple[bytes, dict]:
+        """Zoomed capture of a physical desktop rect (e.g. one window), on any
+        display. Does not change the click mapping of the last screenshot."""
+        displays = self.list_displays()
+        if not displays:
+            raise RuntimeError("no displays available")
+        ux0 = min(d.left for d in displays)
+        uy0 = min(d.top for d in displays)
+        ux1 = max(d.left + d.width for d in displays)
+        uy1 = max(d.top + d.height for d in displays)
+        x0, y0 = max(int(left), ux0), max(int(top), uy0)
+        x1, y1 = min(int(left + width), ux1), min(int(top + height), uy1)
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError("that area is not on any display")
+        png, iw, ih = self._grab_zoomed(x0, y0, x1 - x0, y1 - y0)
+        shot = self.screenshot_rect(x0, y0, x1, y1)
+        info = {"region": [x0, y0, x1 - x0, y1 - y0], "display": self.selected_index,
+                "image_width": iw, "image_height": ih,
+                "coordinate_space": "full_screenshot", "screenshot_region": shot}
+        if shot:
+            info["zoom_factor"] = round(iw / (shot[2] - shot[0]), 3)
+        return png, info
+
+    def capture_region(self, region: "list[float]") -> tuple[bytes, dict]:
+        """Capture a sub-region of the selected display at higher detail (zoom).
+
+        ``region`` is ``[x0, y0, x1, y1]`` in the selected display's most-recent
+        screenshot (virtual) coordinates. Returns the cropped area at native
+        resolution or better (see ``_grab_zoomed``), so the model can read
+        small text. Requires a prior ``capture()`` of this display.
+        """
         m = self.mapped_geometry()
         if len(region) != 4 or not all(math.isfinite(float(v)) for v in region):
             raise ValueError("region must contain four finite coordinates")
@@ -334,20 +402,12 @@ class DisplayManager:
         gw = min(max(1, round((x1 - x0) / scale)), m["left"] + m["pw"] - gx0)
         gh = min(max(1, round((y1 - y0) / scale)), m["top"] + m["ph"] - gy0)
 
-        with _mss.mss() as sct:
-            raw = sct.grab({"left": gx0, "top": gy0, "width": gw, "height": gh})
-        img = Image.frombytes("RGB", (raw.width, raw.height), raw.rgb)
-        if img.width > max_w:
-            ratio = max_w / img.width
-            img = img.resize((max_w, max(1, round(img.height * ratio))), Image.Resampling.LANCZOS)
-        import io
-
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue(), {"region": [gx0, gy0, gw, gh], "display": self.selected_index,
-                                "image_width": img.width, "image_height": img.height,
-                                "coordinate_space": "full_screenshot",
-                                "screenshot_region": [x0, y0, x1, y1]}
+        png, iw, ih = self._grab_zoomed(gx0, gy0, gw, gh)
+        return png, {"region": [gx0, gy0, gw, gh], "display": self.selected_index,
+                     "image_width": iw, "image_height": ih,
+                     "coordinate_space": "full_screenshot",
+                     "screenshot_region": [x0, y0, x1, y1],
+                     "zoom_factor": round(iw / (x1 - x0), 3)}
 
     # ----- coordinate mapping ------------------------------------------------
 

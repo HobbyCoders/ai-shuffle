@@ -29,7 +29,7 @@ import subprocess
 import sys
 from typing import Any, List, Optional
 
-from app.mcp.computer_use import access, activity, abort, safety
+from app.mcp.computer_use import access, activity, abort, safety, windows
 from app.mcp.computer_use.abort import is_stopped, Aborted as _Aborted
 from app.mcp.computer_use.scaling import DisplayManager, computer_use_available, foreground_display
 
@@ -61,6 +61,7 @@ _TOOL_NAMES = [
     "double_click", "triple_click", "left_click_drag",
     "left_mouse_down", "left_mouse_up",
     "key", "hold_key", "type", "scroll", "wait",
+    "list_windows", "focus_window", "window_control",
     "open_application", "read_clipboard", "write_clipboard",
     "computer_batch",
     "release_control",
@@ -89,6 +90,15 @@ def _ok(payload: dict) -> dict:
 
 def _err(message: str, **extra: Any) -> dict:
     return {"isError": True, "content": [_text_item({"success": False, "error": message, **extra})]}
+
+
+_ZOOM_NOTE = ("Reading aid only. Clicks still use the last full screenshot: "
+              "x = screenshot_region[0] + image_x / zoom_factor (same for y).")
+_ZOOM_OFF_SCREENSHOT = ("Reading aid only. This area is not in the last screenshot; "
+                        "switch_display and take a screenshot before clicking here.")
+_WINDOWS_NOTE = ("Front to back. bounds are [x, y, width, height] in physical desktop pixels "
+                 "(list_displays geometry); screenshot_bounds are [x0, y0, x1, y1] in the last "
+                 "screenshot. focus_window / window_control need granted=true.")
 
 
 # ---------------------------------------------------------------------------
@@ -252,9 +262,41 @@ def create_computer_use_server(
             return [_text_item({"success": True, **info, **_display_note(),
                                 "cursor": _virtual_cursor(*mouse.position)}), _img_item(png)]
         if action == "zoom":
-            png, info = mgr.capture_region(p["region"])
+            has_region, has_window = p.get("region") is not None, p.get("window_id") is not None
+            if has_region == has_window:
+                raise ValueError("zoom takes either region or window_id")
+            if has_region:
+                png, info = mgr.capture_region(p["region"])
+            else:
+                win = windows.find_window(p["window_id"], mgr.list_displays())
+                if not win.bounds:
+                    raise ValueError("that window is minimized; focus_window it first")
+                png, info = mgr.capture_rect(*win.bounds)
+                info["window_id"] = win.id
             inputs.check()
+            info["note"] = _ZOOM_NOTE if info.get("zoom_factor") else _ZOOM_OFF_SCREENSHOT
             return [_text_item({"success": True, **info}), _img_item(png)]
+        if action == "list_windows":
+            listed = [_window_payload(w) for w in windows.list_windows(mgr.list_displays())]
+            return [_text_item({"success": True, "windows": listed,
+                                "selected_display": mgr.selected_index, "note": _WINDOWS_NOTE})]
+        if action == "focus_window":
+            win = _granted_window(p.get("window_id"))
+            if not windows.focus(win.id, inputs.sleep, _alt_nudge):
+                raise ValueError("Windows kept another window in front. Click the window's "
+                                 "title bar or taskbar button instead.")
+            return [_text_item({"success": True, "action": action, **_after_change(win.id)})]
+        if action == "window_control":
+            win = _granted_window(p.get("window_id"))
+            op = p.get("operation")
+            if op in ("maximize", "minimize", "restore"):
+                windows.set_state(win.id, op, inputs.sleep)
+            elif op == "move_resize":
+                windows.move_resize(win.id, p.get("bounds"), mgr.list_displays(), inputs.sleep)
+            else:
+                raise ValueError("operation must be maximize, minimize, restore or move_resize")
+            return [_text_item({"success": True, "action": action, "operation": op,
+                                **_after_change(win.id)})]
         if action == "cursor_position":
             gx, gy = mouse.position
             return [_text_item({"success": True, **_virtual_cursor(gx, gy)})]
@@ -341,23 +383,82 @@ def create_computer_use_server(
             inputs.sleep(max(0.0, min(_MAX_WAIT, float(p.get("duration", 0) or 0))))
             return [_text_item({"success": True, "action": action})]
         if action == "open_application":
-            _open_app(str(p.get("app") or ""))
-            return [_text_item({"success": True, "action": action, "app": p.get("app")})]
+            result = _open_app(str(p.get("app") or ""))
+            return [_text_item({"success": True, "action": action, "app": p.get("app"), **result})]
         raise ValueError(f"unknown action: {action}")
 
-    def _open_app(name: str) -> None:
-        # Launch/foreground via the Start menu: tap Win, type, Enter. Robust
-        # across installed apps without resolving executables.
+    # ----- windows ------------------------------------------------------------
+
+    def _window_payload(win: "windows.WindowInfo") -> dict:
+        out = win.to_dict()
+        out["granted"] = windows.is_granted(win, access.info(session_id)["apps"])
+        if win.bounds:
+            x, y, w, h = win.bounds
+            shot = mgr.screenshot_rect(x, y, x + w, y + h)
+            if shot:
+                out["screenshot_bounds"] = shot
+        return out
+
+    def _granted_window(window_id: Any) -> "windows.WindowInfo":
+        # Control is limited to listed windows of granted apps; request_access
+        # is the only way to add an app.
+        win = windows.find_window(window_id, mgr.list_displays())
+        apps = access.info(session_id)["apps"]
+        if not windows.is_granted(win, apps):
+            raise ValueError(
+                f"{win.app!r} is not one of this session's granted apps "
+                f"({', '.join(apps) or 'none'}). Call request_access with apps=[{win.app!r}] first.")
+        return win
+
+    def _after_change(window_id: int) -> dict:
+        try:
+            win = windows.find_window(window_id, mgr.list_displays())
+        except ValueError:
+            return {"window_id": window_id, "note": "The window closed."}
+        out: dict = {"window": _window_payload(win)}
+        if win.display is not None and win.display != mgr.selected_index:
+            out["note"] = (f"The window is on Display {win.display}; call "
+                           f"switch_display('Display {win.display}') and take a screenshot "
+                           "before clicking.")
+        else:
+            out["note"] = "Take a screenshot before clicking."
+        return out
+
+    def _alt_nudge() -> None:
+        # Two Alt taps lift Windows' foreground lock without leaving a menu open.
+        for _ in range(2):
+            inputs.press(keyboard, Key.alt)
+            inputs.release(keyboard, Key.alt)
+
+    def _running_window(name: str) -> "Optional[windows.WindowInfo]":
+        try:
+            listed = windows.list_windows(mgr.list_displays())
+        except Exception:
+            logger.debug("computer-use: window lookup for open_application failed", exc_info=True)
+            return None
+        apps = access.info(session_id)["apps"]
+        return next((w for w in listed if windows.name_matches(name, w.names)
+                     and windows.is_granted(w, apps)), None)
+
+    def _open_app(name: str) -> dict:
         if not name.strip():
             raise ValueError("application name cannot be empty")
         if sys.platform != "win32":
             raise ValueError("open_application is supported on Windows only")
+        # A granted window of the app is already open: focus it instead of
+        # launching another instance.
+        existing = _running_window(name)
+        if existing is not None and windows.focus(existing.id, inputs.sleep, _alt_nudge):
+            return {"method": "focused_existing_window", **_after_change(existing.id)}
+        # Launch via the Start menu: tap Win, type, Enter. Robust across
+        # installed apps without resolving executables.
         _chord([], Key.cmd)
         inputs.sleep(0.5)
         _type_text(name)
         inputs.sleep(0.6)
         _chord([], Key.enter)
         inputs.sleep(0.8)
+        return {"method": "start_menu"}
 
     def _virtual_cursor(gx: float, gy: float) -> dict:
         actual = next((d for d in mgr.list_displays()
@@ -490,8 +591,8 @@ def create_computer_use_server(
         "request_access",
         "Request permission to control a set of applications for this session. Call "
         "this FIRST, before any other tool. The user approves or denies. apps are "
-        "Windows Start-menu display names (e.g. 'Notepad', 'File Explorer'). Returns the "
-        "granted apps.",
+        "Windows Start-menu display names (e.g. 'Notepad', 'File Explorer'), or the app "
+        "name list_windows shows. Returns the granted apps.",
         {
             "type": "object",
             "properties": {
@@ -547,9 +648,8 @@ def create_computer_use_server(
 
     # ----- screenshot / inspect ---------------------------------------------
     @tool("screenshot",
-          "Take a screenshot of the selected display. The returned image is what "
-          "subsequent click coordinates are relative to. Call before acting and to "
-          "check results.",
+          "Take a screenshot of the selected display. All click/scroll coordinates are "
+          "pixels of the most recent screenshot. Call before acting and to check results.",
           {"type": "object", "properties": {}},
           annotations=big)
     async def screenshot(args: dict) -> dict:
@@ -557,13 +657,15 @@ def create_computer_use_server(
     tools.append(screenshot)
 
     @tool("zoom",
-          "Higher-resolution screenshot of a sub-region of the last screenshot, to read "
-          "small text or fine detail. Coordinates in later clicks still refer to the full "
-          "screenshot, not the zoom.",
+          "Zoomed, higher-resolution image to read small text or detail. Pass region "
+          "[x0,y0,x1,y1] in the last screenshot's pixels, or window_id from list_windows "
+          "to capture that window's screen area on any display. Reading aid only: clicks "
+          "still use the last full screenshot; screenshot_region and zoom_factor in the "
+          "result convert image pixels back.",
           {"type": "object",
            "properties": {"region": {"type": "array", "items": {"type": "number"},
-                                     "description": "[x0,y0,x1,y1] in the last screenshot's pixels."}},
-           "required": ["region"]},
+                                     "description": "[x0,y0,x1,y1] in the last screenshot's pixels."},
+                          "window_id": {"type": "integer", "description": "A list_windows id."}}},
           annotations=big)
     async def zoom(args: dict) -> dict:
         return await _run("zoom", args)
@@ -702,9 +804,45 @@ def create_computer_use_server(
     tools.append(wait)
 
     # ----- apps / clipboard --------------------------------------------------
+    WINDOW_ID = {"window_id": {"type": "integer", "description": "A list_windows id."}}
+
+    @tool("list_windows",
+          "List open app windows, front to back: id, title, app, process, state "
+          "(normal/minimized/maximized), foreground, display, bounds (physical desktop "
+          "pixels), screenshot_bounds (area in the last screenshot) and granted (app is "
+          "in this session's grant). Check here before open_application.",
+          {"type": "object", "properties": {}})
+    async def list_windows(args: dict) -> dict:
+        return await _run("list_windows", args)
+    tools.append(list_windows)
+
+    @tool("focus_window",
+          "Bring an open window to the front by its list_windows id, restoring it if "
+          "minimized. Its app must be granted. Screenshot its display before clicking.",
+          {"type": "object", "properties": WINDOW_ID, "required": ["window_id"]})
+    async def focus_window(args: dict) -> dict:
+        return await _run("focus_window", args)
+    tools.append(focus_window)
+
+    @tool("window_control",
+          "Maximize, minimize, restore or move_resize an open window by its list_windows "
+          "id. Its app must be granted. move_resize bounds are [x, y, width, height] in "
+          "physical desktop pixels (the space of list_windows bounds and list_displays "
+          "geometry), not screenshot pixels.",
+          {"type": "object",
+           "properties": {**WINDOW_ID,
+                          "operation": {"type": "string",
+                                        "enum": ["maximize", "minimize", "restore", "move_resize"]},
+                          "bounds": {"type": "array", "items": {"type": "number"},
+                                     "description": "[x, y, width, height]; move_resize only."}},
+           "required": ["window_id", "operation"]})
+    async def window_control(args: dict) -> dict:
+        return await _run("window_control", args)
+    tools.append(window_control)
+
     @tool("open_application",
-          "Launch or foreground an app by its Start-menu name (e.g. 'Notepad'). Take a "
-          "screenshot afterwards to confirm.",
+          "Launch an app by its Start-menu name (e.g. 'Notepad'). If a granted window of "
+          "it is already open, focuses that window instead. Take a screenshot afterwards.",
           {"type": "object", "properties": {"app": {"type": "string"}}, "required": ["app"]})
     async def open_application(args: dict) -> dict:
         return await _run("open_application", args)
@@ -744,10 +882,11 @@ def create_computer_use_server(
 
     # ----- batch -------------------------------------------------------------
     @tool("computer_batch",
-          "Execute a sequence of actions in ONE call (e.g. click, type, key, screenshot). "
-          "Each item: {action, coordinate, text, duration, repeat, scroll_direction, "
-          "scroll_amount, region, start_coordinate}. Stops on the first error. Coordinates "
-          "refer to the screenshot taken before this call.",
+          "Execute a sequence of actions in ONE call. action is any single-action tool "
+          "name (e.g. focus_window, left_click, type, key, zoom, screenshot); other keys "
+          "are that tool's arguments (coordinate, text, region, window_id, operation, ...). "
+          "Stops on the first error. Coordinates refer to the latest screenshot, including "
+          "one taken earlier in the batch.",
           {"type": "object",
            "properties": {"actions": {"type": "array", "items": {"type": "object"}}},
            "required": ["actions"]},

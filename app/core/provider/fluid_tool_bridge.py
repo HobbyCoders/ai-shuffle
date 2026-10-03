@@ -189,13 +189,14 @@ COMPUTER_USE_RISK_MAP: Mapping[str, str] = {
     # Pure observation:
     "screenshot": "safe", "cursor_position": "safe", "list_displays": "safe",
     "list_granted_applications": "safe", "read_clipboard": "safe",
-    "zoom": "safe", "wait": "safe", "release_control": "safe",
+    "zoom": "safe", "wait": "safe", "release_control": "safe", "list_windows": "safe",
     # Everything that drives the desktop mutates it:
     "left_click": "write", "right_click": "write", "middle_click": "write",
     "double_click": "write", "triple_click": "write", "left_click_drag": "write",
     "left_mouse_down": "write", "left_mouse_up": "write", "mouse_move": "write",
     "key": "write", "hold_key": "write", "type": "write", "scroll": "write",
     "switch_display": "write", "open_application": "write",
+    "focus_window": "write", "window_control": "write",
     "write_clipboard": "write", "request_access": "write",
     "computer_batch": "write",
 }
