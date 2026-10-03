@@ -13,10 +13,10 @@ import subprocess
 from urllib.parse import urlsplit
 
 
-def _run(cwd, *args):
+def _run(cwd, *args, timeout=120):
     try:
         return subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, timeout=120,
+            ["git", *args], cwd=cwd, capture_output=True, timeout=timeout,
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         )
     except subprocess.TimeoutExpired as exc:
@@ -482,3 +482,165 @@ def delete_untouched_task_branch(cwd, branch, base) -> dict:
     if removed.returncode:
         return dict(deleted=False, reason=_push_refused(removed.stderr, branch) + " The branch was left in place.")
     return dict(deleted=True, reason=None)
+
+
+# --- Commits back from a Task worker on another worker ----------------------
+#
+# When the worker finishes, the worker that ran it pushes ``task/<id>`` to
+# origin (only with commits past the base, never forced) and the calling
+# worker fetches it into a local branch of the same name. Neither side touches
+# a working tree, index or current branch, and reasons stay fixed text.
+
+#: Seconds for the push on the worker that ran the task.
+RESULT_PUSH_TIMEOUT = 60
+#: Seconds for the fetch on the calling worker; it runs while the report is
+#: being delivered, so it stays well under the delivery timeout.
+RESULT_FETCH_TIMEOUT = 20
+
+
+def _tip(cwd, ref):
+    """The commit ``ref`` names here, or None."""
+    found = _run(cwd, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+    sha = found.stdout.decode(errors="replace").strip()
+    return sha if not found.returncode and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha) else None
+
+
+def _contains(cwd, older, newer):
+    """``_is_ancestor`` that answers False instead of raising."""
+    try:
+        return _is_ancestor(cwd, older, newer)
+    except ValueError:
+        return False
+
+
+def uncommitted_files(cwd):
+    """How many files in the checkout at ``cwd`` hold uncommitted changes, or None."""
+    try:
+        status = _run(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all", timeout=30)
+    except ValueError:
+        return None
+    if status.returncode:
+        return None
+    count, skip = 0, False
+    for entry in status.stdout.decode(errors="replace").split("\0"):
+        if skip or not entry:
+            skip = False
+            continue
+        # A rename or copy is followed by its source path.
+        skip = entry[:1] in "RC"
+        count += 1
+    return count
+
+
+def push_task_result(cwd, branch, base, *, timeout=RESULT_PUSH_TIMEOUT) -> dict:
+    """Push the commits on local ``branch`` past ``base`` to origin, without force.
+
+    Returns ``branch``, ``base``, ``head`` (the local tip, None when the branch
+    is gone), ``commits`` (past ``base``), ``remote`` (origin identity hash),
+    ``pushed`` and a plain ``reason`` when commits were not pushed. Nothing is
+    pushed without commits. Origin's branch is only ever fast-forwarded: one
+    holding a commit this branch lacks (someone else's branch of that name) is
+    left alone. Never raises for Git failures.
+    """
+    _task_branch(cwd, branch)
+    _require_sha(base)
+    result: dict = dict(branch=branch, base=base, head=None, commits=0, remote=None, pushed=False, reason=None)
+    try:
+        head = _tip(cwd, "refs/heads/" + branch)
+        if head is None:
+            result["reason"] = f"The worker's branch {branch} no longer exists on this worker, so nothing was pushed."
+            return result
+        result["head"] = head
+        if head == base:
+            return result
+        counted = _run(cwd, "rev-list", "--count", head, "--not", base)
+        result["commits"] = int(counted.stdout.decode().strip() or 0) if not counted.returncode else 0
+        if not _contains(cwd, base, head):
+            result["reason"] = (f"{branch} no longer starts at its base commit (it was rebased or reset), "
+                                "so it was not pushed and nothing was forced.")
+            return result
+        remote = origin_identity(cwd)
+        if remote is None:
+            result["reason"] = ("This project has no usable origin remote on this worker, so the commits "
+                                "stay in its checkout here.")
+            return result
+        result["remote"] = remote
+        tip, reachable = _remote_tip(cwd, branch)
+        if not reachable:
+            result["reason"] = ("Could not reach origin from this worker (offline, or its Git credentials "
+                                "were refused), so the commits stay in its checkout here.")
+            return result
+        if tip == head:
+            result["pushed"] = True
+            return result
+        if tip is not None and not _contains(cwd, tip, head):
+            result["reason"] = (f"Origin already has a different {branch} (a commit this branch does not "
+                                "contain); it was left alone and nothing was forced.")
+            return result
+        # This exact commit, never a moving HEAD, and a plain push: origin
+        # refuses anything that is not a fast-forward.
+        pushed = _run(cwd, "push", "origin", head + ":refs/heads/" + branch, timeout=timeout)
+    except ValueError:  # timed out
+        result["reason"] = "Git timed out reaching origin from this worker, so the commits stay in its checkout here."
+        return result
+    if pushed.returncode:
+        result["reason"] = _push_refused(pushed.stderr, branch)
+        return result
+    result["pushed"] = True
+    return result
+
+
+def _checked_out(cwd, branch):
+    """True when some worktree of this repository has ``branch`` checked out."""
+    listed = _run(cwd, "worktree", "list", "--porcelain")
+    if listed.returncode:
+        return True  # unknown: treat it as in use and never move it
+    return ("branch refs/heads/" + branch) in listed.stdout.decode(errors="replace").splitlines()
+
+
+def fetch_task_result(cwd, branch, head, remote, *, timeout=RESULT_FETCH_TIMEOUT):
+    """Fetch ``branch`` from origin and point the local ``branch`` at ``head``.
+
+    The local branch is created, or fast-forwarded when it is behind ``head``;
+    one that holds other commits, or is checked out in any worktree, is left
+    alone. Only refs change: no working tree, index or current branch. Raises
+    ``ValueError`` with a plain reason; returns ``head``.
+    """
+    _task_branch(cwd, branch)
+    _require_sha(head)
+    local = origin_identity(cwd)
+    if local is None:
+        raise ValueError("This project has no usable origin remote on this worker, so the branch was not fetched.")
+    if remote is not None and local != remote:
+        raise ValueError("This worker's origin is a different repository from the other worker's origin, "
+                         "so the branch was not fetched.")
+    try:
+        fetched = _run(cwd, "fetch", "--no-tags", "origin",
+                       "+refs/heads/" + branch + ":refs/remotes/origin/" + branch, timeout=timeout)
+    except ValueError:
+        raise ValueError(f"Git timed out fetching {branch} from origin on this worker.") from None
+    if fetched.returncode:
+        if b"couldn't find remote ref" in fetched.stderr.lower():
+            raise ValueError(f"Origin no longer has {branch}, so it could not be fetched here.")
+        raise ValueError(f"Could not fetch {branch} from origin on this worker. Check its Git credentials "
+                         "and connection to origin.")
+    tip = _tip(cwd, "refs/remotes/origin/" + branch)
+    if tip is None or not _contains(cwd, head, tip):
+        raise ValueError(f"Origin's {branch} does not contain the commit the other worker reported, "
+                         "so no local branch was made from it.")
+    ref = "refs/heads/" + branch
+    old = _tip(cwd, ref)
+    if old == head:
+        return head
+    if _checked_out(cwd, branch):
+        raise ValueError(f"{branch} is checked out in a worktree here, so it was left alone; "
+                         f"the commits are at origin/{branch}.")
+    if old is not None and not _contains(cwd, old, head):
+        raise ValueError(f"A different local {branch} already exists here, so it was left alone; "
+                         f"the commits are at origin/{branch}.")
+    # Compare-and-swap: created only if absent, moved only from ``old``.
+    updated = _run(cwd, "update-ref", "-m", "fetch task worker result", ref, head, old or "0" * len(head))
+    if updated.returncode:
+        raise ValueError(f"{branch} changed here while it was being fetched, so it was left alone; "
+                         f"the commits are at origin/{branch}.")
+    return head

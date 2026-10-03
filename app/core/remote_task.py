@@ -776,7 +776,9 @@ async def handle_task_start(body: Dict[str, Any], from_device: str) -> Dict[str,
 # ---------------------------------------------------------------------------
 
 TASK_REPORT_ACTION = "task-report"
-REPORT_TIMEOUT = 20.0
+#: The parent fetches the child's branch before it answers (S13), within
+#: ``checkout_transfer.RESULT_FETCH_TIMEOUT``.
+REPORT_TIMEOUT = 60.0
 REPORT_STATUSES = ("completed", "failed", "stopped")
 #: Delivery retries back off to this ceiling and never give up on their own.
 RETRY_DELAYS = (10, 30, 60, 120, 300, 600)
@@ -868,6 +870,7 @@ def owe_if_finished(session_id: str) -> bool:
     report = build_child_report(session_id)
     if report is None:
         return False
+    report["git"] = git_summary(session_id)
     remote_tasks.owe_report(session_id, report["completion_id"], report)
     return True
 
@@ -970,6 +973,74 @@ async def delivery_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Commits back: the child's branch, pushed there and fetched here
+# ---------------------------------------------------------------------------
+
+def _checkout_mode(session_id: str) -> Optional[str]:
+    """How the child's checkout was set up (:data:`CHECKOUT_MODE_KEY`). Blocking."""
+    from app.db.base import get_db, parse_jsonb
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT payload FROM turns WHERE session_id=%s AND command_id=%s",
+                       (session_id, COMMAND_PREFIX + session_id))
+        row = cursor.fetchone()
+    payload = parse_jsonb(row["payload"]) if row else None
+    mode = payload.get(CHECKOUT_MODE_KEY) if isinstance(payload, dict) else None
+    return mode if isinstance(mode, str) else None
+
+
+def git_summary(session_id: str) -> Dict[str, Any]:
+    """Target side: push the finished child's commits; the report's git block.
+
+    Runs once, when the report is first owed. Never raises: a failure here
+    becomes the block's reason, and the report goes out either way.
+    """
+    from app.core.worker_checkout import REMOTE_NONE, bound_git_block, empty_git_block, push_worker_commits
+
+    mode = None
+    try:
+        mode = _checkout_mode(session_id)
+        block = push_worker_commits(session_id, mode=mode)
+    except Exception as exc:  # noqa: BLE001 — the report must still go
+        from app.core.scrub import redact_url_credentials
+
+        logger.warning("remote_task: could not check the branch of %s: %s", session_id,
+                       redact_url_credentials(str(exc))[:300])
+        block = empty_git_block(mode or REMOTE_NONE, (
+            "This worker could not check the subagent's branch; anything it committed stays in its "
+            "checkout there."))
+    return bound_git_block(block, session_id) or empty_git_block(REMOTE_NONE)
+
+
+async def bring_commits_here(owner_row: Mapping[str, Any], worker_session_id: str, worker_name: str,
+                             raw: Any) -> str:
+    """Parent side: fetch the child's pushed branch; the wake's git paragraph.
+
+    ``raw`` is the report's git block; an older worker sends none and this
+    returns "". A failed fetch never fails the delivery: the paragraph says
+    so. Never raises.
+    """
+    from app.core.scrub import redact_url_credentials
+    from app.core.worker_checkout import bound_git_block, fetch_worker_commits, git_note
+
+    block = bound_git_block(raw, worker_session_id)
+    if block is None:
+        return ""
+    try:
+        outcome = await asyncio.to_thread(fetch_worker_commits, owner_row, worker_session_id, block)
+    except Exception as exc:  # noqa: BLE001 — the report is delivered either way
+        logger.warning("remote_task: could not fetch the branch of %s: %s", worker_session_id,
+                       redact_url_credentials(str(exc))[:300])
+        outcome = {"fetched": False, "released": False,
+                   "reason": "Fetching the branch on this worker failed unexpectedly."}
+    if outcome.get("reason"):
+        logger.info("remote_task: %s not fetched here: %s", worker_session_id,
+                    redact_url_credentials(str(outcome["reason"])))
+    return "\n\n" + git_note(block, outcome, worker_name)
+
+
+# ---------------------------------------------------------------------------
 # Parent side: accept a report and wake the session that called Task
 # ---------------------------------------------------------------------------
 
@@ -1061,13 +1132,14 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
         owner_row = await run_sync(database.get_session, owner)
         path = None
         if owner_row is not None:
+            git_text = await bring_commits_here(owner_row, key, report.worker_name, body.get("git"))
             path = await run_sync(write_task_report, owner_row, key, report.report)
             if await _settle_tracked(report.dispatch, report, path):
                 frame = {
                     "task_id": key,
                     "status": _WAKE_STATUS[report.status],
                     "tool_use_id": report.dispatch.get("tool_use_id") or key,
-                    "summary": _wake_summary(report, path),
+                    "summary": _wake_summary(report, path) + git_text,
                 }
                 await turn_scheduler.on_remote_task_terminal(owner, frame)
             else:

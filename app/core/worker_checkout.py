@@ -15,7 +15,7 @@ import logging
 import os
 import re
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -576,3 +576,194 @@ def release_worker_branch(state) -> Dict[str, Any]:
         return checkout_transfer.delete_untouched_task_branch(base, sent.branch, sent.base_commit)
     except ValueError as exc:
         return {"deleted": False, "reason": str(exc)}
+
+
+# --- Commits back -------------------------------------------------------------
+#
+# When a remote worker finishes, the worker that ran it pushes its
+# ``task/<id>`` to origin if it holds commits, and reports what it did as a
+# git block of identifiers and fixed-text reasons. The calling worker fetches
+# the branch into a local ref of the same name. Uncommitted changes are
+# reported, never committed for the worker.
+
+#: Longest reason kept in a git block.
+MAX_GIT_REASON_CHARS = 300
+
+
+def empty_git_block(mode: str, reason: Optional[str] = None) -> Dict[str, Any]:
+    """A git block with nothing in it: ``mode`` and an optional plain reason."""
+    return {"mode": mode, "branch": None, "base": None, "head": None, "commits": 0,
+            "pushed": False, "uncommitted_files": 0, "remote": None, "reason": reason}
+
+
+def bound_git_block(raw: Any, worker_session_id: str) -> Optional[Dict[str, Any]]:
+    """A git block reduced to known, bounded fields, or None when there is none.
+
+    Used on both sides: before the report is stored and when it arrives. The
+    branch must be this worker's own ``task/<id>``; SHAs, counts and the
+    origin hash must have their shapes; the reason is cut, stripped of URL
+    credentials and of harness markers.
+    """
+    from fluid.tools.hardening import defang_harness_markers
+
+    from app.core.scrub import redact_url_credentials
+
+    if not isinstance(raw, Mapping) or raw.get("mode") not in (REMOTE_BRANCH, REMOTE_SHARED, REMOTE_NONE):
+        return None
+
+    def sha(value: Any) -> Optional[str]:
+        return value if isinstance(value, str) and _SHA.fullmatch(value) else None
+
+    def count(value: Any) -> int:
+        return min(value, 1_000_000) if type(value) is int and value > 0 else 0
+
+    expected = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
+    branch = expected if raw.get("mode") == REMOTE_BRANCH and raw.get("branch") == expected else None
+    head = sha(raw.get("head")) if branch else None
+    reason = raw.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        reason = defang_harness_markers(redact_url_credentials(reason.strip()))[:MAX_GIT_REASON_CHARS]
+    else:
+        reason = None
+    remote = raw.get("remote")
+    return {
+        "mode": raw["mode"],
+        "branch": branch,
+        "base": sha(raw.get("base")) if branch else None,
+        "head": head,
+        "commits": count(raw.get("commits")) if branch else 0,
+        "pushed": bool(branch and head and raw.get("pushed") is True),
+        "uncommitted_files": count(raw.get("uncommitted_files")) if branch else 0,
+        "remote": remote if isinstance(remote, str) and re.fullmatch(r"[0-9a-f]{64}", remote) else None,
+        "reason": reason,
+    }
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def git_note(block: Mapping[str, Any], outcome: Mapping[str, Any], worker_name: str) -> str:
+    """One plain paragraph for the parent: where the remote worker's work is."""
+    worker = worker_name or "the other worker"
+    reason = block.get("reason")
+    if block.get("mode") == REMOTE_SHARED:
+        return (f"Git: it ran read-only in {worker}'s checkout of this project, so there are no "
+                "commits to bring back.")
+    if block.get("mode") != REMOTE_BRANCH:
+        return ("Git: it did not run in a Git checkout (no project, or the project is not a Git "
+                "repository), so there are no commits to bring back.")
+    branch = block.get("branch") or "its task branch"
+    commits = int(block.get("commits") or 0)
+    head = str(block.get("head") or "")[:12]
+    if not commits:
+        text = f"Git: it made no commits on {branch}."
+        if reason:
+            text += f" {reason}"
+    elif block.get("pushed"):
+        text = f"Git: {_plural(commits, 'commit')} on {branch} (head {head}), pushed to origin from {worker}."
+        if outcome.get("fetched"):
+            text += (f" Fetched into this project, so `git log {branch}` shows them; this checkout's "
+                     "files and branch were not changed.")
+        else:
+            text += (f" It was not fetched here: {outcome.get('reason') or 'unknown reason.'} Run "
+                     f"`git fetch origin {branch}` in this project to get it.")
+    else:
+        text = (f"Git: {_plural(commits, 'commit')} on {branch} (head {head}) were not pushed and stay in "
+                f"its checkout on {worker}: {reason or 'unknown reason.'}")
+    files = int(block.get("uncommitted_files") or 0)
+    if files:
+        text += (f" It also left uncommitted changes in {_plural(files, 'file')} in its checkout on "
+                 f"{worker}; they were not committed or copied.")
+    return text
+
+
+def _branch_base(repo: str, branch: str) -> Optional[str]:
+    """The commit ``branch`` was created at: its oldest reflog entry."""
+    from app.core.git_service import git_service
+
+    log = git_service._run_git(repo, ["reflog", "show", "--format=%H", f"refs/heads/{branch}"], timeout=5)
+    entries = [e for e in (log.stdout or "").split() if e]
+    return entries[-1] if not log.returncode and entries and _SHA.fullmatch(entries[-1]) else None
+
+
+def push_worker_commits(worker_session_id: str, *, mode: Optional[str],
+                        base_commit: Optional[str] = None) -> Dict[str, Any]:
+    """Target side: push a finished remote worker's commits; return its git block.
+
+    Only a ``task/<worker id>`` checkout (mode ``branch``) has anything to
+    push, and only commits past ``base_commit`` (the parent's HEAD it started
+    from) are pushed, without force, to that same branch name on origin.
+    Uncommitted changes are counted, not committed. A checkout with no
+    commits and no changes is reclaimed, as a local worker's is. Never raises
+    for Git failures; the reason says what happened.
+    """
+    from app.core import checkout_transfer
+    from app.db import database
+
+    if mode == REMOTE_SHARED:
+        return empty_git_block(REMOTE_SHARED)
+    if mode != REMOTE_BRANCH:
+        return empty_git_block(REMOTE_NONE)
+    branch = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
+    block = empty_git_block(REMOTE_BRANCH)
+    block["branch"] = branch
+    row: Dict[str, Any] = dict(database.get_session(worker_session_id) or {})
+    project_id = row.get("project_v2_id")
+    repo = _base_checkout_path(project_id) if project_id else None
+    if not repo:
+        block["reason"] = "The project's checkout is gone from this worker, so nothing was pushed."
+        return block
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", worker_session_id):
+        block["reason"] = "Invalid worker identity for a dedicated branch; nothing was pushed."
+        return block
+    base = base_commit if isinstance(base_commit, str) and _SHA.fullmatch(base_commit) else _branch_base(repo, branch)
+    if not base:
+        block["reason"] = f"Could not tell which commit {branch} started from, so nothing was pushed."
+        return block
+    pushed = checkout_transfer.push_task_result(repo, branch, base)
+    block.update({key: pushed[key] for key in ("base", "head", "commits", "pushed", "remote", "reason")})
+    path = row.get("worktree_path")
+    if path and os.path.isdir(path):
+        block["uncommitted_files"] = checkout_transfer.uncommitted_files(path) or 0
+    if pushed["head"] == base and not block["uncommitted_files"]:
+        reclaim_untouched_worker_checkout(worker_session_id)
+    return block
+
+
+def fetch_worker_commits(parent_row, worker_session_id: str, block: Mapping[str, Any]) -> Dict[str, Any]:
+    """Parent side: bring a remote worker's pushed branch into this project.
+
+    ``block`` is the validated git block from its report. With commits on
+    origin, the branch is fetched into a local ``task/<id>`` so ``git log``
+    works here; only refs change. With no commits, the branch the parent
+    published at dispatch is removed from origin while it still points at its
+    base. Returns ``fetched``, ``released`` and a plain ``reason`` when it was
+    not fetched. Never raises for Git failures.
+    """
+    from app.core import checkout_transfer, project_resolver
+
+    outcome: Dict[str, Any] = {"fetched": False, "released": False, "reason": None}
+    branch = f"{WORKER_BRANCH_PREFIX}{worker_session_id}"
+    if block.get("mode") != REMOTE_BRANCH or block.get("branch") != branch:
+        return outcome
+    row = dict(parent_row or {})
+    project = project_resolver.resolve_project_v2(row) if (row.get("project_v2_id") or row.get("project_id")) else None
+    repo = _base_checkout_path(project["id"]) if project else None
+    if not repo:
+        outcome["reason"] = "This project is not checked out on this worker, so the branch was not fetched here."
+        return outcome
+    base, head = block.get("base"), block.get("head")
+    try:
+        if not block.get("commits") and base and head == base:
+            released = checkout_transfer.delete_untouched_task_branch(repo, branch, base)
+            outcome["released"] = bool(released.get("deleted"))
+            return outcome
+        if not block.get("pushed") or not head:
+            return outcome
+        checkout_transfer.fetch_task_result(repo, branch, head, block.get("remote"))
+    except ValueError as exc:
+        outcome["reason"] = str(exc)
+        return outcome
+    outcome["fetched"] = True
+    return outcome
