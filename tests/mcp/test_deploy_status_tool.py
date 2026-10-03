@@ -32,6 +32,12 @@ def test_registered_allowlisted_and_safe():
     assert "DeployStatus" not in NATIVE_SHADOWED_BUILTINS
 
 
+def test_description_marks_it_on_demand():
+    description = _handlers()["DeployStatus"].description
+    assert "when the owner asks" in description
+    assert "not as a routine step after a merge" in description
+
+
 def _body(result):
     return json.loads(result["content"][0]["text"])
 

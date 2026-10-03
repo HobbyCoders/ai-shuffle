@@ -2557,7 +2557,9 @@ def create_builtin_tools_server(
         "whether it contains the given PR or commit, and the next action "
         "(up to date / update this worker / publish edge first). Also says "
         "whether Android needs a new Play build (only for android/ changes). "
-        "Read-only. Pass pr OR commit; with neither it reports drift from main.",
+        "Read-only. Pass pr OR commit; with neither it reports drift from main. "
+        "Call it when the owner asks whether a change is live, not as a "
+        "routine step after a merge.",
         {
             "type": "object",
             "properties": {

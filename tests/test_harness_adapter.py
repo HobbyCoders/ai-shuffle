@@ -6574,6 +6574,9 @@ def test_github_section_carries_the_git_hazard_rules():
     assert "git stash" in text and 'push -u -m "<tag>"' in text
     # A stale ``--merged`` listing nearly deleted a live session's branch.
     assert "git worktree list" in text and "bulk branch delete" in text
+    # Deploy status is on demand: no standing order to append a "Live on" line
+    # to every merge report.
+    assert "DeployStatus" not in text and "Live on" not in text
 
 
 @pytest.mark.asyncio

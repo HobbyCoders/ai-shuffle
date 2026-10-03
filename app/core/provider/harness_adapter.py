@@ -5529,11 +5529,7 @@ already. Leave worktree deletion to the app (its removal detaches the links \
 first). If you absolutely must remove one by hand, first delete each link \
 itself without recursing (`Remove-Item` on the link path in PowerShell, or \
 `fsutil reparsepoint delete`; never `rm -rf` on it), then remove the \
-worktree.
-
-After reporting a merged change, call DeployStatus with its PR and end the \
-report with its summary line, e.g. `Live on: Unraid ✗ · DesktopWorker ✓ · \
-Android: no build needed`."""
+worktree."""
 
 # What "verified" has to mean before a code session says it. Written against
 # six sessions in one day that shipped user-facing changes checked only against
