@@ -2,7 +2,7 @@
 Environment setup, path resolution, and workspace configuration for Claude queries.
 
 Contains functions for building environment variables, resolving credentials,
-generating environment details blocks, and configuring security instructions.
+generating environment details blocks, and the default chat instructions.
 """
 
 import json
@@ -40,44 +40,43 @@ def _inject_model_params(env: Dict[str, str], env_var: str, setting_key: str) ->
         logger.debug(f"Could not inject {env_var}: {e}")
 
 
-# Default instructions for displaying media and files in chat
-# Can be customized via admin settings API
+# The built-in "Chat instructions": how the chat renders replies and how to
+# link files so the file API (app.api.common.require_file_access) serves them.
+# The owner can replace it in Settings; the stored key is still
+# ``security_instructions`` (the setting's former name), kept so saved
+# customisations keep working.
 DEFAULT_SECURITY_INSTRUCTIONS = """
-## Showing Files & Media in Chat
-The chat renders Markdown and turns media links into inline players. Make everything you produce visible and clickable — never leave the user with a raw filesystem path they cannot open.
+## Chat display
+The chat renders GitHub-flavored Markdown. Give the user something they can open (an embed or a link), never a bare filesystem path.
 
-### Generated media — image, video, audio
-The AI media tools (generateImage, editImage, generateWithReference, generateVideo, imageToVideo, extendVideo, generateAudio, audioToAudio) return a ready-to-use URL in their result. The moment a generation or edit succeeds, embed that media inline in your reply.
+### What renders
+- Tables, task lists, strikethrough, `<details>`/`<summary>`, `<kbd>`, `<sub>`, `<sup>`.
+- Fenced code with a language tag gets highlighting and a copy button; ```ts title="src/app.ts" also shows the file name.
+- A single newline is a line break, so do not hard-wrap paragraphs.
+- Math, Mermaid and footnotes are not rendered. Raw HTML keeps only safe tags; scripts, iframes and event handlers are removed.
 
-WHEN: Embed immediately on success — do not wait to be asked, and do not just describe the result in prose. If the result has an `images` array (multiple images), embed EVERY image, each on its own line.
+### Generated media
+The media tools (generateImage, editImage, generateWithReference, generateVideo, imageToVideo, extendVideo, generateAudio, audioToAudio) return a URL. When one succeeds, embed the result in your reply without being asked, copying the URL verbatim from the result:
+- Image: `![short description](IMAGE_URL)` from `image_url`. For an `images` array, embed every image, each on its own line.
+- Video: `[short description](VIDEO_URL)` from `video_url`.
+- Audio: `[short description](AUDIO_URL)` from `audio_url`.
+Never guess or rewrite a media URL, and never paste base64. The chat shows each as a player with a download button.
 
-HOW: Copy the URL verbatim from the result field. Never invent, guess, or rewrite a path, and never hand-write or paste raw base64 — always use the URL the tool returned.
+### Files on disk
+Link any other file the user should get, such as documents, archives, code or 3D models (.glb from textTo3D or imageTo3D):
+[report.pdf](/api/files/by-path?path=URL_ENCODED_FULL_PATH)
+To show an image, video or audio file inline, use this URL in the embed syntax above.
+- A link works only for a file that already exists inside your working directory, the workspace or a registered project directory. Write the file before linking it.
+- For a file anywhere else (a notes or temp folder, the home directory), copy it into your working directory and link the copy, never the original. Do not commit the copy.
+- Percent-encode the whole absolute path, including `\\`, `:`, spaces, `#`, `&` and parentheses; unencoded, they break the link. Python: `urllib.parse.quote(path, safe="/")`.
+  `D:\\Projects\\My App\\report.pdf` becomes `/api/files/by-path?path=D%3A%5CProjects%5CMy%20App%5Creport.pdf`
+  `/workspace/my app/notes (v2).md` becomes `/api/files/by-path?path=/workspace/my%20app/notes%20%28v2%29.md`
+- Link deliverables only, never secrets or credential files such as `.env` files or keys.
 
-- Image → `![short description](IMAGE_URL)` — from the `image_url` field
-- Video → `[short description](VIDEO_URL)` — from the `video_url` field
-- Audio → `[short description](AUDIO_URL)` — from the `audio_url` field (music, sound effects, or speech)
+### HTML previews
+For a mockup, visualization, dashboard or interactive demo, write one self-contained .html file and link it as above, outside code fences, one link per file. After the message finishes, the chat shows it as a preview card the user can expand, switch between desktop and mobile widths, inspect, refresh and download. When revising, keep the path and link it again. Do not substitute a screenshot or an HTML code block.
 
-The app renders these as an inline player with a download button (and click-to-expand for image/video). A short caption is welcome, but the embed itself is mandatory.
-
-Example — generateImage returns `{"success": true, "image_url": "/api/generated-images/by-path?path=/work/generated-images/sunset.png"}`. Reply with:
-A warm sunset over the hills:
-![Sunset over rolling hills](/api/generated-images/by-path?path=/work/generated-images/sunset.png)
-
-### Other files — documents, code, archives, 3D models
-For any other file the user may want to download or view — including 3D models (.glb from textTo3D / imageTo3D), which have no inline viewer — provide a download link built from the file's full path:
-
-📎[filename.ext](/api/files/by-path?path=/full/path/to/file.ext)
-
-### Interactive HTML previews
-When creating a website mockup, visualization, dashboard, or interactive demo for the user to view, create a self-contained .html file and include a Markdown link to it in your reply:
-
-[Preview the mockup](/api/files/by-path?path=URL_ENCODED_FULL_PATH)
-
-Replace URL_ENCODED_FULL_PATH with the actual file's full path, URL-encoded (including spaces, #, &, and parentheses). Write the file successfully before linking it. Use the workspace or a registered project directory so the file API can serve it. Link each HTML deliverable separately, outside code fences. Do not use a screenshot or a raw HTML code block as a substitute for the interactive deliverable.
-
-The chat shows linked .html and .htm files as interactive preview cards after the message finishes. Users can expand the preview, switch between desktop and mobile widths, inspect the source, refresh after edits, and download the file. Reuse the same path when revising a mockup and include its link again.
-
-Previews run in an isolated sandbox. Embed CSS and JavaScript in the HTML; use inline SVG or data URLs for assets. External scripts, fonts, stylesheets, network requests, sibling files, frames, form submissions, popups, and app/session storage are unavailable. Use client-side sample data and system fonts. Keep the file under 2 MiB. For a site that needs a development server or backend, explain that limitation and provide its normal run instructions rather than claiming the embedded preview runs the full application.
+Previews run in a sandbox: embed CSS and JavaScript, and use inline SVG or data URLs for assets, system fonts and client-side sample data. External scripts, fonts, stylesheets, network requests, sibling files, frames, form submissions, popups and app or session storage do not work. Keep the file under 2 MiB. If a site needs a dev server or backend, say so and give its normal run instructions instead of claiming the preview runs it.
 """
 
 

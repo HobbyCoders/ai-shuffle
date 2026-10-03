@@ -2,7 +2,7 @@
 
 Key storage (fal.ai, fal billing, Anthropic) and ``GET /integrations`` must
 never hand back key material: keys are stored encrypted, reported masked, and
-a locked credential store never downgrades a key to plaintext. The security
+a locked credential store never downgrades a key to plaintext. The chat
 instructions, voice, Claude auth mode and loop guard editors are owner-only
 and validate before they write.
 """
@@ -327,42 +327,61 @@ def test_anthropic_key_switches_mode_only_when_asked(c, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Security instructions
+# Chat instructions (formerly "security instructions"): both route names serve
+# the same stored ``security_instructions`` value.
 # ---------------------------------------------------------------------------
 
-def test_security_instructions_default_customise_and_revert(c):
-    first = c.get(f"{BASE}/security-instructions").json()
+INSTRUCTION_PATHS = ["chat-instructions", "security-instructions"]
+
+
+@pytest.mark.parametrize("path", INSTRUCTION_PATHS)
+def test_chat_instructions_default_customise_and_revert(c, path):
+    first = c.get(f"{BASE}/{path}").json()
     assert first == {"current": DEFAULT_SECURITY_INSTRUCTIONS, "default": DEFAULT_SECURITY_INSTRUCTIONS,
                      "is_customized": False}
-    r = c.put(f"{BASE}/security-instructions", json={"instructions": "  Ask before deleting.  "})
+    r = c.put(f"{BASE}/{path}", json={"instructions": "  Ask before deleting.  "})
     assert r.status_code == 200
-    assert r.json() == {"success": True, "message": "Security instructions updated successfully"}
-    assert c.get(f"{BASE}/security-instructions").json() == {
-        "current": "Ask before deleting.", "default": DEFAULT_SECURITY_INSTRUCTIONS, "is_customized": True}
-    r = c.delete(f"{BASE}/security-instructions")
-    assert r.json() == {"success": True, "message": "Security instructions reverted to default"}
-    assert c.get(f"{BASE}/security-instructions").json()["is_customized"] is False
+    assert r.json() == {"success": True, "message": "Chat instructions updated successfully"}
+    assert database.get_system_setting("security_instructions") == "Ask before deleting."
+    # Either name reads the value the other wrote.
+    for other in INSTRUCTION_PATHS:
+        assert c.get(f"{BASE}/{other}").json() == {
+            "current": "Ask before deleting.", "default": DEFAULT_SECURITY_INSTRUCTIONS, "is_customized": True}
+    r = c.delete(f"{BASE}/{path}")
+    assert r.json() == {"success": True, "message": "Chat instructions reverted to default"}
+    assert c.get(f"{BASE}/{path}").json()["is_customized"] is False
     assert database.get_system_setting("security_instructions") is None
     # Reverting twice is harmless.
-    assert c.delete(f"{BASE}/security-instructions").status_code == 200
+    assert c.delete(f"{BASE}/{path}").status_code == 200
 
 
+def test_saved_customisation_survives_a_new_default(c, monkeypatch):
+    """An owner's edited text keeps winning when the built-in default changes."""
+    database.set_system_setting("security_instructions", "My own rules.")
+    monkeypatch.setattr(settings_api, "DEFAULT_SECURITY_INSTRUCTIONS", "A newer default.")
+    body = c.get(f"{BASE}/chat-instructions").json()
+    assert body == {"current": "My own rules.", "default": "A newer default.", "is_customized": True}
+    assert database.get_system_setting("security_instructions") == "My own rules."
+
+
+@pytest.mark.parametrize("path", INSTRUCTION_PATHS)
 @pytest.mark.parametrize("text", ["", "   \n\t"])
-def test_security_instructions_blank_is_400_and_keeps_custom_text(c, text):
+def test_chat_instructions_blank_is_400_and_keeps_custom_text(c, text, path):
     database.set_system_setting("security_instructions", "Keep me")
-    r = c.put(f"{BASE}/security-instructions", json={"instructions": text})
+    r = c.put(f"{BASE}/{path}", json={"instructions": text})
     assert r.status_code == 400
     assert r.json()["detail"] == "Instructions cannot be empty. Use DELETE to revert to default."
     assert database.get_system_setting("security_instructions") == "Keep me"
 
 
+@pytest.mark.parametrize("path", INSTRUCTION_PATHS)
 @pytest.mark.parametrize("method,body", [("get", None), ("put", {"instructions": "pwned"}), ("delete", None)])
-def test_security_instructions_are_owner_only(client, api_user, method, body):
+def test_chat_instructions_are_owner_only(client, api_user, method, body, path):
     database.set_system_setting("security_instructions", "owner text")
     kwargs = {"headers": api_user}
     if body is not None:
         kwargs["json"] = body
-    r = getattr(client, method)(f"{BASE}/security-instructions", **kwargs)
+    r = getattr(client, method)(f"{BASE}/{path}", **kwargs)
     assert r.status_code == 403
     assert "owner text" not in r.text
     assert database.get_system_setting("security_instructions") == "owner text"

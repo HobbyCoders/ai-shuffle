@@ -1,9 +1,9 @@
 <script lang="ts">
 	/**
 	 * Security: Sign-in (owner password, trusted LAN) and Agent safety (agents
-	 * run as you, computer use, code sandbox, security instructions).
+	 * run as you, computer use, code sandbox, chat instructions).
 	 *
-	 * Owner access and the security instructions are worker settings; the
+	 * Owner access and the chat instructions are worker settings; the
 	 * instructions keep an explicit Save and survive a change made elsewhere
 	 * (banner + Load latest). Computer use follows the shared computerUse
 	 * store, polled only while this page is mounted.
@@ -191,7 +191,11 @@
 		else if (result.status === 'forbidden') sandboxForbidden = true;
 	}
 
-	/* ---------- security instructions ---------- */
+	/* ---------- chat instructions ---------- */
+
+	// Formerly "security instructions". The worker also answers
+	// /settings/chat-instructions, but this UI keeps the old path so it still
+	// works against workers that predate the rename.
 
 	interface Instructions {
 		current: string;
@@ -232,7 +236,7 @@
 			if (isForbidden(e)) instrLoad = 'forbidden';
 			else if (!quiet) {
 				instrLoad = 'error';
-				instrError = getErrorMessage(e, 'Could not load the security instructions.');
+				instrError = getErrorMessage(e, 'Could not load the chat instructions.');
 			}
 		}
 	}
@@ -251,7 +255,7 @@
 			instrRemote = null;
 			flashSaved();
 		} catch (e: unknown) {
-			instrError = getErrorMessage(e, 'Could not save the security instructions.');
+			instrError = getErrorMessage(e, 'Could not save the chat instructions.');
 		} finally {
 			instrBusy = false;
 		}
@@ -268,7 +272,7 @@
 			instrRemote = null;
 			flashSaved();
 		} catch (e: unknown) {
-			instrError = getErrorMessage(e, 'Could not revert the security instructions.');
+			instrError = getErrorMessage(e, 'Could not revert the chat instructions.');
 		} finally {
 			instrBusy = false;
 		}
@@ -418,6 +422,7 @@
 	<SecurityInstructionsEditor
 		bind:value={instrText}
 		saved={instrSaved}
+		defaultText={instrDefault}
 		customized={instrCustomized}
 		busy={instrBusy}
 		changedElsewhere={!!instrRemote}

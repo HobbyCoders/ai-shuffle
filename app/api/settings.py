@@ -547,25 +547,31 @@ async def dismiss_loop_guard_turn(held_id: str, token: str = Depends(require_adm
 
 
 # ============================================================================
-# Security Instructions (System Prompt)
+# Chat instructions (system prompt)
 # ============================================================================
+#
+# Shown in Settings as "Chat instructions". The setting was called "security
+# instructions" before; the stored key ``security_instructions`` and the
+# ``/security-instructions`` routes stay so saved customisations, network sync
+# and older clients keep working. ``/chat-instructions`` is the current name.
 
 class SecurityInstructionsResponse(BaseModel):
-    """Response model for security instructions."""
+    """Response model for the chat instructions."""
     current: str
     default: str
     is_customized: bool
 
 
 class SecurityInstructionsUpdateRequest(BaseModel):
-    """Request model for updating security instructions."""
+    """Request model for updating the chat instructions."""
     instructions: str
 
 
+@router.get("/chat-instructions", response_model=SecurityInstructionsResponse)
 @router.get("/security-instructions", response_model=SecurityInstructionsResponse)
 async def get_security_instructions(token: str = Depends(require_admin)):
     """
-    Get the current security instructions that are added to all system prompts.
+    Get the chat instructions that are added to all system prompts.
 
     Returns both the current active instructions (custom or default) and the
     original default instructions for comparison/revert purposes.
@@ -581,13 +587,14 @@ async def get_security_instructions(token: str = Depends(require_admin)):
     )
 
 
+@router.put("/chat-instructions")
 @router.put("/security-instructions")
 async def update_security_instructions(
     request: SecurityInstructionsUpdateRequest,
     token: str = Depends(require_admin)
 ):
     """
-    Update the security instructions that are added to all system prompts.
+    Update the chat instructions that are added to all system prompts.
 
     The instructions are prepended to all system prompts sent to Claude.
     This allows customizing the base behavior across all profiles.
@@ -606,14 +613,15 @@ async def update_security_instructions(
 
     return {
         "success": True,
-        "message": "Security instructions updated successfully"
+        "message": "Chat instructions updated successfully"
     }
 
 
+@router.delete("/chat-instructions")
 @router.delete("/security-instructions")
 async def revert_security_instructions(token: str = Depends(require_admin)):
     """
-    Revert security instructions to the default.
+    Revert the chat instructions to the default.
 
     This removes any custom instructions and returns to using the built-in default.
 
@@ -631,7 +639,7 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 
     return {
         "success": True,
-        "message": "Security instructions reverted to default"
+        "message": "Chat instructions reverted to default"
     }
 
 
@@ -642,7 +650,7 @@ async def revert_security_instructions(token: str = Depends(require_admin)):
 # Runtime-editable knobs stored as plain ``system_settings`` values (they
 # are NOT secrets — the OpenAI key itself lives encrypted on the model_providers
 # row the voice session is funded by, never here). Stored/read through the same
-# get_system_setting/set_system_setting helpers the security-instructions
+# get_system_setting/set_system_setting helpers the chat-instructions
 # section above uses, so a change takes effect without a restart.
 
 # The realtime models a voice session may run on. Anything outside this

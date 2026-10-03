@@ -277,10 +277,10 @@ describe('code sandbox', () => {
 	});
 });
 
-describe('security instructions', () => {
+describe('chat instructions', () => {
 	async function openEditor() {
-		await fireEvent.click(await screen.findByRole('button', { name: /^Security instructions/ }));
-		return screen.getByLabelText('Security instructions', { selector: 'textarea' }) as HTMLTextAreaElement;
+		await fireEvent.click(await screen.findByRole('button', { name: /^Chat instructions/ }));
+		return screen.getByLabelText('Chat instructions', { selector: 'textarea' }) as HTMLTextAreaElement;
 	}
 
 	it('saves edits explicitly and refuses an empty text', async () => {
@@ -313,7 +313,42 @@ describe('security instructions', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Revert' }));
 		await waitFor(() => expect(transport.delete).toHaveBeenCalledWith('/settings/security-instructions'));
 		await waitFor(() => expect(area.value).toBe('Default rules.'));
-		expect(screen.getByRole('button', { name: /^Security instructions/ }).textContent).toContain('Default');
+		expect(screen.getByRole('button', { name: /^Chat instructions/ }).textContent).toContain('Default');
+		expect(screen.queryByText(/current default/)).toBeNull();
+	});
+
+	it('says when the saved text differs from the default and shows the default read-only', async () => {
+		render(SecurityPage);
+		await openEditor();
+		expect(screen.getByText('Your saved text differs from the current default.')).toBeTruthy();
+		expect(screen.queryByLabelText('Current default chat instructions')).toBeNull();
+		const toggle = screen.getByRole('button', { name: 'View default' });
+		expect(toggle.getAttribute('aria-expanded')).toBe('false');
+		await fireEvent.click(toggle);
+		const shown = screen.getByLabelText('Current default chat instructions') as HTMLTextAreaElement;
+		expect(shown.value).toBe('Default rules.');
+		expect(shown.readOnly).toBe(true);
+		expect(screen.getByLabelText('Chat instructions', { selector: 'textarea' })).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Hide default' }));
+		expect(screen.queryByLabelText('Current default chat instructions')).toBeNull();
+		expect(transport.put).not.toHaveBeenCalled();
+		expect(transport.delete).not.toHaveBeenCalled();
+	});
+
+	it('says when a saved customization matches the default, without a compare view', async () => {
+		instructions = { current: 'Default rules.', default: 'Default rules.', is_customized: true };
+		render(SecurityPage);
+		await openEditor();
+		expect(screen.getByText('Your saved text matches the current default.')).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'View default' })).toBeNull();
+	});
+
+	it('shows no comparison note while the default is in use', async () => {
+		instructions = { current: 'Default rules.', default: 'Default rules.', is_customized: false };
+		render(SecurityPage);
+		await openEditor();
+		expect(screen.queryByText(/current default/)).toBeNull();
+		expect((screen.getByRole('button', { name: 'Revert to default' }) as HTMLButtonElement).disabled).toBe(true);
 	});
 
 	it('keeps unsaved edits when the instructions change elsewhere, then loads the latest on request', async () => {

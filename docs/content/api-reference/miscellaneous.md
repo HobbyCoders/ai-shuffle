@@ -711,9 +711,11 @@ curl -X PATCH http://localhost:8000/api/v1/settings/integrations/model-params \
 
 Returns `{"success": true, "params": {"guidance_scale": 3.5}}` with the options as saved.
 
-### GET /api/v1/settings/security-instructions
+### GET /api/v1/settings/chat-instructions
 
-The base instructions included in the system prompt of every chat.
+The chat instructions: the text added to the system prompt of every chat. The built-in default tells agents what the chat renders and how to link files so they open. Settings shows it under **Security > Chat instructions**.
+
+These routes were named `security-instructions` before; `/api/v1/settings/security-instructions` still answers `GET`, `PUT` and `DELETE` the same way.
 
 **Auth:** Owner only
 
@@ -725,9 +727,9 @@ The base instructions included in the system prompt of every chat.
 }
 ```
 
-`current` is the text in use: your custom text, or the built-in default when none is saved. `default` is always the built-in text, so you can compare or start from it.
+`current` is the text in use: your custom text, or the built-in default when none is saved. `default` is always the built-in text of the running version, so you can compare or start from it. A saved custom text is never replaced by a newer default; revert to pick up the new default.
 
-### PUT /api/v1/settings/security-instructions
+### PUT /api/v1/settings/chat-instructions
 
 Replace the instructions with your own text.
 
@@ -736,21 +738,18 @@ Replace the instructions with your own text.
 **Body (JSON):** `instructions` (string, required). Surrounding whitespace is trimmed; empty text returns `400` (use `DELETE` to go back to the default).
 
 ```bash
-curl -X PUT http://localhost:8000/api/v1/settings/security-instructions \
-  -H "Authorization: Bearer $OWNER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"instructions": "Never run destructive commands without asking first."}'
+curl -X PUT http://localhost:8000/api/v1/settings/chat-instructions   -H "Authorization: Bearer $OWNER_TOKEN"   -H "Content-Type: application/json"   -d '{"instructions": "Never run destructive commands without asking first."}'
 ```
 
-Returns `{"success": true, "message": "Security instructions updated successfully"}`.
+Returns `{"success": true, "message": "Chat instructions updated successfully"}`.
 
-### DELETE /api/v1/settings/security-instructions
+### DELETE /api/v1/settings/chat-instructions
 
 Remove your custom text and go back to the built-in default.
 
 **Auth:** Owner only
 
-Returns `{"success": true, "message": "Security instructions reverted to default"}`.
+Returns `{"success": true, "message": "Chat instructions reverted to default"}`.
 
 ### GET /api/v1/settings/application-updates
 

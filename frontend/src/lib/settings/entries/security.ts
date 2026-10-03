@@ -1,6 +1,6 @@
 /**
  * Security: owner password, trusted LAN, agents run as you (desktop app),
- * computer use, code sandbox, security instructions.
+ * computer use, code sandbox, chat instructions.
  * SecurityPage.svelte renders one `<SettingRow id>` per entry.
  */
 import type { SettingEntry } from '../types';
@@ -64,8 +64,8 @@ export const entries: SettingEntry[] = [
 		id: 'security.secInstr',
 		category: 'security',
 		section: 'Agent safety',
-		label: 'Security instructions',
+		label: 'Chat instructions',
 		hint: 'Sent to every agent',
-		keywords: ['system prompt', 'custom instructions', 'revert']
+		keywords: ['system prompt', 'custom instructions', 'security instructions', 'markdown', 'file links', 'revert']
 	}
 ];
