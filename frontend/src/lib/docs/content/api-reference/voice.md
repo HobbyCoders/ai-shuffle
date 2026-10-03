@@ -8,7 +8,7 @@ order: 17
 
 Endpoints for voice mode: its settings, a voice preview, starting a voice session and controlling the call. A voice session is a normal session whose `mode` is `voice`; the voice agent in the call hands work to agents that run in that session.
 
-New calls use GPT Live 1 (`gpt-live-1`), and the call audio travels over the WebSocket `/api/v1/voice/sessions/{session_id}/audio`, which is not covered on this page. If that socket drops during a GPT Live call, the app reopens it with `?resume=1`, which replaces the session's leftover audio connection instead of being refused with `4409`. Sessions pinned to an older OpenAI Realtime model instead connect from the browser with a short-lived client secret and then report the call with [POST /api/v1/voice/sessions/{session_id}/call](#post-apiv1voicesessionssession_idcall).
+New calls use GPT Live 1 (`gpt-live-1`), and the call audio travels over the WebSocket `/api/v1/voice/sessions/{session_id}/audio`, which is not covered on this page. If that socket drops during a GPT Live call, the app keeps trying to reopen it for about 30 seconds with backoff, using `?resume=1`, which replaces the session's leftover audio connection instead of being refused with `4409`. While the server restores its own provider connection, it sends `{"type": "status", "state": "reconnecting"}` on the socket, then `"live"` once restored. Sessions pinned to an older OpenAI Realtime model instead connect from the browser with a short-lived client secret and then report the call with [POST /api/v1/voice/sessions/{session_id}/call](#post-apiv1voicesessionssession_idcall).
 
 Calls are paid for by an enabled OpenAI provider with a stored API key (Settings → Providers). ChatGPT-subscription logins cannot fund voice calls.
 
@@ -217,7 +217,7 @@ curl http://localhost:8000/api/v1/voice/sessions/0f6c2d1e-7a4b-4c1d-9e2f-5b8a7c6
 }
 ```
 
-`active` without `connected` means the call's provider connection is down. For a GPT Live call the server is reconnecting it: it makes up to three attempts over several seconds, and `connected` returns to `true` when one succeeds. If none does, the call ends. For a call on an older Realtime model the server does not reconnect on its own. With no live call, `active` and `connected` are `false` and `started_at` and `model` are `null`. `active_tasks` is the number of agents currently running for the session. For a call on an OpenAI Realtime model, `usage` counts tokens for the whole call (for example `input_tokens`, `output_tokens`) and `estimated_cost_usd` is a list-price estimate (`null` for an unpriced model); GPT Live calls report `{}` and `null`.
+`active` without `connected` means the call's provider connection is down. For a GPT Live call the server is reconnecting it: it retries with backoff for about 20 seconds, and `connected` returns to `true` when an attempt succeeds. If none does, the call ends. For a call on an older Realtime model the server does not reconnect on its own. With no live call, `active` and `connected` are `false` and `started_at` and `model` are `null`. `active_tasks` is the number of agents currently running for the session. For a call on an OpenAI Realtime model, `usage` counts tokens for the whole call (for example `input_tokens`, `output_tokens`) and `estimated_cost_usd` is a list-price estimate (`null` for an unpriced model); GPT Live calls report `{}` and `null`.
 
 ### GET /api/v1/voice/sessions/{session_id}/config
 

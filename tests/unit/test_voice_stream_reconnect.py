@@ -151,6 +151,8 @@ async def test_abrupt_provider_close_reconnects_and_carries_the_call_on(harness)
     assert resumed.startswith(SEED) and voice_stream.RESUME_NOTE in resumed
     assert not [e for e in second.sent if e["type"] == "session.instructions.append"]  # No second greeting.
     assert harness.attempts == ["Bearer sk-test"] * 2
+    assert harness.browser.events("status") == [{"type": "status", "state": "reconnecting"},
+                                                {"type": "status", "state": "live"}]
     # The old session's handoff result reaches the new session as plain commentary.
     await harness.call.send({"type": "session.commentary.append", "delegation_id": "d-old", "content": "Done."})
     assert second.sent[-1] == {"type": "session.commentary.append", "delegation_id": None, "content": "Done."}
@@ -246,6 +248,7 @@ async def test_session_is_renewed_before_the_expiry_the_provider_reports(harness
     await until(lambda: second.started() and harness.call.connected)
 
     assert first.sent[-1] == {"type": "session.close"} and first.closed
+    assert harness.browser.events("status") == []  # A planned renewal is not shown as a reconnect.
     assert voice_stream.RESUME_NOTE in second.started()[0]["session"]["input"][0]["content"][0]["text"]
     await harness.call.close()
     await asyncio.wait_for(run, 3)
@@ -282,7 +285,7 @@ async def test_drop_and_give_up_are_logged_with_the_close_details(harness, caplo
     text = caplog.text
     # The provider leg's drop names the WebSocket close state, not just a class.
     assert "GPT Live connection dropped" in text and "ConnectionClosedError: no close frame received or sent" in text
-    assert "reconnect attempt 1 of 3 failed: OSError: network unreachable" in text
+    assert "reconnect attempt 1 failed after" in text and "s: OSError: network unreachable" in text
     assert "Voice audio stream failed for s1 after" in text
     assert "Every reconnect attempt failed. Last failure: OSError: network unreachable" in text
     assert harness.call.finished.is_set()
@@ -336,3 +339,47 @@ async def test_take_over_ends_the_leftover_call_and_waits_for_its_cleanup(harnes
 @pytest.mark.asyncio
 async def test_take_over_without_a_leftover_call_is_a_no_op():
     await voice_stream.take_over("nobody")
+
+
+def test_reconnect_window_is_about_twenty_seconds_with_backoff():
+    waits, starts = 0.0, []
+    for attempt, delay in enumerate(voice_stream.RECONNECT_DELAYS, 1):
+        if attempt > 1 and waits + delay > voice_stream.RECONNECT_WINDOW_S:
+            break
+        waits += delay
+        starts.append(waits)
+    assert starts == [0.5, 1.5, 3.5, 7.5, 11.5, 15.5, 19.5]
+    assert list(voice_stream.RECONNECT_DELAYS) == sorted(voice_stream.RECONNECT_DELAYS)  # Backoff, never shorter.
+    assert voice_stream.RECONNECT_WINDOW_S + voice_stream.RECONNECT_ATTEMPT_S <= 30
+
+
+@pytest.mark.asyncio
+async def test_no_reconnect_attempt_starts_after_the_window(harness, monkeypatch):
+    monkeypatch.setattr(voice_stream, "RECONNECT_DELAYS", (0.1,) * 10)
+    monkeypatch.setattr(voice_stream, "RECONNECT_WINDOW_S", 0.25)
+    first = FakeProvider()
+    harness.script += [first]  # Every later attempt fails to connect.
+    run = asyncio.create_task(harness.call.run())
+    await until(lambda: harness.browser.events("ready"))
+    first.drop()
+    await asyncio.wait_for(run, 3)
+
+    assert len(harness.attempts) == 1 + 2  # Attempts at about 0.1 s and 0.2 s; 0.3 s is past the window.
+    assert harness.browser.events("status") == [{"type": "status", "state": "reconnecting"}]
+    assert harness.browser.events("error") == [{"type": "error", "message": voice_stream.DROPPED_MESSAGE}]
+
+
+@pytest.mark.asyncio
+async def test_failed_renewal_attempt_shows_reconnecting(harness, monkeypatch):
+    monkeypatch.setattr(voice_stream, "RENEW_MIN_AGE_S", 0)
+    monkeypatch.setattr(voice_stream, "RENEW_LEAD_S", 1.9)
+    monkeypatch.setattr(voice_stream, "RENEW_LAST_S", 0.5)
+    first = FakeProvider(expires_in=2)
+    second = FakeProvider()
+    harness.script += [first, OSError("network unreachable"), second]
+    run = asyncio.create_task(harness.call.run())
+    await until(lambda: second.started() and harness.call.connected)
+    assert harness.browser.events("status") == [{"type": "status", "state": "reconnecting"},
+                                                {"type": "status", "state": "live"}]
+    await harness.call.close()
+    await asyncio.wait_for(run, 3)

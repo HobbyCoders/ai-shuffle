@@ -3,14 +3,14 @@ import { get } from 'svelte/store';
 const api = vi.hoisted(() => ({ prepareConversationCall: vi.fn(), mintVoiceSecret: vi.fn(), attachVoiceCall: vi.fn(), hangupVoiceCall: vi.fn(), getVoiceCallState: vi.fn() }));
 vi.mock('$lib/api/voice', () => api);
 const streamed = vi.hoisted(() => ({ close: vi.fn(), muteInput: vi.fn(), muteOutput: vi.fn(), sendText: vi.fn() }));
-const streamHandlers = vi.hoisted(() => ({ current: null as null | { closed(message: string | null, reason: string): void } }));
+const streamHandlers = vi.hoisted(() => ({ current: null as null | { closed(message: string | null, reason: string): void; reconnecting?(active: boolean): void } }));
 vi.mock('./voiceAudioStream', () => ({
 	openVoiceAudioStream: vi.fn(async (_session: string, _mic: unknown, handlers: typeof streamHandlers.current) => {
 		streamHandlers.current = handlers;
 		return streamed;
 	}),
 }));
-import { startCall, startCallForSession, hangup, voiceCallState, sendVoiceText, reconcileVoiceCall, confirmCallReplacement, toggleMic, STREAM_DROPPED_MESSAGE, STREAM_RECONNECT_DELAYS_MS } from './voiceCall';
+import { startCall, startCallForSession, hangup, voiceCallState, sendVoiceText, reconcileVoiceCall, confirmCallReplacement, toggleMic, STREAM_DROPPED_MESSAGE, STREAM_RECONNECT_BACKOFF_MS, STREAM_RECONNECT_WINDOW_MS, STREAM_ATTEMPT_TIMEOUT_MS } from './voiceCall';
 
 let channel: EventTarget & { send: ReturnType<typeof vi.fn>; readyState: string; close: ReturnType<typeof vi.fn> };
 let track: { enabled: boolean; stop: ReturnType<typeof vi.fn> };
@@ -185,23 +185,59 @@ describe('voice owner lifecycle', () => {
 		expect(api.hangupVoiceCall).not.toHaveBeenCalled();
 		expect(get(voiceCallState)).toMatchObject({ sessionId: 'owner', error: null, endReason: null });
 	});
-	it('ends the call with a plain message when the audio connection cannot be restored', async () => {
+	// When each reconnect attempt starts, in ms after the drop, if every attempt fails at once.
+	const attemptTimes = () => {
+		const times: number[] = [];
+		for (let attempt = 1, at = 0; ; attempt++) {
+			const delay = STREAM_RECONNECT_BACKOFF_MS[Math.min(attempt, STREAM_RECONNECT_BACKOFF_MS.length) - 1];
+			if (attempt > 1 && at + delay > STREAM_RECONNECT_WINDOW_MS) return times;
+			at += delay;
+			times.push(at);
+		}
+	};
+	it('keeps trying for about 30 seconds with backoff, then ends with a plain message', async () => {
 		vi.spyOn(console, 'info').mockImplementation(() => {});
 		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
 		const { openVoiceAudioStream } = await import('./voiceAudioStream');
-		for (const _ of STREAM_RECONNECT_DELAYS_MS) vi.mocked(openVoiceAudioStream).mockRejectedValueOnce(new Error('no close frame received or sent'));
+		const times = attemptTimes();
+		expect(times).toEqual([500, 1500, 3500, 7500, 11500, 15500, 19500, 23500, 27500]);
+		for (const _ of times) vi.mocked(openVoiceAudioStream).mockRejectedValueOnce(new Error('no close frame received or sent'));
 		vi.useFakeTimers();
 		try {
 			streamHandlers.current!.closed('The voice connection dropped.', 'connection-dropped');
-			await vi.advanceTimersByTimeAsync(STREAM_RECONNECT_DELAYS_MS.reduce((a, b) => a + b, 0) + 100);
+			await vi.advanceTimersByTimeAsync(25_000);
+			// Still trying, and the caller still sees it.
+			expect(get(voiceCallState).status).toBe('reconnecting');
+			expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1 + times.filter(t => t <= 25_000).length);
+			await vi.advanceTimersByTimeAsync(STREAM_RECONNECT_WINDOW_MS);
 		} finally {
 			vi.useRealTimers();
 		}
 		await vi.waitFor(() => expect(get(voiceCallState).error).toBe(STREAM_DROPPED_MESSAGE));
-		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1 + STREAM_RECONNECT_DELAYS_MS.length);
+		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1 + times.length);
 		expect(get(voiceCallState)).toMatchObject({ status: 'error', endReason: 'connection-dropped' });
 		expect(STREAM_DROPPED_MESSAGE).not.toContain('close frame');
 		expect(api.hangupVoiceCall).toHaveBeenCalledWith('owner', 'connection-dropped');
+	});
+	it('gives up on a hanging reconnect attempt after its limit and tries again', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		const { openVoiceAudioStream } = await import('./voiceAudioStream');
+		vi.mocked(openVoiceAudioStream).mockImplementationOnce((_s, _m, _h, signal) => new Promise((_, reject) => {
+			signal.addEventListener('abort', () => reject(new Error('Voice connection cancelled.')), { once: true });
+		}));
+		vi.useFakeTimers();
+		try {
+			streamHandlers.current!.closed('The voice connection dropped.', 'connection-dropped');
+			await vi.advanceTimersByTimeAsync(STREAM_RECONNECT_BACKOFF_MS[0] + STREAM_ATTEMPT_TIMEOUT_MS - 100);
+			expect(vi.mocked(openVoiceAudioStream).mock.calls[1][3].aborted).toBe(false);
+			await vi.advanceTimersByTimeAsync(100 + STREAM_RECONNECT_BACKOFF_MS[1] + 10);
+		} finally {
+			vi.useRealTimers();
+		}
+		await vi.waitFor(() => expect(get(voiceCallState).status).toBe('live'));
+		expect(vi.mocked(openVoiceAudioStream).mock.calls[1][3].aborted).toBe(true);
+		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(3);
 	});
 	it('stops reconnecting when the caller hangs up meanwhile', async () => {
 		vi.spyOn(console, 'info').mockImplementation(() => {});
@@ -209,9 +245,30 @@ describe('voice owner lifecycle', () => {
 		const { openVoiceAudioStream } = await import('./voiceAudioStream');
 		streamHandlers.current!.closed('The voice connection dropped.', 'connection-dropped');
 		await hangup();
-		await new Promise(resolve => setTimeout(resolve, STREAM_RECONNECT_DELAYS_MS[0] + 50));
+		await new Promise(resolve => setTimeout(resolve, STREAM_RECONNECT_BACKOFF_MS[0] + 50));
 		expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(1);
 		expect(get(voiceCallState)).toMatchObject({ status: 'ended', endReason: 'user', error: null });
+	});
+	it('cancels an in-flight reconnect attempt at once on hang-up', async () => {
+		vi.spyOn(console, 'info').mockImplementation(() => {});
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		const { openVoiceAudioStream } = await import('./voiceAudioStream');
+		vi.mocked(openVoiceAudioStream).mockImplementationOnce((_s, _m, _h, signal) => new Promise((_, reject) => {
+			signal.addEventListener('abort', () => reject(new Error('Voice connection cancelled.')), { once: true });
+		}));
+		streamHandlers.current!.closed('The voice connection dropped.', 'connection-dropped');
+		await vi.waitFor(() => expect(vi.mocked(openVoiceAudioStream)).toHaveBeenCalledTimes(2));
+		await hangup();
+		expect(vi.mocked(openVoiceAudioStream).mock.calls[1][3].aborted).toBe(true);
+		expect(get(voiceCallState)).toMatchObject({ status: 'ended', endReason: 'user', error: null });
+	});
+	it('shows reconnecting while the server restores its provider connection', async () => {
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		streamHandlers.current!.reconnecting!(true);
+		expect(get(voiceCallState).status).toBe('reconnecting');
+		streamHandlers.current!.reconnecting!(false);
+		expect(get(voiceCallState).status).toBe('live');
+		expect(api.hangupVoiceCall).not.toHaveBeenCalled();
 	});
 	it('reports a server error on a streamed call without reconnecting', async () => {
 		vi.spyOn(console, 'info').mockImplementation(() => {});

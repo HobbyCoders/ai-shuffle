@@ -205,10 +205,13 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
 
 
 LIVE_URL = "wss://api.openai.com/v1/live/sessions"
-# A dropped GPT Live connection is retried after each of these pauses before
-# the call ends. Every attempt (connect plus session start) has its own limit.
-RECONNECT_DELAYS = (0.5, 2.0, 5.0)
-RECONNECT_ATTEMPT_S = 25
+# A dropped GPT Live connection is retried with backoff for about 20 seconds,
+# long enough for a phone to move between Wi-Fi and mobile data. No attempt
+# starts after RECONNECT_WINDOW_S; each attempt (connect plus session start)
+# has its own limit, so the call ends at most about 30 seconds after the drop.
+RECONNECT_DELAYS = (0.5, 1.0, 2.0, 4.0, 4.0, 4.0, 4.0)
+RECONNECT_WINDOW_S = 20
+RECONNECT_ATTEMPT_S = 10
 # Upper bound on restored connections in one call, so a provider that keeps
 # dropping cannot hold a call in a reconnect loop.
 MAX_RECONNECTS = 12
@@ -770,14 +773,22 @@ class VoiceStream:
                        self.session_id, reason, int(time.time() - self.started_at), detail, self.reconnects)
         self.provider_close_reason = None
         self.expires_at = None
+        # A planned renewal is usually seamless; the caller only sees a
+        # reconnect when the connection dropped or a renewal attempt failed.
+        announced = reason != "renew"
+        if announced:
+            await self.tell_browser("reconnecting")
+        dropped_at = time.monotonic()
         try:
             if old is not None:
                 await self.discard_upstream(old, graceful=reason == "renew")
             if self.reconnects > MAX_RECONNECTS:
-                raise VoiceConnectionLost("Too many reconnects in one call.")
+                raise VoiceConnectionLost(f"Too many reconnects in one call ({MAX_RECONNECTS}).")
             await self.flush()  # The rebuilt history includes everything said so far.
             history = await self.live_history(resumed=True)
             for attempt, delay in enumerate(RECONNECT_DELAYS, 1):
+                if attempt > 1 and time.monotonic() - dropped_at + delay > RECONNECT_WINDOW_S:
+                    break  # No new attempt starts after the window.
                 if await self.wait_closed(delay):
                     return
                 try:
@@ -785,19 +796,35 @@ class VoiceStream:
                         await self.restore_session(history)
                 except Exception as exc:  # noqa: BLE001 - every failure is retried, bounded
                     self.last_drop = exc
-                    logger.warning("Voice %s: reconnect attempt %d of %d failed: %s", self.session_id,
-                                   attempt, len(RECONNECT_DELAYS), describe_close(exc))
+                    logger.warning("Voice %s: reconnect attempt %d failed after %.1f s: %s", self.session_id,
+                                   attempt, time.monotonic() - dropped_at, describe_close(exc))
+                    if not announced:
+                        announced = True
+                        await self.tell_browser("reconnecting")
                     continue
                 if self.closed:
                     return
                 self.restoring = False
                 self.connected = True
-                logger.info("Voice %s: GPT Live connection restored on attempt %d", self.session_id, attempt)
+                logger.info("Voice %s: GPT Live connection restored on attempt %d after %.1f s", self.session_id,
+                            attempt, time.monotonic() - dropped_at)
+                if announced:
+                    await self.tell_browser("live")
                 await self.send_held()
                 return
             raise VoiceConnectionLost("Every reconnect attempt failed.") from self.last_drop
         finally:
             self.restoring = False
+
+    async def tell_browser(self, state: str) -> None:
+        """Show the caller that the provider connection is being restored.
+
+        Microphone audio the browser sends meanwhile is dropped, not replayed.
+        """
+        try:
+            await self.emit({"type": "status", "state": state})
+        except (RuntimeError, WebSocketDisconnect, OSError):
+            pass  # The browser leg ends the call on its own.
 
     async def report_quiet_end(self, *, upstream_ended: bool) -> None:
         """Say who ended a call that stopped without an error (#1671).

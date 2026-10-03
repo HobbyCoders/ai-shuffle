@@ -47,6 +47,15 @@ afterEach(() => vi.unstubAllGlobals());
 const handlers = () => ({ caption: vi.fn(), speaking: vi.fn(), closed: vi.fn() });
 
 describe('voice PCM stream', () => {
+ it('passes on the server status while it restores the provider connection', async () => {
+  const h = { ...handlers(), reconnecting: vi.fn() };
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, h, new AbortController().signal);
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'status', state: 'reconnecting' }) });
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'status', state: 'live' }) });
+  expect(h.reconnecting.mock.calls).toEqual([[true], [false]]);
+  expect(h.closed).not.toHaveBeenCalled();
+  await stream.close();
+ });
  it('asks the server to replace a leftover connection only when reopening a dropped call', async () => {
   const first = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
   const reopened = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal, undefined, true);

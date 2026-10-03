@@ -10,6 +10,8 @@ interface Handlers {
  caption(id: string, role: 'user' | 'assistant', delta: string): void;
  speaking(active: boolean): void;
  closed(message: string | null, reason: VoiceStreamEndReason): void;
+ /** The server is restoring (true) or has restored (false) its provider connection. */
+ reconnecting?(active: boolean): void;
 }
 /**
  * Why the stream ended without the client asking it to (#1671). The labels are
@@ -159,6 +161,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
       }
      }
      else if (message.type === 'caption') handlers.caption(message.id, message.role, message.delta);
+     else if (message.type === 'status') handlers.reconnecting?.(message.state === 'reconnecting');
      else if (message.type === 'ended') { fail('provider-closed', 'The voice provider ended the call.'); }
      else if (message.type === 'error') { fail('provider-error', message.message || 'The voice provider reported an error.'); ws.close(); }
     } catch (handlerError) { console.warn('[voice] ignoring a failed voice event handler:', handlerError); }

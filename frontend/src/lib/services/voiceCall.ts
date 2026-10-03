@@ -137,11 +137,16 @@ const RECONNECT_AFTER_MS = 50 * 60 * 1000;
 const CONNECT_TIMEOUT_MS = 20_000;
 
 /**
- * Pauses before each attempt to reopen a streamed call's audio socket after it
- * drops without a close (network change, server restart). The call ends with
- * STREAM_DROPPED_MESSAGE when every attempt fails.
+ * Reopening a streamed call's audio socket after it drops without a close
+ * (a phone moving between Wi-Fi and mobile data, a server restart). Attempts
+ * wait with backoff (the last pause repeats) and none starts after the
+ * window, so a phone switching networks has about 30 seconds to come back.
+ * Each attempt has its own limit. The call ends with STREAM_DROPPED_MESSAGE
+ * when no attempt succeeds.
  */
-export const STREAM_RECONNECT_DELAYS_MS: readonly number[] = [500, 2000, 5000];
+export const STREAM_RECONNECT_BACKOFF_MS: readonly number[] = [500, 1000, 2000, 4000];
+export const STREAM_RECONNECT_WINDOW_MS = 30_000;
+export const STREAM_ATTEMPT_TIMEOUT_MS = 10_000;
 /** Upper bound on restored audio connections in one call. */
 export const STREAM_MAX_RESTORES = 5;
 export const STREAM_DROPPED_MESSAGE =
@@ -739,9 +744,15 @@ export async function startCall(
 					patch(quiet ? { sessionId: sessionIdIn, notice: message } : { sessionId: sessionIdIn, error: message });
 				});
 			};
-			const open = (resume: boolean) => openVoiceAudioStream(sessionIdIn, acquired, {
+			const open = (resume: boolean, signal: AbortSignal) => openVoiceAudioStream(sessionIdIn, acquired, {
 				caption: (id, role, delta) => { if (myGeneration === generation) appendCaption(id, role, delta, false); },
 				speaking: active => { if (myGeneration === generation) patch({ agentSpeaking: active }); },
+				// The server is restoring its provider connection; the caller
+				// sees "reconnecting" until it reports the call live again.
+				reconnecting: active => {
+					if (myGeneration !== generation || !audioStream) return;
+					patch(active ? { status: 'reconnecting', agentSpeaking: false } : { status: 'live' });
+				},
 				closed: (message, reason) => {
 					if (myGeneration !== generation) return;
 					// Only the socket to this server dropped; the server ends the
@@ -751,7 +762,23 @@ export async function startCall(
 					if (reason === 'connection-dropped' && cred.model === 'gpt-live-1') void restoreStream();
 					else endStream(message, reason);
 				},
-			}, abort.signal, cred.options?.mic_threshold_db, resume);
+			}, signal, cred.options?.mic_threshold_db, resume);
+			// One reconnect attempt: hang-up (the call's abort) cancels it at
+			// once, and an attempt that hangs is given up after its limit.
+			const openAttempt = async () => {
+				const attempt = new AbortController();
+				const relay = () => attempt.abort();
+				abort.signal.addEventListener('abort', relay, { once: true });
+				const timer = setTimeout(relay, STREAM_ATTEMPT_TIMEOUT_MS);
+				try {
+					return await open(true, attempt.signal);
+				} catch (e) {
+					abort.signal.removeEventListener('abort', relay);
+					throw e;
+				} finally {
+					clearTimeout(timer);
+				}
+			};
 			// Reopen the audio socket on the same session. The server replaces
 			// any leftover connection and seeds the new provider session with
 			// the saved conversation; chat work started by the call carries on.
@@ -765,27 +792,32 @@ export async function startCall(
 				audioStream = null;
 				patch({ status: 'reconnecting', agentSpeaking: false });
 				console.info('[voice] audio connection dropped; reconnecting');
+				// The dropped stream's microphone audio is discarded with it; the
+				// new socket starts with live audio, never a replayed backlog.
 				await dropped?.close();
-				for (const [index, delay] of STREAM_RECONNECT_DELAYS_MS.entries()) {
+				const droppedAt = Date.now();
+				for (let attempt = 1; ; attempt++) {
+					const delay = STREAM_RECONNECT_BACKOFF_MS[Math.min(attempt, STREAM_RECONNECT_BACKOFF_MS.length) - 1];
+					if (attempt > 1 && Date.now() - droppedAt + delay > STREAM_RECONNECT_WINDOW_MS) break;
 					await new Promise(resolve => setTimeout(resolve, delay));
 					if (myGeneration !== generation) return;
 					try {
-						const stream = await open(true);
+						const stream = await openAttempt();
 						if (myGeneration !== generation) { await stream.close(); return; }
 						audioStream = stream;
 						applyMicMuted(get(voiceCallState).micMuted);
 						stream.muteOutput(get(voiceCallState).agentMuted);
 						patch({ status: 'live' });
-						console.info('[voice] audio connection restored on attempt', index + 1);
+						console.info('[voice] audio connection restored on attempt', attempt, 'after', Date.now() - droppedAt, 'ms');
 						return;
 					} catch (e) {
 						if (myGeneration !== generation) return;
-						console.warn('[voice] audio reconnect attempt', index + 1, 'failed:', e);
+						console.warn('[voice] audio reconnect attempt', attempt, 'failed:', e);
 					}
 				}
 				endStream(STREAM_DROPPED_MESSAGE, 'connection-dropped');
 			};
-			const stream = await open(false);
+			const stream = await open(false, abort.signal);
 			if (myGeneration !== generation) { await stream.close(); return; }
 			audioStream = stream;
 			applyMicMuted(get(voiceCallState).micMuted);
