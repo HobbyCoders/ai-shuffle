@@ -12,6 +12,7 @@ import pytest
 from app.core import provider_agent, provider_agent_supervisor, remote_task, swarm, turn_scheduler
 from app.core import remote_task_approvals as relay
 from app.core.provider_agent_feed import reset_feed_groups
+from app.core.query_session_lifecycle import stop_all_background_tasks
 from app.core.task_registry import task_registry
 from app.db import database, interactions, remote_tasks, session_events, turns
 from app.db.base import get_db
@@ -204,6 +205,95 @@ def test_a_child_stopped_after_the_notice_stays_stopped_and_its_report_wakes_nob
     with b.active():
         assert len(wakes()) == 1
         assert remote_tasks.get_dispatch(child)["completion_id"]
+
+
+def press_stop(b):
+    """The owner presses Stop on the parent chat; stops being sent finish first."""
+    async def stop():
+        results = await stop_all_background_tasks("caller", user_stop=True)
+        await remote_task.drain_stops()
+        return results
+    with b.active():
+        return asyncio.run(stop())
+
+
+def stop_requests(router):
+    return [r for r in router.requests(UNRAID_URL) if r[1].endswith("/" + remote_task.TASK_STOP_ACTION)]
+
+
+def test_stop_on_the_parent_after_the_notice_reaches_the_child_when_its_worker_returns(
+        workers, monkeypatch):
+    """#1780: notice, Stop on the parent, worker back, child stopped, report wakes nobody."""
+    a, b, router = network(workers, monkeypatch)
+    child = started_child(a, b)
+    notice(b, go_quiet(b, router, child))
+    with b.active():
+        [first] = wakes()
+    finish_wake(a, b, first)
+
+    [result] = press_stop(b)
+    assert result["task_id"] == child and result["ok"] is True
+    assert "sent again when it answers" in result["detail"]
+    with b.active():
+        dispatch = remote_tasks.get_dispatch(child)
+        assert dispatch["stop_requested_at"] and dispatch["stop_reason"] == "user_stopped"
+        assert dispatch["stop_state"] == remote_tasks.STOP_PENDING
+    with a.active():
+        assert not remote_tasks.get_child(child)["stop_requested_at"]  # Unraid is still away
+    # Stop again: idempotent, nothing new is asked for.
+    assert press_stop(b) == []
+
+    router.down.clear()
+    with b.active():
+        assert asyncio.run(remote_task.deliver_stops()) == 1
+        assert remote_tasks.get_dispatch(child)["stop_state"] == remote_tasks.STOP_SENT
+    with a.active():
+        assert remote_tasks.get_child(child)["stop_requested_at"]
+        assert task_registry.is_user_stopped(child)
+        [turn] = [t for t in all_turns(child) if t["source"] == "provider_agent"]
+        assert turn["state"] == "aborted"
+        assert asyncio.run(remote_task.sweep()) == 1
+        assert remote_tasks.get_child(child)["report"]["status"] == "stopped"
+    with b.active():
+        assert len(wakes()) == 1
+        dispatch = remote_tasks.get_dispatch(child)
+        assert dispatch["completion_id"] and dispatch["status"] == "stopped"
+        assert asyncio.run(remote_task.deliver_stops()) == 0
+
+
+def test_a_report_that_beats_the_stop_after_the_notice_wakes_nobody(workers, monkeypatch):
+    """The child finished while its worker was away; Stop pressed after the notice still holds.
+
+    The owner wrote to the chat since, so the session's in-memory Stop latch is
+    gone: only the durable stop keeps the report from waking it.
+    """
+    a, b, router = network(workers, monkeypatch)
+    child = started_child(a, b)
+    notice(b, go_quiet(b, router, child))
+    with b.active():
+        [first] = wakes()
+    finish_wake(a, b, first)
+    press_stop(b)
+    with b.active():
+        assert task_registry.clear_user_stop("caller")
+    router.down.clear()
+    deliver(a, child, text="Disk is 40% full.")
+    with b.active():
+        assert len(wakes()) == 1
+        assert remote_tasks.get_dispatch(child)["completion_id"]
+        assert asyncio.run(remote_task.deliver_stops()) == 0  # at rest there: not owed
+    assert stop_requests(router) == []
+
+
+def test_stop_leaves_a_reachable_or_finished_remote_child_to_the_usual_path(workers, monkeypatch):
+    """Only children past the notice are picked up here; others are not asked twice."""
+    a, b, router = network(workers, monkeypatch)
+    child = started_child(a, b)
+    deliver(a, child, text="Disk is 40% full.")
+    with b.active():
+        assert remote_tasks.noticed_unstopped("caller") == []
+    assert press_stop(b) == []
+    assert stop_requests(router) == []
 
 
 def test_a_resumed_run_that_goes_quiet_gets_its_own_notice(workers, monkeypatch):

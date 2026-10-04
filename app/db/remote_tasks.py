@@ -227,6 +227,24 @@ def claim_offline_notice(worker_session_id: str) -> Optional[Dict[str, Any]]:
         return _row(cursor.fetchone())
 
 
+def noticed_unstopped(session_id: str) -> List[Dict[str, Any]]:
+    """Children of ``session_id`` (as root or caller) past the offline notice.
+
+    Still owed their report and not stopped here yet: the notice took them out
+    of the registry and the supervisor, so a Stop on the session finds them
+    here (S12). Oldest first.
+    """
+    with get_db() as conn:
+        init_schema(conn)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM remote_tasks WHERE completion_id IS NULL "
+            "AND offline_notice_at IS NOT NULL AND stop_requested_at IS NULL "
+            "AND (root_session_id=%s OR owner_session_id=%s) ORDER BY created_at",
+            (session_id, session_id))
+        return [_row(row) for row in cursor.fetchall()]
+
+
 def request_stop(worker_session_id: str, reason: str) -> Optional[Dict[str, Any]]:
     """Record that this worker stopped the child: the stop is owed to its target.
 

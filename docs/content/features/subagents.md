@@ -176,8 +176,9 @@ counted when it answers again.
 - **Late reports.** If the worker comes back and the subagent finishes, its
   report is still kept, and the chat is woken once more with the real outcome.
   Messages to it are delivered again once its worker answers.
-- **Known limit:** after the notice, Stop in the parent chat no longer reaches
-  the subagent. Swarm cancel and the spend limits still do.
+- **Stop after the notice.** Stop in the parent chat still reaches the
+  subagent: the stop is kept and sent when its worker answers again, and the
+  subagent's later report does not wake the chat.
 - **The subagent's worker restarts.** The run is cut off. When that worker
   starts again, it reports the run as failed, says it restarted, and includes
   the subagent's last words marked "(unfinished)". Continue it with

@@ -51,7 +51,10 @@ not answered ``task-status`` for :data:`OFFLINE_NOTICE_SECONDS`,
 the child may still be running there: the record settles as an error, its
 approval prompts here are withdrawn, a Swarm item ends, and the caller wakes.
 A report that still arrives later is accepted and wakes the caller once more
-with the real outcome. A target that restarted while a child ran reports it
+with the real outcome. Stop on the caller still reaches the child after the
+notice (:func:`stop_noticed_children`): the stop is recorded durably and
+delivered when its worker answers, and the child's report wakes nobody. A
+target that restarted while a child ran reports it
 failed at boot (the turn reap aborts it, :func:`sweep` sends the report), and
 the child can be continued by message once its worker is back.
 
@@ -1916,6 +1919,38 @@ async def stop_remote_child(worker_id: str, target_device_id: str, *, reason: st
     except Exception:  # noqa: BLE001 — too slow: the send goes on in the background
         return pending
     return dict(results.get(worker_id) or pending)
+
+
+async def stop_noticed_children(session_id: str, *, reason: str) -> List[Dict[str, Any]]:
+    """Stop this session's children whose worker went quiet past the notice. Never raises.
+
+    The offline notice (:func:`notice_offline`) settled their records and
+    dropped their supervisor records, so Stop's usual walk no longer finds
+    them; they may still be running on their worker. Each goes through
+    :func:`stop_remote_child`, so the stop is durable and delivered when the
+    worker answers again, and the child's later report wakes nobody. Returns
+    one result per child, as the Stop path reports a task.
+    """
+    from app.db import remote_tasks
+
+    try:
+        rows = await asyncio.to_thread(remote_tasks.noticed_unstopped, session_id)
+    except Exception:  # noqa: BLE001 — never fail a Stop
+        logger.warning("remote_task: could not read noticed children of %s", session_id,
+                       exc_info=True)
+        return []
+    results: List[Dict[str, Any]] = []
+    for row in rows:
+        worker_id = row["worker_session_id"]
+        try:
+            stopped = await stop_remote_child(worker_id, row["target_device_id"], reason=reason)
+        except Exception:  # noqa: BLE001 — the next child still gets its stop
+            logger.warning("remote_task: could not stop noticed child %s", worker_id, exc_info=True)
+            continue
+        detail = stopped.get("detail")
+        results.append({"ok": True, "kind": "agent", "task_id": worker_id,
+                         **({"detail": detail} if detail else {})})
+    return results
 
 
 async def drain_stops() -> None:

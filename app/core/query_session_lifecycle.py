@@ -621,6 +621,20 @@ async def stop_all_background_tasks(
         results.append(await stop_session_task(session_id, task_id,
                                               **({"source": source} if source != "user_stop" else {})))
 
+    if user_stop:
+        # A Task child on another worker whose worker went quiet past the
+        # offline notice is no longer in the registry or the supervisor, but may
+        # still run there: its stop is recorded and delivered when it answers.
+        try:
+            from app.core import remote_task
+            from app.core.task_registry import USER_STOP_REASON
+
+            results.extend(await remote_task.stop_noticed_children(
+                session_id, reason=USER_STOP_REASON if source == "user_stop" else source))
+        except Exception:  # noqa: BLE001 — never let a remote stop fail a Stop.
+            logger.warning("Stop: stopping noticed remote children of %s failed", session_id,
+                           exc_info=True)
+
     for worker_session_id in worker_sessions:
         try:
             from app.mcp.builtin_tools import stop_session_background_shells
