@@ -5,9 +5,11 @@ is an in-memory ``system_settings`` behind the real encryption. Nothing here
 reaches a network.
 """
 
+import hashlib
 import json
 import logging
 from types import SimpleNamespace
+from typing import ClassVar
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -17,7 +19,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from app.api import plugin_oauth as api
-from app.core import encryption, plugin_oauth
+from app.core import account_hub, encryption, owner_auth, plugin_oauth
 from app.core.plugin_oauth import PluginOAuthError
 
 PLUGIN = "dns-reader@mp"
@@ -30,6 +32,10 @@ BASE = "https://shuffle.test"
 CALLBACK = BASE + api.CALLBACK
 REGISTER = "https://dash.example.com/oauth2/register"
 REG_SECRET = "registered-secret-never-shown"
+RELAY = "https://hobbycoders.com/browser/plugin-oauth/callback"
+SERVER_ID = "11111111-2222-3333-4444-555555555555"
+SERVER_SECRET = "5e" * 32
+REAL_HUB_CALL = account_hub.call
 
 
 def _manifest(**auth_changes) -> dict:
@@ -117,6 +123,40 @@ def provider(monkeypatch):
 
     monkeypatch.setattr(plugin_oauth, "_post", post)
     monkeypatch.setattr(plugin_oauth, "_post_json", post_json)
+    return fake
+
+
+class Hub:
+    """A fake account hub behind ``account_hub.call`` and a linked worker
+    behind ``owner_auth.linked_binding``. ``answer`` is ``None`` (register and
+    return the relay address), a hub status code, an exception to raise or a
+    dict to return."""
+
+    def __init__(self):
+        self.binding: dict | None = {"server_id": SERVER_ID, "active": True}
+        self.calls: list[tuple] = []
+        self.answer = None
+
+    def linked_binding(self):
+        return self.binding
+
+    def call(self, binding, method, suffix, body=None, **kwargs):
+        self.calls.append((binding, method, suffix, body))
+        if isinstance(self.answer, int):
+            raise account_hub.HubResponseError("Account hub authorization unavailable", self.answer)
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        if isinstance(self.answer, dict):
+            return self.answer
+        return {"relay_uri": RELAY, "expires_at": "2026-10-04T00:10:00.000Z"}
+
+
+@pytest.fixture(autouse=True)
+def hub(monkeypatch):
+    fake = Hub()
+    monkeypatch.setattr(owner_auth.settings, "account_browser_origin", "https://hobbycoders.com")
+    monkeypatch.setattr(owner_auth, "linked_binding", fake.linked_binding)
+    monkeypatch.setattr(account_hub, "call", fake.call)
     return fake
 
 
@@ -538,3 +578,383 @@ async def test_a_changed_shipped_client_between_start_and_callback_saves_nothing
         plugin.manifest = _manifest(client_id="shipped-2")
         page = await client.get("/api/v1/plugins/oauth/callback", params={"state": state, "code": CODE})
         assert "did not complete" in page.text and provider.calls == []
+
+
+# ─── a shipped client returns through the account hub's relay page ──────────
+
+
+def _query(url: str) -> dict:
+    return {k: v[0] for k, v in parse_qs(urlsplit(url).query).items()}
+
+
+def _cookie(response) -> tuple[str, str, str]:
+    """``name=value``, the raw Set-Cookie header and the name of the
+    browser-binding cookie."""
+    header = response.headers["set-cookie"]
+    return header.split(";", 1)[0], header, header.split("=", 1)[0]
+
+
+@pytest.fixture
+def started_requests(monkeypatch):
+    """Every AuthorizationRequest the routes build, so a test knows the state
+    and verifier even when the start was refused."""
+    made: list = []
+    real = plugin_oauth.start_sign_in
+
+    def record(*args, **kwargs):
+        made.append(real(*args, **kwargs))
+        return made[-1]
+
+    monkeypatch.setattr(plugin_oauth, "start_sign_in", record)
+    return made
+
+
+def _secrets_of(made) -> list[str]:
+    return [value for auth in made for value in (auth.state, auth.code_verifier)]
+
+
+async def _start_raw(client, **kwargs):
+    return await client.post("/api/v1/plugins/oauth/start", json={"plugin": PLUGIN, "service": SERVICE}, **kwargs)
+
+
+async def test_a_shipped_client_registers_the_sign_in_with_the_hub(app, store, plugin, provider, hub):
+    plugin.manifest = _manifest(client_id="shipped-1")
+    async with _client(app) as client:
+        response = await _start_raw(client)
+        assert response.status_code == 200, response.text
+        started = response.json()
+        query = _query(started["authorization_url"])
+        state = query["state"]
+        assert query["redirect_uri"] == RELAY and query["client_id"] == "shipped-1"
+        assert started["redirect_uri"] == RELAY
+        assert started["relayed"] is True and started["return_origin"] == BASE
+        _, header, _ = _cookie(response)
+        assert "secure" in header.lower() and f"path={api.CALLBACK}" in header.lower()
+        assert "httponly" in header.lower() and "samesite=lax" in header.lower()
+        # One registration: the hash of the state and the browser's origin,
+        # nothing else (no state, verifier, client id or plugin id).
+        assert len(hub.calls) == 1
+        binding, method, suffix, body = hub.calls[0]
+        assert (binding, method, suffix) == (hub.binding, "POST", "plugin-oauth/relays")
+        assert body == {"state_hash": hashlib.sha256(state.encode()).hexdigest(), "return_origin": BASE,
+                        "service": SERVICE, "provider_host": "dash.example.com"}
+        pending = api._pending[state]
+        assert pending.return_origin == BASE and pending.request.redirect_uri == RELAY
+        assert state not in json.dumps(body) and pending.request.code_verifier not in json.dumps(body)
+
+
+async def test_a_relayed_sign_in_completes_on_the_worker_callback(app, store, plugin, provider, caplog,
+                                                                 started_requests):
+    caplog.set_level(logging.DEBUG)
+    plugin.manifest = _manifest(client_id="shipped-1")
+    async with _client(app) as client:
+        _, state = await _start(client)
+        # The hub page links the browser to this worker's own callback.
+        page = await client.get(api.CALLBACK, params={"state": state, "code": CODE})
+        assert page.status_code == 200 and "Signed in to example" in page.text, page.text
+        assert "window.opener.postMessage(" in page.text and f',"{BASE}");' in page.text
+        url, form = provider.calls[0]
+        assert url == "https://dash.example.com/oauth2/token"
+        assert form["redirect_uri"] == RELAY and form["code"] == CODE and form["client_id"] == "shipped-1"
+        assert (await _status(client))["state"] == "signed_in"
+        assert any(k.endswith(":tokens") for k in store) and state not in api._pending
+        for secret in (CODE, ACCESS, REFRESH, state):
+            assert secret not in page.text
+    worker_logs = "\n".join(r.getMessage() for r in caplog.records if BASE not in r.getMessage())
+    for secret in [CODE, ACCESS, REFRESH] + _secrets_of(started_requests):
+        assert secret not in worker_logs
+
+
+async def test_a_relayed_callback_must_arrive_on_the_origin_that_started_it(app, store, plugin, provider):
+    plugin.manifest = _manifest(client_id="shipped-1")
+    async with _client(app, "https://a.example") as client:
+        response = await _start_raw(client)
+        state = _query(response.json()["authorization_url"])["state"]
+        cookie, _, _ = _cookie(response)
+    async with _client(app, "https://b.example") as other:
+        refused = await other.get(api.CALLBACK, params={"state": state, "code": CODE}, headers={"Cookie": cookie})
+        assert refused.status_code == 400
+    assert state in api._pending and provider.calls == []
+    assert not any(k.endswith(":tokens") for k in store)
+    # Default port and case do not make a different origin.
+    async with _client(app, "https://A.example:443") as same:
+        page = await same.get(api.CALLBACK, params={"state": state, "code": CODE}, headers={"Cookie": cookie})
+        assert page.status_code == 200 and "Signed in to example" in page.text
+
+
+async def test_a_start_on_a_non_canonical_host_registers_the_whatwg_origin(app, store, plugin, provider, hub):
+    plugin.manifest = _manifest(client_id="shipped-1")
+    async with _client(app, "https://a.example") as client:
+        response = await _start_raw(client, headers={"Host": "A.Example:443"})
+        assert response.status_code == 200, response.text
+        state = _query(response.json()["authorization_url"])["state"]
+        assert response.json()["return_origin"] == "https://a.example"
+        assert hub.calls[0][3]["return_origin"] == "https://a.example"
+        cookie, _, _ = _cookie(response)
+        page = await client.get(api.CALLBACK, params={"state": state, "code": CODE}, headers={"Cookie": cookie})
+        assert page.status_code == 200 and "Signed in to example" in page.text
+
+
+@pytest.mark.parametrize("uri, origin", [
+    ("https://a.example/api/v1/plugins/oauth/callback", "https://a.example"),
+    ("https://A.Example:443/x", "https://a.example"),
+    ("HTTPS://a.example:8443/", "https://a.example:8443"),
+    ("http://localhost:80/x", "http://localhost"),
+    ("http://127.0.0.1:8000/x?y=1", "http://127.0.0.1:8000"),
+    ("http://[::1]:8000/x", "http://[::1]:8000"),
+    ("https://[2001:DB8::1]:443/", "https://[2001:db8::1]"),
+])
+def test_web_origin_is_the_whatwg_serialization(uri, origin):
+    assert api._web_origin(uri) == origin
+
+
+async def test_relayed_sign_ins_keep_every_existing_guard(app, store, plugin, provider, owner):
+    plugin.manifest = _manifest(client_id="shipped-1")
+    async with _client(app) as client:
+        _, state = await _start(client)
+        unknown = await client.get(api.CALLBACK, params={"state": "x" * 43, "code": CODE})
+        assert unknown.status_code == 400
+        async with _client(app) as other:  # another browser: no HttpOnly cookie
+            assert (await other.get(api.CALLBACK, params={"state": state, "code": CODE})).status_code == 400
+        owner.token = "a-different-session"
+        assert (await client.get(api.CALLBACK, params={"state": state, "code": CODE})).status_code == 400
+        owner.token = "owner-session"
+        assert state in api._pending and provider.calls == []
+        await client.get(api.CALLBACK, params={"state": state, "code": CODE})
+        replay = await client.get(api.CALLBACK, params={"state": state, "code": CODE})
+        assert replay.status_code == 400 and len(provider.calls) == 1
+        _, state = await _start(client)
+        api._pending[state].expires = 0
+        expired = await client.get(api.CALLBACK, params={"state": state, "code": CODE})
+        assert expired.status_code == 400 and state not in api._pending and len(provider.calls) == 1
+
+
+async def test_an_unlinked_worker_cannot_use_a_shipped_client(app, store, plugin, provider, hub):
+    plugin.manifest = _manifest(client_id="shipped-1")
+    hub.binding = None
+    async with _client(app) as client:
+        response = await _start_raw(client)
+        assert response.status_code == 409
+        assert response.json()["detail"] == plugin_oauth._MESSAGES["relay_unavailable"]
+        assert "set-cookie" not in response.headers
+        assert hub.calls == [] and api._pending == {}
+        status = (await client.get("/api/v1/plugins/oauth/status", params={"plugin": PLUGIN})).json()
+        assert status["relay_uri"] == RELAY and status["relay_available"] is False
+        entry = status["services"][0]
+        assert (entry["relay"], entry["relay_reason"], entry["return_address"]) == (
+            "unavailable", "not_linked", CALLBACK)
+        # The owner's own client still works, straight back to the worker.
+        await _configure(client)
+        started = await _sign_in(client)
+        assert started["redirect_uri"] == CALLBACK and started["relayed"] is False and hub.calls == []
+
+
+async def test_a_plain_http_lan_address_cannot_use_a_shipped_client(app, store, plugin, provider, hub):
+    plugin.manifest = _manifest(client_id="shipped-1")
+    async with _client(app, "http://192.168.1.20:8000") as lan:
+        response = await _start_raw(lan)
+        assert response.status_code == 400
+        assert response.json()["detail"] == plugin_oauth._MESSAGES["invalid_redirect"]
+        assert hub.calls == [] and api._pending == {}
+        status = (await lan.get("/api/v1/plugins/oauth/status", params={"plugin": PLUGIN})).json()
+        assert status["relay_available"] is False
+        entry = status["services"][0]
+        assert (entry["relay"], entry["relay_reason"]) == ("unavailable", "insecure_address")
+        assert entry["return_address"] == "http://192.168.1.20:8000" + api.CALLBACK
+    async with _client(app, "http://localhost:8000") as local:
+        response = await _start_raw(local)
+        assert response.status_code == 200, response.text
+        started = response.json()
+        assert started["relayed"] is True and started["return_origin"] == "http://localhost:8000"
+        assert "secure" not in _cookie(response)[1].lower()
+        assert hub.calls[0][3]["return_origin"] == "http://localhost:8000"
+        page = await local.get(api.CALLBACK, params={"state": _query(started["authorization_url"])["state"],
+                                                     "code": CODE})
+        assert "Signed in to example" in page.text and ',"http://localhost:8000");' in page.text
+
+
+async def test_a_misconfigured_account_origin_cannot_use_a_shipped_client(app, store, plugin, provider, hub,
+                                                                          monkeypatch):
+    plugin.manifest = _manifest(client_id="shipped-1")
+    monkeypatch.setattr(owner_auth.settings, "account_browser_origin", "http://hobbycoders.com")
+    async with _client(app) as client:
+        response = await _start_raw(client)
+        assert response.status_code == 409
+        assert response.json()["detail"] == plugin_oauth._MESSAGES["relay_unavailable"]
+        assert hub.calls == [] and api._pending == {}
+        status = (await client.get("/api/v1/plugins/oauth/status", params={"plugin": PLUGIN})).json()
+        assert status["relay_uri"] == "" and status["relay_available"] is False
+        entry = status["services"][0]
+        assert (entry["relay"], entry["relay_reason"], entry["return_address"]) == (
+            "unavailable", "not_configured", CALLBACK)
+
+
+@pytest.mark.parametrize("answer, status, detail", [
+    (401, 409, plugin_oauth._MESSAGES["relay_unavailable"]),
+    (403, 409, plugin_oauth._MESSAGES["relay_unavailable"]),
+    (429, 429, api.TOO_MANY),
+    (404, 502, api.HUB_FAILED),
+    (409, 502, api.HUB_FAILED),
+    (503, 502, api.HUB_FAILED),
+    (None, 502, api.HUB_FAILED),  # not reached (timeout, TLS, DNS): no hub status
+    (TimeoutError("timed out"), 502, api.HUB_FAILED),
+    ({"relay_uri": "https://evil.example/browser/plugin-oauth/callback"}, 502, api.HUB_FAILED),
+    ({"relay_uri": RELAY + "/"}, 502, api.HUB_FAILED),
+    ({}, 502, api.HUB_FAILED),
+])
+async def test_a_failed_hub_registration_leaves_nothing_pending(app, store, plugin, provider, hub, caplog,
+                                                                 started_requests, answer, status, detail):
+    caplog.set_level(logging.DEBUG)
+    plugin.manifest = _manifest(client_id="shipped-1")
+    if answer is None:
+        answer = account_hub.HubResponseError("Account hub authorization unavailable", None)
+    hub.answer = answer
+    async with _client(app) as client:
+        response = await _start_raw(client)
+    assert response.status_code == status and response.json() == {"detail": detail}
+    assert "set-cookie" not in response.headers
+    assert len(hub.calls) == 1 and api._pending == {} and provider.calls == []
+    assert "evil.example" not in response.text
+    worker_logs = "\n".join(r.getMessage() for r in caplog.records if BASE not in r.getMessage())
+    assert "Plugin sign-in relay registration" in worker_logs
+    assert len(started_requests) == 1
+    for secret in _secrets_of(started_requests) + [hub.calls[0][3]["state_hash"]]:
+        assert secret not in response.text and secret not in worker_logs
+
+
+async def test_owner_and_registered_clients_never_use_the_relay(app, store, plugin, provider, hub):
+    # The owner's client wins over a shipped one and returns to the worker.
+    plugin.manifest = _manifest(client_id="shipped-1")
+    async with _client(app) as client:
+        await _configure(client)
+        started = await _sign_in(client)
+        assert started["redirect_uri"] == CALLBACK and started["relayed"] is False
+        assert started["return_origin"] == BASE
+        assert _query(started["authorization_url"])["redirect_uri"] == CALLBACK
+        assert provider.calls[-1][1]["redirect_uri"] == CALLBACK
+        entry = await _status(client)
+        assert (entry["relay"], entry["relay_reason"], entry["return_address"]) == ("not_used", "", CALLBACK)
+    plugin.manifest = _manifest(registration_url=REGISTER)
+    store.clear()
+    async with _client(app) as client:
+        started = await _sign_in(client)
+        assert started["redirect_uri"] == CALLBACK and started["relayed"] is False
+        assert provider.calls[-2] == (REGISTER, {
+            "client_name": "AI Shuffle", "redirect_uris": [CALLBACK], "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"],
+            "scope": "zone:read"})
+        entry = await _status(client)
+        assert (entry["relay"], entry["return_address"]) == ("not_used", CALLBACK)
+    # Unlinked does not matter to them either.
+    hub.binding = None
+    async with _client(app) as client:
+        assert (await _start_raw(client)).status_code == 200
+    assert hub.calls == []
+
+
+async def test_status_reports_the_relay_for_each_source(app, store, plugin, provider, hub):
+    async with _client(app) as client:
+        plugin.manifest = _manifest()
+        status = (await client.get("/api/v1/plugins/oauth/status", params={"plugin": PLUGIN})).json()
+        assert status["redirect_uri"] == CALLBACK and status["relay_uri"] == RELAY
+        assert status["relay_available"] is True
+        entry = status["services"][0]
+        assert (entry["client_source"], entry["relay"], entry["relay_reason"], entry["return_address"]) == (
+            "none", "not_used", "", CALLBACK)
+        plugin.manifest = _manifest(client_id="shipped-1")
+        entry = await _status(client)
+        assert (entry["client_source"], entry["relay"], entry["relay_reason"], entry["return_address"]) == (
+            "plugin", "used", "", RELAY)
+        # Signed in through the relay: an unlinked worker keeps the sign-in
+        # (refresh needs no redirect), only a new sign-in is unavailable.
+        await _sign_in(client)
+        hub.binding = None
+        status = (await client.get("/api/v1/plugins/oauth/status", params={"plugin": PLUGIN})).json()
+        entry = status["services"][0]
+        assert (entry["state"], entry["reason"]) == ("signed_in", "")
+        assert (entry["relay"], entry["relay_reason"]) == ("unavailable", "not_linked")
+        assert status["relay_available"] is False
+        plugin.manifest = _manifest(client_id="shipped-1", client_secret="x")
+        entry = await _status(client)
+        assert (entry["state"], entry["relay"], entry["return_address"]) == ("invalid", "not_used", CALLBACK)
+    assert hub.calls and all(call[2] == "plugin-oauth/relays" for call in hub.calls)
+
+
+@pytest.mark.parametrize("source, own, linked, relay, expected", [
+    ("owner", "https://w.example/cb", True, RELAY, ("not_used", "")),
+    ("registered", "https://w.example/cb", False, "", ("not_used", "")),
+    ("none", "http://192.168.1.5/cb", False, "", ("not_used", "")),
+    ("plugin", "https://w.example/cb", True, RELAY, ("used", "")),
+    ("plugin", "http://127.0.0.1:8000/cb", True, RELAY, ("used", "")),
+    ("plugin", "https://w.example/cb", False, RELAY, ("unavailable", "not_linked")),
+    ("plugin", "http://192.168.1.5/cb", False, "", ("unavailable", "not_linked")),
+    ("plugin", "http://192.168.1.5/cb", True, "", ("unavailable", "insecure_address")),
+    ("plugin", "https://w.example/cb", True, "", ("unavailable", "not_configured")),
+])
+def test_relay_state(source, own, linked, relay, expected):
+    assert plugin_oauth.relay_state(source, own, linked, relay) == expected
+
+
+# ─── the real hub client, with a fake connection instead of the network ─────
+
+
+class _Connection:
+    """Stands in for ``account_hub._PinnedHTTPS``: records the request and
+    answers ``status`` with ``body``, or raises ``error``."""
+
+    sent: ClassVar[list] = []
+    status: ClassVar[int] = 200
+    body: ClassVar[dict] = {}
+    error: ClassVar[BaseException | None] = None
+
+    def __init__(self, host, timeout=None, context=None):
+        self.host = host
+
+    def request(self, method, path, body=None, headers=None):
+        type(self).sent.append((self.host, method, path, json.loads(body), dict(headers)))
+        if type(self).error is not None:
+            raise type(self).error
+
+    def getresponse(self):
+        payload = json.dumps(type(self).body).encode()
+        return SimpleNamespace(status=type(self).status, read=lambda n=-1: payload[:n],
+                               getheader=lambda name: None)
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("status, error, expected", [
+    (200, None, 200), (401, None, 409), (404, None, 502), (429, None, 429), (500, None, 502),
+    (200, TimeoutError("timed out"), 502),
+])
+async def test_the_registration_rides_the_worker_hub_channel(app, store, plugin, provider, hub, monkeypatch,
+                                                              caplog, started_requests, status, error, expected):
+    """Through the real ``account_hub.call``: the worker's server secret as
+    bearer, the documented path and body, and no secret in any log or answer."""
+    caplog.set_level(logging.DEBUG)
+    plugin.manifest = _manifest(client_id="shipped-1")
+    _Connection.sent, _Connection.status, _Connection.error = [], status, error
+    _Connection.body = {"relay_uri": RELAY, "expires_at": "2026-10-04T00:10:00.000Z"}
+    hub.binding = {"server_id": SERVER_ID, "active": True, "hub_url": account_hub.configured_origin()}
+    monkeypatch.setattr(account_hub, "call", REAL_HUB_CALL)
+    monkeypatch.setattr(account_hub, "_PinnedHTTPS", _Connection)
+    monkeypatch.setattr(account_hub, "secret_for", lambda binding: SERVER_SECRET)
+    monkeypatch.setattr(account_hub, "_paused_until", {})
+    async with _client(app) as client:
+        response = await _start_raw(client)
+    assert response.status_code == expected, response.text
+    host, method, path, body, headers = _Connection.sent[0]
+    assert (host, method, path) == ("hobbycoders.com", "POST", f"/v1/servers/{SERVER_ID}/plugin-oauth/relays")
+    assert headers["Authorization"] == "Bearer " + SERVER_SECRET
+    assert sorted(body) == ["provider_host", "return_origin", "service", "state_hash"]
+    assert (expected == 200) == bool(api._pending)
+    worker_logs = "\n".join(r.getMessage() for r in caplog.records if BASE not in r.getMessage())
+    # A started sign-in hands the state to the browser only inside the
+    # provider's authorize URL; nothing else carries it.
+    answer = dict(response.json())
+    answer.pop("authorization_url", None)
+    for text in (json.dumps(answer), worker_logs, json.dumps(body)):
+        assert SERVER_SECRET not in text
+        for secret in _secrets_of(started_requests):
+            assert secret not in text

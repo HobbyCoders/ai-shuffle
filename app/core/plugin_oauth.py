@@ -93,6 +93,8 @@ _MESSAGES = {
     "bad_response": "The service sent a sign-in response this app cannot use.",
     "storage_locked": "Secure credential storage is locked on this worker.",
     "storage": "The saved sign-in could not be read on this worker.",
+    "relay_unavailable": ("Signing in with this plugin's own app needs this worker connected to your AI "
+                          "Shuffle account (Settings > Account). You can also enter your own OAuth client."),
 }
 
 
@@ -703,6 +705,31 @@ def client_source(config: OAuthConfig, owner: OAuthClient | None) -> str:
     if config.registration_url:
         return "registered"
     return "none"
+
+
+def relay_state(source: str, own: str, linked: bool, relay_uri: str) -> tuple[str, str]:
+    """Whether a sign-in returns through the account hub's fixed relay page,
+    as ``(relay, reason)``. Pure.
+
+    Only a plugin's shipped client (``source == "plugin"``) uses the relay;
+    every other source returns to ``own`` (``("not_used", "")``). A shipped
+    client can use it when the worker is linked to an account, ``own`` (this
+    worker's own callback as the browser reaches it) is an https or loopback
+    http address, and ``relay_uri`` is configured: ``("used", "")``.
+    Otherwise ``("unavailable", reason)`` with the first failing reason of
+    ``not_linked``, ``insecure_address`` and ``not_configured``.
+    """
+    if source != "plugin":
+        return "not_used", ""
+    if not linked:
+        return "unavailable", "not_linked"
+    try:
+        _check_redirect(own)
+    except PluginOAuthError:
+        return "unavailable", "insecure_address"
+    if not relay_uri:
+        return "unavailable", "not_configured"
+    return "used", ""
 
 
 def current_client(config: OAuthConfig, redirect_uri: str) -> tuple[OAuthClient | None, str]:

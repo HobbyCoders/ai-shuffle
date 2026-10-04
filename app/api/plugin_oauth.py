@@ -12,9 +12,16 @@ The return address is derived from the address the owner's browser used to
 reach this worker (``request.base_url``) plus :data:`CALLBACK`, exactly as the
 Gmail connector derives and checks its redirect URI. It must be ``https://``
 or ``http://localhost``. With an owner-entered client the owner registers that
-address with the provider; a plugin's shipped client works only from the
-addresses its author registered; a client registered automatically
+address with the provider; a client registered automatically
 (``registration_url``) is registered for each address on its first sign-in.
+
+A plugin's shipped client is registered by its author for one fixed address,
+the account hub's relay page (:func:`relay_uri`). Before sending the owner to
+the provider the worker registers the sign-in with the hub over its server
+secret channel (``sha256(state)`` and the browser's origin, never the state);
+the hub page then sends the browser on to this worker's own callback after
+one confirmation. That needs a worker linked to an account and an https (or
+loopback http) address; otherwise the shipped client cannot be used here.
 
 The owner's OAuth client, registered clients and the tokens are stored by
 :mod:`app.core.plugin_oauth`, encrypted and worker-local. No route returns a
@@ -36,6 +43,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictStr
 
 from app.api.auth import require_admin
+from app.core import account_hub, owner_auth
 from app.core import plugin_oauth as core
 from app.core.plugin_oauth import AuthorizationRequest, OAuthConfig, PluginOAuthError
 from app.db.async_database import run_sync
@@ -44,6 +52,7 @@ router = APIRouter(prefix="/api/v1/plugins/oauth", tags=["Plugins"])
 logger = logging.getLogger(__name__)
 
 CALLBACK = "/api/v1/plugins/oauth/callback"
+RELAY_PATH = "/browser/plugin-oauth/callback"
 COOKIE_PREFIX = "plugin_oauth_"
 TTL = 600
 MAX_PENDING = 64
@@ -51,8 +60,12 @@ MAX_PENDING = 64
 _STATUS = {
     "not_installed": 404, "not_declared": 404, "plugin_off": 409, "invalid_declaration": 409,
     "not_configured": 409, "registration_failed": 409, "invalid_client": 400, "invalid_redirect": 400,
-    "storage_locked": 409, "storage": 409,
+    "storage_locked": 409, "storage": 409, "relay_unavailable": 409,
 }
+
+TOO_MANY = "Too many sign-ins are waiting. Try again in a few minutes."
+HUB_FAILED = ("The AI Shuffle account service could not be reached or needs an update. "
+              "Try again shortly.")
 
 INSECURE_TRANSPORT = ("Enter an OAuth client only from the AI Shuffle desktop app window, this worker's "
                       "HTTPS address, or a browser on this computer.")
@@ -66,6 +79,7 @@ class _Pending:
     flow_id: str
     config: OAuthConfig
     request: AuthorizationRequest
+    return_origin: str  # _web_origin() of this worker's own callback, as the browser reached it
 
 
 _pending: dict[str, _Pending] = {}
@@ -90,15 +104,39 @@ def _digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-def _origin(uri: str) -> str:
+def _web_origin(uri: str) -> str:
+    """The WHATWG origin of ``uri``: lowercase scheme and host, the default
+    port dropped, an IPv6 host in brackets. The hub checks a registered
+    origin with ``new URL(v).origin === v``, so this is the form it accepts."""
     parts = urlsplit(uri)
-    return f"{parts.scheme}://{parts.netloc}"
+    scheme, host = parts.scheme.lower(), parts.hostname or ""
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    if ":" in host:
+        host = f"[{host}]"
+    default = {"http": 80, "https": 443}.get(scheme)
+    return f"{scheme}://{host}" + (f":{port}" if port is not None and port != default else "")
 
 
 def redirect_uri(request: Request) -> str:
     """This worker's return address as the owner's browser reaches it, the same
     derivation as the Gmail connector's suggested redirect URI."""
     return str(request.base_url).rstrip("/") + CALLBACK
+
+
+def relay_uri() -> str:
+    """The account hub's fixed return page for plugin-shipped clients, or
+    ``""`` when the account browser origin is not configured correctly."""
+    try:
+        return owner_auth.browser_origin() + RELAY_PATH
+    except HTTPException:
+        return ""
+
+
+def _linked() -> bool:
+    return owner_auth.linked_binding() is not None
 
 
 def _private_transport(request: Request) -> None:
@@ -152,6 +190,17 @@ def _plugin_status(plugin_id: str, service: str | None) -> dict:
             "services": [_service_status(plugin_id, name) for name in names]}
 
 
+def _add_relay(result: dict, own: str, linked: bool, relay: str) -> None:
+    """Where each service's sign-in returns: through the hub relay for a
+    shipped client, else this worker's own address."""
+    result["relay_uri"] = relay
+    result["relay_available"] = core.relay_state("plugin", own, linked, relay)[0] == "used"
+    for entry in result.get("services", []):
+        state, reason = core.relay_state(entry.get("client_source", "none"), own, linked, relay)
+        entry["relay"], entry["relay_reason"] = state, reason
+        entry["return_address"] = relay if state == "used" else own
+
+
 @router.get("/status")
 async def sign_in_status(request: Request, plugin: str, service: str = "",
                          token: str = Depends(require_admin)):
@@ -161,7 +210,9 @@ async def sign_in_status(request: Request, plugin: str, service: str = "",
         result = await run_sync(_plugin_status, plugin, service or None)
     except PluginOAuthError as exc:
         raise _refuse(exc) from None
-    result["redirect_uri"] = redirect_uri(request)
+    own = redirect_uri(request)
+    result["redirect_uri"] = own
+    _add_relay(result, own, await run_sync(_linked), relay_uri())
     return result
 
 
@@ -197,32 +248,92 @@ async def delete_client(plugin: str, service: str, token: str = Depends(require_
     return {"deleted": deleted}
 
 
+def _source(config: OAuthConfig) -> str:
+    return core.client_source(config, core.load_client(config.plugin_id, config.service))
+
+
+def _room(now: float) -> None:
+    for key in [k for k, v in _pending.items() if v.expires <= now]:
+        del _pending[key]
+    if len(_pending) >= MAX_PENDING:
+        raise HTTPException(429, TOO_MANY)
+
+
+def _safe_origin(value: object) -> str:
+    try:
+        return _web_origin(value) if isinstance(value, str) else type(value).__name__
+    except ValueError:
+        return "unreadable"
+
+
+async def _register_relay(binding: dict, config: OAuthConfig, auth: AuthorizationRequest, origin: str) -> None:
+    """Tell the account hub which origin this sign-in returns to, keyed by
+    ``sha256(state)``. Nothing from the hub is echoed; logs name only the
+    hub's status or the exception class."""
+    body = {"state_hash": _digest(auth.state), "return_origin": origin, "service": config.service,
+            "provider_host": urlsplit(config.authorize_url).hostname or ""}
+    try:
+        result = await run_sync(account_hub.call, binding, "POST", "plugin-oauth/relays", body)
+    except Exception as exc:  # noqa: BLE001 - every hub failure maps to fixed wording
+        status = account_hub.hub_status(exc)
+        logger.warning("Plugin sign-in relay registration failed: hub status %s (%s)", status, type(exc).__name__)
+        if status in (401, 403):
+            raise _refuse(PluginOAuthError("relay_unavailable")) from None
+        if status == 429:
+            raise HTTPException(429, TOO_MANY) from None
+        raise HTTPException(502, HUB_FAILED) from None
+    returned = result.get("relay_uri") if isinstance(result, dict) else None
+    if returned != auth.redirect_uri:
+        logger.warning("Plugin sign-in relay registration returned another relay address: expected %s, got %s",
+                       _web_origin(auth.redirect_uri), _safe_origin(returned))
+        raise HTTPException(502, HUB_FAILED)
+
+
 @router.post("/start")
 async def start(data: ServiceRef, request: Request, token: str = Depends(require_admin)):
     """Begin a sign-in. Returns the provider's ``authorization_url`` for the
-    owner's browser; the flow expires after :data:`TTL` seconds."""
-    address = redirect_uri(request)
+    owner's browser; the flow expires after :data:`TTL` seconds. A plugin's
+    shipped client returns through the account hub's relay page (``relayed``);
+    every other client returns to this worker's own address."""
+    own = redirect_uri(request)
+    origin = _web_origin(own)
+    address, binding = own, None
 
     try:
         config = await run_sync(core.installed_config, data.plugin, data.service, require_on=True)
         # The owner's client, else the plugin's shipped public client, else one
         # registered for this return address (registered now when needed).
-        client, _source = await core.client_for_sign_in(config, address)
+        source = await run_sync(_source, config)
+        if source == "plugin":
+            relay = relay_uri()
+            binding = await run_sync(owner_auth.linked_binding)
+            state, reason = core.relay_state(source, own, binding is not None, relay)
+            if state != "used":
+                raise PluginOAuthError("invalid_redirect" if reason == "insecure_address" else "relay_unavailable")
+            address = relay
+        client, used = await core.client_for_sign_in(config, address)
+        if used != source:
+            # The owner saved or removed a client meanwhile: the return address
+            # chosen above no longer fits the client in effect.
+            raise HTTPException(409, "This service's sign-in setup changed. Start the sign-in again.")
         auth = core.start_sign_in(config, client, address)
     except PluginOAuthError as exc:
         raise _refuse(exc) from None
+    _room(time.monotonic())
+    if binding is not None:
+        await _register_relay(binding, config, auth, origin)
+    # Stored only now: a refused hub registration leaves nothing pending.
     now = time.monotonic()
-    for key in [k for k, v in _pending.items() if v.expires <= now]:
-        del _pending[key]
-    if len(_pending) >= MAX_PENDING:
-        raise HTTPException(429, "Too many sign-ins are waiting. Try again in a few minutes.")
+    _room(now)
     browser = secrets.token_urlsafe(32)
     flow_id = secrets.token_urlsafe(16)
-    _pending[auth.state] = _Pending(now + TTL, _digest(browser), _digest(token), flow_id, config, auth)
+    _pending[auth.state] = _Pending(now + TTL, _digest(browser), _digest(token), flow_id, config, auth, origin)
     response = JSONResponse({"authorization_url": auth.url, "flow_id": flow_id,
-                             "redirect_uri": address, "expires_in": TTL})
+                             "redirect_uri": address, "expires_in": TTL,
+                             "relayed": binding is not None, "return_origin": origin})
+    # The cookie lives on this worker's own origin, where the callback runs.
     response.set_cookie(COOKIE_PREFIX + auth.state[:16], browser, httponly=True,
-                        secure=address.startswith("https:"), samesite="lax", max_age=TTL, path=CALLBACK)
+                        secure=own.startswith("https:"), samesite="lax", max_age=TTL, path=CALLBACK)
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -264,12 +375,12 @@ async def callback(request: Request, state: str = "", code: str = "", error: str
     if (pending is None or not browser or owner is None
             or not secrets.compare_digest(_digest(browser), pending.browser)
             or not secrets.compare_digest(_digest(owner), pending.owner)
-            or _origin(str(request.url)) != _origin(pending.request.redirect_uri)):
+            or _web_origin(str(request.url)) != pending.return_origin):
         raise HTTPException(400, "This sign-in has expired, was already used, or belongs to another "
                                  "browser. Start it again from AI Shuffle.")
     # Consume before any await: a replayed callback finds nothing.
     del _pending[state]
-    origin = _origin(pending.request.redirect_uri)
+    origin = pending.return_origin
     if error or not code:
         return _callback_page(state, origin, pending,
                               error="The sign-in was cancelled at the service. Nothing was changed.")
