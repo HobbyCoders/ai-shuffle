@@ -299,21 +299,28 @@ async def _kill_worker_session(worker_session_id: str, *, reason: str = "host_cl
     return "idle"
 
 
-async def _stop_remote_worker(record: WorkerRecord, *, reason: str) -> str:
+async def _stop_remote_worker(record: WorkerRecord, *, reason: str,
+                              summary: Optional[str] = None) -> Dict[str, Any]:
     """Stop a Task child that runs on another worker. Never raises.
 
     Its session, process tree and approval prompts belong to that worker, so
     nothing here may be killed or settled on its behalf (the mirrored session
-    is read-only). Reaching the child on its worker (the ``interrupt`` control
-    action with ``stop_background``) is slice S8 of the cross-worker design;
-    until then the parent's record settles as stopped and the child keeps
-    running there. Its later report does not wake a parent the user stopped.
+    is read-only). The worker that runs it is asked to stop it with the
+    ``task-stop`` control action; a worker that cannot be reached now is asked
+    again when it answers. Returns ``{"outcome", "detail"?}``
+    (``remote_task.stop_remote_child``). Its later report wakes nobody.
     """
-    logger.info(
-        "ProviderAgent supervisor: %s runs on worker %s; stopping it there is not "
-        "supported yet (reason=%s)", record.worker_session_id, record.remote_device_id, reason,
-    )
-    return "remote_not_stopped"
+    try:
+        from app.core import remote_task
+
+        return await remote_task.stop_remote_child(
+            record.worker_session_id, str(record.remote_device_id), reason=reason, summary=summary)
+    except Exception:  # noqa: BLE001 — teardown must never raise
+        logger.warning(
+            "ProviderAgent supervisor: could not stop %s on worker %s",
+            record.worker_session_id, record.remote_device_id, exc_info=True,
+        )
+        return {"outcome": "remote_stop_pending"}
 
 
 async def settle_killed_worker(worker_session_id: str, reason: str) -> None:
@@ -559,9 +566,8 @@ async def teardown_worker(
         await stop_all_background_tasks(record.worker_session_id, user_stop=True, source=reason)
     await _settle_card(record, preview, summary)
 
-    if record.remote_device_id:
-        outcome = await _stop_remote_worker(record, reason=reason)
-    else:
+    outcome = "remote"
+    if not record.remote_device_id:
         outcome = await _kill_worker_session(record.worker_session_id, reason=reason)
         # AFTER the kill, so the runtime has stopped appending to the event log
         # the flush reads, and BEFORE the registry row goes terminal, so the
@@ -602,13 +608,23 @@ async def teardown_worker(
     _purge_park_gate_residue(parent_session_id, record)
     unregister_worker(parent_session_id, record.worker_session_id)
 
-    return {
+    detail = None
+    if record.remote_device_id:
+        # AFTER the record settled here: a report the stop provokes then finds
+        # it stopped and wakes nobody.
+        stopped = await _stop_remote_worker(record, reason=reason, summary=summary)
+        outcome, detail = stopped.get("outcome") or "remote_stop_pending", stopped.get("detail")
+
+    result = {
         "workerSessionId": record.worker_session_id,
         "taskId": record.task_id,
         "provider": record.provider_id,
         "model": record.model_id,
         "outcome": outcome,
     }
+    if detail:
+        result["detail"] = detail
+    return result
 
 
 async def _teardown(

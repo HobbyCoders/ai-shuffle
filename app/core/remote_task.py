@@ -34,8 +34,13 @@ rebuilds the rest. :func:`check_targets` asks each target with
 ``task-status`` (:func:`handle_task_status`) and records contact or since
 when it has been unreachable (``app.db.remote_tasks``).
 
+Stopping the child here (Stop, stop-all, Swarm cancel, deleting the parent)
+reaches it on its worker with ``task-stop`` (:func:`stop_remote_child`,
+answered by :func:`handle_task_stop` only for the worker that started it). The
+stop is durable, so one that cannot be delivered now is sent again by
+:func:`deliver_stops` when the target answers.
+
 Not here yet (later slices of docs/reviews/cross-worker-subagents-2026-10-03.md):
-stop reaching the child (S8, ``provider_agent_supervisor._stop_remote_worker``),
 resume by message (S9, refused in ``agent_messaging.make_message``), approval
 routing (S10) and the notice after a long silence (S12, from
 ``remote_tasks.unreachable_since``). Until S10 a remote child runs with Away
@@ -359,8 +364,20 @@ async def dispatch_remote(
         root_session_id=root_session_id, owner_session_id=caller_session_id, label=label,
         agent_name=agent_name, roster_name=roster_name, provider_id=provider_id,
         model_id=model_id, prompt=prompt, launch_tool_use_id=launch_tool_use_id)
+    await _bind_swarm_item(worker_id, caller_session_id)
     return remote_receipt(answer, worker=worker, worker_id=worker_id, result_agent=result_agent,
                           model_id=model_id, label=label, mode=mode)
+
+
+async def _bind_swarm_item(worker_id: str, caller_session_id: str) -> None:
+    """Tie the child to the Swarm item that launched it, if any, so Swarm
+    cancel can stop it and settle that item. Never raises."""
+    try:
+        from app.core.swarm import bind_worker
+
+        await bind_worker(worker_id, caller_session_id)
+    except Exception:  # noqa: BLE001 — the child runs either way
+        logger.debug("remote_task: Swarm binding failed for %s", worker_id, exc_info=True)
 
 
 def remote_receipt(answer: Mapping[str, Any], *, worker: Mapping[str, Any], worker_id: str,
@@ -1131,10 +1148,12 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
         owner = report.dispatch["owner_session_id"]
         owner_row = await run_sync(database.get_session, owner)
         path = None
+        # Stopped here: durable, so this holds even if the record was lost.
+        stopped_here = bool(current and current.get("stop_requested_at"))
         if owner_row is not None:
             git_text = await bring_commits_here(owner_row, key, report.worker_name, body.get("git"))
             path = await run_sync(write_task_report, owner_row, key, report.report)
-            if await _settle_tracked(report.dispatch, report, path):
+            if await _settle_tracked(report.dispatch, report, path) and not stopped_here:
                 frame = {
                     "task_id": key,
                     "status": _WAKE_STATUS[report.status],
@@ -1492,6 +1511,7 @@ async def tracking_loop() -> None:
             if not reattached:
                 await reattach_all()
                 reattached = True
+            await deliver_stops()
             await check_targets()
         except asyncio.CancelledError:
             raise
@@ -1531,3 +1551,239 @@ async def handle_task_status(body: Dict[str, Any], from_device: str) -> Dict[str
     from app.db.async_database import run_sync
 
     return await run_sync(answer_task_status, body, from_device)
+
+
+# ---------------------------------------------------------------------------
+# Stop: the parent asks the target to stop a child (task-stop)
+# ---------------------------------------------------------------------------
+
+TASK_STOP_ACTION = "task-stop"
+STOP_TIMEOUT = 20.0
+#: How long a stop path waits for the target's answer. A slower answer is
+#: left to the send already under way and, failing that, to the retry from
+#: :func:`tracking_loop`, so a Stop here never hangs on the network.
+STOP_WAIT = 2.0
+MAX_STOP_IDS = MAX_STATUS_IDS
+#: What a target answers per child: stopped now, or already at rest. A child
+#: it does not know for the asking worker is :data:`CHILD_UNKNOWN`.
+CHILD_STOPPED = "stopped"
+CHILD_FINISHED = "finished"
+_STOP_ANSWERS = (CHILD_STOPPED, CHILD_FINISHED, CHILD_UNKNOWN)
+#: Stop reasons a target is told (for its log); anything else travels as ``stopped``.
+_STOP_REASONS = frozenset({
+    "user_stop", "user_stopped", "user_stopped_all", "swarm_cancelled", "session_closed",
+    "parent_turn_ended", "provider_rate_limited", "host_cleanup",
+})
+
+_stop_sends: set = set()
+
+
+def _unreached_detail(name: str) -> str:
+    return (f"{name} could not be reached, so the subagent may still be running there. "
+            "The stop is sent again when it answers.")
+
+
+async def _send_stops(target_device_id: str, worker_ids: List[str],
+                      reason: str) -> Dict[str, Dict[str, Any]]:
+    """Send one ``task-stop`` and record the answer. Never raises.
+
+    Returns ``{id: {"outcome", "detail"?}}``. The target's answer settles each
+    stop (``sent``); a refusal is final (``refused``), with a plain message for
+    an older release that does not know the action; anything else leaves the
+    stops pending for :func:`deliver_stops`.
+    """
+    from app.db import remote_tasks
+    from app.network import control
+
+    name = worker_display_name(target_device_id)
+    body = {"version": WIRE_VERSION, "worker_session_ids": worker_ids,
+            "reason": reason if reason in _STOP_REASONS else "stopped"}
+    try:
+        answer = await control.call(target_device_id, TASK_STOP_ACTION, body, timeout=STOP_TIMEOUT)
+    except control.ControlRefused as exc:
+        why = str(exc).rstrip(".")
+        if "Unknown control action" in why:
+            detail = (f"{name} runs an older release that cannot stop a subagent from another "
+                      f"worker, so it keeps running there until it finishes. Update {name}, or "
+                      "stop the subagent in its chat there.")
+        else:
+            detail = f"{name} refused to stop the subagent: {why}."
+        logger.warning("remote_task: stop of %s refused: %s", ", ".join(worker_ids), detail)
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(remote_tasks.settle_stop, worker_ids, remote_tasks.STOP_REFUSED,
+                                    error=detail)
+        return {i: {"outcome": "remote_stop_refused", "detail": detail} for i in worker_ids}
+    except Exception as exc:  # noqa: BLE001 — unreachable, off-network: sent again later
+        logger.info("remote_task: stop of %s not delivered to %s yet: %s",
+                    ", ".join(worker_ids), target_device_id, exc)
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(remote_tasks.note_stop_failed, worker_ids,
+                                    str(exc) or type(exc).__name__)
+        return {i: {"outcome": "remote_stop_pending", "detail": _unreached_detail(name)}
+                for i in worker_ids}
+    children = answer.get("children") if isinstance(answer, dict) else None
+    results: Dict[str, Dict[str, Any]] = {}
+    answered: List[str] = []
+    for worker_id in worker_ids:
+        entry = children.get(worker_id) if isinstance(children, dict) else None
+        state = entry.get("state") if isinstance(entry, dict) else None
+        if state in _STOP_ANSWERS:
+            answered.append(worker_id)
+            results[worker_id] = {"outcome": f"remote_{state}"}
+        else:
+            results[worker_id] = {"outcome": "remote_stop_pending", "detail": _unreached_detail(name)}
+    if answered:
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(remote_tasks.settle_stop, answered, remote_tasks.STOP_SENT)
+    return results
+
+
+async def stop_remote_child(worker_id: str, target_device_id: str, *, reason: str,
+                            summary: Optional[str] = None) -> Dict[str, Any]:
+    """Stop a Task child on the worker that runs it. Never raises.
+
+    The stop is recorded durably first, so a target that cannot be reached
+    now is asked again when it answers (:func:`deliver_stops`). A nested
+    caller's own record settles here too, as a local worker's does when it
+    ends. Returns ``{"outcome", "detail"?}``: ``remote_stopped``,
+    ``remote_finished``, ``remote_unknown``, ``remote_stop_refused`` (the
+    detail says why) or ``remote_stop_pending`` (not answered yet; it will be
+    asked again).
+    """
+    from app.core.task_registry import task_registry
+    from app.db import remote_tasks
+
+    try:
+        row = await asyncio.to_thread(remote_tasks.request_stop, worker_id, reason)
+    except Exception:  # noqa: BLE001 — still try to reach it once
+        logger.warning("remote_task: could not record the stop of %s", worker_id, exc_info=True)
+        row = None
+    owner = (row or {}).get("owner_session_id")
+    if owner and owner != (row or {}).get("root_session_id"):
+        with contextlib.suppress(Exception):
+            current = task_registry.get_task(owner, worker_id)
+            if current is not None and current.get("status") == "running":
+                task_registry.complete_task(owner, worker_id, "killed", summary=summary,
+                                            reason=reason, notify=False)
+    send = asyncio.create_task(_send_stops(target_device_id, [worker_id], reason))
+    _stop_sends.add(send)
+    send.add_done_callback(_stop_sends.discard)
+    pending = {"outcome": "remote_stop_pending",
+               "detail": _unreached_detail(worker_display_name(target_device_id))}
+    if row is not None and row.get("unreachable_since"):
+        # Known to be away: do not hold the stop here for an answer.
+        return pending
+    try:
+        results = await asyncio.wait_for(asyncio.shield(send), STOP_WAIT)
+    except Exception:  # noqa: BLE001 — too slow: the send goes on in the background
+        return pending
+    return dict(results.get(worker_id) or pending)
+
+
+async def drain_stops() -> None:
+    """Wait for the stops being sent right now (tests, shutdown)."""
+    while _stop_sends:
+        await asyncio.gather(*list(_stop_sends), return_exceptions=True)
+
+
+async def deliver_stops() -> int:
+    """Send every stop a target has not answered yet. Returns how many were answered.
+
+    Run by :func:`tracking_loop` every :data:`TRACK_SECONDS`, so a child does
+    not keep running after its parent stopped it just because its worker was
+    away at that moment. Never raises.
+    """
+    from app.db import remote_tasks
+
+    try:
+        rows = await asyncio.to_thread(remote_tasks.pending_stops)
+    except Exception:  # noqa: BLE001 — try again next round
+        logger.warning("remote_task: could not read pending stops", exc_info=True)
+        return 0
+    groups: Dict[tuple, List[str]] = {}
+    for row in rows:
+        key = (row["target_device_id"], row.get("stop_reason") or "stopped")
+        groups.setdefault(key, []).append(row["worker_session_id"])
+    answered = 0
+    for (target, reason), ids in groups.items():
+        for start in range(0, len(ids), MAX_STOP_IDS):
+            results = await _send_stops(target, ids[start:start + MAX_STOP_IDS], reason)
+            answered += sum(1 for r in results.values() if r["outcome"] != "remote_stop_pending")
+    return answered
+
+
+async def stop_child_here(worker_session_id: str) -> None:
+    """Stop a child another worker started here, as Stop on its chat would.
+
+    The durable interrupt reaches its turn, then the user-stop sweep latches
+    the session, aborts queued turns and ends its own background work and
+    subagents. Its report then says ``stopped``. Never raises.
+    """
+    from app.core import turn_manager
+    from app.core.query_session_lifecycle import stop_all_background_tasks
+
+    try:
+        await turn_manager.interrupt_async(worker_session_id, "stop", stop_background=True)
+    except Exception:  # noqa: BLE001 — the sweep below still runs
+        logger.warning("remote_task: could not interrupt child %s", worker_session_id, exc_info=True)
+    try:
+        await stop_all_background_tasks(worker_session_id, user_stop=True)
+    except Exception:  # noqa: BLE001
+        logger.warning("remote_task: could not stop the work of child %s", worker_session_id,
+                       exc_info=True)
+
+
+def _stop_targets(body: Mapping[str, Any], from_device: str) -> Dict[str, Optional[Dict[str, Any]]]:
+    """Validate a ``task-stop`` and read the asked children. Blocking.
+
+    Raises ``PermissionError`` when the asker is not an active worker of this
+    account, or when any asked child was started here by another worker (the
+    whole request is refused and nothing is stopped). Returns ``{id: row}``,
+    None for a child this worker does not know.
+    """
+    from app.db import remote_tasks
+
+    _require_worker_member(from_device)
+    if not isinstance(body, dict) or body.get("version") != WIRE_VERSION:
+        raise ValueError("Unsupported stop request version")
+    ids = body.get("worker_session_ids")
+    if (not isinstance(ids, list) or not ids or len(ids) > MAX_STOP_IDS
+            or any(not isinstance(i, str) or not i.strip() or len(i) > 64 for i in ids)):
+        raise ValueError(f"worker_session_ids must list 1 to {MAX_STOP_IDS} ids")
+    ids = list(dict.fromkeys(ids))
+    rows = remote_tasks.children_by_id(ids)
+    if any(row["parent_device_id"] != from_device for row in rows.values()):
+        raise PermissionError("Only the worker that started a subagent here may stop it.")
+    for worker_id in rows:
+        remote_tasks.mark_child_stopped(worker_id)
+    return {worker_id: rows.get(worker_id) for worker_id in ids}
+
+
+async def handle_task_stop(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    """``task-stop`` control action: stop children the asking worker started here.
+
+    Idempotent: a running child is stopped (again, harmlessly), one already at
+    rest answers ``finished`` and keeps its report, and an unknown one answers
+    ``unknown``. A finished child is latched stopped too, so a later message
+    cannot resume it.
+    """
+    from app.core.task_registry import task_registry
+    from app.db import remote_tasks
+    from app.db.async_database import run_sync
+
+    rows = await run_sync(_stop_targets, body, from_device)
+    children: Dict[str, Dict[str, str]] = {}
+    for worker_id, row in rows.items():
+        if row is None:
+            children[worker_id] = {"state": CHILD_UNKNOWN}
+        # A child at rest whose report the sweep has not stored yet: store it
+        # now, so it keeps the report it finished with and answers finished.
+        elif row["state"] == remote_tasks.RUNNING and not await run_sync(owe_if_finished, worker_id):
+            logger.info("remote_task: worker %s stopped child %s (%s)", from_device, worker_id,
+                        body.get("reason"))
+            await stop_child_here(worker_id)
+            children[worker_id] = {"state": CHILD_STOPPED}
+        else:
+            task_registry.mark_user_stopped(worker_id)
+            children[worker_id] = {"state": CHILD_FINISHED}
+    return {"children": children}

@@ -70,12 +70,39 @@ def owns_terminal(parent_session_id):
     launch = current_launch.get()
     return launch is not None and launch.coordinator.session_id == parent_session_id
 
-async def cancel_worker(task_id):
+async def _stop_remote_item(worker_id, reason):
+    """Stop a Swarm item that runs on another worker; False when it runs here.
+
+    It goes through the supervisor's teardown, like Stop on its card: the
+    record settles here and the worker that runs it is asked to stop it.
+    """
+    from app.core import provider_agent_supervisor as supervisor
+    from app.core.remote_task import stop_remote_child
+    from app.db import remote_tasks
+    try:
+        dispatch = await asyncio.to_thread(remote_tasks.get_dispatch, worker_id)
+    except Exception:
+        return False
+    if dispatch is None:
+        return False
+    summary = "Session closed" if reason == "session_closed" else "Swarm cancelled"
+    record = supervisor.get_worker(dispatch["root_session_id"], worker_id)
+    if record is not None:
+        await supervisor.teardown_worker(record, reason=reason, summary=summary, preview=f"{summary}.")
+    else:
+        await stop_remote_child(worker_id, dispatch["target_device_id"], reason=reason, summary=summary)
+    return True
+
+async def _stop_item(worker_id, reason):
     from app.core.provider_agent_supervisor import _kill_worker_session
+    if not await _stop_remote_item(worker_id, reason):
+        await _kill_worker_session(worker_id, reason=reason)
+
+async def cancel_worker(task_id):
     launch = workers.get(task_id)
     ids = [key for key, value in workers.items() if value is launch] if launch else [task_id]
     reason = "session_closed" if launch and launch.coordinator.closed else "swarm_cancelled"
-    await asyncio.gather(*(_kill_worker_session(key, reason=reason) for key in ids))
+    await asyncio.gather(*(_stop_item(key, reason) for key in ids))
     job = worker_jobs.get(task_id)
     if job is not None:
         job.cancel()

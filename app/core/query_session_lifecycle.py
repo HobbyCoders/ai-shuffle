@@ -286,13 +286,15 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
 
     record = provider_agent_supervisor.get_worker(session_id, task_id)
     if record is not None:
-        await provider_agent_supervisor.teardown_worker(
+        torn = await provider_agent_supervisor.teardown_worker(
             record,
             reason=source,
             summary=USER_STOP_SUMMARY if source == USER_STOP_REASON else f"Stopped by host: {source}",
             preview="Stopped by the user." if source == USER_STOP_REASON else f"Stopped by host: {source}",
         )
-        return {"ok": True, "kind": "agent", "task_id": task_id}
+        # A child on another worker: whether the stop reached it, in words.
+        detail = (torn or {}).get("detail")
+        return {"ok": True, "kind": "agent", "task_id": task_id, **({"detail": detail} if detail else {})}
 
     # 3) Any other agent task — the adapter has no per-task stop, so settle the
     # registry row ourselves and report it. On a live session this is the

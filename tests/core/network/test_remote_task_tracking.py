@@ -155,9 +155,14 @@ def test_a_child_stopped_here_keeps_its_status_and_its_report_wakes_nobody(worke
         result = asyncio.run(provider_agent_supervisor.teardown_worker(
             record, reason="user_stopped_all", summary="Stopped by user (stop all workers)",
             preview="Stopped by the user."))
-        assert result["outcome"] == "remote_not_stopped"
+        assert result["outcome"] == "remote_stopped" and "detail" not in result
         assert task_registry.get_task("caller", child)["status"] == "killed"
-    deliver(a, child, text="Finished anyway.")
+        assert remote_tasks.get_dispatch(child)["stop_state"] == remote_tasks.STOP_SENT
+    with a.active():
+        # Stopped on its worker: its queued turn is aborted and it reports so.
+        assert remote_tasks.get_child(child)["stop_requested_at"]
+        assert asyncio.run(remote_task.sweep()) == 1
+        assert remote_tasks.get_child(child)["report"]["status"] == "stopped"
     with b.active():
         assert task_registry.get_task("caller", child)["status"] == "killed"
         assert wakes() == []

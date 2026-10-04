@@ -390,6 +390,11 @@ def _task_status_handler():
     return handle_task_status
 
 
+def _task_stop_handler():
+    from app.core.remote_task import handle_task_stop
+    return handle_task_stop
+
+
 def _application_update_handler():
     from app.core.update_workers import peer_action
     return peer_action
@@ -444,6 +449,7 @@ _LAZY_HANDLERS = {
     "task-start": _task_start_handler,
     "task-report": _task_report_handler,
     "task-status": _task_status_handler,
+    "task-stop": _task_stop_handler,
     "rewind": _rewind_handler,
     "session-git": _session_git_handler,
     "project-git": _project_git_handler,
