@@ -34,7 +34,10 @@ A parent restart while a prompt is open restores it (:func:`restore_proxies`,
 run at boot): the durable prompt row stays on the root session and its answer
 is still forwarded while the child waits. A target restart ends the tool call
 with the child's turn; the parent's prompt is then withdrawn when the child's
-report arrives, and an answer given before that is refused as late.
+report arrives, and an answer given before that is refused as late. A target
+quiet long enough for the offline notice (``remote_task.notice_offline``) has
+its open prompts withdrawn then; if it comes back with the child still
+running, its next prompts are shown again.
 """
 from __future__ import annotations
 
@@ -437,6 +440,11 @@ def _still_running(request: _Request) -> bool:
     # before the target answers it or when no record here settled.
     if not dispatch or dispatch.get("completion_id") or dispatch.get("stop_requested_at"):
         return False
+    if dispatch.get("offline_notice_at"):
+        # Its worker was quiet long enough that the caller stopped waiting
+        # (S12) and its record here settled; the worker is back and the child
+        # still runs, so a person decides its tool calls as before.
+        return True
     record = task_registry.get_task(request.root_session_id, request.worker_session_id)
     return record is None or record.get("status") == "running"
 

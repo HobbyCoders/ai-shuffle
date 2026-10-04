@@ -11,7 +11,10 @@ Two worker-local tables (never replicated):
   unreachable (``unreachable_since``) and the child's state as the target last
   reported it (``target_state``). A stop asked for here is durable
   (``stop_requested_at``, ``stop_state`` pending -> sent or refused) and is
-  sent again until the target answers it.
+  sent again until the target answers it. ``offline_notice_at`` records that
+  the caller was told the target had been unreachable too long (S12): sent
+  once per run, and a report that still arrives later is accepted as its own
+  wake.
 * ``remote_task_children`` (target side): one row per child another worker
   started here, created with the child. It goes ``running`` -> ``owed`` (the
   final report is built and stored) -> ``delivered`` (the parent
@@ -49,11 +52,14 @@ _PARENT_DDL = """CREATE TABLE IF NOT EXISTS remote_tasks (
     stop_requested_at TEXT,
     stop_reason TEXT,
     stop_state TEXT,
-    stop_error TEXT)"""
+    stop_error TEXT,
+    offline_notice_at TEXT)"""
 
-#: Columns added after the table first shipped: tracking (S7), stop (S8).
+#: Columns added after the table first shipped: tracking (S7), stop (S8),
+#: the notice after a long silence (S12).
 _PARENT_ADDED = ("target_name", "last_contact_at", "unreachable_since", "target_state",
-                 "stop_requested_at", "stop_reason", "stop_state", "stop_error")
+                 "stop_requested_at", "stop_reason", "stop_state", "stop_error",
+                 "offline_notice_at")
 
 _TARGET_DDL = """CREATE TABLE IF NOT EXISTS remote_task_children (
     worker_session_id TEXT PRIMARY KEY,
@@ -202,6 +208,23 @@ def note_unreachable(worker_session_ids: List[str]) -> Dict[str, str]:
             if row is not None:
                 since[row["worker_session_id"]] = row["unreachable_since"]
     return since
+
+
+def claim_offline_notice(worker_session_id: str) -> Optional[Dict[str, Any]]:
+    """Claim the one notice that the target has been quiet too long.
+
+    Only for a child still owed its report, not stopped here and not noticed
+    yet in this run; the claim is atomic, so two passes never both send it.
+    Returns the row, or None when there is nothing to notice.
+    """
+    with get_db() as conn:
+        init_schema(conn)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE remote_tasks SET offline_notice_at=%s WHERE worker_session_id=%s "
+            "AND completion_id IS NULL AND offline_notice_at IS NULL AND stop_requested_at IS NULL "
+            "RETURNING *", (utc_now_iso(), worker_session_id))
+        return _row(cursor.fetchone())
 
 
 def request_stop(worker_session_id: str, reason: str) -> Optional[Dict[str, Any]]:
@@ -475,7 +498,7 @@ def reopen_dispatch(worker_session_id: str, completion_id: str) -> bool:
     """Parent side: the child was resumed after the report ``completion_id``.
 
     That report moves to ``remote_task_completions`` and the row is tracked
-    again until the next one. False when the row no longer carries that
+    again until the next one; the resumed run may get its own offline notice. False when the row no longer carries that
     report (already reopened, or a newer report already arrived).
     """
     with get_db() as conn:
@@ -483,7 +506,7 @@ def reopen_dispatch(worker_session_id: str, completion_id: str) -> bool:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE remote_tasks SET completion_id=NULL, status=NULL, report_path=NULL, "
-            "delivered_at=NULL, unreachable_since=NULL, target_state=NULL "
+            "delivered_at=NULL, unreachable_since=NULL, target_state=NULL, offline_notice_at=NULL "
             "WHERE worker_session_id=%s AND completion_id=%s RETURNING worker_session_id",
             (worker_session_id, completion_id))
         if cursor.fetchone() is None:

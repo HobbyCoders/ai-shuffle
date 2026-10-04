@@ -45,8 +45,16 @@ the parent reaches the child (a finished one is resumed and reports again
 under a new completion id) and the child reaches its ``main``. A stopped child
 refuses a message on both workers, so it is never resumed.
 
-Not here yet (later slices of docs/reviews/cross-worker-subagents-2026-10-03.md):
-the notice after a long silence (S12, from ``remote_tasks.unreachable_since``).
+No parent waits forever on a worker that went away (S12). When a target has
+not answered ``task-status`` for :data:`OFFLINE_NOTICE_SECONDS`,
+:func:`notice_offline` tells the caller once that it stopped waiting and that
+the child may still be running there: the record settles as an error, its
+approval prompts here are withdrawn, a Swarm item ends, and the caller wakes.
+A report that still arrives later is accepted and wakes the caller once more
+with the real outcome. A target that restarted while a child ran reports it
+failed at boot (the turn reap aborts it, :func:`sweep` sends the report), and
+the child can be continued by message once its worker is back.
+
 A remote child's permission prompts are shown in the parent conversation
 (``remote_task_approvals``); its questions and private-access requests still
 get Away handling there: deferred, never granted, and listed in its report.
@@ -905,6 +913,8 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
             origin = cursor.fetchone()
         origin_id = origin["id"] if origin else settled["id"]
     status, report, needs = _turn_report(session_id, settled["id"], settled["_outcome"], origin_id)
+    if status == "failed" and settled.get("stop_reason") == LEASE_EXPIRED:
+        report = _cut_off_report(report)
     from app.core.provider_agent import MAX_REPORT_CHARS
     return {
         "version": WIRE_VERSION,
@@ -915,6 +925,27 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
         "truncated": len(report) >= MAX_REPORT_CHARS,
         "needs_owner": needs,
     }
+
+
+#: ``turns.stop_reason`` of a turn the boot reap (or a lapsed run lease) aborted.
+LEASE_EXPIRED = "lease_expired"
+_NO_REPORT = "The chat ended without a written report."
+
+
+def _cut_off_report(partial: str) -> str:
+    """The failed report of a child whose run this worker lost (a restart).
+
+    Its last streamed words are kept, marked as unfinished; they are not a
+    report.
+    """
+    from app.core.provider_agent import bound_report
+
+    text = ("The worker that ran this subagent restarted (or lost its run) before the subagent "
+            "finished, so its work was cut off. It can be continued with SendMessage now that the "
+            "worker is back.")
+    if partial and partial != _NO_REPORT:
+        text += "\n\nWhat it had written before it was cut off (unfinished):\n" + partial
+    return bound_report(text)[0]
 
 
 def owe_if_finished(session_id: str) -> bool:
@@ -1202,19 +1233,28 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
         path = None
         # Stopped here: durable, so this holds even if the record was lost.
         stopped_here = bool(current and current.get("stop_requested_at"))
+        # The caller was already told this worker went quiet (S12): the
+        # report is still taken, and wakes it once more with the outcome.
+        noticed = bool(current and current.get("offline_notice_at")) and not stopped_here
         if owner_row is not None:
             git_text = await bring_commits_here(owner_row, key, report.worker_name, body.get("git"))
             path = await run_sync(write_task_report, owner_row, key, report.report)
-            if await _settle_tracked(report.dispatch, report, path) and not stopped_here:
+            if (await _settle_tracked(report.dispatch, report, path, noticed=noticed)
+                    and not stopped_here):
+                summary = _wake_summary(report, path) + git_text
+                if noticed:
+                    summary = (f"{report.worker_name} answered again after the notice that it was "
+                               "unreachable, and this is the subagent's report.\n\n" + summary)
                 frame = {
                     "task_id": key,
                     "status": _WAKE_STATUS[report.status],
                     "tool_use_id": report.dispatch.get("tool_use_id") or key,
-                    "summary": _wake_summary(report, path) + git_text,
+                    "summary": summary,
                 }
-                if past:
-                    # A resumed run's report: its own wake, past the
-                    # one-wake-per-task latch the first report set.
+                if past or noticed:
+                    # A resumed run's report, or one after the offline
+                    # notice: its own wake, past the one-wake-per-task latch
+                    # the earlier report or notice set.
                     frame["agent_message_turn_id"] = report.completion_id
                 await turn_scheduler.on_remote_task_terminal(owner, frame)
             else:
@@ -1225,10 +1265,32 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
                         key, owner)
         await run_sync(remote_tasks.mark_delivered, key, completion_id=report.completion_id,
                        status=report.status, report_path=path)
+        _finish_swarm_item(key, _SWARM_STATUS[report.status], report.report)
         from app.core import remote_task_approvals
 
         await run_sync(remote_task_approvals.drop_proxies, report.dispatch["root_session_id"], key)
         return {"delivered": True, "duplicate": False}
+
+
+#: A report's status as the Swarm item that launched the child records it.
+_SWARM_STATUS = {"completed": "completed", "failed": "failed", "stopped": "cancelled"}
+
+
+def _finish_swarm_item(worker_id: str, status: str, result: str) -> None:
+    """End the Swarm item that launched this child, if any. Never raises.
+
+    The Swarm waits on the item's launch; a child on another worker has no
+    local job to end it, so its report (or the offline notice) does. Ending
+    an item twice keeps the first outcome.
+    """
+    try:
+        from app.core.swarm import workers as swarm_workers
+
+        launch = swarm_workers.get(worker_id)
+        if launch is not None:
+            launch.finish(status, result)
+    except Exception:  # noqa: BLE001 — the report is delivered either way
+        logger.debug("remote_task: could not end the Swarm item of %s", worker_id, exc_info=True)
 
 
 @contextlib.asynccontextmanager
@@ -1257,6 +1319,15 @@ MAX_STATUS_IDS = 200
 #: What a target says about a child: its ``remote_task_children`` state, or
 #: ``unknown`` when it has no such child for the asking worker.
 CHILD_UNKNOWN = "unknown"
+#: How long a target may go without answering before the caller is told it
+#: stopped waiting (:func:`notice_offline`).
+OFFLINE_NOTICE_SECONDS = 30 * 60
+#: ``reason`` on a record the offline notice settled.
+OFFLINE_REASON = "worker_unreachable"
+
+#: When this process first checked its targets. Silence before it (this
+#: worker was down, not the target) never counts towards the notice.
+_tracking_started: Optional[Any] = None
 
 
 def worker_display_name(device_id: Optional[str]) -> str:
@@ -1437,13 +1508,18 @@ async def reattach_all() -> int:
 
 
 async def _settle_tracked(dispatch: Mapping[str, Any], report: "_Report",
-                          report_path: Optional[str]) -> bool:
+                          report_path: Optional[str], *, noticed: bool = False,
+                          reason: Optional[str] = None) -> bool:
     """Settle the child's registry records, card and supervisor record.
 
     Returns False when this worker had already settled the record (a Stop
     here, or a watchdog): its status stands and the report must not wake
     anyone. A record that is missing (the report beat its tracking) is created
     first, so TaskList still lists the finished child.
+
+    ``noticed`` is a report arriving after the offline notice settled the
+    record as an error: the real outcome replaces it (a record stopped here
+    since keeps its status). ``reason`` is recorded on the terminal record.
     """
     from app.core import provider_agent_supervisor as supervisor
     from app.core.provider_agent import _completion_summary
@@ -1457,7 +1533,8 @@ async def _settle_tracked(dispatch: Mapping[str, Any], report: "_Report",
         await task_registry.ensure_hydrated(session_id)
     record = task_registry.get_task(root, worker_id)
     tracked = supervisor.get_worker(root, worker_id)
-    if record is not None and record.get("status") != "running":
+    reopened = noticed and record is not None and record.get("status") == "error"
+    if record is not None and record.get("status") != "running" and not reopened:
         if tracked is not None:
             supervisor.unregister_worker(root, worker_id)
         return False
@@ -1481,7 +1558,7 @@ async def _settle_tracked(dispatch: Mapping[str, Any], report: "_Report",
     for session_id in dict.fromkeys((root, owner)):
         task_registry.complete_task(
             session_id, worker_id, status, summary=summary,
-            reason=USER_STOP_REASON if report.status == "stopped" else None,
+            reason=USER_STOP_REASON if report.status == "stopped" else reason,
             report_path=report_path, report_chars=len(report.report))
     supervisor.unregister_worker(root, worker_id)
     return True
@@ -1525,18 +1602,40 @@ def _mirrored_states(worker_ids: List[str]) -> Dict[str, Optional[str]]:
     return {worker_id: (rows.get(worker_id) or {}).get("state") for worker_id in worker_ids}
 
 
-async def check_targets() -> int:
+def _quiet_seconds(since: Optional[str], now: Any) -> float:
+    """How long a target has been quiet as this process saw it (0 when unknown)."""
+    from datetime import datetime, timezone
+
+    try:
+        moment = datetime.fromisoformat(str(since))
+    except ValueError:
+        return 0.0
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    floor = _tracking_started or now
+    return (now - max(moment, floor)).total_seconds()
+
+
+async def check_targets(now: Optional[Any] = None) -> int:
     """Ask each target about the children it runs for this worker.
 
     A target that answers clears ``unreachable_since`` and records each
     child's state as it reports it; one that cannot be reached keeps the first
     time it went quiet. The registry records show the worker's state and that
-    time; their status stays ``running`` until the report arrives (the notice
-    after a long silence is S12). Returns how many children are unreachable.
+    time; their status stays ``running`` until the report arrives, or until
+    the target has been quiet for :data:`OFFLINE_NOTICE_SECONDS`
+    (:func:`notice_offline`). ``now`` (an aware datetime) is for tests.
+    Returns how many children are unreachable.
     """
+    from datetime import datetime, timezone
+
     from app.core.task_registry import task_registry
     from app.db import remote_tasks
 
+    global _tracking_started
+    now = now or datetime.now(timezone.utc)
+    if _tracking_started is None:
+        _tracking_started = now
     rows = await asyncio.to_thread(remote_tasks.tracked_dispatches)
     by_target: Dict[str, List[Dict[str, Any]]] = {}
     for row in rows:
@@ -1560,7 +1659,73 @@ async def check_targets() -> int:
                     task_registry.update_remote_status(
                         session_id, worker_id, worker_state=mirrored.get(worker_id),
                         unreachable_since=since.get(worker_id))
+                if (worker_id in since and not row.get("offline_notice_at")
+                        and _quiet_seconds(since[worker_id], now) >= OFFLINE_NOTICE_SECONDS):
+                    try:
+                        await notice_offline(row, since[worker_id])
+                    except Exception:  # noqa: BLE001 — one child never blocks the others
+                        logger.warning("remote_task: offline notice for %s failed", worker_id,
+                                       exc_info=True)
     return quiet
+
+
+def _offline_text(worker_name: str, since: str) -> str:
+    """The caller's notice that it stopped waiting for a quiet worker."""
+    from datetime import datetime
+
+    try:
+        when = datetime.fromisoformat(since).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        when = since
+    minutes = OFFLINE_NOTICE_SECONDS // 60
+    return (
+        f"{worker_name} has not answered for {minutes} minutes (since {when}), so this stopped "
+        "waiting for the subagent. It may still be running there.\n\n"
+        f"If {worker_name} comes back and the subagent finishes, its report still arrives here as "
+        f"its own notification. Until then a message to it cannot be delivered, and TaskGet shows "
+        f"when {worker_name} answers again. Carry on without its result, or redo that work here "
+        "if you need it now.")
+
+
+async def notice_offline(dispatch: Mapping[str, Any], since: str) -> bool:
+    """Tell the caller once that a child's worker has been quiet too long.
+
+    The caller stops waiting: the record settles as an error (reason
+    :data:`OFFLINE_REASON`), the card ends, open approval prompts for the
+    child are withdrawn here, a Swarm item that launched it ends as failed,
+    and the caller wakes with the notice. Nothing is sent to the target, which
+    may still be running the child: its report is still accepted later and
+    wakes the caller again (``handle_task_report``), a message to it is
+    refused with a plain reason while the worker stays away, and its spend is
+    still collected when it is back (``assistant_limits.refresh_remote``).
+    True when this call sent the notice.
+    """
+    from app.core import remote_task_approvals, turn_scheduler
+    from app.db import database, remote_tasks
+
+    worker_id = dispatch["worker_session_id"]
+    async with _tracking_lock(worker_id):
+        claimed = await asyncio.to_thread(remote_tasks.claim_offline_notice, worker_id)
+        if claimed is None:
+            return False
+        root, owner = claimed["root_session_id"], claimed["owner_session_id"]
+        name = worker_display_name(claimed["target_device_id"])
+        text = _offline_text(name, since)
+        logger.warning("remote_task: %s quiet since %s; told %s to stop waiting for %s",
+                       name, since, owner, worker_id)
+        await asyncio.to_thread(remote_task_approvals.drop_proxies, root, worker_id)
+        notice = _Report(worker_id, "", "failed", text, False, [], dict(claimed), name)
+        settled = await _settle_tracked(claimed, notice, None, reason=OFFLINE_REASON)
+        _finish_swarm_item(worker_id, "failed", text)
+        if not settled or await asyncio.to_thread(database.get_session, owner) is None:
+            return True
+        frame = {"task_id": worker_id, "status": _WAKE_STATUS["failed"],
+                 "tool_use_id": claimed.get("tool_use_id") or worker_id, "summary": text}
+        if await asyncio.to_thread(remote_tasks.past_completions, worker_id):
+            # A resumed run: the first report already used the task's latch.
+            frame["agent_message_turn_id"] = f"offline:{since}"
+        await turn_scheduler.on_remote_task_terminal(owner, frame)
+        return True
 
 
 async def tracking_loop() -> None:
@@ -1971,6 +2136,21 @@ def _message_refusal(exc: Exception, *, who: str, where: str) -> str:
             "was not delivered; send it again when that worker is back.")
 
 
+def _offline_message_refusal(who: str, where: str, dispatch: Mapping[str, Any]) -> str:
+    """A message to a child whose worker is still away after the offline notice."""
+    from datetime import datetime
+
+    since = dispatch.get("unreachable_since")
+    try:
+        when = f" since {datetime.fromisoformat(since).strftime('%Y-%m-%d %H:%M UTC')}" if since else ""
+    except ValueError:
+        when = ""
+    return (f"Could not deliver to {who}: {where} has not answered{when}, and you were already told "
+            "this conversation stopped waiting for it. The message was not delivered. The subagent "
+            "may still be running there; if it finishes, its report still comes back here. Send the "
+            f"message again when {where} is back (TaskGet shows when it answers).")
+
+
 def _invalid_answer(who: str, where: str) -> Dict[str, Any]:
     return {"text": (f"Could not confirm delivery to {who}: {where} gave an invalid answer. It may "
                      "have arrived; do not send it again until you have checked."), "is_error": True}
@@ -1983,9 +2163,11 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
     Same meaning as for a local child: a running child takes it at its next
     tool result, a parked one when it next wakes (``urgent`` wakes it), and a
     finished one is resumed over its own transcript, its new report coming
-    back through ``task-report``. A stopped child refuses. Returns
-    ``{"text", "is_error"}`` for the tool result; "queued" is never reported
-    as delivered.
+    back through ``task-report``. A stopped child refuses. A child whose
+    worker the caller was told is away (:func:`notice_offline`) is still
+    tried, since the worker may be back; while it stays away the answer says
+    so in plain words. Returns ``{"text", "is_error"}`` for the tool result;
+    "queued" is never reported as delivered.
     """
     from app.core import agent_messaging
     from app.core.task_registry import task_registry
@@ -2022,6 +2204,11 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
     try:
         answer = await _send_message(dispatch["target_device_id"], body)
     except Exception as exc:  # noqa: BLE001 — refused or unreachable: say which
+        from app.network import control
+
+        if (dispatch.get("offline_notice_at") and isinstance(exc, control.RunnerUnreachable)
+                and MAY_HAVE_APPLIED not in str(exc)):
+            return {"text": _offline_message_refusal(who, where, dispatch), "is_error": True}
         return {"text": _message_refusal(exc, who=who, where=where), "is_error": True}
     status = answer.get("status") if isinstance(answer, dict) else None
     if status == RESUMED:
