@@ -402,11 +402,46 @@ def test_preview_retains_reads_and_chat_mutations_but_not_admin_authority(app, p
     client.cookies.set(preview_access.COOKIE_NAME, preview_access.mint(SESSION))
     assert client.get("/api/v1/sessions").status_code == 200
     assert client.post("/api/v1/sessions/abc/messages", headers={"Origin": "http://10.0.0.135:18090"}).status_code == 200
-    request = _request("/api/v1/settings/test-only", cookies={preview_access.COOKIE_NAME: preview_access.mint(SESSION)},
-                       headers=_VITE if proxied else {})
-    if proxied:
-        with pytest.raises(HTTPException):
-            require_admin(request)
-    else:
-        assert require_admin(request) == "local-owner"
+    cookies = {preview_access.COOKIE_NAME: preview_access.mint(SESSION)}
+    request = _request("/api/v1/settings/test-only", cookies=cookies, headers=_VITE if proxied else {})
+    # Owner-only pages can be READ on the grant alone ("what the local owner
+    # has for reading"), so a proxied or preview-listener visit renders them.
+    assert require_admin(request) == ("preview:" + SESSION if proxied else "local-owner")
     assert request.state.preview_grant.session_id == SESSION
+    # ...but the grant alone never changes one, under any prefix.
+    for path in ("/api/v1/settings/test-only", "/api/v1/assistant/limits"):
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            change = _request(path, method, cookies=cookies,
+                              headers={**(_VITE if proxied else {}), "Origin": "http://10.0.0.135:8000"})
+            if proxied or path.startswith(preview_access.MUTATION_DENY_PREFIXES):
+                with pytest.raises(HTTPException) as refused:
+                    require_admin(change)
+                assert refused.value.status_code == 403
+            else:
+                # A direct LAN owner keeps its own authority outside the ceiling.
+                assert require_admin(change) == "local-owner"
+
+
+@pytest.mark.parametrize("method,admitted", [("GET", True), ("HEAD", True), ("POST", False), ("PUT", False),
+                                             ("PATCH", False), ("DELETE", False)])
+def test_preview_listener_reads_owner_pages_but_never_changes_them(method, admitted):
+    """On the preview listener the grant is the browser's only credential:
+    the Assistant and Settings pages must render, and nothing there may be
+    changed from the browser."""
+    from fastapi import HTTPException
+
+    from app.api.auth import require_admin
+
+    cookies = {preview_access.COOKIE_NAME: preview_access.mint(SESSION)}
+    request = _request("/api/v1/assistant", method, port=8002, ingress="preview", peer="172.17.0.2",
+                       cookies=cookies, headers={"Origin": "http://10.0.0.135:8002"})
+    if admitted:
+        assert require_admin(request) == "preview:" + SESSION
+        assert request.state.is_admin is True and request.state.api_user is None
+    else:
+        with pytest.raises(HTTPException) as refused:
+            require_admin(request)
+        assert refused.value.status_code == 403
+    # Without the cookie the same visit is refused outright.
+    with pytest.raises(HTTPException):
+        require_admin(_request("/api/v1/assistant", method, port=8002, ingress="preview", peer="172.17.0.2"))

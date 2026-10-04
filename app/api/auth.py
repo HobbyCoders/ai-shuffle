@@ -240,6 +240,21 @@ def require_auth(request: Request) -> str:
     )
 
 
+def _preview_may_read(request: Request) -> bool:
+    """Whether an agent preview may READ this owner-only route.
+
+    A preview grant is "what the local owner has for reading"
+    (app.core.preview_access). It used to see owner pages only because the
+    browser was also a same-host peer on the local listener; on the preview
+    listener the grant is all it has, and without this the Assistant and
+    Settings pages render as "Owner access required". Reads only: a preview
+    never changes an owner-only route, whichever prefix it lives under.
+    """
+    if getattr(request, 'method', 'GET') not in ('GET', 'HEAD', 'OPTIONS'):
+        return False
+    return preview_access.grant(request) is not None
+
+
 def require_admin(request: Request) -> str:
     """Require the install administrator or its live-authorized managed owner.
 
@@ -261,6 +276,10 @@ def require_admin(request: Request) -> str:
             request.state.is_admin = True
             request.state.api_user = None
             return candidate
+        # A stale cookie from another install on this host confers nothing and
+        # must not shadow this request's own preview read (#1542).
+        if _preview_may_read(request):
+            return _admit_preview(request, preview_access.grant(request))
         raise HTTPException(403, 'Owner access required')
 
     if owner_auth.local_access(request):
@@ -270,6 +289,8 @@ def require_admin(request: Request) -> str:
         request.state.api_user = None
         request.state.auth_token = 'local-owner'
         return 'local-owner'
+    if _preview_may_read(request):
+        return _admit_preview(request, preview_access.grant(request))
     raise HTTPException(status_code=403, detail='Owner access required')
 
 
