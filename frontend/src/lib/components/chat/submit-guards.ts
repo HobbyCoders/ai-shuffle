@@ -112,3 +112,12 @@ export function sendButtonState(s: SendButtonInput): { disabled: boolean; title:
 	if (!s.hasContent) return { disabled: true, title: 'Type a message to send' };
 	return { disabled: false, title: s.autoBranch ? 'Branch will be auto-created from your message' : 'Send message' };
 }
+
+/**
+ * The lane whose project rules a composer follows. The assistant's home is
+ * stored as a code session, but it never has a project and shows no picker,
+ * so it follows the chat lane: sends and attachments must not ask for one.
+ */
+export function projectRulesLane(mode: SessionMode | undefined, assistantHome: boolean): SessionMode {
+	return assistantHome ? 'chat' : (mode ?? 'code');
+}

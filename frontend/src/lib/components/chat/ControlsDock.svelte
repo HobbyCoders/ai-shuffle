@@ -37,7 +37,7 @@
 	import { getVoiceSessionConfig, loadVoiceSettings, usesDelegation, voiceModelLabel, type VoiceOptions } from '$lib/api/voice';
 	import { watchResources } from '$lib/services/watch-resources';
 	import { anyCredential } from '$lib/stores/auth.svelte';
-	import { NO_CREDENTIAL_REASON } from './submit-guards';
+	import { NO_CREDENTIAL_REASON, projectRulesLane } from './submit-guards';
 	import ContextUsageBar from './ContextUsageBar.svelte';
 	import EffortPopoverCard from './EffortPopoverCard.svelte';
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
@@ -176,6 +176,8 @@
 	// Chat and voice are projectless, web-only lanes with a fixed tool surface
 	// (decided server-side), so there is no access to grant.
 	const isCodeLane = $derived($activeSession.mode !== 'chat'); // voice shares code controls
+	// The assistant's home has no project by construction; see projectRulesLane.
+	const projectLane = $derived(projectRulesLane($activeSession.mode, assistantMode));
 	// Attach survives into the chat lane. Its uploads skip the project endpoint
 	// for a shared workspace directory, and the chat ceiling carries a `Read`
 	// scoped to that directory, so an attached file is genuinely readable there.
@@ -191,7 +193,7 @@
 	});
 	const attachDisabled = $derived(
 		!$anyCredential || isUploading || !!attachmentBlockReason(
-			$activeSession.project, $activeSession.projectV2Id, $activeSession.mode, $activeSession.sessionId
+			$activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId
 		)
 	);
 
@@ -584,7 +586,7 @@
 				: (attachmentBlockReason(
 						$activeSession.project,
 						$activeSession.projectV2Id,
-						$activeSession.mode,
+						projectLane,
 						$activeSession.sessionId
 					) ?? 'Attach file')}
 		>

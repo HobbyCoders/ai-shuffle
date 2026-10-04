@@ -36,7 +36,7 @@
 
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import { notify } from '$lib/stores/notifications';
-	import { evaluateSubmitGuards, sendButtonState } from './submit-guards';
+	import { evaluateSubmitGuards, projectRulesLane, sendButtonState } from './submit-guards';
 	import { attachmentBlockReason } from './attach-disable';
 	// Collapse / gesture / sheet behaviour is the mobile app's; the web build
 	// gets the desktop no-op defaults (see composer-shell.ts).
@@ -85,6 +85,9 @@
 	// once one is open, and only falls back to the sidepanel's pick on a fresh
 	// compose screen.
 	const composerMode = $derived($activeSession.mode);
+	// Which lane's project rules apply. The assistant's home is stored as a
+	// code session but has no project by construction, like the chat lane.
+	const projectLane = $derived(projectRulesLane(composerMode, assistantMode));
 	// Remote runtime summaries are display/control truth, not transcript streaming
 	// state. A parked turn can also retain background work that Stop must reach.
 	const stoppableWork = $derived(hasStoppableWork(
@@ -408,7 +411,7 @@
 	/** Take a large paste as a .txt attachment; false keeps it inline. */
 	function handleLargePaste(text: string): boolean {
 		if (!attachSupported || !$anyCredential || isUploading) return false;
-		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, composerMode, $activeSession.sessionId)) return false;
+		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)) return false;
 		const file = pastedTextFile(text);
 		isUploading = true;
 		uploadComposerFile(file)
@@ -697,7 +700,7 @@
 	// Handle form submission
 	async function handleSubmit() {
 		if (!ownsComposer() || heldForCatalog) return;
-		if (composerMode !== 'chat' && !catalogHoldWaived && activeSession.composerAwaitingProjectCatalog) {
+		if (projectLane !== 'chat' && !catalogHoldWaived && activeSession.composerAwaitingProjectCatalog) {
 			if (!(await holdForProjectCatalog())) return;
 		}
 		// Get serialized message from editor (includes inline @path references)
@@ -715,7 +718,7 @@
 			hasProject: !!$activeSession.project || !!$activeSession.projectV2Id,
 			// The project guard is a code-lane requirement; the projectless lanes
 			// would otherwise refuse every send.
-			mode: composerMode
+			mode: projectLane
 		});
 		if (block) {
 			if (block.notice) notify(block.notice.message, { severity: block.notice.tone });
@@ -1027,10 +1030,10 @@
 	 * two can never drift onto different targets.
 	 */
 	function uploadComposerFile(file: File): Promise<FileUploadResponse> {
-		if (composerMode !== 'chat' && !$activeSession.project && $activeSession.sessionId && $activeSession.projectV2Id) {
+		if (projectLane !== 'chat' && !$activeSession.project && $activeSession.sessionId && $activeSession.projectV2Id) {
 			return api.uploadFile(`/sessions/${encodeURIComponent($activeSession.sessionId)}/upload`, file);
 		}
-		if (composerMode === 'chat') {
+		if (projectLane === 'chat') {
 			return api.uploadFile('/workspace/upload', file, undefined, undefined, CHAT_UPLOADS_DIRNAME);
 		}
 		return api.uploadFile(
@@ -1045,7 +1048,7 @@
 		const block = attachmentBlockReason(
 			$activeSession.project,
 			$activeSession.projectV2Id,
-			composerMode,
+			projectLane,
 			$activeSession.sessionId
 		);
 		if (block) {
@@ -1061,7 +1064,7 @@
 		if (!files || files.length === 0) return;
 		// A code-lane upload needs the project in the URL; a chat-lane one has no
 		// project by construction and must not be turned away for missing it.
-		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, composerMode, $activeSession.sessionId)) return;
+		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)) return;
 
 		isUploading = true;
 		try {
@@ -1164,7 +1167,7 @@
 		const dropBlock = attachmentBlockReason(
 			$activeSession.project,
 			$activeSession.projectV2Id,
-			composerMode,
+			projectLane,
 			$activeSession.sessionId
 		);
 		if (dropBlock) {

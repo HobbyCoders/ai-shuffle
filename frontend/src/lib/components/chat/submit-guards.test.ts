@@ -9,7 +9,8 @@
  * composer stays silent.
  */
 import { describe, it, expect } from 'vitest';
-import { evaluateSubmitGuards, sendButtonState, NO_CREDENTIAL_REASON, type SubmitGuardInput } from './submit-guards';
+import { evaluateSubmitGuards, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON, type SubmitGuardInput } from './submit-guards';
+import { attachmentBlockReason } from './attach-disable';
 
 /** A fully-ready send: prompt typed, nothing uploading, profile + project set. */
 function ready(over: Partial<SubmitGuardInput> = {}): SubmitGuardInput {
@@ -139,5 +140,29 @@ describe('sendButtonState', () => {
 
 	it('puts the missing credential first, since nothing else can be fixed without it', () => {
 		expect(sendButtonState({ ...ready, hasCredential: false, hasContent: false, isUploading: true }).title).toBe(NO_CREDENTIAL_REASON);
+	});
+});
+
+describe('projectRulesLane', () => {
+	const home: SubmitGuardInput = {
+		hasPrompt: true, isUploading: false, isCreatingWorktree: false,
+		hasProfile: true, hasAnyProfile: true, hasProject: false
+	};
+
+	it("lets the assistant's home send and attach without a project", () => {
+		// The home is stored as a code session with no project. Read as a code
+		// lane it refused every send with "Select a project first."
+		expect(evaluateSubmitGuards({ ...home, mode: 'code' })!.notice?.message).toBe('Select a project first.');
+		const lane = projectRulesLane('code', true);
+		expect(lane).toBe('chat');
+		expect(evaluateSubmitGuards({ ...home, mode: lane })).toBeNull();
+		expect(attachmentBlockReason(null, null, lane, 'home-session')).toBeNull();
+	});
+
+	it('leaves ordinary sessions on their own lane', () => {
+		expect(projectRulesLane('code', false)).toBe('code');
+		expect(projectRulesLane('chat', false)).toBe('chat');
+		expect(projectRulesLane(undefined, false)).toBe('code');
+		expect(evaluateSubmitGuards({ ...home, mode: projectRulesLane('code', false) })).not.toBeNull();
 	});
 });

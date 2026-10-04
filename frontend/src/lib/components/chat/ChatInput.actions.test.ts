@@ -9,12 +9,16 @@ const streaming = source.split('{:else if stoppableWork}')[1].split('\n\t\t\t\t\
 describe('streaming composer actions', () => {
 	it('routes existing remote-only attachments to session staging for picker and drop', () => {
 		expect(source).toContain('`/sessions/${encodeURIComponent($activeSession.sessionId)}/upload`');
-		expect(source).toContain('attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, composerMode, $activeSession.sessionId)');
-		const gates = source.match(/composerMode,\r?\n\s*\$activeSession.sessionId\r?\n\s*\);/g); // \r? keeps CRLF checkouts matching
+		expect(source).toContain('attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)');
+		const gates = source.match(/projectLane,\r?\n\s*\$activeSession.sessionId\r?\n\s*\);/g); // \r? keeps CRLF checkouts matching
 		expect(gates).toHaveLength(2);
 		const dock = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/ControlsDock.svelte'), 'utf8');
 		expect(dock).not.toContain('isRemoteOnlyCompose');
-		expect(dock).toContain('$activeSession.mode, $activeSession.sessionId');
+		expect(dock).toContain('projectLane, $activeSession.sessionId');
+		// The assistant's home is projectless: both components take their
+		// project rules from the same lane, not from the stored session mode.
+		expect(source).toContain('projectRulesLane(composerMode, assistantMode)');
+		expect(dock).toContain('projectRulesLane($activeSession.mode, assistantMode)');
 		const sender = readFileSync(resolve(process.cwd(), 'src/lib/stores/session/message-sender.ts'), 'utf8');
 		expect(sender).toContain('upload_paths: (!remoteOnly || !!_state.sessionId)');
 	});
