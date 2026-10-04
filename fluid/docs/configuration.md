@@ -458,6 +458,21 @@ What the child CLI is given, and what it is not:
   only in that case; the mod reads them once at session start and unsets
   them, so the commands the model runs do not inherit them. Off a
   subscription the CLI measures no windows and nothing is posted.
+- With the mod loaded, every compaction of the main conversation (`/compact`,
+  automatic, plugin-started or precomputed) adds one fixed line to what the
+  CLI's summarizer is told, after any text typed after `/compact`: "AI Shuffle
+  puts its own reminders back after this summary: saved memory, the
+  environment note, Away mode and the session ledger. Do not restate them.
+  Quote the user's most recent request word for word, and keep open
+  questions, decisions and promised follow-ups." It has no setting of its own;
+  `FLUID_CLAUDE_MOD=false` turns it off with the rest of the mod. The CLI sends
+  these instructions in the summarizer request's last message, after the
+  conversation it reuses as a cached prefix, so the line changes no cached
+  prefix, and it is the same bytes every time. A subagent's compaction is left
+  alone, the mod never vetoes or answers a compaction itself, and the CLI's
+  result passes through unchanged. The settings `PreCompact` hook (and so a
+  `PreCompact` subscriber on the HookBus) sees the line in
+  `custom_instructions`.
 - A `tool_policy` that raises (or returns an awaitable that raises) denies the
   call.
 

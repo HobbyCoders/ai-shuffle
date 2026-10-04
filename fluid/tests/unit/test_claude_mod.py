@@ -69,7 +69,7 @@ def test_the_shipped_mod_is_a_complete_plugin() -> None:
     assert f"{manifest['name']}@inline" == CLAUDE_MOD_PLUGIN
     hooks = json.loads((root / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     assert hooks == {"modules": ["./register.ts"]}
-    for name in ("register.ts", "steer.ts", "usage.ts"):
+    for name in ("register.ts", "steer.ts", "usage.ts", "compact.ts"):
         assert (root / "hooks" / name).is_file()
     # Nothing the CLI generates is ever committed into the shipped folder.
     assert not (root / ".claude-plugin" / "types").exists()
@@ -91,6 +91,25 @@ def test_the_mod_never_asks_for_credentials() -> None:
     assert set(re.findall(r"\$\.env\.(?:get|set)\('([A-Z_]+)'", source)) == {
         CLAUDE_MOD_URL_ENV, CLAUDE_MOD_TOKEN_ENV, CLAUDE_MOD_SOCKET_ENV,
     }
+
+
+def test_the_summarizer_line_is_fixed_text_and_calls_nothing() -> None:
+    hooks = Path(CLAUDE_MOD_SOURCE) / "hooks"
+    compact = (hooks / "compact.ts").read_text(encoding="utf-8")
+    register = (hooks / "register.ts").read_text(encoding="utf-8")
+    # The line is a constant: no `$` call, no template that could carry
+    # session text, so every compaction gets the same bytes.
+    assert "$." not in compact
+    note = re.search(r"export const FLUID_SUMMARY_NOTE =\n((?:\s+'[^\n]*\n)+)", compact)
+    assert note is not None and "${" not in note.group(1) and "`" not in note.group(1)
+    # Bound once, for the main conversation only, and always handed on with
+    # next(): the hook never answers or vetoes a compaction itself.
+    assert register.count("on('session.compact'") == 1
+    block = register[register.index("on('session.compact'"):]
+    block = block[:block.index("\n  })\n") + 5]
+    assert "e.agentId !== undefined) return next(e)" in block
+    assert "skip" not in block
+    assert re.search(r"\$\.", block.replace("($, e, next)", "")) is None
 
 
 # ─── The gate and the argv ───────────────────────────────────────────────────
@@ -136,6 +155,7 @@ def test_a_cli_with_mods_gets_a_session_copy_of_the_mod(tmp_path, version) -> No
     assert (staged / "hooks" / "register.ts").is_file()
     assert (staged / "hooks" / "steer.ts").is_file()
     assert (staged / "hooks" / "usage.ts").is_file()
+    assert (staged / "hooks" / "compact.ts").is_file()
     assert not (staged / "tests").exists()
 
 

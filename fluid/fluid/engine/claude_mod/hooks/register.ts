@@ -3,10 +3,12 @@
 // newer. It keeps the model on the dedicated file tools: the bash-first steer
 // never reaches the model, and a trimmed Bash description gets its pointer to
 // Read, Grep, Glob, Edit and Write back. It also reports the plan usage the
-// CLI measures to AI Shuffle over the session's loopback bridge (usage.ts).
-// It reads no credentials and never calls the API; a hook that fails is
-// skipped and the CLI's own behaviour goes on, as without the mod.
+// CLI measures to AI Shuffle over the session's loopback bridge (usage.ts),
+// and tells the summarizer what AI Shuffle puts back after a compaction
+// (compact.ts). It reads no credentials and never calls the API; a hook that
+// fails is skipped and the CLI's own behaviour goes on, as without the mod.
 import type { Register } from 'claude-code'
+import { withFluidNote } from './compact.ts'
 import { withDedicatedToolGuidance, withoutBashFirstSteer } from './steer.ts'
 import { POST_TIMEOUT_MS, type UsageBridge, bridgeFrom, shouldPost, usageReport } from './usage.ts'
 
@@ -20,6 +22,21 @@ export const register: Register = (on) => {
   on('tool.describe', { tool: 'Bash' }, async ($, e, next) => {
     const answer = await next(e)
     return { ...answer, description: withDedicatedToolGuidance(answer.description) }
+  })
+
+  // The main conversation's compactions, every trigger: the summarizer is
+  // told what AI Shuffle puts back. A subagent's compaction, the result and a
+  // skip pass through untouched; a note that cannot be built leaves the
+  // compaction as the CLI would run it.
+  on('session.compact', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    let instructions = e.instructions
+    try {
+      instructions = withFluidNote(e.instructions)
+    } catch {
+      // Unchanged.
+    }
+    return next(instructions === e.instructions ? e : { ...e, instructions })
   })
 
   // Usage reporting. The bridge is read once, then taken out of the
