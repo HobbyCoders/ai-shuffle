@@ -82,6 +82,25 @@ class TestUsageLimitsEndpoint:
         assert body["windows"][0]["observed_at"] == 1_700_000_000_000
         assert body["snapshots"][0]["windows"][0]["observed_at"] == 1_600_000_000_000
 
+    def test_windows_name_the_route_that_reported_them(self):
+        snapshot = {
+            "windows": [
+                {"type": "five_hour", "utilization": 12.0, "source": "claude_mod"},
+                # Rows persisted before routes were recorded carry none.
+                {"type": "seven_day", "utilization": 50.0},
+            ],
+            "fetched_at": 1_700_000_100.0, "available": True, "generation": 1,
+            "snapshots": [{"instance_id": "local-1", "windows": [
+                {"type": "seven_day", "utilization": 50.0, "source": "cli_stream"}],
+                "fetched_at": 1_700_000_100_000, "available": True}],
+            "self_instance_id": "local-1",
+        }
+        with patch("app.api.usage.usage_limits_monitor") as mon:
+            mon.get_cluster_snapshot = AsyncMock(return_value=snapshot)
+            body = _client().get("/api/v1/usage/limits").json()
+        assert [w["source"] for w in body["windows"]] == ["claude_mod", None]
+        assert body["snapshots"][0]["windows"][0]["source"] == "cli_stream"
+
     def test_accepts_int_epoch_resets_at(self):
         """Newer Claude CLI usage payloads carry ``resets_at`` as int epoch
         seconds; cross-install rows persisted that way can't be retro-fixed, so

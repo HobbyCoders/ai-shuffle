@@ -514,6 +514,8 @@ class HarnessAdapter(ProviderAdapter):
             # raises ClaudeCliMissingError here, before any engine is built.
             claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
             delegated_blocked = _delegated_disallowed(options)
+            from app.core.usage_limits import claude_mod_usage_sink
+
             self._engine = DelegatedLoop(
                 store=store,
                 model=options.model,
@@ -599,6 +601,10 @@ class HarnessAdapter(ProviderAdapter):
                 # AI Shuffle's Claude Code mod (--plugin-dir on CLI 2.1.287+);
                 # FLUID_CLAUDE_MOD=false turns it off.
                 claude_mod=settings.fluid_claude_mod,
+                # The plan usage the mod reports after each turn goes into
+                # the same Claude usage store the stream's rate_limit events
+                # feed (usage panel, peer publication, broadcast).
+                plan_usage_sink=claude_mod_usage_sink,
             )
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)

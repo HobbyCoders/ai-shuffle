@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,10 @@ import fluid.engine.delegated as delegated_mod
 from fluid.engine.delegated import (
     CLAUDE_MOD_PLUGIN,
     CLAUDE_MOD_SINCE,
+    CLAUDE_MOD_SOCKET_ENV,
     CLAUDE_MOD_SOURCE,
+    CLAUDE_MOD_TOKEN_ENV,
+    CLAUDE_MOD_URL_ENV,
     DelegatedLoop,
     claude_mod_enabled,
 )
@@ -65,7 +69,7 @@ def test_the_shipped_mod_is_a_complete_plugin() -> None:
     assert f"{manifest['name']}@inline" == CLAUDE_MOD_PLUGIN
     hooks = json.loads((root / "hooks" / "hooks.json").read_text(encoding="utf-8"))
     assert hooks == {"modules": ["./register.ts"]}
-    for name in ("register.ts", "steer.ts"):
+    for name in ("register.ts", "steer.ts", "usage.ts"):
         assert (root / "hooks" / name).is_file()
     # Nothing the CLI generates is ever committed into the shipped folder.
     assert not (root / ".claude-plugin" / "types").exists()
@@ -76,8 +80,17 @@ def test_the_mod_never_asks_for_credentials() -> None:
     source = "\n".join(
         p.read_text(encoding="utf-8") for p in (Path(CLAUDE_MOD_SOURCE) / "hooks").glob("*.ts")
     )
-    for call in ("$.session.authorize", "$.http", "$.env", "$.process", "$.fs", "$.model"):
+    for call in ("$.session.authorize", "$.process", "$.fs", "$.model", "$.store"):
         assert call not in source
+    # Its one network call is the usage post to the loopback bridge, and no
+    # request it makes carries the subscription credential (``auth:``).
+    assert source.count("$.http") == 1
+    assert re.search(r"\$\.http\s*\.fetch\(target\.url", source)
+    assert re.search(r"\bauth\s*:", source) is None
+    # It reads and clears only the three bridge variables DelegatedLoop sets.
+    assert set(re.findall(r"\$\.env\.(?:get|set)\('([A-Z_]+)'", source)) == {
+        CLAUDE_MOD_URL_ENV, CLAUDE_MOD_TOKEN_ENV, CLAUDE_MOD_SOCKET_ENV,
+    }
 
 
 # ─── The gate and the argv ───────────────────────────────────────────────────
@@ -122,6 +135,7 @@ def test_a_cli_with_mods_gets_a_session_copy_of_the_mod(tmp_path, version) -> No
     assert (staged / "hooks" / "hooks.json").is_file()
     assert (staged / "hooks" / "register.ts").is_file()
     assert (staged / "hooks" / "steer.ts").is_file()
+    assert (staged / "hooks" / "usage.ts").is_file()
     assert not (staged / "tests").exists()
 
 

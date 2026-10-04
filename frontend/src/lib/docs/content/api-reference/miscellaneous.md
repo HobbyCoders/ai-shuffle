@@ -108,7 +108,7 @@ Download the per-provider usage for `start_date`..`end_date` as CSV: one `day` r
 
 ### GET /api/v1/usage/limits
 
-Get the latest usage readings: the Claude windows the Claude CLI reported while it ran, and the last saved reading for each other provider that has one. A plain read never waits on a provider; rows that are due are refreshed in the background. Read again while `provider_refreshing` is `true` to get the new rows as they arrive.
+Get the latest usage readings: the Claude windows the Claude CLI reported while it ran (in its own stream, and after each turn through AI Shuffle's Claude Code mod), and the last saved reading for each other provider that has one. A plain read never waits on a provider; rows that are due are refreshed in the background. Read again while `provider_refreshing` is `true` to get the new rows as they arrive.
 
 Which providers get a row:
 
@@ -145,6 +145,7 @@ curl "http://localhost:8000/api/v1/usage/limits?refresh=true" \
 | Field | Description |
 |-------|-------------|
 | `windows[].observed_at` | Epoch ms when the Claude CLI last reported this window. Each window has its own, so an old window still shows its age after a newer event updates another one. A repeated identical reading moves it too; the shared copy other devices read is updated at most once a minute per window. A window the CLI reports as rejected counts as fully used even when the report has no utilization. The same field appears in `snapshots[].windows[]` |
+| `windows[].source` | Which route last reported this window: `cli_stream` (the rate-limit events in the CLI's stream, sent only when a window moves a whole point or its status changes) or `claude_mod` (AI Shuffle's Claude Code mod, after each turn and at most once a minute while a window holds still). The newer reading wins whichever route sent it. `null` on windows saved before this field existed. The same field appears in `snapshots[].windows[]` |
 | `providers` | The provider rows described above. `null` when the cached rows could not be read; keep the rows you already show instead of clearing them |
 | `providers[].status` | `fresh` (read within the provider's interval), `stale` (older, or the last attempt failed), `unavailable` (failed with no reading yet) or `never_fetched` |
 | `providers[].last_error_kind` | Why the last attempt failed: `billing_access_denied`, `missing_credentials`, `timeout`, `unavailable` or `unsupported`; `null` after a success. After `billing_access_denied` or `unsupported` the provider is not asked again until its key changes |

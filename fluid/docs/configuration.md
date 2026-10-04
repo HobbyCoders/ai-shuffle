@@ -443,6 +443,21 @@ What the child CLI is given, and what it is not:
   cannot load the mod still runs the turn; the init frame's plugin list says
   whether it loaded, and a steer the transcript check finds says whether the
   mod kept it from the model. `--setting-sources` does not affect the mod.
+- With the mod loaded and a `plan_usage_sink` (an async callable taking a
+  `PlanUsageReport`, as AI Shuffle passes), the mod also reports plan usage.
+  On `session.measure`, which the CLI fires after each main-thread turn and
+  when a rate-limit window moves a whole point, it posts each window's kind,
+  share used and reset time, and nothing else, to `POST /claude-mod/usage` on
+  the session's bridge socket: at once when a window moved, otherwise at most
+  once a minute, without holding the turn. That route takes its own
+  per-session token (it cannot call a tool, and the bridge token cannot post
+  to it), loopback peers only, and caps body size, header size and read time;
+  `fluid/engine/claude_mod_usage.py` is the report contract and bounds every
+  value. The CLI's env carries `FLUID_CLAUDE_MOD_URL`,
+  `FLUID_CLAUDE_MOD_SOCKET` (on a Unix socket) and `FLUID_CLAUDE_MOD_TOKEN`
+  only in that case; the mod reads them once at session start and unsets
+  them, so the commands the model runs do not inherit them. Off a
+  subscription the CLI measures no windows and nothing is posted.
 - A `tool_policy` that raises (or returns an awaitable that raises) denies the
   call.
 

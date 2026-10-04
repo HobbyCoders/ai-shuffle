@@ -1,12 +1,25 @@
 """
 Claude usage-limit monitor.
 
-AI Shuffle does not poll any Claude usage endpoint. The only Claude usage
-source is the ``rate_limit`` events the running CLI emits in its own stream (``claude_rate_limit_events``
-in ``app.core.usage_sources``): each one refines a single window, which this
-monitor keeps in memory, persists per install and broadcasts to connected
-clients as a ``usage_snapshot`` WebSocket event. The full picture lives on the
-user's own usage page (https://claude.ai/settings/usage), which the usage
+AI Shuffle does not poll any Claude usage endpoint. Claude usage comes from
+the running CLI alone (``claude_rate_limit_events`` in
+``app.core.usage_sources``), by two routes into this one monitor:
+
+* the ``rate_limit`` events the CLI emits in its own stream. Claude Code
+  sends one only when a window moves a whole point or its limit status
+  changes, so a window that holds still is never reported again;
+* AI Shuffle's Claude Code mod (``fluid/engine/claude_mod``), which posts
+  every rate-limit window the CLI measured after each main-thread turn and
+  when a window moves (``apply_mod_report_and_broadcast``). That re-dates
+  windows that held still, so they do not read as stale while a session runs.
+
+Each window records which route reported it (``source``) and when
+(``observed_at``); a reading older than the one on file is dropped, whatever
+its route. The monitor keeps the windows in memory, persists them per install
+and broadcasts them to connected clients as a ``usage_snapshot`` WebSocket
+event. With no Claude session running nothing reports, and the last reading
+stays on file (rolled over at each reset, below). The full picture lives on
+the user's own usage page (https://claude.ai/settings/usage), which the usage
 widget links to.
 
 Windows key on the CLI's ``rate_limit_type`` strings (``five_hour``,
@@ -55,6 +68,10 @@ _REJECTED = "rejected"
 
 # Network collection carrying each device's ``usage_snapshots`` row.
 NETWORK_COLLECTION = "usage_snapshots"
+
+# Each window's ``source``: the route that last reported it.
+SOURCE_CLI_STREAM = "cli_stream"
+SOURCE_CLAUDE_MOD = "claude_mod"
 
 
 def reset_epoch_seconds(resets_at: Any) -> Optional[float]:
@@ -137,6 +154,9 @@ class UsageLimitsMonitor:
         self._observed_due: Optional[str] = None
         # This install's network device id (installs registry), when known.
         self._self_device_id: Optional[str] = None
+        # Set by ``apply_mod_report`` when an unchanged report re-dated the
+        # windows and the shared row is due the new dates.
+        self._mod_persist_due: bool = False
 
     def current_generation(self) -> int:
         return self._generation
@@ -466,7 +486,7 @@ class UsageLimitsMonitor:
         # Each event observes one window; ``observed_at`` (epoch ms) lets
         # clients tell a fresh window from one last reported long ago.
         updated = {"type": rate_limit_type, "utilization": util, "resets_at": resets_at,
-                   "observed_at": int(now * 1000)}
+                   "observed_at": int(now * 1000), "source": SOURCE_CLI_STREAM}
         replaced = False
         changed = True
         for i, w in enumerate(self._windows):
@@ -492,6 +512,92 @@ class UsageLimitsMonitor:
             return None
         self._generation = max(self._generation + 1, int(now))
         return self._snapshot()
+
+    def apply_mod_report(
+        self,
+        windows: List[Dict[str, Any]],
+        observed_at: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Apply the windows AI Shuffle's Claude Code mod reported (in-memory).
+
+        ``windows`` are ``{"kind", "percent_used", "resets_at"}`` as fluid's
+        ``parse_plan_usage_report`` bounded them (percent USED, 0-100 or
+        past 100 on a spend limit; reset in epoch seconds or None), measured
+        at ``observed_at`` (epoch seconds). A window already on file with a
+        later ``observed_at`` keeps its reading, whichever route reported it.
+
+        Returns the snapshot when a reading changed (persist + broadcast), else
+        None. An unchanged report still re-dates its windows in memory and, at
+        most once a minute, flags the shared row for the new dates
+        (``_mod_persist_due``). Does NOT persist or broadcast.
+        """
+        self._mod_persist_due = False
+        observed_ms = int(observed_at * 1000)
+        applied: List[str] = []
+        changed = False
+        for window in windows:
+            if not isinstance(window, dict):
+                continue
+            kind = window.get("kind")
+            used = window.get("percent_used")
+            if not isinstance(kind, str) or not kind:
+                continue
+            if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(used):
+                continue
+            resets_at = window.get("resets_at")
+            if isinstance(resets_at, bool) or not isinstance(resets_at, (int, type(None))):
+                resets_at = None
+            util = round(100.0 - min(100.0, max(0.0, float(used))), 1)
+            index = next((i for i, w in enumerate(self._windows) if w.get("type") == kind), None)
+            current = self._windows[index] if index is not None else None
+            if current is not None:
+                seen = current.get("observed_at")
+                if isinstance(seen, int) and seen > observed_ms:
+                    continue  # a newer reading is on file
+                if current.get("utilization") != util or current.get("resets_at") != resets_at:
+                    changed = True
+            else:
+                changed = True
+            updated = {"type": kind, "utilization": util, "resets_at": resets_at,
+                       "observed_at": observed_ms, "source": SOURCE_CLAUDE_MOD}
+            if index is None:
+                self._windows.append(updated)
+            else:
+                self._windows[index] = updated
+            applied.append(kind)
+        if not applied:
+            return None
+        self._available = True
+        self._fetched_at = max(self._fetched_at, observed_at)
+        if changed:
+            self._generation = max(self._generation + 1, int(time.time()))
+            return self._snapshot()
+        mono = time.monotonic()
+        if any(
+            self._observed_persisted.get(kind) is None
+            or mono - self._observed_persisted[kind] >= _OBSERVED_PERSIST_INTERVAL_SECONDS
+            for kind in applied
+        ):
+            for kind in applied:
+                self._observed_persisted[kind] = mono
+            self._mod_persist_due = True
+        return None
+
+    async def apply_mod_report_and_broadcast(
+        self, windows: List[Dict[str, Any]], observed_at: float,
+    ) -> None:
+        """Apply a mod report and, when it changed or re-dated the row, persist and broadcast.
+
+        The same store, row, peer publication and broadcast as the stream's
+        events (``apply_live_event_and_broadcast``).
+        """
+        await run_sync(self._seed_from_db)
+        snapshot = self.apply_mod_report(windows, observed_at)
+        due, self._mod_persist_due = self._mod_persist_due, False
+        if snapshot is None and not due:
+            return
+        await run_sync(self._persist_snapshot)
+        await self._broadcast(await run_sync(self._cluster_snapshot))
 
     async def _broadcast(self, snapshot: Dict[str, Any]) -> None:
         """Fan the snapshot out to all connected clients (best-effort)."""
@@ -575,6 +681,22 @@ class UsageLimitsMonitor:
         """A network peer's usage row landed here: show it on every open client."""
         self._cluster_cache = None
         await self._broadcast(await run_sync(self._cluster_snapshot))
+
+
+async def claude_mod_usage_sink(report: Any) -> None:
+    """Take a plan usage report from a delegated Claude session's mod.
+
+    ``report`` is fluid's ``PlanUsageReport``, already validated and bounded
+    by the bridge route that received it. Never raises into the bridge.
+    """
+    try:
+        windows = [
+            {"kind": w.kind, "percent_used": w.percent_used, "resets_at": w.resets_at}
+            for w in report.windows
+        ]
+        await usage_limits_monitor.apply_mod_report_and_broadcast(windows, report.measured_at)
+    except Exception as e:  # noqa: BLE001 — a usage write must never reach the turn
+        logger.debug("Claude mod usage report skipped: %s", e)
 
 
 def _network_self_device_id() -> Optional[str]:

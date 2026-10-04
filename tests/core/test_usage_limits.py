@@ -639,3 +639,168 @@ class TestNetworkCopy:
             snap = monitor._cluster_snapshot()
         assert snap["self_device_id"] is None
         assert snap["snapshots"][-1]["instance_id"] == settings.effective_instance_id
+
+
+# ---------------------------------------------------------------------------
+# Reports from AI Shuffle's Claude Code mod (apply_mod_report)
+# ---------------------------------------------------------------------------
+
+
+def _mod_window(kind, percent_used, resets_at=None):
+    return {"kind": kind, "percent_used": percent_used, "resets_at": resets_at}
+
+
+class TestClaudeModReport:
+    def test_report_lands_as_remaining_with_its_route_and_time(self, monitor):
+        now = time.time()
+        reset = int(now) + 4 * HOUR
+        snap = monitor.apply_mod_report(
+            [_mod_window("five_hour", 23.5, reset), _mod_window("seven_day", 7.0)], now)
+        assert snap is not None and snap["available"] is True
+        windows = _by_type(snap["windows"])
+        assert windows["five_hour"] == {
+            "type": "five_hour", "utilization": 76.5, "resets_at": reset,
+            "observed_at": int(now * 1000), "source": usage_limits.SOURCE_CLAUDE_MOD,
+        }
+        assert windows["seven_day"]["utilization"] == 93.0
+        assert windows["seven_day"]["resets_at"] is None
+        assert monitor._fetched_at == now
+
+    def test_spend_limit_past_100_reads_exhausted(self, monitor):
+        snap = monitor.apply_mod_report([_mod_window("five_hour", 140.0)], time.time())
+        assert snap["windows"][0]["utilization"] == 0.0
+
+    def test_stream_events_are_marked_with_their_route(self, monitor):
+        snap = monitor.apply_live_event("five_hour", 0.25, None)
+        assert snap["windows"][0]["source"] == usage_limits.SOURCE_CLI_STREAM
+
+    def test_newer_reading_wins_whichever_route(self, monitor):
+        now = time.time()
+        monitor.apply_mod_report([_mod_window("five_hour", 10.0)], now)
+        # The stream reports the same window afterwards: it replaces the mod's.
+        monitor.apply_live_event("five_hour", 0.30, None)
+        window = _by_type(monitor._windows)["five_hour"]
+        assert window["utilization"] == 70.0
+        assert window["source"] == usage_limits.SOURCE_CLI_STREAM
+        stream_observed = window["observed_at"]
+
+        # A mod report measured before that event arrives late: dropped.
+        generation = monitor.current_generation()
+        assert monitor.apply_mod_report([_mod_window("five_hour", 12.0)], now - 5) is None
+        assert _by_type(monitor._windows)["five_hour"]["observed_at"] == stream_observed
+        assert _by_type(monitor._windows)["five_hour"]["utilization"] == 70.0
+        assert monitor.current_generation() == generation
+
+        # A later one wins and names its route.
+        snap = monitor.apply_mod_report([_mod_window("five_hour", 31.0)], now + 5)
+        window = _by_type(snap["windows"])["five_hour"]
+        assert window["utilization"] == 69.0
+        assert window["source"] == usage_limits.SOURCE_CLAUDE_MOD
+        assert window["observed_at"] == int((now + 5) * 1000)
+
+    def test_unchanged_report_re_dates_and_flags_the_row_once_a_minute(self, monitor):
+        now = time.time()
+        assert monitor.apply_mod_report([_mod_window("five_hour", 10.0)], now) is not None
+        generation = monitor.current_generation()
+
+        # The first repeat after the full report is not due a write: the
+        # monitor only marks the time it last wrote, so seed that here.
+        monitor._observed_persisted["five_hour"] = time.monotonic()
+        assert monitor.apply_mod_report([_mod_window("five_hour", 10.0)], now + 30) is None
+        assert monitor._mod_persist_due is False
+        assert _by_type(monitor._windows)["five_hour"]["observed_at"] == int((now + 30) * 1000)
+        assert monitor.current_generation() == generation
+
+        # A minute on, the same reading is due the shared row's new date.
+        monitor._observed_persisted["five_hour"] -= 3600
+        assert monitor.apply_mod_report([_mod_window("five_hour", 10.0)], now + 90) is None
+        assert monitor._mod_persist_due is True
+        assert monitor.current_generation() == generation
+
+    @pytest.mark.parametrize("window", [
+        {"kind": "", "percent_used": 5.0},
+        {"kind": None, "percent_used": 5.0},
+        {"kind": "five_hour", "percent_used": True},
+        {"kind": "five_hour", "percent_used": float("nan")},
+        {"kind": "five_hour", "percent_used": "5"},
+        "five_hour",
+    ])
+    def test_malformed_windows_are_skipped(self, monitor, window):
+        assert monitor.apply_mod_report([window], time.time()) is None
+        assert monitor._windows == [] and monitor._available is False
+
+    def test_non_integer_reset_is_dropped_not_kept(self, monitor):
+        snap = monitor.apply_mod_report(
+            [{"kind": "five_hour", "percent_used": 5.0, "resets_at": "soon"}], time.time())
+        assert snap["windows"][0]["resets_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_report_persists_and_broadcasts_like_a_stream_event(self, monitor, mock_db):
+        monitor._broadcast = AsyncMock()
+        now = time.time()
+        reset = int(now) + 4 * HOUR
+        await monitor.apply_mod_report_and_broadcast([_mod_window("five_hour", 40.0, reset)], now)
+        row = _own_row()
+        assert row["available"] is True
+        assert row["windows"] == [{
+            "type": "five_hour", "utilization": 60.0, "resets_at": reset,
+            "observed_at": int(now * 1000), "source": usage_limits.SOURCE_CLAUDE_MOD,
+        }]
+        monitor._broadcast.assert_awaited_once()
+
+        # An unchanged repeat within the minute: memory only.
+        persist = MagicMock(wraps=monitor._persist_snapshot)
+        monitor._persist_snapshot = persist
+        await monitor.apply_mod_report_and_broadcast([_mod_window("five_hour", 40.0, reset)], now + 30)
+        assert persist.call_count == 0 and monitor._broadcast.await_count == 1
+
+        # A minute on, the shared row learns the new date, same generation.
+        monitor._observed_persisted["five_hour"] -= 3600
+        await monitor.apply_mod_report_and_broadcast([_mod_window("five_hour", 40.0, reset)], now + 90)
+        assert persist.call_count == 1 and monitor._broadcast.await_count == 2
+        row = _own_row()
+        assert row["windows"][0]["observed_at"] == int((now + 90) * 1000)
+        assert row["generation"] == monitor.current_generation()
+
+    @pytest.mark.asyncio
+    async def test_report_after_restart_keeps_the_stored_windows(self, mock_db):
+        now = time.time()
+        before = UsageLimitsMonitor()
+        before._broadcast = AsyncMock()
+        await before.apply_live_event_and_broadcast(
+            "seven_day_overage_included", 0.30, int(now) + 2 * DAY)
+
+        after = UsageLimitsMonitor()
+        after._broadcast = AsyncMock()
+        await after.apply_mod_report_and_broadcast([_mod_window("five_hour", 2.0)], now)
+        windows = _by_type(_own_row()["windows"])
+        assert windows["seven_day_overage_included"]["utilization"] == 70.0
+        assert windows["five_hour"]["utilization"] == 98.0
+
+
+class TestClaudeModUsageSink:
+    @pytest.mark.asyncio
+    async def test_sink_hands_the_bounded_report_to_the_monitor(self):
+        from fluid.engine.claude_mod_usage import parse_plan_usage_report
+
+        now = time.time()
+        report = parse_plan_usage_report({
+            "v": 1, "measuredAt": int(now * 1000),
+            "rateLimits": [{"kind": "five_hour", "percentUsed": 23.46,
+                            "resetsAt": int(now) + HOUR}],
+        }, now=now)
+        with patch.object(usage_limits.usage_limits_monitor, "apply_mod_report_and_broadcast",
+                          new=AsyncMock()) as apply:
+            await usage_limits.claude_mod_usage_sink(report)
+        windows, measured_at = apply.await_args.args
+        assert windows == [{"kind": "five_hour", "percent_used": 23.5,
+                            "resets_at": int(now) + HOUR}]
+        assert measured_at == report.measured_at
+
+    @pytest.mark.asyncio
+    async def test_sink_never_raises_into_the_bridge(self):
+        with patch.object(usage_limits.usage_limits_monitor, "apply_mod_report_and_broadcast",
+                          new=AsyncMock(side_effect=RuntimeError("db down"))):
+            await usage_limits.claude_mod_usage_sink(MagicMock(windows=[], measured_at=1.0))
+        # Not a report at all.
+        await usage_limits.claude_mod_usage_sink(object())

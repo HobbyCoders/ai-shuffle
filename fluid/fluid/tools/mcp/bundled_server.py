@@ -40,6 +40,15 @@ per-session bridge token; the child receives it through the
 ``FLUID_BUNDLED_TOKEN`` environment entry of its MCP config, never on the
 command line. A request without the right token gets one error line and a
 closed connection.
+
+The same socket can also answer a few plain HTTP/1.1 ``POST`` routes
+(``http_routes``), for callers that speak only HTTP: AI Shuffle's Claude Code
+mod posts its usage reports this way through ``$.http.fetch``. A connection
+whose first line is an HTTP request line is served as one request and closed.
+HTTP routes take their own token (``http_token``, sent as ``Authorization:
+Bearer``), never the bridge token, so a holder of one cannot call tools;
+bodies are JSON, capped at ``HTTP_MAX_BODY_BYTES``, and a TCP peer must be
+loopback.
 """
 
 from __future__ import annotations
@@ -48,8 +57,11 @@ import argparse
 import asyncio
 import base64
 import hmac
+import ipaddress
 import json
+import logging
 import os
+import re
 import sys
 from collections.abc import Awaitable, Callable, Iterator, MutableMapping
 from dataclasses import replace
@@ -62,6 +74,8 @@ from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
 if TYPE_CHECKING:
     from fluid.hooks.bus import HookBus
     from fluid.permissions.engine import PermissionEngine
+
+logger = logging.getLogger(__name__)
 
 _BUNDLED_SERVER_NAME = "fluid_bundled"
 _TCP_PREFIX = "tcp:"
@@ -85,6 +99,21 @@ IMAGE_BUDGET_CHARS = 8 * 1024 * 1024
 # ``_meta`` (seen in 2.1.285). The child forwards it so the parent's hooks and
 # host tools can key on the same id the CLI's transcript uses.
 TOOL_USE_ID_META_KEY = "claudecode/toolUseId"
+# An HTTP route's handler: the decoded JSON body in, nothing out. A
+# ``ValueError`` means the body was refused (400).
+HttpRoute = Callable[[Any], Awaitable[None]]
+# Largest HTTP body and header block an HTTP route reads, and how long one
+# request may take to arrive.
+HTTP_MAX_BODY_BYTES = 16 * 1024
+_HTTP_MAX_HEADER_BYTES = 8 * 1024
+_HTTP_READ_TIMEOUT = 5.0
+_HTTP_REQUEST_LINE = re.compile(rb"^([A-Z]{3,7}) (/[!-~]*) HTTP/1\.[01]\r?\n$")
+_HTTP_REASONS = {
+    204: "No Content", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+    404: "Not Found", 405: "Method Not Allowed", 411: "Length Required",
+    413: "Content Too Large", 415: "Unsupported Media Type",
+    431: "Request Header Fields Too Large",
+}
 
 
 # ─── Address scheme ──────────────────────────────────────────────────────────
@@ -122,6 +151,8 @@ async def serve_registry_socket(
     permissions: PermissionEngine | None = None,
     hooks: HookBus | None = None,
     on_stop: OnStop | None = None,
+    http_token: str | None = None,
+    http_routes: dict[str, HttpRoute] | None = None,
 ) -> asyncio.AbstractServer:
     """Serve ``list``/``call`` requests against ``registry`` over a socket.
 
@@ -136,6 +167,9 @@ async def serve_registry_socket(
     the native loop's dispatch path does (see ``_answer``); ``on_stop`` is
     told when a hook ends the turn.
 
+    ``http_routes`` (with ``http_token``, required for them) maps a path to
+    the handler of a JSON ``POST`` there; see ``_serve_http``.
+
     Lines on this socket carry whole tool arguments and whole results, so
     both sides read with the same cap as the CLI's stdout.
 
@@ -143,13 +177,20 @@ async def serve_registry_socket(
     (``server.close()`` + ``await server.wait_closed()``).
     """
     ctx = ctx or ToolCtx()
+    routes = http_routes if http_token else None
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
+            first = True
             while True:
                 line = await reader.readline()
                 if not line:
                     return
+                if first and routes and _HTTP_REQUEST_LINE.match(line):
+                    assert http_token is not None
+                    await _serve_http(line, reader, writer, http_token, routes)
+                    return
+                first = False
                 try:
                     req = json.loads(line)
                 except json.JSONDecodeError:
@@ -179,6 +220,103 @@ async def serve_registry_socket(
     return await asyncio.start_unix_server(
         handle, path=socket_path, limit=STREAM_LINE_LIMIT,
     )
+
+
+def _peer_is_local(writer: asyncio.StreamWriter) -> bool:
+    """True for a unix-socket peer or a loopback TCP peer."""
+    peer = writer.get_extra_info("peername")
+    if not isinstance(peer, tuple) or not peer:
+        return True  # a unix domain socket: the filesystem scopes it
+    try:
+        return ipaddress.ip_address(str(peer[0]).split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+async def _respond_http(writer: asyncio.StreamWriter, status: int) -> None:
+    reason = _HTTP_REASONS.get(status, "")
+    writer.write(
+        f"HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode()
+    )
+    await writer.drain()
+
+
+async def _serve_http(
+    request_line: bytes,
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    token: str,
+    routes: dict[str, HttpRoute],
+) -> None:
+    """Answer one HTTP/1.1 request on a bridge connection, then return.
+
+    Only ``POST`` of a JSON body to a path in ``routes``, from a local peer,
+    with ``Authorization: Bearer <token>``. The handler gets the decoded body;
+    its ``ValueError`` is a 400, any other failure is logged and still a 204,
+    since the body was accepted and the caller has nothing to retry.
+    """
+    match = _HTTP_REQUEST_LINE.match(request_line)
+    assert match is not None
+    method, target = match.group(1).decode(), match.group(2).decode()
+    headers: dict[str, str] = {}
+    size = 0
+    try:
+        while True:
+            line = await asyncio.wait_for(reader.readline(), _HTTP_READ_TIMEOUT)
+            size += len(line)
+            if size > _HTTP_MAX_HEADER_BYTES:
+                await _respond_http(writer, 431)
+                return
+            if line in (b"\r\n", b"\n"):
+                break
+            if not line:
+                return
+            name, sep, value = line.decode("latin-1").partition(":")
+            if sep:
+                headers[name.strip().lower()] = value.strip()
+        if not _peer_is_local(writer):
+            await _respond_http(writer, 403)
+            return
+        auth = headers.get("authorization", "")
+        presented = auth[7:] if auth[:7].lower() == "bearer " else None
+        if not _token_ok(token, presented):
+            await _respond_http(writer, 401)
+            return
+        handler = routes.get(target.split("?", 1)[0])
+        if handler is None:
+            await _respond_http(writer, 404)
+            return
+        if method != "POST":
+            await _respond_http(writer, 405)
+            return
+        if headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+            await _respond_http(writer, 415)
+            return
+        length_text = headers.get("content-length", "")
+        if not length_text.isdigit():
+            await _respond_http(writer, 411)
+            return
+        length = int(length_text)
+        if length > HTTP_MAX_BODY_BYTES:
+            await _respond_http(writer, 413)
+            return
+        raw = await asyncio.wait_for(reader.readexactly(length), _HTTP_READ_TIMEOUT)
+    except (asyncio.TimeoutError, asyncio.IncompleteReadError, ConnectionError):
+        return
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        await _respond_http(writer, 400)
+        return
+    try:
+        await handler(body)
+    except ValueError as exc:
+        logger.debug("bridge refused a %s body: %s", target, exc)
+        await _respond_http(writer, 400)
+        return
+    except Exception:  # noqa: BLE001 — a host failure is the host's, not the caller's
+        logger.warning("bridge route %s failed", target, exc_info=True)
+    await _respond_http(writer, 204)
 
 
 def _token_ok(expected: str, presented: Any) -> bool:

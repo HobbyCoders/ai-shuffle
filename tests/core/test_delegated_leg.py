@@ -247,6 +247,18 @@ async def test_both_legs_get_the_adapters_hook_bus(monkeypatch, tmp_path):
     assert _KwargsLoop.captured["hooks"] is native.hooks
 
 
+@pytest.mark.asyncio
+async def test_delegated_leg_sends_mod_usage_to_the_claude_usage_store(monkeypatch, tmp_path):
+    """The plan usage the Claude Code mod reports reaches the same store the
+    stream's rate_limit events feed."""
+    from app.core.usage_limits import claude_mod_usage_sink
+
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    monkeypatch.setattr(ha, "DelegatedLoop", _KwargsLoop)
+    await ha.HarnessAdapter().connect(_preset_options(tmp_path))
+    assert _KwargsLoop.captured["plan_usage_sink"] is claude_mod_usage_sink
+
+
 def test_delegated_tool_policy_denies_what_the_app_denies(tmp_path):
     """The PreToolUse policy refuses the blocklist, anything off the surface
     and a permission-engine deny rule; everything else is left to the CLI."""

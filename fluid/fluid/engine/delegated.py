@@ -74,12 +74,14 @@ import shutil
 import signal
 import socket
 import tempfile
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps, matches_tool_pattern
+from fluid.engine.claude_mod_usage import USAGE_PATH, PlanUsageReport, parse_plan_usage_report
 from fluid.engine.delegated_proto import (
     FORCED_CHILD_ENV,
     ControlReply,
@@ -333,6 +335,16 @@ CLAUDE_MOD_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cl
 CLAUDE_MOD_PLUGIN = "ai-shuffle@inline"
 # Unset leaves the mod on; otherwise only 1, true, yes or on keep it on.
 CLAUDE_MOD_ENV = "FLUID_CLAUDE_MOD"
+# Where the mod posts the plan usage the CLI measures (``claude_mod/hooks/
+# usage.ts``, contract in ``claude_mod_usage``): the bridge's HTTP route, the
+# unix socket it goes over (unset on a loopback port), and a per-session token
+# that authorizes that route alone, never a tool call. Set in the CLI's env
+# only when the mod is loaded and a host takes the reports
+# (``plan_usage_sink``); the mod reads them once and unsets them, so the
+# commands the model runs do not inherit them.
+CLAUDE_MOD_URL_ENV = "FLUID_CLAUDE_MOD_URL"
+CLAUDE_MOD_SOCKET_ENV = "FLUID_CLAUDE_MOD_SOCKET"
+CLAUDE_MOD_TOKEN_ENV = "FLUID_CLAUDE_MOD_TOKEN"
 
 
 def claude_mod_enabled(env: dict[str, str] | None = None) -> bool:
@@ -532,6 +544,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         ] | None = None,
         journal: Any | None = None,
         claude_mod: bool | None = None,
+        plan_usage_sink: Callable[[PlanUsageReport], Awaitable[None]] | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -670,6 +683,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._claude_mod_dir: str | None = None
         self._claude_mod_state = "off"
         self._claude_mod_listed: bool | None = None
+        # The host's taker of the plan usage the mod reports (see
+        # ``CLAUDE_MOD_URL_ENV``), and the token for that route alone.
+        self.plan_usage_sink = plan_usage_sink
+        self._mod_token = secrets.token_urlsafe(32)
+        self._usage_route = False
 
         self._session: SessionMeta | None = None
         self._session_id = session_id
@@ -1109,6 +1127,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             s for s in self.registry.list_tools(loaded_only=True)
             if s.source in ("inproc", "builtin") and self._bridge_tool_permitted(s.name)
         ]
+        # The mod's usage reports ride the same socket as an HTTP route, so
+        # the socket also runs for a session whose bridge serves no tool.
+        usage_route = self.claude_mod and self.plan_usage_sink is not None
         # Written even when it names no server: the config is what carries
         # --strict-mcp-config, and an empty one is how the child is told to
         # connect none of the user's own servers.
@@ -1118,7 +1139,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._socket_path = (
             os.path.join(tmpdir, "bundled.sock") if use_unix else "tcp:127.0.0.1:0"
         )
-        if specs:
+        if specs or usage_route:
             self._socket_server = await serve_registry_socket(
                 self.registry, self._socket_path, self.ctx,
                 token=self._bridge_token,
@@ -1126,7 +1147,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 permissions=self.permissions,
                 hooks=self.hooks,
                 on_stop=self._hook_stop,
+                http_token=self._mod_token if usage_route else None,
+                http_routes={USAGE_PATH: self._take_plan_usage} if usage_route else None,
             )
+            self._usage_route = usage_route
             if not use_unix:
                 # Port 0 was an ask for *any* free port — resolve what we got so
                 # the child config names the port it can actually dial.
@@ -1253,6 +1277,38 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             f": {'; '.join(errors)}" if errors else "",
         )
 
+    def _claude_mod_env(self) -> dict[str, str]:
+        """Where this spawn's mod posts plan usage, or nothing.
+
+        Nothing unless this spawn was handed the mod and the bridge serves
+        the usage route; the mod then reports nothing and the turn runs as
+        before. Called after ``_build_argv``, which decides the mod per spawn.
+        """
+        if not (getattr(self, "_claude_mod_dir", None) and getattr(self, "_usage_route", False)):
+            return {}
+        address = self._socket_path or ""
+        if address.startswith("tcp:"):
+            env = {CLAUDE_MOD_URL_ENV: f"http://{address[4:]}{USAGE_PATH}"}
+        else:
+            env = {
+                CLAUDE_MOD_URL_ENV: f"http://localhost{USAGE_PATH}",
+                CLAUDE_MOD_SOCKET_ENV: address,
+            }
+        env[CLAUDE_MOD_TOKEN_ENV] = self._mod_token
+        return env
+
+    async def _take_plan_usage(self, body: Any) -> None:
+        """The bridge's usage route: validate the mod's report, hand it on.
+
+        ``ValueError`` (a 400 to the mod) for a body that is not a bounded
+        report; the host's own failure is logged by the bridge and never
+        reaches the turn.
+        """
+        sink = self.plan_usage_sink
+        if sink is None:
+            return
+        await sink(parse_plan_usage_report(body, now=time.time()))
+
     def _ensure_tmpdir(self) -> str:
         """The per-session scratch directory, created on first use."""
         tmpdir = getattr(self, "_tmpdir", None)
@@ -1353,13 +1409,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._proc_results = 0
         self._cli_cost_total = None if self._spawn_resume else 0.0
         self._claude_mod_listed = None
+        argv = self._build_argv()
+        # After the argv, which decides whether this spawn gets the mod.
+        child_env = {**self._child_env(), **self._claude_mod_env()}
         self._proc = await asyncio.create_subprocess_exec(
-            *self._build_argv(),
+            *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=self.cwd,
-            env=self._child_env(),
+            env=child_env,
             limit=STREAM_LINE_LIMIT,
             **spawn_kwargs,
         )

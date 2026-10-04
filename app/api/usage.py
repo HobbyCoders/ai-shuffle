@@ -69,6 +69,9 @@ class UsageWindow(BaseModel):
     # Epoch ms of the CLI event that last reported THIS window. A snapshot's
     # ``fetched_at`` moves with any window, so it cannot date the others.
     observed_at: int | None = None
+    # Which route reported it: ``cli_stream`` (the CLI's rate_limit events)
+    # or ``claude_mod`` (AI Shuffle's Claude Code mod); None on older rows.
+    source: Optional[str] = None
 
     @field_validator("resets_at", mode="before")
     @classmethod
