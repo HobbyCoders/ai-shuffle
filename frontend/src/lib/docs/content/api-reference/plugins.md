@@ -491,7 +491,11 @@ The owner's client, registered clients and the tokens are stored encrypted on th
 
 Only a plugin that is switched on and approved can start a sign-in. An agent cannot sign in, enter a client or read a token; it asks with `RequestChatAccess(kind="service", plugin, service)` and receives a grant handle (see [Private Access](/docs/api-reference/sessions#private-access)).
 
-**Return address.** The sign-in returns to `<address>/api/v1/plugins/oauth/callback`, where `<address>` is the address your browser uses to reach this worker, the same way the Gmail connector forms its redirect URI. It must be `https://` or `http://localhost` (or `127.0.0.1`); a plain `http://` LAN address is refused. Each address you sign in from (for example the desktop app on `http://127.0.0.1:8000` and the worker's HTTPS remote access address) is a separate redirect URI, and the sign-in fails at the provider for an address the client was not registered for. With a client you entered, register each exact URL in the provider's OAuth app. A plugin's shipped `client_id` works only from the addresses its author registered, typically `http://127.0.0.1:8000/api/v1/plugins/oauth/callback` for the desktop app. A registered client is registered for each address automatically. `GET /status` shows the address for the current connection in `redirect_uri`.
+**Return address.** With a client the owner entered or a registered client, the sign-in returns to `<address>/api/v1/plugins/oauth/callback`, where `<address>` is the address your browser uses to reach this worker, the same way the Gmail connector forms its redirect URI. It must be `https://` or `http://localhost` (or `127.0.0.1`, `[::1]`); a plain `http://` LAN address is refused. Each address you sign in from (for example the desktop app on `http://127.0.0.1:8000` and the worker's HTTPS remote access address) is a separate redirect URI, and the sign-in fails at the provider for an address the client was not registered for. With a client you entered, register each exact URL in the provider's OAuth app. A registered client is registered for each address automatically. `GET /status` shows the address for the current connection in `redirect_uri`; it is the only address an owner ever registers.
+
+**Relay for shipped clients.** A sign-in with the plugin's shipped `client_id` always uses one fixed return address on the account hub, `https://hobbycoders.com/browser/plugin-oauth/callback` (the account browser origin, setting `ACCOUNT_BROWSER_ORIGIN` with default `https://hobbycoders.com`, followed by `/browser/plugin-oauth/callback`). Plugin authors register exactly this URL as the redirect URI of the shipped public client. Before sending the owner to the provider, the worker registers the sign-in with the hub over its account link: it sends the SHA-256 of the `state`, the origin the browser is using (`return_origin`), the service name and the provider's host name, and never the state, PKCE verifier, client ID or plugin ID. The hub keeps that record for 10 minutes. The provider sends the browser to the hub page, which never redirects on its own: it names the service, the worker, its address and the account that owns it, and shows one **Continue** link to that worker's `/api/v1/plugins/oauth/callback` carrying only `state` and `code` (or `state` and `error`). The hub forwards only to the origin a linked worker registered for that state, never to an address taken from the URL. The token exchange stays on the worker.
+
+The relay is available only when the worker is linked to an account, the worker's own return address passes the rule above (`https://`, or `http://` on `localhost`, `127.0.0.1` or `[::1]`), and the account browser origin is configured. Otherwise the shipped client cannot be used from this address, and the owner links the worker or enters a client. There is no fallback to automatic registration.
 
 **Auth:** Owner only. `PUT /client` additionally needs the desktop app window, the worker's HTTPS address or a browser on the worker's own machine, as for private access inputs; other connections get `403`.
 
@@ -504,6 +508,8 @@ Query: `plugin` (the plugin ID) and optionally `service`. Without `service`, lis
   "plugin_id": "dns-reader@my-marketplace",
   "enabled": true,
   "redirect_uri": "https://shuffle.example.com/api/v1/plugins/oauth/callback",
+  "relay_uri": "https://hobbycoders.com/browser/plugin-oauth/callback",
+  "relay_available": true,
   "services": [
     {
       "plugin_id": "dns-reader@my-marketplace",
@@ -521,7 +527,10 @@ Query: `plugin` (the plugin ID) and optionally `service`. Without `service`, lis
       "access": "read",
       "authorize_host": "dash.cloudflare.com",
       "plugin_client_id": "",
-      "registration_url": ""
+      "registration_url": "",
+      "return_address": "https://shuffle.example.com/api/v1/plugins/oauth/callback",
+      "relay": "not_used",
+      "relay_reason": ""
     }
   ]
 }
@@ -537,6 +546,15 @@ Query: `plugin` (the plugin ID) and optionally `service`. Without `service`, lis
 
 `client_source` says where the client comes from: `owner` (entered by the owner; it wins), `plugin` (the plugin's shipped `client_id`), `registered` (registered automatically at the plugin's `registration_url`; also shown before the first registration) or `none`. `client_configured` is true when the owner saved a client, and `client_id` is that client's ID (empty otherwise). `plugin_client_id` and `registration_url` are what the plugin declares (empty when not declared). `access` is the declared access, `read` (GET and HEAD) or `write`. Returns `404` for a plugin that is not installed or a service it does not declare a sign-in for.
 
+The relay fields:
+
+- `redirect_uri` is always the worker's own return address. `relay_uri` is the fixed hub address, or `""` when the account browser origin is not configured. `relay_available` is true when the worker is linked to an account and both the own address and `relay_uri` are usable.
+- `relay` is `not_used` when `client_source` is not `plugin`. For a shipped client it is `used` when the relay is available, else `unavailable`, with `relay_reason` `not_linked` (the worker is not linked to an account), `insecure_address` (a plain `http://` address that is not localhost) or `not_configured` (the account browser origin is not configured), checked in that order. `relay_reason` is `""` in every other case.
+- `return_address` is `relay_uri` when `relay` is `used`, else `redirect_uri`.
+- The relay does not change `state` or `reason`. A `signed_in` service stays signed in on a worker that is not linked, because refreshing needs no return address.
+
+Workers that predate the relay leave these fields out.
+
 ### PUT /api/v1/plugins/oauth/client
 
 Save the OAuth client for a plugin service: `{"plugin": "...", "service": "...", "client_id": "...", "client_secret": "..."}`. `client_secret` is optional (leave it out for a public client). Saving a different `client_id` removes the existing sign-in. Returns the service entry from `GET /status`. Validation errors return `422` and never echo the secret; a malformed client returns `400`; locked credential storage returns `409`.
@@ -549,9 +567,29 @@ Query: `plugin` and `service`. Removes the owner's client, the clients registere
 
 Body: `{"plugin": "...", "service": "..."}`. Returns `authorization_url` (open it in the same browser), `flow_id`, `redirect_uri` and `expires_in` (600 seconds). Sets an HttpOnly cookie scoped to the callback path that ties the sign-in to this browser. The pending sign-in is also tied to the owner session that started it, can be used once, and expires after 10 minutes. When the sign-in needs a registered client for this return address, the worker registers it first. Returns `409` when the plugin is off or not approved, when there is no client (`not_configured`) or when the provider refused a registration, `502` when the provider could not be reached for a registration, `400` for a return address that is not HTTPS or localhost, and `429` when 64 sign-ins are already waiting.
 
+The response also carries `relayed` (whether the sign-in goes through the hub relay) and `return_origin`, the origin of the worker's own return address in standard web form (lowercase scheme and host, default port 80 or 443 dropped, IPv6 in brackets). When `relayed` is true, `redirect_uri` is the relay address; otherwise it is the worker's own address.
+
+```json
+{"authorization_url": "...", "flow_id": "...", "redirect_uri": "https://hobbycoders.com/browser/plugin-oauth/callback",
+ "expires_in": 600, "relayed": true, "return_origin": "https://worker.example"}
+```
+
+The cookie always lives on the worker's own origin, and it is Secure when the own address is `https://`. When relayed, the worker registers the sign-in with the hub before answering and checks that the hub returns exactly the expected relay address; if any step fails, nothing is left pending. Refusals added with the relay, with fixed wording that never repeats what the hub said:
+
+| Case | Status | Message |
+|------|--------|---------|
+| Shipped client, worker not linked to an account, or the account browser origin is not configured | `409` | "Signing in with this plugin's own app needs this worker connected to your AI Shuffle account (Settings > Account). You can also enter your own OAuth client." |
+| Shipped client on a linked worker reached over a plain `http://` address that is not localhost | `400` | "The sign-in return address must be an https:// address (or http on this computer)." (the existing message) |
+| The hub answers `401` or `403` | `409` | The same message as a worker that is not linked |
+| The hub answers `429` (it keeps at most 20 waiting sign-ins per worker) | `429` | "Too many sign-ins are waiting. Try again in a few minutes." |
+| The hub answers `404` or another status, times out, or returns a different relay address | `502` | "The AI Shuffle account service could not be reached or needs an update. Try again shortly." |
+| The owner saved or removed a client while the sign-in was starting, so the return address chosen no longer fits the client in effect | `409` | "This service's sign-in setup changed. Start the sign-in again." |
+
+In the first two cases the worker does not contact the hub.
+
 ### GET /api/v1/plugins/oauth/callback
 
-The provider sends the browser here. Not called directly. It needs the `state` from a pending sign-in, the cookie set by `/start` and the same owner session; an unknown, used or expired `state`, another browser or another session gets `400`. The plugin must still be switched on, approved and declare the same sign-in, or nothing is saved. On success the worker exchanges the code with the provider and stores the tokens. The response is a small page (`Cache-Control: no-store`, no referrer) that posts `{"type": "plugin-oauth", "flow_id", "plugin_id", "service", "state", "error"}` to the window that opened it and closes. It never carries the code or a token.
+The provider sends the browser here, or, for a relayed sign-in, the **Continue** link on the hub page does. Not called directly. It needs the `state` from a pending sign-in, the cookie set by `/start` and the same owner session; an unknown, used or expired `state`, another browser or another session gets `400`. The request must also arrive on the origin the sign-in started from (`return_origin`; `https://Host:443` and `https://host` count as the same), otherwise it gets `400` and the pending sign-in is kept. The plugin must still be switched on, approved and declare the same sign-in, or nothing is saved. On success the worker exchanges the code with the provider and stores the tokens. The response is a small page (`Cache-Control: no-store`, no referrer) that posts `{"type": "plugin-oauth", "flow_id", "plugin_id", "service", "state", "error"}` to the window that opened it and closes. It never carries the code or a token.
 
 ### POST /api/v1/plugins/oauth/sign-out
 

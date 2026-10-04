@@ -133,10 +133,27 @@ A plugin that talks to an outside API declares it under `services`: `name`, `pro
 
 Two optional keys let the owner sign in without registering an OAuth app first:
 
-- `client_id`: a public OAuth client the plugin author registered with the provider. It needs `"pkce": true`, is never paired with a secret, and is refused if it looks like a key or token. The provider only accepts it from the return addresses the author registered for it (see [Service sign-in](/docs/api-reference/plugins#service-sign-in-oauth)).
+- `client_id`: a public OAuth client the plugin author registered with the provider. It needs `"pkce": true`, is never paired with a secret, and is refused if it looks like a key or token. The author registers exactly one return address (redirect URI) for it with the provider: `https://hobbycoders.com/browser/plugin-oauth/callback`. Every sign-in with a shipped client returns through that address, from any worker and any address (see below and [Service sign-in](/docs/api-reference/plugins#service-sign-in-oauth)).
 - `registration_url`: the provider's dynamic client registration endpoint (RFC 7591), under the same address rules as the other endpoints. On the first sign-in from a return address, the worker registers its own public client there for that address and keeps it encrypted on the worker.
 
 The client a sign-in uses is, in order: one the owner entered, else the plugin's `client_id`, else a registered one. With none of these, the owner enters a client before signing in.
+
+**Signing in through hobbycoders.com.** A sign-in with a plugin's shipped `client_id` always returns to the fixed address above, so the author registers one address and the owner registers nothing. Before sending you to the provider, the worker tells your AI Shuffle account which address your browser is using for this sign-in. After you approve at the provider, a hobbycoders.com page opens in the sign-in window. It names the service, your worker, the worker's address and the account that owns it, with one **Continue** link back to that worker, which finishes the sign-in as usual. Continue only if you started this sign-in in AI Shuffle just now; if you did not, close the window and nothing is sent. The page always asks, because a plugin's client ID is public: without that check, someone else's worker could collect a sign-in meant for yours. If you cancel at the provider, the page says the sign-in was cancelled and its link closes the sign-in with nothing signed in. The provider's one-time code passes through that page on its way to your worker, but hobbycoders.com never sees the PKCE verifier, a client secret or a token; the worker exchanges the code itself.
+
+A service that signs in this way shows **Returns through hobbycoders.com** in the sign-in card and in its Connections row, and while the sign-in window is open the card says that AI Shuffle asks you to confirm once on hobbycoders.com. The Continue page stays valid until you finish: reloading it shows the same page, and the sign-in can still be completed only once.
+
+**When it is not used.** A client you entered yourself and a client the worker registered automatically return straight to the worker's own address, `<address>/api/v1/plugins/oauth/callback`, with no hobbycoders.com page. With your own client, register that address in the provider's OAuth app; the sign-in card shows it.
+
+**When it is not available.** A shipped client cannot be used from this worker when:
+
+- The worker is not connected to your AI Shuffle account. Connect it in **Settings > Account**, or enter your own OAuth client. Automatic registration is not tried instead.
+- You reach the worker over a plain `http://` LAN address. Use its HTTPS address, or the desktop app or a browser on the worker's own machine.
+- The worker's AI Shuffle account address is not set up correctly. Enter your own OAuth client.
+- The AI Shuffle account service could not be reached or has not been updated for plugin sign-in yet. The sign-in says so and offers **Set up manually** beside the sign-in button; try again later, or enter your own OAuth client there.
+
+In the first three cases the card and the Connections row show the manual setup with a line saying why.
+
+A service that is already signed in stays signed in on a worker that is not connected, because refreshing a token needs no return address.
 
 The plugin list and `CheckPlugin` show where the plugin signs in, which scopes it asks for, its shipped `client_id` and its `registration_url`, so they are part of what the owner approves. A plugin update that asks for more scopes, changes an endpoint, the `registration_url` or the `client_id` needs a new sign-in.
 
