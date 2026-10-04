@@ -175,6 +175,24 @@ async function harness(viewport, touch) {
 	await option.waitFor();
 	const panelBox = await page.locator('.mpk-panel').boundingBox();
 	check(panelBox && panelBox.x >= 0 && panelBox.x + panelBox.width <= viewport.width + 0.5, 'model picker panel within viewport', panelBox);
+	// The dialog body scrolls and ends at the footer; the whole panel must sit
+	// inside it, so no model is hidden behind "Send report" (#1811).
+	const bodyBox = await page.locator('.mpk-panel').evaluate((el) => {
+		let node = el.parentElement;
+		while (node && !['auto', 'scroll'].includes(getComputedStyle(node).overflowY)) node = node.parentElement;
+		const r = node.getBoundingClientRect();
+		return { top: r.top, bottom: r.bottom, scrollTop: node.scrollTop };
+	});
+	check(panelBox && panelBox.y >= bodyBox.top - 0.5 && panelBox.y + panelBox.height <= bodyBox.bottom + 0.5, 'model picker panel above the footer, inside the dialog body', { panelBox, bodyBox });
+	const lastRow = page.locator('.mpk-panel [role="option"]').last();
+	await lastRow.scrollIntoViewIfNeeded();
+	const rowBox = await lastRow.boundingBox();
+	const bodyScroll = await page.locator('.mpk-panel').evaluate((el) => {
+		let node = el.parentElement;
+		while (node && !['auto', 'scroll'].includes(getComputedStyle(node).overflowY)) node = node.parentElement;
+		return node.scrollTop;
+	});
+	check(rowBox && rowBox.y + rowBox.height <= bodyBox.bottom + 0.5 && bodyScroll === bodyBox.scrollTop, 'last model row reachable without scrolling the dialog', { rowBox, bodyBox, bodyScroll });
 	await shot(page, '2-model-picker');
 	await option.click();
 	await page.keyboard.press('Escape');
@@ -267,7 +285,7 @@ async function harness(viewport, touch) {
 
 try {
 	await harness({ width: 1280, height: 800 }, false);
-	await harness({ width: 390, height: 844 }, true);
+	await harness({ width: 390, height: 800 }, true);
 	console.log(`support report: ${passed} checks passed`);
 } finally {
 	await browser.close();

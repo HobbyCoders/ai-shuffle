@@ -341,6 +341,12 @@ describe('buildDisplayItems — settled turns', () => {
 		expect(collapsedVisibleMessages(items).some((message) => message.type === 'subagent')).toBe(false);
 	});
 
+	it('keeps a stopped subagent card visible instead of folding it away (#1806)', () => {
+		const stopped = subagent({ agentStatus: 'stopped', agentStopNote: 'Stopped by user' });
+		const items = buildDisplayItems([user('go'), tool(), stopped, text('done')], SETTLED);
+		expect(collapsedVisibleMessages(items).some((message) => message.id === stopped.id)).toBe(true);
+	});
+
 	it('keeps a still-running subagent card visible', () => {
 		const running = subagent({ agentStatus: 'running' });
 		const items = buildDisplayItems([user('go'), tool(), running, text('done')], SETTLED);

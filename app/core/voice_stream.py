@@ -36,6 +36,11 @@ SETTLE_MAX_S = 3.0
 # Caller speech with no reply yet is held this long before a checkpoint stores
 # it, so a pause to think does not split one request into two chat messages.
 HOLD_UNANSWERED_S = 10.0
+# A reply whose transcript stopped mid-sentence is held this long before a
+# checkpoint stores it. The output transcript can stall for seconds inside one
+# spoken reply (#1798: "I- I'll take a" ... 8 s ... "look when they come in.").
+HOLD_MID_REPLY_S = 15.0
+_SENTENCE_END = re.compile(r"[.!?…][\"'”’)\]]*\s*$")
 # Listening sounds GPT Live can make while the caller is still talking.
 _BACKCHANNEL_WORDS = frozenset({
     "mm", "mmm", "mhm", "mmhmm", "hm", "hmm", "uh", "uhhuh", "huh", "um",
@@ -314,6 +319,8 @@ class VoiceStream:
         self.delegation_task: asyncio.Task | None = None
         self.send_lock = asyncio.Lock()
         self.flush_lock = asyncio.Lock()
+        # The pending caller text was typed into the call, not spoken.
+        self.pending_typed = False
         self.last_caption_role = None
         self.progress = None
         self.transcript_seq = 0
@@ -395,19 +402,31 @@ class VoiceStream:
         user = self.pending["user"].rstrip()
         return bool(user) and not is_noise(user) and not user.endswith("?") and is_backchannel(self.pending["assistant"])
 
-    async def flush(self):
+    async def flush(self, *, keep_reply: bool = False):
+        """Store the pending exchange as one voice turn.
+
+        ``keep_reply`` stores only the caller's words and keeps a reply that is
+        still being spoken pending, so a handoff never cuts it in two (#1798).
+        """
         from app.core.turn_recorder import record_voice_exchange
         # Checkpoint, handoff and speaker changes can flush concurrently. Keep
         # their durable turns in arrival order, including during barge-in.
         async with self.flush_lock:
             user, assistant = self.pending["user"], self.pending["assistant"]
-            self.pending = {"user": "", "assistant": ""}
+            if keep_reply:
+                assistant = ""
+                self.pending = {"user": "", "assistant": self.pending["assistant"]}
+            else:
+                self.pending = {"user": "", "assistant": ""}
+            typed, self.pending_typed = self.pending_typed, False
             if is_noise(user):
                 user = ""  # Breath or background sound, not something the caller said.
             if user or assistant:
                 self.caption_ids["user"] += 1
-                self.caption_ids["assistant"] += 1
-                await record_voice_exchange(self.session_id, user or None, assistant or None, model=self.config["model"])
+                if not keep_reply:
+                    self.caption_ids["assistant"] += 1
+                await record_voice_exchange(self.session_id, user or None, assistant or None, model=self.config["model"],
+                                            user_source="typed" if typed else "voice")
 
     def is_quiet(self) -> bool:
         """A natural pause: nobody is mid-sentence, so a held note may be spoken."""
@@ -526,7 +545,9 @@ class VoiceStream:
                 await self.send({"type": "session.thinking.append", "delegation_id": delegation_id,
                                  "content": NO_REQUEST_NOTE})
                 return
-            await self.flush()
+            # Store the request before the chat turn starts, but not the reply
+            # the voice is speaking right now: it is stored whole once spoken.
+            await self.flush(keep_reply=True)
             if self.progress is not None:
                 async def submitted(turn_id):
                     await self.progress.submitted(turn_id, delegation_id)
@@ -711,6 +732,7 @@ class VoiceStream:
             # path, not a guessed provider text event or a second conversation.
             await self.flush()
             await self.caption("user", "\n\nTyped message:\n" + text)
+            self.pending_typed = True  # Stored as typed text, not as speech.
             await self.flush()  # Durable admission before acknowledging/dispatching.
             entries = [e for e in self.transcript if e.get("seq", 0) > self.delegated_seq]
             self.delegated_seq = self.transcript_seq
@@ -759,7 +781,11 @@ class VoiceStream:
         # Speech nobody has answered yet is usually a pause to think; storing
         # it now would split one request into two chat messages.
         unanswered = self.pending["user"] and not self.pending["assistant"]
-        return time.monotonic() - self.last_caption_at >= (HOLD_UNANSWERED_S if unanswered else 2)
+        # Likewise a reply that stopped mid-sentence is usually still being
+        # spoken; storing it now would split one reply into two messages.
+        mid_reply = self.pending["assistant"] and not _SENTENCE_END.search(self.pending["assistant"])
+        hold = HOLD_UNANSWERED_S if unanswered else HOLD_MID_REPLY_S if mid_reply else 2
+        return time.monotonic() - self.last_caption_at >= hold
 
     async def start_live(self, history: list[dict]) -> None:
         live_config = live_session_config(self.config, history)

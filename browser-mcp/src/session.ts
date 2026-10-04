@@ -166,6 +166,10 @@ export class Session {
   viewportMode: "fit" | "fixed" = "fixed";
   private desiredViewport = { width: 1280, height: 800 };
   private pinnedViewport?: { width: number; height: number };
+  /** The browser's own screen, read once from a page with no emulation. */
+  private nativeScreen?: { width: number; height: number };
+  /** The screen-preserving metrics last sent to each page (see pinViewport). */
+  private readonly screenMetrics = new WeakMap<Page, string>();
   workspaceStatus?: () => Record<string, unknown>;
 
   runAgentExclusive<T>(fn: () => Promise<T>): Promise<T> {
@@ -178,7 +182,10 @@ export class Session {
   }
 
   async currentCDP(): Promise<CDPSession> {
-    const page = this.requirePage();
+    return this.cdpFor(this.requirePage());
+  }
+
+  private cdpFor(page: Page): Promise<CDPSession> {
     let pending = this.cdpSessions.get(page);
     if (!pending) {
       pending = raceWithTimeout(page.context().newCDPSession(page), 5000, "CDP session timed out");
@@ -278,8 +285,9 @@ export class Session {
     // Persistent CDP contexts have no default viewport override. Apply ours
     // before exposing the tab/target, including on first use and reconnect.
     const viewport = this.currentEntry()?.page.viewportSize() ?? this.desiredViewport;
+    if (!this.nativeScreen) await this.readNativeScreen(page);
     try {
-      await raceWithTimeout(page.setViewportSize(viewport), 5000, "initial viewport timed out");
+      await this.pinViewport(page, viewport, "initial viewport timed out");
     } catch (error) {
       await page.close().catch(() => {});
       throw error;
@@ -550,13 +558,63 @@ export class Session {
    * holds control — so a measurement the agent takes is the size it asked for.
    */
   async setViewport(width: number, height: number, pinned = false): Promise<AppliedViewport> {
-    await raceWithTimeout(this.requirePage().setViewportSize({ width, height }), 5000, "viewport timed out; outcome unknown, do not replay");
+    await this.pinViewport(this.requirePage(), { width, height }, "viewport timed out; outcome unknown, do not replay");
     this.desiredViewport = { width, height };
     this.viewportMode = "fixed";
     if (pinned) this.pinnedViewport = { width, height };
     await this.bringToFront();
     this.notifyNavigation();
     return this.appliedViewport();
+  }
+
+  /**
+   * Remember the screen a page reports before any viewport emulation (the
+   * real display, or Chrome's --ozone-override-screen-size on Docker). Best
+   * effort: without it the screen simply follows the viewport, as before.
+   */
+  private async readNativeScreen(page: Page): Promise<void> {
+    try {
+      const screen = await raceWithTimeout(
+        page.evaluate(() => ({ width: window.screen.width, height: window.screen.height })),
+        APPLIED_VIEWPORT_TIMEOUT_MS,
+        "screen read timed out",
+      );
+      if (Number.isInteger(screen?.width) && Number.isInteger(screen?.height) && screen.width > 0 && screen.height > 0) {
+        this.nativeScreen = { width: screen.width, height: screen.height };
+      }
+    } catch { /* keep the viewport-sized screen */ }
+  }
+
+  /**
+   * Pin a page's viewport. Playwright's setViewportSize emulates device
+   * metrics with screen == viewport, which hides the browser's real screen
+   * from pages (#1791). Re-issue the same metrics with the native screen size
+   * so screen.width/height stay what the browser reports, never smaller than
+   * the viewport. Chrome ignores a session re-sending its own unchanged
+   * metrics, so when Playwright changed them in between, ours is cleared first.
+   */
+  private async pinViewport(page: Page, size: { width: number; height: number }, timeoutMessage: string): Promise<void> {
+    const before = page.viewportSize();
+    await raceWithTimeout(page.setViewportSize(size), 5000, timeoutMessage);
+    const native = this.nativeScreen;
+    if (!native) return;
+    const metrics = {
+      width: size.width,
+      height: size.height,
+      deviceScaleFactor: 1,
+      mobile: false,
+      screenWidth: Math.max(native.width, size.width),
+      screenHeight: Math.max(native.height, size.height),
+      screenOrientation: { angle: 0, type: "landscapePrimary" as const },
+    };
+    const key = JSON.stringify(metrics);
+    const ours = this.screenMetrics.get(page) === key;
+    if (ours && before?.width === size.width && before?.height === size.height) return;
+    this.screenMetrics.delete(page);
+    const cdp = await this.cdpFor(page);
+    if (ours) await raceWithTimeout(cdp.send("Emulation.clearDeviceMetricsOverride"), 5000, timeoutMessage);
+    await raceWithTimeout(cdp.send("Emulation.setDeviceMetricsOverride", metrics), 5000, timeoutMessage);
+    this.screenMetrics.set(page, key);
   }
 
   /** What the page reports as its own viewport, not what we asked for. */
@@ -590,7 +648,7 @@ export class Session {
     const current = entry.page.viewportSize();
     if (current && current.width === pin.width && current.height === pin.height) return;
     try {
-      await raceWithTimeout(entry.page.setViewportSize(pin), 5000, "viewport timed out");
+      await this.pinViewport(entry.page, pin, "viewport timed out");
       this.desiredViewport = { ...pin };
       this.viewportMode = "fixed";
       await this.bringToFront();

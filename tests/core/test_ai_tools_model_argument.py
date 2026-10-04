@@ -48,3 +48,32 @@ def test_worker_receives_the_requested_model(name, args, expected):
     worker = _Worker()
     asyncio.run(_tools(worker)[name].handler(dict(args)))
     assert worker.calls == [(name, expected)]
+
+
+IMAGE_TOOLS = ["generateImage", "editImage", "generateWithReference"]
+
+
+def _image_tools(tool_env=None):
+    return {t.name: t for t in _create_image_tools(_Worker(), tool_env)}
+
+
+@pytest.mark.parametrize("name", IMAGE_TOOLS)
+def test_image_descriptions_name_the_configured_models_only(name):
+    """#1796: the descriptions named fixed fal model lists (Nano Banana ...)
+    whatever was configured, so agents picked one of those models."""
+    env = {"IMAGE_MODEL": "openai/gpt-image-2.5/flare/text-to-image",
+           "IMAGE_EDIT_MODEL": "openai/gpt-image-2.5/flare/edit"}
+    t = _image_tools(env)[name]
+    text = t.description + " " + t.input_schema["properties"]["model"]["description"]
+    expected = env["IMAGE_MODEL"] if name == "generateImage" else env["IMAGE_EDIT_MODEL"]
+    assert expected in text
+    assert "fal.ai" in text
+    assert "nano-banana" not in text.lower() and "nano banana" not in text.lower()
+
+
+def test_edit_description_falls_back_like_the_node_tool():
+    tools = _image_tools({"IMAGE_MODEL": "fal-ai/nano-banana-2"})
+    assert "fal-ai/nano-banana-2" in tools["editImage"].description
+    tools = _image_tools(None)
+    assert "fal-ai/flux-pro/kontext" in tools["editImage"].description
+    assert "fal-ai/flux-pro/v1.1-ultra" in tools["generateImage"].description

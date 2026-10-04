@@ -73,8 +73,11 @@ def test_key_session_token_cannot_reach_owner_routes():
     assert client.get("/api/v1/mcp/servers").json() == {"ok": True}
 
 
+@pytest.mark.parametrize("delegated", [False, True])
 @pytest.mark.parametrize("session_id, has_token", [(OWNER, True), (KEY, False), (KEY_WORKER, False)])
-def test_workspace_card_carries_no_token_for_key_sessions(monkeypatch, session_id, has_token):
+def test_workspace_card_carries_no_token_for_key_sessions(monkeypatch, session_id, has_token, delegated):
+    """Same rule on both legs: a delegated (Claude CLI) owner session gets its
+    preview link too (#1789); an API key's session never does."""
     import app.core.environment as environment
     import app.core.mcp_config as mcp_config
     import app.core.provider.harness_adapter as ha
@@ -83,6 +86,7 @@ def test_workspace_card_carries_no_token_for_key_sessions(monkeypatch, session_i
     monkeypatch.setattr(environment, "workspace_facts_card",
                         lambda cwd, *, browser_host, app_port, preview_url: f"card preview={preview_url}")
     adapter = ha.HarnessAdapter()
+    adapter._is_delegated = delegated
     monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: session_id)
     card = adapter._build_workspace_card(ha.SessionOptions(model="m", cwd="."))
     assert card.startswith("card preview=")

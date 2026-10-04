@@ -3,7 +3,7 @@
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
 	import { resourceSync } from '$lib/services/resource-sync';
-	import { chatAccessSummary } from '$lib/stores/chat-access';
+	import { chatAccessSummary, setPrivateAccessPending, type PendingAccessItem } from '$lib/stores/chat-access';
 	import PrivateAccessRequest from './PrivateAccessRequest.svelte';
 	import '../deck/cards/card-design-system.css';
 	import './private-access.css';
@@ -33,11 +33,27 @@
 	let error = $state('');
 	// The header reads the pending count for its button label and the git
 	// panel's "Private access" row opens the dialog from outside this component.
-	const openDialog = () => dialog?.showModal();
+	const openDialog = () => { if (dialog && !dialog.open) dialog.showModal(); };
+	// What is waiting, for the chat's own prompt (PrivateAccessPrompt, #1807).
+	const items = $derived<PendingAccessItem[]>([
+		...data.requests.map((r) => ({
+			id: r.id,
+			kind: (['machine', 'folder', 'service'].includes(r.kind) ? r.kind : 'machine') as PendingAccessItem['kind'],
+			detail: r.purpose
+		})),
+		...data.actions.map((a) => ({
+			id: a.id,
+			kind: 'action' as const,
+			detail: a.operation === 'command' ? `$ ${a.arguments.command ?? ''}`
+				: a.operation === 'http' ? `${a.arguments.method ?? ''} ${a.arguments.path ?? ''}`
+				: `Write ${a.arguments.path ?? ''}`
+		}))
+	]);
 	$effect(() => {
 		chatAccessSummary.set({
 			sessionId,
 			pending: pendingCount,
+			items,
 			active: data.grants.length,
 			saved: data.saved_connections.length,
 			error: !!error,
@@ -116,6 +132,8 @@
 			const next = await api.get<typeof data>(base);
 			if (!alive) return;
 			data = next;
+			// The sidebar's "Needs you" mark follows the authoritative snapshot.
+			setPrivateAccessPending(sessionId, next.requests.length + next.actions.length);
 			error = '';
 			failures = 0;
 			if (next.requests.length || next.actions.length) {

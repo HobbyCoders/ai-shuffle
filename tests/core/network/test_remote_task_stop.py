@@ -80,6 +80,48 @@ def test_the_single_task_stop_reaches_the_child_on_its_worker(workers, monkeypat
     assert_stopped_on_target(a, b, child)
 
 
+def _builtin_handlers(session_id):
+    from unittest.mock import patch
+
+    import app.mcp.builtin_tools as bt
+    import app.mcp.inproc as sdk
+
+    captured = {}
+    real_create = sdk.create_tool_server
+
+    def spy(name, version, tools):
+        captured["tools"] = tools
+        return real_create(name=name, version=version, tools=tools)
+
+    with patch.object(sdk, "create_tool_server", side_effect=spy):
+        bt.create_builtin_tools_server(session_id=session_id, profile_id="p", project_id=None)
+    return {t.name: t.handler for t in captured["tools"]}
+
+
+def test_the_parent_agent_stops_its_remote_child_with_task_stop(workers, monkeypatch, kicks):
+    """#1805: the agent's own tool, same effect as the card's Stop, its own words."""
+    from app.core.task_registry import AGENT_STOP_REASON, PARENT_AGENT_STOP_SUMMARY
+    from tests.mcp.tool_helpers import tool_result_json
+
+    a, b, router = network(workers, monkeypatch)
+    child = started_child(a, b)
+    with b.active():
+        database.create_session(session_id="other", profile_id="default", project_id=None,
+                                title="Another chat", is_active=True, permission_mode="default")
+        refused = tool_result_json(asyncio.run(_builtin_handlers("other")["TaskStop"]({"task_id": child})))
+        assert refused["success"] is False and "different session" in refused["error"]
+        assert stop_requests(router) == []
+        body = tool_result_json(asyncio.run(_builtin_handlers("caller")["TaskStop"]({"task_id": child})))
+        assert body["success"] is True, body
+        assert body["reason"] == AGENT_STOP_REASON and body["running"] is False
+        assert remote_tasks.get_dispatch(child)["stop_reason"] == AGENT_STOP_REASON
+        record = task_registry.get_task("caller", child)
+        assert record["reason"] == AGENT_STOP_REASON
+        assert record["summary"] == PARENT_AGENT_STOP_SUMMARY
+    assert len(stop_requests(router)) == 1
+    assert_stopped_on_target(a, b, child)
+
+
 def test_stop_on_the_parent_chat_stops_the_remote_child(workers, monkeypatch, kicks):
     a, b, router = network(workers, monkeypatch)
     child = started_child(a, b)
@@ -381,3 +423,81 @@ def test_a_report_after_a_stop_wakes_nobody_even_without_a_settled_record(worker
         assert wakes() == []
         assert task_registry.get_task("caller", child)["status"] == "killed"
         assert remote_tasks.get_dispatch(child)["status"] == "stopped"
+
+
+# --- a worker shutdown is not a stop (#1808) -------------------------------------------
+
+def _shutting_down(monkeypatch, sessions, runtimes=None):
+    """``stop_running_sessions`` over just these sessions, with these live runtimes."""
+    from app.core import desktop_lifecycle, session_runtime, startup
+
+    monkeypatch.setattr(startup, "is_shutting_down", False)
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: set(sessions))
+    monkeypatch.setattr(session_runtime, "active_executions", lambda: {})
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: (runtimes or {}).get(sid))
+    return desktop_lifecycle.stop_running_sessions
+
+
+def test_a_shutdown_of_the_childs_worker_leaves_it_resumable(workers, monkeypatch, kicks):
+    """docker stop / desktop quit on the worker running the child: the parent's
+    report names the shutdown, the record is not a user stop, a message resumes it."""
+    from app.core.task_registry import USER_STOP_REASON
+    from tests.core.network.test_remote_task_messaging import message_turns, send
+
+    a, b, router = network(workers, monkeypatch)
+    child = started_child(a, b)
+    with a.active():
+        turn = child_turn(child)
+        assert turns.start_turn(turn["id"])
+        session_events.append_events(child, [{"type": "assistant.text_delta", "turn_id": turn["id"],
+                                              "payload": {"text": "Counted to 3."}}])
+
+    class Runtime:
+        turn_id = turn["id"]
+
+        async def interrupt(self, mode, escalation_timeout=None):
+            # What the live turn does on a stop: it ends aborted.
+            assert mode == "stop"
+            session_events.append_events(child, [{
+                "type": "turn.aborted", "turn_id": turn["id"],
+                "payload": {"message": "The chat was interrupted before it finished."}}])
+            assert turns.settle_turn(turn["id"], "aborted")
+
+    stop_running_sessions = _shutting_down(monkeypatch, [child], {child: Runtime()})
+    with a.active():
+        asyncio.run(stop_running_sessions())
+        assert not task_registry.is_user_stopped(child)
+        assert asyncio.run(remote_task.sweep()) == 1
+        report = remote_tasks.get_child(child)["report"]
+        assert report["status"] == "failed"
+        assert "shut down" in report["report"] and "Nobody stopped it" in report["report"]
+    assert stop_requests(router) == []
+    with b.active():
+        record = task_registry.get_task("caller", child)
+        assert record["status"] != "killed" and record.get("reason") != USER_STOP_REASON
+        [wake] = wakes()
+        assert "shut down" in wake["prompt"]
+    outcome = send(b, child, "Carry on counting.")
+    assert not outcome.is_error, outcome.text
+    assert outcome.text.startswith("Resume queued for Default on Unraid")
+    with a.active():
+        [resumed] = message_turns(child)
+        assert "Carry on counting." in resumed["prompt"]
+
+
+def test_a_shutdown_of_the_parents_worker_leaves_the_remote_child_running(
+        workers, monkeypatch, kicks):
+    """Quitting the parent's worker stops its own work, not the child on Unraid."""
+    a, b, router = network(workers, monkeypatch)
+    child = started_child(a, b)
+    stop_running_sessions = _shutting_down(monkeypatch, ["caller"])
+    with b.active():
+        asyncio.run(stop_running_sessions())
+        asyncio.run(remote_task.drain_stops())
+        assert task_registry.get_task("caller", child)["status"] == "running"
+        dispatch = remote_tasks.get_dispatch(child)
+        assert dispatch["stop_requested_at"] is None and dispatch["stop_reason"] is None
+    assert stop_requests(router) == []
+    with a.active():
+        assert child_turn(child)["state"] == "queued"
+        assert not task_registry.is_user_stopped(child)

@@ -31,6 +31,7 @@
 	import { computeContextBadge, shouldShowBranchPill, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { gitStateQuery, runnerBadgeMenuItems } from './runner-badge-menu';
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
+	import { pendingHandoff } from './pending-handoff';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
@@ -158,9 +159,27 @@
 	let runnerActionError = $state('');
 	let pendingResume = $state<{ item: RunnerBadgeMenuItem; sessionId: string } | null>(null);
 
-	const runnerBusy = $derived(
-		runnerAction && runnerAction.sessionId === $activeSession.sessionId ? runnerAction : null
-	);
+	/**
+	 * A hand-off the agent queued with HandOffSession (#1809). It runs on the
+	 * owning worker when the turn ends, so the chip learns of it from the chat,
+	 * and shows the same pending state as a move the owner started here.
+	 */
+	const agentHandoff = $derived(pendingHandoff($activeSession.messages));
+	const MOVE_TITLE = 'Committing, pushing and syncing this session. This can take a minute.';
+	const runnerBusy = $derived.by((): { label: string; title: string } | null => {
+		if (runnerAction && runnerAction.sessionId === $activeSession.sessionId) {
+			return { label: runnerAction.label, title: MOVE_TITLE };
+		}
+		if (!agentHandoff) return null;
+		return agentHandoff.phase === 'moving'
+			? { label: `Moving to ${agentHandoff.worker}…`, title: MOVE_TITLE }
+			: {
+					label: `Moving to ${agentHandoff.worker} after this turn`,
+					title: `The agent queued a move to ${agentHandoff.worker}. When this turn and its background work end, the app commits, pushes and moves this session there.`
+				};
+	});
+	/** No second move while one is running or queued. */
+	const runnerLocked = $derived(runnerActionPending || !!agentHandoff);
 	const runnerDone = $derived(
 		!runnerBusy && runnerActionDone && runnerActionDone.sessionId === $activeSession.sessionId
 			? runnerActionDone
@@ -208,8 +227,8 @@
 	}
 
 	function toggleRunnerMenu() {
-		// The chip is disabled while a move runs; never start a second one.
-		if (runnerActionPending) return;
+		// The chip is disabled while a move runs or is queued; never start a second one.
+		if (runnerLocked) return;
 		runnerActionError = '';
 		if (showRunnerMenu) {
 			closeDropdown('runner');
@@ -220,7 +239,7 @@
 	}
 
 	async function runMenuAction(item: RunnerBadgeMenuItem, confirmed = false) {
-		if (!item.action || item.disabled || runnerActionPending) return;
+		if (!item.action || item.disabled || runnerLocked) return;
 		const sessionId = $activeSession.sessionId;
 		if (!sessionId) return;
 		// Only Git projects commit and push on the way; plain chats move history alone.
@@ -275,7 +294,7 @@
 	function confirmResume() {
 		const pending = pendingResume;
 		pendingResume = null;
-		if (pending && !runnerActionPending && pending.sessionId === $activeSession.sessionId) {
+		if (pending && !runnerLocked && pending.sessionId === $activeSession.sessionId) {
 			void runMenuAction(pending.item, true);
 		}
 	}
@@ -354,13 +373,13 @@
 					class:busy={!!runnerBusy}
 					class:done={!!runnerDone}
 					title={runnerBusy
-						? 'Committing, pushing and syncing this session. This can take a minute.'
+						? runnerBusy.title
 						: badge?.title || 'Runs on this device — move this session to another worker'}
 					aria-label={runnerBusy
 						? runnerBusy.label
 						: `Runner: ${badge?.runner?.deviceName ?? 'Local'}${badge?.runner && !badge.runner.online ? ' (offline)' : ''}`}
 					aria-busy={runnerBusy ? 'true' : undefined}
-					disabled={runnerActionPending}
+					disabled={runnerLocked}
 					aria-haspopup="menu"
 					aria-expanded={showRunnerMenu}
 					onclick={toggleRunnerMenu}
@@ -644,14 +663,12 @@
 		color: var(--foreground);
 	}
 
-	/* Brief confirmation once the session runs on the new worker. */
+	/* Brief confirmation once the session runs on the new worker. Theme
+	   tokens only: no preset defines --success, so it stayed the app's green
+	   under every theme (#1809). The tick carries the meaning. */
 	.ctx-chip.runner.done {
-		color: var(--success);
-		background: color-mix(in oklch, var(--success) 14%, var(--muted));
-	}
-
-	.ctx-chip.runner.done :global(svg) {
-		color: var(--success);
+		color: var(--foreground);
+		background: color-mix(in oklch, var(--primary) 18%, var(--muted));
 	}
 
 	/* Long device names in the progress label must not push the row wider

@@ -1456,6 +1456,7 @@ async def record_voice_exchange(
     model: Optional[str] = None,
     usage: Optional[Dict[str, Any]] = None,
     system_text: Optional[str] = None,
+    user_source: str = "voice",
 ) -> Optional[str]:
     """Persist ONE completed voice exchange as a synthetic turn.
 
@@ -1467,7 +1468,10 @@ async def record_voice_exchange(
 
     ``user_text=None`` is legitimate — a model-initiated response, or an input
     transcription that never arrived — and simply omits the ``message.user``
-    event. ``system_text`` is a note the bridge injected into the call, kept
+    event; with no ``assistant_text`` the ``message.assistant`` event is
+    omitted too (an empty one showed as an empty reply). ``user_source`` tags the
+    user message: ``voice`` for speech, ``typed`` for text typed into the call.
+    ``system_text`` is a note the bridge injected into the call, kept
     apart from the user's words throughout (see
     :func:`_voice_exchange_side_effects`). Returns the synthetic turn id, or
     ``None`` when nothing was written. Never raises: a persistence bug must not
@@ -1495,12 +1499,13 @@ async def record_voice_exchange(
             rows.append(_build_event(
                 contract.MessageUser, session_id, turn_id=turn_id,
                 content=user_text, kind="text",
-                extra_payload={"source": "voice"},
+                extra_payload={"source": user_source},
             ))
-        rows.append(_build_event(
-            contract.MessageAssistant, session_id, turn_id=turn_id,
-            content=assistant_text or "", kind="text", model=model,
-        ))
+        if assistant_text:
+            rows.append(_build_event(
+                contract.MessageAssistant, session_id, turn_id=turn_id,
+                content=assistant_text, kind="text", model=model,
+            ))
         rows.append(_build_event(
             contract.TurnCompleted, session_id, turn_id=turn_id,
             stop_reason="end_turn", usage=usage or {},

@@ -537,6 +537,10 @@
 				{/if}
 				{#if canCopy}
 					<div class="assistant-actions" class:is-visible={showActions}>
+						<!-- A block with no stats row (mid-turn, or a reply without
+						     metadata) has no visible time; show it with the actions on
+						     hover, as the user bubble does. -->
+						{#if timestamp && !metadata}<span class="assistant-time">{formatMessageTime(timestamp)}</span>{/if}
 						<MessageActions
 							{sessionId}
 							messageContent={content}
@@ -619,11 +623,21 @@
 	/* Space is always reserved so revealing the controls on hover never
 	   reflows the transcript — only opacity changes. Keyboard focus reveals
 	   them too, so tabbing onto the button never lands on something invisible. */
+	/* Left-aligned with the reply it belongs to, after any stats: the reply
+	   starts at the left edge, so its actions do too. */
 	.assistant-actions {
-		margin-left: auto;
+		display: flex;
+		align-items: center;
+		gap: 8px;
 		opacity: 0;
 		pointer-events: none;
 		transition: opacity 0.12s ease;
+	}
+
+	.assistant-time {
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		color: var(--subtle-foreground);
 	}
 
 	.assistant-actions.is-visible,

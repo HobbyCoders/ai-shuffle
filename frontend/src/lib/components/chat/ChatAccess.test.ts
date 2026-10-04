@@ -15,6 +15,9 @@ const accessAuth = vi.hoisted(() => {
 });
 vi.mock('$lib/stores/auth.svelte', () => ({auth: accessAuth}));
 import ChatAccess from './ChatAccess.svelte';
+import PrivateAccessPrompt from './PrivateAccessPrompt.svelte';
+import { get } from 'svelte/store';
+import { privateAccessPending } from '$lib/stores/chat-access';
 import { resourceSync } from '$lib/services/resource-sync';
 const empty = () => ({ requests: [], actions: [], grants: [], saved_connections: [], vault_available: false });
 let snapshot: ReturnType<typeof empty> | Record<string, unknown>;
@@ -34,6 +37,25 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); resourceSync.clear(); vi.useRealTimers(); });
 describe('private access header disclosure', () => {
+ // #1807: a request raised while the chat is open shows IN the chat, and the
+ // session is marked as needing the owner, without opening the header panel.
+ it('shows a request raised in the open chat as an in-chat prompt and marks the session', async () => {
+  render(ChatAccess, {sessionId: 's1', trigger: 'none'});
+  render(PrivateAccessPrompt, {sessionId: 's1'});
+  await flush();
+  expect(screen.queryByRole('region', {name: /private access waiting/i})).toBeNull();
+  snapshot = {...empty(), requests: [{id: 'r1', kind: 'machine', purpose: 'Check the container logs', expires_at: 9999999999}]};
+  resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
+  const region = screen.getByRole('region', {name: /private access waiting/i});
+  expect(region.textContent).toContain('Check the container logs');
+  expect(get(privateAccessPending).get('s1')).toBe(1);
+  await fireEvent.click(screen.getByRole('button', {name: 'Review'}));
+  expect((document.querySelector('dialog.access-dialog') as HTMLDialogElement).open).toBe(true);
+  snapshot = empty();
+  resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
+  expect(screen.queryByRole('region', {name: /private access waiting/i})).toBeNull();
+  expect(get(privateAccessPending).has('s1')).toBe(false);
+ });
  it('resumes a service setup after dialog close without keeping its token or consent', async () => {
   Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
   snapshot = {...empty(), requests: [{id:'r1',kind:'service',purpose:'Read inventory',expires_at:9999999999,service_provider:'cloudflare',suggested_url:'https://api.cloudflare.com/client/v4'}]};

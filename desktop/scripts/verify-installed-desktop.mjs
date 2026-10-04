@@ -1,5 +1,6 @@
 // Real NSIS -> existing-profile upgrade -> signed stable update -> same EXE launch.
-// Run only on a fresh Windows CI machine. Never upload its profile or raw logs.
+// Run only on a fresh Windows CI machine. Never upload its profile; only the
+// redacted logs listed in evidenceLogs are copied into the evidence folder.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -23,6 +24,21 @@ const report={success:false,checks:[]};
 const passed=message=>{report.checks.push(message);console.log('PASS: '+message);};
 const log=await fs.open(path.join(temporary,'installed-desktop.log'),'a');
 let chromium,browser,page;
+// The installed app's own logs (desktop/README.md), so a failed start names its
+// cause. Only these files, never the database, descriptors, keys or browser state.
+const evidenceLogs=[['logs','worker.log'],['logs','worker.prev.log'],['logs','postgres.log'],['updates','build.log']];
+const LOG_TAIL_CHARS=8*1024*1024;
+const redact=line=>line.replace(/github_pat_[A-Za-z0-9_]+|\bgh[pousr]_[A-Za-z0-9]{20,}|\bsk-[A-Za-z0-9_-]{16,}/g,'[redacted]')
+ .replace(/\bBearer\s+[^\s"',]+/gi,'Bearer [redacted]').replace(/:\/\/[^\/\s:@]+:[^@\s]+@/g,'://[redacted]@')
+ .replace(/\b([\w-]*(?:token|password|passwd|secret|authorization|api[_-]?key|cookie)[\w-]*)(["']?\s*[:=]\s*["']?)[^\s"',&]+/gi,'$1$2[redacted]');
+async function collectLogs(){
+ const target=path.join(output,'logs');await fs.mkdir(target,{recursive:true});report.logs={};
+ for(const [folder,name] of evidenceLogs){const key=folder+'/'+name;let text;
+  try{text=await fs.readFile(path.join(profile,folder,name),'utf8');}catch(error){report.logs[key]=error.code==='ENOENT'?'missing':String(error);continue;}
+  const truncated=text.length>LOG_TAIL_CHARS;const lines=(truncated?text.slice(-LOG_TAIL_CHARS):text).split(/\r?\n/).map(redact);
+  await fs.writeFile(path.join(target,name),lines.join('\n'));report.logs[key]=truncated?'copied (tail)':'copied';
+  if(!report.success&&name==='worker.log')console.error('--- worker.log (last 60 lines) ---\n'+lines.slice(-60).join('\n'));}
+}
 async function until(fn,message,timeout=120000){const end=Date.now()+timeout;while(Date.now()<end){if(await fn())return;await new Promise(r=>setTimeout(r,500));}throw Error(message);}
 // The installed launcher and updated Electron overlap briefly during handoff.
 // Let Chromium allocate a port for each process instead of racing for one port.
@@ -113,8 +129,8 @@ try{
  try{report.sourceState=JSON.parse(await fs.readFile(path.join(sourceRoot,'state.json'),'utf8'));}catch{}
  try{report.workerReady=(await fetch('http://127.0.0.1:8000/health/ready',{signal:AbortSignal.timeout(1000)})).status;}catch{}
  try{const launchLog=await fs.readFile(path.join(sourceRoot,'launch.log'),'utf8');report.debuggerPorts=[...launchLog.matchAll(/DevTools listening on ws:\/\/127\.0\.0\.1:(\d+)/g)].map(match=>Number(match[1]));}catch{}
- // Build children receive a credential-free environment. Retain only bounded
- // error diagnostics, never worker logs, browser state or the private profile.
- try{const buildLog=await fs.readFile(path.join(sourceRoot,'build.log'),'utf8');report.buildErrors=buildLog.split(/\r?\n/).filter(line=>/error|failed|traceback|cannot|no such|not found|not recognized/i.test(line)).slice(-25).map(line=>line.replace(/github_pat_[A-Za-z0-9_]+/g,'[redacted]').replace(/(token|password|authorization)\s*[:=]\s*\S+/gi,'$1=[redacted]').slice(0,1000));console.error(report.buildErrors.join('\n'));}catch{}
+ // Build children receive a credential-free environment. The redacted logs
+ // themselves are copied by collectLogs; this keeps a short error summary.
+ try{const buildLog=await fs.readFile(path.join(sourceRoot,'build.log'),'utf8');report.buildErrors=buildLog.split(/\r?\n/).filter(line=>/error|failed|traceback|cannot|no such|not found|not recognized/i.test(line)).slice(-25).map(line=>redact(line).slice(0,1000));console.error(report.buildErrors.join('\n'));}catch{}
  if(page&&!page.isClosed())await screenshot('failure').catch(()=>{});}
-finally{if(page)await close().catch(()=>{});await log.close();await fs.writeFile(path.join(output,'acceptance.json'),JSON.stringify(report,null,2));}
+finally{if(page)await close().catch(()=>{});await log.close();await collectLogs().catch(error=>{report.logsError=String(error);});await fs.writeFile(path.join(output,'acceptance.json'),JSON.stringify(report,null,2));}

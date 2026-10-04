@@ -115,6 +115,9 @@ CANCELLED_CHIP_STATUS = "cancelled"
 # row; only one of them is worth a red cross in the transcript.
 AGENT_STOP_SUMMARY = "Stopped by the agent"
 AGENT_STOP_REASON = "agent_stopped"
+# The same deliberate stop of a SUBAGENT, by the conversation that started it
+# (its ``TaskStop``, #1805). Same reason; the words name who stopped it.
+PARENT_AGENT_STOP_SUMMARY = "Stopped by the parent agent"
 
 # Ceiling on remembered user-stop latches (see ``TaskRegistry._user_stopped``).
 # Generous: the latch normally lives for seconds, until the user's next message.

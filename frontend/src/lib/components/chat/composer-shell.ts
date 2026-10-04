@@ -119,6 +119,12 @@ export interface ComposerSheetProps {
 	/** The session write is pending; keep the saved choice visible until it succeeds. */
 	permissionUpdating?: boolean;
 	onPermissionSelect: (value: string) => void;
+	/** Away mode for this chat: the agent takes recommended defaults instead of asking. */
+	awayEnabled?: boolean;
+	/** False until the chat has started (Away is stored per session). */
+	awayAvailable?: boolean;
+	awayBusy?: boolean;
+	onToggleAway?: () => void;
 }
 
 // ─── Registry ───────────────────────────────────────────────────────────────

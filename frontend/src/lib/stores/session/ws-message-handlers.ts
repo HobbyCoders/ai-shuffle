@@ -24,6 +24,7 @@ import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 import { pendingQueue, reconcilePendingPeerMessages } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
+import { setPrivateAccessPending } from '../chat-access';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -1084,6 +1085,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					...(data.assistant_confirm && typeof data.assistant_confirm === 'object'
 						? { assistant_confirm: data.assistant_confirm as PermissionRequestType['assistant_confirm'] }
 						: {}),
+					// Who asked, on a subagent's prompt (names the worker of a relayed one).
+					...(data.provider_agent && typeof data.provider_agent === 'object'
+						? { provider_agent: data.provider_agent as PermissionRequestType['provider_agent'] }
+						: {}),
 				} as PermissionRequestType;
 
 				// The same prompt now arrives twice by design: once on the origin
@@ -1280,6 +1285,21 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					if (same) return s;
 					return { ...s, pendingQuestions: questions };
 				});
+				break;
+			}
+
+			case 'chat_access_changed': {
+				// The worker says a session's private access changed and how many
+				// requests/approvals now wait for the owner (#1807). The open chat's
+				// panel refetches through resourceSync and publishes its own count;
+				// this keeps every other session's "Needs you" mark current. An
+				// older worker sends no count: leave the mark as it is.
+				const accessSessionId = data.session_id;
+				const pending = data.pending;
+				if (typeof accessSessionId === 'string' && accessSessionId
+					&& typeof pending === 'number' && Number.isFinite(pending)) {
+					setPrivateAccessPending(accessSessionId, pending);
+				}
 				break;
 			}
 

@@ -292,6 +292,27 @@ async def test_delegated_leg_puts_the_turn_note_back_after_a_compaction(monkeypa
         await adapter.disconnect()
 
 
+@pytest.mark.asyncio
+async def test_compaction_note_carries_date_and_branch_without_the_app_env(monkeypatch, tmp_path):
+    """#1794: a profile without the app's <env> block has no date or branch
+    in its turn note, so after /compact the agent ran git to answer "what
+    branch are we on". The put-back note now names both."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "feature-x", str(repo)], check=True)
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_preset_options(repo))
+    try:
+        assert adapter._env_note() is None
+        note = await adapter._engine.compact_context()
+        assert "Today's date: " in note and "Current branch: feature-x" in note
+    finally:
+        await adapter.disconnect()
+
+
 def test_delegated_tool_policy_denies_what_the_app_denies(tmp_path):
     """The PreToolUse policy refuses the blocklist, anything off the surface
     and a permission-engine deny rule; everything else is left to the CLI."""
@@ -495,6 +516,36 @@ def test_delegated_append_carries_fluid_instructions_skills_and_learned_guidance
     assert ha.DELEGATED_INSTRUCTIONS_HEADER not in ha._delegated_append_text(
         "APPEND TEXT", options, ToolRegistry(),
     )
+
+
+def test_delegated_full_replace_skills_name_the_file_to_read(
+    tmp_path, _isolated_home, monkeypatch,
+):
+    """#1793: Claude Code's Skill tool cannot load the app's built-in skills
+    or a repository's .fluid/skills ("Unknown skill"). The delegated
+    full-replace prompt names each SKILL.md to Read instead of pointing at the
+    Skill tool; the native leg keeps fluid's own header (its Skill tool loads
+    them)."""
+    from fluid.context import instructions
+    from fluid.context.compiler import SKILLS_HEADER
+
+    builtin = Path(instructions.__file__).resolve().parent.parent / "builtin_skills"
+    monkeypatch.setattr(instructions, "builtin_skills_dir", lambda: builtin)
+    project = tmp_path / "proj"
+    (project / ".fluid" / "skills" / "deploy").mkdir(parents=True)
+    skill_md = project / ".fluid" / "skills" / "deploy" / "SKILL.md"
+    skill_md.write_text("---\nname: deploy\ndescription: Ship a build\n---\nbody", encoding="utf-8")
+    options = SessionOptions(model="fable", system_prompt="BASE", cwd=str(project))
+
+    delegated = ha.HarnessAdapter._compile_prompt("BASE", None, options)
+    assert SKILLS_HEADER not in delegated
+    assert ha.DELEGATED_SKILLS_HEADER in delegated
+    assert f"- deploy: Ship a build ({skill_md})" in delegated
+    assert (builtin / "build-plugin" / "SKILL.md").is_file()
+    assert f"({builtin / 'build-plugin' / 'SKILL.md'})" in delegated
+
+    native = ha.HarnessAdapter._compile_prompt_sections("BASE", None, options).text
+    assert SKILLS_HEADER in native and ha.DELEGATED_SKILLS_HEADER not in native
 
 
 # ─── Claude Code compactions become the chat's compaction card ──────────────

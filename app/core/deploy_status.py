@@ -50,8 +50,30 @@ def _out(repo: Path, *args: str, timeout: int = 15) -> Optional[str]:
     return result.stdout.strip() if result is not None and result.returncode == 0 else None
 
 
+# A registered project's origin must BE the ai-shuffle repository (any owner,
+# so a fork works), not merely mention it the way the fixed candidates may.
+_AI_SHUFFLE_ORIGIN = re.compile(r"[/:][^/:]+/ai-shuffle(?:\.git)?/?$", re.IGNORECASE)
+
+
+def _project_checkouts() -> List[Path]:
+    """Registered projects' paths on this worker (the desktop app keeps its
+    ai-shuffle project outside the workspace folder, #1815)."""
+    try:
+        from app.core.project_utils import get_project_working_dir
+        from app.db import database
+        return [Path(get_project_working_dir(p["path"]))
+                for p in database.get_all_projects() or [] if p.get("path")]
+    except Exception:  # noqa: BLE001 — no database is no candidates, not an error
+        logger.debug("deploy status: project lookup failed", exc_info=True)
+        return []
+
+
 def find_repo() -> Optional[Path]:
-    """A local ai-shuffle checkout with an origin remote, or None."""
+    """A local ai-shuffle checkout with an origin remote, or None.
+
+    ``SHUFFLE_SOURCE_REPO``, the app's own root and ``<workspace>/ai-shuffle``
+    first, then any registered project whose origin is the ai-shuffle repo.
+    """
     candidates: List[Path] = []
     if os.environ.get("SHUFFLE_SOURCE_REPO"):
         candidates.append(Path(os.environ["SHUFFLE_SOURCE_REPO"]))
@@ -67,6 +89,15 @@ def find_repo() -> Optional[Path]:
             continue
         url = _out(candidate, "remote", "get-url", "origin", timeout=5)
         if url and "ai-shuffle" in url.lower():
+            top = _out(candidate, "rev-parse", "--show-toplevel", timeout=5)
+            return Path(top) if top else candidate
+    seen = {str(c) for c in candidates}
+    for candidate in _project_checkouts():
+        if str(candidate) in seen or not candidate.is_dir():
+            continue
+        seen.add(str(candidate))
+        url = _out(candidate, "remote", "get-url", "origin", timeout=5)
+        if url and _AI_SHUFFLE_ORIGIN.search(url.strip()):
             top = _out(candidate, "rev-parse", "--show-toplevel", timeout=5)
             return Path(top) if top else candidate
     return None

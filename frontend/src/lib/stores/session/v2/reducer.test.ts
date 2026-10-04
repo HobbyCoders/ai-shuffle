@@ -462,7 +462,9 @@ describe('message.user reconcile', () => {
 		expect(s.messages[0].id).toBe('local-def');
 	});
 
-	it('does NOT reconcile stale content beyond the 30s window (appends instead)', () => {
+	it('replaces the local copy with the stored one when the worker clock differs from the browser (#1800)', () => {
+		// The browser stamped the optimistic row; the worker running the chat
+		// stamped created_at. Five minutes of skew must still yield ONE bubble.
 		const optimistic: ChatMessage = {
 			id: 'local-old',
 			role: 'user',
@@ -475,7 +477,18 @@ describe('message.user reconcile', () => {
 			seeded,
 			ev('message.user', { id: 'srv-11', content: 'ping', command_id: null, created_at: '2026-07-12T00:05:00.000Z' })
 		);
-		expect(s.messages).toHaveLength(2);
+		expect(s.messages).toHaveLength(1);
+		expect(s.messages[0].id).toBe('local-old');
+		// Confirmed: it now has an origin seq like any server message.
+		expect(s.messageOriginSeq.has('local-old')).toBe(true);
+	});
+
+	it('never folds a second identical send onto an already confirmed message', () => {
+		const s = fold([
+			ev('message.user', { id: 'srv-a', content: 'again', created_at: '2026-07-12T00:00:00.000Z' }),
+			ev('message.user', { id: 'srv-b', content: 'again', created_at: '2026-07-12T00:00:02.000Z' }),
+		]);
+		expect(s.messages.map((m) => m.id)).toEqual(['srv-a', 'srv-b']);
 	});
 
 	it('absorbs the recorder copy onto an adjacent backfill copy (damaged-log repair)', () => {
@@ -1440,6 +1453,34 @@ describe('subagent cards', () => {
 		const s2 = reduce(s, ev('task.updated', { task_id: 'reg-1', state: 'completed', tool_use_id: 'toolu-1' }));
 		const card2 = s2.messages.find((m) => m.type === 'subagent');
 		expect(card2?.agentStatus).toBe('completed');
+	});
+
+	it('a stopped subagent card reads stopped with who stopped it (#1806)', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
+			ev('task.updated', {
+				task_id: 'reg-1', state: 'killed', summary: 'Stopped by user', tool_use_id: 'toolu-1',
+			}),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentStatus).toBe('stopped');
+		expect(card?.agentStopNote).toBe('Stopped by user');
+		// The stop is not dressed as a failure, and no late progress revives it.
+		const s2 = reduce(s, ev('subagent.progress', { task_id: 'toolu-1', kind: 'chunk', note: 'late' }));
+		expect(s2.messages.find((m) => m.type === 'subagent')?.agentStatus).toBe('stopped');
+	});
+
+	it('subagent.completed killed settles stopped; the later chip adds the note', () => {
+		const s = fold([
+			ev('subagent.started', { task_id: 'toolu-1', description: 'bg work' }),
+			ev('subagent.completed', { task_id: 'toolu-1', status: 'killed', result_preview: 'partial private output' }),
+			ev('task.updated', {
+				task_id: 'reg-1', state: 'killed', summary: 'Stopped by user', tool_use_id: 'toolu-1',
+			}),
+		]);
+		const card = s.messages.find((m) => m.type === 'subagent');
+		expect(card?.agentStatus).toBe('stopped');
+		expect(card?.agentStopNote).toBe('Stopped by user');
 	});
 
 	it('subagent.progress never re-opens a card settled to error', () => {

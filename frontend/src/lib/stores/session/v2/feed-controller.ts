@@ -44,6 +44,11 @@ export interface FeedControllerDeps {
 	 * event. The feed must not create cards from replayed lifecycle events: an
 	 * old requested event may already be answered or expired. */
 	requestPendingQuestions: () => void;
+	/** Same for permission rows. A permission raised on another worker (a chat
+	 * that runs there, or a subagent's relayed prompt) reaches this device only
+	 * as this durable event: the live `permission_request` frame stays on the
+	 * worker that raised it (#1802). */
+	requestPendingPermissions: () => void;
 	/** #606 item 4: drop a pending/deferred permission or pending question by
 	 *  `request_id` when a durable `interaction.answered` / `interaction.expired`
 	 *  event says it was resolved (possibly on another device). Wired to
@@ -59,7 +64,8 @@ let reducerState: V2SessionState = initialState();
 let currentSessionId: string | null = null;
 let rafHandle: number | null = null;
 let timerHandle: ReturnType<typeof setTimeout> | null = null;
-let pendingQuestionsResyncHandle: ReturnType<typeof setTimeout> | null = null;
+let pendingResyncHandle: ReturnType<typeof setTimeout> | null = null;
+type InteractionKind = 'permission' | 'question';
 
 /**
  * Delivered user messages are reported to `pendingQueue`, which owns the whole
@@ -94,8 +100,9 @@ let everCaughtUp = false;
 let sentinelPending = false;
 // A requested event during hydration is only a hint. Hold one dirty bit until
 // the authoritative history boundary (or hydration fallback) so a long replay
-// cannot issue one WS snapshot request per SSE chunk.
-let pendingQuestionsResyncDirty = false;
+// cannot issue one WS snapshot request per SSE chunk. Tracked per kind so a
+// permission request never costs a question read, and the other way round.
+const pendingResyncDirty = new Set<InteractionKind>();
 // Events actually reduced on this feed since start(). The hydration floor keys
 // off this: publishing "hydration complete" with ZERO reduced events renders an
 // empty transcript, which the chat surface classifies as `cleared` — the
@@ -253,7 +260,7 @@ function completeHydration(premature: boolean): void {
 	fold(true);
 	// A floor-driven completion intentionally leaves sentinelPending=true, but
 	// the durable rows are still authoritative now; force this one recovery read.
-	flushPendingQuestionsResync(currentSessionId, feedGeneration, true);
+	schedulePendingResync(currentSessionId, feedGeneration, true);
 	if (!premature) captureTranscript();
 }
 
@@ -778,7 +785,7 @@ function resetFeedFlags(): void {
 	caughtUp = false;
 	everCaughtUp = false;
 	sentinelPending = false;
-	pendingQuestionsResyncDirty = false;
+	pendingResyncDirty.clear();
 	eventsReduced = 0;
 	transcriptPublished = false;
 	hydrationSlow = false;
@@ -807,9 +814,9 @@ function teardown(capture: boolean): void {
 	}
 	hiddenStreamDirty = false;
 	clearCatchupFallback();
-	if (pendingQuestionsResyncHandle !== null) {
-		clearTimeout(pendingQuestionsResyncHandle);
-		pendingQuestionsResyncHandle = null;
+	if (pendingResyncHandle !== null) {
+		clearTimeout(pendingResyncHandle);
+		pendingResyncHandle = null;
 	}
 	// The fold clock belongs to a feed, not to the module: a fresh feed must not
 	// inherit the previous session's throttle window.
@@ -823,26 +830,21 @@ function teardown(capture: boolean): void {
 
 /**
  * A durable requested event is a recovery hint, not a card payload. Coalesce
- * bursts (and replayed history) into one authoritative WS snapshot so a late
- * event cannot resurrect a question that has already been answered/expired.
+ * bursts (and replayed history) into one authoritative WS snapshot per kind so
+ * a late event cannot resurrect a prompt that has already been answered/expired.
  */
-function schedulePendingQuestionsResync(sessionId: string, generation: number, force = false): void {
-	if (!force && (!caughtUp || sentinelPending)) {
-		pendingQuestionsResyncDirty = true;
-		return;
-	}
-	if (pendingQuestionsResyncHandle !== null) return;
-	pendingQuestionsResyncHandle = setTimeout(() => {
-		pendingQuestionsResyncHandle = null;
+function schedulePendingResync(sessionId: string | null, generation: number, force = false): void {
+	if (!sessionId || pendingResyncDirty.size === 0) return;
+	if (!force && (!caughtUp || sentinelPending)) return;
+	if (pendingResyncHandle !== null) return;
+	pendingResyncHandle = setTimeout(() => {
+		pendingResyncHandle = null;
 		if (generation !== feedGeneration || currentSessionId !== sessionId) return;
-		deps?.requestPendingQuestions();
+		const kinds = [...pendingResyncDirty];
+		pendingResyncDirty.clear();
+		if (kinds.includes('permission')) deps?.requestPendingPermissions();
+		if (kinds.includes('question')) deps?.requestPendingQuestions();
 	}, 0);
-}
-
-function flushPendingQuestionsResync(sessionId: string | null, generation: number, force = false): void {
-	if (!sessionId || !pendingQuestionsResyncDirty) return;
-	pendingQuestionsResyncDirty = false;
-	schedulePendingQuestionsResync(sessionId, generation, force);
 }
 
 export const feedController: FeedController = {
@@ -902,7 +904,7 @@ export const feedController: FeedController = {
 					sentinelPending = false;
 					clearCatchupFallback();
 					fold(true);
-					flushPendingQuestionsResync(sessionId, generation);
+					schedulePendingResync(sessionId, generation);
 					// Hydration finished on a REAL sentinel — the only state exact
 					// enough to cache (invalidation rule R1).
 					captureTranscript();
@@ -975,9 +977,14 @@ export const feedController: FeedController = {
 				if (
 					ev.type === 'interaction.requested' &&
 					ev.session_id === sessionId &&
-					ev.kind === 'question'
+					(ev.kind === 'question' || ev.kind === 'permission') &&
+					// The worker that raised a permission also sends it live; a card
+					// already shown needs no re-read.
+					!(ev.kind === 'permission' &&
+						deps?.getState().pendingPermissions?.some((p) => p.request_id === ev.request_id))
 				) {
-					schedulePendingQuestionsResync(sessionId, generation);
+					pendingResyncDirty.add(ev.kind);
+					schedulePendingResync(sessionId, generation);
 				}
 				// A frame just arrived while still batching: the stream is alive,
 				// so keep waiting for `caught_up`. Re-armed AFTER counting the
@@ -993,7 +1000,8 @@ export const feedController: FeedController = {
 				// cheap no-op when the card isn't present (see the store method), so a
 				// backfilled event for an already-gone card does nothing. Card CREATION
 				// stays on the legacy relay by design (interaction.requested is not
-				// used to reconstruct a card; it only triggers an authoritative resync).
+				// used to reconstruct a card; it only triggers an authoritative resync,
+				// above, through that relay).
 				if (
 					(ev.type === 'interaction.answered' || ev.type === 'interaction.expired') &&
 					typeof ev.request_id === 'string' &&

@@ -73,6 +73,12 @@ describe('owner runtime state', () => {
 		expect(deriveStatus({ remoteRuntimeState, streaming: true, optimisticStreaming: true,
 			attention: null, isActive: true })).toBe(expected);
 	});
+	// #1807: a pending private-access request outranks the owner's run state,
+	// which reads `working` while the RequestChatAccess call waits.
+	it.each(['working', 'idle', 'unknown', null] as const)('a waiting private-access request reads as needing the owner over %s', (remoteRuntimeState) => {
+		expect(deriveStatus({ remoteRuntimeState, streaming: true, privateAccess: true,
+			attention: null, isActive: true })).toBe('needs_permission');
+	});
 	it('keeps git stage independent after a remote turn settles', () => {
 		expect(deriveStatus({ remoteRuntimeState: 'idle', streaming: true,
 			attention: null, isActive: true, prState: 'open' })).toBe('pr');
@@ -506,6 +512,12 @@ describe('sessionNeedsYou / attentionTitle', () => {
 		const remote = { status: 'active', is_remote: true } as const;
 		expect(sessionNeedsYou({ ...remote, remote_runtime_state: 'permission' }, null)).toBe(true);
 		expect(sessionNeedsYou({ ...remote, remote_runtime_state: 'idle' }, { count: 3 })).toBe(false);
+	});
+	it('counts a waiting private-access request for local and remote sessions (#1807)', () => {
+		expect(sessionNeedsYou(local, null, 1)).toBe(true);
+		expect(sessionNeedsYou({ status: 'active', is_remote: true, remote_runtime_state: 'working' }, null, 2)).toBe(true);
+		expect(sessionNeedsYou(local, null, 0)).toBe(false);
+		expect(sessionNeedsYou({ ...local, status: 'archived' }, null, 1)).toBe(false);
 	});
 	it('prefixes the count only when something is waiting', () => {
 		expect(attentionTitle('AI Shuffle', 0)).toBe('AI Shuffle');

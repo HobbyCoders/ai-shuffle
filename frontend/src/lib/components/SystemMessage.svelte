@@ -249,9 +249,13 @@
 				const trigger = metadata.trigger as string || 'manual';
 				const preTokens = metadata.pre_tokens as number;
 
+				// The badge shows the size once it is known, so the sentence is
+				// what says a typed /compact was manual.
 				let content = trigger === 'auto'
 					? 'Context was automatically compacted.'
-					: 'Context was compacted.';
+					: metadata.trigger === 'manual'
+						? 'Context was compacted manually (/compact).'
+						: 'Context was compacted.';
 
 				if (preTokens) {
 					// Format large numbers nicely

@@ -491,3 +491,60 @@ def test_checkpoint_holds_unanswered_speech_through_a_pause(monkeypatch):
     call.pending["assistant"] = "On it."
     call.last_caption_at = time.monotonic() - 2
     assert call.checkpoint_due()
+
+
+# ---------------------------------------------------------------------------
+# #1798: one spoken reply is one stored message, in spoken order
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_handoff_stores_the_request_and_keeps_the_reply_being_spoken_whole(monkeypatch):
+    """The handoff flush cut "Sure," off the reply the voice was speaking."""
+    capture = recorder(monkeypatch)
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", AsyncMock(return_value=""))
+    call = stream()
+    call.upstream = Upstream([])
+    await call.caption("user", "Take a look at the two images.")
+    await call.caption("assistant", "Sure,")
+    await call.run_delegation("d1", list(call.transcript))
+    # The reply arrives in several transcript segments after the handoff.
+    await call.caption("assistant", " I- I'll take a")
+    await call.caption("assistant", " look when they come in.")
+    await call.caption("user", "Thanks.")
+    await call.flush()
+    assert [(a.args[1], a.args[2]) for a in capture.call_args_list] == [
+        ("Take a look at the two images.", None),
+        (None, "Sure, I- I'll take a look when they come in."),
+        ("Thanks.", None),
+    ]
+
+
+def test_checkpoint_holds_a_reply_that_stopped_mid_sentence(monkeypatch):
+    call = stream()
+    call.pending["assistant"] = "Sure, I- I'll take a"
+    call.last_caption_at = time.monotonic() - 8
+    assert not call.checkpoint_due()  # the transcript stalled inside the reply
+    call.last_caption_at = time.monotonic() - voice_stream.HOLD_MID_REPLY_S
+    assert call.checkpoint_due()
+    for finished in ("Thanks, that's approved.", "Do you authorize it?", "Done!”"):
+        call.pending["assistant"] = finished
+        call.last_caption_at = time.monotonic() - 2
+        assert call.checkpoint_due()
+
+
+@pytest.mark.asyncio
+async def test_typed_text_in_a_call_is_stored_as_typed_not_spoken(monkeypatch):
+    capture = recorder(monkeypatch)
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", AsyncMock(return_value="Seen."))
+    call = stream()
+    call.upstream = Upstream([])
+    await call.caption("user", "I'll attach them.")
+    await call.caption("assistant", "Okay.")
+    await call.receive_text(json.dumps({"type": "input_text", "id": "t1", "text": "@WIP_2.png @WIP_1.png"}))
+    await call.delegation_task
+    await call.caption("user", "Did they arrive?")
+    await call.flush()
+    stored = [(a.args[1], a.args[2], a.kwargs["user_source"]) for a in capture.call_args_list]
+    assert stored[0] == ("I'll attach them.", "Okay.", "voice")
+    assert stored[1][0].endswith("@WIP_2.png @WIP_1.png") and stored[1][2] == "typed"
+    assert stored[2] == ("Did they arrive?", None, "voice")

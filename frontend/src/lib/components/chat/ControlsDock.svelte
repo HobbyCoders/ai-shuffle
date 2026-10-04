@@ -717,6 +717,10 @@
 	permissionValue={permissionValue}
 	{permissionUpdating}
 	onPermissionSelect={selectPermission}
+	awayEnabled={away}
+	awayAvailable={!!awaySessionId}
+	awayBusy={!!(awaySessionId && awayMode.busy[awaySessionId])}
+	onToggleAway={toggleAway}
 	showCodeControls={isCodeLane && !assistantMode}
 	showSetup={!assistantMode}
 	showEffort={!assistantMode}

@@ -308,15 +308,18 @@ async def test_owner_push_refreshes_the_viewer_only_from_the_real_owner(pair, mo
     _reach(pair.a, pair.b, B_URL)
     published = []
 
-    async def publish(session_id, api_user_id, *, saved=False):
-        published.append((session_id, api_user_id, saved))
+    async def publish(session_id, api_user_id, *, saved=False, pending=None):
+        published.append((session_id, api_user_id, saved, pending))
 
     monkeypatch.setattr(chat_access, "publish_change", publish)
     monkeypatch.setattr(routing, "PUSH_DELAY", 0)
+    # The owner's waiting count travels with the push, so the viewer's sidebar
+    # can mark the mirrored session as needing the owner (#1807).
+    monkeypatch.setattr(chat_access.broker, "pending_count", lambda session_id: 1)
     with pair.a.active():
         routing.watch(SESSION, pair.b.device_id)
         await pair.real_push((SESSION, pair.b.device_id), True)
-    assert published == [(SESSION, None, True)]
+    assert published == [(SESSION, None, True, 1)]
     assert (SESSION, pair.b.device_id) in routing._watchers
     # Only the device that runs the session may ask a viewer to refresh.
     with pair.b.active():
@@ -324,7 +327,13 @@ async def test_owner_push_refreshes_the_viewer_only_from_the_real_owner(pair, mo
             await routing.handle_changed({"session_id": SESSION}, pair.b.device_id)
         with pytest.raises(LookupError):
             await routing.handle_changed({"session_id": "unknown"}, pair.a.device_id)
-    assert published == [(SESSION, None, True)]
+    assert published == [(SESSION, None, True, 1)]
+    # An older owner sends no count, and a malformed one is dropped, never trusted.
+    with pair.b.active():
+        await routing.handle_changed({"session_id": SESSION}, pair.a.device_id)
+        await routing.handle_changed({"session_id": SESSION, "pending": True}, pair.a.device_id)
+        await routing.handle_changed({"session_id": SESSION, "pending": -1}, pair.a.device_id)
+    assert published[1:] == [(SESSION, None, False, None)] * 3
 
 
 async def test_undeliverable_push_forgets_the_watcher(pair, monkeypatch):

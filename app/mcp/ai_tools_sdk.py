@@ -63,15 +63,45 @@ _LARGE_RESULT_ANNOTATIONS = ToolAnnotations(maxResultSizeChars=200_000)
 # Each tool is defined with the @tool decorator. The worker instance is
 # captured via closure at server creation time.
 
-def _create_image_tools(worker: NodeWorker) -> list:
-    """Create image generation/editing tool functions."""
-    tools = []
+# Defaults the Node tools fall back to when Settings names no image model
+# (tools/image-generation/generateImage.ts, editImage.ts).
+_DEFAULT_IMAGE_MODEL = "fal-ai/flux-pro/v1.1-ultra"
+_DEFAULT_IMAGE_EDIT_MODEL = "fal-ai/flux-pro/kontext"
 
-    @tool("generateImage", "Generate an image from a text prompt using AI (fal.ai models: Flux Pro Ultra, Flux Dev, Flux Schnell, Nano Banana 2, Recraft V4)", {
+
+def _configured_image_models(tool_env: Optional[Dict[str, str]]) -> tuple:
+    """``(generation model, edit model)`` the Node tools will use with no model passed.
+
+    Mirrors the Node resolution order: generation reads IMAGE_MODEL; editing and
+    reference generation read IMAGE_EDIT_MODEL, then IMAGE_MODEL.
+    """
+    env = tool_env or {}
+    image_model = env.get("IMAGE_MODEL") or ""
+    edit_model = env.get("IMAGE_EDIT_MODEL") or image_model or _DEFAULT_IMAGE_EDIT_MODEL
+    return image_model or _DEFAULT_IMAGE_MODEL, edit_model
+
+
+def _model_override_description(configured: str) -> str:
+    # Name the configured model only. Listing example models here made agents
+    # pick one (Nano Banana) and tell the owner they were using it (#1796).
+    return (f"Optional fal.ai endpoint ID. Omit it to use the configured model ({configured}); "
+            "pass one only when the user names a fal.ai model.")
+
+
+def _create_image_tools(worker: NodeWorker, tool_env: Optional[Dict[str, str]] = None) -> list:
+    """Create image generation/editing tool functions.
+
+    The descriptions name the provider these tools run on (fal.ai) and the
+    models configured in Settings, never a fixed list of other models.
+    """
+    tools = []
+    image_model, edit_model = _configured_image_models(tool_env)
+
+    @tool("generateImage", f"Generate an image from a text prompt with fal.ai, using the configured model {image_model}", {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the image to generate"},
-            "model": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/flux-pro/v1.1-ultra, fal-ai/flux/dev, fal-ai/flux/schnell, fal-ai/nano-banana-2, fal-ai/recraft-v4)"}
+            "model": {"type": "string", "description": _model_override_description(image_model)}
         },
         "required": ["prompt"]
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
@@ -81,12 +111,12 @@ def _create_image_tools(worker: NodeWorker) -> list:
 
     tools.append(generate_image)
 
-    @tool("editImage", "Edit an existing image using AI - add, remove, or modify elements (fal.ai models: Nano Banana 2 Edit, Flux Kontext, Nano Banana Pro Edit)", {
+    @tool("editImage", f"Edit an existing image (add, remove, or modify elements) with fal.ai, using the configured edit model {edit_model}", {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the edit to make"},
             "image_path": {"type": "string", "description": "Path to the image to edit"},
-            "model": {"type": "string", "description": "fal.ai model ID (e.g., fal-ai/nano-banana-2, fal-ai/flux-pro/kontext, fal-ai/nano-banana-pro)"}
+            "model": {"type": "string", "description": _model_override_description(edit_model)}
         },
         "required": ["prompt", "image_path"]
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
@@ -96,7 +126,7 @@ def _create_image_tools(worker: NodeWorker) -> list:
 
     tools.append(edit_image)
 
-    @tool("generateWithReference", "Generate an image using reference images for character/style consistency (fal.ai: uses the configured image-edit model — Flux Kontext or Nano Banana)", {
+    @tool("generateWithReference", f"Generate an image using reference images for character/style consistency with fal.ai, using the configured edit model {edit_model}", {
         "type": "object",
         "properties": {
             "prompt": {"type": "string", "description": "Text description of the image to generate"},
@@ -105,7 +135,7 @@ def _create_image_tools(worker: NodeWorker) -> list:
                 "items": {"type": "string"},
                 "description": "Paths to reference images (up to 14)"
             },
-            "model": {"type": "string", "description": "Optional fal.ai model ID override (e.g. fal-ai/nano-banana-pro, fal-ai/flux-pro/kontext). Defaults to the user's configured image-edit model."}
+            "model": {"type": "string", "description": _model_override_description(edit_model)}
         },
         "required": ["prompt", "reference_images"]
     }, annotations=_LARGE_RESULT_ANNOTATIONS)
@@ -500,7 +530,7 @@ def create_ai_tools_server(
     )
 
     # Create all tool functions with the worker baked in via closure
-    all_image_tools = _create_image_tools(worker)
+    all_image_tools = _create_image_tools(worker, tool_env)
     all_video_tools = _create_video_tools(worker)
     all_3d_tools = _create_3d_tools(worker)
     all_audio_gen_tools = _create_audio_gen_tools(worker)

@@ -118,10 +118,16 @@ export function deriveStatus(input: {
 	backgroundWork?: boolean;
 	parked?: boolean;
 	attention: { count: number; kind: 'permission' | 'question' } | null;
+	/** A private-access request or one-shot approval waits for the owner (#1807). */
+	privateAccess?: boolean;
 	openPr?: boolean;
 	prState?: 'open' | 'merged' | 'closed' | null;
 	isActive: boolean;
 }): SessionCardStatus {
+	// A private-access request blocks the agent on the owner like a permission
+	// prompt. It is tracked apart from the run state, so it also outranks a
+	// mirror's owner state (which reads `working` while the tool call waits).
+	if (input.privateAccess) return 'needs_permission';
 	// A mirror has no local leases/jobs. Owner state also clears stale local
 	// streaming/attention maps when the remote turn settles.
 	if (input.remoteRuntimeState) {
@@ -561,9 +567,11 @@ export function cardActions(s: Pick<Session, 'is_active' | 'status'>): CardActio
  */
 export function sessionNeedsYou(
 	s: Pick<Session, 'status' | 'is_remote' | 'remote_runtime_state'>,
-	attention: { count: number } | null | undefined
+	attention: { count: number } | null | undefined,
+	privateAccessPending = 0
 ): boolean {
 	if (isArchived(s as Session)) return false;
+	if (privateAccessPending > 0) return true;
 	if (s.is_remote) return s.remote_runtime_state === 'permission' || s.remote_runtime_state === 'question';
 	return !!attention && attention.count > 0;
 }

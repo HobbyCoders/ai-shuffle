@@ -436,7 +436,37 @@ describe('SystemMessage — Claude Code compaction', () => {
 		});
 		const text = container.textContent ?? '';
 		expect(text).toContain('Context Compacted');
-		expect(text).toContain('Context was compacted.');
+		expect(text).toContain('Context was compacted manually (/compact).');
 		expect(text).toContain('manual');
+	});
+
+	it('still says manual when the size takes the badge (#1794)', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_boundary',
+					systemData: {
+						compact_metadata: { trigger: 'manual', pre_tokens: 62365, post_tokens: 4119 }
+					}
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('62k → compacted');
+		expect(text).toContain('Context was compacted manually (/compact). Previous context: 62.4k tokens.');
+	});
+
+	it('does not call a compaction with no trigger manual', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_boundary',
+					systemData: { compact_metadata: { pre_tokens: 50000 } }
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Context was compacted. Previous context');
+		expect(text).not.toContain('manual');
 	});
 });

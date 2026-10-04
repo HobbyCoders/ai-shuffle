@@ -929,6 +929,16 @@ function mapTaskStatus(state: string): Task['status'] {
 	return TASK_STATE_MAP[state] ?? 'running';
 }
 
+/**
+ * A subagent card's settled status. A killed task was STOPPED — by the user's
+ * Stop, a cancelled swarm, a closed session — not failed: it reads "Stopped"
+ * and keeps its own row instead of folding away as a failure (#1806).
+ */
+function subagentTerminalStatus(status: string): NonNullable<ChatMessage['agentStatus']> {
+	if (status === 'completed') return 'completed';
+	return status === 'killed' || status === 'cancelled' || status === 'stopped' ? 'stopped' : 'error';
+}
+
 // ─── Tool-result rejection classification (#612) ──────────────────────────────
 
 /**
@@ -1373,18 +1383,21 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			if (commandId && reconcilable) {
 				idx = state.messages.findIndex((m) => m.role === 'user' && m.commandId === commandId);
 			}
-			// 2. Fallback: same content, appended ≤30s before this event.
+			// 2. Fallback: the same text on a row the server has not confirmed yet
+			//    (an optimistic send has no origin seq), or a repeat delivery of
+			//    this very event. No clock is compared (#1800): the optimistic row
+			//    is stamped by the browser and `created_at` by the worker running
+			//    the session — on a chat that runs on another worker those clocks
+			//    can differ by more than any window, which rendered the owner's
+			//    message twice. A row that already has an origin seq is a real
+			//    earlier message and must never absorb a second identical send.
 			if (idx === -1 && reconcilable) {
-				const eventMs = Date.parse(createdAt);
-				idx = state.messages.findIndex((m) => {
-					if (m.role !== 'user' || m.content !== content) return false;
-					// Only reconcile a message that hasn't already been reconciled
-					// (no server id yet — its id differs from this event's id).
-					if (m.id === event.id) return true;
-					const ms = m.timestamp ? Date.parse(m.timestamp) : NaN;
-					if (Number.isNaN(ms) || Number.isNaN(eventMs)) return false;
-					return Math.abs(eventMs - ms) <= 30_000;
-				});
+				idx = state.messages.findIndex(
+					(m) =>
+						m.role === 'user' &&
+						m.content === content &&
+						(m.id === event.id || !state.messageOriginSeq.has(m.id))
+				);
 			}
 			// 3. Server-vs-server repair: logs written before the backfill fix
 			//    (history_backfill._without_pending_prompt) carry the first user
@@ -1899,7 +1912,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const card = findSubagentByTask(state.messages, taskId, state.messageOriginSeq);
 			if (!card) return state;
 			const status = str(event.status);
-			const agentStatus: ChatMessage['agentStatus'] = status === 'completed' ? 'completed' : 'error';
+			const agentStatus = subagentTerminalStatus(status);
 			// Finalize any streaming children.
 			const children = (card.agentChildren ?? []).map((c) =>
 				c.streaming ? { ...c, streaming: false } : c
@@ -2027,9 +2040,14 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 						c.streaming ? { ...c, streaming: false } : c
 					);
 					messages = replaceById(messages, card.id, {
-						agentStatus: status === 'completed' ? 'completed' : 'error',
+						agentStatus: subagentTerminalStatus(status),
 						agentChildren: children,
+						// Who stopped it ("Stopped by user"): the card shows it (#1806).
+						...(status === 'killed' && summary.summary ? { agentStopNote: summary.summary } : {}),
 					});
+				} else if (card && card.agentStatus === 'stopped' && !card.agentStopNote && summary.summary) {
+					// subagent.completed already settled it as stopped without a note.
+					messages = replaceById(messages, card.id, { agentStopNote: summary.summary });
 				}
 				// This is a GENUINE terminal event: drop this summary (and any joined
 				// card) from the speculative-settle record so a following turn.parked

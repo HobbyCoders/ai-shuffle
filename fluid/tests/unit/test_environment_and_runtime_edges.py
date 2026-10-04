@@ -215,6 +215,35 @@ def test_harvest_environment_facts_reports_empty_node_modules(tmp_path, monkeypa
     assert "missing in ." in facts["env.node_modules"]
 
 
+def test_harvested_node_modules_fact_is_the_same_in_every_worktree(tmp_path, monkeypatch) -> None:
+    # #1814: the fact named only the packages missing in the session's own
+    # worktree, so each session in another worktree rewrote it (revision 74).
+    from fluid.codemode.skills import SkillStore
+
+    monkeypatch.setattr(runtime.importlib.util, "find_spec", lambda name: object())
+    fresh, older = tmp_path / "fresh", tmp_path / "older"
+    for checkout in (fresh, older):
+        for package in ("desktop", "frontend"):
+            (checkout / package).mkdir(parents=True)
+            (checkout / package / "package.json").write_text("{}")
+    (older / "frontend" / "node_modules" / "left-pad").mkdir(parents=True)
+    texts = [dict(runtime.harvest_environment_facts(str(c)))["env.node_modules"] for c in (fresh, older)]
+    assert texts[0] == texts[1] and "desktop, frontend" in texts[0]
+
+    store = SkillStore(tmp_path / "store")
+    for checkout in (fresh, older, fresh):
+        runtime.write_harvested_facts(store, "project:x", runtime.harvest_environment_facts(str(checkout)))
+    fact = next(m for m in store.memories() if m.key == "env.node_modules")
+    assert fact.revision == 1
+
+
+def test_harvest_skips_node_modules_fact_when_every_package_is_installed(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(runtime.importlib.util, "find_spec", lambda name: object())
+    (tmp_path / "package.json").write_text("{}")
+    (tmp_path / "node_modules" / "left-pad").mkdir(parents=True)
+    assert "env.node_modules" not in dict(runtime.harvest_environment_facts(str(tmp_path)))
+
+
 @pytest.mark.parametrize("origin, expected", [
     ("http://10.0.0.5:8080", "http://10.0.0.5:<port>"),
     ("http://10.0.0.5", "http://10.0.0.5:<port>"),  # portless: was "http:<port>"

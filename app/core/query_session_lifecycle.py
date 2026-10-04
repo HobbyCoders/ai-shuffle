@@ -284,13 +284,19 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
     # purges the park-gate residue.
     from app.core import provider_agent_supervisor
 
+    from app.core.task_registry import AGENT_STOP_REASON, PARENT_AGENT_STOP_SUMMARY
+
     record = provider_agent_supervisor.get_worker(session_id, task_id)
     if record is not None:
+        if source == USER_STOP_REASON:
+            summary, preview = USER_STOP_SUMMARY, "Stopped by the user."
+        elif source == AGENT_STOP_REASON:
+            # The parent agent's own TaskStop (#1805).
+            summary, preview = PARENT_AGENT_STOP_SUMMARY, f"{PARENT_AGENT_STOP_SUMMARY}."
+        else:
+            summary = preview = f"Stopped by host: {source}"
         torn = await provider_agent_supervisor.teardown_worker(
-            record,
-            reason=source,
-            summary=USER_STOP_SUMMARY if source == USER_STOP_REASON else f"Stopped by host: {source}",
-            preview="Stopped by the user." if source == USER_STOP_REASON else f"Stopped by host: {source}",
+            record, reason=source, summary=summary, preview=preview,
         )
         # A child on another worker: whether the stop reached it, in words.
         detail = (torn or {}).get("detail")
@@ -557,6 +563,14 @@ async def stop_all_background_tasks(
             include_shells = False
 
     active = task_registry.get_active(session_id)
+    # A worker shutting down (docker stop, quitting the desktop app) ends only
+    # its own work: a Task child running on another worker keeps running, and
+    # its report reaches this chat when this worker is back (#1808).
+    from app.core import startup
+
+    keep_remote = bool(getattr(startup, "is_shutting_down", False))
+    if keep_remote:
+        active = [task for task in active if not task.get("worker")]
     task_ids = [task.get("id") for task in active if task.get("id")]
 
     # Worker sessions to sweep AFTER the kills. A ProviderAgent worker's own
@@ -621,7 +635,7 @@ async def stop_all_background_tasks(
         results.append(await stop_session_task(session_id, task_id,
                                               **({"source": source} if source != "user_stop" else {})))
 
-    if user_stop:
+    if user_stop and not keep_remote:
         # A Task child on another worker whose worker went quiet past the
         # offline notice is no longer in the registry or the supervisor, but may
         # still run there: its stop is recorded and delivered when it answers.

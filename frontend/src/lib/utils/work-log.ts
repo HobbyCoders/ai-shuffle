@@ -172,7 +172,9 @@ function isRoutineTool(msg: ChatMessage, gallery = false): boolean {
 /**
  * A subagent card whose `agentStatus` has settled ('completed'/'error') is a
  * finished delegation: routine work that belongs inside the turn's fold. A
- * 'pending'/'running' card is live and keeps its own row.
+ * 'pending'/'running' card is live and keeps its own row, and so does a
+ * 'stopped' one: somebody stopped it on purpose, and folding it away made the
+ * card look like it went missing (#1806).
  */
 function isSettledSubagent(msg: ChatMessage): boolean {
 	return msg.type === 'subagent' && (msg.agentStatus === 'completed' || msg.agentStatus === 'error');

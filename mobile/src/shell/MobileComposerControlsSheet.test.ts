@@ -235,6 +235,22 @@ describe('integrated mobile composer controls', () => {
 		expect(screen.queryByRole('switch', { name: 'Fast mode' })).toBeNull();
 	});
 
+	it('offers Away mode with Tool access, and not in the home of the assistant', async () => {
+		const onToggleAway = vi.fn();
+		const view = render(MobileComposerControlsSheet, { props: props({ awayAvailable: true, awayEnabled: false, onToggleAway }) });
+		const away = screen.getByRole('switch', { name: 'Away mode' });
+		expect(away.getAttribute('aria-checked')).toBe('false');
+		await fireEvent.click(away);
+		expect(onToggleAway).toHaveBeenCalledTimes(1);
+		view.unmount();
+		// Before the chat has started there is no session to store it on.
+		const fresh = render(MobileComposerControlsSheet, { props: props({ awayAvailable: false, onToggleAway }) });
+		expect((screen.getByRole('switch', { name: 'Away mode' }) as HTMLButtonElement).disabled).toBe(true);
+		fresh.unmount();
+		render(MobileComposerControlsSheet, { props: props({ showCodeControls: false, showSetup: false, showEffort: false, awayAvailable: true, onToggleAway }) });
+		expect(screen.queryByRole('switch', { name: 'Away mode' })).toBeNull();
+	});
+
 	it('lets a fresh chat choose its required agent without exposing code controls', async () => {
 		appMode.set('chat');
 		activeSession.newChat();

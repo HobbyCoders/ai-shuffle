@@ -396,13 +396,18 @@ def _assistant_confirm(
 
         if not is_primary_session(target):
             return None
-        chat = None
+        chat = job = None
         if route is not None and route.requester == ASSISTANT_REQUESTER:
             chat = route.label
+        elif route is not None:
+            # A background job (Task worker) under the home: its question
+            # names the job, so it is not mistaken for the current request.
+            job = route.display_label
         return assistant_confirm.marker(
             kwargs.get("tool_name") or "", kwargs.get("tool_input"),
             chat_title=chat,
             chat_session_id=route.worker_session_id if route is not None else None,
+            job=job,
         )
     except Exception:  # noqa: BLE001 — an ordinary card is the fallback
         logger.debug("assistant confirm marker failed for %s", target, exc_info=True)

@@ -117,6 +117,55 @@ def test_a_busy_child_gets_the_message_queued(workers, monkeypatch, kicks):
         assert task_registry.get_task("caller", child)["status"] == "running"
 
 
+def test_a_running_child_takes_the_message_at_its_next_tool_result(workers, monkeypatch, kicks):
+    """#1804: the parent lives on the other worker, so it has no roster on the
+    child's; the live hand-over must still accept it as the child's `main`."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.core import session_runtime
+
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    with a.active():
+        [turn] = [t for t in all_turns(child) if t["source"] == "provider_agent"]
+        assert turns.start_turn(turn["id"])
+        runtime = session_runtime.SessionRuntime(turns.get_turn(turn["id"]))
+    monkeypatch.setitem(session_runtime._live_runtimes, child, runtime)
+    adapter = MagicMock(steer=AsyncMock(), steer_peer=AsyncMock(), provider_kind="delegated")
+    state = SimpleNamespace(adapter=adapter)
+    monkeypatch.setattr("app.core.session_pool.get_session_pool",
+                        lambda: SimpleNamespace(get=lambda _: state, peek=lambda _: state))
+    # Both test workers share one process-wide task registry, so "caller"'s
+    # roster would be visible on the child's worker; in production it is not.
+    on_target = []
+    real_rows, real_message_child = agent_messaging.peer_rows, remote_task._message_child
+
+    def peer_rows(session_id):
+        return [] if on_target and session_id == "caller" else real_rows(session_id)
+
+    async def message_child(msg, from_device):
+        on_target.append(True)
+        try:
+            return await real_message_child(msg, from_device)
+        finally:
+            on_target.clear()
+
+    monkeypatch.setattr(agent_messaging, "peer_rows", peer_rows)
+    monkeypatch.setattr(remote_task, "_message_child", message_child)
+    outcome = send(b, child, "Also check the logs.")
+    assert not outcome.is_error, outcome.text
+    with a.active():
+        [queued] = message_turns(child)
+    adapter.steer_peer.assert_awaited_once_with("Also check the logs.", sender="caller",
+                                                id=queued["id"])
+    assert queued["id"] in runtime._steer_attempted
+    with a.active():
+        on_target.append(True)
+        assert agent_messaging.may_message("caller", child)
+        assert not agent_messaging.may_message("someone-else", child)
+
+
 def test_a_parked_child_holds_the_message_unless_urgent(workers, monkeypatch, kicks):
     a, b, _ = network(workers, monkeypatch)
     child = started_child(a, b)

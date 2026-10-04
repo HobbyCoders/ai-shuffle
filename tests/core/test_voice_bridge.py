@@ -384,7 +384,8 @@ async def test_unknown_and_malformed_frames_are_ignored(mock_db, fake_sockets, c
     with caplog.at_level(logging.WARNING, logger="app.core.voice_bridge"):
         await _drain(bridge, sock)
 
-    assert _types() == ["turn.started", "message.user", "message.assistant", "turn.completed"]
+    # A response with no reply transcript stores no empty reply (#1798).
+    assert _types() == ["turn.started", "message.user", "turn.completed"]
     assert any("rate limited" in r.getMessage() for r in caplog.records)
 
 
@@ -1608,8 +1609,7 @@ async def test_a_truncation_error_event_is_logged_and_the_call_continues(
         await _drain(bridge, sock)
 
     assert any("truncation" in r.getMessage() for r in caplog.records)
-    assert _types() == ["turn.started", "message.user", "message.assistant",
-                        "turn.completed"]
+    assert _types() == ["turn.started", "message.user", "turn.completed"]
 
 
 # ---------------------------------------------------------------------------

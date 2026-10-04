@@ -21,6 +21,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
+	import { privateAccessPending } from '$lib/stores/chat-access';
 	import { sessionNeedsYou, attentionTitle } from './session-card-data';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
@@ -437,7 +438,7 @@
 	// Sessions waiting on a permission or question, shown in the tab title so a
 	// backgrounded tab still says when an agent is blocked on you.
 	const needsYouCount = $derived(
-		$sessions.filter((s) => !s.hidden && sessionNeedsYou(s, $backgroundPermissions.get(s.id))).length
+		$sessions.filter((s) => !s.hidden && sessionNeedsYou(s, $backgroundPermissions.get(s.id), $privateAccessPending.get(s.id))).length
 	);
 </script>
 

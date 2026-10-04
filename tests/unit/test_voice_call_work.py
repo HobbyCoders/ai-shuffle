@@ -547,3 +547,93 @@ async def test_spoken_answer_to_the_assistants_question_is_recorded_like_a_typed
     assert recorded == [("s", "req-c", "Do you authorize me to run `pytest`? Please answer yes or no.", "approved")]
     assert "approved this one request" in assistant_confirm.context_note("s")
     assistant_confirm.reset()
+
+
+# ---------------------------------------------------------------------------
+# #1797: a yes covers a retry of the same action; a background job is named
+# ---------------------------------------------------------------------------
+
+def _edit(request_id, image="/w/WIP_1.png", model="fal-ai/nano-banana-2", worker=None):
+    request = {"request_id": request_id, "tool_name": "mcp__ai-tools__editImage", "title": "Edit image",
+               "tool_input": {"prompt": "repaint", "image_path": image, "model": model}}
+    if worker:
+        request["provider_agent"] = {"worker_session_id": worker, "label": "Agents-page inventory"}
+    return request
+
+
+@pytest.mark.asyncio
+async def test_a_yes_covers_a_retry_of_the_same_tool_on_the_same_target(monkeypatch):
+    desk, calls, _ = _desk(monkeypatch)
+    desk.offer(_edit("req-1"))
+    desk.delivered("req-1")
+    assert (await desk.hear("yes")).verdict == YES
+    # The edit failed and is retried with a different model: not asked again.
+    assert desk.offer(_edit("req-2", model="openai/gpt-image-2.5/flare/edit")) is None
+    assert not desk.awaiting
+    [(request_id, note)] = await desk.settle_retries()
+    assert request_id == "req-2" and "already said yes" in note
+    assert [(c["request_id"], c["decision"]) for c in calls] == [("req-1", "allow"), ("req-2", "allow")]
+    # A retry of the retry is covered too.
+    assert desk.offer(_edit("req-3")) is None
+    await desk.settle_retries()
+    assert calls[-1]["request_id"] == "req-3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other", [
+    _edit("req-2", image="/w/WIP_2.png"),                     # a different target
+    _edit("req-2", worker="worker-1"),                       # a different asker
+    {**_edit("req-2"), "tool_name": "mcp__ai-tools__generateWithReference"},  # a different tool
+    {"request_id": "req-2", "tool_name": "mcp__ai-tools__editImage", "tool_input": {"prompt": "p"}},
+])
+async def test_a_yes_never_carries_to_a_different_action(monkeypatch, other):
+    desk, calls, _ = _desk(monkeypatch)
+    desk.offer(_edit("req-1"))
+    desk.delivered("req-1")
+    await desk.hear("yes")
+    assert "Approval needed" in desk.offer(other)
+    assert await desk.settle_retries() == [] and len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_no_or_an_old_yes_is_not_carried(monkeypatch):
+    desk, calls, _ = _desk(monkeypatch)
+    desk.offer(_edit("req-1"))
+    desk.delivered("req-1")
+    await desk.hear("no")
+    assert desk.offer(_edit("req-2")) is not None  # asked again after a no
+    desk.delivered("req-2")
+    await desk.hear("yes")
+    monkeypatch.setattr(voice_approval.time, "monotonic",
+                        lambda: desk.approved[voice_approval.retry_key(_edit("x"))]
+                        + voice_approval.RETRY_WINDOW_SECONDS + 1)
+    assert desk.offer(_edit("req-3")) is not None  # the window has passed
+
+
+@pytest.mark.asyncio
+async def test_retry_is_approved_quietly_through_the_progress_relay(monkeypatch):
+    desk, calls, _ = _desk(monkeypatch)
+    send = AsyncMock()
+    progress = voice_progress.VoiceProgress("s", send, approvals=desk)
+
+    def requested(request):
+        return _event("interaction.requested", {
+            "kind": "permission", "interaction_id": "i-" + request["request_id"],
+            "request_id": request["request_id"], "request": request})
+
+    progress.consume(requested(_edit("req-1")))
+    await progress.flush(force=True)
+    await progress.hear("yes")
+    await progress.flush(force=True)
+    progress.consume(requested(_edit("req-2", model="fal-ai/flux-pro/kontext")))
+    await progress.flush(force=True)
+    sent = send.call_args.args[0]
+    assert sent["type"] == "session.thinking.append" and "already said yes" in sent["content"]
+    assert [c["request_id"] for c in calls] == ["req-1", "req-2"]
+
+
+def test_a_background_jobs_request_names_the_job():
+    summary = voice_approval.request_summary(
+        {"request_id": "r", "tool_name": "Bash", "title": "Run grep",
+         "provider_agent": {"worker_session_id": "w", "label": "Agents-page inventory"}})
+    assert summary.startswith("For the background job “Agents-page inventory”: Run grep")

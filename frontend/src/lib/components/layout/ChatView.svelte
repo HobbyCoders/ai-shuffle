@@ -21,6 +21,7 @@
 	import { assistantState } from '$lib/stores/assistant';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
+	import PrivateAccessPrompt from '$lib/components/chat/PrivateAccessPrompt.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 	import ChatModeHero from './ChatModeHero.svelte';
 	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
@@ -355,6 +356,7 @@
 				<BackgroundWorkStrip jobs={backgroundJobs} onOpen={openJob} onStop={stopJob} />
 			{/if}
 			{#key $sessionOwnerBoundary}
+				<PrivateAccessPrompt sessionId={$activeSession.sessionId} />
 				<QuestionTray requests={$activeSession.pendingQuestions ?? []} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
 				<ChatInput compact={!showEmptyHero} {assistantMode} {onBrowserToggle} {onBrowserPreload} {browserOpen} />
 			{/key}

@@ -50,6 +50,13 @@ _YES_PHRASES = (
     "go ahead", "do it", "proceed", "approved", "approve", "authorized", "authorised",
     "confirmed", "confirm", "allow it", "allowed", "yes", "yep", "yeah", "yup", "y",
     "ok", "okay", "sure",
+    # The owner pointing back at a yes is a yes for the request just asked
+    # (#1797: "Didn't I already say yes" left the request open).
+    "didn't i already say yes", "didnt i already say yes", "did i not already say yes",
+    "didn't i say yes", "didnt i say yes", "i already said yes", "i said yes already",
+    "i already said yes to that", "i said yes", "already said yes", "i already approved it",
+    "i already approved that", "i already approved", "i already authorized it",
+    "i already authorised it",
 )
 _NO_PHRASES = (
     "i do not authorize it", "i don't authorize it", "i do not authorise it",
@@ -133,15 +140,25 @@ def describe(tool_name: str, tool_input: Any) -> str:
     return f"use {name}" + (f" with {detail}" if detail else "")
 
 
-def question(tool_name: str, tool_input: Any, *, chat_title: Optional[str] = None) -> str:
+def question(tool_name: str, tool_input: Any, *, chat_title: Optional[str] = None,
+             job: Optional[str] = None) -> str:
+    """The one plain question for a request.
+
+    ``job`` names a background job (a Task worker) that asked: it leads the
+    question, so its ask is not heard as a repeat of what the owner is
+    discussing with the assistant (#1797).
+    """
+    if job:
+        return (f"The background job “{_short(job, 80)}” asks: do you authorize it to "
+                f"{describe(tool_name, tool_input)}? Please answer yes or no.")
     where = f" for “{_short(chat_title, 80)}”" if chat_title else ""
     return f"Do you authorize me to {describe(tool_name, tool_input)}{where}? Please answer yes or no."
 
 
 def marker(tool_name: str, tool_input: Any, *, chat_title: Optional[str] = None,
-           chat_session_id: Optional[str] = None) -> Dict[str, Any]:
+           chat_session_id: Optional[str] = None, job: Optional[str] = None) -> Dict[str, Any]:
     """The ``assistant_confirm`` payload a permission row carries."""
-    out: Dict[str, Any] = {"question": question(tool_name, tool_input, chat_title=chat_title)}
+    out: Dict[str, Any] = {"question": question(tool_name, tool_input, chat_title=chat_title, job=job)}
     if chat_session_id:
         out["chat_session_id"] = chat_session_id
     return out

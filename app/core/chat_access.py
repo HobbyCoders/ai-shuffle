@@ -239,12 +239,17 @@ async def session_bypasses_confirmation(session_id: str) -> bool:
     return permission_mode_for_session_mode(mode, row.get("mode")) == "bypassPermissions"
 
 
-async def publish_change(session_id: str, api_user_id: str | None, *, saved: bool = False) -> None:
+async def publish_change(session_id: str, api_user_id: str | None, *, saved: bool = False,
+                         pending: int | None = None) -> None:
     """Tell this worker's UI for the session's principal to refetch its access panel.
 
     Saved connections belong to the owner, not the session, and every session's
     panel lists them: a saved-list change also invalidates the unscoped
     resource so the owner's panels on other sessions refresh.
+
+    ``pending`` (requests and one-shot approvals waiting for the owner, a bare
+    count with nothing private in it) lets the sidebar mark a session that is
+    not open as needing the owner. ``None`` when unknown (an older owner).
     """
     resources = [f"chat-access:{session_id}"] + (["chat-access"] if saved else [])
     try:
@@ -259,10 +264,10 @@ async def publish_change(session_id: str, api_user_id: str | None, *, saved: boo
         kind, identity = await run_sync(principal_preference_identity, principal)
         global_events.resources_changed(*resources, user_type=kind, user_id=identity)
         from app.core.sync_engine import sync_engine
-        await sync_engine._broadcast_user_message(
-            api_user_id or "admin",
-            {"type": "chat_access_changed", "session_id": session_id},
-        )
+        message = {"type": "chat_access_changed", "session_id": session_id}
+        if pending is not None:
+            message["pending"] = pending
+        await sync_engine._broadcast_user_message(api_user_id or "admin", message)
     except Exception:
         logger.debug("Access refresh notification unavailable", exc_info=True)
 
@@ -298,12 +303,22 @@ class Broker:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # Synchronous shutdown has no connected UI to notify.
-        task = loop.create_task(publish_change(session_id, owner[2] if len(owner) > 2 else None, saved=saved))
+        task = loop.create_task(publish_change(session_id, owner[2] if len(owner) > 2 else None, saved=saved,
+                                               pending=self.pending_count(session_id)))
         self._notifications.add(task)
         task.add_done_callback(self._notifications.discard)
         # Devices showing this session as a mirror refresh through their own worker.
         from app.network import chat_access_routing
         chat_access_routing.notify_watchers(session_id, saved=saved)
+
+    def pending_count(self, session_id: str) -> int:
+        """Requests and one-shot approvals of a session still waiting for the owner."""
+        now = time.time()
+        requests = sum(1 for r in self.requests.values()
+                       if r.session_id == session_id and not r.result.done() and r.expires_at > now)
+        actions = sum(1 for a in self.actions.values()
+                      if a.session_id == session_id and not a.decision.done())
+        return requests + actions
 
     def _finish_request(self, request: AccessRequest) -> None:
         if self.requests.get(request.id) is not request:

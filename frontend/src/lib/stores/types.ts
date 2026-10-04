@@ -121,8 +121,9 @@ export interface ChatMessage {
 	agentName?: string; // The dispatched agent's display name (e.g., 'Frontend Designer') — the card's identity
 	agentDescription?: string; // Task description from the Task tool
 	agentPrompt?: string; // The initial prompt sent to the subagent
-	agentStatus?: 'pending' | 'running' | 'completed' | 'error'; // Current status
+	agentStatus?: 'pending' | 'running' | 'completed' | 'error' | 'stopped'; // Current status ('stopped': deliberately stopped, e.g. the user's Stop)
 	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
+	agentStopNote?: string; // Who stopped a 'stopped' card, as the task registry recorded it ("Stopped by user")
 	agentLaunchToolUseId?: string; // The model's Task launch tool_use_id absorbed into this card (fluid-leg worker cards)
 	agentUsage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number; input_tokens?: number; output_tokens?: number }; // Task progress stats
 	// Team member fields (Claude Code agent-teams feature)

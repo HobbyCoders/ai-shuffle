@@ -450,12 +450,18 @@ def _chat_access_handler():
     return handle
 
 
+def _app_logs_handler():
+    from app.mcp.builtin_tools import handle_peer_app_logs
+    return handle_peer_app_logs
+
+
 def _chat_access_changed_handler():
     from app.network.chat_access_routing import handle_changed
     return handle_changed
 
 
 _LAZY_HANDLERS = {
+    "app-logs": _app_logs_handler,
     "chat-access": _chat_access_handler,
     "chat-access-changed": _chat_access_changed_handler,
     "run-settings": _run_settings_handler,
@@ -571,10 +577,21 @@ async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
             from app.core.sync_engine import sync_engine
             await sync_engine.broadcast_session_updated(
                 session_id=session_id, updates={"title": title}, source_device_id=None)
+    # Read BEFORE submit, as the local send path does: submit's kick does not
+    # make a turn live synchronously.
+    from app.db import turns as turns_db
+    had_live = await run_sync(turns_db.get_live_turn, session_id) is not None
     turn_id = await turn_manager.submit_async(
         session_id, source, prompt=prompt,
         profile_id=body.get("profile_id"), project_id=row.get("project_id") or None,
         overrides=_turn_overrides(body.get("overrides")), payload=payload or None)
+    if had_live:
+        # A message sent from another device while this worker's turn runs
+        # gets the same mid-turn delivery as a local send: steered in at the
+        # next tool boundary. Without this it sat "Not seen yet" until the turn
+        # ended or the owner pressed Interrupt, which cancels the running tool.
+        from app.core.session_runtime import try_steer_pending
+        await try_steer_pending(session_id)
     return {"turn_id": turn_id, "session_id": session_id}
 
 

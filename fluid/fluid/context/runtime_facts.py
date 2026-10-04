@@ -165,9 +165,10 @@ def harvest_environment_facts(cwd: str) -> list[tuple[str, str]]:
     """``(key, text)`` facts a worker can establish without the model.
 
     Only the facts worth a memory: a missing pytest (with where Python lives,
-    since that is the thing sessions get wrong), and package directories whose
-    node_modules are missing or empty. Text is deliberately free of dates and
-    counts so a re-harvest with the same state is a no-op save.
+    since that is the thing sessions get wrong), and, when any package
+    directory's node_modules are missing or empty, the package directories a
+    fresh worktree must install. Text is deliberately free of dates, counts
+    and per-worktree install state so a re-harvest is a no-op save.
     """
     root = Path(cwd)
     facts: list[tuple[str, str]] = []
@@ -192,19 +193,24 @@ def harvest_environment_facts(cwd: str) -> list[tuple[str, str]]:
         ]
     except OSError:
         packages = []
-    missing: list[str] = []
+    labels: list[str] = []
+    missing = False
     for package in packages[:8]:
+        labels.append(str(package.relative_to(root)) or ".")
         modules = package / "node_modules"
         try:
             empty = modules.is_dir() and next(modules.iterdir(), None) is None
         except OSError:
             empty = False
-        if not modules.is_dir() or empty:
-            missing.append(str(package.relative_to(root)) or ".")
+        missing = missing or not modules.is_dir() or empty
     if missing:
+        # Names every package directory, not just the ones missing right now:
+        # which are installed differs per worktree, and naming those made each
+        # session in another worktree rewrite the fact (#1814). The per-turn
+        # runtime note still says which are missing in this checkout.
         facts.append((
             _KEY_NODE_MODULES,
-            "Node dependencies are missing in " + ", ".join(missing)
+            "Node dependencies can be missing in " + ", ".join(labels)
             + " (run the package's install step in each fresh worktree before its scripts).",
         ))
     return facts

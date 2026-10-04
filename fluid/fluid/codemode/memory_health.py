@@ -43,6 +43,10 @@ UNUSED_SHARE = 0.5
 # Harvested (tool-provenance) facts.
 CHURN_MIN_REVISIONS = 10
 CHURN_PER_WEEK = 3.0
+# A fact not rewritten for this long has stopped churning (#1814: two legacy
+# shared environment facts kept the signal raised long after their rewrites
+# stopped, because lifetime revisions only fall below the rate with age).
+CHURN_QUIET = 7 * DAY
 UNCONFIRMED_PILE = 15
 STALE_UNCONFIRMED_AGE = 30 * DAY
 STALE_UNCONFIRMED_QUIET = 14 * DAY
@@ -53,9 +57,9 @@ NEAR_DUPLICATE_GROUPS = 5
 # Capacity.
 FULL_SHARE = 0.9
 DOCUMENT_FULL_SHARE = 0.8
-# Snapshot.
-SNAPSHOT_OMITTED_MIN = 50
-SNAPSHOT_OMITTED_SHARE = 0.5
+# Snapshot: bounded by design, Recall finds the rest. Leaving facts out is
+# reported, not counted as needing attention (#1814); a snapshot that shows
+# nothing although facts are in scope is.
 # Curation and protected facts.
 CURATION_WINDOW = 14 * DAY
 CURATION_FAILED_STREAK = 3
@@ -340,7 +344,9 @@ def _unconfirmed_signal(live, now) -> dict:
     for e in tool:
         revisions = int(e.get("revision") or 1)
         weeks = max(1.0, (now - float(e.get("created_at") or now)) / (7 * DAY))
-        if revisions >= CHURN_MIN_REVISIONS and (revisions - 1) / weeks >= CHURN_PER_WEEK:
+        rewritten_lately = now - float(e.get("updated_at") or now) < CHURN_QUIET
+        if (revisions >= CHURN_MIN_REVISIONS and (revisions - 1) / weeks >= CHURN_PER_WEEK
+                and rewritten_lately):
             churny.append(e["id"])
     detail = {"unconfirmed": len(tool), "rewritten_often": len(churny),
               "max_revision": max((int(e.get("revision") or 1) for e in tool), default=0)}
@@ -397,11 +403,15 @@ def _snapshot_signal(plans) -> dict:
     detail = {"scopes": scopes}
     if not worst or not worst["in_scope"]:
         return _signal("snapshot", False, "No facts to show yet.", **detail)
-    if worst["omitted"] >= SNAPSHOT_OMITTED_MIN and worst["omitted"] / worst["in_scope"] >= SNAPSHOT_OMITTED_SHARE:
-        where = "in one project" if worst["scope"] != "global" else "overall"
+    empty = next((s for s in scopes if s["omitted"] and not s["shown"]), None)
+    if empty:
         return _signal("snapshot", True,
+                       f"Sessions see none of {empty['in_scope']} facts; none fit the snapshot.", **detail)
+    if worst["omitted"]:
+        where = "in one project" if worst["scope"] != "global" else "overall"
+        return _signal("snapshot", False,
                        f"Sessions see {worst['shown']} of {worst['in_scope']} facts {where}; "
-                       "the rest need Recall.", **detail)
+                       "Recall finds the rest.", **detail)
     return _signal("snapshot", False, f"Sessions see {worst['shown']} of {worst['in_scope']} facts.", **detail)
 
 

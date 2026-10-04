@@ -47,13 +47,15 @@ async def test_access_request_lifecycle_broadcasts_scoped_refresh(monkeypatch):
     task = asyncio.create_task(broker.request("session-7", "machine", "Verify an isolated test target"))
     await asyncio.sleep(0)
     await asyncio.gather(*broker._notifications)
-    send.assert_awaited_with("user-7", {"type": "chat_access_changed", "session_id": "session-7"})
+    # The bare waiting count lets the sidebar mark a session that is not open (#1807).
+    send.assert_awaited_with("user-7", {"type": "chat_access_changed", "session_id": "session-7", "pending": 1})
     request_id = next(iter(broker.requests))
     await broker.decline("session-7", request_id)
     with pytest.raises(chat_access.AccessDenied, match="declined"):
         await task
     await asyncio.gather(*broker._notifications)
     assert send.await_count == 2
+    send.assert_awaited_with("user-7", {"type": "chat_access_changed", "session_id": "session-7", "pending": 0})
     assert not broker.requests
 
 

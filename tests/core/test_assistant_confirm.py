@@ -65,6 +65,36 @@ def test_hedged_delegating_and_off_topic_are_unclear(text):
     assert confirm.classify(text) == confirm.UNCLEAR
 
 
+@pytest.mark.parametrize("text", [
+    "Didn't I already say yes", "Didn’t I already say yes?", "didnt i already say yes",
+    "I already said yes.", "I said yes", "Yes, I already said yes", "I already approved it",
+])
+def test_pointing_back_at_a_yes_is_a_yes(text):
+    """#1797: "Didn't I already say yes" was unclear and the request stayed open."""
+    assert confirm.classify(text) == confirm.YES
+
+
+@pytest.mark.parametrize("text", ["I already said no", "I said yes to the other one", "didn't I"])
+def test_pointing_back_needs_a_plain_yes(text):
+    assert confirm.classify(text) != confirm.YES
+
+
+def test_a_background_jobs_question_names_the_job():
+    text = confirm.question("Bash", {"command": "grep -rn seed"}, job="Agents-page inventory")
+    assert text == ("The background job “Agents-page inventory” asks: do you authorize it to run "
+                    "`grep -rn seed`? Please answer yes or no.")
+
+
+def test_a_task_worker_under_the_home_is_named_in_its_question(monkeypatch):
+    from app.core import assistant_service
+    monkeypatch.setattr(assistant_service, "is_primary_session", lambda sid: sid == "home")
+    route = approvals.WorkerApprovalRoute(worker_session_id="w1", parent_session_id="home",
+                                          label="Agents-page inventory")
+    marker = approvals._assistant_confirm("home", {"tool_name": "Bash", "tool_input": {"command": "ls"}}, route)
+    assert marker["question"].startswith("The background job “Agents-page inventory” asks:")
+    assert marker["chat_session_id"] == "w1"
+
+
 def test_question_names_exactly_what_will_happen():
     text = confirm.question("Bash", {"command": "git push origin main"}, chat_title="Fix the flaky test")
     assert text == ("Do you authorize me to run `git push origin main` for “Fix the flaky test”? "

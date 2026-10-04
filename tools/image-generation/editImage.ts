@@ -283,16 +283,11 @@ export async function editImage(input: EditImageInput): Promise<EditImageRespons
   const modelId = getModelId(providerId, input.model);
   const modelInfo = provider.models.find(m => m.id === modelId);
 
-  if (!modelInfo) {
-    const availableModels = provider.models.map(m => m.id);
-    return {
-      success: false,
-      error: `Model '${modelId}' not found for ${provider.name}. Available models: ${availableModels.join(', ')}`
-    };
-  }
-
-  // Check if model supports editing
-  if (!modelInfo.capabilities.includes('image-edit')) {
+  // A model outside the built-in list is a fal.ai catalog model (Settings
+  // offers the whole catalog, e.g. 'openai/gpt-image-2.5/flare/edit').
+  // provider.edit checks it against the catalog and refuses one fal.ai does
+  // not offer, so it is not rejected here.
+  if (modelInfo && !modelInfo.capabilities.includes('image-edit')) {
     return {
       success: false,
       error: `Model '${modelId}' does not support image editing. Try a different model.`

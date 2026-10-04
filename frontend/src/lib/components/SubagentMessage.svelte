@@ -10,9 +10,13 @@
 
 	const statusInfo = $derived({
 		isRunning: isSubagentRunning(message.agentStatus, message.toolId, runningToolIds),
-		isError: message.agentStatus === 'error'
+		isError: message.agentStatus === 'error',
+		// Deliberately stopped (#1806): not a failure, and the card stays put.
+		isStopped: message.agentStatus === 'stopped'
 	});
-	const statusLabel = $derived(statusInfo.isRunning ? 'Running' : statusInfo.isError ? 'Failed' : message.agentStatus === 'pending' ? 'Pending' : 'Completed');
+	const statusLabel = $derived(statusInfo.isRunning ? 'Running' : statusInfo.isError ? 'Failed' : statusInfo.isStopped ? 'Stopped' : message.agentStatus === 'pending' ? 'Pending' : 'Completed');
+	// Who stopped it, as the task registry recorded it ("Stopped by user").
+	const stopNote = $derived(statusInfo.isStopped && !statusInfo.isRunning ? message.agentStopNote?.trim() || '' : '');
 
 	// Map known SDK agent types to display labels
 	const KNOWN_AGENT_LABELS: Record<string, string> = {
@@ -77,7 +81,7 @@
 		<span class="sa-desc">{message.agentDescription || 'Subagent'}</span>
 
 		<span class="sa-right">
-			<span class="sa-status" role="status">{statusLabel}</span>
+			<span class="sa-status" role="status" title={stopNote || undefined}>{statusLabel}</span>
 
 			<svg class="sa-chev" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="m6 9 6 6 6-6" />
@@ -91,6 +95,10 @@
 				<svg class="sa-glyph is-error" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
 					<path d="M18 6 6 18M6 6l12 12" />
 				</svg>
+			{:else if statusInfo.isStopped}
+				<svg class="sa-glyph is-stopped" width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+					<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />
+				</svg>
 			{:else if message.agentStatus === 'pending'}
 				<svg class="sa-glyph" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /></svg>
 			{:else}
@@ -102,6 +110,9 @@
 	</summary>
 
 	<div class="sa-body">
+		{#if stopNote}
+			<p class="stop-note">{stopNote}</p>
+		{/if}
 		{#if message.agentSessionId}
 			<a class="transcript-link" href={`/?session=${encodeURIComponent(message.agentSessionId)}`}
 				onclick={(event) => openSessionLink(event, message.agentSessionId!)} data-sveltekit-reload>
@@ -224,6 +235,8 @@
 
 	.sa-glyph.is-ok { color: var(--emerald); }
 	.sa-glyph.is-error { color: var(--rose); }
+	.sa-glyph.is-stopped { color: var(--warning); }
+	.stop-note { margin: 0; padding: 6px 0 0; color: var(--muted-foreground); font-size: 12px; }
 	.sa-glyph.is-running {
 		color: var(--primary);
 		animation: sa-spin 0.9s linear infinite;

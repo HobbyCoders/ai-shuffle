@@ -707,6 +707,7 @@ feedController.attach({
 	// authoritative WS relay decide whether the row is still pending; this avoids
 	// resurrecting answered/expired requests while recovering a live card.
 	requestPendingQuestions: () => { wsConn.send({ type: 'get_pending_questions' }); },
+	requestPendingPermissions: () => { wsConn.send({ type: 'get_pending_permissions' }); },
 	// #606 item 4: let the SSE feed clear a permission/question card by request_id
 	// when it tails a durable interaction.answered / interaction.expired event
 	// (routed through the same injection the feed already uses for update/getState,

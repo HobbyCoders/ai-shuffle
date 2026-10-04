@@ -259,6 +259,11 @@ class VoiceProgress:
             return False
 
     async def flush(self, force=False):
+        if self.approvals is not None and self.approvals.retries:
+            # A retry of an action the caller already approved on this call is
+            # approved without asking again; the voice is told quietly.
+            for request_id, text in await self.approvals.settle_retries():
+                self.note("approval-retry:" + request_id, text)
         if not self.pending:
             return
         now = time.monotonic()

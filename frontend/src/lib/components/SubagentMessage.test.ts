@@ -38,6 +38,14 @@ describe('Subagent transcript card', () => {
   render(SubagentMessage, { message: { ...message, agentStatus } });
   expect(screen.getByRole('status').textContent).toBe(agentStatus === 'error' ? 'Failed' : 'Pending');
  });
+ it('reads stopped, not failed, and says who stopped it (#1806)', async () => {
+  const { container } = render(SubagentMessage, { message: { ...message, agentStatus: 'stopped', agentStopNote: 'Stopped by user' } });
+  expect(screen.getByRole('status').textContent).toBe('Stopped');
+  expect(container.querySelector('.sa-glyph.is-stopped')).not.toBeNull();
+  await fireEvent.click(container.querySelector('summary')!);
+  expect(screen.getByText('Stopped by user')).toBeTruthy();
+  expect(screen.queryByText('Private worker result')).toBeNull();
+ });
  it('does not invent session links from native SDK agent IDs', async () => {
   const { container } = render(SubagentMessage, { message: { ...message, agentSessionId: undefined, agentId: 'native-agent', agentStatus: 'completed' } });
   await fireEvent.click(container.querySelector('summary')!);

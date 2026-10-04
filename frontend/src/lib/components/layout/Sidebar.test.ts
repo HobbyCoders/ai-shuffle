@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { privateAccessPending } from '$lib/stores/chat-access';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
 import { sidebarGroups } from '$lib/stores/expansion-preferences';
@@ -556,6 +557,24 @@ describe('Sidebar session groups', () => {
 describe('Sidebar Needs you lane', () => {
 	const labels = sectLabels;
 	const lane = () => document.querySelector('[data-group="needs-you"]');
+
+	// #1807: a private-access request blocks the agent on the owner like a
+	// permission prompt, so it lifts the row the same way.
+	it('lifts a row waiting on a private-access request, and back when answered', async () => {
+		privateAccessPending.set(new Map([['active', 1]]));
+		try {
+			render(Sidebar, { props: sidebarProps });
+			expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
+			expect(lane()?.textContent).toContain('Active chat');
+			expect(cardFrame('Active chat').textContent).toContain('Needs permission');
+
+			privateAccessPending.set(new Map());
+			await tick();
+			expect(labels()).toEqual(['Active 1', 'Settled 1']);
+		} finally {
+			privateAccessPending.set(new Map());
+		}
+	});
 
 	it('lifts rows waiting on a prompt out of Active and Settled, and back when answered', async () => {
 		mocks.backgroundPermissions.set(new Map([

@@ -52,6 +52,7 @@
 		sessionsHasMore
 	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
+	import { privateAccessPending } from '$lib/stores/chat-access';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { preloadPanelForView } from '$lib/components/deck/lazy/panels';
@@ -350,6 +351,7 @@
 						backgroundWork: !!s.has_running_tasks,
 						parked: !!s.parked_task_kind,
 						attention: $backgroundPermissions.get(s.id) ?? null,
+						privateAccess: ($privateAccessPending.get(s.id) ?? 0) > 0,
 						prState: s.pr_state ?? null,
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
 						isActive: !!s.is_active

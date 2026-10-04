@@ -918,6 +918,8 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
     status, report, needs = _turn_report(session_id, settled["id"], settled["_outcome"], origin_id)
     if status == "failed" and settled.get("stop_reason") == LEASE_EXPIRED:
         report = _cut_off_report(report)
+    elif status == "failed" and _shut_down(settled):
+        report = _cut_off_report(report, shutdown=True)
     from app.core.provider_agent import MAX_REPORT_CHARS
     return {
         "version": WIRE_VERSION,
@@ -935,17 +937,31 @@ LEASE_EXPIRED = "lease_expired"
 _NO_REPORT = "The chat ended without a written report."
 
 
-def _cut_off_report(partial: str) -> str:
+def _shut_down(turn: Mapping[str, Any]) -> bool:
+    """Whether this worker's shutdown interrupted ``turn`` (``desktop_lifecycle``)."""
+    from app.core.task_registry import SERVER_SHUTDOWN_REASON
+
+    payload = turn.get("payload") if isinstance(turn.get("payload"), dict) else {}
+    return payload.get("interrupt_source") == SERVER_SHUTDOWN_REASON
+
+
+def _cut_off_report(partial: str, *, shutdown: bool = False) -> str:
     """The failed report of a child whose run this worker lost (a restart).
 
-    Its last streamed words are kept, marked as unfinished; they are not a
-    report.
+    ``shutdown`` is a graceful stop of this worker (docker stop, quitting the
+    desktop app) rather than a crash. Its last streamed words are kept,
+    marked as unfinished; they are not a report.
     """
     from app.core.provider_agent import bound_report
 
-    text = ("The worker that ran this subagent restarted (or lost its run) before the subagent "
-            "finished, so its work was cut off. It can be continued with SendMessage now that the "
-            "worker is back.")
+    if shutdown:
+        text = ("The worker that ran this subagent shut down before the subagent finished, so its "
+                "work was cut off. Nobody stopped it. It can be continued with SendMessage once "
+                "that worker is back.")
+    else:
+        text = ("The worker that ran this subagent restarted (or lost its run) before the subagent "
+                "finished, so its work was cut off. It can be continued with SendMessage now that "
+                "the worker is back.")
     if partial and partial != _NO_REPORT:
         text += "\n\nWhat it had written before it was cut off (unfinished):\n" + partial
     return bound_report(text)[0]
@@ -1804,7 +1820,7 @@ CHILD_FINISHED = "finished"
 _STOP_ANSWERS = (CHILD_STOPPED, CHILD_FINISHED, CHILD_UNKNOWN)
 #: Stop reasons a target is told (for its log); anything else travels as ``stopped``.
 _STOP_REASONS = frozenset({
-    "user_stop", "user_stopped", "user_stopped_all", "swarm_cancelled", "session_closed",
+    "user_stop", "user_stopped", "user_stopped_all", "agent_stopped", "swarm_cancelled", "session_closed",
     "parent_turn_ended", "provider_rate_limited", "host_cleanup",
     "assistant_daily_limit", "assistant_job_time",
 })

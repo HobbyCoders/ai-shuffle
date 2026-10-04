@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import AssistantMessage from './AssistantMessage.svelte';
@@ -121,5 +123,23 @@ describe('AssistantMessage copy', () => {
 		expect(row.classList.contains('is-visible')).toBe(true);
 		await fireEvent.mouseLeave(view.container.querySelector('.message-container')!);
 		expect(row.classList.contains('is-visible')).toBe(false);
+	});
+	it('shows the time with the actions when the block has no stats row', () => {
+		// A reply without metadata has no visible time; hover must still tell
+		// the owner when it arrived, as the user bubble does.
+		const when = new Date('2026-10-04T15:10:00');
+		const bare = render(AssistantMessage, { content: 'Reply', streaming: false, timestamp: when });
+		const time = bare.container.querySelector('.assistant-actions .assistant-time');
+		expect(time?.textContent?.trim()).toBeTruthy();
+		bare.unmount();
+		// With stats the time is already in the row and is not repeated.
+		const full = render(AssistantMessage, { content: 'Reply', streaming: false, timestamp: when, metadata: { duration_ms: 1200 } });
+		expect(full.container.querySelector('.assistant-time')).toBeNull();
+	});
+
+	it('keeps the actions at the left, next to the reply', () => {
+		const source = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/AssistantMessage.svelte'), 'utf8');
+		const rule = source.split('.assistant-actions {')[1].split('}')[0];
+		expect(rule).not.toContain('margin-left: auto');
 	});
 });

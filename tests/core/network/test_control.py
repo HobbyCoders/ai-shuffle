@@ -504,6 +504,49 @@ async def test_control_turns_whitelist_overrides_and_use_the_sessions_project(wo
     assert len(submitted) == 3
 
 
+async def test_control_turns_steers_a_message_into_the_owners_live_turn(workers, monkeypatch):
+    """#1786: a send forwarded from another device while the owner's turn runs
+    is steered in at the next tool boundary, like a local send, instead of
+    waiting for the turn to end (or for the owner to press Interrupt)."""
+    a, b = workers("a"), workers("b")
+    served = _served_client(monkeypatch, a)
+    order: list = []
+    live = {"s-steer": None}
+
+    async def fake_submit(session_id, source, **kwargs):
+        order.append(("submit", session_id))
+        return "turn_q"
+
+    async def fake_steer(session_id):
+        order.append(("steer", session_id))
+        return 1
+
+    from app.core import session_runtime, turn_manager
+    from app.db import turns as turns_db
+    monkeypatch.setattr(turn_manager, "submit_async", fake_submit)
+    monkeypatch.setattr(session_runtime, "try_steer_pending", fake_steer)
+    monkeypatch.setattr(turns_db, "get_live_turn", lambda sid: live.get(sid))
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with a.active():
+        database.create_session(session_id="s-steer", profile_id="default", project_id=None,
+                                title="On A", is_active=True)
+        engine.scan_all()
+    converge([a, b])
+    with a.active():
+        store.touch_member(b.device_id, endpoints=[])
+    with b.active():
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        # Idle owner: the send starts its own turn; nothing to steer into.
+        await control.submit_turn(a.device_id, "s-steer", prompt="first")
+        assert order == [("submit", "s-steer")]
+        # A turn is live on the owner: the queued row is handed to it.
+        live["s-steer"] = {"id": "turn_live", "state": "running"}
+        await control.submit_turn(a.device_id, "s-steer", prompt="mid-turn remark")
+        assert order[1:] == [("submit", "s-steer"), ("steer", "s-steer")]
+
+
 async def test_control_session_creation_validates_its_fields(workers, monkeypatch):
     """NET-24: api_user_id, hidden, permission_mode and branch are not taken on faith."""
     a, b = workers("a"), workers("b")

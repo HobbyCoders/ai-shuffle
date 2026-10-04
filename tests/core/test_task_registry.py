@@ -1419,12 +1419,59 @@ class TestRegistryAwareOutputStop:
         task_registry.reset_all()
 
     @pytest.mark.asyncio
-    async def test_task_stop_agent_task_reports_unsupported(self):
+    async def test_task_stop_stops_the_sessions_own_subagent(self, monkeypatch):
+        """#1805: an agent stops a local subagent it started, as the card's Stop does."""
+        from unittest.mock import AsyncMock
+
+        from app.core import provider_agent_supervisor as supervisor
+        from app.core.task_registry import AGENT_STOP_REASON, PARENT_AGENT_STOP_SUMMARY
+
         task_registry.reset_all()
+        supervisor.reset()
+        kill = AsyncMock(return_value="killed")
+        monkeypatch.setattr(supervisor, "_kill_worker_session", kill)
+        monkeypatch.setattr(supervisor, "settle_killed_worker", AsyncMock())
+        monkeypatch.setattr(supervisor, "_cancel_worker_prompts", AsyncMock())
+        monkeypatch.setattr("app.db.remote_tasks.get_dispatch", lambda _id: None)
         task_registry.start_task("sess", "a1", "agent", "agent task")
+        supervisor.register_worker(supervisor.WorkerRecord(
+            parent_session_id="sess", worker_session_id="a1", task_id="a1", tool_use_id="a1"))
+        try:
+            handlers = _build_builtin_handlers(session_id="sess")
+            payload = _parse_envelope(await handlers["TaskStop"]({"task_id": "a1"}))
+            assert payload["success"] is True, payload
+            assert payload["kind"] == "agent" and payload["running"] is False
+            assert payload["reason"] == AGENT_STOP_REASON
+            kill.assert_awaited_once_with("a1", reason=AGENT_STOP_REASON)
+            record = task_registry.get_task("sess", "a1")
+            assert record["status"] == "killed"
+            assert record["reason"] == AGENT_STOP_REASON
+            assert record["summary"] == PARENT_AGENT_STOP_SUMMARY
+            assert supervisor.get_worker("sess", "a1") is None
+        finally:
+            supervisor.reset()
+            task_registry.reset_all()
+
+    @pytest.mark.asyncio
+    async def test_task_stop_refuses_a_subagent_another_agent_started(self, monkeypatch):
+        """A nested worker is listed on the root only for routing: not stopped."""
+        task_registry.reset_all()
+        monkeypatch.setattr("app.db.remote_tasks.get_dispatch", lambda _id: None)
+        task_registry.start_task("sess", "n1", "agent", "nested worker")
+        handlers = _build_builtin_handlers(session_id="sess")
+        payload = _parse_envelope(await handlers["TaskStop"]({"task_id": "n1"}))
+        assert payload["success"] is False
+        assert "another agent" in payload["error"]
+        assert task_registry.get_task("sess", "n1")["status"] == "running"
+        task_registry.reset_all()
+
+    @pytest.mark.asyncio
+    async def test_task_stop_refuses_another_sessions_subagent(self):
+        task_registry.reset_all()
+        task_registry.start_task("other", "a1", "agent", "agent task")
         handlers = _build_builtin_handlers(session_id="sess")
         payload = _parse_envelope(await handlers["TaskStop"]({"task_id": "a1"}))
         assert payload["success"] is False
-        assert "cannot" in payload["error"].lower()
-        assert payload.get("kind") == "agent"
+        assert "different session" in payload["error"]
+        assert task_registry.get_task("other", "a1")["status"] == "running"
         task_registry.reset_all()

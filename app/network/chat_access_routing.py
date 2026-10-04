@@ -104,7 +104,10 @@ async def _push(key: tuple, saved: bool) -> None:
     try:
         await asyncio.sleep(PUSH_DELAY)  # one push for a burst of changes
         _scheduled.discard(key)
-        await control.call(device_id, "chat-access-changed", {"session_id": session_id, "saved": saved},
+        from app.core.chat_access import broker
+        await control.call(device_id, "chat-access-changed",
+                           {"session_id": session_id, "saved": saved,
+                            "pending": broker.pending_count(session_id)},
                            timeout=PUSH_TIMEOUT)
     except Exception as exc:  # noqa: BLE001 - best effort; the viewer re-registers when it next asks
         logger.debug("Private-access refresh for %s not delivered: %s", device_id, type(exc).__name__)
@@ -176,5 +179,9 @@ async def handle_changed(body: Dict[str, Any], from_device: str) -> Dict[str, An
         raise LookupError("Unknown session")
     if await run_sync(control.owner_of, row) != from_device:
         raise PermissionError("That device does not run this session")
-    await publish_change(session_id, row.get("api_user_id"), saved=body.get("saved") is True)
+    pending = body.get("pending")
+    if isinstance(pending, bool) or not isinstance(pending, int) or not 0 <= pending <= 1000:
+        pending = None  # an older owner sends none
+    await publish_change(session_id, row.get("api_user_id"), saved=body.get("saved") is True,
+                         pending=pending)
     return {"refreshed": True}

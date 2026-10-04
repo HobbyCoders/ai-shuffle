@@ -22,7 +22,8 @@
 		effortExplanation = NO_ADJUSTABLE_EFFORT, effortKnown = true,
 		fastSupported = false, fastEnabled = false, onToggleFast, showCodeControls = true,
 		showSetup = true, showEffort = true,
-		permissionOptions, permissionValue, permissionUpdating = false, onPermissionSelect
+		permissionOptions, permissionValue, permissionUpdating = false, onPermissionSelect,
+		awayEnabled = false, awayAvailable = false, awayBusy = false, onToggleAway
 	}: Props = $props();
 
 	let page = $state<'overview' | 'models'>('overview');
@@ -178,6 +179,13 @@
 						</div>
 						<p class="setting-description" aria-live="polite">{permissionUpdating ? 'Saving tool access…' : `${permissionLabel} · ${permissionDescription}`}</p>
 					</div>
+					{#if onToggleAway}
+						<!-- Away mode sits with Tool access on desktop; the sheet had no way to set it. -->
+						<div class="fast-row">
+							<div class="fast-copy"><span>Away</span><small id={`${panelId}-away-help`}>{awayAvailable ? "Don't ask me; use recommended defaults and list them at the end" : 'Available once the chat has started'}</small></div>
+							<button type="button" class="fast-switch" role="switch" aria-label="Away mode" aria-describedby={`${panelId}-away-help`} aria-checked={awayEnabled} disabled={!awayAvailable || awayBusy} onclick={() => onToggleAway?.()}><span></span></button>
+						</div>
+					{/if}
 				{/if}
 				{#if showEffort && fastSupported && !modelLocked}
 					<div class="fast-row">

@@ -7716,11 +7716,39 @@ def test_workspace_card_is_slotted_as_an_environment_section():
     order = [s.kind for s in without_env.sections]
     assert order.index("environment") < order.index("extra")
 
-    # The delegated leg never gets it.
+    # The delegated full-replace prompt carries it too (#1789): it holds the
+    # preview link, the agent browser's only door to the running UI.
     delegated = ha.HarnessAdapter._compile_prompt_sections(
         "BASE", None, _native_opts(), native=False, workspace_card=card,
     )
-    assert card not in (delegated.text or "")
+    assert card in (delegated.text or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shape", ["preset", "full_replace", "plain"])
+async def test_delegated_connect_carries_the_workspace_card(monkeypatch, agent_workspace, shape):
+    """#1789: a delegated session's CLI prompt carries the session's
+    "# Workspace facts" card, whichever prompt shape the profile uses. The
+    card builder itself decides on the preview link (owner yes, API key no;
+    see tests/core/test_preview_access_key_sessions.py)."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import settings
+    from fluid.tools.registry import ToolRegistry
+
+    card = "# Workspace facts\n- preview link here"
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(ha.HarnessAdapter, "_build_workspace_card", lambda self, options: card)
+    monkeypatch.setattr(settings, "prompt_full_replace", shape == "full_replace")
+    prompt = {"type": "preset", "append": "APPEND TEXT"} if shape == "preset" else "BASE PROMPT"
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(SessionOptions(
+        model="fable", system_prompt=prompt, cwd=str(agent_workspace),
+        extra={"fluid_registry": ToolRegistry()},
+    ))
+    captured = _CapturingLoop.captured
+    text = (captured["system"] or "") + (captured["append_system_prompt"] or "")
+    assert text.count(card) == 1
+    assert adapter._workspace_card == card
 
 
 @pytest.mark.asyncio

@@ -483,3 +483,44 @@ describe('PermissionRequest — multi-line (code) descriptions', () => {
 		expect(screen.getByText(/git status/)).toBeTruthy();
 	});
 });
+
+// #1803: a prompt relayed from a subagent on another worker names that worker
+// and offers no "always" rule, because only allow-once or deny travels back.
+describe('PermissionRequest — relayed prompt from a subagent on another worker', () => {
+	const relayed = () => makeRequest({
+		tool_name: 'Write',
+		tool_input: { file_path: '/tmp/probe.txt' },
+		provider_agent: {
+			worker_session_id: 'child-1',
+			label: 'Task worker on DesktopWorker',
+			worker_name: 'DesktopWorker',
+			remote_approval_id: 'a'.repeat(32),
+		},
+	});
+
+	it('names the worker and hides the always option', () => {
+		render(PermissionRequest, { props: { request: relayed() } });
+
+		expect(screen.getByText('DesktopWorker subagent')).toBeTruthy();
+		expect(screen.getByTestId('relayed-note').textContent).toMatch(/subagent running on DesktopWorker.*this request only/s);
+		expect(screen.queryByRole('checkbox')).toBeNull();
+		expect(screen.queryByText(/Always do this/)).toBeNull();
+	});
+
+	it('answers once, never with a remembered rule', async () => {
+		const onRespond = vi.fn();
+		renderArmedForClicks({ request: relayed(), onRespond });
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		expect(onRespond.mock.calls[0][0]).toMatchObject({ decision: 'allow', remember: 'none' });
+	});
+
+	it('keeps the always option on a local subagent prompt', () => {
+		render(PermissionRequest, { props: { request: makeRequest({
+			provider_agent: { worker_session_id: 'child-2', label: 'Task worker' },
+		}) } });
+
+		expect(screen.getByText('Permission')).toBeTruthy();
+		expect(screen.getByLabelText(/Always do this for Bash/)).toBeTruthy();
+	});
+});

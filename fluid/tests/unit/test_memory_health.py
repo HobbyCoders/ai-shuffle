@@ -123,6 +123,17 @@ def test_harvested_fact_rewritten_over_and_over_needs_attention(tmp_path):
     assert s["detail"]["max_revision"] == 12
 
 
+def test_harvested_fact_no_longer_rewritten_is_not_churn(tmp_path):
+    # #1814: a legacy shared env fact at revision 74 whose rewrites stopped
+    # kept the signal raised for months, until its age diluted the rate.
+    store = SkillStore(tmp_path)
+    fact = store.save_memory("Node dependencies are missing in a.", provenance="tool", key="env.node_modules")
+    age(store, {fact.id}, created=5 * DAY, updated=memory_health.CHURN_QUIET + DAY, revision=74)
+    s = signal(memory_health.check(store), "unconfirmed")
+    assert s["state"] == "healthy" and s["detail"]["rewritten_often"] == 0
+    assert s["detail"]["max_revision"] == 74
+
+
 def test_a_pile_of_unconfirmed_facts_needs_attention(tmp_path):
     store = SkillStore(tmp_path)
     for i in range(memory_health.UNCONFIRMED_PILE):
@@ -209,14 +220,28 @@ def test_a_nearly_full_memory_file_needs_attention(tmp_path, monkeypatch):
     assert s["state"] == "attention" and "% full" in s["reason"]
 
 
-def test_snapshot_that_leaves_out_most_facts_needs_attention(tmp_path, monkeypatch):
+def test_snapshot_that_leaves_out_most_facts_is_informational(tmp_path, monkeypatch):
+    # The snapshot is bounded by design and Recall finds the rest (#1814):
+    # reported with its numbers, not counted as needing attention.
     tiny_snapshot(monkeypatch, 400)
     store = SkillStore(tmp_path)
     for i in range(70):
         store.save_memory(f"Project fact {i}", scope="project:one", protected=True)
-    s = signal(memory_health.check(store), "snapshot")
-    assert s["state"] == "attention" and "of 70 facts in one project" in s["reason"]
+    result = memory_health.check(store)
+    s = signal(result, "snapshot")
+    assert s["state"] == "healthy" and "of 70 facts in one project" in s["reason"]
+    assert "Recall finds the rest" in s["reason"]
     assert s["detail"]["scopes"][0]["omitted"] >= 50
+    assert result["state"] == "healthy"
+
+
+def test_snapshot_that_shows_nothing_needs_attention(tmp_path, monkeypatch):
+    tiny_snapshot(monkeypatch, 10)  # no fact fits
+    store = SkillStore(tmp_path)
+    for i in range(3):
+        store.save_memory(f"Project fact {i}", scope="project:one", protected=True)
+    s = signal(memory_health.check(store), "snapshot")
+    assert s["state"] == "attention" and "none of 3 facts" in s["reason"]
 
 
 def test_repeated_curation_failures_need_attention(tmp_path):

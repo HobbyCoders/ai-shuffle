@@ -7,8 +7,9 @@ describe('voice composer parity', () => {
 		const view = source('components/layout/ChatView.svelte');
 		expect(view.match(/<ChatInput /g)).toHaveLength(1);
 		expect(view).toContain('const showComposer = true;');
-		// The assistant's background work strip may sit between the call panel and the composer.
-		expect(view).toMatch(/<VoiceCallPanel[^>]+compact \/>\s*\{\/if\}\s*(?:\{#if assistantMode\}\s*<BackgroundWorkStrip[^>]+\/>\s*\{\/if\}\s*)?\{#key \$sessionOwnerBoundary\}\s*<QuestionTray[^>]+\/>\s*<ChatInput/);
+		// The assistant's background work strip may sit between the call panel and the composer,
+		// and a waiting private-access request shows above the question tray (#1807).
+		expect(view).toMatch(/<VoiceCallPanel[^>]+compact \/>\s*\{\/if\}\s*(?:\{#if assistantMode\}\s*<BackgroundWorkStrip[^>]+\/>\s*\{\/if\}\s*)?\{#key \$sessionOwnerBoundary\}\s*(?:<PrivateAccessPrompt[^>]+\/>\s*)?<QuestionTray[^>]+\/>\s*<ChatInput/);
 	});
 	it('uses code context and permission controls for voice on desktop and mobile', () => {
   expect(source('components/chat/ChatInput.svelte')).toContain('<ContextPillBar />');

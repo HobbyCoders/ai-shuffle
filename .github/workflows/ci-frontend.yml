@@ -109,7 +109,7 @@ jobs:
       - name: Build AI tools from source
         if: github.event_name != 'pull_request' || steps.changes.outputs.tools == 'true'
         working-directory: tools
-        run: npm ci --ignore-scripts && npm run build && npm audit --audit-level=high
+        run: npm ci --ignore-scripts && npm test && npm audit --audit-level=high
 
       # The worker network's crypto vectors must verify with WebCrypto, the API
       # the account hub and the mobile app use (tests/core/network/vectors.json

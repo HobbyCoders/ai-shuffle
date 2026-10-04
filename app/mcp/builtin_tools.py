@@ -308,6 +308,231 @@ def _cap_app_errors(rows: List[Dict[str, Any]]) -> tuple:
     )
 
 
+async def _read_app_errors(args: Dict[str, Any], session_id: Optional[str]) -> Dict[str, Any]:
+    """The GetAppErrors payload for THIS worker. Raises ``ValueError`` for a
+    refusal the caller reports as the tool error."""
+    from app.db import error_logs
+
+    limit = max(1, min(int(args.get("limit") or 10), _APP_ERRORS_MAX_LIMIT))
+    source = (args.get("source") or "").strip() or None
+    min_level = (args.get("min_level") or "ERROR").strip().upper()
+    levels = _APP_ERROR_LEVELS.get(min_level)
+    if levels is None:
+        raise ValueError(
+            f"min_level must be one of "
+            f"{', '.join(sorted(_APP_ERROR_LEVELS))} (got {min_level!r})."
+        )
+    since = None
+    since_minutes = args.get("since_minutes")
+    if since_minutes:
+        try:
+            since = datetime.now(timezone.utc) - timedelta(minutes=float(since_minutes))
+        except (TypeError, ValueError):
+            since = None
+    sess = session_id if args.get("this_session_only") else None
+
+    error_id = (args.get("error_id") or "").strip()
+    if error_id:
+        errors = await asyncio.to_thread(
+            error_logs.get_recent_errors, limit=1, error_id=error_id,
+            session_id=sess,
+        )
+        if not errors:
+            raise ValueError("Error record not found in the requested scope.")
+        return {"error_id": error_id, **_detail_page(errors[0].get("detail") or "", args)}
+
+    errors = await asyncio.to_thread(
+        error_logs.get_recent_errors,
+        limit=limit,
+        source=source,
+        session_id=sess,
+        since=since,
+        levels=levels,
+    )
+    matched = len(errors)
+    errors, truncated = _cap_app_errors(errors)
+    payload = {
+        "errors": errors,
+        "count": len(errors),
+        "min_level": min_level,
+    }
+    if truncated:
+        payload["truncated"] = truncated
+        payload["matched"] = matched
+    elif min_level == "ERROR" and not errors:
+        # The failure this tool was built to prevent: an agent read
+        # count: 0 as "the app is fine" while the thing it was chasing
+        # sat one level down.
+        payload["note"] = (
+            "no ERROR-level records matched — this is not proof nothing "
+            "went wrong; retry with min_level: \"WARNING\"."
+        )
+    return payload
+
+
+async def _read_app_logs(args: Dict[str, Any]) -> Dict[str, Any]:
+    """The GetAppLogs payload for THIS worker. Raises ``ValueError`` for a
+    refusal the caller reports as the tool error."""
+    from app.api.logs import ring_handler
+
+    try:
+        limit = int(args.get("limit") or _APP_LOGS_DEFAULT_LIMIT)
+    except (TypeError, ValueError):
+        limit = _APP_LOGS_DEFAULT_LIMIT
+    limit = max(1, min(limit, _APP_LOGS_MAX_LIMIT))
+    level = (args.get("level") or "").strip().upper() or None
+    if level is not None and level not in _APP_LOG_LEVELS:
+        raise ValueError(
+            f"level must be one of {', '.join(sorted(_APP_LOG_LEVELS))} "
+            f"(got {level!r})."
+        )
+    search = (args.get("search") or "").strip().lower() or None
+    cutoff = None
+    since_minutes = args.get("since_minutes")
+    if since_minutes:
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(
+                minutes=float(since_minutes)
+            )
+        except (TypeError, ValueError):
+            cutoff = None
+
+    buffer = list(ring_handler.buffer)
+    record_id = (args.get("record_id") or "").strip()
+    if record_id:
+        record = next((r for r in buffer if _log_record_id(r) == record_id), None)
+        if record is None:
+            raise ValueError("Log record unavailable: it was evicted or this process restarted.")
+        return {"record_id": record_id, **_detail_page(record.message, args)}
+    lines, matched, used = [], 0, 0
+    for record in reversed(buffer):  # newest first
+        if level and record.level != level:
+            continue
+        if search and search not in record.message.lower():
+            continue
+        if cutoff is not None and not _log_record_after(record, cutoff):
+            continue
+        matched += 1
+        if len(lines) >= limit or used >= _APP_LOGS_MAX_CHARS:
+            continue
+        message = _clip(record.message, _APP_LOGS_MAX_LINE_CHARS)
+        used += len(message)
+        lines.append({
+            "record_id": _log_record_id(record),
+            "timestamp": record.timestamp,
+            "level": record.level,
+            "logger": record.logger_name,
+            "message": message,
+        })
+    payload: Dict[str, Any] = {
+        "lines": lines,
+        "count": len(lines),
+        "matched": matched,
+        "buffered": len(buffer),
+    }
+    if matched > len(lines):
+        payload["truncated"] = (
+            f"{matched - len(lines)} more matching line(s) omitted. "
+            "Narrow with search / level / since_minutes rather than "
+            "raising limit."
+        )
+    elif not lines:
+        payload["note"] = (
+            "nothing matched. The buffer holds only this process's "
+            "recent lines and is empty after a restart; try a wider "
+            "search or drop the level filter."
+        )
+    return payload
+
+
+# ── GetAppErrors / GetAppLogs on another worker ─────────────────────────────
+#
+# ``worker`` sends the same read to another of the owner's workers over the
+# signed control channel (action ``app-logs``). The peer runs the readers
+# above, so caps and redaction are its own local ones; the answer is labelled
+# with the worker it came from. A bad pick is refused, never read here.
+APP_LOGS_ACTION = "app-logs"
+_APP_LOGS_PEER_TIMEOUT = 20.0
+#: The arguments a peer is sent. ``worker`` is not among them: no second hop.
+_APP_LOGS_ARGS = {
+    "errors": ("error_id", "offset", "max_chars", "limit", "min_level", "source",
+               "this_session_only", "since_minutes"),
+    "logs": ("limit", "record_id", "offset", "max_chars", "level", "search", "since_minutes"),
+}
+_APP_LOGS_TOOLS = {"errors": "GetAppErrors", "logs": "GetAppLogs"}
+
+
+async def _read_app_kind(kind: str, args: Dict[str, Any], session_id: Optional[str]) -> Dict[str, Any]:
+    if kind == "errors":
+        return await _read_app_errors(args, session_id)
+    return await _read_app_logs(args)
+
+
+async def _app_read_on_worker(kind: str, args: Dict[str, Any], session_id: Optional[str]) -> Dict[str, Any]:
+    """Run GetAppErrors/GetAppLogs on the worker ``args['worker']`` names."""
+    from app.network import control, runners
+
+    tool_name = _APP_LOGS_TOOLS[kind]
+    try:
+        row = await asyncio.to_thread(
+            runners.resolve_worker, args.get("worker"),
+            instead="omit worker to read this worker", refused="nothing was read",
+        )
+    except ValueError as exc:
+        return _err(str(exc))
+    name = row.get("device_name") or row["device_id"]
+    forwarded = {key: args[key] for key in _APP_LOGS_ARGS[kind] if key in args}
+    try:
+        if row.get("is_self"):
+            payload = await _read_app_kind(kind, forwarded, session_id)
+        else:
+            payload = await control.call(
+                row["device_id"], APP_LOGS_ACTION,
+                {"kind": kind, "args": forwarded, "session_id": session_id},
+                timeout=_APP_LOGS_PEER_TIMEOUT,
+            )
+    except ValueError as exc:
+        return _err(str(exc), worker=name)
+    except control.ControlRefused as exc:
+        if "Unknown control action" in str(exc):
+            return _err(f"{name} runs an older release that cannot share its logs; "
+                        "nothing was read. Ask the owner to update it.", worker=name)
+        return _err(f"{name} refused the read: {exc}", worker=name)
+    except control.RunnerUnreachable as exc:
+        return _err(f"{name} could not be reached: {exc}; nothing was read.", worker=name)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("%s on %s failed", tool_name, name)
+        return _err(f"failed to read {name}: {exc}", worker=name)
+    if not isinstance(payload, dict):
+        return _err(f"{name} sent an unreadable answer; nothing was read.", worker=name)
+    return _ok({"worker": name, **payload})
+
+
+async def handle_peer_app_logs(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    """``app-logs`` control action: this worker's errors or log for a peer.
+
+    Only another active worker of this account may ask; a phone or other
+    client member is refused. Validation errors raise ``ValueError`` (400).
+    """
+    from app.network import engine, membership
+
+    ctx = engine.context()
+    member = ctx.member(from_device) if ctx is not None else None
+    if (member is None or member.kind != membership.KIND_WORKER
+            or member.status != membership.STATUS_ACTIVE):
+        raise PermissionError("Only this account's workers can read this worker's logs")
+    kind = body.get("kind")
+    if kind not in _APP_LOGS_ARGS:
+        raise ValueError("kind must be errors or logs")
+    raw = body.get("args")
+    if not isinstance(raw, dict):
+        raise ValueError("args must be an object")
+    session = body.get("session_id")
+    session = session if isinstance(session, str) and 0 < len(session) <= 200 else None
+    args = {key: raw[key] for key in _APP_LOGS_ARGS[kind] if key in raw}
+    return await _read_app_kind(kind, args, session)
+
+
 def _strip_ansi(text: str) -> str:
     """Fluid's ANSI scrubber, imported lazily and never fatal."""
     try:
@@ -560,6 +785,47 @@ def _foreign_task_error(task_id: str, owner_session_id: Optional[str]) -> Dict[s
         task_id=task_id,
         owner_session_id=owner_session_id,
     )
+
+
+async def _stop_own_subagent(session_id: str, task_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """TaskStop on a subagent: stop it if this session started it (#1805).
+
+    The stop is the task card's Stop (``stop_session_task``) with the parent
+    agent's attribution. A local worker is supervised under the session that
+    started it; a child on another worker under the conversation's root, with
+    its direct caller in the dispatch row. A worker a nested subagent started
+    is only listed here for routing, so it is refused, not stopped.
+    """
+    from app.core import provider_agent_supervisor
+    from app.core.query_session_lifecycle import stop_session_task
+    from app.core.task_registry import AGENT_STOP_REASON, PARENT_AGENT_STOP_SUMMARY
+    from app.db import remote_tasks
+
+    if record.get("status") != "running":
+        return _ok({"task_id": task_id, "kind": "agent", "running": False,
+                    "status": record.get("status"), "detail": "already finished"})
+    dispatch = await asyncio.to_thread(remote_tasks.get_dispatch, task_id)
+    if dispatch is not None and dispatch.get("owner_session_id") == session_id:
+        holder = dispatch["root_session_id"]
+    elif dispatch is None and provider_agent_supervisor.get_worker(session_id, task_id) is not None:
+        holder = session_id
+    else:
+        return _err(
+            "This subagent was started by another agent in this conversation, "
+            "so only that agent can stop it (or the owner, with Stop on its "
+            "task card).",
+            task_id=task_id, kind="agent", status=record.get("status"),
+        )
+    result = await stop_session_task(holder, task_id, source=AGENT_STOP_REASON)
+    payload = {"task_id": task_id, "kind": "agent", "running": False,
+               "status": "killed", "reason": AGENT_STOP_REASON,
+               "summary": PARENT_AGENT_STOP_SUMMARY}
+    if result.get("detail"):
+        payload["detail"] = result["detail"]
+    if not result.get("ok"):
+        return _err(f"Could not stop the subagent: {result.get('detail') or 'unknown error'}",
+                    task_id=task_id, kind="agent")
+    return _ok(payload)
 
 
 async def stop_background_shell_task(
@@ -2012,7 +2278,9 @@ def create_builtin_tools_server(
 
     @tool(
         "TaskStop",
-        "Stop a background task spawned by Monitor.",
+        "Stop a background task spawned by Monitor, or a subagent this "
+        "session started with Task (on this worker or another one). A "
+        "stopped subagent cannot be resumed with SendMessage.",
         {
             "type": "object",
             "properties": {"task_id": {"type": "string"}},
@@ -2023,13 +2291,11 @@ def create_builtin_tools_server(
         tid = (args.get("task_id") or "").strip()
         result = await stop_background_shell_task(tid, session_id=session_id)
         if result is None:
-            # A background AGENT task can't be force-stopped from
-            # here — this tool only owns Monitor shell subprocesses. Say so
-            # clearly instead of "not found" when the id is a real agent task the
-            # registry knows.
             if session_id:
                 from app.core.task_registry import task_registry
                 record = task_registry.get_task(session_id, tid)
+                if record is not None and record.get("kind") == "agent":
+                    return await _stop_own_subagent(session_id, tid, record)
                 if record is not None:
                     return _err(
                         "Agent tasks are run by the harness and tracked in the "
@@ -2040,6 +2306,14 @@ def create_builtin_tools_server(
                         kind=record.get("kind"),
                         status=record.get("status"),
                     )
+            owners = [s for s in _sessions_holding_task(tid) if s != session_id]
+            if session_id and owners:
+                return _err(
+                    "This task belongs to a different session, so it cannot be "
+                    "stopped from here.",
+                    task_id=tid,
+                    owner_session_id=owners[0],
+                )
             return _task_not_found(tid, session_id)
         if result.get("survivors"):
             # Never claim a stop the OS did not give us: answering
@@ -2291,7 +2565,8 @@ def create_builtin_tools_server(
         "list is cut off once the payload gets large. A `truncated` field says "
         "so — narrow with source / since_minutes / this_session_only rather "
         "than raising limit. For a clipped trace, pass its error_id with offset "
-        "and max_chars to retrieve a bounded detail page.",
+        "and max_chars to retrieve a bounded detail page. Pass worker to read "
+        "another of the owner's online workers.",
         {
             "type": "object",
             "properties": {
@@ -2311,6 +2586,14 @@ def create_builtin_tools_server(
                 "source": {"type": "string", "description": "Filter by source: frontend, backend, ws, or api."},
                 "this_session_only": {"type": "boolean", "description": "Only errors tied to this chat session."},
                 "since_minutes": {"type": "integer", "description": "Only errors seen within the last N minutes."},
+                "worker": {
+                    "type": "string",
+                    "description": (
+                        "Another of the owner's workers to read, by exact name "
+                        "or device id. Omit for this worker. An offline or "
+                        "unknown worker is refused, never read here instead."
+                    ),
+                },
             },
             "required": [],
         },
@@ -2318,64 +2601,12 @@ def create_builtin_tools_server(
     async def get_app_errors(args: dict) -> dict:
         if not is_admin:
             return _err("GetAppErrors requires an owner session.")
+        if args.get("worker") is not None:
+            return await _app_read_on_worker("errors", args, session_id)
         try:
-            from app.db import error_logs
-
-            limit = max(1, min(int(args.get("limit") or 10), _APP_ERRORS_MAX_LIMIT))
-            source = (args.get("source") or "").strip() or None
-            min_level = (args.get("min_level") or "ERROR").strip().upper()
-            levels = _APP_ERROR_LEVELS.get(min_level)
-            if levels is None:
-                return _err(
-                    f"min_level must be one of "
-                    f"{', '.join(sorted(_APP_ERROR_LEVELS))} (got {min_level!r})."
-                )
-            since = None
-            since_minutes = args.get("since_minutes")
-            if since_minutes:
-                try:
-                    since = datetime.now(timezone.utc) - timedelta(minutes=float(since_minutes))
-                except (TypeError, ValueError):
-                    since = None
-            sess = session_id if args.get("this_session_only") else None
-
-            error_id = (args.get("error_id") or "").strip()
-            if error_id:
-                errors = await asyncio.to_thread(
-                    error_logs.get_recent_errors, limit=1, error_id=error_id,
-                    session_id=sess,
-                )
-                if not errors:
-                    return _err("Error record not found in the requested scope.")
-                return _ok({"error_id": error_id, **_detail_page(errors[0].get("detail") or "", args)})
-
-            errors = await asyncio.to_thread(
-                error_logs.get_recent_errors,
-                limit=limit,
-                source=source,
-                session_id=sess,
-                since=since,
-                levels=levels,
-            )
-            matched = len(errors)
-            errors, truncated = _cap_app_errors(errors)
-            payload = {
-                "errors": errors,
-                "count": len(errors),
-                "min_level": min_level,
-            }
-            if truncated:
-                payload["truncated"] = truncated
-                payload["matched"] = matched
-            elif min_level == "ERROR" and not errors:
-                # The failure this tool was built to prevent: an agent read
-                # count: 0 as "the app is fine" while the thing it was chasing
-                # sat one level down.
-                payload["note"] = (
-                    "no ERROR-level records matched — this is not proof nothing "
-                    "went wrong; retry with min_level: \"WARNING\"."
-                )
-            return _ok(payload)
+            return _ok(await _read_app_errors(args, session_id))
+        except ValueError as e:
+            return _err(str(e))
         except Exception as e:
             logger.exception("GetAppErrors failed")
             return _err(f"failed to read errors: {e}")
@@ -2402,7 +2633,8 @@ def create_builtin_tools_server(
         "(a session id, a task id, a function name) and is by far the best "
         "way to make the answer small. Output is capped server-side. Pass a "
         "record_id with offset and max_chars to read a clipped line in bounded "
-        "pages; an evicted record is reported as unavailable.",
+        "pages; an evicted record is reported as unavailable. Pass worker to "
+        "read another of the owner's online workers.",
         {
             "type": "object",
             "properties": {
@@ -2435,6 +2667,14 @@ def create_builtin_tools_server(
                     "type": "number",
                     "description": "Only lines written within the last N minutes.",
                 },
+                "worker": {
+                    "type": "string",
+                    "description": (
+                        "Another of the owner's workers to read, by exact name "
+                        "or device id. Omit for this worker. An offline or "
+                        "unknown worker is refused, never read here instead."
+                    ),
+                },
             },
             "required": [],
         },
@@ -2442,77 +2682,12 @@ def create_builtin_tools_server(
     async def get_app_logs(args: dict) -> dict:
         if not is_admin:
             return _err("GetAppLogs requires an owner session.")
+        if args.get("worker") is not None:
+            return await _app_read_on_worker("logs", args, session_id)
         try:
-            from app.api.logs import ring_handler
-
-            try:
-                limit = int(args.get("limit") or _APP_LOGS_DEFAULT_LIMIT)
-            except (TypeError, ValueError):
-                limit = _APP_LOGS_DEFAULT_LIMIT
-            limit = max(1, min(limit, _APP_LOGS_MAX_LIMIT))
-            level = (args.get("level") or "").strip().upper() or None
-            if level is not None and level not in _APP_LOG_LEVELS:
-                return _err(
-                    f"level must be one of {', '.join(sorted(_APP_LOG_LEVELS))} "
-                    f"(got {level!r})."
-                )
-            search = (args.get("search") or "").strip().lower() or None
-            cutoff = None
-            since_minutes = args.get("since_minutes")
-            if since_minutes:
-                try:
-                    cutoff = datetime.now(timezone.utc) - timedelta(
-                        minutes=float(since_minutes)
-                    )
-                except (TypeError, ValueError):
-                    cutoff = None
-
-            buffer = list(ring_handler.buffer)
-            record_id = (args.get("record_id") or "").strip()
-            if record_id:
-                record = next((r for r in buffer if _log_record_id(r) == record_id), None)
-                if record is None:
-                    return _err("Log record unavailable: it was evicted or this process restarted.")
-                return _ok({"record_id": record_id, **_detail_page(record.message, args)})
-            lines, matched, used = [], 0, 0
-            for record in reversed(buffer):  # newest first
-                if level and record.level != level:
-                    continue
-                if search and search not in record.message.lower():
-                    continue
-                if cutoff is not None and not _log_record_after(record, cutoff):
-                    continue
-                matched += 1
-                if len(lines) >= limit or used >= _APP_LOGS_MAX_CHARS:
-                    continue
-                message = _clip(record.message, _APP_LOGS_MAX_LINE_CHARS)
-                used += len(message)
-                lines.append({
-                    "record_id": _log_record_id(record),
-                    "timestamp": record.timestamp,
-                    "level": record.level,
-                    "logger": record.logger_name,
-                    "message": message,
-                })
-            payload: Dict[str, Any] = {
-                "lines": lines,
-                "count": len(lines),
-                "matched": matched,
-                "buffered": len(buffer),
-            }
-            if matched > len(lines):
-                payload["truncated"] = (
-                    f"{matched - len(lines)} more matching line(s) omitted. "
-                    "Narrow with search / level / since_minutes rather than "
-                    "raising limit."
-                )
-            elif not lines:
-                payload["note"] = (
-                    "nothing matched. The buffer holds only this process's "
-                    "recent lines and is empty after a restart; try a wider "
-                    "search or drop the level filter."
-                )
-            return _ok(payload)
+            return _ok(await _read_app_logs(args))
+        except ValueError as e:
+            return _err(str(e))
         except Exception as e:
             logger.exception("GetAppLogs failed")
             return _err(f"failed to read logs: {e}")

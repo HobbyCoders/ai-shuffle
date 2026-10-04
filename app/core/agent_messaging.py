@@ -104,8 +104,22 @@ def peer_rows(session_id: str | None) -> list[dict]:
 
 
 def may_message(sender: str, target: str) -> bool:
-    """Whether ``sender`` can still address ``target`` (the roster's rule)."""
-    return any(row["worker_session_id"] == target for row in peer_rows(sender))
+    """Whether ``sender`` can still address ``target`` (the roster's rule).
+
+    A Task child another worker started here also hears from the
+    conversation that started it. That sender lives on the other worker, so
+    it has no roster here; ``remote_task._message_child`` checked it on
+    arrival, and without this its message waited for the child's turn to end
+    instead of joining it at the next tool result (#1804).
+    """
+    if any(row["worker_session_id"] == target for row in peer_rows(sender)):
+        return True
+    from app.core import remote_task
+
+    parent = remote_task.remote_parent(target)
+    return parent is not None and sender in {
+        parent.get("owner_session_id"), parent.get("parent_session_id"),
+    }
 
 
 def sender_label(receiver: str | None, sender: str) -> str | None:

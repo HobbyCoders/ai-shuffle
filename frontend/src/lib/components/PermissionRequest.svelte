@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
 	import './deck/cards/card-design-system.css';
+	import type { PermissionWorkerTag } from '$lib/api/client';
 
 	export interface PermissionRequestData {
 		request_id: string;
@@ -15,6 +16,8 @@
 		description?: string;
 		decision_reason?: string;
 		blocked_path?: string;
+		/** Set on a subagent's prompt; names the worker of a relayed one. */
+		provider_agent?: PermissionWorkerTag | null;
 	}
 
 	interface Props {
@@ -177,8 +180,17 @@
 	/** Remember scope for the decision about to be sent. The checkbox is a
 	 *  tool-wide "always" — profile-scoped and pattern-less. */
 	function currentRemember(): 'none' | 'profile' {
-		return alwaysForTool ? 'profile' : 'none';
+		return alwaysForTool && !relayedFrom ? 'profile' : 'none';
 	}
+
+	/** The worker a relayed prompt came from: a subagent running on another
+	 *  worker. Only allow-once or deny travels back there and a person decides
+	 *  every one of its requests, so no "always" rule can apply to it. */
+	const relayedFrom = $derived.by(() => {
+		const tag = request.provider_agent;
+		if (!tag || !tag.remote_approval_id) return null;
+		return (tag.worker_name ?? '').trim() || 'another worker';
+	});
 
 	// Arming. A prompt must never be answered by input meant for something
 	// else, so every way of answering it is held back for a moment after it
@@ -428,7 +440,7 @@
 						border-color: color-mix(in oklch, var(--muted-foreground) 20%, transparent);
 					"
 				>
-					Permission
+					{relayedFrom ? `${relayedFrom} subagent` : 'Permission'}
 				</span>
 			</h3>
 			<p class="text-xs text-muted-foreground truncate">{request.tool_name}</p>
@@ -549,8 +561,15 @@
 		{/if}
 	</div>
 
-	<!-- Remember Option — one checkbox that applies to whichever button is pressed -->
+	<!-- Remember Option — one checkbox that applies to whichever button is pressed.
+	     A relayed prompt has none: its answer applies to this request only. -->
 	<div class="px-4 py-3 border-t border-border/40 bg-card/30">
+		{#if relayedFrom}
+			<p class="relayed-note" data-testid="relayed-note">
+				Asked by a subagent running on <strong>{relayedFrom}</strong>. Your answer applies
+				to this request only; the subagent asks again for each one.
+			</p>
+		{:else}
 		<label class="always-option {alwaysForTool ? 'selected' : ''}">
 			<input
 				type="checkbox"
@@ -563,6 +582,7 @@
 				Remembers the next choice — Approve saves an always-allow rule, Deny saves an always-deny rule.
 			</span>
 		</label>
+		{/if}
 	</div>
 
 	<!-- Action Buttons -->
@@ -693,6 +713,22 @@
 		font-size: 0.875rem;
 		font-weight: 500;
 		color: var(--foreground);
+	}
+
+	.relayed-note {
+		margin: 0;
+		padding: 0.625rem 0.75rem;
+		border-radius: var(--radius, 0.75rem);
+		border: 1px solid var(--border);
+		background: var(--card);
+		font-size: 0.75rem;
+		line-height: 1.5;
+		color: var(--muted-foreground);
+	}
+
+	.relayed-note strong {
+		color: var(--foreground);
+		font-weight: 600;
 	}
 
 	.always-hint {

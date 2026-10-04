@@ -223,6 +223,8 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
         "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
+        // As docker/start-chrome.sh: pages must keep seeing this screen (#1791).
+        "--ozone-override-screen-size=1920,1080",
         `--remote-debugging-port=${port}`,
         `--user-data-dir=${userDataDir}`,
         "about:blank",
@@ -750,6 +752,28 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     await session.runAgentExclusive(async () => undefined);
     const restored = await page.evaluate(() => window.innerWidth);
     expect(restored).toBe(412);
+  });
+
+  it("keeps the browser's screen size while the viewport is pinned (#1791)", async () => {
+    const screenOf = async () => (await session.ensurePage()).evaluate(() => ({
+      screen: [window.screen.width, window.screen.height], inner: [window.innerWidth, window.innerHeight],
+    }));
+    await runNavigate(session, { url: fixtureUrl });
+    await runResize(session, { width: 1280, height: 800 });
+    expect(await screenOf()).toEqual({ screen: [1920, 1080], inner: [1280, 800] });
+
+    await runResize(session, { width: 412, height: 700 });
+    expect(await screenOf()).toEqual({ screen: [1920, 1080], inner: [412, 700] });
+
+    await runTabs(session, { op: "create" });
+    await runNavigate(session, { url: fixtureUrl });
+    expect(await screenOf()).toEqual({ screen: [1920, 1080], inner: [412, 700] });
+
+    // A viewer resize behind the agent's back drops the override; the pin restores it.
+    const page = await session.ensurePage();
+    await page.setViewportSize({ width: 369, height: 714 });
+    await session.runAgentExclusive(async () => undefined);
+    expect(await screenOf()).toEqual({ screen: [1920, 1080], inner: [412, 700] });
   });
 
   it("screenshot brings a backgrounded tab forward before capturing", async () => {

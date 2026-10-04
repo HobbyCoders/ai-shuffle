@@ -68,14 +68,21 @@
 </nav>
 
 <style>
-	.crumbs { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 0 1 auto; }
+	/* The nav spans the strip's free width so the crumb caps below are shares of
+	   the space actually available, not of the crumbs' own text. */
+	.crumbs { display: flex; align-items: center; gap: 7px; min-width: 0; flex: 1 1 auto; }
 	.crumb { min-width: 0; max-width: 220px; border: none; background: transparent; padding: 0; font: inherit; font-size: 13px; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
 	button.crumb, a.crumb { cursor: pointer; }
 	button.crumb:hover, a.crumb:hover { color: var(--foreground); text-decoration: underline; }
 	.crumb:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 4px; }
 	.crumbs :global(.crumb-sep) { color: var(--subtle-foreground); flex: none; }
 	.current { min-width: 0; flex: 0 1 auto; }
-	.parent { flex: 0 1 220px; }
+	/* The leading crumbs keep their own text width and give way only past a
+	   share of the strip; the current title absorbs any shortfall first. A
+	   fixed 220px basis on the parent used to reserve empty space after short
+	   names and squeeze "Sessions" to "Se…" beside it (#1799). */
+	.project, .parent { flex: none; max-width: min(220px, 25%); }
+	.project { max-width: min(220px, max(25%, 4.5rem)); }
 	.mobile { flex: 1; }
 	.mobile:not(.has-parent) { justify-content: center; }
 	@media (max-width: 700px) {

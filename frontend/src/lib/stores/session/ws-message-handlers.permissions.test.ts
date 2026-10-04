@@ -8,6 +8,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMessageHandlers, type MessageHandlerDeps, type SessionAttention } from './ws-message-handlers';
 import type { ActiveSessionState } from '../active-session';
 import type { PermissionRequest } from '$lib/api/client';
+import { get } from 'svelte/store';
+import { privateAccessPending } from '../chat-access';
 
 vi.mock('$lib/services/error-reporter', () => ({ reportClientError: vi.fn() }));
 vi.mock('$lib/services/fix-with-ai', () => ({ startFixChat: vi.fn() }));
@@ -79,6 +81,25 @@ describe('permission queue frames', () => {
 		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'card', tool_name: 'Bash', tool_input: { command: 'ls' } });
 		expect(h.state().pendingPermissions[0].assistant_confirm).toEqual(confirm);
 		expect(h.state().pendingPermissions[1]).not.toHaveProperty('assistant_confirm');
+	});
+
+	it('tracks the private-access waiting count from chat_access_changed (#1807)', () => {
+		const h = harness();
+		const counts = () => get(privateAccessPending);
+		h.handleMessage({ type: 'chat_access_changed', session_id: 'bg', pending: 2 });
+		expect(counts().get('bg')).toBe(2);
+		// An older worker sends no count: the mark is left as it is.
+		h.handleMessage({ type: 'chat_access_changed', session_id: 'bg' });
+		expect(counts().get('bg')).toBe(2);
+		h.handleMessage({ type: 'chat_access_changed', session_id: 'bg', pending: 0 });
+		expect(counts().has('bg')).toBe(false);
+	});
+
+	it('keeps the worker tag on a live request so a relayed prompt can name its worker (#1803)', () => {
+		const h = harness();
+		const tag = { worker_session_id: 'child-1', label: 'Task worker on DesktopWorker', worker_name: 'DesktopWorker', remote_approval_id: 'a'.repeat(32) };
+		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'relayed', tool_name: 'Write', tool_input: { file_path: '/tmp/x' }, provider_agent: tag });
+		expect(h.state().pendingPermissions[0].provider_agent).toEqual(tag);
 	});
 
 	it('accepts the requeue reply, which names requeued_ids and no resolved_ids (backend requeue_deferred_permissions)', () => {

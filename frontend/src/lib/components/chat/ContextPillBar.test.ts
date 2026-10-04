@@ -221,6 +221,41 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		success.mockRestore();
 	});
 
+	it('shows an agent-queued hand-off as pending until the move completes (#1809)', async () => {
+		const handOff = {
+			id: 'tool-handoff', role: 'assistant', type: 'tool_use', content: '', toolStatus: 'complete',
+			toolName: 'mcp__builtins__HandOffSession', toolInput: { worker: 'DesktopWorker' },
+			toolResult: JSON.stringify({ queued: true, worker: 'DesktopWorker', message: 'Hand-off to DesktopWorker is queued.' })
+		};
+		const note = (status: string) => ({
+			id: `handoff-${status}`, role: 'system', type: 'system', content: '',
+			systemSubtype: 'handoff', systemData: { status, worker: 'DesktopWorker' }
+		});
+		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, handOff] });
+		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner',
+			device_name: 'Unraid', device_online: true, is_remote: true, controllable: true }]);
+		const view = render(ContextPillBar, { sheetMode });
+		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
+		// The same pending state as a move the owner started: busy, labelled, locked.
+		expect(chip.textContent).toContain('Moving to DesktopWorker after this turn');
+		expect(chip.getAttribute('aria-busy')).toBe('true');
+		expect(chip.classList.contains('busy')).toBe(true);
+		expect(chip.disabled).toBe(true);
+		await fireEvent.click(chip);
+		expect(view.queryByRole('menu')).toBeNull();
+
+		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, handOff, note('started')] });
+		await tick();
+		expect(chip.textContent).toContain('Moving to DesktopWorker…');
+		expect(chip.disabled).toBe(true);
+
+		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, handOff, note('started'), note('moved')] });
+		await tick();
+		expect(chip.getAttribute('aria-busy')).toBeNull();
+		expect(chip.disabled).toBe(false);
+		expect(chip.textContent).toContain('Unraid');
+	});
+
 	it('shows why Continue here failed and restores the chip', async () => {
 		const reason = "Branch main in the receiving worker's checkout C:/repo has 1 commit (newest: abc1234 fix) that is not on origin. Push them from that worker, or move them to another branch there, then try again. Nothing was changed.";
 		vi.mocked(adoptSession).mockRejectedValueOnce({ status: 409, detail: reason });

@@ -1463,11 +1463,26 @@ async def test_record_voice_exchange_writes_a_note_only_exchange(mock_db):
         SID, None, None, system_text="[agent update] Worker 'x' finished.",
     )
     assert turn_id is not None
-    # The assistant event is unconditional (same as a user-only exchange).
-    assert _types() == [
-        "turn.started", "message.user", "message.assistant", "turn.completed",
-    ]
+    # No reply, no assistant event (same as a user-only exchange).
+    assert _types() == ["turn.started", "message.user", "turn.completed"]
     assert _rows()[1]["payload"]["source"] == tr.VOICE_SYSTEM_NOTE_SOURCE
+
+
+async def test_record_voice_exchange_writes_no_empty_reply(mock_db):
+    # #1798: a user-only exchange stored an empty assistant message, which the
+    # transcript showed as an empty reply between two parts of the call.
+    _mk_session()
+    await tr.record_voice_exchange(SID, "take a look at these", None, model="gpt-live-1")
+    assert _types() == ["turn.started", "message.user", "turn.completed"]
+    assert [(m["role"], m["content"]) for m in sessions_db.get_session_messages(SID)] == [
+        ("user", "take a look at these")]
+
+
+async def test_record_voice_exchange_tags_typed_text(mock_db):
+    # #1798: text typed into a call (an attachment note) was tagged as speech.
+    _mk_session()
+    await tr.record_voice_exchange(SID, "Typed message: @WIP_2.png", None, user_source="typed")
+    assert _rows()[1]["payload"]["source"] == "typed"
 
 
 async def test_record_voice_exchange_never_raises(mock_db, monkeypatch):

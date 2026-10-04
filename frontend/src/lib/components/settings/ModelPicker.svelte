@@ -88,11 +88,31 @@
 	let openUpward = $state(false);
 	let panelHeight = $state(PANEL_PREFERRED_HEIGHT);
 
+	/**
+	 * Vertical bounds the panel can be seen in: the viewport, narrowed by every
+	 * scrolling ancestor. Inside a dialog the body scrolls and ends at the
+	 * footer, so measuring against the window alone let the panel open into
+	 * the hidden part of the body, behind the footer (#1811).
+	 */
+	function visibleBounds(el: HTMLElement): { top: number; bottom: number } {
+		let top = 0;
+		let bottom = window.innerHeight;
+		for (let node = el.parentElement; node; node = node.parentElement) {
+			const { overflowY } = getComputedStyle(node);
+			if (overflowY !== 'auto' && overflowY !== 'scroll') continue;
+			const r = node.getBoundingClientRect();
+			top = Math.max(top, r.top);
+			bottom = Math.min(bottom, r.bottom);
+		}
+		return { top, bottom };
+	}
+
 	function positionPanel() {
 		if (typeof window === 'undefined' || !rootEl) return;
 		const rect = rootEl.getBoundingClientRect();
-		const spaceBelow = window.innerHeight - rect.bottom - VIEWPORT_MARGIN;
-		const spaceAbove = rect.top - VIEWPORT_MARGIN;
+		const bounds = visibleBounds(rootEl);
+		const spaceBelow = bounds.bottom - rect.bottom - VIEWPORT_MARGIN;
+		const spaceAbove = rect.top - bounds.top - VIEWPORT_MARGIN;
 		if (spaceBelow < PANEL_MIN_HEIGHT && spaceAbove > spaceBelow) {
 			openUpward = true;
 			panelHeight = Math.max(PANEL_MIN_HEIGHT, Math.min(PANEL_PREFERRED_HEIGHT, spaceAbove));

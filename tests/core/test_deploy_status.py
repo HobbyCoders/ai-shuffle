@@ -117,6 +117,42 @@ def test_no_checkout_gives_a_reason(monkeypatch):
     assert report["workers"][0]["behind"] is None and report["workers"][0]["reason"] == report["reason"]
 
 
+def _no_fixed_candidates(monkeypatch, tmp_path):
+    from app.core.config import settings
+    monkeypatch.delenv("SHUFFLE_SOURCE_REPO", raising=False)
+    monkeypatch.setattr(ds, "_APP_ROOT", tmp_path / "installed-app")  # no Git data, like the desktop
+    monkeypatch.setattr(settings, "workspace_dir", str(tmp_path / "workspace"))
+
+
+def test_find_repo_uses_a_registered_project_checkout(monkeypatch, tmp_path, repo):
+    # #1815: the desktop's ai-shuffle project lives outside the workspace folder.
+    root, _ = repo
+    other = tmp_path / "ai-shuffle-plugins"
+    other.mkdir()
+    _git(other, "init", "-q")
+    _git(other, "remote", "add", "origin", "https://github.com/HobbyCoders/ai-shuffle-plugins.git")
+    _git(root, "remote", "add", "origin", "https://github.com/HobbyCoders/ai-shuffle.git")
+    _no_fixed_candidates(monkeypatch, tmp_path)
+    projects = [{"path": str(tmp_path / "gone")}, {"path": str(other)}, {"path": str(root)}]
+    with patch("app.db.database.get_all_projects", return_value=projects):
+        assert ds.find_repo() == root.resolve()
+
+
+def test_find_repo_keeps_the_fixed_candidates_first(monkeypatch, tmp_path, repo):
+    root, _ = repo
+    _git(root, "remote", "add", "origin", "git@github.com:HobbyCoders/ai-shuffle.git")
+    _no_fixed_candidates(monkeypatch, tmp_path)
+    monkeypatch.setenv("SHUFFLE_SOURCE_REPO", str(root))
+    with patch("app.db.database.get_all_projects", side_effect=AssertionError("not consulted")):
+        assert ds.find_repo() == root.resolve()
+
+
+def test_find_repo_without_a_database_finds_nothing(monkeypatch, tmp_path):
+    _no_fixed_candidates(monkeypatch, tmp_path)
+    with patch("app.db.database.get_all_projects", side_effect=RuntimeError("no pool")):
+        assert ds.find_repo() is None
+
+
 def test_collect_workers_reads_self_and_peers(monkeypatch):
     listing = {"self_device_id": "me", "runners": [
         {"device_id": "me", "device_name": "Unraid", "is_self": True, "online": True},

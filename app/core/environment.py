@@ -1156,9 +1156,27 @@ def _worktree_lines(
 TURN_ENV_HEADER = "Environment facts that change while a session runs"
 
 
+def checkout_branch(working_dir: Optional[str]) -> Optional[str]:
+    """The branch checked out in ``working_dir``, or None (no repo, detached
+    HEAD, git missing or slow). Bounded subprocess; never raises."""
+    if not working_dir:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "symbolic-ref", "--short", "-q", "HEAD"],
+            cwd=working_dir, capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return None
+    branch = result.stdout.strip() if result.returncode == 0 else ""
+    return branch or None
+
+
 def generate_turn_environment_note(
     execution_mode: str = "local",
     worktree_info: Optional[Dict[str, str]] = None,
+    *,
+    branch: Optional[str] = None,
 ) -> str:
     """The volatile half of the <env> block, rendered fresh for one turn.
 
@@ -1171,9 +1189,15 @@ def generate_turn_environment_note(
     Re-rendered per turn rather than once per session, so the newest copy is
     always current; the header says so, because older turns keep their own
     copies in history and those can name a branch that has since changed.
+
+    ``branch`` names the checkout's branch when worktree mode does not (the
+    worktree lines win when both are present).
     """
     lines = [f"Today's date: {_today()}"]
-    lines.extend(_worktree_lines(execution_mode, worktree_info))
+    worktree = _worktree_lines(execution_mode, worktree_info)
+    lines.extend(worktree)
+    if branch and not worktree:
+        lines.append(f"Current branch: {branch}")
     body = "\n".join(lines)
     return (
         "<system-reminder>\n"

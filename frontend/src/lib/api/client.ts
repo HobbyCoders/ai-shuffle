@@ -411,6 +411,17 @@ export interface PermissionRequest {
 	 * in the message box; `chat_session_id` names the started chat that asked.
 	 */
 	assistant_confirm?: { question?: string | null; chat_session_id?: string | null } | null;
+	/** Worker tag on a prompt raised for a subagent (app/core/provider_agent_approvals.py).
+	 *  `worker_name` + `remote_approval_id` mark a prompt relayed from a subagent
+	 *  on another worker (app/core/remote_task_approvals.py). */
+	provider_agent?: PermissionWorkerTag | null;
+}
+
+export interface PermissionWorkerTag {
+	worker_session_id?: string | null;
+	label?: string | null;
+	worker_name?: string | null;
+	remote_approval_id?: string | null;
 }
 
 // User Question types (for AskUserQuestion tool)

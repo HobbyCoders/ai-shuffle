@@ -79,6 +79,92 @@ function imageToDataUri(imagePath: string): string | null {
 }
 
 // ============================================================================
+// Edit routing
+// ============================================================================
+
+/** The input field a fal.ai edit endpoint reads its source image from. */
+export type EditImageField = 'image_url' | 'image_urls';
+
+export interface EditRoute {
+  endpoint: string;
+  field: EditImageField;
+}
+
+/**
+ * Endpoint and image field for the edit families listed above, or null for any
+ * other fal.ai endpoint. Nano Banana edit endpoints take a list in `image_urls`
+ * (sending `image_url` fails with "422 body.image_urls: Field required");
+ * Kontext takes a single `image_url`.
+ */
+export function knownEditRoute(model: string): EditRoute | null {
+  if (model.includes('kontext')) return { endpoint: model, field: 'image_url' };
+  if (model === 'fal-ai/nano-banana-2' || model === 'fal-ai/nano-banana-2/edit') {
+    return { endpoint: 'fal-ai/nano-banana-2/edit', field: 'image_urls' };
+  }
+  if (model.includes('nano-banana')) return { endpoint: 'fal-ai/nano-banana-pro/edit', field: 'image_urls' };
+  return null;
+}
+
+/** The source-image field declared by a fal.ai endpoint's OpenAPI input schema. */
+export function editImageFieldFromOpenapi(openapi: any): EditImageField | null {
+  const schemas = openapi?.components?.schemas;
+  if (!schemas || typeof schemas !== 'object') return null;
+  for (const [name, schema] of Object.entries<any>(schemas)) {
+    if (!name.endsWith('Input')) continue;
+    const props = schema?.properties || {};
+    if ('image_urls' in props) return 'image_urls';
+    if ('image_url' in props) return 'image_url';
+  }
+  return null;
+}
+
+/** The request body for an edit, with the source image in the field the endpoint reads. */
+export function buildEditInput(field: EditImageField, prompt: string, dataUri: string): Record<string, any> {
+  return field === 'image_urls'
+    ? { prompt, image_urls: [dataUri] }
+    : { prompt, image_url: dataUri };
+}
+
+const FAL_MODELS_API = 'https://api.fal.ai/v1/models';
+
+function configuredEditModelNote(): string {
+  const configured = process.env.IMAGE_EDIT_MODEL || process.env.IMAGE_MODEL;
+  return configured
+    ? ` The configured image edit model is '${configured}'; omit model to use it.`
+    : ' Omit model to use the configured one.';
+}
+
+/**
+ * Route an edit to a fal.ai catalog endpoint (any model picked in Settings,
+ * e.g. 'openai/gpt-image-2.5/flare/edit') by reading its published input
+ * schema. A model fal.ai does not know is refused plainly instead of being
+ * sent to the wrong endpoint.
+ */
+export async function catalogEditRoute(model: string): Promise<EditRoute | { error: string }> {
+  let openapi: any;
+  try {
+    const url = `${FAL_MODELS_API}?endpoint_id=${encodeURIComponent(model)}&expand=openapi-3.0`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      return { error: `Could not read the fal.ai input schema for '${model}' (HTTP ${response.status}). No edit was attempted.` };
+    }
+    const body: any = await response.json();
+    const entry = (body?.models || []).find((m: any) => m?.endpoint_id === model);
+    if (!entry) {
+      return { error: `'${model}' is not a fal.ai model, and image editing here runs on fal.ai.${configuredEditModelNote()}` };
+    }
+    openapi = entry.openapi;
+  } catch (error) {
+    return { error: `Could not read the fal.ai input schema for '${model}': ${error instanceof Error ? error.message : 'request failed'}. No edit was attempted.` };
+  }
+  const field = editImageFieldFromOpenapi(openapi);
+  if (!field) {
+    return { error: `fal.ai model '${model}' does not take a source image, so it cannot edit one.${configuredEditModelNote()}` };
+  }
+  return { endpoint: model, field };
+}
+
+// ============================================================================
 // Provider Implementation
 // ============================================================================
 
@@ -242,19 +328,15 @@ export const falImageProvider: ImageProvider = {
     try {
       fal.config({ credentials: credentials.apiKey });
 
-      // Route to the correct edit endpoint based on the selected model
-      const editModel = model.includes('kontext')
-        ? model
-        : model === 'fal-ai/nano-banana-2' || model === 'fal-ai/nano-banana-2/edit'
-          ? 'fal-ai/nano-banana-2/edit'
-          : model.includes('nano-banana')
-            ? 'fal-ai/nano-banana-pro/edit'
-            : 'fal-ai/flux-pro/kontext'; // Default to Kontext for editing
-
-      const falInput: Record<string, any> = {
-        prompt: (input.prompt || '').trim(),
-        image_url: dataUri,
-      };
+      // Route to the selected model's edit endpoint, with the source image in
+      // the field that endpoint reads. Any other fal.ai model (a catalog pick
+      // in Settings) is used as-is, never silently swapped for Kontext.
+      const route = knownEditRoute(model) ?? await catalogEditRoute(model);
+      if ('error' in route) {
+        return { success: false, error: route.error };
+      }
+      const editModel = route.endpoint;
+      const falInput = buildEditInput(route.field, (input.prompt || '').trim(), dataUri);
 
       if (input.seed !== undefined) {
         falInput.seed = input.seed;

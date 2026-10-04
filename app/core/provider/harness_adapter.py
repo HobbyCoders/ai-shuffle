@@ -474,6 +474,12 @@ class HarnessAdapter(ProviderAdapter):
             # PROMPT_FULL_REPLACE is on.
             from app.core.config import settings
 
+            # The "# Workspace facts" card, as on the native leg: it carries
+            # the session's preview link (owner sessions only), the agent
+            # browser's one door to this worker's running UI (#1789).
+            self._workspace_card = await asyncio.to_thread(
+                self._build_workspace_card, options
+            )
             if system is None:
                 # discover_agents walks .fluid/agents, .agents/agents and
                 # plugin dirs (rglob): disk IO, so it runs in a worker thread.
@@ -481,6 +487,7 @@ class HarnessAdapter(ProviderAdapter):
                 delegated_append = await asyncio.to_thread(
                     _delegated_append_text, append_system, options, self._registry,
                     worker=self._worker_identity,
+                    workspace_card=self._workspace_card,
                 )
             elif settings.prompt_full_replace:
                 # The compiled prompt already carries the merged agents index
@@ -488,7 +495,7 @@ class HarnessAdapter(ProviderAdapter):
                 # added here — that is what keeps the block un-doubled.
                 delegated_system = await asyncio.to_thread(
                     self._compile_prompt, system, append_system, options,
-                    self._worker_identity,
+                    self._worker_identity, self._workspace_card,
                 )
                 delegated_append = None
             else:
@@ -509,6 +516,10 @@ class HarnessAdapter(ProviderAdapter):
                         part for part in (
                             delegated_append, _worker_block(self._worker_identity)
                         ) if part
+                    )
+                if self._workspace_card:
+                    delegated_append = "\n\n".join(
+                        part for part in (delegated_append, self._workspace_card) if part
                     )
             # Resolving the CLI stats PATH entries on disk. A missing CLI
             # raises ClaudeCliMissingError here, before any engine is built.
@@ -1543,9 +1554,10 @@ class HarnessAdapter(ProviderAdapter):
             return False
 
     def _build_workspace_card(self, options: SessionOptions) -> Optional[str]:
-        """The "# Workspace facts" card for this native session, or None.
+        """The "# Workspace facts" card for this session, or None.
 
-        Native legs only. The card is a per-session snapshot: the first
+        Both legs: the delegated leg appends it to the CLI's prompt. The card
+        is a per-session snapshot: the first
         connect runs the cheap probes in
         :func:`app.core.environment.workspace_facts_card`, mints the
         session-scoped preview-access URL (:mod:`app.core.preview_access`)
@@ -1561,8 +1573,6 @@ class HarnessAdapter(ProviderAdapter):
         An API key's session gets no URL: the grant would sign it in as the
         owner. Blocking DB reads/writes: runs off the loop. Never raises.
         """
-        if self._is_delegated:
-            return None
         cwd = options.cwd or "."
         try:
             session_id = self._resolve_app_session_id()
@@ -1698,7 +1708,31 @@ class HarnessAdapter(ProviderAdapter):
     async def _compact_context_note(self) -> Optional[str]:
         """The turn's note, rendered fresh, for the delegated loop to put back
         after a Claude Code compaction."""
-        return await asyncio.to_thread(self._turn_context_note)
+        return await asyncio.to_thread(self._compact_note)
+
+    def _compact_note(self) -> Optional[str]:
+        """:meth:`_turn_context_note`, always with today's date and the branch.
+
+        The turn note carries them only when the profile's prompt has the
+        app's <env> block (the branch only in worktree mode). A compaction
+        drops whatever the conversation said about them, so here a note
+        without a branch gets the checkout's date-and-branch reminder instead
+        (#1794: after /compact the agent ran git to answer "what branch").
+        """
+        env = self._env_note()
+        if not env or "Current branch:" not in env:
+            try:
+                from app.core.environment import (
+                    checkout_branch, generate_turn_environment_note,
+                )
+
+                cwd = getattr(self._options, "cwd", None)
+                env = generate_turn_environment_note(branch=checkout_branch(cwd))
+            except Exception:  # noqa: BLE001 — a reminder never fails a turn
+                logger.warning("[HarnessAdapter] compaction env note failed", exc_info=True)
+        blocks = [env, self._memory_snapshot(), self._away_note()]
+        present = [block for block in blocks if block]
+        return "\n\n".join(present) if present else None
 
     def _env_note(self) -> Optional[str]:
         """The volatile half of the app's <env> block for this turn.
@@ -3743,6 +3777,20 @@ class HarnessAdapter(ProviderAdapter):
                     )
                     for section in sections
                 ]
+            elif not native:
+                # The delegated leg's Skill tool is Claude Code's: it loads
+                # .claude/skills, never the app's built-in or .fluid skills
+                # the compiler listed ("Unknown skill", #1793). Name each
+                # SKILL.md file to Read instead.
+                delegated_skills = _delegated_skills_index(options)
+                sections = [
+                    (
+                        replace(section, text=delegated_skills)
+                        if section.kind == "skills" and delegated_skills
+                        else section
+                    )
+                    for section in sections
+                ]
             if index:
                 insert_at = len(sections)
                 for position, section in enumerate(sections):
@@ -3750,7 +3798,7 @@ class HarnessAdapter(ProviderAdapter):
                         insert_at = position
                         break
                 sections.insert(insert_at, PromptSection(kind="agents", text=index))
-            if native and workspace_card:
+            if workspace_card:
                 # After fluid's environment section when there is one, else
                 # before the first extra block — the same slot either way, so
                 # a profile's own <env> never pushes the card around.
@@ -3894,6 +3942,7 @@ class HarnessAdapter(ProviderAdapter):
         append_system: Optional[str],
         options: SessionOptions,
         worker: Optional[str] = None,
+        workspace_card: Optional[str] = None,
     ) -> Optional[str]:
         """Run the fluid prompt compiler over the app's system-prompt parts.
 
@@ -3901,7 +3950,8 @@ class HarnessAdapter(ProviderAdapter):
         agent's configured prompt. ``append_system`` (the preset
         shape's security+instructions text) rides as an extra block. The
         compiler adds fluid's own gathering: instruction files, skills index,
-        environment. Never raises — a compiler failure falls back to the
+        environment. ``workspace_card`` is slotted as on the native leg.
+        Never raises — a compiler failure falls back to the
         pre-compiler string so a session can always start.
 
         This is the DELEGATED full-replace path for a plain-string profile
@@ -3910,7 +3960,8 @@ class HarnessAdapter(ProviderAdapter):
         comes here: it keeps Claude Code's prompt (``_delegated_append_text``).
         """
         compiled = HarnessAdapter._compile_prompt_sections(
-            system, append_system, options, native=False, worker=worker
+            system, append_system, options, native=False, worker=worker,
+            workspace_card=workspace_card,
         )
         if compiled is None:
             return system if system is not None else append_system
@@ -6193,14 +6244,53 @@ def _delegated_fluid_context(options: SessionOptions) -> List[str]:
                 blocks.append("\n\n".join([DELEGATED_INSTRUCTIONS_HEADER, *files]))
             skills = discover_skills(cwd, include_global=user_on, include_project=project_on)
             if skills:
-                lines = "\n".join(
-                    f"- {skill.name}: {skill.description} ({skill.path})"
-                    for skill in skills
-                )
-                blocks.append(f"{DELEGATED_SKILLS_HEADER}\n{lines}")
+                blocks.append(_delegated_skills_block(skills))
     except Exception:  # noqa: BLE001 — a prompt block never fails a connect
         logger.warning("[HarnessAdapter] fluid instructions for the delegated leg failed", exc_info=True)
     return blocks
+
+
+def _delegated_skills_block(skills: Any) -> str:
+    """The delegated leg's skills list: each skill with its SKILL.md path."""
+    lines = "\n".join(
+        f"- {skill.name}: {skill.description} ({skill.path})" for skill in skills
+    )
+    return f"{DELEGATED_SKILLS_HEADER}\n{lines}"
+
+
+def _delegated_skills_index(options: SessionOptions) -> Optional[str]:
+    """The full-replace compiled prompt's skills section, for the delegated leg.
+
+    Discovers the same skills the compiler's ``skills_index`` lists (same
+    scope gating, plugins included) but renders them with
+    :func:`_delegated_skills_block`, which tells the agent which file to
+    Read. None when there are none or discovery fails (the caller keeps the
+    compiler's section). Never raises.
+    """
+    sources = _fluid_setting_sources(options)
+    user_on = sources is None or "user" in sources
+    project_on = sources is None or "project" in sources
+    cwd = options.cwd or "."
+    try:
+        from fluid.context.instructions import discover_skills
+
+        plugins = None
+        if user_on:
+            from fluid.context.plugins import discover_plugins
+
+            plugins = discover_plugins(
+                cwd, sources=sources if sources is not None else ("user", "project", "local"),
+            )
+        skills = discover_skills(
+            cwd, include_global=user_on, include_project=project_on,
+            include_plugins=plugins is not None, plugins=plugins,
+        )
+    except Exception:  # noqa: BLE001 — a prompt block never fails a connect
+        logger.warning("[HarnessAdapter] delegated skills index failed", exc_info=True)
+        return None
+    if not skills:
+        return None
+    return _delegated_skills_block(sorted(skills, key=lambda skill: skill.name))
 
 
 def _delegated_append_text(
@@ -6209,6 +6299,7 @@ def _delegated_append_text(
     registry: Any,
     *,
     worker: Optional[str] = None,
+    workspace_card: Optional[str] = None,
 ) -> Optional[str]:
     """``--append-system-prompt`` for a preset profile on the delegated leg.
 
@@ -6221,9 +6312,10 @@ def _delegated_append_text(
     the text is byte-identical across the session's turns and the CLI's
     prompt cache keeps hitting.
 
-    ``VERIFICATION_BLOCK`` stays native-only: it points at the native
-    leg's "# Workspace facts" card and browser tool names, neither of which
-    this leg has.
+    ``VERIFICATION_BLOCK`` stays native-only: it names the native leg's
+    browser tools. ``workspace_card`` (the session's "# Workspace facts"
+    card, with its preview link for an owner session) follows the worker
+    block.
 
     Only tools this leg offers are described: the agents index and the Task
     and Monitor routing need the bridged ``mcp__builtins__Task`` /
@@ -6241,6 +6333,8 @@ def _delegated_append_text(
     parts = [text] if text else []
     if worker:
         parts.append(_worker_block(worker))
+    if workspace_card:
+        parts.append(workspace_card)
     parts.extend(_workflow_prompt_blocks(
         options, _delegated_permitted_names(options, registry),
         swarm_available=False, task_available=task_offered,

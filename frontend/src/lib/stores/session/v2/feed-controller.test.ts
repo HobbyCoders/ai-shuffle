@@ -146,10 +146,12 @@ function makeDeps(initial?: Partial<ActiveSessionState>) {
 		};
 	});
 	const requestPendingQuestions = vi.fn();
+	const requestPendingPermissions = vi.fn();
 	return {
 		update,
 		getState,
 		requestPendingQuestions,
+		requestPendingPermissions,
 		resolveInteractionByRequestId,
 		get state() {
 			return state;
@@ -975,7 +977,68 @@ describe('feedController cross-device interaction settle (#606 item 4)', () => {
 		expect(deps.requestPendingQuestions).toHaveBeenCalledTimes(1);
 	});
 
-	it('does not resync for permission requests or another session', () => {
+	// #1802: a permission raised on another worker (a chat running there, or a
+	// remote subagent's relayed prompt) never reaches this device as a live
+	// permission_request frame. The durable event is its only signal, so the
+	// open chat must re-read the authoritative pending rows at once.
+	it('a durable permission request while the chat is open resyncs pending permissions', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+
+		for (const seq of [1, 2]) {
+			hoisted.onEvent!({
+				type: 'interaction.requested',
+				id: `evt-perm-${seq}`,
+				seq,
+				session_id: 's1',
+				kind: 'permission',
+				request_id: `perm-${seq}`,
+			});
+		}
+		vi.advanceTimersByTime(0);
+		expect(deps.requestPendingPermissions).toHaveBeenCalledTimes(1);
+		expect(deps.requestPendingQuestions).not.toHaveBeenCalled();
+	});
+
+	it('skips the permission resync when the card is already shown', () => {
+		const deps = makeDeps({
+			pendingPermissions: [{ request_id: 'perm-live' }],
+		} as unknown as Partial<ActiveSessionState>);
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!(caughtUp(0));
+		hoisted.onEvent!({
+			type: 'interaction.requested', id: 'evt-live', seq: 1, session_id: 's1',
+			kind: 'permission', request_id: 'perm-live',
+		});
+		vi.advanceTimersByTime(0);
+		expect(deps.requestPendingPermissions).not.toHaveBeenCalled();
+	});
+
+	it('resyncs each requested kind once when both arrive together', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		hoisted.onEvent!({
+			type: 'interaction.requested', id: 'evt-h-perm', seq: 1, session_id: 's1',
+			kind: 'permission', request_id: 'perm-h',
+		});
+		hoisted.onEvent!({
+			type: 'interaction.requested', id: 'evt-h-q', seq: 2, session_id: 's1',
+			kind: 'question', request_id: 'q-h',
+		});
+		vi.advanceTimersByTime(0);
+		expect(deps.requestPendingPermissions).not.toHaveBeenCalled();
+
+		hoisted.onEvent!(caughtUp(2));
+		vi.advanceTimersByTime(0);
+		expect(deps.requestPendingPermissions).toHaveBeenCalledTimes(1);
+		expect(deps.requestPendingQuestions).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not resync for another session', () => {
 		const deps = makeDeps({
 			pendingPermissions: [{ request_id: 'perm-1' }],
 		} as unknown as Partial<ActiveSessionState>);
@@ -983,29 +1046,25 @@ describe('feedController cross-device interaction settle (#606 item 4)', () => {
 		feedController.start('s1');
 		hoisted.onEvent!(caughtUp(0));
 
-		// Permission requests are handled by their existing relay. A request for a
-		// different feed session must never refresh this session's queue.
-		hoisted.onEvent!({
-			type: 'interaction.requested',
-			id: 'evt-req',
-			seq: 0,
-			session_id: 's1',
-			kind: 'permission',
-			request_id: 'perm-1',
-		});
-		hoisted.onEvent!({
-			type: 'interaction.requested',
-			id: 'evt-other',
-			seq: 1,
-			session_id: 's2',
-			kind: 'question',
-			request_id: 'q-other',
-		});
+		// A request for a different feed session must never refresh this
+		// session's queue.
+		for (const kind of ['permission', 'question']) {
+			hoisted.onEvent!({
+				type: 'interaction.requested',
+				id: `evt-other-${kind}`,
+				seq: 1,
+				session_id: 's2',
+				kind,
+				request_id: `other-${kind}`,
+			});
+		}
 		hoisted.onEvent!(textDelta('e1', 'foo'));
 		flushRaf();
+		vi.advanceTimersByTime(0);
 
 		expect(deps.resolveInteractionByRequestId).not.toHaveBeenCalled();
 		expect(deps.requestPendingQuestions).not.toHaveBeenCalled();
+		expect(deps.requestPendingPermissions).not.toHaveBeenCalled();
 		const perms = deps.state.pendingPermissions as Array<{ request_id: string }>;
 		expect(perms.map((p) => p.request_id)).toEqual(['perm-1']);
 	});
