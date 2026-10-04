@@ -8,6 +8,16 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 0.9.0
+
+- The persistent assistant has a simpler, talk-first view. It asks for approval in the conversation, reports back when work it started finishes, and keeps to a daily spend limit and a time limit per job that you set on the Assistant page.
+- Subagents can run on another of your workers and report back to the chat that started them. You can message them, stop them and answer their approval prompts from that chat.
+- Plugins are installed switched off and reviewed before you enable them. Claude Code and Codex plugins can be imported, an agent can find and install a plugin for you to review, and a plugin can sign in to an outside service.
+- Claude sessions show your plan usage in the app and show compactions in the chat.
+- Memory keeps facts that curation retires in an archive you can still search, and Settings > System shows a Memory health row.
+- Automations can run on a model you pick for them.
+- Fixed: the assistant no longer asks you to select a project, the call button no longer disappears after loading the app, and "Load older sessions" loads more each time.
+
 ## 0.8.22
 
 - Add the persistent assistant: one long-running assistant that stays available across your sessions.
