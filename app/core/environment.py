@@ -1345,11 +1345,18 @@ def _shuffle_facts(cwd: Path, app_port: Optional[int], preview_url: Optional[str
     )
     if preview_url:
         ui += (
-            f" To open its UI from the agent browser, navigate ONCE to "
-            f"{preview_url} (a token bound to this session; it sets the cookie "
-            "the rest of the visit uses, and the cookie also passes through a "
+            f" The agent browser is refused :{port} itself. To open the UI "
+            f"from the agent browser, navigate ONCE to "
+            f"{preview_url} (the worker's preview-only port and a token bound "
+            "to this session; it sets the cookie the rest of the visit uses, "
+            "so stay on that port, and the cookie also passes through a "
             "branch's Vite dev proxy). Mutations of auth, credentials, "
             "settings and network config are refused on that cookie."
+        )
+    else:
+        ui += (
+            f" The agent browser is refused :{port}, and this session has no "
+            "preview link, so it cannot open the running UI."
         )
     lines.append(ui)
     lines.append(

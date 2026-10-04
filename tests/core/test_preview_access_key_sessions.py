@@ -34,6 +34,8 @@ def _rows(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
     monkeypatch.setattr(settings, "shuffle_local_access", True)
+    # The card only quotes a link when the preview listener is up.
+    monkeypatch.setattr(preview_access, "_listener_port", 8002)
     from app.db import database, sessions
 
     lookup = _ROWS.get
@@ -128,3 +130,26 @@ def test_workspace_card_is_byte_identical_across_reconnects(tmp_path, monkeypatc
     lifetime = grant.expires_at - clock[0]
     shortest = preview_access.DEFAULT_TTL - preview_access.STABLE_WINDOW
     assert shortest < lifetime <= preview_access.DEFAULT_TTL
+
+
+def test_workspace_card_has_no_link_without_the_preview_listener(tmp_path, monkeypatch):
+    """The agent browser is refused the worker's own ports, so a link to them
+    would be a dead end: with the listener off the card says so instead."""
+    import sys
+
+    import app.core.provider.harness_adapter as ha
+    from app.core import environment, mcp_config
+
+    root = tmp_path / "ai-shuffle"
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "preview.py").write_text("# preview")
+    (root / "fluid").mkdir()
+    monkeypatch.setattr(environment, "_PYTEST_PROBE", {"value": sys.executable})
+    monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.135")
+    monkeypatch.setattr(preview_access, "_listener_port", None)
+
+    adapter = ha.HarnessAdapter()
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: OWNER)
+    card = adapter._build_workspace_card(ha.SessionOptions(model="m", cwd=str(root)))
+    assert preview_access.REDIRECT_PATH not in card and "token=" not in card
+    assert "cannot open the running UI" in card

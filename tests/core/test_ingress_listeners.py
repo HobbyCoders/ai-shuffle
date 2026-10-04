@@ -138,16 +138,61 @@ def test_supervisor_selects_protected_port_without_changing_trust(monkeypatch, o
         sock.getsockname.return_value = (host, port)
         return sock
 
+    from app.core import preview_access
+
     monkeypatch.setattr(serve, "bind_listener", bind)
+    monkeypatch.delenv("SHUFFLE_PREVIEW_PORT", raising=False)
+    monkeypatch.setattr(preview_access, "_listener_port", None)  # run() records the port
     server = MagicMock()
     monkeypatch.setattr(uvicorn, "Server", server)
     serve.run(None, SimpleNamespace(host="127.0.0.1", port=18000, log_level="error"))
-    assert binds == [("127.0.0.1", 18000), ("127.0.0.1", expected)]
+    # Local, protected, then the agent browser's preview-only listener.
+    assert binds == [("127.0.0.1", 18000), ("127.0.0.1", expected), ("127.0.0.1", 18002)]
     config = server.call_args.args[0]
     assert config.proxy_headers is False
     assert config.app.local_port == 18000
     assert config.app.remote_port == expected
+    assert config.app.preview_port == 18002
+    assert preview_access.listener_port() == 18002
+    assert len(server.return_value.run.call_args.kwargs["sockets"]) == 3
     server.return_value.run.assert_called_once()
+
+
+@pytest.mark.parametrize("failure", ["taken", "off", "invalid"])
+def test_worker_starts_without_the_preview_listener(monkeypatch, failure):
+    """The preview door is optional: a taken, disabled or misnamed port must
+    never cost the worker its two required listeners."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from app import serve
+    from app.core import preview_access
+
+    monkeypatch.delenv("SHUFFLE_DESKTOP_PROTECTED_PORT", raising=False)
+    monkeypatch.delenv("SHUFFLE_PREVIEW_PORT", raising=False)
+    if failure == "off":
+        monkeypatch.setenv("SHUFFLE_PREVIEW_PORT", "0")
+    elif failure == "invalid":
+        monkeypatch.setenv("SHUFFLE_PREVIEW_PORT", "8001")  # the protected port
+    binds = []
+
+    def bind(host, port):
+        if failure == "taken" and port == 18002:
+            raise OSError("address already in use")
+        binds.append((host, port))
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+        sock.getsockname.return_value = (host, port)
+        return sock
+
+    monkeypatch.setattr(serve, "bind_listener", bind)
+    monkeypatch.setattr(preview_access, "_listener_port", 9)
+    server = MagicMock()
+    monkeypatch.setattr(uvicorn, "Server", server)
+    serve.run(None, SimpleNamespace(host="127.0.0.1", port=18000, log_level="error"))
+    assert binds == [("127.0.0.1", 18000), ("127.0.0.1", 8001)]
+    assert server.call_args.args[0].app.preview_port is None
+    assert preview_access.listener_port() is None
+    assert len(server.return_value.run.call_args.kwargs["sockets"]) == 2
 
 
 @pytest.mark.parametrize("port", ["0", "65536", "18000", "not-a-port"])

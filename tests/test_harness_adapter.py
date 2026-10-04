@@ -7832,6 +7832,7 @@ async def test_workspace_card_rerenders_once_its_preview_url_expires(
     from app.db import database
 
     monkeypatch.setenv("BROWSER_LOOPBACK_HOST", "10.9.8.7")
+    monkeypatch.setattr(preview_access, "_listener_port", 8002)
     _insert_session_row(mock_db, "agents-session")
     # Only an ai-shuffle checkout's card quotes the preview URL.
     (agent_workspace / "app").mkdir()
@@ -7850,6 +7851,8 @@ async def test_workspace_card_rerenders_once_its_preview_url_expires(
     assert stored["preview_expires_at"] == preview_access.session_token_with_expiry(
         "agents-session", now=clock["now"])[1]
     assert preview_access.REDIRECT_PATH in first._workspace_card
+    # The link names the preview-only listener, never the owner's port.
+    assert "http://10.9.8.7:8002/" in first._workspace_card
 
     clock["now"] += preview_access.STABLE_WINDOW + 60  # new token window, old token alive
     again = ha.HarnessAdapter()

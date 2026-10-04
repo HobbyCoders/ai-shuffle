@@ -108,6 +108,23 @@ MUTATION_DENY_PREFIXES = (
     "/api/v1/chat-access",
 )
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+#: The listener the agent browser uses (see :mod:`app.serve`). The browser is
+#: refused the worker's local and protected ports because a request from the
+#: same host to them is the owner; this one never confers that trust, and
+#: admits nothing but the token redirect and requests carrying a live grant.
+PREVIEW_INGRESS = "preview"
+_listener_port: Optional[int] = None
+
+
+def set_listener_port(port: Optional[int]) -> None:
+    """Record the bound preview listener (None when it is off or failed)."""
+    global _listener_port
+    _listener_port = int(port) if port else None
+
+
+def listener_port() -> Optional[int]:
+    """The preview listener's port in this process, or None without one."""
+    return _listener_port
 
 
 @dataclass(frozen=True)
@@ -268,7 +285,7 @@ def _private_peer(request) -> bool:
     headers are deliberately NOT a denial here (see the module docstring)."""
     from app.core import owner_auth
 
-    if getattr(request, "scope", {}).get("shuffle.ingress") != "local":
+    if getattr(request, "scope", {}).get("shuffle.ingress") not in ("local", PREVIEW_INGRESS):
         return False
     try:
         peer = ipaddress.ip_address(request.client.host)

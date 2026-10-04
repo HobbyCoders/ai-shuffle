@@ -1581,11 +1581,14 @@ class HarnessAdapter(ProviderAdapter):
             browser_host = _browser_loopback_host(os.environ.get("BROWSER_LOOPBACK_HOST"))
             preview_url = None
             preview_expires_at = None
-            if session_id and browser_host and self._session_runs_as_owner(session_id):
+            # The agent browser is refused the worker's own ports; the preview
+            # listener is its only door, so no listener means no URL.
+            preview_port = preview_access.listener_port()
+            if session_id and browser_host and preview_port and self._session_runs_as_owner(session_id):
                 try:
                     token, expires = preview_access.session_token_with_expiry(session_id)
                     preview_url = preview_access.preview_url(
-                        session_id, browser_host, int(settings.port), token=token,
+                        session_id, browser_host, preview_port, token=token,
                     )
                     preview_expires_at = expires
                 except Exception:  # noqa: BLE001 — the card still renders
@@ -6915,7 +6918,8 @@ def _monitor_budget_seconds() -> Optional[int]:
 # "# Workspace facts" snapshot persistence (see
 # ``HarnessAdapter._build_workspace_card``). Bumped only if the stored shape
 # changes; a snapshot of another version is re-rendered once.
-_WORKSPACE_SNAPSHOT_VERSION = 1
+# 2: the preview link moved to the preview-only listener (the old :8000 link is refused).
+_WORKSPACE_SNAPSHOT_VERSION = 2
 #: A frozen card whose preview-access URL dies within this many seconds is
 #: rendered again on the next connect instead of handing the agent a dead
 #: link. The token lives 18-24h (``preview_access.session_token``), so a
