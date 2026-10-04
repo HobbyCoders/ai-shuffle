@@ -605,6 +605,10 @@ class HarnessAdapter(ProviderAdapter):
                 # the same Claude usage store the stream's rate_limit events
                 # feed (usage panel, peer publication, broadcast).
                 plan_usage_sink=claude_mod_usage_sink,
+                # The turn's note (memory, Away mode, date and branch), put
+                # back after a CLI compaction: mid-turn, the CLI folds the
+                # user message that carried it into its summary.
+                compact_context=self._compact_context_note,
             )
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
@@ -1687,6 +1691,11 @@ class HarnessAdapter(ProviderAdapter):
         blocks = [self._env_note(), self._memory_snapshot(), self._away_note()]
         present = [block for block in blocks if block]
         return "\n\n".join(present) if present else None
+
+    async def _compact_context_note(self) -> Optional[str]:
+        """The turn's note, rendered fresh, for the delegated loop to put back
+        after a Claude Code compaction."""
+        return await asyncio.to_thread(self._turn_context_note)
 
     def _env_note(self) -> Optional[str]:
         """The volatile half of the app's <env> block for this turn.

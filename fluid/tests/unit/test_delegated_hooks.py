@@ -417,6 +417,244 @@ async def test_session_start_after_compact_reinjects_the_ledger(tmp_path) -> Non
     assert "never push to main" not in startup["hookSpecificOutput"]["additionalContext"]
 
 
+# ─── the host's turn note, put back after a compaction ──────────────────────
+
+_NOTE = "<system-reminder>\nowner is away; today is 2026-10-03\n</system-reminder>"
+
+
+def _note_provider(text: str | None = _NOTE, *, calls: list | None = None):
+    async def provide() -> str | None:
+        if calls is not None:
+            calls.append(1)
+        return text
+
+    return provide
+
+
+async def _add_ledger(loop: DelegatedLoop, tmp_path) -> str:
+    await ledger.handler(
+        {"action": "add", "section": "constraints", "text": "never push to main"},
+        ToolCtx(cwd=str(tmp_path), session_id=loop.session_id),
+    )
+    return ledger.render_ledger_reminder(
+        ledger.read_ledger(ToolCtx(cwd=str(tmp_path)), loop.session_id), tool_name=None,
+    )
+
+
+async def _fire_main_compact(loop, written, **data) -> dict:
+    """SessionStart(compact) the way the CLI fires it for the main thread:
+    after its ``status: compacting`` frame, before the null status."""
+    loop._track_main_compaction({"type": "system", "subtype": "status", "status": "compacting"})
+    try:
+        return await _fire(loop, written, "SessionStart", {"source": "compact", **data})
+    finally:
+        loop._track_main_compaction({
+            "type": "system", "subtype": "status", "status": None, "compact_result": "success",
+        })
+
+
+async def test_compact_puts_the_note_back_after_the_ledger_once(tmp_path) -> None:
+    rec = _Recorder({SESSION_START: HookDecision(additional_context="hook context")})
+    calls: list = []
+    loop, written = await _loop(
+        tmp_path, hooks=rec.bus, compact_context=_note_provider(calls=calls),
+    )
+    expected_ledger = await _add_ledger(loop, tmp_path)
+    output = await _fire_main_compact(loop, written)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert context == f"{expected_ledger}\n\n{_NOTE}\n\nhook context"
+    assert context.count("never push to main") == 1
+    assert calls == [1]
+    # Rendered fresh for every compaction, never cached.
+    await _fire_main_compact(loop, written)
+    assert calls == [1, 1]
+
+
+async def test_the_note_is_only_for_a_compaction(tmp_path) -> None:
+    calls: list = []
+    loop, written = await _loop(
+        tmp_path, hooks=HookBus(), compact_context=_note_provider(calls=calls),
+    )
+    loop._track_main_compaction({"type": "system", "subtype": "status", "status": "compacting"})
+    for source in ("startup", "resume", "clear"):
+        assert await _fire(loop, written, "SessionStart", {"source": source}) == {}
+    assert calls == []
+
+
+async def test_a_subagent_compaction_gets_no_note(tmp_path) -> None:
+    """A subagent's compaction fires SessionStart(compact) too (2.1.289), with
+    no status frame on the main stream and no agent id; the ledger still
+    comes back there, as before, but not the main conversation's note."""
+    calls: list = []
+    loop, written = await _loop(
+        tmp_path, hooks=HookBus(), compact_context=_note_provider(calls=calls),
+    )
+    expected_ledger = await _add_ledger(loop, tmp_path)
+    output = await _fire(loop, written, "SessionStart", {"source": "compact"})
+    assert output["hookSpecificOutput"]["additionalContext"] == expected_ledger
+    # A payload that names an agent is a subagent's even mid-compaction.
+    output = await _fire_main_compact(loop, written, agent_id="a5c59162fe12413ab")
+    assert output["hookSpecificOutput"]["additionalContext"] == expected_ledger
+    assert calls == []
+
+
+def test_status_frames_track_the_main_compaction(tmp_path) -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="m", claude_cmd=["true"])
+    assert loop._main_compacting is False
+    loop._track_main_compaction({"type": "system", "subtype": "status", "status": "compacting"})
+    assert loop._main_compacting is True
+    # A subagent's frame (parent_tool_use_id) and other frames leave it alone.
+    loop._track_main_compaction({
+        "type": "system", "subtype": "status", "status": None, "parent_tool_use_id": "toolu_1",
+    })
+    loop._track_main_compaction({"type": "system", "subtype": "compact_boundary"})
+    assert loop._main_compacting is True
+    loop._track_main_compaction({
+        "type": "system", "subtype": "status", "status": None, "compact_result": "failed",
+    })
+    assert loop._main_compacting is False
+
+
+@pytest.mark.parametrize("provider", ["raises", "returns_none", "returns_blank", "wrong_type"])
+async def test_a_failing_note_leaves_the_old_answer(tmp_path, provider) -> None:
+    async def raises() -> str:
+        raise RuntimeError("memory store unreadable")
+
+    providers = {
+        "raises": raises,
+        "returns_none": _note_provider(None),
+        "returns_blank": _note_provider("  \n "),
+        "wrong_type": _note_provider(42),  # type: ignore[arg-type]
+    }
+    rec = _Recorder({SESSION_START: HookDecision(additional_context="hook context")})
+    loop, written = await _loop(tmp_path, hooks=rec.bus, compact_context=providers[provider])
+    expected_ledger = await _add_ledger(loop, tmp_path)
+    output = await _fire_main_compact(loop, written)
+    assert output["hookSpecificOutput"]["additionalContext"] == (
+        f"{expected_ledger}\n\nhook context"
+    )
+
+
+async def test_a_slow_note_is_skipped_at_its_deadline(tmp_path, monkeypatch) -> None:
+    import asyncio
+
+    import fluid.engine.delegated as delegated_mod
+
+    monkeypatch.setattr(delegated_mod, "COMPACT_CONTEXT_TIMEOUT", 0.05)
+
+    async def slow() -> str:
+        await asyncio.sleep(5)
+        return _NOTE
+
+    loop, written = await _loop(tmp_path, hooks=HookBus(), compact_context=slow)
+    expected_ledger = await _add_ledger(loop, tmp_path)
+    started = asyncio.get_running_loop().time()
+    output = await _fire_main_compact(loop, written)
+    assert asyncio.get_running_loop().time() - started < 2
+    assert output["hookSpecificOutput"]["additionalContext"] == expected_ledger
+
+
+async def test_the_note_is_capped(tmp_path) -> None:
+    from fluid.engine.delegated import COMPACT_CONTEXT_MAX_CHARS
+
+    loop, written = await _loop(
+        tmp_path, hooks=HookBus(), compact_context=_note_provider("x" * 100_000),
+    )
+    output = await _fire_main_compact(loop, written)
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert len(context) == COMPACT_CONTEXT_MAX_CHARS
+    assert context.endswith(
+        f"\n[note cut: it was longer than {COMPACT_CONTEXT_MAX_CHARS} characters]"
+    )
+    # A note at the cap goes out whole.
+    loop.compact_context = _note_provider("y" * COMPACT_CONTEXT_MAX_CHARS)
+    output = await _fire_main_compact(loop, written)
+    assert output["hookSpecificOutput"]["additionalContext"] == "y" * COMPACT_CONTEXT_MAX_CHARS
+
+
+async def test_a_note_alone_registers_session_start(tmp_path) -> None:
+    """With neither a HookBus nor a deny policy, a note provider still has
+    the CLI ask the loop at SessionStart, and the answer needs no bus."""
+    loop, written = await _loop(tmp_path, compact_context=_note_provider())
+    assert loop._cli_hook_events() == ("SessionStart",)
+    output = await _fire_main_compact(loop, written)
+    assert output["hookSpecificOutput"]["additionalContext"] == _NOTE
+
+
+FAKE_SCRIPT = str(Path(__file__).parent.parent / "fixtures" / "fake_claude_script.py")
+
+
+def _hook_callback(request_id: str, **data: Any) -> dict:
+    return {"type": "control_request", "request_id": request_id, "request": {
+        "subtype": "hook_callback", "callback_id": "fluid_SessionStart", "tool_use_id": None,
+        "input": {"hook_event_name": "SessionStart", "session_id": "cli-sess",
+                  "transcript_path": "/t/cli.jsonl", "cwd": ".", **data},
+    }}
+
+
+@pytest.mark.parametrize("trigger", ["auto", "manual"])
+async def test_the_note_comes_back_in_stream_order_end_to_end(tmp_path, trigger) -> None:
+    """The frame order 2.1.289 writes, against the scripted fake CLI: a
+    subagent's compaction (no status frame) gets the ledger only; the main
+    thread's, automatic mid-turn or manual, gets the ledger and then the note."""
+    status_on = {"type": "system", "subtype": "status", "status": "compacting",
+                 "session_id": "cli-sess"}
+    status_off = {"type": "system", "subtype": "status", "status": None,
+                  "compact_result": "success", "session_id": "cli-sess"}
+    boundary = {"type": "system", "subtype": "compact_boundary", "session_id": "cli-sess",
+                "compact_metadata": {"trigger": trigger, "pre_tokens": 1276}}
+    script = {"turns": [[
+        {"op": "frame", "frame": _hook_callback("cli_hook_sub", source="compact")},
+        {"op": "frame", "frame": status_on},
+        {"op": "frame", "frame": _hook_callback("cli_hook_main", source="compact")},
+        {"op": "frame", "frame": status_off},
+        {"op": "frame", "frame": boundary},
+        # After the main compaction is over, a stray compact SessionStart
+        # (a later subagent's) gets no note either.
+        {"op": "frame", "frame": _hook_callback("cli_hook_late", source="compact")},
+        {"op": "text", "text": "done"},
+        {"op": "result"},
+    ]]}
+    script_path = tmp_path / "script.json"
+    script_path.write_text(json.dumps(script), encoding="utf-8")
+    calls: list = []
+    loop = DelegatedLoop(
+        store=MemoryStore(), model="claude-fake", claude_cmd=[sys.executable, FAKE_SCRIPT],
+        env={"FAKE_CLAUDE_SCRIPT": str(script_path)}, cwd=str(tmp_path),
+        ctx=ToolCtx(cwd=str(tmp_path)), hooks=HookBus(),
+        compact_context=_note_provider(calls=calls),
+    )
+    answers: dict[str, str] = {}
+    write = loop._write_frame
+
+    async def capture(frame: dict) -> None:
+        response = frame.get("response") or {}
+        if frame.get("type") == "control_response" and str(
+            response.get("request_id", "")
+        ).startswith("cli_hook_"):
+            specific = (response.get("response") or {}).get("hookSpecificOutput") or {}
+            answers[response["request_id"]] = specific.get("additionalContext", "")
+        await write(frame)
+
+    loop._write_frame = capture  # type: ignore[method-assign]
+    try:
+        await loop._ensure_session()
+        expected_ledger = await _add_ledger(loop, tmp_path)
+        await loop.submit(UserTurn(content="/compact" if trigger == "manual" else "go"))
+        await loop.wait_turn()
+        events = loop.bus.log(loop.session_id)
+    finally:
+        await loop.aclose()
+
+    assert isinstance(events[-1], TurnComplete)
+    assert answers == {
+        "cli_hook_sub": expected_ledger,
+        "cli_hook_main": f"{expected_ledger}\n\n{_NOTE}",
+        "cli_hook_late": expected_ledger,
+    }
+    assert calls == [1]
+
+
 async def test_unknown_callback_answers_with_an_error(tmp_path) -> None:
     loop, written = await _loop(tmp_path, hooks=HookBus())
     await loop._answer_hook_request(HookCallbackRequest(

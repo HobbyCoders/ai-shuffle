@@ -49,7 +49,8 @@ permission engine's deny rules), and a deny from either the hooks or the policy
 wins over any allow, and a PreToolUse answer that fails or overruns its
 budget is a deny (fail closed: the CLI would otherwise carry on without it). A
 SessionStart with source ``compact`` re-injects the session ledger, the way the
-native loop recites it on every user turn. Notification (on parking for a
+native loop recites it on every user turn, and then the host's turn note
+(``compact_context``), which a mid-turn compaction folds into the summary. Notification (on parking for a
 permission prompt) and SessionEnd (on ``aclose``) are raised by the loop
 itself, as the native loop raises them, not by the CLI.
 
@@ -207,6 +208,16 @@ _CLI_HOOK_EVENTS: dict[str, str] = {
 # Registered with only a deny policy and no HookBus: the policy gate, and the
 # ledger re-injection after a compaction.
 _POLICY_HOOK_EVENTS = ("PreToolUse", "SessionStart")
+# Registered with only a ``compact_context`` provider: the re-supply after a
+# compaction.
+_COMPACT_HOOK_EVENTS = ("SessionStart",)
+
+# The host's note put back after a CLI compaction (``compact_context``): how
+# long the provider may take, well inside the CLI's hook callback budget, and
+# how many characters it may add (cut with ``_COMPACT_CONTEXT_CUT``).
+COMPACT_CONTEXT_TIMEOUT = 5.0
+COMPACT_CONTEXT_MAX_CHARS = 24_000
+_COMPACT_CONTEXT_CUT = "\n[note cut: it was longer than {limit} characters]"
 # Callback ids name their event, so an answer never depends on registration
 # order surviving a respawn.
 _HOOK_CALLBACK_PREFIX = "fluid_"
@@ -545,6 +556,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         journal: Any | None = None,
         claude_mod: bool | None = None,
         plan_usage_sink: Callable[[PlanUsageReport], Awaitable[None]] | None = None,
+        compact_context: Callable[[], Awaitable[str | None]] | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -590,6 +602,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # falls back to the permission engine's deny rules. Bridge-served
         # calls are gated at the bridge instead and never reach it.
         self.tool_policy = tool_policy
+        # The host's per-turn note (memory, Away mode, date and branch), put
+        # back after a CLI compaction of the main conversation: an async
+        # callable returning the text, or None. The CLI folds the user
+        # message that carried it into its summary when it compacts mid-turn.
+        self.compact_context = compact_context
+        # The main conversation is compacting: set by the CLI's
+        # ``system/status`` frame (``compacting``, then null), which it sends
+        # before the SessionStart(compact) callback for the main thread only.
+        # A subagent's compaction fires the same callback with no status
+        # frame and no ``agent_id`` (2.1.289), so this is what tells them apart.
+        self._main_compacting = False
         # True once the CLI accepted the ``initialize`` request that registered
         # this loop's hook callbacks (per process; reset on every spawn).
         self.cli_hooks_registered = False
@@ -2261,6 +2284,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         assert self._proc is not None and self._proc.stdout is not None
         parent = user_node
         last_assistant: Message | None = None
+        self._main_compacting = False
         while True:
             line = await self._next_stdout_line()
             if not line:
@@ -2283,6 +2307,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # even while terminal publication or storage is still pending.
                 self._peer_admission_open = False
                 self._drop_pending_peers()
+            self._track_main_compaction(frame)
             mapped = mapper.feed(frame)
             if mapped.hook_request is not None:
                 # The CLI waits on this answer before it goes on, so it is
@@ -2643,6 +2668,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return tuple(_CLI_HOOK_EVENTS)
         if self._needs_policy_hook():
             return _POLICY_HOOK_EVENTS
+        if self.compact_context is not None:
+            return _COMPACT_HOOK_EVENTS
         return ()
 
     def _has_deny_rules(self) -> bool:
@@ -3094,13 +3121,21 @@ class DelegatedLoop(BackgroundLifecycleMixin):
     async def _cli_session_start(self, data: dict[str, Any]) -> dict[str, Any]:
         """SessionStart. After a compaction (source ``compact``) the session
         ledger goes back into context first: the CLI's summary may have
-        dropped it, and it is the state that must survive every compaction."""
+        dropped it, and it is the state that must survive every compaction.
+        The host's turn note (``compact_context``) follows it: a mid-turn
+        compaction folds the user message that carried it into the summary.
+        Only the main conversation's compaction (``_main_compacting``) gets
+        the note; a subagent's fires the same callback and is left without."""
         source = str(data.get("source") or "startup")
         parts: list[str] = []
         if source == "compact":
             ledger = self._ledger_context()
             if ledger:
                 parts.append(ledger)
+            if self._main_compacting and not data.get("agent_id"):
+                note = await self._compact_context_note()
+                if note:
+                    parts.append(note)
         if self.hooks is not None:
             decision = await self.hooks.emit(
                 SESSION_START, self._cli_hook_payload(data, source=source),
@@ -3113,6 +3148,45 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         return {"hookSpecificOutput": {
             "hookEventName": "SessionStart", "additionalContext": "\n\n".join(parts),
         }}
+
+    def _track_main_compaction(self, frame: dict[str, Any]) -> None:
+        """Follow the main thread's ``system/status`` frames: ``compacting``
+        while its compaction runs, null (with ``compact_result``) after."""
+        if (
+            frame.get("type") == "system" and frame.get("subtype") == "status"
+            and not frame.get("parent_tool_use_id")
+        ):
+            self._main_compacting = frame.get("status") == "compacting"
+
+    async def _compact_context_note(self) -> str | None:
+        """The host's note for after a compaction, capped, or None.
+
+        The provider gets ``COMPACT_CONTEXT_TIMEOUT``; one that fails, overruns
+        or returns nothing is logged and skipped, never failing the hook.
+        """
+        provider = self.compact_context
+        if provider is None:
+            return None
+        try:
+            text = await asyncio.wait_for(provider(), COMPACT_CONTEXT_TIMEOUT)
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            logger.warning(
+                "the compaction note was not ready within %.0fs; skipped",
+                COMPACT_CONTEXT_TIMEOUT,
+            )
+            return None
+        except Exception:  # noqa: BLE001 — a reminder never fails a hook
+            logger.warning("the compaction note failed; skipped", exc_info=True)
+            return None
+        if not isinstance(text, str) or not text.strip():
+            return None
+        text = text.strip()
+        if len(text) > COMPACT_CONTEXT_MAX_CHARS:
+            cut = _COMPACT_CONTEXT_CUT.format(limit=COMPACT_CONTEXT_MAX_CHARS)
+            text = text[:COMPACT_CONTEXT_MAX_CHARS - len(cut)].rstrip() + cut
+        return text
 
     def _ledger_context(self) -> str | None:
         """The session ledger in the native loop's reminder form, or None.

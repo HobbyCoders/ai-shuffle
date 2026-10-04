@@ -259,6 +259,39 @@ async def test_delegated_leg_sends_mod_usage_to_the_claude_usage_store(monkeypat
     assert _KwargsLoop.captured["plan_usage_sink"] is claude_mod_usage_sink
 
 
+@pytest.mark.asyncio
+async def test_delegated_leg_puts_the_turn_note_back_after_a_compaction(monkeypatch, tmp_path):
+    """The loop's ``compact_context`` renders the same note every user
+    message carries (date and branch, memory, Away mode), fresh, and the
+    main thread's compact SessionStart answer carries it."""
+    from app.core import away_mode
+
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    away = {"text": "<system-reminder>\nAWAY MODE: the owner is away\n</system-reminder>"}
+    monkeypatch.setattr(away_mode, "turn_note", lambda _sid: away["text"])
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_preset_options(tmp_path, turn_env={
+        "execution_mode": "worktree", "worktree_info": {"branch": "feature-note"},
+    }))
+    try:
+        loop = adapter._engine
+        assert isinstance(loop, DelegatedLoop)
+        note = await loop.compact_context()
+        assert note == adapter._turn_context_note()
+        assert "Today's date" in note and "feature-note" in note and "AWAY MODE" in note
+        # Rendered on every call: Away mode turned off mid-turn is not put back.
+        away["text"] = None
+        assert "AWAY MODE" not in await loop.compact_context()
+
+        away["text"] = "<system-reminder>\nAWAY MODE: still away\n</system-reminder>"
+        loop._track_main_compaction({"type": "system", "subtype": "status", "status": "compacting"})
+        output = await loop._cli_session_start({"source": "compact", "transcript_path": ""})
+        context = output["hookSpecificOutput"]["additionalContext"]
+        assert "AWAY MODE: still away" in context and "feature-note" in context
+    finally:
+        await adapter.disconnect()
+
+
 def test_delegated_tool_policy_denies_what_the_app_denies(tmp_path):
     """The PreToolUse policy refuses the blocklist, anything off the surface
     and a permission-engine deny rule; everything else is left to the CLI."""

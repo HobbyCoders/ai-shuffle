@@ -404,6 +404,20 @@ What the child CLI is given, and what it is not:
   conversation; the new handle is what gets stored.
 - A result the CLI marks as failed ends the turn with an error, not a
   completion. The one exception is `error_max_turns`, a stop reason.
+- After the CLI compacts the main conversation (automatically, also in the
+  middle of a turn, or on `/compact`), its `SessionStart` hook with source
+  `compact` puts the session ledger back and then, when the host passes a
+  `compact_context` (an async callable returning text or `None`, as AI Shuffle
+  does with its per-turn memory, Away mode, date and branch note), that text.
+  A mid-turn compaction folds the user message that carried the note into the
+  summary, so without this the model works without it until the next user
+  message. The provider gets 5 seconds and its text is capped at 24,000
+  characters; one that fails, overruns or returns nothing is logged and
+  skipped, and the hook answers as before. The CLI fires the same hook for a
+  subagent's compaction, with nothing in the payload to say so (2.1.289); the
+  loop tells the main thread's apart by the `system/status` `compacting` frame
+  the CLI writes first, and a subagent gets the ledger but not the note. No
+  mod is needed.
 - `continual = true` journals the turn and every tool result the CLI reports,
   and serves `Recall` and `Remember` over the bridge. Synthesis passes need a
   native provider, named with `continual_provider`.
