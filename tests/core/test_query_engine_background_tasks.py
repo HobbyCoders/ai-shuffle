@@ -343,3 +343,24 @@ async def test_parked_result_later_shown_to_be_background_is_not_flushed(tmp_pat
         events = await _run(b)
     assert not frames_of(events, "subagent_done")
     assert events[-1]["type"] == "done"
+
+
+async def test_the_main_compaction_card_shows_while_a_sub_agent_runs(tmp_path):
+    """While a sub-agent is tracked, the pump hides system messages as its
+    context. A compact_boundary is the parent's (the adapter only emits the
+    main conversation's compaction), so it still reaches the chat."""
+    card = {"compact_metadata": {"trigger": "auto", "pre_tokens": 150000}}
+    with ExitStack() as stack:
+        adapter = fresh_adapter([
+            _launch("tu-bg", subagent_type="researcher", description="dig",
+                    prompt="find it", run_in_background=True),
+            _user_result("tu-bg", "Async agent launched successfully. agentId: a1"),
+            SystemMessage(subtype="skill_note", data={"n": 1}),  # still hidden
+            SystemMessage(subtype="compact_boundary", data=card),
+            _done(),
+        ])
+        b = engine_patches(stack, cwd=str(tmp_path), adapter=adapter)
+        frames = await _run(b)
+    assert [f for f in frames_of(frames, "system") if f["subtype"] != "model_info"] == [
+        {"type": "system", "subtype": "compact_boundary", "data": card},
+    ]

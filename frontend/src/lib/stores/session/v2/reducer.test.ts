@@ -2310,6 +2310,35 @@ describe('system + unknown events', () => {
 		expect(s.messages[0]).toMatchObject({ systemSubtype: 'compaction_boundary' });
 	});
 
+	it('a Claude Code compaction renders the Context Compacted card with its data', () => {
+		const data = {
+			compact_metadata: { trigger: 'auto', pre_tokens: 166397, post_tokens: 34856 },
+		};
+		const s = fold([
+			ev('turn.started'),
+			ev('system.compaction_boundary', { id: 'cb2', subtype: 'compact_boundary', data }),
+		]);
+		const card = s.messages.find((m) => m.id === 'cb2');
+		expect(card).toMatchObject({
+			type: 'system',
+			systemSubtype: 'compact_boundary',
+			systemData: data,
+			content: '',
+		});
+	});
+
+	it("the replay's elided-prefix marker stays the plain marker", () => {
+		const s = fold([
+			ev('system.compaction_boundary', {
+				id: 'elided-s1-9',
+				subtype: 'compact_boundary',
+				data: { trigger: 'compacted', tier: 3, elidedEvents: 8 },
+			}),
+		]);
+		expect(s.messages[0]).toMatchObject({ systemSubtype: 'compaction_boundary' });
+		expect(s.messages[0].systemData).toBeUndefined();
+	});
+
 	it('unknown event types are ignored', () => {
 		const before = fold([ev('turn.started')]);
 		const after = reduce(before, ev('totally.unknown', { foo: 1 }));

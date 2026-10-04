@@ -3496,8 +3496,46 @@ class HarnessAdapter(ProviderAdapter):
                 )
             ]
 
+        if cls == "ContextCompaction":
+            return self._compaction_card(event)
+
         # Unknown / no-analog fluid event — skip.
         return []
+
+    #: The delegated leg's ``ContextCompaction`` reasons and the CLI trigger
+    #: each stands for (``cli_compact``: a trigger the CLI did not name).
+    _CLI_COMPACTION_TRIGGERS = {
+        "cli_auto_compact": "auto",
+        "cli_manual_compact": "manual",
+        "cli_compact": None,
+    }
+
+    def _compaction_card(self, event: Any) -> list:
+        """Claude Code compacted the main conversation (the delegated leg only
+        reports the parent's): the chat's "Context Compacted" card, shaped as
+        the CLI's own ``compact_boundary`` (``compact_metadata`` with
+        ``trigger``, ``pre_tokens`` and ``post_tokens``). The turn recorder
+        keeps it as ``system.compaction_boundary``, so it shows after reload.
+
+        No summary text: the CLI's summary stays out of the chat. A native
+        ``ContextCompaction`` is a view-level promotion whose marker comes from
+        the replay itself (``app/api/events.py``), so it maps to nothing.
+        """
+        reason = getattr(event, "reason", None)
+        if reason not in self._CLI_COMPACTION_TRIGGERS:
+            return []
+        metadata: Dict[str, Any] = {}
+        trigger = self._CLI_COMPACTION_TRIGGERS[reason]
+        if trigger:
+            metadata["trigger"] = trigger
+        # 0 means "not reported" on the event.
+        for key, attr in (("pre_tokens", "before_tokens"), ("post_tokens", "after_tokens")):
+            value = getattr(event, attr, 0)
+            if isinstance(value, int) and value > 0:
+                metadata[key] = value
+        return [SystemMessage(
+            subtype="compact_boundary", data={"compact_metadata": metadata},
+        )]
 
     # ─── Per-turn usage roll-up (ErrorEvent billing backstop) ─────────
 

@@ -353,6 +353,44 @@ def _int_or_zero(value: Any) -> int:
         return 0
 
 
+def is_compact_boundary(frame: Any) -> bool:
+    """True for the CLI's ``system/compact_boundary`` frame."""
+    return (
+        isinstance(frame, dict)
+        and frame.get("type") == "system"
+        and frame.get("subtype") == "compact_boundary"
+    )
+
+
+def compaction_from_boundary(
+    frame: dict[str, Any], *, session_id: str, turn_id: str | None,
+) -> ContextCompaction:
+    """The ``ContextCompaction`` a CLI ``compact_boundary`` frame stands for.
+
+    The CLI owns the compaction, so the event carries what it reports and
+    nothing invented: its trigger as the reason, its own before/after token
+    counts, and no digest text — ``trimmed`` and ``spans`` are the native
+    ladder's decisions and stay empty. Tier 3 is the honest rung: a CLI
+    compaction folds the whole prefix into a summary.
+    """
+    meta = frame.get("compact_metadata")
+    if not isinstance(meta, dict):
+        # A boundary with no metadata still says the context changed.
+        meta = {}
+    trigger = meta.get("trigger")
+    reason = (
+        f"cli_{trigger}_compact"
+        if trigger in ("auto", "manual")
+        else "cli_compact"
+    )
+    return ContextCompaction(
+        session_id=session_id, turn_id=turn_id,
+        tier=3, reason=reason,
+        before_tokens=_int_or_zero(meta.get("pre_tokens")),
+        after_tokens=_int_or_zero(meta.get("post_tokens")),
+    )
+
+
 def usage_fields(usage: dict[str, Any]) -> dict[str, Any]:
     """Extract the four canonical token counters (CLI key names == fluid's)."""
     return {
@@ -825,28 +863,10 @@ class StreamJsonMapper:
         Without it the delegated leg would emit nothing when the prompt
         collapses mid-turn, and a host asking for the latest compaction
         boundary would conclude a Claude-lane session had never compacted.
-
-        The CLI owns the compaction, so the event carries what it reports and
-        nothing invented: its trigger as the reason, its own before/after token
-        counts, and no digest text — ``trimmed`` and ``spans`` are the native
-        ladder's decisions and stay empty. Tier 3 is the honest rung: a CLI
-        compaction folds the whole prefix into a summary.
+        See :func:`compaction_from_boundary` for what the event carries.
         """
-        meta = frame.get("compact_metadata")
-        if not isinstance(meta, dict):
-            # A boundary with no metadata still says the context changed.
-            meta = {}
-        trigger = meta.get("trigger")
-        reason = (
-            f"cli_{trigger}_compact"
-            if trigger in ("auto", "manual")
-            else "cli_compact"
-        )
-        return Mapped(events=[ContextCompaction(
-            session_id=self.session_id, turn_id=self.turn_id,
-            tier=3, reason=reason,
-            before_tokens=_int_or_zero(meta.get("pre_tokens")),
-            after_tokens=_int_or_zero(meta.get("post_tokens")),
+        return Mapped(events=[compaction_from_boundary(
+            frame, session_id=self.session_id, turn_id=self.turn_id,
         )])
 
     def _on_assistant(self, frame: dict[str, Any]) -> Mapped:

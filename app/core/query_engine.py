@@ -2871,7 +2871,12 @@ async def _stream_to_websocket_impl(
                     # so any non-null parent is a subagent event and must never route to
                     # the main lane — even when the launch id is absent from task_tool_uses.
                     is_subagent_lane = parent_tool_id is not None
-                    is_from_subagent = is_subagent_lane or len(task_tool_uses) > 0
+                    # A compact_boundary is the parent conversation's: the
+                    # adapter only emits the main thread's compaction, which
+                    # may land while a subagent is still tracked here.
+                    is_from_subagent = is_subagent_lane or (
+                        len(task_tool_uses) > 0 and message.subtype != "compact_boundary"
+                    )
 
                     # Suppress no-op "status" system messages emitted by the SDK
                     # on every stream_request_start (status="requesting"). These

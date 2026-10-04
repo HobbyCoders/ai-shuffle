@@ -23,7 +23,7 @@ import pytest
 from fluid.tools.registry import ToolRegistry
 
 import app.core.provider.harness_adapter as ha
-from app.core.provider.events import AssistantMessage, ResultMessage, TextBlock
+from app.core.provider.events import AssistantMessage, ResultMessage, SystemMessage, TextBlock
 from app.core.provider.types import SessionOptions
 
 TURN_BUDGET_SECONDS = 15.0
@@ -32,7 +32,10 @@ FAKE_CLI = textwrap.dedent(
     r'''
     import json, os, sys, time
 
-    MODE = os.environ["WAKE_MODE"]  # "perm", "latency", "notify" or "plain"
+    # "perm", "latency", "notify", "plain", or a compaction: "compact" (the
+    # main conversation's, between turns), "subcompact" (a subagent's, between
+    # turns) or "midturn" (the main one's and a subagent's inside turn 1).
+    MODE = os.environ["WAKE_MODE"]
     SID = "cli-wake-1"
     pending_users = []
 
@@ -81,6 +84,18 @@ FAKE_CLI = textwrap.dedent(
             if kind == want:
                 return msg
 
+    def compaction(main, pre):
+        """The frames 2.1.289 writes for a compaction: status frames only
+        around the main conversation's."""
+        if main:
+            emit({"type": "system", "subtype": "status", "status": "compacting",
+                  "session_id": SID})
+            emit({"type": "system", "subtype": "status", "status": None,
+                  "compact_result": "success", "session_id": SID})
+        emit({"type": "system", "subtype": "compact_boundary", "session_id": SID,
+              "compact_metadata": {"trigger": "auto", "pre_tokens": pre,
+                                   "post_tokens": 30000}})
+
     def prompt_text(msg):
         content = msg.get("message", {}).get("content")
         if isinstance(content, str):
@@ -98,10 +113,19 @@ FAKE_CLI = textwrap.dedent(
             emit({"type": "system", "subtype": "init", "session_id": SID,
                   "model": "claude-fake", "tools": ["Bash", "Read"], "mcp_servers": []})
         emit(assistant([{"type": "text", "text": "ANSWER: " + prompt_text(msg)}], "end_turn"))
+        if first and MODE == "midturn":
+            compaction(False, 111000)
+            compaction(True, 150000)
         emit(result())
         if not first:
             continue
         first = False
+        if MODE in ("compact", "subcompact"):
+            # An idle compaction, written after the turn's result.
+            compaction(MODE == "compact", 150000)
+            continue
+        if MODE == "midturn":
+            continue
         # The background job the first turn started has finished: the CLI
         # runs a turn of its own to report it, with no user frame.
         if MODE == "plain":
@@ -247,6 +271,74 @@ async def test_a_lone_task_notification_does_not_arm_the_wake_wait(monkeypatch, 
             _turn_text(adapter, "second"), TURN_BUDGET_SECONDS,
         )
         assert durations and max(durations) < 1.0, durations
+    finally:
+        await adapter.disconnect()
+
+
+async def _turn_messages(adapter, prompt: str) -> list:
+    await adapter.send_query(prompt)
+    messages = []
+    async for message in adapter.receive_events():
+        messages.append(message)
+        if isinstance(message, ResultMessage):
+            return messages
+    raise AssertionError("turn ended without a result")
+
+
+def _compaction_cards(messages) -> list:
+    return [
+        m.data for m in messages
+        if isinstance(m, SystemMessage) and m.subtype == "compact_boundary"
+    ]
+
+
+_CARD = {"compact_metadata": {"trigger": "auto", "pre_tokens": 150000, "post_tokens": 30000}}
+
+
+@pytest.mark.asyncio
+async def test_a_mid_turn_compaction_reaches_the_chat_as_its_card(monkeypatch, tmp_path):
+    """Only the main conversation's: the subagent's boundary in the same turn
+    gives no card in the parent chat."""
+    adapter = await _adapter(monkeypatch, tmp_path, "midturn")
+    try:
+        assert _compaction_cards(await _turn_messages(adapter, "first")) == [_CARD]
+        assert _compaction_cards(await _turn_messages(adapter, "second")) == []
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_between_turns_reaches_the_chat_with_the_next_turn(
+    monkeypatch, tmp_path,
+):
+    adapter = await _adapter(monkeypatch, tmp_path, "compact")
+    try:
+        assert _compaction_cards(await _turn_messages(adapter, "first")) == []
+        await asyncio.sleep(0.2)  # the CLI compacts after the first result
+        second = await asyncio.wait_for(
+            _turn_messages(adapter, "second"), TURN_BUDGET_SECONDS,
+        )
+        assert _compaction_cards(second) == [_CARD]
+        texts = [
+            block.text for m in second if isinstance(m, AssistantMessage)
+            for block in m.content or [] if isinstance(block, TextBlock)
+        ]
+        assert "ANSWER: second" in "".join(texts)
+        # Shown once: the third turn does not replay it.
+        assert _compaction_cards(await _turn_messages(adapter, "third")) == []
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_compaction_between_turns_gives_no_card(monkeypatch, tmp_path):
+    adapter = await _adapter(monkeypatch, tmp_path, "subcompact")
+    try:
+        await _turn_messages(adapter, "first")
+        await asyncio.sleep(0.2)
+        assert _compaction_cards(await asyncio.wait_for(
+            _turn_messages(adapter, "second"), TURN_BUDGET_SECONDS,
+        )) == []
     finally:
         await adapter.disconnect()
 

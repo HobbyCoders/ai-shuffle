@@ -2142,6 +2142,23 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 		}
 
 		case 'system.compaction_boundary': {
+			// A Claude Code compaction (the delegated leg) carries the CLI's
+			// own metadata: show it as the "Context Compacted" card, with its
+			// trigger and size. Anything else (the replay's elided-prefix
+			// marker) stays the plain marker it always was.
+			const data = obj(event.data);
+			if (str(event.subtype) === 'compact_boundary' && obj(data?.compact_metadata)) {
+				const card: ChatMessage = {
+					id: event.id,
+					role: 'system',
+					type: 'system',
+					content: '',
+					systemSubtype: 'compact_boundary',
+					systemData: data,
+					timestamp: createdAt || undefined,
+				};
+				return appendMessage(closeOpen(state), card, seq);
+			}
 			const msg: ChatMessage = {
 				id: event.id,
 				role: 'system',

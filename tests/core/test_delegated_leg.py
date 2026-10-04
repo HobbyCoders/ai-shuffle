@@ -495,3 +495,48 @@ def test_delegated_append_carries_fluid_instructions_skills_and_learned_guidance
     assert ha.DELEGATED_INSTRUCTIONS_HEADER not in ha._delegated_append_text(
         "APPEND TEXT", options, ToolRegistry(),
     )
+
+
+# ─── Claude Code compactions become the chat's compaction card ──────────────
+
+
+@pytest.mark.parametrize(("reason", "trigger"), [
+    ("cli_auto_compact", "auto"), ("cli_manual_compact", "manual"),
+])
+def test_a_cli_compaction_becomes_the_compact_boundary_card(reason, trigger):
+    from fluid.events.model import ContextCompaction
+
+    from app.core.provider.events import SystemMessage
+
+    adapter = ha.HarnessAdapter()
+    [card] = adapter._translate(ContextCompaction(
+        session_id="ses", turn_id="turn", tier=3, reason=reason,
+        before_tokens=166_397, after_tokens=34_856,
+    ))
+    assert isinstance(card, SystemMessage)
+    assert card.subtype == "compact_boundary"
+    # The CLI's own boundary shape, which the chat's card reads; no summary.
+    assert card.data == {"compact_metadata": {
+        "trigger": trigger, "pre_tokens": 166_397, "post_tokens": 34_856,
+    }}
+
+
+def test_a_cli_compaction_without_counts_or_trigger_claims_neither():
+    from fluid.events.model import ContextCompaction
+
+    [card] = ha.HarnessAdapter()._translate(ContextCompaction(
+        session_id="ses", tier=3, reason="cli_compact",
+    ))
+    assert card.subtype == "compact_boundary"
+    assert card.data == {"compact_metadata": {}}
+
+
+@pytest.mark.parametrize("reason", ["trigger", "overflow", "image_consumed", ""])
+def test_a_native_compaction_still_maps_to_nothing(reason):
+    """The native ladder's promotions are view-level; their marker comes from
+    the replay, not from a card per promotion."""
+    from fluid.events.model import ContextCompaction
+
+    assert ha.HarnessAdapter()._translate(ContextCompaction(
+        session_id="ses", tier=2, reason=reason, spans=[["a", "b", "digest"]],
+    )) == []

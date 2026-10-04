@@ -2180,6 +2180,128 @@ async def test_the_cli_lane_reports_its_compaction_to_the_host() -> None:
         await loop.aclose()
 
 
+# Which conversation compacted: 2.1.289 sends a ``compacting`` status frame
+# (then a null one with the result) before the main thread's boundary, and no
+# status frame for a subagent's.
+
+SCRIPTED = str(Path(__file__).parent.parent / "fixtures" / "fake_claude_script.py")
+_STATUS_ON = {"type": "system", "subtype": "status", "status": "compacting"}
+_STATUS_OFF = {"type": "system", "subtype": "status", "status": None,
+               "compact_result": "success"}
+
+
+def _boundary(pre: int, **extra) -> dict:
+    return {"type": "system", "subtype": "compact_boundary", **extra,
+            "compact_metadata": {"trigger": "auto", "pre_tokens": pre, "post_tokens": 900}}
+
+
+def _main_compaction(pre: int) -> list[dict]:
+    return [{"op": "frame", "frame": f} for f in (_STATUS_ON, _STATUS_OFF, _boundary(pre))]
+
+
+def _scripted_loop(tmp_path, turns: list[list[dict]], store=None, session_id=None) -> DelegatedLoop:
+    script = tmp_path / "script.json"
+    script.write_text(json.dumps({"turns": turns}), encoding="utf-8")
+    return DelegatedLoop(
+        store=store or MemoryStore(), model="claude-fake", claude_cmd=[sys.executable, SCRIPTED],
+        env={"FAKE_CLAUDE_SCRIPT": str(script)}, cwd=str(tmp_path), session_id=session_id,
+    )
+
+
+def _compactions(events) -> list[ContextCompaction]:
+    return [e for e in events if isinstance(e, ContextCompaction)]
+
+
+async def test_only_the_main_conversations_boundary_is_reported(tmp_path) -> None:
+    """A subagent's boundary (no status frame before it, or a parent tool
+    call on it) gives no ContextCompaction, so no card in the parent's chat;
+    the main thread's, in the same turn, does."""
+    loop = _scripted_loop(tmp_path, [[
+        {"op": "text", "text": "working"},
+        {"op": "frame", "frame": _boundary(111)},
+        {"op": "frame", "frame": _boundary(222, parent_tool_use_id="toolu_task")},
+        *_main_compaction(333),
+        # The main boundary was used up: a later bare one is a subagent's.
+        {"op": "frame", "frame": _boundary(444)},
+        {"op": "text", "text": "done"},
+        {"op": "result"},
+    ]])
+    try:
+        await loop.submit(UserTurn(content="go"))
+        await loop.wait_turn()
+        events = loop.bus.log(loop.session_id)
+    finally:
+        await loop.aclose()
+    assert [c.before_tokens for c in _compactions(events)] == [333]
+    assert isinstance(events[-1], TurnComplete)
+
+
+def test_a_failed_main_compaction_leaves_no_boundary_due() -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="m", claude_cmd=["true"])
+    loop._track_main_compaction(_STATUS_ON)
+    loop._track_main_compaction({**_STATUS_OFF, "compact_result": "failed"})
+    assert loop._take_main_boundary(_boundary(1)) is False
+    loop._track_main_compaction(_STATUS_ON)
+    loop._track_main_compaction(_STATUS_OFF)
+    assert loop._take_main_boundary(_boundary(1, parent_tool_use_id="toolu_1")) is False
+    assert loop._take_main_boundary(_boundary(1)) is True
+    assert loop._take_main_boundary(_boundary(1)) is False
+
+
+async def test_a_compaction_between_turns_is_kept_for_the_next_turn(tmp_path) -> None:
+    """An idle compaction the CLI writes after a turn's result used to be
+    dropped by the next turn's stale-frame drain. Now the main one is
+    published and stored with the next turn, ahead of its TurnStarted; a
+    subagent's, in the same gap, is still dropped."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _scripted_loop(tmp_path, [
+        [{"op": "text", "text": "one"}, {"op": "result"},
+         {"op": "frame", "frame": _boundary(111)},
+         *_main_compaction(150_000)],
+        [{"op": "text", "text": "two"}, {"op": "result"}],
+    ], store=store, session_id=sid)
+    try:
+        await loop.submit(UserTurn(content="first"))
+        await loop.wait_turn()
+        await asyncio.sleep(0.2)  # the frames land after the result
+        await loop.submit(UserTurn(content="second"))
+        await loop.wait_turn()
+        events = loop.bus.log(sid)
+    finally:
+        await loop.aclose()
+    compactions = _compactions(events)
+    assert [(c.reason, c.before_tokens, c.after_tokens) for c in compactions] == [
+        ("cli_auto_compact", 150_000, 900),
+    ]
+    starts = [e for e in events if isinstance(e, TurnStarted)]
+    assert len(starts) == 2
+    position = events.index(compactions[0])
+    assert events.index(starts[0]) < position < events.index(starts[1])
+    assert compactions[0].turn_id == starts[1].turn_id
+    assert _compactions(await store.events_since(sid, 0)) == compactions
+    assert not any(isinstance(e, ErrorEvent) for e in events)
+
+
+async def test_a_compaction_read_by_a_control_wait_between_turns_is_kept(tmp_path) -> None:
+    """The other between-turn reader (a control request answered while no
+    turn runs) keeps the boundary too."""
+    loop = _scripted_loop(tmp_path, [[
+        {"op": "text", "text": "one"}, {"op": "result"}, *_main_compaction(150_000),
+    ]])
+    try:
+        await loop.submit(UserTurn(content="first"))
+        await loop.wait_turn()
+        await asyncio.sleep(0.2)  # the frames land after the result
+        assert await loop.get_context_usage() is not None
+        events = loop.bus.log(loop.session_id)
+    finally:
+        await loop.aclose()
+    compactions = _compactions(events)
+    assert [c.before_tokens for c in compactions] == [150_000]
+    assert compactions[0].turn_id is None  # no turn was running
+
+
 # ─── Harness notices do not borrow the user's marker ─────────────────────────
 
 

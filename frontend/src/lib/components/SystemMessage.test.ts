@@ -406,3 +406,37 @@ describe('SystemMessage — generic system rows', () => {
 		expect(container.querySelector('.sys-body')).not.toBeNull();
 	});
 });
+
+describe('SystemMessage — Claude Code compaction', () => {
+	it('shows the Context Compacted card with the trigger and the size', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_boundary',
+					systemData: {
+						compact_metadata: { trigger: 'auto', pre_tokens: 166397, post_tokens: 34856 }
+					}
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Context Compacted');
+		expect(text).toContain('Context was automatically compacted.');
+		expect(text).toContain('166k → compacted');
+	});
+
+	it('names a typed /compact as manual', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_boundary',
+					systemData: { compact_metadata: { trigger: 'manual' } }
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Context Compacted');
+		expect(text).toContain('Context was compacted.');
+		expect(text).toContain('manual');
+	});
+});

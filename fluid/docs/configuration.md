@@ -418,6 +418,13 @@ What the child CLI is given, and what it is not:
   loop tells the main thread's apart by the `system/status` `compacting` frame
   the CLI writes first, and a subagent gets the ledger but not the note. No
   mod is needed.
+- The CLI's `compact_boundary` frame becomes a `ContextCompaction` event
+  (reason `cli_auto_compact`, `cli_manual_compact` or `cli_compact`, with its
+  token counts) only for the main conversation, told apart by the same
+  `compacting` status frame; a subagent's boundary is not reported. A
+  boundary the CLI writes between turns is not discarded with the other stale
+  frames: it is published and stored at once, and a host reading events from
+  its last cursor gets it with the next turn.
 - `continual = true` journals the turn and every tool result the CLI reports,
   and serves `Recall` and `Remember` over the bridge. Synthesis passes need a
   native provider, named with `continual_provider`.

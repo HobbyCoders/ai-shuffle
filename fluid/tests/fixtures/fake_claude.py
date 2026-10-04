@@ -160,8 +160,13 @@ def turn_simple(sid: str) -> None:
 
 
 def turn_compacting(sid: str) -> None:
-    """A turn the CLI compacts its own context in the middle of."""
+    """A turn the CLI compacts its own context in the middle of, in the frame
+    order 2.1.289 writes for the main conversation: ``compacting`` status,
+    null status with the result, then the boundary."""
     emit(assistant_frame(sid, [{"type": "text", "text": "Reading everything."}], "end_turn"))
+    emit({"type": "system", "subtype": "status", "status": "compacting", "session_id": sid})
+    emit({"type": "system", "subtype": "status", "status": None,
+          "compact_result": "success", "session_id": sid})
     emit({
         "type": "system", "subtype": "compact_boundary", "session_id": sid,
         "uuid": "uuid-compact-1",

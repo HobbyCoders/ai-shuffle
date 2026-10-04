@@ -602,6 +602,20 @@ async def test_system_compaction_boundary_passthrough(mock_db):
     await rec.close()
 
 
+async def test_a_claude_code_compaction_card_is_recorded_for_reload(mock_db):
+    """The delegated leg's card (the CLI's ``compact_metadata``) is kept
+    whole, so the reloaded chat shows the same card as the live one."""
+    _mk_session()
+    rec = await _recorder()
+    data = {"compact_metadata": {"trigger": "manual", "pre_tokens": 90000, "post_tokens": 4000}}
+    await rec.on_event({"type": "system", "subtype": "compact_boundary", "data": data})
+    row = _rows()[-1]
+    assert row["event_type"] == "system.compaction_boundary"
+    assert row["payload"]["subtype"] == "compact_boundary"
+    assert row["payload"]["data"] == data
+    await rec.close()
+
+
 async def test_hook_event_maps_to_system_note(mock_db):
     _mk_session()
     rec = await _recorder()

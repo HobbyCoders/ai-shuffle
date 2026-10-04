@@ -89,7 +89,9 @@ from fluid.engine.delegated_proto import (
     HookCallbackRequest,
     PermissionBridge,
     StreamJsonMapper,
+    compaction_from_boundary,
     flatten_tool_content,
+    is_compact_boundary,
     parse_control_cancel,
     parse_control_response,
     parse_hook_callback,
@@ -613,6 +615,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # A subagent's compaction fires the same callback with no status
         # frame and no ``agent_id`` (2.1.289), so this is what tells them apart.
         self._main_compacting = False
+        # A main-thread compaction started (its ``compacting`` status frame)
+        # and its ``compact_boundary`` has not arrived yet. The boundary comes
+        # after the null status, so ``_main_compacting`` is already off by
+        # then; this is what says the boundary is the main conversation's.
+        self._main_boundary_due = False
         # True once the CLI accepted the ``initialize`` request that registered
         # this loop's hook callbacks (per process; reset on every spawn).
         self.cli_hooks_registered = False
@@ -2107,6 +2114,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     continue
                 if not isinstance(frame, dict):
                     continue
+                if await self._keep_between_turn_compaction(frame):
+                    continue
                 kind = frame.get("type")
                 if kind == "control_request":
                     if not await self._answer_stale_control_request(frame):
@@ -2308,6 +2317,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self._peer_admission_open = False
                 self._drop_pending_peers()
             self._track_main_compaction(frame)
+            if is_compact_boundary(frame) and not self._take_main_boundary(frame):
+                # Not the parent conversation's compaction: no event, so no
+                # "Context Compacted" card in the parent's chat.
+                logger.info("a subagent's compaction boundary; not reported")
+                continue
             mapped = mapper.feed(frame)
             if mapped.hook_request is not None:
                 # The CLI waits on this answer before it goes on, so it is
@@ -3151,12 +3165,75 @@ class DelegatedLoop(BackgroundLifecycleMixin):
 
     def _track_main_compaction(self, frame: dict[str, Any]) -> None:
         """Follow the main thread's ``system/status`` frames: ``compacting``
-        while its compaction runs, null (with ``compact_result``) after."""
+        while its compaction runs, null (with ``compact_result``) after.
+
+        A ``compacting`` frame also makes the next ``compact_boundary`` the
+        main conversation's (``_main_boundary_due``); a compaction that ends
+        in anything but success has no boundary coming, so it clears that."""
         if (
             frame.get("type") == "system" and frame.get("subtype") == "status"
             and not frame.get("parent_tool_use_id")
         ):
             self._main_compacting = frame.get("status") == "compacting"
+            if self._main_compacting:
+                self._main_boundary_due = True
+            elif frame.get("compact_result") not in (None, "success"):
+                self._main_boundary_due = False
+
+    def _take_main_boundary(self, frame: dict[str, Any]) -> bool:
+        """True when this ``compact_boundary`` is the main conversation's.
+
+        The CLI sends a ``compacting`` status frame before the main thread's
+        compaction and none for a subagent's (2.1.289, as for the
+        SessionStart note above); a frame naming a parent tool call is a
+        subagent's whatever came before. Consumes the pending boundary.
+        """
+        main = not frame.get("parent_tool_use_id") and (
+            self._main_boundary_due or self._main_compacting
+        )
+        if main:
+            self._main_boundary_due = False
+        return main
+
+    async def _keep_between_turn_compaction_line(self, text: str) -> bool:
+        """:meth:`_keep_between_turn_compaction` for a raw stdout line."""
+        if "compact" not in text:  # cheap: most lines are not about compaction
+            return False
+        try:
+            frame = json.loads(text)
+        except ValueError:
+            return False
+        return isinstance(frame, dict) and await self._keep_between_turn_compaction(frame)
+
+    async def _keep_between_turn_compaction(self, frame: dict[str, Any]) -> bool:
+        """Handle a frame read with no turn reading stdout, if it is part of a
+        compaction; True when it was a ``compact_boundary``.
+
+        An idle compaction between turns would otherwise be discarded with
+        the other stale frames, and the chat would never learn of it. The
+        main conversation's boundary is published as the same
+        ``ContextCompaction`` a turn's reader would publish (the host picks
+        it up with the next turn's events); a subagent's is dropped.
+        """
+        self._track_main_compaction(frame)
+        if not is_compact_boundary(frame):
+            return False
+        if not self._take_main_boundary(frame):
+            logger.info("a subagent's compaction boundary between turns; not reported")
+            return True
+        if self._session is None:
+            return True  # nothing to attach it to; not reachable with a CLI running
+        try:
+            await self._emit(compaction_from_boundary(
+                frame, session_id=self._session.session_id, turn_id=self._active_turn_id,
+            ))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a notice never fails the next turn
+            logger.warning("could not keep a between-turn compaction boundary", exc_info=True)
+            return True
+        logger.info("kept a compaction boundary the CLI wrote between turns")
+        return True
 
     async def _compact_context_note(self) -> str | None:
         """The host's note for after a compaction, capped, or None.
@@ -3439,6 +3516,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if not text:
                 continue
             if self._route_control_response(text) or await self._answer_hook_line(text):
+                continue
+            if await self._keep_between_turn_compaction_line(text):
                 continue
             kind = _frame_type(text)
             if kind == "result":
