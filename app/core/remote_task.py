@@ -245,6 +245,28 @@ def _caller_bindings(caller_row: Mapping[str, Any], caller_session_id: str):
     return _caller_permission_mode(caller_row), loop_guard.session_origin(caller_session_id)
 
 
+def _link_job(caller_session_id: str, worker_id: str, device_id: str, label: str) -> None:
+    """Count the child against the assistant's limits when the assistant
+    (its home or one of its jobs) started it. Blocking; never raises."""
+    try:
+        from app.core import assistant_service
+
+        assistant_service.link_remote_job(caller_session_id, worker_id, device_id, "task", label)
+    except Exception:  # noqa: BLE001 — the child runs either way
+        logger.warning("remote_task: could not link %s to the assistant's limits", worker_id, exc_info=True)
+
+
+def _forget_job(worker_id: str) -> None:
+    """Undo :func:`_link_job` for a child that provably never started. Blocking; never raises."""
+    try:
+        from app.core import assistant_service
+        from app.db import assistant as assistant_store
+
+        assistant_store.forget_remote_job(assistant_service.assistant_id(), worker_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("remote_task: could not forget the link of %s", worker_id, exc_info=True)
+
+
 async def dispatch_remote(
     *,
     worker: Mapping[str, Any],
@@ -292,6 +314,13 @@ async def dispatch_remote(
     if ctx is None:
         return {"ok": False, "error": (
             f"This worker is not part of a worker network; omit worker to run it here; {NOT_DISPATCHED}.")}
+    from app.core import assistant_limits
+
+    # The owner's daily spending limit, as for a local worker. Not a
+    # NOT_DISPATCHED refusal: running it here instead is refused too.
+    refusal = await asyncio.to_thread(assistant_limits.start_refusal, caller_session_id)
+    if refusal:
+        return {"ok": False, "error": refusal}
 
     worker_id = str(uuid.uuid4())
     permission_mode, origin = await asyncio.to_thread(_caller_bindings, caller_row, caller_session_id)
@@ -335,10 +364,13 @@ async def dispatch_remote(
         target_device_id=worker["device_id"], owner_session_id=caller_session_id,
         root_session_id=root_session_id, tool_use_id=launch_tool_use_id, mode=mode,
         label=label, agent=result_agent, target_name=name)
+    # Its spend counts against the assistant's limits when the assistant started it.
+    await asyncio.to_thread(_link_job, caller_session_id, worker_id, worker["device_id"], label)
 
     async def never_started() -> None:
         await release()
         await asyncio.to_thread(remote_tasks.forget_dispatch, worker_id)
+        await asyncio.to_thread(_forget_job, worker_id)
 
     try:
         answer = await control.call(worker["device_id"], TASK_START_ACTION, body, timeout=START_TIMEOUT)
@@ -1380,8 +1412,11 @@ async def reattach(dispatch: Mapping[str, Any]) -> bool:
                   roster_name=(record or {}).get("name"), model_label=(record or {}).get("model"),
                   target_device_id=target, worker_name=name)
         cursor = await asyncio.to_thread(_child_cursor, worker_id)
+        # Provider and model as the child's mirrored session row records them.
+        child = await asyncio.to_thread(database.get_session, worker_id) or {}
         await _follow(worker_id=worker_id, target_device_id=target, root_session_id=root,
-                      label=current.get("label") or "Task worker", provider_id=None, model_id=None,
+                      label=current.get("label") or "Task worker", provider_id=child.get("provider_id"),
+                      model_id=child.get("model"),
                       agent_name=(record or {}).get("agent") or current.get("agent"), prompt=None,
                       launch_tool_use_id=current.get("tool_use_id"), resume_cursor=cursor)
         return True
@@ -1603,6 +1638,7 @@ _STOP_ANSWERS = (CHILD_STOPPED, CHILD_FINISHED, CHILD_UNKNOWN)
 _STOP_REASONS = frozenset({
     "user_stop", "user_stopped", "user_stopped_all", "swarm_cancelled", "session_closed",
     "parent_turn_ended", "provider_rate_limited", "host_cleanup",
+    "assistant_daily_limit", "assistant_job_time",
 })
 
 _stop_sends: set = set()
@@ -1971,6 +2007,12 @@ async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: st
     if len(text) > MAX_MESSAGE_CHARS:
         return {"text": (f"Could not deliver to {who}: the message is {len(text)} characters; another "
                          f"worker takes at most {MAX_MESSAGE_CHARS}."), "is_error": True}
+    from app.core import assistant_limits
+
+    # The assistant's daily spending limit (S11): that worker cannot see it.
+    refusal = await asyncio.to_thread(assistant_limits.message_refusal, worker_id)
+    if refusal:
+        return {"text": f"Could not deliver to {who}: {refusal}", "is_error": True}
     known = dispatch.get("completion_id")
     body = {
         "version": WIRE_VERSION, "to": TO_CHILD, "worker_session_id": worker_id,
@@ -2048,6 +2090,10 @@ async def _reopen_locked(dispatch: Mapping[str, Any], completion_id: str) -> boo
     owner = dispatch["owner_session_id"]
     if not await asyncio.to_thread(remote_tasks.reopen_dispatch, worker_id, completion_id):
         return False
+    from app.core import assistant_limits
+
+    # Running again: its spend is collected again even if it had aged out.
+    await asyncio.to_thread(assistant_limits.wake_remote_job, worker_id)
     for session_id in dict.fromkeys((root, owner)):
         await task_registry.ensure_hydrated(session_id)
     record = task_registry.get_task(root, worker_id, durable=True)

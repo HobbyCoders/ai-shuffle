@@ -332,3 +332,70 @@ async def test_the_homes_own_reply_is_stopped_and_reported_once_it_settles(assis
     turns.settle_turn(turn["id"], "aborted")
     await limits.enforce()
     assert len(notices) == 1 and "so I stopped my current reply and won't start new work" in notices[0][1]
+
+
+# --- jobs on another worker ----------------------------------------------------------
+
+def remote_job(session_id="remote-job", kind="task"):
+    return store.link_remote_job(service.assistant_id(), session_id, "serverworker-device", kind, "Remote job")
+
+
+def test_a_remote_jobs_rise_is_booked_once_on_the_day_it_is_learned(assistant_fixture):
+    aid = service.assistant_id()
+    remote_job()
+    now = datetime.now(timezone.utc)
+    yesterday = limits.day_window(now)[1] - timedelta(hours=1)
+    assert store.record_remote_usage(aid, "remote-job", 2.0, active=True, at=yesterday) == 2.0
+    assert limits.status(now)["spent_today_usd"] == 0  # Learned yesterday: yesterday's spend.
+    assert store.record_remote_usage(aid, "remote-job", 2.0, active=True) == 0  # Seen twice.
+    assert store.record_remote_usage(aid, "remote-job", 1.5, active=True) == 0  # Settled lower.
+    assert store.record_remote_usage(aid, "remote-job", 3.25, active=True) == pytest.approx(1.25)
+    assert limits.status(now)["spent_today_usd"] == pytest.approx(1.25)
+    assert store.record_remote_usage(aid, "not-linked", 9.0, active=True) == 0.0
+    # A job that spent something is never forgotten as never started.
+    store.forget_remote_job(aid, "remote-job")
+    assert store.get_remote_job(aid, "remote-job") is not None
+    remote_job("never-started")
+    store.forget_remote_job(aid, "never-started")
+    assert store.get_remote_job(aid, "never-started") is None
+
+
+def test_remote_jobs_age_out_only_once_their_worker_says_they_are_idle(assistant_fixture):
+    aid = service.assistant_id()
+    remote_job("idle")
+    remote_job("unknown")
+    remote_job("quiet")  # Its worker never answers.
+    start = datetime.now(timezone.utc)
+    store.record_remote_usage(aid, "idle", 1.0, active=False, at=start)  # Spent: not idle yet.
+    store.record_remote_usage(aid, "idle", 1.0, active=False, at=start)
+    store.note_remote_unknown(aid, "unknown", at=start)
+    later = start + limits.REMOTE_IDLE_FOR + timedelta(minutes=1)
+    assert [j["session_id"] for j in store.remote_jobs_to_check(aid, limits.REMOTE_IDLE_FOR, later)] == ["quiet"]
+    store.record_remote_usage(aid, "idle", 1.5, active=False, at=later)  # Spent again: back in.
+    assert {j["session_id"] for j in store.remote_jobs_to_check(aid, limits.REMOTE_IDLE_FOR, later)} == {"idle", "quiet"}
+
+
+def test_a_remote_usage_answer_that_does_not_add_up_is_ignored():
+    assert limits._entry({"known": True, "cost_usd": -1}) is None
+    assert limits._entry({"known": True, "cost_usd": float("nan")}) is None
+    assert limits._entry({"known": True, "cost_usd": True}) is None
+    assert limits._entry({"cost_usd": 1.0}) is None
+    assert limits._entry({"known": False, "cost_usd": 5}) == {"known": False}
+    entry = limits._entry({"known": True, "cost_usd": 1e12, "turns": [{"turn_id": "t1"}, {"turn_id": 3}, "x"]})
+    assert entry["cost_usd"] == limits.MAX_REPORTED_USD
+    # A turn not said to be unattended is treated as the owner's and never stopped.
+    assert entry["turns"] == [{"turn_id": "t1", "person": True}] and entry["running"] is True
+
+
+def test_remote_stops_follow_the_limits(assistant_fixture):
+    job = dict(session_id="r", device_id="d", kind="chat", label="R", job_minutes=10.0,
+               turns=[{"turn_id": "t1", "person": False}, {"turn_id": "t2", "person": True}])
+    state = dict(limit_reached=False, job_limit_enabled=True, max_job_minutes=30)
+    assert limits.plan_remote(state, [job]) == []
+    [stop] = limits.plan_remote({**state, "limit_reached": True}, [job])
+    assert stop["reason"] == "daily_limit" and stop["turn_ids"] == ["t1"]
+    [stop] = limits.plan_remote(state, [{**job, "job_minutes": 30.0}])
+    assert stop["reason"] == "job_time"
+    assert limits.plan_remote({**state, "job_limit_enabled": False}, [{**job, "job_minutes": 300.0}]) == []
+    limits_db.record_stop(service.assistant_id(), "r", "t1", "job_time", "R")
+    assert limits.plan_remote({**state, "limit_reached": True}, [job]) == []

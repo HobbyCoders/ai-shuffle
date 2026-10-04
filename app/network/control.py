@@ -410,6 +410,11 @@ def _task_approval_answer_handler():
     return handle_task_approval_answer
 
 
+def _remote_usage_handler():
+    from app.core.assistant_limits import handle_remote_usage
+    return handle_remote_usage
+
+
 def _application_update_handler():
     from app.core.update_workers import peer_action
     return peer_action
@@ -468,6 +473,7 @@ _LAZY_HANDLERS = {
     "task-message": _task_message_handler,
     "task-approval": _task_approval_handler,
     "task-approval-answer": _task_approval_answer_handler,
+    "remote-usage": _remote_usage_handler,
     "rewind": _rewind_handler,
     "session-git": _session_git_handler,
     "project-git": _project_git_handler,

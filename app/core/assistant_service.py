@@ -814,7 +814,41 @@ def link_job(home_session_id, session_id):
         raise ValueError("Not an assistant participating session")
     if not _owned_here(database.get_session(session_id)):
         raise ValueError("Job owner or runner does not match assistant")
+    if _counted_by_another_worker(session_id):
+        # Its spend is already counted by the assistant that started it.
+        return None
     return store.link_job(assistant_id(), session_id)
+
+
+def _counted_by_another_worker(session_id):
+    """Whether another worker's assistant started ``session_id`` here.
+
+    That worker counts the chat (or Task child) against its own limits
+    (``assistant_limits.refresh_remote``), so linking it here too would
+    charge one spend to two limits.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT payload FROM turns WHERE session_id=%s ORDER BY created_at ASC LIMIT 1", (session_id,))
+        row = row_to_dict(cursor.fetchone())
+    payload = (row or {}).get("payload")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            payload = None
+    return isinstance(payload, dict) and bool(
+        payload.get("orchestration_report_device") or payload.get("task_report_device"))
+
+
+def link_remote_job(caller_session_id, session_id, device_id, kind, label=None):
+    """Link a job started on worker ``device_id`` when the assistant (its home
+    or one of its jobs) started it. Returns the link, or None for any other
+    caller."""
+    home = home_for_session(caller_session_id)
+    if not home or home != get_primary_session_id():
+        return None
+    return store.link_remote_job(assistant_id(), session_id, device_id, kind, label)
 
 
 # The home's instructions. Fixed text, so it stays in the cached prompt

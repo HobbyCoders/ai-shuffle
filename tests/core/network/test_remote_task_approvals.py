@@ -624,3 +624,33 @@ def test_a_child_resumed_by_a_message_asks_the_parent_and_reports_only_its_own(
         assert "Disk checked." in second and "permission for Write" in second
         # Held back during the first run: not repeated.
         assert "permission for Bash" not in second
+
+
+# --- with the assistant's limits (S11) ------------------------------------------------
+
+def test_a_limit_stop_withdraws_the_childs_open_prompt(workers, monkeypatch, proxies, held):
+    """The daily limit stops the child through the S8 path, so its prompt goes too."""
+    from app.core import assistant_limits as limits, turn_recorder
+    from app.db import assistant_limits as limits_db
+    from tests.core.network.test_remote_task_limits import book, make_home, set_limits
+
+    async def no_brief(*args, **kwargs):
+        return "brief"
+    monkeypatch.setattr(turn_recorder, "record_brief", no_brief)
+    a, b, _ = network(workers, monkeypatch)
+    make_home(b, "caller")
+    child = started_child(a, b)
+    turn = start_child_turn(a, child)
+    with b.active():
+        set_limits(daily_spend_limit_usd=1)
+        book("caller", 2.0)
+
+    async def stop(row):
+        await limits.enforce()
+        await remote_task.drain_stops()
+        assert interactions.get_interaction(row["id"])["state"] == "cancelled"
+        assert remote_tasks.get_dispatch(child)["stop_reason"] == "assistant_daily_limit"
+        assert limits_db.stopped(turn["id"])
+    _, result = round_trip(a, b, proxies, held, ask_kwargs(child), stop)
+    assert isinstance(result, PermissionResultDeny)
+    assert result.message.startswith(relay.CANCELLED_MESSAGE)

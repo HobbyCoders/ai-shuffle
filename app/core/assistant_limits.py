@@ -10,7 +10,19 @@ The home conversation plus every session linked to it in ``assistant_runs``:
 research runs, Task workers and chats it started or messaged (nested starts
 link to the same home). A linked session counts from the moment it was
 linked, so an older chat the assistant only messaged counts from then on.
-Chats started on another worker spend there and are not counted here.
+
+Task workers and chats it started on another worker count too
+(``assistant_remote_jobs``). That worker books their turns in its own
+``usage_log`` and never links them to its own assistant, so the spend is
+charged to this limit only. Every pass of :func:`enforce` asks each such
+worker (control action ``remote-usage``) for the job's cumulative cost: the
+job's own turns, the Task workers it started there and its running turns'
+per-call costs. The rise over the highest total seen before is booked once,
+here, when it is learned (``assistant_remote_costs``), so an answer seen
+twice, a restart or a worker that comes back after being unreachable never
+counts a dollar twice and never loses one. Cost a worker could not report yet
+counts on the day it arrives. A worker on a release without the action is
+read from its mirrored ``sessions.total_cost_usd`` instead.
 
 The cost source is the one automations and Stats use: the per-turn
 ``usage_log`` booking of the turn's reported ``total_cost_usd``. A turn counts
@@ -33,6 +45,16 @@ Enforcement
   live turns of the home and its jobs with the ordinary Stop path, and it
   stops a job that has worked longer than the job time limit. Turns a person
   started inside a job are left alone.
+* A job on another worker is stopped the way that kind of job is stopped
+  from here. A Task child goes through the one remote stop path, as Stop on
+  its card or Swarm cancel does: the supervisor's teardown when it has a
+  record here, else ``remote_task.stop_remote_child``. That stop is durable
+  (sent again when the worker answers), withdraws the child's approval
+  prompts here and makes a later SendMessage refuse to resume it. A chat gets
+  the ``interrupt`` control action on each running turn, as Stop on a
+  mirrored chat does. Turns a person started there are left alone too.
+* SendMessage to a Task child on another worker is refused at the limit
+  (``message_refusal``), as the turn it would start is for a local child.
 * One plain notice is posted into the home conversation between turns: at
   80% (once per day), when the limit is reached, and when a job is stopped.
 """
@@ -40,6 +62,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -61,6 +84,20 @@ LIVE_STATES = ("running", "interrupting", "draining")
 # the assistant, so its whole working time is the job's run time.
 CREATED_BY_ASSISTANT = timedelta(minutes=5)
 _CHUNK = 400
+
+# Jobs on another worker (``assistant_remote_jobs``).
+REMOTE_USAGE_ACTION = "remote-usage"
+REMOTE_WIRE_VERSION = 1
+REMOTE_TIMEOUT = 15.0
+MAX_REMOTE_IDS = 200
+MAX_REMOTE_TURNS = 20
+#: A cumulative cost above this is not believed.
+MAX_REPORTED_USD = 1_000_000.0
+#: A job its worker reported idle, with nothing new spent, for this long is
+#: not asked about any more.
+REMOTE_IDLE_FOR = timedelta(hours=24)
+TASK_JOB, CHAT_JOB = "task", "chat"
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def assistant_id():
@@ -221,6 +258,13 @@ def _in_flight(cursor, tracked, live):
     return total
 
 
+def _remote_booked(cursor, start):
+    """What jobs on other workers spent, as booked here since ``start``."""
+    cursor.execute("SELECT cost_usd FROM assistant_remote_costs WHERE assistant_id=%s AND booked_at >= %s",
+                   (assistant_id(), start))
+    return sum(max(0.0, float(row["cost_usd"] or 0)) for row in cursor.fetchall())
+
+
 def _measure(now=None) -> dict:
     """Spend today plus what enforcement needs, from one connection."""
     day, start, resets_at, tz_name = day_window(now)
@@ -228,7 +272,8 @@ def _measure(now=None) -> dict:
         cursor = conn.cursor()
         tracked = _tracked(cursor)
         live = _live_turns(cursor, tracked) if tracked else []
-        spent = (_booked(cursor, tracked, start) + _in_flight(cursor, tracked, live)) if tracked else 0.0
+        spent = (_booked(cursor, tracked, start) + _in_flight(cursor, tracked, live)
+                 + _remote_booked(cursor, start)) if tracked else 0.0
     return dict(day=day, start=start, resets_at=resets_at, timezone=tz_name,
                 spent=spent, tracked=tracked, live=live)
 
@@ -381,9 +426,10 @@ def session_usage(session_id):
         "limit_reached": state["limit_reached"],
         "max_job_minutes": state["max_job_minutes"] if state["job_limit_enabled"] else None,
         "day": state["day"], "timezone": state["timezone"], "resets_at": state["resets_at"],
-        "note": ("Today's spend for the assistant conversation and every job it started on this worker, "
-                 "in US dollars at API prices (subscription use is an estimate). Only the owner can change "
-                 "these limits."),
+        "note": ("Today's spend for the assistant conversation and every job it started, on this worker "
+                 "or another one, in US dollars at API prices (subscription use is an estimate). Another "
+                 "worker's spend counts once that worker reports it, about once a minute. Only the owner "
+                 "can change these limits."),
     }
 
 
@@ -438,7 +484,13 @@ async def enforce(now=None):
     """Stop work past the limits and post the owner's notices. Never raises."""
     from app.core import turn_manager
     try:
+        observed = await refresh_remote(now)
+    except Exception:
+        logger.exception("Assistant limits: could not collect the spend of jobs on other workers")
+        observed = []
+    try:
         state, stops = await run_sync(plan, now)
+        remote = await run_sync(plan_remote, state, observed)
     except Exception:
         logger.exception("Assistant limits: could not measure today's spend")
         return
@@ -451,10 +503,276 @@ async def enforce(now=None):
                 logger.info("Assistant limits: stopped turn %s in %s (%s)", turn_id, session_id, reason)
         except Exception:
             logger.exception("Assistant limits: could not stop turn %s", turn_id)
+    for stop in remote:
+        try:
+            if await _stop_remote(stop):
+                await run_sync(limits_db.record_stop, aid, stop["session_id"], stop["turn_ids"][0],
+                               stop["reason"], stop["label"])
+                logger.info("Assistant limits: stopped %s %s on %s (%s)", stop["kind"], stop["session_id"],
+                            stop["device_id"], stop["reason"])
+        except Exception:
+            logger.exception("Assistant limits: could not stop %s on %s", stop["session_id"], stop["device_id"])
     try:
         await _post_notices(state)
     except Exception:
         logger.exception("Assistant limits: notices failed")
+
+
+# ---------------------------------------------------------------------------
+# Jobs on another worker
+# ---------------------------------------------------------------------------
+
+def _payload(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    return value if isinstance(value, dict) else None
+
+
+def _started_by(payload, device_id):
+    """Whether a session's first turn records ``device_id`` as the worker that started it."""
+    return bool(payload) and device_id in (payload.get("task_report_device"),
+                                           payload.get("orchestration_remote_origin"))
+
+
+def _job_usage(cursor, session_id, from_device, now):
+    """What one job ``from_device`` started here has spent, and its live turns."""
+    from app.network import control
+
+    cursor.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))
+    session = row_to_dict(cursor.fetchone())
+    if not session or session.get("api_user_id") or control.owner_of(session) is not None:
+        return {"known": False}
+    cursor.execute("SELECT payload FROM turns WHERE session_id=%s ORDER BY created_at ASC LIMIT 1", (session_id,))
+    first = row_to_dict(cursor.fetchone())
+    if not _started_by(_payload((first or {}).get("payload")), from_device):
+        return {"known": False}
+    # Task workers it started here: every one of them, nested or not, names
+    # the job (their chain's root on this worker) as its parent.
+    cursor.execute("SELECT id FROM sessions WHERE parent_session_id=%s AND is_worker=TRUE", (session_id,))
+    ids = [session_id] + [row["id"] for row in cursor.fetchall()]
+    tracked = {sid: None for sid in ids}
+    live = _live_turns(cursor, ids)
+    cost = _booked(cursor, tracked, _EPOCH) + _in_flight(cursor, tracked, live)
+    own = [turn for turn in live if turn["session_id"] == session_id][:MAX_REMOTE_TURNS]
+    return {
+        "known": True,
+        "cost_usd": round(cost, 6),
+        "running": bool(live),
+        "turns": [{"turn_id": turn["id"], "person": turn.get("source") in PERSON_SOURCES} for turn in own],
+        "job_minutes": round(_job_minutes(session, now), 3),
+    }
+
+
+def answer_remote_usage(body, from_device, now=None):
+    """``remote-usage`` on the worker that runs the jobs. Blocking.
+
+    Answers only for sessions this worker owns whose first turn records
+    ``from_device`` as the worker that started them (a Task child it
+    dispatched, a chat it started); any other id reads as unknown. The cost
+    is cumulative: the job's own turns, the Task workers it started here and
+    its running turns' per-call costs. Raises ``PermissionError`` /
+    ``ValueError`` (a named refusal).
+    """
+    from app.core.remote_task import _require_worker_member
+
+    _require_worker_member(from_device)
+    if not isinstance(body, dict) or body.get("version") != REMOTE_WIRE_VERSION:
+        raise ValueError("Unsupported usage request version")
+    ids = body.get("session_ids")
+    if (not isinstance(ids, list) or not ids or len(ids) > MAX_REMOTE_IDS
+            or any(not isinstance(i, str) or not i.strip() or len(i) > 200 for i in ids)):
+        raise ValueError(f"session_ids must list 1 to {MAX_REMOTE_IDS} ids")
+    now = now or datetime.now(timezone.utc)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        jobs = {sid: _job_usage(cursor, sid, from_device, now) for sid in dict.fromkeys(ids)}
+    return {"version": REMOTE_WIRE_VERSION, "jobs": jobs}
+
+
+async def handle_remote_usage(body, from_device):
+    """``remote-usage`` control action."""
+    return await run_sync(answer_remote_usage, body, from_device)
+
+
+def _number(value, ceiling):
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
+        return None
+    return min(float(value), ceiling)
+
+
+def _entry(value):
+    """One job in a ``remote-usage`` answer, validated, else None."""
+    if not isinstance(value, dict):
+        return None
+    if value.get("known") is False:
+        return {"known": False}
+    cost = _number(value.get("cost_usd"), MAX_REPORTED_USD)
+    if value.get("known") is not True or cost is None:
+        return None
+    raw = value.get("turns") if isinstance(value.get("turns"), list) else []
+    turns = [{"turn_id": t["turn_id"], "person": t.get("person") is not False}
+             for t in raw[:MAX_REMOTE_TURNS]
+             if isinstance(t, dict) and isinstance(t.get("turn_id"), str) and 0 < len(t["turn_id"]) <= 200]
+    return {"known": True, "cost_usd": cost, "running": value.get("running") is True or bool(turns),
+            "turns": turns, "job_minutes": _number(value.get("job_minutes"), 10.0 ** 7) or 0.0}
+
+
+def _book_mirrored(aid, session_ids, at):
+    """A worker without ``remote-usage``: book from its mirrored session cost."""
+    from app.db import database
+
+    for session_id in session_ids:
+        row = database.get_session(session_id)
+        if row is not None:
+            store.record_remote_usage(aid, session_id, row.get("total_cost_usd") or 0, active=False, at=at)
+
+
+async def refresh_remote(now=None):
+    """Ask each worker that runs a remote job what the job has spent; book the rise.
+
+    Returns the jobs whose worker answered, each with its live turns and
+    minutes worked, for :func:`plan_remote`. A worker that cannot be reached
+    keeps what was counted for it and is asked again on the next pass; one on
+    an older release is read from the mirror. Never asks anyone when the
+    assistant has no remote jobs.
+    """
+    from app.network import control
+
+    aid = assistant_id()
+    at = now or datetime.now(timezone.utc)
+    jobs = await run_sync(store.remote_jobs_to_check, aid, REMOTE_IDLE_FOR, at)
+    by_device: dict = {}
+    for job in jobs:
+        by_device.setdefault(job["device_id"], []).append(job)
+    observed = []
+    for device_id, group in by_device.items():
+        for index in range(0, len(group), MAX_REMOTE_IDS):
+            chunk = group[index:index + MAX_REMOTE_IDS]
+            ids = [job["session_id"] for job in chunk]
+            try:
+                answer = await control.call(device_id, REMOTE_USAGE_ACTION,
+                                            {"version": REMOTE_WIRE_VERSION, "session_ids": ids},
+                                            timeout=REMOTE_TIMEOUT)
+            except control.ControlRefused as exc:
+                logger.info("Assistant limits: %s refused remote-usage (%s); reading its mirror", device_id, exc)
+                await run_sync(_book_mirrored, aid, ids, at)
+                continue
+            except Exception as exc:  # noqa: BLE001 - unreachable: asked again next pass
+                logger.info("Assistant limits: %s did not answer remote-usage: %s", device_id, exc)
+                continue
+            entries = answer.get("jobs") if isinstance(answer, dict) else None
+            for job in chunk:
+                entry = _entry(entries.get(job["session_id"])) if isinstance(entries, dict) else None
+                if entry is None:
+                    continue
+                if not entry["known"]:
+                    await run_sync(store.note_remote_unknown, aid, job["session_id"], at)
+                    continue
+                await run_sync(store.record_remote_usage, aid, job["session_id"], entry["cost_usd"],
+                               active=entry["running"], at=at)
+                observed.append({**job, **entry})
+    return observed
+
+
+def plan_remote(state, observed):
+    """The remote jobs the limits stop on this pass.
+
+    Each stop is a dict with ``session_id``, ``device_id``, ``kind``,
+    ``label``, ``reason`` and ``turn_ids`` (the live turns no person started).
+    A job with a live turn already stopped is left out.
+    """
+    stops = []
+    for job in observed:
+        turn_ids = [turn["turn_id"] for turn in job["turns"] if not turn["person"]]
+        if not turn_ids:
+            continue
+        if state["limit_reached"]:
+            reason = "daily_limit"
+        elif state["job_limit_enabled"] and job["job_minutes"] >= state["max_job_minutes"]:
+            reason = "job_time"
+        else:
+            continue
+        if any(limits_db.stopped(turn["turn_id"]) for turn in job["turns"]):
+            continue
+        stops.append(dict(session_id=job["session_id"], device_id=job["device_id"], kind=job["kind"],
+                          label=job.get("label"), reason=reason, turn_ids=turn_ids))
+    return stops
+
+
+_STOP_TEXT = {"daily_limit": "Stopped at the assistant's daily spending limit",
+              "job_time": "Stopped at the assistant's job time limit"}
+
+
+async def _stop_remote(stop):
+    """Stop one remote job. True when the stop was made (recorded once, then announced).
+
+    A Task child goes through the S8 stop path only (teardown, else
+    ``stop_remote_child``), so its approvals are withdrawn and a message
+    cannot resume it, as for any other stop. A stop its worker refused
+    before (an older release) is not sent again every pass.
+    """
+    from app.network import control
+
+    session_id, device_id = stop["session_id"], stop["device_id"]
+    if stop["kind"] == TASK_JOB:
+        from app.core import provider_agent_supervisor as supervisor
+        from app.core.remote_task import stop_remote_child
+        from app.db import remote_tasks
+
+        dispatch = await run_sync(remote_tasks.get_dispatch, session_id)
+        if dispatch and dispatch.get("stop_state") == remote_tasks.STOP_REFUSED:
+            logger.info("Assistant limits: %s refused to stop %s before; not asking again",
+                        device_id, session_id)
+            return False
+        text = _STOP_TEXT[stop["reason"]]
+        reason = "assistant_" + stop["reason"]
+        record = supervisor.get_worker(dispatch["root_session_id"], session_id) if dispatch else None
+        if record is not None:
+            result = await supervisor.teardown_worker(record, reason=reason, summary=text,
+                                                      preview=text + ".")
+        else:
+            result = await stop_remote_child(session_id, dispatch["target_device_id"] if dispatch else device_id,
+                                             reason=reason, summary=text)
+        if (result or {}).get("outcome") == "remote_stop_refused":
+            logger.warning("Assistant limits: could not stop %s on %s: %s", session_id, device_id,
+                           (result or {}).get("detail"))
+            return False
+        return True
+    stopped = False
+    for turn_id in stop["turn_ids"]:
+        answer = await control.interrupt(device_id, session_id, "stop", turn_id=turn_id)
+        stopped = stopped or bool((answer or {}).get("interrupted"))
+    return stopped
+
+
+def message_refusal(worker_session_id):
+    """Why SendMessage may not reach the assistant's Task child on another
+    worker now, or None. Never raises.
+
+    At the limit a message would start an unattended turn there that this
+    worker's turn check cannot see, so it is refused here, as that turn is
+    refused for a local child.
+    """
+    try:
+        if store.get_remote_job(assistant_id(), worker_session_id) is None:
+            return None
+        state = status()
+    except Exception:  # noqa: BLE001 - never block unrelated messages
+        logger.warning("Assistant limits: message check failed for %s", worker_session_id, exc_info=True)
+        return None
+    return _reached_text(state) if state["limit_reached"] else None
+
+
+def wake_remote_job(worker_session_id):
+    """A message resumed the assistant's Task child on another worker: ask
+    about its spend again even if it had aged out as idle. Never raises."""
+    try:
+        store.wake_remote_job(assistant_id(), worker_session_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("Assistant limits: could not wake %s", worker_session_id, exc_info=True)
 
 
 def _list(labels):

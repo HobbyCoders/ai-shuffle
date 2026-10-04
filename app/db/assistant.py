@@ -142,6 +142,28 @@ def create_schema(cursor):
             cursor.execute(f"ALTER TABLE assistant_account ADD COLUMN {column} TEXT")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_events_pending ON assistant_events(assistant_id, status, observed_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_runs_status ON assistant_runs(assistant_id, status, created_at)")
+    # Jobs the assistant started on another worker (remote Task children and
+    # StartSession chats). Not in assistant_runs: that table's session_id is a
+    # foreign key, and the job's session row reaches this worker only when
+    # its mirror arrives (if ever). ``reported_usd`` is the highest cumulative
+    # cost that worker reported; each increase is booked once, at the time it
+    # was learned, in assistant_remote_costs. ``idle_since`` is when that
+    # worker first said the job was idle with nothing new spent (NULL while it
+    # runs or spends; an unreachable worker never sets it).
+    cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_remote_jobs (
+        assistant_id TEXT NOT NULL REFERENCES assistant_state(id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL, device_id TEXT NOT NULL, kind TEXT NOT NULL,
+        home_session_id TEXT, label TEXT,
+        reported_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+        answered_at TIMESTAMPTZ, idle_since TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (assistant_id, session_id)
+    )""")
+    cursor.execute("""CREATE TABLE IF NOT EXISTS assistant_remote_costs (
+        id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL, session_id TEXT NOT NULL,
+        cost_usd DOUBLE PRECISION NOT NULL, booked_at TIMESTAMPTZ NOT NULL
+    )""")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_assistant_remote_costs_booked ON assistant_remote_costs(assistant_id, booked_at)")
 
 
 def research_limits(state=None):
@@ -620,6 +642,118 @@ def link_job(assistant_id, session_id, kind="delegated"):
             return existing
         cursor.execute("INSERT INTO assistant_runs (id,assistant_id,home_session_id,session_id,kind,status) VALUES (%s,%s,%s,%s,%s,'linked') RETURNING *", (str(uuid.uuid4()), assistant_id, state["home_session_id"], session_id, kind))
         return _parse(cursor.fetchone())
+
+
+# --- jobs on another worker ---------------------------------------------------
+
+#: Ledger rows older than this are pruned; the limits read one day at a time.
+REMOTE_COST_RETENTION = timedelta(days=35)
+
+
+def link_remote_job(assistant_id, session_id, device_id, kind, label=None):
+    """Link a job the assistant started on worker ``device_id``. Idempotent."""
+    with get_db() as conn:
+        state = lock_state(conn, assistant_id)
+        if not state or not state["home_session_id"]:
+            raise ValueError("Assistant home is not configured")
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO assistant_remote_jobs (assistant_id,session_id,device_id,kind,home_session_id,label,"
+                       "created_at) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (assistant_id,session_id) DO NOTHING",
+                       (assistant_id, session_id, device_id, kind, state["home_session_id"],
+                        (label or None) and str(label)[:160], now()))
+        cursor.execute("SELECT * FROM assistant_remote_jobs WHERE assistant_id=%s AND session_id=%s",
+                       (assistant_id, session_id))
+        return row_to_dict(cursor.fetchone())
+
+
+def forget_remote_job(assistant_id, session_id):
+    """Drop a link whose job provably never started (nothing booked for it)."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM assistant_remote_jobs WHERE assistant_id=%s AND session_id=%s AND reported_usd=0 "
+                       "AND NOT EXISTS (SELECT 1 FROM assistant_remote_costs c WHERE c.assistant_id=%s "
+                       "AND c.session_id=%s)", (assistant_id, session_id, assistant_id, session_id))
+
+
+def get_remote_job(assistant_id, session_id):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM assistant_remote_jobs WHERE assistant_id=%s AND session_id=%s",
+                       (assistant_id, session_id))
+        return row_to_dict(cursor.fetchone())
+
+
+def _at(value):
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+
+
+def remote_jobs_to_check(assistant_id, idle_for, at=None):
+    """Linked remote jobs still worth asking about, oldest first.
+
+    A job drops out once its worker has said it was idle, with nothing new
+    spent, for ``idle_for``. A worker that cannot be reached never ages its
+    jobs out, so its late usage is still collected when it comes back.
+    """
+    cutoff = (at or now()) - idle_for
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM assistant_remote_jobs WHERE assistant_id=%s ORDER BY created_at",
+                       (assistant_id,))
+        rows = [row_to_dict(row) for row in cursor.fetchall()]
+    return [row for row in rows if _at(row["idle_since"]) is None or _at(row["idle_since"]) > cutoff]
+
+
+def record_remote_usage(assistant_id, session_id, total_usd, *, active, at=None):
+    """Book what a remote job spent since it was last heard from. Returns the new cost.
+
+    ``total_usd`` is the job's cumulative cost as its worker reports it. Only
+    the rise over the highest total seen so far is booked, once, at ``at``;
+    a total that went down (an in-flight estimate settled lower) books
+    nothing. ``active`` (running, or spent something) clears ``idle_since``.
+    """
+    at = at or now()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT reported_usd, idle_since FROM assistant_remote_jobs WHERE assistant_id=%s "
+                       "AND session_id=%s FOR UPDATE", (assistant_id, session_id))
+        row = row_to_dict(cursor.fetchone())
+        if row is None:
+            return 0.0
+        previous = max(0.0, float(row["reported_usd"] or 0))
+        total = max(0.0, float(total_usd or 0))
+        added = total - previous if total > previous + 1e-9 else 0.0
+        idle_since = None if (active or added) else (row["idle_since"] or at)
+        cursor.execute("UPDATE assistant_remote_jobs SET reported_usd=%s, answered_at=%s, idle_since=%s "
+                       "WHERE assistant_id=%s AND session_id=%s",
+                       (max(previous, total), at, idle_since, assistant_id, session_id))
+        if added:
+            cursor.execute("INSERT INTO assistant_remote_costs (id,assistant_id,session_id,cost_usd,booked_at) "
+                           "VALUES (%s,%s,%s,%s,%s)", (str(uuid.uuid4()), assistant_id, session_id, added, at))
+            cursor.execute("DELETE FROM assistant_remote_costs WHERE assistant_id=%s AND booked_at < %s",
+                           (assistant_id, at - REMOTE_COST_RETENTION))
+        return added
+
+
+def note_remote_unknown(assistant_id, session_id, at=None):
+    """The worker answered but has no such job for us: it starts ageing out."""
+    at = at or now()
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE assistant_remote_jobs SET answered_at=%s, idle_since=COALESCE(idle_since,%s) "
+                              "WHERE assistant_id=%s AND session_id=%s", (at, at, assistant_id, session_id))
+
+
+def wake_remote_job(assistant_id, session_id):
+    """The job runs again (a message resumed it): it is asked about again."""
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE assistant_remote_jobs SET idle_since=NULL WHERE assistant_id=%s "
+                              "AND session_id=%s", (assistant_id, session_id))
 
 
 def retention_sweep(assistant_id, at=None):

@@ -704,6 +704,7 @@ async def _start_remote(plan, sender_id, sender_generation):
     if not isinstance(answer, dict) or answer.get("session_id") != plan["body"]["session_id"]:
         raise ValueError(f"{name} gave an invalid answer; retry with the same request_id.")
     owner = answer.get("owner_device_id") or remote["device_id"]
+    await asyncio.to_thread(_link_remote_chat, sender_id, answer["session_id"], owner, plan["body"].get("title"))
     result = {"session_id": answer["session_id"], "turn_id": answer.get("turn_id"),
               "status": answer.get("status") or "queued",
               "delivery_status": answer.get("delivery_status") or "queued",
@@ -724,6 +725,16 @@ async def _start_remote(plan, sender_id, sender_generation):
             result["note"] += (f" {name} runs an older release, so this chat will not report back on "
                                "its own; tell the owner to check it there.")
     return result
+
+
+def _link_remote_chat(sender_id, session_id, device_id, title):
+    """Count a chat made on another worker against the assistant's limits when
+    the assistant (its home or one of its jobs) asked for it. Never raises."""
+    try:
+        from app.core.assistant_service import link_remote_job
+        link_remote_job(sender_id, session_id, device_id, "chat", title)
+    except Exception:  # noqa: BLE001 — the chat exists either way
+        log.warning("Could not link remote chat %s to the assistant's limits", session_id, exc_info=True)
 
 
 def _delete_receipt(receipt_id):
