@@ -194,8 +194,12 @@ function invalidateVoiceSettings() {
 resourceSync.subscribe(['settings'], invalidateVoiceSettings);
 sessionOwnerBoundary.subscribe(invalidateVoiceSettings);
 
+const EXPIRED_SETTINGS_REQUEST = 'ExpiredVoiceSettingsRequest';
+
 function expiredSettingsRequest(): Error {
-	return new Error('Voice settings request expired. Reload the current settings.');
+	const error = new Error('Voice settings request expired. Reload the current settings.');
+	error.name = EXPIRED_SETTINGS_REQUEST;
+	return error;
 }
 
 /**
@@ -240,11 +244,18 @@ export async function saveVoiceSettings(patch: VoiceSettingsUpdate): Promise<Voi
  * the new-chat surface simply doesn't grow a Voice pill).
  */
 export async function isVoiceEnabled(): Promise<boolean> {
-	try {
-		return (await loadVoiceSettings()).voice_mode_enabled;
-	} catch (e) {
-		console.warn('[voice] could not read voice settings:', e);
-		return false;
+	for (let attempt = 0; ; attempt++) {
+		try {
+			return (await loadVoiceSettings()).voice_mode_enabled;
+		} catch (e) {
+			// An expired read is not a failure: sign-in finishing or a settings
+			// change replaced it while it was in flight, which is routine during
+			// page load. Callers ask once on mount, so answering "off" here hid
+			// the call button for the whole visit. Read the current value instead.
+			if (e instanceof Error && e.name === EXPIRED_SETTINGS_REQUEST && attempt < 3) continue;
+			console.warn('[voice] could not read voice settings:', e);
+			return false;
+		}
 	}
 }
 

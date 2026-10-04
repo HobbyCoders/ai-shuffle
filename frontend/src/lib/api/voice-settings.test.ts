@@ -55,6 +55,28 @@ describe('voice settings synchronization', () => {
   expect(transport.get).toHaveBeenCalledTimes(2);
  });
 
+ it('answers from the current settings when sign-in expires the first read', async () => {
+  // Page load: the call button asks once on mount, then sign-in completes and
+  // retires that read. Answering "off" hid the button for the whole visit.
+  const voice = await import('./voice');
+  const early = deferred<ReturnType<typeof settings>>();
+  transport.get.mockReturnValueOnce(early.promise).mockResolvedValueOnce(settings());
+  const enabled = voice.isVoiceEnabled();
+  changeAccount();
+  early.resolve({ ...settings(), voice_mode_enabled: false });
+  expect(await enabled).toBe(true);
+  expect(transport.get).toHaveBeenCalledTimes(2);
+ });
+
+ it('still reads as off when the settings cannot be fetched at all', async () => {
+  const voice = await import('./voice');
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  transport.get.mockRejectedValue(new Error('network down'));
+  expect(await voice.isVoiceEnabled()).toBe(false);
+  expect(transport.get).toHaveBeenCalledTimes(1);
+  warn.mockRestore();
+ });
+
  it('retires reads and write responses belonging to the previous account', async () => {
   const voice = await import('./voice');
   const oldRead = deferred<ReturnType<typeof settings>>(), oldWrite = deferred<ReturnType<typeof settings>>();
