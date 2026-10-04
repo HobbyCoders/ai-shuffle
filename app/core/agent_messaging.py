@@ -24,6 +24,22 @@ def peer_rows(session_id: str | None) -> list[dict]:
     if session_id in swarm.workers:
         return rows
 
+    from app.core import remote_task
+
+    # A Task child another worker started here: its `main` is the
+    # conversation on that worker (app.core.remote_task.send_to_parent).
+    parent = remote_task.remote_parent(session_id)
+    if parent is not None:
+        rows.insert(0, {
+            "name": "main",
+            "ref": None,
+            "worker_session_id": parent["owner_session_id"],
+            "status": "running",
+            "kind": "parent",
+            "description": f"The conversation that started you, on {parent['worker_name']}",
+            "remote_parent": parent["device_id"],
+        })
+
     # Nested dispatch records a worker on both the root (UI routing) and the
     # direct caller. The root also knows that caller as a worker; exclude that
     # routing copy rather than sending a nested worker's `main` to the root.
@@ -31,7 +47,7 @@ def peer_rows(session_id: str | None) -> list[dict]:
         owner
         for owner in task_registry.sessions_with_task(session_id)
         if (task_registry.get_task(owner, session_id) or {}).get("kind") == "agent"
-    ]
+    ] if parent is None else []
     direct_owners = [
         owner
         for owner in owners
@@ -129,8 +145,7 @@ def make_roster(supplier):
 
 def make_message(supplier):
     async def message(data, ctx):
-        from app.core import session_runtime, turn_scheduler
-        from app.core.session_pool import get_session_pool
+        from app.core import turn_scheduler
         from app.core.task_registry import task_registry
 
         session_id = supplier()
@@ -168,14 +183,19 @@ def make_message(supplier):
             )
         row = matches[0]
         target = row["worker_session_id"]
-        if row.get("worker"):
-            # Its session belongs to that worker; nothing here may queue a turn
-            # on the read-only mirror. Messaging it is slice S9.
-            return ToolOutcome(
-                text=(f"{row['name']} runs on {row['worker']}; sending it a message is not "
-                      "supported yet. Its report comes back here when it finishes."),
-                is_error=True,
-            )
+        text = str(data.get("message") or "")
+        urgent = bool(data.get("urgent"))
+        if row.get("remote_parent") or row.get("worker"):
+            # That session lives on another worker: the message travels there
+            # (app.core.remote_task), and nothing here queues a turn on the
+            # read-only mirror.
+            from app.core import remote_task
+
+            if row.get("remote_parent"):
+                outcome = await remote_task.send_to_parent(session_id, row, text, urgent=urgent)
+            else:
+                outcome = await remote_task.send_to_child(session_id, row, text, urgent=urgent)
+            return ToolOutcome(text=outcome["text"], is_error=outcome["is_error"])
         resuming = row["status"] != "running"
         if resuming:
             error = await resume_unavailable(target, row)
@@ -186,53 +206,87 @@ def make_message(supplier):
                 text=f"Could not deliver to {row['name']}: receiver was stopped",
                 is_error=True,
             )
-        state = get_session_pool().get(target)
-        adapter = getattr(state, "adapter", None)
-        engine = getattr(adapter, "engine", None)
-        text = str(data.get("message") or "")
-        urgent = bool(data.get("urgent"))
-        # An engine that says it is idle is not offered the message: the
-        # scheduler below decides between a wake and a hold on the app's own
-        # park state, which the engine's can lag. Engines that do not report
-        # (None) are offered it as before and refuse when idle.
-        if (not resuming and getattr(adapter, "provider_kind", None) != "delegated"
-                and engine is not None and session_runtime.get_live_runtime(target) is not None
-                and getattr(engine, "turn_running", None) is not False):
-            try:
-                # Only the app queue may start a turn. The atomic no-wake op
-                # also covers a runtime still starting or an engine just done.
-                await engine.submit(AgentMessage(
-                    text=text, sender=session_id, wake=False, urgent=urgent,
-                ))
-            except RuntimeError:
-                # Refusal means not accepted; keep it on the durable queue.
-                pass
-            else:
-                return ToolOutcome(text=f"Delivered to {row['name']}")
-        if resuming:
-            turn_id = await turn_scheduler.on_agent_message(
-                target, session_id, text, reply_to=session_id,
-            )
-        else:
-            turn_id = await turn_scheduler.on_agent_message(
-                target, session_id, text, **({"urgent": True} if urgent else {}),
-            )
+        if not resuming:
+            status, turn_id = await deliver_message(target, session_id, text, urgent=urgent)
+            return ToolOutcome(**delivery_receipt(row["name"], status, turn_id))
+        turn_id = await turn_scheduler.on_agent_message(
+            target, session_id, text, reply_to=session_id,
+        )
         if not turn_id:
-            return ToolOutcome(
-                text=f"Could not deliver to {row['name']}: receiver was stopped",
-                is_error=True,
-            )
+            return ToolOutcome(**delivery_receipt(row["name"], STOPPED))
         if turn_id == turn_scheduler.HELD:
             return ToolOutcome(text=held_receipt(row["name"]))
-        if resuming:
-            return ToolOutcome(text=f"Resume queued for {row['name']} (turn {turn_id})")
-        # A receiver that is running (a delegated CLI turn, or a native one the
-        # engine path above could not reach) takes the queued message at its
-        # next tool boundary; the row's receipt retires it exactly once.
-        await session_runtime.try_steer_pending(target)
-        return ToolOutcome(text=f"Queued for {row['name']}")
+        return ToolOutcome(text=f"Resume queued for {row['name']} (turn {turn_id})")
 
     return message
+
+
+#: What :func:`deliver_message` did with a message.
+DELIVERED = "delivered"
+QUEUED = "queued"
+HELD = "held"
+STOPPED = "stopped"
+
+
+async def deliver_message(target: str, sender: str, text: str, *,
+                          urgent: bool = False) -> tuple[str, str | None]:
+    """Hand ``text`` from ``sender`` to ``target``, a session on this worker.
+
+    ``(DELIVERED, None)`` when its live engine took it (read at the next tool
+    result), ``(QUEUED, turn id)`` when it waits on the session's queue (a
+    running receiver still takes it at its next tool boundary), ``(HELD, None)``
+    when the receiver is parked on background work and the message waits for
+    its next wake, ``(STOPPED, None)`` when the receiver was stopped. Used for
+    local receivers and for messages another worker sent here
+    (``app.core.remote_task``).
+    """
+    from app.core import session_runtime, turn_scheduler
+    from app.core.session_pool import get_session_pool
+
+    state = get_session_pool().get(target)
+    adapter = getattr(state, "adapter", None)
+    engine = getattr(adapter, "engine", None)
+    # An engine that says it is idle is not offered the message: the
+    # scheduler below decides between a wake and a hold on the app's own
+    # park state, which the engine's can lag. Engines that do not report
+    # (None) are offered it as before and refuse when idle.
+    if (getattr(adapter, "provider_kind", None) != "delegated"
+            and engine is not None and session_runtime.get_live_runtime(target) is not None
+            and getattr(engine, "turn_running", None) is not False):
+        try:
+            # Only the app queue may start a turn. The atomic no-wake op
+            # also covers a runtime still starting or an engine just done.
+            await engine.submit(AgentMessage(
+                text=text, sender=sender, wake=False, urgent=urgent,
+            ))
+        except RuntimeError:
+            # Refusal means not accepted; keep it on the durable queue.
+            pass
+        else:
+            return DELIVERED, None
+    turn_id = await turn_scheduler.on_agent_message(
+        target, sender, text, **({"urgent": True} if urgent else {}),
+    )
+    if not turn_id:
+        return STOPPED, None
+    if turn_id == turn_scheduler.HELD:
+        return HELD, None
+    # A receiver that is running (a delegated CLI turn, or a native one the
+    # engine path above could not reach) takes the queued message at its
+    # next tool boundary; the row's receipt retires it exactly once.
+    await session_runtime.try_steer_pending(target)
+    return QUEUED, turn_id
+
+
+def delivery_receipt(name: str, status: str, turn_id: str | None = None) -> dict:
+    """The sender's tool result for a :func:`deliver_message` status."""
+    if status == DELIVERED:
+        return {"text": f"Delivered to {name}"}
+    if status == QUEUED:
+        return {"text": f"Queued for {name}"}
+    if status == HELD:
+        return {"text": held_receipt(name)}
+    return {"text": f"Could not deliver to {name}: receiver was stopped", "is_error": True}
 
 
 def held_receipt(name: str) -> str:

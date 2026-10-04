@@ -293,19 +293,6 @@ def test_an_older_target_that_refuses_task_status_counts_as_reachable(workers, m
         control._LAZY_HANDLERS[remote_task.TASK_STATUS_ACTION] = original
 
 
-# --- messaging stays local until S9 -----------------------------------------------------
-
-def test_sending_a_message_to_a_remote_child_is_refused_by_name(workers, monkeypatch, kicks):
-    a, b, _ = network(workers, monkeypatch)
-    child = started_child(a, b)
-    with b.active():
-        send = agent_messaging.make_message(lambda: "caller")
-        outcome = asyncio.run(send({"to": child, "message": "Also check the logs."}, None))
-        assert outcome.is_error and "runs on Unraid" in outcome.text
-        from app.db import turns
-        assert turns.get_latest_turn(child) is None  # nothing queued on the mirror
-
-
 # --- a local-only session is unaffected ---------------------------------------------------
 
 def test_a_local_task_keeps_its_shape_and_nothing_is_checked(workers, monkeypatch, kicks):

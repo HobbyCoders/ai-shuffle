@@ -371,3 +371,136 @@ def retry_report_later(worker_session_id: str, *, next_attempt_at: str, error: s
             "UPDATE remote_task_children SET attempts=attempts+1, next_attempt_at=%s, last_error=%s, "
             "updated_at=%s WHERE worker_session_id=%s AND state=%s",
             (next_attempt_at, error[:500], utc_now_iso(), worker_session_id, OWED))
+
+
+# --- messages and resumes (S9) -------------------------------------------------
+#
+# Two more worker-local tables, created on first use like the ones above:
+#
+# * ``remote_task_messages`` (both sides): one row per ``task-message`` this
+#   worker applied, keyed by the sender's message id, with the answer it gave.
+#   A retried message gets the same answer back and is never applied twice.
+# * ``remote_task_completions`` (parent side): the reports of a child that
+#   were already delivered before a message resumed it. A late retry of one of
+#   them is a duplicate, never a new report.
+
+_MESSAGES_DDL = """CREATE TABLE IF NOT EXISTS remote_task_messages (
+    message_id TEXT PRIMARY KEY,
+    worker_session_id TEXT NOT NULL,
+    from_device_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    resume_turn_id TEXT,
+    created_at TEXT NOT NULL)"""
+
+_COMPLETIONS_DDL = """CREATE TABLE IF NOT EXISTS remote_task_completions (
+    worker_session_id TEXT NOT NULL,
+    completion_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (worker_session_id, completion_id))"""
+
+
+def _init_messaging(conn) -> None:
+    init_schema(conn)
+    cursor = conn.cursor()
+    cursor.execute(_MESSAGES_DDL)
+    cursor.execute(_COMPLETIONS_DDL)
+
+
+def message_answer(message_id: str) -> Optional[Dict[str, Any]]:
+    """The stored row for an applied message, or None."""
+    with get_db() as conn:
+        _init_messaging(conn)
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM remote_task_messages WHERE message_id=%s", (message_id,))
+        row = cursor.fetchone()
+    if row is None:
+        return None
+    data = dict(row)
+    data["answer"] = parse_jsonb(data["answer"])
+    return data
+
+
+def record_message(message_id: str, *, worker_session_id: str, from_device_id: str,
+                   direction: str, answer: Dict[str, Any],
+                   resume_turn_id: Optional[str] = None) -> bool:
+    """Remember an applied message and its answer; False when already recorded."""
+    with get_db() as conn:
+        _init_messaging(conn)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO remote_task_messages (message_id, worker_session_id, from_device_id, "
+            "direction, answer, resume_turn_id, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (message_id) DO NOTHING RETURNING message_id",
+            (message_id, worker_session_id, from_device_id, direction, json.dumps(answer),
+             resume_turn_id, utc_now_iso()))
+        return cursor.fetchone() is not None
+
+
+def latest_resume_turn(worker_session_id: str) -> Optional[str]:
+    """Target side: the turn the newest message-resume of this child queued."""
+    with get_db() as conn:
+        _init_messaging(conn)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT resume_turn_id FROM remote_task_messages WHERE worker_session_id=%s "
+            "AND resume_turn_id IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            (worker_session_id,))
+        row = cursor.fetchone()
+    return row["resume_turn_id"] if row else None
+
+
+def resume_child(worker_session_id: str, parent_device_id: str,
+                 known_completion_id: Optional[str]) -> bool:
+    """Target side: a message resumed a finished child, so a new report is owed.
+
+    Back to ``running`` from ``delivered`` or ``refused``, or from ``owed``
+    when the parent already has that report (its acknowledgement was lost).
+    False when the row is in none of those states.
+    """
+    with get_db() as conn:
+        _init_messaging(conn)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE remote_task_children SET state=%s, completion_id=NULL, report=NULL, attempts=0, "
+            "next_attempt_at=NULL, last_error=NULL, updated_at=%s "
+            "WHERE worker_session_id=%s AND parent_device_id=%s AND "
+            "(state IN (%s, %s) OR (state=%s AND completion_id=%s)) RETURNING worker_session_id",
+            (RUNNING, utc_now_iso(), worker_session_id, parent_device_id, DELIVERED, REFUSED,
+             OWED, known_completion_id))
+        return cursor.fetchone() is not None
+
+
+def reopen_dispatch(worker_session_id: str, completion_id: str) -> bool:
+    """Parent side: the child was resumed after the report ``completion_id``.
+
+    That report moves to ``remote_task_completions`` and the row is tracked
+    again until the next one. False when the row no longer carries that
+    report (already reopened, or a newer report already arrived).
+    """
+    with get_db() as conn:
+        _init_messaging(conn)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE remote_tasks SET completion_id=NULL, status=NULL, report_path=NULL, "
+            "delivered_at=NULL, unreachable_since=NULL, target_state=NULL "
+            "WHERE worker_session_id=%s AND completion_id=%s RETURNING worker_session_id",
+            (worker_session_id, completion_id))
+        if cursor.fetchone() is None:
+            return False
+        cursor.execute(
+            "INSERT INTO remote_task_completions (worker_session_id, completion_id, created_at) "
+            "VALUES (%s, %s, %s) ON CONFLICT (worker_session_id, completion_id) DO NOTHING",
+            (worker_session_id, completion_id, utc_now_iso()))
+        return True
+
+
+def past_completions(worker_session_id: str) -> List[str]:
+    """Parent side: reports of this child delivered before a resume, oldest first."""
+    with get_db() as conn:
+        _init_messaging(conn)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT completion_id FROM remote_task_completions WHERE worker_session_id=%s "
+            "ORDER BY created_at", (worker_session_id,))
+        return [row["completion_id"] for row in cursor.fetchall()]

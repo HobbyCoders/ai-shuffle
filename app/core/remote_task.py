@@ -40,9 +40,13 @@ answered by :func:`handle_task_stop` only for the worker that started it). The
 stop is durable, so one that cannot be delivered now is sent again by
 :func:`deliver_stops` when the target answers.
 
+SendMessage works both ways with ``task-message`` (:func:`handle_task_message`):
+the parent reaches the child (a finished one is resumed and reports again
+under a new completion id) and the child reaches its ``main``. A stopped child
+refuses a message on both workers, so it is never resumed.
+
 Not here yet (later slices of docs/reviews/cross-worker-subagents-2026-10-03.md):
-resume by message (S9, refused in ``agent_messaging.make_message``), approval
-routing (S10) and the notice after a long silence (S12, from
+approval routing (S10) and the notice after a long silence (S12, from
 ``remote_tasks.unreachable_since``). Until S10 a remote child runs with Away
 handling: an approval it needs is deferred, never granted, and listed in its
 final reply.
@@ -847,7 +851,7 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
     deferred are listed as the child met them.
     """
     from app.core.session_orchestration import _turn_report
-    from app.db import database
+    from app.db import database, remote_tasks
     from app.db.base import get_db
 
     if database.get_session(session_id) is None:
@@ -858,13 +862,17 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
     settled = _settled_outcome(session_id)
     if settled is None:
         return None
-    with get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s",
-                       (session_id, COMMAND_PREFIX + session_id))
-        origin = cursor.fetchone()
-    status, report, needs = _turn_report(session_id, settled["id"], settled["_outcome"],
-                                         origin["id"] if origin else settled["id"])
+    # Approvals held back since this run began: the newest message-resume,
+    # else the original start, so a resumed run does not repeat old ones.
+    origin_id = remote_tasks.latest_resume_turn(session_id)
+    if origin_id is None:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM turns WHERE session_id=%s AND command_id=%s",
+                           (session_id, COMMAND_PREFIX + session_id))
+            origin = cursor.fetchone()
+        origin_id = origin["id"] if origin else settled["id"]
+    status, report, needs = _turn_report(session_id, settled["id"], settled["_outcome"], origin_id)
     from app.core.provider_agent import MAX_REPORT_CHARS
     return {
         "version": WIRE_VERSION,
@@ -1133,6 +1141,11 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
     local background worker's do before its wake. A record this worker already
     settled (the user stopped it here) keeps its status, and the report is
     stored without waking anyone.
+
+    A child a message resumed (``task-message``) reports again under a new
+    completion id. That report reopens the record first when it beat the
+    message's answer, and wakes the caller once more; a retry of any report
+    already delivered is a duplicate.
     """
     from app.core import turn_scheduler
     from app.core.task_dispatch import write_task_report
@@ -1143,8 +1156,15 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
     key = report.worker_session_id
     async with _tracking_lock(key):
         current = await run_sync(remote_tasks.get_dispatch, key)
-        if current and current.get("completion_id"):
+        past = await run_sync(remote_tasks.past_completions, key)
+        known = current.get("completion_id") if current else None
+        if report.completion_id == known or report.completion_id in past:
             return {"delivered": True, "duplicate": True}
+        if known:
+            # A resumed run's report that arrived before the message's answer
+            # reopened the record (lock already held here).
+            await _reopen_locked(current, known)
+            past = [*past, known]
         owner = report.dispatch["owner_session_id"]
         owner_row = await run_sync(database.get_session, owner)
         path = None
@@ -1160,6 +1180,10 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
                     "tool_use_id": report.dispatch.get("tool_use_id") or key,
                     "summary": _wake_summary(report, path) + git_text,
                 }
+                if past:
+                    # A resumed run's report: its own wake, past the
+                    # one-wake-per-task latch the first report set.
+                    frame["agent_message_turn_id"] = report.completion_id
                 await turn_scheduler.on_remote_task_terminal(owner, frame)
             else:
                 logger.info("remote_task: report for %s stored; it was already settled here",
@@ -1787,3 +1811,376 @@ async def handle_task_stop(body: Dict[str, Any], from_device: str) -> Dict[str, 
             task_registry.mark_user_stopped(worker_id)
             children[worker_id] = {"state": CHILD_FINISHED}
     return {"children": children}
+
+
+# ---------------------------------------------------------------------------
+# Messages both ways (task-message): resume a finished child, reach `main`
+# ---------------------------------------------------------------------------
+
+TASK_MESSAGE_ACTION = "task-message"
+#: Resuming may restore the child's reclaimed checkout before it answers.
+MESSAGE_TIMEOUT = 30.0
+MAX_MESSAGE_CHARS = MAX_PROMPT_CHARS
+#: ``to`` on the wire: the child on the worker that runs it, or ``main``,
+#: the conversation that started it, on the worker that dispatched it.
+TO_CHILD = "child"
+TO_MAIN = "main"
+#: The answer for a finished child the message started again. The other
+#: answers are ``agent_messaging``'s delivery statuses.
+RESUMED = "resumed"
+
+_MESSAGE_KEYS = frozenset({
+    "version", "to", "worker_session_id", "message_id", "sender_session_id", "text",
+    "urgent", "known_completion_id",
+})
+_RESUMABLE = {"completed": "completed", "failed": "failed"}
+
+_message_locks: Dict[str, List[Any]] = {}
+_parents: Dict[tuple, Optional[Dict[str, Any]]] = {}
+_PARENT_CACHE = 2048
+
+
+def remote_parent(session_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Where a Task child another worker started here reaches its ``main``.
+
+    ``{"device_id", "owner_session_id", "parent_session_id", "worker_name"}``,
+    or None for every session that is not such a child. Fixed for a session's
+    life, so it is remembered. Never raises.
+    """
+    if not session_id:
+        return None
+    try:
+        from app.network import engine
+
+        ctx = engine.context()
+        if ctx is None:
+            return None
+        key = (ctx.device_id, session_id)
+        if key not in _parents:
+            owed = report_owed(session_id)
+            parent = None
+            if owed and owed.get("owner_session_id"):
+                parent = {"device_id": owed["device_id"], "owner_session_id": owed["owner_session_id"],
+                          "parent_session_id": owed.get("parent_session_id")}
+            while len(_parents) >= _PARENT_CACHE:
+                _parents.pop(next(iter(_parents)))
+            _parents[key] = parent
+        parent = _parents[key]
+    except Exception:  # noqa: BLE001 — doubt answers "a local session"
+        logger.debug("remote_task: parent lookup failed for %s", session_id, exc_info=True)
+        return None
+    if parent is None:
+        return None
+    return {**parent, "worker_name": worker_display_name(parent["device_id"])}
+
+
+@contextlib.asynccontextmanager
+async def _message_lock(key: str):
+    """One application of a message id at a time, so a retry waits for the first."""
+    entry = _message_locks.setdefault(key, [asyncio.Lock(), 0])
+    entry[1] += 1
+    try:
+        async with entry[0]:
+            yield
+    finally:
+        entry[1] -= 1
+        if entry[1] <= 0:
+            _message_locks.pop(key, None)
+
+
+async def _send_message(device_id: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """``task-message`` with one retry of the same message id after a timeout.
+
+    The receiver applies a message id once, so the retry is safe; it turns
+    "may have arrived" into a definite answer whenever the link recovers.
+    """
+    from app.network import control
+
+    try:
+        return await control.call(device_id, TASK_MESSAGE_ACTION, body, timeout=MESSAGE_TIMEOUT)
+    except control.RunnerUnreachable as exc:
+        if MAY_HAVE_APPLIED not in str(exc):
+            raise
+        logger.info("remote_task: message %s unconfirmed, retrying once: %s", body["message_id"], exc)
+    return await control.call(device_id, TASK_MESSAGE_ACTION, body, timeout=MESSAGE_TIMEOUT)
+
+
+def _message_refusal(exc: Exception, *, who: str, where: str) -> str:
+    """The sender's text for a message that did not arrive."""
+    from app.network import control
+
+    reason = str(exc).rstrip(".")
+    if isinstance(exc, control.ControlRefused):
+        if "Unknown control action" in reason:
+            return (f"Could not deliver to {who}: {where} runs an older release that cannot take "
+                    "messages for subagents; ask the owner to update it. The message was not delivered.")
+        return f"Could not deliver to {who}: {where} refused it: {reason}. The message was not delivered."
+    if MAY_HAVE_APPLIED in reason:
+        return (f"Could not confirm delivery to {who}: {reason}. It may have arrived; do not assume "
+                "it did, and do not send it again until you have checked.")
+    return (f"Could not deliver to {who}: {where} cannot be reached right now ({reason}). The message "
+            "was not delivered; send it again when that worker is back.")
+
+
+def _invalid_answer(who: str, where: str) -> Dict[str, Any]:
+    return {"text": (f"Could not confirm delivery to {who}: {where} gave an invalid answer. It may "
+                     "have arrived; do not send it again until you have checked."), "is_error": True}
+
+
+async def send_to_child(sender_session_id: str, row: Mapping[str, Any], text: str, *,
+                        urgent: bool = False) -> Dict[str, Any]:
+    """SendMessage from this worker to a Task child it sent to another worker.
+
+    Same meaning as for a local child: a running child takes it at its next
+    tool result, a parked one when it next wakes (``urgent`` wakes it), and a
+    finished one is resumed over its own transcript, its new report coming
+    back through ``task-report``. A stopped child refuses. Returns
+    ``{"text", "is_error"}`` for the tool result; "queued" is never reported
+    as delivered.
+    """
+    from app.core import agent_messaging
+    from app.core.task_registry import task_registry
+    from app.db import remote_tasks
+
+    worker_id = row["worker_session_id"]
+    where = str(row.get("worker") or "the other worker")
+    who = f"{row['name']} on {where}"
+    dispatch = await asyncio.to_thread(remote_tasks.get_dispatch, worker_id)
+    if dispatch is None:
+        return {"text": f"Could not deliver to {who}: this worker has no record of sending it there.",
+                "is_error": True}
+    # A stop asked for here is durable (S8): refuse even before the target
+    # answered it, so a message never resumes what this worker stopped.
+    if (task_registry.is_user_stopped(worker_id) or row.get("status") == "killed"
+            or dispatch.get("stop_requested_at")):
+        return {"text": (f"Could not deliver to {who}: it was stopped, and a message cannot restart it. "
+                         "Ask the owner to continue it in its chat."), "is_error": True}
+    if len(text) > MAX_MESSAGE_CHARS:
+        return {"text": (f"Could not deliver to {who}: the message is {len(text)} characters; another "
+                         f"worker takes at most {MAX_MESSAGE_CHARS}."), "is_error": True}
+    known = dispatch.get("completion_id")
+    body = {
+        "version": WIRE_VERSION, "to": TO_CHILD, "worker_session_id": worker_id,
+        "message_id": str(uuid.uuid4()), "sender_session_id": sender_session_id,
+        "text": text, "urgent": bool(urgent), "known_completion_id": known,
+    }
+    try:
+        answer = await _send_message(dispatch["target_device_id"], body)
+    except Exception as exc:  # noqa: BLE001 — refused or unreachable: say which
+        return {"text": _message_refusal(exc, who=who, where=where), "is_error": True}
+    status = answer.get("status") if isinstance(answer, dict) else None
+    if status == RESUMED:
+        if known:
+            await reopen(dispatch, known)
+        return {"text": (f"Resume queued for {who} (turn {answer.get('turn_id')}). You will be woken "
+                         "with its new report when it finishes."), "is_error": False}
+    if status not in (agent_messaging.DELIVERED, agent_messaging.QUEUED, agent_messaging.HELD):
+        return _invalid_answer(who, where)
+    return {"text": agent_messaging.delivery_receipt(who, status)["text"], "is_error": False}
+
+
+async def send_to_parent(sender_session_id: str, row: Mapping[str, Any], text: str, *,
+                         urgent: bool = False) -> Dict[str, Any]:
+    """SendMessage ``main`` from a Task child that another worker started here.
+
+    The message reaches the conversation that started it on that worker as a
+    peer message from this child, with local semantics there. Returns
+    ``{"text", "is_error"}``.
+    """
+    from app.core import agent_messaging
+
+    parent = remote_parent(sender_session_id)
+    if parent is None:
+        return {"text": "Could not deliver to main: this session has no parent on another worker.",
+                "is_error": True}
+    where = parent["worker_name"]
+    who = f"main on {where}"
+    if len(text) > MAX_MESSAGE_CHARS:
+        return {"text": (f"Could not deliver to {who}: the message is {len(text)} characters; another "
+                         f"worker takes at most {MAX_MESSAGE_CHARS}."), "is_error": True}
+    body = {
+        "version": WIRE_VERSION, "to": TO_MAIN, "worker_session_id": sender_session_id,
+        "message_id": str(uuid.uuid4()), "sender_session_id": sender_session_id,
+        "text": text, "urgent": bool(urgent), "known_completion_id": None,
+    }
+    try:
+        answer = await _send_message(parent["device_id"], body)
+    except Exception as exc:  # noqa: BLE001 — refused or unreachable: say which
+        return {"text": _message_refusal(exc, who=who, where=where), "is_error": True}
+    status = answer.get("status") if isinstance(answer, dict) else None
+    if status not in (agent_messaging.DELIVERED, agent_messaging.QUEUED, agent_messaging.HELD):
+        return _invalid_answer(who, where)
+    return {"text": agent_messaging.delivery_receipt(who, status)["text"], "is_error": False}
+
+
+async def reopen(dispatch: Mapping[str, Any], completion_id: str) -> bool:
+    """A message resumed a child whose report ``completion_id`` came back.
+
+    Tracked again like a running background Task (registry records, launch
+    key, supervisor, card back to running) until its next report. False when
+    that report is no longer the current one (already reopened, or the next
+    report beat the message's answer).
+    """
+    async with _tracking_lock(dispatch["worker_session_id"]):
+        return await _reopen_locked(dispatch, completion_id)
+
+
+async def _reopen_locked(dispatch: Mapping[str, Any], completion_id: str) -> bool:
+    from app.core.task_registry import task_registry
+    from app.core.turn_recorder import record_task_start_frame
+    from app.db import remote_tasks
+
+    worker_id = dispatch["worker_session_id"]
+    root = dispatch["root_session_id"]
+    owner = dispatch["owner_session_id"]
+    if not await asyncio.to_thread(remote_tasks.reopen_dispatch, worker_id, completion_id):
+        return False
+    for session_id in dict.fromkeys((root, owner)):
+        await task_registry.ensure_hydrated(session_id)
+    record = task_registry.get_task(root, worker_id, durable=True)
+    if record is not None and record.get("status") == "killed":
+        # Stopped here: it stays stopped; a report it still sends wakes nobody.
+        return True
+    target = dispatch["target_device_id"]
+    name = worker_display_name(target)
+    label = dispatch.get("label") or "Task worker"
+    for session_id in dict.fromkeys((root, owner)):
+        task_registry.resume_task(session_id, worker_id)
+        task_registry.start_task(session_id, worker_id, "agent", label, remote_device_id=target,
+                                 worker_name=name)
+    task_registry.mark_background_launch(owner, worker_id)
+    cursor = await asyncio.to_thread(_child_cursor, worker_id)
+    await _follow(worker_id=worker_id, target_device_id=target, root_session_id=root, label=label,
+                  provider_id=None, model_id=None,
+                  agent_name=(record or {}).get("agent") or dispatch.get("agent"), prompt=None,
+                  launch_tool_use_id=dispatch.get("tool_use_id"), resume_cursor=cursor)
+    # The card's chip goes back to running, as for a local continuation.
+    await record_task_start_frame(root, worker_id, description=label, summary=label,
+                                  tool_use_id=worker_id)
+    return True
+
+
+def _parse_message(body: Mapping[str, Any]) -> Dict[str, Any]:
+    if not isinstance(body, dict) or body.get("version") != WIRE_VERSION:
+        raise ValueError("Unsupported message version; update this worker.")
+    unknown = set(body) - _MESSAGE_KEYS
+    if unknown:
+        raise ValueError(f"Unknown message fields: {', '.join(sorted(unknown))}")
+    if body.get("to") not in (TO_CHILD, TO_MAIN):
+        raise ValueError("to must be child or main")
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_MESSAGE_CHARS:
+        raise ValueError(f"text must be a non-empty string of at most {MAX_MESSAGE_CHARS} characters")
+    if not isinstance(body.get("urgent", False), bool):
+        raise ValueError("urgent must be true or false")
+    known = body.get("known_completion_id")
+    if known is not None and (not isinstance(known, str) or len(known) > 200):
+        raise ValueError("known_completion_id must be a string")
+    return {
+        "to": body["to"],
+        "worker_session_id": _text(body, "worker_session_id", 64),
+        "message_id": _text(body, "message_id", 100),
+        "sender_session_id": _text(body, "sender_session_id", 200),
+        "text": defang_harness_markers(text),
+        "urgent": bool(body.get("urgent")),
+        "known_completion_id": known,
+    }
+
+
+_STOPPED_CHILD = "it was stopped on this worker, and a message cannot restart it"
+
+
+async def _message_child(msg: Mapping[str, Any], from_device: str) -> Dict[str, Any]:
+    """Target side: a message from the worker that started this child."""
+    from app.core import agent_messaging, provider_agent, turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.db import remote_tasks
+
+    worker_id = msg["worker_session_id"]
+    child = await asyncio.to_thread(remote_tasks.get_child, worker_id)
+    if child is None or child["parent_device_id"] != from_device:
+        raise PermissionError("No subagent with this id was started here by the asking worker.")
+    owed = await asyncio.to_thread(report_owed, worker_id) or {}
+    if msg["sender_session_id"] not in {owed.get("parent_session_id"), owed.get("owner_session_id")}:
+        raise PermissionError("Only the conversation that started this subagent can message it.")
+    report = child.get("report") if isinstance(child.get("report"), dict) else {}
+    # ``stop_requested_at`` is the parent's durable stop (S8): it outlives the
+    # in-memory latch, so a restart here does not let a message resume it.
+    if (task_registry.is_user_stopped(worker_id) or report.get("status") == "stopped"
+            or child.get("stop_requested_at")):
+        raise ValueError(_STOPPED_CHILD)
+    if child["state"] == remote_tasks.RUNNING:
+        status, turn_id = await agent_messaging.deliver_message(
+            worker_id, msg["sender_session_id"], msg["text"], urgent=msg["urgent"])
+        if status == agent_messaging.STOPPED:
+            raise ValueError(_STOPPED_CHILD)
+        return {"status": status, "turn_id": turn_id}
+    if child["state"] == remote_tasks.OWED and child.get("completion_id") != msg["known_completion_id"]:
+        raise ValueError("it just finished and its report is still on its way to you; send the "
+                         "message again after that report arrives")
+    error = await agent_messaging.resume_unavailable(
+        worker_id, {"status": _RESUMABLE.get(report.get("status"), "completed")})
+    if error:
+        raise ValueError(f"it cannot be resumed: {error}")
+    # Known as a worker again, so its settle hook owes the new report at once.
+    provider_agent.register_worker_session(worker_id)
+    turn_id = await turn_scheduler.on_agent_message(
+        worker_id, msg["sender_session_id"], msg["text"], urgent=True)
+    if not turn_id or turn_id == turn_scheduler.HELD:
+        raise ValueError(_STOPPED_CHILD)
+    # After the turn exists: a report owed from here on is the resumed run's.
+    if not await asyncio.to_thread(remote_tasks.resume_child, worker_id, from_device,
+                                   msg["known_completion_id"]):
+        logger.warning("remote_task: resumed %s, but its report row did not reopen", worker_id)
+    return {"status": RESUMED, "turn_id": turn_id}
+
+
+async def _message_main(msg: Mapping[str, Any], from_device: str) -> Dict[str, Any]:
+    """Parent side: a child this worker sent elsewhere messages ``main``."""
+    from app.core import agent_messaging
+    from app.db import database, remote_tasks
+
+    worker_id = msg["worker_session_id"]
+    dispatch = await asyncio.to_thread(remote_tasks.get_dispatch, worker_id)
+    if (dispatch is None or dispatch["target_device_id"] != from_device
+            or msg["sender_session_id"] != worker_id):
+        raise PermissionError("No subagent with this id was sent to the asking worker.")
+    owner = dispatch["owner_session_id"]
+    if await asyncio.to_thread(database.get_session, owner) is None:
+        raise ValueError("the conversation that started it no longer exists")
+    status, turn_id = await agent_messaging.deliver_message(
+        owner, worker_id, msg["text"], urgent=msg["urgent"])
+    if status == agent_messaging.STOPPED:
+        raise ValueError("main was stopped by the owner")
+    return {"status": status, "turn_id": turn_id}
+
+
+async def handle_task_message(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    """``task-message`` control action, both directions.
+
+    Only the worker at the other end of this child may send: the one that
+    started it (``to: child``) or the one running it (``to: main``). A message
+    id is applied once; a retry gets the first answer back with
+    ``duplicate: true``.
+    """
+    from app.db import remote_tasks
+    from app.db.async_database import run_sync
+
+    await run_sync(_require_worker_member, from_device)
+    msg = _parse_message(body)
+    async with _message_lock(msg["message_id"]):
+        seen = await run_sync(remote_tasks.message_answer, msg["message_id"])
+        if seen is not None:
+            if (seen["from_device_id"] != from_device
+                    or seen["worker_session_id"] != msg["worker_session_id"]):
+                raise ValueError("This message id was already used for another message.")
+            return {**seen["answer"], "duplicate": True}
+        if msg["to"] == TO_CHILD:
+            answer = await _message_child(msg, from_device)
+        else:
+            answer = await _message_main(msg, from_device)
+        await run_sync(
+            remote_tasks.record_message, msg["message_id"], worker_session_id=msg["worker_session_id"],
+            from_device_id=from_device, direction=msg["to"], answer=answer,
+            resume_turn_id=answer.get("turn_id") if answer.get("status") == RESUMED else None)
+        return {**answer, "duplicate": False}
