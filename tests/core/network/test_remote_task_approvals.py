@@ -143,6 +143,11 @@ def responder(decision):
 
 
 async def finish_ask(a, ask, held):
+    # A accepts the answer on another thread and hands it to ``held`` with
+    # ``call_soon_threadsafe``. When the proxy finished while ``answer`` was
+    # still running, this coroutine can get here in the same loop pass, before
+    # that callback ran: wait for the answer, or nothing would release it.
+    await until(lambda: held)
     with a.active():
         release(held)
         return await asyncio.wait_for(ask, 10)

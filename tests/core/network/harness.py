@@ -9,6 +9,7 @@ engine code runs unmodified for whichever worker is "current".
 from __future__ import annotations
 
 import contextlib
+import contextvars
 from typing import List, Optional
 from unittest.mock import patch
 
@@ -16,6 +17,10 @@ from app.core.config import settings
 from app.db import base, database
 from app.network import engine, identity
 from tests.pg_shim import ShimConnection, close_connection, new_sqlite_connection
+
+#: The worker whose ``active()`` block the current context runs in; copied into
+#: tasks and ``asyncio.to_thread`` calls, so their database reads stay on it.
+_ACTIVE: contextvars.ContextVar[Optional["Worker"]] = contextvars.ContextVar("network_worker", default=None)
 
 
 class Worker:
@@ -39,16 +44,28 @@ class Worker:
     @contextlib.contextmanager
     def active(self):
         def _conn():
-            return self.shim
+            # The patch below is process-wide, but work that ``asyncio.to_thread``
+            # started under this worker may still be running in a pool thread
+            # when the loop thread switches to the other worker (a mock HTTP
+            # call serves its request as the receiving worker, synchronously).
+            # Such a thread carries the context it was started in, so it keeps
+            # reading its own worker's database instead of the other one's.
+            return (_ACTIVE.get() or self).shim
         with patch.object(base, "get_connection", _conn), patch.object(database, "get_connection", _conn), \
                 patch.object(settings, "data_dir", self.data_dir), \
                 patch.object(settings, "fluid_skills_dir", str(self.data_dir / "fluid" / "skills")):
             outer_identity, outer_context = identity._cached, engine._context
             identity._cached = self.identity
             engine._context = self.context
+            outer_active = _ACTIVE.get()
+            token = _ACTIVE.set(self)
             try:
                 yield self
             finally:
+                try:
+                    _ACTIVE.reset(token)
+                except ValueError:  # exited in another context than it was entered in
+                    _ACTIVE.set(outer_active)
                 self.identity = identity._cached
                 self.context = engine._context
                 # Nesting-safe: hand the globals back to whichever worker was active before.
