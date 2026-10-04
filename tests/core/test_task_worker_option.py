@@ -181,6 +181,14 @@ def test_task_schema_offers_worker_only_with_other_workers(mock_db, monkeypatch)
     text = worker["description"]
     assert "Laptop (darwin, display); OldBox (linux, no display, older release that cannot run remote " \
            "subagents); Unraid (linux, no display, Claude CLI signed in)" in text
+    # What the merged remote slices do: background only, approvals in the
+    # parent, questions and private access held back, messages reach it.
+    assert "always runs in the background" in text
+    assert "the project must be checked out there" in text
+    assert "answers its approval prompts in the parent conversation" in text
+    assert "questions and private-access requests are held back and listed in its report" in text
+    assert "SendMessage reaches it there" in text
+    assert "held back, not granted" not in text
     # Online state stays out so a worker going offline does not rewrite the prefix.
     assert "offline" not in text.replace("unknown or offline", "")
     # The rest of the contract is unchanged.

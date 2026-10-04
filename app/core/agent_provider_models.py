@@ -563,12 +563,15 @@ def task_worker_property() -> dict[str, Any] | None:
             f"on, by exact name or device id. Other workers: {listed}. Name "
             "this worker to run here; omitted, it runs here unless the owner "
             "set a default worker for the assistant. An unknown or offline "
-            "worker is refused, never replaced by this one. There it runs in "
-            "its own checkout of this project (committed work only), with that "
-            "worker's own logins and no private-access grants, and approvals "
-            "it needs are held back, not granted. Its report comes back to you "
-            "automatically when it finishes. Agents defined in files or plugins "
-            "run only here."
+            "worker is refused, never replaced by this one. There it always "
+            "runs in the background, in its own checkout of this project "
+            "(committed work only; the project must be checked out there), with "
+            "that worker's own logins and no private-access grants. The owner "
+            "answers its approval prompts in the parent conversation; its "
+            "questions and private-access requests are held back and listed in "
+            "its report. Its report comes back to you automatically when it "
+            "finishes; SendMessage reaches it there. Agents defined "
+            "in files or plugins run only here."
         ),
     }
 

@@ -44,6 +44,148 @@ tasks were interrupted. An interrupted worker keeps its task id and transcript:
 Interrupted Monitor commands are not restarted; run them again if they are still
 needed.
 
+## Running a subagent on another worker
+
+When your account has more than one worker in its
+[worker network](/docs/features/worker-network), a Task subagent can run on
+another worker. Ask for it in plain words ("run this on Unraid"); the agent
+names the worker in its Task call. Each Swarm task can name a worker too. The
+subagent is still part of the chat that started it: it reports back there, you
+can message and stop it from there, and its approval prompts appear there.
+
+### Setting a default for the assistant
+
+The **Run work on** row in the Limits section of the Assistant page sets where
+the personal assistant's background jobs run. It applies to Task and Swarm work
+started by the assistant's conversation and by the jobs it starts, on the worker
+whose page you set it on. Ordinary chats never use it. A worker that is offline
+or needs an update is shown but cannot be picked.
+
+If the chosen worker cannot take a job (it went offline, runs an older release,
+or refused before anything started), the job runs on the assistant's own worker
+instead and the agent is told why. A worker the agent names itself is never replaced: if it
+cannot take the job, the call is refused.
+
+### What it needs
+
+- **Both workers online and up to date.** A worker on an older release is
+  refused with a request to update it.
+- **The project checked out on that worker,** from the same Git remote. The
+  subagent's branch moves between workers through that remote, so both workers
+  need to be able to push and fetch there with their own Git credentials.
+  Nothing is cloned for you.
+- **A login on that worker** for the subagent's provider, and a model that
+  worker can serve. If one is missing, the start is refused. It never switches
+  to another provider or model.
+- **An agent stored in the app.** Agents defined in files or plugins run only on
+  the worker that started them.
+- **A chat you own.** Sessions started with an API key, and the assistant's
+  background observation, cannot run a subagent on another worker.
+
+A subagent running on another worker can start its own subagents only on that
+worker.
+
+### What travels and what does not
+
+- **The brief** travels, up to 50,000 characters. A longer one is refused, never
+  cut.
+- **The permission mode** is a ceiling, not a grant. The subagent runs at the
+  strictest of the parent's mode, the mode set on its agent, and the most that
+  worker allows (`REMOTE_TASK_MAX_PERMISSION_MODE`, default
+  `bypassPermissions`). The start receipt names the mode it got.
+- **Credentials** do not travel. The subagent uses the logins and provider keys
+  on the worker that runs it.
+- **Private-access grants** do not travel. The subagent has none, and the
+  parent's grants are not passed on.
+- **Memory and skills** are the copies on that worker. The network syncs saved
+  facts and skills between workers, so they match once sync has caught up.
+- **The worktree** does not travel. Your committed work does: the subagent gets
+  its own checkout on that worker, on a `task/<id>` branch at the parent's last
+  commit. Uncommitted changes in the parent's checkout are not copied.
+  Read-only research agents use that worker's checkout of the project
+  read-only. Without a project, the subagent runs in that worker's workspace.
+  Paths never travel.
+
+### While it runs
+
+A subagent on another worker always runs in the background, even when the agent
+asked to wait for it. Its progress card follows its transcript as it syncs from
+that worker, and `TaskList`, `TaskGet` and `ListAgents` show which worker runs
+it. When it finishes, the chat that started it is woken with its report, the
+same as for a local subagent.
+
+**Commits come back.** When it finishes with commits, the worker that ran it
+pushes its `task/<id>` branch to the Git remote, never forced. The parent's
+worker then fetches it, so `git log task/<id>` works there. The parent's working
+tree, index and current branch are not touched. Uncommitted changes the subagent
+left behind are counted in the report, never committed. The report ends with a
+short "Git:" note saying where the work is, or why it was not pushed or fetched.
+
+**Stop.** Stopping the subagent reaches it on the worker that runs it: its stop
+button in the chat's background tasks, Stop on the parent chat, Swarm cancel and
+deleting the parent chat all do. If that worker is unreachable, the stop is kept and sent again when it
+answers. A worker on an older release cannot be stopped this way and says so. A
+stopped subagent refuses later messages, so it is never restarted by accident.
+
+**Messages both ways.** `SendMessage` reaches a subagent on another worker the
+same way it reaches a local one. A busy subagent reads the message at its next
+tool result. One that is waiting on background work holds it until it next
+wakes, unless the message is urgent. A finished subagent is resumed over its own
+transcript and reports again. The subagent can also message `main`, the chat
+that started it. A message is refused, with the reason, when the subagent was
+stopped, when its worker is unreachable or runs an older release, or, for the
+assistant's subagents, when its daily spending limit has been reached. "Queued"
+and "held" are never reported as delivered.
+
+### Approvals
+
+When the subagent needs your permission, the prompt appears in the parent chat
+on the parent's worker, with the worker's name on the card (for example "Task ·
+Default on Unraid"). When the parent is the assistant's conversation, the
+assistant asks you in plain words instead, as for its other work.
+
+- Only "allow once" or "deny" goes back to the subagent. If you choose
+  "always allow", that call is allowed once and the rule is saved on the
+  parent's side only. Rules saved on the parent never answer the subagent's
+  prompts: a person decides each one.
+- Anything that goes wrong denies, never allows: no answer in time, the parent
+  unreachable or on an older release, or Stop on either worker. A prompt that
+  nobody answered in time is listed in the subagent's report.
+- Questions and private-access requests from the subagent are not passed on.
+  They are held back and listed in its report.
+
+### Spend limits
+
+The assistant's **Daily spending limit** and **Longest background job** count
+work on other workers: Task subagents and chats the assistant started there.
+The parent's worker asks the other worker for each job's running cost about once
+a minute, so remote cost can show up a little late. When a limit is reached, a
+remote subagent is stopped the same way Stop stops it, and a new remote Task is
+refused before anything is sent. Cost spent while a worker was unreachable is
+counted when it answers again.
+
+### When a worker goes quiet or restarts
+
+- **The 30-minute notice.** If the worker running a subagent has not answered
+  for 30 minutes, the chat that started it gets one notice: it stopped waiting,
+  and the subagent may still be running there. Nothing is sent to that worker.
+  Time while the parent's own worker was down does not count, and after a parent
+  restart the 30 minutes start again. Open approval prompts from that subagent
+  are withdrawn; if its worker comes back with the subagent still running, its
+  next prompts are shown again.
+- **Late reports.** If the worker comes back and the subagent finishes, its
+  report is still kept, and the chat is woken once more with the real outcome.
+  Messages to it are delivered again once its worker answers.
+- **Known limit:** after the notice, Stop in the parent chat no longer reaches
+  the subagent. Swarm cancel and the spend limits still do.
+- **The subagent's worker restarts.** The run is cut off. When that worker
+  starts again, it reports the run as failed, says it restarted, and includes
+  the subagent's last words marked "(unfinished)". Continue it with
+  `SendMessage` once that worker is back.
+- **The parent's worker restarts.** The parent keeps its record of the subagent,
+  and its card, prompts and status checks come back at startup. A report sent
+  while the parent was down is sent again until the parent accepts it.
+
 ## Independent top-level orchestration
 
 Agents can coordinate relevant work without a parent/subagent relationship:
@@ -114,7 +256,9 @@ unchanged.
 A chat started on another worker cannot send its approvals back, so it runs in
 Away mode there: approvals are deferred, never granted, and listed in its report
 for you to approve in that chat. Both workers need this release; an older worker
-starts the chat but it will not report back.
+starts the chat but it will not report back. Task subagents on another worker
+work differently: see
+[Running a subagent on another worker](#running-a-subagent-on-another-worker).
 
 ## Session organization
 

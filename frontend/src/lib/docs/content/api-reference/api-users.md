@@ -168,7 +168,7 @@ Every API key acts only on the sessions it started. It cannot read, continue, st
 - `/ws/sessions/{session_id}` closes with `4003` (`4004` for an unknown id).
 - Voice call routes return `403` (see [Voice](/docs/api-reference/voice#call-control)).
 
-Worker sessions an agent starts (Task workers and the workers a voice call hands work to) belong to whoever owns the session that started them, and run as that caller. A worker started from a key's session runs with the key's tools and credentials, like a session the key started itself, and a worker on an agent outside the key's assigned agents is refused. A permission answer from an API key never creates an agent-wide rule; `remember: "profile"` is kept to that session.
+Worker sessions an agent starts (Task workers and the workers a voice call hands work to) belong to whoever owns the session that started them, and run as that caller. A worker started from a key's session runs with the key's tools and credentials, like a session the key started itself, and a worker on an agent outside the key's assigned agents is refused. A key's sessions cannot run a subagent on another worker. A permission answer from an API key never creates an agent-wide rule; `remember: "profile"` is kept to that session.
 
 ### Other data a key cannot reach
 
