@@ -186,7 +186,7 @@ def test_child_starts_on_the_target_in_its_own_checkout_and_owes_its_report(worl
     assert result["mode"] == "remote" and result["worker"] == {"device_id": TARGET, "name": "Unraid"}
     child_id = result["worker_session_id"]
     assert "you will be woken with its report when it finishes" in result["note"]
-    assert "held back there (never granted)" in result["note"]
+    assert "Approvals it needs are shown to the owner in this conversation" in result["note"]
     [(_, action, body)] = calls
     assert action == remote_task.TASK_START_ACTION and body["worker_session_id"] == child_id
 

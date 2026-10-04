@@ -567,7 +567,11 @@ async def teardown_worker(
     await _settle_card(record, preview, summary)
 
     outcome = "remote"
-    if not record.remote_device_id:
+    if record.remote_device_id:
+        # Its proxy approval prompts live here; cancelling them denies the
+        # waiting tool calls on its worker (remote_task_approvals).
+        await _cancel_worker_prompts(record)
+    else:
         outcome = await _kill_worker_session(record.worker_session_id, reason=reason)
         # AFTER the kill, so the runtime has stopped appending to the event log
         # the flush reads, and BEFORE the registry row goes terminal, so the

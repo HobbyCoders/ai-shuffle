@@ -46,10 +46,10 @@ under a new completion id) and the child reaches its ``main``. A stopped child
 refuses a message on both workers, so it is never resumed.
 
 Not here yet (later slices of docs/reviews/cross-worker-subagents-2026-10-03.md):
-approval routing (S10) and the notice after a long silence (S12, from
-``remote_tasks.unreachable_since``). Until S10 a remote child runs with Away
-handling: an approval it needs is deferred, never granted, and listed in its
-final reply.
+the notice after a long silence (S12, from ``remote_tasks.unreachable_since``).
+A remote child's permission prompts are shown in the parent conversation
+(``remote_task_approvals``); its questions and private-access requests still
+get Away handling there: deferred, never granted, and listed in its report.
 """
 from __future__ import annotations
 
@@ -413,8 +413,8 @@ def remote_receipt(answer: Mapping[str, Any], *, worker: Mapping[str, Any], work
                "worker is not supported yet. " if mode == "sync" else "")
             + "End the turn now unless you have genuinely disjoint work; you will be woken with "
             "its report when it finishes, even if that worker is briefly unreachable. "
-            "TaskList/TaskGet show it with its worker. Approvals it needs are held back there "
-            "(never granted) and listed in its report."
+            "TaskList/TaskGet show it with its worker. Approvals it needs are shown to the owner "
+            "in this conversation; one nobody answers in time is denied and listed in its report."
         ),
     }
 
@@ -733,8 +733,8 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
     try:
         with transaction() as conn:
             database.create_session(**fields, _conn=conn)
-            # Approvals cannot travel back yet (S10): Away handling defers
-            # them, never grants them, and the child lists them in its reply.
+            # Permission prompts travel to the parent (remote_task_approvals);
+            # Away handling still defers what cannot (private-access requests).
             conn.cursor().execute(
                 "UPDATE sessions SET away_mode=TRUE, branch=%s WHERE id=%s",
                 (checkout.branch if checkout else None, start.worker_session_id))
@@ -1193,6 +1193,9 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
                         key, owner)
         await run_sync(remote_tasks.mark_delivered, key, completion_id=report.completion_id,
                        status=report.status, report_path=path)
+        from app.core import remote_task_approvals
+
+        await run_sync(remote_task_approvals.drop_proxies, report.dispatch["root_session_id"], key)
         return {"delivered": True, "duplicate": False}
 
 
@@ -1534,6 +1537,9 @@ async def tracking_loop() -> None:
         try:
             if not reattached:
                 await reattach_all()
+                from app.core import remote_task_approvals
+
+                await remote_task_approvals.restore_proxies()
                 reattached = True
             await deliver_stops()
             await check_targets()
@@ -1682,6 +1688,13 @@ async def stop_remote_child(worker_id: str, target_device_id: str, *, reason: st
     except Exception:  # noqa: BLE001 — still try to reach it once
         logger.warning("remote_task: could not record the stop of %s", worker_id, exc_info=True)
         row = None
+    if row is not None:
+        # Every stop path comes here (Swarm cancel may have no supervisor
+        # record): its open approval prompts on this worker are withdrawn, and
+        # their tool calls on the target are denied.
+        from app.core import remote_task_approvals
+
+        await asyncio.to_thread(remote_task_approvals.drop_proxies, row["root_session_id"], worker_id)
     owner = (row or {}).get("owner_session_id")
     if owner and owner != (row or {}).get("root_session_id"):
         with contextlib.suppress(Exception):

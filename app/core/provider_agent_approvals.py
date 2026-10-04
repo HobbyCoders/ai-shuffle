@@ -409,6 +409,36 @@ def _assistant_confirm(
         return None
 
 
+async def _remote_parent(
+    kwargs: Dict[str, Any], route: Optional[WorkerApprovalRoute],
+) -> Any:
+    """The answer from another worker when the prompt's owner is a Task child
+    that worker dispatched here (``remote_task_approvals``), else None.
+
+    Covers the remote child itself and a local worker under it, whose prompt
+    is passed one level further up. Any failure denies; it never allows.
+    """
+    from app.core import remote_task_approvals
+
+    from app.core.provider_agent import is_worker_session
+
+    child = route.parent_session_id if route is not None else kwargs.get("session_id")
+    if not child or not is_worker_session(child):
+        return None  # an ordinary chat: no thread hop, no database read
+    owed = await asyncio.to_thread(remote_task_approvals.remote_child, child)
+    if owed is None:
+        return None
+    try:
+        return await remote_task_approvals.ask_parent(
+            kwargs, owed, child_session_id=child,
+            asker=route.display_label if route is not None else None)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — a tool call must always resolve
+        logger.exception("Remote approval for %s failed", child)
+        return PermissionResultDeny(message=ROUTE_FAILURE_MESSAGE)
+
+
 async def route_permission(kwargs: Dict[str, Any], request_fn: Callable) -> Any:
     """Raise a permission prompt, on the parent when the caller is a worker.
 
@@ -423,6 +453,9 @@ async def route_permission(kwargs: Dict[str, Any], request_fn: Callable) -> Any:
     ``request_permission``'s own arms.
     """
     route = get_route(kwargs.get("session_id"))
+    remote = await _remote_parent(kwargs, route)
+    if remote is not None:
+        return remote
     assistant = await asyncio.to_thread(assistant_route, kwargs.get("session_id"), route)
     if assistant is not None:
         route = assistant
