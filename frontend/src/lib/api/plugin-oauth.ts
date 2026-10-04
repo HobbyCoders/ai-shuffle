@@ -11,6 +11,16 @@ export type SignInState = 'not_configured' | 'signed_out' | 'signed_in' | 'needs
 /** Where the OAuth client comes from; absent on workers that predate the field. */
 export type ClientSource = 'owner' | 'plugin' | 'registered' | 'none';
 
+/**
+ * Whether a sign-in returns through the account hub's fixed address
+ * (`relay_uri`). Only a client the plugin ships uses it: `not_used` for
+ * every other source, `unavailable` when this worker can't use it.
+ */
+export type RelayUse = 'used' | 'not_used' | 'unavailable';
+
+/** Why the relay is `unavailable`, checked in this order; `''` otherwise. */
+export type RelayReason = 'not_linked' | 'insecure_address' | 'not_configured' | '';
+
 export interface ServiceSignIn {
 	plugin_id: string;
 	service: string;
@@ -37,6 +47,11 @@ export interface ServiceSignIn {
 	/** Declared access: `read` (GET and HEAD) or `write`. */
 	access?: 'read' | 'write';
 	authorize_host?: string;
+	/** Where the provider sends the browser back: `relay_uri` when the relay is used, else the worker's own address. */
+	return_address?: string;
+	/** Absent on workers that predate the relay: the screens behave as before. */
+	relay?: RelayUse;
+	relay_reason?: RelayReason;
 }
 
 export interface PluginSignInStatus {
@@ -45,6 +60,10 @@ export interface PluginSignInStatus {
 	enabled: boolean;
 	/** This worker's return address as the current browser reaches it. */
 	redirect_uri: string;
+	/** The hub's fixed return address (`''` when it isn't configured); absent on older workers. */
+	relay_uri?: string;
+	/** Linked to an account and reached at an address the relay can return to. */
+	relay_available?: boolean;
 	services: ServiceSignIn[];
 }
 
@@ -53,6 +72,10 @@ export interface SignInStart {
 	flow_id: string;
 	redirect_uri: string;
 	expires_in: number;
+	/** The sign-in returns through the hub (`redirect_uri` is then `relay_uri`); absent on older workers. */
+	relayed?: boolean;
+	/** The worker's own origin, where the hub sends the browser on to. */
+	return_origin?: string;
 }
 
 /** What the callback page posts to the window that opened it. */

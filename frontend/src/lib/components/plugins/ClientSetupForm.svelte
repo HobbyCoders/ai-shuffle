@@ -18,11 +18,16 @@
 		redirectUri: string;
 		/** The owner's current client id, when replacing one. */
 		currentClientId?: string;
+		/**
+		 * The plugin ships a client this worker can't use (its sign-in would
+		 * return through the account hub): the owner registers their own app.
+		 */
+		ownApp?: boolean;
 		disabled?: boolean;
 		onSaved: (status: ServiceSignIn) => void;
 	}
 
-	let { plugin, service, redirectUri, currentClientId = '', disabled = false, onSaved }: Props = $props();
+	let { plugin, service, redirectUri, currentClientId = '', ownApp = false, disabled = false, onSaved }: Props = $props();
 	const uid = $props.id();
 
 	let clientId = $state('');
@@ -76,7 +81,7 @@
 				<code aria-labelledby="{uid}-ret">{redirectUri}</code>
 				<button type="button" class="cs-btn" onclick={copy} aria-label="Copy return address">{copied ? 'Copied' : 'Copy'}</button>
 			</div>
-			<span class="cs-help">Add this to the provider</span>
+			<span class="cs-help">{ownApp ? 'Add this to your own app at the provider' : 'Add this to the provider'}</span>
 		</li>
 		<li>
 			<label class="cs-field">

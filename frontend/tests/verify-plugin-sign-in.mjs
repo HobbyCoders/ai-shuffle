@@ -5,7 +5,11 @@
 // `plugin-oauth` message the worker's page posts), the focus fallback when no
 // message arrives, inline sign-out, and the manual client setup. Desktop and
 // a 390px phone width; at 390 the mobile shell's stylesheet is applied too.
-// Nothing reaches a real worker or provider: the API is answered here.
+// The account hub relay too: a plugin's own client returning through the
+// hub (a local stand-in for its "Finish signing in" page), and every reason
+// the relay is unavailable. Nothing reaches a real worker, provider or the
+// hub: the API is answered here and any request to hobbycoders.com is
+// aborted and counted (the run fails if one is made).
 //
 // Run from frontend/ while the fixtures are serving:
 //   npx vite dev --config tests/vite.plugin-sign-in.config.js --host 127.0.0.1 --port 6931 --strictPort
@@ -33,6 +37,13 @@ const mobileCss = readFileSync(new URL('../../mobile/src/mobile.css', import.met
 const PLUGIN = 'dns-reader@mp';
 const CALLBACK = '/api/v1/plugins/oauth/callback';
 const SECRET = 'fixture-only-client-secret';
+// The hub's fixed return address as the worker reports it (display only),
+// and the local stand-in the fake provider actually sends the browser to.
+const RELAY_URI = 'https://hobbycoders.com/browser/plugin-oauth/callback';
+const HUB_STAND_IN = 'https://hub.relay.test/browser/plugin-oauth/callback';
+const RELAY_UNAVAILABLE = 'Signing in with this plugin\'s own app needs this worker connected to your AI Shuffle account (Settings > Account). You can also enter your own OAuth client.';
+const HUB_FAILED = 'The AI Shuffle account service could not be reached or needs an update. Try again shortly.';
+const INVALID_REDIRECT = 'The sign-in return address must be an https:// address (or http on this computer).';
 
 const entry = (overrides = {}) => ({
 	// The PR #1762 shape: client_source, plugin_client_id and registration_url.
@@ -53,6 +64,13 @@ const pluginInfo = {
 	],
 };
 
+/** A service using the plugin's shipped client, as a worker with the relay reports it. */
+const relayEntry = (overrides = {}) => entry({
+	client_configured: false, client_id: '', client_source: 'plugin', plugin_client_id: 'dns-reader-public-client',
+	relay: 'used', relay_reason: '', return_address: RELAY_URI, ...overrides,
+});
+const unavailableEntry = (relay_reason) => relayEntry({ relay: 'unavailable', relay_reason, return_address: `${origin}${CALLBACK}` });
+
 let passed = 0;
 
 /** Where the worker takes the client from, as app/core/plugin_oauth.client_source does. */
@@ -60,9 +78,27 @@ const sourceOf = (s) => (s.client_configured ? 'owner' : s.plugin_client_id ? 'p
 
 /** The fake worker and provider for one browser context. `w` is the scenario's world. */
 async function fake(context, w) {
+	// The real hub is never contacted.
+	await context.route((u) => u.hostname === 'hobbycoders.com' || u.hostname.endsWith('.hobbycoders.com'), (route) => {
+		w.hubRequests++;
+		return route.abort();
+	});
+	// A stand-in for the hub's relay page: no script, one link on to the worker's own callback.
+	await context.route((u) => u.hostname === 'hub.relay.test', (route) => {
+		const query = new URL(route.request().url()).searchParams;
+		const code = query.get('code');
+		const next = new URLSearchParams(code ? { state: query.get('state'), code } : { state: query.get('state'), error: query.get('error') });
+		const target = `${origin}${CALLBACK}?${next}`;
+		const body = code
+			? `<h1>Finish signing in</h1><p>Continue to finish signing in to cloudflare (dash.cloudflare.com) on your worker Home.</p><a href="${target}">Continue to Home</a>`
+			: `<h1>Sign-in was cancelled</h1><p>Nothing was signed in.</p><a href="${target}">Return to AI Shuffle</a>`;
+		return route.fulfill({ contentType: 'text/html', body: `<!doctype html><meta charset="utf-8"><title>Hub</title>${body}` });
+	});
 	await context.route((u) => u.hostname === 'auth.provider.test', (route) => {
-		const state = new URL(route.request().url()).searchParams.get('state');
-		const back = `${origin}${CALLBACK}?state=${state}&${w.provider === 'deny' ? 'error=access_denied' : 'code=fixture'}`;
+		const asked = new URL(route.request().url()).searchParams;
+		const state = asked.get('state');
+		const to = asked.get('relay') ? HUB_STAND_IN : `${origin}${CALLBACK}`;
+		const back = `${to}?state=${state}&${w.provider === 'deny' ? 'error=access_denied' : 'code=fixture'}`;
 		return route.fulfill({ contentType: 'text/html', body: `<!doctype html><title>Provider</title><p>Signing in…</p><script>setTimeout(() => location.replace(${JSON.stringify(back)}), 150)</script>` });
 	});
 	await context.route((u) => u.pathname.startsWith('/api/'), async (route) => {
@@ -88,7 +124,9 @@ async function fake(context, w) {
 		if (path === '/chat-access/fixture-session/requests/r1') { w.requests = []; return route.fulfill({ json: { granted: true, saved: false } }); }
 		if (path === '/plugins/oauth/status') {
 			const only = url.searchParams.get('service');
-			return route.fulfill({ json: { plugin_id: PLUGIN, enabled: w.enabled, redirect_uri: `${origin}${CALLBACK}`, services: w.services.filter((s) => !only || s.service === only) } });
+			// relayFields: a worker with the relay (W1); without it, the PR #1762 shape.
+			const relay = w.relayFields ? { relay_uri: RELAY_URI, relay_available: w.services.every((s) => s.relay !== 'unavailable') } : {};
+			return route.fulfill({ json: { plugin_id: PLUGIN, enabled: w.enabled, redirect_uri: w.ownUri || `${origin}${CALLBACK}`, ...relay, services: w.services.filter((s) => !only || s.service === only) } });
 		}
 		if (path === '/plugins/oauth/start') {
 			if (!w.enabled) return route.fulfill({ status: 409, json: { detail: 'Turn this plugin on in Settings > Plugins before signing in to its services.' } });
@@ -100,7 +138,21 @@ async function fake(context, w) {
 				Object.assign(s, { state: 'not_configured', reason: 'registration_failed', client_source: 'none' });
 				return route.fulfill({ status: 409, json: { detail: 'The service did not accept automatic sign-in setup. Enter an OAuth client for it in Settings > Plugins.' } });
 			}
-			return route.fulfill({ json: { authorization_url: 'https://auth.provider.test/authorize?state=fixture-state', flow_id: 'flow-1', redirect_uri: `${origin}${CALLBACK}`, expires_in: 600 } });
+			if (s.relay === 'unavailable') {
+				if (s.relay_reason === 'insecure_address') return route.fulfill({ status: 400, json: { detail: INVALID_REDIRECT } });
+				return route.fulfill({ status: 409, json: { detail: RELAY_UNAVAILABLE } });
+			}
+			if (s.relay === 'used' && w.hub === 'unlinked') {
+				// The worker lost its account link after the status was read: 409, and
+				// the status now reads unavailable / not_linked.
+				Object.assign(s, { relay: 'unavailable', relay_reason: 'not_linked', return_address: `${origin}${CALLBACK}` });
+				return route.fulfill({ status: 409, json: { detail: RELAY_UNAVAILABLE } });
+			}
+			if (s.relay === 'used' && w.hub === 'down') return route.fulfill({ status: 502, json: { detail: HUB_FAILED } });
+			if (s.relay === 'used') {
+				return route.fulfill({ json: { authorization_url: 'https://auth.provider.test/authorize?state=fixture-state&relay=1', flow_id: 'flow-1', redirect_uri: RELAY_URI, expires_in: 600, relayed: true, return_origin: origin } });
+			}
+			return route.fulfill({ json: { authorization_url: 'https://auth.provider.test/authorize?state=fixture-state', flow_id: 'flow-1', redirect_uri: `${origin}${CALLBACK}`, expires_in: 600, ...(w.relayFields ? { relayed: false, return_origin: origin } : {}) } });
 		}
 		if (path === '/plugins/oauth/client' && method === 'PUT') {
 			const body = request.postDataJSON();
@@ -130,7 +182,7 @@ const request = { id: 'r1', kind: 'service', purpose: 'List the DNS records in t
 async function run(viewport, touch) {
 	const name = `${viewport.width}x${viewport.height}`;
 	const context = await browser.newContext({ viewport, isMobile: touch, hasTouch: touch, deviceScaleFactor: 1, serviceWorkers: 'block' });
-	const w = { sent: [], requests: [], services: [], enabled: true, provider: 'approve' };
+	const w = { sent: [], requests: [], services: [], enabled: true, provider: 'approve', hubRequests: 0 };
 	await fake(context, w);
 	const page = await context.newPage();
 	const errors = [];
@@ -155,7 +207,7 @@ async function run(viewport, touch) {
 		const el = selector ? document.querySelector(selector) : null;
 		return Math.max(doc, el ? el.scrollWidth - el.clientWidth : 0);
 	}, selector);
-	const reset = (services, extra = {}) => Object.assign(w, { sent: [], requests: [{ ...request }], services, enabled: true, provider: 'approve', registration: 'accept' }, extra);
+	const reset = (services, extra = {}) => Object.assign(w, { sent: [], requests: [{ ...request }], services, enabled: true, provider: 'approve', registration: 'accept', relayFields: false, ownUri: '', hub: 'up' }, extra);
 
 	// ── The access card ────────────────────────────────────────────────────
 	const openCard = async () => {
@@ -171,6 +223,12 @@ async function run(viewport, touch) {
 	const popupFrom = async (click) => {
 		const [popup] = await Promise.all([context.waitForEvent('page'), click()]);
 		return popup;
+	};
+	/** Follow the hub stand-in's one link; the worker's callback page then closes the window. */
+	const throughHub = async (popup, link) => {
+		const closed = popup.waitForEvent('close');
+		await popup.getByRole('link', { name: link }).click({ noWaitAfter: true });
+		await closed;
 	};
 
 	label = 'card signed out';
@@ -228,6 +286,7 @@ async function run(viewport, touch) {
 	await shippedSignIn.waitFor();
 	check(await card.getByText('Uses the plugin’s client').isVisible(), 'plugin client named');
 	check((await card.getByText('Set up manually').count()) === 0, 'no manual setup with a shipped client');
+	check((await card.getByText(/Returns through|confirm once/).count()) === 0, 'a worker without the relay fields shows no relay line');
 	check((await noOverflow('dialog.access-dialog')) <= 0, 'fits', await noOverflow('dialog.access-dialog'));
 	await shot('card-5b-plugin-client');
 	const shippedPopup = await popupFrom(() => (touch ? shippedSignIn.tap() : shippedSignIn.click()));
@@ -297,6 +356,88 @@ async function run(viewport, touch) {
 	await card.getByText(/sign-in settings are broken/).waitFor();
 	check((await noOverflow('dialog.access-dialog')) <= 0, 'fits', await noOverflow('dialog.access-dialog'));
 	await shot('card-10-invalid');
+
+	// ── The access card: the account hub relay ────────────────────────────
+	label = 'card relay used';
+	reset([relayEntry()], { relayFields: true });
+	card = await openCard();
+	const relaySignIn = card.getByRole('button', { name: 'Sign in with dash.cloudflare.com' });
+	await relaySignIn.waitFor();
+	check(await card.getByText('Returns through hobbycoders.com').isVisible(), 'returns-through line');
+	check(await card.getByText('Uses the plugin’s client').isVisible(), 'plugin client named');
+	check((await card.getByText('Set up manually').count()) === 0, 'no setup needed');
+	check((await noOverflow('dialog.access-dialog')) <= 0, 'fits', await noOverflow('dialog.access-dialog'));
+	await shot('card-11-relay-ready');
+	let hubPopup = await popupFrom(() => (touch ? relaySignIn.tap() : relaySignIn.click()));
+	await hubPopup.waitForURL((u) => u.hostname === 'hub.relay.test');
+	check(await card.getByText('Finish in the sign-in window. AI Shuffle asks you to confirm once on hobbycoders.com.').isVisible(), 'relayed waiting copy');
+	check(await card.getByRole('button', { name: 'Waiting…' }).isVisible(), 'waiting button');
+	check((await noOverflow('dialog.access-dialog')) <= 0, 'waiting fits', await noOverflow('dialog.access-dialog'));
+	await shot('card-12-relay-waiting');
+	await throughHub(hubPopup, 'Continue to Home');
+	await card.getByRole('button', { name: 'Grant access' }).waitFor();
+	check(await card.getByText('Signed in. Grant access to finish.').isVisible(), 'signed in through the hub');
+	check(await card.getByText('Returns through hobbycoders.com').isVisible(), 'line stays once signed in');
+	await shot('card-13-relay-signed-in');
+
+	label = 'card relay cancelled';
+	reset([relayEntry()], { relayFields: true, provider: 'deny' });
+	card = await openCard();
+	const relayAgain = card.getByRole('button', { name: 'Sign in with dash.cloudflare.com' });
+	await relayAgain.waitFor();
+	hubPopup = await popupFrom(() => relayAgain.click());
+	await hubPopup.waitForURL((u) => u.hostname === 'hub.relay.test');
+	await throughHub(hubPopup, 'Return to AI Shuffle');
+	await card.getByText('The sign-in was cancelled at the service. Nothing was changed.').waitFor();
+	check(await relayAgain.isVisible(), 'can try again');
+	await shot('card-14-relay-cancelled');
+
+	for (const [reason, text] of [
+		['not_linked', 'To use dns-reader’s app without setup, connect this worker to your AI Shuffle account in Settings › Account.'],
+		['insecure_address', 'Signing in needs this worker’s HTTPS address or a browser on this computer.'],
+		['not_configured', 'dns-reader’s app can’t be used on this worker because its AI Shuffle account address isn’t set up. You can enter your own client.'],
+	]) {
+		label = `card relay ${reason}`;
+		reset([unavailableEntry(reason)], { relayFields: true, ownUri: reason === 'insecure_address' ? `http://192.168.1.5:8000${CALLBACK}` : '' });
+		card = await openCard();
+		await card.getByText(text).waitFor();
+		check(await card.getByText(text).isVisible(), 'reason line');
+		check((await card.getByRole('button', { name: /Sign in with/ }).count()) === 0, 'no sign-in button');
+		check((await card.getByText(/Returns through|Uses the plugin’s client/).count()) === 0, 'the unusable client is not offered');
+		const setup = card.getByText('Set up manually');
+		check(!(await card.locator('details.ps-manual').evaluate((d) => d.open)), 'setup collapsed');
+		await shot(`card-15-${reason}`);
+		await setup.click();
+		check(await card.getByText(reason === 'insecure_address' ? `http://192.168.1.5:8000${CALLBACK}` : `${origin}${CALLBACK}`).isVisible(), 'the worker’s own return address');
+		check(await card.getByText('Add this to your own app at the provider').isVisible(), 'own-app hint');
+		check((await noOverflow('dialog.access-dialog')) <= 0, 'fits', await noOverflow('dialog.access-dialog'));
+		await shot(`card-16-${reason}-setup`);
+	}
+
+	label = 'card relay 409 at start';
+	reset([relayEntry()], { relayFields: true, hub: 'unlinked' });
+	card = await openCard();
+	const lost = card.getByRole('button', { name: 'Sign in with dash.cloudflare.com' });
+	await lost.waitFor();
+	await lost.click();
+	await card.getByText(/connect this worker to your AI Shuffle account/).waitFor();
+	check(await card.getByText('Set up manually').isVisible(), 'switches to the manual setup');
+	check((await card.getByRole('button', { name: /Sign in with/ }).count()) === 0, 'no sign-in button');
+	check(context.pages().length === 1, 'provider window closed');
+	await shot('card-17-relay-409');
+
+	label = 'card relay hub failed';
+	reset([relayEntry()], { relayFields: true, hub: 'down' });
+	card = await openCard();
+	const down = card.getByRole('button', { name: 'Sign in with dash.cloudflare.com' });
+	await down.waitFor();
+	await down.click();
+	await card.getByText(HUB_FAILED).waitFor();
+	check(await card.getByText('Set up manually').isVisible(), 'manual setup offered');
+	check(await down.isVisible(), 'can try again');
+	check(context.pages().length === 1, 'provider window closed');
+	check((await noOverflow('dialog.access-dialog')) <= 0, 'fits', await noOverflow('dialog.access-dialog'));
+	await shot('card-18-relay-hub-failed');
 
 	// ── Settings > Plugins > Connections ───────────────────────────────────
 	const openSettings = async () => {
@@ -383,7 +524,66 @@ async function run(viewport, touch) {
 	check((await row.getByRole('button', { name: /Sign in/ }).count()) === 0, 'no sign-in while off');
 	await shot('settings-6-plugin-off');
 
+	// ── Settings > Plugins > Connections: the account hub relay ────────────
+	label = 'settings relay used';
+	reset([relayEntry(), github], { relayFields: true });
+	row = await openSettings();
+	check(await row.getByText('Not signed in · dash.cloudflare.com').isVisible(), 'state and host');
+	check(await row.getByText('Returns through hobbycoders.com').isVisible(), 'returns-through line');
+	check((await row.getByRole('button', { name: /Set up manually|Change client/ }).count()) === 0, 'no setup needed');
+	check((await noOverflow()) <= 0, 'fits', await noOverflow());
+	await shot('settings-7-relay-ready');
+	const relayRowSignIn = row.getByRole('button', { name: 'Sign in with dash.cloudflare.com' });
+	const relayRowPopup = await popupFrom(() => (touch ? relayRowSignIn.tap() : relayRowSignIn.click()));
+	await relayRowPopup.waitForURL((u) => u.hostname === 'hub.relay.test');
+	check(await row.getByText('Finish in the sign-in window. AI Shuffle asks you to confirm once on hobbycoders.com.').isVisible(), 'relayed waiting copy');
+	check(await row.getByText('Waiting for sign-in').isVisible(), 'waiting hint');
+	check((await noOverflow()) <= 0, 'waiting fits', await noOverflow());
+	await shot('settings-8-relay-waiting');
+	await throughHub(relayRowPopup, 'Continue to Home');
+	await row.getByText('Signed in · dash.cloudflare.com').waitFor();
+	check(await row.getByText('Returns through hobbycoders.com').isVisible(), 'line stays once signed in');
+	await shot('settings-9-relay-signed-in');
+
+	for (const [reason, hint, text] of [
+		['not_linked', 'Worker not connected', 'To use dns-reader’s app without setup, connect this worker to your AI Shuffle account in Settings › Account.'],
+		['insecure_address', 'Needs an HTTPS address', 'Signing in needs this worker’s HTTPS address or this computer.'],
+		['not_configured', 'Plugin’s app unavailable', 'dns-reader’s app can’t be used on this worker because its AI Shuffle account address isn’t set up. You can enter your own client.'],
+	]) {
+		label = `settings relay ${reason}`;
+		reset([unavailableEntry(reason)], { relayFields: true, ownUri: reason === 'insecure_address' ? `http://192.168.1.5:8000${CALLBACK}` : '' });
+		row = await openSettings();
+		check(await row.getByText(hint).isVisible(), 'short hint');
+		check(await row.getByText(text).isVisible(), 'reason line');
+		check((await row.getByRole('button', { name: /Sign in/ }).count()) === 0, 'no sign-in');
+		await shot(`settings-10-${reason}`);
+		await row.getByRole('button', { name: 'Set up manually' }).click();
+		check(await page.getByText('Add this to your own app at the provider').isVisible(), 'own-app hint');
+		check((await noOverflow()) <= 0, 'fits', await noOverflow());
+		await shot(`settings-11-${reason}-setup`);
+	}
+
+	label = 'settings relay 409 at start';
+	reset([relayEntry()], { relayFields: true, hub: 'unlinked' });
+	row = await openSettings();
+	await row.getByRole('button', { name: 'Sign in with dash.cloudflare.com' }).click();
+	await row.getByText('Worker not connected').waitFor();
+	check(await row.getByRole('button', { name: 'Set up manually' }).isVisible(), 'switches to the manual setup');
+	check((await row.getByRole('button', { name: /Sign in/ }).count()) === 0, 'no sign-in');
+	await shot('settings-12-relay-409');
+
+	label = 'settings relay hub failed';
+	reset([relayEntry()], { relayFields: true, hub: 'down' });
+	row = await openSettings();
+	await row.getByRole('button', { name: 'Sign in with dash.cloudflare.com' }).click();
+	await row.getByText(HUB_FAILED).waitFor();
+	check(await row.getByRole('button', { name: 'Set up manually' }).isVisible(), 'manual setup offered');
+	check(await row.getByRole('button', { name: 'Sign in with dash.cloudflare.com' }).isVisible(), 'can try again');
+	check((await noOverflow()) <= 0, 'fits', await noOverflow());
+	await shot('settings-13-relay-hub-failed');
+
 	label = 'all';
+	check(w.hubRequests === 0, 'no request reached hobbycoders.com', w.hubRequests);
 	check(errors.length === 0, 'no page errors', errors);
 	await context.close();
 }

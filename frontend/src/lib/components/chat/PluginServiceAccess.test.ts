@@ -221,6 +221,115 @@ describe('plugin service sign-in card', () => {
 		expect(screen.queryByRole('button', { name: /Sign in with|Grant access/ })).toBeNull();
 	});
 
+	describe('a plugin’s own client through the account hub', () => {
+		const RELAY = 'https://hobbycoders.com/browser/plugin-oauth/callback';
+		const shipped = (relay: Record<string, unknown> = {}) => status(
+			{ client_configured: false, client_source: 'plugin', client_id: '', plugin_client_id: 'shipped-public-id', return_address: RELAY, relay: 'used', relay_reason: '', ...relay },
+			{ relay_uri: RELAY, relay_available: relay.relay === undefined || relay.relay === 'used' }
+		);
+		const unavailable = (relay_reason: string) => shipped({ relay: 'unavailable', relay_reason, return_address: 'https://w.example/api/v1/plugins/oauth/callback' });
+
+		it('signs in directly, says it returns through hobbycoders.com and asks to confirm there', async () => {
+			m.getSignInStatus.mockResolvedValue(shipped());
+			let answer: (v: unknown) => void = () => {};
+			m.startSignIn.mockReturnValue(new Promise((r) => { answer = r; }));
+			mount();
+			const button = await screen.findByRole('button', { name: 'Sign in with dash.cloudflare.com' });
+			expect(screen.getByText('Returns through hobbycoders.com')).toBeTruthy();
+			expect(screen.getByText('Uses the plugin’s client')).toBeTruthy();
+			expect(screen.queryByText('Set up manually')).toBeNull();
+			await fireEvent.click(button);
+			// Before the worker answers, the status already says the sign-in is relayed.
+			expect(await screen.findByText(/AI Shuffle asks you to confirm once on hobbycoders\.com/)).toBeTruthy();
+			answer({ authorization_url: 'https://dash.cloudflare.com/oauth2/auth?x', flow_id: 'f1', redirect_uri: RELAY, expires_in: 600, relayed: true, return_origin: 'https://w.example' });
+			await waitFor(() => expect(popup.location.href).toContain('dash.cloudflare.com'));
+			expect(screen.getByText(/^Finish in the sign-in window\. AI Shuffle asks you to confirm once on hobbycoders\.com\./)).toBeTruthy();
+			expect(screen.getByRole('button', { name: 'Stop waiting' })).toBeTruthy();
+			// The callback page still posts from the worker's own origin.
+			m.getSignInStatus.mockResolvedValue(shipped({ state: 'signed_in' }));
+			window.dispatchEvent(new MessageEvent('message', { origin: window.location.origin, data: { type: 'plugin-oauth', flow_id: 'f1', state: 'signed_in', error: null } }));
+			expect(await screen.findByRole('button', { name: 'Grant access' })).toBeTruthy();
+		});
+
+		it('offers the manual setup with the connect-this-worker line on an unlinked worker', async () => {
+			m.getSignInStatus.mockResolvedValue(unavailable('not_linked'));
+			mount();
+			expect(await screen.findByText('To use dns-reader’s app without setup, connect this worker to your AI Shuffle account in Settings › Account.')).toBeTruthy();
+			const details = screen.getByText('Set up manually').closest('details')!;
+			expect(details.open).toBe(false);
+			expect(screen.queryByRole('button', { name: /Sign in with/ })).toBeNull();
+			expect(screen.queryByText('Uses the plugin’s client')).toBeNull();
+			expect(screen.queryByText(/Returns through/)).toBeNull();
+			await fireEvent.click(screen.getByText('Set up manually'));
+			// The worker's own address, never the hub's.
+			expect(screen.getByText('https://w.example/api/v1/plugins/oauth/callback')).toBeTruthy();
+			expect(screen.getByText('Add this to your own app at the provider')).toBeTruthy();
+		});
+
+		it('keeps the existing message for a plain-HTTP address, with the manual setup', async () => {
+			m.getSignInStatus.mockResolvedValue(unavailable('insecure_address'));
+			mount();
+			expect((await screen.findByRole('alert')).textContent).toBe('Signing in needs this worker’s HTTPS address or a browser on this computer.');
+			expect(screen.getByText('Set up manually')).toBeTruthy();
+			expect(screen.queryByRole('button', { name: /Sign in with/ })).toBeNull();
+		});
+
+		it('explains an account service that isn’t set up on this worker', async () => {
+			m.getSignInStatus.mockResolvedValue(unavailable('not_configured'));
+			mount();
+			expect(await screen.findByText(/dns-reader’s app can’t be used on this worker/)).toBeTruthy();
+			expect(screen.getByText('Set up manually')).toBeTruthy();
+		});
+
+		it('keeps an existing sign-in usable on an unlinked worker', async () => {
+			m.getSignInStatus.mockResolvedValue(shipped({ state: 'signed_in', relay: 'unavailable', relay_reason: 'not_linked' }));
+			mount();
+			expect(await screen.findByRole('button', { name: 'Grant access' })).toBeTruthy();
+			expect(screen.queryByText('Set up manually')).toBeNull();
+		});
+
+		it('re-reads the status after a 409 at start and switches to the manual setup', async () => {
+			m.getSignInStatus.mockResolvedValueOnce(shipped()).mockResolvedValue(unavailable('not_linked'));
+			m.startSignIn.mockRejectedValue({ status: 409, detail: 'Signing in with this plugin\'s own app needs this worker connected to your AI Shuffle account (Settings > Account). You can also enter your own OAuth client.' });
+			mount();
+			await fireEvent.click(await screen.findByRole('button', { name: 'Sign in with dash.cloudflare.com' }));
+			expect(await screen.findByText(/connect this worker to your AI Shuffle account in Settings › Account/)).toBeTruthy();
+			expect(screen.getByText('Set up manually')).toBeTruthy();
+			expect(screen.queryByRole('button', { name: /Sign in with/ })).toBeNull();
+			expect(popup.close).toHaveBeenCalled();
+			expect(m.getSignInStatus).toHaveBeenCalledTimes(2);
+		});
+
+		it('shows the account service failure and offers the manual setup next to trying again', async () => {
+			m.getSignInStatus.mockResolvedValue(shipped());
+			m.startSignIn.mockRejectedValue({ status: 502, detail: 'The AI Shuffle account service could not be reached or needs an update. Try again shortly.' });
+			mount();
+			await fireEvent.click(await screen.findByRole('button', { name: 'Sign in with dash.cloudflare.com' }));
+			expect((await screen.findByRole('alert')).textContent).toMatch(/needs an update/);
+			expect(screen.getByText('Set up manually').closest('details')!.open).toBe(false);
+			expect(screen.getByRole('button', { name: 'Sign in with dash.cloudflare.com' })).toBeTruthy();
+			await fireEvent.click(screen.getByText('Set up manually'));
+			expect(screen.getByText('Add this to your own app at the provider')).toBeTruthy();
+		});
+
+		it('does not offer the manual setup when too many sign-ins wait', async () => {
+			m.getSignInStatus.mockResolvedValue(shipped());
+			m.startSignIn.mockRejectedValue({ status: 429, detail: 'Too many sign-ins are waiting. Try again in a few minutes.' });
+			mount();
+			await fireEvent.click(await screen.findByRole('button', { name: 'Sign in with dash.cloudflare.com' }));
+			expect((await screen.findByRole('alert')).textContent).toMatch(/Too many sign-ins/);
+			expect(screen.queryByText('Set up manually')).toBeNull();
+		});
+
+		it('behaves as before on a worker without the relay fields', async () => {
+			m.getSignInStatus.mockResolvedValue(status({ client_configured: false, client_source: 'plugin', client_id: '', plugin_client_id: 'shipped-public-id' }));
+			mount();
+			await fireEvent.click(await screen.findByRole('button', { name: 'Sign in with dash.cloudflare.com' }));
+			expect(await screen.findByText('Finish signing in to dash.cloudflare.com in the window that opened.', { exact: false })).toBeTruthy();
+			expect(screen.queryByText(/Returns through|confirm once/)).toBeNull();
+		});
+	});
+
 	it('cancels the request', async () => {
 		m.getSignInStatus.mockResolvedValue(status());
 		const { onComplete } = mount();

@@ -5,14 +5,19 @@
 	 * service). One flow: the primary button signs in at the provider, then
 	 * becomes "Grant access" for this conversation. No key or token is typed
 	 * here; the grant is `{sign_in: true}` and the worker attaches the token.
-	 * The manual client setup appears only when no client is available.
+	 * The manual client setup appears only when no client is available,
+	 * including a plugin's own client that can't return through the account
+	 * hub from here; a sign-in that does return through it says so.
 	 */
 	import { onDestroy, onMount, tick, untrack } from 'svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { isBundledMobile } from '$lib/api/runtime';
 	import { getSignInStatus, type PluginSignInStatus, type ServiceSignIn } from '$lib/api/plugin-oauth';
 	import ClientSetupForm from '$lib/components/plugins/ClientSetupForm.svelte';
-	import { SignInFlow, accessText, clientLine, pluginName, reasonText, returnAddressUsable, signInView } from '$lib/components/plugins/plugin-sign-in.svelte';
+	import {
+		INSECURE_ADDRESS, SignInFlow, accessText, clientLine, pluginName, reasonText, relayBlocked, relayHost, relayLine, relayStartFailed, relayText, relayWaitText,
+		returnAddressUsable, signInView
+	} from '$lib/components/plugins/plugin-sign-in.svelte';
 	import '../deck/cards/card-design-system.css';
 	import './private-access.css';
 
@@ -58,6 +63,13 @@
 		const next = await load();
 		return next?.state ?? null;
 	});
+	/** The plugin's own client can't be used from this worker or address. */
+	const blocked = $derived(!!entry && relayBlocked(entry));
+	/** The host a relayed sign-in returns through, when it does. */
+	const via = $derived(remote ? '' : relayHost(status, entry));
+	const waitVia = $derived(flow.relayed === false ? '' : flow.relayHost || via);
+	/** The account service refused or couldn't take a relayed sign-in: offer the manual setup. */
+	const relayFallback = $derived(!remote && relayStartFailed(entry, flow));
 
 	function hostOf(url: string | undefined): string {
 		try { return url ? new URL(url).hostname : ''; } catch { return ''; }
@@ -153,6 +165,15 @@
 	);
 </script>
 
+{#snippet manualSetup(ownApp: boolean)}
+	<details class="ps-manual">
+		<summary>Set up manually</summary>
+		<div class="ps-manual-body">
+			<ClientSetupForm {plugin} {service} redirectUri={status?.redirect_uri ?? ''} ownApp={ownApp} disabled={closed} onSaved={clientSaved} />
+		</div>
+	</details>
+{/snippet}
+
 <section class="card-system pa-card plugin-signin" aria-label="Sign in to {service}">
 	<header class="pa-head">
 		<div class="pa-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.7 5.7L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.6a1 1 0 01.3-.7l6-6A6 6 0 1121 9z" /></svg></div>
@@ -178,6 +199,7 @@
 		{#if client}
 			<p class="ps-client"><span>{client.text}</span>{#if client.code}<code title={client.code}>{client.code}</code>{/if}</p>
 		{/if}
+		{#if via}<p class="ps-client ps-via">{relayLine(via)}</p>{/if}
 		{#if scopes.length}
 			<details class="ps-scopes">
 				<summary>Scopes asked for <span class="ps-count">{scopes.length}</span></summary>
@@ -201,24 +223,22 @@
 		{:else if view.step === 'plugin_off'}
 			<div class="pa-error ps-retry" role="alert"><span>{pluginName(plugin)} is switched off. Turn it on in Settings › Plugins, then check again.</span><button type="button" class="pa-small-btn" onclick={() => load()}>Check again</button></div>
 		{:else if view.step === 'setup'}
-			{#if entry?.reason === 'registration_failed'}<p class="ps-warn">{reasonText(entry.reason)}</p>
+			{#if blocked && entry?.relay_reason === 'insecure_address'}<p class="pa-error" role="alert">{relayText(entry.relay_reason, plugin)}</p>
+			{:else if blocked}<p class="ps-warn">{relayText(entry?.relay_reason ?? '', plugin)}</p>
+			{:else if entry?.reason === 'registration_failed'}<p class="ps-warn">{reasonText(entry.reason)}</p>
 			{:else}<p class="pa-note">{service} needs a one-time setup before you can sign in.</p>{/if}
-			<details class="ps-manual">
-				<summary>Set up manually</summary>
-				<div class="ps-manual-body">
-					<ClientSetupForm {plugin} {service} redirectUri={status?.redirect_uri ?? ''} disabled={closed} onSaved={clientSaved} />
-				</div>
-			</details>
+			{@render manualSetup(blocked)}
 		{:else}
 			{#if mobileApp && view.step === 'sign_in'}
 				<p class="pa-note">Sign in from a browser or the desktop app, then grant access here.</p>
 			{:else if !returnOk && view.step === 'sign_in'}
-				<p class="pa-error" role="alert">Signing in needs this worker’s HTTPS address or a browser on this computer.</p>
+				<p class="pa-error" role="alert">{INSECURE_ADDRESS.card}</p>
 			{/if}
 			{#if view.again && view.step === 'sign_in'}<p class="ps-warn">{reasonText(entry?.reason ?? '')}</p>{/if}
 			{#if flow.phase === 'error'}<p class="pa-error" role="alert">{flow.error}</p>{/if}
+			{#if relayFallback}{@render manualSetup(true)}{/if}
 			{#if flow.phase === 'waiting'}
-				<p class="ps-wait">Finish signing in to {host} in the window that opened.
+				<p class="ps-wait">{waitVia ? relayWaitText(waitVia) : `Finish signing in to ${host} in the window that opened.`}
 					<button type="button" class="ps-link" onclick={() => flow.cancel()}>Stop waiting</button></p>
 			{:else if flow.unfinished && view.step === 'sign_in'}
 				<p class="ps-wait">Not finished yet. If you closed the window, sign in again.</p>
@@ -313,6 +333,7 @@
 
 	.ps-client { display: flex; align-items: baseline; gap: .375rem; min-width: 0; margin: -.125rem 0 0; font-size: .75rem; color: var(--muted-foreground); }
 	.ps-client span { flex: none; }
+	.ps-via { margin-top: -.375rem; }
 	.ps-client code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--card-font-mono, ui-monospace, monospace); font-size: .6875rem; color: var(--foreground); }
 
 	details { border: 1px solid var(--border); border-radius: .5rem; padding: 0 .75rem; }

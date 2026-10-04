@@ -62,7 +62,8 @@
 			</SettingRow>
 		{/if}
 		{#each signIns as entry (entry.service)}
-			<PluginServiceRow {pluginId} {entry} enabled={status?.enabled ?? false} redirectUri={status?.redirect_uri ?? ''} onChanged={load} />
+			<PluginServiceRow {pluginId} {entry} enabled={status?.enabled ?? false} redirectUri={status?.redirect_uri ?? ''}
+				relayUri={status?.relay_uri ?? ''} onChanged={load} />
 		{/each}
 		{#each plain as name (name)}
 			<SettingRow label={name} hint="Asks you for access" />

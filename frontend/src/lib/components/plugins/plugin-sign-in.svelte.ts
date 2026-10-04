@@ -8,11 +8,16 @@
  * for the callback page's `plugin-oauth` message and, because a provider can
  * cut the window off from this page (or the owner closes it), re-reads the
  * status whenever this window regains focus.
+ *
+ * A client the plugin ships returns through the account hub's fixed address
+ * (`relay`); when this worker can't use it, the service falls back to the
+ * manual setup and `relayText` says why.
  */
 import { getErrorMessage } from '$lib/api/client';
 import {
 	startSignIn,
 	type ClientSource,
+	type PluginSignInStatus,
 	type ServiceSignIn,
 	type SignInMessage,
 	type SignInState
@@ -37,15 +42,19 @@ export interface SignInView {
  * mean a signed-out service gets just the sign-in button; `none`, or
  * `not_configured` (including a refused registration, reason
  * `registration_failed`), means the owner enters a client: the manual
- * setup. Workers that predate `client_source` only know the owner's client,
- * `client_configured`.
+ * setup. A plugin's client that can't return through the hub from here
+ * (`relay: unavailable`) counts as no client, but an existing sign-in stays:
+ * refreshing it needs no return address. Workers that predate
+ * `client_source` only know the owner's client, `client_configured`; those
+ * that predate `relay` never block it.
  */
-export function signInView(service: Pick<ServiceSignIn, 'state' | 'client_configured' | 'client_source'>, enabled: boolean): SignInView {
+export function signInView(service: Pick<ServiceSignIn, 'state' | 'client_configured' | 'client_source' | 'relay'>, enabled: boolean): SignInView {
 	const source = clientSource(service);
-	const hasClient = service.state !== 'not_configured' && source !== 'none';
+	const blocked = relayBlocked(service);
+	const hasClient = service.state !== 'not_configured' && source !== 'none' && !blocked;
 	const manual = !hasClient ? 'needed' : source === 'owner' ? 'available' : 'none';
 	if (service.state === 'invalid') return { step: 'invalid', again: false, manual: 'none' };
-	if (service.state === 'signed_in') return { step: 'signed_in', again: false, manual };
+	if (service.state === 'signed_in') return { step: 'signed_in', again: false, manual: blocked ? 'none' : manual };
 	const again = service.state === 'needs_sign_in';
 	if (!hasClient) return { step: 'setup', again, manual };
 	if (!enabled) return { step: 'plugin_off', again, manual };
@@ -61,6 +70,68 @@ function hostOf(url: string | undefined): string {
 	try { return url ? new URL(url).hostname : ''; } catch { return ''; }
 }
 
+/** The plugin's own client, which this worker can't return to through the hub. */
+export function relayBlocked(service: Pick<ServiceSignIn, 'client_configured' | 'client_source' | 'relay'>): boolean {
+	return clientSource(service) === 'plugin' && service.relay === 'unavailable';
+}
+
+/**
+ * The host a relayed sign-in returns through (hobbycoders.com in
+ * production): the hub's `relay_uri`, else the service's return address.
+ * `''` when the service doesn't use the relay.
+ */
+export function relayHost(
+	status: Pick<PluginSignInStatus, 'relay_uri'> | null | undefined,
+	service: Pick<ServiceSignIn, 'relay' | 'return_address'> | null | undefined
+): string {
+	if (service?.relay !== 'used') return '';
+	return hostOf(status?.relay_uri) || hostOf(service.return_address) || 'your AI Shuffle account';
+}
+
+/** The detail line for a service that returns through the hub. */
+export function relayLine(host: string): string {
+	return `Returns through ${host}`;
+}
+
+/** The waiting copy while the provider window is open, for a relayed sign-in. */
+export function relayWaitText(host: string): string {
+	return `Finish in the sign-in window. AI Shuffle asks you to confirm once on ${host}.`;
+}
+
+/** The existing words for a worker address the provider can't return to. */
+export const INSECURE_ADDRESS = {
+	card: 'Signing in needs this worker’s HTTPS address or a browser on this computer.',
+	row: 'Signing in needs this worker’s HTTPS address or this computer.'
+} as const;
+
+/**
+ * Why the plugin's own client can't be used from here, as one sentence for
+ * under the manual setup; `short` is the settings row hint (at most five
+ * words). `where` picks the card or row wording for an insecure address.
+ */
+export function relayText(reason: string, plugin: string, short = false, where: 'card' | 'row' = 'card'): string {
+	const name = pluginName(plugin);
+	switch (reason) {
+		case 'not_linked':
+			return short ? 'Worker not connected' : `To use ${name}’s app without setup, connect this worker to your AI Shuffle account in Settings › Account.`;
+		case 'insecure_address':
+			return short ? 'Needs an HTTPS address' : INSECURE_ADDRESS[where];
+		case 'not_configured':
+			return short ? 'Plugin’s app unavailable' : `${name}’s app can’t be used on this worker because its AI Shuffle account address isn’t set up. You can enter your own client.`;
+		default:
+			return short ? 'Plugin’s app unavailable' : `${name}’s app can’t be used from here. You can enter your own client.`;
+	}
+}
+
+/**
+ * A relayed sign-in that failed to start because the account service
+ * refused it (409) or couldn't be reached or needs an update (502): the
+ * manual setup is the way around it.
+ */
+export function relayStartFailed(service: Pick<ServiceSignIn, 'relay'> | null | undefined, flow: Pick<SignInFlow, 'phase' | 'failedStatus'>): boolean {
+	return service?.relay === 'used' && flow.phase === 'error' && (flow.failedStatus === 409 || flow.failedStatus === 502);
+}
+
 /**
  * Which client a sign-in uses, for display: the owner's own, the one the
  * plugin ships, or one registered automatically at the plugin's
@@ -68,9 +139,11 @@ function hostOf(url: string | undefined): string {
  * `null` when there is no client yet (the manual setup says so).
  */
 export function clientLine(
-	service: Pick<ServiceSignIn, 'state' | 'client_configured' | 'client_source' | 'client_id' | 'plugin_client_id' | 'registration_url'>
+	service: Pick<ServiceSignIn, 'state' | 'client_configured' | 'client_source' | 'client_id' | 'plugin_client_id' | 'registration_url' | 'relay'>
 ): { text: string; code: string } | null {
 	if (service.state === 'invalid' || service.state === 'not_configured') return null;
+	// The plugin's client can't be used from here: the manual setup says why.
+	if (relayBlocked(service) && service.state !== 'signed_in') return null;
 	switch (clientSource(service)) {
 		case 'owner': return { text: 'Uses your client', code: service.client_id };
 		case 'plugin': return { text: 'Uses the plugin’s client', code: service.plugin_client_id ?? '' };
@@ -152,6 +225,12 @@ export class SignInFlow {
 	error = $state('');
 	/** The owner came back without finishing; the window may still be open. */
 	unfinished = $state(false);
+	/** The HTTP status of a refused start (`0` otherwise). */
+	failedStatus = $state(0);
+	/** The worker said whether this sign-in returns through the hub; `null` until it answers (or an older worker). */
+	relayed = $state<boolean | null>(null);
+	/** The host a relayed sign-in confirms on. */
+	relayHost = $state('');
 
 	#plugin: string;
 	#service: string;
@@ -173,6 +252,9 @@ export class SignInFlow {
 		this.#stop();
 		this.error = '';
 		this.unfinished = false;
+		this.failedStatus = 0;
+		this.relayed = null;
+		this.relayHost = '';
 		// Opened before the request so the browser treats it as the click's
 		// window. Not `noopener`: the callback page posts back to its opener.
 		const popup = window.open('about:blank', '_blank', 'popup,width=560,height=740');
@@ -187,6 +269,10 @@ export class SignInFlow {
 			const started = await startSignIn(this.#plugin, this.#service);
 			if (this.#popup !== popup) return; // cancelled meanwhile
 			this.#flowId = started.flow_id;
+			if (typeof started.relayed === 'boolean') {
+				this.relayed = started.relayed;
+				this.relayHost = started.relayed ? hostOf(started.redirect_uri) : '';
+			}
 			this.#listen();
 			this.#expiry = setTimeout(() => this.#expire(), Math.max(1, started.expires_in) * 1000);
 			popup.location.href = started.authorization_url;
@@ -194,11 +280,13 @@ export class SignInFlow {
 			if (this.#popup !== popup) return;
 			this.#stop();
 			this.phase = 'error';
+			this.failedStatus = (e as { status?: number })?.status ?? 0;
 			// The worker's refusals are fixed wording and never carry a secret.
 			this.error = getErrorMessage(e, 'The sign-in could not start. Try again.');
 			// A refused automatic registration turns the service into
 			// `not_configured` (`registration_failed`): re-read so the manual
-			// setup appears.
+			// setup appears, and so does an unlinked worker's refused relay
+			// (`relay_unavailable`).
 			void this.#recheck();
 		}
 	}

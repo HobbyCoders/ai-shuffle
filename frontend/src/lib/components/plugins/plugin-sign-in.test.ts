@@ -8,6 +8,12 @@ import {
 	ownerClientFallback,
 	pluginName,
 	reasonText,
+	relayBlocked,
+	relayHost,
+	relayLine,
+	relayStartFailed,
+	relayText,
+	relayWaitText,
 	returnAddressUsable,
 	signInView,
 	stateHint
@@ -99,6 +105,70 @@ describe('signInView', () => {
 	});
 });
 
+describe('the account hub relay', () => {
+	const shipped = { client_configured: false, client_source: 'plugin', client_id: '', plugin_client_id: 'shipped' } as const;
+
+	it.each([
+		// state, relay → step, manual
+		['signed_out', 'used', 'sign_in', 'none'],
+		['signed_out', 'unavailable', 'setup', 'needed'],
+		['needs_sign_in', 'unavailable', 'setup', 'needed'],
+		['signed_in', 'unavailable', 'signed_in', 'none'],
+		['signed_in', 'used', 'signed_in', 'none'],
+		['signed_out', undefined, 'sign_in', 'none']
+	] as const)('a shipped client, %s with relay %s → %s, manual %s', (state, relay, step, manual) => {
+		const view = signInView({ ...shipped, state, relay }, true);
+		expect(view.step).toBe(step);
+		expect(view.manual).toBe(manual);
+	});
+
+	it('blocks only the plugin’s own client', () => {
+		expect(relayBlocked({ ...shipped, relay: 'unavailable' })).toBe(true);
+		expect(relayBlocked({ ...shipped, relay: 'used' })).toBe(false);
+		expect(relayBlocked({ ...shipped })).toBe(false);
+		expect(relayBlocked({ client_configured: true, client_source: 'owner', relay: 'unavailable' })).toBe(false);
+		expect(signInView({ client_configured: true, client_source: 'owner', state: 'signed_out', relay: 'not_used' }, true).step).toBe('sign_in');
+	});
+
+	it('does not name the plugin’s client while it can’t be used, but keeps naming it once signed in', () => {
+		expect(clientLine({ ...shipped, state: 'signed_out', relay: 'unavailable' })).toBeNull();
+		expect(clientLine({ ...shipped, state: 'signed_in', relay: 'unavailable' })?.text).toBe('Uses the plugin’s client');
+		expect(clientLine({ ...shipped, state: 'signed_out', relay: 'used' })?.text).toBe('Uses the plugin’s client');
+	});
+
+	it('names the host a relayed sign-in returns through', () => {
+		const relay_uri = 'https://hobbycoders.com/browser/plugin-oauth/callback';
+		expect(relayHost({ relay_uri }, { relay: 'used' })).toBe('hobbycoders.com');
+		expect(relayHost({}, { relay: 'used', return_address: relay_uri })).toBe('hobbycoders.com');
+		expect(relayHost({ relay_uri }, { relay: 'not_used', return_address: 'https://w.example/cb' })).toBe('');
+		expect(relayHost({ relay_uri }, { relay: 'unavailable' })).toBe('');
+		expect(relayHost({ relay_uri }, undefined)).toBe('');
+		expect(relayLine('hobbycoders.com')).toBe('Returns through hobbycoders.com');
+		expect(relayWaitText('hobbycoders.com')).toBe('Finish in the sign-in window. AI Shuffle asks you to confirm once on hobbycoders.com.');
+	});
+
+	it('says plainly why the plugin’s app can’t be used, in five words or fewer for a row', () => {
+		expect(relayText('not_linked', 'dns-reader@mp')).toBe('To use dns-reader’s app without setup, connect this worker to your AI Shuffle account in Settings › Account.');
+		expect(relayText('insecure_address', 'p@m')).toBe('Signing in needs this worker’s HTTPS address or a browser on this computer.');
+		expect(relayText('insecure_address', 'p@m', false, 'row')).toBe('Signing in needs this worker’s HTTPS address or this computer.');
+		expect(relayText('not_configured', 'p@m')).toMatch(/isn’t set up\. You can enter your own client\.$/);
+		expect(relayText('', 'p@m')).toMatch(/You can enter your own client\.$/);
+		for (const reason of ['not_linked', 'insecure_address', 'not_configured', '']) {
+			expect(words(relayText(reason, 'p@m', true))).toBeLessThanOrEqual(5);
+		}
+	});
+
+	it('offers the manual setup after the account service refused or failed a relayed start', () => {
+		const failed = (failedStatus: number) => ({ phase: 'error' as const, failedStatus });
+		expect(relayStartFailed({ relay: 'used' }, failed(502))).toBe(true);
+		expect(relayStartFailed({ relay: 'used' }, failed(409))).toBe(true);
+		expect(relayStartFailed({ relay: 'used' }, failed(429))).toBe(false);
+		expect(relayStartFailed({ relay: 'not_used' }, failed(502))).toBe(false);
+		expect(relayStartFailed({ relay: 'used' }, { phase: 'waiting', failedStatus: 0 })).toBe(false);
+		expect(relayStartFailed(undefined, failed(502))).toBe(false);
+	});
+});
+
 describe('SignInFlow', () => {
 	let popup: { location: { href: string }; close: ReturnType<typeof vi.fn>; closed: boolean };
 	let open: ReturnType<typeof vi.fn>;
@@ -122,6 +192,39 @@ describe('SignInFlow', () => {
 		await pending;
 		expect(m.startSignIn).toHaveBeenCalledWith('p@m', 'svc');
 		expect(popup.location.href).toBe(started.authorization_url);
+		flow.dispose();
+	});
+
+	it('records whether the sign-in returns through the hub, and from where', async () => {
+		m.startSignIn.mockResolvedValue({ ...started, relayed: true, redirect_uri: 'https://hobbycoders.com/browser/plugin-oauth/callback', return_origin: 'https://w.example' });
+		const flow = new SignInFlow('p@m', 'svc', vi.fn());
+		const pending = flow.begin();
+		expect(flow.relayed).toBeNull();
+		await pending;
+		expect(flow.relayed).toBe(true);
+		expect(flow.relayHost).toBe('hobbycoders.com');
+		flow.cancel();
+		m.startSignIn.mockResolvedValue({ ...started, relayed: false });
+		await flow.begin();
+		expect(flow.relayed).toBe(false);
+		expect(flow.relayHost).toBe('');
+		flow.cancel();
+		// An older worker leaves it unknown.
+		m.startSignIn.mockResolvedValue(started);
+		await flow.begin();
+		expect(flow.relayed).toBeNull();
+		flow.dispose();
+	});
+
+	it('keeps the status of a refused start, and clears it on the next try', async () => {
+		m.startSignIn.mockRejectedValueOnce({ status: 502, detail: 'The AI Shuffle account service could not be reached or needs an update. Try again shortly.' });
+		const flow = new SignInFlow('p@m', 'svc', vi.fn().mockResolvedValue('signed_out'));
+		await flow.begin();
+		expect(flow.failedStatus).toBe(502);
+		expect(flow.error).toMatch(/needs an update/);
+		await flow.begin();
+		expect(flow.failedStatus).toBe(0);
+		expect(flow.phase).toBe('waiting');
 		flow.dispose();
 	});
 
