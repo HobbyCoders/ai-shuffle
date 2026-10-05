@@ -227,10 +227,10 @@ def test_buffered_op_that_fails_transiently_on_drain_is_kept(workers, monkeypatc
     head, tail = _pref_ops(a)[-2:]
     real = engine.materialize
 
-    def locked_for_tail(cursor, coll, record_id, record):
+    def locked_for_tail(cursor, coll, record_id, record, **kwargs):
         if record_id == tail["record_id"]:
             raise engine.TransientApplyError("Credential storage is locked; cannot store user_preferences")
-        return real(cursor, coll, record_id, record)
+        return real(cursor, coll, record_id, record, **kwargs)
 
     with b.active():
         assert engine.apply_batch([tail]).pending == 1  # a hole: the head has not arrived
@@ -298,10 +298,10 @@ def test_storage_refusal_keeps_the_stream_moving_and_records_a_conflict(workers,
     poison, healthy = _pref_ops(a)[-2:]
     real = engine.materialize
 
-    def refusing(cursor, coll, record_id, record):
+    def refusing(cursor, coll, record_id, record, **kwargs):
         if record_id == poison["record_id"]:
             raise sqlite3.IntegrityError("NOT NULL constraint failed")
-        return real(cursor, coll, record_id, record)
+        return real(cursor, coll, record_id, record, **kwargs)
 
     monkeypatch.setattr(engine, "materialize", refusing)
     with b.active():

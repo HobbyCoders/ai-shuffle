@@ -450,8 +450,12 @@ def _local_keys(coll: policy.Collection, record_id: str) -> Tuple[Any, ...]:
     return tuple(values[k] for k in coll.keys)
 
 
-def materialize(cursor, coll: policy.Collection, record_id: str, record: Optional[Mapping[str, Any]]) -> Optional[dict]:
-    """Write (or delete) the domain row. Returns the row as re-read, or None."""
+def materialize(cursor, coll: policy.Collection, record_id: str, record: Optional[Mapping[str, Any]],
+                *, origin_device_id: Optional[str] = None) -> Optional[dict]:
+    """Write (or delete) the domain row. Returns the row as re-read, or None.
+
+    ``origin_device_id`` is the device that signed the record, when known.
+    """
     keys = _local_keys(coll, record_id)
     where = " AND ".join(f"{k} = %s" for k in coll.keys)
     # Older workers may re-seed and publish the retired built-in. Never
@@ -459,6 +463,24 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     # A custom agent with this id is still a normal shared agent.
     if coll.name == "agents" and keys == ("Explore",) and record and record.get("is_builtin"):
         return None
+    if coll.name == "pending_interactions":
+        from app.core.model_override import RECEIPT_KINDS
+        # Ordinary sync is a read mirror, not an owner consent channel. Only
+        # the explicit leased handoff may import these execution receipts.
+        existing = _read_row(cursor, coll, record_id)
+        if ((record or {}).get("kind") in RECEIPT_KINDS
+                or (existing or {}).get("kind") in RECEIPT_KINDS):
+            return existing
+        # Only the worker that owns the chat records a prompt's decision: a
+        # remote device's answer reaches it through the signed control channel
+        # (control.answer_permission), never through the mirror. A peer row
+        # must not answer, add or rewrite a prompt of a chat owned here. A
+        # peer delete is still applied: losing the row denies, never allows.
+        ctx = cached_context()
+        if (record is not None and ctx is not None and origin_device_id
+                and origin_device_id != ctx.device_id and _owns_session(cursor, ctx, (
+                    record.get("session_id"), (existing or {}).get("session_id")))):
+            return existing
     if record is None:
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None
@@ -512,6 +534,18 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     cursor.execute(f"SELECT * FROM {coll.table} WHERE {where}", keys)
     row = cursor.fetchone()
     return dict(row) if row else None
+
+
+def _owns_session(cursor, ctx: NetworkContext, session_ids: Sequence[Optional[str]]) -> bool:
+    """Whether this device owns any of ``session_ids`` (the catalog publisher's rule)."""
+    ids = sorted({sid for sid in session_ids if isinstance(sid, str) and sid})
+    if not ids:
+        return False
+    cursor.execute(
+        "SELECT 1 FROM sessions WHERE id IN (" + ", ".join(["%s"] * len(ids)) + ") "
+        "AND (owner_device_id = %s OR (owner_device_id IS NULL AND instance_id = %s)) LIMIT 1",
+        (*ids, ctx.device_id, _my_instance_id()))
+    return cursor.fetchone() is not None
 
 
 def _read_row(cursor, coll: policy.Collection, record_id: str) -> Optional[dict]:
@@ -1138,12 +1172,12 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                                    winning_device_id=env.origin_device_id)
 
     if env.op == OP_DELETE:
-        materialize(cursor, coll, env.record_id, None)
+        materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash="", deleted=True, order_seq=env.order_seq)
     else:
         plaintext = _prepare_mirror(cursor, coll, plaintext)
-        row = materialize(cursor, coll, env.record_id, plaintext)
+        row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id)
         _after_mirror(cursor, coll, plaintext)
         if coll.name == "presence":
             _learn_presence_alias(cursor, ctx, plaintext, env.origin_device_id)
@@ -1681,11 +1715,12 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
                         logger.warning("Snapshot membership record skipped: %s", exc)
                         continue
             if item["deleted"]:
-                materialize(cursor, coll, item["record_id"], None)
+                materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
                 local_hash = ""
             else:
                 prepared = _prepare_mirror(cursor, coll, item["record"])
-                row = materialize(cursor, coll, item["record_id"], prepared)
+                row = materialize(cursor, coll, item["record_id"], prepared,
+                                  origin_device_id=item["origin_device_id"])
                 _after_mirror(cursor, coll, prepared)
                 if coll.name == "presence":
                     _learn_presence_alias(cursor, ctx, prepared, item["origin_device_id"])

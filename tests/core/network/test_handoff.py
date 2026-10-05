@@ -58,6 +58,64 @@ def pair(tmp_path, repositories, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_model_receipts_move_under_the_handoff_lease_but_live_prompts_do_not(pair, monkeypatch):
+    from app.core import model_override as mo
+    from app.db import interactions
+
+    a, b, _, _ = pair
+    from app.db import turns
+    with a.active():
+        assert mo._remember_approval("handoff-test", "opus")
+        turn = turns.enqueue_turn("handoff-test", "user", prompt="use Haiku")
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE turns SET state='completed' WHERE id=%s", (turn["id"],))
+        assert await mo.confirm("handoff-test", "default", model="haiku", baseline="opus", action="start") == mo.NAMED
+        launch = turns.enqueue_turn("handoff-test", "agent_message", prompt="start brief",
+                                    command_id="orchestration:start:launch",
+                                    payload={"orchestration_sender": "origin-chat"})
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE turns SET state='completed' WHERE id=%s", (launch["id"],))
+        interactions.create_interaction("handoff-test", "permission", {"tool_name": "Bash"}, None,
+                                        interaction_id="live-prompt")
+    phases = []
+
+    async def call(device, action, body, **kwargs):
+        assert device == a.device_id and action == "handoff"
+        phases.append(body["phase"])
+        with a.active():
+            return await control.handle(action, body, from_device=b.device_id)
+
+    monkeypatch.setattr(control, "call", call)
+    with b.active():
+        assert not mo._has_approval("handoff-test", "opus")
+        await handoff.receive(database.get_session("handoff-test"))
+        assert mo._has_approval("handoff-test", "opus")
+        assert mo._has_named("handoff-test", "haiku")
+        from app.core.session_orchestration import _start_turn
+        assert _start_turn("handoff-test")["payload"]["orchestration_sender"] == "origin-chat"
+        assert not interactions.get_interaction("live-prompt")
+        # Re-importing the same leased snapshot cannot duplicate receipts or
+        # launch markers, and cannot erase unrelated session receipts.
+        database.create_session("unrelated", "default", title="Unrelated")
+        assert mo._remember_approval("unrelated", "haiku")
+        snapshot = {"sdk_session_id": database.get_session("handoff-test")["sdk_session_id"],
+                    "history": handoff._history(database.get_session("handoff-test"))}
+        for _ in range(2):
+            handoff.install_history("handoff-test", snapshot, ".")
+        assert mo._has_approval("unrelated", "haiku")
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) AS n FROM pending_interactions WHERE session_id='handoff-test'")
+            assert cursor.fetchone()["n"] == 2
+            cursor.execute("SELECT COUNT(*) AS n FROM turns WHERE session_id='handoff-test' "
+                           "AND command_id LIKE 'orchestration:start:%%'")
+            assert cursor.fetchone()["n"] == 1
+    with a.active():
+        assert interactions.get_interaction("live-prompt")["state"] == "pending"
+    assert phases == ["begin", "commit"]
+
+
+@pytest.mark.asyncio
 async def test_receive_transfers_unpushed_dirty_branch_and_native_history(pair, monkeypatch):
     a,b,source,target = pair
     (source / "file.txt").write_text("local staged change")

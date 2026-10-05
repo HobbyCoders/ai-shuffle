@@ -180,7 +180,7 @@
 	/** Remember scope for the decision about to be sent. The checkbox is a
 	 *  tool-wide "always" — profile-scoped and pattern-less. */
 	function currentRemember(): 'none' | 'profile' {
-		return alwaysForTool && !relayedFrom ? 'profile' : 'none';
+		return alwaysForTool && !relayedFrom && request.tool_name !== 'ModelSwitch' ? 'profile' : 'none';
 	}
 
 	/** The worker a relayed prompt came from: a subagent running on another
@@ -564,7 +564,9 @@
 	<!-- Remember Option — one checkbox that applies to whichever button is pressed.
 	     A relayed prompt has none: its answer applies to this request only. -->
 	<div class="px-4 py-3 border-t border-border/40 bg-card/30">
-		{#if relayedFrom}
+		{#if request.tool_name === 'ModelSwitch'}
+			<p>A yes covers this model for this chat, including after app restarts.</p>
+		{:else if relayedFrom}
 			<p class="relayed-note" data-testid="relayed-note">
 				Asked by a subagent running on <strong>{relayedFrom}</strong>. Your answer applies
 				to this request only; the subagent asks again for each one.

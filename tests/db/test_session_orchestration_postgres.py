@@ -28,9 +28,16 @@ def pg_schema():
         base.close_pool()
 
 
-def test_concurrent_top_level_starts_and_replays():
+def test_concurrent_top_level_starts_and_replays(monkeypatch, tmp_path):
     from app.db import base, sessions, turns, database
     from app.core.session_orchestration import _queue
+    from app.network import identity
+    from types import SimpleNamespace
+    # Direct SQL tests bypass startup. Provision an isolated identity rather
+    # than reading or creating one in the real worker's credential directory.
+    monkeypatch.setattr(identity, "settings", SimpleNamespace(effective_data_dir=tmp_path / "network"))
+    monkeypatch.setattr(identity, "_cached", None)
+    identity.load()
     # More callers than pooled connections catches nested checkout deadlocks.
     sid = "pg-orchestration-" + uuid4().hex
     pid = sid + "-agent"

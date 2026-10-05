@@ -120,7 +120,7 @@
 		onPermission({
 			request_id: request.request_id,
 			decision,
-			remember: always && !relayedFrom(request) ? 'profile' : 'none'
+			remember: always && !relayedFrom(request) && request.tool_name !== 'ModelSwitch' ? 'profile' : 'none'
 		});
 		showResult(decision === 'allow', decision === 'allow' ? 'Approved' : 'Denied');
 	}
@@ -191,7 +191,9 @@
 					{/if}
 				</div>
 				{#if command}<pre class="cmd">{#if request.tool_name === 'Bash'}<span class="p">$ </span>{/if}{command}</pre>{/if}
-				{#if relayedFrom(request)}
+				{#if request.tool_name === 'ModelSwitch'}
+					<p class="p-note">A yes covers this model for this chat, including after app restarts.</p>
+				{:else if relayedFrom(request)}
 					<p class="p-note">From {relayedFrom(request)}. Answer each time.</p>
 				{:else}
 					<button type="button" class="check-row" role="checkbox" aria-checked={always} onclick={() => (always = !always)}>

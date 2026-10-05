@@ -1904,6 +1904,9 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute(
         "CREATE INDEX IF NOT EXISTS idx_turns_session_state ON turns(session_id, state)"
     )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_turns_session_position ON turns(session_id, position DESC)"
+    )
 
     # Latest generated composer hint; retained even with no watching browser.
     cursor.execute("""

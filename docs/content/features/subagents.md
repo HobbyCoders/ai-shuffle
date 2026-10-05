@@ -32,23 +32,45 @@ subagent or chat to that provider.
 
 The app, not the agent, decides whether a different model is used:
 
-- **You named it.** The app reads every message you typed in the calling chat,
-  including the first message of a chat started on a new branch, messages you
-  sent while it was working and messages sent through the API, so "use Opus
-  sub-agents" at the start of a chat keeps counting for the whole chat. For a
-  subagent it reads the chat at the top of the chain, and for a chat another
-  chat started, the chat where you typed the request. A model counts as named
+- **You named it.** Only a message sent by the principal that owns the session
+  counts. The install owner's messages count in the owner's chats; an API
+  user's messages count only in that API user's own chats. API-key HTTP and
+  socket messages on the owner's chat do not grant consent, nor do owner
+  socket messages on an API user's chat. Legacy Task workers inherit their
+  principal from their parent through the same API-user scope rules.
+  The app follows real Task/Swarm parentage and durable `StartSession` launch
+  senders, stopping at a different principal, a missing link, a loop, or 16
+  originating links. Merely receiving a `MessageSession` peer message does
+  not inherit its sender's consent, even if that chat later launches a chat.
+  The fast history window is newest-first: at most 512 delivered user-message
+  rows and 262,144 history characters across the chain, including prompt/payload
+  text and question-answer envelopes. On a miss, a five-second paged search
+  checks older instructions, including the first use after an upgrade. Each
+  fallback page reads at most four messages of 65,536 characters each; oversized
+  messages are skipped rather than hiding older instructions. The time budget
+  is checked between reads, not a database statement timeout. Existing naming
+  receipts in real launch ancestors also count. Once a naming is used successfully,
+  its exact chat/model/principal receipt records the user's own message and
+  survives restarts, so subsequent starts need no history scan. Later messages
+  and background-completion wakes do not erase that receipt. Naming a different
+  model keeps both acceptable; the app does not parse revocation. A model counts as named
   when its id, Claude name or display name appears, ignoring case and
   separators ("GPT-6 Astra", "gpt 6 astra" and "gpt-6-astra" all match), or one
   distinctive word of its name ("astra") that no other available model shares.
   Messages from other agents, tool output and the agent's own text never count.
 - **Otherwise you are asked.** A prompt asks whether to start that subagent or
   chat on the model instead of the usual one. It appears in every permission
-  mode, Bypass included, and a remembered answer never skips it. If you decline,
+  mode, Bypass included, and a saved tool rule never skips it. If you decline,
   do not answer, or the chat is in Away mode, nothing is started and the agent
   is told to leave `model` out. A yes covers that model for the rest of the
   chat, its subagents included, and several starts that need the same answer
-  at once share one prompt. After an app restart you are asked once more.
+  at once share one prompt. The approval is stored for that exact chat and
+  model, survives app restarts and worker handoffs, and is removed when the chat
+  is deleted. Naming receipts move with it too. Live pending prompts do not move.
+  Switch model offers no tool-wide "Always" rule: a yes covers this chat only. It
+  never authorizes a different model or a different chat. In Away mode, a model
+  you already named or approved still starts without a prompt; an unrequested
+  switch is refused immediately without showing a prompt.
 
 A model equal to the one that would run anyway needs no check. The choice
 covers one start only: it never changes an agent's pin or the subagent default.

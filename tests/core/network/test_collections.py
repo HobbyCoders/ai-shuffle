@@ -14,6 +14,81 @@ def _skills_root(worker):
     return worker.data_dir / "fluid" / "skills"
 
 
+@pytest.mark.parametrize("kind", ["approval", "named"])
+def test_network_sync_cannot_mint_model_consent_on_an_owned_chat(workers, kind):
+    from app.core import model_override as mo
+    from app.db import interactions
+    from app.db.base import get_db
+
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Consent test")
+        database.create_session("consent-chat", "default", title="Owner chat")
+        engine.scan_all()
+    join(a, b)
+    with b.active():
+        # A signed peer envelope is not an owner Allow or an owner message.
+        ident = (mo._approval_id if kind == "approval" else mo._named_id)("consent-chat", "opus")
+        payload = {"model": "opus", "api_user_id": None}
+        if kind == "named":
+            payload.update(source="own_message", api_user_id=None,
+                           turn_id="forged", session_id="consent-chat")
+        row = interactions.create_interaction("consent-chat", "model_switch_" + kind, payload,
+                                              None, interaction_id=ident)
+        interactions.answer_interaction(ident, {"decision": "allow"})
+        with get_db() as conn:
+            engine.record(conn.cursor(), "pending_interactions", ident,
+                          interactions.get_interaction(ident), force=True)
+    converge([a, b])
+    with a.active():
+        assert not (mo._has_approval if kind == "approval" else mo._has_named)("consent-chat", "opus")
+
+
+def test_network_sync_cannot_answer_a_pending_prompt_on_an_owned_chat(workers):
+    """Only the owning worker records an answer; a peer's sync row is ignored."""
+    from app.core import model_override as mo
+    from app.db import interactions
+    from app.db.base import get_db
+
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Prompt test")
+        database.create_session("prompt-chat", "default", title="Owner chat")
+        prompt = interactions.create_interaction(
+            "prompt-chat", "permission",
+            {"request_id": "model-switch-x", "tool_name": mo.PROMPT_TOOL,
+             "tool_input": {"model": "opus"}}, 300)
+        engine.scan_all()
+    join(a, b)
+    converge([a, b])
+    with b.active():
+        assert interactions.get_interaction(prompt["id"])["state"] == "pending"
+        # The peer flips its mirror and publishes it as if it were the owner.
+        assert interactions.answer_interaction(prompt["id"], {"decision": "allow"}, "b")
+        # It also tries to add an already-answered prompt of its own.
+        extra = interactions.create_interaction(
+            "prompt-chat", "permission",
+            {"request_id": "model-switch-y", "tool_name": mo.PROMPT_TOOL,
+             "tool_input": {"model": "opus"}}, 300)
+        interactions.answer_interaction(extra["id"], {"decision": "allow"}, "b")
+        with get_db() as conn:
+            for ident in (prompt["id"], extra["id"]):
+                engine.record(conn.cursor(), "pending_interactions", ident,
+                              interactions.get_interaction(ident), force=True)
+    converge([a, b])
+    with a.active():
+        row = interactions.get_interaction(prompt["id"])
+        assert row["state"] == "pending" and not row.get("answer")
+        assert interactions.get_interaction(extra["id"]) is None
+        # A real local answer on the owning worker still records the decision.
+        assert interactions.answer_interaction(prompt["id"], {"decision": "deny"}, "phone")
+        engine.scan_all()
+    converge([a, b])
+    with b.active():
+        # The owner's own published decision still reaches the mirror.
+        assert interactions.get_interaction(prompt["id"])["answer"] == {"decision": "deny"}
+
+
 def test_facts_and_skills_reach_other_workers(workers):
     from fluid.codemode.skills import SkillStore
     a, b = workers("a"), workers("b")

@@ -70,8 +70,9 @@ def test_full_names_count_even_when_a_word_is_shared(model, text):
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _turn(session_id, source, prompt, *, steered=False, payload=None, profile="caller"):
-    turn = turns.enqueue_turn(session_id, source, prompt=prompt, profile_id=profile, payload=payload)
+def _turn(session_id, source, prompt, *, steered=False, payload=None, profile="caller", command_id=None):
+    turn = turns.enqueue_turn(session_id, source, prompt=prompt, profile_id=profile, payload=payload,
+                              command_id=command_id)
     with get_db() as conn:
         conn.cursor().execute(
             "UPDATE turns SET state='completed', stop_reason=%s WHERE id=%s",
@@ -144,6 +145,288 @@ async def test_a_model_named_earlier_in_the_chat_still_counts(unpinned):
     assert prompts == [] and len(seen) == 1
 
 
+@pytest.mark.parametrize("prime_receipt", [False, True])
+async def test_named_model_survives_a_real_background_wake_in_away_mode(world, monkeypatch, prime_receipt):
+    from app.core import turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.core.permission_handler import PermissionHandler, permission_handler
+
+    db, seen, prompts, _ = world
+    db.create_model_provider("chatgpt", "ChatGPT", "openai", "https://example.invalid/v1",
+                             models=[{"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol"}])
+    monkeypatch.setattr(permission_handler, "request_permission",
+                        PermissionHandler.request_permission.__get__(permission_handler))
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET away_mode=TRUE WHERE id='parent'")
+    owner = turns.enqueue_turn("parent", "user", prompt="run all subagents with gpt 6.1 sol",
+                               profile_id="caller")
+    turns.start_turn(owner["id"], None, "runner")
+    args = {"agent": "pinned", "model": "prov:chatgpt:gpt-6.1-sol"}
+    starts = 3 if prime_receipt else 0
+    for _ in range(starts):
+        result = await _task(args)
+        assert result["ok"] and result["model_override"]["source"] == mo.NAMED
+    # The later unrelated owner message is the missing production precondition.
+    _turn("parent", "user", "also check the tests")
+    turns.park_turn(owner["id"], ["bg-1857"])
+    task_registry.start_task("parent", "bg-1857", "agent", "bg", tool_use_id="tu-1857")
+    task_registry.mark_background_launch("parent", "tu-1857")
+    try:
+        await turn_scheduler.on_task_terminal("parent", {
+            "task_id": "bg-1857", "status": "completed", "tool_use_id": "tu-1857",
+            "summary": "background work finished", "output_file": "", "usage": {},
+        })
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM turns WHERE session_id='parent' AND source='unpark'")
+            wake = cursor.fetchone()
+        assert wake and "<task-notification>" in wake["prompt"]
+        turns.start_turn(wake["id"], None, "runner")
+        again = await _task(args)
+        assert again["ok"] and again["model_override"]["source"] == mo.NAMED
+        assert len(seen) == starts + 1 and prompts == []
+    finally:
+        task_registry.clear_session("parent")
+
+
+async def test_named_receipt_records_own_message_and_skips_history_after_restart(world, monkeypatch):
+    from app.db import interactions
+
+    turn = _turn("parent", "user", "use Astra")
+    assert await mo.confirm("parent", "caller", model="prov:lane:astra", baseline="opus", action="start") == mo.NAMED
+    receipt = interactions.get_interaction(mo._named_id("parent", "prov:lane:astra"))
+    assert receipt["payload"] == {"model": "prov:lane:astra", "source": "own_message",
+                                  "turn_id": turn["id"], "session_id": "parent", "api_user_id": None}
+    mo._APPROVED.clear()
+    monkeypatch.setattr(mo, "_user_evidence", lambda sid: pytest.fail("receipt must skip history"))
+    assert await mo.confirm("parent", "caller", model="prov:lane:astra", baseline="opus", action="start") == mo.NAMED
+    assert not mo._has_named("parent", "prov:lane:sol")
+    assert not mo._has_named("other", "prov:lane:astra")
+
+
+async def test_api_naming_receipt_keeps_its_sending_principal(world, monkeypatch):
+    from app.db import interactions
+
+    db = world[0]
+    db.create_api_user("key-a", "Key A", "hash")
+    db.create_api_user("key-b", "Key B", "hash")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET api_user_id='key-a' WHERE id='parent'")
+    _turn("parent", "api", "use Astra", payload={"api_user_id": "key-a"})
+    assert await mo.confirm("parent", "caller", model="prov:lane:astra", baseline="opus", action="start") == mo.NAMED
+    receipt = interactions.get_interaction(mo._named_id("parent", "prov:lane:astra"))
+    assert receipt["payload"]["api_user_id"] == "key-a"
+    assert mo._has_named("parent", "prov:lane:astra")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET api_user_id='key-b' WHERE id='parent'")
+    assert not mo._has_named("parent", "prov:lane:astra")
+    assert not mo.user_texts("parent")
+
+
+@pytest.mark.parametrize("restart", [False, True])
+async def test_saved_approval_does_not_cross_principals(world, restart):
+    db, _, _, answer = world
+    answer["result"] = PermissionResultAllow(updated_input={})
+    assert await mo.confirm("parent", "caller", model="prov:lane:astra", baseline="opus", action="start") == mo.APPROVED
+    db.create_api_user("new-key", "New key", "hash")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET api_user_id='new-key' WHERE id='parent'")
+    if restart:
+        mo._APPROVED.clear()
+    answer["result"] = PermissionResultDeny(message="Denied")
+    with pytest.raises(PermissionError):
+        await mo.confirm("parent", "caller", model="prov:lane:astra", baseline="opus", action="start")
+
+
+async def test_saved_and_in_memory_approval_are_checked_before_history(world, monkeypatch):
+    assert mo._remember_approval("parent", "prov:lane:astra")
+    monkeypatch.setattr(mo, "_user_evidence", lambda sid: pytest.fail("approval must skip history"))
+    for _ in range(2):
+        assert await mo.confirm("parent", "caller", model="prov:lane:astra", baseline="opus", action="start") == mo.APPROVED
+
+
+@pytest.mark.parametrize("padding", ["rows", "characters"])
+async def test_first_use_after_upgrade_finds_old_naming(world, monkeypatch, padding):
+    from app.core.permission_handler import PermissionHandler, permission_handler
+
+    db, seen, prompts, _ = world
+    db.create_model_provider("chatgpt", "ChatGPT", "openai", "https://example.invalid/v1",
+                             models=[{"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol"}])
+    _turn("parent", "user", "all subagents are run with gpt 6.1 sol")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE sessions SET away_mode=TRUE WHERE id='parent'")
+        for position in range(2, 515 if padding == "rows" else 3):
+            cursor.execute("INSERT INTO turns (id, session_id, source, prompt, position, state) "
+                           "VALUES (%s, 'parent', 'user', %s, %s, 'completed')",
+                           (f"old-{position}", "continue" if padding == "rows" else "x" * 262144, position))
+    monkeypatch.setattr(permission_handler, "request_permission",
+                        PermissionHandler.request_permission.__get__(permission_handler))
+    result = await _task({"agent": "pinned", "model": "prov:chatgpt:gpt-6.1-sol"})
+    assert result["ok"], result
+    assert result["model_override"]["source"] == mo.NAMED
+    assert len(seen) == 1 and prompts == []
+    assert mo._has_named("parent", "prov:chatgpt:gpt-6.1-sol")
+
+
+@pytest.mark.parametrize("too_old", [False, True])
+def test_history_row_budget_newest_first(world, too_old):
+    _turn("parent", "user", "use Astra")
+    # Bulk fixture setup keeps the test fast while exercising the real SQL window.
+    with get_db() as conn:
+        cursor = conn.cursor()
+        for position in range(2, 513 + int(too_old)):
+            cursor.execute("INSERT INTO turns (id, session_id, source, prompt, position, state) "
+                           "VALUES (%s, 'parent', 'user', 'continue', %s, 'completed')",
+                           (f"budget-{position}", position))
+    texts = mo.user_texts("parent")
+    assert len(texts) == 512
+    assert mo.named_by_user("prov:lane:astra", texts) == (not too_old)
+
+
+def test_history_character_budget_includes_payloads(world):
+    _turn("parent", "user", "use Astra")
+    _turn("parent", "user", "x" * 262144, payload={"padding": "x"})
+    assert mo.user_texts("parent") == []
+
+
+async def test_approval_survives_lost_process_memory_and_away_mode(world, monkeypatch):
+    from app.core import interaction_wait
+    from app.core.permission_handler import PermissionHandler, permission_handler
+    from app.db import interactions
+
+    _, seen, prompts, _ = world
+    _turn("parent", "user", "review the branch")
+    monkeypatch.setattr(permission_handler, "request_permission",
+                        PermissionHandler.request_permission.__get__(permission_handler))
+
+    async def owner_answers(interaction_id, session_id, timeout):
+        row = interactions.get_interaction(interaction_id)
+        result = await permission_handler.respond(row["payload"]["request_id"], session_id, "allow")
+        assert result["resolved"]
+        return interactions.get_interaction(interaction_id)
+
+    monkeypatch.setattr(interaction_wait, "await_interaction", owner_answers)
+    monkeypatch.setattr("app.services.push_notification.fire_and_forget_notify", lambda **kw: None)
+    first = await _task({"agent": "pinned", "model": "prov:lane:astra"})
+    assert first["ok"] and first["model_override"]["source"] == mo.APPROVED
+    receipt = interactions.get_interaction(mo._approval_id("parent", "prov:lane:astra"))
+    assert receipt["state"] == "answered" and receipt["expires_at"] is None
+    assert interactions.get_pending_interactions("parent") == []
+    mo._APPROVED.clear()  # Simulate a server restart, retaining only database state.
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET away_mode=TRUE WHERE id='parent'")
+    _turn("parent", "unpark", "background work finished")
+    again = await _task({"agent": "pinned", "model": "prov:lane:astra"})
+    assert again["ok"], again
+    assert again["model_override"]["source"] == mo.APPROVED
+    assert len(seen) == 2 and prompts == []
+    # The durable approval is model- and chat-scoped, not a broad tool rule.
+    other_model = await _task({"agent": "pinned", "model": "prov:lane:sol"})
+    assert not other_model["ok"] and "no approval prompt was shown" in other_model["error"]
+    sessions.create_session("other", "caller", title="Other")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET away_mode=TRUE WHERE id='other'")
+    with pytest.raises(PermissionError, match="owner is away"):
+        await mo.confirm("other", "caller", model="prov:lane:astra", baseline="opus", action="start x")
+    sessions.delete_session("parent")
+    mo._APPROVED.clear()
+    assert not mo._has_approval("parent", "prov:lane:astra")
+
+
+@pytest.mark.parametrize("remember", ["profile", "session"])
+async def test_remembered_answer_approves_only_its_own_model(world, monkeypatch, remember):
+    """An older client's "Always" on one switch must not answer another model's prompt."""
+    import asyncio
+
+    from app.core import interaction_wait
+    from app.core.permission_handler import PermissionHandler, permission_handler
+    from app.db import interactions
+
+    db = world[0]
+    monkeypatch.setattr(permission_handler, "request_permission",
+                        PermissionHandler.request_permission.__get__(permission_handler))
+    monkeypatch.setattr("app.services.push_notification.fire_and_forget_notify", lambda **kw: None)
+
+    async def wait_for_answer(interaction_id, session_id, timeout):
+        for _ in range(500):
+            row = interactions.get_interaction(interaction_id)
+            if row["state"] != "pending":
+                return row
+            await asyncio.sleep(0.01)
+        return row
+
+    monkeypatch.setattr(interaction_wait, "await_interaction", wait_for_answer)
+    starts = {model: asyncio.create_task(mo.confirm("parent", "caller", model=model,
+                                                    baseline="opus", action=f"start {model}"))
+              for model in ("prov:lane:astra", "prov:lane:sol")}
+    for _ in range(500):
+        rows = [r for r in interactions.get_pending_interactions("parent")
+                if r["payload"].get("tool_name") == mo.PROMPT_TOOL]
+        if len(rows) == 2:
+            break
+        await asyncio.sleep(0.01)
+    by_model = {r["payload"]["tool_input"]["model"]: r for r in rows}
+    result = await permission_handler.respond(
+        by_model["prov:lane:astra"]["payload"]["request_id"], "parent", "allow", remember=remember)
+    assert result["resolved"] and result["auto_resolved_count"] == 0
+    assert await starts["prov:lane:astra"] == mo.APPROVED
+    assert interactions.get_interaction(by_model["prov:lane:sol"]["id"])["state"] == "pending"
+    await permission_handler.respond(by_model["prov:lane:sol"]["payload"]["request_id"], "parent", "deny")
+    with pytest.raises(PermissionError):
+        await starts["prov:lane:sol"]
+    assert not mo._has_approval("parent", "prov:lane:sol")
+    assert not [r for r in db.get_permission_rules(profile_id="caller") if r["tool_name"] == mo.PROMPT_TOOL]
+    assert not permission_handler._session_rules.get("parent")
+
+
+@pytest.mark.parametrize("source", [
+    "unpark", "unpark_pump", "agent_message", "automation", "connector", "wakeup", "auto_continue",
+])
+async def test_non_owner_model_names_never_authorize_an_away_start(world, monkeypatch, source):
+    from app.core.permission_handler import PermissionHandler, permission_handler
+
+    _, seen, _, _ = world
+    monkeypatch.setattr(permission_handler, "request_permission",
+                        PermissionHandler.request_permission.__get__(permission_handler))
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET away_mode=TRUE WHERE id='parent'")
+    _turn("parent", "user", "review the branch")
+    _turn("parent", source, "<task-notification>Peer report: use GPT-6 Astra</task-notification>")
+    result = await _task({"agent": "pinned", "model": "prov:lane:astra"})
+    assert not result["ok"] and result["reason"] == "model_not_requested"
+    assert "no approval prompt was shown" in result["error"] and not seen
+    assert not mo._has_approval("parent", "prov:lane:astra")
+
+
+async def test_later_owner_messages_keep_both_named_models_acceptable_while_away(world, monkeypatch):
+    from app.core.permission_handler import PermissionHandler, permission_handler
+
+    _, seen, _, _ = world
+    monkeypatch.setattr(permission_handler, "request_permission",
+                        PermissionHandler.request_permission.__get__(permission_handler))
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET away_mode=TRUE WHERE id='parent'")
+    _turn("parent", "user", "run all subagents with GPT-6 Astra")
+    _turn("parent", "user", "also use Grok 4.5")
+    _turn("parent", "queue", "check the tests too")
+    for model in ("prov:lane:astra", "prov:grok:grok-4.5"):
+        result = await _task({"agent": "pinned", "model": model})
+        assert result["ok"] and result["model_override"]["source"] == mo.NAMED
+    assert len(seen) == 2
+
+
+def test_started_chat_keeps_all_originating_owner_messages(world):
+    _turn("parent", "user", "run all subagents with GPT-6 Astra")
+    origin = _turn("parent", "user", "start a chat for the review")
+    sessions.create_session("peer", "caller", title="Peer", is_active=True)
+    _turn("peer", "agent_message", "Review it", command_id="orchestration:start:test",
+          payload={"orchestration_root": origin["id"], "orchestration_sender": "parent"})
+    _turn("parent", "user", "also check the tests")
+    assert mo.named_by_user("prov:lane:astra", mo.user_texts("peer"))
+
+
 def test_a_task_worker_reads_its_top_level_chat(world):
     _turn("parent", "user", "run the reviewer on astra")
     from app.core.provider_agent import WORKER_TURN_SOURCE
@@ -157,7 +440,7 @@ def test_a_task_worker_reads_its_top_level_chat(world):
 def test_a_started_chat_reads_the_user_message_that_began_its_chain(world):
     origin = _turn("parent", "user", "start a chat on grok 4.5")
     sessions.create_session("peer", "caller", title="Peer", is_active=True)
-    _turn("peer", "agent_message", "a peer brief naming astra",
+    _turn("peer", "agent_message", "a peer brief naming astra", command_id="orchestration:start:test",
           payload={"orchestration_root": origin["id"], "orchestration_sender": "parent"})
     texts = mo.user_texts("peer")
     assert texts == ["start a chat on grok 4.5"]
@@ -311,8 +594,20 @@ async def test_a_task_worker_shares_its_chats_approval(unpinned):
                             is_worker=True, hidden=True)
     _turn("child", WORKER_TURN_SOURCE, "Review it")
     answer["result"] = PermissionResultDeny(message="User denied permission")
+    mo._APPROVED.clear()  # A worker also recovers its top-level chat's durable approval.
     assert await mo.confirm("child", "caller", model="opus", baseline="fable", action="start x") == mo.APPROVED
     assert len(prompts) == 1
+
+
+async def test_an_approval_that_cannot_be_saved_fails_closed(world, monkeypatch):
+    _, seen, prompts, answer = world
+    _turn("parent", "user", "review the branch")
+    answer["result"] = PermissionResultAllow(updated_input={})
+    monkeypatch.setattr(mo, "_remember_approval", lambda *args: False)
+    result = await _task({"agent": "pinned", "model": "prov:lane:astra"})
+    assert not result["ok"] and "approval could not be saved" in result["error"]
+    assert not seen and len(prompts) == 1
+    assert ("parent", "prov:lane:astra") not in mo._APPROVED
 
 
 async def test_a_denial_is_not_remembered(unpinned):
@@ -414,6 +709,26 @@ async def test_the_agents_own_question_does_not_name_a_model(unpinned, monkeypat
     assert len(prompts) == 1 and not seen
 
 
+async def test_question_answers_share_the_history_byte_budget(unpinned, monkeypatch):
+    from app.core.user_question_handler import QUESTION_KIND
+
+    await _answer_question(monkeypatch, "Which model?", "Opus")
+    # A large prompt leaves no room for the saved question/answer envelope,
+    # even though the answer turn itself is inside the turn-row window.
+    filler = _turn("parent", "user", "fill")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT SUM(length(prompt) + length(CAST(payload AS TEXT))) AS chars "
+                       "FROM turns WHERE session_id='parent'")
+        turn_chars = cursor.fetchone()["chars"]
+        cursor.execute("SELECT length(CAST(payload AS TEXT)) + length(CAST(answer AS TEXT)) AS chars "
+                       "FROM pending_interactions WHERE session_id='parent' AND kind=%s", (QUESTION_KIND,))
+        envelope_chars = cursor.fetchone()["chars"]
+        filler_size = 262144 - turn_chars + len("fill") - envelope_chars + 1
+        cursor.execute("UPDATE turns SET prompt=%s WHERE id=%s", ("x" * filler_size, filler["id"]))
+    assert not mo.named_by_user("opus", mo.user_texts("parent"))
+
+
 async def test_a_model_the_user_gave_as_an_answer_counts(unpinned, monkeypatch):
     _, seen, prompts, _ = unpinned
     _turn("parent", "user", "review the branch")
@@ -480,6 +795,126 @@ async def _start(args, sender="caller"):
 
 
 ARGS = {"title": "Review", "prompt": "Review the change", "request_id": "r1"}
+
+
+async def test_real_started_chat_inherits_saved_naming_after_history_retention(chats):
+    _turn("caller", "user", "use Astra for all subagents", profile="agent")
+    assert await mo.confirm("caller", "agent", model="prov:lane:astra", baseline="sonnet", action="start") == mo.NAMED
+    outcome = await _start(ARGS)
+    assert not outcome.is_error, outcome.text
+    child = json.loads(outcome.text)["session_id"]
+    with get_db() as conn:
+        conn.cursor().execute("DELETE FROM turns WHERE session_id='caller' AND source='user'")
+    assert await mo.confirm(child, "agent", model="prov:lane:astra", baseline="sonnet", action="start") == mo.NAMED
+    assert mo._has_named(child, "prov:lane:astra")
+    assert not mo._has_named(child, "prov:other:astra")
+
+
+async def test_receiving_a_real_peer_message_never_inherits_model_consent(chats):
+    from app.core.permission_handler import PermissionHandler, permission_handler
+    from unittest.mock import patch
+
+    _turn("caller", "user", "use Astra for subagents", profile="agent")
+    sessions.create_session("independent", "agent", title="Independent", is_active=True)
+    _turn("independent", "user", "check the tests", profile="agent")
+    outcome = await orch.make_handler(lambda: "caller")("message", {
+        "session_id": "independent", "message": "please review", "request_id": "peer-review"
+    }, ToolCtx())
+    assert not outcome.is_error, outcome.text
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='completed' WHERE session_id='independent'")
+        conn.cursor().execute("UPDATE sessions SET away_mode=TRUE WHERE id='independent'")
+    with patch.object(permission_handler, "request_permission",
+                      PermissionHandler.request_permission.__get__(permission_handler)):
+        result = await td.dispatch_task_tool(
+            {"prompt": "review", "mode": "sync", "agent": "pinned", "model": "prov:lane:astra"},
+            caller_session_id="independent", caller_provider_id=None)
+        assert not result["ok"] and "away" in result["error"], result
+    assert not mo.named_by_user("prov:lane:astra", mo.user_texts("independent"))
+
+
+@pytest.mark.parametrize("source", ["api", "user", "queue"])
+async def test_api_key_message_on_owner_chat_is_not_owner_consent(world, source):
+    _turn("parent", source, "use Astra", payload={"api_user_id": "key-a"})
+    assert not mo.named_by_user("prov:lane:astra", mo.user_texts("parent"))
+
+
+@pytest.mark.parametrize("source,payload,counts", [
+    ("api", {"api_user_id": "key-a"}, True),
+    ("user", {"api_user_id": "key-a"}, True),
+    ("queue", {"api_user_id": "key-a"}, True),
+    ("user", {}, True),  # Legacy turns inherit their session's principal.
+    ("user", {"user_id": "admin"}, False),
+    ("queue", {"user_id": "paired:phone"}, False),
+    ("api", {"api_user_id": "key-b"}, False),
+])
+def test_only_a_sessions_own_principal_can_name_a_model(world, source, payload, counts):
+    db = world[0]
+    db.create_api_user("key-a", "Key A", "hash")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET api_user_id='key-a' WHERE id='parent'")
+    _turn("parent", source, "use Astra", payload=payload)
+    assert mo.named_by_user("prov:lane:astra", mo.user_texts("parent")) == counts
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_launch_ancestry_stops_at_a_different_principal(world, worker):
+    db = world[0]
+    db.create_api_user("key-a", "Key A", "hash")
+    _turn("parent", "user", "use Astra")
+    sessions.create_session("foreign", "caller", title="Foreign", is_active=True,
+                            is_worker=worker, parent_session_id="parent" if worker else None)
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET api_user_id='key-a' WHERE id='foreign'")
+    if not worker:
+        _turn("foreign", "agent_message", "review", command_id="orchestration:start:test",
+              payload={"orchestration_sender": "parent"})
+    assert not mo.named_by_user("prov:lane:astra", mo.user_texts("foreign"))
+    assert mo.chat_of("foreign") == "foreign"
+
+
+def test_legacy_task_principal_inherits_from_parent_without_crossing_to_owner(world):
+    db = world[0]
+    db.create_api_user("key-a", "Key A", "hash")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET api_user_id='key-a' WHERE id='parent'")
+    _turn("parent", "api", "use Astra", payload={"api_user_id": "key-a"})
+    sessions.create_session("legacy", "caller", title="Legacy", is_worker=True,
+                            parent_session_id="parent")
+    assert mo.chat_of("legacy") == "parent"
+    assert mo.named_by_user("prov:lane:astra", mo.user_texts("legacy"))
+
+
+async def test_launch_after_receiving_peer_context_does_not_inherit_the_peers_consent(chats):
+    _turn("caller", "user", "use Astra", profile="agent")
+    sessions.create_session("independent", "agent", title="Independent", is_active=True)
+    _turn("independent", "user", "review it", profile="agent")
+    outcome = await orch.make_handler(lambda: "caller")("message", {
+        "session_id": "independent", "message": "please review", "request_id": "peer-launch"
+    }, ToolCtx())
+    assert not outcome.is_error, outcome.text
+    outcome = await _start({**ARGS, "request_id": "independent-child"}, sender="independent")
+    assert not outcome.is_error, outcome.text
+    child = json.loads(outcome.text)["session_id"]
+    assert not mo.named_by_user("prov:lane:astra", mo.user_texts(child))
+
+
+async def test_real_started_chat_keeps_origin_after_its_own_later_owner_message(chats):
+    _turn("caller", "user", "run all subagents with GPT-6 Astra", profile="agent")
+    _turn("caller", "user", "start the review chat", profile="agent")
+    outcome = await _start(ARGS)
+    assert not outcome.is_error, outcome.text
+    child_id = json.loads(outcome.text)["session_id"]
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='completed' WHERE session_id=%s", (child_id,))
+        conn.cursor().execute("UPDATE sessions SET away_mode=TRUE WHERE id=%s", (child_id,))
+    _turn(child_id, "user", "check the tests too", profile="agent")
+    result = await td.dispatch_task_tool(
+        {"prompt": "go", "mode": "sync", "agent": "pinned", "model": "prov:lane:astra"},
+        caller_session_id=child_id, caller_provider_id=None)
+    assert result["ok"], result
+    assert result["model_override"]["source"] == mo.NAMED
+    assert chats[2] == []
 
 
 async def test_omitted_model_inherits_and_the_receipt_names_it(chats):

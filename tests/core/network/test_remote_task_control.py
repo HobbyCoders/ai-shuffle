@@ -114,7 +114,9 @@ def finish_child(child, text="Disk is 40% full.", outcome="completed", deferred=
 def all_turns(session_id):
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM turns WHERE session_id=%s ORDER BY created_at", (session_id,))
+        # The shim timestamps have second resolution. Equal timestamps must
+        # follow FIFO position, not whichever index the planner happens to use.
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s ORDER BY created_at, position", (session_id,))
         return [turns._row(r) for r in cursor.fetchall()]
 
 

@@ -105,6 +105,16 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 		});
 	});
 
+	it.each([false, true])('ModelSwitch is chat-scoped and never offers an always rule (relayed=%s)', async (relayed) => {
+		const onRespond = vi.fn();
+		const provider_agent = relayed ? { remote_approval_id: 'r1', worker_name: 'Unraid' } : undefined;
+		renderArmedForClicks({ request: makeRequest({ tool_name: 'ModelSwitch', provider_agent }), onRespond });
+		expect(screen.queryByRole('checkbox')).toBeNull();
+		expect(screen.getByText(/A yes covers this model for this chat, including after app restarts/)).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+		expect(onRespond.mock.calls[0][0]).toMatchObject({ decision: 'allow', remember: 'none' });
+	});
+
 	it('labels the checkbox with the tool it applies to', () => {
 		render(PermissionRequest, { props: { request: makeRequest({ tool_name: 'WebFetch', tool_input: { url: 'https://example.com' } }) } });
 

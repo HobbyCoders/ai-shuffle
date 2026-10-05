@@ -546,6 +546,12 @@ class PermissionHandler:
         if row is None:
             return {"error": "Request not found"}
         payload = row.get("payload") or {}
+        from app.core.model_override import PROMPT_TOOL
+        if payload.get("tool_name") == PROMPT_TOOL:
+            # A model switch answer covers one chat and one model, never a
+            # tool-wide rule; an older client's "Always" must not answer the
+            # chat's other open switch prompts for different models.
+            remember, pattern = None, None
 
         # Defer: answer THIS row {decision: defer}; the requeue path later
         # mints a fresh pending row with the same request_id. The awaiting

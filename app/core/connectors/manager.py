@@ -609,33 +609,9 @@ class ConnectorManager:
         try:
             from app.network import ownership
 
-            def _can_receive():
-                row = database.get_connector(message.connector_id)
-                return not ownership.enrolled() or bool(row and ownership.owns(row))
-
-            # An existing connection can still deliver callbacks after revocation.
-            # Fail closed before the very first external acknowledgment.
-            if not await run_sync(_can_receive):
-                return
-
             # Get the connector instance early for ack/typing/read
             async with self._lock:
                 instance = self._connectors.get(message.connector_id)
-
-            # Acknowledge receipt immediately (emoji reaction + read receipt)
-            if instance and message.platform_message_id:
-                try:
-                    await instance.send_ack_reaction(
-                        message.platform_chat_id, message.platform_message_id
-                    )
-                except Exception:
-                    logger.debug("Ack reaction failed", exc_info=True)
-                try:
-                    await instance.mark_as_read(
-                        message.platform_chat_id, message.platform_message_id
-                    )
-                except Exception:
-                    logger.debug("Mark-as-read failed", exc_info=True)
 
             def _resolve_routing_blocking() -> Dict[str, Any]:
                 """Connector row + API user + session lookup/creation: contiguous
@@ -651,6 +627,10 @@ class ConnectorManager:
                 """
                 # Determine the API user for this connector
                 connector_row = database.get_connector(message.connector_id)
+                # A revoked connection can still deliver callbacks. Check the
+                # same routing row in this hop, before any external acknowledgment.
+                if ownership.enrolled() and not (connector_row and ownership.owns(connector_row)):
+                    return {"not_owned": True}
                 api_user_id = connector_row.get("api_user_id") if connector_row else None
                 api_user = database.get_api_user(api_user_id) if api_user_id else None
                 if not api_user:
@@ -692,6 +672,24 @@ class ConnectorManager:
                 }
 
             routing = await run_sync(_resolve_routing_blocking)
+            if routing.get("not_owned"):
+                return
+
+            # Acknowledge receipt immediately (emoji reaction + read receipt)
+            if instance and message.platform_message_id:
+                try:
+                    await instance.send_ack_reaction(
+                        message.platform_chat_id, message.platform_message_id
+                    )
+                except Exception:
+                    logger.debug("Ack reaction failed", exc_info=True)
+                try:
+                    await instance.mark_as_read(
+                        message.platform_chat_id, message.platform_message_id
+                    )
+                except Exception:
+                    logger.debug("Mark-as-read failed", exc_info=True)
+
             if routing.get("refused"):
                 logger.error(
                     "Connector %s refused a message from chat %s: %s",

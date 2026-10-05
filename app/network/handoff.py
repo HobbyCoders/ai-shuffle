@@ -25,9 +25,17 @@ TABLES = {
     "fluid_session_nodes": ("node_id", "parent_id", "ts", "message"),
     "fluid_session_events": ("seq", "event"),
     "session_store_entries": ("project_key", "subpath", "entry", "created_at"),
+    "pending_interactions": ("id", "kind", "payload", "state", "answer", "created_at", "answered_at"),
+    "turns": ("id", "source", "prompt", "payload", "command_id", "position", "state", "created_at"),
 }
-JSON_COLUMNS = {"tool_input", "metadata", "message", "event", "entry", "payload"}
-APP_TABLES = {"session_messages", "session_events"}
+JSON_COLUMNS = {"tool_input", "metadata", "message", "event", "entry", "payload", "answer"}
+APP_TABLES = {"session_messages", "session_events", "pending_interactions", "turns"}
+# Only settled model receipts move. Live permission/question/access prompts have
+# no move behaviour and stay on the source worker; never replace those here.
+_RECEIPTS_SQL = " AND kind IN ('model_switch_approval', 'model_switch_named') AND state='answered'"
+_LAUNCH_SQL = (" AND command_id LIKE 'orchestration:start:%%' AND source='agent_message' "
+               "AND state NOT IN ('queued','running','interrupting','draining')")
+_TRANSFER_FILTERS = {"pending_interactions": _RECEIPTS_SQL, "turns": _LAUNCH_SQL}
 
 
 def _aad(sid, target):
@@ -195,7 +203,8 @@ def _history(session):
         for table, columns in TABLES.items():
             sid = session["id"] if table in APP_TABLES else session.get("sdk_session_id")
             order = " ORDER BY id" if table in ("session_messages", "session_store_entries") else ""
-            cur.execute(f"SELECT {', '.join(columns)} FROM {table} WHERE session_id=%s" + order, (sid,))
+            receipt_filter = _TRANSFER_FILTERS.get(table, "")
+            cur.execute(f"SELECT {', '.join(columns)} FROM {table} WHERE session_id=%s" + receipt_filter + order, (sid,))
             rows[table] = [dict(row) for row in cur.fetchall()]
     return rows
 
@@ -363,13 +372,24 @@ def install_history(sid, data, cwd):
     with get_db() as conn:
         cur = conn.cursor()
         for table in APP_TABLES:
-            cur.execute(f"DELETE FROM {table} WHERE session_id=%s", (sid,))
+            receipt_filter = _TRANSFER_FILTERS.get(table, "")
+            cur.execute(f"DELETE FROM {table} WHERE session_id=%s" + receipt_filter, (sid,))
         for table, columns in TABLES.items():
             destination_id = sid if table in APP_TABLES else sdk
             for row in data["history"].get(table, []):
+                if table == "pending_interactions":
+                    from app.core.model_override import RECEIPT_KINDS
+                    if row.get("kind") not in RECEIPT_KINDS or row.get("state") != "answered":
+                        continue
+                if table == "turns" and (
+                        row.get("source") != "agent_message"
+                        or not str(row.get("command_id") or "").startswith("orchestration:start:")):
+                    continue
                 values = []
                 for column in columns:
                     value = row.get(column)
+                    if table == "turns" and column == "state":
+                        value = "completed"  # An ancestry marker is never executable work.
                     if column == "cli_session_id":
                         value = None
                     if column == "project_root":
