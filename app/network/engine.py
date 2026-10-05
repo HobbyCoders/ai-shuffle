@@ -485,6 +485,16 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None
     record = dict(record)
+    new_agent = False
+    if coll.name == "agents":
+        cursor.execute("SELECT 1 FROM agents WHERE id = %s", keys)
+        if cursor.fetchone() is None:
+            # Only a re-creation (this worker holds the old agent's tombstone)
+            # detaches grants. On a first arrival, grants already here came
+            # from another origin ahead of this agent and name this very
+            # agent: streams from different origins are not causally ordered.
+            known = store.get_record(cursor, coll.name, record_id)
+            new_agent = known is not None and bool(known["deleted"])
     retired_automation = False
     if coll.name == "automations" and record.get("profile_id") == "Explore":
         cursor.execute("SELECT is_builtin FROM agents WHERE id = %s", ("Explore",))
@@ -527,6 +537,11 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     sql = (f"INSERT INTO {coll.table} ({', '.join(insert_columns)}) VALUES ({', '.join(['%s'] * len(insert_columns))}) "
            f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}")
     cursor.execute(sql, tuple(insert_values))
+    if new_agent:
+        # As for a local create: a deleted agent's API-key assignments must not
+        # attach to a new agent with its id. Covers bootstrap snapshots too.
+        from app.db.api_users import release_grants_for_new_agent
+        release_grants_for_new_agent(cursor, keys[0])
     if retired_automation:
         # last_error is local-only: never add it to the shared field list.
         cursor.execute("UPDATE automations SET last_error = %s WHERE id = %s", (
@@ -534,6 +549,33 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     cursor.execute(f"SELECT * FROM {coll.table} WHERE {where}", keys)
     row = cursor.fetchone()
     return dict(row) if row else None
+
+
+def _grant_deletion_widens_key(cursor, coll: policy.Collection, record_id: str) -> bool:
+    """True when deleting this API-key assignment would open the key up.
+
+    An older build's ``api_user_profiles`` still cascades from ``agents``:
+    when an agent is deleted there (or its tombstone arrives there), it
+    publishes the deletion of every assignment to that agent. For a key whose
+    last assignment that is, applying it here would leave the key with no
+    assignments, which means unrestricted. An assignment to an agent this
+    worker no longer has is exactly that side effect, so its deletion is not
+    applied. A deletion that leaves other assignments only narrows the key,
+    and one for an agent that still exists is a deliberate edit.
+    """
+    if coll.name != "api_user_profiles":
+        return False
+    api_user_id, profile_id = _local_keys(coll, record_id)
+    # The older worker deletes assignments only after it has the agent's
+    # tombstone, which it forwards with them. Ops from different origins in a
+    # batch are not causally ordered, so a tombstone later in this batch counts
+    # as gone too.
+    if profile_id not in (getattr(_batch_agent_deletions, "ids", None) or ()):
+        cursor.execute("SELECT 1 FROM agents WHERE id = %s", (profile_id,))
+        if cursor.fetchone() is not None:
+            return False
+    cursor.execute("SELECT profile_id FROM api_user_profiles WHERE api_user_id = %s", (api_user_id,))
+    return {row["profile_id"] for row in cursor.fetchall()} == {profile_id}
 
 
 def _owns_session(cursor, ctx: NetworkContext, session_ids: Sequence[Optional[str]]) -> bool:
@@ -1153,6 +1195,19 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         store.insert_op(cursor, env.to_dict(), _lane(coll))
         return "lost"
 
+    if env.op == OP_DELETE and _grant_deletion_widens_key(cursor, coll, env.record_id):
+        # Fail closed (see _grant_deletion_widens_key): keep the assignment and
+        # this worker's view of it, record the refused deletion as a conflict,
+        # and keep the op for forwarding so the origin's stream has no gap.
+        logger.warning("Kept API-key assignment %s: its deletion from %s would make the key unrestricted",
+                       env.record_id, env.origin_device_id)
+        store.add_conflict(cursor, collection=env.collection, record_id=env.record_id, losing_clock=env.clock,
+                           losing_device_id=env.origin_device_id, losing_record={"_deleted": True},
+                           winning_clock=int(existing["clock"]) if existing else env.clock,
+                           winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
+        store.insert_op(cursor, env.to_dict(), _lane(coll))
+        return "lost"
+
     if env.collection == "membership":
         _apply_membership(cursor, ctx, plaintext)
 
@@ -1370,6 +1425,9 @@ APPLY_CHUNK = 64
 # Set while a chunk applies: the highest clock seen, observed once at the end
 # of the chunk instead of one network_state update per envelope.
 _deferred_clock = threading.local()
+#: Agent ids deleted somewhere in the batch being applied (see
+#: :func:`_grant_deletion_widens_key`).
+_batch_agent_deletions = threading.local()
 
 
 def _observe_clock(cursor, clock: int) -> None:
@@ -1513,12 +1571,19 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
     ctx = ctx or require_context()
     result = ApplyResult()
     items = list(envelopes)
-    for start in range(0, len(items), APPLY_CHUNK):
-        chunk = items[start:start + APPLY_CHUNK]
-        if len(chunk) > 1 and _apply_chunk(chunk, ctx, result):
-            continue
-        for data in chunk:
-            _apply_one(data, ctx, result)
+    _batch_agent_deletions.ids = {
+        data.get("record_id") for data in items
+        if isinstance(data, Mapping) and data.get("collection") == "agents" and data.get("op") == OP_DELETE
+    }
+    try:
+        for start in range(0, len(items), APPLY_CHUNK):
+            chunk = items[start:start + APPLY_CHUNK]
+            if len(chunk) > 1 and _apply_chunk(chunk, ctx, result):
+                continue
+            for data in chunk:
+                _apply_one(data, ctx, result)
+    finally:
+        _batch_agent_deletions.ids = None
     if result.own_ahead:
         restored_from_backup(result.own_ahead, ctx.identity.incarnation,
                              evidence_network_id=ctx.network_id, evidence_device_id=ctx.device_id)
@@ -1720,6 +1785,13 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
                     except ApplyError as exc:
                         logger.warning("Snapshot membership record skipped: %s", exc)
                         continue
+            if item["deleted"] and _grant_deletion_widens_key(cursor, coll, item["record_id"]):
+                store.add_conflict(cursor, collection=coll.name, record_id=item["record_id"],
+                                   losing_clock=int(item["clock"]), losing_device_id=item["origin_device_id"],
+                                   losing_record={"_deleted": True},
+                                   winning_clock=int(existing["clock"]) if existing else int(item["clock"]),
+                                   winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
+                continue
             if item["deleted"]:
                 materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
                 local_hash = ""

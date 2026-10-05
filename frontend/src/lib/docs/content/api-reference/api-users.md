@@ -152,6 +152,8 @@ When `project_id` is set, the API user can only:
 When `profile_ids` is set, the server limits every agent run started with the key (the `/api/v1/query` and `/api/v1/conversation` endpoints, a chat WebSocket `query` or `queue_message`, and `POST /api/v1/voice/sessions`) to those agents:
 - A `profile` outside the list is rejected with `403`
 - An omitted `profile` runs the key's agent when exactly one is assigned; with several assigned, the request is rejected with `400` naming the allowed ids
+- An omitted `profile` is rejected with `409` when every assigned agent has been deleted: the key keeps its restriction and has no usable agent until the owner assigns an existing one
+- Deleting an agent does not remove it from a key's list. If a new agent is later created with the same id, it is removed from the list instead of inheriting it, and a key for which it was the only assigned agent is switched off until the owner assigns its agents and turns it back on
 - `GET /api/v1/agents` lists only the assigned agents, and `GET /api/v1/agents/{id}` returns `403` for any other
 
 ### Unrestricted

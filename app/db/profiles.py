@@ -103,6 +103,10 @@ def create_profile(
             (profile_id, name, description, json.dumps(config), is_builtin, json.dumps(mcp_tools or []),
              avatar_color, now, now)
         )
+        if cursor.rowcount > 0:
+            # A deleted agent's API-key assignments must not attach to this one.
+            from app.db.api_users import release_grants_for_new_agent
+            release_grants_for_new_agent(cursor, profile_id)
     return get_profile(profile_id)
 
 

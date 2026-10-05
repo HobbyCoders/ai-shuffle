@@ -40,7 +40,7 @@ API keys start with `aih_` and are shown only once at creation time.
 
 API users can be restricted to:
 - **Specific project** — Only access sessions/resources in that project
-- **Specific agents** — Only run their assigned agents (`profile_ids`). Naming another agent returns `403`; omitting the agent runs the only assigned one, or returns `400` when several are assigned
+- **Specific agents** — Only run their assigned agents (`profile_ids`). Naming another agent returns `403`; omitting the agent runs the only assigned one, returns `400` when several are assigned, or `409` when every assigned agent has been deleted
 - These restrictions are enforced server-side, not just hidden from listings
 
 ### Auth levels

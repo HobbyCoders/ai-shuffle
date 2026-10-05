@@ -1457,9 +1457,9 @@ async def _enqueue_context_wake(
     context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
     payload = _context_payload(context)
     if context.get("stop_reason") == "profile_removed":
-        from app.core.wakeup_service import _announce_dropped_wake
+        from app.core.wakeup_service import announce_removed_agent_once
 
-        await _announce_dropped_wake(
+        await announce_removed_agent_once(
             {"session_id": session_id, "source": source},
             context.get("error") or "agent profile was removed",
         )

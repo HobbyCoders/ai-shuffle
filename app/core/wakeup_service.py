@@ -171,12 +171,24 @@ def _now_epoch() -> float:
 # Firing + arming
 # ---------------------------------------------------------------------------
 
+class AgentLookupFailed(Exception):
+    """The wake's agent could not be looked up (e.g. a database error).
+
+    Distinct from "no such agent": the agent may well exist, so the wake is
+    retried rather than dropped.
+    """
+
+
 async def _resolve_profile_id(row: Dict[str, Any]) -> Optional[str]:
     """The profile a wake should run under: the row's, else the session's.
 
     A wakeup persisted without a profile (an older row, or a producer that had
     none to hand) would enqueue a turn the runtime cannot resolve an agent for,
     so the session's own profile is the fallback and "neither" is a drop.
+
+    ``None`` means the agent is confirmed missing. A lookup that fails raises
+    :class:`AgentLookupFailed` instead: a transient error must not drop a wake
+    for good.
     """
     from app.db import database
 
@@ -188,8 +200,9 @@ async def _resolve_profile_id(row: Dict[str, Any]) -> Optional[str]:
             profile_id = (session or {}).get("profile_id")
         if profile_id and await asyncio.to_thread(database.get_profile, profile_id):
             return profile_id
-    except Exception:  # noqa: BLE001 — a failed lookup must not submit a bad turn.
-        logger.exception("wakeup profile lookup failed for session %s", session_id)
+    except Exception as exc:  # noqa: BLE001 — a failed lookup must not submit a bad turn.
+        logger.warning("wakeup profile lookup failed for session %s", session_id, exc_info=True)
+        raise AgentLookupFailed(f"{type(exc).__name__}: {exc}") from exc
     return None
 
 
@@ -237,6 +250,31 @@ async def _announce_dropped_wake(row: Dict[str, Any], reason: str) -> None:
         logger.debug(
             "wakeup drop note failed for session %s", session_id, exc_info=True
         )
+
+
+async def announce_removed_agent_once(row: Dict[str, Any], reason: str) -> None:
+    """Post a removed-agent notice unless the session already shows it.
+
+    One retirement cancels a session's wakes, its parked continuation and
+    every later context wake (each background task that finishes asks for
+    one). They all have the same cause, so the session gets one notice, not
+    one per refusal. Best-effort: a failed check posts the notice.
+    """
+    session_id = row.get("session_id")
+    if not session_id:
+        return
+    try:
+        from app.db import session_events
+
+        latest = await asyncio.to_thread(
+            session_events.get_latest_system_note, str(session_id), DROPPED_NOTE_SUBTYPE
+        )
+    except Exception:  # noqa: BLE001 — never let the check hide the notice.
+        logger.debug("dropped-note lookup failed for session %s", session_id, exc_info=True)
+        latest = None
+    if latest and (latest.get("data") or {}).get("reason") == reason:
+        return
+    await _announce_dropped_wake(row, reason)
 
 
 async def _rearm_after_failed_submit(row: Dict[str, Any], reason: str) -> None:
@@ -348,7 +386,7 @@ async def _fire(row: Dict[str, Any]) -> None:
     if row.get("source") == "profile_cancelled":
         if await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id):
             _retry_attempts.pop(str(wakeup_id), None)
-            await _announce_dropped_wake(row, row.get("reason") or "agent profile was removed")
+            await announce_removed_agent_once(row, row.get("reason") or "agent profile was removed")
         return
 
     # STOP SEMANTICS: a session the user stopped stays stopped until
@@ -391,7 +429,12 @@ async def _fire(row: Dict[str, Any]) -> None:
 
     # Validate before every consumer, including usage-limit resumes and held
     # peer promotions. An explicit missing ID must never fall back to another agent.
-    profile_id = await _resolve_profile_id(row)
+    try:
+        profile_id = await _resolve_profile_id(row)
+    except AgentLookupFailed as exc:
+        # The claim deleted the row: put it back for a retry, like a failed submit.
+        await _rearm_after_failed_submit(row, f"the wake's agent could not be looked up ({exc})")
+        return
     if not profile_id:
         logger.warning(
             "wakeup %s (session %s) has a missing/unresolvable agent %s — dropping the wake",

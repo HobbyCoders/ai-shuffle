@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -81,12 +84,60 @@ def _get_api_user_profile_ids(cursor, user_id: str) -> List[str]:
 
 
 def _enrich_api_user_with_profiles(cursor, user: Optional[Dict[str, Any]]) -> Optional[ApiUserRow]:
-    """Add profile_ids to API user dict from junction table"""
+    """Add profile_ids to API user dict from junction table.
+
+    ``missing_profile_ids`` lists the assigned ids with no agent row:
+    assignments outlive a deleted agent, so the key stays restricted, but
+    those ids cannot run.
+    """
     if not user:
         return None
-    profile_ids = _get_api_user_profile_ids(cursor, user["id"])
+    cursor.execute(
+        "SELECT p.profile_id, a.id AS agent_id FROM api_user_profiles p "
+        "LEFT JOIN agents a ON a.id = p.profile_id WHERE p.api_user_id = %s ORDER BY p.created_at",
+        (user["id"],),
+    )
+    rows = cursor.fetchall()
+    profile_ids = [row["profile_id"] for row in rows]
     user["profile_ids"] = profile_ids if profile_ids else None
+    user["missing_profile_ids"] = [row["profile_id"] for row in rows if row["agent_id"] is None]
     return user
+
+
+def release_grants_for_new_agent(cursor, agent_id: str) -> List[str]:
+    """Detach the assignments a deleted agent with this id left behind.
+
+    Call in the transaction that creates the agent row ``agent_id``, locally
+    or from a peer. Assignments outlive a deleted agent so that a key
+    restricted to it stays restricted; a NEW agent taking the id is a
+    different agent and must not inherit them. A key with other assignments
+    just loses this one (it only narrows). A key for which it was the last
+    one would become unrestricted, so it is switched off instead (fail
+    closed) until the owner picks its agents and turns it back on.
+
+    Returns the ids of the keys that were switched off.
+    """
+    cursor.execute("SELECT api_user_id FROM api_user_profiles WHERE profile_id = %s", (agent_id,))
+    user_ids = [row["api_user_id"] for row in cursor.fetchall()]
+    if not user_ids:
+        return []
+    now = datetime.now(timezone.utc).isoformat()
+    disabled = []
+    for user_id in user_ids:
+        cursor.execute("SELECT COUNT(*) AS n FROM api_user_profiles WHERE api_user_id = %s", (user_id,))
+        if int(cursor.fetchone()["n"]) <= 1:
+            cursor.execute(
+                "UPDATE api_users SET is_active = FALSE, updated_at = %s WHERE id = %s AND is_active = TRUE",
+                (now, user_id),
+            )
+            disabled.append(user_id)
+    cursor.execute("DELETE FROM api_user_profiles WHERE profile_id = %s", (agent_id,))
+    logger.warning(
+        "A new agent took the id %r of a deleted agent: removed its assignment from %d API key(s); "
+        "switched off %s, whose only assigned agent it was",
+        agent_id, len(user_ids), disabled or "none",
+    )
+    return disabled
 
 
 def create_api_user(

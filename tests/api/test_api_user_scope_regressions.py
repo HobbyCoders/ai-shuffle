@@ -404,3 +404,78 @@ def test_import_files_the_session_inside_the_key_scope(client, import_world):
     row = database.get_session(r.json()["session_id"])
     assert (row["project_id"], row["profile_id"], row["api_user_id"]) == (
         "own-project", "own-profile", "u1")
+
+
+# ---------------------------------------------------------------------------
+# 7. Assignments that outlive their agent (#1870)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path, body", [
+    ("/api/v1/sessions", {}),
+    ("/api/v1/conversation", {"prompt": "hi"}),
+    ("/api/v1/conversation/start", {"prompt": "hi"}),
+    ("/api/v1/query", {"prompt": "hi"}),
+])
+def test_key_whose_only_agent_was_deleted_gets_a_clear_refusal(client, path, body):
+    """No agent named: the key's only assigned agent is gone, so it has no
+    usable agent. That is a 409 that says so, never a server error."""
+    database.create_profile("gone-agent", "Gone", None, {"model": "sonnet"})
+    database.create_profile("someone-else", "Other", None, {"model": "sonnet"})
+    _scoped_key(profile_ids=("gone-agent",))
+    database.delete_profile("gone-agent")
+
+    response = client.post(path, json=body, headers=AUTH)
+
+    assert response.status_code == 409, response.text
+    assert "no usable agent" in response.json()["detail"]
+    assert "gone-agent" in response.json()["detail"]
+    assert database.get_sessions(limit=10) == []
+
+
+def test_recreated_agent_id_does_not_inherit_the_deleted_agents_key_grants(mock_db):
+    """Assignments outlive a deleted agent so a key never silently widens. A
+    NEW agent that later takes the same id must not pick them up: a key with
+    other agents loses only that grant, and a key restricted to that id alone
+    is switched off rather than left unrestricted."""
+    from app.core.api_user_scope import worker_refusal
+
+    database.create_profile("helper", "Helper", None, {})
+    database.create_profile("other", "Other", None, {})
+    database.create_api_user("only-helper", "Only", "only-hash", profile_ids=["helper"])
+    database.create_api_user("helper-and-other", "Mixed", "mixed-hash", profile_ids=["helper", "other"])
+    database.create_api_user("open-key", "Open", "open-hash")
+    database.delete_profile("helper")
+    assert database.get_api_user("only-helper")["profile_ids"] == ["helper"]
+
+    database.create_profile("helper", "A different helper", None, {})
+
+    only = database.get_api_user("only-helper")
+    assert not only["is_active"]
+    assert database.get_api_user_by_key_hash("only-hash") is None
+    assert worker_refusal("only-helper", "helper") is not None
+    assert worker_refusal("only-helper", "other") is not None
+    mixed = database.get_api_user("helper-and-other")
+    assert mixed["is_active"] and mixed["profile_ids"] == ["other"]
+    assert worker_refusal("helper-and-other", "helper") is not None
+    assert worker_refusal("open-key", "helper") is None
+    # Seeding an id that already exists changes nothing.
+    database.create_profile("other", "Other", None, {}, if_absent=True)
+    assert database.get_api_user("helper-and-other")["profile_ids"] == ["other"]
+
+
+@pytest.mark.parametrize("profile_ids", [("gone-agent", "someone-else"), None])
+def test_conversation_naming_a_deleted_agent_is_a_clear_400(client, profile_ids):
+    """#1875 review: naming a deleted agent explicitly on /conversation was a
+    500 (the new session row's agent foreign key). It now gets the same 400
+    as /sessions, before any session row exists."""
+    database.create_profile("gone-agent", "Gone", None, {"model": "sonnet"})
+    database.create_profile("someone-else", "Other", None, {"model": "sonnet"})
+    _scoped_key(profile_ids=profile_ids)
+    database.delete_profile("gone-agent")
+
+    response = client.post("/api/v1/conversation", json={"prompt": "hi", "profile": "gone-agent"}, headers=AUTH)
+
+    assert response.status_code == 400, response.text
+    assert "no longer exists" in response.json()["detail"]
+    assert database.get_sessions(limit=10) == []

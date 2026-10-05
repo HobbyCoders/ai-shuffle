@@ -271,7 +271,8 @@ def resolve_api_user_profile(api_user: Optional[dict], requested: Optional[str])
     with no assigned agents) get ``requested`` back unchanged. A restricted
     user asking for an agent outside the set gets 403; one that names no agent
     runs its only agent, or gets 400 listing the allowed ids when it has
-    several.
+    several. When every assigned agent has been deleted (assignments outlive
+    their agent: ``missing_profile_ids``) the key has no usable agent: 409.
     """
     allowed = (api_user or {}).get("profile_ids") or []
     if not allowed:
@@ -283,6 +284,14 @@ def resolve_api_user_profile(api_user: Optional[dict], requested: Optional[str])
                 detail=f"This API key is not allowed to use agent '{requested}'.",
             )
         return requested
+    missing = set((api_user or {}).get("missing_profile_ids") or [])
+    if all(profile_id in missing for profile_id in allowed):
+        names = ", ".join(f"'{profile_id}'" for profile_id in allowed)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This API key has no usable agent: its assigned agents ({names}) were deleted. "
+                   "Ask the owner to assign an existing agent to this key.",
+        )
     if len(allowed) == 1:
         return allowed[0]
     raise HTTPException(

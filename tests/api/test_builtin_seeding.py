@@ -61,6 +61,60 @@ async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(m
     assert worker_refusal("retirement-only", "general-purpose") is not None
 
 
+async def test_retired_session_announces_the_cancelled_continuation_once(mock_db):
+    """Every background task that finishes on a cancelled Explore session asks
+    for a context wake; each refusal used to post another identical notice."""
+    from app.core.builtin_subagents import seed_builtin_subagents
+    from app.core import wakeup_service, turn_scheduler
+    from app.db import database, wakeups, turns, session_events
+
+    database.create_profile("Explore", "Explore", None, {}, is_builtin=True)
+    database.create_session("retired-busy-chat", profile_id="Explore")
+    wakeups.create_wakeup(id="retired-busy-wake", session_id="retired-busy-chat", profile_id="Explore",
+                         prompt="continue", fire_at=9999999999)
+    turn = turns.enqueue_turn("retired-busy-chat", "user", profile_id="Explore", prompt="work")
+    with database.get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state = 'parked' WHERE id = %s", (turn["id"],))
+    seed_builtin_subagents()
+
+    def dropped():
+        return [e for e in session_events.get_events("retired-busy-chat")
+                if e["payload"].get("subtype") == wakeup_service.DROPPED_NOTE_SUBTYPE]
+
+    with patch("app.core.turn_manager.submit_async") as submit:
+        for row in [r for r in wakeups.get_pending_wakeups() if r["session_id"] == "retired-busy-chat"]:
+            await wakeup_service._fire(row)
+        for task in ("task-a", "task-b", "task-c"):
+            result = await turn_scheduler._enqueue_context_wake(
+                "retired-busy-chat", "task_complete", [], [task], "continue")
+            assert result["id"] is None
+        submit.assert_not_called()
+    assert not turns.get_queued_turns("retired-busy-chat")
+    notes = dropped()
+    assert len(notes) == 1, [n["payload"] for n in notes]
+    assert "Explore was removed" in str(notes[0]["payload"])
+
+
+def test_startup_seeding_keeps_keys_granted_to_built_ins(mock_db):
+    """#1875 review: seeding runs on every start. Keys that name built-in
+    agents keep their grants and stay switched on across restarts."""
+    from app.core.builtin_subagents import BUILTIN_SUBAGENTS, seed_builtin_subagents
+    from app.core.api_user_scope import worker_refusal
+    from app.db import database
+
+    builtin_ids = [d["id"] for d in BUILTIN_SUBAGENTS]
+    seed_builtin_subagents()
+    database.create_profile("seed-custom", "Custom", None, {})
+    database.create_api_user("seed-only-gp", "GP only", "seed-gp-hash", profile_ids=[builtin_ids[0]])
+    database.create_api_user("seed-mixed", "Mixed", "seed-mixed-hash", profile_ids=[*builtin_ids, "seed-custom"])
+    for _restart in range(2):
+        assert all(v == "exists" for k, v in seed_builtin_subagents().items() if k in builtin_ids)
+    only, mixed = database.get_api_user("seed-only-gp"), database.get_api_user("seed-mixed")
+    assert only["is_active"] and only["profile_ids"] == [builtin_ids[0]]
+    assert mixed["is_active"] and sorted(mixed["profile_ids"]) == sorted([*builtin_ids, "seed-custom"])
+    assert worker_refusal("seed-only-gp", builtin_ids[0]) is None
+
+
 async def test_missing_stored_wake_profile_drops_once_with_visible_reason(mock_db):
     from app.core import wakeup_service
     from app.core.config import settings

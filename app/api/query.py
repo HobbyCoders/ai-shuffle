@@ -410,6 +410,13 @@ async def conversation(
         # outcome after the wait; refuse here, before a session row is made.
         await _refuse_unready_leg(profile_id, overrides, session_id)
         if not session_id:
+            # The new row's agent foreign key would fail the insert with a
+            # 500: refuse a deleted agent here, as /sessions does.
+            if not await run_sync(database.get_profile, profile_id):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="That agent no longer exists — pick another one.",
+                )
             session_id = str(uuid.uuid4())
             title = derive_session_title(
                 request.prompt, max_chars=50, word_boundary=False

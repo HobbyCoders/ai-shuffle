@@ -13,6 +13,177 @@ from tests.core.network.harness import (
 )
 
 
+def _old_build_cascade(agent_id):
+    """What an older build's ``ON DELETE CASCADE`` on api_user_profiles does
+    when its agent row goes, locally or from a peer's tombstone. This build's
+    schema has no such key, so the test emulates it."""
+    with database.get_db() as conn:
+        conn.cursor().execute("DELETE FROM api_user_profiles WHERE profile_id = %s", (agent_id,))
+
+
+def test_old_worker_cascade_cannot_widen_a_restricted_key(workers):
+    """#1870: an older worker still cascades an agent delete into the API-key
+    assignments and publishes those deletions. On an updated worker, applying
+    the deletion of a key's last assignment to an agent it does not have
+    would make the key unrestricted, so that deletion is refused (kept as a
+    conflict). Narrowing deletions and deliberate edits still apply."""
+    from app.core.api_user_scope import worker_refusal
+    from app.network import policy
+
+    old, updated, third = workers("old-build"), workers("updated-build"), workers("third-build")
+    with old.active():
+        engine.create_network("Mixed versions")
+        for agent_id in ("deleted-there", "deleted-here", "kept"):
+            database.create_profile(agent_id, agent_id, None, {})
+        database.create_api_user("only-there", "Only", "only-there-hash", profile_ids=["deleted-there"])
+        database.create_api_user("mixed-there", "Mixed", "mixed-there-hash", profile_ids=["deleted-there", "kept"])
+        database.create_api_user("only-here", "Only here", "only-here-hash", profile_ids=["deleted-here"])
+        database.create_api_user("open-later", "Opened", "open-later-hash", profile_ids=["kept"])
+        engine.scan_all()
+    join(old, updated)
+    join(old, third)
+    converge([old, updated, third])
+
+    # 1. Deleted on the older worker: its cascade publishes the deletions.
+    with old.active():
+        database.delete_profile("deleted-there")
+        _old_build_cascade("deleted-there")
+        # A deliberate edit on the older worker still opens a key up.
+        database.update_api_user("open-later", profile_ids=[])
+        engine.scan_all()
+    # 2. Deleted on an updated worker: the older worker cascades on apply.
+    with updated.active():
+        database.delete_profile("deleted-here")
+        engine.scan_all()
+    exchange(updated, old)
+    with old.active():
+        _old_build_cascade("deleted-here")
+        engine.scan_all()
+    result = exchange(old, updated)
+    assert result.retry == result.rejected == result.pending == 0, result.reasons
+    # The third worker has neither tombstone yet. The older worker forwards
+    # the updated worker's agent tombstone with its own cascade deletions;
+    # streams from different origins are not causally ordered, so deliver
+    # the worst order: the older worker's deletions first.
+    with third.active():
+        marks = store.local_watermarks()
+    with old.active():
+        ops = store.ops_since(marks, limit=500, exclude_origin=third.device_id)
+    ops.sort(key=lambda op: op["origin_device_id"] != old.device_id)
+    assert {op["origin_device_id"] for op in ops} == {old.device_id, updated.device_id}
+    with third.active():
+        result = engine.apply_batch(ops)
+    assert result.retry == result.rejected == result.pending == 0, result.reasons
+    converge([old, updated, third])
+
+    for receiver in (updated, third):
+        with receiver.active():
+            assert database.get_profile("deleted-there") is None
+            assert database.get_api_user("only-there")["profile_ids"] == ["deleted-there"]
+            assert worker_refusal("only-there", "kept") is not None
+            assert database.get_api_user("only-here")["profile_ids"] == ["deleted-here"]
+            assert worker_refusal("only-here", "kept") is not None
+            assert database.get_api_user("mixed-there")["profile_ids"] == ["kept"]
+            assert database.get_api_user("open-later")["profile_ids"] is None
+            # The refused deletions stay visible as conflicts, and a rescan
+            # publishes nothing that would undo the older worker's state.
+            conflicts = {c["record_id"] for c in store.list_conflicts() if c["collection"] == "api_user_profiles"}
+            coll = policy.collection("api_user_profiles")
+            assert coll.record_id({"api_user_id": "only-there", "profile_id": "deleted-there"}) in conflicts
+            assert engine.scan_all(include_catalog=False, collections=["api_user_profiles", "api_users"]) == 0
+
+
+def test_agent_recreated_on_a_peer_does_not_inherit_a_deleted_agents_grant(workers):
+    """#1870: grants that outlive a deleted agent never attach to a NEW agent
+    with the same id, also when that agent arrives from a peer (here an older
+    build that creates it without detaching anything)."""
+    from app.core.api_user_scope import worker_refusal
+
+    old, updated = workers("old-build"), workers("updated-build")
+    with old.active():
+        engine.create_network("Mixed versions")
+        database.create_profile("helper", "Helper", None, {})
+        database.create_profile("other", "Other", None, {})
+        database.create_api_user("only-helper", "Only", "only-helper-hash", profile_ids=["helper"])
+        database.create_api_user("helper-other", "Mixed", "helper-other-hash", profile_ids=["helper", "other"])
+        engine.scan_all()
+    join(old, updated)
+    converge([old, updated])
+    with updated.active():
+        database.delete_profile("helper")
+        engine.scan_all()
+    converge([old, updated])
+    with old.active():
+        _old_build_cascade("helper")
+        engine.scan_all()
+    converge([old, updated])
+    with updated.active():
+        assert database.get_api_user("only-helper")["profile_ids"] == ["helper"]
+    with old.active():
+        # The older build's create path: a plain insert, nothing detached.
+        with database.get_db() as conn:
+            conn.cursor().execute(
+                "INSERT INTO agents (id, name, description, config, is_builtin, mcp_tools, created_at, updated_at) "
+                "VALUES ('helper', 'A different helper', NULL, '{}', FALSE, '[]', '2026-10-05', '2026-10-05')")
+        engine.scan_all()
+    result = exchange(old, updated)
+    assert result.retry == result.rejected == result.pending == 0, result.reasons
+    with updated.active():
+        assert database.get_profile("helper")["name"] == "A different helper"
+        assert not database.get_api_user("only-helper")["is_active"]
+        assert worker_refusal("only-helper", "helper") is not None
+        assert database.get_api_user("helper-other")["profile_ids"] == ["other"]
+        assert worker_refusal("helper-other", "helper") is not None
+        engine.scan_all()
+    # The switched-off key reaches the older worker too.
+    result = exchange(updated, old)
+    assert result.retry == result.rejected == result.pending == 0, result.reasons
+    with old.active():
+        assert not database.get_api_user("only-helper")["is_active"]
+
+
+def test_grant_that_arrives_before_its_agent_is_kept(workers):
+    """#1875 review: a grant made on B for an agent created on A can reach a
+    third worker before the agent itself (B forwards both streams; streams
+    from different origins are ordered by device id, not causally). The
+    agent's first arrival is not a re-creation: the keys must keep working,
+    there and, after the next scan, everywhere else."""
+    a, b, c = workers("agent-origin"), workers("grant-origin"), workers("third")
+    with a.active():
+        engine.create_network("Three workers")
+        engine.scan_all()
+    join(a, b)
+    join(a, c)
+    converge([a, b, c])
+    with a.active():
+        database.create_profile("late", "Late", None, {})
+        database.create_profile("other", "Other", None, {})
+        engine.scan_all()
+    exchange(a, b)
+    with b.active():
+        database.create_api_user("only-late", "Only", "only-late-hash", profile_ids=["late"])
+        database.create_api_user("late-other", "Two", "late-other-hash", profile_ids=["late", "other"])
+        engine.scan_all()
+    with c.active():
+        marks = store.local_watermarks()
+    with b.active():
+        ops = store.ops_since(marks, limit=500, exclude_origin=c.device_id)
+    # The worst order: the grants before the agents.
+    ops.sort(key=lambda op: op["origin_device_id"] != b.device_id)
+    assert {op["origin_device_id"] for op in ops} == {a.device_id, b.device_id}
+    with c.active():
+        result = engine.apply_batch(ops)
+    assert result.retry == result.rejected == result.pending == 0, result.reasons
+    with c.active():
+        engine.scan_all()
+    converge([a, b, c])
+    for worker in (a, b, c):
+        with worker.active():
+            only, both = database.get_api_user("only-late"), database.get_api_user("late-other")
+            assert only["is_active"] and only["profile_ids"] == ["late"]
+            assert both["is_active"] and sorted(both["profile_ids"]) == ["late", "other"]
+
+
 def test_old_worker_cannot_sync_retired_builtin_back(workers):
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.network import policy

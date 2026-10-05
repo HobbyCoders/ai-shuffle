@@ -346,3 +346,50 @@ async def test_double_fire_race_submits_exactly_one_turn(mock_db, monkeypatch):
 
     assert len(calls) == 1
     assert _pending("w-race") is None
+
+
+# ── a failed agent lookup is not a missing agent (#1870) ─────────────────────
+
+
+async def test_agent_lookup_error_rearms_the_wake_instead_of_dropping_it(
+    mock_db, monkeypatch
+):
+    """A database error while checking the wake's agent is transient: the wake
+    comes back for a retry, with no "could not be started" note. Only an agent
+    that is confirmed missing drops the wake."""
+    from app.core import wakeup_service
+    from app.db import database
+
+    calls = _capture_submit(monkeypatch)
+    armed = _capture_arm(monkeypatch)
+    notes = []
+
+    async def _record(session_id, event):
+        notes.append((session_id, event))
+
+    monkeypatch.setattr("app.core.turn_recorder.record_drained_event", _record)
+    real_get_profile = database.get_profile
+
+    def _flaky_get_profile(profile_id):
+        raise RuntimeError("connection pool exhausted")
+
+    monkeypatch.setattr(database, "get_profile", _flaky_get_profile)
+    row = _row("w-lookup")
+    _persist(row)
+
+    await wakeup_service._fire(row)
+
+    assert notes == [], "a transient lookup error must not announce a drop"
+    assert calls == []
+    persisted = _pending("w-lookup")
+    assert persisted is not None, "a transient lookup error must not consume the wake"
+    assert persisted["profile_id"] == "pr" and persisted["prompt"] == "continue"
+    assert len(armed) == 1 and armed[0][0]["id"] == "w-lookup"
+    assert wakeup_service._retry_attempts["w-lookup"] == 1
+
+    # The database recovers: the re-armed wake runs on its agent.
+    monkeypatch.setattr(database, "get_profile", real_get_profile)
+    await wakeup_service._fire(row)
+    assert len(calls) == 1 and calls[0]["profile_id"] == "pr"
+    assert _pending("w-lookup") is None
+    assert notes == []

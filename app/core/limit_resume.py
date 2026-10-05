@@ -963,7 +963,11 @@ async def _resume_chat(row: Dict[str, Any], meta: Dict[str, Any]) -> Optional[st
     from app.core import archive_guard, turn_manager, wakeup_service
 
     session_id = row["session_id"]
-    profile_id = await wakeup_service._resolve_profile_id(row)
+    try:
+        profile_id = await wakeup_service._resolve_profile_id(row)
+    except wakeup_service.AgentLookupFailed as exc:
+        await wakeup_service._rearm_after_failed_submit(row, f"the resume's agent could not be looked up ({exc})")
+        return None
     if not profile_id:
         await wakeup_service._announce_dropped_wake(row, "no agent profile could be resolved")
         return None
