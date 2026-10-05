@@ -10,7 +10,7 @@ from typing import Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StrictBool
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -547,6 +547,46 @@ async def dismiss_loop_guard_turn(held_id: str, token: str = Depends(require_adm
 
 
 # ============================================================================
+# Resume when a usage limit resets (per provider)
+# ============================================================================
+
+class LimitResumeUpdate(BaseModel):
+    resume_on_reset: Optional[StrictBool] = None
+    compact_before_resume: Optional[StrictBool] = None
+
+
+@router.get("/limit-resume")
+async def get_limit_resume(token: str = Depends(require_auth)):
+    """Each provider's "Resume when the limit resets" and "Compact before
+    resuming" switches, keyed by provider (``claude`` for Claude Code, else
+    the model provider's id), plus the defaults."""
+    from app.core import limit_resume
+
+    return await run_sync(limit_resume.all_settings)
+
+
+@router.put("/limit-resume/{provider_key}")
+async def set_limit_resume(
+    provider_key: str, request: LimitResumeUpdate, token: str = Depends(require_admin),
+):
+    """Change one provider's switches (admin only). Omitted fields keep their
+    value; an empty body is a 400 and an unknown provider a 404."""
+    from app.core import limit_resume
+
+    try:
+        await run_sync(lambda: limit_resume.update_settings(
+            provider_key,
+            resume_on_reset=request.resume_on_reset,
+            compact_before_resume=request.compact_before_resume,
+        ))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Unknown provider")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return await run_sync(limit_resume.all_settings)
+
+
+# ============================================================================
 # Chat instructions (system prompt)
 # ============================================================================
 #
@@ -1005,25 +1045,25 @@ async def update_text_generation_settings(
 # ============================================================================
 
 class SubagentDefaultResponse(BaseModel):
-    """The model every unpinned agent runs on, and the models agents may choose.
+    """The model every unpinned agent runs on.
 
-    Both use the app's model id format: a Claude alias or a
+    The app's model id format: a Claude alias or a
     ``prov:<providerId>:<modelId>`` composite. ``model`` null means no default
     is set: an unpinned agent's start is refused until the owner picks one.
     """
     model: Optional[str] = None
-    allowed: List[str] = Field(default_factory=list)
 
 
 class SubagentDefaultUpdateRequest(BaseModel):
-    """Replace the whole setting."""
+    """Replace the setting. ``allowed`` (the retired "models agents may choose
+    from" list, #1830) is accepted from older pages and ignored."""
     model: Optional[str] = None
-    allowed: List[str] = Field(default_factory=list)
+    allowed: Optional[List[str]] = None
 
 
 @router.get("/subagent-default", response_model=SubagentDefaultResponse)
 async def get_subagent_default(token: str = Depends(require_auth)):
-    """The subagent default and the models agents may choose."""
+    """The subagent default."""
     from app.core import subagent_default
 
     return SubagentDefaultResponse(**await run_sync(subagent_default.payload))
@@ -1034,9 +1074,9 @@ async def update_subagent_default(
     request: SubagentDefaultUpdateRequest,
     token: str = Depends(require_admin),
 ):
-    """Save the subagent default and allowed list. Owner only.
+    """Save the subagent default. Owner only.
 
-    Every id must be a model this install can run: a Claude alias from the
+    The id must be a model this install can run: a Claude alias from the
     registry, or a model in an enabled provider's curated list. A bad id is a
     400 and nothing is saved. The setting is shared with the owner's other
     workers through the network's settings sync.
@@ -1045,7 +1085,7 @@ async def update_subagent_default(
 
     def _apply() -> dict:
         try:
-            subagent_default.write(request.model, request.allowed)
+            subagent_default.write(request.model)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return subagent_default.payload()

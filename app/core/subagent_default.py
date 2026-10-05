@@ -1,18 +1,19 @@
-"""The owner's one "subagent default" model and the models agents may choose.
+"""The owner's one "subagent default" model.
 
-Every agent the lead dispatches runs on, in order (#1827):
+Every agent the lead dispatches runs on, in order (#1827, #1830):
 
-1. a model the lead names for this task, only when it is the default, the
-   agent's own pin, or in ``allowed``;
+1. a model named for this task, used only when the user asked for it (see
+   ``app.core.model_override``);
 2. the agent's pinned model for the caller's provider (``provider_models``);
 3. this global default;
 4. nothing: the start is refused and the owner is asked once to choose one.
    An unpinned agent never falls back to the session's model.
 
 Stored as ONE shared system setting (``subagent_default``, JSON
-``{"model": ..., "allowed": [...]}``), like the text-generation model: the
-network's ``system_settings`` collection syncs it to every worker of the
-account, and the dispatch path reads it without an account-hub lookup.
+``{"model": ...}``), like the text-generation model: the network's
+``system_settings`` collection syncs it to every worker of the account, and
+the dispatch path reads it without an account-hub lookup. Settings written
+before #1830 also carry an ``allowed`` list; it is ignored.
 
 Values use the app's model id format: a Claude registry alias (``sonnet``) or
 a ``prov:<providerId>:<modelId>`` composite. Writes are validated against the
@@ -25,15 +26,11 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 SETTING_KEY = "subagent_default"
-
-# The page offers a short list drawn from the owner's favourites; a cap keeps
-# the Task schema (which lists these ids) small.
-MAX_ALLOWED = 24
 
 NOTIFICATION_CATEGORY = "subagent_default_needed"
 
@@ -45,15 +42,6 @@ SETTINGS_HINT = "The owner sets it on the Agents page (Subagent default)."
 @dataclass(frozen=True)
 class SubagentDefault:
     model: Optional[str] = None
-    allowed: Tuple[str, ...] = ()
-
-
-def _clean_list(values: Any) -> Tuple[str, ...]:
-    seen: list[str] = []
-    for value in values if isinstance(values, (list, tuple)) else ():
-        if isinstance(value, str) and value.strip() and value.strip() not in seen:
-            seen.append(value.strip())
-    return tuple(seen)
 
 
 def read() -> SubagentDefault:
@@ -75,7 +63,7 @@ def read() -> SubagentDefault:
         return SubagentDefault()
     model = data.get("model")
     model = model.strip() if isinstance(model, str) and model.strip() else None
-    return SubagentDefault(model=model, allowed=_clean_list(data.get("allowed")))
+    return SubagentDefault(model=model)
 
 
 def normalize_model(value: Any) -> Tuple[Optional[str], Optional[str]]:
@@ -116,8 +104,8 @@ def normalize_model(value: Any) -> Tuple[Optional[str], Optional[str]]:
     )
 
 
-def write(model: Optional[str], allowed: Iterable[Any]) -> SubagentDefault:
-    """Validate and save the whole setting. Raises ``ValueError`` on a bad id."""
+def write(model: Optional[str]) -> SubagentDefault:
+    """Validate and save the setting. Raises ``ValueError`` on a bad id."""
     from app.db import database
 
     clean_model: Optional[str] = None
@@ -125,23 +113,11 @@ def write(model: Optional[str], allowed: Iterable[Any]) -> SubagentDefault:
         clean_model, error = normalize_model(model)
         if error:
             raise ValueError(f"model: {error}")
-    items = list(allowed or [])
-    if len(items) > MAX_ALLOWED:
-        raise ValueError(f"allowed: at most {MAX_ALLOWED} models.")
-    clean_allowed: list[str] = []
-    for item in items:
-        normalized, error = normalize_model(item)
-        if error or not normalized:
-            raise ValueError(f"allowed: {error}")
-        if normalized not in clean_allowed:
-            clean_allowed.append(normalized)
-    database.set_system_setting(
-        SETTING_KEY, json.dumps({"model": clean_model, "allowed": clean_allowed})
-    )
+    database.set_system_setting(SETTING_KEY, json.dumps({"model": clean_model}))
     if clean_model:
         # A later "no default" state (cleared again) may ask once more.
         reset_asked()
-    return SubagentDefault(model=clean_model, allowed=tuple(clean_allowed))
+    return SubagentDefault(model=clean_model)
 
 
 def usable(value: Optional[str]) -> Optional[str]:
@@ -153,20 +129,13 @@ def usable(value: Optional[str]) -> Optional[str]:
 
 
 def effective() -> SubagentDefault:
-    """The stored setting with entries that can no longer run dropped."""
-    stored = read()
-    allowed: list[str] = []
-    for item in stored.allowed:
-        normalized = usable(item)
-        if normalized and normalized not in allowed:
-            allowed.append(normalized)
-    return SubagentDefault(model=usable(stored.model), allowed=tuple(allowed))
+    """The stored setting, the model dropped when it can no longer run."""
+    return SubagentDefault(model=usable(read().model))
 
 
 def payload() -> Dict[str, Any]:
     """The GET body: the stored choice."""
-    stored = read()
-    return {"model": stored.model, "allowed": list(stored.allowed)}
+    return {"model": read().model}
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +197,7 @@ def ask_owner_once(session_id: Optional[str] = None) -> bool:
         return False
 
 
-def missing_default_error(agent_label: str, allowed: Tuple[str, ...] = ()) -> str:
+def missing_default_error(agent_label: str) -> str:
     """The refusal a lead agent gets for an unpinned agent with no default."""
     text = (
         f"Subagent '{agent_label}' has no model: it is not pinned to one and the "
@@ -238,9 +207,7 @@ def missing_default_error(agent_label: str, allowed: Tuple[str, ...] = ()) -> st
         + SETTINGS_HINT
         + " Do not retry this agent until they have."
     )
-    if allowed:
-        text += (
-            " Until then you may pass model= one of the models the owner allows "
-            f"for subagents: {', '.join(allowed)}."
-        )
-    return text
+    return text + (
+        " If the user named a model for this task, pass it as model; that is "
+        "checked and used for this task only."
+    )

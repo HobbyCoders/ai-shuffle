@@ -511,4 +511,16 @@ def get_all_commands(working_dir: str, *, provider_kind: str = "delegated", sett
                     "description": info["description"],
                     "argument_hint": info.get("argument_hint"), "type": "sdk_builtin",
                 })
+    elif provider_kind in NATIVE_COMPACT_KINDS and not any(c["name"] == "compact" for c in commands):
+        # The native engine runs a bare "/compact" as its own compaction
+        # (fluid NativeLoop manual compaction); it takes no arguments.
+        commands.append({
+            "name": "compact", "display": "/compact",
+            "description": "Compact this chat's context now",
+            "argument_hint": None, "type": "sdk_builtin",
+        })
     return sorted(commands, key=lambda cmd: cmd["name"])
+
+
+#: Native legs whose engine runs a bare ``/compact`` as a compaction.
+NATIVE_COMPACT_KINDS = frozenset({"anthropic", "openai_responses", "openrouter"})

@@ -381,3 +381,54 @@ async def test_ordinary_remote_start_keeps_its_old_body(workers, monkeypatch, ki
         assert not row.get("away_mode")
         [turn] = agent_turns(result["session_id"])
         assert "orchestration_report_device" not in turn["payload"]
+
+
+# ---------------------------------------------------------------------------
+# A model the user asked for, on another worker (#1830)
+# ---------------------------------------------------------------------------
+
+def _user_says(worker, text, session_id="caller"):
+    with worker.active():
+        turn = turns.enqueue_turn(session_id, "user", prompt=text, profile_id="default")
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE turns SET state='completed' WHERE id=%s", (turn["id"],))
+
+
+def _grok(worker):
+    with worker.active():
+        database.create_model_provider("grok", "Grok", "xai", "https://example.invalid/v1",
+                                       models=[{"id": "grok-4.5", "label": "Grok 4.5"}])
+
+
+async def test_a_named_model_starts_on_the_chosen_worker_with_its_provider(workers, monkeypatch, kicks):
+    from app.core import task_dispatch
+    monkeypatch.setattr(task_dispatch, "_credential_gap", lambda provider: None)
+    a, b, _ = network(workers, monkeypatch)
+    _grok(a)  # only the destination has the provider
+    _user_says(b, "Run the test on Unraid with grok 4.5")
+    with b.active():
+        outcome = await start({**ARGS, "model": "prov:grok:grok-4.5"})
+    assert not outcome.is_error, outcome.text
+    result = json.loads(outcome.text)
+    assert result["model"] == "prov:grok:grok-4.5"
+    assert result["provider"]["id"] == "grok"
+    assert result["model_override"] == {"source": "named_by_user", "instead_of": "sonnet"}
+    with a.active():
+        row = database.get_session(result["session_id"])
+        assert (row["provider_id"], row["model"]) == ("grok", "prov:grok:grok-4.5")
+        [turn] = agent_turns(result["session_id"])
+        assert turn["overrides"]["model"] == "prov:grok:grok-4.5"
+        assert turn["payload"]["model_override"]["source"] == "named_by_user"
+
+
+async def test_the_destination_refuses_a_model_it_cannot_run(workers, monkeypatch, kicks):
+    from app.core import task_dispatch
+    monkeypatch.setattr(task_dispatch, "_credential_gap", lambda provider: None)
+    a, b, _ = network(workers, monkeypatch)
+    _user_says(b, "Run the test on Unraid with grok 4.5")
+    with b.active():
+        outcome = await start({**ARGS, "model": "prov:grok:grok-4.5"})
+        assert outcome.is_error
+        assert "Unraid refused the new chat" in outcome.text and "cannot run on this worker" in outcome.text
+        # Nothing was made there, so the receipt is given back.
+        assert receipts() == []

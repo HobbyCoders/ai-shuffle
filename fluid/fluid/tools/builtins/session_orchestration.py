@@ -49,6 +49,64 @@ def _management_tool(name, action, description, *, filter_text=""):
         risk="write", requires_extra=("session_orchestration",)), _handler(action))
 
 
+_START_DESCRIPTION = (
+    "Create and queue an independent, visible top-level chat for relevant work, "
+    "not a Task child. Supply a self-contained peer brief: no transcript is copied. "
+    "Inherits your agent, provider/model, permission mode, project and workspace; pass model "
+    "only when the user named a model for that chat. "
+    "It shares your checkout initially: coordinate file ownership or have it select a separate branch. "
+    "You may orchestrate these peers without requesting subagents. Prefer an existing relevant "
+    "session when possible. No automatic parent completion notification is registered; "
+    "ask it to report back with MessageSession. In the owner's assistant conversation it reports "
+    "back automatically instead. Use a stable request_id and reuse it on retries. "
+    "Autonomous chains are bounded to 4 new sessions, 32 total actions and 8 hops; "
+    "only new user input starts a fresh budget. "
+    "Omit worker to start on this worker. Pass worker (an exact worker name or device id) "
+    "only when the user wants the work run on another online worker of this account, for "
+    "example one with the platform or files the task needs. That chat runs there with your "
+    "agent, model and permission mode in the same project's checkout on that worker (refused "
+    "when the project is not checked out there), never your worktree or branch, and receives "
+    "no private-access grants. It cannot start further chats or MessageSession you back; "
+    "the user sees it in the sidebar. An offline or unknown worker is refused, never "
+    "replaced by this one. "
+    "project (owner's assistant conversation only): a registered project's name, id or path; "
+    "the chat runs in its checkout on a worker that has it, picked automatically unless worker "
+    "is set. It grants no access. "
+)
+# Shared by StartSession, Task and Swarm: the host enforces it, so the text
+# says so rather than asking the model to police itself.
+MODEL_OVERRIDE_RULE = (
+    "Only for when the user named a model for this work; leaving it out is the normal case. "
+    "The host checks that the user asked: a model other than the one this would run on anyway "
+    "is used only when the user named it in this chat, otherwise the owner is asked to approve "
+    "the switch, and a refusal starts nothing. Any model on an enabled provider's list is "
+    "accepted, written as a Claude name (opus) or prov:<providerId>:<modelId>, and it may be on "
+    "another provider. It applies to this start only."
+)
+
+
+def start_session_spec(model_examples=()) -> ToolSpec:
+    """StartSession's spec. ``model_examples`` (app-format ids such as the
+    owner's subagent default) are named in the ``model`` description; any
+    eligible model is accepted and validated by the host."""
+    examples = list(dict.fromkeys(str(value) for value in model_examples if value))
+    properties = {
+        "title": {"type": "string", "maxLength": 160},
+        "prompt": {"type": "string", "maxLength": 8000},
+        "request_id": {"type": "string", "maxLength": 120},
+        "worker": {"type": "string", "minLength": 1, "maxLength": 200},
+        "project": {"type": "string", "minLength": 1, "maxLength": 500},
+        "model": {"type": "string", "minLength": 1, "maxLength": 300, "description": (
+            "Optional: the model the new chat runs on, and so its provider; omitted, it inherits "
+            "yours. " + MODEL_OVERRIDE_RULE + " Effort, context window and fast mode the new "
+            "model does not support fall back to its defaults."
+            + (f" Examples: {', '.join(examples[:8])}." if examples else ""))}}
+    return ToolSpec(name="StartSession", description=(_START_DESCRIPTION + _COMMON),
+        input_schema={"type": "object", "properties": properties,
+                      "required": ["title", "prompt", "request_id"], "additionalProperties": False},
+        risk="write", requires_extra=("session_orchestration",))
+
+
 SPECS = (
     (ToolSpec(name="ListSessions", description=(
         "Find active top-level peer chats on this worker owned by the same user, "
@@ -81,36 +139,7 @@ SPECS = (
             "request_id": {"type": "string", "maxLength": 120}},
             "required": ["session_id", "message", "request_id"], "additionalProperties": False},
         risk="write", requires_extra=("session_orchestration",)), _handler("message")),
-    (ToolSpec(name="StartSession", description=(
-        "Create and queue an independent, visible top-level chat for relevant work, "
-        "not a Task child. Supply a self-contained peer brief: no transcript is copied. "
-        "Inherits your agent, provider/model, permission mode, project and workspace. "
-        "It shares your checkout initially: coordinate file ownership or have it select a separate branch. "
-        "You may orchestrate these peers without requesting subagents. Prefer an existing relevant "
-        "session when possible. No automatic parent completion notification is registered; "
-        "ask it to report back with MessageSession. In the owner's assistant conversation it reports "
-        "back automatically instead. Use a stable request_id and reuse it on retries. "
-        "Autonomous chains are bounded to 4 new sessions, 32 total actions and 8 hops; "
-        "only new user input starts a fresh budget. "
-        "Omit worker to start on this worker. Pass worker (an exact worker name or device id) "
-        "only when the user wants the work run on another online worker of this account, for "
-        "example one with the platform or files the task needs. That chat runs there with your "
-        "agent, model and permission mode in the same project's checkout on that worker (refused "
-        "when the project is not checked out there), never your worktree or branch, and receives "
-        "no private-access grants. It cannot start further chats or MessageSession you back; "
-        "the user sees it in the sidebar. An offline or unknown worker is refused, never "
-        "replaced by this one. "
-        "project (owner's assistant conversation only): a registered project's name, id or path; "
-        "the chat runs in its checkout on a worker that has it, picked automatically unless worker "
-        "is set. It grants no access. "
-        + _COMMON), input_schema={"type": "object", "properties": {
-            "title": {"type": "string", "maxLength": 160},
-            "prompt": {"type": "string", "maxLength": 8000},
-            "request_id": {"type": "string", "maxLength": 120},
-            "worker": {"type": "string", "minLength": 1, "maxLength": 200},
-            "project": {"type": "string", "minLength": 1, "maxLength": 500}},
-            "required": ["title", "prompt", "request_id"], "additionalProperties": False},
-        risk="write", requires_extra=("session_orchestration",)), _handler("start")),
+    (start_session_spec(), _handler("start")),
     _management_tool("SettleSession", "settle",
         "Move a chat from Active to Settled without stopping its work. "
         "This also works when its execution worker is offline."),

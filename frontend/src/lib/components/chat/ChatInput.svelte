@@ -34,7 +34,10 @@
 	import { hasStoppableWork } from './stoppable-work';
 	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
 
-	import { api, type FileUploadResponse } from '$lib/api/client';
+	import { api, getErrorMessage, type FileUploadResponse } from '$lib/api/client';
+	import { cancelLimitResume, compactSession, getCacheState, type CacheState } from '$lib/api/limit-resume';
+	import { pausedChat, pausedLabel } from './limit-resume';
+	import { acknowledge, acknowledgedTokens, coldSendText, shouldWarn } from './cold-send';
 	import { notify } from '$lib/stores/notifications';
 	import { evaluateSubmitGuards, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON } from './submit-guards';
 	import { attachmentBlockReason } from './attach-disable';
@@ -148,6 +151,82 @@
 	// user's answer and goes out as composed.
 	let catalogHoldWaived = false;
 	const CATALOG_HOLD_MS = 10_000;
+
+	// A chat a usage limit paused, with its resume time (#1831). Cancel hides
+	// it at once; the backend's "cancelled" row then ends it for every view.
+	const paused = $derived($activeSession.sessionId ? pausedChat($activeSession.messages) : null);
+	const pauseKey = $derived(paused ? `${$activeSession.sessionId}:${paused.resumeAt}` : null);
+	let cancelledPause = $state<string | null>(null);
+	async function cancelPause() {
+		const sid = $activeSession.sessionId;
+		if (!sid || !pauseKey) return;
+		const key = pauseKey;
+		try {
+			await cancelLimitResume(sid);
+			cancelledPause = key;
+		} catch (e) {
+			notify(getErrorMessage(e, 'Could not cancel the resume.'), { severity: 'error' });
+		}
+	}
+
+	// Before a send into a large chat whose provider cache went cold: say what
+	// it costs and offer to compact first (#1831). The check is bounded so a
+	// slow answer never holds a send.
+	let coldNotice = $state<{ sessionId: string; tokens: number; text: string } | null>(null);
+	let coldCheckWaived = false;
+	let compacting = $state(false);
+	const COLD_CHECK_MS = 1500;
+	$effect(() => {
+		if (coldNotice && coldNotice.sessionId !== $activeSession.sessionId) coldNotice = null;
+	});
+
+	async function coldSendBlocks(sessionId: string): Promise<boolean> {
+		if (coldCheckWaived) {
+			coldCheckWaived = false;
+			return false;
+		}
+		let state: CacheState | null = null;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			state = await Promise.race([
+				getCacheState(sessionId),
+				new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), COLD_CHECK_MS); }),
+			]);
+		} catch {
+			return false;
+		} finally {
+			clearTimeout(timer);
+		}
+		if (!state || !shouldWarn(state, acknowledgedTokens(sessionId))) return false;
+		const text = coldSendText(state);
+		if (!text || !ownsComposer() || get(activeSession).sessionId !== sessionId) return false;
+		coldNotice = { sessionId, tokens: state.context_tokens ?? 0, text };
+		return true;
+	}
+
+	function sendAnyway() {
+		const notice = coldNotice;
+		if (!notice) return;
+		acknowledge(notice.sessionId, notice.tokens);
+		coldNotice = null;
+		coldCheckWaived = true;
+		handleSubmit();
+	}
+
+	async function compactFirst() {
+		const notice = coldNotice;
+		if (!notice || compacting) return;
+		compacting = true;
+		try {
+			await compactSession(notice.sessionId);
+			coldNotice = null;
+			notify('Compacting this chat. Send your message when it finishes.', { severity: 'info' });
+		} catch (e) {
+			notify(getErrorMessage(e, 'Could not compact this chat.'), { severity: 'error' });
+		} finally {
+			compacting = false;
+		}
+	}
 	const initialSessionId = $activeSession.sessionId;
 
 	// Get the draft value as JSON string (preserves file chips)
@@ -728,6 +807,10 @@
 			return;
 		}
 
+		// A large chat with a cold provider cache: ask first (#1831).
+		const sendingTo = $activeSession.sessionId;
+		if (sendingTo && !$activeSession.isStreaming && (await coldSendBlocks(sendingTo))) return;
+
 		// Append any legacy uploaded files (from file upload button) to the end
 		// Note: Files added via @ autocomplete are now inline chips, not in uploadedFiles
 		let messageToSend = finalPrompt;
@@ -1263,6 +1346,21 @@
 		<!-- Worktree Error Message -->
 		{#if $activeSession.worktreeError}
 			<Banner severity="warning" message={$activeSession.worktreeError} dismissible onDismiss={() => activeSession.clearWorktreeError()} />
+		{/if}
+
+		{#if paused && pauseKey !== cancelledPause}
+			<Banner severity="info" message={pausedLabel(paused.resumeAt)} action={{ label: 'Cancel', onClick: cancelPause }} />
+		{/if}
+
+		{#if coldNotice && coldNotice.sessionId === $activeSession.sessionId}
+			<Banner
+				severity="warning"
+				message={coldNotice.text}
+				action={{ label: compacting ? 'Compacting…' : 'Compact first', onClick: compactFirst }}
+				secondaryAction={{ label: 'Send anyway', onClick: sendAnyway }}
+				dismissible
+				onDismiss={() => (coldNotice = null)}
+			/>
 		{/if}
 
 		<form

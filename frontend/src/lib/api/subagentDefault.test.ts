@@ -9,8 +9,8 @@ beforeEach(() => vi.clearAllMocks());
 
 describe('subagent default client', () => {
 	it('reads the contract shape', async () => {
-		mocks.get.mockResolvedValue({ model: 'sonnet', allowed: ['sonnet', 'haiku'] });
-		await expect(getSubagentDefault()).resolves.toEqual({ model: 'sonnet', allowed: ['sonnet', 'haiku'] });
+		mocks.get.mockResolvedValue({ model: 'sonnet' });
+		await expect(getSubagentDefault()).resolves.toEqual({ model: 'sonnet' });
 		expect(mocks.get).toHaveBeenCalledWith('/settings/subagent-default');
 	});
 
@@ -24,14 +24,15 @@ describe('subagent default client', () => {
 		await expect(getSubagentDefault()).rejects.toMatchObject({ status: 500 });
 	});
 
-	it('saves the model and the allowed list', async () => {
-		mocks.put.mockResolvedValue({ model: 'opus', allowed: [] });
-		await putSubagentDefault({ model: 'opus', allowed: [] });
-		expect(mocks.put).toHaveBeenCalledWith('/settings/subagent-default', { model: 'opus', allowed: [] });
+	it('saves the model', async () => {
+		mocks.put.mockResolvedValue({ model: 'opus' });
+		await putSubagentDefault({ model: 'opus' });
+		expect(mocks.put).toHaveBeenCalledWith('/settings/subagent-default', { model: 'opus' });
 	});
 
 	it('normalises missing or odd fields', () => {
-		expect(normalizeSubagentDefault(null)).toEqual({ model: null, allowed: [] });
-		expect(normalizeSubagentDefault({ model: '', allowed: ['a', 3, ''], extra: 1 })).toEqual({ model: null, allowed: ['a'] });
+		expect(normalizeSubagentDefault(null)).toEqual({ model: null });
+		// An older worker still sends the retired allowed list; it is dropped.
+		expect(normalizeSubagentDefault({ model: '', allowed: ['a'], extra: 1 })).toEqual({ model: null });
 	});
 });

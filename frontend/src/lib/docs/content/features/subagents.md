@@ -18,21 +18,45 @@ Subagents are no longer a separate concept. There is no more standalone `/api/v1
 - Orchestration and multi-step delegation during a session go through the app's Task tooling, not a separate subagent-dispatch mechanism.
 - A Task worker started from an API key's session runs as that key (its agents, tools and credentials) and cannot use an agent outside the key's assigned agents. See [API Users](/docs/api-reference/api-users#own-sessions).
 
-## Choosing a Task worker model
+## Models the user asks for
 
-Task shows each eligible agent's default model. When the target runs on a
-configured model provider, Task also offers an optional `model` argument drawn
-from that provider's user-maintained model list. Omit it to keep the agent's
-default; select another listed model to use it for that worker only. Swarm tasks
-accept the same optional `model` and pass it through Task's validation.
+Task, Swarm tasks and `StartSession` take an optional `model`. Leave it out and
+a subagent runs on its pinned model, else on the subagent default; a chat
+started with `StartSession` runs on the caller's model. That is the normal case.
 
-A model choice does not change providers. If an agent is configured to run on a
-different provider, the choice must belong to that target provider's list, not
-the parent's. Dispatch rechecks the list before launching, so removed models,
-disabled providers, and agents outside the caller's allowed roster are refused.
-File/plugin agents use the caller's provider. Native Claude targets without a
-configured provider list retain their assigned model and do not accept this
-override. This does not change the parent chat's model or save a new default.
+`model` is for when you name a model yourself, for example "spin up a general
+agent on GPT-6 Astra" when that agent is pinned to Opus. Any model the app can
+run is accepted: a Claude model (`opus`) or a model on an enabled provider's
+list (`prov:<providerId>:<modelId>`). A model on another provider moves that one
+subagent or chat to that provider.
+
+The app, not the agent, decides whether a different model is used:
+
+- **You named it.** The app reads what you typed in the calling chat since your
+  last message, including messages you sent while it was working. For a
+  subagent it reads the chat at the top of the chain, and for a chat another
+  chat started, the chat where you typed the request. A model counts as named
+  when its id, Claude name or display name appears, ignoring case and
+  separators ("GPT-6 Astra", "gpt 6 astra" and "gpt-6-astra" all match), or one
+  distinctive word of its name ("astra") that no other available model shares.
+  Messages from other agents, tool output and the agent's own text never count.
+- **Otherwise you are asked.** A prompt asks whether to start that subagent or
+  chat on the model instead of the usual one. It appears in every permission
+  mode, Bypass included, and a remembered answer never skips it. If you decline,
+  do not answer, or the chat is in Away mode, nothing is started and the agent
+  is told to leave `model` out.
+
+A model equal to the one that would run anyway needs no check. The choice
+covers one start only: it never changes an agent's pin or the subagent default.
+Effort, context window and fast mode settings the new model does not support
+fall back to that model's defaults. The receipt names the provider and model
+used and how it was asked for (`named_by_user` or `approved_by_owner`), and the
+running-tasks list marks such a subagent's model "your choice".
+
+Limits of the check: it reads only messages you typed into the chats on this
+worker. Work begun from another worker, from an automation or from a connector
+always gets the prompt. A name that appears in a document you pasted counts as
+named.
 
 ## Task workers across an app restart
 
@@ -201,6 +225,9 @@ Agents can coordinate relevant work without a parent/subagent relationship:
 - **StartSession** creates a visible, independent chat with a self-contained peer
   brief. It inherits the caller's agent, model/provider, permissions, project and
   workspace, but not its transcript, private access grants or subagent lifecycle.
+  Its optional `model` starts the chat on another model or provider when you
+  asked for one (see [Models the user asks for](#models-the-user-asks-for)).
+  `MessageSession` works between chats on different providers.
   Coordinate file ownership or select a separate branch before concurrent edits.
 
 These tools do not require an explicit request to use subagents. Models should

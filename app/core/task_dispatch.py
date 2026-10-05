@@ -1215,6 +1215,50 @@ def _task_target_label(target: Any, definition: Any, ref: str) -> str:
     return ref
 
 
+# How the running-tasks list marks a worker started on a model the user asked for.
+_MODEL_NOTE = "your choice"
+
+
+def _model_receipt(
+    provider_id: Optional[str], override: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """The provider a dispatch ran on and, for a user-requested model, how it was asked."""
+    from app.core import model_override
+
+    out: Dict[str, Any] = {
+        "provider": {"id": provider_id, "name": model_override.provider_label(provider_id)},
+    }
+    if override:
+        out["model_override"] = dict(override)
+    return out
+
+
+def _task_baseline_model(
+    target: Any, definition: Any, leg: Optional[str],
+    caller_row: Mapping[str, Any], caller_pid: str,
+) -> Optional[str]:
+    """The app-format model a Task target runs on without ``model``, or None.
+
+    A stored agent: its pin, else the subagent default (None when neither).
+    A file/plugin agent: the subagent default on this leg, else the caller's
+    binding, as the dispatch below resolves it.
+    """
+    from app.core import model_override
+
+    if target is not None:
+        if target.model_source in ("pin", "default") and target.model:
+            return model_override.app_id(leg, target.model)
+        return None
+    from app.core import subagent_default
+    from app.core.agent_provider_models import leg_model_id
+
+    file_default = leg_model_id(leg, subagent_default.effective().model or "")
+    if file_default:
+        return model_override.app_id(leg, file_default)
+    model_id, error = _file_agent_model_id(caller_row, caller_pid, leg)
+    return None if error else model_override.app_id(leg, model_id)
+
+
 def _credential_gap(provider_id: Optional[str]) -> Optional[str]:
     """A ready-to-return error when the resolved leg has no credentials.
 
@@ -1586,33 +1630,41 @@ async def _dispatch_task_tool(
         return {"ok": False, "error": roster_error}
 
     # Resolve the target's effective leg first, including owner-configured pins.
-    # A call may choose a model only from the owner's subagent list (the
-    # default, the models agents may choose, or this agent's own pin), and
-    # never another provider (#1827).
+    # A named model is any model this install can run (#1830). One other than
+    # what the agent would run on anyway (its pin, else the subagent default)
+    # is used only when the user asked for it: named in their messages, or
+    # approved by the owner at a prompt. It may move the worker to another
+    # provider, for this dispatch only.
+    model_override_record: Optional[Dict[str, Any]] = None
     if requested_model:
-        from app.core.agent_provider_models import (
-            leg_model_id,
-            task_model_allowed_choices,
-            task_model_not_allowed_error,
-        )
+        from app.core import model_override
 
         leg = effective_provider_id or None
-        choices = await asyncio.to_thread(task_model_allowed_choices)
-        permitted = {
-            bare for bare in (leg_model_id(leg, value) for value in choices) if bare
-        }
-        if target is not None and target.model_source == "pin" and target.model:
-            permitted.add(target.model)
-        bare_request = leg_model_id(leg, requested_model)
-        if bare_request is None or bare_request not in permitted:
-            return {
-                "ok": False,
-                "error": task_model_not_allowed_error(
-                    requested_model, _task_target_label(target, definition, ref),
-                    leg, choices,
-                ),
-            }
-        requested_model = bare_request
+        try:
+            choice = await asyncio.to_thread(
+                lambda: model_override.resolve(
+                    requested_model, leg, runs_here=args.get("worker") is None))
+        except ValueError as exc:
+            return {"ok": False, "error": f"{exc} Nothing was dispatched."}
+        baseline = await asyncio.to_thread(
+            _task_baseline_model, target, definition, leg, caller_row, str(caller_pid))
+        if choice.model != baseline:
+            target_label = _task_target_label(target, definition, ref)
+            instead = model_override.label(baseline) if baseline else "its default"
+            try:
+                source = await model_override.confirm(
+                    caller_session_id, str(caller_pid), model=choice.model, baseline=baseline,
+                    action=(f"start {target_label} on {model_override.label(choice.model)} "
+                            f"instead of {instead}"))
+            except PermissionError as exc:
+                return {"ok": False, "error": str(exc), "reason": "model_not_requested"}
+            model_override_record = {"source": source, "instead_of": baseline}
+            if choice.provider_id != leg:
+                # The inherited effort may not exist on the new provider.
+                selected_effort = model_override.settings_for_model(
+                    choice.model, choice.provider_id, effort=selected_effort)["effort"]
+            effective_provider_id = choice.provider_id
+        requested_model = choice.model_id
     if requested_model and not effective_provider_id:
         # A native target runs on Claude (the Claude Code CLI on a
         # subscription, or the Anthropic API with a key), whose model list is
@@ -1679,19 +1731,12 @@ async def _dispatch_task_tool(
             # Not pinned and no subagent default: never the session's model.
             # Refuse, tell the lead agent what to ask, and ask the owner once.
             from app.core import subagent_default
-            from app.core.agent_provider_models import (
-                allowed_on_leg,
-                task_model_allowed_choices,
-            )
 
             subagent_default.ask_owner_once(caller_session_id)
-            choices = await asyncio.to_thread(task_model_allowed_choices)
             return {
                 "ok": False,
                 "reason": "subagent_default_missing",
-                "error": subagent_default.missing_default_error(
-                    target.id, allowed_on_leg(effective_provider_id or None, choices),
-                ),
+                "error": subagent_default.missing_default_error(target.id),
             }
         model_id = requested_model or target.model
         system_prompt_append = None
@@ -1817,6 +1862,9 @@ async def _dispatch_task_tool(
         kwargs["tool_allowlist"] = tool_allowlist
     if tool_denylist:
         kwargs["tool_denylist"] = tool_denylist
+    if model_override_record:
+        # The running-tasks list shows the worker's model with this note.
+        kwargs["model_note"] = _MODEL_NOTE
 
     # Allocate the durable identity before scheduling the worker. Fluid uses
     # this exact id as its background detach receipt (polling by label could
@@ -1918,6 +1966,7 @@ async def _dispatch_task_tool(
             "mode": "background",
             "agent": result_agent,
             "model": model_id,
+            **_model_receipt(effective_provider_id, model_override_record),
             "task_id": worker_id,
             "worker_session_id": worker_id,
             "description": label,
@@ -1970,6 +2019,7 @@ async def _dispatch_task_tool(
         "mode": "sync",
         "agent": result_agent,
         "model": model_id,
+        **_model_receipt(effective_provider_id, model_override_record),
         "worker_session_id": outcome.session_id,
     }
     if queued_seconds >= 1.0:

@@ -448,6 +448,12 @@ async def _maybe_failover(
         "(account failover retired)",
         session_id, settled.get("id"),
     )
+    # "Resume when the limit resets" (#1831): one resume after the reset when
+    # the provider's setting is on. Task workers are decided by
+    # provider_agent, which knows the parent waiting on them.
+    from app.core import limit_resume
+
+    await limit_resume.on_limit_stop(session_id, settled, terminal)
 
 
 # ---------------------------------------------------------------------------
@@ -1208,12 +1214,14 @@ def message_resume_lock(session_id: str) -> asyncio.Lock:
 
 async def on_agent_message(
     session_id: str, sender: str, text: str, *, reply_to: str | None = None,
-    urgent: bool = False,
+    urgent: bool = False, extra_payload: Dict[str, Any] | None = None,
 ) -> str | None:
     """Queue a peer message for ``session_id``, or hold it while it is parked.
 
     Returns the queued turn's id, :data:`HELD` when the message was held for
     the receiver's next wake, or None when the receiver was stopped.
+    ``extra_payload`` rides a worker continuation's turn (``reply_to`` set):
+    a usage-limit resume marks its continuation with it (#1831).
     """
     from app.core import archive_guard
     from app.core.task_registry import task_registry
@@ -1229,12 +1237,13 @@ async def on_agent_message(
             return None
         return await _on_agent_message_locked(
             session_id, sender, text, reply_to=reply_to, urgent=urgent,
+            continuation_payload=extra_payload,
         )
 
 
 async def _on_agent_message_locked(
     session_id: str, sender: str, text: str, *, reply_to: str | None = None,
-    urgent: bool = False,
+    urgent: bool = False, continuation_payload: Dict[str, Any] | None = None,
 ) -> str | None:
     """Queue peer traffic that cannot join an app-owned live turn.
 
@@ -1266,7 +1275,10 @@ async def _on_agent_message_locked(
     if reply_to and task_registry.is_user_stopped(reply_to):
         return None
     prompt = format_peer_message(sender, defang_harness_markers(text)).strip()
-    extra_payload = {"agent_message_reply_to": reply_to} if reply_to else None
+    extra_payload = (
+        {**(continuation_payload or {}), "agent_message_reply_to": reply_to}
+        if reply_to else None
+    )
     if not reply_to:
         if task_registry.is_user_stopped(session_id):
             return None

@@ -311,18 +311,125 @@ async def _project_placement(sender_id, data):
                      f"Checked: {', '.join(checked)}. Ask the owner to open or clone it on a worker first.")
 
 
+def start_session_spec():
+    """StartSession's spec; its ``model`` names the owner's subagent default
+    as an example. Any eligible model is accepted and checked (#1830)."""
+    from fluid.tools.builtins.session_orchestration import start_session_spec as build
+    try:
+        from app.core import subagent_default
+        examples = tuple(filter(None, (subagent_default.effective().model,)))
+    except Exception:  # noqa: BLE001 — the examples are advisory
+        log.debug("Could not read the subagent default for StartSession", exc_info=True)
+        examples = ()
+    return build(examples)
+
+
+def _inherited_model(sender, overrides):
+    """The app-format model a new chat inherits from ``sender`` (None = unbound)."""
+    from app.core import model_override
+    from app.core.query_options import decode_provider_model, is_native_claude_model
+    value = overrides.get("model") or sender.get("model")
+    provider_id = sender.get("provider_id")
+    if not value or decode_provider_model(value) is not None:
+        return model_override.app_id(None, value)
+    if provider_id and is_native_claude_model(value):
+        # A native Claude pick on a provider chat runs natively unless that
+        # provider itself serves the id (query_options' rebind rule).
+        from app.core.provider_agent import curated_model_ids
+        from app.db.model_providers import get_model_provider
+        if value not in curated_model_ids(get_model_provider(provider_id)):
+            provider_id = None
+    return model_override.app_id(provider_id, value)
+
+
+def _start_model_plan(sender_id, data, remote):
+    """What StartSession's ``model`` asks for, before the owner is consulted.
+
+    None when it names the model the chat inherits anyway (no check needed).
+    Otherwise ``{model, provider_id, model_id, baseline, profile_id, seen}``;
+    ``seen`` is True when this request_id already has a receipt, so a retry
+    reads it back without asking the owner again. Raises for a model that is
+    not eligible (on this worker when the chat runs here).
+    """
+    from app.core import model_override
+    from app.db.base import get_db
+    sender = _caller(sender_id)
+    context = _context(sender_id)
+    overrides = context.get("overrides") or {}
+    baseline = _inherited_model(sender, overrides)
+    try:
+        choice = model_override.resolve(data.get("model"), sender.get("provider_id"),
+                                        runs_here=remote is None)
+    except ValueError as exc:
+        raise ValueError(f"{exc} Nothing was started.") from None
+    if choice.model == baseline:
+        return None
+    command_id = "orchestration:start:" + hashlib.sha256(
+        (sender_id + ":" + str(data.get("request_id") or "")).encode()).hexdigest()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM turns WHERE command_id=%s LIMIT 1", (command_id,))
+        seen = cursor.fetchone() is not None
+    return {"model": choice.model, "provider_id": choice.provider_id, "model_id": choice.model_id,
+            "baseline": baseline, "profile_id": sender.get("profile_id"), "seen": seen}
+
+
+async def _confirm_start_model(sender_id, data, placement):
+    """Check StartSession's ``model`` and, when it switches models, that the
+    user asked for it (named it, or the owner approved). Returns the plan for
+    :func:`_queue`, False when the model is the inherited one, or None when
+    no model was passed. Raises PermissionError with the refusal."""
+    if data.get("model") is None:
+        return None
+    from app.core import model_override
+    if placement is not None:
+        remote = placement["remote"]
+    else:
+        remote = await asyncio.to_thread(_remote_worker, data.get("worker"))
+    plan = await asyncio.to_thread(_start_model_plan, sender_id, data, remote)
+    if plan is None:
+        return False
+    if plan["seen"]:
+        plan["source"] = None
+        return plan
+    title = str(data.get("title") or "").strip()[:80] or "new chat"
+    action = (f"start the chat “{title}” on {model_override.label(plan['model'])} instead of "
+              f"{model_override.label(plan['baseline']) if plan['baseline'] else 'your model'}")
+    plan["source"] = await model_override.confirm(
+        sender_id, plan["profile_id"], model=plan["model"], baseline=plan["baseline"], action=action)
+    return plan
+
+
+def _start_overrides(overrides, plan, mapped):
+    """The new chat's first-turn overrides for a switched model: the caller's,
+    with model and run settings replaced so the turn cannot rebind back."""
+    result = {key: value for key, value in overrides.items()
+              if key not in ("model", "provider", "effort", "context_window", "fast")}
+    result["model"] = plan["model"]
+    result.update({key: value for key, value in mapped.items() if value is not None})
+    return result
+
+
+def _override_record(plan):
+    """What the chat and the receipt record about a switched model."""
+    return {"model": plan["model"], "provider_id": plan["provider_id"],
+            "source": plan.get("source"), "instead_of": plan.get("baseline")}
+
+
 def _remote_session_id(command_id):
     # Deterministic, so a retried request lands on the same chat on the destination.
     return str(uuid5(NAMESPACE_URL, "ai-shuffle:" + command_id))
 
 
 def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerprint, *,
-                 project_v2_id=None, assistant=False):
+                 project_v2_id=None, assistant=False, model_plan=None):
     """What the destination needs to make the chat. No path, worktree, branch,
     credential or tool identity: those belong to this install.
 
     ``assistant``: the owner's assistant asked, so the chat reports back here
-    and runs with Away handling there (approvals cannot travel back)."""
+    and runs with Away handling there (approvals cannot travel back).
+    ``model_plan``: a model the user asked for (#1830); the destination
+    re-checks that it can run there and maps the run settings again."""
     body = {
         "session_id": _remote_session_id(command_id), "command_id": command_id,
         "fingerprint": fingerprint, "title": _text(data, "title", 160), "prompt": prompt,
@@ -338,6 +445,13 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         "permission_mode": overrides.get("permission_mode", sender.get("permission_mode")),
         "context_window": sender.get("context_window"), "fast": sender.get("fast"),
     }
+    if model_plan:
+        from app.core import model_override
+        mapped = model_override.settings_for_model(
+            model_plan["model"], model_plan["provider_id"], effort=body["effort"],
+            context_window=body["context_window"], fast=body["fast"])
+        body.update(model=model_plan["model"], provider_id=model_plan["provider_id"], **mapped)
+        body["model_choice"] = _override_record(model_plan)
     if assistant:
         body["report_back"] = True
     return body
@@ -388,7 +502,7 @@ def accept_remote_start(body, from_device):
         raise ValueError("Invalid peer-chain depth")
     profile_id = _remote_text(body, "profile_id", 200)
     project_v2_id = _remote_text(body, "project_v2_id", 200, required=False)
-    model = _remote_text(body, "model", 200, required=False)
+    model = _remote_text(body, "model", 300, required=False)
     effort = _remote_text(body, "effort", 40, required=False)
     permission_mode = control._valid_permission_mode(body.get("permission_mode"))
     context_window = body.get("context_window")
@@ -401,12 +515,15 @@ def accept_remote_start(body, from_device):
     worker_name = member.name or from_device
 
     report_back = body.get("report_back") is True
+    choice = body.get("model_choice") if isinstance(body.get("model_choice"), dict) else None
 
     def receipt(turn, created):
+        row = sessions.get_session(session_id) or {}
         return {"session_id": session_id, "turn_id": turn["id"], "created": created,
                 "status": "queued" if created else "already_queued",
                 "delivery_status": _delivery_status(turn),
-                "report_back": bool((turn.get("payload") or {}).get("orchestration_report_device"))}
+                "report_back": bool((turn.get("payload") or {}).get("orchestration_report_device")),
+                "model": row.get("model"), "provider_id": row.get("provider_id")}
 
     if sessions.get_session(session_id) is not None:
         with get_db() as conn:
@@ -423,7 +540,20 @@ def accept_remote_start(body, from_device):
     if project_v2_id and not checkouts.has_active_base_checkout(project_v2_id, settings.effective_instance_id):
         raise ValueError("This project is not checked out on this worker; open or clone it here first. "
                          "Nothing was started.")
-    if provider_id and model_providers.get_model_provider(provider_id) is None:
+    if choice is not None:
+        # A model the user asked for on the calling worker (#1830): it must run
+        # HERE, never quietly on something else, and the inherited settings are
+        # mapped against this worker's provider rows.
+        from app.core import model_override
+        try:
+            picked = model_override.resolve(choice.get("model"), runs_here=True)
+        except ValueError as exc:
+            raise ValueError(f"{exc} Nothing was started.") from None
+        provider_id, model = picked.provider_id, picked.model
+        mapped = model_override.settings_for_model(model, provider_id, effort=effort,
+                                                   context_window=context_window, fast=fast)
+        effort, context_window, fast = mapped["effort"], mapped["context_window"], mapped["fast"]
+    elif provider_id and model_providers.get_model_provider(provider_id) is None:
         provider_id = None
     payload = {
         "orchestration_depth": depth, "orchestration_sender": sender_session,
@@ -432,6 +562,11 @@ def accept_remote_start(body, from_device):
         "peer_sender_label": f"{sender_label} (on {worker_name})",
         "forwarded_by_device": from_device,
     }
+    if choice is not None:
+        payload["model_override"] = {
+            "model": model, "provider_id": provider_id,
+            "source": choice.get("source") if choice.get("source") in ("named_by_user", "approved_by_owner") else None,
+            "instead_of": choice.get("instead_of") if isinstance(choice.get("instead_of"), str) else None}
     if report_back:
         # The owner's assistant asked: report back to its worker when done.
         payload["orchestration_report_device"] = from_device
@@ -440,7 +575,8 @@ def accept_remote_start(body, from_device):
     with transaction() as conn:
         sessions.create_session(
             session_id=session_id, title=title, profile_id=profile_id, project_v2_id=project_v2_id,
-            is_active=True, provider_id=provider_id, derive_provider_from_profile=provider_id is None,
+            is_active=True, provider_id=provider_id,
+            derive_provider_from_profile=provider_id is None and choice is None,
             model=model, effort=effort, permission_mode=permission_mode,
             context_window=context_window, fast=fast, _conn=conn)
         if report_back:
@@ -474,9 +610,12 @@ async def handle_remote_start(body, from_device):
     return result
 
 
-def _queue(sender_id, data, action, placement=None):
+def _queue(sender_id, data, action, placement=None, model_plan=None):
     """``placement`` is :func:`_project_placement`'s answer for a StartSession
-    that named a project (the owner's assistant only)."""
+    that named a project (the owner's assistant only). ``model_plan`` is
+    :func:`_confirm_start_model`'s answer when the call passed ``model``: a
+    plan for a switched model the user asked for, or False for the model the
+    chat inherits anyway."""
     from app.db import sessions, turns, mobile_tool_identity
     from app.db.base import transaction
     from app.core import turn_scheduler
@@ -508,6 +647,11 @@ def _queue(sender_id, data, action, placement=None):
         raise ValueError("worker applies only to StartSession.")
     if action != "start" and data.get("project") is not None:
         raise ValueError("project applies only to StartSession.")
+    if action != "start" and data.get("model") is not None:
+        raise ValueError("model applies only to StartSession.")
+    if action == "start" and data.get("model") is not None and model_plan is None:
+        raise ValueError("model was not checked; nothing was started.")
+    plan = model_plan or None
     if placement is None and data.get("project") is not None:
         raise ValueError("project is available only in the owner's assistant conversation; omit it.")
     if placement is not None:
@@ -585,7 +729,8 @@ def _queue(sender_id, data, action, placement=None):
                 # Re-ask the destination: it answers with the chat it already made.
                 return {"remote": remote, "receipt_id": previous["id"], "reserved": False,
                         "body": _remote_body(sender, data, overrides, payload, prompt, command_id, fingerprint,
-                                             project_v2_id=project_v2_id, assistant=assistant)}
+                                             project_v2_id=project_v2_id, assistant=assistant,
+                                             model_plan=plan)}
             return {"session_id": previous["session_id"], "turn_id": previous["id"],
                     "status": "already_queued", "delivery_status": _delivery_status(previous),
                     "created": False,
@@ -603,7 +748,7 @@ def _queue(sender_id, data, action, placement=None):
             raise ValueError("The user stopped a participating session.")
         if remote is not None:
             body = _remote_body(sender, data, overrides, payload, prompt, command_id, fingerprint,
-                                project_v2_id=project_v2_id, assistant=assistant)
+                                project_v2_id=project_v2_id, assistant=assistant, model_plan=plan)
             receipt_payload = {"orchestration_fingerprint": fingerprint, "remote_device_id": remote["device_id"],
                                "remote_session_id": body["session_id"]}
             if assistant:
@@ -628,14 +773,27 @@ def _queue(sender_id, data, action, placement=None):
                 "worktree_path": sender.get("worktree_path")}
             if placement is not None:
                 workspace["project_v2_id"] = project_v2_id
+            run = {"provider_id": sender.get("provider_id"),
+                   "model": overrides.get("model") or sender.get("model"),
+                   "effort": overrides.get("effort", sender.get("effort")),
+                   "context_window": sender.get("context_window"), "fast": sender.get("fast")}
+            if plan:
+                # A model the user asked for (#1830): its provider, and only
+                # the inherited settings that still apply to it.
+                from app.core import model_override
+                mapped = model_override.settings_for_model(
+                    plan["model"], plan["provider_id"], effort=run["effort"],
+                    context_window=run["context_window"], fast=run["fast"])
+                run.update(provider_id=plan["provider_id"], model=plan["model"], **mapped)
+                overrides = _start_overrides(overrides, plan, mapped)
+                payload["model_override"] = _override_record(plan)
             target = sessions.create_session(
                 session_id=new_id, title=title, profile_id=sender["profile_id"],
                 api_user_id=sender.get("api_user_id"), is_active=True,
-                provider_id=sender.get("provider_id"), derive_provider_from_profile=False,
-                model=overrides.get("model") or sender.get("model"),
-                effort=overrides.get("effort", sender.get("effort")),
+                provider_id=run["provider_id"], derive_provider_from_profile=False,
+                model=run["model"], effort=run["effort"],
                 permission_mode=overrides.get("permission_mode", sender.get("permission_mode")),
-                context_window=sender.get("context_window"), fast=sender.get("fast"),
+                context_window=run["context_window"], fast=run["fast"],
                 mode=sender.get("mode"), _conn=conn, **workspace,
             )
             if sender.get("branch") and placement is None:
@@ -656,6 +814,8 @@ def _queue(sender_id, data, action, placement=None):
     result = {"session_id": target["id"], "turn_id": turn["id"], "status": "queued",
               "delivery_status": "queued", "created": action == "start", "url": "/?session=" + target["id"],
               "note": "Queued is not delivered. Retry the same request_id to read queued/begun/consumed/stopped status. No automatic reply or completion notification; peers must use MessageSession. New sessions share the caller's workspace; coordinate edits or choose a separate branch."}
+    if action == "start":
+        result.update(_model_receipt(target, plan))
     if assistant:
         project = placement["project"] if placement is not None else None
         result["note"] = (
@@ -666,6 +826,17 @@ def _queue(sender_id, data, action, placement=None):
         if project:
             result["project"] = {"id": project["id"], "name": project.get("name")}
     return result
+
+
+def _model_receipt(row, plan, *, model=None, provider_id=None):
+    """The provider and model a started chat actually runs on, for the receipt."""
+    from app.core import model_override
+    model = model or (row or {}).get("model")
+    provider_id = provider_id if row is None else (row or {}).get("provider_id")
+    out = {"model": model, "provider": {"id": provider_id, "name": model_override.provider_label(provider_id)}}
+    if plan:
+        out["model_override"] = {"source": plan.get("source"), "instead_of": plan.get("baseline")}
+    return out
 
 
 def _device_name(device_id):
@@ -722,6 +893,13 @@ async def _start_remote(plan, sender_id, sender_generation):
                        "private-access grants. Queued is not delivered; retry the same request_id to read "
                        "its status. It cannot start chats or MessageSession you back; the user sees it "
                        "in the sidebar once the worker publishes it.")}
+    # What the destination actually made it on; an older release does not
+    # say, so the request's own model stands in.
+    choice = plan["body"].get("model_choice")
+    result.update(_model_receipt(
+        None, {"source": choice.get("source"), "baseline": choice.get("instead_of")} if choice else None,
+        model=answer.get("model") or plan["body"].get("model"),
+        provider_id=answer.get("provider_id") if "model" in answer else plan["body"].get("provider_id")))
     if plan["body"].get("report_back"):
         if answer.get("report_back"):
             result["note"] = (f"Runs on {name}, in the project's checkout there, with no private-access "
@@ -949,8 +1127,11 @@ def make_handler(supplier):
                 # Worker checks may take a network round trip: before the lock.
                 placement = (await _project_placement(sender_id, data)
                              if action == "start" and data.get("project") is not None else None)
+                # A model choice may wait for the owner's answer: also before the lock.
+                model_plan = (await _confirm_start_model(sender_id, data, placement)
+                              if action == "start" else None)
                 async with turn_scheduler.message_resume_lock(target_id):
-                    result = await asyncio.to_thread(_queue, sender_id, data, action, placement)
+                    result = await asyncio.to_thread(_queue, sender_id, data, action, placement, model_plan)
                     if "remote" in result:
                         # The destination kicks and publishes its own chat;
                         # nothing here is local work to wake or broadcast.

@@ -58,6 +58,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -89,6 +90,7 @@ from fluid.context.cache_probe import (
     system_text_of,
 )
 from fluid.context.compaction import (
+    MANUAL_COMPACT_REASON,
     CompactionConfig,
     Compactor,
     Promotion,
@@ -110,6 +112,7 @@ from fluid.events.model import (
     BlockStop,
     CacheMissAlert,
     ContextCompaction,
+    DelegatedDiagnostic,
     ErrorEvent,
     Event,
     HandoffCreated,
@@ -452,6 +455,22 @@ _TRANSIENT_ERROR_SUFFIXES = (
     "TooManyConnectionsError",
     "CannotConnectNowError",
 )
+
+
+_COMPACT_REQUEST_RE = re.compile(r"^/compact\s*$")
+
+
+def _is_compact_request(content: Any) -> bool:
+    """Whether a turn's content is a bare ``/compact`` (the whole message).
+
+    Arguments are not accepted: native compaction is mechanical and takes no
+    instructions, so "/compact keep the API notes" stays an ordinary message.
+    """
+    if isinstance(content, str):
+        return bool(_COMPACT_REQUEST_RE.match(content.strip()))
+    texts = [b.text for b in content or () if isinstance(b, Text)]
+    others = [b for b in content or () if not isinstance(b, Text)]
+    return len(texts) == 1 and not others and bool(_COMPACT_REQUEST_RE.match(texts[0].strip()))
 
 
 def _is_transient_error(exc: BaseException) -> bool:
@@ -2396,6 +2415,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             await self._start_and_loop(sid, turn_id, head)
             return
 
+        if _is_compact_request(op.content):
+            # "/compact" typed by the owner or sent by the host: compact the
+            # rendered history now, without a model call or a new node.
+            await self._run_manual_compaction(sid, turn_id, op.source)
+            return
+
         op, question_ids = await self._question_turn_content(op)
         content: list[Any] = (
             [Text(op.content)] if isinstance(op.content, str) else list(op.content)
@@ -2445,6 +2470,78 @@ class NativeLoop(BackgroundLifecycleMixin):
         elif self._journal is not None:
             self._journal.record_event("user", _plain_text(content))
         await self._start_and_loop(sid, turn_id, user_node)
+
+    async def _run_manual_compaction(self, sid: str, turn_id: str, source: str) -> None:
+        """An owner-requested compaction: one turn, no model call, no new node.
+
+        Runs :meth:`Compactor.compact_now` (the guarded ladder window
+        protection uses) on the current path. Its promotions are emitted and
+        persisted like any batch, so they stay applied after a restart, and a
+        summary ``ContextCompaction`` (reason ``manual_compact``) reports the
+        sizes for the host's "Context Compacted" card. When nothing could be
+        reclaimed a ``DelegatedDiagnostic`` of kind ``compaction_failed`` says
+        why, the same report a Claude Code ``/compact`` that did not compact
+        produces. Either way the turn ends with ``TurnComplete``.
+        """
+        await self._emit(TurnStarted(
+            session_id=sid, node_id="", turn_id=turn_id, model=self.model,
+            provider=self.provider.name, source=source,
+            thinking=self._session_thinking.get(sid),
+        ))
+        nodes = await self.store.load_path(sid)
+        promotions: list[Promotion] = []
+        failure: str | None = None
+        scale = 1.0
+        if not self._compactor.active:
+            failure = "compaction is turned off for this session"
+        elif not nodes:
+            failure = "there is no conversation to compact yet"
+        else:
+            overhead = self._context_overhead_tokens()
+            measured = await self._measured_window_prompt(sid, nodes)
+            estimate = self._compactor.estimate_view_tokens(nodes, overhead)
+            if measured and estimate > 0:
+                scale = min(1.0, max(0.6, measured / estimate))
+            try:
+                promotions = self._compactor.compact_now(
+                    nodes, overhead_tokens=overhead,
+                    context_window=self.context_window,
+                    output_reserve_tokens=self.max_tokens or _DEFAULT_OUTPUT_RESERVE,
+                    scale=scale,
+                )
+            except Exception as exc:  # noqa: BLE001 — reported as a failed compaction
+                log.warning("manual compaction failed", exc_info=True)
+                failure = f"compaction failed: {type(exc).__name__}"
+            if not promotions and failure is None:
+                failure = (
+                    "nothing could be compacted: the context is already as small "
+                    "as compaction makes it without touching the most recent work"
+                )
+        if promotions:
+            self._history_rewrites.extend(describe_promotions(promotions))
+            await self._emit_pre_compact(sid, turn_id, promotions)
+            tail = self._note_rewrite_tail(self._compactor.view(nodes), promotions)
+            for promo in promotions:
+                await self._emit_compaction(sid, turn_id, promo, rewrite_tail_tokens_est=tail)
+            await self._emit(ContextCompaction(
+                session_id=sid, turn_id=turn_id,
+                tier=max(p.tier for p in promotions),
+                reason=MANUAL_COMPACT_REASON,
+                reclaimed_chars=sum(p.reclaimed_chars for p in promotions),
+                before_tokens=int(promotions[0].before_tokens * scale),
+                after_tokens=int(promotions[-1].after_tokens * scale),
+                decision_reason="manual",
+                render_version=self._compactor.render_version,
+            ))
+        else:
+            await self._emit(DelegatedDiagnostic(
+                session_id=sid, turn_id=turn_id, kind="compaction_failed",
+                message=failure or "nothing could be compacted",
+            ))
+        await self._emit_terminal_with_park(TurnComplete(
+            session_id=sid, turn_id=turn_id, stop_reason="end_turn",
+            num_model_calls=0, usage={}, cost_usd=0.0,
+        ))
 
     async def _start_and_loop(
         self, sid: str, turn_id: str, from_node: SessionNode

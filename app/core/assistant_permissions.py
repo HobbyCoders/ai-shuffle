@@ -427,7 +427,12 @@ def _check_plugin_rule(data, scope):
 
 def _start_session_rule(data, scope):
     """Starting a chat here, or in a named registered project, is ordinary
-    work. A chat on another worker with no project could land anywhere."""
+    work. A chat on another worker with no project could land anywhere.
+
+    ``model`` (#1830) never lowers this level and is not judged here: a model
+    other than the inherited one passes its own host check (the user named it,
+    or the owner approves a prompt in every mode), so the level stays the one
+    the worker and project give."""
     worker = data.get("worker")
     if worker in (None, "") or data.get("project") not in (None, ""):
         return LOW

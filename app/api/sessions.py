@@ -1827,6 +1827,114 @@ async def resume_session(
     return {"turn_id": turn_id, "session_id": session_id, "queued": bool(busy)}
 
 
+# ============================================================================
+# Compact now, cold-send check, resume after a usage limit (#1831)
+# ============================================================================
+
+@router.post("/{session_id}/compact")
+async def compact_session(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth),
+):
+    """Compact this chat's context now: a ``/compact`` turn from the owner.
+
+    Claude Code compacts with its own ``/compact``; a native chat runs the
+    engine's own compaction (the ladder that runs near the limit). The chat
+    shows "Context Compacted" only when it worked, else "Compaction failed"
+    with the reason. Refused with 409 while a turn runs or waits, 409 for an
+    archived chat, 400 for a chat that cannot compact (voice).
+    """
+    existing = await require_session(request, session_id)
+    _refuse_archived(existing, "compact")
+
+    from app.core import limit_resume, turn_claim, turn_manager
+    from app.db import turns as turns_db
+
+    leg = await run_sync(limit_resume.session_leg, existing)
+    if leg not in limit_resume.COMPACTING_LEGS:
+        raise HTTPException(status_code=400, detail="This chat cannot be compacted.")
+    if await run_sync(turns_db.session_has_unsettled_turns, session_id):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Wait for the current turn to finish, then compact.",
+        )
+    payload: dict = {}
+    api_user = get_api_user_from_request(request)
+    if api_user:
+        payload["api_user_id"] = api_user["id"]
+    profile_id = existing.get("profile_id")
+    turn_id = await turn_manager.submit_async(
+        session_id,
+        "user",
+        prompt=limit_resume.COMPACT_PROMPT,
+        profile_id=None if profile_id == "claude-code" else profile_id,
+        project_id=existing.get("project_id"),
+        payload=payload or None,
+        no_kick=True,
+    )
+    await run_sync(turn_claim.notify_turns_changed, session_id)
+    return {"turn_id": turn_id, "session_id": session_id}
+
+
+@router.get("/{session_id}/cache-state")
+async def get_session_cache_state(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth),
+):
+    """Whether a message sent now re-reads a large context with a cold cache.
+
+    ``warn`` is true when the context is at least ``threshold_tokens`` and the
+    last provider call is older than ``cache_ttl_seconds`` for the chat's leg
+    (Claude Code 3600 s, native legs 300 s). The composer asks before such a
+    send and offers to compact first.
+    """
+    existing = await require_session(request, session_id)
+    from app.core import send_cost
+
+    return await run_sync(send_cost.cache_state, existing)
+
+
+@router.get("/{session_id}/limit-resume")
+async def get_session_limit_resume(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth),
+):
+    """This chat's scheduled resume after a usage limit (``pending``, or
+    null) and the Task workers it waits on that a limit paused
+    (``workers``: their ids)."""
+    await require_session(request, session_id)
+    from app.core import limit_resume
+
+    pending = await run_sync(limit_resume.pending, session_id)
+    workers = await run_sync(limit_resume.paused_workers_of, session_id)
+    return {"session_id": session_id, "pending": pending, "workers": workers}
+
+
+@router.post("/{session_id}/limit-resume/cancel")
+async def cancel_session_limit_resume(
+    request: Request,
+    session_id: str,
+    task_id: Optional[str] = Query(None, description="A paused Task worker of this chat"),
+    token: str = Depends(require_auth),
+):
+    """Cancel the resume this chat (or one of its paused Task workers) has
+    scheduled. A cancelled worker settles as stopped. ``cancelled`` is false
+    when nothing was scheduled."""
+    await require_session(request, session_id)
+    from app.core import limit_resume
+
+    target = session_id
+    if task_id:
+        if task_id not in await run_sync(limit_resume.paused_workers_of, session_id):
+            raise HTTPException(status_code=404, detail="No paused worker with that id")
+        target = task_id
+    cancelled = await limit_resume.cancel(target)
+    return {"session_id": session_id, "task_id": task_id, "cancelled": cancelled}
+
+
 @router.post("/batch-delete", status_code=status.HTTP_200_OK)
 async def batch_delete_sessions(
     request: Request,

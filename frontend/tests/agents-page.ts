@@ -126,8 +126,7 @@ let subagentDefault: any =
 	defaultMode === '404'
 		? null
 		: {
-				model: defaultMode === 'unset' ? null : 'sonnet',
-				allowed: ['sonnet', 'haiku']
+				model: defaultMode === 'unset' ? null : 'sonnet'
 			};
 
 localStorage.setItem(
@@ -177,7 +176,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 	if (path.startsWith('/tools/surface')) return json(surface);
 	if (path === '/settings/subagent-default') {
 		if (!subagentDefault) return json({ detail: 'Not Found' }, 404);
-		if (method === 'PUT') subagentDefault = { model: body.model, allowed: body.allowed };
+		if (method === 'PUT') subagentDefault = { model: body.model };
 		return json(subagentDefault);
 	}
 	if (path === '/assistant') return json({ agent_id: 'juniper', home_session_id: 'h1', configured: true, enabled: true, status: 'ready', research_sources: 2, agent: identities[0] });

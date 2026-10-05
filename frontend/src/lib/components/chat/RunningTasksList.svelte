@@ -40,6 +40,8 @@
 	import { swarms } from '$lib/stores/swarms';
 	import { usageTargetDeviceName } from '$lib/stores/usage-target';
 	import { stopSessionTask } from '$lib/api/sessions';
+	import { cancelLimitResume } from '$lib/api/limit-resume';
+	import { pausedLabel, pausedWorkers } from './limit-resume';
 	import { notify } from '$lib/stores/notifications';
 	import { openSession } from '$lib/services/session-navigation';
 	import { buildShell } from '$lib/utils/platform';
@@ -125,6 +127,8 @@
 	}
 
 	const rows = $derived(buildRows({ tasks, swarms: sessionSwarms, messages, stopping, stopped, defaultWorker }));
+	// Workers a usage limit paused, by task id: their resume time (#1831).
+	const paused = $derived(pausedWorkers(messages));
 	const counts = $derived(countRows(rows));
 	const hasRunning = $derived(counts.running > 0);
 	const shown = $derived(visibleRows(rows, filter, query));
@@ -210,6 +214,8 @@
 	async function stopTask(id: string): Promise<boolean> {
 		if (!sessionId) return false;
 		try {
+			// A paused worker is stopped by cancelling its scheduled resume.
+			if (paused.has(id)) return (await cancelLimitResume(sessionId, id)).cancelled;
 			const result = await stopSessionTask(sessionId, id);
 			return result.ok;
 		} catch {
@@ -484,11 +490,12 @@
 					<span class="icon-slot" aria-hidden="true"></span>
 				{/if}
 				{#if row.state === 'running'}
+					{@const stopLabel = isSwarm ? 'Stop swarm' : paused.has(row.id) ? 'Cancel' : 'Stop'}
 					<button
 						type="button"
 						class="icon-btn stop"
-						title={isSwarm ? 'Stop swarm' : 'Stop'}
-						aria-label="{isSwarm ? 'Stop swarm' : 'Stop'}: {row.name}"
+						title={stopLabel}
+						aria-label="{stopLabel}: {row.name}"
 						onclick={(e) => guardClick(e, () => requestStop(row))}
 					><Square size={size === 'roomy' ? 15 : 12} fill="currentColor" strokeWidth={0} /></button>
 				{:else if row.state === 'stopping'}
@@ -498,6 +505,9 @@
 				{/if}
 			</span>
 		</div>
+		{#if !isSwarm && row.state === 'running' && paused.has(row.id)}
+			<div class="paused-note in-row" role="status">{pausedLabel(paused.get(row.id) ?? 0)}</div>
+		{/if}
 		{#if isSwarm && confirmingSwarm === row.key && row.state === 'running'}
 			<div class="confirm in-row" role="alertdialog" aria-label="Stop swarm {row.name}">
 				<span>Stop this swarm and its {plural(row.members.filter((m) => m.status === 'running' || m.status === 'queued' || m.status === 'blocked').length, 'unfinished task')}?</span>
@@ -770,6 +780,13 @@
 		text-align: right;
 	}
 	.meta-time { font-weight: 550; color: var(--foreground); white-space: nowrap; }
+	.paused-note {
+		margin: 0 0 4px 28px;
+		font-size: 0.75rem;
+		line-height: 1.3;
+		color: var(--muted-foreground);
+	}
+	.size-roomy .paused-note { margin-left: 44px; font-size: 0.8125rem; }
 	.meta-worker { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 	.is-stopped .meta-time { color: var(--muted-foreground); font-weight: 500; }
 	.is-stopped .row-name, .is-stopped .row-icon { opacity: 0.6; }

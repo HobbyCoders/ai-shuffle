@@ -167,7 +167,7 @@
 		}
 	}
 
-	async function saveSubagentDefault(next: { model: string | null; allowed: string[] }) {
+	async function saveSubagentDefault(next: { model: string | null }) {
 		if (!subagentDefault) return;
 		const before = subagentDefault;
 		subagentDefault = { ...before, ...next };
@@ -1168,8 +1168,7 @@
 						onDeleteGroup={deleteGroup}
 						onOpenAssistant={(id) => layout.openFeaturePage('assistant', id)}
 						onRetryIdentity={loadIdentities}
-						onDefaultModel={(model) => saveSubagentDefault({ model, allowed: subagentDefault?.allowed ?? [] })}
-						onAllowed={(allowed) => saveSubagentDefault({ model: subagentDefault?.model ?? null, allowed })}
+						onDefaultModel={(model) => saveSubagentDefault({ model })}
 						onDuplicate={duplicateAgent}
 						onExport={() => editingProfile && handleExportProfile(editingProfile.id)}
 						onDelete={deleteOpenAgent}

@@ -1,9 +1,10 @@
 """A Claude caller picks a Claude model per Task, like a provider-row caller.
 
 Native targets (no provider) run on Claude: the Claude Code CLI on a
-subscription, or the Anthropic API with a key. Their Task ``model`` choices
-are the Claude aliases on the owner's subagent list (#1827); the worker stays
-native.
+subscription, or the Anthropic API with a key. A Task ``model`` may be any
+Claude alias, or another provider's model written as its ``prov:`` id, which
+moves that one worker to that provider (#1830). The user's message in the
+parent names the models, so no owner prompt is involved here.
 """
 import pytest
 
@@ -24,8 +25,8 @@ def native(mock_db, monkeypatch, tmp_path):
     db.create_profile("caller", "Caller", None, {"model": "opus"})
     db.create_profile("helper", "Helper", None, {"model": "sonnet"})
     db.create_session(session_id="parent", profile_id="caller", title="Parent")
-    from app.core import subagent_default
-    subagent_default.write(None, ["haiku", "sonnet", "opus", "fable", "prov:chatgpt:gpt-5.6-sol"])
+    from tests.core.test_task_model_choices import _user_says
+    _user_says("parent", "Try haiku, opus, fable or gpt-5.6-sol for this.")
     monkeypatch.setattr(td, "_credential_gap", lambda provider: None)
     monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda row: str(tmp_path))
     seen = []
@@ -38,9 +39,9 @@ def native(mock_db, monkeypatch, tmp_path):
     return db, seen
 
 
-def test_native_caller_contract_offers_the_owners_list(native):
+def test_native_caller_contract_takes_any_model_string(native):
     contract = apm.build_task_contract("caller", None)
-    assert contract.input_schema["properties"]["model"]["enum"] == ["haiku", "sonnet", "opus", "fable", "prov:chatgpt:gpt-5.6-sol"]
+    assert "enum" not in contract.input_schema["properties"]["model"]
 
 
 @pytest.mark.parametrize("model, expected", [
@@ -71,21 +72,21 @@ async def test_native_dispatch_without_a_model_keeps_the_stored_assignment(nativ
     assert seen[0]["provider_id"] is None
 
 
-@pytest.mark.parametrize("model", ["gpt-5.6-sol", "prov:chatgpt:gpt-5.6-sol", "claude-3-opus"])
-async def test_native_dispatch_refuses_a_model_claude_does_not_offer(native, model):
+@pytest.mark.parametrize("model", ["gpt-5.6-sol", "claude-3-opus", "prov:chatgpt:unlisted"])
+async def test_native_dispatch_refuses_a_model_this_install_cannot_run(native, model):
     _, seen = native
     result = await td.dispatch_task_tool(
         {"agent": "helper", "prompt": "go", "model": model, "mode": "sync"},
         caller_session_id="parent", caller_provider_id=None,
     )
     assert not result["ok"]
-    assert "not one the owner allows" in result["error"]
+    assert "cannot run on this worker" in result["error"]
     assert not seen
 
 
-async def test_mixed_roster_keeps_each_providers_own_list(native):
-    """A native caller with one target pinned to a ChatGPT row sees the owner's
-    one list; dispatch still checks the choice against the target's own leg."""
+async def test_mixed_roster_reads_bare_ids_on_each_targets_own_leg(native):
+    """A bare id is read on the target's own leg; a Claude alias or a prov: id
+    names its own provider and may move a worker the user asked to move."""
     db, seen = native
     db.create_profile(
         "gpt-helper", "GPT Helper", None,
@@ -93,13 +94,13 @@ async def test_mixed_roster_keeps_each_providers_own_list(native):
     )
     contract = apm.build_task_contract("caller", None)
     assert "gpt-helper" in contract.input_schema["properties"]["agent"]["enum"]
-    assert contract.input_schema["properties"]["model"]["enum"] == ["haiku", "sonnet", "opus", "fable", "prov:chatgpt:gpt-5.6-sol"]
 
     for agent, model, ok in [
-        ("gpt-helper", "haiku", False),       # a Claude alias on the ChatGPT leg
-        ("helper", "gpt-5.6-sol", False),     # a ChatGPT model on the native leg
+        ("gpt-helper", "haiku", True),        # a Claude alias moves it to Claude
+        ("helper", "gpt-5.6-sol", False),     # a bare non-Claude id on the native leg
         ("gpt-helper", "gpt-5.6-sol", True),
         ("helper", "haiku", True),
+        ("helper", "prov:chatgpt:gpt-5.6-sol", True),  # moved to ChatGPT
     ]:
         result = await td.dispatch_task_tool(
             {"agent": agent, "prompt": "go", "model": model, "mode": "sync"},
@@ -108,25 +109,22 @@ async def test_mixed_roster_keeps_each_providers_own_list(native):
         assert result["ok"] is ok, (agent, model, result)
 
     assert [(s["provider_id"], s["model_id"]) for s in seen] == [
+        (None, "haiku"),
         ("chatgpt", "gpt-5.6-sol"),
         (None, "haiku"),
+        ("chatgpt", "gpt-5.6-sol"),
     ]
 
 
-async def test_refusal_lists_choices_and_names_the_settings(native):
-    """A Sol request on a Claude target says what the target CAN take from the
-    owner's list and where the owner changes it — not just 'no'."""
+async def test_refusal_says_how_to_write_a_providers_model(native):
+    """A bare Sol id on a Claude target says how to name a provider's model."""
     _, seen = native
     result = await td.dispatch_task_tool(
         {"agent": "helper", "prompt": "go", "model": "gpt-5.6-sol", "mode": "sync"},
         caller_session_id="parent", caller_provider_id=None,
     )
     assert not result["ok"]
-    error = result["error"]
-    assert "runs on Claude" in error
-    assert "Choose one of: haiku, sonnet, opus, fable, or omit model" in error
-    assert "never switches providers" in error
-    assert "Agents page" in error
+    assert "prov:<providerId>:<modelId>" in result["error"]
     assert not seen
 
 
@@ -139,10 +137,7 @@ def test_contract_lists_each_targets_leg_and_its_choices(native):
     description = apm.build_task_contract("caller", None).description
     assert "- helper (model: sonnet; runs on Claude)" in description
     assert "- gpt-helper (model: gpt-5.6-luna; runs on ChatGPT)" in description
-    assert (
-        "Models the owner allows subagents to use (Task's model): haiku, "
-        "sonnet, opus, fable, prov:chatgpt:gpt-5.6-sol." in description
-    )
+    assert "Models the owner allows" not in description
     assert apm.TASK_MODEL_SETTINGS_HINT in description
 
 

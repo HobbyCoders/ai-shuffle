@@ -286,6 +286,60 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/resume \
 
 `queued` is `true` when the retry waits behind a running turn. If a retry is already queued, that turn is returned with `"duplicate": true`. Claude Code sessions cannot be resumed this way and return `409`. When the provider cut the last reply off mid-stream, that partial reply stays in the transcript marked interrupted. If no tool call in it finished before the error, the retry starts again from the user's message and the partial reply stays on a side branch; if one did, the partial reply and its tool calls stay on the re-sent path, and the model reads them and the calls' error results before it continues.
 
+### POST /api/v1/sessions/{session_id}/compact
+
+Compact the chat's context now. This sends the chat a `/compact` turn. A Claude Code chat runs Claude Code's own `/compact`. Any other chat runs the app's compaction: older tool results are trimmed and older turns are summarized, the newest work is kept as it is, and a summarized turn can still be read back with `HistoryExpand`. The chat shows **Context Compacted** with the sizes before and after when it worked, or **Compaction failed** with the reason.
+
+**Auth:** Required
+
+```json
+{ "turn_id": "...", "session_id": "sess_abc123" }
+```
+
+**Errors:** `409` while a turn runs or waits in the queue, `409` for an archived chat, `400` for a chat that cannot be compacted (voice).
+
+### GET /api/v1/sessions/{session_id}/cache-state
+
+Whether a message sent now would read a large context with a cold provider cache. The composer asks this before such a send and offers to compact first.
+
+**Auth:** Required
+
+```json
+{
+  "leg": "delegated",
+  "context_tokens": 412000,
+  "last_call_at": 1791172200.0,
+  "idle_seconds": 5400.0,
+  "cache_ttl_seconds": 3600.0,
+  "threshold_tokens": 150000,
+  "cold": true,
+  "large": true,
+  "warn": true
+}
+```
+
+`cold` is `true` when the last model call is older than `cache_ttl_seconds`: 3600 seconds for Claude Code, which keeps its cache entries for an hour, and 300 seconds for the other providers. `large` is `true` from `threshold_tokens` (150,000) up. `warn` is both. `context_tokens` is the last context reading, or the size of the last prompt when there is none.
+
+### GET /api/v1/sessions/{session_id}/limit-resume
+
+The chat's scheduled resume after a usage limit (`pending`, or `null`), and the ids of the background Task workers it waits on that a usage limit paused (`workers`).
+
+**Auth:** Required
+
+```json
+{
+  "session_id": "sess_abc123",
+  "pending": {"fire_at": 1791173520.4, "reset_at": 1791173400.0, "provider": "claude", "limit_key": "claude:29852890", "compact": true},
+  "workers": []
+}
+```
+
+### POST /api/v1/sessions/{session_id}/limit-resume/cancel
+
+Cancel the chat's scheduled resume. With `?task_id=<worker id>` it cancels the resume of that paused worker instead; the worker is then stopped. Returns `{"session_id": "...", "task_id": null, "cancelled": true}`, with `cancelled` `false` when nothing was scheduled. Returns `404` for a `task_id` that is not a paused worker of this chat.
+
+**Auth:** Required
+
 ### POST /api/v1/sessions/batch-delete
 
 Delete multiple sessions at once.

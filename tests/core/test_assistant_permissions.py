@@ -158,6 +158,18 @@ HIGH_CALLS = [
 ]
 
 
+@pytest.mark.parametrize("base", [
+    {"title": "Fix", "prompt": "Fix", "request_id": "r"},
+    {"title": "Fix", "prompt": "Fix", "request_id": "r", "worker": "Unraid", "project": "ai-shuffle"},
+    {"title": "Fix", "prompt": "Fix", "request_id": "r", "worker": "Unraid"},
+])
+@pytest.mark.parametrize("model", ["opus", "prov:lane:gpt-6-astra"])
+def test_start_session_model_never_lowers_the_level(base, model):
+    """#1830: a model has its own host check (the user named it, or the owner
+    approves), so it leaves the worker/project level exactly as it was."""
+    assert ap.level("StartSession", {**base, "model": model}, SCOPE) == ap.level("StartSession", base, SCOPE)
+
+
 @pytest.mark.parametrize("name,data", LOW_CALLS)
 def test_ordinary_work_goes_ahead(name, data):
     assert ap.level(name, data, SCOPE) == ap.LOW

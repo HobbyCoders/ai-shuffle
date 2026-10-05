@@ -46,9 +46,10 @@ def input_schema(worker: dict | None = None) -> dict:
         "id": {"type": "string"}, "title": {"type": "string"},
         "agent": {"type": "string"}, "prompt": {"type": "string"},
         "model": {"type": "string", "description": (
-            "Optional model override only when the host's Task schema offers it. "
-            "Use a Task-listed model on this agent's provider; omit for its default. "
-            "The Task dispatcher validates this choice and cannot switch providers.")},
+            "Optional model for this task only, under the same rule as Task's model: "
+            "only when the user named a model for this work; omit it to use the agent's "
+            "own model or the subagent default. The host checks that the user asked and "
+            "otherwise asks the owner to approve the switch.")},
         "depends_on": {"type": "array", "items": {"type": "string"}}}
     if worker is not None:
         item["worker"] = dict(worker)

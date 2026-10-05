@@ -529,6 +529,15 @@ async def sweep_stalled_parks(
         if not session_id:
             continue
         try:
+            from app.core.limit_resume import paused_workers_of
+
+            if await asyncio.to_thread(paused_workers_of, session_id):
+                # Waiting on a Task worker a usage limit paused: its resume is
+                # scheduled for a known time, so this park is not lost (#1831).
+                continue
+        except Exception:  # noqa: BLE001 — fall through to the usual handling
+            logger.debug("Park watchdog: paused-worker check failed", exc_info=True)
+        try:
             if ceiling > 0 and parked_seconds >= ceiling:
                 await _force_stalled_park(session_id, turn_id, parked_seconds)
                 _park_warned.discard(session_id)

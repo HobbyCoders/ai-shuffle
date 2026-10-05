@@ -1941,6 +1941,11 @@ class SessionRuntime:
         * a different profile — a message addressed to another agent.
         """
         payload = row.get("payload") or {}
+        if (row.get("prompt") or "").strip().split(None, 1)[:1] == ["/compact"]:
+            # A compaction is a turn of its own. Steered into a live turn it
+            # would arrive as text for the model, and on Claude Code it would
+            # not compact at all; it runs when the live turn ends instead.
+            return False
         if row.get("source") == "agent_message":
             # Only an attributed, scope-checked producer may use the peer channel.
             # Recheck revocation/ownership/Stop before handing it to the engine.

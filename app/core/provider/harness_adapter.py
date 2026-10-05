@@ -135,7 +135,7 @@ from fluid.codemode.continual import Synthesizer
 from fluid.codemode.journal import ToolJournal
 from fluid.codemode.session import CodeModeSession
 from fluid.codemode.subprocess_kernel import KernelConfig
-from fluid.context.compaction import CompactionConfig
+from fluid.context.compaction import MANUAL_COMPACT_REASON, CompactionConfig
 from fluid.engine.native import NativeLoop
 from fluid.engine.delegated import ClaudeCliMissingError, DelegatedLoop
 from fluid.hooks.bus import HookBus
@@ -1529,7 +1529,12 @@ class HarnessAdapter(ProviderAdapter):
         # memory. Rendered fresh on every send, so nothing the model reads is
         # older than this turn.
         source = self._take_turn_source()
-        command = self._is_delegated and _is_cli_command(prompt)
+        # Claude Code takes any slash command as typed; a native session takes
+        # only a bare "/compact", which its engine runs as a compaction.
+        command = (
+            _is_cli_command(prompt) if self._is_delegated
+            else (prompt or "").strip() == "/compact"
+        )
         # A slash command goes to Claude Code exactly as typed. The CLI takes
         # everything after the command name as its arguments, so the note
         # appended to a "/compact" became the summarizer's custom
@@ -3605,6 +3610,10 @@ class HarnessAdapter(ProviderAdapter):
         the replay itself (``app/api/events.py``), so it maps to nothing.
         """
         reason = getattr(event, "reason", None)
+        if reason == MANUAL_COMPACT_REASON:
+            # A native session compacted on request (``/compact``): its engine
+            # follows the decisions with one summary event carrying the sizes.
+            reason = "cli_manual_compact"
         if reason not in self._CLI_COMPACTION_TRIGGERS:
             return []
         metadata: Dict[str, Any] = {}
@@ -6599,6 +6608,14 @@ def _install_task_contract(registry: ToolRegistry, contract: Any) -> None:
         input_schema=_swarm_schema(
             (contract.input_schema.get("properties") or {}).get("worker")
         ),
+    )
+    # StartSession's ``model`` names the same subagent default as an example
+    # (#1830). A no-op when this session has no StartSession tool.
+    from app.core.session_orchestration import start_session_spec
+
+    spec = start_session_spec()
+    registry.amend_spec(
+        "StartSession", description=spec.description, input_schema=spec.input_schema,
     )
 
 

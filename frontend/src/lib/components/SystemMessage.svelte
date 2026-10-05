@@ -12,6 +12,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { notify } from '$lib/stores/notifications';
 	import { resumeSession } from '$lib/api/sessions';
+	import { LIMIT_RESUME_SUBTYPE, pausedLabel } from '$lib/components/chat/limit-resume';
 
 	// Create a local marked instance to avoid mutating global config
 	const localMarked = new Marked({ breaks: true, gfm: true });
@@ -787,6 +788,23 @@
 					content: warningContent,
 					badge: 'warning',
 					badgeColor: 'amber'
+				};
+			}
+
+			case LIMIT_RESUME_SUBTYPE: {
+				// A resume after a usage limit (#1831): scheduled, moved, run,
+				// cancelled or dropped. A row with task_id is about a worker.
+				const status = typeof data.status === 'string' ? data.status : '';
+				const at = typeof data.resume_at === 'number' ? data.resume_at : null;
+				const text = typeof data.content === 'string' ? data.content : message.content || '';
+				const open = (status === 'scheduled' || status === 'deferred') && at !== null;
+				const body = open ? pausedLabel(at) + (status === 'deferred' ? '. The limit was still in force.' : '') : text;
+				return {
+					title: data.task_id ? 'Worker usage limit' : 'Usage limit',
+					content: body,
+					badge: status || 'usage limit',
+					badgeColor: status === 'resumed' ? 'green' : open ? 'amber' : 'gray',
+					compact: true
 				};
 			}
 

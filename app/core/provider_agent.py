@@ -1761,6 +1761,40 @@ async def _notify_caller_terminal(
         )
 
 
+async def _pause_for_usage_limit(
+    worker_session_id: str, worker_turn_id: str, owner_session_id: str,
+) -> Optional[str]:
+    """Pause a background worker a usage limit stopped, if its provider says so.
+
+    Reads the worker turn's terminal payload; on a usage-limit stop it asks
+    :func:`app.core.limit_resume.on_limit_stop` to schedule the resume (the
+    provider's "Resume when the limit resets" setting, a known reset time, a
+    parent that was not stopped). Returns the paused report text when a resume
+    was scheduled, else None and the worker settles as it always has. Never
+    raises.
+    """
+    try:
+        from app.core import account_failover, limit_resume, turn_scheduler
+        from app.db import turns as turns_db
+
+        terminal = await asyncio.to_thread(
+            turn_scheduler._turn_terminal_payload, worker_session_id, worker_turn_id,
+        )
+        if not account_failover.is_usage_limit_error(terminal):
+            return None
+        turn = await asyncio.to_thread(turns_db.get_turn, worker_turn_id) or {}
+        scheduled = await limit_resume.on_limit_stop(
+            worker_session_id, turn, terminal, worker_owner=owner_session_id,
+        )
+        return limit_resume.PAUSED_SUMMARY if scheduled is not None else None
+    except Exception:  # noqa: BLE001 — the worker settles as before
+        logger.warning(
+            "ProviderAgent: usage-limit pause check failed for worker %s",
+            worker_session_id, exc_info=True,
+        )
+        return None
+
+
 async def announce_abandoned_retry(
     owner_session_id: str, worker_session_id: str, summary: str
 ) -> None:
@@ -1813,6 +1847,7 @@ async def dispatch_worker(
     first_frame_seconds: Optional[float] = None,
     max_wall_seconds: Optional[float] = None,
     suppress_caller_wake: Optional[Callable[[str, Optional[str], int], bool]] = None,
+    model_note: Optional[str] = None,
 ) -> WorkerOutcome:
     """Run ``prompt`` in a fresh session bound to ``provider_id``/``model_id``.
 
@@ -1893,6 +1928,9 @@ async def dispatch_worker(
     worker_session_id = worker_session_id or str(uuid.uuid4())
     title = (label or "").strip() or f"Task worker · {model_id or profile_id}"
     model_tag = model_id or "inherit"
+    if model_note:
+        # A model the user asked for on this dispatch (#1830), named as such.
+        model_tag = f"{model_tag} ({model_note})"
     # The session that actually dispatched this worker — the one whose turn is
     # waiting on it and whose notification lanes must be armed. Equals
     # ``parent_session_id`` at depth 1; differs for a nested dispatch, where
@@ -2407,6 +2445,24 @@ async def dispatch_worker(
 
         outcome = final_turn_outcome(worker_session_id)
         usage_seen = outcome["usage"] if isinstance(outcome["usage"], dict) else {}
+        if background and not nested and worker_turn_id:
+            # A usage limit stopped the worker and its provider resumes by
+            # itself after the reset (#1831): the worker stays on the parent's
+            # running tasks as paused and the parent is not woken now. Its
+            # resume reports through the worker-continuation path instead.
+            paused = await _pause_for_usage_limit(
+                worker_session_id, worker_turn_id, owner_session_id,
+            )
+            if paused is not None:
+                status = "paused"
+                preview = paused
+                return WorkerOutcome(
+                    ok=True,
+                    session_id=worker_session_id,
+                    report=paused,
+                    usage=outcome["usage"],
+                    frames_forwarded=feed.frames_forwarded,
+                )
         if outcome["error"]:
             preview = str(outcome["error"])
             return WorkerOutcome(
@@ -2563,6 +2619,31 @@ async def dispatch_worker(
                 provider_agent_supervisor.unregister_worker(
                     parent_session_id, worker_session_id
                 )
+        elif status == "paused":
+            # Paused by a usage limit with a resume scheduled (#1831). Nothing
+            # terminal happens: the card and the registry row stay running,
+            # marked paused, the worker row keeps its status and checkout, and
+            # the parent is not woken. The resume continues this worker and
+            # its report settles all of it.
+            try:
+                await feed.stop_following(final_drain=True)
+            except BaseException:  # noqa: BLE001 — teardown must not mask the outcome
+                logger.debug("ProviderAgent: feed teardown failed", exc_info=True)
+            try:
+                from app.core.limit_resume import PAUSED_SUMMARY
+
+                task_registry.update_task(
+                    parent_session_id, worker_session_id, summary=PAUSED_SUMMARY,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug("ProviderAgent: paused summary write failed", exc_info=True)
+            provider_agent_supervisor.record_usage(
+                parent_session_id, worker_session_id, usage_seen
+            )
+            if provider_agent_supervisor.get_worker(parent_session_id, worker_session_id) is supervised:
+                provider_agent_supervisor.unregister_worker(
+                    parent_session_id, worker_session_id
+                )
         else:
             # Terminal frames FIRST. The terminal ``task.updated`` this emits is
             # what clears the v2 spinner overlay / background-tasks chip (it
@@ -2712,7 +2793,7 @@ async def dispatch_worker(
         # nothing to review: reclaim it rather than leak a worktree per
         # research-only worker. Anything committed or changed is retained.
         # A resumed worker re-materializes it from the recorded tip.
-        if worker_checkout is not None and not outstanding:
+        if worker_checkout is not None and not outstanding and status != "paused":
             from app.core.worker_checkout import reclaim_untouched_worker_checkout
             await emit_shielded(asyncio.to_thread(
                 reclaim_untouched_worker_checkout, worker_session_id, worker_checkout,

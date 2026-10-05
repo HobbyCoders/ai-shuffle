@@ -1,9 +1,9 @@
 """One global subagent default in place of a required model per agent (#1827).
 
-Resolution when a subagent starts: a model the lead names for this task (only
-from the owner's list, the default or the agent's pin), else the agent's pin
-for the caller's provider, else the default, else a refusal that asks the
-owner once. Never the session's model.
+Resolution when a subagent starts: a model named for this task (used only
+when the user asked for it, #1830; see test_model_override.py), else the
+agent's pin for the caller's provider, else the default, else a refusal that
+asks the owner once. Never the session's model.
 """
 import asyncio
 
@@ -53,36 +53,35 @@ async def _task(args, provider=None, **kwargs):
 # Resolution order
 # ---------------------------------------------------------------------------
 
-async def test_explicit_model_from_the_allowed_list_wins(lane):
-    _, seen, _ = lane
-    subagent_default.write("sonnet", ["opus"])
-    result = await _task({"agent": "pinned", "model": "opus"})
-    assert result["ok"], result
-    assert (seen[0]["provider_id"], seen[0]["model_id"]) == (None, "opus")
+@pytest.mark.parametrize("agent, model", [("pinned", "haiku"), ("plain", "sonnet")])
+async def test_explicit_model_equal_to_the_pin_or_default_needs_no_check(lane, monkeypatch, agent, model):
+    from app.core import model_override
 
+    async def never(*args, **kwargs):
+        raise AssertionError("a model the agent runs on anyway needs no check")
 
-@pytest.mark.parametrize("model", ["sonnet", "haiku"])
-async def test_explicit_model_equal_to_the_default_or_the_pin_is_accepted(lane, model):
+    monkeypatch.setattr(model_override, "confirm", never)
     _, seen, _ = lane
-    subagent_default.write("sonnet", [])
-    result = await _task({"agent": "pinned", "model": model})
+    subagent_default.write("sonnet")
+    result = await _task({"agent": agent, "model": model})
     assert result["ok"], result
     assert seen[0]["model_id"] == model
+    assert "model_override" not in result
 
 
-async def test_explicit_model_outside_the_list_is_refused(lane):
+async def test_explicit_model_this_install_cannot_run_is_refused(lane):
     _, seen, _ = lane
-    subagent_default.write("sonnet", ["haiku"])
-    result = await _task({"agent": "plain", "model": "opus"})
+    subagent_default.write("sonnet")
+    result = await _task({"agent": "plain", "model": "prov:lane:unlisted"})
     assert not result["ok"]
-    assert "not one the owner allows" in result["error"]
-    assert "Choose one of: sonnet, haiku" in result["error"]
+    assert "cannot run on this worker" in result["error"]
+    assert "Nothing was dispatched" in result["error"]
     assert not seen
 
 
 async def test_pin_beats_the_default(lane):
     _, seen, _ = lane
-    subagent_default.write("sonnet", [])
+    subagent_default.write("sonnet")
     result = await _task({"agent": "pinned"})
     assert result["ok"], result
     assert seen[0]["model_id"] == "haiku"
@@ -90,7 +89,7 @@ async def test_pin_beats_the_default(lane):
 
 async def test_unpinned_agent_runs_on_the_default(lane):
     _, seen, _ = lane
-    subagent_default.write("sonnet", [])
+    subagent_default.write("sonnet")
     result = await _task({"agent": "plain"})
     assert result["ok"], result
     assert (seen[0]["provider_id"], seen[0]["model_id"]) == (None, "sonnet")
@@ -98,9 +97,9 @@ async def test_unpinned_agent_runs_on_the_default(lane):
 
 async def test_changing_the_default_changes_every_unpinned_agent(lane):
     _, seen, _ = lane
-    subagent_default.write("sonnet", [])
+    subagent_default.write("sonnet")
     await _task({"agent": "plain"})
-    subagent_default.write("opus", [])
+    subagent_default.write("opus")
     await _task({"agent": "plain"})
     await _task({"agent": "pinned"})
     assert [s["model_id"] for s in seen] == ["sonnet", "opus", "haiku"]
@@ -109,7 +108,7 @@ async def test_changing_the_default_changes_every_unpinned_agent(lane):
 async def test_a_default_on_another_provider_pins_that_provider(lane):
     """Like an assignment that names another leg: the worker runs there."""
     _, seen, _ = lane
-    subagent_default.write("prov:lane:sol", [])
+    subagent_default.write("prov:lane:sol")
     result = await _task({"agent": "plain"})
     assert result["ok"], result
     assert (seen[0]["provider_id"], seen[0]["model_id"]) == ("lane", "sol")
@@ -127,15 +126,10 @@ async def test_no_default_refuses_and_asks_the_owner_never_the_session_model(lan
     assert not seen
 
 
-async def test_no_default_still_takes_an_allowed_model_for_this_task(lane):
-    _, seen, _ = lane
-    subagent_default.write(None, ["haiku"])
+async def test_no_default_refusal_points_at_a_user_named_model(lane):
+    _, _, _ = lane
     refused = await _task({"agent": "plain"})
-    assert "pass model= one of the models the owner allows" in refused["error"]
-    assert "haiku" in refused["error"]
-    result = await _task({"agent": "plain", "model": "haiku"})
-    assert result["ok"], result
-    assert seen[0]["model_id"] == "haiku"
+    assert "If the user named a model for this task, pass it as model" in refused["error"]
 
 
 def test_ask_owner_once_notifies_a_single_time(mock_db, monkeypatch):
@@ -156,7 +150,7 @@ def test_ask_owner_once_notifies_a_single_time(mock_db, monkeypatch):
     assert asyncio.run(run()) == (True, False)
     assert sent == [("admin", subagent_default.NOTIFICATION_CATEGORY)]
     # Saving a default re-arms it for a later "cleared again".
-    subagent_default.write("sonnet", [])
+    subagent_default.write("sonnet")
     assert subagent_default._asked is False
 
 
@@ -167,10 +161,10 @@ async def test_file_agent_uses_the_default_on_its_own_leg_else_the_session(lane)
     db.update_session("parent", launched_model="opus")
     # No default: the file agent keeps borrowing the caller's model, as before.
     await _task({"agent": "reader"}, agent_registry=registry)
-    subagent_default.write("sonnet", [])
+    subagent_default.write("sonnet")
     await _task({"agent": "reader"}, agent_registry=registry)
     # A default on another leg is not taken: file agents never switch legs.
-    subagent_default.write("prov:lane:sol", [])
+    subagent_default.write("prov:lane:sol")
     await _task({"agent": "reader"}, agent_registry=registry)
     assert [(s["provider_id"], s["model_id"]) for s in seen] == [
         (None, "opus"), (None, "sonnet"), (None, "opus")]
@@ -178,7 +172,7 @@ async def test_file_agent_uses_the_default_on_its_own_leg_else_the_session(lane)
 
 def test_voice_roster_ignores_the_default(lane):
     db, _, _ = lane
-    subagent_default.write("sonnet", [])
+    subagent_default.write("sonnet")
     db.create_profile("voiced", "Voiced", None, {"provider_models": {"__voice__": "haiku"}})
     roster = apm.available_voice_subagents()
     assert [(t.id, t.model) for t in roster] == [("voiced", "haiku")]
@@ -188,31 +182,35 @@ def test_voice_roster_ignores_the_default(lane):
 # Task tool contract
 # ---------------------------------------------------------------------------
 
-def test_task_model_choices_are_the_default_plus_allowed(lane):
-    subagent_default.write("sonnet", ["haiku", "prov:lane:sol", "haiku"])
+def test_task_model_takes_any_model_and_states_the_user_rule(lane):
+    subagent_default.write("sonnet")
     contract = apm.build_task_contract("caller", None)
     prop = contract.input_schema["properties"]["model"]
-    assert prop["enum"] == ["sonnet", "haiku", "prov:lane:sol"]
+    assert prop["type"] == "string" and "enum" not in prop
     assert "Omitted, the agent runs on its own pinned model" in prop["description"]
     assert "never runs on this session's model" in prop["description"]
+    assert "Only for when the user named a model" in prop["description"]
+    assert "The host checks that the user asked" in prop["description"]
+    assert "The owner's subagent default: sonnet." in contract.description
     assert "- plain (model: sonnet, the subagent default; runs on Claude)" in contract.description
     assert "- pinned (model: haiku; runs on Claude)" in contract.description
 
 
 def test_without_a_default_unpinned_agents_are_listed_as_needing_one(lane):
     contract = apm.build_task_contract("caller", None)
-    assert "model" not in contract.input_schema["properties"]
+    assert "enum" not in contract.input_schema["properties"]["model"]
     assert "plain" in contract.input_schema["properties"]["agent"]["enum"]
     assert "- plain (no model: not pinned and the owner has not chosen" in contract.description
+    assert "subagent default:" not in contract.description
 
 
 def test_an_unrunnable_default_reads_as_none(lane):
     db, _, _ = lane
-    subagent_default.write("prov:lane:sol", ["prov:lane:astra"])
+    subagent_default.write("prov:lane:sol")
     db.update_model_provider("lane", enabled=False)
     by_id = {t.id: t for t in apm.available_subagents("caller", None)}
     assert by_id["plain"].model_source == "unset"
-    assert apm.task_model_allowed_choices() == ()
+    assert subagent_default.effective().model is None
 
 
 # ---------------------------------------------------------------------------
@@ -220,29 +218,32 @@ def test_an_unrunnable_default_reads_as_none(lane):
 # ---------------------------------------------------------------------------
 
 def test_write_normalizes_and_validates(lane):
-    saved = subagent_default.write("claude-opus-4-6", ["prov:lane:sol", "haiku", "haiku"])
-    assert saved == subagent_default.SubagentDefault("opus", ("prov:lane:sol", "haiku"))
+    saved = subagent_default.write("claude-opus-4-6")
+    assert saved == subagent_default.SubagentDefault("opus")
     assert subagent_default.read() == saved
 
 
-@pytest.mark.parametrize("model, allowed", [
-    ("gpt-5", []),                     # a bare non-Claude id
-    ("prov:lane:unlisted", []),        # not curated on the provider
-    ("prov:missing:sol", []),          # no such provider
-    ("prov:lane", []),                 # malformed composite
-    ("claude-3-opus", []),             # not a Claude model the app offers
-    (None, ["haiku", "prov:lane:nope"]),
+def test_a_stored_allowed_list_from_before_1830_is_ignored(lane):
+    from app.db import database
+
+    database.set_system_setting(
+        subagent_default.SETTING_KEY, '{"model": "sonnet", "allowed": ["haiku"]}')
+    assert subagent_default.read() == subagent_default.SubagentDefault("sonnet")
+    assert subagent_default.payload() == {"model": "sonnet"}
+
+
+@pytest.mark.parametrize("model", [
+    "gpt-5",                 # a bare non-Claude id
+    "prov:lane:unlisted",    # not curated on the provider
+    "prov:missing:sol",      # no such provider
+    "prov:lane",             # malformed composite
+    "claude-3-opus",         # not a Claude model the app offers
 ])
-def test_write_refuses_models_this_install_cannot_run(lane, model, allowed):
-    subagent_default.write("sonnet", ["haiku"])
+def test_write_refuses_models_this_install_cannot_run(lane, model):
+    subagent_default.write("sonnet")
     with pytest.raises(ValueError):
-        subagent_default.write(model, allowed)
+        subagent_default.write(model)
     assert subagent_default.read().model == "sonnet"
-
-
-def test_write_caps_the_allowed_list(lane):
-    with pytest.raises(ValueError):
-        subagent_default.write(None, ["haiku"] * (subagent_default.MAX_ALLOWED + 1))
 
 
 # ---------------------------------------------------------------------------

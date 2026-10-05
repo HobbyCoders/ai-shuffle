@@ -382,6 +382,12 @@ async def finish_message_resume(session_id, settled, outcome):
                 text = str(payload.get("errors") or "Worker continuation failed")
         status = "completed" if outcome == "completed" else "error"
         summary, _ = provider_agent.bound_report(text or "Worker continuation ended without a report")
+        # A worker a usage limit paused: its parent was not woken at the pause,
+        # so this report is where it hears, once, that it was paused (#1831).
+        from app.core.limit_resume import report_note
+        note = report_note(settled.get("payload"))
+        if note:
+            summary = f"{note}\n\n{summary}"
         # Read park BEFORE busy: unpark starts queued/running before clearing
         # the parked row. The single busy query covers queued->running too.
         # Admission holds this lock until both queue and ownership are written.

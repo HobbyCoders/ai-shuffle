@@ -28,6 +28,10 @@ export const LOOP_HELP =
 	'While Claude runs on your subscription, work that starts without you (automations, wake-ups, connectors, and the workers they start) counts against an hourly budget. Past it, the next turn waits for you under Waiting for you. Nothing you start yourself is held or timed, including the workers your chats start.';
 const LOOP_WORKER_LIMIT_HELP =
 	'Stops a worker that an automation, wake-up or connector started once it has run this long. Workers your own chats start have no limit. A change reaches running workers within a minute.';
+export const LIMIT_RESUME_HELP =
+	'When this provider stops a chat or a background worker at its usage limit and says when the limit resets, the chat resumes by itself shortly after that time, once. A chat you stopped, archived or moved is not resumed, and sending a message cancels it. Without a reset time nothing is scheduled.';
+export const LIMIT_COMPACT_HELP =
+	'Resuming does not make the next turn cheaper: by then the provider cache has expired, so it reads the whole conversation again. Compacting first makes that read much smaller. Applies only while Resume when the limit resets is on.';
 export const FAL_BALANCE_HELP =
 	'Read with the media key itself, at most once every five minutes. Usage shows the same reading.';
 export const NATIVE_IMAGE_HELP =
@@ -88,6 +92,30 @@ export const entries: SettingEntry[] = [
 		tab: 'Policy',
 		keywords: ['background worker', 'unattended', 'time limit', 'minutes'],
 		default: 60
+	},
+	{
+		id: 'providers.limitResume',
+		category: 'providers',
+		section: 'Usage limit',
+		label: 'Resume when the limit resets',
+		hint: 'Once, after the reset',
+		help: LIMIT_RESUME_HELP,
+		item: CLAUDE_SUB_ITEM,
+		tab: 'Policy',
+		keywords: ['usage limit', 'session limit', 'rate limit', 'resume', 'reset', '429', 'auto resume'],
+		default: false
+	},
+	{
+		id: 'providers.limitCompact',
+		category: 'providers',
+		section: 'Usage limit',
+		label: 'Compact before resuming',
+		hint: 'Recommended',
+		help: LIMIT_COMPACT_HELP,
+		item: CLAUDE_SUB_ITEM,
+		tab: 'Policy',
+		keywords: ['usage limit', 'compact', 'resume', 'cache', 'cost'],
+		default: true
 	},
 	{
 		id: 'providers.cliSignOut',
@@ -158,6 +186,7 @@ export function searchSource(): SearchItem[] {
 			if (c.flavor === 'device') {
 				at('Banked resets', 'Usage', 'codex rate limit reset use');
 				at('Weekly allowance', 'Usage', 'subscription usage limit');
+				at('Resume when the limit resets', 'Overview', 'usage limit resume reset compact');
 			}
 			if (c.flavor === 'device' || c.flavor === 'key' || c.flavor === 'gateway') {
 				at('Model curation', 'Models', 'offered models picker checklist');

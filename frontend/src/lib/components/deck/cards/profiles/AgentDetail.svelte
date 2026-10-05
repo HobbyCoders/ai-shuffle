@@ -73,7 +73,6 @@
 		onOpenAssistant: (profileId: string) => void;
 		onRetryIdentity: () => void;
 		onDefaultModel: (model: string) => void | Promise<void>;
-		onAllowed: (allowed: string[]) => void | Promise<void>;
 		onDuplicate: () => void;
 		onExport: () => void;
 		onDelete: () => void | Promise<void>;
@@ -123,7 +122,6 @@
 		onOpenAssistant,
 		onRetryIdentity,
 		onDefaultModel,
-		onAllowed,
 		onDuplicate,
 		onExport,
 		onDelete,
@@ -346,7 +344,6 @@
 					{subagentDefault}
 					{defaultError}
 					{onDefaultModel}
-					{onAllowed}
 				/>
 			{:else if current === 'advanced'}
 				<AgentAdvancedTab {form} {onFormChange} />

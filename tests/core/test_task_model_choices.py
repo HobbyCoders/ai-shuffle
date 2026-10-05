@@ -1,5 +1,7 @@
-"""Task model choices follow the owner's subagent list (#1827), checked against
-each provider's persisted model list at dispatch."""
+"""Task model choices (#1827, #1830): any model on an enabled provider's
+persisted list, checked at dispatch. A model other than the agent's own runs
+only when the user asked for it; here the user's message names the models
+(test_model_override.py covers the owner prompt)."""
 import pytest
 
 from app.core import agent_provider_models as apm, task_dispatch as td
@@ -19,8 +21,7 @@ def lane(mock_db, monkeypatch, tmp_path):
     db.create_profile("helper", "Helper", None,
                       {"provider_models": {"lane": "astra"}})
     db.create_session(session_id="parent", profile_id="caller", title="Parent")
-    from app.core import subagent_default
-    subagent_default.write(None, ["prov:lane:astra", "prov:lane:sol"])
+    _user_says("parent", "Run it on sol, or on other-choice where that agent runs.")
     monkeypatch.setattr(td, "_credential_gap", lambda provider: None)
     monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda row: str(tmp_path))
     seen = []
@@ -33,6 +34,13 @@ def lane(mock_db, monkeypatch, tmp_path):
     return db, seen
 
 
+def _user_says(session_id, text):
+    from app.db import turns
+    from app.db.base import get_db
+
+    turn = turns.enqueue_turn(session_id, "user", prompt=text, profile_id="caller")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='completed' WHERE id=%s", (turn["id"],))
 
 
 @pytest.mark.parametrize("surface", ["fluid", "mcp"])
@@ -49,23 +57,19 @@ async def test_tool_adapters_preserve_selected_model(lane, surface):
     else:
         from tests.mcp.test_task_tool_contract import _task_handler
         db.create_session(session_id="session-parent", profile_id="caller", title="MCP Parent")
+        _user_says("session-parent", "Use sol for this one.")
         result = await _task_handler(profile_id="caller", provider_id="lane")(args)
         assert not result["isError"], result
     assert seen[0]["model_id"] == "sol"
     assert seen[0]["provider_id"] == "lane"
 
 
-def test_schema_offers_the_owners_list_not_every_provider_model(lane):
-    db, _ = lane
+def test_schema_takes_a_string_not_every_provider_model(lane):
     contract = apm.build_task_contract("caller", "lane")
-    assert contract.input_schema["properties"]["model"]["enum"] == [
-        "prov:lane:astra", "prov:lane:sol"]
+    prop = contract.input_schema["properties"]["model"]
+    assert prop["type"] == "string" and "enum" not in prop
+    assert "astra" not in prop["description"] and "sol" not in prop["description"]
     assert "- helper (model: astra; runs on Lane)" in contract.description
-    # A model the provider adds is not offered until the owner allows it; one
-    # it drops leaves the list at once.
-    db.update_model_provider("lane", models_json=[{"id": "astra"}, {"id": "new-model"}])
-    refreshed = apm.build_task_contract("caller", "lane")
-    assert refreshed.input_schema["properties"]["model"]["enum"] == ["prov:lane:astra"]
 
 
 @pytest.mark.parametrize("model, expected", [("sol", "sol"), (None, "astra"), ("", "astra")])
@@ -93,14 +97,13 @@ async def test_invalid_choice_never_launches(lane, model):
 
 async def test_removed_choice_is_revalidated_after_schema_creation(lane):
     db, seen = lane
-    assert "prov:lane:sol" in apm.build_task_contract("caller", "lane").input_schema["properties"]["model"]["enum"]
     db.update_model_provider("lane", models_json=[{"id": "astra"}])
     result = await td.dispatch_task_tool(
         {"agent": "helper", "prompt": "go", "model": "sol"},
         caller_session_id="parent", caller_provider_id="lane",
     )
     assert not result["ok"]
-    assert "not one the owner allows" in result["error"]
+    assert "cannot run on this worker" in result["error"]
     assert not seen
 
 
@@ -110,11 +113,7 @@ async def test_pinned_provider_not_callers_list_controls_override(lane):
                              models=[{"id": "other-default"}, {"id": "other-choice"}])
     db.create_profile("pinned", "Pinned", None,
                       {"provider_models": {"lane": "prov:other:other-default"}})
-    from app.core import subagent_default
-    subagent_default.write(None, ["prov:lane:astra", "prov:lane:sol", "prov:other:other-choice"])
-    contract = apm.build_task_contract("caller", "lane")
-    assert contract.input_schema["properties"]["model"]["enum"] == [
-        "prov:lane:astra", "prov:lane:sol", "prov:other:other-choice"]
+    # A bare id is read on the target's own provider: "sol" is not on Other.
     for model, ok in [("sol", False), ("other-choice", True)]:
         result = await td.dispatch_task_tool(
             {"agent": "pinned", "prompt": "go", "model": model},
@@ -136,7 +135,6 @@ async def test_disabled_provider_and_invoke_allowlist_still_refuse(lane):
     assert not result["ok"]
     db.update_profile("caller", config={"model": "opus", "agent_invoke_mode": "all"})
     db.update_model_provider("lane", enabled=False)
-    assert "model" not in apm.build_task_contract("caller", "lane").input_schema["properties"]
     result = await td.dispatch_task_tool(
         {"agent": "helper", "prompt": "go", "model": "sol"},
         caller_session_id="parent", caller_provider_id="lane",
@@ -161,14 +159,12 @@ async def test_file_agent_choice_keeps_callers_provider(lane):
     assert seen[0]["provider_id"] == "lane"
 
 
-async def test_uncurated_refusal_lists_the_providers_choices(lane):
+async def test_uncurated_refusal_says_it_cannot_run_here(lane):
     _, seen = lane
     result = await td.dispatch_task_tool(
         {"agent": "helper", "prompt": "go", "model": "unlisted"},
         caller_session_id="parent", caller_provider_id="lane",
     )
     assert not result["ok"]
-    assert "not one the owner allows" in result["error"]
-    assert "runs on Lane. Choose one of: prov:lane:astra, prov:lane:sol" in result["error"]
-    assert "Agents page" in result["error"]
+    assert "Model 'unlisted' cannot run on this worker" in result["error"]
     assert not seen

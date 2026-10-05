@@ -629,7 +629,7 @@ curl -X PUT http://localhost:8000/api/v1/settings/text-generation \
 
 ### GET /api/v1/settings/subagent-default
 
-The model every agent runs on when another agent starts it as a subagent and the agent has no model of its own, plus the short list of models a lead agent may pick for one task.
+The model every agent runs on when another agent starts it as a subagent and the agent has no model of its own.
 
 **Auth:** Required
 
@@ -637,19 +637,17 @@ The model every agent runs on when another agent starts it as a subagent and the
 
 ```json
 {
-  "model": "sonnet",
-  "allowed": ["haiku", "opus", "prov:prov-or:openai/gpt-5.6"]
+  "model": "sonnet"
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `model` | string or null | The subagent default: a Claude alias (`sonnet`) or a `prov:<providerId>:<modelId>` composite. `null` means none is set |
-| `allowed` | string[] | Models a lead agent may name in the Task tool's `model` for one task, in the same id format. The default and the agent's own pinned model are always accepted as well |
 
 A subagent's model is chosen in this order:
 
-1. A model the lead agent names for this task, only when it is in `allowed`, equals `model`, or equals the agent's pinned model. Anything else is refused. The choice must run on the agent's own provider; it never moves the work to another provider.
+1. A model named in the Task or Swarm call's `model` for this task. Any model this install can run is accepted: a Claude alias, or a model on an enabled provider's curated list, on any provider. A model other than the one steps 2 and 3 would give is used only when the user asked for it: they named it in their messages in the calling chat (or, for a subagent or a chat another chat started, in the chat where they typed), or the owner approved the switch at a prompt. Otherwise the start is refused. See [Models the user asks for](/docs/features/subagents#models-the-user-asks-for).
 2. The agent's pinned model for the calling session's provider (`config.provider_models` on the [agent](/docs/api-reference/agents#agent-config-fields)).
 3. `model`. When it names another provider than the calling session's, the subagent runs on that provider, the same way a pin that names another provider does.
 4. Nothing. The start is refused, the lead agent is told to ask the owner to set a default, and the owner gets one notification. A subagent never falls back to the session's model.
@@ -658,15 +656,15 @@ Voice calls are unchanged: they dispatch only agents with a `__voice__` entry in
 
 ### PUT /api/v1/settings/subagent-default
 
-Replace the setting. Send `model` (or `null` to clear it) and the whole `allowed` list.
+Replace the setting. Send `model`, or `null` to clear it.
 
 **Auth:** Owner only
 
 ```bash
-curl -X PUT http://localhost:8000/api/v1/settings/subagent-default   -H "Authorization: Bearer $OWNER_TOKEN"   -H "Content-Type: application/json"   -d '{"model": "sonnet", "allowed": ["haiku", "opus"]}'
+curl -X PUT http://localhost:8000/api/v1/settings/subagent-default   -H "Authorization: Bearer $OWNER_TOKEN"   -H "Content-Type: application/json"   -d '{"model": "sonnet"}'
 ```
 
-Every id must be a model this install can run: a Claude alias from `GET /api/v1/models` (a full Claude id such as `claude-opus-4-6` is saved as its alias), or a model in the curated list of an enabled provider. Duplicates are dropped and `allowed` holds at most 24 entries. Any other value returns `400` and nothing is saved. The response has the same shape as the `GET`. The setting is shared with the owner's other workers.
+The id must be a model this install can run: a Claude alias from `GET /api/v1/models` (a full Claude id such as `claude-opus-4-6` is saved as its alias), or a model in the curated list of an enabled provider. Any other value returns `400` and nothing is saved. An `allowed` list, which older pages send, is accepted and ignored. The response has the same shape as the `GET`. The setting is shared with the owner's other workers.
 
 ### Media tool models
 
@@ -958,6 +956,39 @@ Run a held turn now, past the budget. Returns `{"success": true, "turn_id": "...
 Drop a held turn without running it. Returns `{"success": true}`, or `404`.
 
 **Auth:** Owner only
+
+### GET /api/v1/settings/limit-resume
+
+The per-provider **Resume when the limit resets** and **Compact before resuming** switches (Settings > Providers). With the first on, a chat or background Task worker that the provider's usage limit stopped is resumed once, shortly after the limit resets. With the second on, the chat is compacted first, so the resumed turn reads a smaller context. Keys are `claude` for Claude Code and a model provider's `id` for any other provider.
+
+**Auth:** Required
+
+```json
+{
+  "providers": {
+    "claude": {"resume_on_reset": false, "compact_before_resume": true},
+    "8d1f...": {"resume_on_reset": true, "compact_before_resume": true}
+  },
+  "defaults": {"resume_on_reset": false, "compact_before_resume": true}
+}
+```
+
+The reset time comes from the provider's usage readings when they show the window that stopped the turn, and otherwise from the error text, for example `resets 11:10pm (America/New_York)`. Without a reset time nothing is scheduled, and the chat says so. The resume runs a minute or two after the reset, a little later for each other chat due at the same time. Just before it runs, the provider's usage is read again, and a limit still in force moves it to the next reset, at most three times. A chat is resumed once per limit. A chat the owner stopped, archived or moved to another worker is not resumed, and a message from the owner cancels the scheduled resume. The schedule is stored, so it survives a restart.
+
+### PUT /api/v1/settings/limit-resume/{provider_key}
+
+Change one provider's switches. Send `resume_on_reset`, `compact_before_resume` or both, as `true` or `false`. A field you leave out keeps its value. Returns the same body as `GET`.
+
+**Auth:** Owner only
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/settings/limit-resume/claude \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"resume_on_reset": true}'
+```
+
+**Errors:** `400` when the body changes nothing, `422` for a value that is not `true` or `false`, `404` for an unknown provider.
 
 ### Import Claude and Codex settings
 

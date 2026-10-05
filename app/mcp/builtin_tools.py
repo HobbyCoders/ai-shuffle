@@ -1782,8 +1782,11 @@ def create_builtin_tools_server(
     from fluid.tools.builtins.session_orchestration import SPECS as orchestration_specs
     from fluid.tools.registry import ToolCtx
     from app.core.session_orchestration import make_handler as orchestration_handler
+    from app.core.session_orchestration import start_session_spec
 
     def _orchestration_bridge(spec, handler):
+        if spec.name == "StartSession":
+            spec = start_session_spec()  # names the subagent default as an example (#1830)
         async def invoke(args: dict) -> dict:
             ctx = ToolCtx(cwd=cwd or ".", session_id=session_id)
             ctx.extra["session_orchestration"] = orchestration_handler(lambda: session_id)

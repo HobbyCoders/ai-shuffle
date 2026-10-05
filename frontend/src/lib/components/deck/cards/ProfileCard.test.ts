@@ -358,8 +358,8 @@ describe('Models tab', () => {
 		expect(screen.getByText('Callers on native Claude.')).toBeTruthy();
 	});
 
-	it('shows the default and saves a change to the allowed list', async () => {
-		subagentDefault = { model: 'sonnet', allowed: ['sonnet', 'haiku'] };
+	it('shows the default and saves a new default', async () => {
+		subagentDefault = { model: 'sonnet' };
 		render(ProfileCard);
 		await heading('Researcher');
 		await fireEvent.click(tab('Models'));
@@ -367,9 +367,8 @@ describe('Models tab', () => {
 		// The legacy top-level model counts as a pin.
 		expect(screen.getByRole('radio', { name: /Pin a model/ }).getAttribute('aria-checked')).toBe('true');
 		expect(screen.queryByRole('button', { name: 'Switch' })).toBeNull();
-		await fireEvent.click(screen.getByRole('button', { name: /Remove haiku/i }));
-		await waitFor(() =>
-			expect(mocks.put).toHaveBeenCalledWith('/settings/subagent-default', { model: 'sonnet', allowed: ['sonnet'] })
-		);
+		expect(screen.queryByText(/Models agents may choose from/)).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+		expect(screen.getByRole('button', { name: 'Done' })).toBeTruthy();
 	});
 });

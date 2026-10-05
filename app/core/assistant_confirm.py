@@ -129,6 +129,9 @@ def describe(tool_name: str, tool_input: Any) -> str:
     """What exactly will happen, in a few words."""
     data = tool_input if isinstance(tool_input, dict) else {}
     name = str(tool_name or "a tool")
+    if isinstance(data.get("model_switch"), str) and data["model_switch"].strip():
+        # app.core.model_override: "start ... on <model> instead of <model>".
+        return _short(data["model_switch"], 240)
     if data.get("command"):
         return f"run `{_short(data['command'])}`"
     path = data.get("file_path") or data.get("path") or data.get("notebook_path")

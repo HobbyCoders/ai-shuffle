@@ -1,4 +1,4 @@
-"""``GET/PUT /api/v1/settings/subagent-default`` and agent ``avatar_color`` (#1827)."""
+"""``GET/PUT /api/v1/settings/subagent-default`` (#1827, #1830) and agent ``avatar_color``."""
 import pytest
 
 from app.db import database as db
@@ -21,40 +21,43 @@ class TestSubagentDefaultApi:
         assert resp.status_code in (401, 403)
 
     def test_unset_by_default(self, authenticated_client, mock_db):
-        assert authenticated_client.get(ENDPOINT).json() == {
-            "model": None, "allowed": []}
+        assert authenticated_client.get(ENDPOINT).json() == {"model": None}
 
     def test_put_roundtrip_normalizes(self, authenticated_client, mock_db):
         _provider()
-        resp = authenticated_client.put(ENDPOINT, json={
-            "model": "claude-haiku-4-5",
-            "allowed": ["opus", "prov:lane:sol", "opus"],
-        })
+        resp = authenticated_client.put(ENDPOINT, json={"model": "claude-haiku-4-5"})
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {
-            "model": "haiku", "allowed": ["opus", "prov:lane:sol"]}
+        assert resp.json() == {"model": "haiku"}
         assert authenticated_client.get(ENDPOINT).json() == resp.json()
 
+    def test_an_older_pages_allowed_list_is_accepted_and_ignored(self, authenticated_client, mock_db):
+        """The "models agents may choose from" list is gone (#1830)."""
+        _provider()
+        resp = authenticated_client.put(ENDPOINT, json={
+            "model": "prov:lane:sol", "allowed": ["opus", "prov:nowhere:sol"]})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"model": "prov:lane:sol"}
+        assert "allowed" not in authenticated_client.get(ENDPOINT).json()
+
     def test_null_model_clears_it(self, authenticated_client, mock_db):
-        authenticated_client.put(ENDPOINT, json={"model": "sonnet", "allowed": []})
-        body = authenticated_client.put(ENDPOINT, json={"model": None, "allowed": ["haiku"]}).json()
-        assert body == {"model": None, "allowed": ["haiku"]}
+        authenticated_client.put(ENDPOINT, json={"model": "sonnet"})
+        body = authenticated_client.put(ENDPOINT, json={"model": None}).json()
+        assert body == {"model": None}
 
     @pytest.mark.parametrize("body", [
-        {"model": "gpt-5", "allowed": []},
-        {"model": "prov:lane:unlisted", "allowed": []},
-        {"model": "sonnet", "allowed": ["prov:nowhere:sol"]},
-        {"model": "sonnet", "allowed": ["haiku"] * 25},
+        {"model": "gpt-5"},
+        {"model": "prov:lane:unlisted"},
+        {"model": "prov:nowhere:sol"},
     ])
     def test_invalid_ids_are_400_and_nothing_is_saved(self, authenticated_client, mock_db, body):
         _provider()
-        authenticated_client.put(ENDPOINT, json={"model": "opus", "allowed": []})
+        authenticated_client.put(ENDPOINT, json={"model": "opus"})
         resp = authenticated_client.put(ENDPOINT, json=body)
         assert resp.status_code == 400
         assert authenticated_client.get(ENDPOINT).json()["model"] == "opus"
 
     def test_shape_errors_are_422(self, authenticated_client, mock_db):
-        resp = authenticated_client.put(ENDPOINT, json={"model": "sonnet", "allowed": "haiku"})
+        resp = authenticated_client.put(ENDPOINT, json={"model": ["sonnet"]})
         assert resp.status_code == 422
 
     def test_the_setting_is_shared_across_workers(self):

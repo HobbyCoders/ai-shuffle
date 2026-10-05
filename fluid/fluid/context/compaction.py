@@ -88,6 +88,10 @@ from fluid.store.base import SessionNode
 
 SPAN_DIGEST = "digest"
 EPOCH_STUB = "epoch"
+#: ``ContextCompaction.reason`` of the one summary event an owner-requested
+#: compaction (:meth:`Compactor.compact_now`) emits after its promotions. It
+#: carries the before/after sizes and no decisions, so replay ignores it.
+MANUAL_COMPACT_REASON = "manual_compact"
 
 _REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 
@@ -2177,6 +2181,8 @@ class Compactor:
         output_reserve_tokens: int = 0,
         guarded_only: bool = False,
         scale: float = 1.0,
+        stop_tokens: int | None = None,
+        decision_reason: str = "provider_overflow",
     ) -> list[Promotion]:
         """Overflow recovery: the provider rejected the prompt, so reclaim.
 
@@ -2230,6 +2236,7 @@ class Compactor:
                 context_window=context_window,
                 output_reserve_tokens=output_reserve_tokens,
                 guarded_only=guarded_only, scale=scale,
+                stop_tokens=stop_tokens, decision_reason=decision_reason,
             )
         finally:
             if owns_tail:
@@ -2245,6 +2252,8 @@ class Compactor:
         output_reserve_tokens: int,
         guarded_only: bool,
         scale: float,
+        stop_tokens: int | None = None,
+        decision_reason: str = "provider_overflow",
     ) -> list[Promotion]:
         trim_only = not self.config.enabled
         target: int | None = None
@@ -2263,6 +2272,10 @@ class Compactor:
             )
         if target is not None:
             target = _in_estimate_units(target, scale)
+        if stop_tokens is not None:
+            # A caller-chosen stop (already in chars/4 units), lower than the
+            # trigger: an owner-requested compaction goes to the deep target.
+            target = stop_tokens if target is None else min(target, stop_tokens)
         digest_target = target or 0
 
         def images() -> Promotion | None:
@@ -2408,11 +2421,48 @@ class Compactor:
                                   if a != b), min(len(before_view), len(after_view)))
             promotions.append(replace(
                 promo, reclaimed_chars=reclaimed, before_tokens=before, after_tokens=after,
-                decision_reason="provider_overflow", first_changed_message=first_changed,
+                decision_reason=decision_reason, first_changed_message=first_changed,
             ))
             if target is None or after <= target:
                 break
         return promotions
+
+    def compact_now(
+        self,
+        nodes: list[SessionNode],
+        *,
+        overhead_tokens: int = 0,
+        context_window: int | None = None,
+        output_reserve_tokens: int = 0,
+        scale: float = 1.0,
+    ) -> list[Promotion]:
+        """Compact on request (a host's "compact now"), with the guarded ladder.
+
+        The same rungs window protection and the hard zone run before a
+        request (:meth:`escalate` with ``guarded_only``): trim old results,
+        digest old turns, fold digests, then the in-flight budget rungs. The
+        recency guards stay on, so the newest work is never digested. With a
+        known window it stops at the deep target rather than the trigger; with
+        none, one rung runs, as in overflow recovery. Decisions are sticky and
+        persisted like any batch. Returns the promotions, empty when nothing
+        could be reclaimed.
+        """
+        if not self.active:
+            return []
+        return self.escalate(
+            nodes,
+            overhead_tokens=overhead_tokens,
+            context_window=context_window,
+            output_reserve_tokens=output_reserve_tokens,
+            guarded_only=True,
+            scale=scale,
+            stop_tokens=self._deep_target(context_window, scale),
+            decision_reason="manual",
+        )
+
+    def estimate_view_tokens(self, nodes: list[SessionNode], overhead_tokens: int = 0) -> int:
+        """Estimated tokens of the current view (chars/4 units)."""
+        return self._estimate(nodes, overhead_tokens)
 
     def _estimate(self, nodes: list[SessionNode], overhead_tokens: int) -> int:
         """Estimated tokens the next request carries under the current view."""

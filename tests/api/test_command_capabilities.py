@@ -83,7 +83,8 @@ async def test_api_native_list_and_detail_share_profile_sources(source_tree, mon
     req = caller({"id": "me", "project_id": "mine", "profile_ids": ["p"]})
     listed = await commands.list_commands(session_id="s", http_request=req)
     allowed = sources is None or "user" in sources
-    assert {entry.name for entry in listed.commands} == ({"greet"} if allowed else set())
+    # /compact is the native engine's own compaction, listed on every native menu.
+    assert {entry.name for entry in listed.commands} == ({"greet"} if allowed else set()) | {"compact"}
     if allowed:
         detail = await commands.get_command("greet", session_id="s", http_request=req)
         assert detail.content == "Hello $ARGUMENTS"
@@ -98,7 +99,7 @@ async def test_profile_cwd_is_used_before_session_creation(source_tree, monkeypa
     put(child / ".fluid/commands/here.md", "From profile cwd")
     monkeypatch.setattr(context.database, "get_profile", lambda pid: {"config": {"cwd": str(child), "setting_sources": ["project"], "model": "gpt-test"}})
     result = await commands.list_commands(profile_id="p", http_request=caller())
-    assert [cmd.name for cmd in result.commands] == ["here"]
+    assert [cmd.name for cmd in result.commands if cmd.name != "compact"] == ["here"]
 
 
 def test_skill_invocation_metadata_and_arguments(source_tree):
@@ -152,8 +153,11 @@ def test_native_menu_uses_fluid_files_without_cli_builtins(monkeypatch, tmp_path
     command_dir.mkdir(parents=True)
     (command_dir / 'native.md').write_text('Native command', encoding='utf-8')
     result = slash_commands.get_all_commands(str(tmp_path), provider_kind=kind)
-    assert {cmd['name'] for cmd in result} == (set() if kind in ('voice', 'unavailable') else {'native'})
-    assert not slash_commands.get_all_commands(str(tmp_path), provider_kind=kind, setting_sources=[])
+    # The native engine runs a bare /compact itself (#1831); no other CLI built-in.
+    native = kind not in ('voice', 'unavailable')
+    assert {cmd['name'] for cmd in result} == ({'native', 'compact'} if native else set())
+    bare = slash_commands.get_all_commands(str(tmp_path), provider_kind=kind, setting_sources=[])
+    assert [cmd['name'] for cmd in bare] == (['compact'] if native else [])
 
 
 def test_delegated_menu_keeps_prompt_commands_and_omits_terminal_settings():

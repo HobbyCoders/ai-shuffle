@@ -20,13 +20,11 @@
 	 * The Models tab of an agent (issue #1827).
 	 *
 	 * With the subagent default available: a card with the one global default
-	 * (Change, or Choose while none is set), the
-	 * models the lead agent may choose from, then this agent's choice: use the
+	 * (Change, or Choose while none is set), then this agent's choice: use the
 	 * default (no pinned model) or pin a model per provider. Without the
 	 * endpoint (an older worker answers 404) only the per-provider pickers show,
 	 * as before. Voice has its own card either way.
 	 */
-	import { X } from 'lucide-svelte';
 	import type { SubagentDefault } from '$lib/api/subagentDefault';
 	import RowGroup from '$lib/components/settings/rows/RowGroup.svelte';
 	import SettingRow from '$lib/components/settings/rows/SettingRow.svelte';
@@ -43,10 +41,9 @@
 		/** A load or save failed (not a 404). */
 		defaultError?: string;
 		onDefaultModel: (model: string) => void | Promise<void>;
-		onAllowed: (allowed: string[]) => void | Promise<void>;
 	}
 
-	let { providerModels, onModelsChange, subagentDefault, defaultError = '', onDefaultModel, onAllowed }: Props = $props();
+	let { providerModels, onModelsChange, subagentDefault, defaultError = '', onDefaultModel }: Props = $props();
 
 	const providers = $derived(getProviders());
 	const hasDefault = $derived(!!subagentDefault);
@@ -84,17 +81,6 @@
 		chooseMode(next);
 		const group = (event.currentTarget as HTMLElement).closest('[role="radiogroup"]');
 		queueMicrotask(() => group?.querySelector<HTMLElement>(`[data-mode="${next}"]`)?.focus());
-	}
-
-	const allowed = $derived(subagentDefault?.allowed ?? []);
-
-	function addAllowed(value: string) {
-		if (!value || allowed.includes(value)) return;
-		void onAllowed([...allowed, value]);
-	}
-
-	function removeAllowed(value: string) {
-		void onAllowed(allowed.filter((m) => m !== value));
 	}
 
 	async function pickDefault(value: string) {
@@ -165,19 +151,6 @@
 			<ModelPicker value={dm ?? ''} allowCustom={false} startOnAll onSelect={(value) => void pickDefault(value)} />
 		</div>
 	{/snippet}
-
-	<RowGroup title="Models agents may choose from" count={allowed.length}>
-		{#each allowed as m (m)}
-			<SettingRow label={modelLabel(m)} hint={modelProvider(m)}>
-				{#if m === dm}<span class="chip prim">Default</span>{/if}
-				<button type="button" class="st-btn ghost icon sm" aria-label={`Remove ${modelLabel(m)}`} title="Remove" onclick={() => removeAllowed(m)}><X /></button>
-			</SettingRow>
-		{/each}
-		<SettingRow label="Add a model" hint={allowed.length ? 'From your model list.' : 'None yet.'}>
-			<ModelPicker value="" allowEmpty emptyLabel="Pick a model" allowCustom={false} startOnAll onSelect={addAllowed} />
-		</SettingRow>
-	</RowGroup>
-	<p class="st-note">The lead agent picks from these.</p>
 
 	<RowGroup title="This agent">
 		<div class="tiers" role="radiogroup" aria-label="Model for this agent">
@@ -258,10 +231,6 @@
 		background: var(--st-muted);
 		color: var(--st-mfg);
 		line-height: 1.5;
-	}
-	.chip.prim {
-		background: var(--st-primary-soft);
-		color: var(--st-primary);
 	}
 	.change {
 		display: flex;

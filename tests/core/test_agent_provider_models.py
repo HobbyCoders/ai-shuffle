@@ -145,15 +145,13 @@ def test_task_contract_is_roster_bound_and_offers_claude_models_natively(mock_db
     contract = build_task_contract("caller", None)
 
     assert "reviewer" in contract.input_schema["properties"]["agent"]["enum"]
-    # Task's model offers only the owner's subagent list (#1827): none set,
-    # no model parameter; set, exactly the default and the allowed models.
-    assert "model" not in contract.input_schema["properties"]
+    # Task's model takes any model the user asked for (#1830): a checked
+    # string, never an enum of every provider's models.
+    assert "enum" not in contract.input_schema["properties"]["model"]
     from app.core import subagent_default
-    subagent_default.write("sonnet", ["haiku", "opus"])
+    subagent_default.write("sonnet")
     contract = build_task_contract("caller", None)
-    assert contract.input_schema["properties"]["model"]["enum"] == [
-        "sonnet", "haiku", "opus",
-    ]
+    assert "enum" not in contract.input_schema["properties"]["model"]
     assert "subagent" in contract.description.lower()
     assert "reviewer" in contract.description
     assert "sonnet" in contract.description

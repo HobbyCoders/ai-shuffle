@@ -466,26 +466,9 @@ def host_worker_limits_text() -> str:
 # Where the owner changes what Task can dispatch. Named in the contract and in
 # every model refusal so neither the model nor the user has to guess.
 TASK_MODEL_SETTINGS_HINT = (
-    "The owner sets the subagent default and the models agents may choose on "
-    "the Agents page, and can pin one agent to its own model there."
+    "The owner sets the subagent default on the Agents page, and can pin one "
+    "agent to its own model there."
 )
-
-
-def task_model_allowed_choices() -> tuple[str, ...]:
-    """Every model a Task call may name: the default first, then ``allowed``.
-
-    App-format ids (a Claude alias or ``prov:<providerId>:<modelId>``), each
-    still runnable here. An agent's own pin is also accepted at dispatch but
-    is not listed: omitting ``model`` already selects it.
-    """
-    from app.core import subagent_default
-
-    current = subagent_default.effective()
-    choices: list[str] = []
-    for value in ((current.model,) if current.model else ()) + current.allowed:
-        if value and value not in choices:
-            choices.append(value)
-    return tuple(choices)
 
 
 def leg_model_id(leg: str | None, value: str) -> str | None:
@@ -514,31 +497,6 @@ def leg_model_id(leg: str | None, value: str) -> str | None:
     return None if is_native_claude_model(text) else text
 
 
-def allowed_on_leg(leg: str | None, choices: Sequence[str]) -> tuple[str, ...]:
-    """The subset of ``choices`` that runs on ``leg``, as app-format ids."""
-    return tuple(value for value in choices if leg_model_id(leg, value) is not None)
-
-
-def task_model_not_allowed_error(
-    requested: str, target_name: str, leg: str | None, choices: Sequence[str],
-) -> str:
-    """A Task refusal for a model outside the owner's subagent list (#1827)."""
-    on_leg = allowed_on_leg(leg, choices)
-    label = task_model_choices(leg)[0] if leg else "Claude"
-    text = (
-        f"Model '{(requested or '').strip()}' is not one the owner allows "
-        f"subagents to use for '{target_name}', which runs on {label}. "
-    )
-    if on_leg:
-        text += f"Choose one of: {', '.join(on_leg)}, or omit model. "
-    else:
-        text += (
-            "Omit model: the owner allows no other model on this agent's "
-            "provider. "
-        )
-    return text + "An override never switches providers. " + TASK_MODEL_SETTINGS_HINT
-
-
 def task_model_choices(provider_id: str | None) -> tuple[str, tuple[str, ...]]:
     """``(leg label, model ids)`` a Task ``model`` may name on one leg.
 
@@ -564,8 +522,9 @@ def task_model_unavailable_error(
     """A Task refusal for a model the target's leg does not offer.
 
     Lists what the target CAN take, names any other enabled provider whose
-    list holds the requested model (an override never switches providers),
-    and says where the owner changes either.
+    list holds the requested model (written as that provider's
+    ``prov:`` id, which the user may ask for), and says where the owner
+    changes either.
     """
     value = (requested or "").strip()
     label, ids = task_model_choices(provider_id)
@@ -594,10 +553,9 @@ def task_model_unavailable_error(
         logger.debug("Could not list providers for a Task model hint", exc_info=True)
     if elsewhere:
         parts.append(
-            f"'{bare}' is configured on {', '.join(sorted(elsewhere))}, but a "
-            "Task model override cannot switch providers. To dispatch "
-            f"'{target_name}' on it, assign that agent a model from that "
-            "provider for this caller's provider."
+            f"'{bare}' is configured on {', '.join(sorted(elsewhere))}. If the "
+            "user asked for it, pass it as prov:<providerId>:<modelId>; a model "
+            "on another provider moves this one dispatch there."
         )
     parts.append(TASK_MODEL_SETTINGS_HINT)
     return " ".join(parts)
@@ -699,12 +657,10 @@ def build_task_contract(
     # File/plugin agents have no row to pin a model on: they run on the
     # owner's subagent default when it runs on this caller's leg (they never
     # switch legs), else on this session's model as before.
-    allowed_choices = task_model_allowed_choices()
     from app.core import subagent_default as _subagent_default
 
-    file_default = leg_model_id(
-        provider_id or None, _subagent_default.effective().model or ""
-    )
+    default_model = _subagent_default.effective().model
+    file_default = leg_model_id(provider_id or None, default_model or "")
     for target in sorted(additional_targets, key=lambda item: (item.name.casefold(), item.id)):
         if not target.id or target.id in reserved_ids:
             continue
@@ -717,11 +673,10 @@ def build_task_contract(
         reserved_names.add(target.name.casefold())
 
     resolved_targets = tuple(targets)
-    # Task's ``model`` offers the owner's short list (#1827): the subagent
-    # default plus the models agents may choose, not every configured model.
-    # Dispatch revalidates a choice against the chosen target's own leg; an
-    # override never switches providers.
-    model_ids = allowed_choices
+    # Task's ``model`` takes any model this install can run, but dispatch uses
+    # one other than the target's own only when the user asked for it (#1830).
+    # Listing every provider's models would bloat the schema, so the roster
+    # lines (each target's model) and the default stand as examples.
     leg_labels: dict[str | None, str] = {}
     for target in resolved_targets:
         leg = (target.provider_id if target.provider_pinned else provider_id) or None
@@ -754,12 +709,10 @@ def build_task_contract(
             "'# Available agent types' in the system prompt):\n"
             f"{roster}\n"
             + (
-                "Models the owner allows subagents to use (Task's model): "
-                f"{', '.join(model_ids)}. A choice runs only on its own "
-                "provider.\n"
-                if model_ids else ""
+                f"The owner's subagent default: {default_model}.\n"
+                if default_model else ""
             )
-            + "Use only these IDs; do not invent a model or provider. "
+            + "Use only these agent IDs; do not invent an agent, model or provider. "
             + TASK_MODEL_SETTINGS_HINT
         )
     else:
@@ -849,20 +802,21 @@ def build_task_contract(
             ),
         },
     }
-    if model_ids:
-        properties["model"] = {
-            "type": "string",
-            "enum": list(model_ids),
-            "description": (
-                "Optional: a model from the owner's list of models subagents "
-                "may use, for this task only. Omitted, the agent runs on its "
-                "own pinned model, else on the owner's subagent default; it "
-                "never runs on this session's model. A choice must run on the "
-                "target's provider (prov:<providerId>:<modelId> names a "
-                "provider's model, a bare name a Claude model); an override "
-                "never switches providers."
-            ),
-        }
+    from fluid.tools.builtins.session_orchestration import MODEL_OVERRIDE_RULE
+
+    properties["model"] = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300,
+        "description": (
+            "Optional: the model this subagent runs on, for this task only. "
+            "Omitted, the agent runs on its own pinned model, else on the "
+            "owner's subagent default; it never runs on this session's model. "
+            + MODEL_OVERRIDE_RULE
+            + " A bare id that is not a Claude name means a model of the "
+            "agent's own provider."
+        ),
+    }
     if offer_mode:
         mode_description = (
             "sync waits for the report; background returns the worker session "

@@ -1,20 +1,19 @@
 /** The Models tab against faked subagent-default replies: default, pinned, no default yet, and a worker without the endpoint (404 → null). */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import AgentModelsTab from './AgentModelsTab.svelte';
 import type { SubagentDefault } from '$lib/api/subagentDefault';
 
 afterEach(cleanup);
 
-const DEFAULT: SubagentDefault = { model: 'sonnet', allowed: ['sonnet', 'haiku'] };
+const DEFAULT: SubagentDefault = { model: 'sonnet' };
 
 function setup(providerModels: Record<string, string>, ...rest: [SubagentDefault | null | undefined] | []) {
 	const subagentDefault = rest.length ? rest[0] : DEFAULT;
 	const onModelsChange = vi.fn();
 	const onDefaultModel = vi.fn();
-	const onAllowed = vi.fn();
-	render(AgentModelsTab, { providerModels, subagentDefault, onModelsChange, onDefaultModel, onAllowed });
-	return { onModelsChange, onDefaultModel, onAllowed };
+	render(AgentModelsTab, { providerModels, subagentDefault, onModelsChange, onDefaultModel });
+	return { onModelsChange, onDefaultModel };
 }
 
 const choice = (name: RegExp) => screen.getByRole('radio', { name });
@@ -54,16 +53,13 @@ describe('with the subagent default', () => {
 		expect(onModelsChange).toHaveBeenCalledWith({});
 	});
 
-	it('lists the models agents may choose from and removes one', async () => {
-		const { onAllowed } = setup({});
-		const group = screen.getByRole('heading', { name: /Models agents may choose from/ }).closest('section')!;
-		expect(within(group as HTMLElement).getByText('Default')).toBeTruthy();
-		await fireEvent.click(within(group as HTMLElement).getByRole('button', { name: /Remove haiku/i }));
-		expect(onAllowed).toHaveBeenCalledWith(['sonnet']);
+	it('has no list of models agents may choose from (#1830)', () => {
+		setup({});
+		expect(screen.queryByText(/Models agents may choose from/)).toBeNull();
 	});
 
 	it('says when no default is set yet', () => {
-		setup({}, { model: null, allowed: [] });
+		setup({}, { model: null });
 		expect(screen.getByText('No subagent default yet')).toBeTruthy();
 		expect(screen.getByRole('button', { name: 'Choose' })).toBeTruthy();
 		expect(screen.getByText('Choose a default first.')).toBeTruthy();

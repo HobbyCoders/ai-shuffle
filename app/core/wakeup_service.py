@@ -113,6 +113,11 @@ DROPPED_NOTE_SUBTYPE = "wakeup_dropped"
 #: supersede it, because the row is the only copy of those messages.
 HELD_PEER_SOURCE = "held_peer_promotion"
 
+#: ``pending_wakeups.source`` for a resume after a usage limit resets
+#: (``app.core.limit_resume``). Its ``reason`` column holds that module's
+#: metadata as JSON. A user's message supersedes it like any other wake.
+LIMIT_RESUME_SOURCE = "limit_resume"
+
 # Live references to in-flight wake timer tasks, keyed by wakeup id (asyncio
 # keeps only weak refs, and the key is what lets a specific wake be disarmed
 # when its row is deleted out from under it).
@@ -377,6 +382,17 @@ async def _fire(row: Dict[str, Any]) -> None:
             "wakeup %s (session %s) already claimed/fired — skipping",
             wakeup_id, session_id,
         )
+        return
+
+    if row.get("source") == LIMIT_RESUME_SOURCE:
+        # A resume after a usage limit reset (#1831): it re-checks the
+        # provider's usage, may compact first or continue a Task worker, and
+        # re-arms or records its own outcome.
+        from app.core import limit_resume
+
+        if wakeup_id:
+            _retry_attempts.pop(str(wakeup_id), None)
+        await limit_resume.fire(row)
         return
 
     profile_id = await _resolve_profile_id(row)
