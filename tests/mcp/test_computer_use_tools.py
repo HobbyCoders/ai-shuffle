@@ -269,6 +269,24 @@ async def test_keyboard_type_repeat_hold_and_wait(desktop):
     assert desktop.keyboard.press.call_count == desktop.keyboard.release.call_count
 
 
+async def test_x11_refuses_holding_escape_but_still_presses_it(desktop, monkeypatch):
+    from app.mcp.computer_use import linux
+
+    monkeypatch.setattr(safety, "_x11", lambda: True)
+    linux.reset_agent_escapes()
+    # A held Escape auto-repeats like a person's stop key: refused, nothing sent.
+    body = payload(await desktop.tools["hold_key"]({"text": "Escape", "duration": 30}))
+    assert body["code"] == "UNSUPPORTED_CAPABILITY" and body["outcome"] == "rejected"
+    assert "Holding Escape" in body["error"]
+    desktop.keyboard.press.assert_not_called()
+    # A plain Escape press still works, announced once for the stop listener.
+    assert payload(await desktop.tools["key"]({"text": "Escape"}))["success"]
+    assert desktop.keyboard.press.call_count == desktop.keyboard.release.call_count == 1
+    assert linux.consume_agent_escape() is True
+    assert linux.consume_agent_escape() is False
+    linux.reset_agent_escapes()
+
+
 @pytest.mark.parametrize("direction,delta", [("up", (0, 1)), ("down", (0, -1)),
                                             ("left", (-1, 0)), ("right", (1, 0))])
 async def test_scroll_directions(desktop, direction, delta):

@@ -16,7 +16,7 @@ from app.api.auth import require_admin, require_auth
 from app.db.async_database import run_sync
 from app.db.settings import get_system_setting, set_system_setting
 from app.mcp.computer_use import activity, abort, safety, overlay
-from app.mcp.computer_use.scaling import computer_use_available
+from app.mcp.computer_use.scaling import computer_use_available, last_availability
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,9 @@ class StatusResponse(BaseModel):
     'is the agent controlling the screen right now, and which one' signal for
     the in-app notification banner."""
     available: bool
-    reason: str  # "ok" when available; otherwise why not (docker, no-display, ...)
+    reason: str  # "ok" when available; otherwise why not (docker, no-display, wayland, ...)
+    detail: Optional[str] = None  # when unavailable: what is wrong and how to fix it
+    missing: list[str] = []  # packages to install, when that is the cause
     enabled: bool
     active: bool = False               # desktop control is owned by a chat
     display: Optional[int] = None      # which monitor it's acting on (when active)
@@ -115,6 +117,7 @@ async def get_status(token: str = Depends(require_auth)) -> StatusResponse:
     banner while the agent is acting.
     """
     available, reason = computer_use_available()
+    found = None if available else last_availability(reason)
     snap = activity.snapshot()
     label = None
     if snap["active"] and snap["display"] is not None:
@@ -124,6 +127,8 @@ async def get_status(token: str = Depends(require_auth)) -> StatusResponse:
     return StatusResponse(
         available=available,
         reason=reason,
+        detail=(found.detail or None) if found else None,
+        missing=list(found.missing) if found else [],
         enabled=await run_sync(get_computer_use_enabled),
         active=bool(snap["active"]),
         display=snap["display"],

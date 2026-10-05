@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.mcp import computer_use_sdk as sdk
-from app.mcp.computer_use import abort, activity, safety
+from app.mcp.computer_use import abort, activity, linux, safety
 from tests.mcp import test_computer_use_tools as _base
 
 pytest.importorskip("PIL.Image")
@@ -283,6 +283,7 @@ def esc_state(monkeypatch):
     monkeypatch.setattr(abort, "_GENERATIONS", {})
     monkeypatch.setattr(activity, "_sessions", {})
     monkeypatch.setattr(safety, "_agent_escape_at", 0.0)
+    monkeypatch.setattr(linux, "_pending_echoes", [])
     monkeypatch.setitem(sys.modules, "pynput.keyboard",
                         SimpleNamespace(Key=SimpleNamespace(esc="esc")))
     activity.record(1, session_id="s")
@@ -312,12 +313,25 @@ def test_macos_trusts_the_injected_flag_so_a_real_escape_is_never_swallowed(esc_
     assert abort.stop_reason("s") == "escape"
 
 
-def test_linux_keeps_the_window_because_its_flag_is_unreliable(esc_state, monkeypatch):
+def test_linux_excuses_one_announced_press_not_a_time_window(esc_state, monkeypatch):
+    # XTest input looks like hardware on X11, so Linux excuses exactly the
+    # Escape presses the agent announced (linux.py), never a time window.
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setitem(sys.modules, "pynput._info", SimpleNamespace(__version__=(1, 8, 2)))
+    inputs = safety.SafeInput("s", object(), SimpleNamespace(press=lambda k: None),
+                              escape_key="esc")
+    inputs.press(inputs.keyboard, "esc")
+    safety._on_press("esc", injected=False)  # the agent's own press
+    assert not abort.is_stopped("s")
+    safety._on_press("esc", injected=False)  # a person's, within 0.5 s
+    assert abort.stop_reason("s") == "escape"
+
+
+def test_linux_ignores_the_time_window(esc_state, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
     safety.note_agent_escape()
     safety._on_press("esc", injected=False)
-    assert not abort.is_stopped("s")
+    assert abort.stop_reason("s") == "escape"
 
 
 def test_non_windows_listener_stops_on_physical_escape(esc_state):
@@ -338,9 +352,20 @@ def test_windows_lower_il_injected_escape_is_ignored(esc_state):
 
 
 async def test_agent_escape_key_marks_its_own_escape(desktop, monkeypatch):
+    monkeypatch.setattr(safety, "_x11", lambda: False)
     monkeypatch.setattr(safety, "_agent_escape_at", 0.0)
     assert payload(await desktop.tools["key"]({"text": "Escape"}))["success"]
     assert safety._recent_agent_escape()
+
+
+async def test_agent_escape_key_is_announced_once_on_linux(desktop, monkeypatch):
+    monkeypatch.setattr(safety, "_x11", lambda: True)
+    monkeypatch.setattr(safety, "_agent_escape_at", 0.0)
+    monkeypatch.setattr(linux, "_pending_echoes", [])
+    assert payload(await desktop.tools["key"]({"text": "Escape"}))["success"]
+    assert not safety._recent_agent_escape()
+    assert linux.consume_agent_escape() is True
+    assert linux.consume_agent_escape() is False
 
 
 # ----- turn interrupts name their source ----------------------------------------

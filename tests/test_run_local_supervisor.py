@@ -176,3 +176,17 @@ class TestLogChildExit:
             env, 8765, 1, "2026-07-12T22:00:00+00:00", "2026-07-12T22:05:00+00:00", 300.0,
         )
         assert "died unexpectedly (exit=1)" in line
+
+
+def test_linux_native_fallback_installs_pynput_without_evdev(tmp_path):
+    reqs = tmp_path / "requirements-native.txt"
+    reqs.write_text("# comment\nmss>=9.0.1  # screenshots\npynput>=1.7.6  # input\nPillow>=12.1.1\n")
+    assert run_local.linux_native_fallback(reqs) == [
+        ["install", "mss>=9.0.1", "Pillow>=12.1.1", "python-xlib>=0.17", "six"],
+        ["install", "--no-deps", "pynput>=1.7.6"],
+    ]
+    real = Path(__file__).resolve().parent.parent / "requirements-native.txt"
+    steps = run_local.linux_native_fallback(real)
+    assert steps[-1][:2] == ["install", "--no-deps"] and steps[-1][2].startswith("pynput")
+    reqs.write_text("mss>=9.0.1\n")
+    assert run_local.linux_native_fallback(reqs) == []

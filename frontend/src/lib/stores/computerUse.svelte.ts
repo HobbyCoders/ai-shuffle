@@ -42,7 +42,7 @@ const APP_STOP_SOURCES: Record<string, string> = {
 	checkout_cleanup: "The chat's checkout was removed.",
 	assistant: 'An assistant limit stopped the run.',
 	automation_timeout: 'The automation hit its time limit.',
-	lease_lost: 'Another worker took over the turn.',
+	lease_lost: 'This worker lost ownership of the turn.',
 	fence_superseded: 'Another worker took over the turn.'
 };
 
@@ -82,6 +82,8 @@ function pageHidden(): boolean {
 class ComputerUseStore {
 	available = $state(true);
 	reason = $state('ok');
+	/** Why it is unavailable and what to do, from the server (null when available). */
+	detail = $state<string | null>(null);
 	enabled = $state(false);
 	inputMode = $state<ComputerUseInputMode>('shared_desktop');
 	active = $state(false);
@@ -128,6 +130,7 @@ class ComputerUseStore {
 			this.connectionLost = false;
 			this.available = s.available;
 			this.reason = s.reason;
+			this.detail = s.detail ?? null;
 			this.enabled = s.enabled;
 			this.inputMode = s.input_mode === 'dedicated_desktop' ? 'dedicated_desktop' : 'shared_desktop';
 			this.active = s.active;

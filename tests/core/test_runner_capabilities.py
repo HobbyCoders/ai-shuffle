@@ -18,10 +18,11 @@ from app.core import runner_capabilities as rc
 
 def test_shape_has_all_keys_and_types():
     caps = rc.detect_capabilities()
-    assert set(caps.keys()) == {"os", "has_display", "has_chrome", "docker", "claude_cli_signed_in",
-                                "provider_kinds", "remote_task"}
+    assert set(caps.keys()) == {"os", "has_display", "computer_use", "has_chrome", "docker",
+                                "claude_cli_signed_in", "provider_kinds", "remote_task"}
     assert caps["os"] in ("windows", "linux", "darwin")
     assert isinstance(caps["has_display"], bool)
+    assert isinstance(caps["computer_use"], bool)
     assert isinstance(caps["has_chrome"], bool)
     assert isinstance(caps["docker"], bool)
     assert isinstance(caps["claude_cli_signed_in"], bool)

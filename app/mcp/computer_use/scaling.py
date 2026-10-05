@@ -134,53 +134,155 @@ def _ensure_dpi_awareness() -> None:
             _dpi_done = True
 
 
-def computer_use_available() -> tuple[bool, str]:
-    """Return ``(available, reason)`` for whether host control is possible here.
+@dataclass(frozen=True)
+class Availability:
+    """Whether this host can run computer use, and if not, what to do about it.
 
-    Disabled inside Docker/headless, when deps are missing, or when no usable
-    display is found. ``reason`` is a short machine-friendly token.
+    ``reason`` is a short machine token (``ok``, ``docker``, ``wayland``, ...);
+    ``detail`` is a sentence for the settings page; ``missing`` names the
+    packages to install when that is the cause.
     """
-    # 1. Never works from inside the container (no host display).
+
+    available: bool
+    reason: str
+    detail: str = ""
+    missing: tuple[str, ...] = ()
+
+
+DOCKER_HELP = ("AI Shuffle is running in a container, which has no desktop to see or "
+               "control. Computer use needs a native install on a computer with a desktop.")
+
+_last: Optional[Availability] = None
+
+
+def _in_docker() -> bool:
     try:
         from app.core.platform import detect_deployment_mode, DeploymentMode
 
-        if detect_deployment_mode() == DeploymentMode.DOCKER:
-            return (False, "docker")
+        return detect_deployment_mode() == DeploymentMode.DOCKER
     except Exception:
         # If platform detection fails, fall through to the probes below.
-        pass
+        return False
+
+
+def _env_disabled() -> bool:
+    return os.environ.get("COMPUTER_USE_DISABLED", "").lower() in ("1", "true", "yes")
+
+
+def _linux_preflight() -> Optional[Availability]:
+    """Linux checks that need no X connection: session, Python packages."""
+    from app.mcp.computer_use import linux
+
+    session = linux.session_type()
+    if session == linux.SESSION_WAYLAND:
+        return Availability(False, "wayland", linux.WAYLAND_HELP)
+    if session == linux.SESSION_NONE:
+        return Availability(False, "no-display", linux.NO_DISPLAY_HELP)
+    missing = linux.missing_python_packages()
+    if missing:
+        return Availability(False, "missing-deps", linux.missing_python_help(missing), tuple(missing))
+    return None
+
+
+def computer_use_quick_check() -> Availability:
+    """Cheap availability for capability heartbeats: env and installed packages only.
+
+    Never opens a display or spawns a process. ``available`` here means "no
+    known blocker"; :func:`computer_use_availability` is the ground truth.
+    """
+    if _in_docker():
+        return Availability(False, "docker", DOCKER_HELP)
+    if _env_disabled():
+        return Availability(False, "env-disabled")
+    if sys.platform.startswith("linux"):
+        blocked = _linux_preflight()
+        if blocked is not None:
+            return blocked
+    else:
+        import importlib.util
+        missing = [p for m, p in (("mss", "mss"), ("pynput", "pynput"), ("PIL", "Pillow"))
+                   if importlib.util.find_spec(m) is None]
+        if missing:
+            return Availability(False, "missing-deps", missing=tuple(missing))
+    return Availability(True, "ok")
+
+
+def computer_use_availability() -> Availability:
+    """Full availability check, including a live display probe.
+
+    Disabled inside Docker, when deps are missing, or when no usable display is
+    found. On Linux it also tells Wayland and headless hosts apart, names any
+    missing system library, and checks the X server accepts synthetic input.
+    """
+    global _last
+    _last = result = _availability()
+    return result
+
+
+def _availability() -> Availability:
+    # 1. Never works from inside the container (no host display).
+    if _in_docker():
+        return Availability(False, "docker", DOCKER_HELP)
 
     # 2. Explicit operator kill-switch.
-    if os.environ.get("COMPUTER_USE_DISABLED", "").lower() in ("1", "true", "yes"):
-        return (False, "env-disabled")
+    if _env_disabled():
+        return Availability(False, "env-disabled")
 
-    _ensure_dpi_awareness()
-    # 3. Required libraries present?
-    try:
-        import mss  # noqa: F401
-        import pynput  # noqa: F401
-        from PIL import Image  # noqa: F401
-    except Exception:
-        return (False, "missing-deps")
-
-    # 4. Per-OS display sanity check.
     if sys.platform.startswith("linux"):
-        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-            return (False, "no-display")
+        # 3. Session type and Python packages, then the X libraries mss loads
+        # and a live X connection (importing pynput needs one).
+        from app.mcp.computer_use import linux
 
-    # 5. Ground-truth probe: can we actually enumerate monitors?
+        blocked = _linux_preflight()
+        if blocked is not None:
+            return blocked
+        libs = linux.missing_system_libraries()
+        if libs:
+            return Availability(False, "missing-system-packages",
+                                linux.missing_libraries_help(libs), tuple(libs))
+        reason, help_text = linux.probe_x11()
+        if reason:
+            return Availability(False, reason, help_text)
+        try:
+            import pynput  # noqa: F401
+        except Exception as exc:
+            return Availability(False, "x11-unreachable", f"Mouse and keyboard control could not start: {exc}")
+    else:
+        _ensure_dpi_awareness()
+        # 3. Required libraries present?
+        try:
+            import mss  # noqa: F401
+            import pynput  # noqa: F401
+            from PIL import Image  # noqa: F401
+        except Exception as exc:
+            return Availability(False, "missing-deps", f"Could not load the computer-use packages: {exc}. "
+                                "Install them with 'pip install -r requirements-native.txt'.")
+
+    # 4. Ground-truth probe: can we actually enumerate monitors?
     try:
         import mss as _mss
 
         with _mss.mss() as sct:
             # monitors[0] is the union box; at least one real monitor => len >= 2.
             if len(sct.monitors) < 2:
-                return (False, "no-monitors")
-    except Exception:
+                return Availability(False, "no-monitors")
+    except Exception as exc:
         logger.debug("Computer-use: monitor probe failed", exc_info=True)
-        return (False, "screenshot-probe-failed")
+        return Availability(False, "screenshot-probe-failed", f"Screen capture failed: {exc}")
 
-    return (True, "ok")
+    return Availability(True, "ok")
+
+
+def computer_use_available() -> tuple[bool, str]:
+    """Return ``(available, reason)`` for whether host control is possible here."""
+    result = computer_use_availability()
+    return result.available, result.reason
+
+
+def last_availability(reason: str) -> Optional[Availability]:
+    """The most recent full check, if it ended with ``reason`` (for its detail)."""
+    last = _last
+    return last if last is not None and last.reason == reason else None
 
 
 def enumerate_displays() -> "list[DisplayInfo]":

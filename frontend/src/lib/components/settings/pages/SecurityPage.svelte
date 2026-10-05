@@ -109,9 +109,31 @@
 			hint: 'Unavailable in Docker',
 			help: 'AI Shuffle is running in Docker, which cannot control the host desktop. Run it natively to use this.'
 		},
-		'no-display': { hint: 'No display on this host', help: 'No desktop display detected on this host.' },
+		'no-display': {
+			hint: 'No desktop on this host',
+			help: 'No desktop display detected on this host. On Linux, start AI Shuffle from an X11 desktop session.'
+		},
+		wayland: {
+			hint: 'Wayland is not supported',
+			help: 'Computer use needs an X11 session on Linux. Log in with an X11 session (for example GNOME on Xorg) and restart AI Shuffle.'
+		},
 		'no-monitors': { hint: 'No monitors detected', help: 'No monitors detected on this host.' },
-		'missing-deps': { hint: 'mss or pynput missing', help: 'The mss/pynput packages are not installed on the server.' },
+		'missing-deps': {
+			hint: 'Python packages missing',
+			help: 'The computer-use Python packages are not installed. Run pip install -r requirements-native.txt.'
+		},
+		'missing-system-packages': {
+			hint: 'System libraries missing',
+			help: 'Screen-capture libraries are missing on this host.'
+		},
+		'x11-unreachable': {
+			hint: 'Cannot reach the X display',
+			help: 'AI Shuffle could not connect to the X display. Check DISPLAY and XAUTHORITY.'
+		},
+		'x11-no-xtest': {
+			hint: 'X server lacks XTEST',
+			help: 'The X server has no XTEST extension, which mouse and keyboard control needs.'
+		},
 		'env-disabled': {
 			hint: 'Turned off by environment',
 			help: 'Disabled by the COMPUTER_USE_DISABLED environment variable.'
@@ -368,13 +390,14 @@
 		<SettingRow
 			id="security.computerUse"
 			hint={computerHint}
-			help={computerUse.available ? undefined : computerOff.help}
+			help={computerUse.available ? undefined : (computerUse.detail ?? computerOff.help)}
 			dim={!computerUse.available}
 			value={computerUse.available ? computerUse.enabled : undefined}
 			onReset={() => void setComputerUse(false)}
 		>
+			<!-- A saved "on" cannot run on a host without computer use: show it off. -->
 			<Switch
-				checked={computerUse.enabled}
+				checked={computerUse.available && computerUse.enabled}
 				disabled={!computerUse.available || computerBusy}
 				onchange={(on) => void setComputerUse(on)}
 			/>

@@ -17,12 +17,13 @@ _listener_lock = threading.Lock()
 # LLKHF_INJECTED: Windows sets it on every SendInput key, including pynput's.
 # (LLKHF_LOWER_IL_INJECTED, 0x02, is only ever set together with it.)
 _LLKHF_INJECTED = 0x10
-# Where the platform cannot say whether a key was injected, an Escape that
-# arrives this soon after the agent pressed Escape is the agent's own. That is
-# Linux (pynput's Xorg listener reads XTest input as not injected; uinput
-# cannot tell) and pynput before 1.8 anywhere. Windows (LLKHF_INJECTED) and
-# macOS with pynput 1.8+ (source process id) say reliably, so there a real
-# Esc right after the agent's own is never ignored.
+# On macOS with pynput before 1.8 the listener cannot say whether a key was
+# injected, so an Escape that arrives this soon after the agent pressed Escape
+# is the agent's own. Windows (LLKHF_INJECTED) and macOS with pynput 1.8+
+# (source process id) say reliably, so there a real Esc right after the
+# agent's own is never ignored. Linux does not use this window: XTest input
+# looks like hardware there, so linux.py excuses exactly one Escape press per
+# Escape the agent sends instead (see _on_press).
 _AGENT_ESCAPE_WINDOW_S = 0.5
 _agent_escape_at = 0.0
 
@@ -48,6 +49,10 @@ def _injected_flag_reliable() -> bool:
         return False
 
 
+def _x11() -> bool:
+    return sys.platform.startswith("linux")
+
+
 def _win32_event_filter(msg, data):
     # Physical Escape only: the agent's key('Escape') must still close
     # menus/dialogs. The injected flag is authoritative on Windows.
@@ -63,7 +68,14 @@ def _on_press(key, injected=False):
     from pynput.keyboard import Key
     if key != Key.esc or injected:
         return
-    if not _injected_flag_reliable() and _recent_agent_escape():
+    if _x11():
+        # X11 cannot mark XTEST input as injected; skip only the agent's own
+        # announced Escape press (see linux.py). A person's is never announced.
+        from app.mcp.computer_use import linux
+        if linux.consume_agent_escape():
+            logger.info("computer-use: ignoring the agent's own Escape press")
+            return
+    elif not _injected_flag_reliable() and _recent_agent_escape():
         logger.info("computer-use: ignoring Escape right after the agent's own Escape")
         return
     abort.stop_active("escape", detail="physical Esc key-down (non-Windows listener)")
@@ -132,12 +144,23 @@ class SafeInput:
 
     def press(self, device, key):
         with abort.input_guard(self.session_id, self.token):
-            if self.escape_key is not None and key == self.escape_key:
-                note_agent_escape()
             if (device, key) not in self.held:
                 self.held.append((device, key))
+            announced = None
+            if self.escape_key is not None and key == self.escape_key:
+                if _x11():
+                    # One excuse per press, withdrawn if the press fails.
+                    from app.mcp.computer_use import linux
+                    announced = linux.expect_agent_escape()
+                else:
+                    note_agent_escape()
             self.sent += 1
-            device.press(key)
+            try:
+                device.press(key)
+            except BaseException:
+                if announced is not None:
+                    linux.withdraw_agent_escape(announced)
+                raise
 
     def release(self, device, key):
         # Releases are allowed after abort and serialize with emergency cleanup.

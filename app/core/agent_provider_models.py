@@ -572,6 +572,8 @@ def _worker_traits(row: Mapping[str, Any]) -> str:
     caps = row.get("capabilities") or {}
     traits = [str(caps.get("os") or row.get("platform") or "unknown OS")]
     traits.append("display" if caps.get("has_display") else "no display")
+    if caps.get("computer_use"):
+        traits.append("computer use")
     if caps.get("has_chrome"):
         traits.append("Chrome")
     if caps.get("claude_cli_signed_in"):

@@ -38,8 +38,8 @@ export const entries: SettingEntry[] = [
 		category: 'security',
 		section: 'Agent safety',
 		label: 'Computer use',
-		help: 'Lets agents see and control this computer’s screen, mouse and keyboard, in every chat. It needs a native install with a display; a worker in Docker cannot control the host.',
-		keywords: ['screen', 'mouse', 'keyboard', 'host display'],
+		help: 'Lets agents see and control this computer’s screen, mouse and keyboard, in every chat. It needs a native install with a desktop: Windows, macOS, or Linux in an X11 session. A worker in Docker or on a headless server cannot control a screen.',
+		keywords: ['screen', 'mouse', 'keyboard', 'host display', 'linux', 'x11', 'wayland'],
 		default: false
 	},
 	{

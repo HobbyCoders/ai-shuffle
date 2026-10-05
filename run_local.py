@@ -210,13 +210,47 @@ def install_dependencies():
             ], check=True)
             print_status("Native (computer-use) dependencies installed", "success")
         except subprocess.CalledProcessError as e:
-            print_status(
-                f"Native (computer-use) dependencies skipped: {e}. "
-                "Computer-use will be unavailable.",
-                "warning",
-            )
+            error = e
+            # On Linux this is usually evdev failing to compile (no kernel
+            # headers / C compiler), which X11 desktop control does not need.
+            fallback = linux_native_fallback(native_requirements) if sys.platform.startswith("linux") else []
+            if fallback:
+                try:
+                    for args in fallback:
+                        subprocess.run([str(get_venv_pip()), *args], check=True)
+                    print_status("Native (computer-use) dependencies installed without evdev "
+                                 "(not needed for X11 desktop control)", "success")
+                    error = None
+                except subprocess.CalledProcessError as e2:
+                    error = e2
+            if error is not None:
+                print_status(
+                    f"Native (computer-use) dependencies skipped: {error}. "
+                    "Computer-use will be unavailable.",
+                    "warning",
+                )
 
     return True
+
+
+def linux_native_fallback(requirements: Path) -> list[list[str]]:
+    """pip argument lists that install the computer-use packages without evdev.
+
+    pynput depends on evdev on Linux, which compiles from source and fails on a
+    machine without kernel headers and a C compiler. Only pynput's uinput
+    backend uses evdev; computer use drives X11 through python-xlib. So install
+    everything else normally, then pynput's X11 dependencies, then pynput
+    itself with --no-deps.
+    """
+    lines = [line.split("#", 1)[0].strip() for line in requirements.read_text().splitlines()]
+    specs = [line for line in lines if line]
+    pynput = [s for s in specs if s.lower().startswith("pynput")]
+    others = [s for s in specs if s not in pynput]
+    if not pynput:
+        return []
+    steps = [["install", *others, "python-xlib>=0.17", "six"]]
+    steps.append(["install", "--no-deps", *pynput])
+    return steps
 
 
 def build_frontend():

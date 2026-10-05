@@ -11,7 +11,10 @@ const owner = vi.hoisted(() => ({
 const transport = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), post: vi.fn(), delete: vi.fn(), patch: vi.fn() }));
 const refresh = vi.hoisted(() => vi.fn());
 const layout = vi.hoisted(() => ({ openFeaturePage: vi.fn() }));
-const host = vi.hoisted(() => ({ desktop: null as unknown, status: { available: true, reason: 'ok', enabled: false } }));
+const host = vi.hoisted(() => ({
+	desktop: null as unknown,
+	status: { available: true, reason: 'ok', enabled: false } as Record<string, unknown>
+}));
 const computer = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), setMode: vi.fn(), stop: vi.fn() }));
 
 vi.mock('$lib/api/owner', () => owner);
@@ -217,6 +220,36 @@ describe('computer use', () => {
 		render(SecurityPage);
 		expect(await screen.findByText('Unavailable in Docker')).toBeTruthy();
 		expect((screen.getByRole('switch', { name: 'Computer use' }) as HTMLButtonElement).disabled).toBe(true);
+	});
+
+	it('shows the switch off on a host that cannot run it, even when the saved setting is on', async () => {
+		host.status = { available: false, reason: 'docker', enabled: true };
+		render(SecurityPage);
+		await screen.findByText('Unavailable in Docker');
+		const toggle = screen.getByRole('switch', { name: 'Computer use' });
+		expect(toggle.getAttribute('aria-checked')).toBe('false');
+	});
+
+	it('explains a Linux host it cannot use, with the server detail behind the help button', async () => {
+		host.status = {
+			available: false,
+			reason: 'wayland',
+			enabled: false,
+			detail: 'This is a Wayland session. Log out and pick an X11 session.'
+		};
+		render(SecurityPage);
+		expect(await screen.findByText('Wayland is not supported')).toBeTruthy();
+		expect((screen.getByRole('switch', { name: 'Computer use' }) as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.focus(screen.getByRole('button', { name: 'About Computer use' }));
+		expect((await screen.findByRole('tooltip')).textContent).toContain('pick an X11 session');
+	});
+
+	it('names missing Linux packages when the server sends no detail', async () => {
+		host.status = { available: false, reason: 'missing-system-packages', enabled: false };
+		render(SecurityPage);
+		expect(await screen.findByText('System libraries missing')).toBeTruthy();
+		await fireEvent.focus(screen.getByRole('button', { name: 'About Computer use' }));
+		expect((await screen.findByRole('tooltip')).textContent).toContain('Screen-capture libraries are missing');
 	});
 
 	it('turns on through the shared store', async () => {

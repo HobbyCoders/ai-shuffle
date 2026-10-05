@@ -10,8 +10,15 @@ import { api } from './client';
 export interface ComputerUseStatus {
 	/** Whether this host can run computer-use (false in Docker/headless). */
 	available: boolean;
-	/** "ok" when available; otherwise why not: docker, no-display, missing-deps, ... */
+	/**
+	 * "ok" when available; otherwise why not: docker, no-display, wayland,
+	 * missing-deps, missing-system-packages, x11-unreachable, x11-no-xtest, ...
+	 */
 	reason: string;
+	/** When unavailable: what is wrong on this host and how to fix it. */
+	detail?: string | null;
+	/** Packages to install, when that is why it is unavailable. */
+	missing?: string[];
 	/** Whether the global toggle is currently on. */
 	enabled: boolean;
 	/** True until the owning chat releases control, finishes, or is stopped. */

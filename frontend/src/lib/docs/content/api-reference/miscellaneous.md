@@ -1047,7 +1047,7 @@ Reload the catalog from fal.ai now. Returns `success`, `models_fetched` and `cat
 
 ## Computer Use
 
-Lets agents see and control this computer's screen. Available only where AI Shuffle runs on a desktop with a display, not in Docker.
+Lets agents see and control this computer's screen. Available only where AI Shuffle runs natively on a desktop: Windows, macOS, or Linux in an X11 session. Not in Docker, on a headless server, or in a Linux Wayland session.
 
 ### GET /api/v1/computer-use/status
 
@@ -1065,7 +1065,7 @@ Lets agents see and control this computer's screen. Available only where AI Shuf
 }
 ```
 
-`available` and `reason` say whether this host supports it (`reason` explains why not). `active` is `true` while an agent is controlling the screen; `display_label` then names the display. The response also has live details (`action`, `busy`, `cursor`, `geometry`, `seconds_since`, `stop_reason`, `escape_available`, `overlay_available`). `input_mode` is `shared_desktop` or `dedicated_desktop`; see the input mode endpoints below.
+`available` and `reason` say whether this host supports it. When it does not, `reason` is one of `docker`, `env-disabled`, `no-display` (no desktop: `DISPLAY` is unset on Linux), `wayland`, `missing-deps` (Python packages), `missing-system-packages` (Linux screen-capture libraries), `x11-unreachable`, `x11-no-xtest`, `no-monitors` or `screenshot-probe-failed`; `detail` then says what to do and `missing` lists the packages to install. Both are `null` and `[]` when it is available. `active` is `true` while an agent is controlling the screen; `display_label` then names the display. The response also has live details (`action`, `busy`, `cursor`, `geometry`, `seconds_since`, `stop_reason`, `escape_available`, `overlay_available`). `input_mode` is `shared_desktop` or `dedicated_desktop`; see the input mode endpoints below.
 
 ### GET /api/v1/computer-use/enabled
 

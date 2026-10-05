@@ -17,12 +17,18 @@ Shape::
     {
         "os": "windows" | "linux" | "darwin",
         "has_display": bool,
+        "computer_use": bool,
         "has_chrome": bool,
         "docker": bool,
         "claude_cli_signed_in": bool,
         "provider_kinds": ["openai", ...],
         "remote_task": int,
     }
+
+``computer_use`` is whether computer use is switched on for this worker and
+nothing is known to block it (Docker, a Wayland or headless Linux session,
+missing packages). It never opens the display; the settings page's status
+runs the full check.
 
 ``claude_cli_signed_in`` is whether this runner's own Claude Code CLI reports
 a login, from the last ``claude auth status`` probe (no subprocess here). Each
@@ -69,6 +75,20 @@ def _detect_has_display() -> bool:
         if sys.platform.startswith("win") or sys.platform == "darwin":
             return True
         return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    except Exception:  # noqa: BLE001 — detection must never raise
+        return False
+
+
+def _detect_computer_use() -> bool:
+    """Whether computer use is turned on here and nothing is known to block it."""
+    try:
+        from app.mcp.computer_use.scaling import computer_use_quick_check
+
+        if not computer_use_quick_check().available:
+            return False
+        from app.api.computer_use import get_computer_use_enabled
+
+        return bool(get_computer_use_enabled())
     except Exception:  # noqa: BLE001 — detection must never raise
         return False
 
@@ -169,6 +189,7 @@ def detect_capabilities() -> Dict[str, Any]:
     return {
         "os": _detect_os(),
         "has_display": _detect_has_display(),
+        "computer_use": _detect_computer_use(),
         "has_chrome": _detect_has_chrome(),
         "docker": _detect_docker(),
         "claude_cli_signed_in": _detect_claude_cli_signed_in(),

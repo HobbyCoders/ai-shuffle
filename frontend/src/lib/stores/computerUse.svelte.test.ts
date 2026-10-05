@@ -309,6 +309,9 @@ describe('stopNotice', () => {
 		const shutdown = stopNotice('interrupt:server_shutdown');
 		expect(shutdown).toEqual({ title: 'Computer use ended', detail: 'The app is shutting down. You have control.' });
 		expect(stopNotice('interrupt:assistant')?.detail).toMatch(/assistant limit/);
+		// A lost lease means this worker could not renew it, not that another took over.
+		expect(stopNotice('interrupt:lease_lost')?.detail).toBe('This worker lost ownership of the turn. You have control.');
+		expect(stopNotice('interrupt:fence_superseded')?.detail).toBe('Another worker took over the turn. You have control.');
 		expect(stopNotice('interrupt:something_new')?.detail).toBe('The app interrupted the turn. You have control.');
 		for (const reason of ['interrupt:server_shutdown', 'interrupt:assistant', 'interrupt:lease_lost', 'stopped', 'completed']) {
 			expect(stopNotice(reason)?.detail).not.toMatch(/Stop in the chat|Esc was pressed|Stop computer use/);

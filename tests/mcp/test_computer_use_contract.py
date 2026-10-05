@@ -205,6 +205,7 @@ async def test_capabilities_are_reported_with_the_grant(desktop):
 
 async def test_windows_only_tools_are_not_offered_elsewhere(desktop, monkeypatch):
     monkeypatch.setattr(sdk, "_windows_tools_supported", lambda: False)
+    monkeypatch.setattr(sdk, "_linux", lambda: False)
     tools = sdk.create_computer_use_server(enabled=True, permission_mode="bypassPermissions",
                                            session_id="test", virtual_size=(150, 100))
     assert not set(tools) & sdk._WINDOWS_ONLY_TOOLS
@@ -216,6 +217,25 @@ async def test_windows_only_tools_are_not_offered_elsewhere(desktop, monkeypatch
     body = last(await tools["computer_batch"]({"actions": [{"action": "list_windows"}]}))
     assert body["code"] == "UNSUPPORTED_CAPABILITY"
     assert "list_windows" not in sdk.system_guidance()
+
+
+async def test_linux_offers_the_clipboard_but_not_the_window_tools(desktop, monkeypatch):
+    monkeypatch.setattr(sdk, "_windows_tools_supported", lambda: False)
+    monkeypatch.setattr(sdk, "_linux", lambda: True)
+    tools = sdk.create_computer_use_server(enabled=True, permission_mode="bypassPermissions",
+                                           session_id="test", virtual_size=(150, 100))
+    assert {"read_clipboard", "write_clipboard"} <= set(tools)
+    assert not set(tools) & (sdk._WINDOWS_ONLY_TOOLS - sdk._CLIPBOARD_TOOLS)
+    caps = payload(await tools["request_access"]({"apps": [], "reason": "t"}))["capabilities"]
+    assert {"read_clipboard", "write_clipboard"} <= set(caps["tools"])
+    assert set(caps["unavailable"]) == set(sdk._WINDOWS_ONLY_TOOLS - sdk._CLIPBOARD_TOOLS)
+    monkeypatch.setattr(sdk, "_clipboard_read", lambda: "copied")
+    body = last(await tools["computer_batch"]({"actions": [{"action": "read_clipboard"}]}))
+    assert body["success"] is True
+    guidance = sdk.system_guidance()
+    assert "Linux (X11)" in guidance and "clipboard" in guidance and "polkit" in guidance
+    assert "list_windows" not in guidance and "ui_tree" not in guidance
+    assert len(guidance) < 2000
 
 
 # ----- model-facing text ------------------------------------------------------------

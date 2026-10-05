@@ -99,6 +99,10 @@ The message in the app says which of these it is.
 
 **A chat connector refuses to start:** Telegram, Discord, WhatsApp and the other chat connectors need a **sender allowlist**, the accounts allowed to talk to your agent. Add your own account ID to the allowlist in the connector's settings, then start it again. Tool approvals for connector turns appear in the app, not in the chat.
 
+## Computer use is unavailable
+
+**Settings > Security > Computer use** is greyed out with the reason next to it; the help button says what to do. In Docker (including Unraid) it is always unavailable: a container has no desktop to control. It needs a native install on a computer with a desktop. On Linux that must be an X11 session: in a Wayland session, log out and choose an X11 session such as "GNOME on Xorg" or "Plasma (X11)". If it names missing packages or libraries, install them and the setting becomes available within a minute.
+
 ## The built-in browser crashes
 
 Pages crash or the browser closes when the container has too little shared memory. The template and compose file set `--shm-size=1g` / `shm_size: 1gb`; if you created the container another way, add it.
