@@ -373,8 +373,41 @@ def hydrate(session_id: str) -> int:
 # Mirror-side hooks (called by the engine after materializing a record)
 # ---------------------------------------------------------------------------
 
-def prepare_session_mirror(cursor, record: Dict[str, Any]) -> Dict[str, Any]:
-    """A mirrored session must not reference local-only rows it cannot see."""
+def _provenance_from(cursor, record: Dict[str, Any], origin_device_id: Optional[str],
+                     device_id: Optional[str]) -> bool:
+    """True when this copy may set the chat's account label (#1849).
+
+    Only the worker that runs the chat knows whose it is, so only a copy that
+    worker signed carries the label. The worker that runs the chat keeps its
+    own column (written from its own record); a mirror takes the label from
+    the owner it already knows, or for a chat it has not seen yet, from the
+    worker the copy names as its owner. A copy from any other worker, or one
+    whose sender cannot be identified, never sets, clears or changes it.
+    """
+    if not origin_device_id or origin_device_id == device_id:
+        return False
+    cursor.execute("SELECT owner_device_id, instance_id FROM sessions WHERE id = %s", (record["id"],))
+    local = cursor.fetchone()
+    owner = local["owner_device_id"] if local is not None else None
+    if local is not None and (owner == device_id or (
+            not owner and (local["instance_id"] or "") in ("", _my_instance_id()))):
+        return False  # This worker runs the chat: its own record is the only source.
+    if not owner:
+        owner = record.get("owner_device_id")
+    if not owner and local is not None:
+        # A legacy row with no owner: the worker whose stream wrote it here.
+        existing = store.get_record(cursor, "sessions", record["id"])
+        owner = existing["origin_device_id"] if existing is not None else None
+    return bool(owner) and owner == origin_device_id
+
+
+def prepare_session_mirror(cursor, record: Dict[str, Any], *, origin_device_id: Optional[str] = None,
+                           device_id: Optional[str] = None) -> Dict[str, Any]:
+    """A mirrored session must not reference local-only rows it cannot see.
+
+    ``origin_device_id`` is the worker that signed the copy and ``device_id``
+    this worker; without them the copy cannot set the chat's account label.
+    """
     record = dict(record)
     project_id = record.get("project_id")
     if project_id:
@@ -399,6 +432,11 @@ def prepare_session_mirror(cursor, record: Dict[str, Any]) -> Dict[str, Any]:
         local = cursor.fetchone()
         if local is not None and local["api_user_id"]:
             record["api_user_id"] = local["api_user_id"]
+    if record.get("id") and not _provenance_from(cursor, record, origin_device_id, device_id):
+        # Only the owning worker labels the chat (#1849): any other copy
+        # leaves the column as this worker holds it (none for a new row). An
+        # owner on an older build omits the field, with the same effect.
+        record.pop("provenance_owner", None)
     # A later owner catalog update must not undo an offline sidebar edit.
     # Keep this independent of the owner's stream, including when membership
     # arrives before the session catalog during bootstrap.

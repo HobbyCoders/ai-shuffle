@@ -12,6 +12,7 @@ from app.api.auth import require_admin
 from app.core import assistant_introduction as introductions, assistant_limits as limits, assistant_service as service
 from app.core import assistant_worker
 from app.core.assistant_manager import assistant_manager
+from app.core.session_payload import client_view
 from app.db import assistant as store, assistant_limits as limits_db
 from app.db.async_database import run_sync
 
@@ -201,7 +202,7 @@ async def configure_assistant(body: Configuration):
 @router.post("/open")
 async def open_assistant(body: Optional[OpenRequest] = Body(None)):
     session = await _value_error_call(service.open_home, body.model if body else None)
-    return {"session_id": session["id"], "home_session_id": session["id"], "session": session}
+    return {"session_id": session["id"], "home_session_id": session["id"], "session": client_view(session)}
 
 
 # Older clients still call these. Research has no owner switch any more, so

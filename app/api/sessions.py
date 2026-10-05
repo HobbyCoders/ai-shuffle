@@ -34,6 +34,7 @@ from app.api.common import api_error_handler
 from app.api.worktree_session_meta import enrich_session_worktree_meta
 from app.api.git_owner import refuse_subagent_git
 from app.core.project_utils import get_project_working_dir
+from app.core.session_payload import client_view
 
 import logging
 logger = logging.getLogger(__name__)
@@ -1435,7 +1436,8 @@ async def update_session(
         status=session_status,
     )
 
-    return session
+    # The raw row (RETURNING *) carries server-only columns.
+    return client_view(session)
 
 
 @router.get("/{session_id}/context-usage")

@@ -1176,7 +1176,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash="", deleted=True, order_seq=env.order_seq)
     else:
-        plaintext = _prepare_mirror(cursor, coll, plaintext)
+        plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx)
         row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id)
         _after_mirror(cursor, coll, plaintext)
         if coll.name == "presence":
@@ -1198,11 +1198,17 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     return "applied"
 
 
-def _prepare_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Owner-ordered rows may reference local-only rows; drop what we cannot see."""
+def _prepare_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any], *,
+                    origin_device_id: Optional[str] = None, ctx: Optional[NetworkContext] = None) -> Mapping[str, Any]:
+    """Owner-ordered rows may reference local-only rows; drop what we cannot see.
+
+    ``origin_device_id`` is the worker that wrote the copy (the envelope's
+    signer, or a snapshot item's recorded origin).
+    """
     if coll.name == "sessions":
         from app.network import catalog
-        return catalog.prepare_session_mirror(cursor, dict(plaintext))
+        return catalog.prepare_session_mirror(cursor, dict(plaintext), origin_device_id=origin_device_id,
+                                              device_id=ctx.device_id if ctx is not None else None)
     return plaintext
 
 
@@ -1718,7 +1724,8 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
                 materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
                 local_hash = ""
             else:
-                prepared = _prepare_mirror(cursor, coll, item["record"])
+                prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],
+                                           ctx=ctx)
                 row = materialize(cursor, coll, item["record_id"], prepared,
                                   origin_device_id=item["origin_device_id"])
                 _after_mirror(cursor, coll, prepared)

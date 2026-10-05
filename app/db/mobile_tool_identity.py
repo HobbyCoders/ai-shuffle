@@ -74,3 +74,51 @@ def bind(session_id, principal, *, new=False, claim=False, conn=None):
             account_id=EXCLUDED.account_id, credential_hash=EXCLUDED.credential_hash""",
             (session_id, principal['owner'], principal['kind'], principal['principal_id'],
              principal.get('account_id'), principal['credential_hash']))
+        # The session row carries the record's owner to the workers that
+        # mirror this chat (``mirrored``), so where the chat runs the column
+        # follows the record this worker decides from. The owner never
+        # changes once recorded (ON CONFLICT keeps it); a first record here
+        # can still differ from a label mirrored before the chat moved to this
+        # worker (an admin claim after a handoff), and then replaces it. A
+        # worker the chat moved away from keeps the running worker's label.
+        if not _runs_elsewhere(session):
+            owner = previous['owner'] if previous else principal['owner']
+            c.execute("UPDATE sessions SET provenance_owner = %s WHERE id = %s "
+                      "AND (provenance_owner IS NULL OR provenance_owner <> %s)",
+                      (owner, session_id, owner))
+
+
+def _runs_elsewhere(session):
+    """True when another worker of this network runs the chat."""
+    try:
+        from app.network import control
+        return control.owner_of(dict(session)) is not None
+    except Exception:  # noqa: BLE001 - no readable network: the chat runs here
+        return False
+
+
+def mirrored(session):
+    """The account record a session row carries, shaped like :func:`read`.
+
+    Set on the worker that ran the chat when its record was bound, and
+    synced with the session catalog, so a worker that only mirrors the chat
+    (and so has no ``mobile_tool_identity`` row) knows whose it is. Only the
+    owner travels: principal ids and credential hashes stay on that worker,
+    so ``principal_id`` and ``credential_hash`` are None here. None when the
+    row names no owner (an owner on an older build, or a chat with no record).
+    """
+    owner = (session or {}).get('provenance_owner')
+    if not isinstance(owner, str) or not owner:
+        return None
+    if owner == 'install-admin':
+        kind, account_id = 'admin', None
+    elif owner.startswith('account:') and len(owner) > len('account:'):
+        # Only a paired device's principal carries an account id.
+        kind, account_id = 'paired', owner[len('account:'):]
+    elif owner.startswith(('paired:', 'api_user:')):
+        kind, account_id = owner.split(':', 1)[0], None
+    else:
+        return None  # An owner this build cannot interpret proves nothing.
+    return dict(session_id=session.get('id'), owner=owner, kind=kind, principal_id=None,
+                account_id=account_id, credential_hash=None)
+

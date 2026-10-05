@@ -2255,6 +2255,22 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN away_mode BOOLEAN")
         migrations_applied.append("sessions.away_mode")
 
+    # The chat's account record (#1849): the owner of its mobile_tool_identity
+    # row, copied onto the session so the catalog carries it to the workers
+    # that mirror the chat. Additive/nullable, no index, no SCHEMA_VERSION
+    # bump (the migrations fingerprint covers this block). Existing records
+    # are copied once; mobile_tool_identity is created at startup, so a fresh
+    # database has neither the table nor rows to copy yet.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "provenance_owner"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN provenance_owner TEXT")
+        migrations_applied.append("sessions.provenance_owner")
+        if table_exists(cursor, "mobile_tool_identity"):
+            cursor.execute(
+                "UPDATE sessions SET provenance_owner = (SELECT m.owner FROM mobile_tool_identity m "
+                "WHERE m.session_id = sessions.id) "
+                "WHERE EXISTS (SELECT 1 FROM mobile_tool_identity m WHERE m.session_id = sessions.id)")
+            migrations_applied.append("sessions.provenance_owner_backfill")
+
     # API-user run configuration. ``model`` / ``effort`` are the preconfigured
     # selection every connector/API session created FOR this user binds at
     # create_session (and re-binds on each connector turn, since ``connector``

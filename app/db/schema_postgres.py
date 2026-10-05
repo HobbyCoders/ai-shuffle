@@ -282,6 +282,12 @@ def create_postgres_schema(cursor) -> None:
             -- with their recommended option instead of parking, and approval
             -- prompts are deferred (never granted). NULL/FALSE = present.
             away_mode BOOLEAN,
+            -- Who the chat belongs to (``mobile_tool_identity.owner``:
+            -- 'install-admin', 'account:<id>', 'paired:<id>' or
+            -- 'api_user:<id>'). Written with that record on the worker that
+            -- runs the chat and synced with the catalog, so another worker
+            -- applies the same account rule to a mirror. NULL = no record.
+            provenance_owner TEXT,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,

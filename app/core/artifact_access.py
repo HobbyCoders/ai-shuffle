@@ -58,7 +58,16 @@ def authorize_session_artifact(request, row, digest, session_id=None):
                         break
             if not referenced:
                 raise HTTPException(404, 'Not found')
-    provenance = mobile_tool_identity.read(target)
+    # A chat another worker runs has no local record here; its session row
+    # carries the owner from that worker (#1849), so the account rules below
+    # apply to a mirror exactly as they do where the chat runs. A worker the
+    # chat moved away from keeps its old record, so there the running
+    # worker's label comes first: it may have changed since (a claim there).
+    carried = mobile_tool_identity.mirrored(session)
+    if carried is not None and _network_mirror(session):
+        provenance = carried
+    else:
+        provenance = mobile_tool_identity.read(target) or carried
     api_user = getattr(request.state, 'api_user', None)
     client = getattr(request.state, 'paired_client', None)
     allowed = False

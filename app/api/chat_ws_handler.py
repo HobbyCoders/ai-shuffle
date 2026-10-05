@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.permission_handler import permission_handler
 from app.core.session_modes import chat_mode_read_permitted, normalize_session_mode
+from app.core.session_payload import client_view
 from app.core.session_title import derive_session_title
 from app.core.sync_engine import sync_engine
 # The origin socket reuses sync_engine's bounded-queue writer.
@@ -2066,7 +2067,7 @@ class ChatWebSocketHandler:
         history_response = {
             "type": "history",
             "session_id": session_id,
-            "session": session,
+            "session": client_view(session),
             "messages": messages,
             "isStreaming": is_streaming,
         }
