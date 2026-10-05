@@ -42,6 +42,7 @@ from app.core.pg_session_store import _scrub_pg_illegal
 logger = logging.getLogger(__name__)
 
 NOTIFY_CHANNEL = "session_events"
+COMPACTION_AUDIT_PREFIX_LIMIT = 100
 
 # Post-commit wake for the worker network, installed by
 # ``app.network.startup`` (app.db never imports app.network). Called with
@@ -95,6 +96,10 @@ def append_events(
     row inserts, and a best-effort notify. Raises :class:`FenceViolation` if a
     supplied ``run_id`` no longer owns the session, ``ValueError`` if ``events``
     is empty or ``run_id`` is given without ``fence_token``.
+
+    An optional stable ``id`` makes replay inserts idempotent. Duplicate IDs
+    still reserve sequence slots; the returned range is the allocation, not
+    a guarantee of one new row per slot (replay cursors allow gaps).
     """
     if not events:
         raise ValueError("events must be non-empty")
@@ -136,7 +141,7 @@ def append_events(
         # 3. Insert one row per event.
         params = [
             (
-                str(uuid.uuid4()),
+                event.get("id") or str(uuid.uuid4()),
                 session_id,
                 first_seq + i,
                 run_id,
@@ -150,7 +155,8 @@ def append_events(
         cursor.executemany(
             "INSERT INTO session_events "
             "(id, session_id, seq, run_id, turn_id, event_type, payload, command_id) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (id) DO NOTHING",
             params,
         )
 
@@ -267,6 +273,26 @@ def get_events(
     for row in rows:
         row["payload"] = _parse_payload(row.get("payload"))
     return rows
+
+
+def get_compaction_events_before(session_id: str, before_seq: int) -> List[Dict[str, Any]]:
+    """Newest durable audit cards in an elided prefix, in transcript order.
+
+    Hydration is bounded even when a session has years of compactions.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, session_id, seq, run_id, turn_id, event_type, payload, "
+            "command_id, created_at FROM session_events "
+            "WHERE session_id = %s AND seq < %s "
+            "AND event_type = 'system.compaction_boundary' ORDER BY seq DESC LIMIT %s",
+            (session_id, before_seq, COMPACTION_AUDIT_PREFIX_LIMIT),
+        )
+        rows = rows_to_list(cursor.fetchall())
+    for row in rows:
+        row["payload"] = _parse_payload(row.get("payload"))
+    return list(reversed(rows))
 
 
 def get_latest_system_note(session_id: str, subtype: str) -> Optional[Dict[str, Any]]:

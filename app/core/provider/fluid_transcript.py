@@ -519,6 +519,63 @@ def _splice_inner_calls(
     return out
 
 
+def _splice_compaction_cards(
+    entries: List[Dict[str, Any]], sdk_session_id: str
+) -> List[Dict[str, Any]]:
+    """Read-only audit projection; never add cards to rewind's node indexes.
+
+    Use recorder rows (not engine summaries). Whitelist the display metadata
+    even for private exports, so sharing cannot pick up a delegated summary or
+    internal recovery fields. The engine timestamp keeps late replay appends
+    at the original boundary, rather than at the time recovery ran.
+    """
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            "SELECT e.id, e.payload, e.created_at FROM session_events e "
+            "JOIN sessions s ON s.id = e.session_id "
+            f"WHERE s.sdk_session_id = {ph()} "
+            "AND e.event_type = 'system.compaction_boundary' ORDER BY e.seq",
+            (sdk_session_id,),
+        )
+        rows = cursor.fetchall()
+    cards: List[Dict[str, Any]] = []
+    for row in rows:
+        payload = _as_dict(row["payload"])
+        if payload.get("subtype") != "compact_boundary":
+            continue
+        data = _as_dict(payload.get("data"))
+        metadata = _as_dict(data.get("compact_metadata"))
+        safe = {k: metadata[k] for k in (
+            "trigger", "pre_tokens", "post_tokens", "context_window"
+        ) if k in metadata}
+        stamp = _iso(data.get("compaction_event_ts")) or str(row["created_at"])
+        cards.append({
+            "uuid": row["id"], "type": "system", "subtype": "compact_boundary",
+            "timestamp": stamp, "content": "",
+            "data": {"compact_metadata": safe},
+        })
+    if not cards:
+        return entries
+    cards.sort(key=lambda e: _entry_epoch(e) or 0)
+    out: List[Dict[str, Any]] = []
+    index = 0
+    for entry in entries:
+        stamp = _entry_epoch(entry)
+        while (
+            index < len(cards) and stamp is not None
+            and (_entry_epoch(cards[index]) or 0) <= stamp
+        ):
+            out.append(cards[index])
+            index += 1
+        out.append(entry)
+    out.extend(cards[index:])
+    return out
+
+
 def fluid_transcript_entries(
     sdk_session_id: str, include_inner_calls: bool = False
 ) -> List[Dict[str, Any]]:
@@ -529,10 +586,10 @@ def fluid_transcript_entries(
     ``jsonl_parser._transform_entries``, ``rewind_db_sync``'s matchers) and it
     behaves exactly as it does for a legacy transcript.
 
-    ``include_inner_calls`` adds the tool calls a code-mode cell made from
-    inside the kernel, read from the event log and spliced in as ordinary
-    tool_use/tool_result entries. It defaults to False because the default
-    result MUST stay index-aligned with :func:`load_fluid_path` — rewind maps a
+    ``include_inner_calls`` adds read-only audit records: code-mode kernel
+    tool calls as ordinary tool_use/tool_result entries, and recorded
+    compaction boundaries at their original engine timestamps. It defaults to
+    False because the result MUST stay index-aligned with :func:`load_fluid_path` — rewind maps a
     keep-count over entries straight back to the node that becomes the new head,
     and fork and the checkpoint list depend on the same 1:1 mapping. Splicing
     breaks that alignment, so only read-only renderers (``/live``, the detail
@@ -544,9 +601,11 @@ def fluid_transcript_entries(
         _node_to_entry(node, sdk_session_id)
         for node in load_fluid_path(sdk_session_id)
     ]
-    if not include_inner_calls or not entries:
+    if not include_inner_calls:
         return entries
-    return _splice_inner_calls(entries, sdk_session_id)
+    return _splice_compaction_cards(
+        _splice_inner_calls(entries, sdk_session_id), sdk_session_id
+    )
 
 
 # ─── Checkpoints ─────────────────────────────────────────────────────────────

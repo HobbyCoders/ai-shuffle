@@ -295,13 +295,28 @@ def _compaction_cards(messages) -> list:
 _CARD = {"compact_metadata": {"trigger": "auto", "pre_tokens": 150000, "post_tokens": 30000}}
 
 
+async def _expected_card(adapter) -> dict:
+    """The card plus its replay identity and original time, both taken from
+    the one persisted engine boundary: the recorder derives its row id from
+    the identity (a replay cannot add a second row), and exports place the
+    card at the timestamp. Neither field is display metadata."""
+    from fluid.events import ContextCompaction
+
+    loop = adapter._engine
+    [boundary] = [e for e in await loop.store.events_since(loop.session_id, -1)
+                  if isinstance(e, ContextCompaction)]
+    return {**_CARD, "compaction_event_id": f"{boundary.session_id}:{boundary.seq}",
+            "compaction_event_ts": boundary.ts}
+
+
 @pytest.mark.asyncio
 async def test_a_mid_turn_compaction_reaches_the_chat_as_its_card(monkeypatch, tmp_path):
     """Only the main conversation's: the subagent's boundary in the same turn
     gives no card in the parent chat."""
     adapter = await _adapter(monkeypatch, tmp_path, "midturn")
     try:
-        assert _compaction_cards(await _turn_messages(adapter, "first")) == [_CARD]
+        assert _compaction_cards(await _turn_messages(adapter, "first")) == [
+            await _expected_card(adapter)]
         assert _compaction_cards(await _turn_messages(adapter, "second")) == []
     finally:
         await adapter.disconnect()
@@ -318,7 +333,7 @@ async def test_a_compaction_between_turns_reaches_the_chat_with_the_next_turn(
         second = await asyncio.wait_for(
             _turn_messages(adapter, "second"), TURN_BUDGET_SECONDS,
         )
-        assert _compaction_cards(second) == [_CARD]
+        assert _compaction_cards(second) == [await _expected_card(adapter)]
         texts = [
             block.text for m in second if isinstance(m, AssistantMessage)
             for block in m.content or [] if isinstance(block, TextBlock)

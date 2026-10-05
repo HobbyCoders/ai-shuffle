@@ -110,9 +110,9 @@ def _link_app_session(app_session_id: str, sdk_session_id: str) -> None:
 
 
 def _seed_app_turns(
-    session_id: str, count: int, *, steer_during: int | None = None
+    session_id: str, count: int, *, steer_during: int | None = None, start: int = 0
 ) -> None:
-    for turn in range(count):
+    for turn in range(start, start + count):
         events = [
             {
                 "type": "message.user",
@@ -403,3 +403,47 @@ async def test_reconnect_never_reapplies_elision(mock_db, gw):
 
     assert all(frame.get("event") != "system.compaction_boundary" for frame in frames)
     assert frames[0]["id"] == 6
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", ["auto", "manual"])
+async def test_completed_cli_compaction_survives_later_prefix_elision(mock_db, gw, trigger):
+    from app.core.provider.harness_adapter import HarnessAdapter
+    from app.core.turn_recorder import TurnRecorder
+    from fluid.engine.delegated_proto import compaction_from_boundary
+
+    sid, sdk = "app-audit-compact", "ses_auditcompact"
+    _seed_fluid(sdk, _four_turn_path())
+    _link_app_session(sid, sdk)
+    _seed_app_turns(sid, 1)
+    from app.core.provider.types import SessionOptions
+    adapter = HarnessAdapter()
+    adapter._options = SessionOptions(model="fable", extra={"context_window": 200_000})
+    # CLI boundary -> Fluid event -> adapter -> turn recorder: never seed the
+    # value the reader is supposed to consume directly into session_events.
+    [card] = adapter._translate(compaction_from_boundary({
+        "compact_metadata": {"trigger": trigger, "pre_tokens": 170000, "post_tokens": 23000},
+    }, session_id=sdk, turn_id="turn-0"))
+    rec = await TurnRecorder.maybe_create(sid)
+    await rec.on_event({"type": "system", "subtype": card.subtype, "data": card.data})
+    await rec.close()
+    _seed_app_turns(sid, 3, start=1)
+    _append_compaction(sdk, 1, [["n1", "n4", "epoch"]], tier=3)
+    stored = next(r for r in session_events_db.get_events(sid)
+                  if r["event_type"] == "system.compaction_boundary")
+    assert stored["seq"] < _compacted_replay_start(sid)[0]
+    frames = []
+    stream = event_stream(sid, 0)
+    try:
+        async for chunk in stream:
+            frame = parse_frame(chunk)
+            frames.append(frame)
+            if frame.get("event") == "caught_up":
+                break
+    finally:
+        await stream.aclose()
+    [durable] = [f for f in frames if f.get("id") == stored["seq"]]
+    assert durable["data"]["data"] == card.data
+    assert card.data["compact_metadata"]["context_window"] == 200_000
+    assert durable["data"]["created_at"]
+    seqs = [f["id"] for f in frames if "id" in f]
+    assert seqs == sorted(set(seqs))

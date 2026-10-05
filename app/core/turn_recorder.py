@@ -464,11 +464,17 @@ def _translate_shared(
         if subtype in _COMPACTION_SUBTYPES:
             # Contract model carries no fields; pass the raw frame through in
             # the payload.
-            return [_build_event(
+            record = _build_event(
                 contract.SystemCompactionBoundary, session_id,
                 extra_payload={"subtype": subtype, "data": event.get("data")},
                 **kw,
-            )]
+            )
+            identity = _as_dict(event.get("data")).get("compaction_event_id")
+            if isinstance(identity, str) and identity:
+                record["id"] = str(uuid.uuid5(
+                    uuid.NAMESPACE_URL, f"compaction:{session_id}:{identity}"
+                ))
+            return [record]
         return [_build_event(
             contract.SystemNote, session_id,
             subtype=subtype,

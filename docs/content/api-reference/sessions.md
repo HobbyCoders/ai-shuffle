@@ -194,7 +194,7 @@ Common event types include `turn.started`, `message.user`, `assistant.text_delta
 
 In the replay, each run of consecutive `assistant.text_delta` (or `assistant.thinking_delta`) events from the same turn arrives as one merged frame: its `text` is the whole run and its `id` and `seq` are those of the run's last event. Live events after the replay are not merged.
 
-When `from_seq` is `0` and the conversation has been compacted, the replay skips the compacted part. It starts with one `event: system.compaction_boundary` frame (no `id`; `data.elidedEvents` counts the skipped events) followed by the events from the first turn kept after compaction. A reconnect with `from_seq` above `0` replays from that point and never skips.
+When `from_seq` is `0` and the conversation has been compacted, the replay skips the compacted part, except for its durable `system.compaction_boundary` audit records. Those arrive first with their original `id`, sequence and timestamp. Then one synthetic `event: system.compaction_boundary` frame (no `id`; `data.elidedEvents` counts the skipped prefix) precedes the events from the first turn kept after compaction. A reconnect with `from_seq` above `0` replays from that point and never skips.
 
 After the replay, the stream sends one `event: caught_up` frame (`{"seq": N}`, no `id`). Idle streams send `: keepalive` comment lines.
 
@@ -288,7 +288,9 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/resume \
 
 ### POST /api/v1/sessions/{session_id}/compact
 
-Compact the chat's context now. This sends the chat a `/compact` turn. A Claude Code chat runs Claude Code's own `/compact`. Any other chat runs the app's compaction: older tool results are trimmed and older turns are summarized, the newest work is kept as it is, and a summarized turn can still be read back with `HistoryExpand`. The chat shows **Context Compacted** with the sizes before and after when it worked, or **Compaction failed** with the reason.
+Compact the chat's context now. This sends the chat a `/compact` turn. A Claude Code chat runs Claude Code's own `/compact`. Any other chat runs the app's compaction: older tool results are trimmed and older turns are summarized, the newest work is kept as it is, and a summarized turn can still be read back with `HistoryExpand`. The chat shows **Context Compacted** when it worked, or **Compaction failed** with the reason.
+
+Successful manual and automatic compactions leave durable transcript entries with their timestamp, trigger and available token counts (and configured window when known). Reloading preserves earlier compaction entries even when older conversation turns are summarized. Summary text stays in recoverable history rather than the default visible row.
 
 **Auth:** Required
 

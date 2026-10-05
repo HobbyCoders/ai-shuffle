@@ -163,6 +163,9 @@ async def test_compact_reaches_the_cli_bare_and_shows_its_card(monkeypatch, tmp_
     try:
         await _turn(adapter, "hello")
         messages = await _turn(adapter, "/compact")
+        from fluid.events import ContextCompaction
+        [boundary] = [e for e in await adapter._engine.store.events_since(adapter._engine.session_id, -1)
+                      if isinstance(e, ContextCompaction)]
     finally:
         await adapter.disconnect()
     hello, compact = _recorded(tmp_path)
@@ -171,7 +174,8 @@ async def test_compact_reaches_the_cli_bare_and_shows_its_card(monkeypatch, tmp_
     cards = _system(messages, "compact_boundary")
     assert cards == [{"compact_metadata": {
         "trigger": "manual", "pre_tokens": 870000, "post_tokens": 9000,
-    }}]
+    }, "compaction_event_id": f"{boundary.session_id}:{boundary.seq}",
+        "compaction_event_ts": boundary.ts}]
     assert _system(messages, "compact_failed") == []
 
 

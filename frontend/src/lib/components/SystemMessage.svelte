@@ -13,6 +13,7 @@
 	import { notify } from '$lib/stores/notifications';
 	import { resumeSession } from '$lib/api/sessions';
 	import { LIMIT_RESUME_SUBTYPE, pausedLabel } from '$lib/components/chat/limit-resume';
+	import { formatTokenCount } from '$lib/components/chat/context-usage';
 
 	// Create a local marked instance to avoid mutating global config
 	const localMarked = new Marked({ breaks: true, gfm: true });
@@ -246,36 +247,36 @@
 			}
 
 			case 'compact_boundary': {
-				const metadata = data.compact_metadata as Record<string, unknown> || {};
-				const trigger = metadata.trigger as string || 'manual';
-				const preTokens = metadata.pre_tokens as number;
+				// The adapter normalizes native and delegated boundaries to snake_case.
+				// Older CLI JSONL also retains its original camelCase metadata.
+				const metadata = (data.compact_metadata || data.compactMetadata || {}) as Record<string, unknown>;
+				const legacy = (data.compactMetadata || {}) as Record<string, unknown>;
+				const trigger = metadata.trigger || legacy.trigger;
+				const knownTokens = (value: unknown): string | null =>
+					typeof value === 'number' && Number.isFinite(value) && value > 0
+						? formatTokenCount(value) : null;
+				const before = knownTokens(metadata.pre_tokens ?? metadata.preTokens ?? legacy.preTokens);
+				const after = knownTokens(metadata.post_tokens ?? metadata.postTokens ?? legacy.postTokens);
+				const window = knownTokens(metadata.context_window ?? metadata.contextWindow ?? legacy.contextWindow);
+				let size = before && after ? `${before} → ${after}`
+					: before ? `${before} before` : after ? `${after} after` : '';
+				if (window) size += `${size ? ' of ' : 'Window: '}${window}`;
 
-				// The badge shows the size once it is known, so the sentence is
-				// what says a typed /compact was manual. A /compact the app sent
-				// (the session sat idle near the limit) reads "manual" from
-				// Claude Code too, so the app marks it requested_by "app".
+				// An idle-near-limit /compact also reads "manual" from the CLI.
+				const appRequested = metadata.requested_by === 'app';
 				let content = trigger === 'auto'
-					? 'Context was automatically compacted.'
-					: metadata.requested_by === 'app'
+					? `Context compacted automatically${size ? `: ${size}` : '.'}`
+					: appRequested
 						? 'AI Shuffle asked the agent to compact the context because the session was idle near the limit.'
-						: metadata.trigger === 'manual'
+						: trigger === 'manual'
 							? 'Context was compacted manually (/compact).'
 							: 'Context was compacted.';
-
-				if (preTokens) {
-					// Format large numbers nicely
-					const formatTokens = (n: number) => {
-						if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
-						if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-						return n.toLocaleString();
-					};
-					content += ` Previous context: ${formatTokens(preTokens)} tokens.`;
-				}
+				if (trigger !== 'auto' && size) content += ` ${size}.`;
 
 				return {
 					title: 'Context Compacted',
 					content,
-					badge: preTokens ? `${Math.round(preTokens / 1000)}k → compacted` : (trigger === 'auto' ? 'auto' : 'manual'),
+					badge: trigger === 'auto' ? 'auto' : appRequested ? 'app' : trigger === 'manual' ? 'manual' : undefined,
 					badgeColor: 'green'
 				};
 			}
@@ -1117,6 +1118,19 @@
 					</div>
 				{/if}
 			</details>
+		</div>
+	{:else if message.systemSubtype === 'compact_boundary'}
+		<div class="w-full sys-flat" data-testid="compaction-card">
+			<div class="sys-row flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0">
+				<svg class="w-4 h-4 text-primary shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+				</svg>
+				<span class="text-sm font-medium text-foreground">{formatted.title}</span>
+				{#if formatted.badge}
+					<span class="px-1.5 py-0.5 text-[10px] rounded-sm {getBadgeClasses(formatted.badgeColor || 'gray')}">{formatted.badge}</span>
+				{/if}
+				<p class="basis-full pl-6 text-sm text-muted-foreground whitespace-normal wrap-anywhere min-w-0" data-testid="compaction-content">{formatted.content}</p>
+			</div>
 		</div>
 	{:else if formatted.compact}
 		<!-- Compact single-line rendering for hooks — styled like tool messages -->

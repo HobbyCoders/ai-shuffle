@@ -48,6 +48,53 @@ it('labels peer receipts as automatically delivered, without an Interrupt action
 });
 
 
+describe('SystemMessage — compact_boundary', () => {
+	const sizes = { pre_tokens: 182_000, post_tokens: 41_000, context_window: 200_000 };
+	it.each([
+		[sizes, 'Context compacted automatically: 182k → 41k of 200k'],
+		[{ pre_tokens: 182_000, post_tokens: 41_000 }, 'Context compacted automatically: 182k → 41k'],
+		[{ pre_tokens: 182_000 }, 'Context compacted automatically: 182k before'],
+		[{}, 'Context compacted automatically.'],
+		[{ post_tokens: 41_000, context_window: 200_000 }, 'Context compacted automatically: 41k after of 200k'],
+		[{ context_window: 200_000 }, 'Context compacted automatically: Window: 200k'],
+		[{ pre_tokens: 0, post_tokens: 0, context_window: 0 }, 'Context compacted automatically.'],
+		[{ pre_tokens: NaN, post_tokens: Infinity, context_window: -1 }, 'Context compacted automatically.'],
+		[{ pre_tokens: '182000', post_tokens: null }, 'Context compacted automatically.'],
+		[{ pre_tokens: 1_500_000, post_tokens: 999 }, 'Context compacted automatically: 1.5M → 999']
+	])('renders known sizes once: %j', (metadata, expected) => {
+		render(SystemMessage, { message: makeMessage({ systemSubtype: 'compact_boundary',
+			systemData: { compact_metadata: { trigger: 'auto', ...metadata } } }) });
+		expect(screen.getAllByText(expected)).toHaveLength(1);
+		expect(screen.getByTestId('compaction-content').textContent).toBe(expected);
+		expect(screen.getByTestId('compaction-content').className).not.toContain('truncate');
+	});
+
+	it.each([
+		['manual', undefined, 'Context was compacted manually (/compact).'],
+		['manual', 'app', 'AI Shuffle asked the agent to compact the context because the session was idle near the limit.'],
+		[undefined, undefined, 'Context was compacted.']
+	])('preserves the explanation for %s / %s with and without sizes', (trigger, requested_by, explanation) => {
+		const message = (metadata: Record<string, unknown>) => makeMessage({ systemSubtype: 'compact_boundary',
+			systemData: { compact_metadata: { trigger, requested_by, ...metadata } } });
+		const { rerender } = render(SystemMessage, { message: message(sizes) });
+		expect(screen.getAllByText(`${explanation} 182k → 41k of 200k.`)).toHaveLength(1);
+		return rerender({ message: message({}) }).then(() => {
+			expect(screen.getAllByText(explanation!)).toHaveLength(1);
+		});
+	});
+
+	it('reads old CLI camelCase records, including partially normalized JSONL', async () => {
+		const legacy = { trigger: 'auto', preTokens: 182_000, postTokens: 41_000, contextWindow: 200_000 };
+		const { rerender } = render(SystemMessage, { message: makeMessage({ systemSubtype: 'compact_boundary',
+			systemData: { compactMetadata: legacy } }) });
+		expect(screen.getAllByText('Context compacted automatically: 182k → 41k of 200k')).toHaveLength(1);
+		await rerender({ message: makeMessage({ systemSubtype: 'compact_boundary', systemData: {
+			compactMetadata: legacy, compact_metadata: { trigger: 'auto', pre_tokens: 182_000 }
+		} }) });
+		expect(screen.getAllByText('Context compacted automatically: 182k → 41k of 200k')).toHaveLength(1);
+	});
+});
+
 describe('SystemMessage — task_updated / task_notification', () => {
 	it('shows the "Task" label, a status chip, and the description summary', () => {
 		const { container } = render(SystemMessage, {
@@ -421,8 +468,7 @@ describe('SystemMessage — agent compaction', () => {
 		});
 		const text = container.textContent ?? '';
 		expect(text).toContain('Context Compacted');
-		expect(text).toContain('Context was automatically compacted.');
-		expect(text).toContain('166k → compacted');
+		expect(text).toContain('Context compacted automatically: 166.4k → 34.9k');
 	});
 
 	it('names a typed /compact as manual', () => {
@@ -440,7 +486,7 @@ describe('SystemMessage — agent compaction', () => {
 		expect(text).toContain('manual');
 	});
 
-	it('still says manual when the size takes the badge (#1794)', () => {
+	it('still says manual alongside the known before and after sizes (#1794)', () => {
 		const { container } = render(SystemMessage, {
 			props: {
 				message: makeMessage({
@@ -452,8 +498,7 @@ describe('SystemMessage — agent compaction', () => {
 			}
 		});
 		const text = container.textContent ?? '';
-		expect(text).toContain('62k → compacted');
-		expect(text).toContain('Context was compacted manually (/compact). Previous context: 62.4k tokens.');
+		expect(text).toContain('Context was compacted manually (/compact). 62.4k → 4.1k.');
 	});
 
 	it('does not call a compaction with no trigger manual', () => {
@@ -466,7 +511,7 @@ describe('SystemMessage — agent compaction', () => {
 			}
 		});
 		const text = container.textContent ?? '';
-		expect(text).toContain('Context was compacted. Previous context');
+		expect(text).toContain('Context was compacted. 50k before.');
 		expect(text).not.toContain('manual');
 	});
 

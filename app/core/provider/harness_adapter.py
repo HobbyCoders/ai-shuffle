@@ -3605,32 +3605,62 @@ class HarnessAdapter(ProviderAdapter):
         ``trigger``, ``pre_tokens`` and ``post_tokens``). The turn recorder
         keeps it as ``system.compaction_boundary``, so it shows after reload.
 
-        No summary text: the CLI's summary stays out of the chat. A native
-        ``ContextCompaction`` is a view-level promotion whose marker comes from
-        the replay itself (``app/api/events.py``), so it maps to nothing.
+        No summary text: summaries stay in the recoverable engine history.
+        Native promotions need the same durable card; the replay's synthetic
+        elided-prefix marker is not a record of when compaction happened.
         """
+        if not getattr(event, "batch_final", True):
+            return []
         reason = getattr(event, "reason", None)
         if reason == MANUAL_COMPACT_REASON:
             # A native session compacted on request (``/compact``): its engine
             # follows the decisions with one summary event carrying the sizes.
             reason = "cli_manual_compact"
-        if reason not in self._CLI_COMPACTION_TRIGGERS:
+        if reason in self._CLI_COMPACTION_TRIGGERS:
+            trigger = self._CLI_COMPACTION_TRIGGERS[reason]
+        elif getattr(event, "trimmed", None) or getattr(event, "spans", None):
+            if self._compact_requested_by is not None:
+                # A native /compact emits its mechanical decisions followed by
+                # one manual summary. Only the summary is the visible record.
+                return []
+            # An automatic native promotion was actually applied, not merely
+            # a compacting status or an attempted/no-op compaction.
+            trigger = "auto"
+        else:
             return []
         metadata: Dict[str, Any] = {}
-        trigger = self._CLI_COMPACTION_TRIGGERS[reason]
         if trigger:
             metadata["trigger"] = trigger
-        # 0 means "not reported" on the event.
-        for key, attr in (("pre_tokens", "before_tokens"), ("post_tokens", "after_tokens")):
+        # 0 means "not reported" on the event. A native batch's card spans
+        # the whole batch: the first rung's before, this (last) rung's after.
+        for key, attr in (
+            ("pre_tokens", "batch_before_tokens"), ("pre_tokens", "before_tokens"),
+            ("post_tokens", "after_tokens"),
+        ):
+            if key in metadata:
+                continue
             value = getattr(event, attr, 0)
             if isinstance(value, int) and value > 0:
                 metadata[key] = value
+        window = getattr(event, "context_window", 0)
+        if not window and self._options is not None:
+            window = getattr(self._engine, "context_window", None) or (self._options.extra or {}).get("context_window")
+        if window:
+            metadata["context_window"] = window
         if trigger == "manual" and self._compact_requested_by == "app":
             # The CLI reports any /compact as manual; this one the app sent.
             metadata["requested_by"] = "app"
-        return [SystemMessage(
-            subtype="compact_boundary", data={"compact_metadata": metadata},
-        )]
+        data: Dict[str, Any] = {"compact_metadata": metadata}
+        seq = getattr(event, "seq", -1)
+        sid = getattr(event, "session_id", None)
+        if sid and isinstance(seq, int) and seq >= 0:
+            # The persisted engine stream, not the adapter lifetime, owns this
+            # identity. A resumed/replayed event must keep its recorder row.
+            data["compaction_event_id"] = f"{sid}:{seq}"
+        stamp = getattr(event, "ts", 0)
+        if stamp:
+            data["compaction_event_ts"] = stamp
+        return [SystemMessage(subtype="compact_boundary", data=data)]
 
     # ─── Per-turn usage roll-up (ErrorEvent billing backstop) ─────────
 

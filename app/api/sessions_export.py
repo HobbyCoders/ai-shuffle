@@ -341,6 +341,16 @@ async def export_session(
             msg_type = msg.get("type")
             timestamp = msg.get("metadata", {}).get("timestamp") if isinstance(msg.get("metadata"), dict) else None
 
+            if role == "system" and msg.get("systemSubtype") == "compact_boundary":
+                meta = (msg.get("systemData") or {}).get("compact_metadata") or {}
+                md_lines.append(
+                    f"*Context Compacted ({meta.get('trigger', 'unknown')}): "
+                    f"{meta.get('pre_tokens', '?')} → {meta.get('post_tokens', '?')} tokens; "
+                    f"window {meta.get('context_window', '?')}.*"
+                )
+                md_lines.append("")
+                continue
+
             # Skip empty messages and certain system messages
             if not content and msg_type not in ("tool_use", "subagent"):
                 continue

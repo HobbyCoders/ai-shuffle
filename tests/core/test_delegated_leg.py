@@ -583,11 +583,12 @@ def test_a_cli_compaction_without_counts_or_trigger_claims_neither():
 
 
 @pytest.mark.parametrize("reason", ["trigger", "overflow", "image_consumed", ""])
-def test_a_native_compaction_still_maps_to_nothing(reason):
-    """The native ladder's promotions are view-level; their marker comes from
-    the replay, not from a card per promotion."""
+def test_a_native_promotion_has_a_durable_card(reason):
+    """The synthetic replay marker cannot replace an actual compaction record."""
     from fluid.events.model import ContextCompaction
 
-    assert ha.HarnessAdapter()._translate(ContextCompaction(
+    [card] = ha.HarnessAdapter()._translate(ContextCompaction(
         session_id="ses", tier=2, reason=reason, spans=[["a", "b", "digest"]],
-    )) == []
+    ))
+    assert card.subtype == "compact_boundary"
+    assert card.data == {"compact_metadata": {"trigger": "auto"}}

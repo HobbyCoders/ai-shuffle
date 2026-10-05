@@ -58,6 +58,78 @@ def _session_with_messages(session_id="s1", **kw):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("share_safe", [False, True])
+async def test_recorded_native_compaction_in_all_exports_and_transcript_pages(client, world, mock_db, monkeypatch, share_safe):
+    from psycopg2.extras import Json
+    from app.db.base import get_db
+    from tests.core.test_native_compact_adapter import _multi_promotion_turn
+    from app.core.provider.fluid_transcript import fluid_transcript_entries
+
+    _key()
+    sid, adapter, loop, _ = await _multi_promotion_turn(mock_db, monkeypatch, profile_id="agent-a")
+    try:
+        nodes = await loop.store.load_path(loop.session_id)
+        from app.db import session_events
+        [record] = [r for r in session_events.get_events(sid)
+                    if r["event_type"] == "system.compaction_boundary"]
+        # Prove export whitelisting excludes future/legacy summary additions,
+        # not just that today's producer happens to omit them.
+        record["payload"]["data"]["summary"] = "summary-must-not-appear"
+        record["payload"]["data"]["compact_metadata"]["summary"] = "summary-must-not-appear"
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE session_events SET payload = %s WHERE id = %s",
+                           (Json(record["payload"]), record["id"]))
+            cursor.execute("UPDATE sessions SET api_user_id = %s WHERE id = %s", ("k1", sid))
+            cursor.execute("INSERT INTO fluid_sessions (session_id, head_node_id, created_at) VALUES (%s, %s, %s)",
+                           (loop.session_id, nodes[-1].node_id, nodes[0].ts))
+            for node in nodes:
+                cursor.execute("INSERT INTO fluid_session_nodes (session_id, node_id, parent_id, ts, message) VALUES (%s, %s, %s, %s, %s)",
+                               (loop.session_id, node.node_id, node.parent_id, node.ts, Json(node.message.to_dict())))
+        database.update_session(sid, sdk_session_id=loop.session_id)
+        r = client.get(f"/api/v1/sessions/{sid}/export", headers=AUTH,
+                       params={"format": "json", "share_safe": share_safe})
+        assert r.status_code == 200, r.text
+        messages = r.json()["messages"]
+        cards = [m for m in messages if m.get("subtype") == "compact_boundary"]
+        assert len(cards) == 1, "the real recorder card disappeared or duplicated in JSON export"
+        # The card falls between the new user query and its assistant response.
+        index = messages.index(cards[0])
+        assert messages[index - 1]["content"] == "next question"
+        assert messages[index + len(cards)]["role"] == "assistant"
+        for card in cards:
+            assert set(card["systemData"]) == {"compact_metadata"}
+            assert set(card["systemData"]["compact_metadata"]) == {
+                "trigger", "pre_tokens", "post_tokens", "context_window"}
+            assert card["content"] == ""
+        raw = client.get(f"/api/v1/sessions/{sid}/export", headers=AUTH,
+                         params={"format": "jsonl", "share_safe": share_safe})
+        assert raw.status_code == 200
+        assert '"compact_boundary"' in raw.text
+        md = client.get(f"/api/v1/sessions/{sid}/export", headers=AUTH,
+                        params={"format": "markdown", "share_safe": share_safe})
+        assert md.status_code == 200
+        assert "Context Compacted" in md.text
+        assert all("summary-must-not-appear" not in response.text for response in (r, raw, md))
+        detail = client.get(f"/api/v1/sessions/{sid}", headers=AUTH)
+        assert detail.status_code == 200, detail.text
+        assert any(m.get("subtype") == "compact_boundary" for m in detail.json()["messages"])
+        # Detail's response model separately drops systemData/systemSubtype;
+        # the shared projection supplies them, but that schema is out of scope.
+        page = client.get(f"/api/v1/sessions/{sid}/live", headers=AUTH, params={"message_limit": 1})
+        assert page.status_code == 200, page.text
+        pagination = page.json()["message_pagination"]
+        older = client.get(f"/api/v1/sessions/{sid}/live", headers=AUTH,
+                           params={"message_limit": 1, "before_seq": pagination["next_before_seq"]})
+        assert older.status_code == 200, older.text
+        assert any(m.get("systemSubtype") == "compact_boundary" for m in older.json()["messages"])
+        # Read-only audit inserts never alter rewind's 1:1 node projection.
+        assert len(fluid_transcript_entries(loop.session_id)) == len(nodes)
+    finally:
+        await adapter.disconnect()
+
+
 class TestExport:
     def test_markdown_renders_each_legacy_message_kind(self, client, world):
         sid = _session_with_messages()

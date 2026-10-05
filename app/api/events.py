@@ -51,6 +51,7 @@ from app.core.history_backfill import ensure_backfilled
 from app.db.session_events import (
     EMPTY_LOG_EPOCH,
     get_events,
+    get_compaction_events_before,
     get_log_epoch,
     get_max_seq,
     get_tool_use_seqs,
@@ -672,6 +673,18 @@ async def event_stream(
                 _compacted_replay_start, session_id
             )
             if first_kept > 0:
+                # Compaction rewrites the model's view, not its audit trail.
+                # Replay durable cards in sequence before the synthetic prefix
+                # marker; never move old rows to new seqs or duplicate them in
+                # the retained tail. Reconnects still use their ordinary cursor.
+                audit_rows = await asyncio.to_thread(
+                    get_compaction_events_before, session_id, first_kept
+                )
+                for row in audit_rows:
+                    frame = _frame(row)
+                    yield frame
+                    frames_sent += 1
+                    bytes_sent += len(frame)
                 frame = _boundary_frame(
                     session_id, first_kept, elided_events, tier
                 )

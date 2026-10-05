@@ -19,6 +19,17 @@ def test_seqs_start_at_one_and_are_contiguous(mock_db):
     assert [e["event_type"] for e in events] == ["a", "b", "c", "d", "e"]
 
 
+def test_compaction_prefix_keeps_newest_100_at_boundary(mock_db):
+    se.append_events("s1", [{"type": "system.compaction_boundary", "payload": {"index": i}}
+                             for i in range(102)])
+    se.append_events("s1", [{"type": "other"}])
+    rows = se.get_compaction_events_before("s1", 102)
+    assert len(rows) == 100
+    assert [r["seq"] for r in rows] == list(range(2, 102))
+    assert len(se.get_compaction_events_before("s1", 101)) == 100
+    assert len(se.get_compaction_events_before("s1", 100)) == 99
+
+
 def test_per_session_independent_seqs(mock_db):
     se.append_events("s1", [{"type": "a"}])
     fs, ls = se.append_events("s2", [{"type": "z"}])

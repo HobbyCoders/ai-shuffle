@@ -354,6 +354,16 @@ class ContextCompaction(Event):
     # including on every event persisted before these fields existed.
     before_tokens: int = 0
     after_tokens: int = 0
+    # Only the last rung of a batch produces its durable host audit card. Keep
+    # every rung event for lossless rehydration (image and text trims differ).
+    # Defaults preserve older and delegated events as standalone boundaries.
+    batch_final: bool = True
+    context_window: int = 0
+    # The first rung's ``before_tokens``: the size the whole batch started
+    # from, so the card reads first-before → last-after. A provider-overflow
+    # escalation sizes each rung on its own, so a later rung's
+    # ``before_tokens`` is only what the previous rung left. 0 when unknown.
+    batch_before_tokens: int = 0
     # The delegated leg only: the summary the claude CLI wrote for this
     # compaction, read back from its transcript, and ``node_id`` names the
     # last node the CLI had seen before it (``None`` between turns). The CLI's

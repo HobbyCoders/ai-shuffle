@@ -2522,11 +2522,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             await self._emit_pre_compact(sid, turn_id, promotions)
             tail = self._note_rewrite_tail(self._compactor.view(nodes), promotions)
             for promo in promotions:
-                await self._emit_compaction(sid, turn_id, promo, rewrite_tail_tokens_est=tail)
+                await self._emit_compaction(sid, turn_id, promo, rewrite_tail_tokens_est=tail, batch_final=False)
             await self._emit(ContextCompaction(
                 session_id=sid, turn_id=turn_id,
                 tier=max(p.tier for p in promotions),
                 reason=MANUAL_COMPACT_REASON,
+                context_window=self.context_window or 0,
                 reclaimed_chars=sum(p.reclaimed_chars for p in promotions),
                 before_tokens=int(promotions[0].before_tokens * scale),
                 after_tokens=int(promotions[-1].after_tokens * scale),
@@ -3055,6 +3056,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         *,
         schedule: dict[str, Any] | None = None,
         rewrite_tail_tokens_est: int | None = None,
+        batch_final: bool = True,
+        batch_before_tokens: int = 0,
     ) -> None:
         await self._emit(ContextCompaction(
             session_id=sid, turn_id=turn_id,
@@ -3063,6 +3066,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             spans=[list(s) for s in promo.spans],
             reclaimed_chars=promo.reclaimed_chars,
             before_tokens=promo.before_tokens, after_tokens=promo.after_tokens,
+            batch_final=batch_final, context_window=self.context_window or 0,
+            batch_before_tokens=batch_before_tokens,
             decision_reason=promo.decision_reason,
             first_changed_message=promo.first_changed_message,
             token_basis=promo.token_basis,
@@ -3278,10 +3283,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 await self._emit_pre_compact(sid, turn_id, promotions)
             schedule_fields = self._compactor.schedule_event_fields()
             tail = self._note_rewrite_tail(rendered, promotions) if promotions else None
-            for promo in promotions:
+            for index, promo in enumerate(promotions):
                 await self._emit_compaction(
                     sid, turn_id, promo,
                     schedule=schedule_fields, rewrite_tail_tokens_est=tail,
+                    batch_final=index == len(promotions) - 1,
+                    batch_before_tokens=promotions[0].before_tokens,
                 )
             projected_prompt = self._estimate_request_input_tokens(history)
             drops_sticky = self._drops_sticky_on_empty()
@@ -3617,9 +3624,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                         tail = self._note_rewrite_tail(
                             self._compactor.view(nodes), consumed
                         )
-                        for promo in consumed:
+                        for index, promo in enumerate(consumed):
                             await self._emit_compaction(
-                                sid, turn_id, promo, rewrite_tail_tokens_est=tail
+                                sid, turn_id, promo, rewrite_tail_tokens_est=tail,
+                                batch_final=index == len(consumed) - 1,
+                                batch_before_tokens=consumed[0].before_tokens,
                             )
                         continue
                 if (
@@ -3653,9 +3662,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                         tail = self._note_rewrite_tail(
                             self._compactor.view(nodes), escalations
                         )
-                        for promo in escalations:
+                        for index, promo in enumerate(escalations):
                             await self._emit_compaction(
-                                sid, turn_id, promo, rewrite_tail_tokens_est=tail
+                                sid, turn_id, promo, rewrite_tail_tokens_est=tail,
+                                batch_final=index == len(escalations) - 1,
+                                batch_before_tokens=escalations[0].before_tokens,
                             )
                         continue
                 # The failed call's usage was folded in above (before the
