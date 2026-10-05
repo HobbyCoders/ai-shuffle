@@ -8,6 +8,18 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## 0.9.1
+
+- The phone chat controls are redesigned: a larger composer, a quick bar for model, effort and access, one "Chat controls" panel, and prompts you approve or deny above the composer. The Android app can switch the worker it shows from the "Connected to" bar.
+- The Agents page has a list and a separate detail view with tabs. Subagents share one default model, set under Agents > Models; a pin on an agent still wins.
+- An agent starts a subagent or a new chat on a different model only when you named that model or approve a prompt.
+- Subscription providers have a "Resume when the limit resets" setting, off by default. A chat that stopped at a usage limit continues after the reset, compacting first if you leave that on.
+- A delegated chat warns before a send that will be expensive after a long pause, with a "Compact first" button. `/compact` now works in native sessions.
+- Running tasks have one list that groups swarms and opens an agent's transcript. Notifications appear in one place under the chat header.
+- Archived chats are read-only until you restore them. "Update and restart" waits for running work and says so. Moving a chat to another worker mid-turn waits for the turn to end.
+- Notification sounds are removed.
+- Fixed: `/compact` in delegated Claude chats now reduces context, voice calls no longer cut speech short or drop words, resumed subagents show as running, and the Windows installer's update check no longer stalls on a first-run dialog.
+
 ## 0.9.0
 
 - The persistent assistant has a simpler, talk-first view. It asks for approval in the conversation, reports back when work it started finishes, and keeps to a daily spend limit and a time limit per job that you set on the Assistant page.
