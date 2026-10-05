@@ -92,6 +92,7 @@ def world(mock_db, monkeypatch, tmp_path):
     db.create_profile("pinned", "Pinned", None, {"provider_models": {"__native__": "opus"}})
     db.create_session(session_id="parent", profile_id="caller", title="Parent")
     monkeypatch.setattr(td, "_credential_gap", lambda provider: None)
+    monkeypatch.setattr(mo, "_APPROVED", set())
     monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda row: str(tmp_path))
     subagent_default.write("sonnet")
     seen, prompts = [], []
@@ -122,13 +123,25 @@ async def _task(args, **kwargs):
 # What counts as the user's own words
 # ---------------------------------------------------------------------------
 
-def test_user_texts_are_the_last_message_and_what_was_steered_after_it(world):
-    _turn("parent", "user", "earlier: use sol")
+def test_user_texts_are_every_message_the_user_typed_in_the_chat(world):
+    _turn("parent", "worktree", "earlier: use sol")
     _turn("parent", "agent_message", "peer says: use astra")
     _turn("parent", "user", "now continue")
     _turn("parent", "queue", "and use grok", steered=True)
     _turn("parent", "auto_continue", "continue")
-    assert mo.user_texts("parent") == ["now continue", "and use grok"]
+    _turn("parent", "connector", "a channel member: use haiku")
+    turns.enqueue_turn("parent", "user", prompt="not sent yet: use sonnet", profile_id="caller")
+    assert mo.user_texts("parent") == ["earlier: use sol", "now continue", "and use grok"]
+
+
+async def test_a_model_named_earlier_in_the_chat_still_counts(unpinned):
+    """The owner's standing instruction outlives their next message."""
+    _, seen, prompts, _ = unpinned
+    _turn("parent", "worktree", OWNER_SENTENCE)
+    _turn("parent", "user", "Also make sure UI changes reflect on mobile and desktop")
+    result = await _task({"agent": "designer", "model": "opus"})
+    assert result["ok"] and result["model_override"]["source"] == mo.NAMED
+    assert prompts == [] and len(seen) == 1
 
 
 def test_a_task_worker_reads_its_top_level_chat(world):
@@ -173,6 +186,66 @@ async def test_named_model_runs_over_the_pin_and_moves_provider_without_a_prompt
     assert "model_note" not in seen[1]
 
 
+OWNER_SENTENCE = ("Here's the list of things that I want you to go through and fix. "
+                  "You will spin up Opus sub-agents to complete work for you.")
+
+
+@pytest.fixture
+def unpinned(world):
+    """An agent with no pin of its own, on a Fable subagent default."""
+    world[0].create_profile("designer", "Designer", None, {"provider_models": {"__voice__": "opus"}})
+    subagent_default.write("fable")
+    return world
+
+
+@pytest.mark.parametrize("source", ["user", "worktree", "api"])
+async def test_the_owners_sentence_names_opus_for_an_unpinned_agent(unpinned, source):
+    """The first message of a chat started on a new branch is a ``worktree``
+    turn; one sent through the HTTP API is an ``api`` turn. Both are typed by
+    the user, so naming Opus there is enough: no prompt, no refusal."""
+    _, seen, prompts, _ = unpinned
+    _turn("parent", source, OWNER_SENTENCE)
+    result = await _task({"agent": "designer", "model": "opus"})
+    assert result["ok"], result
+    assert result["model_override"] == {"source": mo.NAMED, "instead_of": "fable"}
+    assert seen[0]["model_id"] == "opus"
+    assert prompts == []
+
+
+@pytest.mark.parametrize("text", [
+    OWNER_SENTENCE,
+    "use opus",
+    "run them on Opus 4",
+    "OPUS sub-agents please",
+    "spin up opus-powered agents",
+    "Claude Opus for the reviewers",
+    "claude-opus-5",
+])
+def test_ordinary_phrasings_of_opus_count_as_named(unpinned, text):
+    assert mo.named_by_user("opus", [text])
+
+
+@pytest.mark.parametrize("text", [
+    "You will spin up sub-agents to complete work for you.",  # no model at all
+    "You will spin up Sonnet sub-agents to complete work for you.",  # another model
+    "write it as an opusculum",  # not the whole word
+])
+async def test_a_branch_chat_that_does_not_name_opus_still_asks(unpinned, text):
+    _, seen, prompts, _ = unpinned
+    _turn("parent", "worktree", text)
+    result = await _task({"agent": "designer", "model": "opus"})
+    assert not result["ok"] and result["reason"] == "model_not_requested"
+    assert len(prompts) == 1 and not seen
+
+
+async def test_a_connector_message_naming_the_model_does_not_count(unpinned):
+    """A connector channel can carry other people's messages."""
+    _, seen, prompts, _ = unpinned
+    _turn("parent", "connector", "use Opus sub-agents")
+    result = await _task({"agent": "designer", "model": "opus"})
+    assert not result["ok"] and len(prompts) == 1 and not seen
+
+
 async def test_unnamed_model_asks_the_owner_in_every_mode_and_approval_runs_it(world):
     _, seen, prompts, answer = world
     _turn("parent", "user", "review the branch")
@@ -200,6 +273,96 @@ async def test_a_denied_or_unanswered_prompt_starts_nothing(world, answer_messag
     assert not seen and len(prompts) == 1
 
 
+async def test_one_approval_covers_that_model_for_the_rest_of_the_chat(unpinned):
+    db, seen, prompts, answer = unpinned
+    _turn("parent", "worktree", "You will spin up sub-agents to complete work for you.")
+    answer["result"] = PermissionResultAllow(updated_input={})
+    first = await _task({"agent": "designer", "model": "opus"})
+    assert first["ok"] and first["model_override"]["source"] == mo.APPROVED
+    assert len(prompts) == 1
+    # The same switch again, for another agent and in a later message: no prompt.
+    answer["result"] = PermissionResultDeny(message="User denied permission")
+    _turn("parent", "user", "and one more")
+    again = await _task({"agent": "designer", "model": "opus"})
+    assert again["ok"] and again["model_override"] == {"source": mo.APPROVED, "instead_of": "fable"}
+    db.create_profile("writer", "Writer", None, {})
+    other_agent = await _task({"agent": "writer", "model": "opus"})
+    assert other_agent["ok"], other_agent
+    assert len(prompts) == 1 and len(seen) == 3
+    # Another model is a new question, and so is another chat.
+    assert not (await _task({"agent": "designer", "model": "haiku"}))["ok"]
+    assert len(prompts) == 2
+    sessions.create_session("other", "caller", title="Other")
+    _turn("other", "user", "go")
+    elsewhere = await td.dispatch_task_tool(
+        {"prompt": "go", "mode": "sync", "agent": "designer", "model": "opus"},
+        caller_session_id="other", caller_provider_id=None)
+    assert not elsewhere["ok"] and len(prompts) == 3
+
+
+async def test_a_task_worker_shares_its_chats_approval(unpinned):
+    _, _, prompts, answer = unpinned
+    _turn("parent", "user", "review the branch")
+    answer["result"] = PermissionResultAllow(updated_input={})
+    assert (await _task({"agent": "designer", "model": "opus"}))["ok"]
+    from app.core.provider_agent import WORKER_TURN_SOURCE
+
+    sessions.create_session("child", "caller", title="Child", parent_session_id="parent",
+                            is_worker=True, hidden=True)
+    _turn("child", WORKER_TURN_SOURCE, "Review it")
+    answer["result"] = PermissionResultDeny(message="User denied permission")
+    assert await mo.confirm("child", "caller", model="opus", baseline="fable", action="start x") == mo.APPROVED
+    assert len(prompts) == 1
+
+
+async def test_a_denial_is_not_remembered(unpinned):
+    _, _, prompts, answer = unpinned
+    _turn("parent", "user", "review the branch")
+    assert not (await _task({"agent": "designer", "model": "opus"}))["ok"]
+    answer["result"] = PermissionResultAllow(updated_input={})
+    assert (await _task({"agent": "designer", "model": "opus"}))["ok"]
+    assert len(prompts) == 2
+
+
+@pytest.mark.parametrize("allow", [True, False])
+async def test_parallel_calls_needing_the_same_switch_share_one_prompt(unpinned, monkeypatch, allow):
+    """Five Task calls in one parallel block raise one prompt, not five."""
+    import asyncio
+    from app.core.permission_handler import permission_handler
+
+    _, seen, _, _ = unpinned
+    _turn("parent", "user", "review the branch")
+    asked, release = [], asyncio.Event()
+
+    async def request_permission(**kwargs):
+        asked.append(kwargs)
+        await release.wait()
+        return (PermissionResultAllow(updated_input={}) if allow
+                else PermissionResultDeny(message="User denied permission"))
+
+    monkeypatch.setattr(permission_handler, "request_permission", request_permission)
+    looked = []
+
+    class Asking(dict):
+        def get(self, key, default=None):
+            looked.append(key)
+            return super().get(key, default)
+
+    monkeypatch.setattr(mo, "_ASKING", Asking())
+    calls = [asyncio.ensure_future(_task({"agent": "designer", "model": "opus"})) for _ in range(5)]
+    for _ in range(500):  # until every call has asked or waits on that prompt
+        if len(looked) >= 5:
+            break
+        await asyncio.sleep(0.01)
+    release.set()
+    results = await asyncio.gather(*calls)
+    assert len(asked) == 1
+    assert all(result["ok"] is allow for result in results), results
+    if not allow:
+        assert all("declined" in result["error"] for result in results)
+    assert len(seen) == (5 if allow else 0)
+
+
 async def test_away_mode_never_switches(world, monkeypatch):
     """The real permission path: Away defers the prompt, so nothing switches."""
     from app.core.permission_handler import PermissionHandler, permission_handler
@@ -220,6 +383,52 @@ async def test_a_peer_message_or_tool_output_naming_the_model_does_not_count(wor
     _turn("parent", "user", "go on")
     _turn("parent", "agent_message", "Peer: run pinned on astra")
     result = await _task({"agent": "pinned", "model": "prov:lane:astra"})
+    assert not result["ok"] and len(prompts) == 1 and not seen
+
+
+async def _answer_question(monkeypatch, question, answer):
+    """Ask ``question`` the way AskUserQuestion does and answer it in the app."""
+    from unittest.mock import AsyncMock
+    from app.core.user_question_handler import user_question_handler
+
+    monkeypatch.setattr("app.core.turn_manager._kick", lambda sid: None)
+    monkeypatch.setattr("app.core.turn_claim.notify_turns_changed", lambda sid: None)
+    monkeypatch.setattr("app.core.interaction_wait.notify_changed", lambda sid: None)
+    request_id = f"q-{len(question)}-{len(answer)}"
+    await user_question_handler.post_question(
+        request_id=request_id, tool_use_id="tu", session_id="parent",
+        questions=[{"question": question}], broadcast_func=AsyncMock())
+    assert await user_question_handler.respond(request_id, "parent", {question: answer})
+    with get_db() as conn:  # the answer turn has run
+        conn.cursor().execute("UPDATE turns SET state='completed' WHERE session_id='parent' AND state='queued'")
+
+
+async def test_the_agents_own_question_does_not_name_a_model(unpinned, monkeypatch):
+    """An answer turn carries the agent's question text; only the answer is the user's."""
+    _, seen, prompts, _ = unpinned
+    _turn("parent", "user", "review the branch")
+    await _answer_question(monkeypatch, "Should the reviewers run on Opus?", "No, keep the default")
+    assert "No, keep the default" in "\n".join(mo.user_texts("parent"))
+    result = await _task({"agent": "designer", "model": "opus"})
+    assert not result["ok"] and result["reason"] == "model_not_requested"
+    assert len(prompts) == 1 and not seen
+
+
+async def test_a_model_the_user_gave_as_an_answer_counts(unpinned, monkeypatch):
+    _, seen, prompts, _ = unpinned
+    _turn("parent", "user", "review the branch")
+    await _answer_question(monkeypatch, "Which model should the reviewers use?", "Opus")
+    result = await _task({"agent": "designer", "model": "opus"})
+    assert result["ok"] and result["model_override"]["source"] == mo.NAMED
+    assert prompts == [] and len(seen) == 1
+
+
+async def test_a_message_a_voice_model_handed_to_the_chat_does_not_count(unpinned):
+    """A voice call's hand-off is written by the voice model (or wraps the
+    whole call transcript), so it is not the user's own words."""
+    _, seen, prompts, _ = unpinned
+    _turn("parent", "user", "Use Opus sub-agents for the review", payload={"voice_delegation": True})
+    result = await _task({"agent": "designer", "model": "opus"})
     assert not result["ok"] and len(prompts) == 1 and not seen
 
 

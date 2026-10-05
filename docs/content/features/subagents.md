@@ -32,8 +32,10 @@ subagent or chat to that provider.
 
 The app, not the agent, decides whether a different model is used:
 
-- **You named it.** The app reads what you typed in the calling chat since your
-  last message, including messages you sent while it was working. For a
+- **You named it.** The app reads every message you typed in the calling chat,
+  including the first message of a chat started on a new branch, messages you
+  sent while it was working and messages sent through the API, so "use Opus
+  sub-agents" at the start of a chat keeps counting for the whole chat. For a
   subagent it reads the chat at the top of the chain, and for a chat another
   chat started, the chat where you typed the request. A model counts as named
   when its id, Claude name or display name appears, ignoring case and
@@ -44,7 +46,9 @@ The app, not the agent, decides whether a different model is used:
   chat on the model instead of the usual one. It appears in every permission
   mode, Bypass included, and a remembered answer never skips it. If you decline,
   do not answer, or the chat is in Away mode, nothing is started and the agent
-  is told to leave `model` out.
+  is told to leave `model` out. A yes covers that model for the rest of the
+  chat, its subagents included, and several starts that need the same answer
+  at once share one prompt. After an app restart you are asked once more.
 
 A model equal to the one that would run anyway needs no check. The choice
 covers one start only: it never changes an agent's pin or the subagent default.
@@ -55,7 +59,10 @@ running-tasks list marks such a subagent's model "your choice".
 
 Limits of the check: it reads only messages you typed into the chats on this
 worker. Work begun from another worker, from an automation or from a connector
-always gets the prompt. A name that appears in a document you pasted counts as
+always gets the prompt. When you answer a question the agent asked, only your
+answer counts, not the question, and a request a voice call hands to the chat
+does not count because the voice model wrote it. A model you mentioned only to rule it out ("not Opus")
+still counts as named. A name that appears in a document you pasted counts as
 named.
 
 ## Task workers across an app restart

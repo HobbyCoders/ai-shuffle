@@ -9,13 +9,19 @@ curated list, in the app's id format (``sonnet``, ``prov:<providerId>:<modelId>`
 The model the agent "feels like" is never used on its word. A different model
 runs only when the user asked for it, checked here by the host:
 
-1. **Named by the user.** :func:`user_texts` collects what the user typed in
-   the calling chat since (and including) their last message: the last turn
-   with source ``user``/``queue`` and every later message steered into it. A
-   Task worker is followed up to its top-level chat, and a chat another chat
-   started with StartSession to the user message that began that chain.
-   Peer messages (``agent_message`` turns), tool output, notices and model
-   text are never turns of those sources, so they never count.
+1. **Named by the user.** :func:`user_texts` collects every message the user
+   typed in the calling chat (:data:`USER_SOURCES`: ``user``, ``queue``, the
+   first message of a chat started on a new branch, ``worktree``, and an HTTP
+   API message, ``api``), so a standing instruction such as "spin up Opus
+   sub-agents" keeps counting after later messages. A Task worker is followed
+   up to its top-level chat, and a chat another chat started with
+   StartSession to the user message that began that chain. Peer messages
+   (``agent_message`` turns), connector channels, tool output, notices and
+   model text are never turns of those sources, so they never count. Two
+   turns of those sources hold text the user did not write and are read
+   narrower: an answer to the agent's question counts its answer, not the
+   question, and a voice call's hand-off (written by the voice model) does
+   not count.
    :func:`named_by_user` then looks for the model's id, alias or display
    name, case-insensitively with separators ignored ("GPT-6 Astra",
    "gpt 6 astra", "gpt6astra"), or for one distinctive word of its name
@@ -24,7 +30,11 @@ runs only when the user asked for it, checked here by the host:
    permission prompt ("Start ... on GPT-6 Astra instead of Opus?"), in every
    permission mode, Bypass included, and never from a saved rule. Away mode,
    a denial or no answer refuses the start; nothing falls back to the
-   requested model or to the session's model.
+   requested model or to the session's model. A yes covers that model for
+   the rest of the chat (its top-level chat, for a Task worker), and starts
+   that need the same answer while the prompt is open wait for it instead
+   of each raising a prompt of their own. The approval is kept in memory, so
+   after a restart the owner is asked once more.
 
 The choice applies to that one start. It never changes an agent's pin or the
 subagent default.
@@ -59,6 +69,11 @@ _GENERIC_WORDS = frozenset({
     "anthropic", "openai", "google", "meta", "xai", "mistral", "deepseek", "qwen",
 })
 _CHAIN_LIMIT = 16
+
+# (top-level chat id, model) pairs the owner approved at a prompt, and the
+# prompts open right now, by the same key (see :func:`confirm`).
+_APPROVED: set = set()
+_ASKING: Dict[Tuple[str, str], Any] = {}
 
 
 @dataclass(frozen=True)
@@ -271,12 +286,74 @@ def provider_label(provider_id: Optional[str]) -> str:
 # What the user typed
 # ---------------------------------------------------------------------------
 
-def _user_prompts_since(cursor, session_id: str, position: Optional[int] = None) -> List[str]:
-    """The user's messages in ``session_id`` from ``position`` on, else from
-    their last message on (that message plus everything steered after it)."""
+# Turn sources whose prompt is what the user typed into the chat: a message
+# (``user``), one sent while a turn ran (``queue``), the first message of a
+# chat started on a new branch (``worktree``) and a message sent through the
+# HTTP API (``api``). Connector channels (other people can post there), peer
+# messages, wakes, resumes and automations are not.
+USER_SOURCES = ("user", "queue", "worktree", "api")
+_SOURCES_SQL = ", ".join(f"'{source}'" for source in USER_SOURCES)
+
+
+_EVERY = object()
+
+
+def _answer_text(cursor, session_id: str, request_id: Any) -> Optional[str]:
+    """The user's answers to the agent's question ``request_id``, without the
+    question itself (the agent wrote that), or None."""
+    from app.core.user_question_handler import QUESTION_KIND, resolve_answer_envelope
+    from app.db.base import parse_jsonb
+
+    if not request_id:
+        return None
+    cursor.execute("SELECT payload, answer FROM pending_interactions WHERE session_id=%s AND kind=%s",
+                   (session_id, QUESTION_KIND))
+    for row in cursor.fetchall():
+        payload = parse_jsonb(row.get("payload")) or {}
+        if not isinstance(payload, dict) or payload.get("request_id") != request_id:
+            continue
+        answers = resolve_answer_envelope(parse_jsonb(row.get("answer")))
+        keys = [str(q.get("question") or "") for q in payload.get("questions") or [] if isinstance(q, dict)]
+        return "\n".join(
+            ", ".join(map(str, answers[key])) if isinstance(answers[key], list) else str(answers[key])
+            for key in keys if key in answers)
+    return None
+
+
+def _typed(cursor, session_id: str, rows: Iterable[Dict[str, Any]]) -> List[str]:
+    """The text the user typed in each turn row: a voice call's hand-off
+    (written by the voice model) is left out, and an answer to the agent's
+    question keeps only the answer."""
+    from app.core.turn_manager import VOICE_DELEGATION
+    from app.db.base import parse_jsonb
+
+    texts = []
+    for row in rows:
+        prompt = row.get("prompt")
+        payload = parse_jsonb(row.get("payload")) or {}
+        payload = payload if isinstance(payload, dict) else {}
+        if not isinstance(prompt, str) or payload.get(VOICE_DELEGATION):
+            continue
+        if "question_request_id" in payload:
+            prompt = _answer_text(cursor, session_id, payload["question_request_id"])
+            if prompt is None:
+                continue
+        texts.append(prompt)
+    return texts
+
+
+def _user_prompts_since(cursor, session_id: str, position: Any = None) -> List[str]:
+    """The user's messages in ``session_id`` from ``position`` on, every one
+    for :data:`_EVERY`, else from their last message on (that message plus
+    everything steered after it)."""
+    if position is _EVERY:
+        cursor.execute(
+            f"SELECT prompt, payload FROM turns WHERE session_id=%s AND source IN ({_SOURCES_SQL}) "
+            "AND state <> 'queued' ORDER BY position", (session_id,))
+        return _typed(cursor, session_id, cursor.fetchall())
     if position is None:
         cursor.execute(
-            "SELECT position FROM turns WHERE session_id=%s AND source IN ('user','queue') "
+            f"SELECT position FROM turns WHERE session_id=%s AND source IN ({_SOURCES_SQL}) "
             "AND state <> 'queued' AND COALESCE(stop_reason, '') <> 'steered' "
             "ORDER BY position DESC LIMIT 1", (session_id,))
         row = cursor.fetchone()
@@ -284,9 +361,9 @@ def _user_prompts_since(cursor, session_id: str, position: Optional[int] = None)
             return []
         position = row["position"]
     cursor.execute(
-        "SELECT prompt FROM turns WHERE session_id=%s AND source IN ('user','queue') "
+        f"SELECT prompt, payload FROM turns WHERE session_id=%s AND source IN ({_SOURCES_SQL}) "
         "AND state <> 'queued' AND position >= %s ORDER BY position", (session_id, position))
-    return [row["prompt"] for row in cursor.fetchall() if isinstance(row.get("prompt"), str)]
+    return _typed(cursor, session_id, cursor.fetchall())
 
 
 def _context_turn(session_id: str) -> Optional[Dict[str, Any]]:
@@ -294,6 +371,17 @@ def _context_turn(session_id: str) -> Optional[Dict[str, Any]]:
     from app.db import turns
 
     return turns.get_live_turn(session_id) or turn_scheduler._latest_context_turn(session_id)
+
+
+def chat_of(session_id: str) -> str:
+    """The top-level chat ``session_id`` belongs to (itself for a chat). Never raises."""
+    try:
+        from app.core.task_dispatch import caller_chain
+
+        return caller_chain(session_id)[1] or session_id
+    except Exception:  # noqa: BLE001 — the session itself is the narrowest scope
+        logger.debug("Could not resolve the chat of %s", session_id, exc_info=True)
+        return session_id
 
 
 def user_texts(session_id: str) -> List[str]:
@@ -307,7 +395,7 @@ def user_texts(session_id: str) -> List[str]:
         seen = {current}
         with get_db() as conn:
             cursor = conn.cursor()
-            texts: List[str] = _user_prompts_since(cursor, current)
+            texts: List[str] = _user_prompts_since(cursor, current, _EVERY)
             for _ in range(_CHAIN_LIMIT):
                 # A chat StartSession began: follow its chain to the chat (and
                 # the user turn) it started from.
@@ -321,7 +409,7 @@ def user_texts(session_id: str) -> List[str]:
                     break  # begun on another worker (its messages are not here), or a loop
                 current = origin["session_id"]
                 seen.add(current)
-                from_user = origin["source"] in ("user", "queue")
+                from_user = origin["source"] in USER_SOURCES
                 texts.extend(_user_prompts_since(cursor, current, origin["position"] if from_user else None))
         return texts
     except Exception:  # noqa: BLE001 — no evidence means the owner is asked
@@ -357,6 +445,40 @@ async def confirm(session_id: str, profile_id: Optional[str], *, model: str,
     texts = await asyncio.to_thread(user_texts, session_id)
     if texts and await asyncio.to_thread(named_by_user, model, texts):
         return NAMED
+    key = (await asyncio.to_thread(chat_of, session_id), model)
+    while key not in _APPROVED:
+        pending = _ASKING.get(key)
+        if pending is None:
+            break
+        # The same switch is already being asked: share that one answer.
+        outcome = await asyncio.shield(pending)
+        if outcome is None:
+            continue  # that prompt was abandoned before an answer
+        if outcome != APPROVED:
+            raise PermissionError(_refusal(model, baseline, f"the user did not name it in this chat and {outcome}"))
+    if key in _APPROVED:
+        return APPROVED
+    future = asyncio.get_running_loop().create_future()
+    _ASKING[key] = future
+    outcome = None
+    try:
+        outcome = await _ask_owner(session_id, profile_id, model=model, baseline=baseline, action=action)
+        if outcome == APPROVED:
+            _APPROVED.add(key)
+    finally:
+        _ASKING.pop(key, None)
+        if not future.done():
+            future.set_result(outcome)
+    if outcome != APPROVED:
+        raise PermissionError(_refusal(model, baseline, f"the user did not name it in this chat and {outcome}"))
+    return APPROVED
+
+
+async def _ask_owner(session_id: str, profile_id: Optional[str], *, model: str,
+                     baseline: Optional[str], action: str) -> str:
+    """:data:`APPROVED`, else why not ("the owner declined the switch.")."""
+    import asyncio
+
     from app.core import provider_agent_approvals
     from app.core.agent_types import PermissionResultAllow
     from app.core.permission_handler import permission_handler
@@ -375,7 +497,8 @@ async def confirm(session_id: str, profile_id: Optional[str], *, model: str,
         "title": question,
         "display_name": "Switch model",
         "description": question,
-        "decision_reason": "The agent asked for a model you did not name in this chat.",
+        "decision_reason": ("The agent asked for a model you did not name in this chat. "
+                            "A yes covers it for the rest of this chat."),
         "skip_saved_rules": True,
     }
     try:
@@ -389,14 +512,12 @@ async def confirm(session_id: str, profile_id: Optional[str], *, model: str,
         return APPROVED
     message = str(getattr(result, "message", "") or "")
     if message.startswith("Owner away") or "away" in message.casefold():
-        why = "the owner is away, so the switch was not approved."
-    elif "timed out" in message:
-        why = "the owner did not answer the prompt."
-    elif result is None:
-        why = "the owner could not be asked."
-    else:
-        why = "the owner declined the switch."
-    raise PermissionError(_refusal(model, baseline, f"the user did not name it in this chat and {why}"))
+        return "the owner is away, so the switch was not approved."
+    if "timed out" in message:
+        return "the owner did not answer the prompt."
+    if result is None:
+        return "the owner could not be asked."
+    return "the owner declined the switch."
 
 
 # ---------------------------------------------------------------------------
