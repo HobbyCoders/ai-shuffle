@@ -10,7 +10,7 @@ Projects link AI Shuffle to directories on your system, providing file access, g
 
 ## Overview
 
-A project is a reference to a directory (e.g., your code repository). When you create a session with a project, Claude has access to that directory's files and can browse, read, and modify them.
+A project is a reference to a directory (e.g., your code repository). When you create a session with a project, the agent has access to that directory's files and can browse, read, and modify them.
 
 ## Creating a Project
 
@@ -68,7 +68,7 @@ Git worktrees allow parallel development on multiple branches without switching:
 
 1. Create a session with a worktree (specify branch name)
 2. AI Shuffle creates a git worktree for that branch
-3. Claude works in the isolated worktree directory
+3. The agent works in the isolated worktree directory
 4. Changes stay separate from the main branch
 
 A branch chosen in the new-session composer's branch chip is a one-time choice,
@@ -115,4 +115,4 @@ This finds Claude Code CLI sessions recorded for this project's directory (in th
 
 ## Chat History
 
-Previous sessions in a project are available for @ mention references, allowing Claude to reference context from past conversations.
+Previous sessions in a project are available for @ mention references, allowing the agent to reference context from past conversations.

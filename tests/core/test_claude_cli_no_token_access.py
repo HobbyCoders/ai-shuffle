@@ -123,7 +123,7 @@ def test_check_prerequisites_asks_the_cli(monkeypatch, cli_home, caplog):
     _forbid_opening(monkeypatch, cli_home)
     monkeypatch.setattr(cs, "probe", lambda resolver=None: _status(False))
     monkeypatch.setattr(startup, "_check_browser_mcp_prereqs", lambda: None)
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("INFO"):
         startup.check_prerequisites()
     assert "claude auth login" in caplog.text
     assert cs.peek() is not None  # warms the cache /health reads

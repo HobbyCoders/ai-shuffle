@@ -75,7 +75,30 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 	const options: PickerOption[] = [];
 	const { providerModelsOnly = false, providerScope, familyBlurbs = false } = opts;
 
-	// Bundled Claude metadata also labels historical sessions. It is not proof
+	for (const p of getProviders()) {
+		if (providerScope && providerScope !== p.id) continue;
+		const display = getProviderDisplay(p);
+		groups.push({
+			key: p.id,
+			name: display.name,
+			subtext: display.subtext,
+			glyph: providerGlyphKind(p.provider_type),
+			isApi: p.auth_kind === 'api'
+		});
+		for (const pm of p.models) {
+			options.push({
+				value: encodeProviderModel(p.id, pm.id),
+				label: pm.label,
+				description: pm.id,
+				groupKey: p.id,
+				group: display.name,
+				groupSubtext: display.subtext
+			});
+		}
+	}
+
+	// Claude is one provider group among the others, after the connected
+	// providers. Bundled Claude metadata also labels historical sessions. It is not proof
 	// that this worker has an account or API key that can run those models.
 	const claudeAuth = getClaudeAuth();
 	if (claudeAuth.auth_kind && !providerModelsOnly && (!providerScope || providerScope === NATIVE_PROVIDER_KEY)) {
@@ -101,28 +124,6 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 				groupKey: NATIVE_GROUP_KEY,
 				group: claude.name,
 				groupSubtext: claude.subtext
-			});
-		}
-	}
-
-	for (const p of getProviders()) {
-		if (providerScope && providerScope !== p.id) continue;
-		const display = getProviderDisplay(p);
-		groups.push({
-			key: p.id,
-			name: display.name,
-			subtext: display.subtext,
-			glyph: providerGlyphKind(p.provider_type),
-			isApi: p.auth_kind === 'api'
-		});
-		for (const pm of p.models) {
-			options.push({
-				value: encodeProviderModel(p.id, pm.id),
-				label: pm.label,
-				description: pm.id,
-				groupKey: p.id,
-				group: display.name,
-				groupSubtext: display.subtext
 			});
 		}
 	}

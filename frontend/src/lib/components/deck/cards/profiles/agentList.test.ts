@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { Profile } from '$lib/api/client';
 import {
 	FOLDER_NONE,
+	defaultModelBinding,
 	isPinned,
 	pinnedModel,
 	profileModels,
@@ -110,5 +111,19 @@ describe('uniqueAgentId', () => {
 		expect(uniqueAgentId('Release Notes!', [])).toBe('release-notes');
 		expect(uniqueAgentId('Scribe copy', ['scribe-copy', 'scribe-copy-2'])).toBe('scribe-copy-3');
 		expect(uniqueAgentId('  ', [])).toBe('agent');
+	});
+});
+
+describe('defaultModelBinding', () => {
+	it('pins a Claude alias on the native key', () => {
+		expect(defaultModelBinding('sonnet')).toEqual({ __native__: 'sonnet' });
+	});
+	it('pins a provider default on its own key, never the native one', () => {
+		expect(defaultModelBinding('prov:row-1:gpt-5.5')).toEqual({ 'row-1': 'prov:row-1:gpt-5.5' });
+		expect(defaultModelBinding('prov:or:meta/llama:free')).toEqual({ or: 'prov:or:meta/llama:free' });
+	});
+	it('pins nothing without a default', () => {
+		expect(defaultModelBinding('')).toEqual({});
+		expect(defaultModelBinding(null)).toEqual({});
 	});
 });

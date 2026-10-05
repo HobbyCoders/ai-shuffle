@@ -328,13 +328,37 @@ def worker_cap_error(worker_session_id: str, seconds: float, origin: Optional[st
     )
 
 
-def scheduled_run_guidance(profile: Optional[dict] = None) -> Optional[str]:
-    """The creation-time reminder, or None when it does not apply (API key
-    mode, or a profile bound to a non-Claude provider)."""
+def _claude_cli_signed_in() -> bool:
+    from app.core import claude_cli_status
+
+    status = claude_cli_status.peek() or claude_cli_status.get_status()
+    return bool(status and status.signed_in)
+
+
+def scheduled_run_guidance(
+    profile: Optional[dict] = None,
+    *,
+    model: Optional[str] = None,
+    provider_id: Optional[str] = None,
+) -> Optional[str]:
+    """The creation-time reminder, or None when it does not apply.
+
+    It applies only when the run would use the Claude subscription: Claude is
+    in subscription mode, the Claude Code CLI is signed in, and the run's
+    effective model (``model`` / ``provider_id``, as the automation resolves
+    them) is a Claude model on the Claude leg. Blocking (may probe the CLI).
+    """
     try:
-        if profile and (profile.get("config") or {}).get("provider"):
+        if provider_id or (profile and (profile.get("config") or {}).get("provider")):
             return None
-        return SCHEDULED_RUN_GUIDANCE if _subscription_mode() else None
+        if model is not None:
+            from app.core.query_options import is_native_claude_model
+
+            if not is_native_claude_model(model):
+                return None
+        if not _subscription_mode() or not _claude_cli_signed_in():
+            return None
+        return SCHEDULED_RUN_GUIDANCE
     except Exception:  # noqa: BLE001
         return None
 

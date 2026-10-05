@@ -148,10 +148,17 @@ class FetchModelsResponse(BaseModel):
     a ``media_kind``) so the UI can say where they live instead of leaving the
     user hunting for a model their key genuinely offers. Defaulted, so an older
     client that ignores it still parses.
+
+    ``recommended`` lists the ids of the provider's built-in preset roster
+    (``model_catalog_presets``) that ``models`` contains, in roster order: the
+    chat models the setup wizard may pre-check. Empty for a provider with no
+    roster (OpenRouter, custom gateways): an upstream ``/models`` list is
+    unsorted and can hold embedding or moderation models.
     """
     source: str
     models: List[Dict[str, Any]]
     hidden: List[Dict[str, Any]] = []
+    recommended: List[str] = []
 
 
 class CodexDeviceStartResponse(BaseModel):
@@ -1033,6 +1040,31 @@ async def refresh_capabilities(body: RefreshCapabilitiesRequest, token: str = De
     return {"refreshed": refreshed, "failed": failed}
 
 
+# Upstream answers that mean "this key is not accepted". Anything else
+# (timeouts, 5xx, rate limits, DNS) is transient and never recorded, so a
+# working provider stays usable through an outage.
+_CREDENTIAL_REJECTED_CODES = frozenset({"http_401", "http_403"})
+
+
+async def _record_credential_check(
+    provider_id: str, *, accepted: bool, row: Optional[dict] = None,
+) -> None:
+    """Store the API-key catalog fetch's verdict for worker readiness
+    (``model_providers.credential_status``). Best-effort: a failed write
+    never fails the fetch. ``row`` is the row the fetch started from: the
+    verdict is dropped when its key or endpoint was replaced meanwhile."""
+    try:
+        await run_sync(
+            db.record_credential_check, provider_id, accepted,
+            checked_token=(row or {}).get("auth_token"),
+            checked_base_url=(row or {}).get("base_url"),
+            guard=row is not None,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not record the credential check for provider %s", provider_id,
+                       exc_info=True)
+
+
 @router.post("/{provider_id}/fetch-models", response_model=FetchModelsResponse)
 async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
     """Fetch a provider's live model catalog for the curation UI.
@@ -1067,10 +1099,16 @@ async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
             )
         else:
             auth_token = _generic_auth_token(row)
-            models = await fetch_upstream_models(
-                row["base_url"], auth_token, client=client,
-                provider_type=row.get("provider_type"),
-            )
+            try:
+                models = await fetch_upstream_models(
+                    row["base_url"], auth_token, client=client,
+                    provider_type=row.get("provider_type"),
+                )
+            except UpstreamModelsError as exc:
+                if str(exc) in _CREDENTIAL_REJECTED_CODES:
+                    await _record_credential_check(provider_id, accepted=False, row=row)
+                raise
+            await _record_credential_check(provider_id, accepted=True, row=row)
     except HTTPException:
         raise
     except UpstreamModelsError as e:
@@ -1087,7 +1125,15 @@ async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
         {**entry, "media_kind": model_modality.media_kind(entry.get("id"))}
         for entry in media
     ]
-    return FetchModelsResponse(source="upstream", models=models, hidden=hidden)
+    listed = {entry.get("id") for entry in models if isinstance(entry, dict)}
+    recommended = [
+        entry["id"]
+        for entry in (model_catalog_presets.preset_models_for(row) or [])
+        if entry.get("id") in listed
+    ]
+    return FetchModelsResponse(
+        source="upstream", models=models, hidden=hidden, recommended=recommended,
+    )
 
 
 # ============================================================================

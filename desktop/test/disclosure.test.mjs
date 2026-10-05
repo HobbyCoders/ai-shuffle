@@ -17,7 +17,7 @@ async function profile(t) {
 test('the disclosure says agents run as the user, with their own login and full file access', () => {
 	const text = [AGENT_ACCESS.message, agentAccessDetail()].join('\n');
 	assert.match(text, /run as you/);
-	assert.match(text, /your own `claude` login/);
+	assert.match(text, /your own accounts: the provider sign-ins/);
 	assert.match(text, /any file your user account can/);
 	assert.match(text, /Help > Agent Access/);
 });

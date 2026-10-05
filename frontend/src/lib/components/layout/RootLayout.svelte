@@ -16,10 +16,10 @@
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
-	import { auth, isAuthenticated } from '$lib/stores/auth.svelte';
+	import { agentGate, auth, isAuthenticated } from '$lib/stores/auth.svelte';
 	import { theme } from '$lib/stores/theme.svelte';
 	import { pwa } from '$lib/stores/pwa.svelte';
-	import { ensureModelRegistryHydrated } from '$lib/constants/models';
+	import { ensureModelRegistryHydrated, setReadyProviders } from '$lib/constants/models';
 	import { onDestroy } from 'svelte';
 	import type { Snippet } from 'svelte';
 	import InstallPrompt from '$lib/components/InstallPrompt.svelte';
@@ -56,6 +56,9 @@
 	// the reload (so it can't wipe an in-progress composer draft) and flips
 	// `updateReady`. Surface that as a non-blocking, sticky banner whose action
 	// applies the update on demand. Fires once per pending update.
+	// The composer's default model follows which providers can run (see getDefaultModel).
+	$effect(() => { setReadyProviders($agentGate?.ready_providers ?? null); });
+
 	let updateBannerShown = false;
 	$effect(() => {
 		if (pwa.current.updateReady && !updateBannerShown) {

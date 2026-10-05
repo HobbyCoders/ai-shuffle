@@ -211,8 +211,15 @@ def test_the_cap_failure_names_the_loop_guard_and_its_setting(mock_db):
 # Guidance
 # ---------------------------------------------------------------------------
 
-def test_scheduled_run_guidance_only_in_subscription_mode_for_claude_profiles(mock_db):
+def test_scheduled_run_guidance_only_in_subscription_mode_for_claude_profiles(mock_db, monkeypatch):
+    from app.core import claude_cli_status
+
     _subscription()
+    signed_out = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=False)
+    monkeypatch.setattr(claude_cli_status, "peek", lambda: signed_out)
+    assert loop_guard.scheduled_run_guidance({"config": {}}) is None  # no Claude sign-in in use
+    monkeypatch.setattr(claude_cli_status, "peek",
+                        lambda: claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True))
     assert loop_guard.scheduled_run_guidance({"config": {}}) == loop_guard.SCHEDULED_RUN_GUIDANCE
     assert "use an API key for scheduled runs" in loop_guard.SCHEDULED_RUN_GUIDANCE
     assert loop_guard.scheduled_run_guidance({"config": {"provider": "prov-1"}}) is None

@@ -175,7 +175,13 @@ def _request_leg(profile_id: str, overrides: dict | None, session_id: str | None
         if selected not in curated_model_ids(row):
             provider_id = None
     if not model and not provider_id:
-        model = DEFAULT_MODEL
+        # No model named: the same default build_options_from_profile uses.
+        from app.core.credential_gate import default_run_model
+
+        # An API run is unattended: no most used chat model (query_options
+        # gives the REST lane, which carries no typed turn source, the same).
+        provider_id, model = default_run_model(prefer_most_used=False)
+        model = model or DEFAULT_MODEL
     return provider_kind_for_sdk_options(
         SimpleNamespace(model=model, aih_provider_id=provider_id)
     )

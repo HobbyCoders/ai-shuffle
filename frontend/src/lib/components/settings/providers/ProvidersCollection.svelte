@@ -23,7 +23,7 @@
 	import CredentialDetail from './CredentialDetail.svelte';
 	import DraftDetail from './DraftDetail.svelte';
 	import { providerDrafts } from './drafts.svelte';
-	import { buildProviders, isConnected, parseProviderItem } from './providers-model';
+	import { buildProviders, claudeUsageRecorded, isConnected, parseProviderItem } from './providers-model';
 	import { startGateway } from './provider-actions';
 
 	let filter = $state('');
@@ -36,6 +36,7 @@
 			anthropicKeyMasked: s.anthropicKeyMasked,
 			fal: { keySet: s.falKeySet, masked: s.falKeyMasked, enabled: s.falEnabled },
 			usage: s.usage?.providers,
+			claudeUsed: claudeUsageRecorded(s.usage),
 			drafts: providerDrafts.list,
 			draftGateways: providerDrafts.gateways
 		})

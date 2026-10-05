@@ -33,6 +33,8 @@ export interface ClaudeAuthSummary {
 	api_key: { set: boolean; last4: string | null };
 	/** Whether new Claude agent runs can start on this worker, and why not. */
 	gate?: AgentGateStatus;
+	/** Why Claude itself cannot run, null when it can. `gate.reason` is about the whole worker. Absent on older workers. */
+	claude_reason?: string | null;
 }
 
 export function getClaudeAuth(refresh = false): Promise<ClaudeAuthSummary> {

@@ -8,8 +8,7 @@ export type SetupStepId =
 	| 'welcome'
 	| 'owner'
 	| 'license'
-	| 'mode'
-	| 'credential'
+	| 'provider'
 	| 'workspace'
 	| 'first-run'
 	| 'extras';
@@ -23,8 +22,7 @@ const LABELS: Record<SetupStepId, string> = {
 	welcome: 'Welcome',
 	owner: 'Password',
 	license: 'License',
-	mode: 'Mode',
-	credential: 'Sign in',
+	provider: 'AI provider',
 	workspace: 'Workspace',
 	'first-run': 'First run',
 	extras: 'Account & GitHub',
@@ -43,7 +41,7 @@ export function hasOwnerStep(status: OwnerStatus | null | undefined): boolean {
 export function setupSteps(options: { ownerStep: boolean }): SetupStep[] {
 	const ids: SetupStepId[] = ['welcome'];
 	if (options.ownerStep) ids.push('owner');
-	ids.push('license', 'mode', 'credential', 'workspace', 'first-run', 'extras');
+	ids.push('license', 'provider', 'workspace', 'first-run', 'extras');
 	return ids.map((id) => ({ id, label: LABELS[id] }));
 }
 

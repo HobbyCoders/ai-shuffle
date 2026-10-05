@@ -114,10 +114,12 @@
 	// (PA13's cross-provider switch) — decode it once and let BOTH the model id
 	// and the provider id come from the pick, mirroring the backend's resolution.
 	const overrideComposite = $derived(decodeProviderModel($activeSession.modelOverride));
+	const defaultComposite = $derived(decodeProviderModel(getDefaultModel()));
 	const effectiveModel = $derived.by(() => {
 		if (overrideComposite) return overrideComposite.modelId;
 		if ($activeSession.modelOverride) return $activeSession.modelOverride;
-		return getDefaultModel();
+		// The default can itself be a composite (no Claude credential on the worker).
+		return defaultComposite?.modelId ?? getDefaultModel();
 	});
 	// The label reads the RAW selection so a composite round-trips to its
 	// provider-scoped label rather than a bare id.
@@ -131,7 +133,8 @@
 	const effectiveProviderId = $derived.by(() => {
 		if (overrideComposite) return overrideComposite.providerId;
 		if ($activeSession.modelOverride && isPresetModel($activeSession.modelOverride)) return null;
-		return $activeSession.liveProvider ?? null;
+		if ($activeSession.liveProvider) return $activeSession.liveProvider;
+		return !$activeSession.modelOverride && defaultComposite ? defaultComposite.providerId : null;
 	});
 	const contextMax = $derived(getContextMaxForModel(effectiveModel, effectiveProviderId));
 
@@ -863,7 +866,7 @@
 							device yet. It appears after that device's next Claude turn.
 						</div>
 					{:else}
-						<div class="row-reset no-data">No usage data yet. Claude Code reports it while an agent runs.</div>
+						<div class="row-reset no-data">No usage data yet. It appears after the next Claude turn.</div>
 					{/if}
 					<!-- AI Shuffle only sees the windows the CLI reports during a run;
 					     the full picture is on the user's own claude.ai usage page. -->

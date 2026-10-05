@@ -2,36 +2,54 @@
 	/**
 	 * Wizard step: the first agent run. One short prompt in a new chat session
 	 * (no project, no file tools), with the reply streamed in, so the owner
-	 * sees an agent answer before leaving setup. It names what pays for the
-	 * run: the CLI's account on a subscription, or the saved key's last four,
-	 * both from the worker's `claude-auth` summary.
+	 * sees an agent answer before leaving setup.
+	 *
+	 * The run uses a provider that is ready: the one connected in this wizard
+	 * first, else the worker's default, else the first ready one (see
+	 * `pickFirstRunModel`). The step names that provider and model, and sends
+	 * the model explicitly so a default on an unconnected provider never decides.
+	 *
+	 * When no ready provider has a model to run (a key saved without picking
+	 * one), the step says which provider needs one and links back to the
+	 * provider step instead of sending a run the worker would refuse.
 	 *
 	 * A turn the credential gate refuses (`agent_setup_required`) or the loop
-	 * guard holds (`loop_guard_confirm`) shows the worker's own message, with
-	 * a way back to the sign-in step for the first.
+	 * guard holds (`loop_guard_confirm`) shows the worker's own message, with a
+	 * way back to the provider step for the first.
 	 */
 	import { onDestroy, onMount } from 'svelte';
 	import { AlertTriangle, Check, Loader2, Play } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import { getAgentCredentials, type AgentCredentials, type ClaudeAuthMode } from '$lib/api/agent-credentials';
+	import { auth } from '$lib/stores/auth.svelte';
+	import { providers } from '$lib/stores/providers.svelte';
 	import {
-		ensureStarterAgent, FIRST_RUN_PROMPT, LOOP_GUARD_CODE, SETUP_REQUIRED_CODE, startFirstAgentRun,
-		type FirstRunHandle, type FirstRunState
+		getDefaultModel, getModels, getProviders, hydrateModelRegistry
+	} from '$lib/constants/models.svelte';
+	import { buildProviders } from '$lib/components/settings/providers/providers-model';
+	import { setupReadiness } from './provider-readiness';
+	import {
+		ensureStarterAgent, FIRST_RUN_PROMPT, LOOP_GUARD_CODE, pickFirstRunModel, SETUP_REQUIRED_CODE,
+		startFirstAgentRun, type FirstRunHandle, type FirstRunModel, type FirstRunState
 	} from '$lib/services/first-agent-run';
 
 	interface Props {
-		mode: ClaudeAuthMode | null;
+		/** The provider the owner connected in this wizard, if any. */
+		preferredProvider?: string | null;
 		onContinue: () => void;
 		onBack?: () => void;
-		/** Go to the sign-in step, after the worker refused the run for setup. */
-		onFixCredential?: () => void;
+		/** Go to the provider step, after the worker refused the run for setup. */
+		onFixProvider?: () => void;
 	}
-	let { mode, onContinue, onBack, onFixCredential }: Props = $props();
+	let { preferredProvider = null, onContinue, onBack, onFixProvider }: Props = $props();
 
 	let run = $state<FirstRunState | null>(null);
 	let starting = $state(false);
 	let startError = $state('');
-	let creds = $state<AgentCredentials | null>(null);
+	let pick = $state<FirstRunModel | null>(null);
+	let picking = $state(true);
+	/** Ready providers with no model picked, by name, when nothing can run. */
+	let needsModel = $state<string[]>([]);
+	const BRAND_NAMES: Record<string, string> = { openai: 'OpenAI', grok: 'xAI Grok', openrouter: 'OpenRouter' };
 	let handle: FirstRunHandle | null = null;
 	let outputEl = $state<HTMLDivElement | null>(null);
 
@@ -39,18 +57,40 @@
 	const finished = $derived(!!run && ['done', 'failed', 'needs-input'].includes(run.phase));
 	const succeeded = $derived(run?.phase === 'done');
 	const attempted = $derived(finished || !!startError);
-	const cliAccount = $derived(creds?.cli.signed_in ? creds.cli.email : null);
-	const keyLast4 = $derived(creds?.apiKey.last4 ?? null);
 	const refused = $derived(finished && run?.code === SETUP_REQUIRED_CODE);
 	const held = $derived(finished && run?.code === LOOP_GUARD_CODE);
 
-	// The worker's own mode when this visit has no choice yet (a reload past the mode step).
-	const payingMode = $derived(mode ?? creds?.mode ?? null);
-	const payer = $derived(payingMode === 'api_key'
-		? `your Anthropic API key${keyLast4 ? ` (ending in ${keyLast4})` : ''}, billed per use`
-		: payingMode === 'subscription'
-			? `your Claude plan${cliAccount ? ` (${cliAccount})` : ''}, through the Claude Code CLI`
-			: 'the credential you set up');
+	const payer = $derived(pick
+		? pick.modelLabel ? `${pick.modelLabel} on ${pick.providerName}` : pick.providerName
+		: 'the provider you connected');
+
+	/** Read what is ready now and choose the provider and model for the run. */
+	async function choose() {
+		picking = true;
+		try {
+			const [status] = await Promise.all([
+				auth.checkAuth().catch(() => auth.current.status),
+				providers.refreshAll().catch(() => {}),
+				hydrateModelRegistry().catch(() => false),
+			]);
+			const s = providers.current;
+			const views = buildProviders({
+				rows: s.providers, claude: s.claude, anthropicKeyMasked: s.anthropicKeyMasked,
+				fal: { keySet: s.falKeySet, masked: s.falKeyMasked, enabled: s.falEnabled },
+			});
+			const readiness = setupReadiness(status?.agent_gate, views, s.providers);
+			pick = pickFirstRunModel({
+				ready: readiness.ready, preferred: preferredProvider, rows: s.providers, registry: getProviders(),
+				defaultModel: getDefaultModel(), claudeModels: getModels(),
+			});
+			needsModel = pick ? [] : readiness.needsModel.map((id) =>
+				BRAND_NAMES[id] ?? s.providers.find((r) => `gw:${r.id}` === id)?.name ?? 'Your gateway');
+		} catch {
+			pick = null;
+		} finally {
+			picking = false;
+		}
+	}
 
 	async function start() {
 		if (running) return;
@@ -60,6 +100,7 @@
 			const agent = await ensureStarterAgent();
 			handle = startFirstAgentRun({
 				profileId: agent.id,
+				model: pick?.model ?? null,
 				onUpdate: (state) => {
 					run = state;
 					queueMicrotask(() => { if (outputEl) outputEl.scrollTop = outputEl.scrollHeight; });
@@ -74,20 +115,39 @@
 		}
 	}
 
-	onMount(() => {
-		getAgentCredentials().then((c) => { creds = c; }).catch(() => {});
-	});
+	onMount(() => { void choose(); });
 	onDestroy(() => { handle?.cancel(); });
 </script>
 
 <div class="space-y-4" data-testid="setup-first-run">
 	<p class="text-sm text-muted-foreground">
-		Run a one-line task to see an agent answer. It runs in a new chat session with no project and no access to your files, and it is paid for by {payer}.
+		Run a one-line task to see an agent answer. It runs in a new chat session with no project and no access to your files.
 	</p>
-	<div class="bg-muted/30 border border-border rounded-lg px-4 py-3">
-		<p class="text-xs text-muted-foreground mb-1">The task</p>
-		<p class="text-sm text-foreground">{FIRST_RUN_PROMPT}</p>
+	<div class="bg-muted/30 border border-border rounded-lg px-4 py-3 space-y-2">
+		<div>
+			<p class="text-xs text-muted-foreground mb-1">The task</p>
+			<p class="text-sm text-foreground">{FIRST_RUN_PROMPT}</p>
+		</div>
+		<div class="border-t border-border pt-2" data-testid="setup-first-run-model">
+			<p class="text-xs text-muted-foreground mb-1">Runs on</p>
+			<p class="text-sm text-foreground">
+				{#if !picking && needsModel.length}<span class="text-muted-foreground">No model picked yet.</span>{:else if picking}<span class="inline-flex items-center gap-2 text-muted-foreground"><Loader2 size={12} class="animate-spin" /> Checking your providers…</span>{:else}{payer}, billed to your own account with that provider.{/if}
+			</p>
+		</div>
 	</div>
+
+	{#if !picking && !pick && needsModel.length}
+		<div role="alert" class="bg-warning/10 border border-warning/40 px-4 py-3 rounded-lg text-sm" data-testid="setup-first-run-needs-model">
+			<p class="flex items-center gap-2 font-medium text-foreground">
+				<AlertTriangle size={16} strokeWidth={2} class="text-warning" />
+				{needsModel.join(', ')} {needsModel.length > 1 ? 'need' : 'needs'} a model
+			</p>
+			<p class="text-muted-foreground mt-1">
+				{needsModel.length > 1 ? 'They are' : 'It is'} connected, but no model is picked, so there is nothing to run.
+				{#if onFixProvider}<button type="button" class="text-primary underline" onclick={onFixProvider}>Go back to AI provider</button>, open {needsModel[0]} and pick a model.{/if}
+			</p>
+		</div>
+	{/if}
 
 	{#if run && (run.text || running)}
 		<div bind:this={outputEl} class="reply bg-background border border-border rounded-lg px-4 py-3 text-sm text-foreground" aria-live="polite" aria-label="Agent reply" data-testid="setup-first-run-reply">
@@ -106,8 +166,8 @@
 				{refused ? 'Agents cannot start yet' : held ? 'The run is waiting for your confirmation' : 'The run did not finish'}
 			</p>
 			<p class="text-muted-foreground mt-1">{startError || run?.error}</p>
-			{#if refused && onFixCredential}
-				<p class="text-muted-foreground mt-1"><button type="button" class="text-primary underline" onclick={onFixCredential}>Go back to Sign in</button> to finish setting up the credential, then try again.</p>
+			{#if refused && onFixProvider}
+				<p class="text-muted-foreground mt-1"><button type="button" class="text-primary underline" onclick={onFixProvider}>Go back to AI provider</button> to connect a provider or finish its sign-in, then try again.</p>
 			{:else if !refused && !held}
 				<p class="text-muted-foreground mt-1">The Troubleshooting guide under Agents do not start lists the usual causes.</p>
 			{/if}
@@ -117,11 +177,11 @@
 	<div class="flex gap-3">
 		{#if onBack}<button type="button" onclick={onBack} class="btn btn-secondary flex-1 py-3" disabled={running}>Back</button>{/if}
 		{#if !succeeded}
-			<button type="button" onclick={start} class="btn {attempted ? 'btn-secondary' : 'btn-primary'} flex-1 py-3" disabled={running}>
+			<button type="button" onclick={start} class="btn {attempted ? 'btn-secondary' : 'btn-primary'} flex-1 py-3" disabled={running || picking || (!pick && needsModel.length > 0)}>
 				{#if running}<Loader2 size={16} class="inline-block animate-spin mr-2" />Running…{:else}<Play size={16} class="inline-block mr-2" />{attempted ? 'Try again' : 'Run it'}{/if}
 			</button>
 		{/if}
-		{#if succeeded || attempted}
+		{#if succeeded || attempted || (!pick && needsModel.length > 0)}
 			<button type="button" onclick={onContinue} class="btn {succeeded ? 'btn-primary' : 'btn-secondary'} flex-1 py-3" disabled={running}>
 				{succeeded ? 'Continue' : 'Continue anyway'}
 			</button>

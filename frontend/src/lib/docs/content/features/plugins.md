@@ -12,7 +12,7 @@ Plugins extend AI Shuffle with additional hooks, commands, agents, and prompts. 
 
 The plugin system allows you to:
 
-- Add new capabilities to Claude sessions through plugin-contributed hooks
+- Add new capabilities to sessions through plugin-contributed hooks
 - Install file-based agents that work alongside your own agents
 - Extend the system with custom commands and skills
 - Share and reuse configurations across teams via marketplace repositories
@@ -67,7 +67,7 @@ A plugin can contribute any combination of:
 | **Hooks**    | Event-driven logic that runs at key points in AI workflow |
 | **Commands** | Custom commands available to the system                   |
 | **Agents**   | File-based subagents with their own prompts and tools     |
-| **Skills**   | Specialized skills that extend Claude's abilities          |
+| **Skills**   | Specialized skills that extend an agent's abilities        |
 | **MCP servers** | Tool servers bundled with the plugin                  |
 
 Each plugin in the API response includes boolean flags indicating which capabilities it provides: `has_hooks`, `has_commands`, `has_agents`, `has_skills`, `has_mcp`.

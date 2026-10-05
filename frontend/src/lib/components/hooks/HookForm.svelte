@@ -85,13 +85,13 @@
 	const eventDescriptions: Record<string, string> = {
 		PreToolUse: 'Fires before a tool is invoked (can filter by tool name)',
 		PostToolUse: 'Fires after a tool completes (can filter by tool name)',
-		Stop: 'Fires when Claude finishes a response',
+		Stop: 'Fires when the agent finishes a response',
 		SessionStart: 'Fires when a new session starts',
 		SessionEnd: 'Fires when a session is closed',
 		UserPromptSubmit: 'Fires when user submits a prompt',
 		PreCompact: 'Fires before message history is compacted',
 		SubagentStop: 'Fires when a subagent completes',
-		Notification: 'Fires when Claude sends a notification'
+		Notification: 'Fires when the agent sends a notification'
 	};
 	let remoteChange = $state('');
 	function snapshot() { return JSON.stringify([name, scopeProjectId, event, hookType, command, timeout, url, secret, toolMatcher, enabled]); }

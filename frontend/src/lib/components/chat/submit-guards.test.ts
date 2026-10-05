@@ -9,7 +9,7 @@
  * composer stays silent.
  */
 import { describe, it, expect } from 'vitest';
-import { evaluateSubmitGuards, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON, type SubmitGuardInput } from './submit-guards';
+import { evaluateSubmitGuards, gateBlocksComposer, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON, type SubmitGuardInput } from './submit-guards';
 import { attachmentBlockReason } from './attach-disable';
 
 /** A fully-ready send: prompt typed, nothing uploading, profile + project set. */
@@ -164,5 +164,33 @@ describe('projectRulesLane', () => {
 		expect(projectRulesLane('chat', false)).toBe('chat');
 		expect(projectRulesLane(undefined, false)).toBe('code');
 		expect(evaluateSubmitGuards({ ...home, mode: projectRulesLane('code', false) })).not.toBeNull();
+	});
+});
+
+describe('gateBlocksComposer', () => {
+	const gate = { ready: false, reason: 'Connect a provider', license_allows_runs: true };
+
+	it('stays quiet when the gate is ready or absent', () => {
+		expect(gateBlocksComposer(null, false)).toBe(false);
+		expect(gateBlocksComposer({ ...gate, ready: true }, false)).toBe(false);
+		expect(gateBlocksComposer({ ...gate, reason: null }, false)).toBe(false);
+	});
+
+	it('warns when no provider is ready at all', () => {
+		expect(gateBlocksComposer({ ...gate, any_provider_ready: false }, true)).toBe(true);
+	});
+
+	it('does not warn about one provider when another is ready', () => {
+		// Claude not signed in, OpenAI connected: the app works.
+		expect(gateBlocksComposer({ ...gate, any_provider_ready: true }, false)).toBe(false);
+	});
+
+	it('always warns when the license blocks runs', () => {
+		expect(gateBlocksComposer({ ...gate, license_allows_runs: false, any_provider_ready: true }, true)).toBe(true);
+	});
+
+	it('falls back to the any-credential flag on older servers', () => {
+		expect(gateBlocksComposer(gate, false)).toBe(true);
+		expect(gateBlocksComposer(gate, true)).toBe(false);
 	});
 });

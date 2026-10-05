@@ -46,7 +46,8 @@ async def _present(automation):
 
 async def _with_notices(automation):
     """Attach "use an API key for scheduled runs" when this automation would
-    run on the user's Claude subscription (see app.core.loop_guard)."""
+    run on the user's Claude subscription (see app.core.loop_guard): a signed-in
+    Claude CLI in subscription mode and a Claude model for the run."""
     if not isinstance(automation, dict):
         return automation
 
@@ -55,7 +56,11 @@ async def _with_notices(automation):
         from app.core.profiles import get_profile
 
         profile_id = automation.get("profile_id")
-        return loop_guard.scheduled_run_guidance(get_profile(profile_id) if profile_id else None)
+        return loop_guard.scheduled_run_guidance(
+            get_profile(profile_id) if profile_id else None,
+            model=automation.get("effective_model") or "",
+            provider_id=automation.get("effective_provider_id"),
+        )
 
     try:
         notice = await run_sync(_notice)

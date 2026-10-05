@@ -11,6 +11,7 @@ import { providers as providersStore } from '$lib/stores/providers.svelte';
 import {
 	attentionCount,
 	buildProviders,
+	claudeUsageRecorded,
 	CLAUDE_KEY_ITEM,
 	CLAUDE_PROVIDER_ITEM,
 	CLAUDE_SUB_ITEM,
@@ -134,7 +135,8 @@ function currentViews(): ProviderView[] {
 		claude: s.claude,
 		anthropicKeyMasked: s.anthropicKeyMasked,
 		fal: { keySet: s.falKeySet, masked: s.falKeyMasked, enabled: s.falEnabled },
-		usage: s.usage?.providers
+		usage: s.usage?.providers,
+		claudeUsed: claudeUsageRecorded(s.usage)
 	});
 }
 

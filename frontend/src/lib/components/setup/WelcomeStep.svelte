@@ -18,8 +18,8 @@
 
 <div class="space-y-4" data-testid="setup-welcome">
 	<p class="text-sm text-foreground leading-relaxed">
-		AI Shuffle runs AI coding agents on {desktop ? 'this computer' : 'your server'}: Claude Code and other agent tools,
-		a workspace for your projects, and sessions you can follow from any of your devices.
+		AI Shuffle runs AI coding agents on {desktop ? 'this computer' : 'your server'}, with a workspace for your projects
+		and sessions you can follow from any of your devices.
 	</p>
 
 	<section class="disclosure" aria-labelledby="welcome-access">
@@ -42,8 +42,8 @@
 		<div>
 			<h2 id="welcome-account">You bring your own AI account</h2>
 			<p>
-				You use your own Claude subscription or your own Anthropic API key (and, if you like, other providers).
-				AI Shuffle never pays for, resells or shares model usage: your provider bills you directly, and your prompts go from {desktop ? 'this computer' : 'this worker'} straight to your provider.
+				Agents run on your own AI provider account, with a subscription or an API key. You choose the provider in the next steps.
+				AI Shuffle never pays for, resells or shares model usage. Your provider bills you directly, and your prompts go from {desktop ? 'this computer' : 'this worker'} straight to your provider.
 			</p>
 		</div>
 	</section>

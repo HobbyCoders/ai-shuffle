@@ -120,7 +120,7 @@
 		<span class="wname" title={name}>{compactName}</span>
 
 		{#if serverSide}
-			<span class="wl-badge" title="Executed server-side by Anthropic API">server</span>
+			<span class="wl-badge" title="Run on the provider's servers">server</span>
 		{/if}
 
 		{#if dismissedQuestion}

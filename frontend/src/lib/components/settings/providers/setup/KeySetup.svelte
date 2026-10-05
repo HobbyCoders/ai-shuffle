@@ -1,14 +1,15 @@
 <script lang="ts">
 	/**
 	 * KeySetup: a new API key.
-	 *  - OpenAI, Grok and OpenRouter (`key`): Continue creates the row with the
+	 *  - OpenAI, Grok and OpenRouter (`key`): Continue (`submitLabel`) creates the row with the
 	 *    provider's fixed endpoint, then the models step picks what to offer. A
-	 *    created row is reused on retry, never created twice.
+	 *    created row is reused on retry, never created twice; the retry's key
+	 *    replaces the stored one (the provider may have rejected the first).
 	 *  - Anthropic (`anthropic`): "Use this key" stores it for Claude Code. When
 	 *    Claude has no other credential it also becomes the active one.
 	 */
 	import { getErrorMessage } from '$lib/api/client';
-	import { createModelProvider } from '$lib/api/model-providers';
+	import { createModelProvider, updateModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
 	import RowGroup from '../../rows/RowGroup.svelte';
 	import SettingRow from '../../rows/SettingRow.svelte';
@@ -21,11 +22,13 @@
 		draft: Draft;
 		/** Claude has no other credential: the new key becomes the active one. */
 		makeActive?: boolean;
+		/** Label of the submit button for a non-Anthropic key (the setup wizard says "Save key"). */
+		submitLabel?: string;
 		onFinish: (item: string) => void;
 		onCancel: () => void;
 	}
 
-	let { draft, makeActive = false, onFinish, onCancel }: Props = $props();
+	let { draft, makeActive = false, submitLabel = 'Continue', onFinish, onCancel }: Props = $props();
 
 	const config = $derived(
 		draft.providerId === 'openai' || draft.providerId === 'grok' || draft.providerId === 'openrouter'
@@ -63,6 +66,9 @@
 				});
 				rowId = row.id;
 				providerDrafts.update(draft.item, { rowId });
+			} else {
+				// Same row, new key: never a second row for one credential.
+				await updateModelProvider(rowId, { auth_token: value });
 			}
 			await providers.refreshProviders();
 			key = '';
@@ -90,7 +96,7 @@
 	<div class="pv-acts">
 		<button type="button" class="st-btn ghost" disabled={busy} onclick={onCancel}>Cancel</button>
 		<button type="button" class="st-btn primary" disabled={busy || !key.trim()} onclick={submit}>
-			{#if busy}Saving{:else if draft.flavor === 'anthropic'}Use this key{:else}Continue{/if}
+			{#if busy}Saving{:else if draft.flavor === 'anthropic'}Use this key{:else}{submitLabel}{/if}
 		</button>
 	</div>
 {/if}

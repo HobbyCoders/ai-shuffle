@@ -292,9 +292,12 @@ def check_prerequisites() -> None:
     if cli.signed_in:
         logger.info("Claude Code CLI %s: signed in", cli.cli_version or "")
     elif cli.installed:
-        logger.warning("Claude Code CLI: not signed in. Sign in from Settings or run `claude auth login` on this worker")
+        # Claude is one provider among several: not signed in is information.
+        # Whether any agent can run is logged by the credential gate below.
+        logger.info("Claude Code CLI: not signed in. Claude subscription runs need a sign-in "
+                    "(Settings > Providers > Claude, or `claude auth login` on this worker)")
     else:
-        logger.warning("Claude Code CLI: %s", cli.error or "not installed")
+        logger.info("Claude Code CLI: %s", cli.error or "not installed")
     from app.core import claude_relogin_notice
     claude_relogin_notice.mark_if_needed()
 
@@ -307,10 +310,10 @@ def check_prerequisites() -> None:
     except Exception:
         logger.warning("Could not record the Claude Code auth mode", exc_info=True)
 
-    # The one credential gate (license plus the active mode's credential). With
-    # neither a CLI sign-in nor a stored key the worker stays in a blocking
-    # setup state: every new agent run is refused with the setup message, and
-    # nothing falls back to any other credential.
+    # The one credential gate: the license plus at least one usable agent
+    # provider (Claude or any other). With no provider at all the worker stays
+    # in a blocking setup state. A Claude turn with no Claude credential is
+    # still refused on its own; nothing falls back to another credential.
     from app.core import credential_gate
     credential_gate.record_startup(cli)
 

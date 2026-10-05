@@ -1,5 +1,5 @@
 /**
- * How Claude Code is paid for on this worker, and whether agents can start.
+ * How the Claude provider is paid for on this worker, and whether agents can start.
  *
  * The setup wizard reads all of it from one call, `GET /api/v1/settings/claude-auth`
  * (the same summary Settings > Providers > Claude shows):
@@ -9,7 +9,9 @@
  * - `cli`: what `claude auth status` reports, with the account only when signed in.
  * - `api_key`: whether a key is stored, and its last four characters.
  * - `gate`: the worker's credential gate, the same answer that refuses turns
- *   (`ready`, `reason`, `claude_credential_ready`, `license_allows_runs`).
+ *   (`ready`, `reason`, `claude_credential_ready`, `license_allows_runs`). Its
+ *   `ready` and `reason` cover the whole worker (any provider).
+ * - `claude_reason`: why Claude itself cannot run, null when it can.
  *
  * `PUT /api/v1/settings/claude-auth` with `{ mode }` stores the choice (owner
  * only) and answers with the same summary. `POST /api/v1/settings/integrations/anthropic`
@@ -31,13 +33,13 @@ export interface AgentCredentials {
 	modeLabel: string;
 	/** False only before the worker has recorded its default mode. */
 	explicit: boolean;
-	/** A new Claude agent run can start: the license allows it and the mode's credential exists. */
+	/** The server gate's `ready`: the license allows runs and some agent provider is ready. */
 	ready: boolean;
 	/** The active mode's credential exists (CLI signed in, or a key stored). */
 	credentialReady: boolean;
 	/** The license allows new agent runs. */
 	licenseAllowsRuns: boolean;
-	/** Why agents cannot start, fit to show the user; null when they can. */
+	/** Why Claude cannot run, fit to show the user; null when it can. */
 	reason: string | null;
 	cli: ClaudeAuthSummary['cli'];
 	apiKey: ClaudeAuthSummary['api_key'];
@@ -63,10 +65,23 @@ export function credentialsFromSummary(summary: ClaudeAuthSummary): AgentCredent
 		ready: gate ? gate.ready === true : credentialReady,
 		credentialReady,
 		licenseAllowsRuns,
-		reason: gate?.reason || null,
+		reason: claudeReason(summary, credentialReady),
 		cli: summary.cli,
 		apiKey: summary.api_key,
 	};
+}
+
+/**
+ * The Claude-specific reason. A license block stops Claude too, so its
+ * message comes first. Otherwise a worker that sends `claude_reason` decides
+ * it; an older one only has the worker-wide `gate.reason`, used when Claude's
+ * own credential is not ready.
+ */
+function claudeReason(summary: ClaudeAuthSummary, credentialReady: boolean): string | null {
+	const gate = summary.gate;
+	if (gate?.license_allows_runs === false && gate.reason) return gate.reason;
+	if ('claude_reason' in summary) return summary.claude_reason || null;
+	return credentialReady ? null : summary.gate?.reason || null;
 }
 
 /**

@@ -183,6 +183,9 @@ export interface FetchModelsResult {
 	 *  can name their destination instead of looking like a failed fetch.
 	 *  Absent on older payloads. */
 	hidden?: (ProviderModelEntry & { media_kind?: string })[];
+	/** Ids from the provider's built-in chat roster that `models` holds, in
+	 *  roster order. Empty for a provider with no roster; absent on older payloads. */
+	recommended?: string[];
 }
 
 export async function fetchProviderModels(id: string): Promise<FetchModelsResult> {

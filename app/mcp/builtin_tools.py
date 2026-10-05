@@ -1715,7 +1715,8 @@ def create_builtin_tools_server(
             from app.core.profiles import get_profile
 
             notice = await asyncio.to_thread(
-                lambda: loop_guard.scheduled_run_guidance(get_profile(profile_id) if profile_id else None)
+                lambda: loop_guard.scheduled_run_guidance(
+                    get_profile(profile_id) if profile_id else None, model=model or None)
             )
         except Exception:  # noqa: BLE001 — advice never fails the tool
             notice = None

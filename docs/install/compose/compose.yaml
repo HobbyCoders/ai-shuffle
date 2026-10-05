@@ -83,9 +83,11 @@ services:
       - ${WORKSPACE_DIR:-./workspace}:/workspace
       # AI Shuffle settings.
       - fluid-settings:/home/appuser/.fluid
-      # The Claude Code CLI login, kept when the container is replaced.
+      # Provider CLI sign-in (the Claude Code CLI, for a Claude subscription),
+      # kept when the container is replaced.
       - claude-home:/home/appuser/.claude
-      # The Claude Code CLI itself (installed on first start, updates itself).
+      # Provider CLI programs (the Claude Code CLI, installed on first start;
+      # it updates itself).
       - local-home:/home/appuser/.local
       # GitHub CLI sign-in.
       - gh-auth:/home/appuser/.config/gh
@@ -93,7 +95,7 @@ services:
       - browser-profile:/home/appuser/chrome-profile
 
     # Ready once the database answers. First start can take a few minutes
-    # while the Claude Code CLI installs.
+    # while it sets up, including installing the Claude Code CLI.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/ready"]
       interval: 30s

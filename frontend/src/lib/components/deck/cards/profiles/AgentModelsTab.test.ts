@@ -1,10 +1,20 @@
 /** The Models tab against faked subagent-default replies: default, pinned, no default yet, and a worker without the endpoint (404 → null). */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+const store = vi.hoisted(() => ({
+	current: { claude: null as unknown, usage: null as unknown },
+	loadClaude: vi.fn()
+}));
+vi.mock('$lib/stores/providers.svelte', () => ({
+	providers: { get current() { return store.current; }, loadClaude: store.loadClaude }
+}));
 import AgentModelsTab from './AgentModelsTab.svelte';
 import type { SubagentDefault } from '$lib/api/subagentDefault';
 
-afterEach(cleanup);
+afterEach(() => {
+	cleanup();
+	store.current = { claude: null, usage: null };
+});
 
 const DEFAULT: SubagentDefault = { model: 'sonnet' };
 
@@ -43,7 +53,9 @@ describe('with the subagent default', () => {
 	it('picking "Pin" with nothing pinned opens the pickers without saving anything', async () => {
 		const { onModelsChange } = setup({});
 		await fireEvent.click(choice(/Pin a model/));
-		expect(screen.getByText('Callers on native Claude.')).toBeTruthy();
+		expect(choice(/Pin a model/).getAttribute('aria-checked')).toBe('true');
+		// Claude is not connected here and nothing is pinned for it: no Claude row.
+		expect(screen.queryByText('Callers on native Claude.')).toBeNull();
 		expect(onModelsChange).not.toHaveBeenCalled();
 	});
 
@@ -87,5 +99,42 @@ describe('without the endpoint (404)', () => {
 	it('shows a quiet loading line until the reply arrives', () => {
 		setup({}, undefined);
 		expect(screen.getByRole('status').textContent).toMatch(/Loading models/);
+	});
+});
+
+describe('the Claude row when its sign-in has lapsed', () => {
+	const lapsed = {
+		mode: 'subscription',
+		cli: { installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null },
+		api_key: { set: false, last4: null }
+	};
+
+	it('still offers a Claude pin to an owner who uses Claude', async () => {
+		// The CLI probe says signed out, but Claude plan usage was recorded here last week.
+		const lastWeek = Date.now() - 7 * 24 * 60 * 60 * 1000;
+		store.current = { claude: lapsed, usage: { windows: [{ type: 'five_hour', observed_at: lastWeek }] } };
+		setup({});
+		await fireEvent.click(choice(/Pin a model/));
+		expect(screen.getByText('Callers on native Claude.')).toBeTruthy();
+	});
+
+	it('has no Claude row for an owner whose Claude usage is months old', async () => {
+		const longAgo = Date.now() - 90 * 24 * 60 * 60 * 1000;
+		store.current = { claude: lapsed, usage: { windows: [{ type: 'five_hour', observed_at: longAgo }] } };
+		setup({});
+		await fireEvent.click(choice(/Pin a model/));
+		expect(screen.queryByText('Callers on native Claude.')).toBeNull();
+	});
+
+	it('has no Claude row for an owner who never used Claude', async () => {
+		store.current = { claude: lapsed, usage: { windows: [] } };
+		setup({});
+		await fireEvent.click(choice(/Pin a model/));
+		expect(screen.queryByText('Callers on native Claude.')).toBeNull();
+	});
+
+	it('reads the Claude summary when the store has none yet', () => {
+		setup({});
+		expect(store.loadClaude).toHaveBeenCalled();
 	});
 });

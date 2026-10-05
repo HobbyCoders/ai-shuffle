@@ -341,6 +341,10 @@ export interface AgentGateStatus {
 	reason?: string | null;
 	license_allows_runs?: boolean;
 	startup_state?: 'ready' | 'setup_required' | null;
+	/** At least one agent provider (any brand) has a usable credential. Absent on older workers. */
+	any_provider_ready?: boolean;
+	/** The agent providers with a usable credential: `claude`, `openai`, `grok`, `openrouter`, `gw:<id>`. */
+	ready_providers?: string[];
 }
 
 // Profile types — Fluid harness options. Legacy SDK keys remain tolerated on

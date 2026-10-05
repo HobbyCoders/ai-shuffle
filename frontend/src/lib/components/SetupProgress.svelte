@@ -30,7 +30,7 @@
 	li[aria-current] { color: var(--foreground); font-weight: 600; }
 	li[aria-current] .number { background: var(--primary); color: var(--primary-foreground); }
 	li.complete .number { background: var(--success); color: var(--success-foreground); }
-	/* Eight steps do not fit a phone with every label: show the current one,
+	/* Seven steps do not fit a phone with every label: show the current one,
 	   keep the others for screen readers. */
 	@media (max-width: 520px) {
 		li:not([aria-current]) .label {

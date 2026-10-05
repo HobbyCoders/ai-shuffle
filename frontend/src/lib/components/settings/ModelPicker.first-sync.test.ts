@@ -59,5 +59,5 @@ it('does not let a slow pre-sync response erase the synced provider list', async
 it('offers native models only when the backend reports configured Claude auth', async () => {
  api.get.mockResolvedValue({ ...synced, claude: { auth_kind: 'api', plan_type: null } });
  await hydrateModelRegistry();
- expect(buildModelPickerCatalog().groups.map(g => g.key)).toEqual(['__claude__', 'synced-provider']);
+ expect(buildModelPickerCatalog().groups.map(g => g.key)).toEqual(['synced-provider', '__claude__']);
 });

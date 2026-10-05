@@ -6,8 +6,11 @@ import {
 	buildProviders,
 	classifyRow,
 	CLAUDE_KEY_ITEM,
+	claudeGateNotice,
 	CLAUDE_SUB_ITEM,
 	claudeHeaderStatus,
+	claudeInUse,
+	claudeUsageRecorded,
 	draftName,
 	FAL_KEY_ITEM,
 	filterProviders,
@@ -47,7 +50,7 @@ describe('grouping', () => {
 			})
 		);
 		const { connected, notConnected } = splitProviders(views);
-		expect(connected.map((p) => p.name)).toEqual(['Claude', 'OpenAI', 'xAI Grok', 'fal.ai', 'Homelab vLLM']);
+		expect(connected.map((p) => p.name)).toEqual(['OpenAI', 'xAI Grok', 'Claude', 'fal.ai', 'Homelab vLLM']);
 		expect(notConnected.map((p) => p.name)).toEqual(['OpenRouter']);
 		// Subscriptions come before keys inside a provider.
 		expect(byId(views, 'openai').credentials.map((c) => c.flavor)).toEqual(['device', 'key']);
@@ -210,6 +213,86 @@ describe('Claude', () => {
 		expect(claudeHeaderStatus(summary)).toEqual({ status: 'off', text: 'Off, not in the picker' });
 	});
 
+	it('is not connected and needs nothing when Claude was never set up', () => {
+		// The worker records "subscription" by default; that alone must not
+		// put a warned Claude row in the list or in the attention badge.
+		const summary = claudeSummary({
+			mode: 'subscription',
+			cli: {
+				installed: false,
+				signed_in: false,
+				email: null,
+				org_name: null,
+				plan: null,
+				auth_method_label: null,
+				error: null
+			},
+			api_key: { set: false, last4: null }
+		});
+		const views = buildProviders(input({ claude: summary }));
+		expect(byId(views, 'claude').credentials).toEqual([]);
+		expect(splitProviders(views).notConnected.map((p) => p.id)).toContain('claude');
+		expect(attentionCount(views)).toBe(0);
+	});
+
+	describe('a lapsed Claude sign-in', () => {
+		const signedOut = {
+			installed: true, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null
+		};
+		const noKey = { set: false, last4: null };
+
+		const DAY = 24 * 60 * 60 * 1000;
+		const lastWeek = { windows: [{ type: 'five_hour', observed_at: Date.now() - 7 * DAY }] };
+
+		it('keeps the warned subscription row and counts it when Claude was used last week', () => {
+			const summary = claudeSummary({ mode: 'subscription', cli: signedOut, api_key: noKey });
+			const used = claudeUsageRecorded(lastWeek);
+			expect(used).toBe(true);
+			expect(claudeInUse(summary, used)).toBe(true);
+			const views = buildProviders(input({ claude: summary, claudeUsed: used }));
+			const claude = byId(views, 'claude');
+			expect(claude.credentials.map((c) => [c.item, c.status, c.attention])).toEqual([[CLAUDE_SUB_ITEM, 'warn', true]]);
+			expect(splitProviders(views).connected.map((p) => p.id)).toContain('claude');
+			expect(attentionCount(views)).toBe(1);
+		});
+
+		it('keeps the warned key row when the API key mode was used recently and the key is gone', () => {
+			const summary = claudeSummary({ mode: 'api_key', cli: signedOut, api_key: noKey });
+			const views = buildProviders(input({ claude: summary, claudeUsed: claudeUsageRecorded(lastWeek) }));
+			expect(byId(views, 'claude').credentials.map((c) => [c.item, c.attention])).toEqual([[CLAUDE_KEY_ITEM, true]]);
+			expect(attentionCount(views)).toBe(1);
+		});
+
+		it('usage observed 3 months ago with no sign-in or key is not in use', () => {
+			const old = { windows: [{ type: 'five_hour', observed_at: Date.now() - 90 * DAY }, { type: 'seven_day' }] };
+			for (const mode of ['subscription', 'api_key'] as const) {
+				const summary = claudeSummary({ mode, cli: signedOut, api_key: noKey });
+				const used = claudeUsageRecorded(old);
+				expect(used).toBe(false);
+				expect(claudeInUse(summary, used)).toBe(false);
+				const views = buildProviders(input({ claude: summary, claudeUsed: used }));
+				expect(byId(views, 'claude').credentials).toEqual([]);
+				expect(splitProviders(views).notConnected.map((p) => p.id)).toContain('claude');
+				expect(attentionCount(views)).toBe(0);
+			}
+		});
+
+		it('an owner who never used Claude still sees it under Not connected, with no warning', () => {
+			const summary = claudeSummary({ mode: 'subscription', cli: signedOut, api_key: noKey });
+			const used = claudeUsageRecorded({ windows: [] });
+			expect(claudeInUse(summary, used)).toBe(false);
+			const views = buildProviders(input({ claude: summary, claudeUsed: used }));
+			expect(byId(views, 'claude').credentials).toEqual([]);
+			expect(splitProviders(views).notConnected.map((p) => p.id)).toContain('claude');
+			expect(attentionCount(views)).toBe(0);
+		});
+
+		it('Claude turned off is not in use, whatever was recorded', () => {
+			const summary = claudeSummary({ mode: 'off', cli: signedOut, api_key: noKey });
+			expect(claudeInUse(summary, true)).toBe(false);
+		});
+	});
+
 	it('shows the selected credential even when it is not ready', () => {
 		const summary = claudeSummary({
 			mode: 'subscription',
@@ -222,7 +305,7 @@ describe('Claude', () => {
 				auth_method_label: null,
 				error: null
 			},
-			api_key: { set: false, last4: null },
+			api_key: { set: true, last4: '1234' },
 			gate: {
 				ready: false,
 				mode: 'subscription',
@@ -234,7 +317,8 @@ describe('Claude', () => {
 		const views = buildProviders(input({ claude: summary }));
 		const claude = byId(views, 'claude');
 		expect(claude.credentials.map((c) => [c.item, c.status, c.statusText])).toEqual([
-			[CLAUDE_SUB_ITEM, 'warn', 'Not signed in']
+			[CLAUDE_SUB_ITEM, 'warn', 'Not signed in'],
+			[CLAUDE_KEY_ITEM, 'standby', 'Standby']
 		]);
 		expect(attentionCount(views)).toBe(1);
 		expect(claudeHeaderStatus(summary).status).toBe('warn');
@@ -302,5 +386,29 @@ describe('plan label', () => {
 		expect(planLabel('unknown')).toBeNull();
 		expect(planLabel('')).toBeNull();
 		expect(planLabel(null)).toBeNull();
+	});
+});
+
+describe('claudeGateNotice', () => {
+	const gate = { ready: true, mode: 'subscription' as const, claude_credential_ready: true, reason: null, license_allows_runs: true };
+
+	it('is quiet when Claude is ready or off', () => {
+		expect(claudeGateNotice(claudeSummary({ gate }))).toBeNull();
+		expect(claudeGateNotice(claudeSummary({ mode: 'off', gate: { ...gate, claude_credential_ready: false } }))).toBeNull();
+	});
+
+	it('warns about Claude even while another provider keeps the gate ready', () => {
+		const summary = claudeSummary({ mode: 'subscription', gate: { ...gate, ready: true, claude_credential_ready: false } });
+		expect(claudeGateNotice(summary)).toBe('Claude cannot run: the Claude Code CLI is not signed in on this worker.');
+	});
+
+	it('names the missing key in API key mode', () => {
+		const summary = claudeSummary({ mode: 'api_key', gate: { ...gate, mode: 'api_key', claude_credential_ready: false } });
+		expect(claudeGateNotice(summary)).toBe('Claude cannot run: no Anthropic API key is stored on this worker.');
+	});
+
+	it('shows the license reason', () => {
+		const summary = claudeSummary({ gate: { ...gate, ready: false, license_allows_runs: false, reason: 'License expired.' } });
+		expect(claudeGateNotice(summary)).toBe('License expired.');
 	});
 });

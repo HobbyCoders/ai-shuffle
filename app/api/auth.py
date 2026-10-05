@@ -56,7 +56,8 @@ def _agent_gate_safe(cli: dict) -> dict:
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Credential gate status failed (ignored): {e}")
         return {"ready": False, "reason": None, "mode": None, "claude_credential_ready": False,
-                "license_allows_runs": True, "startup_state": None}
+                "license_allows_runs": True, "startup_state": None,
+                "any_provider_ready": False, "ready_providers": []}
 
 
 def get_session_token(request: Request) -> Optional[str]:
@@ -407,7 +408,8 @@ async def get_auth_status(request: Request, response: Response = None):
     # Account details only go to a caller who is signed in to this worker.
     if not (is_admin_authenticated or is_paired_authenticated):
         cli = {"installed": cli["installed"], "signed_in": cli["signed_in"]}
-        agent_gate = {k: agent_gate[k] for k in ("ready", "mode", "claude_credential_ready")}
+        agent_gate = {k: agent_gate.get(k) for k in ("ready", "mode", "claude_credential_ready",
+                                                       "any_provider_ready")}
 
     return {
         "authenticated": is_admin_authenticated or is_paired_authenticated,
@@ -423,16 +425,16 @@ async def get_auth_status(request: Request, response: Response = None):
         } if pref_identity else None,
         "setup_required": auth_service.is_setup_required(),
         "claude_authenticated": claude_authenticated,
-        # "Does this install have ANY usable credential": the active Claude
-        # Code mode's credential (CLI sign-in, or the stored API key in api_key
-        # mode) OR at least one enabled model-provider row with a stored
-        # credential. The composer and first-run setup gate on THIS, not on
-        # claude auth alone; Claude-CLI auth remains required only for
-        # claude-subscription agents.
-        "has_any_credential": bool(agent_gate["claude_credential_ready"]) or _has_provider_credential_safe(),
-        # The one credential gate (license plus the active mode's credential):
-        # when ``ready`` is false, new Claude agent runs are refused with
-        # ``reason``. See app/core/credential_gate.py.
+        # "Does this install have ANY usable credential": any agent provider
+        # (Claude's active mode, or an enabled model-provider row with a stored
+        # credential). Kept for older clients; ``agent_gate.any_provider_ready``
+        # is the same answer from the gate.
+        "has_any_credential": bool(agent_gate.get("any_provider_ready"))
+        or bool(agent_gate["claude_credential_ready"]) or _has_provider_credential_safe(),
+        # The one credential gate: ``ready`` is the license plus at least one
+        # usable agent provider (``ready_providers``); when false, ``reason``
+        # says why. Claude's own answer is ``claude_credential_ready``. See
+        # app/core/credential_gate.py.
         "agent_gate": agent_gate,
         # Kept for older clients: the CLI reports one signed-in state.
         "claude_token_valid": claude_authenticated,

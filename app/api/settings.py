@@ -450,14 +450,22 @@ class ClaudeAuthModeRequest(BaseModel):
 
 async def claude_auth_payload(refresh: bool = False) -> dict:
     """The mode, the CLI account from the probe, the key's last four, and the
-    credential gate (whether new agent runs can start, and why not)."""
+    credential gate (whether new agent runs can start on any provider, and
+    ``claude_credential_ready`` for Claude itself)."""
     from app.core import claude_auth_mode, claude_cli_status, credential_gate
 
     status = await claude_cli_status.get_status_async(refresh)
     cli = status.to_dict()
 
     def _load() -> dict:
-        return {**claude_auth_mode.summary(cli), "gate": credential_gate.status_payload(cli)}
+        try:
+            claude_reason = credential_gate.claude_credential_ready(cli)[1]
+        except Exception:  # noqa: BLE001 — display text only
+            claude_reason = credential_gate.CHECK_FAILED_MESSAGE
+        return {**claude_auth_mode.summary(cli), "gate": credential_gate.status_payload(cli),
+                # Why Claude itself cannot run (None when it can). ``gate.reason``
+                # is about the worker as a whole.
+                "claude_reason": claude_reason}
 
     return await run_sync(_load)
 

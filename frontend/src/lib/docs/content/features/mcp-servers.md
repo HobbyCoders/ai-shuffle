@@ -1,16 +1,16 @@
 <!--
 title: MCP Servers
-description: Extend Claude's capabilities with Model Context Protocol servers
+description: Extend your agents' capabilities with Model Context Protocol servers
 order: 3
 -->
 
 # MCP Servers
 
-MCP (Model Context Protocol) servers extend Claude's capabilities by providing external tools, data sources, and integrations. AI Shuffle manages MCP server configuration and discovery so Claude can use tools from databases, file systems, APIs, and more.
+MCP (Model Context Protocol) servers extend your agents' capabilities by providing external tools, data sources, and integrations. AI Shuffle manages MCP server configuration and discovery so agents can use tools from databases, file systems, APIs, and more.
 
 ## Overview
 
-MCP is an open protocol that lets AI models interact with external systems through a standardized interface. When you configure an MCP server in AI Shuffle, Claude gains access to the tools that server provides. Tools from MCP servers appear alongside Claude's built-in tools and are invoked the same way.
+MCP is an open protocol that lets AI models interact with external systems through a standardized interface. When you configure an MCP server in AI Shuffle, agents gain access to the tools that server provides. Tools from MCP servers appear alongside the agent's built-in tools and are invoked the same way.
 
 Key concepts:
 
@@ -162,7 +162,7 @@ curl -X POST http://localhost:8000/api/v1/mcp/servers \
     "type": "stdio",
     "command": "npx",
     "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"],
-    "description": "Filesystem access for Claude"
+    "description": "Filesystem access"
   }'
 ```
 
@@ -266,7 +266,7 @@ Returns the count of global servers configured.
 
 ### Filesystem Server (stdio)
 
-Give Claude read/write access to a specific directory:
+Give agents read/write access to a specific directory:
 
 ```json
 {
@@ -280,7 +280,7 @@ Give Claude read/write access to a specific directory:
 
 ### SQLite Database Server (stdio)
 
-Let Claude query and modify a SQLite database:
+Let agents query and modify a SQLite database:
 
 ```json
 {

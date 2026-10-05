@@ -208,15 +208,25 @@ export interface ProvidersInput {
 	drafts?: DraftCredential[];
 	/** New gateways being set up: provider id → name. */
 	draftGateways?: { id: `gw:${string}`; name: string }[];
+	/**
+	 * The worker has Claude plan-usage readings (`claudeUsageRecorded`): Claude
+	 * turns ran here, so Claude was in use even when its sign-in has lapsed.
+	 */
+	claudeUsed?: boolean;
 }
 
 const BUILT_IN: { id: BuiltInProviderId; name: string; glyph: ProviderGlyphKind; letter: string }[] = [
-	{ id: 'claude', name: 'Claude', glyph: 'claude', letter: 'C' },
 	{ id: 'openai', name: 'OpenAI', glyph: 'openai', letter: 'O' },
 	{ id: 'grok', name: 'xAI Grok', glyph: 'grok', letter: 'X' },
+	{ id: 'claude', name: 'Claude', glyph: 'claude', letter: 'C' },
 	{ id: 'openrouter', name: 'OpenRouter', glyph: 'openrouter', letter: 'R' },
 	{ id: 'fal', name: 'fal.ai', glyph: 'custom', letter: 'f' }
 ];
+
+/** Agent providers in the order Settings > Providers lists them (fal.ai is media only, so left out). */
+export const AGENT_PROVIDER_ORDER: readonly Exclude<BuiltInProviderId, 'fal'>[] = BUILT_IN
+	.map((b) => b.id)
+	.filter((id): id is Exclude<BuiltInProviderId, 'fal'> => id !== 'fal');
 
 export const MODE_LABEL: Record<ClaudeAuthMode, string> = {
 	subscription: 'Subscription',
@@ -233,9 +243,46 @@ function plural(n: number, one: string, many = `${one}s`): string {
 	return `${n} ${n === 1 ? one : many}`;
 }
 
-/** The Claude credentials: the one the mode selects always shows (warned when not ready). */
-function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string | null): CredentialView[] {
+/**
+ * Whether the owner uses Claude on this worker, from what the worker reports:
+ * the CLI is signed in, a key is stored, or Claude plan usage was observed
+ * here recently (`claudeUsageRecorded`). A mode alone says nothing: the
+ * worker records "subscription" by default, and an "API key" mode whose key
+ * is gone is a leftover, not a choice. Off is never in use.
+ */
+export function claudeInUse(claude: ClaudeAuthSummary | null, usageRecorded = false): boolean {
+	if (!claude) return false;
+	if (claude.cli?.signed_in || claude.api_key?.set) return true;
+	return claude.mode !== 'off' && usageRecorded;
+}
+
+/** How long a Claude usage reading shows Claude in use: 30 days. */
+export const CLAUDE_USAGE_RECENT_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * The usage snapshot holds a Claude plan window observed in the last 30 days:
+ * Claude turns ran on this worker recently. Readings are kept forever, so an
+ * older one (or one with no `observed_at`) does not count.
+ */
+export function claudeUsageRecorded(
+	usage: { windows?: { observed_at?: number | null }[] | null } | null | undefined,
+	now: number = Date.now()
+): boolean {
+	return (usage?.windows ?? []).some((w) => {
+		const seen = w?.observed_at;
+		return typeof seen === 'number' && Number.isFinite(seen) && now - seen <= CLAUDE_USAGE_RECENT_MS;
+	});
+}
+
+/**
+ * The Claude credentials. Claude the owner never used is not connected,
+ * whatever its mode (see `claudeInUse`). Once Claude is in use, the
+ * credential the mode selects always shows, warned when not ready, so a
+ * lapsed sign-in asks for attention instead of disappearing.
+ */
+function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string | null, used = false): CredentialView[] {
 	if (!claude) return [];
+	if (!claudeInUse(claude, used)) return [];
 	const mode = claude.mode;
 	const out: CredentialView[] = [];
 	const cli = claude.cli;
@@ -440,7 +487,7 @@ export function buildProviders(input: ProvidersInput): ProviderView[] {
 	const byProvider = new Map<ProviderId, CredentialView[]>();
 	const push = (id: ProviderId, c: CredentialView) => byProvider.set(id, [...(byProvider.get(id) ?? []), c]);
 
-	for (const c of claudeCredentials(input.claude, input.anthropicKeyMasked)) push('claude', c);
+	for (const c of claudeCredentials(input.claude, input.anthropicKeyMasked, input.claudeUsed)) push('claude', c);
 	// Subscriptions first, then keys, in the order the worker returns them.
 	const ordered = [...rows].sort((a, b) => Number(flavorOfRow(a) !== 'device') - Number(flavorOfRow(b) !== 'device'));
 	const usagePlans = new Map((input.usage ?? []).map((u) => [u.provider_id, u.plan_type ?? null]));
@@ -606,6 +653,22 @@ export function claudeHeaderStatus(claude: ClaudeAuthSummary | null): { status: 
 			: claude.api_key.set;
 	if (!ready) return { status: 'warn', text: 'Not ready' };
 	return { status: 'ok', text: claude.mode === 'subscription' ? 'Runs on subscription' : 'Runs on API key' };
+}
+
+/**
+ * The warning on the Claude provider page, or null. Keys off Claude's own
+ * credential (`claude_credential_ready`), not the gate's `ready`: that one
+ * says whether any provider can run, so it stays true while Claude alone is
+ * not ready. A license block shows the server's reason.
+ */
+export function claudeGateNotice(claude: ClaudeAuthSummary | null): string | null {
+	const gate = claude?.gate;
+	if (!claude || !gate || claude.mode === 'off') return null;
+	if (gate.license_allows_runs === false) return gate.reason || 'The license does not allow new agent runs.';
+	if (gate.claude_credential_ready !== false) return null;
+	return claude.mode === 'api_key'
+		? 'Claude cannot run: no Anthropic API key is stored on this worker.'
+		: 'Claude cannot run: the Claude Code CLI is not signed in on this worker.';
 }
 
 /** Credentials that need the user: the index badge counts these. */

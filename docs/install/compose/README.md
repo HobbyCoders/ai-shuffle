@@ -26,8 +26,8 @@ For a Linux server, a NAS or a desktop running Docker. On Unraid, use the
    docker compose up -d
    ```
 
-   The first start downloads the image and installs the Claude Code CLI, so it
-   can take a few minutes. `docker compose ps` shows `healthy` when it is ready.
+   The first start downloads the image and sets it up (including the Claude
+   Code CLI), so it can take a few minutes. `docker compose ps` shows `healthy` when it is ready.
 4. Open <http://localhost:8000> on the same computer and follow the setup
    wizard.
 

@@ -6,7 +6,7 @@ order: 1
 
 # AI Shuffle
 
-AI Shuffle is a self-hosted workspace for AI agents, made by HobbyCoders. It runs Claude Code, and it can also run models from other providers. You bring your own AI account or API key; AI Shuffle includes no AI usage. New here? Start with [Requirements](/docs/getting-started/requirements) and [First run](/docs/getting-started/first-run). It includes a chat interface, connectors for messaging platforms and services, automation pipelines, and a REST API for building integrations.
+AI Shuffle is a self-hosted workspace for AI agents, made by HobbyCoders. It runs AI agents with your own account from any supported provider: Claude, OpenAI, OpenRouter, xAI Grok or a custom gateway, by subscription sign-in or API key. AI Shuffle includes no AI usage. New here? Start with [Requirements](/docs/getting-started/requirements) and [First run](/docs/getting-started/first-run). It includes a chat interface, connectors for messaging platforms and services, automation pipelines, and a REST API for building integrations.
 
 ## Key Features
 
@@ -87,5 +87,5 @@ Full REST API for external integrations:
 
 - **Frontend:** SvelteKit with Svelte 5, Tailwind CSS, TipTap editor
 - **Backend:** FastAPI with WebSocket support, PostgreSQL database
-- **Agents:** the Fluid harness runs sessions, streaming and tool execution against the configured provider; Claude Code sessions run the standard Claude Code CLI with your own sign-in or API key
+- **Agents:** the Fluid harness runs sessions, streaming and tool execution against the configured provider; Claude sessions run the standard Claude Code CLI with your own sign-in or API key
 - **Storage:** PostgreSQL for sessions, message history and settings; your projects stay as ordinary files in the workspace

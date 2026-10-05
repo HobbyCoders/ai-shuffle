@@ -104,7 +104,7 @@ it('warns when the active mode has no credential', async () => {
 	worker.state.integrations.anthropic_api_key_set = false;
 	await show();
 	expect(screen.getByText('Not ready')).toBeTruthy();
-	expect(screen.getByText('No Anthropic API key is stored on this worker.')).toBeTruthy();
+	expect(screen.getByText('Claude cannot run: no Anthropic API key is stored on this worker.')).toBeTruthy();
 	expect(within(credentials()).getByText('No key stored')).toBeTruthy();
 	expect(screen.getByRole('button', { name: 'Anthropic API key, No key stored' })).toBeTruthy();
 });

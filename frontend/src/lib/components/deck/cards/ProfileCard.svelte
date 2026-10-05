@@ -56,6 +56,7 @@
 	import {
 		FOLDER_NONE,
 		folderOf,
+		defaultModelBinding,
 		isPinned,
 		pinnedModel,
 		pinnedProviders,
@@ -296,7 +297,7 @@
 			description: '',
 			// With the subagent default a new agent pins nothing; without it, it
 			// starts pinned to the default model as before.
-			provider_models: subagentDefault ? {} : { [NATIVE_PROVIDER_KEY]: getDefaultModel() },
+			provider_models: subagentDefault ? {} : defaultModelBinding(getDefaultModel()),
 			max_turns: null,
 			allowed_tools: [],
 			disallowed_tools: [],
@@ -971,7 +972,7 @@
 					? { [NATIVE_PROVIDER_KEY]: exported }
 					: subagentDefault
 						? {}
-						: { [NATIVE_PROVIDER_KEY]: getDefaultModel() })
+						: defaultModelBinding(getDefaultModel()))
 			},
 			max_turns: agent.max_turns || null,
 			allowed_tools: agent.allowed_tools || [],

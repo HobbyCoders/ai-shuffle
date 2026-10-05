@@ -208,8 +208,14 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
             profile_config = json.loads(profile_config)
         selected = row.get("launched_model") or profile_config.get("model")
         if not selected and not row.get("provider_id"):
-            from app.core.model_registry import DEFAULT_MODEL
-            selected = DEFAULT_MODEL
+            # No model named: the same default build_options_from_profile uses.
+            from app.core.credential_gate import default_run_selection
+            # A voice delegation is not a typed owner turn: keep the
+            # unattended order rather than the most used chat model. Its
+            # pick is validated with the servable rule below, so no gateway.
+            selected = await run_sync(
+                default_run_selection, prefer_most_used=False, servable_only=True,
+            )
     if not selected:
         return "No chat model is selected. Ask the user to choose one in the composer."
     decoded = decode_provider_model(selected)

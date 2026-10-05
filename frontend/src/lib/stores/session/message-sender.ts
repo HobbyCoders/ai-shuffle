@@ -19,7 +19,7 @@ import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
 import { pendingQueue, newLocalPendingId } from './pending-queue';
 import { contextWindowForChoice } from '$lib/constants/model-context';
-import { getDefaultModel } from '$lib/constants/models';
+import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { effortToSend } from '../assistant';
 
@@ -192,6 +192,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		const overrides: Record<string, string | string[] | number | boolean> = {};
 		if (_state.mode !== 'chat') overrides.workspace_project_ids = [...(_state.workspaceProjectIds ?? [])];
 		if (_state.modelOverride) overrides.model = _state.modelOverride;
+		else if (!_state.sessionId) {
+			// A new chat shows the default of a provider that can run. When the
+			// server's own default belongs to one that cannot (only OpenAI is
+			// connected, the server still says Claude), send what the picker shows.
+			const shown = getDefaultModel();
+			if (shown && shown !== getServerDefaultModel()) overrides.model = shown;
+		}
 		if (_state.permissionModeOverride) overrides.permission_mode = _state.permissionModeOverride;
 		const effort = effortToSend(_state.sessionId, _state.effortLevelOverride);
 		if (effort) overrides.effort = effort;

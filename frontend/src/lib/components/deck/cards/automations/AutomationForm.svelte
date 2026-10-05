@@ -1,6 +1,7 @@
 <script lang="ts">
 	import {
 		automationFallbackModel,
+		fallbackModelHint,
 		savedFallbackModel,
 		type Automation,
 		type TriggerItem,
@@ -28,7 +29,8 @@
 	import Banner from '$lib/components/Banner.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { onMount } from 'svelte';
-	import { getClaudeAuth, type ClaudeAuthMode } from '$lib/api/claude-auth';
+	import { getClaudeAuth } from '$lib/api/claude-auth';
+	import { decodeProviderModel } from '$lib/constants/models';
 	import { openSettings } from '$lib/settings/navigation.svelte';
 
 	interface Props {
@@ -143,26 +145,33 @@
 		onToggleActionExpand
 	}: Props = $props();
 
-	// Subscription mode: an automation runs on the user's Claude plan while
-	// they are away. Recommend an API key before it is saved (the server adds
-	// the same notice to the save response).
-	let claudeMode = $state<ClaudeAuthMode | null>(null);
+	// A run on a Claude model in subscription mode uses the user's Claude plan
+	// while they are away. Recommend an API key before it is saved (the server
+	// adds the same notice to the save response). Only when Claude is signed in
+	// and this automation would run on a Claude model: subscription is the
+	// worker's default mode, so the mode alone does not mean Claude is in use.
+	let claudeSubscription = $state(false);
 	onMount(() => {
 		getClaudeAuth()
-			.then((summary) => (claudeMode = summary.mode))
+			.then((summary) => (claudeSubscription = summary.mode === 'subscription' && !!summary.cli?.signed_in))
 			.catch(() => {
 				// No notice when the mode cannot be read.
 			});
 	});
 	const scheduledRunNotice = $derived.by(() => {
-		if (claudeMode !== 'subscription') return '';
+		if (!claudeSubscription) return '';
 		const profile = profiles.find((p) => p.id === formProfileId);
 		if (profile?.config?.provider) return '';
-		return 'Claude Code is in subscription mode, so this automation runs on your Claude plan while you are away. Use an API key for scheduled runs (Settings > Providers > Claude). The loop guard holds unattended turns past its budget until you confirm them.';
+		// No model of its own: unattended runs use Claude's default while Claude
+		// is connected, so only an explicit other-provider choice clears this.
+		const model = formModel || profile?.config?.model || '';
+		if (model && decodeProviderModel(model)) return '';
+		return 'Claude runs on your subscription, so this automation uses your Claude plan while you are away. Use an API key for scheduled runs (Settings > Providers > Claude). The loop guard holds unattended turns past its budget until you confirm them.';
 	});
 
-	// What runs use with no model of their own: the app default, unless the
-	// selected agent still carries a legacy saved model. An edited automation on
+	// What runs use with no model of their own: the worker's default for
+	// unattended runs (not the chat default), unless the selected agent still
+	// carries a legacy saved model. An edited automation on
 	// its saved agent takes the server's report; otherwise it is read from the
 	// selected agent.
 	const fallbackModel = $derived.by(() => {
@@ -175,7 +184,7 @@
 		}
 		return automationFallbackModel(profiles.find((p) => p.id === formProfileId)?.config);
 	});
-	const modelEmptyLabel = $derived(fallbackModel.legacy ? 'Saved on agent (legacy)' : 'App default');
+	const modelEmptyLabel = $derived(fallbackModel.legacy ? 'Saved on agent (legacy)' : 'Worker default');
 
 	// What the Model row says under the picker; an unchanged choice that is
 	// gone shows why runs fail.
@@ -183,9 +192,7 @@
 		const unchanged = savedAutomation && (savedAutomation.model || '') === formModel;
 		if (unchanged && savedAutomation?.model_error) return savedAutomation.model_error;
 		if (formModel) return 'Every run uses this model.';
-		return fallbackModel.legacy
-			? `Uses ${fallbackModel.label}, saved on this agent (legacy).`
-			: `Uses ${fallbackModel.label}, the app default.`;
+		return fallbackModelHint(fallbackModel);
 	});
 	const modelHintIsError = $derived(
 		!!savedAutomation?.model_error && (savedAutomation.model || '') === formModel

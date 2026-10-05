@@ -72,6 +72,38 @@ describe('agent credentials', () => {
 		expect(creds).toMatchObject({ ready: false, credentialReady: true, licenseAllowsRuns: false, reason: 'New agent runs are paused until you add a license key.' });
 	});
 
+	it('uses the Claude reason, not the worker-wide one, when the worker sends it', () => {
+		const claudeReason = 'Claude cannot run: the Claude Code CLI is not signed in on this worker.';
+		// Only OpenAI is connected: the worker can run, Claude cannot.
+		const openaiOnly = credentialsFromSummary(summary({
+			gate: { ready: true, reason: null, mode: 'subscription', claude_credential_ready: false, license_allows_runs: true,
+				startup_state: 'ready', any_provider_ready: true, ready_providers: ['openai'] },
+			claude_reason: claudeReason,
+		}));
+		expect(openaiOnly).toMatchObject({ ready: true, credentialReady: false, reason: claudeReason });
+		// Nothing connected: the worker-wide reason is not shown as Claude's.
+		const none = credentialsFromSummary(summary({
+			gate: { ready: false, reason: 'Connect an AI provider to start agents.', mode: 'subscription', claude_credential_ready: false,
+				license_allows_runs: true, startup_state: 'setup_required', any_provider_ready: false, ready_providers: [] },
+			claude_reason: claudeReason,
+		}));
+		expect(none.reason).toBe(claudeReason);
+		// Claude ready while the worker-wide reason names something else.
+		const claudeOk = credentialsFromSummary(summary({
+			gate: { ready: true, reason: 'Something about another provider.', mode: 'subscription', claude_credential_ready: true,
+				license_allows_runs: true, startup_state: 'ready' },
+			claude_reason: null,
+		}));
+		expect(claudeOk.reason).toBeNull();
+	});
+
+	it('falls back to the gate reason on an older worker only while Claude is not ready', () => {
+		expect(credentialsFromSummary(summary()).reason).toBe(NOT_SIGNED_IN);
+		expect(credentialsFromSummary(summary({
+			gate: { ready: true, reason: 'Worker-wide note.', mode: 'subscription', claude_credential_ready: true, license_allows_runs: true },
+		})).reason).toBeNull();
+	});
+
 	it('stores the mode and answers with the new summary', async () => {
 		mocks.put.mockResolvedValue(summary({ mode: 'api_key', mode_label: 'Anthropic API key' }));
 		expect(await setClaudeAuthMode('api_key')).toMatchObject({ mode: 'api_key', modeLabel: 'Anthropic API key' });

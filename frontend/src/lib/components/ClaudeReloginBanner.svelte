@@ -14,6 +14,8 @@
 
 	let hidden = $state(false);
 	const notice = $derived($auth.status?.claude_cli?.relogin_notice ?? null);
+	// Only while Claude is in use: an owner who turned Claude off has nothing to re-sign.
+	const claudeOff = $derived($auth.status?.agent_gate?.mode === 'off');
 
 	async function dismiss() {
 		hidden = true;
@@ -25,7 +27,7 @@
 	}
 </script>
 
-{#if notice && $isAdmin && !hidden}
+{#if notice && $isAdmin && !hidden && !claudeOff}
 	<NotificationSlot order={DOCK_ORDER.account}>
 		<Banner
 			variant="page"

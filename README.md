@@ -6,7 +6,7 @@ A self-hosted workspace for AI agents, by HobbyCoders.
 
 AI Shuffle runs on your own server, NAS or PC and brings your agents, projects, conversations and tools into one place. Build software, research a problem, automate recurring work, browse the web or generate media, from a browser, the desktop app or the Android app.
 
-It runs Claude Code and other agent tools with **your own** AI account. You bring a Claude subscription (you sign in to the standard Claude Code CLI yourself) or an API key, and your AI provider bills you directly. AI Shuffle includes no AI usage and never pays for, resells or sees it. Your projects, sessions and database stay on your machine; prompts go from there straight to the provider you chose.
+It runs AI agents with **your own** AI account. You connect any supported provider (Claude, OpenAI, OpenRouter, xAI Grok or a custom gateway) by subscription sign-in or API key, and that provider bills you directly. One provider is enough to start. An existing Claude subscription works through the standard Claude Code CLI, which you sign in to yourself. AI Shuffle includes no AI usage and never pays for, resells or sees it. Your projects, sessions and database stay on your machine; prompts go from there straight to the provider you chose.
 
 ## What you get
 
@@ -34,7 +34,7 @@ The Android app is on [Google Play](https://play.google.com/store/apps/details?i
 
 Email support@hobbycoders.com. Never send passwords, API keys, license keys, pull tokens or sign-in codes. See the [privacy policy](https://hobbycoders.com/privacy), [terms](https://hobbycoders.com/terms), [license terms](https://hobbycoders.com/license) and [refund policy](https://hobbycoders.com/refund).
 
-AI Shuffle is an independent product. It runs Claude Code, which is made by Anthropic; Anthropic does not build, endorse or support AI Shuffle.
+AI Shuffle is an independent product. It is not affiliated with Anthropic, OpenAI, xAI or any other AI provider, and none of them build, endorse or support it.
 
 ## License
 

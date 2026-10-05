@@ -10,18 +10,27 @@
  * turn start, so the credential and license gates apply to it exactly as to
  * any other run, and whatever they refuse comes back as the error.
  *
+ * The run names its model explicitly (`overrides.model`), picked from a
+ * provider that is ready (see `pickFirstRunModel`), so a worker whose default
+ * model belongs to a provider without a credential still answers.
+ *
  * Two refusals carry a code on the chat WebSocket's `error` frame
  * (`{ type: 'error', session_id, message, code }`):
  * - `agent_setup_required`: the credential gate refused the turn (no license,
- *   or no credential for the active Claude Code mode). `message` says what is
- *   missing and where to fix it.
+ *   or no usable credential for the provider the run needs). `message` says
+ *   what is missing and where to fix it.
  * - `loop_guard_confirm`: the subscription loop guard held an unattended turn
  *   for the owner's confirmation. `message` says why and where to confirm it.
  * The session's event feed reports the same refusal as `turn.aborted` without
  * the code, often first, so an abort waits briefly for the coded frame.
  */
 import { api, getErrorMessage, type Profile } from '$lib/api/client';
+import type { ModelProvider } from '$lib/api/model-providers';
 import { wsUrl } from '$lib/api/runtime';
+import { providerOfRow } from '$lib/components/settings/providers/providers-model';
+import {
+	decodeProviderModel, encodeProviderModel, type ModelOption, type ProviderEntry
+} from '$lib/constants/models.svelte';
 import { createSseFeed, type SseFeed } from '$lib/stores/session/v2/sse-feed';
 
 export const FIRST_RUN_PROMPT = 'Say hello in one short sentence, then list three things you can help me with, one line each.';
@@ -93,9 +102,100 @@ function str(value: unknown): string {
 	return typeof value === 'string' ? value : '';
 }
 
+// ---------------------------------------------------------------------------
+// Which provider and model the first run uses
+// ---------------------------------------------------------------------------
+
+export interface FirstRunModelInput {
+	/** Ready agent providers: `claude`, `openai`, `grok`, `openrouter`, `gw:<id>`. */
+	ready: readonly string[];
+	/** The provider the owner connected in this wizard, tried first. */
+	preferred?: string | null;
+	/** model_providers rows (the providers store), to map brands onto rows. */
+	rows: readonly ModelProvider[];
+	/** Enabled provider rows with their curated models (the model registry). */
+	registry: readonly ProviderEntry[];
+	/** The worker's default model (a Claude alias or a `prov:` composite). */
+	defaultModel: string;
+	/** The Claude models the registry offers. */
+	claudeModels: readonly ModelOption[];
+}
+
+export interface FirstRunModel {
+	/** Brand id: `claude`, `openai`, `grok`, `openrouter`, `gw:<id>`. */
+	providerId: string;
+	/** The value sent as `overrides.model`; null leaves the worker's default. */
+	model: string | null;
+	/** "OpenAI", "xAI Grok", or the gateway's name. */
+	providerName: string;
+	/** The model's label, when known. */
+	modelLabel: string | null;
+}
+
+const BRAND_NAMES: Record<string, string> = { claude: 'Claude', openai: 'OpenAI', grok: 'xAI Grok', openrouter: 'OpenRouter' };
+
+/** The registry rows of a brand, subscriptions first (they are what the owner pays for already). */
+function brandEntries(brand: string, input: FirstRunModelInput): { entry: ProviderEntry; row: ModelProvider | undefined }[] {
+	return input.registry
+		.map((entry) => ({ entry, row: input.rows.find((r) => r.id === entry.id) }))
+		.filter(({ entry, row }) => (row ? providerOfRow(row) === brand : `gw:${entry.id}` === brand))
+		.sort((a, b) => Number(b.entry.auth_kind === 'subscription') - Number(a.entry.auth_kind === 'subscription'));
+}
+
+function forBrand(brand: string, input: FirstRunModelInput): FirstRunModel | null {
+	if (brand === 'claude') {
+		const isClaudeDefault = !decodeProviderModel(input.defaultModel) && !!input.defaultModel;
+		const option = isClaudeDefault
+			? input.claudeModels.find((m) => m.value === input.defaultModel)
+			: input.claudeModels[0];
+		const model = isClaudeDefault ? input.defaultModel : (option?.value ?? null);
+		return { providerId: 'claude', model, providerName: 'Claude', modelLabel: option?.label ?? null };
+	}
+	const decoded = decodeProviderModel(input.defaultModel);
+	for (const { entry, row } of brandEntries(brand, input)) {
+		// The worker's own default, when it already points at this brand.
+		const modelId = decoded?.providerId === entry.id
+			? decoded.modelId
+			: entry.default_model || entry.models[0]?.id || null;
+		if (!modelId) continue;
+		const label = entry.models.find((m) => m.id === modelId)?.label ?? modelId;
+		const name = BRAND_NAMES[brand] ?? row?.name ?? entry.name;
+		return { providerId: brand, model: encodeProviderModel(entry.id, modelId), providerName: name, modelLabel: label };
+	}
+	return null;
+}
+
+/**
+ * The provider and model for the first run: the provider connected in this
+ * wizard when it is ready, then the worker's default when its provider is
+ * ready, then the first ready provider with a model. Null when nothing ready
+ * has a model to name; the run then goes out with the worker's default.
+ */
+export function pickFirstRunModel(input: FirstRunModelInput): FirstRunModel | null {
+	const ready = new Set(input.ready);
+	const order: string[] = [];
+	if (input.preferred && ready.has(input.preferred)) order.push(input.preferred);
+	const decoded = decodeProviderModel(input.defaultModel);
+	if (decoded) {
+		const row = input.rows.find((r) => r.id === decoded.providerId);
+		const brand = row ? providerOfRow(row) : `gw:${decoded.providerId}`;
+		if (ready.has(brand)) order.push(brand);
+	} else if (ready.has('claude')) {
+		order.push('claude');
+	}
+	order.push(...input.ready);
+	for (const brand of new Set(order)) {
+		const pick = forBrand(brand, input);
+		if (pick) return pick;
+	}
+	return null;
+}
+
 interface StartOptions {
 	profileId: string;
 	prompt?: string;
+	/** Model to run with (`overrides.model`); omitted uses the worker's default. */
+	model?: string | null;
 	onUpdate?: (state: FirstRunState) => void;
 	timeoutMs?: number;
 	/** Test seams. */
@@ -225,7 +325,9 @@ export function startFirstAgentRun(options: StartOptions): FirstRunHandle {
 		socket = options.openSocket ? options.openSocket(url) : new WebSocket(url);
 		socket.onopen = () => {
 			try {
-				socket?.send(JSON.stringify({ type: 'query', prompt, profile: options.profileId, mode: 'chat', request_id: requestId }));
+				const frame: Record<string, unknown> = { type: 'query', prompt, profile: options.profileId, mode: 'chat', request_id: requestId };
+				if (options.model) frame.overrides = { model: options.model };
+				socket?.send(JSON.stringify(frame));
 			} catch (e) {
 				finish('failed', getErrorMessage(e, 'Could not reach the worker.'));
 			}

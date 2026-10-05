@@ -24,7 +24,7 @@ describe('Generation model catalog', () => {
 		await hydrateModelRegistry();
 		render(GenerationModelSelect);
 		const select = screen.getByRole('combobox', { name: /Generation model/ }) as HTMLSelectElement;
-		expect(Array.from(select.options, (option) => option.value)).toEqual(['', 'opus', 'prov:strong:vendor/astra:latest']);
+		expect(Array.from(select.options, (option) => option.value)).toEqual(['', 'prov:strong:vendor/astra:latest', 'opus']);
 		expect(select.value).toBe('');
 		expect(screen.queryByRole('option', { name: /Custom/ })).toBeNull();
 	});

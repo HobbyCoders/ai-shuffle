@@ -6,9 +6,9 @@ order: 0
 
 # AI Shuffle documentation
 
-AI Shuffle is a self-hosted workspace for AI agents, made by HobbyCoders. You run it on your own server, NAS or PC, and open it in a browser or the Android app. It runs Claude Code and other agent tools with **your own** AI account: you bring a Claude subscription or an API key, and your AI provider bills you directly. AI Shuffle never pays for, resells or sees your AI usage.
+AI Shuffle is a self-hosted workspace for AI agents, made by HobbyCoders. You run it on your own server, NAS or PC, and open it in a browser or the Android app. It runs AI agents with **your own** AI account: you connect any supported provider by subscription sign-in or API key, and that provider bills you directly. AI Shuffle never pays for, resells or sees your AI usage.
 
-AI Shuffle is an independent product. Anthropic makes Claude Code, but it does not build, endorse or support AI Shuffle.
+AI Shuffle is an independent product. It is not affiliated with, built, endorsed or supported by any AI provider.
 
 ## Install
 
@@ -24,7 +24,7 @@ AI Shuffle is an independent product. Anthropic makes Claude Code, but it does n
 | Page | Read it when |
 | --- | --- |
 | [First run](/docs/getting-started/first-run) | The container is running and you open AI Shuffle for the first time. |
-| [Modes and costs](/docs/getting-started/modes-and-costs) | You are choosing between a Claude subscription and an API key, or want to know what things cost. |
+| [Modes and costs](/docs/getting-started/modes-and-costs) | You are choosing between a subscription and an API key, or want to know what things cost. |
 | [Quick start](/docs/getting-started/quick-start) | Setup is done and you want to start working. |
 | [Remote access](/docs/getting-started/remote-access) | You want to use AI Shuffle from your phone or away from home. |
 

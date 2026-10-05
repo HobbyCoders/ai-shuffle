@@ -4,8 +4,11 @@
 	 * own group in the model picker: name, endpoint, the dialect it speaks
 	 * (Anthropic Messages or OpenAI chat/completions) and an optional token.
 	 * Connect creates the row (`provider_type: 'custom'`), then the models step
-	 * picks what to offer.
+	 * picks what to offer. A draft that already has a row (the setup wizard
+	 * sent it back, e.g. its token was rejected) starts from that row's fields
+	 * and updates it instead of creating a second one.
 	 */
+	import { untrack } from 'svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import { providers } from '$lib/stores/providers.svelte';
 	import RowGroup from '../../rows/RowGroup.svelte';
@@ -30,9 +33,12 @@
 		{ value: 'openai', label: 'OpenAI chat' }
 	];
 
-	let name = $state('');
-	let endpoint = $state('');
-	let dialect = $state<Dialect>('openai');
+	const existing = untrack(() =>
+		draft.rowId ? providers.current.providers?.find((p) => p.id === draft.rowId) : undefined
+	);
+	let name = $state(existing?.name ?? '');
+	let endpoint = $state(existing?.base_url ?? '');
+	let dialect = $state<Dialect>(existing?.api_dialect === 'anthropic' ? 'anthropic' : 'openai');
 	let token = $state('');
 	let busy = $state(false);
 	let error = $state('');
@@ -46,9 +52,25 @@
 		busy = true;
 		error = '';
 		try {
-			const row = await providers.createGateway({ name, base_url: endpoint, api_dialect: dialect, auth_token: token });
+			let rowId = draft.rowId;
+			if (rowId) {
+				const value = token.trim();
+				await providers.saveProvider(
+					{
+						name: name.trim(),
+						provider_type: 'custom',
+						base_url: endpoint.trim(),
+						api_dialect: dialect,
+						...(value ? { auth_token: value } : {})
+					},
+					rowId
+				);
+			} else {
+				const row = await providers.createGateway({ name, base_url: endpoint, api_dialect: dialect, auth_token: token });
+				rowId = row.id;
+			}
 			token = '';
-			providerDrafts.update(draft.item, { rowId: row.id, step: 'models' });
+			providerDrafts.update(draft.item, { rowId, step: 'models' });
 		} catch (e) {
 			error = getErrorMessage(e, 'Could not add the gateway');
 		} finally {

@@ -1,12 +1,12 @@
 <!--
 title: Model Providers
-description: Non-Anthropic model providers, model catalog fetch, ChatGPT and Grok sign-in, banked rate-limit resets, usage tracking keys, and the model registry
+description: Provider rows (OpenAI, ChatGPT, xAI, Grok, OpenRouter, custom), model catalog fetch, ChatGPT and Grok sign-in, banked rate-limit resets, usage tracking keys, and the model registry
 order: 13
 -->
 
 # Model Providers API
 
-Endpoints for the model providers (OpenRouter, OpenAI, ChatGPT, xAI, Grok and custom endpoints) that sessions can use besides Claude, and for the model registry that lists every selectable model.
+Endpoints for the model providers stored as provider rows (OpenAI, ChatGPT, xAI, Grok, OpenRouter and custom endpoints), and for the model registry that lists every selectable model. Claude is set up through its own endpoints: see [claude-auth](/docs/api-reference/miscellaneous#get-apiv1settingsclaude-auth) and [Authentication](/docs/api-reference/authentication).
 
 Every endpoint on this page except `GET /api/v1/models` and `POST /api/v1/model-providers/refresh-capabilities` needs owner access. API-user keys (`aih_...`) get `403`. The examples send an owner token from `POST /api/v1/owner/login` (see [Owner password](/docs/api-reference/authentication#owner-password)).
 

@@ -52,8 +52,9 @@ services:
       # Active Fluid settings. Kept separate from every provider import source so
       # preview/apply can remain copy-only and destination conflicts stay visible.
       - fluid-settings:/home/appuser/.fluid
-      # The Claude Code CLI's own config directory (historical volume name). Run
-      # `claude auth login` in the AI Shuffle terminal (or
+      # Provider CLI sign-in (Claude Code, for a Claude subscription). Historical
+      # volume name. If you use a Claude subscription, run `claude auth login` in
+      # the AI Shuffle terminal (or
       # `docker exec -it -u appuser <container> claude auth login`); the CLI keeps
       # its login here. AI Shuffle never stores or refreshes your Claude credentials.
       - claude-auth:/home/appuser/.claude
@@ -119,7 +120,7 @@ services:
       start_period: 40s
 
     # Resource limits (adjust based on your Unraid server)
-    # Note: The container runs Python + Node.js (Claude CLI) + MCP servers
+    # Note: The container runs Python + Node.js (provider CLIs) + MCP servers
     # concurrently. 4 CPUs is recommended; reduce to 2 for constrained hosts.
     #
     # IMPORTANT — memory & the OOM crash:
@@ -174,14 +175,15 @@ volumes:
   # Named volume for active Fluid settings and imported copies.
   fluid-settings:
     driver: local
-  # The Claude Code CLI's config directory (its own login and settings).
+  # Provider CLI sign-in: the Claude Code CLI's config directory (its own login
+  # and settings).
   # Do not rename: existing Docker/Unraid installs depend on this volume identity.
   claude-auth:
     driver: local
   # Named volume for GitHub CLI authentication persistence
   gh-auth:
     driver: local
-  # Named volume for ~/.local (the user-installed Claude Code CLI and its updates)
+  # Named volume for ~/.local (provider CLI programs: the Claude Code CLI and its updates)
   local-home:
     driver: local
   # Named volume for the browser-automation Chrome profile (persisted logins)

@@ -1,8 +1,21 @@
 """Settings > Loop guard endpoints and the automation "use an API key" notice."""
 from unittest.mock import AsyncMock, patch
 
-from app.core import claude_auth_mode, loop_guard
+import pytest
+
+from app.core import claude_auth_mode, claude_cli_status, loop_guard
 from app.db import database as db
+
+
+@pytest.fixture
+def cli_signed_in(monkeypatch):
+    """The Claude Code CLI reports a sign-in (or not) without running it."""
+    def _set(value: bool):
+        status = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=value)
+        monkeypatch.setattr(claude_cli_status, "peek", lambda: status)
+        monkeypatch.setattr(claude_cli_status, "get_status", lambda force=False, resolver=None: status)
+    _set(True)
+    return _set
 
 ENDPOINT = "/api/v1/settings/loop-guard"
 
@@ -35,15 +48,16 @@ def test_confirm_and_dismiss_held_turns(authenticated_client):
     assert authenticated_client.get(ENDPOINT).json()["held"] == []
 
 
-def _automation(client):
+def _automation(client, **fields):
     db.create_profile(profile_id="auto-profile", name="Auto", description=None, config={})
     return client.post("/api/v1/automations", json={
         "name": "Nightly", "trigger_type": "webhook", "trigger_config": {},
-        "prompt": "summarize", "profile_id": "auto-profile",
+        "prompt": "summarize", "profile_id": "auto-profile", **fields,
     })
 
 
-def test_automation_create_in_subscription_mode_recommends_an_api_key(authenticated_client, mock_encryption):
+def test_automation_create_in_subscription_mode_recommends_an_api_key(
+        authenticated_client, mock_encryption, cli_signed_in):
     claude_auth_mode.set_mode("subscription")
     r = _automation(authenticated_client)
     assert r.status_code == 201, r.text
@@ -52,8 +66,33 @@ def test_automation_create_in_subscription_mode_recommends_an_api_key(authentica
     assert r.json()["notices"] == [loop_guard.SCHEDULED_RUN_GUIDANCE]
 
 
-def test_automation_create_in_api_key_mode_has_no_notice(authenticated_client, mock_encryption):
+def test_automation_create_in_api_key_mode_has_no_notice(authenticated_client, mock_encryption, cli_signed_in):
     claude_auth_mode.set_mode("api_key")
     r = _automation(authenticated_client)
     assert r.status_code == 201, r.text
     assert r.json()["notices"] == []
+
+
+def test_no_notice_when_the_claude_cli_is_not_signed_in(authenticated_client, mock_encryption, cli_signed_in):
+    claude_auth_mode.set_mode("subscription")
+    cli_signed_in(False)
+    r = _automation(authenticated_client)
+    assert r.status_code == 201, r.text
+    assert r.json()["notices"] == []
+
+
+def test_no_notice_when_the_automation_runs_on_another_provider(authenticated_client, mock_encryption, cli_signed_in):
+    claude_auth_mode.set_mode("subscription")
+    db.create_model_provider("oa", "OpenAI", "openai", "https://api.openai.com/v1", auth_token="enc:key",
+                             models=[{"id": "gpt-5", "label": "GPT-5"}], default_model="gpt-5")
+    r = _automation(authenticated_client, model="prov:oa:gpt-5")
+    assert r.status_code == 201, r.text
+    assert r.json()["effective_provider_id"] == "oa"
+    assert r.json()["notices"] == []
+
+
+def test_guidance_needs_a_claude_model(cli_signed_in, mock_db):
+    claude_auth_mode.set_mode("subscription")
+    assert loop_guard.scheduled_run_guidance(None, model="sonnet") == loop_guard.SCHEDULED_RUN_GUIDANCE
+    assert loop_guard.scheduled_run_guidance(None, model="gpt-5") is None
+    assert loop_guard.scheduled_run_guidance(None, model="sonnet", provider_id="oa") is None

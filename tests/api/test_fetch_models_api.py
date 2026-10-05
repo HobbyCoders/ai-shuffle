@@ -779,3 +779,46 @@ class TestMediaModelFiltering:
 
         assert len(body["models"]) == 2
         assert body["hidden"] == []
+
+
+class TestRecommendedModels:
+    """``recommended``: the preset roster ids the upstream list holds, the only
+    models the setup wizard may pre-check."""
+
+    def test_openai_lists_its_roster_models_in_roster_order(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        unlock_encryption(mock_db)
+        _make_provider(provider_type="openai", base_url="https://api.openai.com/v1",
+                       auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        def _handler(request):
+            return httpx.Response(200, json={"data": [
+                {"id": "text-embedding-3-small"},
+                {"id": "omni-moderation-latest"},
+                {"id": "babbage-002"},
+                {"id": "gpt-5.4-mini"},
+                {"id": "gpt-5.6-terra"},
+            ]})
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        # The upstream list is unsorted and keeps non-chat models.
+        assert body["models"][0]["id"] == "text-embedding-3-small"
+        assert body["recommended"] == ["gpt-5.6-terra", "gpt-5.4-mini"]
+
+    def test_a_provider_without_a_roster_recommends_nothing(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        unlock_encryption(mock_db)
+        _make_provider(auth_token=encryption.encrypt_value(RAW_TOKEN))
+
+        def _handler(request):
+            return httpx.Response(200, json={"data": [{"id": "openai/gpt-5.6-sol"}]})
+
+        _install_mock_transport(monkeypatch, _handler)
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["recommended"] == []

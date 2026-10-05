@@ -29,7 +29,7 @@ export const entries: SettingEntry[] = [
 		section: 'Agent safety',
 		label: 'Agents run as you',
 		hint: 'Same access as you',
-		help: 'In the desktop app, agents use your own Claude CLI login, API keys and GitHub login. They can read, change and delete any file your user can, run programs and reach your network. Nothing isolates them. Run the worker in Docker or on another machine for a boundary.',
+		help: 'In the desktop app, agents use your own provider sign-ins, API keys and GitHub login. They can read, change and delete any file your user can, run programs and reach your network. Nothing isolates them. Run the worker in Docker or on another machine for a boundary.',
 		keywords: ['disclosure', 'desktop', 'agent access'],
 		platform: 'desktop-app'
 	},

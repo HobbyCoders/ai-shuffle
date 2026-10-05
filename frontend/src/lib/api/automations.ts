@@ -4,7 +4,7 @@
 
 import { api } from './client';
 import { apiOrigin } from './runtime';
-import { encodeProviderModel, getDefaultModel, getModelLabel, getProviders } from '$lib/constants/models';
+import { encodeProviderModel, getModelLabel, getProviders } from '$lib/constants/models';
 
 // ============================================================================
 // Types
@@ -167,7 +167,8 @@ function modelName(model: string | null | undefined, providerId: string | null |
 
 /**
  * Short label for the model an automation's runs use, e.g. `Opus` for its own
- * choice, `Sonnet (app default)` without one, `GPT-5 (saved on agent)` when
+ * choice, `Sonnet (worker default)` without one (the model the worker
+ * reports for unattended runs, not the chat default), `GPT-5 (saved on agent)` when
  * the agent still carries a legacy model, and `Model unavailable` when the
  * stored choice is gone.
  */
@@ -179,14 +180,20 @@ export function automationModelLabel(automation: Pick<
 	if (automation.model) return getModelLabel(automation.model);
 	const name = modelName(automation.effective_model, automation.effective_provider_id);
 	if (automation.model_source === 'agent') return `${name} (saved on agent)`;
-	if (automation.model_source === 'default') return `${name} (app default)`;
+	if (automation.model_source === 'default') {
+		return automation.effective_model ? `${name} (worker default)` : 'Worker default';
+	}
 	return name;
 }
 
 /** What runs use when an automation has no model of its own. */
 export interface AutomationFallbackModel {
-	/** Display name of the model, e.g. `Sonnet`. */
-	label: string;
+	/**
+	 * Display name of the model, e.g. `Sonnet`. Null when the run takes the
+	 * worker's unattended default and the worker has not said which model that
+	 * is (a form not saved yet): say so without naming a model.
+	 */
+	label: string | null;
 	/** True when it is a legacy model saved on the agent, not the app default. */
 	legacy: boolean;
 }
@@ -194,9 +201,11 @@ export interface AutomationFallbackModel {
 /**
  * The model a run without its own choice uses, read from the agent the form
  * has selected. Mirrors `resolve_automation_model` in
- * app/core/automation_service.py: the app default (the model a new chat shows
- * when none is picked), unless the agent still carries a legacy saved model or
- * provider from an older version.
+ * app/core/automation_service.py: a legacy model or provider still saved on
+ * the agent, else the worker's default for unattended runs. That default is
+ * not the chat default (Claude's default when Claude is connected, else the
+ * newest usable provider's), and only the worker knows it, so the label is
+ * null until a saved automation reports it (`savedFallbackModel`).
  */
 export function automationFallbackModel(
 	agentConfig: { model?: string | null; provider?: string | null } | null | undefined
@@ -208,7 +217,15 @@ export function automationFallbackModel(
 		const fallback = getProviders().find((p) => p.id === provider)?.default_model ?? null;
 		return { label: modelName(fallback, provider), legacy: true };
 	}
-	return { label: getModelLabel(getDefaultModel()), legacy: false };
+	return { label: null, legacy: false };
+}
+
+/** The Model row's hint for a run with no model of its own. */
+export function fallbackModelHint(fallback: AutomationFallbackModel): string {
+	if (fallback.legacy) return `Uses ${fallback.label ?? 'the provider default'}, saved on this agent (legacy).`;
+	return fallback.label
+		? `Uses ${fallback.label}, the worker's default for unattended runs.`
+		: "Uses the worker's default model for unattended runs.";
 }
 
 /** The same answer from a saved automation's server report. */

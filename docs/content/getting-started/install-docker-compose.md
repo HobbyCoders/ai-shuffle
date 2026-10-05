@@ -102,9 +102,11 @@ services:
       - ${WORKSPACE_DIR:-./workspace}:/workspace
       # AI Shuffle settings.
       - fluid-settings:/home/appuser/.fluid
-      # The Claude Code CLI login, kept when the container is replaced.
+      # Provider CLI sign-in (the Claude Code CLI, for a Claude subscription),
+      # kept when the container is replaced.
       - claude-home:/home/appuser/.claude
-      # The Claude Code CLI itself (installed on first start, updates itself).
+      # Provider CLI programs (the Claude Code CLI, installed on first start;
+      # it updates itself).
       - local-home:/home/appuser/.local
       # GitHub CLI sign-in.
       - gh-auth:/home/appuser/.config/gh
@@ -112,7 +114,7 @@ services:
       - browser-profile:/home/appuser/chrome-profile
 
     # Ready once the database answers. First start can take a few minutes
-    # while the Claude Code CLI installs.
+    # while it sets up, including installing the Claude Code CLI.
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/ready"]
       interval: 30s
@@ -256,13 +258,13 @@ Keep `COOKIE_SECURE=false` for plain `http://` on your LAN. Set it to `true` onl
 docker compose up -d
 ```
 
-The first start downloads the image and installs the Claude Code CLI with Anthropic's installer, so it can take a few minutes. `docker compose ps` shows `healthy` when AI Shuffle is ready; `docker compose logs -f` shows progress.
+The first start downloads the image and sets it up, so it can take a few minutes. Setup includes installing the Claude Code CLI with Anthropic's installer, used if you connect a Claude subscription. `docker compose ps` shows `healthy` when AI Shuffle is ready; `docker compose logs -f` shows progress.
 
 ## 6. First launch
 
 Open the address you chose (<http://localhost:8000> on the host itself) and follow [First run](/docs/getting-started/first-run). The welcome screen and the owner password come first; the rest of the wizard follows once the password is set.
 
-To sign in to the Claude Code CLI from the host's terminal instead of the in-app one:
+If you use a Claude subscription, you can sign in to the Claude Code CLI from the host's terminal instead of the in-app one:
 
 ```bash
 docker exec -it -u appuser ai-shuffle claude auth login

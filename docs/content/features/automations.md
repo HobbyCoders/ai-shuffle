@@ -116,8 +116,8 @@ Supported event types:
 | `session.complete`     | A session finished successfully           |
 | `session.error`        | A session encountered an error            |
 | `session.started`      | A new session was started                 |
-| `permission.requested` | Claude is waiting for permission approval |
-| `input.needed`         | Claude is waiting for user input          |
+| `permission.requested` | The agent is waiting for permission approval |
+| `input.needed`         | The agent is waiting for user input          |
 
 ### Connector Trigger
 
@@ -281,7 +281,7 @@ Each run records:
 - **tokens_in / tokens_out** -- Token counts
 - **duration_ms** -- Execution time
 - **prompt_rendered** -- The prompt after template variable substitution
-- **response** -- The last 2,000 characters of Claude's final reply. The full conversation is in the run's session (`session_id`)
+- **response** -- The last 2,000 characters of the agent's final reply. The full conversation is in the run's session (`session_id`)
 - **error** -- Error message if the run failed
 - **output_status** -- What happened to the output: `delivered`, `failed`, `suppressed` or `deduplicated`
 - **trigger_data** -- What started the run. Its `trigger` is `schedule`, `connector_event`, `connector_trigger`, `webhook` or `manual`, next to that trigger's data (for example the webhook `payload`). The run history shows it as Schedule, Event, Connector, Webhook or Manual

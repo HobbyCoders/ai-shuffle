@@ -13,6 +13,10 @@ every worker that had an active-account pointer, before deleting anything,
 and sets a database-wide flag. ``mark_if_needed`` runs at startup and turns
 that flag into this worker's own pending notice, so a second worker sharing
 the database gets it too. Nothing here reads the retired table.
+
+The notice is about the Claude provider only: it is shown and logged only
+while Claude is turned on for this worker (mode not ``off``). An owner who
+turned Claude off, or uses other providers only, never sees it.
 """
 
 from __future__ import annotations
@@ -30,9 +34,9 @@ DISMISSED = "dismissed"
 LOGOUT_COMMAND = "claude auth logout"
 LOGIN_COMMAND = "claude auth login"
 MESSAGE = (
-    "AI Shuffle no longer signs in to Claude for you. The Claude Code CLI now "
-    "manages its own sign-in. To make sure the CLI's token comes from its own "
-    "sign-in on Anthropic's page, sign out and in again once: run "
+    "Claude: sign in to the Claude Code CLI again once. Claude's sign-in is now "
+    "managed by the Claude Code CLI itself, not by AI Shuffle. To make sure its "
+    "token comes from the CLI's own sign-in on Anthropic's page, run "
     f"`{LOGOUT_COMMAND}` and then `{LOGIN_COMMAND}` (Settings > Providers > "
     "Claude has Sign out and Sign in)."
 )
@@ -47,6 +51,16 @@ def _legacy_sign_in_used() -> bool:
     return database.get_system_setting(database.CLAUDE_RELOGIN_NEEDED_MARKER) == "1"
 
 
+def _claude_in_use() -> bool:
+    """Whether Claude is turned on for this worker (any mode but ``off``)."""
+    try:
+        from app.core import claude_auth_mode
+
+        return not claude_auth_mode.is_off()
+    except Exception:  # noqa: BLE001 — unknown reads as "in use"
+        return True
+
+
 def mark_if_needed() -> bool:
     """Record a pending notice for this worker when the old sign-in was used.
 
@@ -59,7 +73,8 @@ def mark_if_needed() -> bool:
             return current == PENDING
         if _legacy_sign_in_used():
             database.set_system_setting(_key(), PENDING)
-            logger.warning("Claude Code CLI: %s", MESSAGE)
+            if _claude_in_use():
+                logger.warning("Claude Code CLI: %s", MESSAGE)
             return True
     except Exception:  # noqa: BLE001 — a notice must never block startup
         logger.debug("Claude re-login notice check skipped", exc_info=True)
@@ -79,6 +94,6 @@ def dismiss() -> None:
 
 def payload() -> dict | None:
     """The notice for the status endpoints, or None."""
-    if not pending():
+    if not pending() or not _claude_in_use():
         return None
     return {"message": MESSAGE, "logout_command": LOGOUT_COMMAND, "login_command": LOGIN_COMMAND}

@@ -369,7 +369,8 @@ def validate_provider_model(
         return ModelValidation(
             ok=False,
             code=PROVIDER_MISSING,
-            reason=f"The provider '{pid}' does not exist.",
+            # No raw id: the owner cannot act on one. Callers add what to do.
+            reason="The AI provider for this model has been removed.",
             provider_label=pid,
         )
 

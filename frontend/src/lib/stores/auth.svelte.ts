@@ -111,7 +111,7 @@ export const claudeAuthenticated = createDerived(() => _state.status?.claude_aut
 export const anyCredential = createDerived(
 	() => _state.status?.has_any_credential ?? _state.status?.claude_authenticated ?? false
 );
-// The server's credential gate for Claude agent runs (null on older backends).
+// The server's agent gate: license plus any ready provider (null on older backends).
 export const agentGate = createDerived(() => _state.status?.agent_gate ?? null);
 export const githubAuthenticated = createDerived(() => _state.status?.github_authenticated ?? false);
 export const username = createDerived(() => _state.status?.username ?? null);

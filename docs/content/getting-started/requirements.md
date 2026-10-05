@@ -21,7 +21,7 @@ AI Shuffle runs as one Docker container. The machine that runs it is called a **
 - **Swap matters.** Each agent is its own process with its own memory. Without swap on the host, a burst of agents can run the whole machine out of memory.
 - **Unraid** works with its built-in Docker support; see [Install on Unraid](/docs/getting-started/install-unraid).
 
-The container carries everything else it needs: its own private PostgreSQL database, the built-in browser (Chromium), Node.js and the GitHub CLI. On first start it installs the Claude Code CLI with Anthropic's own installer, and the CLI keeps itself up to date after that.
+The container carries everything else it needs: its own private PostgreSQL database, the built-in browser (Chromium), Node.js and the GitHub CLI. On first start it also installs the Claude Code CLI, used for Claude subscriptions, with Anthropic's own installer, and the CLI keeps itself up to date after that.
 
 ## Network access
 
@@ -29,7 +29,7 @@ The worker needs outbound HTTPS to:
 
 - `registry.hobbycoders.com`, to download the AI Shuffle image with your pull token (image layers then come from GitHub's container storage);
 - `claude.ai` and Anthropic's download servers, to install and update the Claude Code CLI;
-- your AI provider, for example Anthropic's API, and any other provider you set up;
+- the AI providers you connect, for example OpenAI, xAI, OpenRouter or Anthropic;
 - `hobbycoders.com`, for update checks, license checks and (only if you turn it on) remote access;
 - the Python package index (`pypi.org`, with downloads from `files.pythonhosted.org`) and the npm registry (`registry.npmjs.org`), only while an in-app update installs;
 - the Python package index again when you install a connector's runtime in **Settings > Plugins** (Apps), which downloads that connector's Python packages.
@@ -39,8 +39,8 @@ Nothing needs to reach the worker from the internet. Never forward its port from
 ## Accounts you need
 
 - **An AI Shuffle license**, or a trial. Your license email contains your **license key** (you enter it in the app) and your **pull token** (Docker uses it to download the image). See [License](/docs/getting-started/license).
-- **Your own AI account.** For Claude Code this is either a Claude subscription that you sign in to yourself, or an Anthropic API key. AI Shuffle includes no AI usage. See [Modes and costs](/docs/getting-started/modes-and-costs).
-- **Optional:** accounts with other AI providers (OpenAI, xAI, OpenRouter, fal.ai), a GitHub account for repository features, and a free HobbyCoders account for the Android app and remote access.
+- **Your own AI account** with at least one supported provider: Claude, OpenAI, OpenRouter, xAI Grok or a custom gateway. Connect it by subscription sign-in or API key. AI Shuffle includes no AI usage. See [Modes and costs](/docs/getting-started/modes-and-costs).
+- **Optional:** more AI providers, fal.ai for images, video and audio, a GitHub account for repository features, and a free HobbyCoders account for the Android app and remote access.
 
 ## Devices you use it from
 

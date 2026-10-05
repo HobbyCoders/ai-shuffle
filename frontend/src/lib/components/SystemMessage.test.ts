@@ -407,7 +407,7 @@ describe('SystemMessage — generic system rows', () => {
 	});
 });
 
-describe('SystemMessage — Claude Code compaction', () => {
+describe('SystemMessage — agent compaction', () => {
 	it('shows the Context Compacted card with the trigger and the size', () => {
 		const { container } = render(SystemMessage, {
 			props: {
@@ -483,7 +483,7 @@ describe('SystemMessage — Claude Code compaction', () => {
 		});
 		const text = container.textContent ?? '';
 		expect(text).toContain('Context Compacted');
-		expect(text).toContain('AI Shuffle asked Claude Code to compact the context');
+		expect(text).toContain('AI Shuffle asked the agent to compact the context');
 		expect(text).not.toContain('compacted manually (/compact)');
 	});
 
@@ -498,7 +498,7 @@ describe('SystemMessage — Claude Code compaction', () => {
 		});
 		const text = container.textContent ?? '';
 		expect(text).toContain('Compaction Failed');
-		expect(text).toContain('Claude Code did not compact the context. Reason: Not enough messages to compact.');
+		expect(text).toContain('The agent did not compact the context. Reason: Not enough messages to compact.');
 		expect(text).not.toContain('Context Compacted');
 	});
 });

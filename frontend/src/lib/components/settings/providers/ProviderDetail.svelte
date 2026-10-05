@@ -22,6 +22,7 @@
 	import ProviderTile from './ProviderTile.svelte';
 	import {
 		addableKinds,
+		claudeGateNotice,
 		claudeHeaderStatus,
 		MODE_LABEL,
 		MODE_OPTIONS,
@@ -38,6 +39,7 @@
 
 	const claude = $derived(providers.current.claude);
 	const mode = $derived<ClaudeAuthMode>(claude?.mode ?? 'subscription');
+	const claudeNotice = $derived(claudeGateNotice(claude));
 	const kinds = $derived(addableKinds(provider));
 	const live = $derived(provider.credentials.filter((c) => c.on));
 	const pickerModels = $derived(live.reduce((n, c) => n + (c.row?.models.length ?? 0), 0));
@@ -123,8 +125,8 @@
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet banner()}
-		{#if provider.claude && claude?.gate && !claude.gate.ready && claude.gate.reason && mode !== 'off'}
-			<InlineBanner tone="warn">{claude.gate.reason}</InlineBanner>
+		{#if provider.claude && claudeNotice}
+			<InlineBanner tone="warn">{claudeNotice}</InlineBanner>
 		{/if}
 		{#if provider.claude && providers.current.claudeError}
 			<InlineBanner tone="warn">{providers.current.claudeError}</InlineBanner>

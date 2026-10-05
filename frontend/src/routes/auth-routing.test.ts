@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({ goto: vi.fn(), init: vi.fn(), destroy: vi.fn()
 vi.mock('$app/navigation', () => ({ goto: mocks.goto }));
 vi.mock('$lib/stores/theme.svelte', () => ({ theme: { init: vi.fn() } }));
 vi.mock('$lib/stores/pwa.svelte', () => ({ pwa: { init: vi.fn(), current: { updateReady: false } } }));
-vi.mock('$lib/constants/models', () => ({ ensureModelRegistryHydrated: mocks.hydrate }));
+vi.mock('$lib/constants/models', () => ({ ensureModelRegistryHydrated: mocks.hydrate, setReadyProviders: vi.fn() }));
 vi.mock('$lib/stores/notifications', () => ({ notify: { loadHistory: mocks.history, banner: vi.fn() } }));
 vi.mock('$lib/services/error-reporter', () => ({ installGlobalErrorHandlers: () => () => {} }));
 vi.mock('$lib/utils/visual-viewport', () => ({ bindVisualViewport: () => () => {} }));
@@ -248,7 +248,7 @@ it('shows a fresh install the wizard welcome, then the owner password step, befo
 	expect(view.getByText('Update checks')).toBeTruthy();
 	expect(view.getByRole('link', { name: /What is sent/ }).getAttribute('href')).toBe('https://hobbycoders.com/privacy#updates');
 	const progress = view.getByRole('navigation', { name: 'Setup progress' });
-	for (const label of ['Welcome', 'Password', 'License', 'Mode', 'Sign in', 'Workspace', 'First run', 'Account & GitHub'])
+	for (const label of ['Welcome', 'Password', 'License', 'AI provider', 'Workspace', 'First run', 'Account & GitHub'])
 		expect(progress.textContent).toContain(label);
 	await fireEvent.click(view.getByRole('button', { name: 'Continue' }));
 	await waitFor(() => expect(view.getByRole('heading', { name: 'Set an owner password' })).toBeTruthy());

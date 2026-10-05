@@ -13,6 +13,7 @@ vi.mock('$lib/api/claude-auth', () => ({
 	getClaudeAuth: vi.fn(() => Promise.resolve({ mode: 'api_key' }))
 }));
 
+import { getClaudeAuth } from '$lib/api/claude-auth';
 import { encodeProviderModel, hydrateModelRegistry } from '$lib/constants/models';
 import { automationFallbackModel, automationModelLabel, type Automation } from '$lib/api/automations';
 import AutomationForm from './AutomationForm.svelte';
@@ -120,13 +121,15 @@ function saved(fields: Partial<Automation>): Automation {
 }
 
 describe('AutomationForm model picker', () => {
-	it('starts on the app default and emits the picked model', async () => {
+	it('starts on the worker default without naming the chat default, and emits the picked model', async () => {
 		const { getByTestId, onUpdateFormModel } = renderForm();
 		const row = within(getByTestId('automation-model-row'));
-		expect(row.getByText('Uses Sonnet, the app default.')).toBeTruthy();
+		// Unattended runs do not follow the chat default, so no model is named before the worker reports one.
+		expect(row.getByText("Uses the worker's default model for unattended runs.")).toBeTruthy();
+		expect(row.queryByText(/Sonnet/)).toBeNull();
 		expect(row.queryByText(/agent/i)).toBeNull();
 
-		await fireEvent.click(row.getByRole('button', { name: 'App default' }));
+		await fireEvent.click(row.getByRole('button', { name: 'Worker default' }));
 		await fireEvent.click(row.getByRole('tab', { name: /^Claude/ }));
 		await fireEvent.click(row.getByRole('option', { name: /Haiku/ }));
 		expect(onUpdateFormModel).toHaveBeenCalledWith('haiku');
@@ -135,7 +138,7 @@ describe('AutomationForm model picker', () => {
 	it('emits a provider model as its picker value', async () => {
 		const { getByTestId, onUpdateFormModel } = renderForm();
 		const row = within(getByTestId('automation-model-row'));
-		await fireEvent.click(row.getByRole('button', { name: 'App default' }));
+		await fireEvent.click(row.getByRole('button', { name: 'Worker default' }));
 		await fireEvent.click(row.getByRole('tab', { name: /OpenAI/ }));
 		await fireEvent.click(row.getByRole('option', { name: /GPT-5\.6/ }));
 		expect(onUpdateFormModel).toHaveBeenCalledWith(encodeProviderModel('openai-row', 'gpt-5.6'));
@@ -156,11 +159,14 @@ describe('AutomationForm model picker', () => {
 		expect(queryByText('Custom…')).toBeNull();
 	});
 
-	it('names the app default an existing automation runs on', () => {
-		const { getByTestId } = renderForm({ currentView: 'edit', savedAutomation: saved({}) });
+	it("names the model the worker reports for an existing automation's unattended runs", () => {
+		const { getByTestId } = renderForm({
+			currentView: 'edit',
+			savedAutomation: saved({ effective_model: 'gpt-5.6', effective_provider_id: 'openai-row' })
+		});
 		const row = within(getByTestId('automation-model-row'));
-		expect(row.getByText('Uses Sonnet, the app default.')).toBeTruthy();
-		expect(row.getByRole('button', { name: 'App default' })).toBeTruthy();
+		expect(row.getByText("Uses GPT-5.6, the worker's default for unattended runs.")).toBeTruthy();
+		expect(row.getByRole('button', { name: 'Worker default' })).toBeTruthy();
 	});
 
 	it('says so when the agent still carries a legacy saved model', () => {
@@ -199,7 +205,7 @@ describe('AutomationForm model picker', () => {
 
 	it('says why runs fail when the stored model is gone', () => {
 		const error =
-			"This automation's model is no longer available: The provider 'gone' does not exist. Pick another model in the automation's settings.";
+			"This automation's model is no longer available: The AI provider for this model has been removed. Pick another model in the automation's settings.";
 		const { getByTestId } = renderForm({
 			currentView: 'edit',
 			formModel: 'prov:gone:gpt-x',
@@ -230,7 +236,8 @@ describe('AutomationForm model picker', () => {
 describe('automationModelLabel', () => {
 	it('labels the choice, the fallback and a gone model', () => {
 		expect(automationModelLabel(saved({ model: 'haiku', model_source: 'automation' }))).toBe('Haiku');
-		expect(automationModelLabel(saved({}))).toBe('Sonnet (app default)');
+		expect(automationModelLabel(saved({}))).toBe('Sonnet (worker default)');
+		expect(automationModelLabel(saved({ effective_model: null }))).toBe('Worker default');
 		expect(
 			automationModelLabel(
 				saved({ effective_model: 'gpt-5.6', effective_provider_id: 'openai-row', model_source: 'agent' })
@@ -244,12 +251,44 @@ describe('automationModelLabel', () => {
 });
 
 describe('automationFallbackModel', () => {
-	it('is the app default unless the agent carries a legacy model or provider', () => {
-		expect(automationFallbackModel(undefined)).toEqual({ label: 'Sonnet', legacy: false });
-		expect(automationFallbackModel({})).toEqual({ label: 'Sonnet', legacy: false });
+	it('names no model for the worker default unless the agent carries a legacy model or provider', () => {
+		expect(automationFallbackModel(undefined)).toEqual({ label: null, legacy: false });
+		expect(automationFallbackModel({})).toEqual({ label: null, legacy: false });
 		expect(automationFallbackModel({ model: 'haiku' })).toEqual({ label: 'Haiku', legacy: true });
 		// A provider with no model runs on that provider's default.
 		expect(automationFallbackModel({ provider: 'openai-row' })).toEqual({ label: 'GPT-5.6', legacy: true });
 		expect(automationFallbackModel({ provider: 'gone-row' })).toEqual({ label: 'Provider default', legacy: true });
+	});
+});
+
+describe('scheduled-run notice', () => {
+	const signedOut = { mode: 'subscription', cli: { signed_in: false } };
+	const signedIn = { mode: 'subscription', cli: { signed_in: true } };
+	const claudeAuth = vi.mocked(getClaudeAuth);
+
+	async function noticeFor(summary: unknown, overrides: Record<string, unknown> = {}) {
+		claudeAuth.mockResolvedValueOnce(summary as never);
+		const { queryByTestId } = renderForm(overrides);
+		await Promise.resolve();
+		await Promise.resolve();
+		return queryByTestId('automation-api-key-notice');
+	}
+
+	it('stays hidden when Claude was never signed in (default subscription mode)', async () => {
+		expect(await noticeFor(signedOut)).toBeNull();
+	});
+
+	it('stays hidden when the automation runs on another provider', async () => {
+		expect(await noticeFor(signedIn, { formModel: encodeProviderModel('openai-row', 'gpt-5.6') })).toBeNull();
+	});
+
+	it('shows with no model of its own: unattended runs use Claude while Claude is connected', async () => {
+		const notice = await noticeFor(signedIn);
+		expect(notice?.textContent).toContain('Claude runs on your subscription');
+	});
+
+	it('shows for a Claude model on a signed-in Claude subscription', async () => {
+		const notice = await noticeFor(signedIn, { formModel: 'haiku' });
+		expect(notice?.textContent).toContain('Claude runs on your subscription');
 	});
 });

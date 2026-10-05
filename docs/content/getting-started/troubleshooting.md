@@ -29,7 +29,7 @@ In the commands below, the container is called `ai-shuffle` with Docker Compose 
 
 ## The container does not become healthy
 
-- **First start:** installing the Claude Code CLI takes a few minutes. Wait for the log to settle.
+- **First start:** setting up, including installing the Claude Code CLI, takes a few minutes. Wait for the log to settle.
 - **Check readiness from inside:** `docker exec ai-shuffle curl -fsS http://localhost:8000/health/ready`. An answer means the app is up and the problem is the address or network (next section).
 - **It restarts in a loop:** look for the first error in the log. `Killed`, `out of memory` or a sudden stop usually means the host ran out of memory; add swap, run fewer agents at once, or give the host more memory.
 - **`Permission denied` on `/workspace` or `/data`:** set `PUID` and `PGID` to the owner of those folders (Unraid: 99 and 100).
@@ -67,9 +67,19 @@ Changing **Owner password** in the Unraid template (or `OWNER_PASSWORD` in `.env
 
 The message in the app says which of these it is.
 
-**No credential is set up.** AI Shuffle never falls back to another account. Sign in to the Claude Code CLI or add an API key in **Settings → Providers** (the setup wizard does the same; see [First run](/docs/getting-started/first-run)).
+**No AI provider is connected.** AI Shuffle never falls back to another account. Connect a provider in **Settings → Providers**, by subscription sign-in or API key (the setup wizard does the same; see [First run](/docs/getting-started/first-run)).
 
-**API key mode, but no key is stored.** The mode you chose has no credential, so AI Shuffle waits instead of using the CLI's sign-in. Add your key in **Settings → Providers**, or switch **Claude Code mode** to subscription.
+**A subscription sign-in stopped working:** it was signed out or expired. Sign in again for that provider in **Settings → Providers**.
+
+**Your plan's usage limit was reached** (subscription): agents pause until the limit resets, and nothing is retried before then. Wait, or use an API key for heavy or unattended work. To have the chat continue by itself after the reset, turn on **Settings → General → Usage limits → Resume when the limit resets**. See [Modes and costs](/docs/getting-started/modes-and-costs).
+
+**The API key is refused:** the key was deleted, or the account has no credit or reached its spend limit. Check your provider's console, then paste a new key in **Settings → Providers**.
+
+**The license banner says new agent runs are paused:** see [License](/docs/getting-started/license). Your data is not affected.
+
+### Claude
+
+**API key mode, but no key is stored.** The mode you chose has no credential, so AI Shuffle waits instead of using the CLI's sign-in. Add your Anthropic key in **Settings → Providers → Claude**, or switch Claude's mode to subscription.
 
 **The Claude Code CLI is not signed in** (subscription mode):
 
@@ -79,15 +89,9 @@ The message in the app says which of these it is.
 
 **The Claude Code CLI is missing.** The installer runs on first start and needs `claude.ai` and Anthropic's download servers. Check the host can reach them, then restart the container. The CLI is kept in its own folder (`/home/appuser/.local`); make sure it is mapped.
 
-**Your plan's usage limit was reached** (subscription mode): agents pause until the limit resets, and nothing is retried before then. Wait, or switch to API key mode for heavy or unattended work. To have the chat continue by itself after the reset, turn on **Settings → General → Usage limits → Resume when the limit resets**. See [Modes and costs](/docs/getting-started/modes-and-costs).
-
 **An automation, wake-up, connector or background agent waits for confirmation** (subscription mode): the loop guard held it because unattended turns reached their hourly budget. Confirm or dismiss it under **Settings → Providers → Claude subscription → Policy**, raise the budget there, or switch to API key mode for unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
 
 **A background agent stopped after an hour** (subscription mode): an automation, wake-up or connector started it, and the loop guard's default time limit ended it. Change the limit (**Unattended worker limit**) under **Settings → Providers → Claude subscription → Policy**, or use API key mode for long unattended work. Agents started from your own chats have no such limit.
-
-**The API key is refused:** the key was deleted or the Console account has no credit or reached its spend limit. Check the Anthropic Console, then paste a new key in Settings.
-
-**The license banner says new agent runs are paused:** see [License](/docs/getting-started/license). Your data is not affected.
 
 ## Tool calls are denied
 

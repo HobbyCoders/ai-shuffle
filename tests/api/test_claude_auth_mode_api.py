@@ -78,11 +78,13 @@ def test_payload_carries_the_credential_gate(authenticated_client):
     with _probe(True):
         body = authenticated_client.get(ENDPOINT).json()
     assert body["gate"]["ready"] is False
-    assert body["gate"]["reason"] == credential_gate.NO_KEY_MESSAGE
+    assert body["gate"]["reason"] == credential_gate.NO_PROVIDER_MESSAGE
+    assert body["claude_reason"] == credential_gate.NO_KEY_MESSAGE
     db.set_system_setting("anthropic_api_key", encryption.encrypt_value("sk-ant-api03-secret-ABCD"))
     with _probe(False):
         body = authenticated_client.get(ENDPOINT).json()
     assert body["gate"]["ready"] is True and body["gate"]["reason"] is None
+    assert body["gate"]["ready_providers"] == ["claude"] and body["claude_reason"] is None
 
 
 @pytest.mark.real_agent_gate
@@ -99,7 +101,8 @@ def test_put_off_turns_claude_off(authenticated_client):
     assert [m["value"] for m in body["modes"]] == ["subscription", "api_key", "off"]
     assert body["gate"]["mode"] == "off"
     assert body["gate"]["claude_credential_ready"] is False
-    assert body["gate"]["reason"] == credential_gate.OFF_MESSAGE
+    assert body["gate"]["reason"] == credential_gate.NO_PROVIDER_MESSAGE
+    assert body["claude_reason"] == credential_gate.OFF_MESSAGE
     integrations = authenticated_client.get("/api/v1/settings/integrations").json()
     assert integrations["claude_auth_mode"] == "off"
     assert integrations["claude_code_auth_method"] == "off"

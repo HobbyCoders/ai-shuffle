@@ -68,13 +68,13 @@ The template also sets `--shm-size=1g` (the built-in browser needs more shared m
 
 ## 6. Apply and wait for the first start
 
-Choose **Apply**. Unraid downloads the image and starts the container. The first start installs the Claude Code CLI with Anthropic's installer and can take a few minutes. Follow it in the log (click the container icon, then **Logs**); the web interface opens once setup is done.
+Choose **Apply**. Unraid downloads the image and starts the container. The first start sets up the container, including installing the Claude Code CLI with Anthropic's installer, and can take a few minutes. Follow it in the log (click the container icon, then **Logs**); the web interface opens once setup is done.
 
 ## 7. First launch
 
 Open `http://<server address>:8000` (or click the icon, then **WebUI**) and follow [First run](/docs/getting-started/first-run). The welcome screen and the owner password come first; the rest of the wizard follows once the password is set.
 
-To sign in to the Claude Code CLI from Unraid's own terminal instead of the in-app one, open **>_ Terminal** at the top of the Unraid web interface and run:
+If you use a Claude subscription, you can sign in to the Claude Code CLI from Unraid's own terminal instead of the in-app one. Open **>_ Terminal** at the top of the Unraid web interface and run:
 
 ```bash
 docker exec -it -u appuser AI-Shuffle claude auth login

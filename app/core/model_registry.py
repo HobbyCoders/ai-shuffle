@@ -380,11 +380,27 @@ def _providers_payload() -> List[Dict[str, object]]:
     # Plan strings are only meaningful for subscription rows, and only fetched
     # when at least one such row exists (an all-API-key install skips the read).
     plan_types = _provider_plan_types() if any(_is_subscription_row(r) for r in rows) else {}
+    # Which rows can run now: the same query the credential gate uses, so the
+    # browser's own default pick skips a row needing a re-sign-in or with a
+    # rejected key. ``None`` (unknown) when the read fails.
+    try:
+        usable_ids: Optional[set] = {
+            r.get("id") for r in (database.list_usable_model_providers() or [])
+        }
+    except Exception as e:
+        logger.warning("Could not load usable model providers for registry payload: %s", e)
+        usable_ids = None
     return [
         {
             "id": row.get("id"),
             "name": row.get("name"),
             "provider_type": row.get("provider_type"),
+            # A label (``chatgpt`` / ``grok`` / null), never a credential: an
+            # older ChatGPT or SuperGrok sign-in is stored as ``custom`` with
+            # this mode, so the browser needs it to classify the row exactly
+            # like ``credential_gate.provider_id_for_row``.
+            "auth_mode": row.get("auth_mode"),
+            "usable": (row.get("id") in usable_ids) if usable_ids is not None else None,
             "auto_permission_supported": supports_auto_permission(row.get('default_model') or DEFAULT_MODEL, row),
             "capability_generation": row.get("revision"),
             # Display metadata (brand + auth-kind subtext). ``auth_kind`` says
@@ -464,6 +480,24 @@ def _claude_payload() -> Dict[str, object]:
         return {"auth_kind": None, "plan_type": None, "enabled": True}
 
 
+def _default_selection() -> str:
+    """The model a new chat with no pick runs on, as a picker value.
+
+    A native alias, or a ``prov:<providerId>:<modelId>`` composite for a
+    provider row (``credential_gate.default_run_selection``: the owner's most
+    used model while its provider is usable, else a usable provider's default
+    model). Reads the cached Claude probe only and degrades to
+    ``DEFAULT_MODEL`` on any failure.
+    """
+    try:
+        from app.core import credential_gate
+
+        return credential_gate.default_run_selection(probe=False) or DEFAULT_MODEL
+    except Exception as e:  # noqa: BLE001 — the registry payload never fails
+        logger.warning("Could not resolve the default model for registry: %s", e)
+        return DEFAULT_MODEL
+
+
 def registry_payload() -> Dict[str, object]:
     """Serialized registry for the ``GET /api/models`` endpoint."""
     return {
@@ -478,7 +512,7 @@ def registry_payload() -> Dict[str, object]:
             }
             for m in MODELS
         ],
-        "default": DEFAULT_MODEL,
+        "default": _default_selection(),
         "inherit_value": INHERIT_VALUE,
         "legacy_map": dict(LEGACY_MODEL_MAP),
         "providers": _providers_payload(),

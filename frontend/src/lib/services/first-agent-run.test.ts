@@ -7,9 +7,11 @@ vi.mock('$lib/api/client', async (importOriginal) => ({
 }));
 vi.mock('$lib/stores/session/v2/sse-feed', () => ({ createSseFeed: vi.fn() }));
 import {
-	ABORT_GRACE_MS, ensureStarterAgent, FIRST_RUN_PROMPT, LOOP_GUARD_CODE, SETUP_REQUIRED_CODE, startFirstAgentRun,
-	type FirstRunState
+	ABORT_GRACE_MS, ensureStarterAgent, FIRST_RUN_PROMPT, LOOP_GUARD_CODE, pickFirstRunModel, SETUP_REQUIRED_CODE,
+	startFirstAgentRun, type FirstRunModelInput, type FirstRunState
 } from './first-agent-run';
+import type { ModelProvider } from '$lib/api/model-providers';
+import type { ModelOption, ProviderEntry } from '$lib/constants/models.svelte';
 
 class FakeSocket {
 	sent: Record<string, unknown>[] = [];
@@ -28,10 +30,10 @@ let socket: FakeSocket;
 let feedEvents: ((event: Record<string, unknown>) => void) | null;
 let feedStopped: boolean;
 
-function start(timeoutMs?: number) {
+function start(timeoutMs?: number, model?: string | null) {
 	const updates: FirstRunState[] = [];
 	const handle = startFirstAgentRun({
-		profileId: 'assistant', timeoutMs,
+		profileId: 'assistant', timeoutMs, model,
 		onUpdate: (s) => updates.push(s),
 		openSocket: (url) => { socket = new FakeSocket(url); return socket as unknown as WebSocket; },
 		openFeed: (_id, onEvent) => { feedEvents = onEvent; return { stop: () => { feedStopped = true; } }; },
@@ -166,5 +168,69 @@ describe('starter agent', () => {
 		mocks.post.mockResolvedValue({ id: 'assistant', name: 'Assistant' });
 		expect(await ensureStarterAgent()).toMatchObject({ id: 'assistant' });
 		expect(mocks.post).toHaveBeenCalledWith('/agents', expect.objectContaining({ name: 'Assistant', config: {} }));
+	});
+});
+
+const row = (over: Partial<ModelProvider>): ModelProvider => ({
+	id: 'r', name: 'Row', provider_type: 'openai', base_url: '', auth_token_set: true, auth_token_masked: '', models: [],
+	default_model: null, small_fast_model: null, extra_env: {}, context_window: null, max_output_tokens: null, enabled: true,
+	...over,
+} as ModelProvider);
+const entry = (over: Partial<ProviderEntry>): ProviderEntry => ({
+	id: 'r', name: 'Row', provider_type: 'openai', models: [], default_model: null, auth_kind: 'api', plan_type: null, ...over,
+});
+const claudeModels = [{ value: 'sonnet', label: 'Sonnet', family: 'sonnet' }, { value: 'opus', label: 'Opus', family: 'opus' }] as ModelOption[];
+const ROWS = [
+	row({ id: 'codex', name: 'ChatGPT', provider_type: 'custom', auth_mode: 'chatgpt' } as Partial<ModelProvider>),
+	row({ id: 'xai', name: 'Grok', provider_type: 'xai' }),
+	row({ id: 'gw1', name: 'Together', provider_type: 'custom' }),
+];
+const REGISTRY = [
+	entry({ id: 'codex', name: 'ChatGPT', provider_type: 'custom', auth_kind: 'subscription', models: [{ id: 'gpt-5', label: 'GPT-5' }], default_model: 'gpt-5' }),
+	entry({ id: 'xai', name: 'Grok', provider_type: 'xai', models: [{ id: 'grok-4', label: 'Grok 4' }] }),
+	entry({ id: 'gw1', name: 'Together', provider_type: 'custom', models: [{ id: 'llama', label: 'Llama' }] }),
+];
+const input = (over: Partial<FirstRunModelInput>): FirstRunModelInput => ({
+	ready: [], preferred: null, rows: ROWS, registry: REGISTRY, defaultModel: 'sonnet', claudeModels, ...over,
+});
+
+describe('first run model', () => {
+	it('sends the chosen model as an override, and nothing extra without one', () => {
+		start(undefined, 'prov:codex:gpt-5');
+		socket.onopen?.();
+		expect(socket.sent[0]).toMatchObject({ type: 'query', overrides: { model: 'prov:codex:gpt-5' } });
+		start();
+		socket.onopen?.();
+		expect(socket.sent[0].overrides).toBeUndefined();
+	});
+
+	it('does not use a Claude default when Claude is not ready', () => {
+		expect(pickFirstRunModel(input({ ready: ['openai'] }))).toEqual({
+			providerId: 'openai', model: 'prov:codex:gpt-5', providerName: 'OpenAI', modelLabel: 'GPT-5',
+		});
+	});
+
+	it('keeps the Claude default when Claude is ready', () => {
+		expect(pickFirstRunModel(input({ ready: ['openai', 'claude'] }))).toMatchObject({ providerId: 'claude', model: 'sonnet', modelLabel: 'Sonnet' });
+	});
+
+	it('prefers the provider connected in the wizard', () => {
+		expect(pickFirstRunModel(input({ ready: ['claude', 'grok'], preferred: 'grok' }))).toMatchObject({
+			providerId: 'grok', model: 'prov:xai:grok-4', providerName: 'xAI Grok', modelLabel: 'Grok 4',
+		});
+	});
+
+	it('names a gateway by its row and uses a ready default composite', () => {
+		expect(pickFirstRunModel(input({ ready: ['gw:gw1'] }))).toMatchObject({ providerId: 'gw:gw1', model: 'prov:gw1:llama', providerName: 'Together' });
+		expect(pickFirstRunModel(input({ ready: ['openai', 'grok'], defaultModel: 'prov:xai:grok-4' }))).toMatchObject({ providerId: 'grok' });
+	});
+
+	it('picks a Claude model when Claude is ready but the default is another provider', () => {
+		expect(pickFirstRunModel(input({ ready: ['claude'], defaultModel: 'prov:xai:grok-4' }))).toMatchObject({ providerId: 'claude', model: 'sonnet' });
+	});
+
+	it('returns null when nothing ready has a model', () => {
+		expect(pickFirstRunModel(input({ ready: [] }))).toBeNull();
+		expect(pickFirstRunModel(input({ ready: ['openrouter'] }))).toBeNull();
 	});
 });

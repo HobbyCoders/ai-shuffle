@@ -8,15 +8,15 @@ order: 13
 
 You bring your own AI account. HobbyCoders sells the workspace, not the AI. These answers match the [FAQ on hobbycoders.com](https://hobbycoders.com/ai-shuffle/faq).
 
-## Do I need my own Claude account?
+## Do I need my own AI account?
 
-Yes. AI Shuffle doesn't include any AI usage. To use Claude Code in AI Shuffle you need your own Claude subscription or an Anthropic API key. You sign in or add your key yourself, and Anthropic bills you directly.
+Yes, one from any supported provider. AI Shuffle doesn't include any AI usage. You connect your own account with Claude, OpenAI, OpenRouter, xAI Grok or a custom gateway, by subscription sign-in or API key, and that provider bills you directly.
 
-AI Shuffle can also use other AI providers you already have an account with, such as an OpenAI or xAI account or an OpenRouter key. Each one bills you under its own terms.
+You need one provider to start. You can add more later in **Settings → Providers**, and each one bills you under its own terms.
 
-## Does AI Shuffle use or resell my Claude subscription?
+## Does AI Shuffle use or resell my AI subscription?
 
-No. When you use a subscription, AI Shuffle runs the standard Claude Code program, and you sign in to it yourself through Anthropic's own sign-in page. HobbyCoders doesn't copy, store or pass on your sign-in, never routes other people's work through your account, and doesn't resell or mark up AI usage.
+No. You sign in to your subscription yourself, on the provider's own sign-in page. A Claude subscription runs through the standard Claude Code program, which keeps its own sign-in; HobbyCoders doesn't copy or store it. A ChatGPT or SuperGrok sign-in gives your installation a token, which it keeps encrypted on your own machine and never sends to HobbyCoders. HobbyCoders never routes other people's work through your account, and doesn't resell or mark up AI usage.
 
 ## Subscription or API key: which should I pick?
 
@@ -68,9 +68,9 @@ Not quite. At launch we can't sell to buyers in the European Union or the United
 
 Not yet. A license is for one person's account. Each person uses their own AI accounts; sharing one AI subscription between several people is against the AI providers' terms, and AI Shuffle is not built for it.
 
-## Is AI Shuffle made by Anthropic?
+## Is AI Shuffle made by an AI provider?
 
-No. AI Shuffle is an independent product by HobbyCoders. It runs Claude Code, which is made by Anthropic, but Anthropic doesn't build, endorse or support AI Shuffle.
+No. AI Shuffle is an independent product by HobbyCoders. It is not affiliated with Anthropic, OpenAI or xAI. None of them build, endorse or support AI Shuffle.
 
 ## Where do I get help?
 

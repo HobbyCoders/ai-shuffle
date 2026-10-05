@@ -18,6 +18,7 @@
 
 import { api } from '$lib/api/client';
 import type { ReasoningCapabilities } from '$lib/api/model-providers';
+import { classifyRow } from '$lib/components/settings/providers/providers-model';
 
 export type ModelFamily = 'haiku' | 'sonnet' | 'opus' | 'fable';
 
@@ -217,6 +218,16 @@ export interface ProviderEntry {
 	 * a subscription row whose snapshot hasn't landed yet.
 	 */
 	plan_type: string | null;
+	/**
+	 * Sign-in mode label (`chatgpt` / `grok`, else null). An older ChatGPT or
+	 * SuperGrok sign-in is a `custom` row with this mode. Absent on an older payload.
+	 */
+	auth_mode?: string | null;
+	/**
+	 * Whether the worker's credential gate counts this row as able to run now
+	 * (`list_usable_model_providers`). Null/absent when unknown (older worker).
+	 */
+	usable?: boolean | null;
 }
 
 /**
@@ -246,15 +257,25 @@ interface RegistryState {
 	providers: ProviderEntry[];
 	claude: ClaudeAuthInfo;
 	hydrated: boolean;
+	/**
+	 * Agent providers that can run now (`/auth/status` -> `agent_gate.ready_providers`):
+	 * `claude`, `openai`, `grok`, `openrouter`, `gw:<row id>`. Null when unknown
+	 * (not loaded yet, or an older worker): the server's default is used as is.
+	 */
+	readyProviders: string[] | null;
+	/** The worker's `/api/models` payload named a default (older workers may not). */
+	serverDefaultSet: boolean;
 }
 
 const _registry = $state<RegistryState>({
 	models: [...STATIC_MODELS],
 	default: STATIC_DEFAULT,
+	serverDefaultSet: false,
 	legacyMap: { ...STATIC_LEGACY_MAP },
 	providers: [],
 	claude: { auth_kind: null, plan_type: null },
-	hydrated: false
+	hydrated: false,
+	readyProviders: null
 });
 
 // ---------------------------------------------------------------------------
@@ -273,9 +294,105 @@ export function supportsAutoPermission(value: string | null | undefined): boolea
 	return _registry.models.find(m => m.value === normalizeModel(value || getDefaultModel()))?.auto_permission_supported === true;
 }
 
-/** Default model used when nothing is configured yet. Reactive. */
+/**
+ * Default model used when nothing is configured yet. Reactive.
+ *
+ * The server's default (`/api/models` `default`) is the source of truth: the
+ * worker runs that model when a chat picks none, so every label and implicit
+ * choice uses it. When the server names none (an older worker, or before
+ * hydration), or names one the browser can positively tell cannot run, it is
+ * computed here from a provider that can run (see `resolveDefaultModel`).
+ *
+ * Unattended runs (automations, wake-ups, connectors, API) do not follow this
+ * chat default; see `automationFallbackModel`.
+ */
 export function getDefaultModel(): string {
+	return resolveDefaultModel(_registry.default, _registry.readyProviders, _registry.providers, _registry.models);
+}
+
+/** The server's own default, before readiness is applied. */
+export function getServerDefaultModel(): string {
 	return _registry.default;
+}
+
+/** Record which agent providers can run (`agent_gate.ready_providers`); null when unknown. */
+export function setReadyProviders(ids: readonly string[] | null | undefined): void {
+	const next = Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : null;
+	const prev = _registry.readyProviders;
+	if (prev === next || (prev && next && prev.length === next.length && prev.every((id, i) => id === next[i]))) return;
+	_registry.readyProviders = next;
+}
+
+/**
+ * The provider id a registry row counts as in `ready_providers`. Must match
+ * the worker's `credential_gate.provider_id_for_row` (app/core/credential_gate.py):
+ * `auth_mode` first, so a legacy `custom` row signed in with ChatGPT or SuperGrok
+ * is `openai` / `grok`, then `provider_type`.
+ */
+function brandOfEntry(id: string, entry: Pick<ProviderEntry, 'provider_type' | 'auth_mode'> | undefined): string {
+	switch (entry ? classifyRow({ provider_type: entry.provider_type, auth_mode: entry.auth_mode ?? null }) : 'custom') {
+		case 'chatgpt': case 'openai': return 'openai';
+		case 'grok': case 'xai': return 'grok';
+		case 'openrouter': return 'openrouter';
+		default: return `gw:${id}`;
+	}
+}
+
+/** The provider a model value runs on: `claude`, `openai`, `grok`, `openrouter` or `gw:<row id>`. */
+export function providerOfModel(value: string, providers: readonly ProviderEntry[]): string {
+	const composite = decodeProviderModel(value);
+	if (!composite) return 'claude';
+	return brandOfEntry(composite.providerId, providers.find((p) => p.id === composite.providerId));
+}
+
+/**
+ * The default model given which providers can run.
+ *
+ * - Readiness unknown, or nothing ready: the server's default as is.
+ * - The server's default is kept unless the browser can positively tell its
+ *   provider cannot run: a Claude alias while `claude` is not ready, or a
+ *   `prov:<row id>:<model>` whose row is missing from `/api/models` or that
+ *   the worker marks unusable. A composite whose row exists but whose brand
+ *   does not match `ready_providers` is trusted: the worker picked it from
+ *   its own usable rows, and a classification mismatch must not override it.
+ * - Otherwise the first ready provider with a usable model, in the same order as the
+ *   worker's `credential_gate.default_provider_model`: provider rows in the
+ *   worker's order (newest first), each row's default when it lists it (else
+ *   its first model), subscription rows first; Claude's own default last.
+ */
+export function resolveDefaultModel(
+	serverDefault: string,
+	ready: readonly string[] | null,
+	providers: readonly ProviderEntry[],
+	claudeModels: readonly ModelOption[]
+): string {
+	if (!ready || ready.length === 0) return serverDefault;
+	if (serverDefault && !serverDefaultCannotRun(serverDefault, ready, providers)) return serverDefault;
+	const order = [...ready.filter((b) => b !== 'claude'), ...ready.filter((b) => b === 'claude')];
+	for (const brand of order) {
+		if (brand === 'claude') {
+			const preferred = claudeModels.find((m) => m.value === STATIC_DEFAULT) ?? claudeModels[0];
+			if (preferred) return preferred.value;
+			continue;
+		}
+		const entries = providers
+			.filter((p) => p.usable !== false && brandOfEntry(p.id, p) === brand)
+			.sort((a, b) => Number(b.auth_kind === 'subscription') - Number(a.auth_kind === 'subscription'));
+		for (const entry of entries) {
+			const listed = entry.models.some((m) => m.id === entry.default_model);
+			const modelId = (listed ? entry.default_model : null) || entry.models[0]?.id;
+			if (modelId) return encodeProviderModel(entry.id, modelId);
+		}
+	}
+	return serverDefault;
+}
+
+/** Whether the browser can positively tell the server's default cannot run now. */
+function serverDefaultCannotRun(value: string, ready: readonly string[], providers: readonly ProviderEntry[]): boolean {
+	const composite = decodeProviderModel(value);
+	if (!composite) return !ready.includes('claude');
+	const row = providers.find((p) => p.id === composite.providerId);
+	return !row || row.usable === false;
 }
 
 /** True once the registry has been hydrated from the backend. */
@@ -622,6 +739,8 @@ interface RegistryProviderPayload {
 	default_model: string | null;
 	auth_kind?: ProviderAuthKind | null;
 	plan_type?: string | null;
+	auth_mode?: string | null;
+	usable?: boolean | null;
 }
 
 interface RegistryClaudePayload {
@@ -673,7 +792,10 @@ function mapPayloadProvider(p: RegistryProviderPayload): ProviderEntry {
 		}),
 		default_model: p.default_model ?? null,
 		auth_kind: p.auth_kind ?? (p.provider_type === 'chatgpt' || p.provider_type === 'grok' ? 'subscription' : 'api'),
-		plan_type: p.plan_type ?? null
+		plan_type: p.plan_type ?? null,
+		// Additive: an older backend omits both, and the entry then omits them.
+		...(p.auth_mode != null ? { auth_mode: p.auth_mode } : {}),
+		...(typeof p.usable === 'boolean' ? { usable: p.usable } : {})
 	};
 }
 
@@ -817,6 +939,7 @@ async function hydrateRegistry(refreshCapabilities: boolean): Promise<boolean> {
 		warnOnDrift(models, STATIC_MODELS);
 		_registry.models = models;
 		_registry.default = payload.default || STATIC_DEFAULT;
+		_registry.serverDefaultSet = !!payload.default;
 		_registry.legacyMap = payload.legacy_map ?? { ...STATIC_LEGACY_MAP };
 		_registry.providers = Array.isArray(payload.providers)
 			? payload.providers.map(mapPayloadProvider)

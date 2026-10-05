@@ -180,7 +180,8 @@ class TestValidateProviderModel:
 
         assert not result.ok
         assert result.code == pa.PROVIDER_MISSING
-        assert result.reason == "The provider 'ghost' does not exist."
+        assert result.reason == "The AI provider for this model has been removed."
+        assert "ghost" not in result.reason
 
     def test_disabled_provider(self):
         result = pa.validate_provider_model(

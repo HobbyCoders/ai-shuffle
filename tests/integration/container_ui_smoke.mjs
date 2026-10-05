@@ -49,15 +49,25 @@ export async function verifyOfflineSetup(page, { ownerPassword } = {}) {
   assert.equal(status.allowed, true);
   await license.getByRole('heading', { name: 'Beta: no license needed', exact: true }).waitFor();
   await license.getByRole('button', { name: 'Continue', exact: true }).click();
-  for (const [mode, label] of [['subscription', /^Claude subscription/], ['api_key', /^Anthropic API key/]]) {
-    const choice = page.getByTestId('setup-mode');
-    await choice.waitFor();
-    await choice.getByText(mode === 'subscription' ? 'Claude subscription' : 'Anthropic API key', { exact: true }).click();
-    assert.equal(await choice.getByRole('radio', { name: label }).isChecked(), true);
+  // One provider step: every agent provider is a choice, none is connected
+  // here, so Continue stays disabled. Claude's own pay choice (subscription or
+  // API key) lives inside the Claude choice and still stores the real mode.
+  const step = page.getByTestId('setup-provider');
+  await step.waitFor();
+  await step.getByTestId('setup-provider-missing').waitFor();
+  for (const name of ['Claude', 'OpenAI', 'OpenRouter', 'xAI Grok', 'Your own gateway']) {
+    await step.getByRole('list', { name: 'AI providers' }).getByText(name, { exact: true }).waitFor();
+  }
+  assert.equal(await step.getByRole('button', { name: 'Continue', exact: true }).isDisabled(), true);
+  await step.getByTestId('setup-provider-claude').click();
+  for (const [mode, label] of [['subscription', /^Subscription/], ['api_key', /^API key/]]) {
+    const ways = step.getByRole('radiogroup', { name: 'How to pay for Claude' });
+    await ways.waitFor();
     const [response] = await Promise.all([
       page.waitForResponse(response => response.url().endsWith('/settings/claude-auth') && response.request().method() === 'PUT'),
-      choice.getByRole('button', { name: 'Continue', exact: true }).click(),
+      ways.getByText(mode === 'subscription' ? 'Subscription' : 'API key', { exact: true }).click(),
     ]);
+    assert.equal(await ways.getByRole('radio', { name: label }).isChecked(), true);
     assert.equal(response.status(), 200, 'The real mode producer rejected setup');
     const summary = await response.json();
     assert.equal(summary.mode, mode);
@@ -65,21 +75,18 @@ export async function verifyOfflineSetup(page, { ownerPassword } = {}) {
     assert.equal(summary.api_key.set, false, 'Acceptance must not inherit an API key');
     assert.equal(summary.gate.claude_credential_ready, false);
     assert.equal(summary.gate.ready, false);
-    const credential = page.getByTestId('setup-credential');
-    await credential.getByTestId('setup-credential-missing').waitFor();
-    assert.equal(await credential.getByRole('button', { name: 'Continue', exact: true }).isDisabled(), true);
-    assert.equal((await credential.getByTestId('setup-credential-reason').textContent()).trim(), summary.gate.reason);
     const [checked] = await Promise.all([
-      page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/settings/claude-auth') && r.request().method() === 'GET'),
-      credential.getByRole('button', { name: 'Check again', exact: true }).last().click(),
+      page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/auth/status') && r.request().method() === 'GET'),
+      step.getByTestId('setup-provider-missing').getByRole('button', { name: 'Check again', exact: true }).click(),
     ]);
     assert.equal(checked.status(), 200);
-    assert.equal((await workerJson(page, '/api/v1/settings/claude-auth')).gate.ready, false);
-    assert.equal(await credential.getByRole('button', { name: 'Continue', exact: true }).isDisabled(), true);
+    const gate = (await checked.json()).agent_gate;
+    assert.equal(gate.ready, false);
+    if ('any_provider_ready' in gate) assert.equal(gate.any_provider_ready, false, 'No provider may be ready in offline acceptance');
+    assert.equal(await step.getByRole('button', { name: 'Continue', exact: true }).isDisabled(), true);
     assert.equal(await page.getByTestId('setup-workspace').count(), 0, 'No credential may bypass the workspace prerequisite');
     assert.equal(await page.getByTestId('setup-first-run').count(), 0, 'Do not run a model in offline acceptance');
     assert.equal(await page.getByRole('button', { name: 'Finish', exact: true }).count(), 0);
-    if (mode === 'subscription') await credential.getByRole('button', { name: 'Back', exact: true }).click();
   }
   const auth = await workerJson(page, '/api/v1/auth/status');
   assert.equal(auth.onboarding_complete, false, 'A credential-blocked wizard must stay unfinished');
@@ -189,7 +196,7 @@ async function main() {
     assert.equal((await workerJson(page, '/api/v1/auth/status')).onboarding_complete, false);
     assert.deepEqual(completed, [], 'The smoke test must never bypass onboarding completion');
     assert.deepEqual(pageErrors, [], 'Bundled UI raised JavaScript errors');
-    console.log('Bundled wizard persisted both modes, refused missing credentials and stayed unfinished after reload. Workspace/network persistence and update policy APIs passed. No model, account linking, first-run completion or post-setup Settings UI was exercised.');
+    console.log('Bundled wizard persisted both Claude modes from the provider step, refused to continue with no provider ready and stayed unfinished after reload. Workspace/network persistence and update policy APIs passed. No model, account linking, first-run completion or post-setup Settings UI was exercised.');
   } finally {
     await page.screenshot({ path: '/tmp/container-ui.png', mask: [page.locator('code, input[type="password"]')] });
     await context.close();

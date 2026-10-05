@@ -1321,6 +1321,11 @@ def create_postgres_schema(cursor) -> None:
             openai_admin_key TEXT,
             openai_billing_org_id TEXT,
             openai_billing_instance_id TEXT,
+            -- Last result of the provider's own model-catalog fetch: 'ok',
+            -- 'rejected' (401/403) or NULL (not checked since the key or
+            -- endpoint was set). Read by list_usable_model_providers. Same
+            -- guarded ADD COLUMN in database._run_column_migrations.
+            credential_status TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )

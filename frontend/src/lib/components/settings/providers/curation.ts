@@ -56,6 +56,19 @@ export function rowsFromFetch(stored: ProviderModelEntry[], res: FetchModelsResu
 	return [...extras, ...catalogRows];
 }
 
+/**
+ * The setup wizard's pre-check: the first `recommended` id (the provider's
+ * built-in chat roster) the list holds. With none, nothing is checked and the
+ * owner picks: an upstream list is unsorted and may hold embedding or
+ * moderation models. Rows that already have a check are kept as they are.
+ */
+export function precheckRecommended(rows: CurationRow[], recommended: readonly string[] | undefined): CurationRow[] {
+	if (rows.some((r) => r.checked)) return rows;
+	const ids = new Set(rows.map((r) => r.id));
+	const pick = (recommended ?? []).find((id) => ids.has(id));
+	return pick ? rows.map((r) => (r.id === pick ? { ...r, checked: true } : r)) : rows;
+}
+
 /** When the fetch fails: the stored curation, checked, so nothing gets wiped. */
 export function rowsFromStored(stored: ProviderModelEntry[]): CurationRow[] {
 	return stored.map((m) => ({
@@ -116,4 +129,49 @@ export type HiddenMedia = { id: string; label?: string; media_kind?: string };
 export function mediaKindLabel(kind: string | undefined): string {
 	if (kind === 'voice' || kind === 'image' || kind === 'video') return kind;
 	return 'speech';
+}
+
+/**
+ * Why a catalog fetch failed, in plain words, for the setup wizard. The
+ * worker answers a failed upstream fetch with 502 and a detail ending in the
+ * upstream code (`http_401`, `http_404`, `invalid_json`...):
+ * - `rejected`: the provider refused the key (401/403); the key must change.
+ * - `no-list`: the endpoint has no usable model list (404/405, not JSON).
+ * - `transient`: a timeout, rate limit or server error; trying again may work.
+ */
+export type FetchFailureKind = 'rejected' | 'no-list' | 'transient';
+export interface FetchFailure {
+	kind: FetchFailureKind;
+	message: string;
+}
+
+const UPSTREAM_PREFIX = /^Could not fetch models from the provider upstream:\s*/i;
+
+export function describeFetchFailure(detail: string, name: string): FetchFailure {
+	const text = (detail ?? '').trim();
+	const code = /\bhttp_(\d{3})\b/.exec(text)?.[1];
+	const status = code ? Number(code) : null;
+	if (status === 401 || status === 403) {
+		return { kind: 'rejected', message: `That key was rejected by ${name}. Check it and try again.` };
+	}
+	if (status === 404 || status === 405 || /\binvalid_json\b|\bmissing_base_url\b/.test(text)) {
+		return {
+			kind: 'no-list',
+			message: `${name} does not list its models (there is no /models address). AI Shuffle reads the models from that list, and model names cannot be typed in by hand yet.`
+		};
+	}
+	if (status === 429) {
+		return { kind: 'transient', message: `${name} is limiting requests right now. Wait a moment, then retry.` };
+	}
+	if (status !== null && status >= 500) {
+		return { kind: 'transient', message: `${name} had a server error (HTTP ${status}). Retry in a moment.` };
+	}
+	const rest = text.replace(UPSTREAM_PREFIX, '').trim();
+	if (!rest || /timeout|timed out/i.test(rest)) {
+		return { kind: 'transient', message: `${name} did not answer in time. Retry in a moment.` };
+	}
+	if (UPSTREAM_PREFIX.test(text)) {
+		return { kind: 'transient', message: `Could not reach ${name} (${rest}). Retry in a moment.` };
+	}
+	return { kind: 'transient', message: text };
 }

@@ -322,6 +322,9 @@ class TestRegistryPayloadProviders:
             "auto_permission_supported": False,
             "name": "OpenRouter",
             "provider_type": "openrouter",
+            "auth_mode": None,
+            # An API key with curated models: the credential gate counts it.
+            "usable": True,
             # Display metadata: an API-key row, so no plan string.
             "auth_kind": "api",
             "plan_type": None,
@@ -436,6 +439,45 @@ class TestRegistryPayloadProviders:
         entry = m.registry_payload()["providers"][0]
         assert entry["auth_kind"] == "subscription"
         assert entry["plan_type"] == "prolite"
+
+    def test_legacy_custom_sign_in_row_carries_auth_mode_and_usable(self, mock_db):
+        """An older ChatGPT sign-in stored as ``custom`` + ``auth_mode='chatgpt'``
+        carries the mode (so the browser classifies it as OpenAI, like the
+        gate) and whether the gate counts it as usable."""
+        db.create_model_provider(
+            provider_id="prov-legacy",
+            name="Codex",
+            provider_type="custom",
+            base_url="https://chatgpt.example/api",
+            models=[{"id": "gpt-5.6", "label": "GPT-5.6"}],
+            enabled=True,
+        )
+        db.set_codex_token_bundle(
+            "prov-legacy", access_token="enc:a", refresh_token="enc:r",
+            account_id="acct", auth_mode="chatgpt",
+        )
+        db.create_model_provider(
+            provider_id="prov-unchecked",
+            name="Keyed",
+            provider_type="openai",
+            base_url="https://api.openai.com/v1",
+            auth_token="enc:k",
+            enabled=True,
+        )
+        entries = {p["id"]: p for p in m.registry_payload()["providers"]}
+        assert entries["prov-legacy"]["auth_mode"] == "chatgpt"
+        assert entries["prov-legacy"]["usable"] is True
+        assert entries["prov-unchecked"]["auth_mode"] is None
+        # A never-checked key with no curated model does not count yet.
+        assert entries["prov-unchecked"]["usable"] is False
+        assert "codex_access_token" not in entries["prov-legacy"]
+
+        db.set_codex_token_bundle(
+            "prov-legacy", access_token="enc:a", refresh_token="enc:r",
+            account_id="acct", auth_mode="chatgpt", needs_reauth=True,
+        )
+        legacy = next(p for p in m.registry_payload()["providers"] if p["id"] == "prov-legacy")
+        assert legacy["usable"] is False
 
     def test_api_key_rows_report_api_auth_and_no_plan(self, mock_db):
         """API-key rows never carry a plan string, even if a usage snapshot

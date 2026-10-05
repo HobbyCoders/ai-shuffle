@@ -275,6 +275,123 @@ def count_configured_model_providers() -> int:
         return int(row["n"]) if row else 0
 
 
+#: ``model_providers.credential_status`` values, written from the provider's
+#: own model-catalog fetch (:func:`record_credential_check`). NULL = never
+#: checked since the key or endpoint was last set.
+CREDENTIAL_OK = "ok"
+CREDENTIAL_REJECTED = "rejected"
+
+
+def record_credential_check(
+    provider_id: str,
+    accepted: bool,
+    *,
+    checked_token: Optional[str] = None,
+    checked_base_url: Optional[str] = None,
+    guard: bool = False,
+) -> None:
+    """Record whether the provider accepted its stored credential.
+
+    Written by the model-catalog fetch: a successful fetch is ``ok``, an
+    upstream 401/403 is ``rejected``. Callers never record a transient
+    failure (timeout, 5xx, network), so a working provider stays usable
+    through an outage. Does not bump ``revision``: this is an observation,
+    not an edit, and must not race the capability refresh's revision check.
+
+    With ``guard``, ``checked_token`` / ``checked_base_url`` are the stored
+    key blob and endpoint the fetch started with: when either was replaced
+    while the fetch was in flight, the verdict is about the old key and is
+    dropped rather than recorded against the new one.
+    """
+    status = CREDENTIAL_OK if accepted else CREDENTIAL_REJECTED
+    with get_db() as conn:
+        cursor = conn.cursor()
+        if guard:
+            cursor.execute(
+                "SELECT auth_token, base_url FROM model_providers WHERE id = %s",
+                (provider_id,),
+            )
+            current = row_to_dict(cursor.fetchone())
+            if not current or (
+                (current.get("auth_token") or None) != (checked_token or None)
+                or (current.get("base_url") or None) != (checked_base_url or None)
+            ):
+                logger.info(
+                    "Credential check for provider %s dropped: its key or endpoint "
+                    "changed while the check ran", provider_id,
+                )
+                return
+        cursor.execute(
+            "UPDATE model_providers SET credential_status = %s WHERE id = %s",
+            (status, provider_id),
+        )
+
+
+def _same_secret(stored: Optional[str], new: Optional[str]) -> bool:
+    """Whether two stored key blobs hold the same key.
+
+    Encryption is not deterministic, so equal keys can have different blobs:
+    compare plaintexts. A blob that cannot be decrypted counts as different.
+    """
+    if (stored or None) == (new or None):
+        return True
+    if not stored or not new:
+        return False
+    try:
+        from app.core import encryption
+
+        def _plain(value: str) -> str:
+            return encryption.decrypt_value(value) if encryption.is_encrypted(value) else value
+
+        return _plain(stored) == _plain(new)
+    except Exception:  # noqa: BLE001 — unknown means "changed": re-check the key
+        return False
+
+
+def list_usable_model_providers() -> List[ModelProviderRow]:
+    """Enabled rows that can run a model now, newest created first.
+
+    * API-key rows (``auth_token`` set) count when the worker has evidence the
+      key works: the last catalog fetch succeeded (``credential_status =
+      'ok'``) or the row already lists at least one model (an install that
+      curated models before this was recorded). A key the upstream rejected
+      (``credential_status = 'rejected'``, a 401/403 on the catalog fetch)
+      never counts; a key that was never checked and lists no model does not
+      count either.
+    * Subscription sign-ins (``codex_access_token``) count while they are not
+      waiting for the user to sign in again (``needs_reauth``).
+    * A keyless custom gateway counts (a local gateway may need no key)
+      unless its last check was rejected.
+
+    Only stored state is read: no decryption, no network. Public columns
+    only; the token blobs never leave the query.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT {_PUBLIC_COLUMNS} FROM model_providers
+            WHERE enabled = TRUE
+              AND (
+                    (auth_token IS NOT NULL AND auth_token <> ''
+                     AND COALESCE(credential_status, '') <> '{CREDENTIAL_REJECTED}'
+                     AND (credential_status = '{CREDENTIAL_OK}'
+                          OR (models_json IS NOT NULL AND models_json NOT IN ('', '[]'))))
+                 OR (codex_access_token IS NOT NULL AND codex_access_token <> ''
+                     AND needs_reauth IS NOT TRUE)
+                 OR (provider_type = 'custom'
+                     AND (auth_token IS NULL OR auth_token = '')
+                     AND COALESCE(auth_mode, '') NOT IN ('chatgpt', 'grok')
+                     AND base_url IS NOT NULL AND base_url <> ''
+                     AND COALESCE(credential_status, '') <> '{CREDENTIAL_REJECTED}')
+              )
+            ORDER BY created_at DESC
+            """
+        )
+        rows = rows_to_list(cursor.fetchall())
+        return [_parse_json_columns(r) for r in rows]  # type: ignore[return-value]
+
+
 def _normalize_model_capabilities(models):
     """Whitelist canonical capability data on every catalog write, including legacy imports."""
     from app.core.model_effort import sanitize_effort_metadata
@@ -317,6 +434,20 @@ def update_model_provider(
     if not updates:
         return get_model_provider(provider_id)
 
+    if "auth_token" in kwargs or "base_url" in kwargs:
+        # A new key or endpoint has not been checked: forget the last result.
+        # Only a real change counts: an edit that resends the same endpoint,
+        # or a re-encryption of the same key, keeps it.
+        current = get_model_provider(provider_id, include_token=True) or {}
+        changed = (
+            "base_url" in kwargs
+            and (kwargs["base_url"] or None) != (current.get("base_url") or None)
+        ) or (
+            "auth_token" in kwargs
+            and not _same_secret(current.get("auth_token"), kwargs["auth_token"])
+        )
+        if changed:
+            updates.append("credential_status = NULL")
     updates.append("updated_at = %s")
     values.append(datetime.now(timezone.utc).isoformat())
     updates.append("revision = %s")

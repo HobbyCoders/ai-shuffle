@@ -1,6 +1,6 @@
 <!--
 title: Modes and Costs
-description: Claude subscription or API key, what each costs you, and when to use an API key
+description: Subscription or API key, what each costs you, and when to use an API key
 order: 7
 -->
 
@@ -8,27 +8,40 @@ order: 7
 
 AI Shuffle includes no AI usage. You pay HobbyCoders for the app, and you pay your AI provider for the AI. The two bills never mix: AI Shuffle never pays for, resells, marks up or routes AI usage, and never uses anyone else's account for your work.
 
-## The two ways to run Claude Code
+## Providers
 
-AI Shuffle runs Claude Code in exactly one mode at a time, the one you chose. It never switches modes on its own, and if the mode you chose has no credential, agents wait instead of falling back to anything.
+Connect any of these, one or several. Each uses your own account and bills you under its own terms.
 
-### Subscription mode
+- **Claude:** a Claude subscription (Pro or Max) through the Claude Code CLI, or an Anthropic API key.
+- **OpenAI:** a ChatGPT subscription sign-in, or an OpenAI API key.
+- **OpenRouter:** an OpenRouter API key, one key for many models.
+- **xAI Grok:** a SuperGrok subscription sign-in, or an xAI API key.
+- **Custom gateway:** any compatible endpoint with your own token, including a local model server.
+- **fal.ai:** a media key for images, video and audio. It does not run agents on its own.
 
-AI Shuffle runs the standard, unmodified Claude Code CLI, which you sign in to yourself with your own Claude account through Anthropic's sign-in page (see [First run](/docs/getting-started/first-run)).
+Voice mode uses your own OpenAI account.
 
-- **What it costs you:** your Claude plan's fixed monthly price (Pro or Max), paid to Anthropic. AI Shuffle adds nothing.
-- **Limits:** your plan's usage limits apply, exactly as when you use Claude Code in your own terminal. Anthropic sizes these plans for one person's ordinary, hands-on use. When you reach a limit, agents pause until it resets.
+## Subscription or API key
+
+Agents run on exactly the credential you chose. AI Shuffle never moves your work to another account on its own, and if a credential stops working, agents wait instead of falling back to anything.
+
+### Subscription
+
+You sign in to your own subscription on the provider's own sign-in page (see [First run](/docs/getting-started/first-run)).
+
+- **What it costs you:** your plan's fixed monthly price, paid to the provider. AI Shuffle adds nothing.
+- **Limits:** your plan's usage limits apply, exactly as in the provider's own apps. Providers size these plans for one person's ordinary, hands-on use. When you reach a limit, agents pause until it resets.
 - **Good for:** interactive work while you are at the keyboard: chatting with an agent, reviewing its changes, a few sessions at a time.
-- **Not good for:** anything that runs without you. Unattended loops on a subscription can use up your plan's limits quickly, and running them is at your own risk under Anthropic's terms.
+- **Not good for:** anything that runs without you. Unattended loops on a subscription can use up your plan's limits quickly, and running them is at your own risk under the provider's terms.
 
-Your subscription is for you. Do not share one Claude account between several people or let other people's work run on it; that is against Anthropic's terms, and AI Shuffle is not built for it.
+Your subscription is for you. Do not share one account between several people or let other people's work run on it; that is against the providers' terms, and AI Shuffle is not built for it.
 
-### API key mode
+### API key
 
-You paste an Anthropic API key from your own Anthropic Console account. AI Shuffle passes it to the agent processes it starts and to nothing else.
+You paste an API key from your own account in the provider's console. AI Shuffle sends it only to that provider, or passes it to the agent processes it starts, and to nothing else.
 
-- **What it costs you:** Anthropic bills your Console account per use, by the number of tokens each request reads and writes, at the prices on Anthropic's pricing page. There is no monthly minimum.
-- **Limits:** your Console account's rate limits and the spend limit you set there.
+- **What it costs you:** the provider bills your account per use, by the number of tokens each request reads and writes, at the prices on its pricing page. There is usually no monthly minimum.
+- **Limits:** your account's rate limits and the spend limit you set there.
 - **Good for:** scheduled automations, overnight runs, connectors that answer messages while you are away, and many agents at once.
 
 ## How much does an API key cost?
@@ -37,9 +50,9 @@ It depends on the model you pick and how much the agent reads. A rough way to es
 
 - An agent working in a code repository mostly **reads**: files, command output, its own earlier turns. Input tokens are often ten or more times the output tokens.
 - Repeated context is billed at a much lower **cached** rate, so a long session usually costs far less than its raw token count suggests.
-- To estimate: take a typical session's input and output tokens (the Anthropic Console's usage page lists them), multiply each by the model's price per million tokens, and add them.
+- To estimate: take a typical session's input and output tokens (your provider's usage page lists them), multiply each by the model's price per million tokens, and add them.
 
-Start with a low monthly spend limit in the Anthropic Console, run your normal workload for a few days, and look at the Console's usage page. Then set the limit you are comfortable with. AI Shuffle cannot see or change your Console bill.
+Start with a low monthly spend limit in your provider's console, run your normal workload for a few days, and look at its usage page. Then set the limit you are comfortable with. AI Shuffle cannot see or change your provider's bill.
 
 ## When usage numbers are estimates
 
@@ -54,21 +67,21 @@ Use an API key for anything that runs when you are not watching:
 - **Connectors** that answer Telegram, Discord, Slack or other messages;
 - **Many agents at once**, for example a batch of parallel tasks.
 
-If you run much of this kind of work, API key mode is the safer choice. The setup wizard gives the same advice when you choose the mode. You can change the mode at any time in **Settings → Providers → Claude**, which also shows the account the CLI is signed in to and the last four characters of your key. If both a sign-in and a key are set up, the mode you picked decides; AI Shuffle never switches on its own.
+If you run much of this kind of work, an API key is the safer choice. The setup wizard gives the same advice.
+
+## Claude: subscription or API key mode
+
+Claude runs in exactly one mode at a time, the one you chose: **Subscription**, **API key** or **Off**. Change it at any time in **Settings → Providers → Claude**, which also shows the account the Claude Code CLI is signed in to and the last four characters of your key. If both a sign-in and a key are set up, the mode you picked decides; AI Shuffle never switches on its own.
 
 ## The loop guard
 
-In subscription mode, AI Shuffle protects your plan from runaway automation:
+With a Claude subscription, AI Shuffle protects your plan from runaway automation:
 
 - Turns that start without you (automations, wake-ups, connectors, and the background agents they start) count against an **unattended budget**: by default 12 per session and 60 per worker in any rolling hour. Past either budget, the next such turn does not start on its own. The session shows why, and the turn waits under **Settings → Providers → Claude subscription → Policy** until you choose **Confirm** (it runs now) or **Dismiss**.
 - Background agents on Claude that an automation, wake-up or connector started get a default **time limit** of 60 minutes, so one that loops cannot run all night.
-- Creating an automation or arming a wake-up in subscription mode shows a reminder to use an API key for scheduled runs.
+- Creating an automation or arming a wake-up on a Claude subscription shows a reminder to use an API key for scheduled runs.
 
-You can change the budgets and the time limit, or turn the guard off, under **Settings → Providers → Claude subscription → Policy**. A change also applies to work that is already running: a lowered time limit stops an agent already past it within about a minute, and a raised one lets it keep going. The counts start again when the worker restarts. The loop guard does not apply in API key mode, where your Console spend limit is the control, or to agents on other providers. It never holds or times work you started yourself: a chat you are driving, and every agent that chat starts, has no loop guard budget or time limit.
-
-## Other providers
-
-You can also add OpenAI, xAI, OpenRouter, fal.ai (images, video and audio) or a local model in Settings. Each uses your own account or key and bills you under its own terms. Voice mode uses your own OpenAI account.
+You can change the budgets and the time limit, or turn the guard off, under **Settings → Providers → Claude subscription → Policy**. A change also applies to work that is already running: a lowered time limit stops an agent already past it within about a minute, and a raised one lets it keep going. The counts start again when the worker restarts. The loop guard does not apply in Claude's API key mode, where your Anthropic Console spend limit is the control, or to agents on other providers. It never holds or times work you started yourself: a chat you are driving, and every agent that chat starts, has no loop guard budget or time limit.
 
 ## What AI Shuffle costs
 

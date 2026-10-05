@@ -39,7 +39,7 @@
 	import { pausedChat, pausedLabel } from './limit-resume';
 	import { acknowledge, acknowledgedTokens, coldSendText, shouldWarn } from './cold-send';
 	import { notify } from '$lib/stores/notifications';
-	import { evaluateSubmitGuards, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON } from './submit-guards';
+	import { evaluateSubmitGuards, gateBlocksComposer, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON } from './submit-guards';
 	import { attachmentBlockReason } from './attach-disable';
 	// Collapse / gesture / sheet behaviour is the mobile app's; the web build
 	// gets the desktop no-op defaults (see composer-shell.ts).
@@ -1337,10 +1337,10 @@
 			<Banner severity="error" message={errorMessage} dismissible onDismiss={() => (errorMessage = '')} />
 		{/if}
 
-		<!-- Agents cannot start here yet (no license, or no credential for the
-		     chosen Claude Code mode): say what is missing instead of failing later. -->
-		{#if $agentGate && !$agentGate.ready && $agentGate.reason && (!$anyCredential || $agentGate.license_allows_runs === false)}
-			<Banner severity="warning" message={$agentGate.reason} />
+		<!-- Agents cannot start here yet (no license, or no provider ready):
+		     say what is missing instead of failing later. -->
+		{#if gateBlocksComposer($agentGate, $anyCredential)}
+			<Banner severity="warning" message={$agentGate?.reason ?? ''} />
 		{/if}
 
 		<!-- Worktree Error Message -->

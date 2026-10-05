@@ -150,6 +150,18 @@ describe('every migrated notification renders through the dock', () => {
 		expect(inDock(await screen.findByText('Sign out and in again.'))).toBe(true);
 	});
 
+	it('no Claude sign-in notice while Claude is off', async () => {
+		setAuth({
+			authenticated: true,
+			is_admin: true,
+			claude_cli: { relogin_notice: { message: 'Sign out and in again.' } },
+			agent_gate: { ready: true, mode: 'off', claude_credential_ready: false }
+		});
+		render((await import('./ClaudeReloginBanner.svelte')).default);
+		await Promise.resolve();
+		expect(screen.queryByText('Sign out and in again.')).toBeNull();
+	});
+
 	it('the install prompt', async () => {
 		vi.useFakeTimers();
 		render((await import('./InstallPrompt.svelte')).default);

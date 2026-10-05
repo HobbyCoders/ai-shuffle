@@ -257,7 +257,7 @@
 				let content = trigger === 'auto'
 					? 'Context was automatically compacted.'
 					: metadata.requested_by === 'app'
-						? 'AI Shuffle asked Claude Code to compact the context because the session was idle near the limit.'
+						? 'AI Shuffle asked the agent to compact the context because the session was idle near the limit.'
 						: metadata.trigger === 'manual'
 							? 'Context was compacted manually (/compact).'
 							: 'Context was compacted.';
@@ -281,12 +281,12 @@
 			}
 
 			case 'compact_failed': {
-				// A /compact Claude Code did not carry out. No "compacted" card
+				// A /compact the agent did not carry out. No "compacted" card
 				// is shown for it; this one says so, with the CLI's reason.
 				const reason = typeof data.reason === 'string' ? data.reason.trim() : '';
 				const who = data.requested_by === 'app'
-					? 'AI Shuffle asked Claude Code to compact the context, but it did not.'
-					: 'Claude Code did not compact the context.';
+					? 'AI Shuffle asked the agent to compact the context, but it did not.'
+					: 'The agent did not compact the context.';
 				return {
 					title: 'Compaction Failed',
 					content: reason ? `${who} Reason: ${reason}` : who,

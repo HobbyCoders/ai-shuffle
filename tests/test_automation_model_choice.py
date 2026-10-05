@@ -129,7 +129,7 @@ class TestNormalize:
         from app.db import database
 
         _provider(database)
-        with pytest.raises(ValueError, match="does not exist"):
+        with pytest.raises(ValueError, match="has been removed"):
             normalize_model_choice("prov:p-gone:gpt-x")
         with pytest.raises(ValueError):
             normalize_model_choice("prov:p-open:not-curated")
@@ -227,7 +227,7 @@ class TestResolve:
         resolved = resolve_automation_model({"model": "prov:p-gone:gpt-x"})
         assert resolved["selection"] == "prov:p-gone:gpt-x"
         assert "no longer available" in resolved["error"]
-        assert "p-gone" in resolved["error"]
+        assert "has been removed" in resolved["error"] and "p-gone" not in resolved["error"]
 
     def test_model_dropped_from_list_reports_error(self, mock_db):
         from app.db import database
@@ -418,7 +418,7 @@ class TestApi:
             "/api/v1/automations", json=self._body(model="prov:p-gone:gpt-x"),
         )
         assert response.status_code == 400
-        assert "does not exist" in response.json()["detail"]
+        assert "has been removed" in response.json()["detail"]
 
     def test_list_reports_fallback_for_old_automations(self, authenticated_client, mock_encryption):
         from app.core.model_registry import DEFAULT_MODEL

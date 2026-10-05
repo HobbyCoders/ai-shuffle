@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
 	authStatus: {} as Record<string, unknown>,
 	setMode: vi.fn(), creds: vi.fn(), saveKey: vi.fn(),
 	license: vi.fn(), agent: vi.fn(), run: vi.fn(),
+	providerStore: { providers: [] as unknown[], claude: null, anthropicKeyMasked: null, falKeySet: false, falKeyMasked: '', falEnabled: true },
+	registry: [] as unknown[], defaultModel: 'sonnet',
 }));
 vi.mock('$app/navigation', () => ({ goto: mocks.goto }));
 vi.mock('$lib/api/network', () => ({ getNetworkStatus: mocks.getStatus, createNetwork: mocks.create,
@@ -25,6 +27,13 @@ vi.mock('$lib/stores/auth.svelte', () => ({
 	auth: { checkAuth: mocks.checkAuth, get current() { return { status: mocks.authStatus }; }, logout: vi.fn(),
 		subscribe(run: (v: unknown) => void) { run({ status: mocks.authStatus }); return () => {}; } },
 	isAdmin: { subscribe(run: (v: boolean) => void) { run(true); return () => {}; } },
+}));
+vi.mock('$lib/stores/providers.svelte', () => ({
+	providers: { get current() { return mocks.providerStore; }, refreshAll: async () => {}, refreshProviders: async () => {} },
+}));
+vi.mock('$lib/constants/models.svelte', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/constants/models.svelte')>()),
+	hydrateModelRegistry: async () => true, getProviders: () => mocks.registry, getDefaultModel: () => mocks.defaultModel,
 }));
 vi.mock('$lib/stores/owner-access.svelte', () => ({ ownerAccess: { get status() { return mocks.ownerStatus; }, refresh: mocks.ownerRefresh } }));
 vi.mock('$lib/api/agent-credentials', async (importOriginal) => ({
@@ -42,6 +51,7 @@ vi.mock('$lib/components/DirectoryBrowser.svelte', () => import('$lib/test-stubs
 vi.mock('$lib/components/settings/ClaudeCliPanel.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 import Setup from './+page.svelte';
 import type { AgentCredentials, ClaudeAuthMode } from '$lib/api/agent-credentials';
+import type { AgentGateStatus } from '$lib/api/client';
 
 const fingerprint = 'abcd-1234-abcd-1234-abcd-1234-abcd-1234';
 const fresh = (): NetworkStatus => ({ device: { device_id: 'local-device', fingerprint }, enrolled: false, platform: 'linux', version: 'test', instance_id: 'local-install', enrollment: null, hub: { linked: false } });
@@ -71,20 +81,25 @@ function creds(over: Partial<AgentCredentials> = {}): AgentCredentials {
 		...over,
 	};
 }
-const signedIn = () => creds({ ready: true, credentialReady: true, reason: null,
-	cli: { installed: true, signed_in: true, email: 'owner@example.com', org_name: null, plan: 'max', auth_method_label: null, error: null } });
+/** The worker's gate as `/auth/status` reports it, with the providers that are ready. */
+const gate = (ready: string[]): AgentGateStatus => ({
+	ready: ready.length > 0, mode: 'subscription', claude_credential_ready: ready.includes('claude'),
+	any_provider_ready: ready.length > 0, ready_providers: ready,
+});
 
 beforeEach(() => {
 	vi.resetAllMocks();
 	try { sessionStorage.clear(); } catch { /* not available */ }
 	status = fresh(); connection = disconnected; workerMode = 'subscription';
 	mocks.ownerStatus = dockerOwner;
-	mocks.authStatus = { setup_required: true, auth_mode: 'local', claude_cli: { installed: true, signed_in: false, login: { surface: 'docker' } } };
+	mocks.authStatus = { setup_required: true, auth_mode: 'local', claude_cli: { installed: true, signed_in: false, login: { surface: 'docker' } }, agent_gate: gate([]) };
+	mocks.providerStore = { providers: [], claude: null, anthropicKeyMasked: null, falKeySet: false, falKeyMasked: '', falEnabled: true };
+	mocks.registry = []; mocks.defaultModel = 'sonnet';
 	vi.spyOn(window, 'open').mockReturnValue(null);
 	mocks.getStatus.mockImplementation(async () => status);
 	mocks.create.mockImplementation(async () => { status = enrolled(); return { network: status.network }; });
 	mocks.workspace.mockResolvedValue({ workspace_path: '/workspace', default_path: '/workspace', is_local_mode: false, is_configured: false, exists: true });
-	mocks.saveWorkspace.mockResolvedValue({}); mocks.checkAuth.mockResolvedValue(undefined); mocks.complete.mockResolvedValue(undefined);
+	mocks.saveWorkspace.mockResolvedValue({}); mocks.checkAuth.mockImplementation(async () => mocks.authStatus); mocks.complete.mockResolvedValue(undefined);
 	mocks.githubStatus.mockResolvedValue({ authenticated: false, user: null });
 	mocks.setMode.mockImplementation(async (mode: ClaudeAuthMode) => { workerMode = mode; return creds(); });
 	mocks.creds.mockImplementation(async () => creds());
@@ -114,24 +129,30 @@ async function throughWelcome() {
 async function throughLicense() {
 	await throughWelcome();
 	await click('Continue');
-	await screen.findByTestId('setup-mode');
+	await screen.findByTestId('setup-provider');
 }
-async function throughMode(mode: 'subscription' | 'api_key' = 'subscription') {
+/** A ChatGPT subscription row with a picked model (the wizard needs one to call OpenAI connected). */
+function openaiRow() {
+	mocks.providerStore = { ...mocks.providerStore, providers: [{ id: 'codex', name: 'ChatGPT', provider_type: 'custom', auth_mode: 'chatgpt', enabled: true, codex_access_token_set: true, models: [{ id: 'gpt-5', label: 'GPT-5' }] }] };
+	mocks.registry = [{ id: 'codex', name: 'ChatGPT', provider_type: 'custom', auth_kind: 'subscription', plan_type: null, models: [{ id: 'gpt-5', label: 'GPT-5' }], default_model: 'gpt-5' }];
+}
+/** OpenAI (a ChatGPT subscription row) is the ready provider unless the test says otherwise. */
+function openaiReady() {
+	mocks.authStatus = { ...mocks.authStatus, agent_gate: gate(['openai']) };
+	openaiRow();
+}
+async function throughProvider() {
+	// The row exists from the start; the worker reports it ready on Check again.
+	openaiRow();
 	await throughLicense();
-	await fireEvent.click(screen.getByLabelText(mode === 'subscription' ? /Claude subscription/ : /API key/));
-	await click('Continue');
-	await screen.findByTestId('setup-credential');
-}
-async function throughCredential() {
-	await throughMode();
-	mocks.creds.mockImplementation(async () => signedIn());
+	openaiReady();
 	await click(/Check again/);
-	await screen.findByTestId('setup-credential-ready');
+	await screen.findByTestId('setup-provider-ready');
 	await click('Continue');
 	await screen.findByTestId('setup-workspace');
 }
 async function throughFirstRun() {
-	await throughCredential();
+	await throughProvider();
 	await click('Continue');
 	await screen.findByTestId('setup-first-run');
 	await click(/Run it/);
@@ -141,14 +162,15 @@ async function throughFirstRun() {
 }
 
 describe('setup wizard v2', () => {
-	it('shows the eight steps in order and the disclosures first', async () => {
+	it('shows the seven steps in order and the disclosures first', async () => {
 		render(Setup);
 		await screen.findByTestId('setup-welcome');
 		const progress = screen.getByRole('navigation', { name: 'Setup progress' });
 		const labels = [...progress.querySelectorAll('li')].map((li) => li.textContent?.replace('Completed', '').replace(/^\d+/, '').trim());
-		expect(labels).toEqual(['Welcome', 'Password', 'License', 'Mode', 'Sign in', 'Workspace', 'First run', 'Account & GitHub']);
+		expect(labels).toEqual(['Welcome', 'Password', 'License', 'AI provider', 'Workspace', 'First run', 'Account & GitHub']);
 		expect(screen.getByText('Agents act with your access')).toBeTruthy();
 		expect(screen.getByText(/never pays for, resells or shares model usage/)).toBeTruthy();
+		expect(screen.getByTestId('setup-welcome').textContent).not.toMatch(/Claude|Anthropic/);
 		expect(screen.getByRole('link', { name: /What is sent/ }).getAttribute('href')).toBe('https://hobbycoders.com/privacy#updates');
 		// The password was set at the owner gate before this page could load.
 		expect(progress.querySelectorAll('li')[1].className).toContain('complete');
@@ -178,49 +200,49 @@ describe('setup wizard v2', () => {
 		expect(items[3].getAttribute('aria-current')).toBe('step');
 	});
 
-	it('stores the mode, with the API key advice for unattended runs', async () => {
+	it('offers every provider equally and names no engine in the subtitle', async () => {
 		await throughLicense();
-		expect(screen.getByTestId('setup-mode-guidance').textContent).toContain('Use an API key for scheduled and unattended runs');
-		expect((screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement).disabled).toBe(true);
-		await fireEvent.click(screen.getByLabelText(/API key/));
-		await click('Continue');
-		expect(mocks.setMode).toHaveBeenCalledWith('api_key');
-		await screen.findByLabelText('Anthropic API key');
+		expect(screen.getByText('Connect at least one AI provider. You can add more later in Settings > Providers.')).toBeTruthy();
+		const list = screen.getByRole('list', { name: 'AI providers' });
+		for (const name of ['Claude', 'OpenAI', 'xAI Grok', 'OpenRouter', 'Your own gateway']) expect(list.textContent).toContain(name);
+		expect(screen.queryByText(/Claude Code/)).toBeNull();
 	});
 
-	it('names the modes as Settings > Providers does and asks for an explicit choice', async () => {
+	it('blocks the provider step until a provider is ready, with no way to skip', async () => {
 		await throughLicense();
-		const group = screen.getByRole('radiogroup', { name: 'Claude Code mode' });
-		expect(group.textContent).toContain('Claude subscription');
-		expect(group.textContent).toContain('Anthropic API key');
-		expect(screen.getByText(/Settings > Providers > Claude\b/)).toBeTruthy();
-		expect([...group.querySelectorAll('input')].some((i) => (i as HTMLInputElement).checked)).toBe(false);
-	});
-
-	it('saves the API key for Claude Code in API key mode', async () => {
-		mocks.saveKey.mockImplementation(async () => {
-			mocks.creds.mockImplementation(async () => creds({ ready: true, credentialReady: true, reason: null, apiKey: { set: true, last4: 'abcd' } }));
-			return { masked: 'sk-ant-...abcd' };
-		});
-		await throughMode('api_key');
-		await fireEvent.input(await screen.findByLabelText('Anthropic API key'), { target: { value: 'sk-ant-secret' } });
-		await click('Save');
-		expect(mocks.saveKey).toHaveBeenCalledWith('sk-ant-secret', { useForClaudeCode: true });
-		expect((await screen.findByTestId('setup-credential-ready')).textContent).toContain('ending in abcd');
-	});
-
-	it('blocks the credential step until the credential exists, with no way to finish without one', async () => {
-		await throughMode();
-		const missing = await screen.findByTestId('setup-credential-missing');
-		expect(missing.textContent).toContain('Agents cannot start yet');
-		expect(missing.textContent).toContain(NOT_SIGNED_IN);
+		expect((await screen.findByTestId('setup-provider-missing')).textContent).toContain('Connect at least one provider');
 		expect((screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement).disabled).toBe(true);
-		expect(screen.queryByText(/without a provider/)).toBeNull();
 		expect(screen.queryByRole('button', { name: /Skip/ })).toBeNull();
 	});
 
+	it('keeps the Claude subscription or key choice inside the Claude provider', async () => {
+		await throughLicense();
+		await fireEvent.click(screen.getByTestId('setup-provider-claude'));
+		await fireEvent.click(await screen.findByLabelText(/API key/));
+		expect(mocks.setMode).toHaveBeenCalledWith('api_key');
+		mocks.saveKey.mockImplementation(async () => {
+			workerMode = 'api_key';
+			mocks.creds.mockImplementation(async () => creds({ ready: true, credentialReady: true, reason: null, apiKey: { set: true, last4: 'abcd' } }));
+			mocks.authStatus = { ...mocks.authStatus, agent_gate: gate(['claude']) };
+			return { masked: 'sk-ant-...abcd' };
+		});
+		await fireEvent.input(await screen.findByLabelText('Anthropic API key'), { target: { value: 'sk-ant-secret' } });
+		await click('Save key');
+		expect(mocks.saveKey).toHaveBeenCalledWith('sk-ant-secret', { useForClaudeCode: true });
+		expect((await screen.findByTestId('setup-provider-ready')).textContent).toContain('Connected: Claude.');
+		expect((screen.getByRole('button', { name: 'Continue' }) as HTMLButtonElement).disabled).toBe(false);
+	});
+
+	it('lets a returning owner with a provider already connected continue', async () => {
+		openaiReady();
+		await throughLicense();
+		expect((await screen.findByTestId('setup-provider-ready')).textContent).toContain('Connected: OpenAI.');
+		await click('Continue');
+		await screen.findByTestId('setup-workspace');
+	});
+
 	it('shows the host folder behind /workspace on Docker and Unraid', async () => {
-		await throughCredential();
+		await throughProvider();
 		const host = screen.getByTestId('setup-workspace-host');
 		expect(host.textContent).toContain('/workspace');
 		expect(host.textContent).toContain('WORKSPACE_DIR');
@@ -231,20 +253,21 @@ describe('setup wizard v2', () => {
 
 	it('names the host folder when the worker reports it', async () => {
 		mocks.workspace.mockResolvedValue({ workspace_path: '/workspace', default_path: '/workspace', is_local_mode: false, is_configured: false, exists: true, host_path: '/mnt/user/projects' });
-		await throughCredential();
+		await throughProvider();
 		expect(screen.getByTestId('setup-workspace-host').textContent).toContain('/mnt/user/projects');
 	});
 
 	it('runs a first agent, streams the reply, and finishes as a clean install', async () => {
-		await throughCredential();
+		await throughProvider();
 		expect(mocks.saveWorkspace).not.toHaveBeenCalled();
 		await click('Continue');
 		expect(mocks.saveWorkspace).toHaveBeenCalledWith('/workspace');
 		expect(mocks.setup).toHaveBeenCalledOnce();
 		await screen.findByTestId('setup-first-run');
-		expect(screen.getByText(/paid for by your Claude plan \(owner@example.com\)/)).toBeTruthy();
+		expect((await screen.findByText(/GPT-5 on OpenAI, billed to your own account/))).toBeTruthy();
+		expect(screen.getByTestId('setup-first-run').textContent).not.toMatch(/Claude|Anthropic/);
 		await click(/Run it/);
-		expect(mocks.run).toHaveBeenCalledWith(expect.objectContaining({ profileId: 'assistant' }));
+		expect(mocks.run).toHaveBeenCalledWith(expect.objectContaining({ profileId: 'assistant', model: 'prov:codex:gpt-5' }));
 		expect((await screen.findByTestId('setup-first-run-reply')).textContent).toContain('Hello! I can help you write code.');
 		await click('Continue');
 		await screen.findByTestId('setup-extras');
@@ -261,7 +284,7 @@ describe('setup wizard v2', () => {
 			onUpdate(final);
 			return { done: Promise.resolve(final), cancel: vi.fn() };
 		});
-		await throughCredential();
+		await throughProvider();
 		await click('Continue');
 		await screen.findByTestId('setup-first-run');
 		await click(/Run it/);
@@ -273,21 +296,21 @@ describe('setup wizard v2', () => {
 		await screen.findByTestId('setup-extras');
 	});
 
-	it('shows the credential gate refusal of the first run and leads back to Sign in', async () => {
+	it('shows the credential gate refusal of the first run and leads back to the provider step', async () => {
 		mocks.run.mockImplementation(({ onUpdate }: { onUpdate: (s: unknown) => void }) => {
 			const final = { phase: 'failed', text: '', sessionId: 's1', error: NOT_SIGNED_IN, code: 'agent_setup_required' };
 			onUpdate(final);
 			return { done: Promise.resolve(final), cancel: vi.fn() };
 		});
-		await throughCredential();
+		await throughProvider();
 		await click('Continue');
 		await screen.findByTestId('setup-first-run');
 		await click(/Run it/);
 		const alert = await screen.findByTestId('setup-first-run-error');
 		expect(alert.textContent).toContain('Agents cannot start yet');
 		expect(alert.textContent).toContain(NOT_SIGNED_IN);
-		await click('Go back to Sign in');
-		await screen.findByTestId('setup-credential');
+		await click('Go back to AI provider');
+		await screen.findByTestId('setup-provider');
 	});
 
 	it('shows a loop guard hold of the first run', async () => {
@@ -297,14 +320,14 @@ describe('setup wizard v2', () => {
 			onUpdate(final);
 			return { done: Promise.resolve(final), cancel: vi.fn() };
 		});
-		await throughCredential();
+		await throughProvider();
 		await click('Continue');
 		await screen.findByTestId('setup-first-run');
 		await click(/Run it/);
 		const alert = await screen.findByTestId('setup-first-run-error');
 		expect(alert.textContent).toContain('The run is waiting for your confirmation');
 		expect(alert.textContent).toContain(held);
-		expect(screen.queryByRole('button', { name: 'Go back to Sign in' })).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Go back to AI provider' })).toBeNull();
 	});
 
 	it('connects GitHub with a token in the last step', async () => {

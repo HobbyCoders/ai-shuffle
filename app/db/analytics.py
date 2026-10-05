@@ -254,6 +254,63 @@ def settle_turn_usage(
     return True
 
 
+#: Turn sources whose model the owner chose by typing into a chat. Same set as
+#: ``app.core.model_override.USER_SOURCES`` (kept literal here so the db layer
+#: does not import app.core): wakes, automations, Task workers, connectors,
+#: peer messages and resumes are not counted.
+_CHOSEN_TURN_SOURCES = ("user", "queue", "worktree", "api")
+
+#: Length of a ``turns.id`` minted by ``turns.enqueue_turn`` /
+#: ``record_adhoc_turn``: ``"turn-" + uuid4().hex``.
+_TURN_ID_LEN = 37
+
+
+def get_most_used_models(since: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """Booked turns per ``(provider_id, provider_type, model)`` since ``since``.
+
+    Counts only turns the owner picked a model for: ``usage_log`` rows settled
+    for a ``turns`` row whose ``source`` is a typed message
+    (:data:`_CHOSEN_TURN_SOURCES`), in a list-visible session that is not a
+    delegated worker (``is_worker``), not hidden (wake-word command sessions),
+    not an automation run (``automation_id``) and not a voice call
+    (``mode = 'voice'``). One-shot text generation (titles, commit text,
+    suggestions) books with no session or turn and never matches.
+
+    The turn is found from the settlement key
+    (``query_persistence.usage_settlement_key``: ``["<session>","<turn>",…]``),
+    so the turn id is the fixed-length slice after the session id and the join
+    is a primary-key lookup. Rows without a settlement key (older bookings,
+    one-shot generation) are not counted.
+
+    Ordered by turns, then most recent use. ``since`` is a UTC timestamp string.
+    """
+    placeholders = ", ".join(["%s"] * len(_CHOSEN_TURN_SOURCES))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""SELECT ul.provider_id, ul.provider_type, ul.model,
+                       COUNT(*) AS turn_count, MAX(ul.created_at) AS last_used
+                FROM usage_log ul
+                JOIN turns t
+                  ON t.id = substr(ul.settlement_key, length(ul.session_id) + 6, {_TURN_ID_LEN})
+                 AND t.session_id = ul.session_id
+                JOIN sessions s ON s.id = ul.session_id
+                WHERE ul.created_at >= %s
+                  AND ul.settlement_key IS NOT NULL
+                  AND ul.model IS NOT NULL AND ul.model <> ''
+                  AND t.source IN ({placeholders})
+                  AND s.automation_id IS NULL
+                  AND COALESCE(s.is_worker, FALSE) = FALSE
+                  AND COALESCE(s.hidden, FALSE) = FALSE
+                  AND COALESCE(s.mode, '') <> 'voice'
+                GROUP BY ul.provider_id, ul.provider_type, ul.model
+                ORDER BY turn_count DESC, last_used DESC
+                LIMIT %s""",
+            (since, *_CHOSEN_TURN_SOURCES, int(limit)),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+
 def get_all_session_usage(session_id: str) -> List[SessionUsageEntry]:
     """Get ALL usage entries for a session, ordered by turn.
 

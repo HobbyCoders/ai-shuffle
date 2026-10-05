@@ -22,7 +22,7 @@ export const AGENT_ACCESS = {
 	title: 'Agents run as you',
 	message: 'Agents in AI Shuffle Desktop run as you, on this computer.',
 	points: [
-		'They use your own accounts: the Claude Code CLI with your own `claude` login, and any other CLI, API key or GitHub login you set up.',
+		'They use your own accounts: the provider sign-ins, API keys and GitHub login you set up.',
 		'They can read, change and delete any file your user account can, run programs, and reach your network, not only the workspace folder.',
 		'Computer use, when you turn it on, controls your real screen, mouse and keyboard.',
 		'Nothing isolates an agent from the rest of your account. Review tool approvals, and do not leave Bypass on for work you would not run yourself.'

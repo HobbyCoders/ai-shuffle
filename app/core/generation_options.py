@@ -257,8 +257,10 @@ def text_generation_config() -> Dict[str, Any]:
     Shaped like the profile config ``build_generation_options`` already
     consumes: ``model`` (a bare id — a ``prov:<providerId>:<modelId>`` setting
     is split here), ``provider`` (``model_providers.id``, or None for native
-    Anthropic) and ``effort``. Falls back to the registry default model with no
-    provider when the setting is unset or unreadable, so generation always has
+    Anthropic) and ``effort``. When the setting is unset or unreadable it falls
+    back to ``credential_gate.default_run_model(prefer_most_used=False)`` (the
+    registry default while Claude is set up, else a usable provider's default
+    model; never the owner's most used chat model), so generation always has
     somewhere to run.
     """
     model: Optional[str] = None
@@ -278,6 +280,14 @@ def text_generation_config() -> Dict[str, Any]:
         decoded = decode_provider_model(model)
         if decoded:
             provider_id, model = decoded
+    else:
+        # Unset: a usable provider's default, without the owner's most used
+        # chat model (that may be an expensive model for titles and
+        # suggestions). Cached Claude probe only: some callers run on the
+        # event loop.
+        from app.core.credential_gate import default_run_model
+
+        provider_id, model = default_run_model(probe=False, prefer_most_used=False)
 
     return {
         "model": model or DEFAULT_MODEL,

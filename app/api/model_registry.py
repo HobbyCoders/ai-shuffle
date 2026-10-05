@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.auth import require_auth
 from app.core.model_registry import registry_payload
+from app.db.async_database import run_sync
 
 router = APIRouter(prefix="/api/v1/models", tags=["Models"])
 
@@ -48,4 +49,5 @@ async def list_models(token: str = Depends(require_auth)) -> dict:
     ``providers`` lists only enabled ``model_providers`` rows and never
     includes the encrypted ``auth_token`` blob.
     """
-    return registry_payload()
+    # The default reads usage history and provider rows: off the event loop.
+    return await run_sync(registry_payload)

@@ -88,7 +88,7 @@ def test_backend_docs_index_serves_the_buyer_pages_in_order():
     assert slugs.index("requirements") < slugs.index("install-unraid") < slugs.index("first-run")
     doc = index.get_doc("getting-started", "first-run")
     assert not doc["content_markdown"].startswith("<!--\ntitle")
-    assert any(s["title"].endswith("Owner password") for s in doc["sections"])
+    assert any(s["title"].endswith("Password") for s in doc["sections"])
 
 
 def test_compose_page_embeds_the_buyer_install_files_verbatim():

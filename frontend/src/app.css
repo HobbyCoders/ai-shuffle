@@ -584,6 +584,24 @@ code {
 	filter: brightness(1.1);
 }
 
+/* Disabled: visibly unavailable. This rule is unlayered and Tailwind v4 utilities
+   live in @layer utilities, so it beats `disabled:opacity-*` and `cursor-*` utilities
+   whatever their specificity (:where only keeps it weaker than other unlayered rules).
+   To change a disabled button's look, add an unlayered rule, not a utility. */
+.btn:where(:disabled) {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.btn:disabled:active {
+	transform: none;
+}
+
+.btn-primary:disabled:hover {
+	box-shadow: var(--shadow-s);
+	filter: none;
+}
+
 .btn-secondary {
 	background-color: var(--secondary);
 	color: var(--secondary-foreground);

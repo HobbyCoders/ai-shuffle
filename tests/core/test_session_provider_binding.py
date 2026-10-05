@@ -408,8 +408,14 @@ class TestInvalidCompositeIsRejected:
 
     def test_unknown_provider(self, mock_db, tmp_path):
         encryption.set_encryption_key("pw", db)
-        with pytest.raises(ValueError, match="does not exist"):
+        from app.core.query_options import REMOVED_PROVIDER_MESSAGE
+
+        with pytest.raises(ValueError) as exc:
             self._build_with(tmp_path, "prov:nope:some-model")
+        assert str(exc.value) == REMOVED_PROVIDER_MESSAGE
+        assert str(exc.value) == (
+            "The AI provider this chat was using has been removed. Pick another model to continue."
+        )
 
     def test_uncurated_model(self, mock_db, tmp_path):
         encryption.set_encryption_key("pw", db)

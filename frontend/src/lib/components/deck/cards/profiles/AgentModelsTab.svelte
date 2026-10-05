@@ -1,5 +1,5 @@
 <script lang="ts" module>
-	import { decodeProviderModel, getModelLabel, getProviderDisplay, getProviders } from '$lib/constants/models';
+	import { decodeProviderModel, getClaudeAuth, getModelLabel, getProviderDisplay, getProviders } from '$lib/constants/models';
 
 	/** "Sonnet 5.5" for any stored model value (alias or prov:<id>:<model>). */
 	export function modelLabel(value: string | null | undefined): string {
@@ -32,6 +32,9 @@
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
 	import { NATIVE_PROVIDER_KEY, VOICE_PROVIDER_KEY, subagentPickerValue } from '$lib/constants/models';
 	import { isPinned } from './agentList';
+	import { onMount } from 'svelte';
+	import { providers as providersStore } from '$lib/stores/providers.svelte';
+	import { claudeInUse, claudeUsageRecorded } from '$lib/components/settings/providers/providers-model';
 
 	interface Props {
 		providerModels: Record<string, string>;
@@ -46,6 +49,19 @@
 	let { providerModels, onModelsChange, subagentDefault, defaultError = '', onDefaultModel }: Props = $props();
 
 	const providers = $derived(getProviders());
+	// Claude is one caller provider among the others: its row shows while
+	// Claude is in use on this worker (Settings > Providers' definition, so a
+	// lapsed sign-in or a CLI probe that has not run yet does not hide it), or
+	// while a pin for it still needs clearing.
+	const store = $derived(providersStore.current);
+	const showClaude = $derived(
+		!!getClaudeAuth().auth_kind ||
+			claudeInUse(store.claude, claudeUsageRecorded(store.usage)) ||
+			!!providerModels[NATIVE_PROVIDER_KEY]
+	);
+	onMount(() => {
+		if (!providersStore.current.claude) void providersStore.loadClaude();
+	});
 	const hasDefault = $derived(!!subagentDefault);
 	const pinnedNow = $derived(isPinned(providerModels));
 	/** "Pin" picked but nothing chosen yet; lasts while this agent is open. */
@@ -91,16 +107,6 @@
 </script>
 
 {#snippet pickers()}
-	<SettingRow label="Claude" hint="Callers on native Claude.">
-		<ModelPicker
-			value={subagentPickerValue(NATIVE_PROVIDER_KEY, providerModels[NATIVE_PROVIDER_KEY])}
-			providerScope={NATIVE_PROVIDER_KEY}
-			allowEmpty
-			emptyLabel="Not offered"
-			allowCustom={false}
-			onSelect={(value) => setProviderModel(NATIVE_PROVIDER_KEY, value)}
-		/>
-	</SettingRow>
 	{#each providers as provider (provider.id)}
 		{@const display = getProviderDisplay(provider)}
 		<SettingRow label={display.name} hint={display.subtext || provider.name}>
@@ -113,6 +119,18 @@
 			/>
 		</SettingRow>
 	{/each}
+	{#if showClaude}
+		<SettingRow label="Claude" hint="Callers on native Claude.">
+			<ModelPicker
+				value={subagentPickerValue(NATIVE_PROVIDER_KEY, providerModels[NATIVE_PROVIDER_KEY])}
+				providerScope={NATIVE_PROVIDER_KEY}
+				allowEmpty
+				emptyLabel="Not offered"
+				allowCustom={false}
+				onSelect={(value) => setProviderModel(NATIVE_PROVIDER_KEY, value)}
+			/>
+		</SettingRow>
+	{/if}
 {/snippet}
 
 {#if defaultError}

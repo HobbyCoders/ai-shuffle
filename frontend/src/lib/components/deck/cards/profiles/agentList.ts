@@ -5,7 +5,20 @@
  * without rendering.
  */
 import type { Profile } from '$lib/api/client';
-import { NATIVE_PROVIDER_KEY, VOICE_PROVIDER_KEY } from '$lib/constants/models';
+import { NATIVE_PROVIDER_KEY, VOICE_PROVIDER_KEY, decodeProviderModel } from '$lib/constants/models';
+
+/**
+ * A new agent's subagent binding for the default model. A Claude alias pins
+ * the native key; a `prov:<row id>:<model>` default (the worker's default when
+ * Claude has no credential) pins that provider's own key instead, never the
+ * native one. Empty when there is no default.
+ */
+export function defaultModelBinding(model: string | null | undefined): Record<string, string> {
+	const value = (model ?? '').trim();
+	if (!value) return {};
+	const composite = decodeProviderModel(value);
+	return composite ? { [composite.providerId]: value } : { [NATIVE_PROVIDER_KEY]: value };
+}
 
 export type AgentFilter = 'all' | 'yours' | 'builtin';
 /** Folder filter value for agents in no folder. */

@@ -82,6 +82,24 @@ def test_relogin_notice_is_shown_once_and_dismissed(authenticated_client, signed
     assert notice.mark_if_needed() is False  # never comes back
 
 
+def test_relogin_notice_is_hidden_while_claude_is_off(authenticated_client, signed_in, mock_db):
+    from app.core import claude_auth_mode
+    from app.core import claude_relogin_notice as notice
+    from app.db.base import get_db
+    from app.db import database as db
+
+    claude_auth_mode.set_mode("off")
+    db.set_system_setting("claude_active_account:other-install", "acct-1")
+    with get_db() as conn:
+        db._retire_claude_accounts(conn.cursor())
+    assert notice.mark_if_needed() is True  # recorded, in case Claude is turned on later
+    assert authenticated_client.get("/api/v1/auth/claude/cli").json()["relogin_notice"] is None
+    claude_auth_mode.set_mode("subscription")
+    body = authenticated_client.get("/api/v1/auth/claude/cli").json()["relogin_notice"]
+    assert body["message"].startswith("Claude: ")
+    assert "AI Shuffle no longer" not in body["message"]
+
+
 def test_missing_cli_is_reported_not_raised(authenticated_client):
     body = authenticated_client.get("/api/v1/auth/claude/cli").json()
     assert body["installed"] is False

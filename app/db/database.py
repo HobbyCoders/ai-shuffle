@@ -1260,6 +1260,13 @@ def _run_column_migrations(cursor):
             cursor.execute("ALTER TABLE model_providers ADD COLUMN api_dialect TEXT")
             migrations_applied.append("model_providers.api_dialect")
 
+        # model_providers.credential_status (2026-10-05): last result of the
+        # provider's model-catalog fetch ('ok' / 'rejected'), so a key the
+        # upstream refused no longer counts as a ready provider.
+        if not column_exists(cursor, "model_providers", "credential_status"):
+            cursor.execute("ALTER TABLE model_providers ADD COLUMN credential_status TEXT")
+            migrations_applied.append("model_providers.credential_status")
+
     # projects.link_group_id (Phase D). Groups same-repo project rows across
     # installs into one logical project on the shared-DB sessions board. The id
     # is derived deterministically from the git remote (identical on every
@@ -3464,6 +3471,7 @@ from app.db.analytics import (  # noqa: F401
     get_analytics_usage_trends,
     get_analytics_top_sessions,
     get_analytics_provider_breakdown,
+    get_most_used_models,
 )
 
 from app.db.api_users import (  # noqa: F401
@@ -3575,6 +3583,8 @@ from app.db.model_providers import (  # noqa: F401
     get_all_model_providers,
     get_enabled_model_providers,
     count_configured_model_providers,
+    list_usable_model_providers,
+    record_credential_check,
     update_model_provider,
     delete_model_provider,
     set_model_provider_enabled,

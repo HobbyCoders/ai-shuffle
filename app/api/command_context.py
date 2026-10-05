@@ -108,7 +108,20 @@ def command_provider_kind(
         return "voice"
     provider_id = session.get("provider_id") if session is not None else config.get("provider")
     selected = model or (session or {}).get("model")
-    raw_model = selected or (session or {}).get("launched_model") or config.get("model") or DEFAULT_MODEL
+    raw_model = selected or (session or {}).get("launched_model") or config.get("model")
+    if not raw_model and not provider_id:
+        # No model named: the same default build_options_from_profile uses.
+        # Most used only for the owner's own composer: an API caller or a
+        # server-side lookup keeps the unattended order, as the run does.
+        from app.core.credential_gate import default_run_model
+        from app.core.query_options import _is_interactive_run
+
+        owner_request = request is not None and get_api_user_from_request(request) is None
+        interactive = owner_request and (
+            session is None or _is_interactive_run({"turn_source": "user"}, session)
+        )
+        provider_id, raw_model = default_run_model(prefer_most_used=interactive)
+    raw_model = raw_model or DEFAULT_MODEL
     decoded = decode_provider_model(selected)
     if decoded:
         provider_id, raw_model = decoded

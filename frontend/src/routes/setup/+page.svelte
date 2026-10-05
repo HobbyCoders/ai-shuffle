@@ -9,13 +9,13 @@
 	 *    page, so the owner gate (OwnerAccessGate) shows steps 1 and 2 itself;
 	 *    here the step only appears as done. The desktop app has no such step.
 	 * 3. License: a key, or the beta, which needs none.
-	 * 4. Mode: Claude subscription through the Claude Code CLI, or an API key.
-	 * 5. Credential for that mode. Blocking: there is no way to finish setup
-	 *    without one.
-	 * 6. Workspace, with the host folder behind it on Docker and Unraid.
-	 * 7. First run: one short prompt, the reply streamed in.
-	 * 8. Optional: HobbyCoders account (or a worker invite), GitHub, and
-	 *    importing recent Claude Code CLI conversations found on this worker.
+	 * 4. AI provider: connect at least one of the agent providers (Claude,
+	 *    OpenAI, xAI Grok, OpenRouter, a custom gateway), all equal choices.
+	 *    Blocking: there is no way to finish setup without one ready.
+	 * 5. Workspace, with the host folder behind it on Docker and Unraid.
+	 * 6. First run: one short prompt on a ready provider, the reply streamed in.
+	 * 7. Optional: HobbyCoders account (or a worker invite), GitHub, and
+	 *    earlier conversations found on this worker, when there are any.
 	 */
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
@@ -28,15 +28,13 @@
 	} from '$lib/api/auth';
 	import { getErrorMessage, type WorkspaceConfig } from '$lib/api/client';
 	import { createNetwork, getNetworkStatus, type NetworkStatus } from '$lib/api/network';
-	import type { AgentCredentials, ClaudeAuthMode } from '$lib/api/agent-credentials';
 	import SetupProgress from '$lib/components/SetupProgress.svelte';
 	import GitHubConnection from '$lib/components/GitHubConnection.svelte';
 	import AccountPanel from '$lib/components/deck/cards/settings/AccountPanel.svelte';
 	import JoinNetworkPanel from '$lib/components/deck/cards/settings/JoinNetworkPanel.svelte';
 	import WelcomeStep from '$lib/components/setup/WelcomeStep.svelte';
 	import LicenseStep from '$lib/components/setup/LicenseStep.svelte';
-	import ModeStep from '$lib/components/setup/ModeStep.svelte';
-	import CredentialStep from '$lib/components/setup/CredentialStep.svelte';
+	import ProviderStep from '$lib/components/setup/ProviderStep.svelte';
 	import WorkspaceStep from '$lib/components/setup/WorkspaceStep.svelte';
 	import FirstRunStep from '$lib/components/setup/FirstRunStep.svelte';
 	import CliHistoryImport from '$lib/components/setup/CliHistoryImport.svelte';
@@ -59,11 +57,10 @@
 		welcome: 'A few steps to set up this worker. It takes about five minutes.',
 		owner: 'The password every browser on your network signs in with.',
 		license: 'Your AI Shuffle license.',
-		mode: 'Choose how Claude Code is paid for.',
-		credential: 'Sign in to the Claude Code CLI or add your API key.',
+		provider: 'Connect at least one AI provider. You can add more later in Settings > Providers.',
 		workspace: 'Where your projects live.',
 		'first-run': 'Watch an agent answer.',
-		extras: 'Optional: your HobbyCoders account, GitHub and earlier Claude Code conversations.',
+		extras: 'Optional: your HobbyCoders account, GitHub and earlier conversations.',
 	};
 
 	function goTo(step: SetupStepId) { currentStep = step; setupError = ''; }
@@ -88,21 +85,9 @@
 	// ── Welcome ──────────────────────────────────────────────────────────────
 	function continueFromWelcome() { markWelcomeSeen(); complete('welcome'); }
 
-	// ── Mode and credential ─────────────────────────────────────────────────
-	// The mode step asks for an explicit choice every time: the worker always
-	// has a mode (startup records a default), but setup confirms it with the owner.
-	let chosenMode = $state<ClaudeAuthMode | null>(null);
-
-	function modeChosen(stored: AgentCredentials) {
-		chosenMode = stored.mode;
-		complete('mode');
-	}
-
-	function switchMode(next: ClaudeAuthMode) {
-		chosenMode = next;
-		completedSteps.delete('mode');
-		goTo('mode');
-	}
+	// ── AI provider ─────────────────────────────────────────────────────────
+	// The provider connected last in this visit; the first run tries it first.
+	let connectedProvider = $state<string | null>(null);
 
 	// ── Workspace ────────────────────────────────────────────────────────────
 	let workspaceConfig = $state<WorkspaceConfig | null>(null);
@@ -236,12 +221,9 @@
 			{:else if currentStep === 'license'}
 				<LicenseStep onContinue={() => complete('license')} onBack={() => back('license')} />
 
-			{:else if currentStep === 'mode'}
-				<ModeStep mode={chosenMode} onChosen={modeChosen} onBack={() => back('mode')} />
-
-			{:else if currentStep === 'credential' && chosenMode}
-				<CredentialStep mode={chosenMode} isAdmin={$isAdmin}
-					onContinue={() => complete('credential')} onBack={() => back('credential')} onSwitchMode={switchMode} />
+			{:else if currentStep === 'provider'}
+				<ProviderStep isAdmin={$isAdmin} onConnected={(id) => (connectedProvider = id)}
+					onContinue={() => complete('provider')} onBack={() => back('provider')} />
 
 			{:else if currentStep === 'workspace'}
 				<WorkspaceStep bind:path={workspacePath} container={workspaceConfig ? !workspaceConfig.is_local_mode : false}
@@ -249,8 +231,8 @@
 					onSave={saveWorkspaceAndContinue} onBack={() => back('workspace')} />
 
 			{:else if currentStep === 'first-run'}
-				<FirstRunStep mode={chosenMode} onContinue={() => complete('first-run')} onBack={() => back('first-run')}
-					onFixCredential={() => goTo(chosenMode ? 'credential' : 'mode')} />
+				<FirstRunStep preferredProvider={connectedProvider} onContinue={() => complete('first-run')} onBack={() => back('first-run')}
+					onFixProvider={() => { completedSteps.delete('provider'); goTo('provider'); }} />
 
 			{:else if currentStep === 'extras'}
 				<div class="space-y-6" data-testid="setup-extras">

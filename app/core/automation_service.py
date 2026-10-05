@@ -505,9 +505,16 @@ def resolve_automation_model(
             logger.debug("Could not read provider %s for model reporting", provider_id, exc_info=True)
         return {"selection": None, "model": default_model_for_provider(row),
                 "provider_id": provider_id, "source": MODEL_SOURCE_AGENT, "error": None}
-    from app.core.model_registry import DEFAULT_MODEL
+    # The app default an unbound automation session starts on. An automation
+    # is unattended, so it never follows the owner's most used chat model:
+    # Claude's default while Claude has its credential, else a usable
+    # provider's own default model, else the registry default. Same probe as
+    # the run's own session build (query_options), so the report and the run
+    # agree; every caller is already off the event loop.
+    from app.core.credential_gate import default_run_model
 
-    return {"selection": None, "model": DEFAULT_MODEL, "provider_id": None,
+    default_provider, default_model = default_run_model(prefer_most_used=False)
+    return {"selection": None, "model": default_model, "provider_id": default_provider,
             "source": MODEL_SOURCE_DEFAULT, "error": None}
 
 

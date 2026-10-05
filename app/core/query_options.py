@@ -646,6 +646,66 @@ def _resolve_thinking_display(
     return None
 
 
+#: Turn sources a person typed into the composer. Only these may start on the
+#: owner's most used model; every other source (automation, wakeup,
+#: connector, api, failover of an unattended turn, ...) keeps the earlier
+#: order, so unattended work never inherits an expensive chat model.
+_INTERACTIVE_TURN_SOURCES = ("user", "queue", "worktree")
+
+
+def _is_interactive_run(
+    overrides: Dict[str, Any], session_row: Optional[Dict[str, Any]]
+) -> bool:
+    """Whether a run that names no model was started by the owner typing.
+
+    The same filters ``analytics.get_most_used_models`` counts on: a typed
+    turn source in a visible session that is not an automation run, a
+    delegated worker or a voice call. Anything unknown is unattended.
+    """
+    if overrides.get("turn_source") not in _INTERACTIVE_TURN_SOURCES:
+        return False
+    row = session_row or {}
+    if not row:
+        return False
+    if row.get("automation_id") or row.get("is_worker") or row.get("hidden"):
+        return False
+    return (row.get("mode") or "") != "voice"
+
+
+#: A turn whose bound provider row was deleted. Plain words, no raw id.
+REMOVED_PROVIDER_MESSAGE = (
+    "The AI provider this chat was using has been removed. "
+    "Pick another model to continue."
+)
+
+
+def _default_provider_model_without_claude(
+    *, prefer_most_used: bool = False,
+) -> Optional[tuple]:
+    """``(provider id or None, model)`` for a run that names no model, or None.
+
+    ``credential_gate.default_run_model``: with ``prefer_most_used`` (an
+    interactive run) the owner's most used model when its provider is still
+    usable; then Claude's default while Claude has its credential, else a
+    usable provider's own default model, else the registry default. None when
+    that is just the registry default. Never raises: a failed check keeps the
+    registry default.
+    """
+    try:
+        from app.core import credential_gate
+        from app.core.model_registry import DEFAULT_MODEL
+
+        provider_id, model = credential_gate.default_run_model(
+            prefer_most_used=prefer_most_used,
+        )
+        if provider_id or (model and model != DEFAULT_MODEL):
+            return provider_id, model
+        return None
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not pick a default provider model", exc_info=True)
+        return None
+
+
 def build_options_from_profile(
     profile: Dict[str, Any],
     project: Optional[Dict[str, Any]] = None,
@@ -1154,6 +1214,11 @@ def build_options_from_profile(
             _decoded_pid, _decoded_mid, require_servable=False
         )
         if not _validation.ok:
+            from app.core.provider_agent import PROVIDER_MISSING
+
+            if _validation.code == PROVIDER_MISSING:
+                # The session's bound row was deleted: say so, never reroute.
+                raise ValueError(REMOVED_PROVIDER_MESSAGE)
             raise ValueError(
                 _validation.reason
                 or f"Model '{_decoded_mid}' is not available on provider "
@@ -1184,10 +1249,40 @@ def build_options_from_profile(
     # still needs a model. A PROVIDER-bound session deliberately gets no floor —
     # a native alias would be meaningless on a provider leg, and resolving to an
     # arbitrary curated id would silently pick a model the user never chose.
+    # The floor is a DEFAULT, not a credential fallback: a run that named no
+    # model starts on the owner's most used model (when its provider is still
+    # usable), else a usable provider's own default model, rather than a
+    # Claude alias the gate may refuse. A model the user chose is never
+    # rerouted.
     if not model_to_use and not provider_id:
         from app.core.model_registry import DEFAULT_MODEL
 
         model_to_use = DEFAULT_MODEL
+        _fallback_default = _default_provider_model_without_claude(
+            prefer_most_used=_is_interactive_run(overrides, _binding_row),
+        )
+        if _fallback_default is not None:
+            provider_id, model_to_use = _fallback_default
+            logger.info(
+                "[Provider] No model named; using default model %r (provider %r).",
+                model_to_use, provider_id,
+            )
+            # A provider default must be bound to the session exactly like an
+            # explicit ``prov:`` pick: only the bare model id lands in
+            # ``launched_model``, so without the binding the next turn
+            # (auto-continue, failover, wake, follow-up) would guess the leg
+            # from the model name and run without the row's key or base URL.
+            if provider_id and session_id and _binding_row is not None:
+                try:
+                    database.set_session_run_binding(
+                        session_id,
+                        model=f"{PROVIDER_MODEL_PREFIX}{provider_id}:{model_to_use}",
+                    )
+                except Exception:  # noqa: BLE001 — this turn still runs on it
+                    logger.exception(
+                        "[Provider] could not bind default model for session %s",
+                        session_id,
+                    )
 
     # Subagent models are not resolved here: the Task tool resolves the target
     # agent's own binding at dispatch time.

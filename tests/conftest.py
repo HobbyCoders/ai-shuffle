@@ -120,6 +120,9 @@ def _agent_credentials_ready_by_default(request, monkeypatch):
     # Claude Code mode, the loop guard's limits) may carry over from the last.
     from app.db.settings import invalidate_system_setting_memo
     invalidate_system_setting_memo()
+    # Nor the default-model resolver's cached usage ranking.
+    from app.core.credential_gate import invalidate_most_used_cache
+    invalidate_most_used_cache()
     if request.node.get_closest_marker("real_agent_gate"):
         yield
         return

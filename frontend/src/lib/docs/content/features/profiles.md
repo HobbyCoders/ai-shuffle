@@ -58,7 +58,7 @@ Any other string is treated as a custom model ID and passed through unchanged (e
 | Mode                | In the composer | Description                                                 |
 |---------------------|-----------------|-------------------------------------------------------------|
 | `default`           | Ask             | Ask before tools that change something; read-only tools run without a prompt |
-| `auto`              | Auto            | Claude Code evaluates tool calls automatically (shown only where available) |
+| `auto`              | Auto            | The provider checks each tool call and approves safe ones (shown only where available) |
 | `acceptEdits`       | Accept Edits    | File edits (Edit, Write, MultiEdit, NotebookEdit) run without asking; every other tool asks, as in Ask |
 | `bypassPermissions` | Bypass          | Skip all permission prompts, including screen control (use with caution) |
 
@@ -146,7 +146,7 @@ The `system_prompt` field holds the agent's instructions (the editor's **Prompt*
 | Field      | Type          | Description                                           |
 |------------|---------------|-------------------------------------------------------|
 | `cwd`      | string        | Override the working directory for sessions             |
-| `add_dirs` | list[string]  | Additional directories Claude can access                |
+| `add_dirs` | list[string]  | Additional directories the agent can access             |
 
 ### Settings Loading
 
