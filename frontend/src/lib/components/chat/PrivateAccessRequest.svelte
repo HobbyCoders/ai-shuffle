@@ -45,6 +45,12 @@
 	let passphrase = $state('');
 	let useKey = $state(false);
 	let verifyKey = $state(false);
+	// Closing the private-access panel bumps clearSecretsKey: drop the typed
+	// password, key and passphrase (the connection details stay for a retry).
+	let previousClearKey = untrack(() => clearSecretsKey);
+	$effect(() => {
+		if (previousClearKey !== clearSecretsKey) { previousClearKey = clearSecretsKey; password = ''; privateKey = ''; passphrase = ''; }
+	});
 	let busy = $state(false);
 	let error = $state('');
 	const durations = [[15, '15 minutes'], [30, '30 minutes'], [60, '1 hour'], [120, '2 hours'], [240, '4 hours'], [480, '8 hours']] as const;

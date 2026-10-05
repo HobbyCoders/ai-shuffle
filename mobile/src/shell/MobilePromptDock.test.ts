@@ -171,7 +171,7 @@ describe('private access', () => {
 		await waitFor(() => expect(decide).toHaveBeenCalledExactlyOnceWith('a1', true));
 	});
 
-	it('sends a request that needs private inputs to the access dialog', async () => {
+	it('sends a request that needs private inputs to the access panel', async () => {
 		const { open, decide } = access([{ id: 'a2', kind: 'folder', detail: 'Compare the Linux paths' }]);
 		renderDock({ permissions: [] });
 		expect(screen.queryByRole('slider')).toBeNull();

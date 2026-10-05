@@ -92,8 +92,9 @@ At phone widths the Git trigger keeps a short label: the desktop label (or the
 ellipsis to leave room for the chat title. The dimmer detail drops; the
 accessible name and the opened panel still expose the full status.
 Mobile header and Git-sheet actions use matching 44px touch targets; both halves
-of a split action share the same height. Private-access dialogs use one scrolling
-body below a fixed close/header row. Connection details wrap within the card and
+of a split action share the same height. Private access opens from a 44px shield
+icon in the phone header as a bottom sheet (an anchored panel on desktop), with
+one scrolling body below a fixed close/header row. Connection details wrap within the card and
 saved host-key fingerprints remain available through a disclosure. Mobile fields
 retain their touch size on unfolded screens; desktop cards do not inherit mobile
 spacing or platform rules. Authentication and approval behavior are unchanged.

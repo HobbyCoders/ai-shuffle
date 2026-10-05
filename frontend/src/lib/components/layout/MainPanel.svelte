@@ -881,13 +881,14 @@
 {#snippet headerActions()}
 	{#if $activeView?.type === 'session' && activeTab?.sessionId}
 		{#key activeTab.sessionId}
-			<!-- Private access is managed here on every lane: the Access button
-			     shows when the chat has a request, a grant or a saved connection,
-			     and opens the dialog to approve, review or revoke. Waiting requests
+			<!-- Private access is managed here on every lane (desktop bar and the
+			     phone shell's PageHeader): a shield icon shows when the chat has a
+			     request, a grant or a saved connection, and opens a panel (a bottom
+			     sheet on phones) to approve, review or revoke. Waiting requests
 			     also show in the chat above the composer (PrivateAccessPrompt).
 			     The Git panel no longer carries it (#1816). Swarms show in the
 			     running-tasks list, which keeps their state hydrated. -->
-			<ChatAccess sessionId={activeTab.sessionId} trigger="button" />
+			<ChatAccess sessionId={activeTab.sessionId} />
 		{/key}
 	{/if}
 	{#if activeTab && !assistantMode && shouldShowHeaderGitActions({

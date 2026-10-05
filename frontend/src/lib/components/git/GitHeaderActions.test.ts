@@ -22,7 +22,7 @@
  *    for one already active (a pinned failure, a resumed Ship It)
  *  - everything disables under actionsBusy (isStreaming)
  *  - the panel is Git only: no swarms, agent transcripts or private access
- *    (#1816; those live in the running-tasks list and the Access button)
+ *    (#1816; those live in the running-tasks list and the private-access icon)
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -1272,7 +1272,7 @@ describe('GitHeaderActions handler wiring', () => {
 	});
 
 	// #1816: the panel is Git only. Swarms and agent transcripts moved to the
-	// running-tasks list; private access lives on the header's Access button
+	// running-tasks list; private access lives on the header's private-access icon
 	// and in the chat's own prompt.
 	it('renders no private-access row, even with grants and requests waiting', async () => {
 		dirtyFeatureBranch();

@@ -1,11 +1,11 @@
 /**
  * chat-access — what the private-access panel for the active chat is showing.
  *
- * ChatAccess owns the polling, the request cards and the dialog. The chat
- * header only needs two things from it: how many approvals are waiting (that
- * outranks every git state on the header button) and a way to open the
- * dialog from the git panel's "Private access" row. ChatAccess publishes both
- * here whenever its snapshot changes and clears the entry when it unmounts.
+ * ChatAccess owns the polling, the request cards and the header panel. The
+ * chat's own prompts (PrivateAccessPrompt above the composer, the phone's
+ * prompt dock) read what is waiting from here and open that panel through
+ * `open`. ChatAccess publishes the summary whenever its snapshot changes and
+ * clears the entry when it unmounts.
  */
 import { writable } from 'svelte/store';
 
@@ -30,11 +30,11 @@ export interface ChatAccessSummary {
 	saved: number;
 	/** The last refresh failed; the panel shows the error. */
 	error: boolean;
-	/** Open the private-access dialog. No-op when there is nothing to show. */
+	/** Open the private-access panel. No-op when there is nothing to show. */
 	open: () => void;
 	/**
 	 * Answer a waiting one-shot approval (`kind: 'action'`) without opening the
-	 * dialog. Requests that need private inputs still go through `open`.
+	 * panel. Requests that need private inputs still go through `open`.
 	 */
 	decide?: (id: string, allow: boolean) => Promise<boolean>;
 }

@@ -1,7 +1,7 @@
 /**
  * #1807: a private-access request or one-shot approval waiting in the OPEN
  * chat is shown in the chat (above the composer), not only in the header
- * panel, and Review opens the access dialog where the private inputs live.
+ * panel, and Review opens the header's access panel where the private inputs live.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';

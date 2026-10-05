@@ -114,15 +114,15 @@ describe('shouldShowGithubGitActions', () => {
 	});
 });
 
-// #1816: private access left the Git panel. The header's Access button is the
-// one place to approve, review and revoke on every lane, so MainPanel always
-// renders ChatAccess with its own button, and no standalone Swarm button.
+// #1816: private access left the Git panel. The header's private-access icon is
+// the one place to approve, review and revoke on every lane, so MainPanel always
+// renders ChatAccess (icon + panel), and no standalone Swarm button.
 describe('chat header private access and swarms', () => {
 	const mainPanel = readFileSync(resolve(process.cwd(), 'src/lib/components/layout/MainPanel.svelte'), 'utf8')
 		.replace(/<!--[\s\S]*?-->/g, '');
 
-	it('gives every session its own Access button', () => {
-		expect(mainPanel).toContain('<ChatAccess sessionId={activeTab.sessionId} trigger="button" />');
+	it('gives every session its own private-access control', () => {
+		expect(mainPanel).toContain('<ChatAccess sessionId={activeTab.sessionId} />');
 	});
 
 	it('renders no swarm dropdown in the header', () => {

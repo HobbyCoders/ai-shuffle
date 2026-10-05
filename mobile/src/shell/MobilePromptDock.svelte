@@ -8,7 +8,7 @@
 	 * Permission and one-shot access approvals are answered by sliding the
 	 * knob right (approve) or left (deny), or by tapping Deny / Approve, with
 	 * "Always do this" beside them. An access request that needs private
-	 * inputs opens the existing access dialog through Review. A question shows
+	 * inputs opens the header's access panel (a bottom sheet) through Review. A question shows
 	 * its options as large buttons plus "Type an answer"; a multi-part or
 	 * multi-select question falls back to the shared question form. Several
 	 * waiting items show "1 of N", which cycles.

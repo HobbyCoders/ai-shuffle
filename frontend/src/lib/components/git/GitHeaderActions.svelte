@@ -9,7 +9,7 @@
 	 * order: the branch against its base, the Ship It pipeline with the next
 	 * step lit, each git action as a row with an in-panel editor, and the
 	 * changed files. It is Git only: swarms and agent transcripts live in the
-	 * running-tasks list, and private access on the header's Access button and
+	 * running-tasks list, and private access on the header's private-access icon and
 	 * in the chat's own prompt (#1816).
 	 *
 	 * Each mutating action (Commit / Push / Pull / Create PR / Ship It) keeps

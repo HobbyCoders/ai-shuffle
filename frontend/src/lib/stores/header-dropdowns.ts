@@ -24,6 +24,8 @@ type HeaderDropdownId =
 	| 'notifications'
 	// Bound-chat session title in the header breadcrumb (rename / fork / delete).
 	| 'session-title'
+	// The chat header's private-access panel (ChatAccess).
+	| 'private-access'
 	// The chat header's git panel (one button opens it) and the option popovers
 	// for the actions inside it. A popover id implies the panel is open too:
 	// GitHeaderActions treats every `git-*` id as "panel open" and returns to

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, fireEvent } from '@testing-library/svelte';
+import { cleanup, render, screen, fireEvent, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 const m = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), delete: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api: m, getErrorMessage: (e: {detail?: string}) => e.detail ?? 'Unavailable' }));
@@ -18,6 +18,7 @@ import ChatAccess from './ChatAccess.svelte';
 import PrivateAccessPrompt from './PrivateAccessPrompt.svelte';
 import { get } from 'svelte/store';
 import { privateAccessPending } from '$lib/stores/chat-access';
+import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 import { resourceSync } from '$lib/services/resource-sync';
 const empty = () => ({ requests: [], actions: [], grants: [], saved_connections: [], vault_available: false });
 let snapshot: ReturnType<typeof empty> | Record<string, unknown>;
@@ -29,18 +30,62 @@ function hidden(value: boolean) {
  document.dispatchEvent(new Event('visibilitychange'));
 }
 beforeEach(() => {
- HTMLDialogElement.prototype.showModal = function () { this.open = true; };
- HTMLDialogElement.prototype.close = function () { this.open = false; this.dispatchEvent(new Event('close')); };
  vi.useFakeTimers(); vi.clearAllMocks(); hidden(false); snapshot = empty(); accessAuth.current = {status: {preview_access: false}};
  m.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? { mode: 'code' } : snapshot);
  m.post.mockResolvedValue({}); m.delete.mockResolvedValue({});
 });
 afterEach(() => { cleanup(); resourceSync.clear(); vi.useRealTimers(); });
-describe('private access header disclosure', () => {
+const trigger = () => screen.getByRole('button', {name: /^Private access/});
+const openAccess = () => fireEvent.click(trigger());
+const panel = () => screen.queryByRole('dialog', {name: 'Private access'});
+describe('private access header entry point', () => {
+ it('renders nothing in the header while the chat has no access, request or saved connection', async () => {
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  expect(screen.queryByRole('button', {name: /^Private access/})).toBeNull();
+  expect(panel()).toBeNull();
+ });
+ it('is a quiet icon with no indicator when only saved connections exist', async () => {
+  snapshot = {...empty(), saved_connections: [{id: 'c1', label: 'NAS', target: 'root@10.0.0.2:22', fingerprint: ''}]};
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  expect(trigger().getAttribute('aria-label')).toBe('Private access');
+  expect(trigger().textContent?.trim()).toBe('');
+  expect(trigger().querySelector('.pa-count, .pa-dot')).toBeNull();
+ });
+ it('marks active access with a dot and names the count', async () => {
+  snapshot = {...empty(), grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/notes', expires_at: 9999999999, writable: false}]};
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  expect(trigger().getAttribute('aria-label')).toBe('Private access: 1 active');
+  expect(trigger().querySelector('.pa-dot.active')).toBeTruthy();
+  expect(trigger().querySelector('.pa-count')).toBeNull();
+ });
+ it('counts requests and approvals waiting, ahead of active access', async () => {
+  snapshot = {...empty(),
+   grants: [{id: 'g1', label: 'NAS', kind: 'machine', target: 'a@b:22', expires_at: 9999999999, writable: true}],
+   requests: [{id: 'r1', kind: 'folder', purpose: 'Read logs', expires_at: 9999999999}],
+   actions: [{id: 'a1', grant_id: 'g1', operation: 'command', arguments: {command: 'pwd'}, expires_at: 9999999999}]};
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  expect(trigger().getAttribute('aria-label')).toBe('Private access: 2 waiting for you');
+  expect(trigger().querySelector('.pa-count')?.textContent).toBe('2');
+  expect(trigger().querySelector('.pa-dot')).toBeNull();
+ });
+ it('marks an unavailable snapshot with an error dot', async () => {
+  m.get.mockImplementation(async (url: string) => {
+   if (url.startsWith('/sessions/')) return {mode: 'code'};
+   throw {status: 503, detail: 'Offline'};
+  });
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  expect(trigger().getAttribute('aria-label')).toBe('Private access: unavailable');
+  expect(trigger().querySelector('.pa-dot.error')).toBeTruthy();
+  await openAccess();
+  expect(screen.getByRole('alert').textContent).toBe('Offline');
+ });
+});
+
+describe('private access header panel', () => {
  // #1807: a request raised while the chat is open shows IN the chat, and the
  // session is marked as needing the owner, without opening the header panel.
  it('shows a request raised in the open chat as an in-chat prompt and marks the session', async () => {
-  render(ChatAccess, {sessionId: 's1', trigger: 'none'});
+  render(ChatAccess, {sessionId: 's1'});
   render(PrivateAccessPrompt, {sessionId: 's1'});
   await flush();
   expect(screen.queryByRole('region', {name: /private access waiting/i})).toBeNull();
@@ -49,82 +94,185 @@ describe('private access header disclosure', () => {
   const region = screen.getByRole('region', {name: /private access waiting/i});
   expect(region.textContent).toContain('Check the container logs');
   expect(get(privateAccessPending).get('s1')).toBe(1);
+  expect(panel()).toBeNull();
+  // The Review click reaches the window too; it must not close what it opened.
   await fireEvent.click(screen.getByRole('button', {name: 'Review'}));
-  expect((document.querySelector('dialog.access-dialog') as HTMLDialogElement).open).toBe(true);
+  expect(panel()).toBeTruthy();
+  expect(trigger().getAttribute('aria-expanded')).toBe('true');
   snapshot = empty();
   resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
   expect(screen.queryByRole('region', {name: /private access waiting/i})).toBeNull();
   expect(get(privateAccessPending).has('s1')).toBe(false);
+  // Nothing left to show: the panel and its icon go away together.
+  expect(panel()).toBeNull();
+  expect(get(openHeaderDropdown)).toBeNull();
  });
- it('resumes a service setup after dialog close without keeping its token or consent', async () => {
+ it('opens as a labelled panel, moves focus into it and returns focus on close', async () => {
+  snapshot = {...empty(), grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/notes', expires_at: 9999999999, writable: false}]};
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  expect(trigger().getAttribute('aria-expanded')).toBe('false');
+  expect(trigger().getAttribute('aria-haspopup')).toBe('dialog');
+  await openAccess(); await flush();
+  const dialog = panel()!;
+  expect(trigger().getAttribute('aria-controls')).toBe(dialog.id);
+  expect(document.activeElement).toBe(dialog);
+  expect(within(dialog).getByText('1 active')).toBeTruthy();
+  await fireEvent.click(within(dialog).getByRole('button', {name: 'Close private access'}));
+  expect(panel()).toBeNull();
+  expect(document.activeElement).toBe(trigger());
+ });
+ it('closes on an outside click but not on clicks inside it', async () => {
+  snapshot = {...empty(), grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/notes', expires_at: 9999999999, writable: false}]};
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  await openAccess(); await flush();
+  await fireEvent.click(within(panel()!).getByRole('button', {name: 'Revoke Notes'}));
+  expect(panel()).toBeTruthy();
+  // The Keep/Revoke swap detached the clicked button; the panel still stays.
+  await fireEvent.click(within(panel()!).getByRole('button', {name: 'Keep'}));
+  expect(panel()).toBeTruthy();
+  await fireEvent.click(document.body);
+  expect(panel()).toBeNull();
+ });
+ it('is one of the header panels: opening another closes it', async () => {
+  snapshot = {...empty(), grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/notes', expires_at: 9999999999, writable: false}]};
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  await openAccess();
+  expect(get(openHeaderDropdown)).toBe('private-access');
+  openDropdown('git-panel'); await tick();
+  expect(panel()).toBeNull();
+  closeDropdown('git-panel');
+ });
+ it('resumes a service setup after the panel closes without keeping its token or consent', async () => {
   Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
   snapshot = {...empty(), requests: [{id:'r1',kind:'service',purpose:'Read inventory',expires_at:9999999999,service_provider:'cloudflare',suggested_url:'https://api.cloudflare.com/client/v4'}]};
   render(ChatAccess, {sessionId:'s1'}); await flush();
-  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
+  await openAccess();
   await fireEvent.click(screen.getByRole('button', {name:'Continue to setup'}));
   await fireEvent.click(screen.getByRole('button', {name:'I have a token'}));
   await fireEvent.input(screen.getByLabelText('API key or token'), {target:{value:'test-only-private-token'}});
   await fireEvent.click(screen.getByRole('checkbox', {name:/I approve access/}));
   await fireEvent.click(screen.getByRole('button', {name:'Close private access'}));
   await flush();
-  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
+  await openAccess();
   expect((screen.getByLabelText('API key or token') as HTMLInputElement).value).toBe('');
   expect((screen.getByRole('checkbox', {name:/I approve access/}) as HTMLInputElement).checked).toBe(false);
   expect(screen.getByText('https://api.cloudflare.com/client/v4')).toBeTruthy();
   expect(m.post).not.toHaveBeenCalled();
  });
- it('keeps Escape inside the dialog instead of triggering global chat shortcuts', async () => {
+ it('clears a typed token when an outside click closes the panel', async () => {
+  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+  snapshot = {...empty(), requests: [{id:'r1',kind:'service',purpose:'Read inventory',expires_at:9999999999,service_provider:'cloudflare',suggested_url:'https://api.cloudflare.com/client/v4'}]};
+  render(ChatAccess, {sessionId:'s1'}); await flush();
+  await openAccess(); await flush();
+  await fireEvent.click(screen.getByRole('button', {name:'Continue to setup'}));
+  await fireEvent.click(screen.getByRole('button', {name:'I have a token'}));
+  await fireEvent.input(screen.getByLabelText('API key or token'), {target:{value:'test-only-private-token'}});
+  await fireEvent.click(document.body); await flush();
+  expect(panel()).toBeNull();
+  await openAccess();
+  expect((screen.getByLabelText('API key or token') as HTMLInputElement).value).toBe('');
+ });
+ it('clears a typed SSH password, private key and passphrase whenever the panel closes', async () => {
+  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+  snapshot = {...empty(), requests: [{id:'r1',kind:'machine',purpose:'Check the logs',expires_at:9999999999}]};
+  render(ChatAccess, {sessionId:'s1'}); await flush();
+  await openAccess(); await flush();
+  await fireEvent.input(screen.getByLabelText('Server IP address'), {target:{value:'10.0.0.2'}});
+  await fireEvent.input(screen.getByLabelText('Password'), {target:{value:'test-only-password'}});
+  await fireEvent.click(document.body); await flush();
+  expect(panel()).toBeNull();
+  await openAccess(); await flush();
+  expect((screen.getByLabelText('Password') as HTMLInputElement).value).toBe('');
+  // Non-secret connection details stay so the owner can carry on.
+  expect((screen.getByLabelText('Server IP address') as HTMLInputElement).value).toBe('10.0.0.2');
+  await fireEvent.click(screen.getByRole('button', {name:/Use a private key instead/}));
+  await fireEvent.input(screen.getByLabelText('Private key'), {target:{value:'test-only-key'}});
+  await fireEvent.input(screen.getByLabelText('Key passphrase'), {target:{value:'test-only-passphrase'}});
+  await fireEvent.keyDown(document.body, {key:'Escape'}); await flush();
+  await openAccess(); await flush();
+  expect((screen.getByLabelText('Private key') as HTMLTextAreaElement).value).toBe('');
+  expect((screen.getByLabelText('Key passphrase') as HTMLInputElement).value).toBe('');
+  expect(m.post).not.toHaveBeenCalled();
+ });
+ it('keeps the panel open when the chat prompt’s Review is pressed while it is already open', async () => {
+  snapshot = {...empty(), requests: [{id:'r1',kind:'folder',purpose:'Read logs',expires_at:9999999999}]};
+  render(ChatAccess, {sessionId:'s1'});
+  render(PrivateAccessPrompt, {sessionId:'s1'});
+  await flush();
+  await openAccess(); await flush();
+  expect(panel()).toBeTruthy();
+  await fireEvent.click(screen.getByRole('button', {name:'Review'}));
+  expect(panel()).toBeTruthy();
+ });
+ it('shifts the anchored panel back inside a narrow desktop window', async () => {
+  snapshot = {...empty(), grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/notes', expires_at: 9999999999, writable: false}]};
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  const anchor = trigger().parentElement!;
+  let right = 300;
+  vi.spyOn(anchor, 'getBoundingClientRect').mockImplementation(() => ({right} as DOMRect));
+  const width = vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(420);
+  try {
+   await openAccess(); await flush();
+   // Right-aligned under the icon it would start at 300 - 420 = -120.
+   expect(panel()!.style.right).toBe('-132px');
+   right = 900;
+   window.dispatchEvent(new Event('resize')); await tick();
+   expect(panel()!.style.right).toBe('');
+  } finally { width.mockRestore(); }
+ });
+ it('keeps Escape inside the panel instead of triggering global chat shortcuts', async () => {
   snapshot = {...empty(), actions:[{id:'a1',grant_id:'g1',operation:'command',arguments:{command:'pwd'},expires_at:9999999999}]};
   render(ChatAccess, {sessionId:'s1'}); await flush();
-  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
+  await openAccess();
   const shortcut = vi.fn();
   window.addEventListener('keydown', shortcut);
   try {
-   const dialog = screen.getByRole('dialog') as HTMLDialogElement;
+   expect(panel()).toBeTruthy();
    // A completed request removes its focused button; Escape then targets body.
    await fireEvent.keyDown(document.body, {key:'Escape'});
-   expect(dialog.open).toBe(false);
+   expect(panel()).toBeNull();
    expect(shortcut).not.toHaveBeenCalled();
+   expect(document.activeElement).toBe(trigger());
+   // Closed, Escape belongs to the chat again.
+   await fireEvent.keyDown(document.body, {key:'Escape'});
+   expect(shortcut).toHaveBeenCalledTimes(1);
   } finally { window.removeEventListener('keydown', shortcut); }
  });
- it('never reopens the dialog or grants after streaming invalidations and fresh snapshots', async () => {
+ it('never opens or closes itself on streaming invalidations and fresh snapshots', async () => {
   const grant = {id:'g1',label:'Granted folder',kind:'folder',target:'/safe',expires_at:9999999999,writable:true};
   snapshot = {...empty(), grants:[grant]};
   const view = render(ChatAccess, {sessionId:'s1'}); await flush();
-  const dialog = view.container.querySelector('dialog')!;
-  const details = view.container.querySelector('details')!;
-  expect(dialog.open).toBe(false);
-  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
-  details.open = true; await fireEvent(details, new Event('toggle')); await tick();
-  details.open = false; await fireEvent(details, new Event('toggle')); await tick();
+  expect(panel()).toBeNull();
+  await openAccess();
   for (let i = 0; i < 5; i++) {
    snapshot = {...empty(), grants:[{...grant}]};
    resourceSync.invalidate(['sessions', 'chat-access:s1']);
    await vi.advanceTimersByTimeAsync(100); await tick();
    await view.rerender({sessionId:'s1'});
-   expect(dialog.open).toBe(true);
-   expect(details.open).toBe(false);
+   expect(panel()).toBeTruthy();
   }
   await fireEvent.click(screen.getByRole('button', {name:'Close private access'}));
   snapshot = {...empty(), grants:[{...grant}], requests:[{id:'r1',kind:'folder',purpose:'Another request',expires_at:9999999999}]};
   resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
-  expect(dialog.open).toBe(false);
-  expect(screen.getByText('1 pending')).toBeTruthy();
+  expect(panel()).toBeNull();
+  expect(trigger().getAttribute('aria-label')).toBe('Private access: 1 waiting for you');
   await vi.advanceTimersByTimeAsync(6000); await tick();
-  expect(dialog.open).toBe(false);
-  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
+  expect(panel()).toBeNull();
+  await openAccess();
+  expect(within(panel()!).getByText('Waiting for you')).toBeTruthy();
   expect(screen.getByRole('textbox', {name:'Resource name'})).toBeTruthy();
  });
- it('preserves an explicitly expanded saved-only panel across refreshes', async () => {
+ it('lists saved connections with an empty state when nothing is active, across refreshes', async () => {
   const saved = {id:'saved1',label:'Saved server',target:'server',fingerprint:''};
   snapshot = {...empty(), saved_connections:[saved]};
-  const view = render(ChatAccess, {sessionId:'s1'}); await flush();
-  await fireEvent.click(screen.getByRole('button', {name:'Private access'}));
-  const details = view.container.querySelector('details')!;
-  details.open = true; await fireEvent(details, new Event('toggle')); await tick();
+  render(ChatAccess, {sessionId:'s1'}); await flush();
+  await openAccess();
+  const dialog = panel()!;
+  expect(within(dialog).getByText(/Nothing is shared with this chat right now/)).toBeTruthy();
+  expect(within(dialog).getByRole('list', {name: 'Saved connections'}).textContent).toContain('Saved server');
   snapshot = {...empty(), saved_connections:[{...saved}]};
   resourceSync.invalidate(['chat-access:s1']); await vi.advanceTimersByTimeAsync(100); await tick();
-  expect(details.open).toBe(true);
+  expect(panel()).toBeTruthy();
  });
 });
 
@@ -144,7 +292,7 @@ describe('private-access recovery and live invalidations', () => {
    saved_connections: [{id: 'c1', label: 'NAS', target: 'root@10.0.0.2:22', fingerprint: '', kind: 'machine'}]};
   render(ChatAccess, {sessionId: 'remote'}); await flush();
   expect(accessCalls().map(([url]) => url)).toEqual(['/chat-access/remote']);
-  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
+  await fireEvent.click(trigger());
   expect(screen.getByText('Folder on Owner PC')).toBeTruthy();
   expect(screen.getByText(/Encrypted on Owner PC/)).toBeTruthy();
   // The owner's change notice arrives as a scoped invalidation on this worker.
@@ -187,7 +335,7 @@ describe('private-access recovery and live invalidations', () => {
   await vi.advanceTimersByTimeAsync(2000);
   expect(accessCalls()).toHaveLength(4);
   snapshot = empty();
-  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
+  await fireEvent.click(trigger());
   await fireEvent.click(screen.getByRole('button', {name: 'Approve once'})); await flush();
   expect(m.post).toHaveBeenCalledWith('/chat-access/s1/actions/a1', {allow: true});
   expect(screen.queryByText('Approve this remote command?')).toBeNull();
@@ -197,7 +345,7 @@ describe('private-access recovery and live invalidations', () => {
    grants: [{id: 'g1', label: 'Inventory', kind: 'service', target: 'https://api.example.com/v1', expires_at: 9999999999, writable: true, fingerprint: ''}],
    actions: [{id: 'a1', grant_id: 'g1', operation: 'http', arguments: {method: 'POST', path: '/items', body: '{"n":1}', content_type: 'application/json'}, expires_at: 9999999999}]};
   const view = render(ChatAccess, {sessionId: 's1'}); await flush();
-  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
+  await fireEvent.click(trigger());
   expect(screen.getByText('Approve this API request?')).toBeTruthy();
   expect(screen.getByText('Inventory · https://api.example.com/v1')).toBeTruthy();
   const pre = view.container.querySelector('pre.pa-mono')!;
@@ -212,7 +360,7 @@ describe('private-access recovery and live invalidations', () => {
    grants: [{id: 'g1', label: 'Notes', kind: 'folder', target: '/home/me/notes', expires_at: 9999999999, writable}],
    actions: [{id: 'a1', grant_id: 'g1', operation: 'command', arguments: {command: 'grep -r todo .'}, expires_at: 9999999999}]};
   const view = render(ChatAccess, {sessionId: 's1'}); await flush();
-  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
+  await fireEvent.click(trigger());
   expect(screen.getByText('Approve this sandboxed command?')).toBeTruthy();
   expect(screen.queryByText('Approve this remote command?')).toBeNull();
   expect(view.container.querySelector('pre.pa-mono')!.textContent).toBe('$ grep -r todo .');
@@ -221,7 +369,7 @@ describe('private-access recovery and live invalidations', () => {
  it('keeps request form input across recovery polls and removes expired access from the next snapshot', async () => {
   snapshot = {...empty(), requests:[{id:'r1',kind:'folder',purpose:'Read the requested file',expires_at:9999999999}]};
   render(ChatAccess,{sessionId:'s1'}); await flush();
-  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
+  await fireEvent.click(trigger());
   const label = screen.getByRole('textbox',{name:'Resource name'}) as HTMLInputElement;
   await fireEvent.input(label,{target:{value:'My folder'}});
   await vi.advanceTimersByTimeAsync(2000); await tick();
@@ -250,7 +398,7 @@ describe('private-access recovery and live invalidations', () => {
    throw { status: 403, detail: 'Denied' };
   });
   render(ChatAccess, {sessionId: 's1'}); await flush();
-  await fireEvent.click(screen.getByRole('button', {name: 'Private access'}));
+  await fireEvent.click(trigger());
   expect(screen.getByRole('alert').textContent).toBe('Denied');
   await vi.advanceTimersByTimeAsync(3_600_000); expect(accessCalls()).toHaveLength(1);
   m.get.mockResolvedValue(empty());

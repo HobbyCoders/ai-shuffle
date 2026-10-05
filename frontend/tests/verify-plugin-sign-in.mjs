@@ -213,7 +213,7 @@ async function run(viewport, touch) {
 	const openCard = async () => {
 		await page.goto(`${origin}/tests/chat-access.html?session=fixture-session`);
 		await phoneShell();
-		const button = page.getByRole('button', { name: 'Private access' }).first();
+		const button = page.getByRole('button', { name: /^Private access/ }).first();
 		await button.waitFor();
 		if (touch) await button.tap(); else await button.click();
 		const card = page.getByRole('region', { name: 'Sign in to cloudflare' });
@@ -242,7 +242,7 @@ async function run(viewport, touch) {
 	check(!(await card.locator('details.ps-scopes').evaluate((d) => d.open)), 'scopes collapsed');
 	check((await card.getByText('API key or token').count()) === 0, 'no key form');
 	check((await card.getByRole('button', { name: 'Grant access' }).count()) === 0, 'no grant before sign-in');
-	check((await noOverflow('dialog.access-dialog')) <= 0, 'fits', await noOverflow('dialog.access-dialog'));
+	check((await noOverflow('.pa-pop:not([hidden]) .pa-pop-body')) <= 0, 'fits', await noOverflow('.pa-pop:not([hidden]) .pa-pop-body'));
 	await shot('card-1-signed-out');
 	const popup = await popupFrom(() => (touch ? signIn.tap() : signIn.click()));
 	await card.getByRole('button', { name: 'Waiting…' }).waitFor();
@@ -271,7 +271,7 @@ async function run(viewport, touch) {
 	check(await card.getByText(`${origin}${CALLBACK}`).isVisible(), 'return address shown');
 	await card.getByLabel('Client ID').fill('my-cloudflare-app');
 	await card.getByLabel(/Client secret/).fill(SECRET);
-	check((await noOverflow('dialog.access-dialog')) <= 0, 'setup fits', await noOverflow('dialog.access-dialog'));
+	check((await noOverflow('.pa-pop:not([hidden]) .pa-pop-body')) <= 0, 'setup fits', await noOverflow('.pa-pop:not([hidden]) .pa-pop-body'));
 	await shot('card-5-setup-open');
 	await card.getByRole('button', { name: 'Save client' }).click();
 	await card.getByRole('button', { name: 'Sign in with dash.cloudflare.com' }).waitFor();
@@ -287,7 +287,7 @@ async function run(viewport, touch) {
 	check(await card.getByText('Uses the plugin’s client').isVisible(), 'plugin client named');
 	check((await card.getByText('Set up manually').count()) === 0, 'no manual setup with a shipped client');
 	check((await card.getByText(/Returns through|confirm once/).count()) === 0, 'a worker without the relay fields shows no relay line');
-	check((await noOverflow('dialog.access-dialog')) <= 0, 'fits', await noOverflow('dialog.access-dialog'));
+	check((await noOverflow('.pa-pop:not([hidden]) .pa-pop-body')) <= 0, 'fits', await noOverflow('.pa-pop:not([hidden]) .pa-pop-body'));
 	await shot('card-5b-plugin-client');
 	const shippedPopup = await popupFrom(() => (touch ? shippedSignIn.tap() : shippedSignIn.click()));
 	await shippedPopup.waitForEvent('close');
@@ -354,7 +354,7 @@ async function run(viewport, touch) {
 	reset([entry({ state: 'invalid', reason: 'invalid_declaration', client_configured: false, client_id: '', client_source: 'none' })]);
 	card = await openCard();
 	await card.getByText(/sign-in settings are broken/).waitFor();
-	check((await noOverflow('dialog.access-dialog')) <= 0, 'fits', await noOverflow('dialog.access-dialog'));
+	check((await noOverflow('.pa-pop:not([hidden]) .pa-pop-body')) <= 0, 'fits', await noOverflow('.pa-pop:not([hidden]) .pa-pop-body'));
 	await shot('card-10-invalid');
 
 	// ── The access card: the account hub relay ────────────────────────────
@@ -366,13 +366,13 @@ async function run(viewport, touch) {
 	check(await card.getByText('Returns through hobbycoders.com').isVisible(), 'returns-through line');
 	check(await card.getByText('Uses the plugin’s client').isVisible(), 'plugin client named');
 	check((await card.getByText('Set up manually').count()) === 0, 'no setup needed');
-	check((await noOverflow('dialog.access-dialog')) <= 0, 'fits', await noOverflow('dialog.access-dialog'));
+	check((await noOverflow('.pa-pop:not([hidden]) .pa-pop-body')) <= 0, 'fits', await noOverflow('.pa-pop:not([hidden]) .pa-pop-body'));
 	await shot('card-11-relay-ready');
 	let hubPopup = await popupFrom(() => (touch ? relaySignIn.tap() : relaySignIn.click()));
 	await hubPopup.waitForURL((u) => u.hostname === 'hub.relay.test');
 	check(await card.getByText('Finish in the sign-in window. AI Shuffle asks you to confirm once on hobbycoders.com.').isVisible(), 'relayed waiting copy');
 	check(await card.getByRole('button', { name: 'Waiting…' }).isVisible(), 'waiting button');
-	check((await noOverflow('dialog.access-dialog')) <= 0, 'waiting fits', await noOverflow('dialog.access-dialog'));
+	check((await noOverflow('.pa-pop:not([hidden]) .pa-pop-body')) <= 0, 'waiting fits', await noOverflow('.pa-pop:not([hidden]) .pa-pop-body'));
 	await shot('card-12-relay-waiting');
 	await throughHub(hubPopup, 'Continue to Home');
 	await card.getByRole('button', { name: 'Grant access' }).waitFor();
@@ -410,7 +410,7 @@ async function run(viewport, touch) {
 		await setup.click();
 		check(await card.getByText(reason === 'insecure_address' ? `http://192.168.1.5:8000${CALLBACK}` : `${origin}${CALLBACK}`).isVisible(), 'the worker’s own return address');
 		check(await card.getByText('Add this to your own app at the provider').isVisible(), 'own-app hint');
-		check((await noOverflow('dialog.access-dialog')) <= 0, 'fits', await noOverflow('dialog.access-dialog'));
+		check((await noOverflow('.pa-pop:not([hidden]) .pa-pop-body')) <= 0, 'fits', await noOverflow('.pa-pop:not([hidden]) .pa-pop-body'));
 		await shot(`card-16-${reason}-setup`);
 	}
 
@@ -436,7 +436,7 @@ async function run(viewport, touch) {
 	check(await card.getByText('Set up manually').isVisible(), 'manual setup offered');
 	check(await down.isVisible(), 'can try again');
 	check(context.pages().length === 1, 'provider window closed');
-	check((await noOverflow('dialog.access-dialog')) <= 0, 'fits', await noOverflow('dialog.access-dialog'));
+	check((await noOverflow('.pa-pop:not([hidden]) .pa-pop-body')) <= 0, 'fits', await noOverflow('.pa-pop:not([hidden]) .pa-pop-body'));
 	await shot('card-18-relay-hub-failed');
 
 	// ── Settings > Plugins > Connections ───────────────────────────────────

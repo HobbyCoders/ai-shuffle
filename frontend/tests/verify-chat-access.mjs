@@ -63,9 +63,9 @@ for (const [viewport, touch] of [[{ width: 1280, height: 800 }, false], [{ width
 		const errors = [];
 		page.on('pageerror', (e) => errors.push(e.message));
 		await page.goto(url);
-		const open = page.getByRole('button', { name: 'Private access' }).first();
+		const open = page.getByRole('button', { name: /^Private access/ }).first();
 		await open.waitFor();
-		await page.waitForFunction(() => /1 pending/.test(document.body.textContent || ''));
+		await page.waitForFunction(() => document.querySelector('button[aria-label="Private access: 1 waiting for you"]'));
 		if (touch) await open.tap(); else await open.click();
 		const card = page.getByRole('region', { name: 'One-shot action approval' });
 		await card.waitFor();
@@ -74,12 +74,12 @@ for (const [viewport, touch] of [[{ width: 1280, height: 800 }, false], [{ width
 		check((await card.locator('pre.pa-mono').textContent()) === '$ grep -rn "TODO" . | head -20', 'command shown verbatim');
 		check(await card.getByText(`${grant.label} · ${grant.target}`).isVisible(), 'grant scope');
 		const fit = await page.evaluate(() => {
-			const dialog = document.querySelector('dialog.access-dialog');
+			const dialog = document.querySelector('.pa-pop:not([hidden])');
 			const box = dialog.getBoundingClientRect();
 			return { left: box.left, right: box.right, width: innerWidth, scroll: document.documentElement.scrollWidth,
 				hint: document.querySelector('.pa-hint').scrollWidth <= document.querySelector('.pa-hint').clientWidth };
 		});
-		check(fit.left >= 0 && fit.right <= fit.width && fit.scroll <= fit.width && fit.hint, 'dialog and hint fit the viewport', fit);
+		check(fit.left >= 0 && fit.right <= fit.width && fit.scroll <= fit.width && fit.hint, 'panel and hint fit the viewport', fit);
 		const approve = card.getByRole('button', { name: 'Approve once' });
 		const size = await approve.boundingBox();
 		check(!touch || size.height >= 32, 'approve button is tappable', size);

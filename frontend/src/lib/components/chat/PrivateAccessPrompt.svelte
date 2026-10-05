@@ -2,7 +2,8 @@
 	/**
 	 * A private-access request (RequestChatAccess) or one-shot approval waiting
 	 * in the open chat, shown above the composer where the owner is reading
-	 * (#1807). The private inputs stay in the access dialog: Review opens it.
+	 * (#1807). The private inputs stay in the header's access panel: Review
+	 * opens it (a bottom sheet on phones).
 	 * ChatAccess owns the data and publishes it through chatAccessSummary.
 	 */
 	import '../deck/cards/card-design-system.css';

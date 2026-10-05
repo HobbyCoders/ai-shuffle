@@ -75,17 +75,17 @@ async function harness(viewport, touch) {
 	const shot = async (step) => { if (shots) await page.screenshot({ path: join(shots, `chat-access-remote-${name}-${step}.png`), fullPage: true }); };
 	const tap = (locator) => (touch ? locator.tap() : locator.click());
 	const overflow = () => page.evaluate(() => {
-		const dialog = document.querySelector('dialog[open]');
+		const dialog = document.querySelector('.pa-pop:not([hidden])');
 		const box = dialog?.getBoundingClientRect();
 		return { page: document.documentElement.scrollWidth > window.innerWidth, dialog: !!box && (box.left < 0 || box.right > window.innerWidth) };
 	});
 
 	await page.goto(url);
-	const trigger = page.getByRole('button', { name: 'Private access' });
+	const trigger = page.getByRole('button', { name: /^Private access/ });
 	await trigger.waitFor();
-	check((await trigger.textContent()).includes('1 pending'), 'the owner-side request is pending on the viewer');
+	check((await trigger.getAttribute('aria-label')) === 'Private access: 1 waiting for you', 'the owner-side request is pending on the viewer');
 	await tap(trigger);
-	const dialog = page.getByRole('dialog', { name: 'Private access for this conversation' });
+	const dialog = page.getByRole('dialog', { name: 'Private access' });
 	await dialog.waitFor();
 	const card = dialog.getByRole('region', { name: 'Private access request' });
 	check(await card.getByText('Check disk usage on the NAS').isVisible(), 'the request card shows the purpose');
@@ -106,7 +106,6 @@ async function harness(viewport, touch) {
 	check(JSON.stringify(state.calls[1]) === JSON.stringify({ method: 'POST', path: '/actions/a1', body: { allow: true } }),
 		'the one-shot approval went to this worker for the owner', state.calls[1]);
 
-	await tap(dialog.locator('summary.pa-summary'));
 	check(await dialog.getByText(/Encrypted on Owner PC/).isVisible(), 'saved connections say where they are stored');
 	await tap(dialog.getByRole('button', { name: 'Revoke' }));
 	await tap(dialog.locator('.pa-small-btn.danger.solid'));
