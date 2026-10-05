@@ -1539,6 +1539,19 @@ async def _enqueue_context_wake(
     if task_registry.stop_invalidated(session_id, generation):
         await asyncio.to_thread(turns_db.remove_queued_turn, turn["id"])
         return {"id": None, "session_id": session_id, "source": source}
+    # Every task this wake reports was wake-suppressed while the write was in
+    # flight (a per-task Stop, or a dispatch that gave up on the wake and told
+    # the parent the worker failed). The entry check ran before the latch, so
+    # remove the row here rather than run a turn nobody should get.
+    if task_ids and all(task_registry.is_wake_suppressed(session_id, tid) for tid in task_ids):
+        removed = await asyncio.to_thread(turns_db.remove_queued_turn, turn["id"])
+        if removed is not None and source == "unpark":
+            _restore_held_peer_messages(session_id, payload.get("held_peer_messages") or "")
+        logger.info(
+            "turn_scheduler: removed a %s wake for %s written after its tasks' "
+            "wakes were suppressed (tasks=%s)", source, session_id, task_ids,
+        )
+        return {"id": None, "session_id": session_id, "source": source}
     note_wake_pending(session_id)
     return turn
 

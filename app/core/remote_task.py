@@ -71,7 +71,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from fluid.tools.hardening import defang_harness_markers
 
@@ -959,7 +959,18 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
     Status is completed, failed (an error, or interrupted by a restart) or
     stopped (stopped by the owner on this worker). The text is the child's
     final reply, bounded like a local worker report; approvals Away handling
-    deferred are listed as the child met them.
+    deferred are listed as the child met them. Has no side effects, so two
+    builds of one settled turn give the same report.
+    """
+    return _child_report(session_id)[0]
+
+
+def _child_report(session_id: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """:func:`build_child_report`, plus the lost Monitor wakes it failed on.
+
+    The caller suppresses those wakes once the failure is stored (#1880).
+    Suppressing them here would make the next build read the same park as
+    a clean end and book its parking remark as the report.
     """
     from app.core.session_orchestration import _turn_report
     from app.db import database, remote_tasks
@@ -969,10 +980,10 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
         return {"version": WIRE_VERSION, "worker_session_id": session_id,
                 "completion_id": f"missing:{session_id}", "status": "failed",
                 "report": "The subagent's session no longer exists on the worker that ran it.",
-                "truncated": False, "needs_owner": []}
+                "truncated": False, "needs_owner": []}, []
     settled = _settled_outcome(session_id)
     if settled is None:
-        return None
+        return None, []
     # Approvals held back since this run began: the newest message-resume,
     # else the original start, so a resumed run does not repeat old ones.
     origin_id = remote_tasks.latest_resume_turn(session_id)
@@ -985,9 +996,11 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
         origin_id = origin["id"] if origin else settled["id"]
     status, report, needs = _turn_report(session_id, settled["id"], settled["_outcome"], origin_id)
     reason = None
+    lost: List[str] = []
     if status == "completed" and settled.get("_lost_wakes"):
         from app.core.provider_agent import bound_report, lost_wake_error
 
+        lost = list(settled["_lost_wakes"])
         status = "failed"
         text = lost_wake_error(session_id, settled["_lost_wakes"])
         if report and report != _NO_REPORT:
@@ -1012,7 +1025,7 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
     if reason:
         # Additive: an older parent ignores it and records a plain failure.
         body["reason"] = reason
-    return body
+    return body, lost
 
 
 #: ``turns.stop_reason`` of a turn the boot reap (or a lapsed run lease) aborted.
@@ -1088,19 +1101,30 @@ def owe_if_finished(session_id: str) -> bool:
         settled = _settled_outcome(session_id)
         if settled is None or settled["id"] == child.get("completion_id"):
             return state == remote_tasks.OWED
-    report = build_child_report(session_id)
+    report, lost = _child_report(session_id)
     if report is None or (state != remote_tasks.RUNNING
                           and report["completion_id"] == child.get("completion_id")):
         return state == remote_tasks.OWED
     report["git"] = git_summary(session_id)
     if state == remote_tasks.RUNNING:
-        remote_tasks.owe_report(session_id, report["completion_id"], report)
-        return True
-    if state == remote_tasks.OWED:
-        return remote_tasks.replace_owed_report(session_id, child.get("completion_id"),
-                                                report["completion_id"], report)
-    logger.info("remote_task: child %s ran again after its report; a new one is owed", session_id)
-    return remote_tasks.reowe_report(session_id, state, report["completion_id"], report)
+        stored = remote_tasks.owe_report(session_id, report["completion_id"], report)
+        owed = True
+    elif state == remote_tasks.OWED:
+        stored = owed = remote_tasks.replace_owed_report(
+            session_id, child.get("completion_id"), report["completion_id"], report)
+    else:
+        logger.info("remote_task: child %s ran again after its report; a new one is owed",
+                    session_id)
+        stored = owed = remote_tasks.reowe_report(session_id, state, report["completion_id"],
+                                                  report)
+    if stored and lost:
+        # The parent will be told this child failed: a late wake must not run
+        # and come back as a resumed run's report. Only after the failure is
+        # stored, or a retry would read the park as a clean end.
+        from app.core.provider_agent import suppress_lost_wakes
+
+        suppress_lost_wakes(session_id, lost)
+    return owed
 
 
 def _retry_at(attempts: int) -> str:

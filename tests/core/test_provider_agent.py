@@ -1793,3 +1793,18 @@ class TestSyncDispatchNeedsNoWake:
 
         _dispatch_bg()
         assert len(dispatch_env.wakes) == 1
+
+
+def test_lost_wake_error_names_the_worker_session_and_counts_every_monitor():
+    """#1880: a Monitor id resolves only inside the worker's session, and a
+    long list is cut to four with the rest counted."""
+    from app.core.provider_agent import lost_wake_error
+
+    one = lost_wake_error("worker-sess-1", ["m1"])
+    assert "worker session worker-sess-1" in one
+    assert "Monitor m1" in one and "more" not in one
+
+    many = lost_wake_error("worker-sess-2", [f"m{i}" for i in range(1, 7)])
+    assert "worker session worker-sess-2" in many
+    assert "Monitor m1, Monitor m2, Monitor m3, Monitor m4 and 2 more" in many
+    assert "Monitor m5" not in many

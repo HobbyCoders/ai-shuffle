@@ -1236,15 +1236,63 @@ def _lost_monitor_wakes(worker_session_id: str) -> List[str]:
 
 
 def lost_wake_error(worker_session_id: str, task_ids: List[str]) -> str:
-    """The failure text for a worker whose Monitor's completion never reached it."""
+    """The failure text for a worker whose Monitor's completion never reached it.
+
+    Names the worker session: a Monitor id resolves only inside it. Lists at
+    most four Monitors and counts the rest."""
     tasks = ", ".join(f"Monitor {tid}" for tid in task_ids[:4])
+    if len(task_ids) > 4:
+        tasks += f" and {len(task_ids) - 4} more"
+    noun = "command" if len(task_ids) == 1 else "commands"
     return (
-        f"The worker's background command ({tasks}) finished, but its completion "
-        "could not be delivered to the worker, so the worker never read the "
-        "result. Its last message is a note it wrote while waiting, not a "
-        "report. Re-dispatch it, or check the command's result yourself. Its "
-        f"transcript is in session {worker_session_id}."
+        f"The background {noun} of worker session {worker_session_id} ({tasks}) "
+        "finished, but the completion could not be delivered to the worker, so "
+        "the worker never read the result. Its last message is a note it wrote "
+        "while waiting, not a report. A late completion will not wake it, so it "
+        "will not continue on its own. Re-dispatch it, or read the result in the "
+        f"transcript of session {worker_session_id} (the Monitor ids work only "
+        "inside that session)."
     )
+
+
+def suppress_lost_wakes(worker_session_id: str, task_ids: List[str]) -> None:
+    """Make sure a lost Monitor wake can no longer run a turn.
+
+    The parent is told the worker failed, so a wake that arrives late must not
+    run a turn nobody reads (and that may duplicate a re-dispatch). Each wake
+    is suppressed: a terminal frame still to come is dropped at the scheduler's
+    entry, a write already in flight is removed by its post-write fence, and a
+    wake queued in the instant before the latch is discarded here, as a
+    per-task Stop does. Sync, on the caller's thread: held peer messages a
+    discarded wake carried re-arm their timer only on the loop (off it they
+    wait for the boot rehydrate). Never raises.
+    """
+    try:
+        from app.core import turn_scheduler
+        from app.core.task_registry import task_registry
+
+        for task_id in task_ids:
+            task_registry.suppress_wake(worker_session_id, task_id)
+        turn_scheduler.discard_queued_task_wakes(worker_session_id, list(task_ids))
+    except Exception:  # noqa: BLE001 — the failure verdict stands either way
+        logger.warning(
+            "ProviderAgent: could not suppress lost wakes %s of worker %s",
+            task_ids, worker_session_id, exc_info=True,
+        )
+
+
+async def _retire_lost_wakes(worker_session_id: str, task_ids: List[str]) -> None:
+    """Suppress a given-up worker's lost wakes and settle its park.
+
+    Without the settle the worker would stay parked until the park watchdog
+    (about an hour), or until a restart with the watchdog off. The settle is
+    the one a per-task Stop uses; with every lost wake suppressed nothing is
+    pending any more. Never raises.
+    """
+    suppress_lost_wakes(worker_session_id, task_ids)
+    from app.core.turn_finalize import settle_stopped_monitor_parks
+
+    await settle_stopped_monitor_parks(worker_session_id)
 
 
 def _worker_deadlines(
@@ -2762,6 +2810,9 @@ async def dispatch_worker(
         # remark. Fail honestly instead of booking it as the report.
         lost_wakes = await asyncio.to_thread(_lost_monitor_wakes, worker_session_id)
         if lost_wakes:
+            # The parent is about to be told this worker failed: a late wake
+            # must not run a turn afterwards, and the park must not linger.
+            await _retire_lost_wakes(worker_session_id, lost_wakes)
             error = lost_wake_error(worker_session_id, lost_wakes)
             preview = error
             status = "error"

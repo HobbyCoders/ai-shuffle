@@ -8,6 +8,7 @@ so patch there — the lazy-import-mock-freeze rule).
 """
 
 import asyncio
+import threading
 from contextlib import ExitStack, contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -556,7 +557,10 @@ def monitor_worker_pool(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "ending", ["exit", "exit_handoff", "timeout", "stop_worker", "stop_parent", "wake_write_fails"],
+    "ending", [
+        "exit", "exit_handoff", "timeout", "stop_worker", "stop_parent", "wake_write_fails",
+        "wake_write_delayed",
+    ],
 )
 async def test_monitor_worker_park_lifecycle(
     mock_db, native_scheduler, spawner_harness, worker_env, monitor_worker_pool,
@@ -581,17 +585,47 @@ async def test_monitor_worker_park_lifecycle(
     monkeypatch.setattr(monitor_spawn, "time", MagicMock(monotonic=lambda: clock["now"]))
     monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
     monkeypatch.setattr(provider_agent, "final_assistant_text", lambda sid: state["report"])
-    if ending == "wake_write_fails":
+    lost_wake = ending in ("wake_write_fails", "wake_write_delayed")
+    release_write = threading.Event()
+    if lost_wake:
         # #1869 item 1: the Monitor ends but publishing its wake fails. The
         # dispatch must stop waiting after the pending-wake limit and fail
         # honestly, even with the park watchdog switched off.
         monkeypatch.setattr(settings, "park_watchdog_enabled", False)
         monkeypatch.setattr(provider_agent, "PENDING_WAKE_LIMIT_SECONDS", 0.2)
-
+    if ending == "wake_write_fails":
         async def failing_wake(*args, **kwargs):
             raise RuntimeError("wake write failed")
 
         monkeypatch.setattr(turn_scheduler, "_enqueue_context_wake", failing_wake)
+        real_retire = provider_agent._retire_lost_wakes
+
+        async def retire(sid, task_ids):
+            # A remote child is never also a local dispatch, so read its
+            # report at the moment the give-up applies, before the local
+            # dispatch settles the park.
+            from app.core import remote_task
+
+            state["remote_report"] = remote_task.build_child_report(sid)
+            # Building a report has no side effect: a second build (the
+            # sweep racing a task-stop, or a retry after a failed store)
+            # gives the same failure. Storing it suppresses the wakes;
+            # see test_remote_child_suppresses_lost_wakes_once_its_failure_is_stored.
+            state["remote_report_again"] = remote_task.build_child_report(sid)
+            state["remote_suppressed"] = task_registry.is_wake_suppressed(sid, task.task_id)
+            await real_retire(sid, task_ids)
+
+        monkeypatch.setattr(provider_agent, "_retire_lost_wakes", retire)
+    elif ending == "wake_write_delayed":
+        # #1880: the same wake row write, slow past the limit but succeeding.
+        # The real write runs only after the dispatch has failed to the parent.
+        real_enqueue = turn_scheduler._enqueue
+
+        def slow_enqueue(*args, **kwargs):
+            assert release_write.wait(5), "the test never released the write"
+            return real_enqueue(*args, **kwargs)
+
+        monkeypatch.setattr(turn_scheduler, "_enqueue", slow_enqueue)
 
     async def terminal(sid, frame):
         if frame.get("task_id") == task.task_id:
@@ -649,8 +683,8 @@ async def test_monitor_worker_park_lifecycle(
                 assert await session_runtime.SessionRuntime(turn).execute() == "parked"
             parked.set()
         elif not task.is_running() and not ending.startswith("stop_"):
-            if ending == "wake_write_fails":
-                return True  # No wake turn ever exists.
+            if lost_wake:
+                return True  # No wake turn exists while the dispatch waits.
             if ending == "exit_handoff" and not woken.is_set():
                 # The real wait_session_idle sees no queued turn yet. Do not
                 # let this fixture hide the terminal-status -> wake-write gap.
@@ -698,28 +732,52 @@ async def test_monitor_worker_park_lifecycle(
             assert not dispatch.done(), "terminal recording is not wake publication"
             assert remote_task._settled_outcome(state["sid"]) is None
             release_handoff.set()
-        if ending == "wake_write_fails":
+        if lost_wake:
             from app.core import remote_task
 
-            await asyncio.wait_for(watcher_done.wait(), 2)
+            if ending == "wake_write_fails":
+                await asyncio.wait_for(watcher_done.wait(), 2)
             assert turns_db.get_queued_turns(state["sid"]) == []
             await asyncio.sleep(0.03)
             assert not dispatch.done()
             # Inside the limit the gap still reads as a pending wake.
             assert remote_task._settled_outcome(state["sid"]) is None
         outcome = await asyncio.wait_for(dispatch, 3)
+        if ending == "wake_write_delayed":
+            # The parent already has the failure; the write is still pending.
+            assert outcome.ok is False
+            assert state["sid"] in outcome.error
+            assert len(parent_wakes) == 1
+            assert parent_wakes[0][1]["status"] != "completed"
+            assert not watcher_done.is_set()
+            # The given-up worker is not left parked until the watchdog.
+            assert turns_db.get_turn(state["turn"]["id"])["state"] == "completed"
+            assert task_registry.is_wake_suppressed(state["sid"], task.task_id)
+            release_write.set()
+            await asyncio.wait_for(watcher_done.wait(), 2)
+            # The late row was written and removed at once: nothing can run.
+            assert turns_db.get_queued_turns(state["sid"]) == []
+            assert not turns_db.session_has_unsettled_turns(state["sid"])
+            assert len(parent_wakes) == 1
+            return
         await asyncio.wait_for(watcher_done.wait(), 2)
         if ending == "wake_write_fails":
             assert outcome.ok is False
             assert "could not be delivered" in outcome.error
-            assert turns_db.get_turn(state["turn"]["id"])["state"] == "parked"
+            assert state["sid"] in outcome.error
+            # #1880: given up, so the park is settled and the wake suppressed.
+            assert turns_db.get_turn(state["turn"]["id"])["state"] == "completed"
+            assert task_registry.is_wake_suppressed(state["sid"], task.task_id)
             assert turns_db.get_queued_turns(state["sid"]) == []
             assert len(parent_wakes) == 1
             assert parent_wakes[0][1]["status"] != "completed"
-            # A remote child reports the same failure, not the parking remark.
-            report = remote_task.build_child_report(state["sid"])
+            # A remote child reports the same failure, not the parking remark,
+            # however often the report is built.
+            report = state["remote_report"]
             assert report["status"] == "failed"
             assert "could not be delivered" in report["report"]
+            assert state["remote_report_again"] == report
+            assert state["remote_suppressed"] is False
             return
         if ending.startswith("stop_"):
             assert outcome.ok is False
@@ -744,6 +802,7 @@ async def test_monitor_worker_park_lifecycle(
     finally:
         task._running = False
         release_handoff.set()
+        release_write.set()
         if not dispatch.done():
             dispatch.cancel()
         await asyncio.gather(dispatch, return_exceptions=True)
@@ -843,6 +902,68 @@ async def test_stopping_only_monitor_cannot_leave_an_unwakeable_park(
     finally:
         task._running = False
         await asyncio.sleep(0)
+
+
+async def test_remote_child_suppresses_lost_wakes_once_its_failure_is_stored(
+    mock_db, monkeypatch,
+):
+    """#1880 review: a remote child given up on a lost Monitor wake suppresses
+    that wake only after its failure report is stored. Suppressing while
+    building made the next build (a retry after a failed store, or the sweep
+    racing a task-stop) read the park as a clean end and owe the parking
+    remark as a completed report."""
+    import app.core.task_registry as tr
+    from app.core import remote_task, turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.db import database, remote_tasks
+    from app.db.base import get_db
+
+    sid = "s-remote-lost-wake"
+    database.create_session(session_id=sid, profile_id=None, title="t")
+    turn = turns_db.enqueue_turn(sid, "provider_agent", prompt="run", profile_id="profile")
+    turns_db.start_turn(turn["id"], None, "runner")
+    task_registry.start_task(sid, "m1", "shell", "pytest")
+    task_registry.mark_monitor_shell_task(sid, "m1")
+    turns_db.park_turn(turn["id"], ["m1"])
+    task_registry.complete_task(sid, "m1", "completed")
+    real_now = tr._now_epoch
+    monkeypatch.setattr(tr, "_now_epoch", lambda: real_now() + 200)
+    with get_db() as conn:
+        remote_tasks.record_child(sid, "dev-parent", conn=conn)
+    monkeypatch.setattr(remote_task, "git_summary", lambda session_id: {})
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid_: None)
+    real_owe = remote_tasks.owe_report
+    calls = []
+
+    def flaky_owe(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            raise RuntimeError("database went away")
+        return real_owe(*args, **kwargs)
+
+    monkeypatch.setattr(remote_tasks, "owe_report", flaky_owe)
+    try:
+        with pytest.raises(RuntimeError):
+            remote_task.owe_if_finished(sid)
+        assert not task_registry.is_wake_suppressed(sid, "m1")
+        assert remote_task.owe_if_finished(sid) is True
+        child = remote_tasks.get_child(sid)
+        assert child["report"]["status"] == "failed"
+        assert "could not be delivered" in child["report"]["report"]
+        assert child["completion_id"] == turn["id"]
+        assert task_registry.is_wake_suppressed(sid, "m1")
+        # The park waits for the watchdog, but the late wake cannot run...
+        assert turns_db.get_turn(turn["id"])["state"] == "parked"
+        await turn_scheduler.on_task_terminal(
+            sid, {"task_id": "m1", "status": "completed", "summary": "m1 done"},
+        )
+        assert turns_db.get_queued_turns(sid) == []
+        # ...and the next sweep keeps the stored failure.
+        assert remote_task.owe_if_finished(sid) is True
+        assert remote_tasks.get_child(sid)["report"]["status"] == "failed"
+        assert len(calls) == 2
+    finally:
+        task_registry.clear_session(sid)
 
 
 @pytest.mark.parametrize("exit_at", ["before_park_write", "after_park_write"])
