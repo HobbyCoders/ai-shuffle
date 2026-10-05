@@ -65,6 +65,7 @@
 	import { usageTargetInstance } from '$lib/stores/usage-target';
 	import { attachmentBlockReason } from './attach-disable';
 	import { awayMode } from '$lib/stores/away-mode.svelte';
+	import { sessions } from '$lib/stores/app-data.svelte';
 
 	interface Props {
 		isUploading: boolean;
@@ -411,6 +412,12 @@
 	const away = $derived(awayMode.isAway(awaySessionId));
 	$effect(() => {
 		void awayMode.load(awaySessionId);
+	});
+	// The session row reloads when the flag changes on this worker or arrives
+	// from the worker that owns the session, so another device's toggle shows here.
+	const awayRowValue = $derived($sessions.find((s) => s.id === awaySessionId)?.away_mode);
+	$effect(() => {
+		awayMode.observe(awaySessionId, awayRowValue);
 	});
 	async function toggleAway() {
 		if (!awaySessionId || awayMode.busy[awaySessionId]) return;

@@ -256,6 +256,17 @@ describe('Chat controls panel', () => {
 		expect(onToggleAway).not.toHaveBeenCalled();
 	});
 
+	it('shows Away on the quick bar, as the desktop composer does, without opening the panel', async () => {
+		const view = render(MobileComposerControlsSheet, { props: props({ awayEnabled: true }) });
+		const access = cell(/^Tool access: Ask, Away mode on$/);
+		expect(access.querySelector('[data-away-badge]')).toBeTruthy();
+		await view.rerender(props({ awayEnabled: false }));
+		expect(cell(/^Tool access: Ask$/).querySelector('[data-away-badge]')).toBeNull();
+		// Before the first message Away cannot be on, whatever the store says.
+		await view.rerender(props({ awayEnabled: true, awayAvailable: false }));
+		expect(cell(/^Tool access: Ask$/).querySelector('[data-away-badge]')).toBeNull();
+	});
+
 	it('offers fast mode only where the model supports it', async () => {
 		const onToggleFast = vi.fn();
 		const view = render(MobileComposerControlsSheet, { props: props({ open: true, fastSupported: true, onToggleFast }) });

@@ -104,6 +104,8 @@
 	const accessIcons: Record<string, typeof Hand> = { default: Hand, auto: Sparkles, acceptEdits: FilePen, bypassPermissions: ShieldOff };
 	const showSetupTiles = $derived(showSetup && !assistantMode);
 	const awayShown = $derived(accessShown && !!onToggleAway);
+	/** Away as the quick bar shows it: the desktop composer's "· Away" badge. */
+	const awayOn = $derived(awayShown && awayEnabled && awayAvailable);
 	const fastShown = $derived(fastSupported && !modelLocked);
 
 	const runningTasks = $derived(($activeSession.activeTasks ?? []).filter((t) => t.status === 'running'));
@@ -538,11 +540,12 @@
 				aria-haspopup="dialog"
 				aria-expanded={picker === 'access'}
 				aria-busy={permissionUpdating || undefined}
-				aria-label={`Tool access: ${ACCESS_LABEL[shownAccess] ?? shownAccess}${permissionUpdating ? ', saving' : ''}`}
+				aria-label={`Tool access: ${ACCESS_LABEL[shownAccess] ?? shownAccess}${permissionUpdating ? ', saving' : ''}${awayOn ? ', Away mode on' : ''}`}
 				onclick={() => togglePicker('access')}
 			>
 				<span class="qi">
 					{#if permissionUpdating}<LoaderCircle size={20} class="mcc-spin" aria-hidden="true" />{:else}<AccessIcon size={20} aria-hidden="true" />{/if}
+					{#if awayOn}<span class="qmini" data-away-badge aria-hidden="true"><Moon size={10} fill="currentColor" /></span>{/if}
 				</span>
 				<span class="ql">{ACCESS_SHORT[shownAccess] ?? shownAccess}</span>
 			</button>

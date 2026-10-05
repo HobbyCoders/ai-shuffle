@@ -100,6 +100,9 @@ export interface Session {
 	/** Fast service tier for this session's run binding. Null on sessions
 	 *  created before the flag existed, and on models that never supported it. */
 	fast?: boolean | null;
+	/** Away mode, as the owning worker has it (mirrored to the other workers).
+	 *  Null when never set, absent from a server too old to send it. */
+	away_mode?: boolean | null;
 	/** Optional persisted concrete context ceiling once the backend stores the override. */
 	context_window?: number | null;
 	/** Which sidepanel lane this session belongs to: 'code' (the full agentic
