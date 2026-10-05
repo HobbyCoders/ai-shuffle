@@ -345,6 +345,124 @@ def test_local_account_chat_continuation_preserves_provenance(app, monkeypatch, 
             identity.bind_session(sid, arriving)
 
 
+@pytest.mark.parametrize('instance_id', [None, 'other-worker-instance'])
+def test_owner_phone_continues_a_chat_another_worker_runs(app, monkeypatch, test_db, instance_id):
+    """Chat 989d9fd5 was started from the owner's desktop on worker B and runs on
+    worker A. On B it is a network mirror, so its instance_id is not B's, and
+    the owner's paired phone on B got "Session authorization denied" on open,
+    send and answer. The owner's own device continues it; nobody else does."""
+    from app.core import mobile_tool_identity as identity
+    from app.db import mobile_tool_identity as provenance
+    from app.network import control
+    c = paired_browser(app, monkeypatch)
+    token = c.cookies.get('session')
+    phone = identity.principal('paired', auth.get_paired_client_from_token(token)['id'], token)
+    desktop = identity.principal('admin', 'install', 'local-transport:' + settings.effective_instance_id)
+    member = SimpleNamespace(kind='worker', status='active')
+    ctx = SimpleNamespace(device_id='dev_this_worker', legacy_instance_map={},
+                          member=lambda device_id: member if device_id == 'dev_other_worker' else None)
+    monkeypatch.setattr(control.engine, 'context', lambda: ctx)
+
+    def mirrored(sid, **columns):
+        database.create_session(sid, 'default')
+        identity.bind_session(sid, desktop, new=True)
+        values = {'instance_id': instance_id, 'owner_device_id': 'dev_other_worker', **columns}
+        test_db.execute('UPDATE sessions SET instance_id=?, owner_device_id=?, api_user_id=? WHERE id=?',
+                        (values['instance_id'], values['owner_device_id'], values.get('api_user_id'), sid))
+
+    mirrored('mirror-chat')
+    before = provenance.read('mirror-chat')
+    identity.bind_session('mirror-chat', phone)
+    assert provenance.read('mirror-chat') == before  # continued, Android provenance not transferred
+    # The other direct caller of same_install_owner permits the same screenshot.
+    from app.core.artifact_access import authorize_session_artifact
+    request = SimpleNamespace(state=SimpleNamespace(
+        paired_client=auth.get_paired_client_from_token(token)))
+    authorize_session_artifact(request, {'created_by_session': 'mirror-chat'}, 'image-hash')
+
+    # An API key principal never inherits the owner's admin/paired bridge.
+    database.create_api_user('key-caller', 'Caller', auth.hash_api_key('aih_key_caller'))
+    api_caller = identity.principal('api_user', 'key-caller', 'aih_key_caller')
+    with pytest.raises(PermissionError, match='Session principal mismatch'):
+        identity.bind_session('mirror-chat', api_caller)
+    # A claimed account id that differs from the live device membership is refused.
+    with pytest.raises(PermissionError, match='Account membership changed'):
+        identity.bind_session('mirror-chat', {**phone, 'account_id': OTHER})
+
+    # A device that is not the owner's (a direct controller) stays refused.
+    database.create_pairing_grant(token_hash='mirror-proof', purpose='controller', scopes=['controller'],
+        target_install_id=None, endpoint_url=None, device_label=None, created_by='local',
+        expires_at=owner_auth.now() + timedelta(minutes=2))
+    direct_token = 'shc_mirror-direct'
+    database.exchange_grant_for_client(token_hash='mirror-proof', device_id='direct-browser',
+        device_name='Direct controller', platform='web', client_type='browser',
+        session_token_hash=pairing.hash_controller_session(direct_token),
+        session_expires_at=owner_auth.now() + timedelta(days=1))
+    direct = identity.principal(
+        'paired', auth.get_paired_client_from_token(direct_token)['id'], direct_token)
+    with pytest.raises(PermissionError, match='Session principal mismatch'):
+        identity.bind_session('mirror-chat', direct)
+
+    # An API key's chat stays refused, mirrored or not.
+    database.create_api_user('integration', 'Connector', auth.hash_api_key('aih_mirror_key'))
+    mirrored('api-mirror', api_user_id='integration')
+    with pytest.raises(PermissionError, match='Session principal mismatch'):
+        identity.bind_session('api-mirror', phone)
+
+    # Run elsewhere but by no worker of this network: not a mirror, still refused.
+    mirrored('stray-chat', owner_device_id=None)
+    with pytest.raises(PermissionError, match='Session principal mismatch'):
+        identity.bind_session('stray-chat', phone)
+    assert provenance.read('mirror-chat') == before
+
+    # An account-linked controller without this worker's owner authority stays refused.
+    test_db.execute('UPDATE mobile_worker_bindings SET linked_by=? WHERE instance_id=?',
+                    ('controller-linked', settings.effective_instance_id))
+    assert account_hub.check_paired_client(auth.get_paired_client_from_token(token)) is False
+    with pytest.raises(PermissionError, match='Session principal mismatch'):
+        identity.bind_session('mirror-chat', phone)
+
+
+@pytest.mark.parametrize('network_state', ['unknown', 'revoked', 'consumer', 'missing', 'unreadable'])
+def test_owner_phone_refuses_untrusted_mirror_runner(app, monkeypatch, test_db, network_state):
+    from app.core import mobile_tool_identity as identity
+    from app.db import mobile_tool_identity as provenance
+    from app.network import control
+
+    c = paired_browser(app, monkeypatch)
+    token = c.cookies.get('session')
+    phone = identity.principal('paired', auth.get_paired_client_from_token(token)['id'], token)
+    desktop = identity.principal('admin', 'install', 'local-transport:' + settings.effective_instance_id)
+    database.create_session('untrusted-mirror', 'default')
+    identity.bind_session('untrusted-mirror', desktop, new=True)
+    before = provenance.read('untrusted-mirror')
+    test_db.execute('UPDATE sessions SET instance_id=?, owner_device_id=? WHERE id=?',
+                    ('unknown-install', 'dev_untrusted', 'untrusted-mirror'))
+
+    member = None if network_state == 'unknown' else SimpleNamespace(
+        kind='consumer' if network_state == 'consumer' else 'worker',
+        status='revoked' if network_state == 'revoked' else 'active')
+
+    def context():
+        if network_state == 'unreadable':
+            raise RuntimeError('Network unavailable')
+        if network_state == 'missing':
+            return None
+        return SimpleNamespace(device_id='dev_this_worker', member=lambda device_id: member)
+
+    monkeypatch.setattr(control.engine, 'context', context)
+    with pytest.raises(PermissionError, match='Session principal mismatch'):
+        identity.bind_session('untrusted-mirror', phone)
+    assert provenance.read('untrusted-mirror') == before
+    from fastapi import HTTPException
+    from app.core.artifact_access import authorize_session_artifact
+    request = SimpleNamespace(state=SimpleNamespace(
+        paired_client=auth.get_paired_client_from_token(token)))
+    with pytest.raises(HTTPException) as refused:
+        authorize_session_artifact(request, {'created_by_session': 'untrusted-mirror'}, 'image-hash')
+    assert refused.value.status_code == 404
+
+
 def test_local_and_account_preference_identity_match_without_device_or_worker_keys(app, monkeypatch):
     from app.core.preference_identity import principal_preference_identity, request_preference_identity
     from types import SimpleNamespace

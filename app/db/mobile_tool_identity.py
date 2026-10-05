@@ -43,7 +43,8 @@ def bind(session_id, principal, *, new=False, claim=False, conn=None):
         with get_db() as connection:
             return bind(session_id, principal, new=new, claim=claim, conn=connection)
     c = conn.cursor()
-    c.execute("SELECT api_user_id, instance_id FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
+    c.execute("SELECT api_user_id, instance_id, owner_device_id FROM sessions WHERE id = %s FOR UPDATE",
+              (session_id,))
     session = c.fetchone()
     if not session:
         raise PermissionError('Unknown session')

@@ -77,11 +77,33 @@ def bind_session(session_id, value, *, new=False, claim=False, conn=None):
     return store.bind(session_id, value, new=new, claim=claim, conn=conn)
 
 
+def _network_mirror(session):
+    """True when another worker of this install's network runs the session."""
+    try:
+        from app.network import control, engine, membership
+        ctx = engine.context()
+        if ctx is None:
+            return False
+        owner = control.owner_of(session)
+        member = ctx.member(owner) if owner else None
+        return bool(member and member.kind == membership.KIND_WORKER
+                    and member.status == membership.STATUS_ACTIVE)
+    except Exception:  # noqa: BLE001 - an unreadable network context fails closed
+        return False
+
+
 def same_install_owner(previous, value, session):
-    """Chat continuation is distinct from replacing Android tool provenance."""
+    """Chat continuation is distinct from replacing Android tool provenance.
+
+    A chat run by another worker of this network is a mirror here, so its
+    instance_id is not this install's. The owner's own devices continue it all
+    the same (the account checks below are unchanged); without this the
+    owner's phone was refused a chat the owner's desktop started.
+    """
     from app.core.config import settings
     if (not value or session['api_user_id']
-            or session['instance_id'] != settings.effective_instance_id):
+            or (session['instance_id'] != settings.effective_instance_id
+                and not _network_mirror(session))):
         return False
     if {previous['kind'], value['kind']} != {'admin', 'paired'}:
         return False
