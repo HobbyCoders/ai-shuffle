@@ -28,6 +28,7 @@ always matches the app's real schema — no more hand-maintained drift.
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import sqlite3
@@ -199,6 +200,12 @@ _NAMED_PARAM_RE = re.compile(r"%\((\w+)\)s")
 _CAST_RE = re.compile(r"::\w+")
 
 
+# Memoized: the translation is a pure function of the SQL text, and the app
+# issues the same static query strings over and over (every test's schema
+# build alone is ~1,000 statements). Re-running ~25 regexes per statement was
+# a measurable share of the suite's run time (issue #1860). Bounded so SQL with
+# interpolated values cannot grow the cache without limit.
+@functools.lru_cache(maxsize=16384)
 def translate_sql(sql: str) -> str:
     """Rewrite PostgreSQL SQL into an SQLite-compatible equivalent.
 
@@ -600,13 +607,7 @@ def route_db_to(raw_conn: sqlite3.Connection):
         yield shim
 
 
-def new_sqlite_connection() -> sqlite3.Connection:
-    """Create a fresh in-memory SQLite connection with the app schema built.
-
-    The schema is created by executing the canonical
-    ``create_postgres_schema`` through :class:`ShimCursor`, so it stays in
-    lockstep with the production schema definition.
-    """
+def _open_raw_connection() -> sqlite3.Connection:
     # ``cached_statements=0`` disables the per-connection prepared-statement
     # cache.  That cache is keyed by SQL text, and ``execute()`` resets a cached
     # statement even while it is still busy, so two threads sharing this single
@@ -622,9 +623,58 @@ def new_sqlite_connection() -> sqlite3.Connection:
     )
     raw.row_factory = sqlite3.Row
     raw.execute("PRAGMA foreign_keys = ON")
+    return raw
 
+
+def _build_schema(raw: sqlite3.Connection) -> None:
     from app.db.schema_postgres import create_postgres_schema
 
     create_postgres_schema(ShimCursor(raw.cursor()))
     raw.commit()
+
+
+# The built schema, kept once per process (each xdist worker has its own) and
+# copied page-for-page into every new connection with SQLite's online backup.
+# Running ``create_postgres_schema`` through the shim costs ~60 ms; the copy
+# costs ~2 ms. Every test gets one of these databases from the autouse
+# ``_raw_sqlite`` fixture, so the build alone was most of the suite's setup
+# time (issue #1860). The copy is the same database a fresh build produces:
+# the schema code reads no environment, and the only rows it writes are
+# constant seed rows. The one exception is the clock: those seed rows'
+# DEFAULT NOW() timestamps are from when this process built the template,
+# not from the start of the test (no test reads them). Never handed to a test.
+_TEMPLATE: sqlite3.Connection | None = None
+_TEMPLATE_LOCK = threading.Lock()
+
+
+def _shim_is_unpatched() -> bool:
+    """True unless a test has swapped the shim's translation functions, in
+    which case the schema must be built through the patched code as before
+    and must not be kept for later tests."""
+    return (translate_sql, _should_skip, ShimCursor.execute) == _ORIGINAL_SHIM_FUNCS
+
+
+def new_sqlite_connection() -> sqlite3.Connection:
+    """Create a fresh in-memory SQLite connection with the app schema built.
+
+    The schema is created by executing the canonical
+    ``create_postgres_schema`` through :class:`ShimCursor`, so it stays in
+    lockstep with the production schema definition. It is built once per
+    process and copied into each new connection (see ``_TEMPLATE``).
+    """
+    global _TEMPLATE
+    raw = _open_raw_connection()
+    if not _shim_is_unpatched():
+        _build_schema(raw)
+        return raw
+    with _TEMPLATE_LOCK:
+        if _TEMPLATE is None:
+            template = _open_raw_connection()
+            _build_schema(template)
+            _TEMPLATE = template
+        _TEMPLATE.backup(raw)
     return raw
+
+
+# The unpatched functions, compared by ``_shim_is_unpatched``.
+_ORIGINAL_SHIM_FUNCS = (translate_sql, _should_skip, ShimCursor.execute)

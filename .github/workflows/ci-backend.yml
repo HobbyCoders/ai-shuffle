@@ -50,8 +50,8 @@ concurrency:
 jobs:
   backend:
     name: Backend tests
-    # Keep a hard job timeout to bound silent backend wedges and surface a useful failure rather than waiting
-    # for the platform default.
+    # Keep a hard job timeout so a silent suite wedge cannot run until the platform default. Schema creation is
+    # reused per worker; validate the resulting behavior before lowering the cap.
     timeout-minutes: 35
     # Same-commit comparison on 2026-09-15: 2 vCPU / 2 workers passed in 415s;
     # 4 vCPU / 4 workers passed in 287s (runs 35005402929 / 35005406199).

@@ -705,10 +705,18 @@ class TestDispatchWiring:
             created["worker"] = session_id
             return "turn-1"
 
+        async def _submit_async(session_id, source, **kwargs):
+            return _submit(session_id, source, **kwargs)
+
         async def _idle(session_id, timeout=300.0):
             return True
 
+        # dispatch_worker submits through submit_async. Left unpatched it
+        # queues a real worker turn that nothing here runs, and the dispatch
+        # then waits on it forever unless an earlier test in the same process
+        # left the real turn scheduler's kick registered.
         monkeypatch.setattr(tm_mod, "submit", _submit)
+        monkeypatch.setattr(tm_mod, "submit_async", _submit_async)
         monkeypatch.setattr(tm_mod, "wait_session_idle", _idle)
         monkeypatch.setattr(tm_mod, "interrupt", lambda *a, **k: None)
         monkeypatch.setattr(db, "get_session", lambda sid: {"id": sid})

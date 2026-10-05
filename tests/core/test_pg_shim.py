@@ -16,6 +16,7 @@ emulate that: swallow ONLY the idle-transaction error, and let every real
 failure through.
 """
 
+import re
 import sqlite3
 import threading
 import time
@@ -190,3 +191,75 @@ def test_concurrent_execute_vs_close_no_crash_no_deadlock():
     assert time.monotonic() < deadline, "close/join exceeded 2s budget"
     assert not worker_error, f"unexpected worker error: {worker_error}"
     assert observed_clean_close.is_set(), "worker never observed a clean close"
+
+
+# =============================================================================
+# issue #1860: the schema is built once per process and copied per connection
+# =============================================================================
+
+
+def _fresh_build() -> sqlite3.Connection:
+    from tests import pg_shim
+
+    raw = pg_shim._open_raw_connection()
+    pg_shim._build_schema(raw)
+    return raw
+
+
+def _dump_without_timestamps(raw: sqlite3.Connection) -> list[str]:
+    # Seed rows take their DEFAULT NOW() timestamp from when the schema was
+    # built, and the per-process copy may have been built minutes before the
+    # fresh one. Everything else in the dump must match exactly.
+    stamp = re.compile(r"'\d{4}-\d\d-\d\d \d\d:\d\d:\d\d(?:\.\d+)?'")
+    return [stamp.sub("'<timestamp>'", line) for line in raw.iterdump()]
+
+
+def test_copied_connection_is_the_database_a_fresh_build_produces():
+    fresh = _fresh_build()
+    copied = new_sqlite_connection()
+    try:
+        assert _dump_without_timestamps(copied) == _dump_without_timestamps(fresh)
+        assert copied.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()[0] > 300
+        # Connection-level settings are per connection, never copied: each new
+        # connection must carry them itself.
+        assert copied.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert copied.row_factory is sqlite3.Row
+    finally:
+        close_connection(fresh)
+        close_connection(copied)
+
+
+def test_copied_connections_do_not_share_rows():
+    first = new_sqlite_connection()
+    second = new_sqlite_connection()
+    try:
+        cur = ShimConnection(first).cursor()
+        cur.execute("INSERT INTO system_settings (key, value) VALUES (%s, %s)", ("k", "v"))
+        ShimConnection(first).commit()
+        assert second.execute("SELECT COUNT(*) FROM system_settings WHERE key = 'k'").fetchone()[0] == 0
+        third = new_sqlite_connection()
+        assert third.execute("SELECT COUNT(*) FROM system_settings WHERE key = 'k'").fetchone()[0] == 0
+        close_connection(third)
+    finally:
+        close_connection(first)
+        close_connection(second)
+
+
+def test_a_patched_translation_builds_through_the_patch_and_is_not_kept(monkeypatch):
+    from tests import pg_shim
+
+    seen = []
+    original = pg_shim.translate_sql
+
+    def recording(sql):
+        seen.append(sql)
+        return original(sql)
+
+    template_before = pg_shim._TEMPLATE
+    monkeypatch.setattr(pg_shim, "translate_sql", recording)
+    raw = new_sqlite_connection()
+    try:
+        assert seen, "the schema must be built through the patched translation"
+        assert pg_shim._TEMPLATE is template_before
+    finally:
+        close_connection(raw)
