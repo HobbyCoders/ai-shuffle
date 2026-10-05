@@ -557,6 +557,11 @@ def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
     effort (``SessionRuntime._steer_refusal``), so without it a message from
     another device waited out any turn sent with one. An effort this worker
     does not know is dropped, as every effort was before, never refused.
+
+    The workspace folder list (``workspace_project_ids``) is dropped on
+    purpose: carrying it would let another device choose which folders this
+    worker's agent may read. A turn without one keeps the chat's folders — the
+    session's stored set when it runs, the live turn's when it is steered in.
     """
     if not isinstance(raw, dict):
         return None

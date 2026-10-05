@@ -600,9 +600,10 @@ class _SteerAdapter:
 
 
 async def _forward_into_live_turn(workers, monkeypatch, session_fields, live_turn, *, prompt,
-                                  profile_id, overrides):
+                                  profile_id, overrides, workspace_project_ids=None, on_owner=None):
     """Start ``live_turn`` on owner A's session, then send ``prompt`` to it from
     member B through the real control route, with the real submit and steer.
+    ``on_owner(session_id)`` runs on A afterwards, for checks of A's own rows.
     Returns ``(steered calls, queued row)``."""
     from unittest.mock import MagicMock, patch
 
@@ -618,6 +619,8 @@ async def _forward_into_live_turn(workers, monkeypatch, session_fields, live_tur
     session_id = session_fields["session_id"]
     with a.active():
         database.create_session(project_id=None, is_active=True, **session_fields)
+        if workspace_project_ids is not None:
+            database.set_session_run_binding(session_id, workspace_project_ids=workspace_project_ids)
         engine.scan_all()
     converge([a, b])
     with a.active():
@@ -638,6 +641,8 @@ async def _forward_into_live_turn(workers, monkeypatch, session_fields, live_tur
         session_runtime._live_runtimes.pop(session_id, None)
     with a.active():
         row = turns_db.get_turn(result["turn_id"])
+        if on_owner is not None:
+            on_owner(session_id)
     return adapter.calls, row, live
 
 
@@ -684,6 +689,119 @@ async def test_control_turns_steer_into_a_main_chat_turn_that_carries_an_effort(
 
     assert calls == [("mid-turn remark", row["id"])]
     assert row["overrides"]["effort"] == "high"
+
+
+#: What the owner's own composer on A sends for a code chat with one extra
+#: workspace folder; the turn it starts is the one a forwarded message must join.
+_FOLDER_TURN_OVERRIDES = {"model": "opus", "effort": "high", "permission_mode": "default", "fast": False,
+                          "workspace_project_ids": ["proj-docs"]}
+
+
+@pytest.mark.parametrize("forwarded_folders", [
+    # B's composer shows the chat's folders (the session row replicates them).
+    ["proj-docs"],
+    # B's composer holds another set, with an id A has never registered.
+    ["proj-docs", "proj-not-on-a"],
+    # B cleared them, or B is an older build / a chat composer that sends none.
+    [],
+    None,
+], ids=["same", "wider", "cleared", "absent"])
+async def test_control_turns_steer_into_a_turn_with_workspace_folders(workers, monkeypatch, forwarded_folders):
+    """A turn started on A with an extra workspace folder: a message sent to it
+    from another device steers in at the next tool boundary, as A's own send
+    does. The route drops the forwarded folder list, so it must mean "keep this
+    chat's folders" rather than "no folders" (which differed from the live turn
+    and held the message until the turn ended). Whatever B sent, nothing of it
+    reaches A's agent or A's stored set."""
+    overrides = {k: v for k, v in _FOLDER_TURN_OVERRIDES.items() if k != "workspace_project_ids"}
+    if forwarded_folders is not None:
+        overrides["workspace_project_ids"] = forwarded_folders
+    stored = {}
+
+    def on_owner(session_id):
+        from app.core.workspace_folders import normalize_workspace_project_ids
+        stored["ids"] = normalize_workspace_project_ids(database.get_session(session_id)["workspace_project_ids"])
+
+    calls, row, _live = await _forward_into_live_turn(
+        workers, monkeypatch,
+        {"session_id": "s-folders", "profile_id": "default", "title": "On A", "model": "opus",
+         "effort": "high"},
+        {"source": "user", "profile_id": "default", "overrides": dict(_FOLDER_TURN_OVERRIDES)},
+        prompt="mid-turn remark", profile_id="default", overrides=overrides,
+        workspace_project_ids=["proj-docs"], on_owner=on_owner,
+    )
+
+    assert calls == [("mid-turn remark", row["id"])]
+    assert "workspace_project_ids" not in (row["overrides"] or {})
+    assert stored["ids"] == ["proj-docs"]
+
+
+async def test_control_turns_wait_when_the_owner_removed_a_folder_mid_turn(workers, monkeypatch):
+    """The turn on A started with two extra folders, then the owner removed one
+    in the folder picker (which saves at once). A message from B names no
+    folders, so it means "this chat's folders" — now one. Steered into the live
+    turn it would keep the removed folder in use; it waits for its own turn,
+    which runs with the stored set."""
+    live_overrides = dict(_FOLDER_TURN_OVERRIDES, workspace_project_ids=["proj-docs", "proj-removed"])
+    calls, row, _live = await _forward_into_live_turn(
+        workers, monkeypatch,
+        {"session_id": "s-removed", "profile_id": "default", "title": "On A", "model": "opus",
+         "effort": "high"},
+        {"source": "user", "profile_id": "default", "overrides": live_overrides},
+        prompt="mid-turn remark", profile_id="default",
+        overrides={k: v for k, v in _FOLDER_TURN_OVERRIDES.items() if k != "workspace_project_ids"},
+        workspace_project_ids=["proj-docs"],
+    )
+
+    assert calls == []
+    assert row["state"] == "queued"
+
+
+@pytest.mark.parametrize("forwarded_folders", [["proj-not-on-a"], []], ids=["unknown", "cleared"])
+async def test_control_turns_own_turn_keeps_the_chats_workspace_folders(workers, monkeypatch, forwarded_folders):
+    """An idle chat on A with an extra folder: a message from B starts its own
+    turn there. It runs with the folders A stored for the chat — never with an
+    id B named, and never with none — and leaves A's stored set as it was."""
+    from unittest.mock import patch
+
+    from app.core import query_options as qo
+    from app.core import turn_manager
+    from app.core.workspace_folders import normalize_workspace_project_ids
+    from app.db import turns as turns_db
+
+    a, b = workers("a"), workers("b")
+    served = _served_client(monkeypatch, a)
+    monkeypatch.setattr(turn_manager, "_kick", lambda session_id: None)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with a.active():
+        database.create_session(session_id="s-idle", profile_id="default", project_id=None,
+                                title="On A", is_active=True)
+        database.set_session_run_binding("s-idle", workspace_project_ids=["proj-docs"])
+        engine.scan_all()
+    converge([a, b])
+    with a.active():
+        store.touch_member(b.device_id, endpoints=[])
+    with b.active():
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        result = await control.submit_turn(
+            a.device_id, "s-idle", prompt="next step", profile_id="default",
+            overrides={"model": "opus", "fast": False, "workspace_project_ids": forwarded_folders})
+    with a.active():
+        row = turns_db.get_turn(result["turn_id"])
+        assert "workspace_project_ids" not in (row["overrides"] or {})
+        assert normalize_workspace_project_ids(
+            database.get_session("s-idle")["workspace_project_ids"]) == ["proj-docs"]
+        # The folders A's runner resolves for that turn are the chat's own.
+        with patch.object(qo, "get_security_instructions", return_value=""), patch(
+            "app.core.workspace_folders.workspace_directories", return_value=["/a/docs"],
+        ) as resolve:
+            options, _ = qo.build_options_from_profile(
+                profile={"id": "default", "config": {"model": "opus"}},
+                overrides=row["overrides"] or {}, session_id="s-idle")
+    assert normalize_workspace_project_ids(resolve.call_args.args[0]) == ["proj-docs"]
+    assert "/a/docs" in options.add_dirs
 
 
 async def test_control_session_creation_validates_its_fields(workers, monkeypatch):

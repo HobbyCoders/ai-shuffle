@@ -144,6 +144,20 @@ _STEERABLE_SOURCES = ("user", "queue", "agent_message")
 # budget rather than which agent answers.
 _STEER_BINDING_KEYS = ("model", "effort", "permission_mode", "workspace_project_ids")
 
+# Binding keys whose ABSENCE on a queued row means "keep this chat's current
+# value", exactly as the run path reads it: ``query_options`` falls back to the
+# session's stored folders and ``set_session_run_binding`` leaves them alone
+# when a turn names none. Such a row joins only while the live turn still has
+# the chat's stored set (the owner may have changed it mid-turn); a row that
+# NAMES a different set is refused. A message from another device always
+# arrives without one — the control route never carries a folder list, so no
+# peer can grant the agent a folder — and without this it waited out every
+# turn started with an extra folder.
+_STEER_INHERITED_WHEN_ABSENT = frozenset({"workspace_project_ids"})
+
+# ``_steer_refusal`` reads the stored folders itself unless handed them.
+_UNREAD = object()
+
 
 async def try_steer_pending(session_id: str) -> int:
     """Try to hand this session's queued user messages to its RUNNING turn.
@@ -1675,6 +1689,10 @@ class SessionRuntime:
             )
             return 0
 
+        stored_folders: Any = _UNREAD
+        if (self.turn.get("overrides") or {}).get("workspace_project_ids") is not None:
+            # What a row naming no folders inherits (``_steer_refusal``).
+            stored_folders = await asyncio.to_thread(self._stored_workspace_ids)
         submitted = 0
         for row in rows:
             if self._steering_closed:
@@ -1682,7 +1700,7 @@ class SessionRuntime:
                 break
             if row.get("source") not in _STEERABLE_SOURCES:
                 continue
-            refusal = self._steer_refusal(row)
+            refusal = self._steer_refusal(row, stored_workspace_ids=stored_folders)
             if refusal is not None:
                 if row.get("id") not in self._steer_refusals_logged:
                     self._steer_refusals_logged.add(row.get("id"))
@@ -1943,7 +1961,25 @@ class SessionRuntime:
         """Whether ``row``'s prompt can join the LIVE turn as it stands."""
         return self._steer_refusal(row) is None
 
-    def _steer_refusal(self, row: Dict[str, Any]) -> Optional[str]:
+    def _stored_workspace_ids(self) -> Optional[Set[str]]:
+        """This chat's stored extra workspace folders, or None when they
+        cannot be read. Blocking DB read."""
+        try:
+            from app.core.workspace_folders import normalize_workspace_project_ids
+            from app.db import database as database_mod
+
+            session_row = database_mod.get_session(self.session_id) or {}
+            return set(normalize_workspace_project_ids(session_row.get("workspace_project_ids")))
+        except Exception:  # noqa: BLE001 — unknown folders only refuse a steer.
+            logger.warning(
+                "SessionRuntime: could not read the workspace folders of %s",
+                self.session_id, exc_info=True,
+            )
+            return None
+
+    def _steer_refusal(
+        self, row: Dict[str, Any], *, stored_workspace_ids: Any = _UNREAD,
+    ) -> Optional[str]:
         """Why ``row``'s prompt cannot join the LIVE turn, or None when it can.
 
         Three things disqualify it, all for the same reason — the live turn is
@@ -1953,7 +1989,9 @@ class SessionRuntime:
         * attachments (``upload_blob_ids``): the files have to be materialized
           into the working dir before the prompt makes sense, which is turn
           setup, not something a tool result can carry;
-        * a different model / effort / permission mode;
+        * a different model / effort / permission mode, or a different set of
+          workspace folders (a row that names none means the chat's stored
+          folders, and joins only while the live turn has that set);
         * a different profile — a message addressed to another agent.
 
         The answer names the rule (and for a binding, the key) and never any
@@ -1986,6 +2024,25 @@ class SessionRuntime:
         live_overrides = self.turn.get("overrides") or {}
         row_overrides = row.get("overrides") or {}
         for key in _STEER_BINDING_KEYS:
+            if key in _STEER_INHERITED_WHEN_ABSENT and key not in row_overrides:
+                if live_overrides.get(key) is None:
+                    continue  # Both run with the chat's folders, as query_options reads it.
+                # The row runs with the chat's STORED folders, which the owner
+                # may have changed since this turn started (the picker saves
+                # at once). Join only while the live turn still has that set,
+                # so a removed folder is never kept in use by a steer.
+                stored = stored_workspace_ids
+                if stored is _UNREAD:
+                    stored = self._stored_workspace_ids()
+                try:
+                    from app.core.workspace_folders import normalize_workspace_project_ids
+
+                    live_ids = set(normalize_workspace_project_ids(live_overrides.get(key)))
+                except ValueError:
+                    return f"{key} differs"
+                if stored is None or set(stored) != live_ids:
+                    return f"{key} differs"
+                continue
             if (row_overrides.get(key) or None) != (live_overrides.get(key) or None):
                 return f"{key} differs"
         return None

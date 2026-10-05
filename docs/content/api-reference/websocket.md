@@ -162,7 +162,7 @@ A `query` sent while a turn is running is queued and answered with `query_queued
 
 Remove an entry with `{"type": "remove_queued_message", "message_id": "turn_789", "session_id": "sess_abc123"}`, or all of them with `clear_queued_messages`. A queued message the running turn has already read cannot be removed; the next `queue_updated` shows what is left.
 
-A `query` queued behind a running turn is also offered to that turn, which can read it at its next step instead of waiting for the turn to end. It stays in the queue until the turn reads it, and removing it before then takes it back. A message the running turn cannot take (one for a different agent, model, effort or permission mode, or any message on an agent backend that cannot accept messages mid-turn) runs as its own turn after the current one.
+A `query` queued behind a running turn is also offered to that turn, which can read it at its next step instead of waiting for the turn to end. It stays in the queue until the turn reads it, and removing it before then takes it back. A message the running turn cannot take (one for a different agent, model, effort, permission mode or set of `workspace_project_ids`, or any message on an agent backend that cannot accept messages mid-turn) runs as its own turn after the current one. For a session that runs on another device, the message is forwarded without `workspace_project_ids` and always keeps the session's own workspace folders, so the device you type on cannot add or remove folders.
 
 ### Connection Lifecycle
 

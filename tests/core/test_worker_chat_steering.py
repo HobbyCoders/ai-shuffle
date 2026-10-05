@@ -299,6 +299,52 @@ async def test_a_main_chat_still_holds_a_message_that_asks_for_another_model(moc
     assert "secret prompt text" not in refusals[0]
 
 
+def test_a_row_naming_other_workspace_folders_is_refused_and_one_naming_none_joins(mock_db):
+    """Folders still bind a turn: a send that NAMES another set waits for its
+    own turn. A row naming none (a message from another device, whose route
+    never carries folders) keeps the live turn's and may join it."""
+    database.create_session(session_id="folders", profile_id=None, title="t")
+    # A local send stores the folders it names (``turn_manager``).
+    database.set_session_run_binding("folders", workspace_project_ids=["docs"])
+    live = _start("folders", "user", profile_id="coding",
+                  overrides={"model": "opus", "workspace_project_ids": ["docs"]})
+    runtime = session_runtime.SessionRuntime(live)
+    row = {"id": "turn-x", "source": "user", "prompt": "hi", "payload": {}, "profile_id": "coding",
+           "overrides": {"model": "opus", "workspace_project_ids": ["docs", "api"]}}
+    assert runtime._steer_refusal(row) == "workspace_project_ids differs"
+    row["overrides"]["workspace_project_ids"] = []
+    assert runtime._steer_refusal(row) == "workspace_project_ids differs"
+    row["overrides"]["workspace_project_ids"] = ["docs"]
+    assert runtime._steer_refusal(row) is None
+    del row["overrides"]["workspace_project_ids"]
+    assert runtime._steer_refusal(row) is None
+    # Absent folders are not a wildcard for the other bindings.
+    row["overrides"]["model"] = "sonnet"
+    assert runtime._steer_refusal(row) == "model differs"
+
+
+def test_a_row_naming_no_folders_waits_when_the_chats_folders_changed_mid_turn(mock_db):
+    """A row naming no folders means the chat's STORED folders. When the owner
+    changed them after the turn started (the picker saves at once), the live
+    turn no longer has that set: the row waits for its own turn rather than
+    keep a removed folder in use, or miss an added one."""
+    database.create_session(session_id="moved", profile_id=None, title="t")
+    database.set_session_run_binding("moved", workspace_project_ids=["docs", "secrets"])
+    live = _start("moved", "user", profile_id="coding",
+                  overrides={"model": "opus", "workspace_project_ids": ["docs", "secrets"]})
+    runtime = session_runtime.SessionRuntime(live)
+    row = {"id": "turn-x", "source": "user", "prompt": "hi", "payload": {}, "profile_id": "coding",
+           "overrides": {"model": "opus"}}
+    assert runtime._steer_refusal(row) is None
+    database.set_session_run_binding("moved", workspace_project_ids=["docs"])
+    assert runtime._steer_refusal(row) == "workspace_project_ids differs"
+    database.set_session_run_binding("moved", workspace_project_ids=["docs", "secrets", "api"])
+    assert runtime._steer_refusal(row) == "workspace_project_ids differs"
+    # The same set in another order is the same folders.
+    database.set_session_run_binding("moved", workspace_project_ids=["secrets", "docs"])
+    assert runtime._steer_refusal(row) is None
+
+
 async def test_a_worker_row_built_by_the_composer_is_refused_by_the_live_turn(mock_db):
     """The defect itself, at the eligibility seam: the row the composer used to
     produce for a worker chat differs from the worker's turn on its agent (and,
