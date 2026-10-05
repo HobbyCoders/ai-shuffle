@@ -141,6 +141,12 @@ export class ApiUsersModel {
 		return this.projects.find((p) => p.id === id)?.name || id;
 	}
 
+	/** How many of these assigned agents still exist. A removed agent's
+	 *  assignment is kept (it keeps the key restricted) but is not counted. */
+	existingProfileCount(ids: readonly string[] | null | undefined): number {
+		return (ids ?? []).filter((id) => this.profiles.some((p) => p.id === id)).length;
+	}
+
 	profileName(id: string | null | undefined): string | null {
 		if (!id) return null;
 		return this.profiles.find((p) => p.id === id)?.name || id;

@@ -144,6 +144,25 @@ describe('removed agent restrictions', () => {
 		await fireEvent.click(remove);
 		await waitFor(() => expect(apiUsers.updateApiUser).toHaveBeenCalledWith('u1', { profile_ids: ['a2'] }));
 	});
+
+	it('counts only agents that still exist, in the list and on the Access tab', async () => {
+		apiUsers.getApiUsers.mockResolvedValue([user({ profile_ids: ['a1', 'Explore'] })]);
+		await open('u1', 'Access');
+		expect(screen.getByRole('button', { name: /Discord Bot/ }).textContent).toContain('Agent default, 1 agent');
+		expect(await screen.findByText(/Agent Explore was removed/)).toBeTruthy();
+		expect(screen.getByText('1 of 2')).toBeTruthy();
+		expect(screen.queryByText('2 of 2')).toBeNull();
+	});
+
+	it('tells an unrestricted key apart from one restricted only to removed agents', async () => {
+		apiUsers.getApiUsers.mockResolvedValue([
+			user({ profile_ids: [] }),
+			user({ id: 'u2', name: 'Old Bot', profile_ids: ['Explore'] })
+		]);
+		await open();
+		expect(screen.getByRole('button', { name: /Discord Bot/ }).textContent).toContain('Agent default, all agents');
+		expect(screen.getByRole('button', { name: /Old Bot/ }).textContent).toContain('Agent default, 0 agents');
+	});
 });
 
 describe('create', () => {

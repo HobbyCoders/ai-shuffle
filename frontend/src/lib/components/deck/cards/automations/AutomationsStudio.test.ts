@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Automation } from '$lib/api/automations';
 import AutomationsStudio from './AutomationsStudio.svelte';
@@ -57,5 +57,40 @@ describe('disabled automation explanation', () => {
             formatDuration: () => '0s', getStatusColor: () => 'var(--muted)',
             getRunStatusBadgeClass: () => '', triggerTypeLabel: () => 'Interval' });
         expect(screen.getByRole('status').textContent).toBe(explanation);
+    });
+});
+
+describe('automation detail state', () => {
+    const detailProps = (over: Record<string, unknown> = {}) => ({
+        automation, runs: [], runsLoading: false, expandedRunIds: new Set<string>(),
+        detailStats: null, onBack: vi.fn(), onEdit: vi.fn(), onTrigger: vi.fn(), onDelete: vi.fn(),
+        onToggleRunExpanded: vi.fn(), formatTime: () => 'Never', formatCost: () => '$0',
+        formatDuration: () => '0s', getStatusColor: () => 'var(--muted)',
+        getRunStatusBadgeClass: () => '', triggerTypeLabel: () => 'Interval', ...over
+    });
+    const agents = (...ids: string[]) => ids.map((id) => ({ id, name: id })) as never;
+
+    it('marks a disabled automation as Disabled in the detail header', () => {
+        render(AutomationDetail, detailProps());
+        expect(screen.getByTestId('automation-disabled-badge').textContent).toBe('Disabled');
+    });
+    it('shows no Disabled badge for an enabled automation', () => {
+        render(AutomationDetail, detailProps({ automation: { ...automation, is_enabled: true, last_error: null } }));
+        expect(screen.queryByTestId('automation-disabled-badge')).toBeNull();
+    });
+    it('says plainly when the agent was removed, and offers to pick another', async () => {
+        const onEdit = vi.fn();
+        const missing = { ...automation, profile_id: 'removed-agent' };
+        render(AutomationDetail, detailProps({ automation: missing, profiles: agents('general-purpose'), onEdit }));
+        expect(screen.getByText('Its agent was removed. Pick another agent to enable it.')).toBeTruthy();
+        await fireEvent.click(screen.getByRole('button', { name: 'Pick an agent' }));
+        expect(onEdit).toHaveBeenCalledWith(missing);
+    });
+    it('does not claim the agent was removed when it exists or the agent list is not loaded', () => {
+        const first = render(AutomationDetail, detailProps({ profiles: agents('general-purpose') }));
+        expect(screen.queryByText(/agent was removed/)).toBeNull();
+        first.unmount();
+        render(AutomationDetail, detailProps({ automation: { ...automation, profile_id: 'removed-agent' }, profiles: null }));
+        expect(screen.queryByText(/agent was removed/)).toBeNull();
     });
 });

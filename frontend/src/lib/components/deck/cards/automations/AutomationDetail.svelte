@@ -8,9 +8,16 @@
 		Trash2
 	} from 'lucide-svelte';
 	import AutomationRunHistory from './AutomationRunHistory.svelte';
+	import type { Profile } from '$lib/api/client';
+
+	/** The assistant's built-in agent is left out of /agents (app/db/assistant.py),
+	 *  so its absence from that list does not mean it was removed. */
+	const ASSISTANT_AGENT_ID = 'builtin_assistant';
 
 	interface Props {
 		automation: Automation;
+		/** Every agent, or null while the list has not loaded (never guess "removed"). */
+		profiles?: Pick<Profile, 'id'>[] | null;
 		runs: AutomationRun[];
 		runsLoading: boolean;
 		expandedRunIds: Set<string>;
@@ -30,6 +37,7 @@
 
 	let {
 		automation,
+		profiles = null,
 		runs,
 		runsLoading,
 		expandedRunIds,
@@ -46,6 +54,12 @@
 		getRunStatusBadgeClass,
 		triggerTypeLabel
 	}: Props = $props();
+
+	const agentMissing = $derived(
+		profiles !== null &&
+			automation.profile_id !== ASSISTANT_AGENT_ID &&
+			!profiles.some((p) => p.id === automation.profile_id)
+	);
 
 	function successRate(total: number, successful: number): string {
 		if (total === 0) return 'N/A';
@@ -74,7 +88,24 @@
 					data-testid="automation-model-badge"
 					title={automation.model_error || 'Model its runs use'}
 				>{automationModelLabel(automation)}</span>
+				{#if !automation.is_enabled}
+					<span
+						class="card-badge card-badge--warning"
+						data-testid="automation-disabled-badge"
+						title="This automation does not run until it is enabled"
+					>Disabled</span>
+				{/if}
 			</div>
+			{#if agentMissing}
+				<div class="auto-agent-missing">
+					<p>
+						{automation.is_enabled
+							? 'Its agent was removed. Pick another agent so it can run.'
+							: 'Its agent was removed. Pick another agent to enable it.'}
+					</p>
+					<button type="button" class="auto-agent-pick" onclick={() => onEdit(automation)}>Pick an agent</button>
+				</div>
+			{/if}
 			{#if automation.last_error}
 				<p class="auto-detail-desc auto-model-error" role="status">{automation.last_error}</p>
 			{/if}
@@ -167,10 +198,12 @@
 		min-width: 0;
 	}
 
+	/* Wraps: name + trigger + model + Disabled badges overflow a 390 px phone on one line. */
 	.auto-detail-name-row {
 		display: flex;
 		align-items: center;
-		gap: 8px;
+		flex-wrap: wrap;
+		gap: 6px 8px;
 	}
 
 	.auto-detail-name {
@@ -178,6 +211,57 @@
 		font-weight: 600;
 		color: var(--text-primary, var(--foreground));
 		margin: 0;
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+
+	.auto-agent-missing {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 6px 12px;
+		margin-top: 8px;
+		padding: 8px 10px;
+		border: 1px solid color-mix(in oklch, var(--warning) 40%, transparent);
+		border-left-width: 3px;
+		border-radius: var(--radius-sm, 6px);
+		background: color-mix(in oklch, var(--warning) 10%, transparent);
+	}
+
+	.auto-agent-missing p {
+		flex: 1 1 14rem;
+		margin: 0;
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 500;
+		color: var(--text-primary, var(--foreground));
+	}
+
+	.auto-agent-pick {
+		flex-shrink: 0;
+		padding: 5px 10px;
+		font: inherit;
+		font-size: var(--text-sm, 0.75rem);
+		font-weight: 600;
+		color: var(--text-primary, var(--foreground));
+		background: var(--card);
+		border: 1px solid var(--border);
+		border-radius: var(--radius-sm, 6px);
+		cursor: pointer;
+		transition: background-color 120ms ease, border-color 120ms ease;
+	}
+
+	.auto-agent-pick:hover {
+		background: var(--hover-overlay);
+		border-color: color-mix(in oklch, var(--warning) 55%, var(--border));
+	}
+
+	.auto-agent-pick:focus-visible {
+		outline: 2px solid var(--ring, var(--primary));
+		outline-offset: 2px;
+	}
+
+	.auto-agent-pick:active {
+		transform: translateY(1px);
 	}
 
 	.auto-detail-desc {
@@ -252,6 +336,21 @@
 	@media (max-width: 639px) {
 		.auto-stats-row {
 			gap: 8px;
+		}
+
+		.auto-agent-pick {
+			min-height: 44px;
+			padding: 0 14px;
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.auto-agent-pick {
+			transition: none;
+		}
+
+		.auto-agent-pick:active {
+			transform: none;
 		}
 	}
 </style>

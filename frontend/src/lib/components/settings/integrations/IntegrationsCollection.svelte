@@ -55,12 +55,15 @@
 	);
 	const userRows = $derived(
 		model.users.map((u) => {
-			const agents = u.profile_ids?.length ?? 0;
+			// No assignments means unrestricted (every agent), not "0 agents";
+			// a key assigned only removed agents stays restricted and reads 0.
+			const agents = model.existingProfileCount(u.profile_ids);
+			const reach = u.profile_ids?.length ? `${agents} agent${agents === 1 ? '' : 's'}` : 'all agents';
 			return {
 				id: u.id,
 				name: u.name,
 				status: u.is_active ? ('ok' as const) : ('off' as const),
-				summary: u.is_active ? `${u.model || 'Agent default'}, ${agents} agent${agents === 1 ? '' : 's'}` : 'Disabled'
+				summary: u.is_active ? `${u.model || 'Agent default'}, ${reach}` : 'Disabled'
 			};
 		})
 	);

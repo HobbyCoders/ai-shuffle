@@ -76,6 +76,8 @@
 	let automations: Automation[] = $state([]);
 	let pendingApprovals: AutomationApproval[] = $state([]);
 	let profiles: Profile[] = $state([]);
+	/** False until /agents has loaded, so the detail never calls a live agent "removed". */
+	let profilesLoaded = $state(false);
 	let projects: Project[] = $state([]);
 	let connectors: Connector[] = $state([]);
 	let connectorTypes: ConnectorTypeInfo[] = $state([]);
@@ -191,6 +193,7 @@
 			automations = automationsData;
 			pendingApprovals = approvalsData;
 			profiles = profilesData;
+			profilesLoaded = true;
 			projects = projectsData;
 			connectors = connectorsData;
 			connectorTypes = connectorTypesData;
@@ -644,6 +647,7 @@
 		{:else if currentView === 'detail' && selectedAutomation}
 			<AutomationDetail
 				automation={selectedAutomation}
+				profiles={profilesLoaded ? profiles : null}
 				{runs}
 				{runsLoading}
 				{expandedRunIds}
@@ -749,6 +753,7 @@
 				<div class="auto-detail-center">
 				<AutomationDetail
 					automation={selectedAutomation}
+					profiles={profilesLoaded ? profiles : null}
 					{runs}
 					{runsLoading}
 					{expandedRunIds}
