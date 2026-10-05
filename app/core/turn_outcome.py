@@ -96,14 +96,15 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
         # event. The marker has no turn_id or usage, but must not erase the
         # completed model call's accounting in automation/connector/REST intake.
         # Only the immediately preceding terminal can belong to this park;
-        # never borrow usage across an abort or an older park.
+        # never borrow usage across an abort, an older park, or the start of
+        # this turn (a parked turn whose own done event was never written).
         before_park = False
         for ev in reversed(events):
             if ev is terminal:
                 before_park = True
                 continue
             if before_park and ev.get("event_type") in (
-                "turn.completed", "turn.aborted", "turn.parked",
+                "turn.completed", "turn.aborted", "turn.parked", "turn.started",
             ):
                 if ev.get("event_type") == "turn.completed":
                     usage = (ev.get("payload") or {}).get("usage")

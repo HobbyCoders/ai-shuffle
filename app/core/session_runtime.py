@@ -2568,10 +2568,17 @@ class SessionRuntime:
                 )):
                     from app.core.turn_finalize import settle_stopped_monitor_parks
 
-                    if await settle_stopped_monitor_parks(sid):
-                        return "completed", True
-                    row = await asyncio.to_thread(turns_db.get_turn, tid)
-                    if row and row.get("state") == "completed":
+                    settled_by_stop = await settle_stopped_monitor_parks(sid)
+                    if not settled_by_stop:
+                        row = await asyncio.to_thread(turns_db.get_turn, tid)
+                        settled_by_stop = bool(row and row.get("state") == "completed")
+                    if settled_by_stop:
+                        # Settled, not parked: finish like any other ended
+                        # turn — an interrupted or errored one gives back the
+                        # steer it swallowed, and the working set is synced.
+                        if self._terminal != "done":
+                            await self._requeue_stranded_steers(sid)
+                        await self._snapshot_working_set(sid)
                         return "completed", True
                 # turn.parked event — only when the park actually happened.
                 try:

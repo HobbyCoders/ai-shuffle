@@ -924,7 +924,9 @@ def _settled_outcome(session_id: str) -> Optional[Dict[str, Any]]:
     The owner's Stop on this worker ends the child's work too, so a
     user-stopped child is over as soon as its turn is.
     """
-    from app.core.provider_agent import _active_worker_background_work, _worker_still_working
+    from app.core.provider_agent import (
+        _active_worker_background_work, _lost_monitor_wakes, _worker_still_working,
+    )
     from app.core.task_registry import task_registry
     from app.db import turns
 
@@ -940,7 +942,14 @@ def _settled_outcome(session_id: str) -> Optional[Dict[str, Any]]:
         _active_worker_background_work(session_id) or _worker_still_working(session_id)
     ):
         return None
-    return {**latest, "_outcome": "completed" if state == "parked" else state}
+    settled = {**latest, "_outcome": "completed" if state == "parked" else state}
+    if state == "parked":
+        # A finished Monitor whose wake never arrived: the park's text is a
+        # parking remark, not a report (``build_child_report`` fails it).
+        lost = _lost_monitor_wakes(session_id)
+        if lost:
+            settled["_lost_wakes"] = lost
+    return settled
 
 
 def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
@@ -975,7 +984,15 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
         origin_id = origin["id"] if origin else settled["id"]
     status, report, needs = _turn_report(session_id, settled["id"], settled["_outcome"], origin_id)
     reason = None
-    if status == "failed" and settled.get("stop_reason") == LEASE_EXPIRED:
+    if status == "completed" and settled.get("_lost_wakes"):
+        from app.core.provider_agent import bound_report, lost_wake_error
+
+        status = "failed"
+        text = lost_wake_error(session_id, settled["_lost_wakes"])
+        if report and report != _NO_REPORT:
+            text += "\n\nIts last message (not a report):\n" + report
+        report = bound_report(text)[0]
+    elif status == "failed" and settled.get("stop_reason") == LEASE_EXPIRED:
         report = _cut_off_report(report)
         reason = WORKER_RESTART_REASON
     elif status == "failed" and _shut_down(settled):

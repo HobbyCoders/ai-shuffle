@@ -555,7 +555,9 @@ def monitor_worker_pool(monkeypatch):
     monkeypatch.setattr(session_pool, "_session_pool", _FakePool())
 
 
-@pytest.mark.parametrize("ending", ["exit", "exit_handoff", "timeout", "stop_worker", "stop_parent"])
+@pytest.mark.parametrize(
+    "ending", ["exit", "exit_handoff", "timeout", "stop_worker", "stop_parent", "wake_write_fails"],
+)
 async def test_monitor_worker_park_lifecycle(
     mock_db, native_scheduler, spawner_harness, worker_env, monitor_worker_pool,
     monkeypatch, ending,
@@ -579,6 +581,17 @@ async def test_monitor_worker_park_lifecycle(
     monkeypatch.setattr(monitor_spawn, "time", MagicMock(monotonic=lambda: clock["now"]))
     monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
     monkeypatch.setattr(provider_agent, "final_assistant_text", lambda sid: state["report"])
+    if ending == "wake_write_fails":
+        # #1869 item 1: the Monitor ends but publishing its wake fails. The
+        # dispatch must stop waiting after the pending-wake limit and fail
+        # honestly, even with the park watchdog switched off.
+        monkeypatch.setattr(settings, "park_watchdog_enabled", False)
+        monkeypatch.setattr(provider_agent, "PENDING_WAKE_LIMIT_SECONDS", 0.2)
+
+        async def failing_wake(*args, **kwargs):
+            raise RuntimeError("wake write failed")
+
+        monkeypatch.setattr(turn_scheduler, "_enqueue_context_wake", failing_wake)
 
     async def terminal(sid, frame):
         if frame.get("task_id") == task.task_id:
@@ -586,9 +599,11 @@ async def test_monitor_worker_park_lifecycle(
             if ending == "exit_handoff":
                 handoff_pending.set()
                 await release_handoff.wait()
-            await native_scheduler(sid, frame)
-            woken.set()
-            watcher_done.set()
+            try:
+                await native_scheduler(sid, frame)
+                woken.set()
+            finally:
+                watcher_done.set()
         else:
             parent_wakes.append((sid, frame))
 
@@ -634,6 +649,8 @@ async def test_monitor_worker_park_lifecycle(
                 assert await session_runtime.SessionRuntime(turn).execute() == "parked"
             parked.set()
         elif not task.is_running() and not ending.startswith("stop_"):
+            if ending == "wake_write_fails":
+                return True  # No wake turn ever exists.
             if ending == "exit_handoff" and not woken.is_set():
                 # The real wait_session_idle sees no queued turn yet. Do not
                 # let this fixture hide the terminal-status -> wake-write gap.
@@ -681,8 +698,29 @@ async def test_monitor_worker_park_lifecycle(
             assert not dispatch.done(), "terminal recording is not wake publication"
             assert remote_task._settled_outcome(state["sid"]) is None
             release_handoff.set()
+        if ending == "wake_write_fails":
+            from app.core import remote_task
+
+            await asyncio.wait_for(watcher_done.wait(), 2)
+            assert turns_db.get_queued_turns(state["sid"]) == []
+            await asyncio.sleep(0.03)
+            assert not dispatch.done()
+            # Inside the limit the gap still reads as a pending wake.
+            assert remote_task._settled_outcome(state["sid"]) is None
         outcome = await asyncio.wait_for(dispatch, 3)
         await asyncio.wait_for(watcher_done.wait(), 2)
+        if ending == "wake_write_fails":
+            assert outcome.ok is False
+            assert "could not be delivered" in outcome.error
+            assert turns_db.get_turn(state["turn"]["id"])["state"] == "parked"
+            assert turns_db.get_queued_turns(state["sid"]) == []
+            assert len(parent_wakes) == 1
+            assert parent_wakes[0][1]["status"] != "completed"
+            # A remote child reports the same failure, not the parking remark.
+            report = remote_task.build_child_report(state["sid"])
+            assert report["status"] == "failed"
+            assert "could not be delivered" in report["report"]
+            return
         if ending.startswith("stop_"):
             assert outcome.ok is False
             assert not task.is_running()
@@ -868,6 +906,203 @@ async def test_monitor_exit_racing_park_queues_exactly_one_wake(
     finally:
         task._running = False
         await asyncio.sleep(0)
+
+
+async def test_stop_settling_an_interrupted_park_requeues_its_swallowed_steer(
+    mock_db, native_scheduler, spawner_harness, monkeypatch,
+):
+    """#1869 item 4: a turn that errored with a Monitor running parks, and a
+    per-task Stop racing the park write settles it. That path returned before
+    ``_requeue_stranded_steers``, leaving the steered message unanswered."""
+    from app.core import monitor_spawn, turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.mcp import builtin_tools
+
+    sid = "s-spawn"
+    task, _frames = spawner_harness
+    task.process = None
+    monkeypatch.setitem(builtin_tools._background_tasks, task.task_id, task)
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", native_scheduler)
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
+    loop = asyncio.get_running_loop()
+
+    async def stop():
+        await _stop_monitor(task.task_id, session_id=sid)
+        task._running = False
+
+    original_park = turns_db.park_turn
+
+    def racing_park(tid, ids):
+        row = original_park(tid, ids)
+        asyncio.run_coroutine_threadsafe(stop(), loop).result(timeout=2)
+        return row
+
+    monkeypatch.setattr(turns_db, "park_turn", racing_park)
+    from app.db import database
+
+    database.create_session(session_id=sid, profile_id=None, title="t")
+    turn = turns_db.enqueue_turn(sid, "user", prompt="run tests")
+    steered = turns_db.enqueue_turn(sid, "user", prompt="also check the logs")
+
+    async def pump(**kwargs):
+        await monitor_spawn.make_fluid_monitor_spawner(sid)({"command": "pytest"}, None)
+        yield {"type": "steer_delivered", "steers": [
+            {"id": steered["id"], "text": "also check the logs"},
+        ]}
+        yield {"type": "error", "error": "boom"}
+
+    try:
+        with _runtime_env(pump=pump) as env, patch(
+            "app.core.task_registry.task_registry", new=task_registry,
+        ):
+            env["recorder"].record_steered_user_message = AsyncMock(return_value=True)
+            runtime = session_runtime.SessionRuntime(turn)
+            await runtime.execute()
+        assert task_registry.is_wake_suppressed(sid, task.task_id)
+        assert turns_db.get_turn(turn["id"])["state"] == "completed"
+        assert turns_db.get_turn(steered["id"])["stop_reason"] == "steered"
+        rows = turns_db.get_queued_turns(sid)
+        assert [r["prompt"] for r in rows] == ["also check the logs"]
+        assert rows[0]["payload"]["user_message_already_recorded"] is True
+    finally:
+        task._running = False
+        await asyncio.sleep(0)
+
+
+async def test_stop_settling_a_completed_park_does_not_requeue_its_steer(
+    mock_db, native_scheduler, spawner_harness, monkeypatch,
+):
+    """#1869 item 4, other side: a turn that ENDED normally keeps the steer it
+    read, as every other completed turn does; only an interrupted or errored
+    one gives it back. Same Stop-vs-park race as the requeue test above."""
+    from app.core import monitor_spawn, turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.mcp import builtin_tools
+
+    sid = "s-spawn"
+    task, _frames = spawner_harness
+    task.process = None
+    monkeypatch.setitem(builtin_tools._background_tasks, task.task_id, task)
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", native_scheduler)
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
+    loop = asyncio.get_running_loop()
+
+    async def stop():
+        await _stop_monitor(task.task_id, session_id=sid)
+        task._running = False
+
+    original_park = turns_db.park_turn
+
+    def racing_park(tid, ids):
+        row = original_park(tid, ids)
+        asyncio.run_coroutine_threadsafe(stop(), loop).result(timeout=2)
+        return row
+
+    monkeypatch.setattr(turns_db, "park_turn", racing_park)
+    from app.db import database
+
+    database.create_session(session_id=sid, profile_id=None, title="t")
+    turn = turns_db.enqueue_turn(sid, "user", prompt="run tests")
+    steered = turns_db.enqueue_turn(sid, "user", prompt="also check the logs")
+
+    async def pump(**kwargs):
+        await monitor_spawn.make_fluid_monitor_spawner(sid)({"command": "pytest"}, None)
+        yield {"type": "steer_delivered", "steers": [
+            {"id": steered["id"], "text": "also check the logs"},
+        ]}
+        yield {"type": "done", "metadata": {}}
+
+    try:
+        with _runtime_env(pump=pump) as env, patch(
+            "app.core.task_registry.task_registry", new=task_registry,
+        ):
+            env["recorder"].record_steered_user_message = AsyncMock(return_value=True)
+            assert await session_runtime.SessionRuntime(turn).execute() == "completed"
+        assert task_registry.is_wake_suppressed(sid, task.task_id)
+        assert turns_db.get_turn(turn["id"])["state"] == "completed"
+        assert turns_db.get_turn(steered["id"])["stop_reason"] == "steered"
+        assert turns_db.get_queued_turns(sid) == []
+    finally:
+        task._running = False
+        await asyncio.sleep(0)
+
+
+async def test_stopping_one_monitor_keeps_the_park_for_anothers_pending_wake(
+    mock_db, native_scheduler, monkeypatch,
+):
+    """#1869 item 2: Monitor B has exited and its wake is still being written
+    when the owner stops Monitor A. The park must stay until B's wake runs, so
+    the dispatch never reads the parking remark, and B wakes exactly once."""
+    from app.core import monitor_spawn, provider_agent, turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.mcp import builtin_tools as bt
+    from tests.core.test_monitor_spawn import _FakeTask
+
+    sid = "s-two-monitors"
+    tasks = {"a": _FakeTask("t-a"), "b": _FakeTask("t-b")}
+    order = iter(["a", "b"])
+    handoff_pending = asyncio.Event()
+    release_handoff = asyncio.Event()
+    terminal_done = asyncio.Event()
+    monkeypatch.setattr(monitor_spawn, "_WATCH_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(turn_scheduler, "_kick_after_batch_window", lambda sid: None)
+
+    async def spawn(command, cwd, session_id, tool_use_id=None):
+        task = tasks[next(order)]
+        task.process = None
+        task_registry.start_task(session_id, task.task_id, "shell", command)
+        bt._background_tasks[task.task_id] = task
+        return task
+
+    async def terminal(sid_, frame):
+        if frame.get("task_id") == "t-b":
+            handoff_pending.set()
+            await release_handoff.wait()
+        await native_scheduler(sid_, frame)
+        if frame.get("task_id") == "t-b":
+            terminal_done.set()
+
+    monkeypatch.setattr(bt, "_spawn_background", spawn)
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", terminal)
+    turn = turns_db.enqueue_turn(sid, "provider_agent", prompt="run tests")
+
+    async def pump(**kwargs):
+        spawner = monitor_spawn.make_fluid_monitor_spawner(sid)
+        await spawner({"command": "sleep 100"}, None)
+        await spawner({"command": "pytest"}, None)
+        yield {"type": "done", "metadata": {}}
+
+    try:
+        with _runtime_env(pump=pump), patch(
+            "app.core.task_registry.task_registry", new=task_registry,
+        ):
+            assert await session_runtime.SessionRuntime(turn).execute() == "parked"
+        # B exits; its watcher records the end, then waits on the wake write.
+        tasks["b"].exit_code = 0
+        tasks["b"]._running = False
+        await asyncio.wait_for(handoff_pending.wait(), 2)
+        # The owner stops A with the real per-task Stop.
+        await _stop_monitor("t-a", session_id=sid)
+        tasks["a"]._running = False
+        assert turns_db.get_turn(turn["id"])["state"] == "parked"
+        assert provider_agent._worker_still_working(sid) is True
+        release_handoff.set()
+        await asyncio.wait_for(terminal_done.wait(), 2)
+        wakes = turns_db.get_queued_turns(sid)
+        assert len(wakes) == 1 and wakes[0]["payload"]["task_ids"] == ["t-b"]
+        with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])), patch(
+            "app.core.task_registry.task_registry", new=task_registry,
+        ):
+            assert await session_runtime.SessionRuntime(wakes[0]).execute() == "completed"
+        assert turns_db.get_turn(turn["id"])["state"] == "completed"
+        assert turns_db.get_queued_turns(sid) == []
+    finally:
+        for task in tasks.values():
+            task._running = False
+            bt._background_tasks.pop(task.task_id, None)
+        release_handoff.set()
+        await asyncio.sleep(0)
+        task_registry.clear_session(sid)
 
 
 async def test_boot_reports_a_produced_monitor_park_to_the_workers_parent(

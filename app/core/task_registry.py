@@ -659,6 +659,39 @@ class TaskRegistry:
             return False
         return task_id in self._wake_suppressed.get(session_id, set())
 
+    def unpublished_monitor_wakes(
+        self, session_id: str, task_ids: List[str]
+    ) -> Dict[str, float]:
+        """Monitors among ``task_ids`` whose end is recorded but whose wake is not.
+
+        Maps each to the seconds since its end was recorded. A Monitor watcher
+        records the terminal status BEFORE it awaits the scheduler's durable
+        wake write; in that gap the park looks idle although a wake is coming.
+        Serving, wake-suppressed and already-woken Monitors are excluded, as is
+        one still running (that is live work, not a pending wake).
+        """
+        pending: Dict[str, float] = {}
+        if not session_id:
+            return pending
+        now = _now_epoch()
+        for task_id in task_ids or []:
+            if (
+                not self.is_monitor_shell_task(session_id, task_id)
+                or self.is_serving_monitor(session_id, task_id)
+                or self.is_wake_suppressed(session_id, task_id)
+                or self.is_woken(session_id, task_id)
+            ):
+                continue
+            record = self.get_task(session_id, task_id)
+            if record is None or record.get("status") == "running":
+                continue
+            try:
+                ended = datetime.fromisoformat(str(record.get("updatedAt"))).timestamp()
+            except (TypeError, ValueError):
+                ended = now
+            pending[task_id] = max(0.0, now - ended)
+        return pending
+
     # ------------------------------------------------------------------
     # Session-wide user-stop latch
     # ------------------------------------------------------------------

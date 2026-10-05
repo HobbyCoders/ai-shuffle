@@ -1167,24 +1167,76 @@ def _worker_still_working(worker_session_id: str) -> bool:
     # scheduler's durable wake write. In that gap the turn is idle and the
     # registry has no running work, but its parking remark is not a report.
     # Once the wake is published, wait for that queued/running turn as well.
+    # The gap is bounded (PENDING_WAKE_LIMIT_SECONDS): a wake write that
+    # failed never arrives, and _lost_monitor_wakes then reports it.
     try:
-        from app.core.task_registry import task_registry
-
         if turns_db.session_has_unsettled_turns(worker_session_id):
             return True
-        if task_registry.is_user_stopped(worker_session_id):
-            return False
-        return any(
-            task_registry.is_monitor_shell_task(worker_session_id, task_id)
-            and task_registry.get_task(worker_session_id, task_id) is not None
-            and not task_registry.is_serving_monitor(worker_session_id, task_id)
-            and not task_registry.is_wake_suppressed(worker_session_id, task_id)
-            and not task_registry.is_woken(worker_session_id, task_id)
-            for task_id in ((row.get("payload") or {}).get("task_ids") or [])
-        )
+        pending = _unpublished_monitor_wakes(worker_session_id, row)
+        return any(age < PENDING_WAKE_LIMIT_SECONDS for age in pending.values())
     except Exception:
         logger.debug("ProviderAgent: pending Monitor wake probe failed for %s", worker_session_id, exc_info=True)
         return False
+
+
+#: How long a finished Monitor's wake may stay unpublished before a parked
+#: worker is no longer treated as working. The write normally takes
+#: milliseconds; past this it failed, and nothing will wake the worker.
+PENDING_WAKE_LIMIT_SECONDS = 120.0
+
+
+def _unpublished_monitor_wakes(
+    worker_session_id: str, row: Optional[Mapping[str, Any]]
+) -> Dict[str, float]:
+    """``{task_id: seconds since its end}`` for the parked turn's finished
+    Monitors whose wake is not written yet. Empty for a user-stopped worker
+    (its wakes are suppressed on purpose). Raises on a registry error."""
+    from app.core.task_registry import task_registry
+
+    if task_registry.is_user_stopped(worker_session_id):
+        return {}
+    return task_registry.unpublished_monitor_wakes(
+        worker_session_id, list(((row or {}).get("payload") or {}).get("task_ids") or []),
+    )
+
+
+def _lost_monitor_wakes(worker_session_id: str) -> List[str]:
+    """Monitors of a still-parked worker whose wake did not arrive in time.
+
+    Non-empty only when the latest turn is parked, nothing is queued or
+    running, no background work is live, and a finished Monitor's wake has
+    been unpublished for :data:`PENDING_WAKE_LIMIT_SECONDS`. The worker's
+    last text is then a parking remark the worker never followed up, so the
+    dispatch must fail rather than book it as the report. Blocking; never
+    raises (an unreadable state answers "none lost").
+    """
+    try:
+        from app.db import turns as turns_db
+
+        row = turns_db.get_latest_run_turn(worker_session_id)
+        if (row or {}).get("state") != "parked":
+            return []
+        if _active_worker_background_work(worker_session_id):
+            return []
+        if turns_db.session_has_unsettled_turns(worker_session_id):
+            return []
+        pending = _unpublished_monitor_wakes(worker_session_id, row)
+        return sorted(tid for tid, age in pending.items() if age >= PENDING_WAKE_LIMIT_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.debug("ProviderAgent: lost Monitor wake probe failed for %s", worker_session_id, exc_info=True)
+        return []
+
+
+def lost_wake_error(worker_session_id: str, task_ids: List[str]) -> str:
+    """The failure text for a worker whose Monitor's completion never reached it."""
+    tasks = ", ".join(f"Monitor {tid}" for tid in task_ids[:4])
+    return (
+        f"The worker's background command ({tasks}) finished, but its completion "
+        "could not be delivered to the worker, so the worker never read the "
+        "result. Its last message is a note it wrote while waiting, not a "
+        "report. Re-dispatch it, or check the command's result yourself. Its "
+        f"transcript is in session {worker_session_id}."
+    )
 
 
 def _worker_deadlines(
@@ -2470,7 +2522,8 @@ async def dispatch_worker(
         # An idle worker is not necessarily a finished one. Two shapes:
         #
         # 1. it PARKED on its own background work (``_worker_still_working``) —
-        #    a park is not an ending, so wait, unbounded;
+        #    a park is not an ending, so wait, unbounded (a finished Monitor's
+        #    unpublished wake only up to PENDING_WAKE_LIMIT_SECONDS);
         # 2. its turn ENDED with background work still live. A worker has no
         #    wake seam it can rely on, so "tests are running, I'll report when
         #    they finish" is not describing a future and must not be booked as
@@ -2685,6 +2738,32 @@ async def dispatch_worker(
             )
 
         report, truncated = bound_report(final_text)
+
+        # Still parked, and a finished Monitor's wake never arrived (its write
+        # failed): the worker never read the result, so its text is a parking
+        # remark. Fail honestly instead of booking it as the report.
+        lost_wakes = await asyncio.to_thread(_lost_monitor_wakes, worker_session_id)
+        if lost_wakes:
+            error = lost_wake_error(worker_session_id, lost_wakes)
+            preview = error
+            status = "error"
+            logger.warning(
+                "ProviderAgent: worker %s stayed parked; wake for %s never arrived "
+                "within %.0fs", worker_session_id, lost_wakes, PENDING_WAKE_LIMIT_SECONDS,
+            )
+            if background:
+                report_path, report_chars = _persist_worker_report(
+                    parent_row, worker_session_id, report
+                )
+            return WorkerOutcome(
+                ok=False,
+                session_id=worker_session_id,
+                report=report,
+                truncated=truncated,
+                error=error,
+                usage=outcome["usage"],
+                frames_forwarded=feed.frames_forwarded,
+            )
 
         # The drain above ran its course and this worker's own background work
         # is STILL live. Its final message is an interim note (and any Monitor

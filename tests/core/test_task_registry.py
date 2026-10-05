@@ -387,6 +387,31 @@ class TestSdkBackgroundWork:
         assert reg.get_parking_background_work("s1") == []
         assert reg.get_parking_background_work("missing") == []
 
+    def test_unpublished_monitor_wakes_ages_from_the_recorded_end(self, reg, monkeypatch):
+        """#1869 item 1: only a finished Monitor with no wake yet is pending,
+        and its age counts from when its end was recorded, not its start."""
+        import app.core.task_registry as tr
+
+        clock = {"now": "2026-10-05T10:00:00+00:00"}
+        monkeypatch.setattr(tr, "_now_iso", lambda: clock["now"])
+        for tid, serves in (("done", False), ("running", False), ("serving", True),
+                            ("stopped", False), ("woken", False)):
+            reg.start_task("s1", tid, "shell", tid)
+            reg.mark_monitor_shell_task("s1", tid, serves=serves)
+        reg.start_task("s1", "plain", "shell", "not a Monitor")
+        clock["now"] = "2026-10-05T10:30:00+00:00"
+        for tid in ("done", "serving", "stopped", "woken", "plain"):
+            reg.complete_task("s1", tid, "completed")
+        reg.suppress_wake("s1", "stopped")
+        reg.mark_woken("s1", "woken")
+        monkeypatch.setattr(
+            tr, "_now_epoch",
+            lambda: tr.datetime.fromisoformat("2026-10-05T10:30:45+00:00").timestamp(),
+        )
+        ids = ["done", "running", "serving", "stopped", "woken", "plain", "unknown"]
+        assert reg.unpublished_monitor_wakes("s1", ids) == {"done": 45.0}
+        assert reg.unpublished_monitor_wakes("", ids) == {}
+
     def test_completed_marked_shell_excluded(self, reg):
         reg.start_task("s1", "sh1", "shell", "build")
         reg.mark_sdk_background_task("s1", "sh1")

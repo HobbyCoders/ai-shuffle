@@ -58,6 +58,30 @@ def test_park_does_not_borrow_usage_across_an_abort_or_older_park():
             assert turn_outcome.final_turn_outcome("s1")["usage"] == {}
 
 
+def test_park_does_not_borrow_previous_turns_usage_across_turn_started():
+    # The parked turn's own done event was never written: the nearest earlier
+    # completion belongs to the PREVIOUS turn and must not be reported.
+    with _events(
+        {"seq": 1, "turn_id": "old", "event_type": "turn.completed",
+         "payload": {"usage": {"tokens_out": 99}}},
+        {"seq": 2, "turn_id": "t2", "event_type": "turn.started", "payload": {}},
+        {"seq": 3, "turn_id": "t2", "event_type": "assistant.text_delta",
+         "payload": {"text": "waiting on a Monitor"}},
+        {"seq": 4, "event_type": "turn.parked", "payload": {}},
+    ):
+        assert turn_outcome.final_turn_outcome("s1")["usage"] == {}
+
+
+def test_park_keeps_its_own_turns_usage():
+    with _events(
+        {"seq": 1, "turn_id": "t2", "event_type": "turn.started", "payload": {}},
+        {"seq": 2, "turn_id": "t2", "event_type": "turn.completed",
+         "payload": {"usage": {"tokens_out": 5}}},
+        {"seq": 3, "event_type": "turn.parked", "payload": {}},
+    ):
+        assert turn_outcome.final_turn_outcome("s1")["usage"] == {"tokens_out": 5}
+
+
 def test_aborted_and_parked_turns_set_terminal_found():
     with _events(
         {"seq": 1, "turn_id": "t1", "event_type": "turn.aborted",

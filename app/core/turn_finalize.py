@@ -232,6 +232,21 @@ async def settle_stopped_monitor_parks(session_id: str) -> bool:
             return False
         if await asyncio.to_thread(pending_reconcile.nonterminal_agent_task_ids, session_id):
             return False
+        # Another Monitor of this park has ended and its wake is being written:
+        # that wake ends the park. Settling now would hand the parking remark
+        # to the dispatch as the report and then run the wake anyway. A user
+        # Stop suppresses that wake, so it never holds the park; neither does
+        # a wake that missed the pending-wake limit (its write failed).
+        if not task_registry.is_user_stopped(session_id):
+            from app.core.provider_agent import PENDING_WAKE_LIMIT_SECONDS
+
+            latest = await asyncio.to_thread(turns_db.get_latest_run_turn, session_id)
+            if (latest or {}).get("state") == "parked":
+                pending = task_registry.unpublished_monitor_wakes(
+                    session_id, list((latest.get("payload") or {}).get("task_ids") or []),
+                )
+                if any(age < PENDING_WAKE_LIMIT_SECONDS for age in pending.values()):
+                    return False
         settled = await asyncio.to_thread(turns_db.settle_parked_turns, session_id)
         await clear_parked_marker_if_idle(session_id)
         return bool(settled)
