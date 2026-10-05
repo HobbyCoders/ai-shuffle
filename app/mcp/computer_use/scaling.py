@@ -15,15 +15,24 @@ Key facts that make the math correct:
   ``mss`` (capture) and ``pynput`` (input) share that same physical-pixel space.
   Without this, clicks land in the wrong place on any non-100%-scaled monitor.
   Once DPI-aware, DPI never enters the math again.
+
+Each screenshot is an observation with an id (``screenshot_id``). Coordinates
+belong to one observation: input is mapped through the current screenshot of
+the selected display, and an action that names an older screenshot, or comes
+after the mapping was invalidated (display switch, layout change, release,
+cancelled call, new owner or turn), is refused with STALE_OBSERVATION rather
+than clicked somewhere else.
 """
 
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -36,9 +45,54 @@ DEFAULT_VIRTUAL_SIZE = (1280, 800)
 # Zoom images: native pixels, fit to ZOOM_MAX_SIDE, small crops upscaled (at
 # most ZOOM_MAX_UPSCALE) so their long side reaches ZOOM_MIN_SIDE and text
 # stays legible to the model.
-ZOOM_MAX_SIDE = 1600
+ZOOM_MAX_SIDE = 1568
 ZOOM_MIN_SIDE = 800
 ZOOM_MAX_UPSCALE = 4.0
+
+# What the model actually sees. Fluid's condition_image shrinks any tool image
+# whose long edge exceeds 1568 px, and Anthropic's API also shrinks images over
+# about 1.15 megapixels. A shrink after capture silently breaks the pixel
+# mapping (a 2% shrink is ~25 px at the far edge), so every image is sized to
+# fit both limits here, before its mapping is recorded.
+MODEL_MAX_EDGE = 1568
+MODEL_MAX_PIXELS = 1_150_000
+
+
+def _model_fit(width: int, height: int) -> float:
+    """Largest scale <= 1 that keeps a width x height image within the model's
+    image budget (long edge and area)."""
+    return min(1.0, MODEL_MAX_EDGE / max(width, height, 1),
+               math.sqrt(MODEL_MAX_PIXELS / max(1, width * height)))
+
+def fit_virtual_size(cfg: object) -> tuple[int, int]:
+    """The screenshot target from a profile's computer-use config, within the
+    model's image budget (the one clamp: capture applies ``_model_fit`` again).
+
+    A missing, null or invalid side falls back to the default rather than
+    failing the server build (which turned desktop control off for the
+    session). An oversized target is shrunk, aspect ratio kept.
+    """
+    cfg = cfg if isinstance(cfg, dict) else {}
+    sizes = []
+    for key, default in zip(("virtual_width", "virtual_height"), DEFAULT_VIRTUAL_SIZE):
+        try:
+            value = int(cfg.get(key) or default)
+        except (TypeError, ValueError, OverflowError):
+            value = default
+        sizes.append(value if value > 0 else default)
+    width, height = sizes
+    scale = _model_fit(width, height)
+    if scale < 1.0:
+        # The epsilon keeps float error from shaving a pixel off an exact fit.
+        width = max(1, int(width * scale + 1e-9))
+        height = max(1, int(height * scale + 1e-9))
+    return width, height
+
+# Process-wide, so an id from another session or server never matches.
+_OBSERVATION_SEQ = itertools.count(1)
+# How far (virtual pixels) a coordinate may sit outside the screenshot and
+# still be clamped onto its edge. Further out is a wrong coordinate.
+_EDGE_SLACK = 2.0
 
 _dpi_lock = threading.Lock()
 _dpi_done = False
@@ -278,8 +332,9 @@ class DisplayManager:
             raw = sct.grab(region)
         pw, ph = raw.width, raw.height
 
-        # Only ever downscale; never upscale a small display.
-        scale = min(self.virtual_w / pw, self.virtual_h / ph, 1.0)
+        # Only ever downscale; never upscale a small display. Never exceed what
+        # the model receives unchanged, whatever virtual size was configured.
+        scale = min(self.virtual_w / pw, self.virtual_h / ph, 1.0, _model_fit(pw, ph))
         vw, vh = max(1, round(pw * scale)), max(1, round(ph * scale))
 
         img = Image.frombytes("RGB", (pw, ph), raw.rgb)
@@ -292,11 +347,14 @@ class DisplayManager:
         img.save(buf, format="PNG")
         png = buf.getvalue()
 
+        shot_id = f"shot-{next(_OBSERVATION_SEQ)}"
         self._map[self.selected_index] = {
             "scale": scale, "pw": pw, "ph": ph,
             "left": geo.left, "top": geo.top, "vw": vw, "vh": vh,
+            "id": shot_id, "at": time.time(),
         }
         info = {
+            "screenshot_id": shot_id,
             "display": self.selected_index,
             "virtual_width": vw, "virtual_height": vh,
             "physical_width": pw, "physical_height": ph,
@@ -304,16 +362,30 @@ class DisplayManager:
         }
         return png, info
 
-    def mapped_geometry(self) -> dict:
-        """Reject input based on an image captured before a topology change."""
+    def current_observation(self) -> Optional[str]:
+        """Id of the screenshot input is mapped through, or None."""
+        m = self._map.get(self.selected_index)
+        return m.get("id") if m else None
+
+    def mapped_geometry(self, screenshot_id: Optional[str] = None) -> dict:
+        """The current screenshot's mapping. Refuses input based on an image
+        that is gone (never taken, invalidated, or captured before a topology
+        change) or on a named screenshot that is not the current one."""
+        from app.mcp.computer_use.errors import stale
         m = self._map.get(self.selected_index)
         if m is None:
-            raise ValueError("take a screenshot first so coordinates can be mapped")
+            raise stale(f"No current screenshot of Display {self.selected_index}. Take a "
+                        "screenshot first so coordinates can be mapped.")
+        if screenshot_id is not None and str(screenshot_id) != m.get("id"):
+            raise stale(f"Screenshot {screenshot_id} is not the current one ({m.get('id')}) for "
+                        f"Display {self.selected_index}. Use the current screenshot's coordinates "
+                        "or take a new screenshot.")
         geo = next((d for d in self.list_displays() if d.index == self.selected_index), None)
         if geo is None or (geo.left, geo.top, geo.width, geo.height) != (
                 m["left"], m["top"], m["pw"], m["ph"]):
             self._map.pop(self.selected_index, None)
-            raise ValueError("display layout changed; take a fresh screenshot before acting")
+            raise stale("The display layout changed since the screenshot (layout changed). "
+                        "Take a fresh screenshot before acting.")
         return m
 
     @staticmethod
@@ -334,6 +406,8 @@ class DisplayManager:
             ratio = min(ZOOM_MAX_UPSCALE, ZOOM_MIN_SIDE / long_side)
         else:
             ratio = 1.0
+        # Then fit the model's image budget (area as well as long edge).
+        ratio *= _model_fit(round(img.width * ratio), round(img.height * ratio))
         if ratio != 1.0:
             img = img.resize((max(1, round(img.width * ratio)), max(1, round(img.height * ratio))),
                              Image.Resampling.LANCZOS)
@@ -373,14 +447,24 @@ class DisplayManager:
             raise ValueError("that area is not on any display")
         png, iw, ih = self._grab_zoomed(x0, y0, x1 - x0, y1 - y0)
         shot = self.screenshot_rect(x0, y0, x1, y1)
+        m = self._map.get(self.selected_index)
         info = {"region": [x0, y0, x1 - x0, y1 - y0], "display": self.selected_index,
                 "image_width": iw, "image_height": ih,
                 "coordinate_space": "full_screenshot", "screenshot_region": shot}
-        if shot:
-            info["zoom_factor"] = round(iw / (shot[2] - shot[0]), 3)
+        if shot and m:
+            # Map the WHOLE image, not just its part on this display: for a
+            # window that spans monitors, image (0, 0) is left of / above the
+            # screenshot, and screenshot_region starts outside it (negative or
+            # past the edge). Points off the screenshot are refused on input.
+            s = m["scale"] or 1.0
+            info["screenshot_region"] = [round((x0 - m["left"]) * s, 1), round((y0 - m["top"]) * s, 1),
+                                         round((x1 - m["left"]) * s, 1), round((y1 - m["top"]) * s, 1)]
+            info["zoom_factor"] = round(iw / ((x1 - x0) * s), 3)
+            info["screenshot_id"] = m.get("id")
         return png, info
 
-    def capture_region(self, region: "list[float]") -> tuple[bytes, dict]:
+    def capture_region(self, region: "list[float]",
+                       screenshot_id: Optional[str] = None) -> tuple[bytes, dict]:
         """Capture a sub-region of the selected display at higher detail (zoom).
 
         ``region`` is ``[x0, y0, x1, y1]`` in the selected display's most-recent
@@ -388,7 +472,7 @@ class DisplayManager:
         resolution or better (see ``_grab_zoomed``), so the model can read
         small text. Requires a prior ``capture()`` of this display.
         """
-        m = self.mapped_geometry()
+        m = self.mapped_geometry(screenshot_id)
         if len(region) != 4 or not all(math.isfinite(float(v)) for v in region):
             raise ValueError("region must contain four finite coordinates")
         scale = m["scale"] or 1.0
@@ -407,17 +491,27 @@ class DisplayManager:
                      "image_width": iw, "image_height": ih,
                      "coordinate_space": "full_screenshot",
                      "screenshot_region": [x0, y0, x1, y1],
-                     "zoom_factor": round(iw / (x1 - x0), 3)}
+                     "zoom_factor": round(iw / (x1 - x0), 3), "screenshot_id": m.get("id")}
 
     # ----- coordinate mapping ------------------------------------------------
 
-    def to_physical(self, vx: float, vy: float) -> tuple[int, int]:
+    def to_physical(self, vx: float, vy: float,
+                    screenshot_id: Optional[str] = None) -> tuple[int, int]:
         """Map a virtual coordinate on the selected display to a global physical
-        ``(x, y)`` for input. Requires a prior ``capture()`` of this display.
+        ``(x, y)`` for input. Requires a current ``capture()`` of this display
+        (and, when ``screenshot_id`` is given, that it is that screenshot).
         """
-        m = self.mapped_geometry()
+        from app.mcp.computer_use.errors import ActionError
+        m = self.mapped_geometry(screenshot_id)
         if not all(math.isfinite(float(v)) for v in (vx, vy)):
-            raise ValueError("coordinates must be finite numbers")
+            raise ActionError("INVALID_ARGUMENT", "coordinates must be finite numbers")
+        if not (-_EDGE_SLACK <= vx <= m["vw"] - 1 + _EDGE_SLACK
+                and -_EDGE_SLACK <= vy <= m["vh"] - 1 + _EDGE_SLACK):
+            # Clamping a far-off point onto the edge clicks something else
+            # (often the taskbar). Refuse instead.
+            raise ActionError("INVALID_ARGUMENT",
+                              f"[{vx:g}, {vy:g}] is outside the screenshot ({m['vw']}x{m['vh']}). "
+                              "Use pixels of the current screenshot.")
         # Clamp the virtual coordinate into the captured image bounds.
         vx = min(max(0.0, float(vx)), m["vw"] - 1)
         vy = min(max(0.0, float(vy)), m["vh"] - 1)

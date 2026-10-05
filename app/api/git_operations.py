@@ -468,7 +468,8 @@ async def _release_session_cwd(session_id: Optional[str]) -> bool:
             await asyncio.to_thread(
                 turns.interrupt_turn, session_id, "stop", turn_id=runtime.turn_id,
             )
-            await asyncio.wait_for(runtime.interrupt("stop", escalation_timeout=1.0), 10)
+            await asyncio.wait_for(
+                runtime.interrupt("stop", escalation_timeout=1.0, source="checkout_cleanup"), 10)
         if executions:
             await asyncio.wait_for(
                 asyncio.shield(asyncio.gather(*executions, return_exceptions=True)), 10,

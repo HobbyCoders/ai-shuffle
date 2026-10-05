@@ -2656,6 +2656,7 @@ class SessionRuntime:
         mode: str = "stop",
         *,
         escalation_timeout: Optional[float] = None,
+        source: Optional[str] = None,
     ) -> str:
         """React to this turn having been flipped to ``interrupting`` (the
         ``turns.interrupt_turn`` guarded transition ran at the command layer).
@@ -2703,8 +2704,14 @@ class SessionRuntime:
         # workers. Honor the shared stop_background bit on the owning runner too.
         # The local WebSocket path also calls this eagerly for latency; stop-all is
         # deliberately idempotent, so the second call sees no active tasks.
+        # Who asked for the interrupt, for the computer-use halt below: a direct
+        # caller names itself (shutdown, checkout cleanup); otherwise the
+        # durable row says (the chat Stop, a usage limit). None stays unknown,
+        # never a guessed user Stop.
+        recorded_source: Optional[str] = None
         try:
             interrupted_row = await asyncio.to_thread(turns_db.get_turn, tid)
+            recorded_source = ((interrupted_row or {}).get("payload") or {}).get("interrupt_source")
             if interrupted_row and interrupted_row.get("stop_background"):
                 from app.core.query_session_lifecycle import stop_all_background_tasks
 
@@ -2730,16 +2737,18 @@ class SessionRuntime:
                 exc_info=True,
             )
 
-        # A user Stop kills the agent AND its computer-use control together:
-        # halt synthetic input for this session and drop its access grants, so
-        # nothing the turn was doing can keep driving the screen. The
-        # session's next turn re-arms (see execute). Steering ('send_now') is
-        # not a Stop — control continues across the replacement query.
+        # A Stop kills the agent AND its computer-use control together: halt
+        # synthetic input for this session and drop its access grants, so
+        # nothing the turn was doing can keep driving the screen. The halt
+        # records the interrupt's true source, so the model is told the app
+        # interrupted it (shutdown, usage limit) and not that the user did.
+        # The session's next turn re-arms (see execute). Steering ('send_now')
+        # is not a Stop; control continues across the replacement query.
         if mode == "stop":
             try:
                 from app.mcp.computer_use import abort, access
 
-                abort.request_stop(sid)
+                abort.request_stop(sid, reason=abort.interrupt_reason(source or recorded_source))
                 access.revoke(sid)
             except Exception:
                 logger.warning(
@@ -2861,6 +2870,14 @@ class SessionRuntime:
         self._unowned = True
         if self._abort_reason is None:
             self._abort_reason = reason
+        try:
+            # Nobody owns the run now: stop its desktop input too, saying why.
+            from app.mcp.computer_use import abort as cu_abort
+
+            cu_abort.request_stop(sid, reason=cu_abort.interrupt_reason(reason))
+        except Exception:
+            logger.debug("SessionRuntime: computer-use halt after %s failed for %s",
+                         reason, sid, exc_info=True)
         self._cancel_pump()
         try:
             from app.core.query_session_lifecycle import interrupt_session

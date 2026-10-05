@@ -176,7 +176,7 @@ async def test_stop_and_move_stops_the_work_first():
             patch("app.core.desktop_lifecycle.stop_session_work", stop):
         await sh.queue_move("s1", "DesktopWorker", stop=True)
         sh.cancel("s1")
-    stop.assert_awaited_once_with("s1")
+    stop.assert_awaited_once_with("s1", source="session_handoff")
 
 
 async def test_route_asks_the_owning_worker():

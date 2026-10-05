@@ -277,6 +277,74 @@ describe("runBatch", () => {
     expect(received).toEqual({ kind: "hover", ref: "e6" });
   });
 
+  it("treats a body that says ok:false (a timed-out wait) as a failed step and reports what did not run", async () => {
+    const timedOut = {
+      inputSchema: okTool.inputSchema,
+      run: async (): Promise<McpToolResult> => ({ content: [{ type: "text", text: '{"ok":false,"matched":false,"timed_out":true}' }] }),
+    };
+    const ran: string[] = [];
+    const lookup = (name: string) => name === "browser_wait" ? timedOut : {
+      inputSchema: okTool.inputSchema,
+      run: async (): Promise<McpToolResult> => { ran.push(name); return okTool.run(); },
+    };
+    const res = await runBatch(session, { actions: ['{"tool":"browser_wait"}', '{"tool":"browser_act"}', '{"tool":"browser_act"}'] }, lookup);
+    const body = JSON.parse(firstText(res));
+    expect(body).toMatchObject({ ok: false, count: 1, not_run: 2 });
+    expect(ran).toEqual([]);
+  });
+
+  it("passes a failed step's outcome through so the model knows whether it ran", async () => {
+    const unknown = {
+      inputSchema: okTool.inputSchema,
+      run: async (): Promise<McpToolResult> => ({
+        content: [{ type: "text", text: '{"ok":false,"code":"outcome_unknown","error":"outcome_unknown: type may have taken effect","outcome":"unknown"}' }],
+        isError: true,
+      }),
+    };
+    const res = await runBatch(session, { actions: ['{"tool":"a"}', '{"tool":"u"}', '{"tool":"a"}'] }, (name) => name === "u" ? unknown : okTool);
+    const body = JSON.parse(firstText(res));
+    expect(body).toMatchObject({ ok: false, count: 2, not_run: 1 });
+    expect(body.results[1]).toEqual({ tool: "u", ok: false, error: "outcome_unknown: type may have taken effect", outcome: "unknown" });
+  });
+
+  it("after a step that navigated, runs only observation steps", async () => {
+    const calls: string[] = [];
+    const tool = (name: string, text = '{"ok":true}') => ({
+      inputSchema: { type: "object", properties: { kind: { type: "string" }, ref: { type: "string" }, op: { type: "string" } }, additionalProperties: false } as JsonSchema,
+      run: async (): Promise<McpToolResult> => { calls.push(name); return { content: [{ type: "text", text }] }; },
+    });
+    const lookup = (name: string) => name === "browser_act"
+      ? tool(name, '{"ok":true,"url_changed":true,"dom_mutated":"major","snapshot_stale":true}')
+      : tool(name);
+    const res = await runBatch(session, { actions: [
+      '{"tool":"browser_act","input":{"kind":"click","ref":"e1"}}',
+      '{"tool":"browser_wait"}',
+      '{"tool":"browser_tabs","input":{"op":"list"}}',
+      '{"tool":"browser_act","input":{"kind":"click","ref":"e2"}}',
+      '{"tool":"browser_snapshot"}',
+    ] }, lookup);
+    const body = JSON.parse(firstText(res));
+    expect(calls).toEqual(["browser_act", "browser_wait", "browser_tabs"]);
+    expect(body).toMatchObject({ ok: true, count: 3, not_run: 2 });
+    expect(body.stopped).toMatch(/step 1 changed the page .* step 4 \(browser_act\)/);
+  });
+
+  it("treats a new tab or a pending dialog as a page change too", async () => {
+    for (const text of [
+      '{"ok":true,"url_changed":false,"events":[{"type":"new_tab","tab_id":"tab2","url":"about:blank"}]}',
+      '{"ok":true,"paused_by_dialog":true,"dialog":{"type":"confirm","message":"sure?"}}',
+    ]) {
+      const calls: string[] = [];
+      const lookup = (name: string) => ({
+        inputSchema: okTool.inputSchema,
+        run: async (): Promise<McpToolResult> => { calls.push(name); return { content: [{ type: "text", text: calls.length === 1 ? text : '{"ok":true}' }] }; },
+      });
+      const res = await runBatch(session, { actions: ['{"tool":"browser_act"}', '{"tool":"browser_act"}'] }, lookup);
+      expect(calls).toHaveLength(1);
+      expect(JSON.parse(firstText(res)).not_run).toBe(1);
+    }
+  });
+
   it("rejects empty and over-cap action lists", async () => {
     expect((await runBatch(session, { actions: [] }, () => okTool)).isError).toBe(true);
     const many = Array.from({ length: BATCH_MAX_ACTIONS + 1 }, () => '{"tool":"a"}');
@@ -289,7 +357,7 @@ describe("runBatch", () => {
       run: async (): Promise<McpToolResult> => ({
         content: [
           { type: "image", data: "aGVsbG8=", mimeType: "image/jpeg" },
-          { type: "text", text: "1280x720 — coordinates for browser_act must use this space" },
+          { type: "text", text: '{"screenshot_id":"s1","width":1280,"height":720}' },
         ],
       }),
     };
@@ -304,7 +372,7 @@ describe("runBatch", () => {
     const images = res.content.filter((c) => c.type === "image");
     expect(images).toEqual([{ type: "image", data: "aGVsbG8=", mimeType: "image/jpeg" }]);
     // summary text still comes from the sub-result's text part
-    expect(body.results[1].summary).toMatch(/1280x720/);
+    expect(body.results[1].summary).toMatch(/"width":1280/);
   });
 });
 

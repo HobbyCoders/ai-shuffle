@@ -17,6 +17,8 @@ Behavior knobs:
     the client's connect timeout can be exercised.
   * ``FLUID_FAKE_CALL_SLEEP_S`` — sleep that many seconds before answering
     any ``tools/call``, so the client's call timeout can be exercised.
+  * ``FLUID_FAKE_INSTRUCTIONS`` — server ``instructions`` to send in the
+    handshake result.
 """
 
 import json
@@ -129,6 +131,8 @@ def _handle(msg: dict) -> dict | None:
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "fakesrv", "version": "0.1.0"},
         }
+        if os.environ.get("FLUID_FAKE_INSTRUCTIONS"):
+            result["instructions"] = os.environ["FLUID_FAKE_INSTRUCTIONS"]
         if method == "server/discover":
             # DiscoverResult requires supportedVersions; without it a 2.0
             # client rejects the reply and falls back to initialize().

@@ -8,7 +8,7 @@ secondary monitor at a different DPI/scale.
 
 import pytest
 
-from app.mcp.computer_use.scaling import DisplayManager, DisplayInfo
+from app.mcp.computer_use.scaling import DisplayInfo, DisplayManager
 
 
 def _mgr_with_map(selected, entry):
@@ -66,15 +66,19 @@ class TestToPhysical:
         with pytest.raises(ValueError, match="screenshot"):
             mgr.to_physical(10, 10)
 
-    def test_out_of_bounds_virtual_is_clamped(self):
+    def test_edge_coordinates_clamp_but_far_ones_are_refused(self):
         mgr = _mgr_with_map(1, {
             "scale": 0.5, "pw": 2560, "ph": 1600,
             "left": 0, "top": 0, "vw": 1280, "vh": 800,
         })
-        # Way past the virtual image — clamps to physical monitor edge.
-        gx, gy = mgr.to_physical(99999, 99999)
-        assert gx <= 2559 and gy <= 1599
-        assert gx >= 0 and gy >= 0
+        # On (or a pixel past) the edge clamps onto the monitor.
+        assert mgr.to_physical(1280, 800) == (2558, 1598)
+        assert mgr.to_physical(-1, -1) == (0, 0)
+        # Far outside the image is a wrong coordinate: clamping it would
+        # click something else (often the taskbar), so it is refused.
+        with pytest.raises(ValueError, match="outside the screenshot") as err:
+            mgr.to_physical(99999, 99999)
+        assert err.value.code == "INVALID_ARGUMENT"
 
     def test_layout_change_requires_new_screenshot(self):
         mgr = _mgr_with_map(2, {"scale": 1, "pw": 100, "ph": 100,
@@ -108,3 +112,66 @@ class TestDefaultIndex:
 
     def test_empty_defaults_to_one(self):
         assert DisplayManager._default_index([]) == 1
+
+
+class TestModelImageBudget:
+    """Images must reach the model unchanged: fluid shrinks tool images over a
+    1568 px long edge and Anthropic's API over ~1.15 MP, which would break the
+    pixel mapping recorded at capture time."""
+
+    @pytest.fixture
+    def big_monitor(self, monkeypatch):
+        import sys
+        from types import SimpleNamespace
+
+        from app.mcp.computer_use import scaling
+
+        Image = pytest.importorskip("PIL.Image")
+        monitors = [{"left": 0, "top": 0, "width": 3840, "height": 2160},
+                    {"left": 0, "top": 0, "width": 3840, "height": 2160}]
+
+        class Capture:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            @property
+            def monitors(self):
+                return monitors
+
+            def grab(self, region):
+                img = Image.new("RGB", (region["width"], region["height"]))
+                return SimpleNamespace(width=img.width, height=img.height, rgb=img.tobytes())
+        monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=Capture))
+        monkeypatch.setattr(scaling, "_ensure_dpi_awareness", lambda: None)
+        return Image
+
+    def test_screenshot_fits_budget_even_with_a_large_virtual_size(self, big_monitor):
+        import base64
+        import io
+
+        from app.mcp.computer_use.scaling import MODEL_MAX_EDGE, MODEL_MAX_PIXELS
+
+        mgr = DisplayManager(virtual_size=(4000, 4000))
+        png, info = mgr.capture()
+        img = big_monitor.open(io.BytesIO(png))
+        assert max(img.size) <= MODEL_MAX_EDGE and img.width * img.height <= MODEL_MAX_PIXELS
+        assert (info["virtual_width"], info["virtual_height"]) == img.size
+        # The recorded mapping matches the image the model sees.
+        gx, gy = mgr.to_physical(img.width - 1, img.height - 1)
+        assert gx == pytest.approx(3839, abs=3) and gy == pytest.approx(2159, abs=3)
+        assert base64.b64encode(png)
+
+    def test_zoom_of_a_large_crop_fits_budget(self, big_monitor):
+        import io
+
+        from app.mcp.computer_use.scaling import MODEL_MAX_EDGE, MODEL_MAX_PIXELS
+
+        mgr = DisplayManager()
+        mgr.capture()
+        png, info = mgr.capture_region([0, 0, 1280, 720])
+        img = big_monitor.open(io.BytesIO(png))
+        assert max(img.size) <= MODEL_MAX_EDGE and img.width * img.height <= MODEL_MAX_PIXELS
+        assert info["zoom_factor"] == pytest.approx(img.width / 1280, abs=0.001)

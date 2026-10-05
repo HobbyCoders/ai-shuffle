@@ -106,6 +106,7 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | charset-normalizer | 3.5.1 | MIT | https://github.com/jawah/charset_normalizer |
 | click | 8.5.0 | BSD-3-Clause | https://github.com/pallets/click/ |
 | colorama | 0.4.6 | BSD License | https://github.com/tartley/colorama |
+| comtypes | 1.4.17 | MIT | https://github.com/enthought/comtypes |
 | coverage | 7.16.1 | Apache-2.0 | https://github.com/coveragepy/coveragepy |
 | cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
 | discord.py | 2.7.1 | MIT License | https://pypi.org/project/discord-py/ |

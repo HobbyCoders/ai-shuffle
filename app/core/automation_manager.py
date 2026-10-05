@@ -1252,7 +1252,7 @@ class AutomationManager:
             session_id, timeout=timeout_seconds
         )
         if not idle:
-            await turn_manager.interrupt_async(session_id, "stop")
+            await turn_manager.interrupt_async(session_id, "stop", source="automation_timeout")
             raise asyncio.TimeoutError()
 
         # 5. Read the final outcome from the durable event log (the v2 path no

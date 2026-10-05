@@ -476,9 +476,10 @@ def test_a_shutdown_of_the_childs_worker_leaves_it_resumable(workers, monkeypatc
     class Runtime:
         turn_id = turn["id"]
 
-        async def interrupt(self, mode, escalation_timeout=None):
+        async def interrupt(self, mode, escalation_timeout=None, source=None):
             # What the live turn does on a stop: it ends aborted.
             assert mode == "stop"
+            assert source == "server_shutdown"
             session_events.append_events(child, [{
                 "type": "turn.aborted", "turn_id": turn["id"],
                 "payload": {"message": "The chat was interrupted before it finished."}}])

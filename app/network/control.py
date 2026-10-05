@@ -305,9 +305,12 @@ async def create_session(device_id: str, session: Dict[str, Any], turn: Optional
 
 
 async def interrupt(device_id: str, session_id: str, mode: str, *, stop_background: bool = False,
-                    turn_id: Optional[str] = None) -> Dict[str, Any]:
-    return await call(device_id, "interrupt", {"session_id": session_id, "mode": mode,
-                                               "stop_background": stop_background, "turn_id": turn_id})
+                    turn_id: Optional[str] = None, source: Optional[str] = None) -> Dict[str, Any]:
+    body = {"session_id": session_id, "mode": mode, "stop_background": stop_background, "turn_id": turn_id}
+    if source:
+        # Who asked (the chat Stop, a usage limit), recorded on the owner's turn.
+        body["source"] = source
+    return await call(device_id, "interrupt", body)
 
 
 async def answer_permission(device_id: str, *, request_id: str, session_id: str, decision: str,
@@ -654,9 +657,12 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     from app.core import turn_manager
     session_id = str(body.get("session_id") or "")
     _require_owned(session_id)
+    source = body.get("source")
+    source = source[:64] if isinstance(source, str) and source else None
     row = await turn_manager.interrupt_async(session_id, str(body.get("mode") or "stop"),
                                              stop_background=bool(body.get("stop_background")),
-                                             turn_id=body.get("turn_id") or None)
+                                             turn_id=body.get("turn_id") or None,
+                                             **({"source": source} if source else {}))
     if row is not None and body.get("stop_background"):
         from app.core.query_session_lifecycle import stop_all_background_tasks
         await stop_all_background_tasks(session_id, user_stop=True)

@@ -18,89 +18,21 @@ import {
 } from "./schemas.js";
 
 export const TOOL_CATALOG = [
-  { name: "browser_status", description: "Current shared browser tabs, viewport, busy state, agent/human control and effective runtime upload configuration. Optional upload_paths checks eligibility without uploading. Available during human control; never creates a page.", inputSchema: statusSchema
-  },
-  { name: "browser_wait", description: "Bounded wait. condition is exactly one of url | text | element — there is no selector condition: for a CSS selector pass condition=element with selector=... (or ref=...). Element state: visible (default), hidden, attached, detached. Default 5s, maximum 15s; interrupted by human takeover.", inputSchema: waitSchema
-  },
-  {
-    name: "browser_navigate",
-    description:
-      "Open a URL (bare domains get https://) or go back/forward. Acquires the page, waits up to 1.5s for visible controls, and returns a snapshot; this is not proof of app readiness. " +
-      "The browser holds NO session cookies for the user's own apps: a landing on another origin (reported as redirected_to_origin) is a sign-in demand it cannot satisfy itself.",
-    inputSchema: navigateSchema
-  },
-  {
-    name: "browser_snapshot",
-    description:
-      "Return the page's accessibility tree as refs you can act on. Refs expire on every navigation and after a major DOM change (browser_act reports snapshot_stale: true when that happened) — never reuse refs across those. Take ONE full snapshot per page, then use filter=interactive or scope_ref=eN to re-read only the part that changed; a large page re-snapshotted in full each time costs thousands of tokens per call.",
-    inputSchema: snapshotSchema
-  },
-  {
-    name: "browser_act",
-    description:
-      "Perform one action (click/type/fill/key/hover/scroll/select/drag/dblclick) on exactly one of ref or coordinate — scroll included; only key may omit both to use the focused element. Refs expire on navigation and after a major DOM change (take a new snapshot). Coordinates are in the pixel space of the last browser_screenshot and need one taken since the previous action or navigation: if that screenshot is stale the server re-captures the viewport itself when the view is unchanged, otherwise it returns stale_screenshot with a fresh screenshot attached for you to re-aim from. Returns a terse change summary.",
-    inputSchema: actSchema
-  },
-  {
-    name: "browser_screenshot",
-    description:
-      "Capture the viewport (or a region / full page). Downscaled JPEG; the returned pixel dimensions define the coordinate space for browser_act. Any action, navigation, tab or viewport change invalidates it for coordinate use. Use it only when layout or rendering is the question — snapshots are cheaper and give refs.",
-    inputSchema: screenshotSchema
-  },
-  {
-    name: "browser_find",
-    description:
-      "Find elements by a plain-language query without pulling the whole tree into context. Returns up to 20 act-able refs; falls back to text matching if the model sub-call is unavailable.",
-    inputSchema: findSchema
-  },
-  {
-    name: "browser_read_text",
-    description:
-      "Reader-mode text of the current page: main article/content region (falls back to body). Returns title, url, and text (capped ~30k chars).",
-    inputSchema: readTextSchema
-  },
-  {
-    name: "browser_eval",
-    description:
-      "Run JavaScript in the page (top-level await allowed; last expression is returned). Result is JSON-ish, size-capped; errors return message + top stack frame, plus recent_requests (status and content-type) so a failed fetch names itself.",
-    inputSchema: evalSchema
-  },
-  {
-    name: "browser_console",
-    description:
-      "Read buffered console messages. `pattern` is REQUIRED (substring/regex). only_errors, limit (default 20, newest last), clear.",
-    inputSchema: consoleSchema
-  },
-  {
-    name: "browser_network",
-    description:
-      "Two-phase: without request_id, list recorded requests (filter by url_pattern); with request_id, return that response's text body (capped ~20k).",
-    inputSchema: networkSchema
-  },
-  {
-    name: "browser_tabs",
-    description:
-      "Manage tabs: op=list|create|close|select. Every other tool acts on the current tab; select moves that pointer. close rejects the last tab.",
-    inputSchema: tabsSchema
-  },
-  {
-    name: "browser_resize",
-    description:
-      "Set the viewport: preset=mobile|tablet|desktop, or explicit width+height (overrides preset).",
-    inputSchema: resizeSchema
-  },
-  {
-    name: "browser_upload",
-    description:
-      "Set files on a file input (by ref). paths must be under the runtime BROWSER_UPLOAD_DIR; preflight with browser_status upload_paths, not the worker shell env. No tool-imposed size cap.",
-    inputSchema: uploadSchema
-  },
-  {
-    name: "browser_batch",
-    description:
-      'Run several tools in order, stop on first error. actions is an array of JSON strings {"tool":"...","input":{...}}. No nested batch; max 20.',
-    inputSchema: batchSchema
-  }
+  { name: "browser_status", description: "Shared browser state without touching the page: control (agent or human), busy, tabs, viewport, pending dialog, downloads, upload root. Works during human control. upload_paths checks files without uploading.", inputSchema: statusSchema },
+  { name: "browser_wait", description: "Wait for condition url, text or element (element takes ref or selector; there is no selector condition). state: visible (default), hidden, attached, detached. timeout_ms default 5000, max 15000. A timeout returns ok:false.", inputSchema: waitSchema },
+  { name: "browser_navigate", description: "Open a URL, or \"back\" / \"forward\". Returns url, title and an interactive snapshot. redirected_to_origin means a sign-in wall this browser cannot pass itself.", inputSchema: navigateSchema },
+  { name: "browser_snapshot", description: "Accessibility tree of the current tab with refs to act on. Refs expire on navigation and may after a major DOM change. After one full snapshot of a page, use filter=interactive or scope_ref.", inputSchema: snapshotSchema },
+  { name: "browser_act", description: "One action on exactly one target: a ref, or a coordinate from the latest browser_screenshot (key may omit both; dialog answers take none). type sends keystrokes, fill sets the value. Returns url_changed, dom_mutated, snapshot_stale and events (new_tab, download, dialog).", inputSchema: actSchema },
+  { name: "browser_screenshot", description: "JPEG of the viewport, a region or the full page, with screenshot_id and size. Its pixels are the coordinate space for browser_act. For layout, images and canvas; snapshots are cheaper.", inputSchema: screenshotSchema },
+  { name: "browser_find", description: "Find elements by a plain-language description without returning the whole tree. Returns up to 20 refs.", inputSchema: findSchema },
+  { name: "browser_read_text", description: "Readable text of the current tab (main content, else body), 30000 chars per call; continue with offset.", inputSchema: readTextSchema },
+  { name: "browser_eval", description: "Run JavaScript in the page and return the result (size capped). Errors include recent network responses.", inputSchema: evalSchema },
+  { name: "browser_console", description: "Buffered console messages matching pattern, newest last.", inputSchema: consoleSchema },
+  { name: "browser_network", description: "Without request_id: list recorded requests. With request_id: that response's text body, 20000 chars per call; continue with offset.", inputSchema: networkSchema },
+  { name: "browser_tabs", description: "op=list, create, select or close. Every other tool acts on the current tab only.", inputSchema: tabsSchema },
+  { name: "browser_resize", description: "Set the viewport by preset or width+height. Returns the applied size.", inputSchema: resizeSchema },
+  { name: "browser_upload", description: "Set files on a file input ref. Paths must be under the runtime upload root; check them with browser_status upload_paths.", inputSchema: uploadSchema },
+  { name: "browser_batch", description: "Run up to 20 tool calls in order. Stops at the first failed step; after a step that navigates or opens a tab or dialog, only observation steps still run.", inputSchema: batchSchema },
 ] as const;
 
 export type BrowserToolName = typeof TOOL_CATALOG[number]["name"];

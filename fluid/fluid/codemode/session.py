@@ -697,13 +697,20 @@ class CodeModeSession:
             manifest = _committed_manifest(called_tools)
             if manifest:
                 text += "\n" + manifest
+        # Past the cap the OLDEST images go: in an act-then-screenshot loop the
+        # last image is the current state, and dropping it would leave the
+        # model acting on a view that is no longer true.
         dropped = len(collected_images) - _CELL_IMAGE_CAP
         if dropped > 0:
-            text += f"\n({dropped} further images omitted — read fewer per cell)"
+            text += (
+                f"\n({dropped} earlier images omitted; only the last "
+                f"{_CELL_IMAGE_CAP} are attached. Read fewer per cell.)"
+            )
+            collected_images = collected_images[dropped:]
         return ToolOutcome(
             text=text,
             is_error=bool(result.error),
-            images=tuple(collected_images[:_CELL_IMAGE_CAP]),
+            images=tuple(collected_images),
         )
 
     # ── continual harness hooks ──

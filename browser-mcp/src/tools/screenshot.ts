@@ -176,11 +176,11 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
           JPEG_QUALITY,
         ] as [string, number, number, number],
       ), 5000, "screenshot encoding timed out");
-      session.setLastScreenshot({ scale: factor, offsetX, offsetY, kind, viewportW: pageDims.innerW, viewportH: pageDims.innerH });
+      const id = session.setLastScreenshot({ scale: factor, offsetX, offsetY, kind, viewportW: pageDims.innerW, viewportH: pageDims.innerH });
       return {
         content: [
           { type: "image", data: shrunk, mimeType: "image/jpeg" },
-          text(`${Math.round(width * factor)}x${Math.round(height * factor)} — coordinates for browser_act must use this space`),
+          text(describeCapture(session, id, Math.round(width * factor), Math.round(height * factor), factor, kind, offsetX, offsetY)),
         ],
       };
     } catch {
@@ -189,23 +189,52 @@ export async function runScreenshot(session: Session, input: ScreenshotInput): P
   }
 
   if (data.length > MAX_BASE64_LEN) {
-    return {
-      content: [
-        text(
-          `screenshot too large to return (${width}x${height}, ~${Math.round(data.length / 1024)}KB encoded). ` +
-            `Capture a smaller region or a viewport screenshot instead.`,
-        ),
-      ],
-    };
+    return errorResult(
+      `screenshot_too_large: the capture is ${width}x${height} (~${Math.round(data.length / 1024)}KB encoded). ` +
+        "Capture a smaller region or the viewport instead.",
+    );
   }
 
-  session.setLastScreenshot({ scale: 1, offsetX, offsetY, kind, viewportW: pageDims.innerW, viewportH: pageDims.innerH });
+  const id = session.setLastScreenshot({ scale: 1, offsetX, offsetY, kind, viewportW: pageDims.innerW, viewportH: pageDims.innerH });
   return {
     content: [
       { type: "image", data, mimeType: "image/jpeg" },
-      text(`${width}x${height} — coordinates for browser_act must use this space`),
+      text(describeCapture(session, id, width, height, 1, kind, offsetX, offsetY)),
     ],
   };
+}
+
+/**
+ * The observation record that travels with the image: which capture this is
+ * (pass screenshot_id to browser_act to bind coordinates to it), where it was
+ * taken, and the size of the pixel space coordinates are read in. `scale` is
+ * image pixels per CSS pixel and `origin` the page position of the image's
+ * top-left corner; the server applies both, the model never has to.
+ */
+export function describeCapture(
+  session: Session,
+  id: string,
+  width: number,
+  height: number,
+  scale: number,
+  kind: "viewport" | "region" | "full",
+  offsetX: number,
+  offsetY: number,
+): string {
+  let url = "";
+  try { url = session.currentUrl().slice(0, 300); } catch { /* page went away */ }
+  return JSON.stringify({
+    screenshot_id: id,
+    tab_id: session.currentTabId() ?? null,
+    url,
+    width,
+    height,
+    kind,
+    scale: Math.round(scale * 1000) / 1000,
+    origin: [Math.round(offsetX), Math.round(offsetY)],
+    captured_at: new Date().toISOString(),
+    note: "browser_act coordinates use this image's pixels",
+  });
 }
 
 function clamp(v: number, lo: number, hi: number): number {

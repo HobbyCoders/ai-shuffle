@@ -71,11 +71,39 @@ describe('ComputerUseBanner', () => {
 		expect(screen.queryByText(/Esc on host/)).toBeNull();
 		expect(screen.getByText(/Use Stop computer use/)).toBeTruthy();
 	});
+	it('names an app interrupt as the app, not the user', () => {
+		computerUse.active = false;
+		computerUse.stopReason = 'interrupt:server_shutdown';
+		render(ComputerUseBanner);
+		expect(screen.getByText('Computer use ended')).toBeTruthy();
+		expect(screen.getByText('The app is shutting down. You have control.')).toBeTruthy();
+		expect(screen.queryByText(/Stop in the chat|Esc was pressed/)).toBeNull();
+	});
+	it('says the chat Stop when the person pressed it', () => {
+		computerUse.active = false;
+		computerUse.stopReason = 'interrupt:user_stop';
+		render(ComputerUseBanner);
+		expect(screen.getByText('Computer use stopped')).toBeTruthy();
+		expect(screen.getByText(/Stopped with Stop in the chat/)).toBeTruthy();
+	});
+	it('reports a finished turn', () => {
+		computerUse.active = false;
+		computerUse.stopReason = 'completed';
+		render(ComputerUseBanner);
+		expect(screen.getByText('The turn finished. You have control.')).toBeTruthy();
+	});
+	it('shows nothing when there is no stop to report', () => {
+		computerUse.active = false;
+		computerUse.stopReason = null;
+		render(ComputerUseBanner);
+		expect(screen.queryByRole('status')).toBeNull();
+	});
 	it('confirms a stop and allows dismissing the confirmation', async () => {
 		computerUse.active = false;
 		computerUse.stopReason = 'escape';
 		render(ComputerUseBanner);
 		expect(screen.getByText('Computer use stopped')).toBeTruthy();
+		expect(screen.getByText('Esc was pressed on this computer. You have control.')).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Dismiss computer use status' }));
 		expect(screen.queryByText('Computer use stopped')).toBeNull();
 	});

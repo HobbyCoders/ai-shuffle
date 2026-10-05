@@ -1,8 +1,10 @@
 <script lang="ts">
 	import ComputerUseBanner from '../src/lib/components/ComputerUseBanner.svelte';
+	import NotificationDock from '../src/lib/components/NotificationDock.svelte';
 	import { computerUse } from '../src/lib/stores/computerUse.svelte';
 
-	// ?state=active|stopped  ?desktop=1 draws Windows caption buttons over the top bar.
+	// ?state=active|stopped  ?reason=<stop_reason> (with state=stopped, default escape)
+	// ?desktop=1 draws Windows caption buttons over the top bar.
 	const params = new URLSearchParams(location.search);
 	const desktop = params.get('desktop') === '1';
 	if (desktop) document.documentElement.classList.add('desktop', 'desktop-win32');
@@ -13,7 +15,7 @@
 	};
 	Object.assign(computerUse, {
 		active: params.get('state') !== 'stopped',
-		stopReason: params.get('state') === 'stopped' ? 'escape' : null,
+		stopReason: params.get('state') === 'stopped' ? (params.get('reason') || 'escape') : null,
 		displayLabel: 'Display 2 · 2560×1440', action: 'left_click', busy: true,
 		secondsSince: 0, escapeAvailable: true, overlayAvailable: true,
 		stopping: false, connectionLost: false
@@ -25,6 +27,7 @@
 		<span class="title">Fix the flaky upload test</span>
 		{#if desktop}<span class="caption" data-testid="caption-buttons"><i>–</i><i>▢</i><i>✕</i></span>{/if}
 	</header>
+	<NotificationDock />
 	<main class="timeline">
 		<p>Assistant: I'll open the app and check the upload dialog.</p>
 	</main>

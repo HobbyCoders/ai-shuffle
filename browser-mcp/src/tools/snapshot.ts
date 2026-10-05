@@ -24,6 +24,8 @@ export async function runSnapshot(
     {
       ok: true,
       snapshot_id: snap.snapshot_id,
+      tab_id: session.currentTabId() ?? null,
+      url: session.currentUrl().slice(0, 300),
       ref_count: snap.refs.length,
       truncated: snap.truncated,
       ...(warning ? { warning } : {}),

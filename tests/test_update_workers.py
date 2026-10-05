@@ -720,7 +720,8 @@ def test_cancel_drops_a_waiting_restart(busy):
 
 def test_stop_them_and_restart_stops_each_session_then_installs(busy, monkeypatch):
     stopped = []
-    async def stop(sid):
+    async def stop(sid, source=None):
+        assert source == "worker_update"
         stopped.append(sid)
         busy.clear()
     monkeypatch.setattr(desktop_lifecycle, "stop_session_work", stop)

@@ -83,7 +83,7 @@ async def _stop_then_restart(request_id):
     """Stop this worker's running work as its Stop buttons do, then install."""
     from app.core.desktop_lifecycle import active_session_ids, stop_session_work
     sessions = active_session_ids()
-    results = await asyncio.gather(*(stop_session_work(sid) for sid in sessions), return_exceptions=True)
+    results = await asyncio.gather(*(stop_session_work(sid, source="worker_update") for sid in sessions), return_exceptions=True)
     for sid, result in zip(sessions, results):
         if isinstance(result, BaseException):
             logger.warning("Application update: could not stop %s before restarting", sid, exc_info=result)

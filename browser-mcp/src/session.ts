@@ -12,7 +12,7 @@
  * refs (they only resolve against the page they were snapshotted from).
  */
 
-import type { Page, Locator, ConsoleMessage, Response, CDPSession } from "playwright-core";
+import type { Page, Locator, ConsoleMessage, Response, CDPSession, Dialog, Download } from "playwright-core";
 import { BrowserManager, BrowserRestartingError } from "./browser.js";
 import { RefRegistry, STALE_REF_REMEDY, isRefToken } from "./refs.js";
 import {
@@ -43,7 +43,7 @@ import type { PageContent } from "./tools/result.js";
 
 export class StaleRefError extends Error {
   constructor(ref: string) {
-    super(`stale_ref: ${ref} — ${STALE_REF_REMEDY}`);
+    super(`stale_ref: ${ref} is ${STALE_REF_REMEDY}`);
     this.name = "StaleRefError";
   }
 }
@@ -149,6 +149,44 @@ export interface TabInfo {
   current: boolean;
 }
 
+/**
+ * Something the page did on its own that the model should hear about without
+ * another round trip: a tab or popup it opened, a download it started, or a
+ * JavaScript dialog. Read back by sequence number (see {@link Session.eventsSince}).
+ */
+export type PageEvent =
+  | { seq: number; type: "new_tab"; tab_id: string; url: string }
+  | { seq: number; type: "download"; tab_id: string; filename: string; url: string }
+  | { seq: number; type: "dialog"; tab_id: string; dialog_type: string; message: string; handled: "accepted" | "dismissed" | "pending" };
+
+type PageEventInput = PageEvent extends infer E ? (E extends PageEvent ? Omit<E, "seq"> : never) : never;
+
+/** A download the page started, as browser_status reports it. */
+export interface DownloadInfo {
+  filename: string;
+  url: string;
+  tab_id: string;
+  state: "in_progress" | "done" | "failed";
+  path?: string;
+  error?: string;
+}
+
+/** A confirm/prompt/beforeunload dialog waiting for the agent's answer. */
+export interface PendingDialog {
+  dialog: Dialog;
+  tab_id: string;
+  type: string;
+  message: string;
+  default_value: string;
+}
+
+/** Longest dialog message or URL echoed back to the model. */
+const EVENT_TEXT_MAX = 500;
+const MAX_EVENTS = 64;
+const MAX_DOWNLOADS = 10;
+/** How long answering a dialog waits for the tool call it paused to finish. */
+export const PAUSED_WORK_TIMEOUT_MS = 10_000;
+
 /** Per-page state: the Page plus its console/network buffers. */
 interface PageEntry {
   id: string;
@@ -162,6 +200,24 @@ export class Session {
   onWorkspaceChange?: () => void;
   agentAdmission?: () => void;
   private screenshotValid = false;
+  /**
+   * May an invalidated viewport screenshot be trusted again without a new
+   * capture? Only after an action that left the DOM and URL untouched; any
+   * other invalidation (navigation, tab or viewport change, human input, a DOM
+   * change) requires a new capture so a coordinate never lands on a page the
+   * model has not seen.
+   */
+  private screenshotRevalidatable = false;
+  private screenshotSeq = 0;
+  private events: PageEvent[] = [];
+  private eventSeq = 0;
+  private readonly downloadList: DownloadInfo[] = [];
+  /** Popups being registered; an action waits for them before reporting. */
+  private readonly adopting = new Set<Promise<unknown>>();
+  pendingDialog?: PendingDialog;
+  private readonly dialogWaiters = new Set<(dialog: PendingDialog) => void>();
+  /** The tool call a pending dialog paused, resumed when the dialog is answered. */
+  private pausedWork?: Promise<unknown>;
   private readonly cdpSessions = new WeakMap<Page, Promise<CDPSession>>();
   viewportMode: "fit" | "fixed" = "fixed";
   private desiredViewport = { width: 1280, height: 800 };
@@ -208,13 +264,177 @@ export class Session {
       } catch { /* disconnected */ }
     }
     const { readEditors } = await import('./editors.js');
-    const editors = page ? await readEditors(page).catch(() => []) : [];
+    // An open dialog blocks page script; the editor scan would only stall.
+    const editors = page && !this.pendingDialog ? await readEditors(page).catch(() => []) : [];
     return { active_tab_id: id ?? null, target_id: target, editors,
       tabs: tabs.slice(0, 128).map(t => ({ ...t, url: t.url.slice(0, 1024), title: t.title.slice(0, 256) })),
       viewport: { mode: this.viewportMode, ...(page?.viewportSize() ?? this.desiredViewport) } };
   }
 
-  invalidateScreenshot(): void { this.screenshotValid = false; }
+  invalidateScreenshot(): void {
+    this.screenshotValid = false;
+    this.screenshotRevalidatable = false;
+  }
+
+  /**
+   * The action that just ran changed neither the DOM nor the URL, so the last
+   * viewport screenshot still shows the page (see tryRevalidateViewportScreenshot).
+   */
+  allowScreenshotRevalidation(): void {
+    if (!this.screenshotValid) this.screenshotRevalidatable = true;
+  }
+
+  // ---- page events (tabs, downloads, dialogs) -------------------------------
+
+  private pushEvent(event: PageEventInput): void {
+    this.eventSeq += 1;
+    this.events.push({ ...event, seq: this.eventSeq } as PageEvent);
+    if (this.events.length > MAX_EVENTS) this.events.splice(0, this.events.length - MAX_EVENTS);
+  }
+
+  /** Sequence mark to pass to {@link eventsSince}. */
+  eventMark(): number {
+    return this.eventSeq;
+  }
+
+  /** Events recorded after `mark`, oldest first, without their sequence numbers. */
+  eventsSince(mark: number): Array<Record<string, unknown>> {
+    return this.events
+      .filter((event) => event.seq > mark)
+      .map(({ seq: _seq, ...rest }) => rest);
+  }
+
+  /** Wait (bounded) for popups that are still being registered as tabs. */
+  async settleAdoptions(timeoutMs = 2000): Promise<void> {
+    if (this.adopting.size === 0) return;
+    await raceWithTimeout(Promise.allSettled([...this.adopting]), timeoutMs, "popup registration timed out").catch(() => undefined);
+  }
+
+  /** The most recent downloads, newest last. */
+  downloads(): DownloadInfo[] {
+    return this.downloadList.map((d) => ({ ...d }));
+  }
+
+  private trackDownload(tabId: string, download: Download): void {
+    const info: DownloadInfo = {
+      filename: download.suggestedFilename().slice(0, 256),
+      url: download.url().slice(0, EVENT_TEXT_MAX),
+      tab_id: tabId,
+      state: "in_progress",
+    };
+    this.downloadList.push(info);
+    if (this.downloadList.length > MAX_DOWNLOADS) this.downloadList.shift();
+    this.pushEvent({ type: "download", tab_id: tabId, filename: info.filename, url: info.url });
+    download.path().then(
+      (path) => { info.state = "done"; info.path = path; },
+      (err) => { info.state = "failed"; info.error = (err instanceof Error ? err.message : String(err)).slice(0, 200); },
+    );
+    this.onWorkspaceChange?.();
+  }
+
+  /**
+   * A JavaScript dialog opened. Without a listener Playwright dismisses every
+   * dialog silently, so confirm() returned false and the model never knew.
+   * alert() has a single answer and is accepted (and reported). confirm,
+   * prompt and beforeunload wait for the agent, except while a viewer holds
+   * the browser: the panel cannot show dialogs, so they are dismissed as before.
+   */
+  private onDialog(tabId: string, dialog: Dialog): void {
+    const type = dialog.type();
+    const message = dialog.message().slice(0, EVENT_TEXT_MAX);
+    let humanControl = false;
+    try { this.agentAdmission?.(); } catch { humanControl = true; }
+    if (type === "alert") {
+      dialog.accept().catch(() => undefined);
+      this.pushEvent({ type: "dialog", tab_id: tabId, dialog_type: type, message, handled: "accepted" });
+      return;
+    }
+    if (humanControl || this.pendingDialog) {
+      dialog.dismiss().catch(() => undefined);
+      this.pushEvent({ type: "dialog", tab_id: tabId, dialog_type: type, message, handled: "dismissed" });
+      return;
+    }
+    const pending: PendingDialog = { dialog, tab_id: tabId, type, message, default_value: dialog.defaultValue().slice(0, EVENT_TEXT_MAX) };
+    this.pendingDialog = pending;
+    this.pushEvent({ type: "dialog", tab_id: tabId, dialog_type: type, message, handled: "pending" });
+    for (const waiter of [...this.dialogWaiters]) waiter(pending);
+    this.onWorkspaceChange?.();
+  }
+
+  /** What the model is told about a pending dialog. */
+  describeDialog(pending = this.pendingDialog): Record<string, unknown> | undefined {
+    if (!pending) return undefined;
+    return {
+      type: pending.type,
+      message: pending.message,
+      tab_id: pending.tab_id,
+      ...(pending.type === "prompt" ? { default_value: pending.default_value } : {}),
+    };
+  }
+
+  /**
+   * Run `work`, but return early if a dialog that needs an answer opens while
+   * it runs: the page is then blocked, so `work` cannot finish until the
+   * dialog is answered. The paused work is kept and resumed by
+   * {@link answerDialog}, which hands back its result.
+   */
+  async raceDialog<T>(work: Promise<T>): Promise<{ paused: false; value: T } | { paused: true; dialog: PendingDialog }> {
+    if (this.pendingDialog) {
+      // Already blocked (a dialog chained right after another was answered).
+      this.pausedWork = work.catch(() => undefined);
+      return { paused: true, dialog: this.pendingDialog };
+    }
+    let waiter: ((dialog: PendingDialog) => void) | undefined;
+    const opened = new Promise<{ paused: true; dialog: PendingDialog }>((resolve) => {
+      waiter = (dialog) => resolve({ paused: true, dialog });
+      this.dialogWaiters.add(waiter);
+    });
+    try {
+      const outcome = await Promise.race([work.then((value) => ({ paused: false as const, value })), opened]);
+      if (outcome.paused) {
+        this.pausedWork = work.catch(() => undefined);
+      }
+      return outcome;
+    } finally {
+      if (waiter) this.dialogWaiters.delete(waiter);
+    }
+  }
+
+  /**
+   * Answer the pending dialog, then let the call it paused finish (bounded).
+   * Returns that call's result when it finished, else undefined.
+   */
+  async answerDialog(accept: boolean, promptText?: string): Promise<{ type: string; resumed: unknown; finished: boolean }> {
+    const pending = this.pendingDialog;
+    if (!pending) throw new Error("no_dialog: no dialog is waiting for an answer");
+    this.pendingDialog = undefined;
+    try {
+      if (accept) await raceWithTimeout(pending.dialog.accept(promptText), 5000, "dialog answer timed out");
+      else await raceWithTimeout(pending.dialog.dismiss(), 5000, "dialog answer timed out");
+    } catch (err) {
+      // A dialog whose page closed or navigated is already gone.
+      if (!/closed|No dialog is showing|Target/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    }
+    this.invalidateScreenshot();
+    this.onWorkspaceChange?.();
+    const paused = this.pausedWork;
+    this.pausedWork = undefined;
+    if (!paused) return { type: pending.type, resumed: undefined, finished: true };
+    try {
+      const raced = await raceWithTimeout(this.raceDialog(paused), PAUSED_WORK_TIMEOUT_MS, "paused work timed out");
+      // Another dialog opened before the paused call could finish.
+      if (raced.paused) return { type: pending.type, resumed: undefined, finished: false };
+      return { type: pending.type, resumed: raced.value, finished: true };
+    } catch {
+      return { type: pending.type, resumed: undefined, finished: false };
+    }
+  }
+
+  /** Dismiss a pending dialog (a viewer is taking control). Best effort. */
+  async dismissPendingDialog(): Promise<void> {
+    if (!this.pendingDialog) return;
+    try { await this.answerDialog(false); } catch { /* the page went away */ }
+  }
 
   private readonly pages = new Map<string, PageEntry>();
   private currentId?: string;
@@ -230,9 +450,10 @@ export class Session {
    * (what page.mouse expects) at act time by {@link toViewportPoint}.
    */
   private lastScreenshot: {
-    scale: number; offsetX: number; offsetY: number;
+    id: string; scale: number; offsetX: number; offsetY: number;
     kind: "viewport" | "region" | "full"; viewportW: number; viewportH: number;
-  } = { scale: 1, offsetX: 0, offsetY: 0, kind: "viewport", viewportW: 0, viewportH: 0 };
+    tabId?: string; url?: string;
+  } = { id: "", scale: 1, offsetX: 0, offsetY: 0, kind: "viewport", viewportW: 0, viewportH: 0 };
   /** Tail of the per-session serialization queue (see {@link runExclusive}). */
   private tail: Promise<unknown> = Promise.resolve();
 
@@ -281,7 +502,7 @@ export class Session {
    * Register a freshly acquired page: install its console/network listeners
    * (once) and its close handler, then store it. Returns the new entry.
    */
-  private async trackPage(page: Page): Promise<PageEntry> {
+  private async trackPage(page: Page, adopted = false): Promise<PageEntry> {
     // Persistent CDP contexts have no default viewport override. Apply ours
     // before exposing the tab/target, including on first use and reconnect.
     const viewport = this.currentEntry()?.page.viewportSize() ?? this.desiredViewport;
@@ -289,8 +510,11 @@ export class Session {
     try {
       await this.pinViewport(page, viewport, "initial viewport timed out");
     } catch (error) {
-      await page.close().catch(() => {});
-      throw error;
+      // A popup the page opened is the site's, not ours to close.
+      if (!adopted) {
+        await page.close().catch(() => {});
+        throw error;
+      }
     }
     this.desiredViewport = { ...viewport };
     this.tabSeq += 1;
@@ -341,7 +565,16 @@ export class Session {
         this.onWorkspaceChange?.();
       } catch { /* a closed/navigated target cannot accept the selected files */ }
     });
+    page.on("popup", (popup) => this.adoptPopup(popup));
+    page.on("download", (download) => this.trackDownload(id, download));
+    page.on("dialog", (dialog) => this.onDialog(id, dialog));
     page.on("close", () => {
+      if (this.pendingDialog?.tab_id === id) {
+        // The dialog went with its page, and so did the call it paused: a
+        // later dialog's answer must not hand back that call's result.
+        this.pendingDialog = undefined;
+        this.pausedWork = undefined;
+      }
       this.pages.delete(id);
       this.onWorkspaceChange?.();
       if (this.currentId === id) {
@@ -355,8 +588,26 @@ export class Session {
     });
 
     this.pages.set(id, entry);
-    reportCurrentTarget(entry.page, entry.id);
+    if (!adopted) reportCurrentTarget(entry.page, entry.id);
     return entry;
+  }
+
+  /**
+   * A tracked page opened a tab or popup (target=_blank, window.open). Register
+   * it as a tab so browser_tabs can select it, without making it current.
+   */
+  private adoptPopup(popup: Page): void {
+    if ([...this.pages.values()].some((entry) => entry.page === popup)) return;
+    if (this.pages.size >= 128) return;
+    const work = this.trackPage(popup, true).then(
+      (entry) => {
+        this.pushEvent({ type: "new_tab", tab_id: entry.id, url: popup.url().slice(0, EVENT_TEXT_MAX) });
+        this.onWorkspaceChange?.();
+      },
+      () => undefined,
+    );
+    this.adopting.add(work);
+    void work.finally(() => this.adopting.delete(work));
   }
 
   async ensurePage(): Promise<Page> {
@@ -838,12 +1089,21 @@ export class Session {
     return [docX - scroll.x, docY - scroll.y];
   }
 
+  /** Record the mapping of a new capture and return its screenshot_id (s1, s2, ...). */
   setLastScreenshot(mapping: {
     scale: number; offsetX: number; offsetY: number;
     kind?: "viewport" | "region" | "full"; viewportW?: number; viewportH?: number;
-  }): void {
+  }): string {
     this.screenshotValid = true;
+    this.screenshotRevalidatable = false;
+    this.screenshotSeq += 1;
+    const entry = this.currentEntry();
+    let url: string | undefined;
+    try { url = entry?.page.url(); } catch { url = undefined; }
     this.lastScreenshot = {
+      id: `s${this.screenshotSeq}`,
+      tabId: entry?.id,
+      url,
       scale: mapping.scale > 0 ? mapping.scale : 1,
       offsetX: mapping.offsetX,
       offsetY: mapping.offsetY,
@@ -851,23 +1111,31 @@ export class Session {
       viewportW: mapping.viewportW ?? 0,
       viewportH: mapping.viewportH ?? 0,
     };
+    return this.lastScreenshot.id;
   }
 
   hasValidScreenshot(): boolean { return this.screenshotValid; }
 
+  /** Id of the latest screenshot (valid or not), "" before the first one. */
+  latestScreenshotId(): string { return this.lastScreenshot.id; }
+
   /**
    * Re-validate a stale VIEWPORT screenshot without a new capture when the
-   * view the model is looking at is still the view on screen: same viewport
-   * size, same scroll position. The pixel-to-document mapping of a viewport
-   * capture is a pure function of those two, so the model's coordinates still
-   * land where it aimed. Anything else (a scrolled page, a resized viewport,
-   * a region/full-page capture) returns false and the caller must re-aim.
+   * view the model is looking at is still the view on screen: the only
+   * invalidation since the capture was an action that changed neither the DOM
+   * nor the URL, and the tab, URL, viewport size and scroll position are the
+   * same. Geometry alone is not enough: a click that opens a modal or loads a
+   * new page at scroll 0 keeps the geometry while moving every target.
+   * Anything else returns false and the caller must re-aim.
    */
   async tryRevalidateViewportScreenshot(): Promise<boolean> {
     if (this.screenshotValid) return true;
+    if (!this.screenshotRevalidatable) return false;
     const last = this.lastScreenshot;
     if (last.kind !== "viewport" || !last.viewportW || !last.viewportH) return false;
-    const page = this.requirePage();
+    const entry = this.currentEntry();
+    if (!entry || entry.id !== last.tabId || entry.page.url() !== last.url) return false;
+    const page = entry.page;
     let dims: { innerW: number; innerH: number; scrollX: number; scrollY: number };
     try {
       dims = await raceWithTimeout(page.evaluate(() => ({

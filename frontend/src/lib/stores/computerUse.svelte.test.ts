@@ -17,7 +17,7 @@ vi.mock('$lib/api/computerUse', () => ({
 }));
 vi.mock('$lib/stores/notifications', () => ({ notify: vi.fn() }));
 
-import { computerUse, POLL_AVAILABLE_MS, POLL_UNAVAILABLE_MS } from './computerUse.svelte';
+import { computerUse, POLL_AVAILABLE_MS, POLL_UNAVAILABLE_MS, stopNotice } from './computerUse.svelte';
 
 function status(available: boolean, enabled = false) {
 	return {
@@ -295,5 +295,30 @@ describe('computerUse input mode', () => {
 		finishPoll(status(true));
 		await poll;
 		expect(computerUse.inputMode).toBe('dedicated_desktop');
+	});
+});
+
+describe('stopNotice', () => {
+	it('credits the person only for their own Esc or Stop', () => {
+		expect(stopNotice('escape')?.detail).toMatch(/^Esc was pressed on this computer/);
+		expect(stopNotice('user')?.detail).toMatch(/Stop computer use/);
+		expect(stopNotice('interrupt:user_stop')?.detail).toMatch(/Stop in the chat/);
+		expect(stopNotice('interrupt:user_stopped_all')?.title).toBe('Computer use stopped');
+	});
+	it('says what the app did for an app interrupt, never that the user stopped it', () => {
+		const shutdown = stopNotice('interrupt:server_shutdown');
+		expect(shutdown).toEqual({ title: 'Computer use ended', detail: 'The app is shutting down. You have control.' });
+		expect(stopNotice('interrupt:assistant')?.detail).toMatch(/assistant limit/);
+		expect(stopNotice('interrupt:something_new')?.detail).toBe('The app interrupted the turn. You have control.');
+		for (const reason of ['interrupt:server_shutdown', 'interrupt:assistant', 'interrupt:lease_lost', 'stopped', 'completed']) {
+			expect(stopNotice(reason)?.detail).not.toMatch(/Stop in the chat|Esc was pressed|Stop computer use/);
+		}
+	});
+	it('covers the setting, a finished turn and an unrecorded source', () => {
+		expect(stopNotice('disabled')?.detail).toMatch(/turned off in Settings/);
+		expect(stopNotice('completed')).toEqual({ title: 'Computer use ended', detail: 'The turn finished. You have control.' });
+		expect(stopNotice('stopped')?.detail).toBe('The chat turn was stopped. You have control.');
+		expect(stopNotice(null)).toBeNull();
+		expect(stopNotice('')).toBeNull();
 	});
 });

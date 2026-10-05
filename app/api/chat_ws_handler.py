@@ -1796,7 +1796,7 @@ class ChatWebSocketHandler:
                 from app.network import control
                 try:
                     await control.interrupt(owner_device, session_id, "stop", stop_background=True,
-                                            turn_id=target_turn_id)
+                                            turn_id=target_turn_id, source="user_stop")
                 except control.RunnerUnreachable as exc:
                     await self._forward_unreachable(session_id, exc)
                 except control.ControlRefused as exc:
@@ -1808,6 +1808,9 @@ class ChatWebSocketHandler:
                 "stop",
                 stop_background=True,
                 turn_id=target_turn_id,
+                # The person's Stop (the runtime's default reading of an
+                # unnamed source too); computer use reports it as theirs.
+                source="user_stop",
             )
             if flipped is not None:
                 # Mark canceled-task wakes suppressed and stop all owned tasks.

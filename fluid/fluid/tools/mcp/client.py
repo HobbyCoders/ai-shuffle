@@ -76,6 +76,10 @@ class McpClient:
         self.config = config
         self.protocol: str | None = None
         self.legacy: bool = False
+        # The server's ``instructions`` from the handshake (how to use its
+        # tools as a whole). Claude Code puts them in the system prompt; a host
+        # that drops them leaves the model with per-tool descriptions only.
+        self.instructions: str | None = None
         self.list_fetches: int = 0  # underlying tools/list round-trips (test/obs hook)
         self.connect_timeout = _timeout_from(config, "connect_timeout", DEFAULT_CONNECT_TIMEOUT_S)
         self.call_timeout = _timeout_from(config, "call_timeout", DEFAULT_CALL_TIMEOUT_S)
@@ -194,6 +198,9 @@ class McpClient:
                     getattr(result, "protocolVersion", None)
                     or getattr(session, "protocol_version", None)
                 )
+                instructions = getattr(result, "instructions", None)
+                if isinstance(instructions, str) and instructions.strip():
+                    self.instructions = instructions.strip()
                 assert self._started is not None
                 if not self._started.done():
                     self._started.set_result(None)

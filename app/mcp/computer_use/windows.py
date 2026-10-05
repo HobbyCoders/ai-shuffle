@@ -21,6 +21,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Optional
 
+from app.mcp.computer_use.errors import ActionError
+
 logger = logging.getLogger(__name__)
 
 WINDOWS_ONLY = "window tools are supported on Windows only"
@@ -52,6 +54,11 @@ _DWMWA_CLOAKED = 14
 _SW_MAXIMIZE, _SW_MINIMIZE, _SW_RESTORE = 3, 6, 9
 _SWP_NOZORDER, _SWP_NOACTIVATE, _SWP_ASYNCWINDOWPOS = 0x4, 0x10, 0x4000
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_DESKTOP_READOBJECTS = 0x0001
+_UOI_NAME = 2
+_ERROR_ACCESS_DENIED = 5
+_TOKEN_QUERY = 0x0008
+_TOKEN_ELEVATION = 20  # TOKEN_INFORMATION_CLASS.TokenElevation
 
 _MIN_SIZE = 64  # smallest width/height move_resize accepts
 _SETTLE_S = 1.5  # how long to wait for another process to apply a change
@@ -151,7 +158,7 @@ def identity_names(path: str, desc: str, product: str) -> tuple[str, ...]:
 
 def _require_windows() -> None:
     if sys.platform != "win32":
-        raise ValueError(WINDOWS_ONLY)
+        raise ActionError("UNSUPPORTED_CAPABILITY", WINDOWS_ONLY)
     # Worker threads must read and set window rects in physical pixels too.
     from app.mcp.computer_use import scaling
     scaling._ensure_dpi_awareness()
@@ -189,6 +196,11 @@ def _api():
         (user32, "SetWindowPos"): ([H, H, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                     ctypes.c_int, ctypes.c_uint], B),
         (user32, "AttachThreadInput"): ([D, D, B], B),
+        (user32, "OpenInputDesktop"): ([D, B, D], wintypes.HANDLE),
+        (user32, "CloseDesktop"): ([wintypes.HANDLE], B),
+        (user32, "GetUserObjectInformationW"): ([wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                                 D, ctypes.POINTER(D)], B),
+        (kernel32, "GetCurrentProcess"): ([], wintypes.HANDLE),
         (kernel32, "GetCurrentThreadId"): ([], D),
         (kernel32, "OpenProcess"): ([D, B, D], wintypes.HANDLE),
         (kernel32, "CloseHandle"): ([wintypes.HANDLE], B),
@@ -403,11 +415,12 @@ def find_window(window_id, displays) -> WindowInfo:
     try:
         wid = int(window_id)
     except (TypeError, ValueError):
-        raise ValueError("window_id must be an id from list_windows")
+        raise ActionError("INVALID_ARGUMENT", "window_id must be an id from list_windows")
     for win in list_windows(displays):
         if win.id == wid:
             return win
-    raise ValueError(f"window {wid} is not open (or not an app window); call list_windows again")
+    raise ActionError("TARGET_NOT_FOUND",
+                      f"window {wid} is not open (or not an app window); call list_windows again")
 
 
 def _wait(check: Callable[[], bool], sleep: Callable[[float], None], timeout=_SETTLE_S) -> bool:
@@ -477,7 +490,7 @@ def set_state(window_id: int, action: str, sleep: Callable[[float], None]) -> st
         if not done():
             user32.ShowWindowAsync(hwnd, cmd)
             if not _wait(done, sleep):
-                raise ValueError(_ELEVATED_HINT)
+                raise ActionError("PERMISSION_REQUIRED", _ELEVATED_HINT)
     return {"maximize": "maximized", "minimize": "minimized"}.get(action, "normal")
 
 
@@ -505,7 +518,7 @@ def move_resize(window_id: int, bounds, displays,
     if user32.IsIconic(hwnd) or user32.IsZoomed(hwnd):
         user32.ShowWindowAsync(hwnd, _SW_RESTORE)
         if not _wait(lambda: not user32.IsIconic(hwnd) and not user32.IsZoomed(hwnd), sleep):
-            raise ValueError(_ELEVATED_HINT)
+            raise ActionError("PERMISSION_REQUIRED", _ELEVATED_HINT)
     before = _frame_rect(hwnd)
     outer = _window_rect(hwnd)
     if not before or not outer:
@@ -523,5 +536,111 @@ def move_resize(window_id: int, bounds, displays,
     _wait(close, sleep)
     after = _frame_rect(hwnd)
     if not after or (after == before and before != target):
-        raise ValueError(_ELEVATED_HINT)
+        raise ActionError("PERMISSION_REQUIRED", _ELEVATED_HINT)
     return after[0], after[1], after[2] - after[0], after[3] - after[1]
+
+
+# ---------------------------------------------------------------------------
+# Input-readiness probes. Fail soft: None means "could not tell", and callers
+# then proceed as before. Only a clear answer blocks an action.
+# ---------------------------------------------------------------------------
+
+def input_desktop_locked() -> Optional[bool]:
+    """True when the lock screen or the UAC secure desktop owns input.
+
+    A normal process cannot open the Winlogon desktop: OpenInputDesktop fails
+    with access denied, or names a desktop other than "Default". Synthetic
+    input and screenshots do not reach it (screenshots come back black).
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        ctypes, wintypes, user32 = _api()[:3]
+        handle = user32.OpenInputDesktop(0, False, _DESKTOP_READOBJECTS)
+        if not handle:
+            return True if ctypes.get_last_error() == _ERROR_ACCESS_DENIED else None
+        try:
+            buf = ctypes.create_unicode_buffer(256)
+            needed = wintypes.DWORD()
+            if not user32.GetUserObjectInformationW(handle, _UOI_NAME, buf,
+                                                    ctypes.sizeof(buf), ctypes.byref(needed)):
+                return None
+            return buf.value.lower() != "default"
+        finally:
+            user32.CloseDesktop(handle)
+    except Exception:
+        logger.debug("input desktop probe failed", exc_info=True)
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def _advapi():
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                          ctypes.POINTER(wintypes.HANDLE)]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                             wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    advapi32.GetTokenInformation.restype = wintypes.BOOL
+    return advapi32
+
+
+def _elevated(process_handle) -> Optional[bool]:
+    ctypes, wintypes, _, kernel32 = _api()[:4]
+    advapi32 = _advapi()
+    token = wintypes.HANDLE()
+    if not advapi32.OpenProcessToken(process_handle, _TOKEN_QUERY, ctypes.byref(token)):
+        return None
+    try:
+        value, size = wintypes.DWORD(), wintypes.DWORD()
+        if not advapi32.GetTokenInformation(token, _TOKEN_ELEVATION, ctypes.byref(value),
+                                            ctypes.sizeof(value), ctypes.byref(size)):
+            return None
+        return bool(value.value)
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def foreground_blocks_input() -> Optional[bool]:
+    """True when the foreground window runs elevated and this process does not.
+
+    Windows (UIPI) silently drops synthetic input into such a window, so the
+    agent would type or click without effect. None when it cannot tell.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        hwnd = _api()[2].GetForegroundWindow()
+    except Exception:
+        logger.debug("foreground elevation probe failed", exc_info=True)
+        return None
+    return window_blocks_input(hwnd)
+
+
+def window_blocks_input(hwnd) -> Optional[bool]:
+    """True when ``hwnd`` runs elevated and this process does not: UIPI blocks
+    both synthetic input and UI Automation into it. None when it cannot tell."""
+    if sys.platform != "win32":
+        return None
+    try:
+        kernel32 = _api()[3]
+        if not hwnd:
+            return None
+        if _elevated(kernel32.GetCurrentProcess()):
+            return False
+        pid = _pid(hwnd)
+        if not pid or pid == os.getpid():
+            return False
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            return _elevated(handle)
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        logger.debug("window elevation probe failed", exc_info=True)
+        return None

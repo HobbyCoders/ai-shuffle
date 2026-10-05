@@ -124,6 +124,9 @@ export class BrowserWorkspace {
           if (c.op === "takeover") {
             if (this.viewer === c.viewer_id) return; // duplicate pending request settled by an earlier takeover
             if (this.pending !== c.viewer_id) throw new Error("takeover cancelled");
+            // The panel cannot show a JavaScript dialog, and one left open
+            // blocks every input the viewer sends: answer it as Cancel.
+            await this.session.dismissPendingDialog();
             this.viewer = c.viewer_id; this.pending = null;
             // A human at the wheel owns the viewport: drop the agent's pin so
             // panel resizes are not undone on the agent's next call.

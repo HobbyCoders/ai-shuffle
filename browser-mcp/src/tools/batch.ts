@@ -1,6 +1,10 @@
 /**
- * browser_batch — run several other tools in one call, sequentially, stopping at
- * the first error. Atomic w.r.t. other sessions' calls because the dispatcher
+ * browser_batch: run several other tools in one call, sequentially. It stops at
+ * the first failed step (an error, or a body that says ok:false), and after a
+ * step that changed the page it runs on only through observation steps, since
+ * later actions were planned against a page that no longer exists. The result
+ * says which steps ran, how the failed one ended (outcome) and how many did
+ * not run. Atomic w.r.t. other sessions' calls because the dispatcher
  * runs it inside a single runExclusive turn; the inner tools are therefore
  * invoked directly (NOT re-entering runExclusive, which would deadlock).
  *
@@ -32,6 +36,41 @@ export interface BatchItemResult {
   ok: boolean;
   summary?: string;
   error?: string;
+  outcome?: string;
+}
+
+/**
+ * Tools that only look. After a step that changed the page (navigated, opened
+ * a tab or a dialog), the rest of the batch was planned against a page that is
+ * gone, so the batch runs on only while the next steps are observations.
+ */
+const OBSERVE_TOOLS: ReadonlySet<string> = new Set([
+  "browser_status", "browser_snapshot", "browser_screenshot", "browser_find",
+  "browser_read_text", "browser_console", "browser_network", "browser_wait",
+]);
+
+function isObservation(action: ParsedAction): boolean {
+  if (OBSERVE_TOOLS.has(action.tool)) return true;
+  return action.tool === "browser_tabs" && action.input.op === "list";
+}
+
+/** Did this step leave the page different from what later steps were planned against? */
+function changedPage(tool: string, input: Record<string, unknown>, body: Record<string, unknown> | undefined): boolean {
+  if (tool === "browser_navigate" || tool === "browser_resize") return true;
+  if (tool === "browser_tabs" && input.op !== "list") return true;
+  if (!body) return false;
+  return body.url_changed === true || body.paused_by_dialog === true || Array.isArray(body.events) && body.events.some(
+    (e) => typeof e === "object" && e !== null && ((e as Record<string, unknown>).type === "new_tab" || (e as Record<string, unknown>).handled === "pending"),
+  );
+}
+
+function parseBody(raw: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** A tool the batch can dispatch to (subset of the full ToolDefinition). */
@@ -99,28 +138,34 @@ export async function runBatch(
 
   const results: BatchItemResult[] = [];
   // Image blocks (screenshots) from sub-results, re-emitted on the batch result
-  // — firstText() alone would silently drop them and the model would never see
-  // a screenshot taken inside a batch.
+  // so a screenshot taken inside a batch reaches the model.
   const images: McpContent[] = [];
   let allOk = true;
+  let stopped: string | undefined;
+  let changedAt = -1;
 
-  for (const raw of actions) {
+  for (const [index, raw] of actions.entries()) {
     const { action, error } = parseBatchAction(raw);
     if (error || !action) {
-      results.push({ tool: "?", ok: false, error: error ?? "parse error" });
+      results.push({ tool: "?", ok: false, error: `invalid_input: ${error ?? "parse error"}`, outcome: "not_executed" });
       allOk = false;
+      break;
+    }
+    if (changedAt >= 0 && !isObservation(action)) {
+      stopped = `step ${changedAt + 1} changed the page (navigation, new tab or dialog), so step ${index + 1} ` +
+        `(${action.tool}) and later steps were not run. Observe the new page, then continue.`;
       break;
     }
     const tool = lookup(action.tool);
     if (!tool) {
-      results.push({ tool: action.tool, ok: false, error: `unknown tool: ${action.tool}` });
+      results.push({ tool: action.tool, ok: false, error: `invalid_input: unknown tool: ${action.tool}`, outcome: "not_executed" });
       allOk = false;
       break;
     }
     const normalizedInput = normalizeOptionalInput(tool.inputSchema, action.input);
     const valid = validateInput(tool.inputSchema, normalizedInput);
     if (!valid.ok) {
-      results.push({ tool: action.tool, ok: false, error: valid.error ?? "invalid input" });
+      results.push({ tool: action.tool, ok: false, error: `invalid_input: ${valid.error ?? "invalid input"}`, outcome: "not_executed" });
       allOk = false;
       break;
     }
@@ -128,21 +173,25 @@ export async function runBatch(
     let res: McpToolResult;
     try {
       session.agentAdmission?.();
-      // Direct call — the batch itself already holds the runExclusive turn.
+      // Direct call: the batch itself already holds the runExclusive turn.
       res = await tool.run(session, normalizedInput);
     } catch (err) {
-      results.push({
-        tool: action.tool,
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const message = err instanceof Error ? err.message : String(err);
+      results.push({ tool: action.tool, ok: false, error: message, ...(message.startsWith("human_control") ? { outcome: "not_executed" } : {}) });
       allOk = false;
       break;
     }
 
-    const summary = firstText(res).slice(0, SUMMARY_MAX_CHARS);
-    if (res.isError) {
-      results.push({ tool: action.tool, ok: false, error: summary || "tool error" });
+    const first = firstText(res);
+    const body = parseBody(first);
+    const summary = first.slice(0, SUMMARY_MAX_CHARS);
+    // A tool can answer without isError and still say it did not get there
+    // (browser_wait timing out reports ok:false): that also ends the batch.
+    if (res.isError || body?.ok === false) {
+      const outcome = typeof body?.outcome === "string" ? body.outcome : undefined;
+      const err = typeof body?.error === "string" ? body.error.slice(0, SUMMARY_MAX_CHARS) : summary || "tool error";
+      results.push({ tool: action.tool, ok: false, error: err, ...(outcome ? { outcome } : {}) });
+      for (const c of res.content) if (c.type === "image") images.push(c);
       allOk = false;
       break;
     }
@@ -150,9 +199,23 @@ export async function runBatch(
     for (const c of res.content) {
       if (c.type === "image") images.push(c);
     }
+    if (body?.paused_by_dialog === true && index < actions.length - 1) {
+      // Every later step would only be refused with dialog_open.
+      stopped = `step ${index + 1} opened a dialog that waits for an answer, so later steps were not run. ` +
+        "Answer it with browser_act kind=accept_dialog or dismiss_dialog.";
+      break;
+    }
+    if (changedAt < 0 && changedPage(action.tool, normalizedInput, body)) changedAt = index;
   }
 
-  const out = jsonResult({ ok: allOk, count: results.length, results });
+  const notRun = actions.length - results.length;
+  const out = jsonResult({
+    ok: allOk,
+    count: results.length,
+    not_run: notRun,
+    ...(stopped ? { stopped } : {}),
+    results,
+  });
   out.content.push(...images);
   return out;
 }

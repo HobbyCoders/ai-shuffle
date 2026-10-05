@@ -497,10 +497,11 @@ TOOL_LEVELS: Dict[str, Level] = {
     "mcp__computer-use__request_access": HIGH,
     "mcp__computer-use__read_clipboard": HIGH, "mcp__computer-use__write_clipboard": HIGH,
     **{f"mcp__computer-use__{name}": LOW for name in (
-        "computer_batch", "cursor_position", "double_click", "focus_window", "hold_key", "key", "left_click",
-        "left_click_drag", "left_mouse_down", "left_mouse_up", "list_displays", "list_granted_applications",
+        "click_element", "computer_batch", "cursor_position", "double_click", "focus_window", "hold_key", "key",
+        "left_click", "left_click_drag", "left_mouse_down", "left_mouse_up", "list_displays", "list_granted_applications",
         "list_windows", "middle_click", "mouse_move", "open_application", "release_control", "right_click",
-        "screenshot", "scroll", "switch_display", "triple_click", "type", "wait", "window_control", "zoom")},
+        "screenshot", "scroll", "set_value", "switch_display", "triple_click", "type", "ui_tree", "wait",
+        "window_control", "zoom")},
     # The app's browser: looking is fine; acting on a page can act on a
     # signed-in account, so it asks.
     **{f"mcp__browser__{name}": LOW for name in (

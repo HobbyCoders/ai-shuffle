@@ -3918,6 +3918,13 @@ class HarnessAdapter(ProviderAdapter):
                 # amend them (see app/core/guidance_surface.py).
                 for block in _learned_guidance_blocks(options.model):
                     sections.append(PromptSection(kind="extra", text=block))
+            if native:
+                # MCP server instructions (the browser server's operating rules,
+                # any external server's). The delegated CLI renders them from
+                # the handshake itself; on this leg nothing else carries them.
+                mcp_block = _mcp_instructions_block(registry, permitted)
+                if mcp_block:
+                    sections.append(PromptSection(kind="extra", text=mcp_block))
             if native and _recall_backend_available() and (
                 permitted is None
                 or {"SessionSearch", "SessionView"} <= permitted
@@ -4250,10 +4257,12 @@ class HarnessAdapter(ProviderAdapter):
         scope = _assistant_scope(options)
         if scope is not None:
             return _AssistantPermissionEngine(
-                scope, approval_policy=policy, rules=_chat_mode_rules(options)
+                scope, approval_policy=policy, rules=_chat_mode_rules(options),
+                doom_loop_threshold_for=_screen_tool_repeat_threshold,
             )
         return PermissionEngine(
-            approval_policy=policy, rules=_chat_mode_rules(options)
+            approval_policy=policy, rules=_chat_mode_rules(options),
+            doom_loop_threshold_for=_screen_tool_repeat_threshold,
         )
 
 
@@ -5504,6 +5513,50 @@ def _tool_predicate(options: SessionOptions):
     if not surface and not blocked:
         return None
     return lambda name: tool_permitted(name, surface, blocked)
+
+
+# Desktop and browser tools act on a screen that changes between calls, so the
+# same call again is ordinary work (a screenshot while a page loads, Tab or
+# Down pressed a few times, one more scroll). Three in a row tripped the
+# repeat guard, which denies under Bypass and asks the user otherwise. They
+# keep a guard, at a count no real act-and-look loop reaches.
+_SCREEN_TOOL_PREFIXES = ("mcp__computer-use__", "mcp__browser__")
+SCREEN_TOOL_REPEAT_THRESHOLD = 8
+
+
+def _screen_tool_repeat_threshold(name: str) -> Optional[int]:
+    if name.startswith(_SCREEN_TOOL_PREFIXES):
+        return SCREEN_TOOL_REPEAT_THRESHOLD
+    return None
+
+
+def _mcp_instructions_block(registry: Any, permitted: Optional[frozenset]) -> Optional[str]:
+    """The servers' own MCP ``instructions`` as one prompt block, or None.
+
+    Only servers with at least one tool this session may call are included,
+    in name order, so the text is stable for the session and the prompt never
+    describes a server the model cannot reach.
+    """
+    getter = getattr(registry, "server_instructions", None)
+    if getter is None:
+        return None
+    try:
+        found = dict(getter())
+    except Exception:  # noqa: BLE001 - instructions are optional prompt text
+        return None
+    parts: List[str] = []
+    for server in sorted(found):
+        prefix = f"mcp__{server}__"
+        if permitted is not None and not any(name.startswith(prefix) for name in permitted):
+            continue
+        parts.append(f"## {server}\n{found[server]}")
+    if not parts:
+        return None
+    return (
+        "# MCP Server Instructions\n\n"
+        "The following MCP servers have provided instructions for how to use "
+        "their tools and resources:\n\n" + "\n\n".join(parts)
+    )
 
 
 def _permitted_tool_names(options: SessionOptions, registry: Any) -> Optional[frozenset]:

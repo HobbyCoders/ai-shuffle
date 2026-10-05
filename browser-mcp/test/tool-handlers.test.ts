@@ -19,7 +19,8 @@ import { runTabs } from "../src/tools/tabs.js";
 import { runUpload } from "../src/tools/upload.js";
 import { runAct, typeTimeoutMs, TYPE_MS_PER_CHAR } from "../src/tools/act.js";
 import { runNavigate } from "../src/tools/navigate.js";
-import { capText, type McpToolResult } from "../src/tools/result.js";
+import { capText, errorResult, type McpToolResult } from "../src/tools/result.js";
+import { TOOL_MAP } from "../src/tools/index.js";
 import { BrowserWorkspace, EDIT_TIMEOUT_MS } from "../src/workspace.js";
 import { uploadField, FILE_FIELD_TIMEOUT_MS } from "../src/editors.js";
 import { NetworkBuffer, newConsoleBuffer, cappedConsoleEntry } from "../src/buffers.js";
@@ -147,7 +148,8 @@ describe("browser_read_text truncation", () => {
     const res = await runReadText(readSession("word ".repeat(READ_TEXT_MAX_CHARS)));
     const body = bodyOf(res);
     expect(body).toMatchObject({ ok: true, truncated: true, chars: READ_TEXT_MAX_CHARS });
-    expect(texts(res)[1]).toMatch(/\n\[truncated: full text is 150000 chars\]$/);
+    expect(body).toMatchObject({ total_chars: 150000, next_offset: READ_TEXT_MAX_CHARS });
+    expect(texts(res)[1]).toMatch(/\n\[truncated: chars 0-30000 of 150000; call browser_read_text with offset=30000 for the rest\]$/);
   });
   it("does not end a cut page on a lone surrogate", async () => {
     const res = await runReadText(readSession("x".repeat(READ_TEXT_MAX_CHARS - 1) + "😀".repeat(10)));
@@ -267,7 +269,11 @@ function actSession(locator: Record<string, unknown>): Session {
     beginWatch: async () => {},
     disposeWatch: async () => {},
     invalidateScreenshot: () => {},
+    allowScreenshotRevalidation: () => {},
     settle: async () => ({ urlChanged: false, domMutated: "minor" }),
+    eventMark: () => 0,
+    eventsSince: () => [],
+    settleAdoptions: async () => {},
   } as unknown as Session;
 }
 
@@ -326,7 +332,106 @@ describe("browser_act type budget", () => {
   });
   it("reports a missing value as a plain error", async () => {
     const res = await runAct(actSession({ fill: vi.fn() }), { kind: "fill", ref: "e1" });
-    expect(bodyOf(res).error).toBe("`fill` requires `value`");
+    expect(bodyOf(res)).toMatchObject({ code: "invalid_input", error: "invalid_input: `fill` requires `value`", outcome: "not_executed" });
+  });
+});
+
+describe("browser_act outcomes", () => {
+  it("never calls a half-typed value retryable: a timeout without a named blocker is outcome_unknown", async () => {
+    const pressSequentially = vi.fn(async () => { throw new Error("locator.pressSequentially: Timeout 2100ms exceeded."); });
+    const res = await runAct(actSession({ pressSequentially, count: async () => 1 }), { kind: "type", ref: "e1", value: "hello" });
+    expect(bodyOf(res)).toMatchObject({ ok: false, code: "outcome_unknown", outcome: "unknown" });
+    expect(String(bodyOf(res).error)).toMatch(/do not repeat it blindly/);
+  });
+  it("keeps a typing timeout that names a blocker as not_actionable (nothing was typed)", async () => {
+    const pressSequentially = vi.fn(async () => {
+      throw new Error("locator.pressSequentially: Timeout 2100ms exceeded.\nCall log:\n  - element is not visible");
+    });
+    const res = await runAct(actSession({ pressSequentially, count: async () => 1 }), { kind: "type", ref: "e1", value: "hello" });
+    expect(bodyOf(res)).toMatchObject({ code: "not_actionable", outcome: "not_executed" });
+  });
+  it("reports a coordinate gesture that failed after input was sent as outcome_unknown", async () => {
+    const session = {
+      ...actSession({}),
+      hasValidScreenshot: () => true,
+      toViewportPoint: async (c: [number, number]) => c,
+      ensurePage: async () => ({ url: () => "http://h/", mouse: { click: async () => { throw new Error("Protocol error: Input.dispatchMouseEvent: socket hang up"); } } }),
+    } as unknown as Session;
+    const res = await runAct(session, { kind: "click", coordinate: [5, 5] });
+    expect(bodyOf(res)).toMatchObject({ code: "outcome_unknown", outcome: "unknown" });
+  });
+  it("rejects ref-only kinds on a coordinate before touching the page", async () => {
+    const ensurePage = vi.fn();
+    for (const kind of ["select", "check", "uncheck"] as const) {
+      const res = await runAct({ ensurePage } as unknown as Session, { kind, coordinate: [1, 1], value: "x" });
+      expect(bodyOf(res)).toMatchObject({ code: "invalid_input", outcome: "not_executed" });
+    }
+    expect(ensurePage).not.toHaveBeenCalled();
+  });
+  it("sets checkbox state with setChecked instead of toggling", async () => {
+    const setChecked = vi.fn(async () => {});
+    expect(bodyOf(await runAct(actSession({ setChecked }), { kind: "check", ref: "e3" })).ok).toBe(true);
+    expect(bodyOf(await runAct(actSession({ setChecked }), { kind: "uncheck", ref: "e3" })).ok).toBe(true);
+    expect(setChecked.mock.calls.map((c) => (c as unknown[])[0])).toEqual([true, false]);
+  });
+  it("reports page events (new tabs, downloads, dialogs) that happened during the action", async () => {
+    const session = {
+      ...actSession({ click: async () => {} }),
+      eventsSince: () => [{ type: "new_tab", tab_id: "tab2", url: "https://x.test/" }],
+    } as unknown as Session;
+    expect(bodyOf(await runAct(session, { kind: "click", ref: "e1" })).events).toEqual([{ type: "new_tab", tab_id: "tab2", url: "https://x.test/" }]);
+  });
+  it("rejects coordinates bound to an older screenshot and attaches a fresh one", async () => {
+    const click = vi.fn();
+    const session = {
+      ...actSession({}),
+      latestScreenshotId: () => "s5",
+      hasValidScreenshot: () => true,
+      currentTabId: () => "tab1",
+      currentUrl: () => "http://h/",
+      bringToFront: async () => true,
+      setLastScreenshot: () => "s6",
+      ensurePage: async () => ({
+        url: () => "http://h/",
+        mouse: { click },
+        evaluate: async () => ({ scrollW: 800, scrollH: 600, innerW: 800, innerH: 600, scrollX: 0, scrollY: 0 }),
+        screenshot: async () => Buffer.from("jpeg"),
+      }),
+    } as unknown as Session;
+    const res = await runAct(session, { kind: "click", coordinate: [5, 5], screenshot_id: "s4" });
+    expect(bodyOf(res)).toMatchObject({ code: "stale_screenshot", outcome: "not_executed" });
+    expect(res.content.some((c) => c.type === "image")).toBe(true);
+    expect(click).not.toHaveBeenCalled();
+  });
+});
+
+describe("error contract", () => {
+  it("derives a stable code from the message prefix", () => {
+    expect(bodyOf(errorResult("stale_ref: e1 is gone"))).toMatchObject({ ok: false, code: "stale_ref" });
+    expect(bodyOf(errorResult("no prefix here")).code).toBeUndefined();
+  });
+});
+
+describe("dialog gate", () => {
+  const pending = { type: "confirm", message: "Delete?", tab_id: "tab1", default_value: "", dialog: {} };
+  function gated(extra: Record<string, unknown> = {}): Session {
+    return {
+      pendingDialog: pending,
+      describeDialog: () => ({ type: "confirm", message: "Delete?", tab_id: "tab1" }),
+      ...extra,
+    } as unknown as Session;
+  }
+  it("refuses page work while a dialog waits, before running anything", async () => {
+    const ensurePage = vi.fn();
+    for (const [name, input] of [["browser_snapshot", {}], ["browser_act", { kind: "click", ref: "e1" }], ["browser_batch", { actions: ['{"tool":"browser_snapshot"}'] }]] as const) {
+      const res = await TOOL_MAP.get(name)!.run(gated({ ensurePage }), input);
+      expect(bodyOf(res)).toMatchObject({ ok: false, code: "dialog_open", outcome: "not_executed", dialog: { type: "confirm", message: "Delete?" } });
+    }
+    expect(ensurePage).not.toHaveBeenCalled();
+  });
+  it("lets the answer through and reports when no dialog is waiting", async () => {
+    const res = await TOOL_MAP.get("browser_act")!.run({ pendingDialog: undefined } as unknown as Session, { kind: "dismiss_dialog" });
+    expect(bodyOf(res)).toMatchObject({ code: "no_dialog", outcome: "not_executed" });
   });
 });
 

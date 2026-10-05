@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Optional
 
 
 def active_session_ids() -> set[str]:
@@ -52,7 +53,7 @@ def busy_work() -> list[dict]:
     return rows
 
 
-async def stop_session_work(sid: str, *, shutdown: bool = False) -> None:
+async def stop_session_work(sid: str, *, shutdown: bool = False, source: Optional[str] = None) -> None:
     """Stop one session's turn and background work, as its Stop button does.
 
     ``shutdown`` is the worker stopping, not the owner: a Task child another
@@ -73,7 +74,7 @@ async def stop_session_work(sid: str, *, shutdown: bool = False) -> None:
                 stop_background=True, turn_id=runtime.turn_id,
                 source=SERVER_SHUTDOWN_REASON,
             )
-            await runtime.interrupt("stop", escalation_timeout=1.0)
+            await runtime.interrupt("stop", escalation_timeout=1.0, source=SERVER_SHUTDOWN_REASON)
         return
     # Latch first, cancel wakeups and queued turns, and stop parked tasks too.
     await stop_all_background_tasks(
@@ -85,7 +86,10 @@ async def stop_session_work(sid: str, *, shutdown: bool = False) -> None:
             turns.interrupt_turn, sid, "stop",
             stop_background=True, turn_id=runtime.turn_id,
         )
-        await runtime.interrupt("stop", escalation_timeout=1.0)
+        # The app stopped it, not the user: computer use says so (``source``
+        # names why, e.g. a worker update or a move to another worker).
+        await runtime.interrupt("stop", escalation_timeout=1.0,
+                                source=source or (SERVER_SHUTDOWN_REASON if shutdown else "app_stop"))
 
 
 async def stop_running_sessions() -> None:

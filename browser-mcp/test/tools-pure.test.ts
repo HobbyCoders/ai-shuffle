@@ -110,6 +110,8 @@ function snapshotSession(
   return {
     ensurePage: async () => ({}),
     notifyNavigation: () => {},
+    currentTabId: () => "tab1",
+    currentUrl: () => "http://app.test/",
     pageContent: async () => page,
     snapshot: async () => ({
       text,
@@ -279,6 +281,8 @@ describe("content warning cost", () => {
     const session = {
       ensurePage: async () => ({}),
       notifyNavigation: () => {},
+      currentTabId: () => "tab1",
+      currentUrl: () => "http://app.test/",
       pageContent: async () => {
         asked += 1;
         return { title: "", textChars: 0 };

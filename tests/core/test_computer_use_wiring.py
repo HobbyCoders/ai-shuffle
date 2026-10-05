@@ -84,6 +84,11 @@ class TestEnabledAndAvailable:
         text = sp if isinstance(sp, str) else (sp or {}).get("append", "")
         assert "mcp__computer-use__" in text
         assert "screenshot" in text
+        # The server's own platform-aware rules, once (not a second,
+        # Windows-only copy).
+        from app.mcp.computer_use_sdk import system_guidance
+        assert text.count(system_guidance()) == 1
+        assert text.count("## Computer use") == 1
 
 
 class TestEnabledButUnavailable:

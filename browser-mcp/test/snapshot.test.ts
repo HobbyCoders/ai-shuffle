@@ -174,6 +174,19 @@ describe("renderSnapshot pipeline", () => {
     expect(r.text).toContain('button "Submit"');
   });
 
+  it("registers refs inside an iframe (f1e2), not just main-frame refs", () => {
+    const yaml = [
+      '- generic [ref=e1]:',
+      '  - button "Top" [ref=e2]',
+      '  - iframe [ref=e3]:',
+      '    - button "Inner" [ref=f1e2]',
+      '    - textbox "x" [ref=f1e3]',
+    ].join("\n");
+    for (const filter of ["all", "interactive"] as const) {
+      expect(renderSnapshot(yaml, { filter }).refs).toEqual(expect.arrayContaining(["e2", "e3", "f1e2", "f1e3"]));
+    }
+  });
+
   it("filter=interactive strips free text", () => {
     const r = renderSnapshot(SAMPLE, { filter: "interactive" });
     expect(r.text).not.toContain("Some intro paragraph");

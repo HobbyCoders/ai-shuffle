@@ -23,7 +23,7 @@
  */
 
 export const STALE_REF_REMEDY =
-  "ref not valid for the current page — take a fresh browser_snapshot and use the new refs";
+  "not valid for the current page. Take a fresh browser_snapshot and use the new refs";
 
 export class RefRegistry {
   private snapshotId = 0;
@@ -135,7 +135,11 @@ export class RefRegistry {
   }
 }
 
-/** Validate the shape of a ref token (e.g. "e12"). */
+/**
+ * Validate the shape of a ref token: "e12" in the main frame, "f1e3" inside an
+ * iframe (Playwright's ai snapshot numbers iframe content per frame and its
+ * aria-ref engine resolves both forms).
+ */
 export function isRefToken(value: string): boolean {
-  return /^e\d+$/.test(value);
+  return /^(?:f\d+)?e\d+$/.test(value);
 }

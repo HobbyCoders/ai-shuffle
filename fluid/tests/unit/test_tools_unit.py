@@ -117,6 +117,18 @@ def test_doom_loop_forces_ask_after_three() -> None:
     assert engine.note_execution("Bash", {"command": "other"}) is False
 
 
+def test_doom_loop_threshold_can_be_raised_per_tool_but_never_lowered() -> None:
+    def threshold_for(name: str) -> int | None:
+        return {"mcp__screen__key": 5, "Bash": 1}.get(name)
+
+    engine = PermissionEngine("never_ask", doom_loop_threshold_for=threshold_for)
+    key = ("mcp__screen__key", {"text": "Tab"})
+    assert [engine.note_execution(*key) for _ in range(5)] == [False] * 4 + [True]
+    # An override below the default does not weaken the guard.
+    bash = ("Bash", {"command": "flaky"})
+    assert [engine.note_execution(*bash) for _ in range(3)] == [False, False, True]
+
+
 async def test_hook_modify_replaces_input() -> None:
     bus = HookBus()
 

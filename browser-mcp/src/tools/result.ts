@@ -116,9 +116,24 @@ export function contentWarning(
   return undefined;
 }
 
+/**
+ * Did a failed call change anything? `not_executed`: nothing happened, the
+ * call can be fixed and retried. `unknown`: the action may have taken effect
+ * (it failed or timed out after input was sent), so the caller must observe
+ * before repeating anything.
+ */
+export type Outcome = "not_executed" | "unknown";
+
+/** Stable error code: the snake_case prefix of an error message ("stale_ref: ..."). */
+export function errorCode(error: string): string | undefined {
+  const m = /^([a-z][a-z_]{2,40}):/.exec(error);
+  return m ? m[1] : undefined;
+}
+
 export function errorResult(error: string, extra: Record<string, unknown> = {}): McpToolResult {
+  const code = errorCode(error);
   return {
-    content: [text(JSON.stringify({ ok: false, error, ...extra }))],
+    content: [text(JSON.stringify({ ok: false, ...(code ? { code } : {}), error, ...extra }))],
     isError: true,
   };
 }

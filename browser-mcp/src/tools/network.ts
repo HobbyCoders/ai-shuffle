@@ -44,6 +44,7 @@ function looksBinary(raw: string): boolean {
 export interface NetworkInput {
   url_pattern?: string;
   request_id?: string;
+  offset?: number;
   limit?: number;
   clear?: boolean;
 }
@@ -129,7 +130,8 @@ export async function runNetwork(session: Session, input: NetworkInput): Promise
       });
     }
 
-    const { text, truncated, fullChars } = capText(raw, NETWORK_BODY_MAX_CHARS);
+    const offset = Math.max(0, Math.min(input.offset ?? 0, raw.length));
+    const { text, truncated, fullChars } = capText(raw.slice(offset), NETWORK_BODY_MAX_CHARS);
     const body: Record<string, unknown> = {
       ok: true,
       id: entry.id,
@@ -138,8 +140,12 @@ export async function runNetwork(session: Session, input: NetworkInput): Promise
       mimeType: contentType || null,
       chars: text.length,
       truncated,
+      ...(offset ? { offset } : {}),
     };
-    if (truncated) body.full_chars = fullChars;
+    if (truncated) {
+      body.full_chars = offset + fullChars;
+      body.next_offset = offset + text.length;
+    }
     return jsonResult(body, text);
   }
 

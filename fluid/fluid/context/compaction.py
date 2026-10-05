@@ -128,6 +128,17 @@ class CompactionConfig:
     # seen them); 0 disables image consumption outside overflow recovery.
     # Never fires mid-turn whatever the value — see Compactor.apply.
     image_trigger_ratio: float = 1.0
+    # Count rung for images, the one image rung allowed mid-turn. When more
+    # than ``live_image_cap`` tool results still carry images the model has
+    # already seen, all but the newest ``live_image_keep`` of them are
+    # consumed in one batch. A desktop or browser loop takes a screenshot per
+    # step; without this a long turn resends every one of them on every call
+    # (cost, and stale views next to the current one) until a provider's
+    # per-request image limit rejects the request. Batching keeps the prefix
+    # rewrite rare: one cache break per (cap - keep) new screenshots.
+    # 0 disables the rung.
+    live_image_cap: int = 12
+    live_image_keep: int = 3
     # Tier-1 knobs (the owned trimmer's config).
     trim: TrimConfig = field(default_factory=TrimConfig)
     # Estimated-total-context trigger FLOOR; also the whole story when the
@@ -1219,7 +1230,8 @@ class Compactor:
         decision logs the signal. ``cache=None`` runs the unpriced ladder.
         """
         try:
-            return self._apply(
+            capped = self._cap_live_images(nodes)
+            rendered, promotions = self._apply(
                 nodes, overhead_tokens=overhead_tokens,
                 context_window=context_window,
                 output_reserve_tokens=output_reserve_tokens,
@@ -1227,6 +1239,7 @@ class Compactor:
                 measured_prompt_tokens=measured_prompt_tokens,
                 cache=cache,
             )
+            return rendered, capped + promotions
         finally:
             self._tail_from = None
             self._turn_live = None
@@ -2058,6 +2071,27 @@ class Compactor:
         if ratio <= 0:
             return 1 << 62
         return int(threshold * ratio)
+
+    def _cap_live_images(self, nodes: list[SessionNode]) -> list[Promotion]:
+        """The image count rung (see ``live_image_cap``); [] when not due."""
+        cap = self.config.live_image_cap
+        if cap <= 0 or not self.active:
+            return []
+        if len(self.trimmer.live_tool_images(nodes)) <= cap:
+            return []
+        newly = self.trimmer.consume_stale_tool_images(
+            nodes, keep=self.config.live_image_keep
+        )
+        if not newly:
+            return []
+        return [
+            Promotion(
+                tier=1,
+                reason="image_consumed",
+                trimmed=tuple(newly),
+                reclaimed_chars=_chars_of(nodes, newly),
+            )
+        ]
 
     def _consume_images(self, nodes: list[SessionNode]) -> list[Promotion]:
         """Persist consume-once image trims and report them as a promotion.

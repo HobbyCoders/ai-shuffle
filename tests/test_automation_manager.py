@@ -593,7 +593,11 @@ class TestRunAsSession:
                 self._automation(timeout_seconds=0.05), "run-s7", "do it", {}
             )
 
-        interrupt.assert_called_once_with(interrupt.call_args.args[0], "stop")
+        # The timeout names itself, so computer use reports the app (not the
+        # user) as having stopped the turn.
+        interrupt.assert_called_once_with(
+            interrupt.call_args.args[0], "stop", source="automation_timeout"
+        )
         failed = [
             c.kwargs for c in db.update_automation_run.call_args_list
             if c.kwargs.get("status") == "failed"

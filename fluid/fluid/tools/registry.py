@@ -362,6 +362,23 @@ class ToolRegistry:
         # name -> (verdict, verdict_ts, last_true_ts)
         self._probe_cache: dict[str, tuple[bool, float, float]] = {}
         self._clock: Callable[[], float] = time.monotonic
+        # server name -> the server's own usage instructions (MCP
+        # ``instructions``). Hosts render them into the system prompt.
+        self._server_instructions: dict[str, str] = {}
+
+    def set_server_instructions(self, server: str, text: str | None) -> None:
+        """Record (or with an empty ``text``, forget) a server's instructions."""
+        if isinstance(text, str) and text.strip():
+            self._server_instructions[server] = text.strip()
+        else:
+            self._server_instructions.pop(server, None)
+
+    def server_instructions(self) -> dict[str, str]:
+        """Instructions of every server that still has a registered tool."""
+        live = {e.server for e in self._entries.values() if e.server is not None}
+        return {
+            name: text for name, text in self._server_instructions.items() if name in live
+        }
 
     def available(self, name: str) -> bool:
         """The tool's probe verdict (cached; grace-windowed). True without one."""
@@ -438,6 +455,9 @@ class ToolRegistry:
         ``load_schema`` — the progressive-disclosure seam.
         """
         descriptors = await self._manager.connect(name, config)
+        lookup = getattr(self._manager, "client", None)
+        client = lookup(name) if callable(lookup) else None
+        self.set_server_instructions(name, getattr(client, "instructions", None))
         specs: list[ToolSpec] = []
         # A server's readOnlyHint is the server's word about itself. Taken
         # at face value it skips the permission prompt, so it counts only

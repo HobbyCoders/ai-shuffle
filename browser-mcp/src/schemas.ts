@@ -37,22 +37,26 @@ export const ACT_KINDS = [
   "scroll",
   "select",
   "drag",
+  "check",
+  "uncheck",
+  "accept_dialog",
+  "dismiss_dialog",
 ] as const;
 
 export const statusSchema: JsonSchema = {
   type: "object", additionalProperties: false,
   properties: {
-    upload_paths: { type: "array", items: { type: "string" }, description: "Optional non-uploading eligibility check in the browser runtime: 1–10 absolute file paths, each at most 4096 characters. Does not create a page or attach files." },
+    upload_paths: { type: "array", items: { type: "string" }, description: "Optional: 1-10 absolute paths to check against the runtime upload root. Nothing is uploaded." },
   },
 };
 export const waitSchema: JsonSchema = {
   type: "object", additionalProperties: false, required: ["condition"],
   properties: {
-    condition: { type: "string", enum: ["url", "text", "element"], description: "Exactly one of url | text | element. There is no selector condition: use element with selector or ref." },
-    url: { type: "string", description: "URL to match (contains by default)." },
-    text: { type: "string", description: "Text of an element to wait for." },
-    ref: { type: "string", description: "Current snapshot ref, alternative to selector." },
-    selector: { type: "string", description: "CSS/Playwright locator selector." },
+    condition: { type: "string", enum: ["url", "text", "element"], description: "url, text or element. No selector condition: use element with selector or ref." },
+    url: { type: "string", description: "URL to match." },
+    text: { type: "string", description: "Text to wait for." },
+    ref: { type: "string", description: "Element ref (condition=element)." },
+    selector: { type: "string", description: "CSS or Playwright selector (condition=element)." },
     state: { type: "string", enum: ["visible", "hidden", "attached", "detached"] },
     match: { type: "string", enum: ["contains", "exact"] },
     timeout_ms: { type: "integer", minimum: 0, maximum: 15000 },
@@ -62,10 +66,7 @@ export const waitSchema: JsonSchema = {
 export const navigateSchema: JsonSchema = {
   type: "object",
   properties: {
-    url: {
-      type: "string",
-      description: 'URL to open, or "back" / "forward" to move through history. Bare domains get https://.',
-    },
+    url: { type: "string", description: 'URL, or "back" / "forward". Bare domains get https://.' },
   },
   required: ["url"],
   additionalProperties: false,
@@ -74,20 +75,9 @@ export const navigateSchema: JsonSchema = {
 export const snapshotSchema: JsonSchema = {
   type: "object",
   properties: {
-    filter: {
-      type: "string",
-      enum: ["interactive", "all"],
-      description: 'interactive = controls + headings/landmarks (default all).',
-    },
-    scope_ref: {
-      type: "string",
-      description: "Re-snapshot only the subtree under this ref (e.g. e12).",
-    },
-    max_chars: {
-      type: "integer",
-      description: "Truncation budget (default 40000).",
-      minimum: 500,
-    },
+    filter: { type: "string", enum: ["interactive", "all"], description: "interactive: controls, headings and landmarks only. Default all." },
+    scope_ref: { type: "string", description: "Snapshot only this ref's subtree." },
+    max_chars: { type: "integer", description: "Output budget, default 40000.", minimum: 500 },
   },
   additionalProperties: false,
 };
@@ -95,47 +85,16 @@ export const snapshotSchema: JsonSchema = {
 export const actSchema: JsonSchema = {
   type: "object",
   properties: {
-    kind: {
-      type: "string",
-      enum: [...ACT_KINDS],
-      description: "Action to perform.",
-    },
-    ref: {
-      type: "string",
-      description: "Target element ref (e.g. e12) from the CURRENT snapshot — refs expire on navigation and major DOM changes. Provide exactly one of ref or coordinate (scroll too); key may omit both to use active focus.",
-    },
-    coordinate: {
-      type: "array",
-      items: { type: "number" },
-      description: "Target [x,y] in the pixel space of the last browser_screenshot, which must postdate the previous action/navigation. Exactly one of ref or coordinate; key may omit both.",
-    },
-    value: {
-      type: "string",
-      description: "Text for type/fill, or option value for select.",
-    },
-    key: {
-      type: "string",
-      description: 'Key name for kind=key (e.g. "Enter", "ArrowDown").',
-    },
-    modifiers: {
-      type: "array",
-      items: { type: "string" },
-      description: 'Modifier keys for kind=key (e.g. ["Control","Shift"]).',
-    },
-    direction: {
-      type: "string",
-      enum: ["up", "down", "left", "right"],
-      description: "Scroll direction for kind=scroll (scroll still targets exactly one of ref or coordinate).",
-    },
-    amount: {
-      type: "integer",
-      description: "Scroll distance in pixels for kind=scroll.",
-    },
-    to_coordinate: {
-      type: "array",
-      items: { type: "number" },
-      description: "Drop point [x,y] for kind=drag.",
-    },
+    kind: { type: "string", enum: [...ACT_KINDS], description: "select, check and uncheck need a ref. accept_dialog and dismiss_dialog answer a pending dialog and take no target." },
+    ref: { type: "string", description: "Element ref from the latest snapshot (e12, or f1e3 inside an iframe). Exactly one of ref or coordinate." },
+    coordinate: { type: "array", items: { type: "number" }, description: "[x,y] in the pixels of the latest browser_screenshot. Exactly one of ref or coordinate." },
+    screenshot_id: { type: "string", description: "Screenshot the coordinates come from (s3). Rejected if a newer screenshot exists." },
+    value: { type: "string", description: "Text for type/fill, option value or label for select, answer for a prompt dialog." },
+    key: { type: "string", description: 'kind=key: a key or chord, e.g. "Enter", "ArrowDown", "Control+A".' },
+    modifiers: { type: "array", items: { type: "string" }, description: 'Held during key, e.g. ["Shift"].' },
+    direction: { type: "string", enum: ["up", "down", "left", "right"], description: "kind=scroll, default down. Scroll still needs a ref or coordinate." },
+    amount: { type: "integer", description: "kind=scroll pixels, default 400." },
+    to_coordinate: { type: "array", items: { type: "number" }, description: "kind=drag drop point [x,y], screenshot pixels." },
   },
   required: ["kind"],
   additionalProperties: false,
@@ -144,15 +103,8 @@ export const actSchema: JsonSchema = {
 export const screenshotSchema: JsonSchema = {
   type: "object",
   properties: {
-    region: {
-      type: "array",
-      items: { type: "number" },
-      description: "Crop [x,y,width,height] in page pixels. Omit for the viewport.",
-    },
-    full_page: {
-      type: "boolean",
-      description: "Capture the full scrollable page instead of the viewport.",
-    },
+    region: { type: "array", items: { type: "number" }, description: "[x,y,width,height] in page CSS pixels. Omit for the viewport." },
+    full_page: { type: "boolean", description: "Capture the whole scrollable page." },
   },
   additionalProperties: false,
 };
@@ -160,11 +112,7 @@ export const screenshotSchema: JsonSchema = {
 export const findSchema: JsonSchema = {
   type: "object",
   properties: {
-    query: {
-      type: "string",
-      description:
-        "What to find, in plain words (e.g. \"the checkout button\", \"email field\").",
-    },
+    query: { type: "string", description: 'What to find, e.g. "the checkout button".' },
   },
   required: ["query"],
   additionalProperties: false,
@@ -172,18 +120,16 @@ export const findSchema: JsonSchema = {
 
 export const readTextSchema: JsonSchema = {
   type: "object",
-  properties: {},
+  properties: {
+    offset: { type: "integer", minimum: 0, description: "Start character; use next_offset from a cut read." },
+  },
   additionalProperties: false,
 };
 
 export const evalSchema: JsonSchema = {
   type: "object",
   properties: {
-    code: {
-      type: "string",
-      description:
-        "JavaScript run in the page. REPL semantics: top-level await allowed. A single bare expression returns its value automatically; multi-statement code must `return` the value explicitly.",
-    },
+    code: { type: "string", description: "JavaScript; top-level await works. A single expression returns its value; otherwise use return." },
   },
   required: ["code"],
   additionalProperties: false,
@@ -192,24 +138,10 @@ export const evalSchema: JsonSchema = {
 export const consoleSchema: JsonSchema = {
   type: "object",
   properties: {
-    pattern: {
-      type: "string",
-      description:
-        "REQUIRED substring or regex; only matching console messages are returned.",
-    },
-    only_errors: {
-      type: "boolean",
-      description: "Keep only level=error messages.",
-    },
-    limit: {
-      type: "integer",
-      description: "Max messages to return, newest last (default 20).",
-      minimum: 1,
-    },
-    clear: {
-      type: "boolean",
-      description: "Empty the console buffer for this page after returning.",
-    },
+    pattern: { type: "string", description: "Required substring or regex." },
+    only_errors: { type: "boolean" },
+    limit: { type: "integer", description: "Default 20.", minimum: 1 },
+    clear: { type: "boolean", description: "Empty the buffer after reading." },
   },
   required: ["pattern"],
   additionalProperties: false,
@@ -218,23 +150,11 @@ export const consoleSchema: JsonSchema = {
 export const networkSchema: JsonSchema = {
   type: "object",
   properties: {
-    url_pattern: {
-      type: "string",
-      description: "Substring or regex to filter the request list by URL.",
-    },
-    request_id: {
-      type: "string",
-      description: "Return this recorded request's response body instead of a list.",
-    },
-    limit: {
-      type: "integer",
-      description: "Max requests to list, newest last (default 20).",
-      minimum: 1,
-    },
-    clear: {
-      type: "boolean",
-      description: "Empty the network buffer for this page after returning.",
-    },
+    url_pattern: { type: "string", description: "Substring or regex filter for the list." },
+    request_id: { type: "string", description: "Return this request's response body." },
+    offset: { type: "integer", minimum: 0, description: "Body start character; use next_offset." },
+    limit: { type: "integer", description: "Requests listed, default 20.", minimum: 1 },
+    clear: { type: "boolean", description: "Empty the buffer after reading." },
   },
   additionalProperties: false,
 };
@@ -244,15 +164,8 @@ export const TABS_OPS = ["list", "create", "close", "select"] as const;
 export const tabsSchema: JsonSchema = {
   type: "object",
   properties: {
-    op: {
-      type: "string",
-      enum: [...TABS_OPS],
-      description: "list | create | close | select.",
-    },
-    tab_id: {
-      type: "string",
-      description: "Target tab (e.g. tab2) for op=close or op=select.",
-    },
+    op: { type: "string", enum: [...TABS_OPS] },
+    tab_id: { type: "string", description: "For close and select, e.g. tab2." },
   },
   required: ["op"],
   additionalProperties: false,
@@ -263,23 +176,9 @@ export const RESIZE_PRESETS = ["mobile", "tablet", "desktop"] as const;
 export const resizeSchema: JsonSchema = {
   type: "object",
   properties: {
-    preset: {
-      type: "string",
-      enum: [...RESIZE_PRESETS],
-      description: "mobile 375x812 | tablet 768x1024 | desktop 1280x800.",
-    },
-    width: {
-      type: "integer",
-      description: "Explicit viewport width (with height; overrides preset).",
-      minimum: 1,
-      maximum: 4096,
-    },
-    height: {
-      type: "integer",
-      description: "Explicit viewport height (with width; overrides preset).",
-      minimum: 1,
-      maximum: 4096,
-    },
+    preset: { type: "string", enum: [...RESIZE_PRESETS], description: "mobile 375x812, tablet 768x1024, desktop 1280x800." },
+    width: { type: "integer", description: "With height; overrides preset.", minimum: 1, maximum: 4096 },
+    height: { type: "integer", description: "With width.", minimum: 1, maximum: 4096 },
   },
   additionalProperties: false,
 };
@@ -287,16 +186,8 @@ export const resizeSchema: JsonSchema = {
 export const uploadSchema: JsonSchema = {
   type: "object",
   properties: {
-    ref: {
-      type: "string",
-      description: "Ref of the file <input> to populate (e.g. e12).",
-    },
-    paths: {
-      type: "array",
-      items: { type: "string" },
-      description:
-        "Absolute file paths to upload. Only files under BROWSER_UPLOAD_DIR are allowed.",
-    },
+    ref: { type: "string", description: "Ref of a file input." },
+    paths: { type: "array", items: { type: "string" }, description: "Absolute paths under the upload root." },
   },
   required: ["ref", "paths"],
   additionalProperties: false,
@@ -305,12 +196,7 @@ export const uploadSchema: JsonSchema = {
 export const batchSchema: JsonSchema = {
   type: "object",
   properties: {
-    actions: {
-      type: "array",
-      items: { type: "string" },
-      description:
-        'Each item is a JSON string {"tool":"browser_...","input":{...}}, run in order, stop on first error. Cannot contain browser_batch.',
-    },
+    actions: { type: "array", items: { type: "string" }, description: 'JSON strings {"tool":"browser_...","input":{...}}, max 20, no nested batch.' },
   },
   required: ["actions"],
   additionalProperties: false,

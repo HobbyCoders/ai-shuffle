@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -79,11 +80,17 @@ class PermissionEngine:
         rules: list[Rule] | None = None,
         *,
         doom_loop_threshold: int = 3,
+        doom_loop_threshold_for: Callable[[str], int | None] | None = None,
     ) -> None:
         assert approval_policy in ("never_ask", "on_write", "always_ask")
         self.approval_policy = approval_policy
         self.rules = rules or []
         self._threshold = doom_loop_threshold
+        # Per-tool override of the repeat threshold (None = the default). For
+        # tools that act on changing outside state, where the same call again
+        # is ordinary work: a screenshot while a page loads, Tab or Down
+        # pressed a few times, one more scroll.
+        self._threshold_for = doom_loop_threshold_for
         self._last_key: tuple[str, str] | None = None
         self._streak = 0
         # Session-scoped "allow always" responses (see allow_always()).
@@ -179,7 +186,15 @@ class PermissionEngine:
         else:
             self._last_key = key
             self._streak = 1
-        if self._streak >= self._threshold:
+        threshold = self._threshold
+        if self._threshold_for is not None:
+            try:
+                override = self._threshold_for(name)
+            except Exception:  # a broken hook must never lower the guard
+                override = None
+            if isinstance(override, int) and override > threshold:
+                threshold = override
+        if self._streak >= threshold:
             self._streak = 0
             return True
         return False

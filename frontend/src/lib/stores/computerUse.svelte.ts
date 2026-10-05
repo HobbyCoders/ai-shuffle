@@ -30,6 +30,51 @@ import { notify } from '$lib/stores/notifications';
 export const POLL_AVAILABLE_MS = 2_000;
 export const POLL_UNAVAILABLE_MS = 60_000;
 
+/** Interrupt sources that are a person's chat Stop (backend abort._USER_SOURCES). */
+const USER_STOP_SOURCES = new Set(['user_stop', 'user_stopped', 'user_stopped_all']);
+
+/** What the app was doing when it interrupted the turn (backend abort._APP_SOURCES). */
+const APP_STOP_SOURCES: Record<string, string> = {
+	server_shutdown: 'The app is shutting down.',
+	worker_update: 'This worker is updating.',
+	session_handoff: 'The chat is moving to another worker.',
+	app_stop: 'The app stopped the chat.',
+	checkout_cleanup: "The chat's checkout was removed.",
+	assistant: 'An assistant limit stopped the run.',
+	automation_timeout: 'The automation hit its time limit.',
+	lease_lost: 'Another worker took over the turn.',
+	fence_superseded: 'Another worker took over the turn.'
+};
+
+export interface StopNotice {
+	title: string;
+	detail: string;
+}
+
+/**
+ * Why control ended, for the banner, from the status endpoint's
+ * `stop_reason`. Only a person's Esc or Stop is described as theirs; an app
+ * interrupt says what the app did. Null when there is nothing to report.
+ */
+export function stopNotice(reason: string | null | undefined): StopNotice | null {
+	if (!reason) return null;
+	const stopped = 'Computer use stopped';
+	const ended = 'Computer use ended';
+	if (reason === 'escape') return { title: stopped, detail: 'Esc was pressed on this computer. You have control.' };
+	if (reason === 'user') return { title: stopped, detail: 'Stopped with Stop computer use. You have control.' };
+	if (reason === 'disabled') return { title: stopped, detail: 'Computer use was turned off in Settings.' };
+	if (reason === 'completed') return { title: ended, detail: 'The turn finished. You have control.' };
+	if (reason.startsWith('interrupt:')) {
+		const source = reason.slice('interrupt:'.length);
+		if (USER_STOP_SOURCES.has(source)) {
+			return { title: stopped, detail: 'Stopped with Stop in the chat. You have control.' };
+		}
+		return { title: ended, detail: `${APP_STOP_SOURCES[source] ?? 'The app interrupted the turn.'} You have control.` };
+	}
+	// "stopped": a turn interrupt whose source was not recorded.
+	return { title: ended, detail: 'The chat turn was stopped. You have control.' };
+}
+
 function pageHidden(): boolean {
 	return typeof document !== 'undefined' && document.visibilityState === 'hidden';
 }

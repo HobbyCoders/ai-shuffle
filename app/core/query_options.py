@@ -55,6 +55,15 @@ from app.core.environment import (  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
+def computer_use_virtual_size(cfg: Any) -> tuple[int, int]:
+    """The computer-use screenshot target, inside what reaches the model
+    unscaled (1568 px long edge, ~1.15 MP; see ``scaling.fit_virtual_size``,
+    the one place those caps live). Null-safe."""
+    from app.mcp.computer_use.scaling import fit_virtual_size
+
+    return fit_virtual_size(cfg)
+
+
 def _ai_tools_credential_fingerprint(tool_env: Optional[Dict[str, str]]) -> Optional[str]:
     """Return a non-secret identity for the fal credential carried by tools.
 
@@ -518,37 +527,6 @@ async def ensure_pending_checkout(
         )
         return False
 
-
-# Operating guidance appended to the system prompt when computer-use is active.
-COMPUTER_USE_GUIDANCE = (
-    "## Computer use\n"
-    "You can control this **Windows** computer with the `mcp__computer-use__*` tools "
-    "(screenshot, left_click, type, key, scroll, list_windows, focus_window, zoom, "
-    "request_access, computer_batch, …) — the standard computer-use interface, with the "
-    "usual conventions (coordinates are [x, y] pixels in the most recent screenshot).\n"
-    "- Call `request_access` FIRST with the apps you'll need (Start-menu names, e.g. "
-    "'Notepad', 'File Explorer') and a one-line reason; wait for approval, then take a "
-    "`screenshot` to begin.\n"
-    "- To use an app, call `list_windows` first. If it is open, `focus_window` its id "
-    "(`window_control` maximizes, minimizes, restores or moves it). Use `open_application` "
-    "only when the app is not running; never search for apps through Start or the taskbar "
-    "by hand. This app (AI Shuffle) is usually in front and won't move itself.\n"
-    "- Take a fresh `screenshot` after actions. Use `zoom` (a screenshot region or a "
-    "window_id) to read small text; clicks still use the last full screenshot's pixels. "
-    "Use `computer_batch` for predictable sequences (focus → click → type → Return).\n"
-    "- For multiple monitors, read the display note on screenshots and use `switch_display`.\n"
-    "- You share the desktop mouse and keyboard with the user. Prefer the browser tools "
-    "for web-only work to avoid moving their mouse. The purple agent marker shows your "
-    "last position, not a separate input device. Call `release_control` when done.\n"
-    "- One chat owns the shared desktop at a time, including between screenshots and "
-    "actions. A busy result means another action/chat owns it: do other work and retry "
-    "later. Never run desktop actions in parallel; use `computer_batch` for sequences.\n"
-    "- The user can press physical Escape anywhere or Stop computer use in the app to "
-    "halt desktop tools for this turn. Respect the stop; do not work around it. The chat "
-    "Stop button also stops the agent. Tool-generated Escape still closes menus normally.\n"
-    "- Synthetic input cannot operate the Windows UAC / secure desktop or the lock screen. "
-    "If you hit an elevation prompt or a black screenshot, stop and ask the user to handle it."
-)
 
 # Token budgets for thinking modes (token-based thinking)
 THINKING_TOKEN_BUDGETS = {
@@ -1577,10 +1555,7 @@ def build_options_from_profile(
             cu_srv = create_computer_use_server(
                 enabled=True,
                 target_display=computer_use_cfg.get("target_display"),
-                virtual_size=(
-                    int(computer_use_cfg.get("virtual_width", 1280)),
-                    int(computer_use_cfg.get("virtual_height", 800)),
-                ),
+                virtual_size=computer_use_virtual_size(computer_use_cfg),
                 permission_mode=permission_mode,
                 session_id=session_id,
                 profile_id=profile.get("id"),
@@ -1594,19 +1569,22 @@ def build_options_from_profile(
             computer_use_enabled = False
             logger.exception("Failed to create computer-use MCP server")
 
-    # When computer-use is active, append operating guidance to the system prompt
-    # so the model uses the tools correctly (coordinate space, screenshot-first,
-    # shared cursor, UAC limits, Stop-button halts). Handle both string and preset
-    # (dict with "append") prompt shapes.
+    # When computer-use is active, append its operating rules to the system
+    # prompt (screenshot ids, error codes, stops, shared desktop). They come
+    # from the server itself, so they match this host's platform and tools.
+    # Handle both string and preset (dict with "append") prompt shapes.
     if computer_use_enabled and "computer-use" in mcp_servers_dict:
+        from app.mcp.computer_use_sdk import system_guidance
+
+        guidance = system_guidance()
         if isinstance(final_system_prompt, dict):
             _existing = final_system_prompt.get("append", "")
             final_system_prompt["append"] = (
-                f"{_existing}\n\n{COMPUTER_USE_GUIDANCE}" if _existing else COMPUTER_USE_GUIDANCE
+                f"{_existing}\n\n{guidance}" if _existing else guidance
             )
         else:
             _base = str(final_system_prompt) if final_system_prompt else ""
-            final_system_prompt = f"{_base}\n\n{COMPUTER_USE_GUIDANCE}" if _base else COMPUTER_USE_GUIDANCE
+            final_system_prompt = f"{_base}\n\n{guidance}" if _base else guidance
 
     if session_mode == "chat":
         # Do not spawn project/user MCP processes just to hide their tools.

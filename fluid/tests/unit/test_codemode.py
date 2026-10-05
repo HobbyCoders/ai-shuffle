@@ -511,8 +511,10 @@ async def test_cell_images_are_capped_with_an_explicit_note() -> None:
             input={"code": "from tools.many import many\nprint(many())\n", "timeout": 20},
         )
         assert len(outcome.images) == 20
-        assert outcome.images[0].data == "IMG0"
-        assert "(5 further images omitted — read fewer per cell)" in outcome.text
+        # The newest images survive: the last one is the current state.
+        assert outcome.images[0].data == "IMG5"
+        assert outcome.images[-1].data == "IMG24"
+        assert "(5 earlier images omitted; only the last 20 are attached." in outcome.text
     finally:
         await session.aclose()
 

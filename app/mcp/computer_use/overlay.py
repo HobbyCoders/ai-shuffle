@@ -187,7 +187,8 @@ class _OverlayManager:
                   "mouse_move": "Moving", "left_click_drag": "Dragging", "scroll": "Scrolling",
                   "switch_display": "Screen selected", "wait": "Waiting",
                   "list_windows": "Listing windows", "focus_window": "Switching windows",
-                  "window_control": "Arranging a window", "open_application": "Opening an app"}
+                  "window_control": "Arranging a window", "open_application": "Opening an app",
+                  "ui_tree": "Reading controls", "set_value": "Filling a field"}
         detail = labels.get(action, "Clicking" if "click" in action else "Using computer")
         if not snap.get("busy") and time.monotonic() - snap["at"] > 2:
             detail = "Thinking · control active"

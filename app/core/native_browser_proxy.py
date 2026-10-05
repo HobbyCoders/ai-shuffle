@@ -53,7 +53,13 @@ def _catalog(path: str, modified: int, size: int):
         ):
             raise ValueError("Invalid browser tool metadata")
         names.add(name)
-    return tools
+    # The server's MCP ``instructions`` (its operating rules: refs, stale
+    # screenshots, human control). The STDIO server sends them at initialize;
+    # this path has no handshake, so the build exports them here.
+    instructions = data.get("instructions")
+    if not isinstance(instructions, str) or not instructions.strip():
+        instructions = None
+    return tools, instructions
 
 
 async def forward_tool(name: str, arguments: dict, env: dict):
@@ -141,7 +147,7 @@ def register_native_browser_proxy(registry, config) -> bool:
         stat = path.stat()
         if stat.st_size > MAX_PAYLOAD:
             return False
-        catalog = _catalog(str(path), stat.st_mtime_ns, stat.st_size)
+        catalog, instructions = _catalog(str(path), stat.st_mtime_ns, stat.st_size)
     except (OSError, ValueError, TypeError, AttributeError):
         return False
 
@@ -198,4 +204,7 @@ def register_native_browser_proxy(registry, config) -> bool:
         if f"mcp__browser__{tool['name']}" not in reserved
     ]
     registry.register_inproc(create_inproc_server("browser", tools), defer=True)
+    setter = getattr(registry, "set_server_instructions", None)
+    if setter is not None:
+        setter("browser", instructions)
     return True

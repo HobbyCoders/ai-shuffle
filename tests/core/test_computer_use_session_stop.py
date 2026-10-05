@@ -44,7 +44,7 @@ def _runtime(sid="s1", tid="t1") -> SessionRuntime:
 
 
 @contextmanager
-def _interrupt_stubs():
+def _interrupt_stubs(row=None):
     """Stub every side effect interrupt() performs beyond computer-use.
 
     ``interrupt_session`` is imported lazily from query_session_lifecycle, so
@@ -65,7 +65,7 @@ def _interrupt_stubs():
     ), patch(
         "app.core.session_runtime.turns_db"
     ) as turns_mod:
-        turns_mod.get_turn.return_value = {"state": "aborted"}
+        turns_mod.get_turn.return_value = row or {"state": "aborted"}
         turns_mod.TERMINAL_STATES = ("completed", "aborted", "parked")
         yield
 
@@ -98,6 +98,59 @@ class TestStopHaltsComputerUse:
             await rt.interrupt("send_now")
         assert not abort.is_stopped("s1")
         assert access.is_granted("s1")
+
+
+class TestStopReasonIsTheTrueSource:
+    """The halt names who interrupted the turn, so the model is never told
+    the user stopped it when the app did (shutdown, usage limit, cleanup)."""
+
+    @pytest.mark.asyncio
+    async def test_chat_stop_is_the_users(self):
+        rt = _runtime()
+        row = {"state": "aborted", "payload": {"interrupt_source": "user_stop"}}
+        with _interrupt_stubs(row):
+            await rt.interrupt("stop")
+        assert abort.stop_reason("s1") == "interrupt:user_stop"
+        assert abort.kind(abort.stop_reason("s1")) == "user"
+        assert "user pressed Stop" in abort.describe(abort.stop_reason("s1"))
+
+    @pytest.mark.asyncio
+    async def test_recorded_app_source_is_not_the_user(self):
+        rt = _runtime()
+        row = {"state": "aborted", "payload": {"interrupt_source": "assistant"}}
+        with _interrupt_stubs(row):
+            await rt.interrupt("stop")
+        reason = abort.stop_reason("s1")
+        assert reason == "interrupt:assistant"
+        assert not abort.user_caused(reason)
+        assert "the user did not stop it" in abort.describe(reason)
+
+    @pytest.mark.asyncio
+    async def test_direct_caller_source_wins(self):
+        rt = _runtime()
+        with _interrupt_stubs():
+            await rt.interrupt("stop", source="server_shutdown")
+        reason = abort.stop_reason("s1")
+        assert reason == "interrupt:server_shutdown"
+        assert abort.describe(reason).startswith("the app is shutting down")
+
+    @pytest.mark.asyncio
+    async def test_unknown_source_claims_nobody(self):
+        rt = _runtime()
+        with _interrupt_stubs():
+            await rt.interrupt("stop")
+        reason = abort.stop_reason("s1")
+        assert reason == "stopped"
+        assert abort.kind(reason) == "unknown"
+        assert "user" not in abort.describe(reason)
+
+    def test_lost_lease_halts_with_its_reason(self):
+        rt = _runtime()
+        rt._unowned = False
+        with patch("app.core.query_session_lifecycle.interrupt_session", new=AsyncMock()):
+            rt._stop_unowned("lease_lost")
+        assert abort.stop_reason("s1") == "interrupt:lease_lost"
+        assert not abort.user_caused("interrupt:lease_lost")
 
 
 class _Bail(Exception):

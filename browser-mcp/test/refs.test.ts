@@ -133,6 +133,12 @@ describe("isRefToken", () => {
     expect(isRefToken("x1")).toBe(false);
     expect(isRefToken("e1 ")).toBe(false);
   });
+  it("accepts iframe refs (fMeN), which Playwright's aria-ref engine resolves", () => {
+    expect(isRefToken("f1e3")).toBe(true);
+    expect(isRefToken("f12e7")).toBe(true);
+    expect(isRefToken("f1")).toBe(false);
+    expect(isRefToken("fe1")).toBe(false);
+  });
 });
 
 describe("STALE_REF_REMEDY", () => {

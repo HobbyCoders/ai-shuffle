@@ -7,7 +7,7 @@
 	 * in place to a chip that keeps Stop within reach; it does not move.
 	 */
 	import { ChevronDown, ChevronUp, Square, X } from 'lucide-svelte';
-	import { computerUse } from '$lib/stores/computerUse.svelte';
+	import { computerUse, stopNotice } from '$lib/stores/computerUse.svelte';
 	import NotificationSlot from './NotificationSlot.svelte';
 	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 
@@ -21,7 +21,7 @@
 		if (computerUse.active) dismissed = false;
 		else collapsed = false;
 	});
-	const stopped = $derived(['user', 'escape', 'disabled', 'pointer_moved'].includes(computerUse.stopReason ?? ''));
+	const notice = $derived(stopNotice(computerUse.stopReason));
 	const actions: Record<string, string> = {
 		screenshot: 'Looking at screen', zoom: 'Reading detail', mouse_move: 'Moving pointer',
 		left_click: 'Clicking', right_click: 'Right-clicking', middle_click: 'Middle-clicking',
@@ -30,6 +30,7 @@
 		type: 'Typing', key: 'Pressing keys', hold_key: 'Holding keys', scroll: 'Scrolling',
 		wait: 'Waiting', open_application: 'Opening an app', switch_display: 'Screen selected',
 		list_windows: 'Listing windows', focus_window: 'Switching windows', window_control: 'Arranging a window',
+		ui_tree: 'Reading controls', click_element: 'Clicking', set_value: 'Filling a field',
 		read_clipboard: 'Reading clipboard', write_clipboard: 'Writing clipboard'
 	};
 	const detail = $derived(computerUse.connectionLost ? 'Connection lost — status may be out of date'
@@ -63,13 +64,13 @@
 		</button>
 	</aside>
 	</NotificationSlot>
-{:else if stopped && !dismissed}
+{:else if notice && !dismissed}
 	<NotificationSlot order={DOCK_ORDER.computerUse}>
-	<aside class="cu-bar stopped" aria-label="Computer use stopped">
+	<aside class="cu-bar stopped" aria-label={notice.title}>
 		<span class="cu-dot idle" aria-hidden="true"></span>
 		<div class="cu-copy" role="status">
-			<strong class="cu-title">Computer use stopped</strong>
-			<small class="cu-hint">You have control. Start a new chat turn to use the computer again.</small>
+			<strong class="cu-title">{notice.title}</strong>
+			<small class="cu-hint">{notice.detail}</small>
 		</div>
 		<button class="cu-icon" aria-label="Dismiss computer use status" onclick={() => dismissed = true}><X size={15} aria-hidden="true" /></button>
 	</aside>

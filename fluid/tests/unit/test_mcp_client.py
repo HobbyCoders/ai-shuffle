@@ -125,3 +125,26 @@ async def test_untrusted_read_only_tool_requires_permission() -> None:
         assert PermissionEngine("on_write").decide(weather, {"city": "x"}).decision == "ask"
     finally:
         await reg.aclose()
+
+
+async def test_server_instructions_from_the_handshake_reach_the_registry() -> None:
+    # The handshake's instructions are the server's operating rules; dropping
+    # them leaves a native session with per-tool descriptions only.
+    cfg = _config()
+    cfg["env"]["FLUID_FAKE_INSTRUCTIONS"] = "Snapshot before you act."
+    reg = ToolRegistry()
+    try:
+        await reg.connect_mcp("srv", cfg)
+        assert reg._manager.client("srv").instructions == "Snapshot before you act."
+        assert reg.server_instructions() == {"srv": "Snapshot before you act."}
+    finally:
+        await reg.aclose()
+
+
+async def test_a_server_without_instructions_records_none() -> None:
+    reg = ToolRegistry()
+    try:
+        await reg.connect_mcp("srv", _config())
+        assert reg.server_instructions() == {}
+    finally:
+        await reg.aclose()

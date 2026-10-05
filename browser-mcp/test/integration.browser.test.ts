@@ -395,7 +395,10 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     const res = await runScreenshot(session, {});
     const img = res.content.find((c) => c.type === "image");
     expect(img && img.type === "image" ? img.mimeType : "").toBe("image/jpeg");
-    expect(firstText(res)).toMatch(/\d+x\d+ — coordinates/);
+    const meta = JSON.parse(firstText(res));
+    expect(meta).toMatchObject({ screenshot_id: expect.stringMatching(/^s\d+$/), tab_id: session.currentTabId(), kind: "viewport", scale: 1 });
+    expect(meta.width).toBeGreaterThan(0);
+    expect(typeof meta.captured_at).toBe("string");
   });
 
   it("oversized viewport screenshot is downscaled to MAX_EDGE", async () => {
@@ -404,9 +407,8 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
     try {
       const res = await runScreenshot(session, {});
       if (res.isError) throw new Error(firstText(res));
-      const m = firstText(res).match(/(\d+)x(\d+) — coordinates/);
-      expect(m).not.toBeNull();
-      const [w, h] = [Number(m![1]), Number(m![2])];
+      const meta = JSON.parse(firstText(res));
+      const [w, h] = [meta.width as number, meta.height as number];
       expect(Math.max(w, h)).toBeLessThanOrEqual(MAX_EDGE);
       // The stored mapping must let coordinate acts scale back to page pixels.
       const decoded = res.content.find((c) => c.type === "image");
@@ -415,6 +417,185 @@ describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
       await page.setViewportSize({ width: 1280, height: 720 });
     }
   });
+
+  it("maps coordinates back through downscaling, device scale factor 2 and scroll", async () => {
+    const page = await session.ensurePage();
+    try {
+      await session.setViewport(1600, 1000);
+      await page.setContent('<style>body{margin:0;height:3000px}</style>' +
+        '<button id="b" style="position:absolute;left:1180px;top:880px;width:40px;height:40px" onclick="this.dataset.hit=(+(this.dataset.hit||0))+1">x</button>' +
+        '<button id="c" style="position:absolute;left:100px;top:700px;width:40px;height:40px" onclick="this.dataset.hit=1">y</button>');
+      const shot = await runScreenshot(session, {});
+      const meta = JSON.parse(firstText(shot));
+      expect(meta).toMatchObject({ width: 1280, height: 800, scale: 0.8 });
+      const res = await runAct(session, { kind: "click", coordinate: [1200 * 0.8, 900 * 0.8], screenshot_id: meta.screenshot_id });
+      expect(JSON.parse(firstText(res)).ok).toBe(true);
+      expect(await page.locator("#b").getAttribute("data-hit")).toBe("1");
+
+      const cdp = await session.currentCDP();
+      await cdp.send("Emulation.setDeviceMetricsOverride", { width: 800, height: 600, deviceScaleFactor: 2, mobile: false });
+      expect(await page.evaluate(() => window.devicePixelRatio)).toBe(2);
+      await page.evaluate(() => window.scrollTo(0, 500));
+      const hiDpi = JSON.parse(firstText(await runScreenshot(session, {})));
+      // Captured in CSS pixels: the image is not doubled, and the origin is the scroll offset.
+      expect(hiDpi).toMatchObject({ width: 800, height: 600, scale: 1, origin: [0, 500] });
+      const hit = await runAct(session, { kind: "click", coordinate: [120, 220], screenshot_id: hiDpi.screenshot_id });
+      expect(JSON.parse(firstText(hit)).ok).toBe(true);
+      expect(await page.locator("#c").getAttribute("data-hit")).toBe("1");
+      await cdp.send("Emulation.clearDeviceMetricsOverride");
+    } finally {
+      await session.setViewport(1281, 720);
+      await session.setViewport(1280, 720);
+    }
+  }, 30000);
+
+  it("never lands a coordinate on a page that changed since the screenshot, even at the same scroll", async () => {
+    const page = await session.ensurePage();
+    await page.setContent('<canvas id="cv" width="300" height="100" style="position:absolute;left:0;top:200px"></canvas>' +
+      '<button id="open" style="position:absolute;left:10px;top:10px;width:100px;height:40px" ' +
+      'onclick="document.getElementById(\'m\').style.display=\'block\'">open</button>' +
+      '<div id="m" style="display:none;position:fixed;inset:0;background:#fff">' +
+      '<button id="del" style="position:absolute;left:10px;top:10px;width:100px;height:40px" onclick="this.dataset.hit=1">delete</button></div>');
+    const shot = JSON.parse(firstText(await runScreenshot(session, {})));
+    // A click that changes nothing keeps the screenshot usable (no extra round trip).
+    expect(JSON.parse(firstText(await runAct(session, { kind: "click", coordinate: [50, 250] }))).dom_mutated).toBe("none");
+    const again = JSON.parse(firstText(await runAct(session, { kind: "click", coordinate: [50, 250], screenshot_id: shot.screenshot_id })));
+    expect(again).toMatchObject({ ok: true, screenshot_refreshed: true });
+    // Opening the modal changes the DOM: the old screenshot no longer describes the page.
+    const opened = JSON.parse(firstText(await runAct(session, { kind: "click", coordinate: [50, 30] })));
+    expect(opened.dom_mutated).not.toBe("none");
+    const blind = await runAct(session, { kind: "click", coordinate: [50, 30] });
+    expect(blind.isError).toBe(true);
+    expect(JSON.parse(firstText(blind))).toMatchObject({ code: "stale_screenshot", outcome: "not_executed" });
+    expect(blind.content.some((c) => c.type === "image")).toBe(true);
+    expect(await page.locator("#del").getAttribute("data-hit")).toBeNull();
+  });
+
+  it("rejects coordinates aimed from an older screenshot than the latest", async () => {
+    const page = await session.ensurePage();
+    await page.setContent('<button id="t" style="position:absolute;left:0;top:0;width:60px;height:30px" onclick="this.dataset.hit=1">t</button>');
+    const first = JSON.parse(firstText(await runScreenshot(session, {})));
+    await runScreenshot(session, { region: [0, 0, 200, 200] });
+    const res = await runAct(session, { kind: "click", coordinate: [10, 10], screenshot_id: first.screenshot_id });
+    expect(JSON.parse(firstText(res))).toMatchObject({ code: "stale_screenshot", outcome: "not_executed" });
+    expect(await page.locator("#t").getAttribute("data-hit")).toBeNull();
+  });
+
+  it("registers and acts on refs inside an iframe", async () => {
+    const page = await session.ensurePage();
+    await page.setContent('<button>Top</button><iframe srcdoc="<button onclick=&quot;document.body.dataset.hit=1&quot;>Inner</button>"></iframe>');
+    await page.frames()[1]?.waitForSelector("button");
+    const snap = await runSnapshot(session, {});
+    const ref = /button "Inner" \[ref=(f\d+e\d+)\]/.exec(snap.content[1].type === "text" ? snap.content[1].text : "")?.[1];
+    expect(ref).toBeTruthy();
+    const res = await runAct(session, { kind: "click", ref: ref! });
+    expect(JSON.parse(firstText(res)).ok).toBe(true);
+    expect(await page.frames()[1].evaluate(() => document.body.dataset.hit)).toBe("1");
+  });
+
+  it("sets checkbox state idempotently with check/uncheck", async () => {
+    const page = await session.ensurePage();
+    await page.setContent('<label><input type="checkbox" id="cb"> Agree</label>');
+    const snap = await session.snapshot({ filter: "interactive" });
+    const ref = /checkbox "Agree" \[ref=(e\d+)\]/.exec(snap.text)?.[1];
+    for (const kind of ["check", "check", "uncheck"] as const) {
+      expect(JSON.parse(firstText(await runAct(session, { kind, ref: ref! }))).ok).toBe(true);
+    }
+    expect(await page.locator("#cb").isChecked()).toBe(false);
+  });
+
+  it("pauses on a confirm dialog, gates other tools, and returns the paused action's result when answered", async () => {
+    const page = await session.ensurePage();
+    await page.setContent('<button id="c" onclick="document.title=String(confirm(\'Delete it?\'))">Delete</button>' +
+      '<button id="p" onclick="document.title=String(prompt(\'Name?\', \'x\'))">Name</button>' +
+      '<button id="a" onclick="alert(\'Saved\'); document.title=\'after-alert\'">Alert</button>');
+    const snap = await session.snapshot({ filter: "interactive" });
+    const refOf = (name: string) => new RegExp(`button "${name}" \\[ref=(e\\d+)\\]`).exec(snap.text)![1];
+    const run = (name: string, input: Record<string, unknown>) => session.runAgentExclusive(() => TOOL_MAP.get(name)!.run(session, input));
+
+    const paused = JSON.parse(firstText(await run("browser_act", { kind: "click", ref: refOf("Delete") })));
+    expect(paused).toMatchObject({ ok: true, paused_by_dialog: true, dialog: { type: "confirm", message: "Delete it?" } });
+    const gated = JSON.parse(firstText(await run("browser_snapshot", {})));
+    expect(gated).toMatchObject({ code: "dialog_open", outcome: "not_executed" });
+    expect(JSON.parse(firstText(await run("browser_status", {}))).pending_dialog).toMatchObject({ type: "confirm" });
+    const answered = JSON.parse(firstText(await run("browser_act", { kind: "accept_dialog" })));
+    expect(answered).toMatchObject({ dialog_handled: "accepted", ok: true, url_changed: false });
+    expect(await page.title()).toBe("true");
+    expect(session.pendingDialog).toBeUndefined();
+
+    expect(JSON.parse(firstText(await run("browser_act", { kind: "click", ref: refOf("Name") }))).dialog).toMatchObject({ type: "prompt", default_value: "x" });
+    expect(JSON.parse(firstText(await run("browser_act", { kind: "accept_dialog", value: "Ada" }))).dialog_handled).toBe("accepted");
+    expect(await page.title()).toBe("Ada");
+
+    const alerted = JSON.parse(firstText(await run("browser_act", { kind: "click", ref: refOf("Alert") })));
+    expect(alerted.events).toEqual([{ type: "dialog", tab_id: session.currentTabId(), dialog_type: "alert", message: "Saved", handled: "accepted" }]);
+    expect(await page.title()).toBe("after-alert");
+  }, 30000);
+
+  it("dismisses a pending dialog when a viewer takes control (the panel cannot show it)", async () => {
+    const page = await session.ensurePage();
+    await page.setContent('<button id="c" onclick="document.title=String(confirm(\'Leave?\'))">Ask</button>');
+    const snap = await session.snapshot({ filter: "interactive" });
+    const ref = /button "Ask" \[ref=(e\d+)\]/.exec(snap.text)![1];
+    const ws = new BrowserWorkspace(session);
+    try {
+      const paused = JSON.parse(firstText(await session.runAgentExclusive(() => TOOL_MAP.get("browser_act")!.run(session, { kind: "click", ref }))));
+      expect(paused.paused_by_dialog).toBe(true);
+      const takeover = await ws.receive({ id: "dlg-1", runtime_id: ws.runtimeId, viewer_id: "v", tab_id: null, op: "takeover", args: {}, expires_at: Date.now() + 30000 });
+      expect(takeover.ok).toBe(true);
+      expect(session.pendingDialog).toBeUndefined();
+      expect(await page.title()).toBe("false");
+      expect((await ws.receive({ id: "dlg-2", runtime_id: ws.runtimeId, viewer_id: "v", tab_id: null, op: "release", args: {}, expires_at: Date.now() + 30000 })).ok).toBe(true);
+    } finally {
+      ws.stop();
+      session.agentAdmission = undefined; session.onWorkspaceChange = undefined; session.workspaceStatus = undefined;
+    }
+  }, 30000);
+
+  it("forgets the paused call when the dialog's tab closes, so a later answer never returns it", async () => {
+    await session.ensurePage();
+    const first = session.currentTabId()!;
+    await session.createTab();
+    const page = await session.ensurePage();
+    const second = session.currentTabId()!;
+    await page.setContent('<button onclick="confirm(\'Close me?\')">Ask</button>');
+    const snap = await session.snapshot({ filter: "interactive" });
+    const ref = /button "Ask" \[ref=(e\d+)\]/.exec(snap.text)![1];
+    const run = (name: string, input: Record<string, unknown>) => session.runAgentExclusive(() => TOOL_MAP.get(name)!.run(session, input));
+    expect(JSON.parse(firstText(await run("browser_act", { kind: "click", ref }))).paused_by_dialog).toBe(true);
+    await session.closeTab(second);
+    expect(session.pendingDialog).toBeUndefined();
+    await session.selectTab(first);
+    const other = await session.ensurePage();
+    // A dialog nobody's call opened (a page timer): its answer has no paused call.
+    await other.evaluate(() => { setTimeout(() => confirm("Timer?"), 0); });
+    const deadline = Date.now() + 5000;
+    while (!session.pendingDialog && Date.now() < deadline) await delay(20);
+    expect(session.pendingDialog?.message).toBe("Timer?");
+    const answered = JSON.parse(firstText(await run("browser_act", { kind: "dismiss_dialog" })));
+    expect(Object.keys(answered).sort()).toEqual(["dialog_handled", "ok", "snapshot_stale"]);
+  }, 30000);
+
+  it("registers a tab the page opens and reports downloads, without switching the current tab", async () => {
+    const page = await session.ensurePage();
+    const before = session.currentTabId();
+    await page.setContent('<a id="n" target="_blank" href="about:blank#popup">Open</a>' +
+      '<a id="d" download="report.txt" href="data:text/plain,hello">Get report</a>');
+    const snap = await session.snapshot({ filter: "interactive" });
+    const refOf = (name: string) => new RegExp(`link "${name}" \\[ref=(e\\d+)\\]`).exec(snap.text)![1];
+    const opened = JSON.parse(firstText(await runAct(session, { kind: "click", ref: refOf("Open") })));
+    const newTab = (opened.events ?? []).find((e: { type: string }) => e.type === "new_tab");
+    expect(newTab).toMatchObject({ type: "new_tab", tab_id: expect.stringMatching(/^tab\d+$/) });
+    expect(session.currentTabId()).toBe(before);
+    expect((await session.listTabs()).map((t) => t.id)).toContain(newTab.tab_id);
+    await session.closeTab(newTab.tab_id);
+
+    const got = JSON.parse(firstText(await runAct(session, { kind: "click", ref: refOf("Get report") })));
+    expect(got.events).toEqual([expect.objectContaining({ type: "download", filename: "report.txt" })]);
+    const deadline = Date.now() + 5000;
+    while (session.downloads().at(-1)?.state === "in_progress" && Date.now() < deadline) await delay(50);
+    expect(session.downloads().at(-1)).toMatchObject({ filename: "report.txt", state: "done", path: expect.any(String) });
+  }, 30000);
 
   it("acting on a bogus ref yields a stale_ref error", async () => {
     const res = await runAct(session, { kind: "click", ref: "e99999" });

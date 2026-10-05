@@ -55,22 +55,27 @@ function extractInPage(): { title: string; url: string; text: string } {
   return { title: document.title, url: location.href, text };
 }
 
-export async function runReadText(session: Session): Promise<McpToolResult> {
+export async function runReadText(session: Session, input: { offset?: number } = {}): Promise<McpToolResult> {
   await session.ensurePage();
   const extracted: Extracted = await session.evaluate(extractInPage, "");
 
-  const { text, truncated, fullChars } = capText(extracted.text, READ_TEXT_MAX_CHARS);
-  const warning = emptyContentWarning(text);
+  const offset = Math.max(0, Math.min(input.offset ?? 0, extracted.text.length));
+  const { text, truncated, fullChars } = capText(extracted.text.slice(offset), READ_TEXT_MAX_CHARS);
+  const warning = offset === 0 ? emptyContentWarning(text) : undefined;
+  const total = offset + fullChars;
+  const next = offset + text.length;
   const body: Record<string, unknown> = {
     ok: true,
     url: extracted.url,
     title: extracted.title,
     chars: text.length,
     truncated,
+    ...(offset ? { offset } : {}),
+    ...(truncated ? { total_chars: total, next_offset: next } : {}),
     ...(warning ? { warning } : {}),
   };
   let trailing = truncated
-    ? `${text}\n[truncated: full text is ${fullChars} chars]`
+    ? `${text}\n[truncated: chars ${offset}-${next} of ${total}; call browser_read_text with offset=${next} for the rest]`
     : text;
   if (warning) trailing = `${trailing}\n[warning] ${warning}`.trim();
   return jsonResult(body, trailing);

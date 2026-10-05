@@ -743,7 +743,7 @@ async def _stop_remote(stop):
         return True
     stopped = False
     for turn_id in stop["turn_ids"]:
-        answer = await control.interrupt(device_id, session_id, "stop", turn_id=turn_id)
+        answer = await control.interrupt(device_id, session_id, "stop", turn_id=turn_id, source="assistant")
         stopped = stopped or bool((answer or {}).get("interrupted"))
     return stopped
 

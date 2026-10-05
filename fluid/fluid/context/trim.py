@@ -18,7 +18,10 @@ estimated context size crosses a trigger. Design rules (plan §7):
   turn boundary, and it swaps only the Image blocks in place so the sibling
   text — and every request byte before the result — is untouched. Consuming an
   image between two calls of the same turn would rewrite a message the provider
-  has already cached and re-bill the whole prompt at full price.
+  has already cached and re-bill the whole prompt at full price. The one
+  exception is the count rung (``consume_stale_tool_images``): a screenshot
+  loop past a fixed number of live images drops all but the newest few in one
+  batch, mid-turn, so one cache break covers many steps.
 * **The tree is never mutated.** Trimming is a view transformation applied when
   history is rendered for a request; the stored SessionNodes keep full fidelity
   (rewind/fork/audit see everything).
@@ -641,7 +644,7 @@ class ToolResultTrimmer:
         return any(isinstance(inner, Image) for inner in block.content or [])
 
     def _consumed_image_results(
-        self, nodes: list[SessionNode]
+        self, nodes: list[SessionNode], *, include_errors: bool = False
     ) -> set[tuple[str, str]]:
         """Image results already consumed by a later assistant response.
 
@@ -662,7 +665,7 @@ class ToolResultTrimmer:
             for block in node.message.content:
                 if (
                     isinstance(block, ToolResultBlock)
-                    and not block.is_error
+                    and (include_errors or not block.is_error)
                     and self._has_image(block)
                 ):
                     out.add((node.node_id, block.tool_use_id))
@@ -926,6 +929,46 @@ class ToolResultTrimmer:
             - self._image_consumed
             - self._trimmed
         )
+        self._image_consumed.update(newly)
+        return newly
+
+    def live_tool_images(self, nodes: list[SessionNode]) -> list[tuple[str, str]]:
+        """Tool results whose images are still in context, oldest first."""
+        out: list[tuple[str, str]] = []
+        for node in nodes:
+            if node.message.role != "user":
+                continue
+            for block in node.message.content:
+                if not isinstance(block, ToolResultBlock) or not self._has_image(block):
+                    continue
+                key = (node.node_id, block.tool_use_id)
+                if key not in self._image_consumed and key not in self._trimmed:
+                    out.append(key)
+        return out
+
+    def consume_stale_tool_images(
+        self, nodes: list[SessionNode], *, keep: int
+    ) -> list[tuple[str, str]]:
+        """Consume seen tool-result images except the newest ``keep``.
+
+        The count rung for long act-and-look loops (computer use, browser
+        screenshots): within one turn the image rung never runs, so every
+        screenshot of the turn would ride every later request. Only results a
+        completed model call already saw are eligible, and the newest ``keep``
+        of those stay, so the current observation never leaves context.
+        Unlike ``consume_images``, error results count too: a refused browser
+        action attaches a fresh screenshot to its error (stale_screenshot), and
+        those would otherwise pile up for the rest of the turn.
+        """
+        if not self.config.enabled:
+            return []
+        seen = self._consumed_image_results(nodes, include_errors=True)
+        eligible = [
+            key for key in self.live_tool_images(nodes)
+            if key in seen and key[1] != USER_IMAGE_KEY
+        ]
+        stale = eligible[: max(0, len(eligible) - max(0, keep))]
+        newly = sorted(set(stale) - self._image_consumed - self._trimmed)
         self._image_consumed.update(newly)
         return newly
 

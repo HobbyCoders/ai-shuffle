@@ -12,8 +12,11 @@ converters are ``sdk_tool_to_inproc`` and ``register_sdk_tools``.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
-from typing import Any, Iterable, List, Mapping, Optional
+from types import SimpleNamespace
+from typing import Any, Callable, Iterable, List, Mapping, Optional
 
 from fluid.tools.inproc import InprocServer, InprocTool, create_inproc_server
 from fluid.tools.registry import ToolRegistry
@@ -196,6 +199,7 @@ COMPUTER_USE_RISK_MAP: Mapping[str, str] = {
     "screenshot": "safe", "cursor_position": "safe", "list_displays": "safe",
     "list_granted_applications": "safe", "read_clipboard": "safe",
     "zoom": "safe", "wait": "safe", "release_control": "safe", "list_windows": "safe",
+    "ui_tree": "safe",
     # Everything that drives the desktop mutates it:
     "left_click": "write", "right_click": "write", "middle_click": "write",
     "double_click": "write", "triple_click": "write", "left_click_drag": "write",
@@ -203,6 +207,7 @@ COMPUTER_USE_RISK_MAP: Mapping[str, str] = {
     "key": "write", "hold_key": "write", "type": "write", "scroll": "write",
     "switch_display": "write", "open_application": "write",
     "focus_window": "write", "window_control": "write",
+    "click_element": "write", "set_value": "write",
     "write_clipboard": "write", "request_access": "write",
     "computer_batch": "write",
 }
@@ -298,6 +303,96 @@ def _builtins_call_timeouts(registry: ToolRegistry) -> dict[str, Optional[float]
     return {"Task": max(cap + 2 * queue + 60.0, float(general))}
 
 
+# ─── computer-use: never cancel a desktop action from a timer ────────────────
+#
+# Desktop actions run on a worker thread, and a timer cancel in the middle of
+# one leaves its outcome unknown. The registry's hang guard
+# (``fluid_external_call_timeout_seconds``) and code mode's per-call ceiling
+# both cancel by timer. So the computer-use server's tools are registered
+# without the registry bound and wrapped: past the bound the call answers with
+# an "outcome unknown" error (EXECUTION_OUTCOME_UNKNOWN, the desktop's own
+# vocabulary) and the action keeps running to its end, holding the desktop
+# lock, so a repeat is refused as DESKTOP_BUSY rather than performed twice.
+# Cancelling the caller (a Stop, steering, an engine close) does cancel the
+# action: the handler invalidates its input (``abort.cancel_inflight``)
+# without halting the session, so a call reported cancelled is never still
+# typing. A real Stop has already halted the desktop with its true reason
+# (``abort.request_stop`` in the session runtime).
+COMPUTER_USE_SERVER = "computer-use"
+# Detached desktop calls still running, so they are not garbage-collected.
+_DETACHED_CALLS: set = set()
+
+
+def _still_running_result(tool: str, seconds: float) -> dict:
+    payload = {
+        "success": False,
+        "error": (
+            f"{tool} did not finish within {seconds:g} s and is still running on "
+            "the desktop. Its outcome is unknown: do not repeat it. Desktop calls "
+            "answer DESKTOP_BUSY until it ends; then take a screenshot to see what "
+            "actually happened before acting again."
+        ),
+        "code": "EXECUTION_OUTCOME_UNKNOWN",
+        "outcome": "unknown",
+    }
+    return {"isError": True, "content": [{"type": "text", "text": json.dumps(payload)}]}
+
+
+def _forget_detached(task: "asyncio.Task") -> None:
+    _DETACHED_CALLS.discard(task)
+    if not task.cancelled():
+        task.exception()  # retrieved, so a late failure is not logged as unhandled
+
+
+def detach_on_timeout(
+    tool_name: str, handler: Callable[[dict], Any], bound: Callable[[], Optional[float]],
+) -> Callable[[dict], Any]:
+    """``handler`` answered within ``bound()`` seconds, never cancelled by it.
+
+    Cancelling the wrapper (a Stop, steering, an engine close) cancels the
+    handler too, whose cancel path stops its input without halting the
+    session. Only the timer leaves it running.
+    """
+
+    async def call(args: dict) -> Any:
+        task = asyncio.ensure_future(handler(args))
+        _DETACHED_CALLS.add(task)
+        task.add_done_callback(_forget_detached)
+        limit = bound()
+        try:
+            await asyncio.wait({task}, timeout=limit if limit and limit > 0 else None)
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        if task.done():
+            return task.result()
+        logger.warning(
+            "[fluid_tool_bridge] computer-use %s still running after %gs; answered "
+            "without cancelling it", tool_name, limit,
+        )
+        return _still_running_result(tool_name, float(limit or 0))
+
+    return call
+
+
+def _detached_tools(registry: ToolRegistry, tools: List[Any]) -> List[Any]:
+    """The computer-use tools with ``detach_on_timeout`` handlers."""
+
+    def bound() -> Optional[float]:
+        return getattr(registry, "external_call_timeout", None)
+
+    out: List[Any] = []
+    for tool in tools:
+        name = getattr(tool, "name", "")
+        out.append(SimpleNamespace(
+            name=name,
+            description=getattr(tool, "description", "") or "",
+            input_schema=getattr(tool, "input_schema", None),
+            handler=detach_on_timeout(name, tool.handler, bound),
+        ))
+    return out
+
+
 def register_recorded_sdk_servers(
     registry: ToolRegistry,
     mcp_servers: Optional[Mapping[str, Any]],
@@ -336,6 +431,12 @@ def register_recorded_sdk_servers(
             tools = [t for t in tools if getattr(t, "name", "") not in excluded]
             if not tools:
                 continue
+        call_timeouts: Optional[Mapping[str, Optional[float]]] = None
+        if name == "builtins":
+            call_timeouts = _builtins_call_timeouts(registry)
+        elif name == COMPUTER_USE_SERVER:
+            tools = _detached_tools(registry, tools)
+            call_timeouts = {getattr(t, "name", ""): None for t in tools}
         register_sdk_tools(
             registry,
             name,
@@ -343,9 +444,7 @@ def register_recorded_sdk_servers(
             risk_map=SERVER_RISK_MAPS.get(name),
             default_risk=SERVER_DEFAULT_RISK.get(name, "write"),
             defer=name in (defer_servers or ()),
-            call_timeouts=(
-                _builtins_call_timeouts(registry) if name == "builtins" else None
-            ),
+            call_timeouts=call_timeouts,
         )
         registered.append(name)
     return registered

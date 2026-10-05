@@ -216,7 +216,7 @@ async def queue_move(session_id: str, target: str, *, stop: bool = False) -> Dic
     if stop:
         from app.core.desktop_lifecycle import stop_session_work
 
-        await stop_session_work(session_id)
+        await stop_session_work(session_id, source="session_handoff")
     # Start waiting now: a parked chat has no turn end left to start it.
     schedule(session_id)
     return {"queued": True, "worker": label}
