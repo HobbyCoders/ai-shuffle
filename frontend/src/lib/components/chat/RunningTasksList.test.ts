@@ -183,6 +183,16 @@ describe('RunningTasksList filter and search', () => {
 });
 
 describe('RunningTasksList stopping', () => {
+	it('draws every row stop as a plain x, the swipe reveal included (as before #1826)', () => {
+		setTasks([task('a', { subject: 'Fix login' })]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		const stop = screen.getByRole('button', { name: 'Stop: Fix login' });
+		expect(stop.querySelector('svg.lucide-x')).not.toBeNull();
+		const row = stop.closest('li')!;
+		expect(row.querySelector('.row-under svg.lucide-x')).not.toBeNull();
+		expect(row.querySelector('svg.lucide-square')).toBeNull();
+	});
+
 	it('stops one task and keeps it as Stopped with its worker', async () => {
 		setTasks([task('a', { subject: 'Remote job', worker: { name: 'Unraid' } }), task('b')]);
 		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });

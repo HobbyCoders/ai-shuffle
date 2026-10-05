@@ -31,7 +31,6 @@
 		LoaderCircle,
 		MessageSquareText,
 		Search,
-		Square,
 		Terminal,
 		Workflow,
 		X
@@ -441,7 +440,7 @@
 		data-state={row.state}
 	>
 		{#if size === 'roomy'}
-			<div class="row-under" aria-hidden="true"><Square size={16} fill="currentColor" />Stop</div>
+			<div class="row-under" aria-hidden="true"><X size={16} strokeWidth={2.5} />Stop</div>
 		{/if}
 		<div
 			class="row-inner"
@@ -497,7 +496,7 @@
 						title={stopLabel}
 						aria-label="{stopLabel}: {row.name}"
 						onclick={(e) => guardClick(e, () => requestStop(row))}
-					><Square size={size === 'roomy' ? 15 : 12} fill="currentColor" strokeWidth={0} /></button>
+					><X size={size === 'roomy' ? 18 : 13} strokeWidth={2.5} /></button>
 				{:else if row.state === 'stopping'}
 					<span class="icon-btn stop busy" role="status" aria-label="Stopping {row.name}"><LoaderCircle size={size === 'roomy' ? 17 : 13} class="spin" /></span>
 				{:else}
@@ -543,7 +542,7 @@
 							{:else if member.status === 'running' && member.taskId}
 								<button type="button" class="icon-btn stop" title="Stop" aria-label="Stop: {member.title}"
 									onclick={() => stopMember(row, member)}>
-									<Square size={size === 'roomy' ? 15 : 12} fill="currentColor" strokeWidth={0} />
+									<X size={size === 'roomy' ? 18 : 13} strokeWidth={2.5} />
 								</button>
 							{:else}
 								<span class="icon-slot" aria-hidden="true"></span>
@@ -729,10 +728,10 @@
 		flex: none;
 		border-radius: calc(var(--radius, 0.75rem) * 0.6);
 		background: var(--muted);
-		color: var(--tool-task, var(--primary));
+		/* Every row type takes the theme's primary; the glyph (bot, terminal,
+		   workflow) tells them apart, not a fixed tool colour. */
+		color: var(--primary);
 	}
-	.row-icon.kind-shell { color: var(--tool-bash, var(--muted-foreground)); }
-	.row-icon.swarm { color: var(--primary); }
 	.row-name {
 		display: flex;
 		align-items: center;
@@ -804,7 +803,7 @@
 		transition: background-color 0.12s ease, color 0.12s ease;
 	}
 	.icon-btn:hover { background: var(--hover-overlay); color: var(--foreground); }
-	.icon-btn.stop { color: var(--destructive); }
+	/* Stop is a plain x: quiet at rest, destructive on hover (as before #1826). */
 	.icon-btn.stop:hover { background: color-mix(in oklch, var(--destructive) 12%, transparent); color: var(--destructive); }
 	.icon-btn.busy { cursor: default; color: var(--muted-foreground); }
 	.icon-btn.busy:hover { background: transparent; }

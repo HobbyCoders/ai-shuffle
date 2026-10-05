@@ -35,7 +35,7 @@
 				<ValueText value="Configured" />
 			</SettingRow>
 		{/if}
-		<SettingRow label="OpenRouter account">
+		<SettingRow label="OpenRouter">
 			<a class="pv-link" href="https://openrouter.ai/settings/credits" target="_blank" rel="noopener noreferrer"
 				>Open OpenRouter<ExternalLink /></a
 			>

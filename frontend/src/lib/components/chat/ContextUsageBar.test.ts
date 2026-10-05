@@ -1602,16 +1602,16 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
         rateLimit.applySnapshot({ available: false, windows: [], providers: [
             { provider_id: 'or-key', provider_type: 'openrouter', provider_name: 'OpenRouter',
               credits: { usage: 3, limit: 10 }, source: 'OpenRouter key API', scope: 'This model key spend', fetched_at: 1000 },
-            { provider_id: 'openrouter-account:or-key', provider_type: 'openrouter_account', provider_name: 'OpenRouter account',
+            { provider_id: 'openrouter-account:or-key', provider_type: 'openrouter_account', provider_name: 'OpenRouter',
               credits: { balance_remaining: 20.75 }, source: 'OpenRouter management API', scope: 'Account credit ledger (USD)', fetched_at: 2000 }
         ] });
         const { container } = render(ContextUsageBar);
         await openPopover(container);
-        expect(screen.getByRole('button', { name: 'OpenRouter account usage — collapse' })).toBeTruthy();
+        // Key and account rows share the provider's name; only the balance row shows.
+        expect(screen.getAllByRole('button', { name: 'OpenRouter usage — collapse' })).toHaveLength(1);
         expect(container.textContent).not.toContain('Source:');
         expect(container.textContent).not.toContain('Account credit ledger (USD)');
         expect(container.textContent).not.toContain('Last successful update:');
-        expect(screen.queryByRole('button', { name: 'OpenRouter usage — collapse' })).toBeNull();
         expect(container.textContent).toContain('$20.75 left');
         expect(container.textContent).not.toContain('$3.00 used');
     });

@@ -232,7 +232,7 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
 
         for provider in providers:
             if supported(provider) and provider.get("enabled", True):
-                names[SNAPSHOT_PREFIX + provider["id"]] = (provider.get("name") or "OpenRouter") + " account"
+                names[SNAPSHOT_PREFIX + provider["id"]] = provider.get("name") or "OpenRouter"
 
         from app.core.provider_usage import (
             FAL_USAGE_PROVIDER_ID,

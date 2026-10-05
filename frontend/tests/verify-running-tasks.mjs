@@ -54,6 +54,24 @@ const rect = (page, selector) => page.locator(selector).first().evaluate((el) =>
 	return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width, height: r.height };
 });
 
+// Every row icon (agent, shell, swarm) takes the theme's primary colour; the
+// glyph tells the kinds apart, never a fixed tool colour.
+async function checkIconColours(page, check) {
+	const seen = await page.evaluate(() => {
+		const probe = document.createElement('span');
+		probe.style.color = 'var(--primary)';
+		document.body.appendChild(probe);
+		const primary = getComputedStyle(probe).color;
+		probe.remove();
+		const icons = [...document.querySelectorAll('.row-icon')].filter((el) => el.getClientRects().length);
+		const kinds = icons.map((el) => ({ kind: el.classList.contains('swarm') ? 'swarm' : [...el.classList].find((c) => c.startsWith('kind-')), color: getComputedStyle(el).color }));
+		return { primary, kinds };
+	});
+	check(seen.kinds.some((k) => k.kind === 'kind-agent') && seen.kinds.some((k) => k.kind === 'kind-shell'), 'agent and shell icons both render', seen.kinds.length);
+	const off = seen.kinds.filter((k) => k.color !== seen.primary);
+	check(off.length === 0, 'every row icon follows the theme primary', { primary: seen.primary, off: off.slice(0, 3) });
+}
+
 async function phoneSheet(tasks, { theme = '', swarm = false } = {}) {
 	const q = `?tasks=${tasks}&shell=mobile${swarm ? '&swarm=1' : ''}${theme ? `&theme=${theme}` : ''}`;
 	const name = `phone ${tasks}${swarm ? ' swarm' : ''}${theme ? ` ${theme}` : ''}`;
@@ -67,6 +85,7 @@ async function phoneSheet(tasks, { theme = '', swarm = false } = {}) {
 	await page.waitForTimeout(400);
 	const dialog = page.getByRole('dialog', { name: 'Running tasks' });
 	check(await dialog.isVisible(), 'sheet opens');
+	await checkIconColours(page, check);
 	const sheet = await rect(page, '.rt-sheet');
 	check(Math.abs(sheet.width - 390) < 1 && Math.abs(sheet.height - 844) < 1, 'sheet is full height', sheet);
 	// Title row, then search, then chips, each on its own row.
@@ -177,6 +196,7 @@ async function desktop(tasks, { theme = '', swarm = false } = {}) {
 	check(await page.getByTestId('tasks-toggle').isVisible(), 'inline toggle shows');
 	const capped = await page.locator('.inline-body.capped').count();
 	check(tasks > 6 ? capped === 1 : capped === 0, 'long list caps its height', { tasks, capped });
+	await checkIconColours(page, check);
 	if (swarm) {
 		await page.getByRole('button', { name: /^Swarm Release 0\.8\.24/ }).click();
 		await page.waitForTimeout(200);

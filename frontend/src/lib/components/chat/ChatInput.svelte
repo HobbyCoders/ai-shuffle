@@ -1466,7 +1466,7 @@
 					     StopButton confirms first when background agents are live. -->
 					<div class="send-cluster">
 						{#if mobileViewport}
-							<!-- Phone shell: dictate sits beside send and gives way to it while typing. -->
+							<!-- Phone shell: dictate sits beside send, with or without a draft. -->
 							{@render recorder()}
 						{/if}
 						<PromptStashMenu

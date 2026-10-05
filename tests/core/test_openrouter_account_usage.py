@@ -112,7 +112,7 @@ async def test_usage_response_separates_scopes_and_hides_legacy_combined_balance
     assert entries["router"].scope.startswith("This model key")
     account = entries[usage.SNAPSHOT_PREFIX + "router"]
     assert account.credits["balance_remaining"] == 7
-    assert account.provider_name == "Router account"
+    assert account.provider_name == "Router"
     assert account.source == "OpenRouter credits API"
     assert account.scope == "Account credit ledger (USD)"
 

@@ -220,11 +220,6 @@ html:root[data-platform='mobile'] .send-cluster .voice-btn-wrapper { margin-bott
 html:root[data-platform='mobile'] .send-cluster .voice-btn-wrapper .voice-btn { margin-bottom: 0; }
 html:root[data-platform='mobile'] .send-cluster .voice-btn svg { width: 20px; height: 20px; }
 
-/* The mic gives way to send while there is a draft, unless it is dictating. */
-html:root[data-platform='mobile'] .chat-input-wrapper.has-draft:not(.dictating) .send-cluster .voice-btn-wrapper {
-	display: none;
-}
-
 /* Drafts save and restore by themselves; the phone shows no stash control. */
 html:root[data-platform='mobile'] .send-cluster .stash {
 	display: none;
@@ -283,6 +278,11 @@ html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-e
 	html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-empty:first-child[data-placeholder='Describe a task or ask a question']::before {
 		content: 'Ask or describe a task';
 	}
+
+	/* The mic stays beside send while there is a draft, so the cluster drops
+	   its gap here: each button keeps its full 44px target and the text field
+	   keeps the room. */
+	html:root[data-platform='mobile'] .send-cluster { gap: 0; }
 }
 
 /* The field's padding makes the target; the editor grows to five lines. */

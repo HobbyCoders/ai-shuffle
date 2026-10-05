@@ -101,10 +101,11 @@ describe('quick bar', () => {
 		expect(bar().querySelectorAll('p, small')).toHaveLength(0);
 	});
 
-	it('marks Bypass as the risky mode and names saving', () => {
+	it('styles Bypass like every other mode and names saving', () => {
 		render(MobileComposerControlsSheet, { props: props({ permissionValue: 'bypassPermissions', permissionUpdating: true }) });
 		const access = cell(/^Tool access: Bypass, saving$/);
-		expect(access.classList.contains('risk')).toBe(true);
+		// No mode-specific class: Bypass uses the same theme tokens as Ask or Edits.
+		expect([...access.classList].filter((c) => !c.startsWith('svelte-'))).toEqual(['qcell']);
 		expect(access.getAttribute('aria-busy')).toBe('true');
 	});
 

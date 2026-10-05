@@ -533,7 +533,6 @@
 			<button
 				type="button"
 				class="qcell"
-				class:risk={shownAccess === BYPASS}
 				class:stepping={preview?.cell === 'access'}
 				data-cell="access"
 				aria-haspopup="dialog"
@@ -602,7 +601,7 @@
 				<div class="segs" role="radiogroup" aria-label="Tool access" aria-busy={permissionUpdating} style:--n={permissionOptions.length}>
 					{#each permissionOptions as option (option.value)}
 						{@const Icon = accessIcons[option.value] ?? Hand}
-						<button type="button" class="seg" class:risk={option.value === BYPASS} role="radio"
+						<button type="button" class="seg" role="radio"
 							aria-checked={option.value === accessValue} disabled={permissionUpdating}
 							onclick={() => pickAccess(option.value)}>
 							<Icon size={18} aria-hidden="true" />
@@ -762,7 +761,7 @@
 									<div class="segs" role="radiogroup" aria-label="Tool access" aria-busy={permissionUpdating} style:--n={permissionOptions.length}>
 										{#each permissionOptions as option (option.value)}
 											{@const Icon = accessIcons[option.value] ?? Hand}
-											<button type="button" class="seg" class:risk={option.value === BYPASS} role="radio"
+											<button type="button" class="seg" role="radio"
 												aria-checked={option.value === accessValue} disabled={permissionUpdating}
 												onclick={() => { if (option.value !== accessValue) onPermissionSelect(option.value); }}>
 												<Icon size={18} aria-hidden="true" />
@@ -871,8 +870,6 @@
 		font-variant-numeric: tabular-nums;
 	}
 	.qcell.lit .qi { color: var(--primary); }
-	.qcell.risk { background: color-mix(in oklch, var(--destructive) 14%, var(--card)); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--destructive) 42%, transparent); }
-	.qcell.risk .qi, .qcell.risk .ql { color: var(--destructive); }
 	.qcell.locked .qi, .qcell.locked .ql { color: var(--subtle-foreground); }
 	.qcell.stepping { background: var(--muted); transform: scale(1.04); }
 	.qmini { position: absolute; right: -9px; bottom: -3px; display: grid; place-items: center; width: 14px; height: 14px; border-radius: 50%; background: var(--card); color: var(--primary); }
@@ -984,11 +981,6 @@
 		box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--primary) 40%, transparent);
 		color: var(--primary);
 		font-weight: 600;
-	}
-	.seg.risk[aria-checked='true'] {
-		background: color-mix(in oklch, var(--destructive) 14%, var(--card));
-		box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--destructive) 42%, transparent);
-		color: var(--destructive);
 	}
 	.segs[aria-busy='true'] .seg { cursor: wait; opacity: 0.6; }
 
