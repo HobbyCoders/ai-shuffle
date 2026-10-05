@@ -215,8 +215,8 @@ class CostPolicyTests(unittest.TestCase):
         self.assertEqual(backend["on"]["workflow_dispatch"]["inputs"]["runner_cpus"]["default"], "2")
         self.assertEqual(javascript["on"]["workflow_dispatch"]["inputs"]["runner_cpus"]["default"], "4")
         self.assertEqual(backend["jobs"]["backend"]["env"]["PYTEST_WORKERS"], "${{ inputs.runner_cpus == '4' && '4' || '2' }}")
-        for config, key in [(backend, "backend"), (javascript, "frontend")]:
-            self.assertEqual(config["jobs"][key]["timeout-minutes"], "20")
+        for config, key, timeout in [(backend, "backend", "35"), (javascript, "frontend", "20")]:
+            self.assertEqual(config["jobs"][key]["timeout-minutes"], timeout)
             self.assertIn("inputs.runner_cpus", config["concurrency"]["group"])
         self.assertEqual(backend["jobs"]["backend"]["runs-on"], "${{ inputs.runner_cpus == '4' && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}")
         self.assertEqual(javascript["jobs"]["frontend"]["runs-on"], "${{ inputs.runner_cpus == '2' && 'blacksmith-2vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}")
