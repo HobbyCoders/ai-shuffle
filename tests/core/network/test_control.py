@@ -504,6 +504,45 @@ async def test_control_turns_whitelist_overrides_and_use_the_sessions_project(wo
     assert len(submitted) == 3
 
 
+async def test_control_turns_carry_the_context_window_to_the_owner(workers, monkeypatch):
+    """A window picked mid-chat on a session another worker runs reaches that
+    worker's session row, which every later turn of the session (a restart, a
+    wake, a limit-reset resume) and its subagents read. It used to be dropped
+    here, so the owner kept the window the session was created with and a
+    Claude leg created at 1M stayed at 1M whatever the user picked after."""
+    a, b = workers("a"), workers("b")
+    served = _served_client(monkeypatch, a)
+    from app.core import turn_manager
+    real_submit = turn_manager.submit_async
+
+    async def submit_without_running(session_id, source, **kwargs):
+        return await real_submit(session_id, source, no_kick=True, **kwargs)
+
+    monkeypatch.setattr(turn_manager, "submit_async", submit_without_running)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with a.active():
+        database.create_session(session_id="s-window", profile_id="default", project_id=None, title="On A",
+                                is_active=True, model="opus", context_window=1_000_000)
+        engine.scan_all()
+    converge([a, b])
+    with a.active():
+        store.touch_member(b.device_id, endpoints=[])
+    with b.active():
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        await control.submit_turn(a.device_id, "s-window", prompt="go",
+                                  overrides={"model": "opus", "context_window": 200_000})
+        for bad in (0, -1, "200000", True, 10**9):
+            with pytest.raises(control.ControlRefused):
+                await control.submit_turn(a.device_id, "s-window", prompt="go",
+                                          overrides={"context_window": bad})
+    with a.active():
+        assert database.get_session("s-window")["context_window"] == 200_000
+        from app.db import turns as turns_db
+        assert turns_db.get_latest_turn("s-window")["overrides"]["context_window"] == 200_000
+
+
 async def test_control_turns_steers_a_message_into_the_owners_live_turn(workers, monkeypatch):
     """#1786: a send forwarded from another device while the owner's turn runs
     is steered in at the next tool boundary, like a local send, instead of

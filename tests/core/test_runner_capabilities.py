@@ -26,7 +26,7 @@ def test_shape_has_all_keys_and_types():
     assert isinstance(caps["docker"], bool)
     assert isinstance(caps["claude_cli_signed_in"], bool)
     assert isinstance(caps["provider_kinds"], list)
-    assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 1
+    assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 2
 
 
 def test_os_matches_platform():

@@ -532,6 +532,24 @@ async def test_a_named_model_on_another_provider_starts_there_with_valid_setting
     assert not back.is_error, back.text
 
 
+@pytest.mark.parametrize("window, expected", [(272_000, 200_000), (1_000_000, 1_000_000)])
+async def test_a_named_claude_model_keeps_the_senders_window_choice(chats, window, expected):
+    """A GPT chat on its standard window that starts a chat on Claude gets
+    Claude's standard window, not the CLI's 1M default: the user's "standard"
+    choice carries across model families as it does for a Task worker."""
+    db = chats[0]
+    db.create_model_provider("codex", "Codex", "openai", "https://example.invalid/v1",
+                             models=[{"id": "gpt-6-luna", "label": "GPT-6 Luna"}])
+    sessions.create_session("gpt-caller", "agent", title="GPT caller", is_active=True,
+                            provider_id="codex", model="prov:codex:gpt-6-luna", context_window=window)
+    _turn("gpt-caller", "user", "start a new chat on opus for the review", profile="agent")
+    outcome = await _start({**ARGS, "model": "opus"}, sender="gpt-caller")
+    assert not outcome.is_error, outcome.text
+    row = sessions.get_session(json.loads(outcome.text)["session_id"])
+    assert (row["provider_id"], row["model"], row["context_window"]) == (None, "opus", expected)
+    assert orch._start_turn(row["id"])["overrides"]["context_window"] == expected
+
+
 async def test_an_unnamed_model_asks_and_a_denial_starts_nothing(chats):
     _, _, prompts, _ = chats
     _turn("caller", "user", "get a second opinion", profile="agent")

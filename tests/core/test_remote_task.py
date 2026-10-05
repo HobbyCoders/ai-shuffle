@@ -560,6 +560,48 @@ def test_the_child_runs_at_the_ceiling(world, monkeypatch):
     assert row["permission_mode"] == turn["overrides"]["permission_mode"] == "acceptEdits"
 
 
+# --- the caller's context window ----------------------------------------------
+
+def _target_version(monkeypatch, version):
+    target = {**UNRAID, "capabilities": {**UNRAID["capabilities"], "remote_task": version}}
+    monkeypatch.setattr(runners, "directory", lambda: {"runners": [SELF, target]})
+
+
+@pytest.mark.parametrize("window", [200_000, 1_000_000])
+def test_the_child_runs_with_the_callers_context_window(world, monkeypatch, window):
+    _target_version(monkeypatch, remote_task.CONTEXT_WINDOW_VERSION)
+    database.set_session_run_binding("parent", context_window=window)
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    result = dispatch({})
+    assert result["ok"] is True, result
+    [(_, _, body)] = calls
+    assert body["context_window"] == window
+    row = database.get_session(result["worker_session_id"])
+    [turn] = child_turns(result["worker_session_id"])
+    assert row["context_window"] == turn["overrides"]["context_window"] == window
+
+
+def test_an_older_target_gets_no_context_window_and_still_starts(world, monkeypatch):
+    _target_version(monkeypatch, 1)
+    database.set_session_run_binding("parent", context_window=200_000)
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    result = dispatch({})
+    assert result["ok"] is True, result
+    [(_, _, body)] = calls
+    assert "context_window" not in body
+    assert database.get_session(result["worker_session_id"])["context_window"] is None
+
+
+@pytest.mark.parametrize("value", [0, -1, "200000", True, 10**9])
+def test_an_invalid_context_window_is_refused(world, value):
+    body = body_for(world, state=RemoteWorkerBranch("none"))
+    with world.net.as_target():
+        with pytest.raises(ValueError, match="context_window"):
+            remote_task.prepare_task_start({**body, "context_window": value}, PARENT)
+
+
 # --- chains on the target -----------------------------------------------------
 
 def test_a_remote_child_is_the_root_here_and_keeps_its_depth(world):

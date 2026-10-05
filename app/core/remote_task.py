@@ -106,7 +106,14 @@ _BODY_KEYS = frozenset({
     "version", "worker_session_id", "agent", "agent_name", "prompt", "label",
     "name", "provider_id", "model", "effort", "permission_mode",
     "tool_allowlist", "mode", "origin", "depth", "checkout", "parent",
+    "context_window",
 })
+#: The ``remote_task`` capability that accepts ``context_window`` in the body.
+#: An older target refuses unknown fields, so the parent sends it only to
+#: targets at this version or later.
+CONTEXT_WINDOW_VERSION = 2
+#: Upper bound for a requested window; real choices are at most 1M.
+MAX_CONTEXT_WINDOW = 10_000_000
 _PARENT_KEYS = frozenset({
     "device_id", "session_id", "owner_session_id", "task_id", "tool_use_id",
 })
@@ -219,9 +226,14 @@ def start_body(
     parent_session_id: str,
     owner_session_id: str,
     tool_use_id: Optional[str],
+    context_window: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """The ``task-start`` body. Identifiers only; never a path or credential."""
-    return {
+    """The ``task-start`` body. Identifiers only; never a path or credential.
+
+    ``context_window`` (the caller's window choice) is sent only when set, so
+    a request without one is byte-identical to the version-1 wire.
+    """
+    body = {
         "version": WIRE_VERSION,
         "worker_session_id": worker_session_id,
         "agent": agent,
@@ -246,14 +258,31 @@ def start_body(
             "tool_use_id": tool_use_id,
         },
     }
+    if context_window:
+        body["context_window"] = int(context_window)
+    return body
 
 
 def _caller_bindings(caller_row: Mapping[str, Any], caller_session_id: str):
-    """``(permission mode, loop-guard origin)`` the child inherits. Blocking."""
+    """``(permission mode, loop-guard origin, context window)`` the child
+    inherits. Blocking."""
     from app.core import loop_guard
-    from app.core.provider_agent import _caller_permission_mode
+    from app.core.provider_agent import _caller_context_window, _caller_permission_mode
 
-    return _caller_permission_mode(caller_row), loop_guard.session_origin(caller_session_id)
+    return (
+        _caller_permission_mode(caller_row),
+        loop_guard.session_origin(caller_session_id),
+        _caller_context_window(caller_row),
+    )
+
+
+def _accepts_context_window(worker: Mapping[str, Any]) -> bool:
+    """Whether the target's ``remote_task`` capability takes ``context_window``."""
+    try:
+        version = int((worker.get("capabilities") or {}).get("remote_task") or 0)
+    except (TypeError, ValueError):
+        return False
+    return version >= CONTEXT_WINDOW_VERSION
 
 
 def _link_job(caller_session_id: str, worker_id: str, device_id: str, label: str) -> None:
@@ -334,7 +363,13 @@ async def dispatch_remote(
         return {"ok": False, "error": refusal}
 
     worker_id = str(uuid.uuid4())
-    permission_mode, origin = await asyncio.to_thread(_caller_bindings, caller_row, caller_session_id)
+    permission_mode, origin, context_window = await asyncio.to_thread(
+        _caller_bindings, caller_row, caller_session_id)
+    if context_window and not _accepts_context_window(worker):
+        # An older target would refuse the whole start over the unknown field;
+        # its child runs at its model's default window instead.
+        logger.info("remote_task: %s predates context_window; the child keeps its default window", name)
+        context_window = None
     try:
         state = await asyncio.to_thread(
             publish_worker_branch, caller_row, worker_id, profile_id, tool_allowlist)
@@ -360,6 +395,7 @@ async def dispatch_remote(
         mode=mode, origin=origin, depth=depth, checkout=state.to_wire(),
         parent_device_id=ctx.device_id, parent_session_id=root_session_id,
         owner_session_id=caller_session_id, tool_use_id=launch_tool_use_id,
+        context_window=context_window,
     )
     if stop_generation is not None and task_registry.stop_invalidated(root_session_id, stop_generation):
         await release()
@@ -487,6 +523,7 @@ class _Start:
     owner_session_id: str
     tool_use_id: Optional[str]
     fingerprint: str
+    context_window: Optional[int] = None
 
 
 def _text(body: Mapping[str, Any], key: str, limit: int) -> str:
@@ -544,6 +581,10 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
     depth = body.get("depth")
     if type(depth) is not int or depth < 1:
         raise ValueError("depth must be a positive integer")
+    context_window = body.get("context_window")
+    if context_window is not None and (
+            type(context_window) is not int or not 0 < context_window <= MAX_CONTEXT_WINDOW):
+        raise ValueError("context_window must be a positive token count")
     tools = body.get("tool_allowlist")
     if tools is not None and (
             not isinstance(tools, list) or not tools or len(tools) > MAX_TOOLS
@@ -580,6 +621,7 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
         owner_session_id=_text(parent, "owner_session_id", 200),
         tool_use_id=_optional_text(parent, "tool_use_id", 200),
         fingerprint=_fingerprint(body),
+        context_window=context_window,
     )
 
 
@@ -738,18 +780,21 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
         raise ValueError(str(exc)) from None
     checkout = received.checkout
     project_v2_id = start.checkout.get("project_v2_id") if received.mode in (REMOTE_BRANCH, REMOTE_SHARED) else None
+    # Fitted to the child's model on THIS worker's provider rows.
+    context_window = provider_agent.worker_context_window(
+        start.context_window, start.provider_id, start.model)
     fields = provider_agent.worker_session_fields(
         worker_session_id=start.worker_session_id, profile_id=start.agent, title=start.label,
         parent_session_id=start.parent_session_id, provider_id=start.provider_id,
         model_id=start.model, effort=start.effort, project_v2_id=project_v2_id,
         worktree_branch=checkout.branch if checkout else None,
         worktree_path=checkout.path if checkout else None,
-        permission_mode=permission_mode,
+        permission_mode=permission_mode, context_window=context_window,
     )
     overrides = provider_agent.worker_turn_overrides(
         provider_id=start.provider_id, model_id=start.model, effort=start.effort,
         cwd=received.cwd, permission_mode=permission_mode, checkout=checkout,
-        tool_allowlist=tools,
+        tool_allowlist=tools, context_window=context_window,
     )
     payload: Dict[str, Any] = {
         REPORT_DEVICE_KEY: from_device,

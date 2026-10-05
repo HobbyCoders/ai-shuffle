@@ -706,6 +706,85 @@ def _caller_effort(caller_row: Optional[Mapping[str, Any]]) -> Optional[str]:
     return None
 
 
+def _positive_window(value: Any) -> Optional[int]:
+    """``value`` as a positive token count, or ``None``."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        window = int(value)
+    except (TypeError, ValueError):
+        return None
+    return window if window > 0 else None
+
+
+def _caller_context_window(caller_row: Optional[Mapping[str, Any]]) -> Optional[int]:
+    """The direct caller's selected input window, for worker inheritance.
+
+    Resolved like :func:`_caller_effort`: the running turn's override, else the
+    latest configured turn's, else the session binding (voice reads only its
+    live binding). ``None`` means the caller never chose one, so the worker
+    keeps its model's default window.
+    """
+    from app.db import turns
+
+    row = caller_row or {}
+    if row.get("id") and row.get("mode") != "voice":
+        try:
+            turn = turns.get_live_turn(str(row["id"]))
+            if turn is None:
+                turn = turns.get_latest_turn(str(row["id"])) or {}
+                if turn.get("state") == "queued":
+                    turn = {}
+            window = _positive_window((turn.get("overrides") or {}).get("context_window"))
+            if window is not None:
+                return window
+        except Exception:  # noqa: BLE001 — session binding fallback
+            logger.debug("ProviderAgent: caller window turn read failed", exc_info=True)
+    return _positive_window(row.get("context_window"))
+
+
+def worker_context_window(
+    window: Optional[int], provider_id: Optional[str], model_id: Optional[str],
+) -> Optional[int]:
+    """Fit the caller's window choice onto the worker's own model.
+
+    The picker's choice is "standard" or "1M"; the stored value is that
+    choice's token count for the caller's model (200K for Claude, 256K/272K
+    for GPT). A worker on another model keeps the same choice: an exact match
+    passes through, otherwise a sub-1M window becomes the worker model's
+    standard window and a 1M window its 1M one. When the worker's choices
+    cannot be resolved here (an inherited model, an unknown row) the value
+    passes through unchanged and ``query_options`` drops it if the model
+    cannot run it — the same fallback a session turn gets.
+    """
+    window = _positive_window(window)
+    if window is None:
+        return None
+    from app.core.model_registry import context_window_choices
+
+    row = None
+    if provider_id:
+        try:
+            from app.db import database
+
+            row = database.get_model_provider(provider_id, include_token=False)
+        except Exception:  # noqa: BLE001 — query_options validates instead
+            logger.debug("ProviderAgent: worker provider row read failed", exc_info=True)
+            return window
+        if not row:
+            return window
+    try:
+        choices = context_window_choices(model_id, row) if model_id else []
+    except Exception:  # noqa: BLE001 — query_options validates instead
+        logger.debug("ProviderAgent: worker window choices failed", exc_info=True)
+        return window
+    if not choices or window in choices:
+        return window
+    if window >= 1_000_000:
+        return max(choices) if max(choices) >= 1_000_000 else None
+    return min(choices)
+
+
 def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional[str]:
     """The caller's EFFECTIVE permission mode, for worker inheritance.
 
@@ -795,6 +874,7 @@ def worker_session_fields(
     worktree_branch: Optional[str] = None,
     worktree_path: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    context_window: Optional[int] = None,
 ) -> Dict[str, Any]:
     """``database.create_session`` keywords for a Task worker's own row.
 
@@ -802,6 +882,10 @@ def worker_session_fields(
     asks it to run (:mod:`app.core.remote_task`): hidden, flagged as a worker,
     and bound to an explicit provider (``None`` is native Claude, never the
     profile's provider). ``permission_mode`` is stamped only when given.
+    ``context_window`` (the caller's window choice, fitted to this worker by
+    :func:`worker_context_window`) is stamped on the row, so every later turn
+    of the worker — a message, a restart, a limit-reset resume — runs with
+    the same window as its first.
     """
     fields: Dict[str, Any] = dict(
         session_id=worker_session_id,
@@ -827,6 +911,8 @@ def worker_session_fields(
     )
     if permission_mode:
         fields["permission_mode"] = permission_mode
+    if context_window:
+        fields["context_window"] = context_window
     return fields
 
 
@@ -842,12 +928,15 @@ def worker_turn_overrides(
     tool_allowlist: Optional[List[str]] = None,
     tool_denylist: Optional[List[str]] = None,
     voice_row: Optional[Mapping[str, Any]] = None,
+    context_window: Optional[int] = None,
 ) -> Dict[str, Any]:
     """The overrides a Task worker's turn is submitted with, local or remote.
 
     ``checkout`` is a :class:`app.core.worker_checkout.WorkerCheckout`; its
-    instructions follow ``system_prompt_append``. ``voice_row`` is a voice
-    caller, whose context window and fast mode the worker keeps.
+    instructions follow ``system_prompt_append``. ``context_window`` is the
+    caller's window choice fitted to the worker (see
+    :func:`worker_context_window`). ``voice_row`` is a voice caller, whose
+    fast mode the worker keeps.
     """
     overrides: Dict[str, Any] = {}
     if provider_id:
@@ -860,11 +949,10 @@ def worker_turn_overrides(
         overrides["cwd"] = cwd
     if permission_mode:
         overrides["permission_mode"] = permission_mode
-    if voice_row:
-        for key in ("context_window", "fast"):
-            value = voice_row.get(key)
-            if value is not None:
-                overrides[key] = value
+    if context_window:
+        overrides["context_window"] = context_window
+    if voice_row and voice_row.get("fast") is not None:
+        overrides["fast"] = voice_row.get("fast")
     # A role definition the worker's profile does not carry — today: an agent
     # defined in a ``.fluid/agents`` markdown file or a plugin, dispatched on
     # the caller's profile because it has no ``agents`` row of its own (ruling
@@ -1980,6 +2068,9 @@ async def dispatch_worker(
 
     from app.core.worker_checkout import prepare_worker_checkout
     worker_checkout = None
+    # The caller's context-window choice, fitted to this worker's model. Set by
+    # the prologue below; pinned on the worker row and its first turn.
+    worker_window: Optional[int] = None
 
     def _prepare_worker_blocking() -> Tuple[
         Optional[SessionRow], Optional[str], Optional[str], Optional[str],
@@ -1993,7 +2084,7 @@ async def dispatch_worker(
         caller can refuse launch before registration or provider submission.
         Nothing here needs a running loop.
         """
-        nonlocal worker_checkout
+        nonlocal worker_checkout, worker_window
         # Inheritance (project/worktree/cwd) reads the DIRECT caller's session;
         # ``parent_session_id`` is the ROUTING parent — for nested Task-tool
         # dispatch it is the ROOT session, whose UI renders the card and answers
@@ -2016,6 +2107,9 @@ async def dispatch_worker(
             effort if isinstance(effort, str) and effort in EFFORT_LEVELS
             else _caller_effort(parent_row) if inherited_effort is _EFFORT_UNSET
             else inherited_effort
+        )
+        worker_window = worker_context_window(
+            _caller_context_window(parent_row), provider_id, model_id,
         )
         project_v2_id = (parent_row or {}).get("project_v2_id")
         branch = (parent_row or {}).get("branch")
@@ -2066,6 +2160,7 @@ async def dispatch_worker(
                 provider_id=provider_id,
                 model_id=model_id,
                 effort=selected_effort,
+                context_window=worker_window,
             ))
             from app.core.assistant_service import home_for_session, link_job
             home = home_for_session(context_session_id or parent_session_id)
@@ -2143,6 +2238,7 @@ async def dispatch_worker(
         tool_allowlist=tool_allowlist,
         tool_denylist=tool_denylist,
         voice_row=parent_row if (parent_row or {}).get("mode") == "voice" else None,
+        context_window=worker_window,
     )
 
     # ONE join key for the whole surface: the worker's session id is the
