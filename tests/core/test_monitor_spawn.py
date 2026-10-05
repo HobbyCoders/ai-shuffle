@@ -291,11 +291,29 @@ def test_commands_that_carry_their_own_bound_are_left_alone(command):
     "pytest -q",
 ])
 def test_unbounded_commands_get_the_default_budget(command, monkeypatch):
-    from app.core.config import settings
+    from app.core.config import Settings, settings
 
-    monkeypatch.setattr(settings, "monitor_command_timeout_seconds", 1200)
+    monkeypatch.delenv("MONITOR_COMMAND_TIMEOUT_SECONDS", raising=False)
+    configured = Settings(_env_file=None)
+    assert configured.monitor_command_timeout_seconds == 2700
+    monkeypatch.setattr(
+        settings, "monitor_command_timeout_seconds", configured.monitor_command_timeout_seconds,
+    )
     assert not ms.command_has_own_time_bound(command)
-    assert ms.monitor_deadline_seconds(command, serves=False) == 1200
+    assert ms.monitor_deadline_seconds(command, serves=False) == 2700
+
+
+@pytest.mark.parametrize("budget", [90, 0])
+def test_monitor_budget_environment_override(budget, monkeypatch):
+    from app.core.config import Settings, settings
+
+    monkeypatch.setenv("MONITOR_COMMAND_TIMEOUT_SECONDS", str(budget))
+    configured = Settings(_env_file=None)
+    assert configured.monitor_command_timeout_seconds == budget
+    monkeypatch.setattr(
+        settings, "monitor_command_timeout_seconds", configured.monitor_command_timeout_seconds,
+    )
+    assert ms.monitor_deadline_seconds("npm run build", serves=False) == budget
 
 
 def test_serves_and_the_kill_switch_both_disable_the_budget(monkeypatch):
@@ -491,6 +509,11 @@ async def test_deadline_stops_the_task_and_wakes_with_a_timeout(
     assert frames[0]["status"] == "killed"
     assert "1200s" in frames[0]["summary"]
     assert "time budget" in frames[0]["summary"]
+    assert "not by a failure" in frames[0]["summary"]
+    assert (
+        "check the job's current state once before starting another watcher"
+        in frames[0]["summary"]
+    )
     assert not task.is_running()
 
 

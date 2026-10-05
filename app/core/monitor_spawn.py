@@ -762,10 +762,9 @@ async def _enforce_deadline(
     second and, passing no summary/reason, leaves this attribution in place.
     """
     summary = (
-        f"Stopped: no result after {budget_seconds}s, the monitor's time "
-        "budget. The command was still running and was stopped — it did not "
-        "fail. Give the next attempt its own bound, or use the job's own "
-        "blocking wait."
+        f"Stopped: no result after {budget_seconds}s — the command was stopped "
+        "by the monitor's time budget, not by a failure; check the job's "
+        "current state once before starting another watcher."
     )
     if session_id:
         try:

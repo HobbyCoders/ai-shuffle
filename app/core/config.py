@@ -803,7 +803,7 @@ class Settings(BaseSettings):
     # ``--max-time``, deadline arithmetic, an iteration cap) — the model's own
     # budget wins. Set to 0 to disable the backstop entirely.
     # Env: MONITOR_COMMAND_TIMEOUT_SECONDS.
-    monitor_command_timeout_seconds: int = 1200  # 20 minutes
+    monitor_command_timeout_seconds: int = 2700  # 45 minutes
     # Head+tail cap on the completion summary the parent is WOKEN with. The
     # full buffer stays available via TaskOutput; this only bounds what a wake
     # turn has to read (a stack-trace tail can otherwise burn a whole turn).

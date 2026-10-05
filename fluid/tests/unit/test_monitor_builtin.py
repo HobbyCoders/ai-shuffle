@@ -323,7 +323,7 @@ async def test_spawn_crosses_parent_cancellation_boundary():
 
 # ─── the host's budget: one number, three places it has to agree ─────────────
 #
-# The host appends "It carries a 1200s time budget: if it is still running
+# The host appends "It carries a Ns time budget: if it is still running
 # then, it is stopped and you are woken with a timeout" to the receipt. Fluid's
 # warning then said the command "will hold the park until the session ends and
 # you will never be woken". Both sentences arrived in one receipt in six
