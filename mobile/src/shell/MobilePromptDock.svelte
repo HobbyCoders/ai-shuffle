@@ -192,6 +192,8 @@
 				</div>
 				{#if command}<pre class="cmd">{#if request.tool_name === 'Bash'}<span class="p">$ </span>{/if}{command}</pre>{/if}
 				{#if request.tool_name === 'ModelSwitch'}
+					<!-- A relayed switch still says which worker's subagent asks (#1881). -->
+					{#if relayedFrom(request)}<p class="p-from">From <strong>{relayedFrom(request)}</strong></p>{/if}
 					<p class="p-note">A yes covers this model for this chat, including after app restarts.</p>
 				{:else if relayedFrom(request)}
 					<p class="p-note">From {relayedFrom(request)}. Answer each time.</p>

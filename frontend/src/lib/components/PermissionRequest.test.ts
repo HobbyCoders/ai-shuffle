@@ -115,6 +115,16 @@ describe('PermissionRequest — approve/deny + always-remember', () => {
 		expect(onRespond.mock.calls[0][0]).toMatchObject({ decision: 'allow', remember: 'none' });
 	});
 
+	it.each([false, true])('offers only Approve and Deny, no Defer, on a ModelSwitch prompt (relayed=%s) (#1881)', (relayed) => {
+		const provider_agent = relayed ? { remote_approval_id: 'r1', worker_name: 'DesktopWorker' } : undefined;
+		render(PermissionRequest, { props: { request: makeRequest({ tool_name: 'ModelSwitch', deferrable: false, provider_agent }) } });
+		expect(screen.queryByRole('button', { name: /defer/i })).toBeNull();
+		expect(screen.queryByText(/defer/i)).toBeNull();
+		expect(screen.getByRole('button', { name: 'Approve' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Deny' })).toBeTruthy();
+		if (relayed) expect(screen.getByText('DesktopWorker subagent')).toBeTruthy();
+	});
+
 	it('labels the checkbox with the tool it applies to', () => {
 		render(PermissionRequest, { props: { request: makeRequest({ tool_name: 'WebFetch', tool_input: { url: 'https://example.com' } }) } });
 

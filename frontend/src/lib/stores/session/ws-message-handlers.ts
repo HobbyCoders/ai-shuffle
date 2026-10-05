@@ -1089,6 +1089,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					...(data.provider_agent && typeof data.provider_agent === 'object'
 						? { provider_agent: data.provider_agent as PermissionRequestType['provider_agent'] }
 						: {}),
+					// A prompt the server will not let anyone defer (Switch model).
+					...(data.deferrable === false ? { deferrable: false } : {}),
 				} as PermissionRequestType;
 
 				// The same prompt now arrives twice by design: once on the origin

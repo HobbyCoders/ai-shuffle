@@ -102,6 +102,14 @@ describe('permission queue frames', () => {
 		expect(h.state().pendingPermissions[0].provider_agent).toEqual(tag);
 	});
 
+	it('keeps deferrable: false on a Switch model prompt and adds nothing to ordinary ones (#1881)', () => {
+		const h = harness();
+		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'switch', tool_name: 'ModelSwitch', tool_input: { model: 'gpt-6' }, deferrable: false });
+		h.handleMessage({ type: 'permission_request', session_id: 'current', request_id: 'card', tool_name: 'Bash', tool_input: { command: 'ls' } });
+		expect(h.state().pendingPermissions[0].deferrable).toBe(false);
+		expect(h.state().pendingPermissions[1]).not.toHaveProperty('deferrable');
+	});
+
 	it('accepts the requeue reply, which names requeued_ids and no resolved_ids (backend requeue_deferred_permissions)', () => {
 		const h = harness({ pendingPermissions: [perm('a')], deferredPermissions: [perm('d')] });
 		// Regression: `resolved_ids` is absent on this frame; the handler used to

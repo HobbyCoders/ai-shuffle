@@ -18,6 +18,9 @@
 		blocked_path?: string;
 		/** Set on a subagent's prompt; names the worker of a relayed one. */
 		provider_agent?: PermissionWorkerTag | null;
+		/** False when the prompt cannot be deferred (Switch model). This card
+		 *  offers Approve and Deny only, so it never shows a Defer control. */
+		deferrable?: boolean;
 	}
 
 	interface Props {

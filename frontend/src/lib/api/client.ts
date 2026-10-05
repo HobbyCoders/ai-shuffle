@@ -420,6 +420,10 @@ export interface PermissionRequest {
 	 *  `worker_name` + `remote_approval_id` mark a prompt relayed from a subagent
 	 *  on another worker (app/core/remote_task_approvals.py). */
 	provider_agent?: PermissionWorkerTag | null;
+	/** False on a prompt that cannot be deferred (Switch model, #1881): it is
+	 *  answered yes or no only and the server refuses a defer for it. Absent
+	 *  means the prompt may be deferred. */
+	deferrable?: boolean;
 }
 
 export interface PermissionWorkerTag {

@@ -40,6 +40,19 @@ class _DeferSentinel:
     into a PreToolUse ``defer`` decision."""
 
 
+def is_deferrable(tool_name: Optional[str]) -> bool:
+    """Whether a prompt for ``tool_name`` may be answered "defer".
+
+    A Switch model prompt's caller treats a defer as a refusal and does not
+    come back, so a deferred one would be re-shown later with nobody waiting
+    for its answer: Approve would do nothing. It is answered yes or no only.
+    Such prompts carry ``deferrable: false`` in their payload and events.
+    """
+    from app.core.model_override import PROMPT_TOOL
+
+    return tool_name != PROMPT_TOOL
+
+
 @dataclass
 class PermissionRequest:
     """A pending permission request for a tool use"""
@@ -280,6 +293,8 @@ class PermissionHandler:
         ):
             if value is not None:
                 payload[key] = value
+        if not is_deferrable(tool_name):
+            payload["deferrable"] = False
         return payload
 
     @staticmethod
@@ -328,6 +343,8 @@ class PermissionHandler:
             "provider_agent",
             # Present only on a prompt answered in the assistant's conversation.
             "assistant_confirm",
+            # False only on a prompt that cannot be deferred (Switch model).
+            "deferrable",
         ):
             if payload.get(key) is not None:
                 d[key] = payload[key]
@@ -552,6 +569,10 @@ class PermissionHandler:
             # tool-wide rule; an older client's "Always" must not answer the
             # chat's other open switch prompts for different models.
             remember, pattern = None, None
+        if decision == "defer" and not is_deferrable(payload.get("tool_name")):
+            # Nobody would wait for the re-shown prompt's answer. Leave the
+            # row pending so the owner can still approve or deny it.
+            return {"error": "This prompt cannot be deferred. Approve or deny it."}
 
         # Defer: answer THIS row {decision: defer}; the requeue path later
         # mints a fresh pending row with the same request_id. The awaiting
@@ -773,6 +794,10 @@ class PermissionHandler:
                 continue
             payload = r.get("payload") or {}
             await run_sync(interactions.mark_interaction_requeued, r["id"])
+            if not is_deferrable(payload.get("tool_name")):
+                # Deferred before defer was refused for it: its caller already
+                # got a refusal, so a re-shown card could not start anything.
+                continue
             new_row = await run_sync(
                 interactions.create_interaction,
                 session_id, PERMISSION_KIND, payload, PERMISSION_TTL_SECONDS,
@@ -861,6 +886,8 @@ class PermissionHandler:
         # The client shows this as the assistant's question, not a card.
         if request.assistant_confirm is not None:
             permission_event["assistant_confirm"] = request.assistant_confirm
+        if not is_deferrable(request.tool_name):
+            permission_event["deferrable"] = False
 
         # ── Delivery leg 1: the origin socket that owns this query ───────────
         # Best-effort: a dead/closing socket must never propagate out of here,
@@ -1044,6 +1071,8 @@ class PermissionHandler:
         for row in interactions.get_answered_interactions(session_id, PERMISSION_KIND):
             answer = row.get("answer") or {}
             if answer.get("decision") != "defer" or answer.get("requeued"):
+                continue
+            if not is_deferrable((row.get("payload") or {}).get("tool_name")):
                 continue
             out.append(self._payload_row_to_dict(row, "deferred"))
         return out

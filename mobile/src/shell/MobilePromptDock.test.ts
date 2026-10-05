@@ -107,6 +107,27 @@ describe('permission prompt', () => {
 		expect(onPermission).toHaveBeenCalledExactlyOnceWith({ request_id: 'p1', decision: 'allow', remember: 'none' });
 	});
 
+	it('names the worker of a relayed ModelSwitch prompt beside the model note (#1881)', () => {
+		renderDock({ permissions: [{ ...bash, tool_name: 'ModelSwitch', deferrable: false, provider_agent: { remote_approval_id: 'r1', worker_name: 'DesktopWorker' } }] });
+		const dock = screen.getByRole('region', { name: 'Waiting on you' });
+		expect(dock.querySelector('.p-from')?.textContent).toBe('From DesktopWorker');
+		expect(within(dock).getByText(/A yes covers this model for this chat, including after app restarts/)).toBeTruthy();
+		// A local switch prompt names no worker.
+		cleanup();
+		renderDock({ permissions: [{ ...bash, tool_name: 'ModelSwitch', deferrable: false }] });
+		expect(document.querySelector('.p-from')).toBeNull();
+	});
+
+	it.each([false, true])('offers only Approve and Deny, no Defer, on a ModelSwitch prompt (relayed=%s)', (relayed) => {
+		const provider_agent = relayed ? { remote_approval_id: 'r1', worker_name: 'DesktopWorker' } : undefined;
+		renderDock({ permissions: [{ ...bash, tool_name: 'ModelSwitch', deferrable: false, provider_agent }] });
+		const dock = screen.getByRole('region', { name: 'Waiting on you' });
+		expect(within(dock).queryByRole('button', { name: /defer/i })).toBeNull();
+		expect(within(dock).queryByText(/defer/i)).toBeNull();
+		expect(within(dock).getByRole('button', { name: /Approve/ })).toBeTruthy();
+		expect(within(dock).getByRole('button', { name: /Deny/ })).toBeTruthy();
+	});
+
 	it('offers no "Always" for a prompt relayed from another worker', () => {
 		renderDock({ permissions: [{ ...bash, provider_agent: { remote_approval_id: 'r1', worker_name: 'Unraid' } }] });
 		expect(screen.queryByRole('checkbox', { name: 'Always do this' })).toBeNull();

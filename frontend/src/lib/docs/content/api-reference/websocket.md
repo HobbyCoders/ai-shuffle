@@ -52,7 +52,7 @@ ws.send(JSON.stringify({
 | `session_created` | New session created for an omitted `session_id` | `session_id`, `title`, `request_id` (echoed if sent) |
 | `tool_use` | A tool call started (for tracking pending tools) | `session_id`, `id`, `name`, `input` (replaced by a truncation marker when over 4 KB) |
 | `tool_result` | A tool call finished | `session_id`, `tool_use_id`, `name`, `output`, `is_error` |
-| `permission_request` | A tool needs approval | `session_id`, `request_id`, `tool_name`, `tool_input`, `queue_position`, `queue_total` |
+| `permission_request` | A tool needs approval. `deferrable: false` marks a request that can only be approved or denied (a Switch model prompt); it is absent otherwise | `session_id`, `request_id`, `tool_name`, `tool_input`, `queue_position`, `queue_total` |
 | `user_question` | The agent asks the user a question | `session_id`, `request_id`, `tool_use_id`, `questions` |
 | `done` | Turn complete | `session_id`, `metadata` (`total_cost_usd`, `tokens_in`, `tokens_out`, `model`, `duration_ms`, ...) |
 | `interrupted` | Turn ended by an interrupt | `session_id`, `message` |
@@ -60,7 +60,7 @@ ws.send(JSON.stringify({
 | `query_queued` | The `query` was queued behind a running turn (or handed to the device that runs the session) instead of starting now | `session_id` |
 | `session_not_found` | Reply to `load_session` for an unknown session (and, for an API key, for another principal's session) | `session_id` |
 | `session_closed` | Reply to `close_session` | `session_id` (null when no session was selected) |
-| `permission_response_ack` | Reply to `permission_response`. `result` is `{"resolved": true, "auto_resolved_count", "auto_resolved_ids"}` on success (plus `"deferred": true` for a deferral), or `{"error": "Request not found"}` when the request is unknown or already answered | `session_id`, `request_id`, `result` |
+| `permission_response_ack` | Reply to `permission_response`. `result` is `{"resolved": true, "auto_resolved_count", "auto_resolved_ids"}` on success (plus `"deferred": true` for a deferral), or `{"error": "Request not found"}` when the request is unknown or already answered. Deferring a request marked `deferrable: false` returns an `error` and leaves it waiting | `session_id`, `request_id`, `result` |
 | `user_question_response_ack` | Reply to `user_question_response` | `session_id`, `request_id`, `success`, `reason` (`not_pending` when the question was already answered) |
 | `pending_permissions` | Reply to `get_pending_permissions` | `session_id`, `pending`, `deferred` |
 | `pending_questions` | Reply to `get_pending_questions` | `session_id`, `questions` |
@@ -124,7 +124,7 @@ ws.send(JSON.stringify({
 }));
 ```
 
-An agent-wide (`"profile"`) rule applies to every session on that agent, so only the owner can create one. An API key that sends `remember: "profile"` gets a rule for its own session only, the same as `"session"`. A `decision` of `"defer"` sets the request aside without answering it; `remember` and `pattern` are ignored. Deferred requests come back in `pending_permissions.deferred`, and `requeue_deferred_permissions` sends them again. The server confirms every answer with `permission_response_ack`.
+An agent-wide (`"profile"`) rule applies to every session on that agent, so only the owner can create one. An API key that sends `remember: "profile"` gets a rule for its own session only, the same as `"session"`. A `decision` of `"defer"` sets the request aside without answering it; `remember` and `pattern` are ignored. A request marked `deferrable: false` cannot be deferred: the reply carries an `error` and the request stays open for an approve or deny. Deferred requests come back in `pending_permissions.deferred`, and `requeue_deferred_permissions` sends them again. The server confirms every answer with `permission_response_ack`.
 
 `get_pending_permissions` and `get_pending_questions` act on the session selected by the last `load_session` or `watch_session` on this socket. Send them after reconnecting to restore prompts that are still open. With no session selected, each replies with empty lists and a null `session_id`.
 
