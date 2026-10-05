@@ -543,7 +543,7 @@ _MAX_CONTEXT_WINDOW = 10_000_000
 
 def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
     """Only the run settings the local WebSocket composer sends: model,
-    permission mode and context window.
+    permission mode, effort and context window.
 
     Anything else — ``cwd`` and ``worktree_info`` above all — is dropped so a
     member cannot run the owner's agent outside the session's checkout. The
@@ -551,6 +551,12 @@ def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
     travel through ``run-settings``), so a window picked mid-chat on another
     device must ride the turn; ``query_options`` then keeps it only when the
     session's model offers it.
+
+    The effort rides too, as it does on a local send: a running turn takes a
+    message at its next tool boundary only when the message names the same
+    effort (``SessionRuntime._steer_refusal``), so without it a message from
+    another device waited out any turn sent with one. An effort this worker
+    does not know is dropped, as every effort was before, never refused.
     """
     if not isinstance(raw, dict):
         return None
@@ -561,6 +567,10 @@ def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
     permission_mode = _valid_permission_mode(raw.get("permission_mode"))
     if permission_mode:
         overrides["permission_mode"] = permission_mode
+    from app.core.generation_options import VALID_EFFORTS
+    effort = raw.get("effort")
+    if isinstance(effort, str) and effort in VALID_EFFORTS:
+        overrides["effort"] = effort
     context_window = raw.get("context_window")
     if context_window is not None:
         if type(context_window) is not int or not 0 < context_window <= _MAX_CONTEXT_WINDOW:

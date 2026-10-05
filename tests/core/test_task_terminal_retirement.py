@@ -510,9 +510,25 @@ class TestParkedWorkerIsNotComplete:
         turns_db.enqueue_turn("w-1", "user", prompt="go", profile_id="p1")
         assert provider_agent._worker_still_working("w-1") is False
 
+    def test_a_message_steered_in_before_the_park_does_not_hide_it(self, mock_db):
+        # A message steered into the worker's running turn settles its own
+        # queue row ``completed`` at once; that row is newer than the turn that
+        # later parks, and reading it as "the latest turn" settled a worker
+        # still waiting on its CI run.
+        turns_db.enqueue_turn("w-1", "user", prompt="go", profile_id="p1")
+        row = turns_db.get_latest_turn("w-1")
+        turns_db.start_turn(row["id"], "run-1", "inst-1")
+        # Older than the steered row for certain (the shim's clock is coarse).
+        mock_db.execute("UPDATE turns SET created_at='2000-01-01' WHERE id=?", (row["id"],))
+        steered = turns_db.enqueue_turn("w-1", "user", prompt="also this", profile_id="p1")
+        assert turns_db.absorb_queued_turn(steered["id"]) is True
+        turns_db.park_turn(row["id"], ["mon-1"])
+        task_registry.start_task("w-1", "mon-1", "shell", "npm test")
+        assert provider_agent._worker_still_working("w-1") is True
+
     def test_an_unreadable_session_settles(self, monkeypatch):
         monkeypatch.setattr(
-            turns_db, "get_latest_turn",
+            turns_db, "get_latest_run_turn",
             lambda sid: (_ for _ in ()).throw(RuntimeError("no db")),
         )
         assert provider_agent._worker_still_working("w-1") is False

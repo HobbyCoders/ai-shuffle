@@ -174,6 +174,61 @@ def _without_home_effort(
     return {key: value for key, value in overrides.items() if key != "effort"}
 
 
+# Payload flag on a person's message that was given a live Task worker's own
+# binding (see ``_active_worker_turn``). A turn carrying it is still the worker's
+# work, so a later message in the same chat joins it the same way.
+WORKER_BOUND = "worker_bound"
+
+
+def _active_worker_turn(session_id: str) -> Optional[Dict[str, Any]]:
+    """The in-progress turn of a Task worker a person is typing into, or None.
+
+    A worker's turn runs under settings its dispatch chose: the worker's own
+    agent, the model the Task call picked, the caller's permission mode, its
+    checkout and tool limits. None of that is on the composer the person types
+    into — a subagent's chat shows whatever agent the composer last had and the
+    session row's bindings, and the row does not even carry the permission mode
+    the worker runs under. Stamped with those values, the message differs from
+    the live turn on profile and binding, so ``SessionRuntime.steer_pending``
+    refuses it and it waits behind the whole turn; when it finally runs, it
+    runs under the composer's agent and mode rather than the worker's.
+
+    A peer message to the same worker already inherits the worker's context
+    turn (``turn_scheduler._enqueue_context_wake``), which is why it steers. A
+    person's message to a live worker gets the same inheritance here.
+
+    Only while the worker's work is in progress — its turn is live, queued and
+    not yet claimed, or parked on background work its dispatch is still
+    waiting for. A worker chat a person
+    resumes after the work has ended is an ordinary chat and keeps the
+    composer's picks, and so does any session that is not a worker. A turn that
+    is a person's own (not ``WORKER_BOUND``) means the chat was already resumed
+    as an ordinary one. Fails open to the ordinary path on any read error.
+    """
+    try:
+        live = turns.get_live_turn(session_id)
+        if live is None:
+            # Not ``get_latest_turn``: a message already steered into the
+            # worker's turn settles its own row at once, newer than the turn
+            # that read it and later parked. A QUEUED one is the worker's next
+            # turn not claimed yet — its first, or a message this branch bound
+            # a moment ago — and a message sent behind it is the worker's too.
+            latest = turns.get_latest_run_turn(session_id)
+            live = latest if latest and latest.get("state") in ("parked", "queued") else None
+        if live is None:
+            return None
+        if (live.get("source") in _OWNER_ANSWER_SOURCES
+                and not (live.get("payload") or {}).get(WORKER_BOUND)):
+            return None
+        from app.db import sessions as sessions_db
+
+        row = sessions_db.get_session(session_id) or {}
+        return live if row.get("is_worker") else None
+    except Exception:  # noqa: BLE001 — the composer's own binding still applies.
+        logger.exception("live worker check failed for session %s", session_id)
+        return None
+
+
 def _submit_blocking(
     session_id: str,
     source: str,
@@ -223,7 +278,22 @@ def _submit_blocking(
         archive_guard.log_dropped(session_id, source, "refused at submit")
         raise archive_guard.SessionArchived(session_id)
     overrides = _without_home_effort(session_id, overrides)
-    if source in _BINDING_SOURCES and overrides:
+    worker_turn = (
+        _active_worker_turn(session_id) if source in _OWNER_ANSWER_SOURCES else None
+    )
+    if worker_turn is not None:
+        # The worker's binding, not the composer's (see ``_active_worker_turn``):
+        # the message joins a live turn at its next tool boundary, and when it
+        # cannot (an attachment, a /compact, a parked worker) it runs as a turn
+        # of the worker's own, never under the composer's agent or a broader
+        # permission mode. The person picked none of these, so none is written
+        # to the session row.
+        profile_id = worker_turn.get("profile_id")
+        project_id = worker_turn.get("project_id")
+        worktree_id = worker_turn.get("worktree_id")
+        overrides = dict(worker_turn.get("overrides") or {}) or None
+        payload = {**(payload or {}), WORKER_BOUND: True}
+    elif source in _BINDING_SOURCES and overrides:
         try:
             from app.db import database
 

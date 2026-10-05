@@ -719,6 +719,9 @@ class SessionRuntime:
         # ``_finalize`` so an undelivered steer is free to be tried again by
         # whatever turn comes next.
         self._steer_attempted: set = set()
+        # Queued rows already logged as not steerable into this turn, so a
+        # refusal is logged once per row rather than on every send and sweep.
+        self._steer_refusals_logged: set = set()
         # Set as ``_finalize`` starts: from then on nothing may be submitted into
         # this turn. The runtime stays registered as live until ``execute``'s
         # outer finally, so a send (or the start-window sweep) can still reach
@@ -1679,7 +1682,16 @@ class SessionRuntime:
                 break
             if row.get("source") not in _STEERABLE_SOURCES:
                 continue
-            if not self._steer_eligible(row):
+            refusal = self._steer_refusal(row)
+            if refusal is not None:
+                if row.get("id") not in self._steer_refusals_logged:
+                    self._steer_refusals_logged.add(row.get("id"))
+                    logger.info(
+                        "SessionRuntime: queued turn %s is not steerable into %s "
+                        "turn %s (%s) — it waits for the drain, and so does "
+                        "everything behind it",
+                        row.get("id"), self.session_id, self.turn_id, refusal,
+                    )
                 break
             row_id = row["id"]
             if row_id in self._steer_attempted:
@@ -1928,7 +1940,11 @@ class SessionRuntime:
         return getattr(state, "adapter", None) if state is not None else None
 
     def _steer_eligible(self, row: Dict[str, Any]) -> bool:
-        """Whether ``row``'s prompt can join the LIVE turn as it stands.
+        """Whether ``row``'s prompt can join the LIVE turn as it stands."""
+        return self._steer_refusal(row) is None
+
+    def _steer_refusal(self, row: Dict[str, Any]) -> Optional[str]:
+        """Why ``row``'s prompt cannot join the LIVE turn, or None when it can.
 
         Three things disqualify it, all for the same reason — the live turn is
         already running under settings this row would change, and folding the
@@ -1939,13 +1955,16 @@ class SessionRuntime:
           setup, not something a tool result can carry;
         * a different model / effort / permission mode;
         * a different profile — a message addressed to another agent.
+
+        The answer names the rule (and for a binding, the key) and never any
+        prompt text, so it is safe to log.
         """
         payload = row.get("payload") or {}
         if (row.get("prompt") or "").strip().split(None, 1)[:1] == ["/compact"]:
             # A compaction is a turn of its own. Steered into a live turn it
             # would arrive as text for the model, and on Claude Code it would
             # not compact at all; it runs when the live turn ends instead.
-            return False
+            return "a /compact runs as its own turn"
         if row.get("source") == "agent_message":
             # Only an attributed, scope-checked producer may use the peer channel.
             # Recheck revocation/ownership/Stop before handing it to the engine.
@@ -1953,23 +1972,23 @@ class SessionRuntime:
             # and a Task/Swarm SendMessage (``task_peer_sender``).
             sender = payload.get("orchestration_sender") or payload.get("task_peer_sender")
             if not sender or not payload.get("peer_message_content"):
-                return False
+                return "peer message without an attributed sender"
             # The asynchronous sweep revalidates scope immediately before
             # hand-over; this predicate is also used by the startup probe.
         if payload.get("upload_blob_ids"):
-            return False
+            return "attachments need turn setup"
         # Never steer external observation into a foreground/broad-permission
         # turn (or vice versa). Admission is part of the execution identity.
         if payload.get("_assistant_proactive") != (self.turn.get("payload") or {}).get("_assistant_proactive"):
-            return False
+            return "_assistant_proactive differs"
         if (row.get("profile_id") or None) != (self.turn.get("profile_id") or None):
-            return False
+            return "profile_id differs"
         live_overrides = self.turn.get("overrides") or {}
         row_overrides = row.get("overrides") or {}
         for key in _STEER_BINDING_KEYS:
             if (row_overrides.get(key) or None) != (live_overrides.get(key) or None):
-                return False
-        return True
+                return f"{key} differs"
+        return None
 
     async def _on_steer_delivered(
         self, recorder: TurnRecorder, event: Dict[str, Any]

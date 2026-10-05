@@ -1124,13 +1124,17 @@ def _worker_still_working(worker_session_id: str) -> bool:
     and anything this predicate is unsure about must answer "finished": it gates
     a wait, and a wait that never ends is worse than the settle it replaces.
 
+    "Latest" skips the rows of messages steered into the worker's turn: each
+    settles its own queue row ``completed`` the moment it is delivered, so it is
+    newer than the turn that read it and later parked, and is not that turn.
+
     Blocking (two indexed reads) — call it off the loop. Never raises: anything
     unreadable answers "not working".
     """
     try:
         from app.db import turns as turns_db
 
-        row = turns_db.get_latest_turn(worker_session_id)
+        row = turns_db.get_latest_run_turn(worker_session_id)
     except Exception:  # noqa: BLE001 — an unreadable row settles the dispatch
         logger.debug(
             "ProviderAgent: park probe failed for worker %s",

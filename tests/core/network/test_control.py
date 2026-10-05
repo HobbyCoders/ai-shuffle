@@ -499,9 +499,14 @@ async def test_control_turns_whitelist_overrides_and_use_the_sessions_project(wo
         assert submitted[-1]["overrides"] == {"permission_mode": "acceptEdits"}
         await control.submit_turn(a.device_id, "s-proj", prompt="go", overrides={"cwd": "/"})
         assert submitted[-1]["overrides"] is None
+        await control.submit_turn(a.device_id, "s-proj", prompt="go", overrides={"effort": "high"})
+        assert submitted[-1]["overrides"] == {"effort": "high"}
+        # An effort this worker does not know is dropped, never refused.
+        await control.submit_turn(a.device_id, "s-proj", prompt="go", overrides={"effort": "turbo"})
+        assert submitted[-1]["overrides"] is None
         with pytest.raises(control.ControlRefused):
             await control.submit_turn(a.device_id, "s-proj", prompt="go", overrides={"permission_mode": "plan-evil"})
-    assert len(submitted) == 3
+    assert len(submitted) == 5
 
 
 async def test_control_turns_carry_the_context_window_to_the_owner(workers, monkeypatch):
@@ -584,6 +589,101 @@ async def test_control_turns_steers_a_message_into_the_owners_live_turn(workers,
         live["s-steer"] = {"id": "turn_live", "state": "running"}
         await control.submit_turn(a.device_id, "s-steer", prompt="mid-turn remark")
         assert order[1:] == [("submit", "s-steer"), ("steer", "s-steer")]
+
+
+class _SteerAdapter:
+    def __init__(self):
+        self.calls = []
+
+    async def steer(self, text, *, id=None, origin="user"):
+        self.calls.append((text, id))
+
+
+async def _forward_into_live_turn(workers, monkeypatch, session_fields, live_turn, *, prompt,
+                                  profile_id, overrides):
+    """Start ``live_turn`` on owner A's session, then send ``prompt`` to it from
+    member B through the real control route, with the real submit and steer.
+    Returns ``(steered calls, queued row)``."""
+    from unittest.mock import MagicMock, patch
+
+    from app.core import session_runtime, turn_manager
+    from app.db import turns as turns_db
+
+    a, b = workers("a"), workers("b")
+    served = _served_client(monkeypatch, a)
+    monkeypatch.setattr(turn_manager, "_kick", lambda session_id: None)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    session_id = session_fields["session_id"]
+    with a.active():
+        database.create_session(project_id=None, is_active=True, **session_fields)
+        engine.scan_all()
+    converge([a, b])
+    with a.active():
+        store.touch_member(b.device_id, endpoints=[])
+        turn = turns_db.enqueue_turn(session_id, live_turn.pop("source"), prompt="the live one", **live_turn)
+        turns_db.start_turn(turn["id"])
+        live = turns_db.get_turn(turn["id"])
+    adapter = _SteerAdapter()
+    pool = MagicMock(name="session_pool")
+    pool.peek.return_value = MagicMock(adapter=adapter)
+    session_runtime._live_runtimes[session_id] = session_runtime.SessionRuntime(live)
+    try:
+        with b.active(), patch("app.core.session_pool.get_session_pool", return_value=pool):
+            store.touch_member(a.device_id, endpoints=[served.base_url])
+            result = await control.submit_turn(a.device_id, session_id, prompt=prompt,
+                                               profile_id=profile_id, overrides=overrides)
+    finally:
+        session_runtime._live_runtimes.pop(session_id, None)
+    with a.active():
+        row = turns_db.get_turn(result["turn_id"])
+    return adapter.calls, row, live
+
+
+async def test_control_turns_steer_an_owner_message_into_a_running_subagent(workers, monkeypatch):
+    """The owner's phone is on member B; the Task worker runs on owner A. The
+    forwarded message carries B's composer (another agent, a model, an effort
+    and no permission mode, and the route itself keeps only some of those). It
+    must take the worker's binding on A and steer into the worker's turn."""
+    from app.core import provider_agent
+
+    overrides = provider_agent.worker_turn_overrides(
+        provider_id=None, model_id="opus", effort="high", cwd="/work/task-checkout",
+        permission_mode="bypassPermissions", system_prompt_append="You are a coding subagent.",
+    )
+    calls, row, live = await _forward_into_live_turn(
+        workers, monkeypatch,
+        {"session_id": "s-worker", "profile_id": "default", "title": "Task worker",
+         "model": "opus", "effort": "high", "hidden": True, "is_worker": True},
+        {"source": provider_agent.WORKER_TURN_SOURCE, "profile_id": "general-purpose",
+         "overrides": overrides},
+        prompt="also check the tests", profile_id="coding",
+        overrides={"model": "sonnet", "effort": "low", "fast": False, "workspace_project_ids": []},
+    )
+
+    assert calls == [("also check the tests", row["id"])]
+    assert row["profile_id"] == "general-purpose"
+    assert row["overrides"] == live["overrides"]
+
+
+async def test_control_turns_steer_into_a_main_chat_turn_that_carries_an_effort(workers, monkeypatch):
+    """A main chat whose running turn was sent with an effort (from the owner's
+    own UI, or a wake that replays it): the same picks sent from another device
+    must steer in, not wait the turn out because the route dropped the effort."""
+    calls, row, _live = await _forward_into_live_turn(
+        workers, monkeypatch,
+        {"session_id": "s-main", "profile_id": "default", "title": "On A", "model": "opus",
+         "effort": "high"},
+        {"source": "user", "profile_id": "default",
+         "overrides": {"model": "opus", "effort": "high", "permission_mode": "default", "fast": False}},
+        prompt="mid-turn remark", profile_id="default",
+        overrides={"model": "opus", "effort": "high", "permission_mode": "default", "fast": False,
+                   "workspace_project_ids": []},
+    )
+
+    assert calls == [("mid-turn remark", row["id"])]
+    assert row["overrides"]["effort"] == "high"
 
 
 async def test_control_session_creation_validates_its_fields(workers, monkeypatch):
