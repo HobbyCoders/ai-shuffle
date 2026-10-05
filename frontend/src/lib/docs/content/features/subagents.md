@@ -182,8 +182,10 @@ assistant asks you in plain words instead, as for its other work.
 - Anything that goes wrong denies, never allows: no answer in time, the parent
   unreachable or on an older release, or Stop on either worker. A prompt that
   nobody answered in time is listed in the subagent's report.
-- Questions and private-access requests from the subagent are not passed on.
-  They are held back and listed in its report.
+- Questions and private-access requests from a subagent on another worker are
+  not passed on. They are held back and listed in its report. A subagent on
+  this worker asks in its main chat instead (see
+  [A subagent's chat](#a-subagents-chat)).
 
 ### Spend limits
 
@@ -294,6 +296,25 @@ for you to approve in that chat. Both workers need this release; an older worker
 starts the chat but it will not report back. Task subagents on another worker
 work differently: see
 [Running a subagent on another worker](#running-a-subagent-on-another-worker).
+
+## A subagent's chat
+
+Opening a subagent's transcript (Open transcript on its Task or Swarm card)
+shows its chat for reading and for messaging the subagent. It has no Git panel,
+branch control or private access control. The worker refuses owner-driven Git
+requests made for a subagent's session (commit, push, pull, branches, checkout,
+pull requests, Finish, Ship It, enabling auto-merge and moving it to another
+worker). Project-level Git controls outside that session remain available to
+the owner. The subagent's own Git work and hand-off through its tools are unaffected.
+
+When a subagent on this worker asks for private access, or a grant it holds
+needs a one-shot approval, the card shows in its main chat (the top-level chat
+at the root of the delegation, also for a nested subagent), headed "Asked by
+subagent" and the subagent's title. Your answer goes to the subagent, and its
+grants are listed there so you can revoke them. Approval rules, scope and expiry
+are unchanged, and a subagent's grant is never usable by the main chat. A chat
+started with StartSession is a top-level chat and keeps both its Git panel and
+its private access control.
 
 ## Session organization
 

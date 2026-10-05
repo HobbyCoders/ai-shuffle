@@ -17,6 +17,21 @@ from app.db.async_database import run_sync
 from app.network import control
 
 _actions = {}
+
+#: Refusal for any owner-driven Git action addressed to a subagent's chat. A
+#: Task/Swarm child's chat is for reading its transcript and messaging it; its
+#: checkout belongs to the agent's own work (its shell Git is unaffected).
+SUBAGENT_GIT_REFUSED = ("Git actions are not available in a subagent's chat. Use the main chat "
+                        "that started it; the subagent manages its own checkout.")
+
+
+def refuse_subagent_git(session) -> None:
+    """403 for an owner-driven Git action on a subagent's chat."""
+    from app.core.provider_agent import is_subagent_row
+    if is_subagent_row(session):
+        raise HTTPException(403, SUBAGENT_GIT_REFUSED)
+
+
 _MUTATING_ACTIONS = {
     'init_repository', 'clone_repository', 'create_branch', 'delete_branch',
     'checkout_branch', 'fetch_from_remote', 'stage_files', 'unstage_files',
@@ -93,6 +108,7 @@ def session_git_action(endpoint):
         from app.api.common import check_project_access
         from app.api.sessions_helpers import check_session_access
         check_session_access(request, session)
+        refuse_subagent_git(session)
         check_project_access(request, values["project_id"])
         await run_sync(_check_project, session, values["project_id"])
         owner = control.owner_of(session)
@@ -130,6 +146,8 @@ async def handle_session_git(body, from_device):
     if not isinstance(params, dict) or set(params) - (set(signature.parameters) - {"request", "token"}):
         raise ValueError("Invalid Git action parameters")
     try:
+        # The owning worker decides on its own row, whatever the caller sent.
+        refuse_subagent_git(session)
         await run_sync(_check_project, session, params.get("project_id"))
         values = {}
         for name, parameter in signature.parameters.items():

@@ -7,6 +7,11 @@
 	 * (openHeaderDropdown). Waiting requests also show in the chat above the
 	 * composer (PrivateAccessPrompt / the mobile prompt dock), whose Review opens
 	 * this panel through chatAccessSummary.open.
+	 *
+	 * A subagent's chat mounts none of this. Its requests, one-shot approvals
+	 * and grants arrive in its main chat's snapshot carrying `session_id` (the
+	 * subagent's session, where every answer is sent) and `subagent` (its
+	 * title, shown on the card).
 	 */
 	import { onDestroy, onMount, tick, untrack } from 'svelte';
 	import { Shield, ShieldAlert, ShieldCheck, X } from 'lucide-svelte';
@@ -14,6 +19,7 @@
 	import { auth } from '$lib/stores/auth.svelte';
 	import { resourceSync } from '$lib/services/resource-sync';
 	import { chatAccessSummary, setPrivateAccessPending, type PendingAccessItem } from '$lib/stores/chat-access';
+	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { buildShell } from '$lib/utils/platform';
 	import { focusableWithin } from '$lib/components/ui/focus-trap';
@@ -21,9 +27,11 @@
 	import '../deck/cards/card-design-system.css';
 	import './private-access.css';
 	let { sessionId }: { sessionId: string } = $props();
-	type Grant = { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean; fingerprint?: string };
-	type Action = { id: string; grant_id: string; operation: string; arguments: Record<string, string>; expires_at: number };
-	type Request = { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string };
+	/** Set on a subagent's item shown in its main chat: its session and chat title. */
+	type FromSubagent = { session_id?: string; subagent?: string };
+	type Grant = FromSubagent & { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean; fingerprint?: string };
+	type Action = FromSubagent & { id: string; grant_id: string; operation: string; arguments: Record<string, string>; expires_at: number };
+	type Request = FromSubagent & { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string };
 	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
 	let data = $state<{grants: Grant[]; actions: Action[]; requests: Request[]; saved_connections: Saved[]; vault_available: boolean}>({grants: [], actions: [], requests: [], saved_connections: [], vault_available: false});
 	let confirmingDelete = $state<string | null>(null);
@@ -191,14 +199,16 @@
 		...data.requests.map((r) => ({
 			id: r.id,
 			kind: (['machine', 'folder', 'service'].includes(r.kind) ? r.kind : 'machine') as PendingAccessItem['kind'],
-			detail: r.purpose
+			detail: r.purpose,
+			subagent: r.subagent
 		})),
 		...data.actions.map((a) => ({
 			id: a.id,
 			kind: 'action' as const,
 			detail: a.operation === 'command' ? `$ ${a.arguments.command ?? ''}`
 				: a.operation === 'http' ? `${a.arguments.method ?? ''} ${a.arguments.path ?? ''}`
-				: `Write ${a.arguments.path ?? ''}`
+				: `Write ${a.arguments.path ?? ''}`,
+			subagent: a.subagent
 		}))
 	]);
 	$effect(() => {
@@ -244,6 +254,8 @@
 		}
 	}
 	const base = untrack(() => `/chat-access/${encodeURIComponent(sessionId)}`);
+	/** Where an item's answer goes: a subagent's item belongs to the subagent's session. */
+	const baseFor = (owning: string | undefined) => (owning && owning !== sessionId ? `/chat-access/${encodeURIComponent(owning)}` : base);
 	async function refresh(poll = false) {
 		if (!alive || document.hidden || denied) return;
 		// Resource broadcasts cannot shorten an error backoff.
@@ -268,11 +280,14 @@
 			// Keep the persisted mode check; retries must not expose private controls
 			// for an unverified session or bypass endpoint authorization.
 			if (!verified) {
-				const session = await api.get<{mode: string; is_remote?: boolean; device_name?: string | null}>(`/sessions/${encodeURIComponent(sessionId)}`);
+				const session = await api.get<{mode: string; is_remote?: boolean; device_name?: string | null; is_worker?: boolean}>(`/sessions/${encodeURIComponent(sessionId)}`);
 				if (!alive) return;
+				// A subagent's chat shows no private access: its items show in its
+				// main chat. A deep link can mount this before /live says so.
+				if (session.is_worker) subagentChats.mark(sessionId, true);
 				// A mirrored conversation's grants stay on the device that runs it;
 				// this worker forwards the panel's requests there.
-				enabled = session.mode == null || ['code', 'chat', 'voice'].includes(session.mode);
+				enabled = !session.is_worker && (session.mode == null || ['code', 'chat', 'voice'].includes(session.mode));
 				owner = session.is_remote ? (session.device_name || 'the device that runs this conversation') : null;
 				verified = true;
 			}
@@ -357,13 +372,13 @@
 	});
 	async function revoke(id: string) {
 		busy = true; error = '';
-		try { await api.delete(`${base}/grants/${id}`); confirmingRevoke = null; await refresh(); }
+		try { await api.delete(`${baseFor(data.grants.find((g) => g.id === id)?.session_id)}/grants/${id}`); confirmingRevoke = null; await refresh(); }
 		catch (e) { error = getErrorMessage(e, 'Could not revoke access.'); }
 		finally { busy = false; }
 	}
 	async function decide(id: string, allow: boolean): Promise<boolean> {
 		busy = true; error = '';
-		try { await api.post(`${base}/actions/${id}`, {allow}); await refresh(); return true; }
+		try { await api.post(`${baseFor(data.actions.find((a) => a.id === id)?.session_id)}/actions/${id}`, {allow}); await refresh(); return true; }
 		catch (e) { error = getErrorMessage(e, 'Could not answer this request.'); return false; }
 		finally { busy = false; }
 	}
@@ -377,6 +392,9 @@
 {/snippet}
 {#snippet serviceIcon()}
 	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.7 5.7L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.6a1 1 0 01.3-.7l6-6A6 6 0 1121 9z" /></svg>
+{/snippet}
+{#snippet fromSubagent(name: string | undefined)}
+	{#if name}<p class="pa-from" title={`Asked by subagent ${name}`}>Asked by subagent <strong>{name}</strong></p>{/if}
 {/snippet}
 {#snippet folderIcon()}
 	<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linejoin="round" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" /></svg>
@@ -460,11 +478,13 @@
 				<h3 class="pa-group">Waiting for you</h3>
 			{/if}
 			{#each data.requests as request (request.id)}
-				<PrivateAccessRequest {sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} {owner} {clearSecretsKey} onComplete={() => void refresh()} />
+				{@render fromSubagent(request.subagent)}
+				<PrivateAccessRequest sessionId={request.session_id ?? sessionId} {request} savedConnections={data.saved_connections} vaultAvailable={data.vault_available} {owner} {clearSecretsKey} onComplete={() => void refresh()} />
 			{/each}
 			{#each data.actions as action (action.id)}
 				{@const grant = data.grants.find(g => g.id === action.grant_id)}
 				{@const sandboxed = action.operation === 'command' && grant?.kind === 'folder'}
+				{@render fromSubagent(action.subagent)}
 				<section class="pa-card" aria-label="One-shot action approval">
 					<header class="pa-head">
 						<div class="pa-icon" aria-hidden="true">
@@ -509,7 +529,7 @@
 							<div class="pa-row-main">
 								<strong>{grant.label}</strong>
 								<code>{grant.target}</code>
-								<small>{grant.kind === 'machine' ? 'Remote commands · session permission mode applies' : grant.kind === 'service' ? (grant.writable ? 'HTTPS API · changes follow session permission mode' : 'HTTPS API · GET and HEAD only') : grant.writable ? 'Read/write · session permission mode applies' : 'Read only'} · until {expiry(grant.expires_at)}{#if grant.kind === 'machine' && grant.fingerprint}{` · host key ${grant.fingerprint.slice(0, 19)}…`}{/if}</small>
+								<small>{#if grant.subagent}{`Subagent ${grant.subagent} · `}{/if}{grant.kind === 'machine' ? 'Remote commands · session permission mode applies' : grant.kind === 'service' ? (grant.writable ? 'HTTPS API · changes follow session permission mode' : 'HTTPS API · GET and HEAD only') : grant.writable ? 'Read/write · session permission mode applies' : 'Read only'} · until {expiry(grant.expires_at)}{#if grant.kind === 'machine' && grant.fingerprint}{` · host key ${grant.fingerprint.slice(0, 19)}…`}{/if}</small>
 							</div>
 							<div class="pa-row-actions">
 								{#if confirmingRevoke === grant.id}
@@ -561,6 +581,9 @@
 <style>
 	/* ── Entry point: the header's icon-button size (ChatExportActions) ──── */
 	.pa-anchor { position: relative; display: flex; align-items: center; }
+	/* Who asked, above a subagent's card in its main chat. */
+	.pa-from { margin: 0 0 -0.25rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.75rem; color: var(--muted-foreground); }
+	.pa-from strong { font-weight: 600; color: var(--foreground); }
 	.pa-trigger {
 		display: grid;
 		place-items: center;

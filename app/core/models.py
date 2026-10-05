@@ -447,6 +447,10 @@ class Session(SessionBase):
     # nullable and NULL means visible, so the validator below coalesces — same
     # single-point coverage as ``mode`` above.
     hidden: bool = False
+    # A Task/Swarm child's own chat (``sessions.is_worker``, see
+    # ``provider_agent.is_subagent_row``). The UI keeps such a chat to reading
+    # and messaging: no Git or private-access controls. NULL reads as False.
+    is_worker: bool = False
     created_at: datetime
     updated_at: datetime
     # Cross-install (cluster) annotation — populated by the API enrichment layer
@@ -511,6 +515,12 @@ class Session(SessionBase):
         for can never leave the API.
         """
         return normalize_session_mode(value)
+
+    @field_validator("is_worker", mode="before")
+    @classmethod
+    def _coalesce_is_worker(cls, value):
+        """NULL ``sessions.is_worker`` (rows before the column) reads as False."""
+        return bool(value)
 
     @field_validator("hidden", mode="before")
     @classmethod

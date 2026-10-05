@@ -3,6 +3,7 @@ import { appData } from '$lib/stores/app-data.svelte';
 import { appMode, normalizeSessionMode } from '$lib/stores/sessionMode.svelte';
 import { layout } from '$lib/stores/layout.svelte';
 import { archivedChats } from '$lib/stores/archived-chats';
+import { subagentChats } from '$lib/stores/subagent-chats';
 import type { Session } from '$lib/api/client';
 
 /** Shared session selection for the sidebar, deep links and in-app links. */
@@ -18,6 +19,8 @@ export function openSession(sessionId: string, openedSession?: Session): void {
 	appMode.set(normalizeSessionMode(session?.mode), false);
 	// An archived chat opens read-only; /live corrects a row this tab lacks.
 	if (session) archivedChats.mark(sessionId, session.status === 'archived');
+	// A subagent's chat opens without Git or private access controls.
+	if (session?.is_worker !== undefined) subagentChats.mark(sessionId, session.is_worker);
 	const select = () => {
 		activeSession.switchSession(sessionId, session?.project_id, worktreeInfo,
 			session?.title || null, session?.project_v2_id ?? null);
@@ -29,6 +32,12 @@ export function openSession(sessionId: string, openedSession?: Session): void {
 	} else {
 		select();
 	}
+}
+
+/** Open a Task or Swarm child's transcript, known to be a subagent's chat before /live answers. */
+export function openSubagentLink(event: MouseEvent, sessionId: string): void {
+	subagentChats.mark(sessionId, true);
+	openSessionLink(event, sessionId);
 }
 
 /** Consume ordinary link clicks in the current app; retain native new-tab gestures. */

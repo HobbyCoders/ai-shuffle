@@ -209,6 +209,11 @@ describe('shouldShowBranchPill', () => {
 		expect(branchPill()).toBe(true);
 	});
 
+	it('hides the checkout selector in a subagent chat (read and message only)', () => {
+		expect(branchPill({ isSubagent: true })).toBe(false);
+		expect(branchPill({ isSubagent: false })).toBe(true);
+	});
+
 	it('hides when the session is remote so the runner menu occupies the slot', () => {
 		expect(branchPill({ isRemote: true })).toBe(false);
 	});

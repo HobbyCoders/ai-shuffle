@@ -30,6 +30,12 @@ export interface HeaderGitActionsInput {
 	 * Finish must remain reachable when a PR is open. Omitted values fail open.
 	 */
 	sessionMode?: string;
+	/**
+	 * The open chat is a subagent's own (a Task or Swarm child). It is for
+	 * reading the transcript and messaging the subagent, so it has no Git
+	 * rail; the server refuses owner Git actions for it too.
+	 */
+	isSubagent?: boolean;
 }
 
 /** Session-scoped Git requests execute on the owning worker, local or remote. */
@@ -37,6 +43,7 @@ export function shouldShowHeaderGitActions(input: HeaderGitActionsInput): boolea
 	const { viewType, hasProject, worktreeDeleted, sessionMode } = input;
 
 	if (viewType !== 'session') return false;
+	if (input.isSubagent) return false;
 	if (!hasProject) return false;
 	if (worktreeDeleted) return false;
 	// Chat lane has no repository. Do NOT also require isMobile: that blanked

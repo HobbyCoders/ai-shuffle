@@ -43,6 +43,8 @@ export interface Session {
 	tags: SessionTag[];  // Tags attached to this session
 	// Fork/branch fields
 	parent_session_id: string | null;  // ID of parent session if this is a fork
+	/** A Task/Swarm child's own chat: read and message only (no Git or private access UI). */
+	is_worker?: boolean;
 	fork_point_message_index: number | null;  // Message index where fork occurred
 	has_forks: boolean;  // True if this session has forked children
 	// Worktree fields - for restoring worktree mode on session resume

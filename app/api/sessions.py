@@ -32,6 +32,7 @@ from app.db.async_database import run_sync
 from app.api.auth import require_auth, get_api_user_from_request
 from app.api.common import api_error_handler
 from app.api.worktree_session_meta import enrich_session_worktree_meta
+from app.api.git_owner import refuse_subagent_git
 from app.core.project_utils import get_project_working_dir
 
 import logging
@@ -244,6 +245,8 @@ async def adopt_session_endpoint(
     body = await _parse_adopt_request(request)
     session = await require_session(request, session_id)
     _refuse_archived(session, "resume")
+    # Resuming here commits, pushes and re-homes the checkout: owner Git.
+    refuse_subagent_git(session)
 
     me = settings.effective_instance_id
     from app.network import control
@@ -345,6 +348,9 @@ async def move_session_endpoint(
         ``false``.
     """
     session = await require_session(request, session_id)
+    # The move commits and pushes the branch. The agent's own hand-off calls
+    # move_session_to directly and is unaffected.
+    refuse_subagent_git(session)
     return await move_session_to(session_id, session, body.target_instance_id)
 
 
@@ -525,6 +531,7 @@ async def queue_move(request: Request, session_id: str, body: QueueMoveRequest,
     cancelled. The chat records the queued state, so every device shows it.
     """
     session = await require_session(request, session_id)
+    refuse_subagent_git(session)
     target = (body.target_instance_id or "").strip()
     if not target:
         from app.core.config import settings
@@ -1191,6 +1198,8 @@ async def get_live_session(
         "effort": session.get("effort"),
         # An archived chat opens read-only (no composer) until restored (#1822).
         "status": session.get("status"),
+        # A subagent's chat shows no Git or private-access controls.
+        "is_worker": bool(session.get("is_worker")),
     }
 
     # Always include the title so the frontend header stays in sync

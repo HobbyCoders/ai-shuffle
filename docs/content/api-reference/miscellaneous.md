@@ -220,6 +220,8 @@ After a `reset`, the cleared windows in [usage limits](#get-apiv1usagelimits) sh
 
 A git route that takes a `worktree_id` query parameter accepts only a worktree of the project in the path; a worktree of another project returns `404`, the same answer as an unknown id.
 
+A git or GitHub route given a subagent's `session_id` (a Task or Swarm child's chat) returns `403`, on this worker and when forwarded to the worker that runs it. So do moving or handing off that session, `Continue here` (adopt) and turning on auto-merge for it.
+
 ### GET /api/v1/projects/{project_id}/git/status
 
 Get git status for a project.

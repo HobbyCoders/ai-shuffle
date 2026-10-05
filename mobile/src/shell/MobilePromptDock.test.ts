@@ -156,7 +156,7 @@ describe('agent question', () => {
 });
 
 describe('private access', () => {
-	function access(items: { id: string; kind: 'action' | 'folder'; detail: string }[]) {
+	function access(items: { id: string; kind: 'action' | 'folder'; detail: string; subagent?: string }[]) {
 		const decide = vi.fn().mockResolvedValue(true);
 		const open = vi.fn();
 		chatAccessSummary.set({ sessionId: 's1', pending: items.length, items, active: 0, saved: 0, error: false, open, decide });
@@ -178,6 +178,12 @@ describe('private access', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Review' }));
 		expect(open).toHaveBeenCalledOnce();
 		expect(decide).not.toHaveBeenCalled();
+	});
+
+	it('names the subagent that asks, in its main chat', () => {
+		access([{ id: 'a3', kind: 'action', detail: '$ uptime', subagent: 'Review PR #1837' }]);
+		renderDock({ permissions: [] });
+		expect(screen.getByText('Review PR #1837').closest('.p-from')?.textContent).toBe('Asked by subagent Review PR #1837');
 	});
 
 	it('ignores another chat\'s requests', () => {

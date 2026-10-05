@@ -5,6 +5,16 @@ inherited by forks. Only the authenticated access API can grant access. Writes,
 commands and state-changing API requests require one-shot approval unless the
 session is in Bypass; model tools cannot grant access or change the session's
 permission mode.
+
+A subagent (a Task/Swarm child) asks for and uses access on its own session,
+under the same rules, but its chat shows no private-access UI. Its requests,
+one-shot approvals and grants surface in its MAIN chat instead: the top-level
+chat at the root of its delegation chain on this worker (``main_session_of``).
+The main chat's snapshot lists them labelled with the subagent, and every
+answer is still addressed to the subagent's own session. Grants never move
+between sessions: the main chat cannot use a subagent's grant, nor the reverse.
+A subagent running for another worker has no main chat here; it runs in Away
+mode, so its requests are refused at once and listed in its report.
 """
 from __future__ import annotations
 
@@ -17,6 +27,7 @@ import os
 import re
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -213,11 +224,51 @@ def _default_executor_load() -> str:
 def owner_from_row(row: dict | None) -> tuple:
     """Apply the private-access ownership rules to an already-loaded session row."""
     from app.network.control import owner_of
+    from app.core.api_user_scope import session_api_user_id
     if not row or row.get("mode") not in (None, "code", "chat", "voice"):
         raise AccessDenied("Resource access requires an existing Code, Chat, or Voice session.")
     if owner_of(row):
         raise AccessDenied("Manage access on the device which owns this session. Grants do not travel between devices.")
-    return (row.get("owner_device_id"), row.get("instance_id"), row.get("api_user_id"))
+    # Legacy worker rows inherit their principal from the delegation parent,
+    # exactly as session authorization does; NULL is not necessarily the owner.
+    return (row.get("owner_device_id"), row.get("instance_id"), session_api_user_id(row))
+
+
+#: Longest delegation chain walked to find a subagent's main chat.
+MAIN_CHAIN_LIMIT = 12
+#: Subagent -> main chat links the broker remembers (oldest dropped first).
+MAIN_LINK_LIMIT = 4096
+
+
+def main_session_of(session_id: str) -> str | None:
+    """The main chat whose private-access UI shows ``session_id``'s requests.
+
+    ``None`` for a session that is not a subagent (it shows its own), and for a
+    subagent whose main chat does not run on this worker (a remote Task child,
+    or a missing parent). Workers name their chain's root on this worker as
+    their parent, but nested chains are walked anyway.
+    """
+    from app.core.provider_agent import is_subagent_row
+    from app.db import database
+    from app.network.control import owner_of
+    current, seen, principal = session_id, set(), None
+    for _ in range(MAIN_CHAIN_LIMIT):
+        row = database.get_session(current)
+        try:
+            owner = owner_from_row(row)
+        except AccessDenied:
+            return None
+        if principal is None:
+            principal = owner
+        elif owner[2] != principal[2]:
+            return None
+        if not is_subagent_row(row):
+            return None if current == session_id or owner_of(row) else current
+        seen.add(current)
+        current = row.get("parent_session_id")
+        if not current or current in seen:
+            return None
+    return None
 
 
 async def session_bypasses_confirmation(session_id: str) -> bool:
@@ -297,27 +348,60 @@ class Broker:
         self.actions: dict[str, Action] = {}
         self.requests: dict[str, AccessRequest] = {}
         self._notifications: set[asyncio.Task] = set()
+        # Subagent session -> the main chat that shows its access (main_session_of).
+        self._main: OrderedDict[str, str] = OrderedDict()
+
+    async def _show_in_main(self, session_id: str, owner: tuple) -> None:
+        """Link a subagent to its main chat once, then refresh that chat's panel.
+
+        Runs after an item is registered and announced, so a main chat's lookup
+        never delays the session's own notification. A known link was already
+        announced to the main chat by that notification.
+        """
+        if session_id in self._main:
+            return
+        from app.db.async_database import run_sync
+        try:
+            main = await run_sync(main_session_of, session_id)
+        except Exception:  # noqa: BLE001 — the subagent's own session still holds everything
+            logger.debug("Private access: main chat lookup failed for %s", session_id, exc_info=True)
+            return
+        if not main or session_id in self._main:
+            return
+        self._main[session_id] = main
+        while len(self._main) > MAIN_LINK_LIMIT:
+            self._main.popitem(last=False)
+        self._notify(session_id, owner)
+
+    def _shown_in(self, session_id: str) -> str:
+        """The chat whose panel shows this session's items: its main chat, else itself."""
+        return self._main.get(session_id, session_id)
 
     def _notify(self, session_id: str, owner: tuple, *, saved: bool = False) -> None:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return  # Synchronous shutdown has no connected UI to notify.
-        task = loop.create_task(publish_change(session_id, owner[2] if len(owner) > 2 else None, saved=saved,
-                                               pending=self.pending_count(session_id)))
-        self._notifications.add(task)
-        task.add_done_callback(self._notifications.discard)
-        # Devices showing this session as a mirror refresh through their own worker.
         from app.network import chat_access_routing
-        chat_access_routing.notify_watchers(session_id, saved=saved)
+        main = self._main.get(session_id)
+        for target in (session_id, main) if main else (session_id,):
+            task = loop.create_task(publish_change(target, owner[2] if len(owner) > 2 else None, saved=saved,
+                                                   pending=self.pending_count(target)))
+            self._notifications.add(task)
+            task.add_done_callback(self._notifications.discard)
+            # Devices showing this session as a mirror refresh through their own worker.
+            chat_access_routing.notify_watchers(target, saved=saved)
 
     def pending_count(self, session_id: str) -> int:
-        """Requests and one-shot approvals of a session still waiting for the owner."""
+        """Requests and one-shot approvals waiting for the owner in this chat's panel.
+
+        A main chat's count includes its subagents' items, which show there.
+        """
         now = time.time()
         requests = sum(1 for r in self.requests.values()
-                       if r.session_id == session_id and not r.result.done() and r.expires_at > now)
+                       if self._shown_in(r.session_id) == session_id and not r.result.done() and r.expires_at > now)
         actions = sum(1 for a in self.actions.values()
-                      if a.session_id == session_id and not a.decision.done())
+                      if self._shown_in(a.session_id) == session_id and not a.decision.done())
         return requests + actions
 
     def _finish_request(self, request: AccessRequest) -> None:
@@ -401,6 +485,11 @@ class Broker:
             if (kind == "service" and pending.kind == kind and pending.purpose == purpose.strip()
                     and pending.service_provider == service_provider and pending.suggested_url == suggested_url
                     and pending.plugin_id == plugin and pending.plugin_service == service):
+                try:
+                    await _defer_if_away(session_id, "private service access request")
+                except AccessDenied:
+                    self._finish_request(pending)
+                    raise
                 return pending.model_pending()
             raise AccessDenied("A private access request is already awaiting the user.")
         duration = SERVICE_PREPARATION_SECONDS if kind == "service" else 240
@@ -410,12 +499,15 @@ class Broker:
                                 suggested_url=suggested_url, plugin_id=plugin, plugin_service=service)
         self.requests[request.id] = request
         self._notify(session_id, owner)
-        if kind == "service":
-            request.timer = asyncio.get_running_loop().call_later(duration, self._finish_request, request)
-            return request.model_pending()
+        keep_pending = False
         try:
+            await self._show_in_main(session_id, owner)
             # Registered first so watchers see it; Away mode then refuses at once.
             await _defer_if_away(session_id, f"private {kind} access request")
+            if kind == "service":
+                request.timer = asyncio.get_running_loop().call_later(duration, self._finish_request, request)
+                keep_pending = True
+                return request.model_pending()
             grant_id = await asyncio.wait_for(request.result, 240)
             if not grant_id:
                 raise AccessDenied("The user declined the private access request.")
@@ -424,8 +516,8 @@ class Broker:
         except asyncio.TimeoutError:
             raise AccessDenied("Private input request expired; ask the user before requesting it again.") from None
         finally:
-            self.requests.pop(request.id, None)
-            self._notify(session_id, owner)
+            if not keep_pending:
+                self._finish_request(request)
 
     async def fulfill(self, session_id: str, request_id: str, submission: GrantSubmission):
         request = self.requests.get(request_id)
@@ -778,16 +870,76 @@ class Broker:
         from app.core import chat_vault, encryption
         from app.db.async_database import run_sync
         saved = await run_sync(chat_vault.catalog, owner, cache_empty=True)
+        actions = [a.public() for a in self.actions.values()
+                   if a.session_id == session_id and not a.decision.done()]
+        requests = [r.public() for r in self._live_requests(session_id, owner)]
+        await self._add_subagents(session_id, owner, result, actions, requests)
         return {
             "saved_connections": saved,
             "vault_available": encryption.is_encryption_ready(),
             "grants": result,
-            "actions": [a.public() for a in self.actions.values()
-                        if a.session_id == session_id and not a.decision.done()],
-            "requests": [r.public() for r in self._live_requests(session_id, owner)],
+            "actions": actions,
+            "requests": requests,
             "folder_available": chat_files.available(),
             "restart_revokes": True,
         }
+
+    async def _add_subagents(self, main: str, main_owner: tuple, grants: list, actions: list, requests: list) -> None:
+        """Append the items of the subagents whose access shows in ``main``.
+
+        Each carries ``session_id`` (where the owner's answer goes) and
+        ``subagent`` (its chat title), so the panel says who is asking.
+        """
+        children = [child for child, shown in list(self._main.items()) if shown == main and (
+            any(g.session_id == child for g in self.grants.values())
+            or any(a.session_id == child for a in self.actions.values())
+            or any(r.session_id == child for r in self.requests.values()))]
+        if not children:
+            return
+        from app.db import database, turns
+        from app.db.async_database import run_sync
+        from app.core.task_registry import task_registry
+        for child in children:
+            try:
+                row = await run_sync(database.get_session, child)
+                owner = owner_from_row(row)
+                valid_link = owner[2] == main_owner[2] and await run_sync(main_session_of, child) == main
+            except AccessDenied:
+                valid_link = False
+            if not valid_link:
+                self._main.pop(child, None)
+                continue
+            label = {"session_id": child, "subagent": (row.get("title") or "").strip() or "Subagent"}
+            grants.extend({**g.public(), **label} for g in self._live_grants(child, owner))
+            # Session rows usually remain "active" after a turn ends. The durable
+            # turn state and Stop latch, not the sidebar's is_active bit, decide
+            # whether a subagent can still be waiting for private input.
+            turn = await run_sync(turns.get_latest_run_turn, child)
+            finished = turn is not None and turn["state"] in ("completed", "aborted")
+            if finished:
+                from app.core.provider_agent import _active_worker_background_work
+                from app.core.user_question_handler import user_question_handler
+                # A removed queue chip or completed follow-up can be newer than
+                # the live/parked turn that still owns the request. Posted
+                # questions also outlive their turn and resume it on an answer.
+                finished = (not await run_sync(turns.session_has_unsettled_turns, child)
+                            and not _active_worker_background_work(child)
+                            and not task_registry.finished_awaiting_report(child)
+                            and not await run_sync(user_question_handler.get_pending_questions, child))
+            terminal = (row.get("status") in ("archived", "completed", "stopped", "failed", "error", "killed")
+                        or task_registry.is_user_stopped(child)
+                        or finished)
+            if terminal:
+                for request in list(self.requests.values()):
+                    if request.session_id == child:
+                        self._finish_request(request)
+                for action in self.actions.values():
+                    if action.session_id == child and not action.decision.done():
+                        action.decision.set_result(False)
+                continue
+            actions.extend({**a.public(), **label} for a in self.actions.values()
+                           if a.session_id == child and not a.decision.done())
+            requests.extend({**r.public(), **label} for r in self._live_requests(child, owner))
 
     async def decide(self, session_id: str, action_id: str, allow: bool):
         await session_owner(session_id)
@@ -826,6 +978,7 @@ class Broker:
         self.actions[action.id] = action
         self._notify(grant.session_id, grant.owner)
         try:
+            await self._show_in_main(grant.session_id, grant.owner)
             await _defer_if_away(grant.session_id, f"private access action: {operation}")
             # A persisted-mode lookup can complete with an old snapshot after
             # a mode-change sweep already ran. Recheck with the action visible

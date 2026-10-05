@@ -38,6 +38,8 @@ import { feedController } from '$lib/stores/session/v2/feed-controller';
 import { api, type Session } from '$lib/api/client';
 import { openSession, openSessionLink } from '$lib/services/session-navigation';
 import { resourceSync } from '$lib/services/resource-sync';
+import { subagentChats } from '$lib/stores/subagent-chats';
+import { get } from 'svelte/store';
 
 beforeEach(() => {
 	activeSession.destroy();
@@ -100,6 +102,20 @@ describe('Swarm session navigation through the actual active-session store', () 
 		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: home.id });
 		expect(appMode.current).toBe('code');
 	});
+	it('marks an opened row as a subagent’s chat from is_worker, and a StartSession peer as not', () => {
+		const row = (id: string, is_worker: boolean): Session => ({
+			id, title: id, hidden: is_worker, mode: 'code', profile_id: 'test', status: 'completed', is_active: true,
+			project_id: null, project_v2_id: null, total_cost_usd: 0, total_tokens_in: 0, total_tokens_out: 0,
+			cache_creation_tokens: 0, cache_read_tokens: 0, context_tokens: 0, turn_count: 0, tags: [],
+			parent_session_id: 'parent', fork_point_message_index: null, has_forks: false, is_worker,
+			created_at: '2026-10-05T00:00:00Z', updated_at: '2026-10-05T00:00:00Z',
+		});
+		openSession('task-child', row('task-child', true));
+		expect(get(subagentChats).has('task-child')).toBe(true);
+		openSession('peer-chat', row('peer-chat', false));
+		expect(get(subagentChats).has('peer-chat')).toBe(false);
+		subagentChats.mark('task-child', false);
+	});
 	it('selects a child absent from the sidebar list and starts that child feed on click', async () => {
 		render(Page);
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
@@ -117,6 +133,8 @@ describe('Swarm session navigation through the actual active-session store', () 
 		expect(link.getAttribute('href')).toBe('/?session=worker-child');
 		const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
 		link.dispatchEvent(event);
+		// A Swarm child's transcript opens as a subagent's chat (no Git or private access UI).
+		expect(get(subagentChats).has('worker-child')).toBe(true);
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
 		expect(event.defaultPrevented).toBe(true);
 		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: 'worker-child' });

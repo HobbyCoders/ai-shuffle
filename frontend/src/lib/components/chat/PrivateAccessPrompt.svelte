@@ -24,6 +24,7 @@
 		service: 'HTTPS service',
 		action: 'One-shot approval'
 	};
+	const fromSubagents = $derived(items.length > 0 && items.every((i) => i.subagent));
 	const heading = $derived(
 		items.length && items.every((i) => i.kind === 'action') ? 'Approval waiting for you' : 'Private access requested'
 	);
@@ -38,7 +39,7 @@
 				</div>
 				<div class="pa-title">
 					<h3><span>{heading}</span><span class="card-badge card-badge--warning">Needs you</span></h3>
-					<p class="pa-subtitle">The agent waits until you answer.{#if count > 1} {count} items.{/if}</p>
+					<p class="pa-subtitle">{fromSubagents ? 'A subagent waits until you answer.' : 'The agent waits until you answer.'}{#if count > 1}{` ${count} items.`}{/if}</p>
 				</div>
 				<button type="button" class="card-btn-primary review" onclick={() => summary?.open()}>
 					Review
@@ -49,6 +50,7 @@
 					{#each items.slice(0, 3) as item (item.id)}
 						<li>
 							<span class="kind">{KIND_LABEL[item.kind]}</span>
+							{#if item.subagent}<span class="from" title={`Asked by subagent ${item.subagent}`}>{item.subagent}</span>{/if}
 							<span class="detail" title={item.detail}>{item.detail}</span>
 						</li>
 					{/each}
@@ -71,10 +73,14 @@
 	.items { list-style: none; margin: 0; padding: 0.5rem 0.75rem 0.625rem; display: grid; gap: 0.375rem; }
 	.items li { display: flex; align-items: baseline; gap: 0.5rem; min-width: 0; font-size: 0.75rem; }
 	.kind { flex-shrink: 0; font-size: 0.625rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted-foreground); }
+	.from { flex-shrink: 1; max-width: 40%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--foreground); }
+	.from::after { content: ' ·'; font-weight: 400; color: var(--muted-foreground); }
 	.detail { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--foreground); }
 	.more { color: var(--muted-foreground); }
 	@media (max-width: 480px) {
 		.items li { flex-direction: column; gap: 0.125rem; }
+		.from { max-width: 100%; }
+		.from::after { content: none; }
 		.detail { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; }
 	}
 	@media (prefers-reduced-motion: reduce) {

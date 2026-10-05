@@ -5,7 +5,7 @@ import { swarms } from '$lib/stores/swarms';
 import { reduceAll, type WireEvent } from '$lib/stores/session/v2/reducer';
 import SwarmReplayHarness from './SwarmReplayHarness.svelte';
 
-vi.mock('$lib/services/session-navigation', () => ({ openSessionLink: vi.fn() }));
+vi.mock('$lib/services/session-navigation', () => ({ openSessionLink: vi.fn(), openSubagentLink: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ recheckAuthOn401: vi.fn() }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 

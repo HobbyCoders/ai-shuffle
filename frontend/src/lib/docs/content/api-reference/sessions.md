@@ -488,6 +488,8 @@ When an agent asks for access to a folder on this worker, a machine over SSH, or
 
 Returns `requests` (open asks: `id`, `kind` (`folder`, `machine` or `service`), `purpose`, `expires_at`), `grants` (`id`, `label`, `kind`, `target`, `expires_at`, `writable`, `fingerprint`), `actions` (actions waiting for approval: `id`, `grant_id`, `operation` (`write`, `command` or `http`), `arguments`, `expires_at`), `saved_connections` (`id`, `kind`, `label`, `target`, `fingerprint`; never a secret), `vault_available`, `folder_available` and `restart_revokes`.
 
+A main chat's snapshot also lists the requests, actions and grants of the subagents (Task and Swarm children) it started on this worker, at any depth. Each of those carries `session_id`, the subagent's session, and `subagent`, its chat title. Answer, decline, approve or revoke them at `/api/v1/chat-access/{that session_id}/…`; the main chat's own id refuses them. The app shows no private access UI in a subagent's own chat.
+
 
 Service setup does not hold an agent tool open while the owner creates a token. `RequestChatAccess(kind="service")` returns immediately with `status: "awaiting_user"`, `request_id`, `kind` and a preparation `expires_at`. The private card can be reopened for 24 hours on the same running worker. Identical tool retries reuse the request without extending that deadline; cancellation, expiry, ownership change and worker restart invalidate it. Preparation grants no access. After the owner submits and confirms readiness in the conversation, the agent uses `ChatResources` to obtain the approved handle. While preparation is pending, that tool can return `pending_requests` containing only request IDs, status, kind and expiry, never setup details or tokens.
 

@@ -136,6 +136,8 @@ export interface ActiveBranchPillInput {
 	isRemote?: boolean;
 	/** Queued work, no runner online — the degraded badge occupies this slot. */
 	degraded?: boolean;
+	/** A subagent's own chat (Task/Swarm child): read and message only, so its branch shows read-only. */
+	isSubagent?: boolean;
 }
 
 /**
@@ -148,7 +150,7 @@ export interface ActiveBranchPillInput {
 export function shouldShowBranchPill(input: ActiveBranchPillInput): boolean {
 	if (input.messageCount === 0) return false;
 	if (!input.project || !input.githubAuthenticated) return false;
-	if (input.isRemote || input.degraded) return false;
+	if (input.isRemote || input.degraded || input.isSubagent) return false;
 	return true;
 }
 

@@ -211,6 +211,8 @@
 						<button type="button" class="count" onclick={next} aria-label={`${position} of ${queue.length}. Show the next request`}>{position} of {queue.length}<ChevronRight size={14} aria-hidden="true" /></button>
 					{/if}
 				</div>
+				<!-- A subagent's item, shown in its main chat: say who asks. -->
+				{#if item.subagent}<p class="p-from">Asked by subagent <strong>{item.subagent}</strong></p>{/if}
 				<p class="p-body">{item.detail}</p>
 				{#if item.kind === 'action' && summary?.decide}
 					<SlideToAnswer approveLabel="Allow" disabled={answered} {armed}
@@ -318,6 +320,8 @@
 		user-select: text;
 	}
 	.cmd .p { color: var(--subtle-foreground); }
+	.p-from { margin: 2px 2px 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--muted-foreground); }
+	.p-from strong { font-weight: 600; color: var(--foreground); }
 	.p-body { margin: 4px 2px 6px; font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
 	.q-text { font-weight: 550; }
 	.p-note { margin: 6px 2px 0; font-size: 12.5px; color: var(--muted-foreground); }

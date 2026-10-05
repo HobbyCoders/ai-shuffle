@@ -47,7 +47,8 @@
 					{onOpenSpotlight}
 					hideGlobalStt={ctx.isSessionView || ctx.embedded}
 				/>
-				{#if ctx.isSessionView}
+				<!-- A subagent's chat has no Git or private access actions: no empty row. -->
+				{#if ctx.isSessionView && !ctx.subagentChat}
 					<PageHeader hideGlobalStt>
 						{#snippet actions()}{@render ctx.headerActions()}{/snippet}
 					</PageHeader>

@@ -401,3 +401,37 @@ def test_queued_move_refusal_is_a_409_with_the_reason(client, mock_database):
         response = client.post("/api/v1/sessions/test-session-id/handoff", json={"target_instance_id": TARGET})
     assert response.status_code == 409
     assert response.json()["detail"] == "A move to DesktopWorker is already queued. Cancel it first."
+
+
+def test_subagent_chat_refuses_owner_move_handoff_adopt_and_auto_merge(client, mock_database):
+    """A subagent's chat is read-and-message only: moves commit and push, and
+    auto-merge acts on its PR, so the owner-facing endpoints refuse them."""
+    from app.api.git_owner import SUBAGENT_GIT_REFUSED
+
+    mock_database.get_session.return_value = _session(is_worker=True, parent_session_id="main-chat")
+    with patch("app.core.auto_merge.enable", new=AsyncMock()) as enable, \
+            patch("app.core.auto_merge.disable", new=AsyncMock(return_value={"enabled": False})) as disable:
+        responses = [
+            _move(client),
+            client.post("/api/v1/sessions/test-session-id/handoff", json={"target_instance_id": TARGET}),
+            client.post("/api/v1/sessions/test-session-id/adopt", json={}),
+            client.put("/api/v1/sessions/test-session-id/auto-merge", json={"enabled": True}),
+        ]
+        for response in responses:
+            assert response.status_code == 403, response.text
+            assert response.json()["detail"] == SUBAGENT_GIT_REFUSED
+        enable.assert_not_called()
+        # Switching it off is never refused, so nothing can be stranded on.
+        off = client.put("/api/v1/sessions/test-session-id/auto-merge", json={"enabled": False})
+        assert off.status_code == 200, off.text
+        disable.assert_awaited_once()
+    mock_database.adopt_session.assert_not_called()
+
+
+def test_startsession_peer_can_still_be_moved(client, mock_database):
+    """A peer started with StartSession is a top-level chat, not a subagent."""
+    mock_database.get_session.return_value = _session(
+        instance_id=TARGET, is_worker=False, parent_session_id="starting-chat")
+    response = _move(client)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "already_there"

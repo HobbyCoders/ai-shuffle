@@ -1046,3 +1046,448 @@ async def test_chat_resources_logs_stage_timings_at_info_without_details(broker,
     assert "grants=1" in text and "owner_lookup=" in text and "total=" in text
     assert "Private label" not in text and str(tmp_path) not in text
     broker.revoke("chat", grant.id)
+
+
+# ── Subagents: access shows in the main chat, answers go to the subagent ──
+
+_OWNER = ("dev", "inst", None)
+
+
+def _rows(**extra):
+    base = {"owner_device_id": "dev", "instance_id": "inst", "api_user_id": None, "mode": "code"}
+    rows = {
+        "main": {**base, "id": "main", "title": "Ship the release"},
+        "child": {**base, "id": "child", "title": "Review PR #1837", "is_worker": True, "parent_session_id": "main"},
+        "nested": {**base, "id": "nested", "title": "Nested", "is_worker": True, "parent_session_id": "child"},
+        "peer": {**base, "id": "peer", "title": "Peer", "is_worker": False, "parent_session_id": "main"},
+        "remote-child": {**base, "id": "remote-child", "is_worker": True, "parent_session_id": "remote-root"},
+        "remote-root": {**base, "id": "remote-root", "owner_device_id": "dev-b"},
+        "orphan": {**base, "id": "orphan", "is_worker": True, "parent_session_id": "gone"},
+        "loop-a": {**base, "id": "loop-a", "is_worker": True, "parent_session_id": "loop-b"},
+        "loop-b": {**base, "id": "loop-b", "is_worker": True, "parent_session_id": "loop-a"},
+    }
+    rows.update(extra)
+    return rows
+
+
+@pytest.fixture
+def delegation(broker, monkeypatch, mock_db):
+    """A main chat with a subagent ('child') and a StartSession peer ('peer') on this worker."""
+    from app.db import database
+    from app.network import control
+    rows = _rows()
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    monkeypatch.setattr(control, "owner_of", lambda row: row.get("owner_device_id") if row.get("owner_device_id") != "dev" else None)
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=_OWNER))
+    monkeypatch.setattr(chat_access, "session_bypasses_confirmation", AsyncMock(return_value=False))
+    monkeypatch.setattr(chat_access, "_defer_if_away", AsyncMock())
+    published = []
+
+    async def publish(session_id, api_user_id, *, saved=False, pending=None):
+        published.append((session_id, pending))
+    monkeypatch.setattr(chat_access, "publish_change", publish)
+    return broker, published
+
+
+def test_main_session_of_finds_the_root_main_chat_on_this_worker(delegation):
+    assert chat_access.main_session_of("child") == "main"
+    assert chat_access.main_session_of("nested") == "main"  # the root, not the intermediate parent
+    # A main chat and a StartSession peer show their own access.
+    assert chat_access.main_session_of("main") is None
+    assert chat_access.main_session_of("peer") is None
+    # No main chat here: another worker's root, a missing parent, a cycle.
+    assert chat_access.main_session_of("remote-child") is None
+    assert chat_access.main_session_of("orphan") is None
+    assert chat_access.main_session_of("loop-a") is None
+
+
+async def _until(predicate):
+    async with asyncio.timeout(3):
+        while not predicate():
+            await asyncio.sleep(0.001)
+
+
+@pytest.mark.skipif(not chat_files.available(), reason="Linux openat2 confinement required")
+@pytest.mark.asyncio
+async def test_subagent_request_grant_and_approval_surface_in_main_chat(delegation, tmp_path):
+    from app.core.chat_access import GrantSubmission
+    broker, published = delegation
+    task = asyncio.create_task(broker.request("child", "folder", "Read the build logs", suggested_path=str(tmp_path)))
+    await _until(lambda: "child" in broker._main)
+    await asyncio.gather(*broker._notifications)
+    # The main chat's panel lists the request, labelled with who asks; the
+    # sidebar count for the main chat includes it.
+    main = await broker.snapshot("main")
+    [request] = main["requests"]
+    assert request["purpose"] == "Read the build logs"
+    assert request["session_id"] == "child" and request["subagent"] == "Review PR #1837"
+    assert broker.pending_count("main") == 1
+    assert ("main", 1) in published
+    # The subagent's own session still holds it (unlabelled): nothing moved.
+    assert [r["id"] for r in (await broker.snapshot("child"))["requests"]] == [request["id"]]
+    # Answers go to the subagent's session; the main chat cannot claim it.
+    spec = GrantInput(kind="folder", label="Logs", path=str(tmp_path), writable=True)
+    with pytest.raises(AccessDenied):
+        await broker.fulfill("main", request["id"], GrantSubmission(connection=spec))
+    await broker.fulfill("child", request["id"], GrantSubmission(connection=spec))
+    grant = await task
+    main = await broker.snapshot("main")
+    assert main["requests"] == []
+    assert [(g["id"], g["session_id"], g["subagent"]) for g in main["grants"]] == [(grant["id"], "child", "Review PR #1837")]
+    # Grants never move between sessions.
+    with pytest.raises(AccessDenied):
+        await broker.run("main", grant["id"], "list", {"path": "."})
+    # A one-shot approval also waits in the main chat, answered for the subagent.
+    write = asyncio.create_task(broker.run("child", grant["id"], "write", {"path": "x", "content": "yes"}))
+    action = await pending(broker)
+    [shown] = (await broker.snapshot("main"))["actions"]
+    assert (shown["id"], shown["session_id"], shown["subagent"]) == (action.id, "child", "Review PR #1837")
+    assert broker.pending_count("main") == 1
+    with pytest.raises(AccessDenied):
+        await broker.decide("main", action.id, True)
+    assert not (tmp_path / "x").exists()
+    await broker.decide("child", action.id, True)
+    assert await write == {"written": True}
+    broker.revoke("child", grant["id"])
+    assert (await broker.snapshot("main"))["grants"] == []
+    await asyncio.gather(*broker._notifications)
+    assert published[-1] == ("main", 0)
+
+
+@pytest.mark.asyncio
+async def test_peer_and_main_chat_keep_their_own_access(delegation):
+    broker, published = delegation
+    for session_id in ("peer", "main"):
+        pending_request = await broker.request(session_id, "service", "Manage DNS", service_provider="cloudflare")
+        assert pending_request["status"] == "awaiting_user"
+    await asyncio.gather(*broker._notifications)
+    assert broker._main == {}
+    main = await broker.snapshot("main")
+    assert [(r["purpose"], "session_id" in r) for r in main["requests"]] == [("Manage DNS", False)]
+    assert [r["purpose"] for r in (await broker.snapshot("peer"))["requests"]] == ["Manage DNS"]
+    assert broker.pending_count("main") == 1 and broker.pending_count("peer") == 1
+    assert {session for session, _ in published} == {"peer", "main"}
+
+
+@pytest.mark.asyncio
+async def test_nested_subagent_shows_in_root_main_chat_and_remote_child_stays_put(delegation):
+    broker, _ = delegation
+    await broker.request("nested", "service", "Read the status page", service_provider="cloudflare")
+    await broker.request("remote-child", "service", "Remote work", service_provider="cloudflare")
+    assert broker._main == {"nested": "main"}
+    [shown] = (await broker.snapshot("main"))["requests"]
+    assert (shown["session_id"], shown["subagent"]) == ("nested", "Nested")
+    assert (await broker.snapshot("child"))["requests"] == []
+    # Another worker's child has no main chat here; it keeps its own (Away refuses it there).
+    assert [r["purpose"] for r in (await broker.snapshot("remote-child"))["requests"]] == ["Remote work"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["running", "parked", "queued-wake", "parked-removed", "running-removed",
+                                   "parked-followup", "parked-pending-report"])
+async def test_subagent_live_access_survives_turn_and_queue_transitions(delegation, mock_db, state):
+    from app.core.task_registry import task_registry
+    from app.db import turns
+    broker, _ = delegation
+    turn = turns.enqueue_turn("child", "user", prompt="Review")
+    turns.start_turn(turn["id"])
+    request = await broker.request("child", "service", "Read DNS", service_provider="cloudflare")
+    try:
+        if state.startswith("parked") or state == "queued-wake":
+            task_registry.mark_background_launch("child", "review-launch")
+            task_registry.start_task("child", "background-review", "agent", "Review", tool_use_id="review-launch")
+            turns.park_turn(turn["id"], ["background-review"])
+        if state not in ("running", "parked"):
+            # Explicit ordering: the shim's NOW() has only second precision.
+            mock_db.execute("UPDATE turns SET created_at = ? WHERE id = ?",
+                            ("2000-01-01T00:00:00", turn["id"]))
+            followup = turns.enqueue_turn("child", "unpark" if state == "queued-wake" else "user",
+                                          prompt="Continue")
+            if state.endswith("removed"):
+                turns.remove_queued_turn(followup["id"])
+            elif state in ("parked-followup", "parked-pending-report"):
+                turns.start_turn(followup["id"])
+                turns.settle_turn(followup["id"], "completed")
+                if state == "parked-pending-report":
+                    # The background job finished, but its completion has not
+                    # been delivered/queued as a wake yet.
+                    task_registry.complete_task("child", "background-review", "completed", notify=False)
+        # Drive the real request producer and durable lifecycle transitions,
+        # not a seeded request or a mocked terminal-state predicate.
+        snapshots = await asyncio.gather(broker.snapshot("main"), broker.snapshot("main"))
+        for snapshot in snapshots:
+            assert [r["id"] for r in snapshot["requests"]] == [request["request_id"]]
+        assert request["request_id"] in broker.requests
+    finally:
+        for pending_request in list(broker.requests.values()):
+            broker._finish_request(pending_request)
+        task_registry.clear_session("child")
+        await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+async def test_subagent_access_survives_completed_turn_waiting_on_posted_question(delegation):
+    from app.core.user_question_handler import UserQuestionHandler
+    from app.db import interactions, turns
+    broker, _ = delegation
+    turn = turns.enqueue_turn("child", "user", prompt="Inspect the service")
+    turns.start_turn(turn["id"])
+    request = await broker.request("child", "service", "Read DNS", service_provider="cloudflare")
+    handler = UserQuestionHandler()
+    try:
+        assert (await handler.post_question(
+            request_id="access-ready", tool_use_id="question-tool", session_id="child",
+            questions=[{"question": "Are your service inputs ready?"}],
+            broadcast_func=AsyncMock(return_value=True)))["status"] == "posted"
+        turns.settle_turn(turn["id"], "completed")
+        assert handler.get_pending_questions("child")
+        assert (await broker.snapshot("main"))["requests"][0]["id"] == request["request_id"]
+        # Once the posted question is no longer answerable and no work remains,
+        # the completed child really is terminal.
+        for question in interactions.get_pending_interactions("child"):
+            interactions.cancel_interaction(question["id"])
+        assert (await broker.snapshot("main"))["requests"] == []
+    finally:
+        for pending_request in list(broker.requests.values()):
+            broker._finish_request(pending_request)
+        await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+async def test_legacy_subagent_inherits_main_api_principal_for_access(delegation, monkeypatch):
+    from app.core import api_user_scope
+    from app.db import database
+    broker, _ = delegation
+    rows = _rows()
+    rows["main"]["api_user_id"] = "same-key"
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    monkeypatch.setattr(chat_access, "session_owner", _real_session_owner)
+    # Old worker rows have NULL api_user_id, but ownership is inherited by the
+    # existing API-user scope rules, including through a nested worker.
+    assert api_user_scope.session_api_user_id(rows["nested"]) == "same-key"
+    request = await broker.request("nested", "service", "Read DNS", service_provider="cloudflare")
+    try:
+        assert chat_access.main_session_of("nested") == "main"
+        assert (await broker.snapshot("main", rows["main"]))["requests"][0]["id"] == request["request_id"]
+    finally:
+        broker._finish_request(broker.requests[request["request_id"]])
+        await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+async def test_terminal_snapshot_cancels_inflight_grant_without_leaking_access(delegation, ssh_target, monkeypatch):
+    from app.core.chat_access import GrantSubmission
+    from app.core.task_registry import task_registry
+    broker, _ = delegation
+    requested = asyncio.create_task(broker.request("child", "machine", "Read logs"))
+    await _until(lambda: "child" in broker._main)
+    request_id = next(iter(broker.requests))
+    pinned, release = asyncio.Event(), asyncio.Event()
+    original_pin = broker.pin_host_key
+
+    async def pin_and_wait(grant, fingerprint):
+        await original_pin(grant, fingerprint)
+        pinned.set()
+        await release.wait()
+
+    monkeypatch.setattr(broker, "pin_host_key", pin_and_wait)
+    approval = asyncio.create_task(broker.fulfill("child", request_id, GrantSubmission(connection=ssh_target[0])))
+    try:
+        await asyncio.wait_for(pinned.wait(), 2)
+        task_registry.mark_user_stopped("child")
+        snapshots = await asyncio.gather(broker.snapshot("main"), broker.snapshot("main"))
+        assert all(snapshot["requests"] == [] for snapshot in snapshots)
+        release.set()
+        with pytest.raises(AccessDenied, match="no longer available"):
+            await asyncio.wait_for(approval, 2)
+        with pytest.raises(AccessDenied, match="declined"):
+            await asyncio.wait_for(requested, 2)
+        assert not broker.requests and not broker.grants
+        assert ssh_target[1] == []
+    finally:
+        release.set()
+        task_registry.clear_user_stop("child")
+        requested.cancel()
+        approval.cancel()
+        await asyncio.gather(requested, approval, return_exceptions=True)
+        await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.skipif(not chat_files.available(), reason="Linux openat2 confinement required")
+@pytest.mark.asyncio
+async def test_terminal_snapshot_releases_real_action_waiter_and_preserves_grant(delegation, tmp_path):
+    from app.core.chat_access import GrantSubmission
+    from app.core.task_registry import task_registry
+    broker, _ = delegation
+    requested = asyncio.create_task(broker.request("child", "folder", "Read build logs"))
+    await _until(lambda: "child" in broker._main)
+    request_id = next(iter(broker.requests))
+    await broker.fulfill("child", request_id, GrantSubmission(
+        connection=GrantInput(kind="folder", label="Logs", path=str(tmp_path), writable=True)))
+    grant = await requested
+    write = asyncio.create_task(broker.run("child", grant["id"], "write", {"path": "x", "content": "yes"}))
+    try:
+        action = await pending(broker)
+        assert (await broker.snapshot("main"))["actions"][0]["id"] == action.id
+        task_registry.mark_user_stopped("child")
+        snapshots = await asyncio.gather(broker.snapshot("main"), broker.snapshot("main"))
+        assert all(snapshot["actions"] == [] for snapshot in snapshots)
+        assert all(snapshot["grants"][0]["id"] == grant["id"] for snapshot in snapshots)
+        with pytest.raises(AccessDenied, match="denied"):
+            await asyncio.wait_for(write, 1)
+        with pytest.raises(AccessDenied, match="no longer awaiting"):
+            await broker.decide("child", action.id, True)
+        assert not (tmp_path / "x").exists()
+    finally:
+        task_registry.clear_user_stop("child")
+        write.cancel()
+        await asyncio.gather(write, return_exceptions=True)
+        broker.revoke("child", grant["id"])
+        await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["completed", "aborted", "stopped", "archived"])
+async def test_subagent_pending_access_withdrawn_on_terminal_state_and_can_request_on_resume(
+        delegation, monkeypatch, mock_db, terminal):
+    from app.db import database, turns
+    from app.core.task_registry import task_registry
+    broker, _ = delegation
+    rows = _rows()
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    turn = turns.enqueue_turn("child", "user", prompt="Review")
+    turns.start_turn(turn["id"])
+    service = await broker.request("child", "service", "Read DNS", service_provider="cloudflare")
+    assert (await broker.snapshot("main"))["requests"][0]["id"] == service["request_id"]
+    grant = chat_access.Grant("existing", "child", _OWNER, "Logs", "folder", "Logs",
+                              chat_access.time.time() + 60)
+    broker.grants[grant.id] = grant
+    if terminal in ("completed", "aborted"):
+        turns.settle_turn(turn["id"], terminal)
+    elif terminal == "stopped":
+        task_registry.mark_user_stopped("child")
+    else:
+        rows["child"]["status"] = "archived"
+    try:
+        assert (await broker.snapshot("main"))["requests"] == []
+        assert service["request_id"] not in broker.requests
+        assert broker.pending_count("main") == 0
+        # Completed workers' existing grants stay visible so the owner can revoke them.
+        assert (await broker.snapshot("main"))["grants"][0]["id"] == grant.id
+        broker.revoke("child", grant.id)
+        assert (await broker.snapshot("main"))["grants"] == []
+    finally:
+        task_registry.clear_user_stop("child")
+        rows["child"]["status"] = "active"
+        turns.settle_turn(turn["id"], "aborted")
+    # The SQLite shim's NOW() has second precision: make sequential turn order
+    # explicit instead of letting random ids break a same-second timestamp tie.
+    mock_db.execute("UPDATE turns SET created_at = ? WHERE id = ?", ("2000-01-01T00:00:00", turn["id"]))
+    resumed = turns.enqueue_turn("child", "user", prompt="Continue")
+    turns.start_turn(resumed["id"])
+    fresh = await broker.request("child", "service", "Read DNS", service_provider="cloudflare")
+    assert fresh["request_id"] != service["request_id"]
+    assert (await broker.snapshot("main"))["requests"][0]["id"] == fresh["request_id"]
+    broker._finish_request(broker.requests[fresh["request_id"]])
+    await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+async def test_subagent_pending_blocking_request_and_action_cancel_on_stop(delegation):
+    from app.core.task_registry import task_registry
+    broker, _ = delegation
+    task = asyncio.create_task(broker.request("child", "machine", "Read logs"))
+    await _until(lambda: "child" in broker._main)
+    action = chat_access.Action("approval", "grant", "child", "command", {"command": "probe"},
+                                chat_access.time.time() + 60, asyncio.get_running_loop().create_future())
+    broker.actions[action.id] = action
+    task_registry.mark_user_stopped("child")
+    try:
+        snapshot = await broker.snapshot("main")
+        assert snapshot["requests"] == snapshot["actions"] == []
+        assert action.decision.done() and action.decision.result() is False
+        with pytest.raises(AccessDenied, match="declined"):
+            await asyncio.wait_for(task, 1)
+    finally:
+        task_registry.clear_user_stop("child")
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["main-key", "child-key", "parent", "intermediate-key", "not-worker"])
+async def test_cached_subagent_link_revalidates_parent_chain_and_principal(delegation, monkeypatch, change):
+    from app.db import database
+    broker, _ = delegation
+    rows = _rows(other={**_rows()["main"], "id": "other"})
+    # Current workers persist their inherited key. NULL on a legacy worker
+    # instead means "inherit", not a different principal from its parent.
+    for row in rows.values():
+        row["api_user_id"] = "same-key"
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    monkeypatch.setattr(chat_access, "session_owner", _real_session_owner)
+    pending_request = await broker.request("nested", "service", "Read DNS", service_provider="cloudflare")
+    assert (await broker.snapshot("main"))["requests"][0]["id"] == pending_request["request_id"]
+    if change == "main-key":
+        rows["main"]["api_user_id"] = "other-key"
+    elif change == "child-key":
+        rows["nested"]["api_user_id"] = "other-key"
+    elif change == "parent":
+        rows["child"]["parent_session_id"] = "other"
+    elif change == "intermediate-key":
+        rows["child"]["api_user_id"] = "other-key"
+    else:
+        rows["nested"]["is_worker"] = False
+    assert (await broker.snapshot("main", rows["main"]))["requests"] == []
+    assert "nested" not in broker._main
+    broker._finish_request(broker.requests[pending_request["request_id"]])
+    await asyncio.gather(*broker._notifications)
+
+
+def test_main_link_refuses_cross_principal_delegation(delegation, monkeypatch):
+    from app.db import database
+    rows = _rows()
+    rows["main"]["api_user_id"] = "other-key"
+    rows["child"]["api_user_id"] = "same-key"
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    assert chat_access.main_session_of("child") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_user_id", [None, "same-key"])
+async def test_same_principal_legacy_main_owner_stamp_keeps_subagent_access(delegation, monkeypatch, api_user_id):
+    from app.db import database
+    broker, _ = delegation
+    rows = _rows()
+    # Legacy owner chats may have no device stamp; owner_of still identifies
+    # both chats as local. A device stamp is not a different account principal.
+    rows["main"]["owner_device_id"] = None
+    rows["main"]["api_user_id"] = rows["child"]["api_user_id"] = api_user_id
+    monkeypatch.setattr(database, "get_session", lambda sid: rows.get(sid))
+    monkeypatch.setattr(chat_access, "session_owner", AsyncMock(return_value=("dev", "inst", api_user_id)))
+    request = await broker.request("child", "service", "Read DNS", service_provider="cloudflare")
+    assert (await broker.snapshot("main", rows["main"]))["requests"][0]["id"] == request["request_id"]
+    broker._finish_request(broker.requests[request["request_id"]])
+    await asyncio.gather(*broker._notifications)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("already_pending", [False, True])
+async def test_service_access_in_away_mode_is_refused_and_recorded(broker, monkeypatch, already_pending):
+    from app.core import away_mode
+    monkeypatch.setattr(away_mode, "answers_questions_async", AsyncMock(return_value=False))
+    record = AsyncMock()
+    monkeypatch.setattr(away_mode, "record_decision", record)
+    monkeypatch.setattr(broker, "_show_in_main", AsyncMock())
+    if already_pending:
+        await broker.request("remote-child", "service", "Read DNS", service_provider="cloudflare")
+    monkeypatch.setattr(away_mode, "answers_questions_async", AsyncMock(return_value=True))
+    with pytest.raises(AccessDenied, match="Owner away; deferred"):
+        await broker.request("remote-child", "service", "Read DNS", service_provider="cloudflare")
+    assert not broker.requests and not broker.grants
+    record.assert_awaited_once_with("remote-child",
+                                   {"kind": "deferred", "action": "private service access request"},
+                                   "Deferred until you are back: private service access request")
+    await asyncio.gather(*broker._notifications)

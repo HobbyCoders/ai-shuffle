@@ -219,3 +219,21 @@ async def test_include_messages_defaults_to_the_full_transcript():
     )
 
     assert [m["content"] for m in result["messages"]] == ["from store"]
+
+
+async def test_metadata_marks_a_subagent_chat_and_not_a_main_chat():
+    """The UI keeps a subagent's chat to reading and messaging from this flag."""
+    for row, expected in (({"is_worker": True, "hidden": True}, True), ({"is_worker": None}, False), ({}, False)):
+        result, _ = await _poll_live(
+            {"id": "s", **row}, store_result=([], {}), legacy_result=([], False),
+            include_messages=False, store_probe=[],
+        )
+        assert result["session_meta"]["is_worker"] is expected
+
+
+def test_session_response_carries_is_worker_and_coalesces_null():
+    from app.core.models import Session
+    base = {"id": "s", "profile_id": "p", "created_at": "2026-10-05T00:00:00", "updated_at": "2026-10-05T00:00:00"}
+    assert Session(**base, is_worker=True).is_worker is True
+    assert Session(**base, is_worker=None).is_worker is False
+    assert Session(**base).is_worker is False

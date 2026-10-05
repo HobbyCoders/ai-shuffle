@@ -41,7 +41,7 @@ function renderLayout() {
 }
 
 beforeEach(() => {
-	Object.assign(mainPanelView, { isSessionView: false, embedded: false });
+	Object.assign(mainPanelView, { isSessionView: false, embedded: false, subagentChat: false });
 	vi.mocked(layout.setSidebarOverlay).mockClear();
 });
 
@@ -84,6 +84,14 @@ describe('MobileAppLayout', () => {
 		expect(header.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 		expect(container.querySelectorAll('header')).toHaveLength(2);
 		expect(header.getAttribute('data-hide-stt')).toBe('true');
+	});
+
+	it('draws no empty chat-action row in a subagent chat (no Git or private access there)', () => {
+		mainPanelView.isSessionView = true;
+		mainPanelView.subagentChat = true;
+		const { container } = renderLayout();
+		expect(screen.queryByRole('banner', { name: 'Chat actions' })).toBeNull();
+		expect(container.querySelectorAll('header')).toHaveLength(1);
 	});
 
 	it('keeps one app bar and no chat-action row on non-session pages', () => {

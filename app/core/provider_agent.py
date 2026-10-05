@@ -128,6 +128,21 @@ def is_worker_session(session_id: Optional[str]) -> bool:
     return bool(session_id) and session_id in _WORKER_SESSION_IDS
 
 
+def is_subagent_row(row: Optional[Mapping[str, Any]]) -> bool:
+    """Whether a session row is a Task/Swarm child (a subagent's own chat).
+
+    Reads the persisted ``sessions.is_worker`` flag, which
+    :func:`worker_session_fields` stamps on every worker row (local and those
+    run for another worker) and the worker network replicates, so it holds
+    across restarts, runners and devices. A StartSession peer is a top-level
+    chat and never carries it. A subagent's chat is for reading the transcript
+    and messaging it: owner-driven Git operations are refused for it
+    (``app.api.git_owner``) and its private-access requests surface in its main
+    chat (``app.core.chat_access``).
+    """
+    return bool(row) and bool(row.get("is_worker"))
+
+
 def reset_worker_sessions() -> None:
     """Drop every recorded worker id (tests only)."""
     _WORKER_SESSION_IDS.clear()

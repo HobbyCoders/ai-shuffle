@@ -549,3 +549,63 @@ describe('private-access request rate', () => {
   expect([sessionCalls().length, accessCalls().length]).toEqual([2, 2]);
  });
 });
+
+describe('a subagent’s private access in its main chat', () => {
+ const fromChild = {session_id: 'child', subagent: 'Review PR #1837'};
+ it('labels who asks and sends every answer to the subagent’s session', async () => {
+  snapshot = {...empty(),
+   requests: [{id: 'r1', kind: 'machine', purpose: 'Check the CI runner', expires_at: 9999999999, ...fromChild}],
+   grants: [{id: 'g1', label: 'Runner', kind: 'machine', target: 'ci@10.0.0.9:22', expires_at: 9999999999, writable: true, ...fromChild}],
+   actions: [{id: 'a1', grant_id: 'g1', operation: 'command', arguments: {command: 'uptime'}, expires_at: 9999999999, ...fromChild}]};
+  render(ChatAccess, {sessionId: 'main'});
+  render(PrivateAccessPrompt, {sessionId: 'main'});
+  await flush();
+  // Above the composer: the subagent is named on each waiting item.
+  const region = screen.getByRole('region', {name: /private access waiting/i});
+  expect(region.textContent).toContain('A subagent waits until you answer.');
+  expect(within(region).getAllByText('Review PR #1837')).toHaveLength(2);
+  expect(get(privateAccessPending).get('main')).toBe(2);
+  await openAccess(); await flush();
+  const dialog = panel()!;
+  expect(within(dialog).getAllByText((_, el) => el?.classList.contains('pa-from') ?? false)).toHaveLength(2);
+  expect(dialog.textContent).toContain('Asked by subagent Review PR #1837');
+  expect(dialog.textContent).toContain('Subagent Review PR #1837 · Remote commands');
+  await fireEvent.click(within(dialog).getByRole('button', {name: 'Approve once'})); await flush();
+  expect(m.post).toHaveBeenCalledWith('/chat-access/child/actions/a1', {allow: true});
+  const ensureOpen = async () => { if (!panel() || panel()!.hidden) { await openAccess(); await flush(); } };
+  await ensureOpen();
+  await fireEvent.click(within(panel()!).getByRole('button', {name: 'Decline'})); await flush();
+  expect(m.delete).toHaveBeenCalledWith('/chat-access/child/requests/r1');
+  await ensureOpen();
+  await fireEvent.click(within(panel()!).getByRole('button', {name: 'Revoke Runner'}));
+  await fireEvent.click(within(panel()!).getByRole('button', {name: 'Revoke'})); await flush();
+  expect(m.delete).toHaveBeenCalledWith('/chat-access/child/grants/g1');
+  // Nothing was sent to the main chat's own endpoints.
+  expect([...m.post.mock.calls, ...m.delete.mock.calls].some(([url]) => String(url).startsWith('/chat-access/main/'))).toBe(false);
+ });
+ it('never fetches a subagent’s own snapshot, even when mounted before /live marks the chat', async () => {
+  const { subagentChats } = await import('$lib/stores/subagent-chats');
+  m.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? { mode: 'code', is_worker: true }
+   : {...empty(), requests: [{id: 'r1', kind: 'machine', purpose: 'Hidden here', expires_at: 9999999999}]});
+  render(ChatAccess, {sessionId: 'child'});
+  render(PrivateAccessPrompt, {sessionId: 'child'});
+  await flush();
+  expect(accessCalls()).toEqual([]);
+  expect(screen.queryByRole('button', {name: /^Private access/})).toBeNull();
+  expect(screen.queryByRole('region', {name: /private access waiting/i})).toBeNull();
+  expect(get(subagentChats).has('child')).toBe(true);
+  subagentChats.mark('child', false);
+ });
+ it('keeps the main chat’s own items unlabelled and addressed to itself', async () => {
+  snapshot = {...empty(), actions: [{id: 'a2', grant_id: 'g2', operation: 'command', arguments: {command: 'ls'}, expires_at: 9999999999}],
+   grants: [{id: 'g2', label: 'NAS', kind: 'machine', target: 'a@b:22', expires_at: 9999999999, writable: true}]};
+  render(ChatAccess, {sessionId: 'main'});
+  render(PrivateAccessPrompt, {sessionId: 'main'});
+  await flush();
+  expect(screen.getByRole('region', {name: /private access waiting/i}).textContent).toContain('The agent waits until you answer.');
+  await openAccess(); await flush();
+  expect(panel()!.querySelector('.pa-from')).toBeNull();
+  await fireEvent.click(within(panel()!).getByRole('button', {name: 'Approve once'})); await flush();
+  expect(m.post).toHaveBeenCalledWith('/chat-access/main/actions/a2', {allow: true});
+ });
+});

@@ -268,7 +268,11 @@ async def get_auto_merge(request: Request, session_id: str, token: str = Depends
 async def update_auto_merge(request: Request, session_id: str, body: AutoMergeUpdate,
                             token: str = Depends(require_auth)):
     """Turn 'Merge when green' on or off for the session's open PR."""
-    await require_session(request, session_id)
+    session = await require_session(request, session_id)
+    if body.enabled:
+        # A PR action. Turning it off stays possible so nothing is stranded on.
+        from app.api.git_owner import refuse_subagent_git
+        refuse_subagent_git(session)
     from app.core import auto_merge
     try:
         if body.enabled:

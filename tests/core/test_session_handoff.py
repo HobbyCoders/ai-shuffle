@@ -193,3 +193,60 @@ def test_busy_state_names_running_tasks():
     with patch("app.core.streaming_status.has_active_run", return_value=False), \
             patch.object(task_registry, "get_active", return_value=[{"subject": "Run tests"}, {"agent": "explore"}]):
         assert sh.busy_state("s1") == {"running": False, "tasks": ["Run tests", "explore"]}
+
+@pytest.mark.parametrize("stop", [False, True])
+async def test_peer_owner_move_refuses_subagent_on_owning_worker(stop):
+    from types import SimpleNamespace
+    from app.network import control, engine
+    member = SimpleNamespace(kind="worker", status="active")
+    context = SimpleNamespace(member=lambda device: member)
+    row = {"id": "child", "is_worker": True}
+    queue = AsyncMock()
+    with patch.object(engine, "require_context", return_value=context), \
+            patch.object(control, "_require_owned", return_value=row) as owned, \
+            patch.object(sh, "queue_move", queue):
+        with pytest.raises(PermissionError, match="subagent"):
+            await sh.handle_control({"session_id": "child", "op": "queue",
+                                     "target": "dev-gaming", "stop": stop}, "dev-viewer")
+    owned.assert_called_once_with("child")
+    queue.assert_not_awaited()
+
+
+@pytest.mark.parametrize("op", ["status", "cancel"])
+async def test_peer_subagent_move_status_and_cancel_remain_available(op):
+    from types import SimpleNamespace
+    from app.network import control, engine
+    context = SimpleNamespace(member=lambda device: SimpleNamespace(kind="worker", status="active"))
+    operation = AsyncMock(return_value={"ok": True})
+    with patch.object(engine, "require_context", return_value=context), \
+            patch.object(control, "_require_owned", return_value={"id": "child", "is_worker": True}), \
+            patch.object(sh, "owner_op", operation):
+        assert await sh.handle_control({"session_id": "child", "op": op}, "dev-viewer") == {"ok": True}
+    operation.assert_awaited_once_with("child", op, None, stop=False)
+
+
+@pytest.mark.parametrize("is_worker", [False, None])
+async def test_peer_owner_move_of_main_chat_remains_available(is_worker):
+    from types import SimpleNamespace
+    from app.network import control, engine
+    context = SimpleNamespace(member=lambda device: SimpleNamespace(kind="worker", status="active"))
+    queue = AsyncMock(return_value={"queued": True})
+    with patch.object(engine, "require_context", return_value=context), \
+            patch.object(control, "_require_owned", return_value={"id": "main", "is_worker": is_worker}), \
+            patch.object(sh, "queue_move", queue):
+        assert await sh.handle_control({"session_id": "main", "op": "queue",
+                                        "target": "dev-gaming"}, "dev-viewer") == {"queued": True}
+    queue.assert_awaited_once_with("main", "dev-gaming", stop=False)
+
+
+async def test_agent_subagent_handoff_still_runs():
+    row = {"id": "child", "is_worker": True}
+    move = AsyncMock()
+    sh.request("child", "DesktopWorker", "Tests pass")
+    assert sh.pending_for("child").by == "agent"
+    with patch.object(sh, "_busy", return_value=False), \
+            patch.object(sh, "_record", AsyncMock()), \
+            patch("app.api.sessions.move_session_to", move), \
+            patch("app.db.database.get_session", return_value=row):
+        assert (await sh.run_pending("child")).startswith("Handed off to DesktopWorker")
+    move.assert_awaited_once_with("child", row, "dev-gaming")

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { ChatMessage } from '$lib/stores/types';
 	import { isSubagentRunning } from '$lib/utils/subagent-status';
-	import { openSessionLink } from '$lib/services/session-navigation';
+	import { openSubagentLink } from '$lib/services/session-navigation';
 
 	let { message, runningToolIds }: {
 		message: ChatMessage;
@@ -115,7 +115,7 @@
 		{/if}
 		{#if message.agentSessionId}
 			<a class="transcript-link" href={`/?session=${encodeURIComponent(message.agentSessionId)}`}
-				onclick={(event) => openSessionLink(event, message.agentSessionId!)} data-sveltekit-reload>
+				onclick={(event) => openSubagentLink(event, message.agentSessionId!)} data-sveltekit-reload>
 				Open transcript <span aria-hidden="true">↗</span>
 			</a>
 		{:else}

@@ -419,3 +419,31 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect(container.querySelector('.wt-indicator .checked')).not.toBeNull();
 	});
 });
+
+describe('a subagent’s chat (read and message only)', () => {
+	const row = { id: base.sessionId, project_v2_id: 'pv2-project', instance_id: 'local', is_remote: false, controllable: true };
+	afterEach(async () => {
+		const { githubAuthenticated } = await import('$lib/stores/auth.svelte');
+		(githubAuthenticated as unknown as { set(v: boolean): void }).set(false);
+		const { subagentChats } = await import('$lib/stores/subagent-chats');
+		subagentChats.mark(base.sessionId, false);
+	});
+	it.each([false, true])('shows its branch read-only, with no checkout or move control (sheetMode=%s)', async (sheetMode) => {
+		const { githubAuthenticated } = await import('$lib/stores/auth.svelte');
+		(githubAuthenticated as unknown as { set(v: boolean): void }).set(true);
+		const { subagentChats } = await import('$lib/stores/subagent-chats');
+		session.store.set({ ...base, worktreeBranch: 'task/49fa37fa', projectV2Id: 'pv2-project' });
+		appSessions.store.set([row]);
+		// A main chat: the interactive branch selector holds the slot and the runner opens the move menu.
+		const main = render(ContextPillBar, { sheetMode });
+		expect(main.container.querySelector('.ctx-chip.readonly[title^="Branch:"]')).toBeNull();
+		expect(main.container.querySelector('.ctx-chip.runner')).not.toBeNull();
+		cleanup();
+		subagentChats.mark(base.sessionId, true);
+		const view = render(ContextPillBar, { sheetMode });
+		const branch = view.container.querySelector('.ctx-chip.readonly[title^="Branch:"]');
+		expect(branch?.textContent).toContain('task/49fa37fa');
+		expect(view.container.querySelector('.ctx-chip.runner')).toBeNull();
+		expect(view.queryByRole('button', { name: /^Runner:/ })).toBeNull();
+	});
+});

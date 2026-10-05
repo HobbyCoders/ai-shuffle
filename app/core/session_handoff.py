@@ -246,8 +246,14 @@ async def handle_control(body: Dict[str, Any], from_device: str) -> Dict[str, An
     if not member or member.kind != "worker" or member.status != "active":
         raise PermissionError("Only active account workers may queue a move.")
     session_id = str(body.get("session_id") or "")
-    await run_sync(control._require_owned, session_id)
-    return await owner_op(session_id, str(body.get("op") or ""), body.get("target"), stop=bool(body.get("stop")))
+    session = await run_sync(control._require_owned, session_id)
+    op = str(body.get("op") or "")
+    if op == "queue":
+        from app.core.provider_agent import is_subagent_row
+        from app.api.git_owner import SUBAGENT_GIT_REFUSED
+        if is_subagent_row(session):
+            raise PermissionError(SUBAGENT_GIT_REFUSED)
+    return await owner_op(session_id, op, body.get("target"), stop=bool(body.get("stop")))
 
 
 async def owner_op(session_id: str, op: str, target: Optional[str] = None, *, stop: bool = False) -> Dict[str, Any]:

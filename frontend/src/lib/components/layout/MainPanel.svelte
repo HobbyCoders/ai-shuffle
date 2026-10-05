@@ -54,6 +54,7 @@
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 	import { assistantState, isAssistantHome } from '$lib/stores/assistant';
 	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
+	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { platform } from '$lib/stores/platform.svelte';
 	import type { MainPanelHeaderContext } from './main-panel-header';
 	import StudioTopBar from './StudioTopBar.svelte';
@@ -285,6 +286,10 @@
 		sidePanel.open(panelScope, 'changes');
 		git.refreshChangedFiles();
 	}
+	// A Changes panel left open in a chat later known to be a subagent's closes.
+	$effect(() => {
+		if (activeIsSubagent && activeSidePanel.active === 'changes') untrack(() => sidePanel.close(panelScope));
+	});
 	function closeSidePanel() {
 		if (activeSidePanel.active === 'browser') browserPanel.closePanel(activeTab?.sessionId ?? null);
 		else sidePanel.close(panelScope);
@@ -313,6 +318,9 @@
 		: activeTab?.projectV2Id || activeTab?.project || null);
 	const activeSessionId = $derived(activeTab?.sessionId ?? null);
 	const activeSessionRow = $derived($sessions.find((s) => s.id === activeSessionId));
+	// A subagent's own chat (Task/Swarm child) is read and message only: no Git
+	// controls and no private access UI (its requests show in its main chat).
+	const activeIsSubagent = $derived(!!activeSessionId && $subagentChats.has(activeSessionId));
 	// Adoption refreshes the session list, not the tab's initial snapshot.
 	const activeWorktreeDeleted = $derived(activeSessionRow?.worktree_deleted ?? activeTab?.worktreeDeleted ?? false);
 	const selectedWorkerTarget = $derived(!activeSessionId && (activeTab?.deviceIntent
@@ -356,6 +364,7 @@
 		const worktreeId = activeWorktreeId;
 		const isRemote = activeIsRemote;
 		const workerTarget = selectedWorkerTarget;
+		const subagent = activeIsSubagent;
 		// Track session ID so the effect re-fires on every tab switch,
 		// even when two sessions share the same project/worktree.
 		// This ensures git state is always fresh after a session change.
@@ -370,7 +379,9 @@
 		// commit, diff) needs a local checkout and nothing else; requiring GitHub
 		// auth here is what made a `gh` blip call clearRepository() and hide the
 		// UI. GitHub-backed actions consult `githubFeaturesAvailable` instead.
-		if (project) {
+		// A subagent's chat has no Git surface, so it loads nothing (the server
+		// refuses session Git for it).
+		if (project && !subagent) {
 			git.setWorkerTarget(workerTarget);
 			git.setRemoteSession(sessionId, isRemote);
 			// IMMEDIATE: restore cached state so UI updates within the same frame.
@@ -433,7 +444,8 @@
 		githubAvailable: activeGithubAvailable,
 		worktreeDeleted: activeWorktreeDeleted,
 		isRemote: activeIsRemote,
-		sessionMode: activeTab?.mode
+		sessionMode: activeTab?.mode,
+		isSubagent: activeIsSubagent
 	});
 	const gitUiVisible = $derived(!!activeTab && shouldShowHeaderGitActions(headerGitInput));
 
@@ -879,7 +891,9 @@
 {/snippet}
 
 {#snippet headerActions()}
-	{#if $activeView?.type === 'session' && activeTab?.sessionId}
+	<!-- Not in a subagent's chat: its requests and approvals show in its main
+	     chat's panel, labelled with the subagent. -->
+	{#if $activeView?.type === 'session' && activeTab?.sessionId && !activeIsSubagent}
 		{#key activeTab.sessionId}
 			<!-- Private access is managed here on every lane (desktop bar and the
 			     phone shell's PageHeader): a shield icon shows when the chat has a
@@ -898,7 +912,8 @@
 		githubAvailable: activeGithubAvailable,
 		worktreeDeleted: activeWorktreeDeleted,
 		isRemote: activeIsRemote,
-		sessionMode: activeTab.mode
+		sessionMode: activeTab.mode,
+		isSubagent: activeIsSubagent
 	})}
 		<div class="git-actions-host">
 			<GitHeaderActions
@@ -932,7 +947,8 @@
 			isSessionView: $activeView?.type === 'session',
 			embedded: $activeView ? embeddedViews.has($activeView.type) : false,
 			downloadAction,
-			headerActions
+			headerActions,
+			subagentChat: activeIsSubagent
 		})}
 	{:else}
 		<!-- Desktop: one bar for the whole main panel — sidebar toggle,

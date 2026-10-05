@@ -68,6 +68,13 @@ describe('shouldShowHeaderGitActions', () => {
 	it('does not hide when sessionMode is omitted (fail open for code)', () => {
 		expect(shouldShowHeaderGitActions(base())).toBe(true);
 	});
+
+	it('hides the Git rail in a subagent chat, local or remote, and keeps it in a main chat', () => {
+		expect(shouldShowHeaderGitActions(base({ isSubagent: true }))).toBe(false);
+		expect(shouldShowHeaderGitActions(base({ isSubagent: true, isRemote: true }))).toBe(false);
+		expect(shouldShowGithubGitActions(base({ isSubagent: true, githubAvailable: true }))).toBe(false);
+		expect(shouldShowHeaderGitActions(base({ isSubagent: false }))).toBe(true);
+	});
 });
 
 describe('shouldShowGithubGitActions', () => {

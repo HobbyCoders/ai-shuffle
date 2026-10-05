@@ -36,6 +36,7 @@
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git, gitStatus } from '$lib/stores/git.svelte';
+	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
 	import {
@@ -90,6 +91,10 @@
 	// Auto naming starts before the session has a worktree ID or branch.
 	const isWorktreeSelected = $derived(isWorktreeSession || $activeSession.isCreatingWorktree);
 
+	// A subagent's own chat (Task/Swarm child) is read and message only: its
+	// branch and runner show read-only, with no checkout or move controls.
+	const isSubagentChat = $derived(!!$activeSession.sessionId && $subagentChats.has($activeSession.sessionId));
+
 	// Interactive branch chip in an active chat. Remote / degraded sessions show
 	// read-only context instead.
 	const showBranch = $derived(
@@ -98,7 +103,8 @@
 			project: $activeSession.project || null,
 			githubAuthenticated: $githubAuthenticated,
 			isRemote: sessionRow?.is_remote ?? false,
-			degraded
+			degraded,
+			isSubagent: isSubagentChat
 		})
 	);
 
@@ -461,7 +467,7 @@
 				<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 				<span class="ctx-chip-label">Read-only — no runner online</span>
 			</span>
-		{:else if sessionRow}
+		{:else if sessionRow && !isSubagentChat}
 			<div class="runner-badge-wrap" bind:this={runnerMenuRef}>
 				<button
 					type="button"

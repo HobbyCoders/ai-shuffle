@@ -16,6 +16,8 @@ export interface PendingAccessItem {
 	kind: 'machine' | 'folder' | 'service' | 'action';
 	/** The agent's stated purpose, or what the one-shot action does. */
 	detail: string;
+	/** Title of the subagent that asks, when the item is a subagent's shown in its main chat. */
+	subagent?: string;
 }
 
 export interface ChatAccessSummary {

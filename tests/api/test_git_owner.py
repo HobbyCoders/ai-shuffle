@@ -157,6 +157,98 @@ async def test_owner_executes_real_commit_endpoint(remote, monkeypatch):
     commit.assert_awaited_once_with("/owner/feature", "Saved", False)
 
 
+_SESSION_ROUTES = [
+    ("GET", "status", None),
+    ("GET", "pr-state", None),
+    ("GET", "branches", None),
+    ("GET", "changed-files", None),
+    ("POST", "generate-commit-message", {}),
+    ("POST", "commit", {"message": "Saved commit", "include_unstaged": False}),
+    ("POST", "push", {"set_upstream": True}),
+    ("POST", "pull", {"strategy": "rebase", "auto_stash": True}),
+    ("POST", "checkout", {"ref": "main", "auto_stash": True}),
+    ("POST", "branches", {"name": "feature-x"}),
+    ("POST", "finish", {"session_id": "session-b", "merge_method": "rebase", "cleanup": True}),
+    ("POST", "ship", {"session_id": "session-b", "merge_method": "squash", "cleanup": False}),
+]
+
+
+@pytest.mark.parametrize("local", [True, False], ids=["owned-here", "owned-elsewhere"])
+@pytest.mark.parametrize("method,path,body", _SESSION_ROUTES)
+def test_subagent_chat_refuses_owner_git(remote, monkeypatch, local, method, path, body):
+    """A Task/Swarm child's chat is read-and-message only: no owner Git, local or forwarded."""
+    row, client = remote
+    row["is_worker"] = True
+    row["parent_session_id"] = "main-chat"
+    if local:
+        monkeypatch.setattr(control, "owner_of", lambda session: None)
+    call = AsyncMock(side_effect=AssertionError("A subagent's Git action must not be forwarded"))
+    monkeypatch.setattr(control, "call", call)
+    local_git = AsyncMock(side_effect=AssertionError("A subagent's Git action must not touch a checkout"))
+    monkeypatch.setattr(git, "get_working_dir_async", local_git)
+    monkeypatch.setattr(git_owner, "_guard_mutation", AsyncMock(side_effect=AssertionError("guard reached")))
+    response = client.request(method, f"/api/v1/projects/pv2-shared/git/{path}?session_id=session-b", json=body)
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"] == git_owner.SUBAGENT_GIT_REFUSED
+    call.assert_not_called()
+    local_git.assert_not_called()
+
+
+def test_subagent_chat_refuses_pull_request(remote, monkeypatch):
+    row, client = remote
+    row["is_worker"] = True
+    monkeypatch.setattr(control, "call", AsyncMock(side_effect=AssertionError("forwarded")))
+    response = client.post("/api/v1/projects/pv2-shared/github/pulls", json={
+        "session_id": "session-b", "title": "PR", "head": "feature", "base": "main", "draft": True,
+    })
+    assert response.status_code == 403
+    assert response.json()["detail"] == git_owner.SUBAGENT_GIT_REFUSED
+
+
+@pytest.mark.parametrize("action,params", [
+    ("create_commit", {"session_id": "session-b", "body": {"message": "Saved", "include_unstaged": False}}),
+    ("get_git_status", {"session_id": "session-b"}),
+    ("finish", {"body": {"session_id": "session-b", "merge_method": "rebase", "cleanup": True}}),
+])
+async def test_owner_refuses_subagent_over_session_git_route(remote, monkeypatch, action, params):
+    """The owning worker checks its own row: a peer cannot drive Git in a subagent's chat."""
+    row, _ = remote
+    row["is_worker"] = True
+    monkeypatch.setattr(control, "owner_of", lambda session: None)
+    _original, signature, hints = git_owner._actions[action]
+    execute = AsyncMock(side_effect=AssertionError("endpoint reached"))
+    monkeypatch.setitem(git_owner._actions, action, (execute, signature, hints))
+    monkeypatch.setattr(git_owner, "_guard_mutation", AsyncMock(side_effect=AssertionError("guard reached")))
+    result = await git_owner.handle_session_git({
+        "action": action, "session_id": row["id"], "params": {"project_id": "pv2-shared", **params},
+    }, "viewer")
+    assert result == {"status": 403, "detail": git_owner.SUBAGENT_GIT_REFUSED}
+    execute.assert_not_called()
+
+
+@pytest.mark.parametrize("extra", [{}, {"is_worker": False, "parent_session_id": "starting-chat"}],
+                         ids=["main-chat", "startsession-peer"])
+async def test_main_chat_and_peer_keep_owner_git(remote, monkeypatch, extra):
+    """Only a subagent is refused: a main chat and a StartSession peer still run Git."""
+    row, client = remote
+    row.update(extra)
+    call = AsyncMock(return_value={"status": 200, "result": {"success": True, "message": "Pushed"}})
+    monkeypatch.setattr(control, "call", call)
+    response = client.post("/api/v1/projects/pv2-shared/git/push?session_id=session-b", json={})
+    assert response.status_code == 200, response.text
+    assert call.call_args.args[2]["action"] == "push_commits"
+    monkeypatch.setattr(control, "owner_of", lambda session: None)
+    _original, signature, hints = git_owner._actions["get_operation"]
+    execute = AsyncMock(return_value={"operation_id": "owner-op", "status": "running"})
+    monkeypatch.setitem(git_owner._actions, "get_operation", (execute, signature, hints))
+    monkeypatch.setattr(git_owner, "_guard_mutation", AsyncMock())
+    result = await git_owner.handle_session_git({
+        "action": "get_operation", "session_id": row["id"],
+        "params": {"project_id": "pv2-shared", "session_id": "session-b", "operation_id": "owner-op"},
+    }, "viewer")
+    assert result["status"] == 200
+
+
 @pytest.fixture
 def worker_repositories(tmp_path, monkeypatch):
     import subprocess

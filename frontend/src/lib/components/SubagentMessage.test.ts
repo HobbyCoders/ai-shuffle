@@ -2,9 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import SubagentMessage from './SubagentMessage.svelte';
 import type { ChatMessage } from '$lib/stores/types';
-import { openSessionLink } from '$lib/services/session-navigation';
+import { openSubagentLink } from '$lib/services/session-navigation';
 
-vi.mock('$lib/services/session-navigation', () => ({ openSessionLink: vi.fn((event: MouseEvent) => event.preventDefault()) }));
+vi.mock('$lib/services/session-navigation', () => ({ openSubagentLink: vi.fn((event: MouseEvent) => event.preventDefault()) }));
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 const message: ChatMessage = {
  id: 'subagent-worker', role: 'assistant', type: 'subagent', content: 'Private worker result',
@@ -26,7 +26,7 @@ describe('Subagent transcript card', () => {
   const link = screen.getByRole('link', { name: 'Open transcript' });
   expect(link.getAttribute('href')).toBe('/?session=worker-session');
   await fireEvent.click(link);
-  expect(openSessionLink).toHaveBeenCalledWith(expect.any(MouseEvent), 'worker-session');
+  expect(openSubagentLink).toHaveBeenCalledWith(expect.any(MouseEvent), 'worker-session');
  });
  it('honors active tasks even when the saved agent status says completed', async () => {
   const { rerender } = render(SubagentMessage, { message: { ...message, agentStatus: 'completed' }, runningToolIds: new Set(['worker']) });
