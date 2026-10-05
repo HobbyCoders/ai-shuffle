@@ -2,6 +2,7 @@
 	import { ArrowUpRight, Film } from 'lucide-svelte';
 	import { openMediaGallery } from '$lib/stores/lightbox';
 	import type { GalleryMedia } from '$lib/utils/media-gallery';
+	import { retryImage } from '$lib/utils/media';
 	let { items }: { items: GalleryMedia[] } = $props();
 	const previews = $derived(items.slice(0, 3));
 	const images = $derived(items.filter(item => item.kind === 'image').length);
@@ -18,7 +19,7 @@
 		{#each previews as item (item.src)}
 			<span class="preview">
 				{#if item.kind === 'image'}
-					<img src={item.src} alt="" loading="lazy" />
+					<img src={item.src} alt="" loading="lazy" use:retryImage={item.src} />
 				{:else}
 					<Film size={22} />
 				{/if}

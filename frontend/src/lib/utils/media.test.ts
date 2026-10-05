@@ -3,13 +3,15 @@
  * tool-result extraction) used by chat message cards.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
 	classifyMediaUrl,
 	rewriteMediaMarkdown,
 	clampRevealToMediaBoundary,
 	extractToolResultMedia,
 	filenameFromMediaUrl,
+	IMAGE_RETRY_DELAYS_MS,
+	retryImageLoad,
 	mediaHtml
 } from './media';
 import { chatFileUrl } from './chat-files';
@@ -183,5 +185,57 @@ describe('session-routed media download names', () => {
 	it('names no file for data URIs or bare directories', () => {
 		expect(filenameFromMediaUrl('data:image/png;base64,AAAA')).toBeNull();
 		expect(filenameFromMediaUrl('/api/generated-images/')).toBeNull();
+	});
+});
+
+describe('retryImageLoad', () => {
+	it('reloads a served image with backoff long enough for a cross-worker sync pass', () => {
+		vi.useFakeTimers();
+		try {
+			const img = document.createElement('img');
+			const source = '/api/v1/artifacts/abc?session_id=s1';
+			img.src = source;
+			const stop = retryImageLoad(img, source);
+			const seen: string[] = [];
+			for (const delay of IMAGE_RETRY_DELAYS_MS) {
+				const before = img.getAttribute('src');
+				img.dispatchEvent(new Event('error'));
+				vi.advanceTimersByTime(delay - 1);
+				expect(img.getAttribute('src')).toBe(before);
+				vi.advanceTimersByTime(1);
+				seen.push(img.getAttribute('src') ?? '');
+			}
+			expect(seen).toEqual(IMAGE_RETRY_DELAYS_MS.map((_, i) => `${source}&retry=${i + 1}`));
+			expect(IMAGE_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(10_000);
+			// Exhausted: a further error schedules nothing.
+			img.dispatchEvent(new Event('error'));
+			vi.runAllTimers();
+			expect(img.getAttribute('src')).toBe(seen[seen.length - 1]);
+			stop();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('leaves data URIs alone and cancels a pending retry on cleanup', () => {
+		vi.useFakeTimers();
+		try {
+			const inline = document.createElement('img');
+			inline.src = 'data:image/png;base64,AAAA';
+			retryImageLoad(inline, inline.src)();
+			inline.dispatchEvent(new Event('error'));
+			vi.runAllTimers();
+			expect(inline.getAttribute('src')).toBe('data:image/png;base64,AAAA');
+
+			const img = document.createElement('img');
+			img.src = '/api/v1/artifacts/abc';
+			const stop = retryImageLoad(img, '/api/v1/artifacts/abc');
+			img.dispatchEvent(new Event('error'));
+			stop();
+			vi.runAllTimers();
+			expect(img.getAttribute('src')).toBe('/api/v1/artifacts/abc');
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

@@ -221,6 +221,87 @@ def test_local_session_image_follows_verified_paired_owner_continuation(mock_db,
         assert c.get(url).status_code == 404
 
 
+def test_owner_phone_on_viewer_worker_reads_screenshot_of_session_run_by_another_worker(
+    mock_db, artifacts_dir, monkeypatch,
+):
+    """The owner's phone, connected to worker B, views a chat that runs on worker A.
+
+    B holds a network mirror of the session (no local ``instance_id``, owner
+    device A, no local mobile-tool provenance) and the synced artifact row,
+    but not the bytes. The phone's ``<img>`` asks B with ``session_id``.
+    """
+    from app.db import mobile_tool_identity, sessions
+    from app.network import blobs, engine
+
+    monkeypatch.setattr(settings, 'instance_id', 'viewer-worker')
+    monkeypatch.setattr(engine, 'context', lambda: SimpleNamespace(
+        device_id='viewer-device', legacy_instance_map={}))
+    monkeypatch.setattr(engine, 'kick', lambda: None)
+
+    def mirror(session_id, **kw):
+        sessions.create_session(session_id, 'default', **kw)
+        with get_db() as conn:
+            conn.cursor().execute('UPDATE sessions SET instance_id=NULL, owner_device_id=%s WHERE id=%s',
+                                  ('owner-device', session_id))
+
+    mirror('remote-chat')
+    data = b'screenshot from Read on worker A'
+    digest = hashlib.sha256(data).hexdigest()
+    upsert_artifact(digest, len(data), 'image/jpeg', 'image.png', 'remote-chat')
+
+    async def fetch(digest_to_fetch):
+        return blobs.store_fetched(digest_to_fetch, data)
+
+    fetch_one = AsyncMock(side_effect=fetch)
+    monkeypatch.setattr(blobs, 'fetch_one', fetch_one)
+
+    app = FastAPI()
+    app.include_router(router)
+
+    def authenticate(request: Request):
+        request.state.paired_client = {
+            'id': 'owner-phone',
+            'account_owner_admin': request.headers.get('x-fixture-owner-admin', 'yes') == 'yes',
+        }
+        request.state.is_admin = request.state.paired_client['account_owner_admin']
+        return 'test-token'
+
+    app.dependency_overrides[_require_auth_or_signed] = authenticate
+    with TestClient(app) as c:
+        url = f'/api/v1/artifacts/{digest}?session_id=remote-chat'
+        # A paired device without owner authority on this worker gets nothing.
+        assert c.get(url, headers={'x-fixture-owner-admin': 'no'}).status_code == 404
+        fetch_one.assert_not_awaited()
+        response = c.get(url)
+        assert response.status_code == 200
+        assert response.content == data
+        assert response.headers['content-type'].startswith('image/jpeg')
+
+        # Boundaries that stay closed on a mirror: an API user's chat, and a
+        # chat whose provenance names another account.
+        from app.db import api_users
+        api_users.create_api_user('other-user', 'Other user', 'other-hash')
+        mirror('api-user-chat', api_user_id='other-user')
+        other = artifact_store.store_bytes(b'api user image', mime='image/png', created_by_session='api-user-chat')
+        assert c.get(f"/api/v1/artifacts/{other['hash']}?session_id=api-user-chat").status_code == 404
+
+        mirror('account-chat')
+        mobile_tool_identity.bind('account-chat', dict(owner='account:account-B', kind='paired',
+            principal_id='phone-B', account_id='account-B', credential_hash='fixture'), new=True)
+        other = artifact_store.store_bytes(b'account B image', mime='image/png', created_by_session='account-chat')
+        assert c.get(f"/api/v1/artifacts/{other['hash']}?session_id=account-chat").status_code == 404
+
+        # A session id alone is not a grant: naming the readable mirror does
+        # not unlock an artifact it never referenced.
+        assert c.get(f"/api/v1/artifacts/{other['hash']}?session_id=remote-chat").status_code == 404
+
+        # A session that names another install but is not a session of this
+        # network (unknown owner device) keeps the old local-only rule.
+        sessions.create_session('foreign-chat', 'default', target_instance_id='unknown-install')
+        other = artifact_store.store_bytes(b'foreign image', mime='image/png', created_by_session='foreign-chat')
+        assert c.get(f"/api/v1/artifacts/{other['hash']}?session_id=foreign-chat").status_code == 404
+
+
 @pytest.mark.parametrize('event_type', ['subagent.progress', 'team.member_progress'])
 def test_nested_worker_image_requires_exact_authorized_parent_reference(mock_db, client, event_type):
     from app.db import api_users, sessions, session_events

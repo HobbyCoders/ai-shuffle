@@ -9,7 +9,7 @@
 	 * either way it sits OUTSIDE the collapsible <details> so it's visible
 	 * regardless of expand state (a screenshot the user can't see is useless).
 	 */
-	import { mediaHtml, resolveMediaUrl } from '$lib/utils/media';
+	import { mediaHtml, resolveMediaUrl, retryImageLoad } from '$lib/utils/media';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 
 	interface Props {
@@ -25,30 +25,13 @@
 
 	let container: HTMLElement | undefined = $state();
 
-	// Artifact-store screenshots (`/api/v1/artifacts/{hash}`) are written
-	// fire-and-forget by the recorder, so the first fetch can race the disk/DB
-	// store and 404. Retry a served (non-data:) URL a few times with backoff
-	// before giving up.
-	const MAX_RETRIES = 3;
+	// Artifact-store screenshots (`/api/v1/artifacts/{hash}`) can 404 briefly
+	// (fire-and-forget store; a viewer on another worker syncs the row a pass
+	// after the event). Retry a served (non-data:) URL with backoff.
 	$effect(() => {
-		if (!container || source.startsWith('data:')) return;
-		const retrySource = source;
-		const img = container.querySelector('img');
+		const img = container?.querySelector('img');
 		if (!img) return;
-		let attempts = 0;
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const onError = () => {
-			if (attempts >= MAX_RETRIES) return;
-			attempts += 1;
-			timer = setTimeout(() => {
-				img.src = `${retrySource}${retrySource.includes('?') ? '&' : '?'}retry=${attempts}`;
-			}, 500 * 2 ** (attempts - 1));
-		};
-		img.addEventListener('error', onError);
-		return () => {
-			img.removeEventListener('error', onError);
-			if (timer !== undefined) clearTimeout(timer);
-		};
+		return retryImageLoad(img, source);
 	});
 </script>
 

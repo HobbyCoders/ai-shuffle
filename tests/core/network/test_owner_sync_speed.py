@@ -68,6 +68,52 @@ async def test_mirrored_session_write_does_not_widen_or_run_a_catalog_pass(worke
     assert [call.kwargs for call in scan.call_args_list] == [{}]
 
 
+async def test_stored_screenshot_publishes_with_the_event_that_names_it(workers, session_hook, monkeypatch, tmp_path):
+    """A viewer worker gets the artifact row in the same pass as the tool.result.
+
+    The live chat on another worker renders the image as soon as the event
+    arrives; its artifact request 404s until the row is there. Without a wake
+    the row waited for the next full scan (up to SCAN_IDLE_MAX_SECONDS).
+    """
+    from app.core import artifact_store
+    from app.core.config import settings
+    monkeypatch.setattr(artifact_store, "ARTIFACTS_DIR", tmp_path / "artifacts")
+    worker = workers("artifact-wake")
+    clock = ScanClock(monkeypatch, passes=2)
+    real_scan_all = engine.scan_all
+    published = []
+
+    def scan(**kwargs):
+        count = real_scan_all(**kwargs)
+        with store.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT collection, record_id FROM sync_ops ORDER BY seq")
+            published.append([(r["collection"], r["record_id"]) for r in cursor.fetchall()])
+        return count
+
+    with worker.active():
+        engine.create_network("Artifact wake")
+        _session("chat")
+        monkeypatch.setattr(engine, "scan_all", scan)
+
+        def read_image():
+            row = artifact_store.store_bytes(b"jpeg bytes", mime="image/jpeg", created_by_session="chat",
+                                             runner_id=settings.effective_instance_id)
+            events_db.append_events("chat", [{"type": "tool.result", "payload": {
+                "tool_use_id": "t1", "artifact_hashes": [row["hash"]]}}])
+            return row
+
+        holder = {}
+        clock.actions = [(1, lambda: holder.update(row=read_image()))]
+        await clock.run()
+    digest = holder["row"]["hash"]
+    assert clock.scans == [0, 2]  # the wake pass, not the next full scan
+    ops = published[1]
+    assert ("artifacts", digest) in ops
+    event_ops = [i for i, (coll, rid) in enumerate(ops) if coll == "session_events" and rid.startswith("chat|")]
+    assert event_ops and ops.index(("artifacts", digest)) < event_ops[-1]
+
+
 def test_prompt_and_run_transitions_name_their_session(workers, session_hook):
     from app.core import session_runtime
     worker = workers("prompt-wake")

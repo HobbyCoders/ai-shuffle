@@ -147,6 +147,48 @@ export function mediaHtml(kind: MediaKind, rawUrl: string, label = '', filename?
 	</div>`;
 }
 
+/**
+ * Backoff for a served image that failed to load (about 15s in total).
+ * Artifact screenshots can 404 briefly: the recorder stores the bytes
+ * fire-and-forget, and a viewer on another worker gets the artifact row a
+ * sync pass after the event that names it.
+ */
+export const IMAGE_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
+
+/** Reload `img` from `source` on error with backoff; returns a cleanup. */
+export function retryImageLoad(img: HTMLImageElement, source: string): () => void {
+	if (!source || /^(?:data|blob):/.test(source)) return () => {};
+	let attempts = 0;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const onError = () => {
+		if (attempts >= IMAGE_RETRY_DELAYS_MS.length) return;
+		const delay = IMAGE_RETRY_DELAYS_MS[attempts];
+		attempts += 1;
+		timer = setTimeout(() => {
+			img.src = `${source}${source.includes('?') ? '&' : '?'}retry=${attempts}`;
+		}, delay);
+	};
+	img.addEventListener('error', onError);
+	return () => {
+		img.removeEventListener('error', onError);
+		if (timer !== undefined) clearTimeout(timer);
+	};
+}
+
+/** Svelte action form of {@link retryImageLoad}: `<img src={s} use:retryImage={s} />`. */
+export function retryImage(img: HTMLImageElement, source: string) {
+	let stop = retryImageLoad(img, source);
+	return {
+		update(next: string) {
+			stop();
+			stop = retryImageLoad(img, next);
+		},
+		destroy() {
+			stop();
+		}
+	};
+}
+
 export interface ResultMedia {
 	kind: MediaKind;
 	src: string;

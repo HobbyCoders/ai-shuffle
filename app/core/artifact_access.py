@@ -8,6 +8,15 @@ from app.db import sessions, mobile_tool_identity, mobile_hub
 from app.db.base import get_db
 
 
+def _network_mirror(session):
+    """True when another worker of this install's network runs the session."""
+    from app.network import control
+    try:
+        return control.owner_of(session) is not None
+    except Exception:  # noqa: BLE001 - an unreadable network context fails closed
+        return False
+
+
 def authorize_session_artifact(request, row, digest, session_id=None):
     owner_session = (row or {}).get('created_by_session')
     target = session_id or owner_session
@@ -74,8 +83,13 @@ def authorize_session_artifact(request, row, digest, session_id=None):
                 'account_id': owner['account_id'] if owner else None,
             }, session)
         if not provenance:
+            # The owner's own device has this install's admin authority. A chat
+            # run by another worker of this network is a mirror here: its
+            # instance_id is local-only (unset) and its provenance stays on the
+            # worker that runs it, so accept that worker's mirror as well.
             allowed = bool(client.get('account_owner_admin') is True
-                           and session.get('instance_id') == settings.effective_instance_id
+                           and (session.get('instance_id') == settings.effective_instance_id
+                                or _network_mirror(session))
                            and not session.get('api_user_id'))
     elif getattr(request.state, 'is_admin', False):
         if provenance and provenance.get('account_id'):

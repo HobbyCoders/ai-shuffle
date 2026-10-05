@@ -71,9 +71,14 @@ def store_bytes(
         created_by_session=created_by_session,
         runner_id=runner_id,
     )
-    from app.network import blobs, engine
+    from app.network import blobs, engine, transport
     if engine.context() is not None:
         blobs.register_present(digest, len(data))
+        # The tool.result naming this hash wakes the next narrow pass; publish
+        # the row in it too. A viewer on another worker renders the image as
+        # soon as the event arrives and 404s until the row does, and without
+        # this wake the row waited for the next full scan (up to a minute).
+        transport.request_scan(["artifacts"])
         engine.kick()
     return row
 
