@@ -36,16 +36,14 @@ from app.core.provider.events import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from tests.core.engine_harness import StubPool, collect
+from tests.core.engine_harness import StubPool, collect, mock_adapter
 
 
 # ─── harness (mirrors test_busy_write_guard_engine._fake_state / _chat_patches) ─
 
 
 def _fake_state(messages, **overrides) -> SessionState:
-    adapter = MagicMock()
-    adapter.is_alive = MagicMock(return_value=True)
-    adapter.send_query = AsyncMock()
+    adapter = mock_adapter()
 
     async def _response():
         for m in messages:

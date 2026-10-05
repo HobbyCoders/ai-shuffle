@@ -238,6 +238,7 @@ def _submit_blocking(
     project_id: Optional[str] = None,
     worktree_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
+    explicit_permission: bool = False,
     payload: Optional[Dict[str, Any]] = None,
     command_id: Optional[str] = None,
     parent_turn_id: Optional[str] = None,
@@ -278,6 +279,11 @@ def _submit_blocking(
         archive_guard.log_dropped(session_id, source, "refused at submit")
         raise archive_guard.SessionArchived(session_id)
     overrides = _without_home_effort(session_id, overrides)
+    if source == "connector":
+        # Connector turns always go through their API user's approval policy.
+        overrides = {**(overrides or {}), "_permission_ceiling": "default"}
+    if (payload or {}).get(VOICE_DELEGATION):
+        explicit_permission = False
     worker_turn = (
         _active_worker_turn(session_id) if source in _OWNER_ANSWER_SOURCES else None
     )
@@ -293,6 +299,7 @@ def _submit_blocking(
         worktree_id = worker_turn.get("worktree_id")
         overrides = dict(worker_turn.get("overrides") or {}) or None
         payload = {**(payload or {}), WORKER_BOUND: True}
+        explicit_permission = False
     elif source in _BINDING_SOURCES and overrides:
         try:
             from app.db import database
@@ -301,7 +308,7 @@ def _submit_blocking(
                 session_id,
                 model=overrides.get("model"),
                 effort=overrides.get("effort"),
-                permission_mode=overrides.get("permission_mode"),
+                permission_mode=overrides.get("permission_mode") if explicit_permission else None,
                 context_window=overrides.get("context_window"),
                 fast=overrides.get("fast"),
                 workspace_project_ids=overrides.get("workspace_project_ids"),
@@ -349,6 +356,7 @@ def _submit_blocking(
         project_id=project_id,
         worktree_id=worktree_id,
         overrides=overrides,
+        explicit_permission=explicit_permission,
         payload=payload,
         command_id=command_id,
         parent_turn_id=parent_turn_id,
@@ -366,6 +374,7 @@ def submit(
     project_id: Optional[str] = None,
     worktree_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
+    explicit_permission: bool = False,
     payload: Optional[Dict[str, Any]] = None,
     command_id: Optional[str] = None,
     parent_turn_id: Optional[str] = None,
@@ -396,6 +405,7 @@ def submit(
         project_id=project_id,
         worktree_id=worktree_id,
         overrides=overrides,
+        explicit_permission=explicit_permission,
         payload=payload,
         command_id=command_id,
         parent_turn_id=parent_turn_id,
@@ -415,6 +425,7 @@ async def submit_async(
     project_id: Optional[str] = None,
     worktree_id: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
+    explicit_permission: bool = False,
     payload: Optional[Dict[str, Any]] = None,
     command_id: Optional[str] = None,
     parent_turn_id: Optional[str] = None,
@@ -445,6 +456,7 @@ async def submit_async(
         project_id=project_id,
         worktree_id=worktree_id,
         overrides=overrides,
+        explicit_permission=explicit_permission,
         payload=payload,
         command_id=command_id,
         parent_turn_id=parent_turn_id,

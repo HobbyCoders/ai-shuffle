@@ -1710,17 +1710,14 @@ async def _stream_to_websocket_impl(
     session = await run_sync(database.get_session, session_id)
     resume_id = session.get("sdk_session_id") if session else None
 
-    # Determine permission mode. Same chain build_options_from_profile uses:
-    # this turn's override, then the session's own binding, then the agent's
-    # config for sessions with no binding.
+    from app.core.session_modes import turn_permission_mode
+
+    # Keep provenance separately from the resolved mode passed to the builder.
+    # No source or parent heuristic can distinguish copied user messages.
+    permission_context = dict(overrides or {})
     config = profile.get("config", {})
-    permission_mode = overrides.get("permission_mode") if overrides else None
-    if not permission_mode:
-        permission_mode = (
-            (session or {}).get("permission_mode")
-            or config.get("permission_mode")
-            or "default"
-        )
+    permission_mode = turn_permission_mode(permission_context, session, config, resume=resume)
+    overrides = {**(overrides or {}), "permission_mode": permission_mode}
 
     # A chat session is pinned to 'default' whatever that chain produced — its
     # composer has no tool-access control to undo an inherited 'plan' (which the
@@ -1779,6 +1776,15 @@ async def _stream_to_websocket_impl(
     # loop: a sync poll would occupy a run_sync worker for 30s.
     if session:
         await ensure_pending_checkout(session)
+    # Checkout setup can suspend while the owner changes the binding or
+    # revokes an explicit choice on this live turn.
+    session = await run_sync(database.get_session, session_id)
+    from app.core.session_runtime import get_live_runtime
+    runtime = get_live_runtime(session_id)
+    if loop_guard_turn and runtime and runtime.turn_id == loop_guard_turn.get("id"):
+        permission_context = runtime.turn.get("overrides") or {}
+    permission_mode = turn_permission_mode(permission_context, session, config, resume=resume)
+    overrides = {**(overrides or {}), "permission_mode": permission_mode}
     _build_opts_start = time.monotonic()
     try:
         # Off the event loop — see execute_query: the build can run git
@@ -1969,22 +1975,9 @@ async def _stream_to_websocket_impl(
                         except Exception as e:
                             logger.warning(f"[WS] Failed to set model on reused session {session_id}: {e}")
 
-                    # permission_mode is baked into the CLI subprocess at spawn.
-                    # requires_reconnect() deliberately lets it change without a
-                    # respawn, so a mid-session switch (e.g. into/out of plan
-                    # mode) must be pushed into the live subprocess here — the
-                    # callback_refs update above only gates the app-level
-                    # can_use_tool callback, not the CLI's own auto-approval.
-                    # Never raise: an exception between the is_streaming claim and
-                    # the main try/finally would strand the flag and brick the client.
-                    new_perm_mode = getattr(options, 'permission_mode', None)
-                    old_perm_mode = getattr(old_opts, 'permission_mode', None)
-                    if new_perm_mode and new_perm_mode != old_perm_mode:
-                        try:
-                            await state.adapter.set_permission_mode(new_perm_mode)
-                            logger.debug(f"[WS] Updated permission_mode to {new_perm_mode} for reused session {session_id}")
-                        except Exception as e:
-                            logger.warning(f"[WS] Failed to set permission_mode on reused session {session_id}: {e}")
+                    # Reconcile permissions only after all setup awaits, in the
+                    # protected query block below. Never replay an early snapshot
+                    # over a successful owner change, or query after setter failure.
 
                 logger.info(f"[WS] Reusing pooled client for session {session_id}")
             except BaseException:
@@ -2683,10 +2676,38 @@ async def _stream_to_websocket_impl(
         set_turn_source = getattr(state.adapter, "set_turn_source", None)
         if callable(set_turn_source):
             set_turn_source(getattr(options, "aih_turn_source", None))
-        if resume:
-            await state.adapter.send_resume()
-        else:
-            await state.adapter.send_query(prompt)
+        # Serialize with the owner's live setter, and reconcile after every
+        # setup await (checkout, option build, model switch and connect). The
+        # read and comparison have no intervening await; a failed setter goes
+        # through the normal turn-error cleanup, never a looser query.
+        from app.api.sessions_permissions import _locks as permission_locks
+        from app.core.session_runtime import get_live_runtime
+
+        async with permission_locks.setdefault(session_id, asyncio.Lock()):
+            latest_session = await run_sync(database.get_session, session_id)
+            runtime = get_live_runtime(session_id)
+            if loop_guard_turn and runtime and runtime.turn_id == loop_guard_turn.get("id"):
+                permission_context = runtime.turn.get("overrides") or {}
+            permission_mode = turn_permission_mode(permission_context, latest_session, config, resume=resume)
+            # The owner's assistant (its home, the chats it starts and their
+            # workers) runs its engine in Bypass whatever the binding says, and
+            # its own approver asks the owner for the high-risk calls
+            # (``build_options_from_profile``). Keep the builder's decision for
+            # the engine; the callback keeps the resolved mode, as before.
+            engine_mode = ("bypassPermissions"
+                           if isinstance(getattr(options, "aih_assistant_scope", None), dict)
+                           else permission_mode)
+            applied_mode = getattr(state.connect_options, "permission_mode", None)
+            if engine_mode != applied_mode:
+                await state.adapter.set_permission_mode(engine_mode)
+            options.permission_mode = engine_mode
+            if state.connect_options is not None:
+                state.connect_options.permission_mode = engine_mode
+            state.callback_refs["permission_mode"] = permission_mode
+            if resume:
+                await state.adapter.send_resume()
+            else:
+                await state.adapter.send_query(prompt)
         _query_send_elapsed = time.monotonic() - _query_send_start
         if _query_send_elapsed > 1.0:
             logger.warning(f"[WS] client.query() took {_query_send_elapsed:.1f}s for session {session_id}")

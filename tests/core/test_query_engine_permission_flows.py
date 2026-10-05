@@ -58,6 +58,14 @@ def _clean_rules():
 async def _callback(tmp_path, *, overrides=None, session_row=None, profile_config=None,
                     user_id=USER, stack=None):
     """Run a turn up to the spawn refusal and return (callback, broadcast, bounds)."""
+    # This callback fixture represents a fresh owner's per-message choice.
+    # Producer/DB provenance is exercised in test_query_engine_turn_lifecycle.
+    if session_row is None:
+        # The owner's send stores its pick as the session's binding before it
+        # queues the turn (``turn_manager._submit_blocking``).
+        session_row = {"permission_mode": (overrides or {}).get("permission_mode") or "default"}
+    if overrides:
+        overrides = {**overrides, "_permission_explicit": True}
     broadcast = AsyncMock()
     own = stack is None
     stack = stack or ExitStack()
@@ -229,15 +237,19 @@ _FETCH = ("WebFetch", {"url": "https://example.com"})
 
 
 @pytest.mark.parametrize("overrides,session_row,config,call,prompts", [
-    # Override wins over the session binding and the agent config.
+    # The owner's per-message pick, stored as the binding, beats the agent
+    # config; a pick tighter than the current binding still wins.
     ({"permission_mode": "default"}, {"permission_mode": "bypassPermissions"},
      {"permission_mode": "acceptEdits"}, _EDIT, True),
-    ({"permission_mode": "acceptEdits"}, {"permission_mode": "default"}, {}, _EDIT, False),
+    ({"permission_mode": "acceptEdits"}, {"permission_mode": "acceptEdits"}, {}, _EDIT, False),
+    # Queued in Accept Edits, then the owner tightened the chat to Ask: the
+    # later tightening wins over the pick the waiting message carries.
+    ({"permission_mode": "acceptEdits"}, {"permission_mode": "default"}, {}, _EDIT, True),
     # No override: the session's binding wins over the agent config.
     (None, {"permission_mode": "bypassPermissions"}, {"permission_mode": "default"}, _FETCH, False),
     (None, {"permission_mode": "default"}, {"permission_mode": "bypassPermissions"}, _FETCH, True),
-    # No override and no binding: the agent config.
-    (None, {}, {"permission_mode": "acceptEdits"}, _EDIT, False),
+    # A real row with no binding (NULL): the session's agent mode decides.
+    (None, {"id": SID, "permission_mode": None}, {"permission_mode": "acceptEdits"}, _EDIT, False),
     # Nothing anywhere: default.
     (None, None, {}, _FETCH, True),
     # The retired "plan" mode normalizes to default.
@@ -245,8 +257,8 @@ _FETCH = ("WebFetch", {"url": "https://example.com"})
     # A chat session is pinned to default whatever the chain produced.
     (None, {"mode": "chat", "permission_mode": "bypassPermissions"}, {}, _FETCH, True),
 ], ids=[
-    "override-default", "override-acceptEdits", "binding-bypass", "binding-default",
-    "config-acceptEdits", "nothing", "plan", "chat-pinned",
+    "override-default", "override-acceptEdits", "override-capped-by-later-tightening",
+    "binding-bypass", "binding-default", "null-binding-uses-agent-acceptEdits", "nothing", "plan", "chat-pinned",
 ])
 async def test_permission_mode_chain_decides_whether_a_tool_prompts(
     tmp_path, overrides, session_row, config, call, prompts,

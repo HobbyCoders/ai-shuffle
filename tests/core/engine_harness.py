@@ -41,18 +41,27 @@ class StubPool:
         self.state = None
 
 
-def make_state(**adapter_attrs):
-    """A connected SessionState around a live MagicMock adapter.
+def mock_adapter(**adapter_attrs):
+    """A live MagicMock provider adapter.
 
-    ``adapter_attrs`` are set on the adapter on top of the defaults
-    (``is_alive() -> True``, ``send_query`` as an AsyncMock).
+    The coroutine methods the engine awaits on every send are AsyncMocks, as
+    they are on every real adapter (``app.core.provider.protocol``):
+    ``send_query``, and ``set_permission_mode``, which the engine awaits when
+    it reconciles the turn's permission mode just before sending.
+    ``adapter_attrs`` are set on top of these defaults.
     """
     adapter = MagicMock()
     adapter.is_alive = MagicMock(return_value=True)
     adapter.send_query = AsyncMock()
+    adapter.set_permission_mode = AsyncMock()
     for name, value in adapter_attrs.items():
         setattr(adapter, name, value)
-    return SessionState(adapter=adapter, is_connected=True)
+    return adapter
+
+
+def make_state(**adapter_attrs):
+    """A connected SessionState around :func:`mock_adapter`."""
+    return SessionState(adapter=mock_adapter(**adapter_attrs), is_connected=True)
 
 
 def stream_response(messages):

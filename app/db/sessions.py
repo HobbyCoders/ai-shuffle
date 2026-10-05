@@ -110,6 +110,9 @@ class SessionRow(TypedDict):
     model: Optional[str]
     effort: Optional[str]
     permission_mode: Optional[str]
+    # A delegated worker's dispatch ceiling, fixed at creation; NULL for every
+    # other session. See ``session_modes.turn_permission_mode``.
+    permission_ceiling: Optional[str]
     context_window: Optional[int]
     # Per-session fast mode: TRUE asks the leg for its expedited service,
     # NULL/FALSE runs standard.
@@ -519,6 +522,7 @@ def create_session(
     model: Optional[str] = None,
     effort: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    permission_ceiling: Optional[str] = None,
     context_window: Optional[int] = None,
     fast: Optional[bool] = None,
     mode: Optional[str] = None,
@@ -569,6 +573,7 @@ def create_session(
             ``query_options.build_options_from_profile``).
         effort: Reasoning effort chosen for this session, or ``None``.
         permission_mode: Permission mode chosen for this session, or ``None``.
+        permission_ceiling: A delegated worker's dispatch ceiling, or ``None``.
         context_window: Explicit input-window limit in tokens, or ``None`` to use
             the selected model/provider's registered default.
         fast: Fast mode chosen for this session, or ``None`` to leave the
@@ -631,6 +636,7 @@ def create_session(
     selected_model = (model or "").strip() or None
     selected_effort = (effort or "").strip() or None
     selected_permission_mode = (permission_mode or "").strip() or None
+    selected_permission_ceiling = (permission_ceiling or "").strip() or None
     try:
         selected_context_window = int(context_window) if context_window else None
     except (TypeError, ValueError):
@@ -672,8 +678,8 @@ def create_session(
             owner_device_id = _runners.self_device_id()
     except Exception:  # noqa: BLE001 — stamping is best-effort; NULL means "this worker"
         owner_device_id = None
-    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "owner_device_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "context_window", "fast", "mode", "hidden", "is_worker"]
-    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, owner_device_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_context_window, selected_fast, resolved_mode, hidden, bool(is_worker)]
+    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "owner_device_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "permission_ceiling", "context_window", "fast", "mode", "hidden", "is_worker"]
+    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, owner_device_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_permission_ceiling, selected_context_window, selected_fast, resolved_mode, hidden, bool(is_worker)]
     if voice_config is not None:
         columns.append("voice_config")
         params.append(json.dumps(voice_config))

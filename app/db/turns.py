@@ -304,6 +304,7 @@ def enqueue_turn(
     parent_turn_id: Optional[str] = None,
     instance_id: Optional[str] = None,
     at_front: bool = False,
+    explicit_permission: bool = False,
     _conn: Any = None,
 ) -> Dict[str, Any]:
     """Append a new ``queued`` turn to a session's queue.
@@ -326,8 +327,13 @@ def enqueue_turn(
     the Postgres schema and the pg_shim SQLite path), so the resulting zero /
     negative values sort correctly.
 
-    Returns the created turn row.
+    Returns the created turn row. Only a producer's explicit_permission choice
+    may stamp a grant; copying overrides must never copy that authority.
     """
+    overrides = dict(overrides or {})
+    overrides.pop("_permission_explicit", None)
+    if explicit_permission and overrides.get("permission_mode"):
+        overrides["_permission_explicit"] = True
     turn_id = f"turn-{uuid.uuid4().hex}"
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
@@ -393,6 +399,26 @@ def update_queued_turn_prompt(
         )
         row = cursor.fetchone()
     return _row(row)
+
+
+def set_live_turn_overrides(turn_id: str, overrides: Dict[str, Any]) -> bool:
+    """Store the run binding a LIVE turn switched to mid-turn (effort, Fast
+    mode, permission mode changed while it runs).
+
+    The runtime already runs under the new values; without this the row keeps
+    the ones it was claimed with. Work that inherits this turn's context (an
+    answer to its question, a peer message, a wake) copies the row's binding,
+    so it would differ from the live turn and never be steered into it.
+    Guarded to live states so a settled turn's history is never rewritten.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE turns SET overrides=%s "
+            "WHERE id=%s AND state IN ('running','draining','interrupting')",
+            (json.dumps(overrides or {}), turn_id),
+        )
+        return cursor.rowcount > 0
 
 
 def record_adhoc_turn(
@@ -811,12 +837,16 @@ def requeue_turn(turn_id: str) -> Optional[Dict[str, Any]]:
     """
     with get_db() as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT overrides FROM turns WHERE id=%s FOR UPDATE", (turn_id,))
+        original = cursor.fetchone()
+        overrides = _row(original).get("overrides", {}) if original else {}
+        overrides.pop("_permission_explicit", None)
         cursor.execute(
             "UPDATE turns SET state='queued', run_id=NULL, instance_id=NULL, "
-            "started_at=NULL, interrupt_mode=NULL, stop_background=FALSE "
+            "started_at=NULL, interrupt_mode=NULL, stop_background=FALSE, overrides=%s "
             "WHERE id=%s AND state IN ('running','interrupting','draining') "
             "RETURNING *",
-            (turn_id,),
+            (json.dumps(overrides), turn_id),
         )
         row = cursor.fetchone()
     result = _row(row)
@@ -1059,11 +1089,15 @@ def reap_expired(skip_turn_ids: Collection[str] = ()) -> List[Dict[str, Any]]:
             if turn["state"] == "running" and turn["source"] in (
                 "user", "queue", "agent_message", "promotion",
             ):
+                # Recovery is a continuation, not a new owner send. We cannot
+                # establish that the old grant is still current after a crash.
+                overrides = dict(turn.get("overrides") or {})
+                overrides.pop("_permission_explicit", None)
                 cursor.execute(
                     "UPDATE turns SET state='queued', run_id=NULL, instance_id=NULL, "
-                    "started_at=NULL, interrupt_mode=NULL, stop_background=FALSE "
+                    "started_at=NULL, interrupt_mode=NULL, stop_background=FALSE, overrides=%s "
                     "WHERE id=%s AND state IN ('running','interrupting','draining')",
-                    (turn["id"],),
+                    (json.dumps(overrides), turn["id"]),
                 )
                 banked.append((turn["session_id"], None))
             else:

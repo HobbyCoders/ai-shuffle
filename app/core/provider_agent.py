@@ -806,25 +806,27 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
 
     Workers inherit the parent's permission level rather than their own agent's
     configured mode, so a call started with bypassPermissions does not produce
-    approval prompts from its workers.
+    approval prompts from its workers. The result becomes the worker's own
+    binding and its durable ceiling.
 
-    Voice uses its live session binding rather than a historical typed turn.
-    For other sessions, resolution mirrors what actually governed the caller:
+    Resolution is what governs the caller now, never a copied turn override
+    (a settled turn's ``permission_mode`` is history: after the owner tightens
+    the chat it would hand the worker the old, looser mode):
 
-    0. the connected caller's live policy, including mid-turn picker changes;
-    1. the caller's most recent turn's ``overrides.permission_mode`` — the
-       composer's per-session selection, which the FE sends with every query;
-    2. else the caller SESSION's own binding — the mode chosen when that
-       session was created, which is also what a voice session (never runs
-       turns) and a server-initiated turn resolve from;
-    3. else the caller AGENT's legacy ``config.permission_mode``, for sessions
-       created before the binding moved onto the row.
+    0. the connected caller's live policy, including mid-turn picker changes
+       (not for voice, which never runs turns);
+    1. else the caller SESSION's current binding;
+    2. else, for a NULL binding, the caller AGENT's ``config.permission_mode``
+       — the same rule ``session_modes.turn_permission_mode`` applies.
 
-    Retired ``plan`` settings are ignored. Returns ``None`` (no override — the
-    worker's own agent config applies) when nothing resolves.
+    A caller that is itself a worker is capped by its own ceiling. Retired
+    ``plan`` settings are ignored. Returns ``None`` (no override — the worker
+    runs at Ask) when nothing resolves.
     """
     if not caller_row:
         return None
+
+    from app.core.session_modes import permission_ceiling, strictest_permission_mode
 
     mode: Optional[str] = None
     session_id = caller_row.get("id")
@@ -836,22 +838,10 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
             candidate = live.callback_refs.get("permission_mode")
             if isinstance(candidate, str) and candidate.strip():
                 return candidate.strip() if candidate != "plan" else None
-        try:
-            from app.db import turns as turns_db
 
-            latest = turns_db.get_latest_turn(str(session_id))
-            candidate = ((latest or {}).get("overrides") or {}).get("permission_mode")
-            if isinstance(candidate, str) and candidate.strip():
-                mode = candidate.strip()
-        except Exception:  # noqa: BLE001 — inheritance is best-effort
-            logger.debug(
-                "ProviderAgent: caller turn-override read failed", exc_info=True,
-            )
-
-    if not mode:
-        candidate = caller_row.get("permission_mode")
-        if isinstance(candidate, str) and candidate.strip():
-            mode = candidate.strip()
+    candidate = caller_row.get("permission_mode")
+    if isinstance(candidate, str) and candidate.strip():
+        mode = candidate.strip()
 
     if not mode:
         profile_id = caller_row.get("profile_id")
@@ -870,6 +860,18 @@ def _caller_permission_mode(caller_row: Optional[Mapping[str, Any]]) -> Optional
 
     if not mode or mode == "plan":
         return None
+    if caller_row.get("is_worker") or caller_row.get("permission_ceiling"):
+        latest_overrides: Dict[str, Any] = {}
+        try:
+            from app.db import turns as turns_db
+
+            latest = turns_db.get_latest_turn(str(session_id)) if session_id else None
+            latest_overrides = (latest or {}).get("overrides") or {}
+        except Exception:  # noqa: BLE001 — the row's own ceiling still applies
+            logger.debug("ProviderAgent: caller turn read failed", exc_info=True)
+        ceiling = permission_ceiling(latest_overrides, caller_row)
+        if ceiling:
+            mode = strictest_permission_mode(mode, ceiling)
     return mode
 
 
@@ -891,13 +893,16 @@ def worker_session_fields(
     worktree_path: Optional[str] = None,
     permission_mode: Optional[str] = None,
     context_window: Optional[int] = None,
+    permission_ceiling: Optional[str] = None,
 ) -> Dict[str, Any]:
     """``database.create_session`` keywords for a Task worker's own row.
 
     One shape for a worker this process dispatches and one another worker
     asks it to run (:mod:`app.core.remote_task`): hidden, flagged as a worker,
     and bound to an explicit provider (``None`` is native Claude, never the
-    profile's provider). ``permission_mode`` is stamped only when given.
+    profile's provider). ``permission_mode`` is stamped only when given;
+    ``permission_ceiling`` (the dispatch mode, which no later turn of the
+    worker may exceed) likewise.
     ``context_window`` (the caller's window choice, fitted to this worker by
     :func:`worker_context_window`) is stamped on the row, so every later turn
     of the worker — a message, a restart, a limit-reset resume — runs with
@@ -927,6 +932,8 @@ def worker_session_fields(
     )
     if permission_mode:
         fields["permission_mode"] = permission_mode
+    if permission_ceiling:
+        fields["permission_ceiling"] = permission_ceiling
     if context_window:
         fields["context_window"] = context_window
     return fields
@@ -965,6 +972,7 @@ def worker_turn_overrides(
         overrides["cwd"] = cwd
     if permission_mode:
         overrides["permission_mode"] = permission_mode
+    overrides["_permission_ceiling"] = permission_mode or "default"
     if context_window:
         overrides["context_window"] = context_window
     if voice_row and voice_row.get("fast") is not None:
@@ -2168,6 +2176,9 @@ async def dispatch_worker(
     # The caller's context-window choice, fitted to this worker's model. Set by
     # the prologue below; pinned on the worker row and its first turn.
     worker_window: Optional[int] = None
+    #: The caller's effective mode, inherited as the worker's binding AND its
+    #: durable ceiling (``None``: the caller resolved to nothing — Ask).
+    dispatch_mode: Optional[str] = None
 
     def _prepare_worker_blocking() -> Tuple[
         Optional[SessionRow], Optional[str], Optional[str], Optional[str],
@@ -2181,7 +2192,7 @@ async def dispatch_worker(
         caller can refuse launch before registration or provider submission.
         Nothing here needs a running loop.
         """
-        nonlocal worker_checkout, worker_window
+        nonlocal worker_checkout, worker_window, dispatch_mode
         # Inheritance (project/worktree/cwd) reads the DIRECT caller's session;
         # ``parent_session_id`` is the ROUTING parent — for nested Task-tool
         # dispatch it is the ROOT session, whose UI renders the card and answers
@@ -2208,6 +2219,7 @@ async def dispatch_worker(
         worker_window = worker_context_window(
             _caller_context_window(parent_row), provider_id, model_id,
         )
+        dispatch_mode = _caller_permission_mode(parent_row)
         project_v2_id = (parent_row or {}).get("project_v2_id")
         branch = (parent_row or {}).get("branch")
         target_instance_id = (parent_row or {}).get("instance_id")
@@ -2258,6 +2270,11 @@ async def dispatch_worker(
                 model_id=model_id,
                 effort=selected_effort,
                 context_window=worker_window,
+                # The authorised mode is the worker's own binding and its
+                # ceiling from birth, as on a remote child, so every later
+                # turn (wake, resume, message) resolves from the row.
+                permission_mode=dispatch_mode or "default",
+                permission_ceiling=dispatch_mode or "default",
             ))
             from app.core.assistant_service import home_for_session, link_job
             home = home_for_session(context_session_id or parent_session_id)
@@ -2329,7 +2346,7 @@ async def dispatch_worker(
         model_id=model_id,
         effort=selected_effort,
         cwd=worker_checkout.path if worker_checkout else _parent_cwd(parent_row),
-        permission_mode=_caller_permission_mode(parent_row),
+        permission_mode=dispatch_mode,
         system_prompt_append=system_prompt_append,
         checkout=worker_checkout,
         tool_allowlist=tool_allowlist,
@@ -2486,6 +2503,7 @@ async def dispatch_worker(
             project_id=project_id,
             worktree_id=worktree_id,
             overrides=overrides,
+            explicit_permission=True,
             # SessionRuntime runs the turn as the payload's principal; with
             # none it runs as the key that owns the worker session (walking
             # worker parents, ``api_user_scope.turn_api_user_id``), and only as

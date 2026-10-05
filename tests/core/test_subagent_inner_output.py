@@ -383,6 +383,7 @@ from unittest.mock import AsyncMock as _AsyncMock, MagicMock as _MagicMock, patc
 
 import app.core.query_engine as _qe  # noqa: E402
 from app.core.session_pool import SessionState as _SessionState  # noqa: E402
+from tests.core.engine_harness import mock_adapter as _mock_adapter  # noqa: E402
 
 
 _ACK_TEXT = (
@@ -393,9 +394,7 @@ _ACK_TEXT = (
 
 
 def _ack_state(messages, **overrides) -> _SessionState:
-    adapter = _MagicMock()
-    adapter.is_alive = _MagicMock(return_value=True)
-    adapter.send_query = _AsyncMock()
+    adapter = _mock_adapter()
 
     async def _response():
         for m in messages:
@@ -724,9 +723,7 @@ async def _collect(agen):
 def _raising_state(messages, exc) -> _SessionState:
     """A SessionState whose receive_response yields ``messages`` then RAISES —
     models a mid-stream interrupt/crash after the launch result was parked."""
-    adapter = _MagicMock()
-    adapter.is_alive = _MagicMock(return_value=True)
-    adapter.send_query = _AsyncMock()
+    adapter = _mock_adapter()
 
     async def _response():
         for m in messages:

@@ -1167,6 +1167,130 @@ async def test_real_native_askuser_posts_continues_and_consumes_host_answer_once
 
 
 @pytest.mark.asyncio
+async def test_real_native_answer_reaches_the_running_turn_after_a_fast_mode_switch(monkeypatch):
+    """Session 989d9fd5 on the native (GPT) leg: the agent posted AskUser and
+    kept working; Fast mode was switched on from another worker; the owner's
+    answer, forwarded over the control route, must reach the SAME turn at its
+    next tool boundary and be receipted once, not wait for the turn to end."""
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from fluid.engine.native import NativeLoop
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins import ask_user
+    from fluid.tools.registry import ToolOutcome, ToolRegistry, ToolSpec
+    from app.core import session_runtime
+    from app.core.session_pool import SessionState
+    from app.core.user_question_handler import UserQuestionHandler, questions_from_tool_input
+    from app.db import database, turns
+    from app.network import control
+
+    sid = "native-answer-after-switch"
+    database.create_session(session_id=sid, profile_id=None, title="t")
+    working, release = asyncio.Event(), asyncio.Event()
+
+    def response(n):
+        if n == 1:
+            block = {"index": 0, "block_type": "tool_use", "tool_name": "AskUser", "tool_use_id": "ask"}
+            delta = StreamChunk("tool_args_delta", {"index": 0, "partial_json": json.dumps({"questions": [
+                {"question": "Route?", "header": "Route",
+                 "options": [{"label": "DesktopWorker"}, {"label": "Deploy from Unraid"}]}]})})
+        elif n == 2:
+            block = {"index": 0, "block_type": "tool_use", "tool_name": "Work", "tool_use_id": "work"}
+            delta = StreamChunk("tool_args_delta", {"index": 0, "partial_json": "{}"})
+        else:
+            block = {"index": 0, "block_type": "text"}
+            delta = StreamChunk("text_delta", {"index": 0, "text": "Deploying from Unraid."})
+        stop = "tool_use" if n < 3 else "end_turn"
+        return [StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
+                StreamChunk("block_start", block), delta, StreamChunk("block_stop", {"index": 0}),
+                StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": stop}),
+                StreamChunk("message_stop", {})]
+
+    class Provider(FakeProvider):
+        def __init__(self):
+            self.requests = []
+
+        async def stream(self, request):
+            self.requests.append(request)
+            for chunk in response(len(self.requests)):
+                yield chunk
+
+    async def work(_input, _ctx):
+        working.set()
+        await release.wait()
+        return ToolOutcome(text="independent work done")
+
+    monkeypatch.setattr("app.core.interaction_wait.notify_changed", lambda s: None)
+    monkeypatch.setattr("app.core.turn_claim.notify_turns_changed", lambda s: None)
+    monkeypatch.setattr("app.core.turn_manager._kick", lambda s: None)
+    registry = ToolRegistry()
+    registry.register_builtin(ask_user.SPEC, ask_user.handler)
+    registry.register_builtin(ToolSpec(name="Work", description="work",
+                                       input_schema={"type": "object", "properties": {}}), work)
+    provider = Provider()
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="gpt-5.4", effort="high",
+                      registry=registry, permissions=PermissionEngine("never_ask"))
+    adapter = _adapter_with(loop)
+    adapter._provider_kind = "openai_responses"
+    adapter._options = SessionOptions(model="gpt-5.4", effort="high", fast=False)
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: sid)
+    handler = UserQuestionHandler()
+    monkeypatch.setattr("app.core.user_question_handler.user_question_handler", handler)
+
+    async def can_use_tool(name, tool_input, context):
+        assert context.nonblocking_question  # the native AskUser never holds the turn
+        posted = await handler.post_question(
+            request_id=context.question_request_id, tool_use_id=context.tool_use_id, session_id=sid,
+            questions=questions_from_tool_input(tool_input), broadcast_func=AsyncMock())
+        return _FakeAllow(posted)
+
+    adapter._can_use_tool = can_use_tool
+    state = SessionState(adapter=adapter, is_connected=True, is_streaming=True,
+                         connect_options=SimpleNamespace(effort="high", aih_fast=False))
+    monkeypatch.setattr("app.core.session_pool.get_session_pool",
+                        lambda: SimpleNamespace(peek=lambda s: state if s == sid else None))
+    live = turns.enqueue_turn(sid, "user", prompt="go", profile_id="coding", overrides={
+        "model": "prov:p:gpt-5.4", "permission_mode": "bypassPermissions"})
+    turns.start_turn(live["id"])
+    session_runtime._live_runtimes[sid] = session_runtime.SessionRuntime(turns.get_turn(live["id"]))
+    try:
+        await adapter.send_query("go")
+        collector = asyncio.create_task(_collect(adapter))
+        await asyncio.wait_for(working.wait(), 5)
+        for _ in range(200):  # the pump posts the question as it streams
+            if handler.get_pending_questions(sid):
+                break
+            await asyncio.sleep(0.01)
+        question, = handler.get_pending_questions(sid)
+        assert question["nonblocking"] is True
+        assert await control.handle("run-settings", {"session_id": sid, "fast": True},
+                                    from_device="dev_gamingpc") == {"effort": "high", "fast": True}
+        assert (await control.handle("question", {
+            "session_id": sid, "request_id": question["request_id"],
+            "answers": {"Route?": "Deploy from Unraid"},
+        }, from_device="dev_gamingpc"))["success"]
+        answer, = turns.get_queued_turns(sid)
+        release.set()
+        events = await asyncio.wait_for(collector, 5)
+        receipts = [e for e in events if isinstance(e, SteerDeliveredEvent)]
+        assert [s.get("id") for r in receipts for s in r.steers] == [answer["id"]]
+        # The model read the answer inside the turn that asked, exactly once.
+        assert len(provider.requests) == 3
+        work_result, = [b for m in provider.requests[-1].messages for b in m.content
+                        if getattr(b, "tool_use_id", None) == "work"]
+        carried = "".join(getattr(part, "text", "") for part in work_result.content)
+        assert carried.count("Answer to your question") == 1
+        assert "Deploy from Unraid" in carried
+        assert "Answer to your question" not in repr(provider.requests[1].messages)
+        assert provider.requests[-1].extra.get("service_tier") == "priority"  # the switch applied too
+    finally:
+        release.set()
+        session_runtime._live_runtimes.pop(sid, None)
+        await loop.aclose()
+
+
+@pytest.mark.asyncio
 async def test_nonblocking_question_posts_before_terminal_without_response_op():
     from unittest.mock import AsyncMock
     from app.core.user_question_handler import UserQuestionHandler

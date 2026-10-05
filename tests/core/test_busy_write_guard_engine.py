@@ -37,16 +37,14 @@ import app.core.query_background as qb
 from app.core.session_pool import SessionState
 from app.db import session_events as se
 from app.db import sessions as sessions_db
-from tests.core.engine_harness import StubPool, collect
+from tests.core.engine_harness import StubPool, collect, mock_adapter
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
 
 def _fake_state(**overrides) -> SessionState:
-    adapter = MagicMock()
-    adapter.is_alive = MagicMock(return_value=True)
-    adapter.send_query = AsyncMock()
+    adapter = mock_adapter()
 
     async def _empty_response():
         if False:  # pragma: no cover — empty async generator
@@ -488,58 +486,81 @@ def _reuse_state_with_opts(perm_mode="default", model="m") -> SessionState:
     return state
 
 
+def _bind_session_permission(stack: ExitStack, permission_mode: str) -> None:
+    """Serve the session row with this stored permission binding.
+
+    The WS path resolves the turn's mode from the session's current binding
+    (``session_modes.turn_permission_mode``), not from the built options, and
+    reconciles the live client with it just before the send.
+    """
+    from app.db import database
+
+    async def _fake_run_sync(fn, *a, **k):
+        if fn == database.get_session:
+            return {"id": "row-1", "permission_mode": permission_mode}
+        return {"id": "row-1"}
+
+    stack.enter_context(patch.object(qe, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)))
+
+
 async def test_chat_applies_permission_mode_on_reuse_without_respawn():
-    """WS path: a reused client whose spawn permission_mode differs from this
-    turn's gets set_permission_mode(new) awaited, and the pool entry is NOT
-    torn down (no respawn — that would kill in-flight background tasks)."""
+    """WS path: a reused client whose spawn permission_mode differs from the
+    session's current binding gets set_permission_mode(new) awaited, and the
+    pool entry is NOT torn down (no respawn — that would kill in-flight
+    background tasks)."""
     state = _reuse_state_with_opts(perm_mode="default", model="m")
     pool = StubPool(state)
 
     with ExitStack() as stack:
         options = _chat_patches(stack, pool)
-        options.permission_mode = "plan"
+        _bind_session_permission(stack, "acceptEdits")
         options.model = "m"  # unchanged → set_model must NOT fire
         events = await collect(qe._stream_to_websocket_impl("hi", "sess-perm", "claude-code"))
 
-    state.adapter.set_permission_mode.assert_awaited_once_with("plan")
+    state.adapter.set_permission_mode.assert_awaited_once_with("acceptEdits")
     state.adapter.set_model.assert_not_awaited()
+    assert state.connect_options.permission_mode == "acceptEdits"
     assert pool.state is state, "reuse must not evict/replace the pooled client"
     assert not any(e.get("type") == "error" for e in events), events
     assert state.is_streaming is False  # empty turn completed, claim released
 
 
 async def test_chat_permission_mode_unchanged_does_not_call_setter():
-    """No spurious setter call when permission_mode is identical to spawn."""
-    state = _reuse_state_with_opts(perm_mode="plan", model="m")
+    """No spurious setter call when the binding is identical to spawn."""
+    state = _reuse_state_with_opts(perm_mode="acceptEdits", model="m")
     pool = StubPool(state)
 
     with ExitStack() as stack:
         options = _chat_patches(stack, pool)
-        options.permission_mode = "plan"
+        _bind_session_permission(stack, "acceptEdits")
         options.model = "m"
         await collect(qe._stream_to_websocket_impl("hi", "sess-noop", "claude-code"))
 
     state.adapter.set_permission_mode.assert_not_awaited()
+    state.adapter.send_query.assert_awaited_once()
 
 
-async def test_chat_permission_mode_setter_failure_does_not_propagate():
-    """A raising set_permission_mode must be swallowed (logged, never raised): an
-    exception between the is_streaming claim and the main try/finally would
-    strand the flag and brick the pooled client. The turn proceeds normally."""
-    state = _reuse_state_with_opts(perm_mode="default", model="m")
+async def test_chat_permission_mode_setter_failure_aborts_the_send_without_stranding():
+    """A raising set_permission_mode must not send the query under the client's
+    old (possibly looser) mode: the turn ends with an error frame instead. The
+    exception goes through the normal turn-error cleanup, so the is_streaming
+    claim is released rather than stranded, and the uncertain client is evicted.
+    """
+    state = _reuse_state_with_opts(perm_mode="bypassPermissions", model="m")
     state.adapter.set_permission_mode = AsyncMock(side_effect=RuntimeError("setter boom"))
     pool = StubPool(state)
 
     with ExitStack() as stack:
         options = _chat_patches(stack, pool)
-        options.permission_mode = "plan"
+        _bind_session_permission(stack, "default")
         options.model = "m"
         events = await collect(qe._stream_to_websocket_impl("hi", "sess-perm-boom", "claude-code"))
 
-    state.adapter.set_permission_mode.assert_awaited_once_with("plan")
-    assert not any(e.get("type") == "error" for e in events), events
-    assert state.is_streaming is False  # turn still completed cleanly
-    assert pool.state is state
+    state.adapter.set_permission_mode.assert_awaited_once_with("default")
+    state.adapter.send_query.assert_not_awaited()
+    assert any(e.get("type") == "error" for e in events), events
+    assert state.is_streaming is False  # claim released by the error path
+    assert pool.state is None, "a client with a refused permission switch must be evicted"
 
 
 async def test_rest_applies_permission_mode_on_reuse_without_respawn():

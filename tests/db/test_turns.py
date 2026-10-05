@@ -11,6 +11,20 @@ from app.db import runs
 # Enqueue + ordering + reads
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("source", ["user", "queue", "provider_agent"])
+def test_permission_provenance_is_an_enqueue_choice_not_copied_context(mock_db, source):
+    original = turns.enqueue_turn("provenance", source, explicit_permission=True,
+                                  overrides={"permission_mode": "bypassPermissions", "model": "opus"})
+    assert original["overrides"]["_permission_explicit"] is True
+    copied = turns.enqueue_turn("provenance", source, overrides=original["overrides"])
+    assert "_permission_explicit" not in copied["overrides"]
+    assert copied["overrides"]["model"] == "opus"
+    turns.start_turn(original["id"])
+    requeued = turns.requeue_turn(original["id"])
+    assert "_permission_explicit" not in requeued["overrides"]
+    assert requeued["overrides"]["permission_mode"] == "bypassPermissions"
+
+
 def test_enqueue_assigns_increasing_positions_and_reads_back(mock_db):
     t1 = turns.enqueue_turn("s1", "user", prompt="first")
     t2 = turns.enqueue_turn("s1", "queue", prompt="second")

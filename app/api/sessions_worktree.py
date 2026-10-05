@@ -491,12 +491,13 @@ async def _create_remote_branch_session(
                 await control.submit_turn(
                     remote_device, session_id=session_id, source="worktree", prompt=prompt,
                     profile_id=portable_profile, project_id=None,
-                    overrides=body.overrides, payload=payload or None,
+                    overrides=body.overrides, payload=payload or None, owner_send=True,
                 )
             else:
                 await turn_manager.submit_async(
                     session_id, "worktree", prompt=prompt, profile_id=portable_profile,
                     project_id=body.project_id or None, overrides=body.overrides,
+                    explicit_permission=True,
                     payload=payload or None, no_kick=True,
                 )
                 await run_sync(turn_claim.notify_turns_changed, session_id)
@@ -711,6 +712,7 @@ async def _create_v2_branch_session(
                 profile_id=profile_id,
                 project_id=body.project_id or None,
                 overrides=body.overrides,
+                explicit_permission=True,
                 payload={"api_user_id": api_user_id} if api_user_id else None,
             )
             query_started = True

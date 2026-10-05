@@ -558,6 +558,22 @@ def test_the_child_runs_at_the_ceiling(world, monkeypatch):
     row = database.get_session(answer["worker_session_id"])
     [turn] = child_turns(answer["worker_session_id"])
     assert row["permission_mode"] == turn["overrides"]["permission_mode"] == "acceptEdits"
+    assert turn["overrides"]["_permission_explicit"] is True
+    assert turn["overrides"]["_permission_ceiling"] == "acceptEdits"
+    # Drive the target's real follow-up producer after its session is loosened.
+    from app.core import turn_manager
+    from app.core.session_modes import turn_permission_mode
+    from app.db import turns
+
+    child_id = answer["worker_session_id"]
+    database.set_session_run_binding(child_id, permission_mode="bypassPermissions")
+    followup_id = turn_manager.submit(child_id, "user", prompt="continue", explicit_permission=True,
+                                      overrides={"permission_mode": "bypassPermissions"}, no_kick=True)
+    followup = turns.get_turn(followup_id)
+    assert followup["payload"]["worker_bound"]
+    assert not followup["overrides"].get("_permission_explicit")
+    assert followup["overrides"]["_permission_ceiling"] == "acceptEdits"
+    assert turn_permission_mode(followup["overrides"], database.get_session(child_id)) == "acceptEdits"
 
 
 # --- the caller's context window ----------------------------------------------

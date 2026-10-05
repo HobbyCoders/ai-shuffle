@@ -138,6 +138,62 @@ async def test_question_producer_answer_steers_or_drains_once(mock_db, ending):
     assert turns_db.get_queued_turns(sid) == []
 
 
+@pytest.mark.parametrize("change", ["run-settings", "permission-mode"])
+async def test_answer_after_a_mid_turn_setting_change_still_steers(mock_db, change):
+    """Session 989d9fd5: Fast mode was switched on from another worker while the
+    turn ran, then the owner answered that turn's question from the same
+    worker. The switch rewrote the runtime's binding (adding ``effort``) but not
+    the turn row the answer copies its binding from, so the answer differed on
+    ``effort``, was never steered, and waited twelve minutes for the turn to end.
+    """
+    from types import SimpleNamespace
+    from app.core.user_question_handler import UserQuestionHandler
+    from app.core import turn_manager
+    from app.network import control
+
+    sid = _seed_session("question-after-switch")
+    live = _start_live(sid, profile_id="coding", overrides={
+        "model": "prov:p:gpt-5.4", "permission_mode": "bypassPermissions"})
+    _live_runtime(sid, live)
+    handler = UserQuestionHandler()
+    await handler.post_question(request_id="q-switch", tool_use_id="tu", session_id=sid,
+                                questions=[{"question": "Route?"}], broadcast_func=AsyncMock())
+
+    class SwitchingAdapter(_Adapter):
+        _options = SimpleNamespace(effort="high", fast=False)
+
+        async def set_run_settings(self, *, effort, fast):
+            return {"effort": effort, "fast": fast}
+
+        async def set_permission_mode(self, mode):
+            return None
+
+    adapter = SwitchingAdapter()
+    pool = MagicMock(name="session_pool")
+    pool.peek.return_value = MagicMock(adapter=adapter, is_connected=True, callback_refs={})
+    with patch("app.core.session_pool.get_session_pool", return_value=pool), \
+            patch.object(turn_manager, "_kick"), \
+            patch("app.core.turn_claim.notify_turns_changed"), \
+            patch("app.core.interaction_wait.notify_changed"), \
+            patch("app.core.permission_handler.permission_handler.resolve_mode_permissions",
+                  new=AsyncMock()):
+        # Both arrive over the cross-worker control route, as they did.
+        if change == "run-settings":
+            await control.handle("run-settings", {"session_id": sid, "fast": True},
+                                 from_device="dev_gamingpc")
+        else:
+            await control.handle("permission-mode", {"session_id": sid, "permission_mode": "acceptEdits"},
+                                 from_device="dev_gamingpc")
+        assert (await control.handle("question", {
+            "session_id": sid, "request_id": "q-switch", "answers": {"Route?": "Deploy from Unraid"},
+        }, from_device="dev_gamingpc"))["success"]
+
+    answer, = turns_db.get_queued_turns(sid)
+    assert "Deploy from Unraid" in answer["prompt"]
+    # Steered into the running turn once, not left for the end of the turn.
+    assert adapter.calls == [(answer["prompt"], answer["id"])]
+
+
 async def test_no_live_runtime_is_a_no_op(mock_db):
     """A session this process does not own falls back to the ordinary drain."""
     _start_live("s1")

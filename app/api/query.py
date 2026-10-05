@@ -461,6 +461,7 @@ async def conversation(
             profile_id=profile_id,
             project_id=project_id,
             overrides=overrides,
+            explicit_permission=True,
             # The runtime runs a queued turn as the key on its payload (as the
             # socket and resume paths do); without it the key's turn ran with
             # the owner's credentials, tools and notes.

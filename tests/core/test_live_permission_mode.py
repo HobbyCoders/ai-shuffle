@@ -39,6 +39,19 @@ async def test_live_ask_bypass_ask_without_interrupt_or_reconnect(live):
     assert state.adapter.set_permission_mode.await_count == 2
 
 
+async def test_live_change_cannot_loosen_a_dispatch_ceiling(live, monkeypatch):
+    from app.core import session_runtime
+
+    state, save = live
+    runtime = session_runtime.get_live_runtime(SID)
+    runtime.turn["overrides"]["_permission_ceiling"] = "default"
+    monkeypatch.setattr(session_runtime, "get_live_runtime", lambda sid: runtime)
+    assert await api.apply_permission_mode(SID, "bypassPermissions") == {"permission_mode": "default"}
+    state.adapter.set_permission_mode.assert_awaited_once_with("default")
+    save.assert_called_with(SID, permission_mode="default")
+    assert runtime.turn["overrides"]["_permission_explicit"] is False
+
+
 async def test_engine_refusal_keeps_old_mode(live):
     state, save = live
     state.adapter.set_permission_mode.side_effect = RuntimeError("refused")

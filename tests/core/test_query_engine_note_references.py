@@ -68,7 +68,7 @@ def _engine_patches(stack, pool, cwd):
 async def _sent_prompt(prompt, api_user_id, tmp_path):
     session_id = f"sess-{uuid.uuid4()}"
     database.create_session(session_id=session_id, profile_id="default")
-    state = make_state(send_resume=AsyncMock())
+    state = make_state(send_resume=AsyncMock(), set_permission_mode=AsyncMock())
     state.adapter.receive_events = stream_response([SystemMessage(subtype="init", data={"session_id": "ses_x"})])
     with ExitStack() as stack:
         _engine_patches(stack, StubPool(state), str(tmp_path))

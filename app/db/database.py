@@ -2271,6 +2271,16 @@ def _run_column_migrations(cursor):
                 "WHERE EXISTS (SELECT 1 FROM mobile_tool_identity m WHERE m.session_id = sessions.id)")
             migrations_applied.append("sessions.provenance_owner_backfill")
 
+    # A delegated worker's dispatch ceiling (app/core/session_modes.py
+    # ``turn_permission_mode``), written once when the worker is created so a
+    # turn that carries no ceiling of its own (a scheduled wake, a limit-reset
+    # resume) is still capped by it. NULL on every pre-existing row: an older
+    # worker falls back to its turn's own limit, else Ask. Additive, no index,
+    # no SCHEMA_VERSION bump (the migrations fingerprint covers this block).
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "permission_ceiling"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN permission_ceiling TEXT")
+        migrations_applied.append("sessions.permission_ceiling")
+
     # API-user run configuration. ``model`` / ``effort`` are the preconfigured
     # selection every connector/API session created FOR this user binds at
     # create_session (and re-binds on each connector turn, since ``connector``

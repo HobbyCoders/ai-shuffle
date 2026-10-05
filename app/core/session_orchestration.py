@@ -421,15 +421,39 @@ def _remote_session_id(command_id):
     return str(uuid5(NAMESPACE_URL, "ai-shuffle:" + command_id))
 
 
+def _started_permission_mode(sender, overrides):
+    """The permission binding a chat started by ``sender`` is created with.
+
+    The sender's CURRENT binding, never the permission mode copied onto its
+    continuation's overrides: after the owner tightens the sender, that copy
+    still says the old, looser mode, and a new session's binding is exactly
+    what every one of its turns resolves from. A ceiling the sender's turn
+    carries (a connector's) caps it. ``None`` (the sender has no binding)
+    leaves the new chat unbound too, so it follows the same agent's mode.
+    """
+    from app.core.session_modes import permission_ceiling, turn_permission_mode
+
+    ceiling = permission_ceiling({"_permission_ceiling": (overrides or {}).get("_permission_ceiling")},
+                                 {**sender, "is_worker": False})
+    if not ceiling:
+        return sender.get("permission_mode")
+    from app.db import database
+    profile = database.get_profile(sender.get("profile_id")) if sender.get("profile_id") else None
+    return turn_permission_mode({"_permission_ceiling": ceiling}, sender,
+                                (profile or {}).get("config") if profile else None)
+
+
 def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerprint, *,
-                 project_v2_id=None, assistant=False, model_plan=None):
+                 project_v2_id=None, assistant=False, model_plan=None, permission_mode=None):
     """What the destination needs to make the chat. No path, worktree, branch,
     credential or tool identity: those belong to this install.
 
     ``assistant``: the owner's assistant asked, so the chat reports back here
     and runs with Away handling there (approvals cannot travel back).
     ``model_plan``: a model the user asked for (#1830); the destination
-    re-checks that it can run there and maps the run settings again."""
+    re-checks that it can run there and maps the run settings again.
+    ``permission_mode``: :func:`_started_permission_mode`, the new chat's
+    binding (the destination caps it again with its own agent and policy)."""
     body = {
         "session_id": _remote_session_id(command_id), "command_id": command_id,
         "fingerprint": fingerprint, "title": _text(data, "title", 160), "prompt": prompt,
@@ -442,7 +466,7 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         "provider_id": sender.get("provider_id"),
         "model": overrides.get("model") or sender.get("model"),
         "effort": overrides.get("effort", sender.get("effort")),
-        "permission_mode": overrides.get("permission_mode", sender.get("permission_mode")),
+        "permission_mode": permission_mode,
         "context_window": sender.get("context_window"), "fast": sender.get("fast"),
     }
     if model_plan:
@@ -690,6 +714,8 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
     prompt = format_peer_message(sender_id, defang_harness_markers(text)).strip()
     prompt = prompt.replace("another agent in this session", "another top-level session", 1)
     overrides = target_context.get("overrides") or {}
+    # Read before the chain lock below: it may look up the sender's agent.
+    started_mode = _started_permission_mode(sender, overrides) if action == "start" else None
     with transaction() as conn:
         cursor = conn.cursor()
         # One database lock serializes all fanout in this autonomous chain.
@@ -730,7 +756,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                 return {"remote": remote, "receipt_id": previous["id"], "reserved": False,
                         "body": _remote_body(sender, data, overrides, payload, prompt, command_id, fingerprint,
                                              project_v2_id=project_v2_id, assistant=assistant,
-                                             model_plan=plan)}
+                                             model_plan=plan, permission_mode=started_mode)}
             return {"session_id": previous["session_id"], "turn_id": previous["id"],
                     "status": "already_queued", "delivery_status": _delivery_status(previous),
                     "created": False,
@@ -748,7 +774,8 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
             raise ValueError("The user stopped a participating session.")
         if remote is not None:
             body = _remote_body(sender, data, overrides, payload, prompt, command_id, fingerprint,
-                                project_v2_id=project_v2_id, assistant=assistant, model_plan=plan)
+                                project_v2_id=project_v2_id, assistant=assistant, model_plan=plan,
+                                permission_mode=started_mode)
             receipt_payload = {"orchestration_fingerprint": fingerprint, "remote_device_id": remote["device_id"],
                                "remote_session_id": body["session_id"]}
             if assistant:
@@ -792,7 +819,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                 api_user_id=sender.get("api_user_id"), is_active=True,
                 provider_id=run["provider_id"], derive_provider_from_profile=False,
                 model=run["model"], effort=run["effort"],
-                permission_mode=overrides.get("permission_mode", sender.get("permission_mode")),
+                permission_mode=started_mode,
                 context_window=run["context_window"], fast=run["fast"],
                 mode=sender.get("mode"), _conn=conn, **workspace,
             )

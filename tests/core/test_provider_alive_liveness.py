@@ -33,7 +33,7 @@ from app.db import database
 from app.db import runs as runs_db
 from app.db import session_events as se
 from app.db import turns as turns_db
-from tests.core.engine_harness import StubPool
+from tests.core.engine_harness import StubPool, mock_adapter
 from tests.core.test_native_usage_settlement_paths import _engine_patches
 
 ENGINE = "ses_luna_worker"
@@ -63,7 +63,7 @@ async def _run_worker_turn(tmp_path, fluid_events):
             for message in translator._translate(event):
                 yield message
 
-    state = SessionState(adapter=MagicMock(), is_connected=True)
+    state = SessionState(adapter=mock_adapter(), is_connected=True)
     state.adapter.is_alive = MagicMock(return_value=True)
     state.adapter.send_query = AsyncMock()
     state.adapter.receive_events = MagicMock(side_effect=lambda: receive())

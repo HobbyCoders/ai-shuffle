@@ -32,6 +32,13 @@ async def _callback(tmp_path, permission_mode):
     """Build a chat turn far enough to wire its can_use_tool callback."""
     with ExitStack() as stack:
         options = _chat_patches(stack, StubPool())
+        previous = qe.run_sync
+        async def read_binding(fn, *args, **kwargs):
+            from app.db import database
+            if fn == database.get_session:
+                return {"permission_mode": permission_mode}
+            return await previous(fn, *args, **kwargs)
+        stack.enter_context(patch.object(qe, "run_sync", side_effect=read_binding))
         options.cwd = str(tmp_path / "missing-cwd-stops-before-connect")
         stack.enter_context(patch.object(qe, "memory_leg_for_options", return_value="native"))
         stack.enter_context(patch("app.core.hook_service.attach_hooks_to_options", return_value=None))

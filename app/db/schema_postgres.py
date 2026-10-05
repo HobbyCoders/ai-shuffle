@@ -288,6 +288,11 @@ def create_postgres_schema(cursor) -> None:
             -- runs the chat and synced with the catalog, so another worker
             -- applies the same account rule to a mirror. NULL = no record.
             provenance_owner TEXT,
+            -- The most permissive mode a delegated worker may ever run in:
+            -- its dispatch mode, fixed at creation. Caps every later turn
+            -- (wakes, resumes, messages) whatever the binding is changed to.
+            -- NULL = no dispatch ceiling (every non-worker session).
+            permission_ceiling TEXT,
             FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
             FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE SET NULL,
             FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE SET NULL,

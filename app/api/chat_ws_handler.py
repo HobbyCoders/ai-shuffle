@@ -1707,6 +1707,7 @@ class ChatWebSocketHandler:
                 await control.submit_turn(
                     owner_device, session_id, prompt=prompt, profile_id=submit_profile_id,
                     project_id=project_id, overrides=overrides or None, payload=payload or None,
+                    owner_send=True,
                 )
             except control.RunnerUnreachable as exc:
                 await self._forward_unreachable(session_id, exc)
@@ -1728,6 +1729,7 @@ class ChatWebSocketHandler:
             profile_id=submit_profile_id,
             project_id=project_id,
             overrides=overrides or None,
+            explicit_permission=True,
             payload=payload or None,
             no_kick=placed_remote,
         )
@@ -2526,7 +2528,7 @@ class ChatWebSocketHandler:
             try:
                 await control.submit_turn(
                     owner_device, session_id, source="queue", prompt=content, profile_id=queue_profile_id,
-                    project_id=project_id, payload=payload or None,
+                    project_id=project_id, payload=payload or None, owner_send=True,
                 )
             except control.RunnerUnreachable as exc:
                 await self._forward_unreachable(session_id, exc)
@@ -2539,6 +2541,7 @@ class ChatWebSocketHandler:
         await turn_manager.submit_async(
             session_id,
             "queue",
+            explicit_permission=True,
             prompt=content,
             profile_id=queue_profile_id,
             project_id=project_id,

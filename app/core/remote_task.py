@@ -790,6 +790,7 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
         worktree_branch=checkout.branch if checkout else None,
         worktree_path=checkout.path if checkout else None,
         permission_mode=permission_mode, context_window=context_window,
+        permission_ceiling=permission_mode,
     )
     overrides = provider_agent.worker_turn_overrides(
         provider_id=start.provider_id, model_id=start.model, effort=start.effort,
@@ -828,7 +829,7 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
                 (checkout.branch if checkout else None, start.worker_session_id))
             turn = turns.enqueue_turn(
                 start.worker_session_id, provider_agent.WORKER_TURN_SOURCE, prompt=start.prompt,
-                profile_id=start.agent, overrides=overrides, payload=payload,
+                profile_id=start.agent, overrides=overrides, explicit_permission=True, payload=payload,
                 command_id=COMMAND_PREFIX + start.worker_session_id, _conn=conn)
             # The report it owes, durable from birth: a restart at any point
             # after this commit still ends in a report (``sweep``).

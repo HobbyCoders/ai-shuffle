@@ -293,6 +293,8 @@ async def test_approving_modes_run_the_write_without_asking(provider, project, t
 
     [run] = _runs()
     assert run["status"] == "completed", run
+    # The automation's session is born with its agent's configured mode.
+    assert database.get_session(run["session_id"])["permission_mode"] == mode
     assert (project / "out.txt").read_text(encoding="utf-8") == "hello"
     [fed] = _fed_back(provider, 1)
     assert not fed.get("is_error")

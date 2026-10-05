@@ -24,6 +24,27 @@ class RunSettingsUpdate(BaseModel):
     fast: Optional[StrictBool] = None
 
 
+async def _store_live_overrides(session_id: str, runtime) -> None:
+    """Write the live turn's new binding to its row as well as the runtime.
+
+    An answer to the turn's question, a peer message or a wake copies the
+    row's binding. Left stale, it differs from the running turn (one Fast mode
+    toggle adds ``effort``), so ``SessionRuntime.steer_pending`` refuses it and
+    it waits for the whole turn to end. The change is already applied, so a
+    failed write is logged rather than undone.
+    """
+    from app.db import turns as turns_db
+
+    turn_id = getattr(runtime, "turn_id", None)
+    if not turn_id:
+        return
+    try:
+        await run_sync(turns_db.set_live_turn_overrides, turn_id, runtime.turn.get("overrides") or {})
+    except Exception:  # noqa: BLE001 — the live setting stands either way
+        logger.warning("Could not store the changed run settings on turn %s of %s",
+                       turn_id, session_id, exc_info=True)
+
+
 async def apply_run_settings(session_id: str, body: RunSettingsUpdate) -> dict:
     from app.core.session_pool import get_session_pool
     from app.core.session_runtime import get_live_runtime
@@ -86,6 +107,7 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate) -> dict:
             if home:
                 turn_overrides.pop("effort", None)
             runtime.turn["overrides"] = turn_overrides
+            await _store_live_overrides(session_id, runtime)
         if connected and state.connect_options is not None:
             state.connect_options.effort = selected["effort"]
             state.connect_options.aih_fast = selected["fast"]
@@ -125,7 +147,9 @@ class PermissionModeUpdate(BaseModel):
 
 
 async def apply_permission_mode(session_id: str, mode: str) -> dict:
-    from app.core.session_modes import permission_mode_for_session_mode
+    from app.core.session_modes import (
+        permission_ceiling, permission_mode_for_session_mode, strictest_permission_mode,
+    )
     from app.core.session_pool import get_session_pool
     from app.core.session_runtime import get_live_runtime
     from app.core.permission_handler import permission_handler
@@ -136,6 +160,13 @@ async def apply_permission_mode(session_id: str, mode: str) -> dict:
         mode = permission_mode_for_session_mode(mode, session.get("mode"))
         state = get_session_pool().peek(session_id)
         runtime = get_live_runtime(session_id)
+        context = runtime.turn if runtime else None
+        if context is None and session.get("is_worker"):
+            from app.db import turns
+            context = await run_sync(turns.get_latest_run_turn, session_id)
+        ceiling = permission_ceiling((context or {}).get("overrides"), session)
+        if ceiling:
+            mode = strictest_permission_mode(mode, ceiling)
         if runtime and (not state or not state.is_connected):
             raise ValueError("The session is still connecting. Try changing permissions again in a moment.")
         connected = state is not None and state.is_connected
@@ -150,7 +181,9 @@ async def apply_permission_mode(session_id: str, mode: str) -> dict:
                 await state.adapter.set_permission_mode(old_mode)
             raise
         if runtime is not None:
-            runtime.turn["overrides"] = {**(runtime.turn.get("overrides") or {}), "permission_mode": mode}
+            runtime.turn["overrides"] = {**(runtime.turn.get("overrides") or {}), "permission_mode": mode,
+                                         "_permission_explicit": False}
+            await _store_live_overrides(session_id, runtime)
         if connected:
             state.callback_refs["permission_mode"] = mode
             if state.connect_options is not None:

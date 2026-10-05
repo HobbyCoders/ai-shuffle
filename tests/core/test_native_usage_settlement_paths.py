@@ -34,7 +34,7 @@ from app.core.turn_recorder import TurnRecorder
 from app.db import database
 from app.db import runs as runs_db
 from app.db import turns as turns_db
-from tests.core.engine_harness import StubPool
+from tests.core.engine_harness import StubPool, mock_adapter
 
 
 ENGINE = "ses_native_worker"
@@ -87,7 +87,7 @@ class _Worker:
         self.release = asyncio.Event()
         self.reached_gate = asyncio.Event()
         self.send_terminal = send_terminal
-        state = SessionState(adapter=MagicMock(), is_connected=True)
+        state = SessionState(adapter=mock_adapter(), is_connected=True)
         state.adapter.is_alive = MagicMock(return_value=True)
         state.adapter.send_query = AsyncMock()
         state.adapter.receive_events = MagicMock(side_effect=self._receive)

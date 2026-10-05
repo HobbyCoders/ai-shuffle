@@ -1178,6 +1178,11 @@ class AutomationManager:
             half-built state this ordering exists to prevent. Nothing here
             needs the loop; the sidebar broadcast that does stays below.
             """
+            # The agent's configured mode is this run's binding from birth,
+            # so its turn and every successor (failover retry, auto-continue,
+            # a wake) resolve their permissions from the row. An unattended
+            # Accept Edits / Bypass automation must not drop to Ask.
+            agent_config = (database.get_profile(profile_id) or {}).get("config") or {}
             database.create_session(
                 session_id=session_id,
                 profile_id=profile_id,
@@ -1185,6 +1190,7 @@ class AutomationManager:
                 title=title,
                 automation_id=automation_id,
                 model=model_selection,
+                permission_mode=agent_config.get("permission_mode"),
                 # An explicit native pick must stay native even when the agent
                 # still carries a legacy provider; a ``prov:`` pick binds its
                 # own provider. Only an unbound run derives it from the agent.

@@ -570,7 +570,7 @@ class UserQuestionHandler:
     ) -> bool:
         from app.core import interaction_events, interaction_wait, turn_claim, turn_manager
         from app.core import turn_scheduler
-        from app.core.session_runtime import try_steer_pending
+        from app.core.session_runtime import _broadcast_queue_after_start, try_steer_pending
         from app.db import interactions
 
         session_id = row["session_id"]
@@ -623,6 +623,10 @@ class UserQuestionHandler:
         await self._retire_native_question(session_id)
         await try_steer_pending(session_id)
         turn_manager._kick(session_id)
+        # Until the model reads it, the answer is a queued user message: show
+        # it as one on this worker's devices, like a send into a busy chat.
+        # Delivery records it in the transcript and clears the bubble.
+        await _broadcast_queue_after_start(session_id)
         try:
             await asyncio.to_thread(turn_claim.notify_turns_changed, session_id)
         except Exception:

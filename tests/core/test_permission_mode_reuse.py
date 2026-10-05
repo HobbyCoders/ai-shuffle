@@ -100,17 +100,40 @@ def _pooled(adapter, sdk_options) -> SessionState:
     return SessionState(adapter=adapter, is_connected=True, connect_options=sdk_options)
 
 
-async def _turns(state, modes):
+async def _turns(state, modes, *, expect_error=False, before_run=None):
+    from app.db import database, turns
+
+    if database.get_session(APP_SID) is None:
+        database.create_session(APP_SID, None, permission_mode="default")
+    from app.core import turn_manager
+
     pool = StubPool(state)
     for mode in modes:
+        # The owner's own send, through the producer that stores its pick as
+        # the session's binding before queuing it.
+        turn = turns.get_turn(turn_manager.submit(
+            APP_SID, "user", prompt="hi", explicit_permission=True,
+            overrides={"permission_mode": mode}, no_kick=True))
+        if before_run is not None:
+            before_run()  # what the owner did while the message waited
         with ExitStack() as stack:
             options = _chat_patches(stack, pool)
+            previous = qe.run_sync
+            async def read_binding(fn, *args, **kwargs):
+                if fn == database.get_session:
+                    return database.get_session(*args, **kwargs)
+                return await previous(fn, *args, **kwargs)
+            stack.enter_context(patch.object(qe, "run_sync", side_effect=read_binding))
             options.permission_mode = mode
             options.model = "gpt-5"
             options.aih_provider_id = None
-            events = await collect(qe._stream_to_websocket_impl("hi", APP_SID, "claude-code"))
-        assert not any(e.get("type") == "error" for e in events), events
-        assert pool.state is state, "the client must be reused, not respawned"
+            events = await collect(qe._stream_to_websocket_impl(
+                "hi", APP_SID, "claude-code", overrides=turn["overrides"], loop_guard_turn=turn))
+        assert any(e.get("type") == "error" for e in events) == expect_error, events
+        if expect_error:
+            assert pool.state is None, "a client with a refused permission switch must be evicted"
+        else:
+            assert pool.state is state, "the client must be reused, not respawned"
 
 
 async def _unwatched_prompt(adapter, engine, name="Write"):
@@ -164,6 +187,22 @@ async def test_bypass_ask_bypass_on_a_reused_client_ends_in_bypass():
     assert await _unwatched_prompt(adapter, engine) is False
 
 
+async def test_message_queued_in_bypass_runs_at_ask_after_the_owner_tightens():
+    """A later tightening wins over the pick a still-queued message carries."""
+    from app.db import database
+
+    engine = _NativeEngine()
+    adapter, sdk_options = await _connected_adapter(engine, "bypassPermissions")
+    state = _pooled(adapter, sdk_options)
+
+    await _turns(state, ["bypassPermissions"], before_run=lambda: database.set_session_run_binding(
+        APP_SID, permission_mode="default"))
+
+    assert adapter.permission_mode == "default"
+    assert engine.permissions.approval_policy == _PERMISSION_POLICY["default"]
+    assert await _unwatched_prompt(adapter, engine) is True
+
+
 async def test_an_unchanged_mode_is_not_reapplied():
     engine = _NativeEngine()
     adapter, sdk_options = await _connected_adapter(engine, "default")
@@ -202,11 +241,16 @@ async def test_a_switch_the_engine_refuses_is_not_recorded_and_is_retried():
     adapter, sdk_options = await _connected_adapter(engine, "default")
     state = _pooled(adapter, sdk_options)
 
-    await _turns(state, ["bypassPermissions"])
+    await _turns(state, ["bypassPermissions"], expect_error=True)
+    adapter.send_query.assert_not_awaited()
     assert state.connect_options.permission_mode == "default"
     assert not [op for op in engine.ops if isinstance(op, SetPermissionMode)]
 
     engine.refuse = False
+    # The failed client was evicted and disconnected. Retry on a new client,
+    # rather than resurrecting a client whose permission state is uncertain.
+    adapter, sdk_options = await _connected_adapter(engine, "default")
+    state = _pooled(adapter, sdk_options)
     await _turns(state, ["bypassPermissions"])
     # The native engine is sent the policy, never the mode name.
     assert [op.mode for op in engine.ops if isinstance(op, SetPermissionMode)] == ["never_ask"]

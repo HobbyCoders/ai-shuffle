@@ -285,11 +285,21 @@ def _unreachable_message(peer: str, me: str, failures: List[BaseException], rout
 
 async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: str = "user",
                       profile_id: Optional[str] = None, project_id: Optional[str] = None,
-                      overrides: Optional[Dict[str, Any]] = None, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                      overrides: Optional[Dict[str, Any]] = None, payload: Optional[Dict[str, Any]] = None,
+                      owner_send: bool = False) -> Dict[str, Any]:
+    """Forward a turn to the session's owner device.
+
+    ``owner_send`` states that this is the owner's own fresh message (the
+    composer's send, queue or worktree start), so the owner honours the
+    permission mode picked for it (see :func:`_turns`). Anything else runs in
+    the session's current mode there.
+    """
     body = {
         "session_id": session_id, "source": source, "prompt": prompt, "profile_id": profile_id,
         "project_id": project_id, "overrides": overrides, "payload": payload,
     }
+    if owner_send:
+        body["owner_send"] = True
     blob_ids = (payload or {}).get("upload_blob_ids")
     if blob_ids:
         from app.network import git
@@ -584,6 +594,10 @@ def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
     return overrides or None
 
 
+#: Sources a forwarded turn may claim as the owner's own fresh send.
+_OWNER_SEND_SOURCES = frozenset({"user", "queue", "worktree"})
+
+
 async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     from app.core import turn_manager
     session_id = str(body.get("session_id") or "")
@@ -622,7 +636,13 @@ async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     turn_id = await turn_manager.submit_async(
         session_id, source, prompt=prompt,
         profile_id=body.get("profile_id"), project_id=row.get("project_id") or None,
-        overrides=_turn_overrides(body.get("overrides")), payload=payload or None)
+        overrides=_turn_overrides(body.get("overrides")),
+        # A per-message mode counts only when the sending worker states this is
+        # the owner's own send, of a kind the owner sends. A wake, a peer
+        # message or a sender that predates the statement runs in the
+        # session's current mode.
+        explicit_permission=body.get("owner_send") is True and source in _OWNER_SEND_SOURCES,
+        payload=payload or None)
     if had_live:
         # A message sent from another device while this worker's turn runs
         # gets the same mid-turn delivery as a local send: steered in at the

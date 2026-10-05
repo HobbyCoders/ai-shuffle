@@ -32,8 +32,10 @@ def test_voice_permission_binding_wins_over_historical_turn(monkeypatch):
     })
     caller = {"id": "voice-owner", "mode": "voice", "permission_mode": "default"}
     assert pa._caller_permission_mode(caller) == "default"
+    # A code caller's settled turn is history too: after the owner tightened
+    # the chat, its stored bypass override must not reach the worker.
     caller["mode"] = "code"
-    assert pa._caller_permission_mode(caller) == "bypassPermissions"
+    assert pa._caller_permission_mode(caller) == "default"
 
 
 def _provider(
@@ -621,21 +623,22 @@ class TestDispatchWorker:
         submitted = dispatch_env.tm.submitted[0]
         assert submitted["overrides"]["permission_mode"] == "bypassPermissions"
 
-    def test_the_callers_turn_override_wins_over_its_profile_config(
+    def test_the_callers_binding_wins_over_its_profile_and_a_stale_turn(
         self, dispatch_env, monkeypatch
     ):
-        """VM22 — a composer-picked mode (per-turn override) is what actually
-        governed the caller, so it beats the caller profile's config."""
+        """VM22 — the composer's pick is stored as the caller's binding, so it
+        beats the caller profile's config; a historical turn override (which
+        may predate a tightening) is never read."""
         from app.db import database as db
         from app.db import turns as turns_db
 
         monkeypatch.setattr(
             turns_db, "get_latest_turn",
-            lambda sid: {"overrides": {"permission_mode": "acceptEdits"}},
+            lambda sid: {"overrides": {"permission_mode": "bypassPermissions"}},
         )
         monkeypatch.setattr(
             db, "get_session",
-            lambda sid: {"id": sid, "profile_id": "caller-prof"},
+            lambda sid: {"id": sid, "profile_id": "caller-prof", "permission_mode": "acceptEdits"},
         )
         monkeypatch.setattr(
             db, "get_profile",
@@ -658,7 +661,7 @@ class TestDispatchWorker:
         )
         monkeypatch.setattr(
             db, "get_session",
-            lambda sid: {"id": sid, "profile_id": "caller-prof"},
+            lambda sid: {"id": sid, "profile_id": "caller-prof", "permission_mode": "plan"},
         )
         monkeypatch.setattr(db, "get_profile", lambda pid: {"id": pid, "config": {}})
 

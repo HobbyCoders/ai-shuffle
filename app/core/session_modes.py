@@ -222,6 +222,62 @@ def strictest_permission_mode(*modes: Any) -> str:
     return PERMISSION_MODE_STRICTNESS[min(ranks)] if ranks else "default"
 
 
+def permission_ceiling(overrides: Optional[Mapping[str, Any]],
+                       session: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """The ceiling that caps a turn's mode, or ``None`` when nothing limits it.
+
+    The strictest of the ceiling the turn carries (a dispatch or connector
+    limit copied with its context) and the session's durable
+    ``permission_ceiling`` (a delegated worker's dispatch mode, fixed when it
+    was created). A worker with neither predates the durable ceiling: its
+    turn's own permission override is a limit, never a grant, else Ask.
+    """
+    overrides = overrides or {}
+    session = session or {}
+    limits = [overrides.get("_permission_ceiling"), session.get("permission_ceiling")]
+    if any(limits):
+        return strictest_permission_mode(*limits)
+    if session.get("is_worker"):
+        return overrides.get("permission_mode") or "default"
+    return None
+
+
+def turn_permission_mode(overrides: Optional[Mapping[str, Any]], session: Optional[Mapping[str, Any]],
+                         config: Optional[Mapping[str, Any]] = None, *, resume: bool = False) -> str:
+    """The permission mode a turn runs in.
+
+    Only an enqueue-time owner choice (``_permission_explicit``, never on a
+    resume) grants a turn its own mode, and never more than the CURRENT
+    binding: that send stored its pick as the binding, so a looser pick on a
+    still-queued message means the owner has tightened the chat since, and a
+    later tightening wins. Every other turn uses the session's CURRENT
+    binding. A NULL binding (a chat created without a pick, an assistant
+    home, a row older than bindings) means the session's agent profile
+    ``config`` decides, as it did before turn provenance. A missing
+    session row or an unresolvable profile (``config`` None) fails closed to
+    Ask. :func:`permission_ceiling` caps every outcome.
+    """
+    overrides = overrides or {}
+    if not session:
+        return "default"
+    current = session.get("permission_mode")
+    explicit = overrides.get("_permission_explicit") is True and not resume
+    if explicit and overrides.get("permission_mode"):
+        mode = overrides["permission_mode"]
+        if current:
+            mode = strictest_permission_mode(mode, current)
+    elif current:
+        mode = current
+    elif config is not None:
+        mode = config.get("permission_mode") or "default"
+    else:
+        mode = "default"
+    ceiling = permission_ceiling(overrides, session)
+    if ceiling:
+        mode = strictest_permission_mode(mode, ceiling)
+    return permission_mode_for_session_mode(mode, session.get("mode"))
+
+
 def mode_approves_without_prompt(permission_mode: Any, tool_name: str) -> bool:
     """Whether a session in ``permission_mode`` approves ``tool_name`` on its own.
 

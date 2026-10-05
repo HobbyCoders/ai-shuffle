@@ -98,10 +98,12 @@ async def test_reuse_restamps_refs_and_pushes_mode_and_model_into_the_live_clien
     state.callback_refs.update({"attention_count": 3, "permission_mode": "default"})
     broadcast = AsyncMock()
     with ExitStack() as stack:
-        b = engine_patches(stack, pool=RecordingPool(state), cwd=str(tmp_path))
+        # The owner's Accept Edits send stored its pick as the binding.
+        b = engine_patches(stack, pool=RecordingPool(state), cwd=str(tmp_path),
+                           session_row={"permission_mode": "acceptEdits"})
         b.options.model = "new"
         b.options.permission_mode = "acceptEdits"
-        events = await _turn(stack, overrides={"permission_mode": "acceptEdits"},
+        events = await _turn(stack, overrides={"permission_mode": "acceptEdits", "_permission_explicit": True},
                              broadcast_func=broadcast, user_id="u-2")
 
     state.adapter.set_model.assert_awaited_once_with("new")
@@ -116,7 +118,99 @@ async def test_reuse_restamps_refs_and_pushes_mode_and_model_into_the_live_clien
     assert frames_of(events, "done")
 
 
-async def test_reuse_survives_a_failed_live_model_and_mode_switch(tmp_path):
+@pytest.mark.parametrize("initial, latest", [
+    ("bypassPermissions", "default"), ("default", "bypassPermissions"),
+])
+@pytest.mark.parametrize("change_after_enqueue", [False, True])
+async def test_parked_wake_uses_latest_permission_choice(mock_db, tmp_path, initial, latest,
+                                                       change_after_enqueue):
+    from app.api.sessions_permissions import apply_permission_mode
+    from app.core import query_options, session_runtime, turn_scheduler
+    from app.db import database, turns
+    from tests.core.helpers import make_profile
+
+    profile = make_profile("claude-code", {"cwd": str(tmp_path)})
+    database.create_session(SID, "claude-code", permission_mode="default")
+    live = turns.enqueue_turn(SID, "user", prompt="work", profile_id="claude-code")
+    turns.start_turn(live["id"])
+    session_runtime._live_runtimes[SID] = session_runtime.SessionRuntime(turns.get_turn(live["id"]))
+    state = _pooled_state([_result()])
+    pool = RecordingPool(state)
+    try:
+        with patch("app.core.session_pool.get_session_pool", return_value=pool), \
+                patch("app.core.permission_handler.permission_handler.resolve_mode_permissions", new_callable=AsyncMock), \
+                patch("app.core.chat_access.broker.resolve_mode_actions", new_callable=AsyncMock):
+            await apply_permission_mode(SID, initial)
+            turns.park_turn(live["id"], ["background-job"])
+            session_runtime._live_runtimes.pop(SID)
+            if not change_after_enqueue:
+                await apply_permission_mode(SID, latest)
+            wake = await turn_scheduler._enqueue_context_wake(
+                SID, "unpark", [], ["background-job"], "Background work finished")
+            if change_after_enqueue:
+                await apply_permission_mode(SID, latest)
+        assert wake["overrides"]["permission_mode"] == initial
+        state.adapter.set_permission_mode.reset_mock()
+        with ExitStack() as stack:
+            b = engine_patches(stack, pool=pool, cwd=str(tmp_path),
+                               session_row=database.get_session(SID), profile=profile)
+
+            def build(**kwargs):
+                with patch.object(query_options, "get_security_instructions", return_value=""):
+                    opts, _ = query_options.build_options_from_profile(**kwargs)
+                assert opts.permission_mode == latest
+                b.options.permission_mode = opts.permission_mode
+                return b.options, {}
+
+            stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", side_effect=build))
+            events = await _turn(stack, prompt=wake["prompt"], overrides=wake["overrides"],
+                                 turn_source=wake["source"], loop_guard_turn=wake)
+        assert state.callback_refs["permission_mode"] == latest
+        # The latest choice was already applied to the parked client: the wake
+        # must not push the stale inherited mode back into it.
+        state.adapter.set_permission_mode.assert_not_awaited()
+        assert frames_of(events, "done")
+    finally:
+        session_runtime._live_runtimes.pop(SID, None)
+
+
+@pytest.mark.parametrize("source, resume, parent_id", [
+    ("failover", False, "failed-turn"),
+    ("resume", True, None),
+    ("auto_continue", False, "settled-turn"),
+    ("user", False, "inherited-turn"),
+])
+async def test_inherited_retry_reuses_client_with_current_permissions(mock_db, tmp_path,
+                                                                    source, resume, parent_id):
+    from app.core import query_options
+    from app.db import database
+    from tests.core.helpers import make_profile
+
+    profile = make_profile("claude-code", {"cwd": str(tmp_path)})
+    database.create_session(SID, "claude-code", permission_mode="default")
+    state = _pooled_state([_result()], connect_mode="bypassPermissions")
+    state.adapter.send_resume = AsyncMock()
+    with ExitStack() as stack:
+        b = engine_patches(stack, pool=RecordingPool(state), cwd=str(tmp_path),
+                           session_row=database.get_session(SID), profile=profile)
+
+        def build(**kwargs):
+            with patch.object(query_options, "get_security_instructions", return_value=""):
+                opts, _ = query_options.build_options_from_profile(**kwargs)
+            assert opts.permission_mode == "default"
+            b.options.permission_mode = opts.permission_mode
+            return b.options, {}
+
+        stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", side_effect=build))
+        events = await _turn(stack, overrides={"permission_mode": "bypassPermissions"},
+                             turn_source=source, resume=resume,
+                             loop_guard_turn={"parent_turn_id": parent_id})
+    state.adapter.set_permission_mode.assert_awaited_once_with("default")
+    assert state.callback_refs["permission_mode"] == "default"
+    assert frames_of(events, "done")
+
+
+async def test_reuse_survives_a_failed_live_model_switch(tmp_path):
     state = _pooled_state([_result()], connect_model="old", connect_mode="default")
     state.adapter.set_model = AsyncMock(side_effect=RuntimeError("no such model"))
     state.adapter.set_permission_mode = AsyncMock(side_effect=RuntimeError("nope"))
@@ -205,6 +299,174 @@ async def test_unbuildable_options_refuse_instead_of_running_elsewhere(tmp_path,
         expected["code"] = "checkout_unavailable"
     assert events == [expected]
     b.make_adapter.assert_not_called()
+
+
+@pytest.mark.parametrize("producer", ["reap-user", "reap-queue", "answer", "worker", "null", "missing", "ceiling", "voice", "connector", "setup", "setup-explicit", "setup-model", "setter-fails"])
+async def test_inherited_permission_producer_paths(mock_db, tmp_path, producer):
+    from app.api.sessions_permissions import apply_permission_mode
+    from app.core import provider_agent, turn_manager
+    from app.db import database, interactions, turns
+    from tests.core.helpers import make_profile
+
+    profile = make_profile("claude-code", {"cwd": str(tmp_path)})
+    database.create_session(SID, "claude-code", permission_mode="bypassPermissions",
+                            is_worker=producer in ("worker", "ceiling", "voice"))
+    overrides = {"permission_mode": "bypassPermissions", "model": "opus", "effort": "high", "fast": True}
+    source = "queue" if producer == "reap-queue" else "connector" if producer == "connector" else "user"
+    if producer not in ("worker", "ceiling", "voice"):
+        tid = turn_manager.submit(SID, source, prompt="work", profile_id="claude-code",
+                                  overrides=overrides, explicit_permission=producer.startswith("reap") or producer in ("answer", "setup-explicit"),
+                                  no_kick=True)
+        context = turns.get_turn(tid)
+    if producer.startswith("reap"):
+        turns.start_turn(tid)
+        assert tid in {row["id"] for row in turns.reap_expired()}
+        turn = turns.get_turn(tid)
+    elif producer == "answer":
+        question = interactions.create_interaction(SID, "question", {"request_id": "q"}, None)
+        assert interactions.answer_question_and_enqueue(question, {"answer": "yes"}, None, "yes", context)
+        turn = turns.get_queued_turns(SID)[-1]
+    elif producer in ("worker", "ceiling", "voice"):
+        worker = turns.enqueue_turn(SID, provider_agent.WORKER_TURN_SOURCE, prompt="work",
+                                    profile_id="claude-code", overrides=provider_agent.worker_turn_overrides(
+                                        provider_id=None, model_id="opus", effort="high", cwd=str(tmp_path),
+                                        permission_mode="default" if producer == "ceiling" else "bypassPermissions"))
+        turns.start_turn(worker["id"])
+        turns.park_turn(worker["id"], ["job"])
+        provider_agent.register_worker_session(SID)
+        try:
+            if producer == "voice":
+                from types import SimpleNamespace
+                from app.core.voice_bridge import VoiceBridge
+                from app.core.task_registry import task_registry
+
+                bridge = SimpleNamespace(session_id="voice-parent", _start_watcher=MagicMock(),
+                                         _ensure_approval_poller=MagicMock())
+                with patch.object(task_registry, "get_task", return_value={"kind": "agent", "status": "running"}):
+                    answer = await VoiceBridge._tool_message_agent(bridge, {"task_id": SID, "message": "follow up"})
+                assert answer["ok"]
+                followup = answer["turn_id"]
+            else:
+                followup = turn_manager.submit(SID, "user", prompt="follow up", overrides=overrides,
+                                               explicit_permission=True, no_kick=True)
+        finally:
+            provider_agent.reset_worker_sessions()
+        turn = turns.get_turn(followup)
+    else:
+        turn = context
+    current = "bypassPermissions" if producer in ("ceiling", "connector") or producer.startswith("setup") else "default"
+    database.set_session_run_binding(SID, permission_mode=current)
+    row = database.get_session(SID)
+    if producer == "null":
+        from app.db.base import get_db
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET permission_mode=NULL WHERE id=%s", (SID,))
+    if producer == "missing":
+        database.delete_session(SID)
+    state = _pooled_state([_result()], connect_mode="bypassPermissions")
+    pool = RecordingPool(state)
+    if producer == "setter-fails":
+        state.adapter.set_permission_mode.side_effect = RuntimeError("tightening refused")
+    with ExitStack() as stack:
+        b = engine_patches(stack, pool=pool, cwd=str(tmp_path), session_row=row, profile=profile)
+        previous = qe.run_sync
+        async def read_binding(fn, *args, **kwargs):
+            if fn == database.get_session:
+                return database.get_session(*args, **kwargs)
+            return await previous(fn, *args, **kwargs)
+        stack.enter_context(patch.object(qe, "run_sync", side_effect=read_binding))
+        # Options stub deliberately echoes its input; the actual producing path
+        # above, not a seeded permission marker, supplies that input.
+        def build(**kwargs):
+            b.options.permission_mode = kwargs["overrides"].get("permission_mode", "default")
+            return b.options, {}
+        stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", side_effect=build))
+        if producer.startswith("setup"):
+            from app.core import session_runtime
+            runtime = session_runtime.SessionRuntime(turns.start_turn(turn["id"]))
+            session_runtime._live_runtimes[SID] = runtime
+            async def checkout(_):
+                with patch("app.core.session_pool.get_session_pool", return_value=pool), \
+                        patch("app.core.permission_handler.permission_handler.resolve_mode_permissions", new_callable=AsyncMock), \
+                        patch("app.core.chat_access.broker.resolve_mode_actions", new_callable=AsyncMock):
+                    await apply_permission_mode(SID, "default")
+                assert database.get_session(SID)["permission_mode"] == "default"
+                state.adapter.set_permission_mode.reset_mock()
+            if producer == "setup-model":
+                b.options.model = "changed-model"
+                state.adapter.set_model.side_effect = checkout
+            else:
+                stack.enter_context(patch("app.core.query_options.ensure_pending_checkout", side_effect=checkout))
+        try:
+            events = await _turn(stack, overrides=turn["overrides"], turn_source=turn["source"], loop_guard_turn=turn)
+        finally:
+            if producer.startswith("setup"):
+                session_runtime._live_runtimes.pop(SID, None)
+    if producer == "setter-fails":
+        assert frames_of(events, "error")
+        state.adapter.send_query.assert_not_awaited()
+        assert not state.is_streaming
+    else:
+        assert state.callback_refs["permission_mode"] == "default"
+        assert b.options.permission_mode == "default"
+        assert frames_of(events, "done")
+        assert all(call.args[0] == "default" for call in state.adapter.set_permission_mode.await_args_list)
+        state.adapter.send_query.assert_awaited_once()
+    if producer.startswith("reap") or producer in ("answer", "worker", "voice"):
+        assert not turn["overrides"].get("_permission_explicit")
+    if producer == "worker" or producer == "ceiling":
+        assert turn["payload"]["worker_bound"] is True
+    assert turn["overrides"]["model"] == "opus"
+    assert turn["overrides"]["effort"] == "high"
+
+
+@pytest.mark.parametrize("source", ["user", "queue"])
+async def test_explicit_owner_send_that_loosens_the_chat_keeps_its_choice(mock_db, tmp_path, source):
+    from app.db import database, turns
+    from app.network import control
+
+    database.create_session(SID, None, permission_mode="default", title="test")
+    with patch("app.core.turn_manager._kick"), patch.object(control, "_require_owned", return_value=database.get_session(SID)):
+        result = await control._turns({"session_id": SID, "source": source, "prompt": "hi", "owner_send": True,
+                                             "overrides": {"permission_mode": "bypassPermissions"}}, "device")
+    turn = turns.get_turn(result["turn_id"])
+    assert turn["overrides"]["_permission_explicit"] is True
+    # The send stored its pick as the chat's binding: an Ask chat loosened to Bypass.
+    assert database.get_session(SID)["permission_mode"] == "bypassPermissions"
+    state = _pooled_state([_result()])
+    with ExitStack() as stack:
+        b = engine_patches(stack, pool=RecordingPool(state), cwd=str(tmp_path), session_row=database.get_session(SID))
+        events = await _turn(stack, overrides=turn["overrides"], turn_source=source, loop_guard_turn=turn)
+    assert frames_of(events, "done")
+    assert b.options.permission_mode == "bypassPermissions"
+    state.adapter.set_permission_mode.assert_awaited_once_with("bypassPermissions")
+
+
+@pytest.mark.parametrize("source", ["user", "queue"])
+async def test_explicit_owner_send_queued_in_bypass_runs_at_ask_after_the_owner_tightens(
+    mock_db, tmp_path, source,
+):
+    from app.api.sessions_permissions import apply_permission_mode
+    from app.db import database, turns
+    from app.network import control
+
+    database.create_session(SID, None, permission_mode="bypassPermissions", title="test")
+    with patch("app.core.turn_manager._kick"), patch.object(
+        control, "_require_owned", side_effect=lambda sid: database.get_session(sid),
+    ):
+        result = await control._turns({"session_id": SID, "source": source, "prompt": "hi", "owner_send": True,
+                                             "overrides": {"permission_mode": "bypassPermissions"}}, "device")
+        # While the message waits, the owner tightens the chat to Ask.
+        assert await apply_permission_mode(SID, "default") == {"permission_mode": "default"}
+    turn = turns.get_turn(result["turn_id"])
+    assert turn["overrides"]["_permission_explicit"] is True
+    state = _pooled_state([_result()], connect_mode="bypassPermissions")
+    with ExitStack() as stack:
+        b = engine_patches(stack, pool=RecordingPool(state), cwd=str(tmp_path), session_row=database.get_session(SID))
+        events = await _turn(stack, overrides=turn["overrides"], turn_source=source, loop_guard_turn=turn)
+    assert frames_of(events, "done")
+    assert b.options.permission_mode == "default"
+    state.adapter.set_permission_mode.assert_awaited_once_with("default")
 
 
 async def test_credential_gate_refuses_with_the_setup_code(tmp_path):
