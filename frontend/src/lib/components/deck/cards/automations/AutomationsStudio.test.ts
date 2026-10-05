@@ -86,6 +86,26 @@ describe('automation detail state', () => {
         await fireEvent.click(screen.getByRole('button', { name: 'Pick an agent' }));
         expect(onEdit).toHaveBeenCalledWith(missing);
     });
+    it('sends Pick an agent to onPickAgent when given, not the plain editor', async () => {
+        const onEdit = vi.fn();
+        const onPickAgent = vi.fn();
+        const missing = { ...automation, profile_id: 'removed-agent' };
+        render(AutomationDetail, detailProps({ automation: missing, profiles: agents('general-purpose'), onEdit, onPickAgent }));
+        await fireEvent.click(screen.getByRole('button', { name: 'Pick an agent' }));
+        expect(onPickAgent).toHaveBeenCalledWith(missing);
+        expect(onEdit).not.toHaveBeenCalled();
+    });
+    it('puts the removed-agent warning on its own header row, not beside the action icons', () => {
+        const missing = { ...automation, profile_id: 'removed-agent' };
+        const { container } = render(AutomationDetail, detailProps({ automation: missing, profiles: agents('general-purpose') }));
+        const warning = screen.getByTestId('automation-agent-missing');
+        const header = container.querySelector('.auto-detail-header')!;
+        // A direct child of the header grid (spans the card on a phone), after the
+        // action icons, and not inside the info column that shares their row.
+        expect(warning.parentElement).toBe(header);
+        expect(warning.previousElementSibling?.classList.contains('auto-detail-header-actions')).toBe(true);
+        expect(container.querySelector('.auto-detail-header-info')!.contains(warning)).toBe(false);
+    });
     it('does not claim the agent was removed when it exists or the agent list is not loaded', () => {
         const first = render(AutomationDetail, detailProps({ profiles: agents('general-purpose') }));
         expect(screen.queryByText(/agent was removed/)).toBeNull();

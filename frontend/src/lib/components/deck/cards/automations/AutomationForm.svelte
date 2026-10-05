@@ -505,7 +505,7 @@
 						No agents yet — create one first
 					</button>
 				{:else}
-					<select class="sel" value={formProfileId} onchange={(e) => onUpdateFormProfileId(e.currentTarget.value)}>
+					<select class="sel" data-agent-picker value={formProfileId} onchange={(e) => onUpdateFormProfileId(e.currentTarget.value)}>
 						<option value="">Select an agent…</option>
 						{#each profiles as profile}
 							<option value={profile.id}>{profile.name}</option>

@@ -9,7 +9,7 @@
 	 * - View run history with stats
 	 * - Approve/deny pending automation runs
 	 */
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import StudioEditorShell from '$lib/components/layout/StudioEditorShell.svelte';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import type {
@@ -266,6 +266,14 @@
 		currentView = 'edit';
 		remoteBaseline = remoteSnapshot();
 		remoteChange = '';
+	}
+	/** "Pick an agent" (the detail's removed-agent warning): open the editor
+	 *  with the Agent section expanded and put keyboard focus on its picker. */
+	async function pickAgent(automation: Automation) {
+		if (collapsedSections.has('config')) toggleSection('config');
+		openEdit(automation);
+		await tick();
+		document.querySelector<HTMLSelectElement>('select.sel[data-agent-picker]')?.focus();
 	}
 	async function openDetail(automation: Automation, quiet = false) {
 		selectedAutomation = automation;
@@ -654,6 +662,7 @@
 				{detailStats}
 				onBack={() => currentView = 'list'}
 				onEdit={openEdit}
+				onPickAgent={pickAgent}
 				onTrigger={handleTrigger}
 				onDelete={handleDelete}
 				onToggleRunExpanded={toggleRunExpanded}
@@ -760,6 +769,7 @@
 					{detailStats}
 					onBack={() => currentView = 'list'}
 					onEdit={openEdit}
+					onPickAgent={pickAgent}
 					onTrigger={handleTrigger}
 					onDelete={handleDelete}
 					onToggleRunExpanded={toggleRunExpanded}

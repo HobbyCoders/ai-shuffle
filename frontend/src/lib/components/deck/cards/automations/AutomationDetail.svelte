@@ -24,6 +24,8 @@
 		detailStats: { total_runs: number; total_cost_usd: number; successful_runs: number; failed_runs: number } | null;
 		onBack: () => void;
 		onEdit: (automation: Automation) => void;
+		/** "Pick an agent": open the editor focused on the agent field (defaults to onEdit). */
+		onPickAgent?: (automation: Automation) => void;
 		onTrigger: (id: string) => void;
 		onDelete: (id: string) => void;
 		onToggleRunExpanded: (runId: string) => void;
@@ -44,6 +46,7 @@
 		detailStats,
 		onBack,
 		onEdit,
+		onPickAgent,
 		onTrigger,
 		onDelete,
 		onToggleRunExpanded,
@@ -96,16 +99,6 @@
 					>Disabled</span>
 				{/if}
 			</div>
-			{#if agentMissing}
-				<div class="auto-agent-missing">
-					<p>
-						{automation.is_enabled
-							? 'Its agent was removed. Pick another agent so it can run.'
-							: 'Its agent was removed. Pick another agent to enable it.'}
-					</p>
-					<button type="button" class="auto-agent-pick" onclick={() => onEdit(automation)}>Pick an agent</button>
-				</div>
-			{/if}
 			{#if automation.last_error}
 				<p class="auto-detail-desc auto-model-error" role="status">{automation.last_error}</p>
 			{/if}
@@ -127,6 +120,18 @@
 				<Trash2 size={16} />
 			</button>
 		</div>
+		{#if agentMissing}
+			<!-- Its own header row (not inside the info column), so on a phone it spans
+			     the card instead of squeezing beside the edit/run/delete icons. -->
+			<div class="auto-agent-missing" data-testid="automation-agent-missing">
+				<p>
+					{automation.is_enabled
+						? 'Its agent was removed. Pick another agent so it can run.'
+						: 'Its agent was removed. Pick another agent to enable it.'}
+				</p>
+				<button type="button" class="auto-agent-pick" onclick={() => (onPickAgent ?? onEdit)(automation)}>Pick an agent</button>
+			</div>
+		{/if}
 	</div>
 
 	<!-- Stats summary -->
@@ -184,9 +189,12 @@
 		height: 100%;
 	}
 
+	/* Grid: back | info | actions, then the removed-agent warning on a second row
+	   (under info + actions on wide screens, the full card width on a phone). */
 	.auto-detail-header {
-		display: flex;
-		align-items: flex-start;
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		align-items: start;
 		gap: 8px;
 		padding: 12px 16px;
 		border-bottom: 1px solid var(--border-subtle, var(--border));
@@ -194,7 +202,6 @@
 	}
 
 	.auto-detail-header-info {
-		flex: 1;
 		min-width: 0;
 	}
 
@@ -216,11 +223,11 @@
 	}
 
 	.auto-agent-missing {
+		grid-column: 2 / -1;
 		display: flex;
 		align-items: center;
 		flex-wrap: wrap;
 		gap: 6px 12px;
-		margin-top: 8px;
 		padding: 8px 10px;
 		border: 1px solid color-mix(in oklch, var(--warning) 40%, transparent);
 		border-left-width: 3px;
@@ -336,6 +343,10 @@
 	@media (max-width: 639px) {
 		.auto-stats-row {
 			gap: 8px;
+		}
+
+		.auto-agent-missing {
+			grid-column: 1 / -1;
 		}
 
 		.auto-agent-pick {

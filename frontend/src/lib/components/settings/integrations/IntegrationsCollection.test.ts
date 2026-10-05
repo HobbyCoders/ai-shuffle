@@ -163,6 +163,20 @@ describe('removed agent restrictions', () => {
 		expect(screen.getByRole('button', { name: /Discord Bot/ }).textContent).toContain('Agent default, all agents');
 		expect(screen.getByRole('button', { name: /Old Bot/ }).textContent).toContain('Agent default, 0 agents');
 	});
+
+	it('says All agents on the Access tab for an unrestricted key, not 0 of N', async () => {
+		apiUsers.getApiUsers.mockResolvedValue([user({ profile_ids: [] })]);
+		await open('u1', 'Access');
+		expect(await screen.findByText('All agents')).toBeTruthy();
+		expect(screen.queryByText('0 of 2')).toBeNull();
+	});
+
+	it('keeps the k of N count on the Access tab for a restricted key', async () => {
+		apiUsers.getApiUsers.mockResolvedValue([user({ profile_ids: ['a1'] })]);
+		await open('u1', 'Access');
+		expect(await screen.findByText('1 of 2')).toBeTruthy();
+		expect(screen.queryByText('All agents')).toBeNull();
+	});
 });
 
 describe('create', () => {

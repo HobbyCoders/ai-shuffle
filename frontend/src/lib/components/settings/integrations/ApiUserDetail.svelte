@@ -330,7 +330,8 @@
 {/snippet}
 
 {#snippet agentRows(selected: string[], onToggle: (id: string) => void)}
-	<RowGroup title="Agents" count="{model.existingProfileCount(selected)} of {model.profiles.length}">
+	<!-- No assignments means unrestricted (every agent), matching the list's "all agents". -->
+	<RowGroup title="Agents" count={selected.length ? `${model.existingProfileCount(selected)} of ${model.profiles.length}` : 'All agents'}>
 		{#each selected.filter((id) => !model.profiles.some((profile) => profile.id === id)) as id}
 			<InlineBanner tone="warn">
 				Agent {id} was removed. This key stays restricted; assign an available agent before removing this restriction.
