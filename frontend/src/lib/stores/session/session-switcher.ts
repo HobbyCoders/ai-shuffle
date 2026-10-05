@@ -78,6 +78,7 @@ interface LiveSnapshot {
 		model?: string | null;
 		provider_id?: string | null;
 		effort?: string | null;
+		context_window?: number | null;
 		workspace_project_ids?: string[];
 		title?: string;
 		worktree_id?: string | null;
@@ -667,9 +668,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// pick, so a chat opened elsewhere shows the tier it actually runs on.
 			fastMode: ephemeral?.fastMode ?? (row?.fast ?? false),
 			workspaceProjectIds: ephemeral?.workspaceProjectIds ?? row?.workspace_project_ids ?? [],
+			// Existing-chat picks are acknowledged on the worker, not unsent
+			// drafts. A cache from another tab/device cannot outrank that row.
 			contextWindowChoice:
-				ephemeral?.contextWindowChoice ??
 				contextChoiceFromWindow(row?.context_window) ??
+				ephemeral?.contextWindowChoice ??
 				DEFAULT_CONTEXT_WINDOW_CHOICE,
 			// Worktree fields: ephemeral > worktreeInfo from session list > safe defaults
 			worktreeIntent: ephemeral?.worktreeIntent ?? worktreeInfo?.worktreeIntent ?? 'local',
@@ -731,6 +734,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const initialFolders = getState().workspaceProjectIds;
 		const initialModel = getState().modelOverride;
 		const initialEffort = getState().effortLevelOverride;
+		const initialContextChoice = getState().contextWindowChoice;
 		let snap: LiveSnapshot | null;
 		try {
 			// `include_messages=false`: the SSE feed is the transcript authority, so
@@ -808,6 +812,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			}
 			if (initialEffort == null && getState().effortLevelOverride === initialEffort && meta.effort !== undefined) {
 				patch.effortLevelOverride = meta.effort;
+			}
+			// Reloads restore a browser snapshot before /live arrives. Replace
+			// its old acknowledged window, but not a pick made during this fetch.
+			const savedContextChoice = contextChoiceFromWindow(meta.context_window);
+			if (savedContextChoice && getState().contextWindowChoice === initialContextChoice) {
+				patch.contextWindowChoice = savedContextChoice;
 			}
 			// An older chat may not be in the paginated session list. Hydrate its
 			// folders from /live, without overwriting an edit made during the fetch.

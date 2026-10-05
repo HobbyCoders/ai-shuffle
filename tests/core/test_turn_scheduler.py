@@ -657,6 +657,40 @@ async def test_auto_continue_on_boundary_cut(mock_db):
     assert execute.await_args.args[0]["id"] == cont["id"]
 
 
+async def test_auto_continue_snapshots_the_acknowledged_context_pin(mock_db):
+    from app.api.sessions_permissions import RunSettingsUpdate, apply_run_settings
+    from app.db import database
+
+    database.create_profile("pin-role", "Pin role", None, {"model": "fable"})
+    database.create_session("pinned-continue", "pin-role", model="fable")
+    settled = _settled_turn(
+        "pinned-continue", stop_reason="tool_use",
+        overrides={"model": "fable", "context_window": 1_000_000},
+    )
+    await apply_run_settings("pinned-continue", RunSettingsUpdate(context_window=200_000))
+    with ExitStack() as stack:
+        stack.enter_context(_patch_execute())
+        _patch_over_threshold(stack)
+        await turn_scheduler.on_turn_settled("pinned-continue", settled["id"], "completed")
+        await _drain_kicks()
+    (continuation,) = _by_source("pinned-continue", "auto_continue")
+    assert continuation["overrides"]["context_window"] == 200_000
+
+
+async def test_queued_before_picker_change_starts_with_acknowledged_pin(mock_db):
+    from app.api.sessions_permissions import RunSettingsUpdate, apply_run_settings
+    from app.db import database, turns
+    from app.core.provider_agent import _caller_context_window
+
+    database.create_profile("queued-pin-role", "Queued pin role", None, {"model": "fable"})
+    database.create_session("queued-pin", "queued-pin-role", model="fable", context_window=1_000_000)
+    queued = turns.enqueue_turn("queued-pin", "user", overrides={"context_window": 1_000_000})
+    await apply_run_settings("queued-pin", RunSettingsUpdate(context_window=200_000))
+    started = turns.start_turn(queued["id"])
+    assert started["overrides"]["context_window"] == 200_000
+    assert _caller_context_window(database.get_session("queued-pin")) == 200_000
+
+
 async def test_auto_continue_skipped_below_threshold(mock_db):
     settled = _settled_turn("a2", stop_reason="tool_use")
 

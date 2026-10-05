@@ -56,7 +56,8 @@ import { git } from './git.svelte';
 import { untrack } from 'svelte';
 import { createStore, createSubscribers, shallowEqual } from './store-utils';
 import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
-import type { ContextWindowChoice } from '$lib/constants/model-context';
+import { contextWindowForChoice, contextChoiceFromWindow, type ContextWindowChoice } from '$lib/constants/model-context';
+import { getDefaultModel } from '$lib/constants/models';
 // Shared types
 import type {
 	ChatMessage, MessageType,
@@ -727,14 +728,14 @@ function rememberBranchIntent() {
 }
 
 let permissionSelectionGeneration = 0;
-const runSettingGenerations = { effort: 0, fast: 0 };
+const runSettingGenerations = { effort: 0, fast: 0, context_window: 0 };
 const runSettingQueues = new Map<string, Promise<unknown>>();
 
-async function setLiveRunSetting(field: 'effort' | 'fast', value: string | null | boolean) {
+async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', value: string | null | boolean | number) {
 	const generation = ++runSettingGenerations[field];
 	const ownerEpoch = sessionOwnerEpoch();
 	const sessionId = _state.sessionId;
-	const stateKey = field === 'effort' ? 'effortLevelOverride' : 'fastMode';
+	const stateKey = field === 'effort' ? 'effortLevelOverride' : field === 'fast' ? 'fastMode' : 'contextWindowChoice';
 	let selected = value;
 	if (sessionId) {
 		// Serialize picks for the same owner/session so a slow earlier request
@@ -743,7 +744,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast', value: string | null 
 		const previous = runSettingQueues.get(queueKey);
 		const apply = () => {
 			if (sessionOwnerEpoch() !== ownerEpoch) return null;
-			return api.put<{ effort: string | null; fast: boolean }>(
+			return api.put<{ effort: string | null; fast: boolean; context_window: number }>(
 				`/sessions/${sessionId}/run-settings`, { [field]: value }
 			);
 		};
@@ -752,12 +753,17 @@ async function setLiveRunSetting(field: 'effort' | 'fast', value: string | null 
 		try {
 			const saved = await pending;
 			if (!saved || sessionOwnerEpoch() !== ownerEpoch) return;
-			selected = saved[field];
+			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window) : saved[field];
+			if (field === 'context_window' && selected) {
+				// Navigation reads the sidebar row before its /live refresh. Keep
+				// an acknowledged pick there too, including across in-flight loads.
+				appData.mergeSessionPatch(sessionId, { context_window: saved.context_window });
+			}
 			const cached = sessionEphemeralCache.restore(sessionId);
 			if (cached) sessionEphemeralCache.save(sessionId, { ...cached, [stateKey]: selected });
 		} catch (error) {
 			if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field]) {
-				notify.error(`Could not change ${field === 'effort' ? 'effort' : 'Fast mode'}: ${error instanceof Error ? error.message : String(error)}`,
+				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${error instanceof Error ? error.message : String(error)}`,
 					{ session_id: sessionId, persist: false });
 			}
 			return;
@@ -766,8 +772,13 @@ async function setLiveRunSetting(field: 'effort' | 'fast', value: string | null 
 		}
 	}
 	if (generation !== runSettingGenerations[field] || sessionOwnerEpoch() !== ownerEpoch) return;
-	setPersistedRunBinding(field === 'effort' ? 'effort' : 'fastMode',
-		field === 'effort' ? selected as string | null : selected ? '1' : '');
+	if (field === 'context_window') {
+		selected = sessionId ? selected : contextChoiceFromWindow(value as number);
+		setPersistedRunBinding('contextWindowChoice', selected as ContextWindowChoice);
+	} else {
+		setPersistedRunBinding(field === 'effort' ? 'effort' : 'fastMode',
+			field === 'effort' ? selected as string | null : selected ? '1' : '');
+	}
 	if (_state.sessionId !== sessionId) return;
 	_update(s => ({ ...s, [stateKey]: selected }));
 	persistSession();
@@ -1054,7 +1065,16 @@ export const activeSession = {
 			persistSession();
 		}
 	},
-	setContextWindowChoice(choice: ContextWindowChoice) { _update(s => ({ ...s, contextWindowChoice: choice })); setPersistedRunBinding('contextWindowChoice', choice); persistSession(); },
+	setContextWindowChoice(choice: ContextWindowChoice) {
+		if (!_state.sessionId) {
+			_update(s => ({ ...s, contextWindowChoice: choice }));
+			setPersistedRunBinding('contextWindowChoice', choice);
+			persistSession();
+			return;
+		}
+		const window = contextWindowForChoice(_state.modelOverride || getDefaultModel(), choice);
+		if (window != null) return setLiveRunSetting('context_window', window);
+	},
 
 	// ── Ephemeral UI State (delegated to draft-manager) ─────────────
 

@@ -122,6 +122,7 @@
 	let usageBar = $state<ContextUsageBar | null>(null);
 	/** Context used, read back from the shared ring for the panel's usage row. */
 	let usagePercent = $state(0);
+	let usageOverLimit = $state(false);
 	const RING_C = 2 * Math.PI * 6;
 	const usageSeverity = $derived(usagePercent > 90 ? 'danger' : usagePercent >= 70 ? 'warning' : 'ok');
 
@@ -552,7 +553,7 @@
 		{/if}
 
 		<div class="qcell usage" data-cell="usage">
-			<ContextUsageBar bind:this={usageBar} bind:percent={usagePercent} onOpenChange={onUsageOpenChange} showPercent />
+			<ContextUsageBar bind:this={usageBar} bind:percent={usagePercent} bind:overLimit={usageOverLimit} onOpenChange={onUsageOpenChange} showPercent />
 		</div>
 
 		<button
@@ -700,7 +701,7 @@
 										stroke-dasharray={RING_C} stroke-dashoffset={RING_C * (1 - Math.min(100, Math.max(0, usagePercent)) / 100)} />
 								</svg>
 								<b>Context and usage</b>
-								<span class="pct">{usagePercent}%</span>
+								<span class="pct">{usageOverLimit ? 'Over limit' : `${usagePercent}%`}</span>
 								<ChevronRight size={20} class="mcp-chev" aria-hidden="true" />
 							</button>
 							{#if showSetupTiles && rendered}

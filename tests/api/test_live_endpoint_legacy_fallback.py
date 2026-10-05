@@ -197,7 +197,7 @@ async def test_include_messages_false_keeps_the_metadata_fields():
 
 async def test_metadata_only_snapshot_includes_hidden_worker_run_binding():
     session = {"id": "hidden-worker", "hidden": True, "model": "gpt-5.6-terra",
-               "provider_id": "openai", "effort": "high"}
+               "provider_id": "openai", "effort": "high", "context_window": 200_000}
     probe = []
     result, legacy = await _poll_live(
         session, store_result=([], {}), legacy_result=([], False),
@@ -206,6 +206,7 @@ async def test_metadata_only_snapshot_includes_hidden_worker_run_binding():
     assert result["session_meta"]["model"] == "gpt-5.6-terra"
     assert result["session_meta"]["provider_id"] == "openai"
     assert result["session_meta"]["effort"] == "high"
+    assert result["session_meta"]["context_window"] == 200_000
     probe[0].assert_not_called()
     legacy.assert_not_called()
 

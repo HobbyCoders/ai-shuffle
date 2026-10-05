@@ -1093,6 +1093,11 @@ def build_options_from_profile(
     _session_effort = (_binding_row or {}).get("effort")
     _session_fast = (_binding_row or {}).get("fast")
     _session_permission_mode = (_binding_row or {}).get("permission_mode")
+    # The turn's own window wins, like model/effort/permission. A queued turn's
+    # copy is replaced with the session's saved pin when it is enqueued and
+    # again when it is claimed (app.db.turns), so a stale snapshot from an
+    # older turn never reaches here; what does is an explicit pick, such as an
+    # API stream request that runs without the turn queue.
     _context_window_value = overrides.get("context_window") or (
         _binding_row or {}
     ).get("context_window")
@@ -1307,10 +1312,23 @@ def build_options_from_profile(
             (main_provider_row or {}).get("provider_type") != "anthropic"
         )
 
-    # Use the same capabilities exposed by the registry to the picker. A stale
-    # choice is discarded after switching to a model that cannot support it.
+    # Validate new/sessionless overrides against the picker, but a saved pin
+    # is a ceiling, not permission to silently use a wider model default when
+    # the model changes or its catalog entry is missing/stale.
     if context_window not in context_window_choices(model_to_use, main_provider_row):
-        context_window = None
+        from app.core.model_registry import get_model, resolve_provider_context_window
+
+        native = get_model(model_to_use) if main_provider_row is None else None
+        maximum = (resolve_provider_context_window(main_provider_row, model_to_use)
+                   if main_provider_row is not None
+                   else native.context_window if native is not None else None)
+        if context_window is not None and (_binding_row or {}).get("context_window"):
+            if maximum is not None and maximum <= context_window:
+                # The default is already no larger than the pin (e.g. haiku).
+                # No override is needed; leave that model's default unchanged.
+                context_window = None
+        else:
+            context_window = None
 
     from app.core.assistant_service import assert_proactive_allowed, build_role_context, is_primary_session
     from app.core.session_modes import narrow_tool_access_for_proactive

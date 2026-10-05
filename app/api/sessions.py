@@ -1197,6 +1197,7 @@ async def get_live_session(
         "model": session.get("model") or session.get("launched_model"),
         "provider_id": session.get("provider_id"),
         "effort": session.get("effort"),
+        "context_window": session.get("context_window"),
         # An archived chat opens read-only (no composer) until restored (#1822).
         "status": session.get("status"),
         # A subagent's chat shows no Git or private-access controls.

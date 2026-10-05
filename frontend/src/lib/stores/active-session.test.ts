@@ -50,6 +50,7 @@ vi.mock('$app/navigation', () => ({ goto: hoisted.goto }));
 
 import { activeSession } from './active-session';
 import { api, recheckAuthOn401 } from '$lib/api/client';
+import { appData } from './app-data.svelte';
 import { auth } from '$lib/stores/auth.svelte';
 import { composerPreferences } from './composer-preferences';
 import { sessionEphemeralCache } from './session-cache';
@@ -213,6 +214,29 @@ describe('live permission selection', () => {
 
 
 describe('live effort and Fast mode selection', () => {
+	describe('context window selection', () => {
+		it('saves the pin without sending a message and waits for acknowledgement', async () => {
+			Object.assign(activeSession.current, { modelOverride: 'fable', contextWindowChoice: '1m' });
+			const patchRow = vi.spyOn(appData, 'mergeSessionPatch');
+			let acknowledge!: (value: { context_window: number }) => void;
+			const put = vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
+			const pending = activeSession.setContextWindowChoice('standard');
+			expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { context_window: 200_000 });
+			expect(activeSession.current.contextWindowChoice).toBe('1m');
+			expect(patchRow).not.toHaveBeenCalled();
+			acknowledge({ context_window: 200_000 });
+			await pending;
+			expect(activeSession.current.contextWindowChoice).toBe('standard');
+			expect(patchRow).toHaveBeenCalledWith('live-knobs', { context_window: 200_000 });
+		});
+		it('keeps the previous pin when saving fails', async () => {
+			Object.assign(activeSession.current, { modelOverride: 'fable', contextWindowChoice: '1m' });
+			vi.spyOn(api, 'put').mockRejectedValue(new Error('unreachable'));
+			await activeSession.setContextWindowChoice('standard');
+			expect(activeSession.current.contextWindowChoice).toBe('1m');
+		});
+	});
+
 	beforeEach(() => {
 		vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({}));
 		sessionEphemeralCache.clear();

@@ -1,7 +1,9 @@
 <script lang="ts">
-	/** Test double for the shared usage ring: a button and the bindable percent. */
-	let { percent = $bindable(0) }: { onOpenChange?: (open: boolean) => void; showPercent?: boolean; percent?: number } = $props();
+	/** Test double for the shared usage ring: a button and the bindable percent / over-limit flag. */
+	let { percent = $bindable(0), overLimit = $bindable(false) }: { onOpenChange?: (open: boolean) => void; showPercent?: boolean; percent?: number; overLimit?: boolean } = $props();
 	percent = 42;
+	// A test sets this to drive the panel's over-the-limit wording.
+	overLimit = (globalThis as { __usageStubOverLimit?: boolean }).__usageStubOverLimit ?? false;
 	export function openDetails() {}
 </script>
 

@@ -5,7 +5,7 @@ from typing import Literal, Optional
 from weakref import WeakValueDictionary
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from app.api.auth import require_auth
 from app.api.sessions_helpers import require_session
@@ -22,6 +22,7 @@ class RunSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]] = None
     fast: Optional[StrictBool] = None
+    context_window: Optional[int] = Field(None, strict=True, gt=0)
 
 
 async def _store_live_overrides(session_id: str, runtime) -> None:
@@ -57,10 +58,31 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate) -> dict:
 
     changes = body.model_dump(exclude_unset=True)
     if not changes or ("fast" in changes and changes["fast"] is None):
-        raise ValueError("Provide effort and/or a boolean fast setting")
+        raise ValueError("Provide effort, a boolean fast setting, or a context_window")
     lock = _locks.setdefault(session_id, asyncio.Lock())
     async with lock:
         session = await run_sync(control._require_owned, session_id)
+        if "context_window" in changes:
+            # Unlike effort, a window is connect-time state on BOTH legs. Save
+            # it now, but never interrupt/reconfigure an in-flight request. The
+            # next turn reads the binding and the pool reconnects if it changed.
+            if len(changes) != 1:
+                raise ValueError("Change the context window separately from effort/Fast mode")
+            from app.core.model_registry import DEFAULT_MODEL, context_window_choices
+
+            model = session.get("model") or session.get("launched_model")
+            if not model:
+                profile = await run_sync(database.get_profile, session.get("profile_id"))
+                model = ((profile or {}).get("config") or {}).get("model") or DEFAULT_MODEL
+            provider_id = session.get("provider_id")
+            if model and model.startswith("prov:"):
+                _, provider_id, model = model.split(":", 2)
+            provider = await run_sync(get_model_provider, provider_id) if provider_id else None
+            window = changes["context_window"]
+            if window not in context_window_choices(model, provider):
+                raise ValueError("This model does not support the selected context window")
+            await run_sync(database.set_session_run_binding, session_id, context_window=window)
+            return {"context_window": window}
         # The assistant's home always runs at its model's default effort.
         home = await run_sync(is_primary_session, session_id)
         if home and "effort" in changes:

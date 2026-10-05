@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
 	computeContextBreakdown,
 	decideBreakdownRefresh,
+	fitBreakdownToWindow,
 	formatTokenCount,
+	resolveContextWindow,
 	mapSdkContextUsage,
 	resolveCategoryColor,
 	usageSeverity,
@@ -616,5 +618,99 @@ describe('decideBreakdownRefresh', () => {
 			'idle',
 		]);
 		expect(actions.filter((a) => a === 'clear')).toHaveLength(0);
+	});
+});
+
+describe('resolveContextWindow', () => {
+	const base = { selected: null, reported: null, capacity: 1_000_000, reportedIsCurrentTurn: false };
+
+	it('uses the picked window over the model capacity', () => {
+		expect(resolveContextWindow({ ...base, selected: 200_000 })).toEqual({ window: 200_000, nextWindow: null });
+	});
+
+	it('uses the model capacity when nothing is picked or reported', () => {
+		expect(resolveContextWindow(base)).toEqual({ window: 1_000_000, nextWindow: null });
+	});
+
+	it('prefers a reported window over the local registry when the model has no choice', () => {
+		expect(resolveContextWindow({ ...base, capacity: 200_000, reported: 1_000_000 }).window).toBe(1_000_000);
+	});
+
+	it('shows an acknowledged pick at once, over the previous turn\'s report', () => {
+		expect(resolveContextWindow({ ...base, selected: 200_000, reported: 1_000_000 }))
+			.toEqual({ window: 200_000, nextWindow: null });
+	});
+
+	it('keeps a running turn\'s own window and names the picked one as next', () => {
+		expect(resolveContextWindow({ ...base, selected: 200_000, reported: 1_000_000, reportedIsCurrentTurn: true }))
+			.toEqual({ window: 1_000_000, nextWindow: 200_000 });
+	});
+
+	it('names no next window when the running turn already uses the pick', () => {
+		expect(resolveContextWindow({ ...base, selected: 200_000, reported: 200_000, reportedIsCurrentTurn: true }))
+			.toEqual({ window: 200_000, nextWindow: null });
+	});
+
+	it('ignores an unknown (0) reported window', () => {
+		expect(resolveContextWindow({ ...base, selected: 200_000, reported: 0, reportedIsCurrentTurn: true }))
+			.toEqual({ window: 200_000, nextWindow: null });
+	});
+});
+
+describe('fitBreakdownToWindow', () => {
+	const sdk = (totalTokens: number, maxTokens: number | null): SdkContextUsage => ({
+		categories: [
+			{ name: 'Messages', tokens: totalTokens, color: '#333' },
+			{ name: 'Free space', tokens: Math.max((maxTokens ?? 0) - totalTokens, 0), color: '#444' },
+		],
+		totalTokens,
+		maxTokens,
+		rawMaxTokens: maxTokens,
+		percentage: maxTokens ? (totalTokens / maxTokens) * 100 : null,
+		model: 'claude-x',
+		isAutoCompactEnabled: true,
+	});
+
+	it('re-measures a 1M report against a 200k pick: total, rows, free space and severity', () => {
+		const fitted = fitBreakdownToWindow(mapSdkContextUsage(sdk(150_000, 1_000_000)), 200_000);
+		expect(fitted.contextMax).toBe(200_000);
+		expect(fitted.totalPercent).toBe(75);
+		expect(fitted.severity).toBe('warning');
+		expect(fitted.overLimit).toBe(false);
+		const messages = fitted.rows.find((r) => r.key === 'Messages')!;
+		expect(messages.tokens).toBe(150_000);
+		expect(messages.barPercent).toBe(75);
+		const free = fitted.rows.find((r) => r.key === 'Free space')!;
+		expect(free.tokens).toBe(50_000);
+		expect(free.barPercent).toBe(25);
+	});
+
+	it('flags more context than the window holds as over the limit, never as a fraction', () => {
+		const fitted = fitBreakdownToWindow(mapSdkContextUsage(sdk(350_000, 1_000_000)), 200_000);
+		expect(fitted.overLimit).toBe(true);
+		expect(fitted.totalPercent).toBe(100);
+		expect(fitted.severity).toBe('danger');
+		expect(fitted.rows.find((r) => r.key === 'Free space')!.tokens).toBe(0);
+	});
+
+	it('fits the estimate path too', () => {
+		const estimate = computeContextBreakdown({
+			rawContextUsed: 100_000, inputTokens: 100_000, outputTokens: 0,
+			cacheCreationTokens: 0, cacheReadTokens: 0, contextMax: 1_000_000,
+		});
+		const fitted = fitBreakdownToWindow(estimate, 200_000);
+		expect(fitted.totalPercent).toBe(50);
+		expect(fitted.rows.find((r) => r.key === 'freeSpace')!.tokens).toBe(100_000);
+	});
+
+	it('returns the same object when the window already matches, keeping the SDK percent verbatim', () => {
+		const breakdown = mapSdkContextUsage({ ...sdk(150_000, 200_000), percentage: 74.9 });
+		expect(fitBreakdownToWindow(breakdown, 200_000)).toBe(breakdown);
+	});
+
+	it('gives an unknown reported window the picked one', () => {
+		const fitted = fitBreakdownToWindow(mapSdkContextUsage(sdk(20_000, null)), 200_000);
+		expect(fitted.contextMax).toBe(200_000);
+		expect(fitted.totalPercent).toBe(10);
 	});
 });

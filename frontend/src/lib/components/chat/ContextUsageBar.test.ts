@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => {
 		isStreaming: false,
 		executionMode: null,
 		modelOverride: null as string | null,
+		contextWindowChoice: null as string | null,
 		profile: null,
 		contextUsed: null as number | null,
 		totalTokensIn: 0,
@@ -469,6 +470,139 @@ describe('ContextUsageBar — pill', () => {
 		// it would read "200k". It must read the breakdown's 1M instead.
 		await waitFor(() => expect(pill.getAttribute('title')).toContain('1M'));
 		expect(pill.getAttribute('title')).not.toContain('200k');
+	});
+});
+
+describe('ContextUsageBar — the chat\'s picked context window', () => {
+	const report = (totalTokens: number, maxTokens: number) => ({
+		categories: [
+			{ name: 'Messages', tokens: totalTokens, color: '#333' },
+			{ name: 'Free space', tokens: Math.max(maxTokens - totalTokens, 0), color: '#444' },
+		],
+		totalTokens,
+		maxTokens,
+		rawMaxTokens: maxTokens,
+		percentage: (totalTokens / maxTokens) * 100,
+		model: 'claude-x',
+		isAutoCompactEnabled: true,
+	});
+	const persisted = (totalTokens: number, maxTokens: number) => ({
+		available: true, source: 'persisted', captured_at: new Date().toISOString(), usage: report(totalTokens, maxTokens),
+	});
+	const pillOf = (container: HTMLElement) => container.querySelector('.usage-indicator') as HTMLButtonElement;
+	const headerValue = (container: HTMLElement) =>
+		container.querySelector('.ctx-value')?.textContent?.replace(/\s+/g, ' ').trim();
+
+	it('shows a saved 200k window on a 1M-capable model as 200k everywhere', async () => {
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'fable', contextWindowChoice: 'standard' });
+		const { container } = render(ContextUsageBar);
+		expect(pillOf(container).getAttribute('title')).toContain('0 / 200k tokens');
+		await openPopover(container);
+		expect(headerValue(container)).toBe('0 / 200k (0%)');
+		expect(container.textContent).not.toContain('1M');
+	});
+
+	it('shows the model capacity when no window is saved', async () => {
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'fable' });
+		const { container } = render(ContextUsageBar);
+		expect(pillOf(container).getAttribute('title')).toContain('0 / 1M tokens');
+	});
+
+	it('caps a 1M preference at what the model can hold', async () => {
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'haiku', contextWindowChoice: '1m' });
+		const { container } = render(ContextUsageBar);
+		expect(pillOf(container).getAttribute('title')).toContain('0 / 200k tokens');
+	});
+
+	it('shows a new chat the window its first turn will use', async () => {
+		mocks.activeSession.set({ ...mocks.DEFAULT, modelOverride: 'fable', contextWindowChoice: 'standard' });
+		const { container } = render(ContextUsageBar);
+		expect(pillOf(container).getAttribute('title')).toContain('0 / 200k tokens');
+		mocks.activeSession.set({ ...mocks.activeSession.current, contextWindowChoice: '1m' });
+		await waitFor(() => expect(pillOf(container).getAttribute('title')).toContain('0 / 1M tokens'));
+	});
+
+	it('moves to an acknowledged pick at once, re-measuring the last turn\'s numbers', async () => {
+		mocks.getContextUsage.mockResolvedValue(persisted(100_000, 1_000_000));
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'fable', contextWindowChoice: '1m' });
+		const { container } = render(ContextUsageBar);
+		await waitFor(() => expect(pillOf(container).getAttribute('title')).toContain('100k / 1M tokens'));
+		expect(pillOf(container).getAttribute('aria-label')).toMatch(/10% of context window used/);
+
+		// What activeSession.setContextWindowChoice publishes once the PUT is acknowledged.
+		mocks.activeSession.set({ ...mocks.activeSession.current, contextWindowChoice: 'standard' });
+		await waitFor(() => expect(pillOf(container).getAttribute('title')).toContain('100k / 200k tokens'));
+		expect(pillOf(container).getAttribute('aria-label')).toMatch(/50% of context window used/);
+		await openPopover(container);
+		expect(headerValue(container)).toBe('100k / 200k (50%)');
+		const free = Array.from(container.querySelectorAll('.breakdown-row')).find((row) =>
+			row.querySelector('.breakdown-label')?.textContent?.trim() === 'Free space');
+		expect(free?.querySelector('.breakdown-value')?.textContent).toContain('100k');
+		expect(mocks.getContextUsage).toHaveBeenCalledTimes(1);
+	});
+
+	it('honours the saved window restored on reload over an older 1M report', async () => {
+		// After a full reload the switcher hydrates the choice from /live metadata;
+		// the persisted breakdown still carries the previous turn's window.
+		mocks.getContextUsage.mockResolvedValue(persisted(40_000, 1_000_000));
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'fable', contextWindowChoice: 'standard' });
+		const { container } = render(ContextUsageBar);
+		await waitFor(() => expect(pillOf(container).getAttribute('title')).toContain('40k / 200k tokens'));
+		expect(pillOf(container).getAttribute('aria-label')).toMatch(/20% of context window used/);
+	});
+
+	it('carries nothing over when switching to another chat', async () => {
+		mocks.getContextUsage.mockImplementation(async (sid: string) =>
+			sid === 'chat-a' ? persisted(150_000, 1_000_000) : { available: false, reason: 'not_connected' });
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 'chat-a', modelOverride: 'fable', contextWindowChoice: 'standard' });
+		const { container } = render(ContextUsageBar);
+		await waitFor(() => expect(pillOf(container).getAttribute('title')).toContain('150k / 200k tokens'));
+
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 'chat-b', modelOverride: 'fable', contextWindowChoice: '1m' });
+		await waitFor(() => expect(pillOf(container).getAttribute('title')).toContain('0 / 1M tokens'));
+		expect(pillOf(container).getAttribute('title')).not.toContain('150k');
+
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 'chat-a', modelOverride: 'fable', contextWindowChoice: 'standard' });
+		await waitFor(() => expect(pillOf(container).getAttribute('title')).toContain('150k / 200k tokens'));
+	});
+
+	it('keeps a running turn on its own window and says when the pick takes over', async () => {
+		mocks.activeSession.set({
+			...mocks.DEFAULT, sessionId: 's1', modelOverride: 'fable', contextWindowChoice: 'standard',
+			isStreaming: true, liveContextUsage: report(300_000, 1_000_000),
+		});
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		await waitFor(() => expect(headerValue(container)).toBe('300k / 1M (30%)'));
+		expect(container.querySelector('.ctx-next')?.textContent).toBe('This turn uses 1M · 200k from the next turn');
+		expect(pillOf(container).getAttribute('title')).toContain('200k from the next turn');
+
+		// The turn ends: the next one runs at 200k, which 300k no longer fits.
+		mocks.activeSession.set({ ...mocks.activeSession.current, isStreaming: false });
+		await waitFor(() => expect(headerValue(container)).toBe('300k / 200k (over limit)'));
+		expect(container.querySelector('.ctx-next')).toBeNull();
+		expect(container.querySelector('.ctx-pct')?.classList.contains('danger')).toBe(true);
+		expect(container.querySelector('svg.usage-ring')?.classList.contains('danger')).toBe(true);
+		expect(pillOf(container).getAttribute('aria-label')).toBe('Context and usage — over the limit, 300k / 200k tokens');
+	});
+
+	it('does not treat the previous turn\'s report as the running turn\'s window', async () => {
+		mocks.getContextUsage.mockResolvedValue(persisted(50_000, 1_000_000));
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'fable', contextWindowChoice: 'standard' });
+		const { container } = render(ContextUsageBar);
+		await waitFor(() => expect(pillOf(container).getAttribute('title')).toContain('50k / 200k tokens'));
+		// A turn starts after the pick; no per-call snapshot yet.
+		mocks.activeSession.set({ ...mocks.activeSession.current, isStreaming: true });
+		await openPopover(container);
+		expect(headerValue(container)).toBe('50k / 200k (25%)');
+		expect(container.querySelector('.ctx-next')).toBeNull();
+	});
+
+	it('prints "Over" under the phone ring when past the limit', async () => {
+		mocks.getContextUsage.mockResolvedValue(persisted(300_000, 1_000_000));
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'fable', contextWindowChoice: 'standard' });
+		const { container } = render(ContextUsageBar, { props: { showPercent: true } });
+		await waitFor(() => expect(container.querySelector('.usage-percent')?.textContent).toBe('Over'));
 	});
 });
 

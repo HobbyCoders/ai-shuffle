@@ -84,3 +84,24 @@ def test_preexisting_auto_compact_window_preserved(tmp_path):
     env = _build_for_model("fable", tmp_path, base_env={AUTO_COMPACT_KEY: "350000"}).env
     assert env[AUTO_COMPACT_KEY] == "350000"
     assert DISABLE_KEY not in env
+
+@pytest.mark.parametrize("model", ["sonnet", "claude-fable-5-1"])
+def test_saved_pin_survives_model_and_effort_change(mock_db, model):
+    from app.db import database
+    from tests.core.test_worker_context_window import _leg_for_worker
+
+    from app.core import turn_manager
+    from app.db import turns
+
+    _leg_for_worker(mock_db, "fable", 200_000)
+    database.set_session_run_binding("window-child", model=model, effort="low")
+    # A server turn (here a wake) replays an older turn's 1M snapshot. The
+    # queue replaces it with the saved pin before the options are built.
+    turn_id = turn_manager._submit_blocking("window-child", "wakeup", prompt="later",
+        profile_id="role", overrides={"model": model, "effort": "low", "context_window": 1_000_000})
+    started = turns.start_turn(turn_id)
+    with patch.object(qo, "get_security_instructions", return_value=""):
+        options, _ = qo.build_options_from_profile(database.get_profile("role"),
+            session_id="window-child", overrides=started["overrides"])
+    assert options.aih_context_window == 200_000
+    assert options.env[AUTO_COMPACT_KEY] == "200000"

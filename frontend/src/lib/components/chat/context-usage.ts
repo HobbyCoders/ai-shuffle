@@ -74,6 +74,12 @@ export interface ContextBreakdown {
 	contextMax: number;
 	/** Clamped 0–100. */
 	totalPercent: number;
+	/**
+	 * More is in context than the window holds (a smaller window was picked
+	 * after the chat grew). The percent stops at 100, so this is what tells
+	 * the reader the used figure is past the limit rather than at it.
+	 */
+	overLimit: boolean;
 	severity: UsageSeverity;
 	rows: ContextBreakdownRow[];
 }
@@ -238,6 +244,7 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 		totalUsed,
 		contextMax,
 		totalPercent,
+		overLimit: contextMax > 0 && totalUsed > contextMax,
 		severity: usageSeverity(totalPercent),
 		rows,
 	};
@@ -381,7 +388,65 @@ export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 		totalUsed,
 		contextMax: max,
 		totalPercent,
+		overLimit: max > 0 && totalUsed > max,
 		severity: usageSeverity(totalPercent),
 		rows,
+	};
+}
+
+/** The window the meter measures against, and the one the next turn uses when that differs. */
+export interface ContextWindowResolution {
+	window: number;
+	/** Set only while a running turn still uses a window other than the picked one. */
+	nextWindow: number | null;
+}
+
+/**
+ * Pick the meter's denominator.
+ *
+ * - `selected`: the chat's picked window for its model (`contextWindowForChoice`),
+ *   or null when the model offers no choice. It is what the next turn sends, so
+ *   it wins over an older report — a pick shows as soon as it is acknowledged.
+ * - `reported`: the window the backend measured the current numbers against
+ *   (the SDK/persisted breakdown's `maxTokens`), or null/0 when unknown.
+ * - `capacity`: the model's own window from the local registry, the last resort.
+ *
+ * A pick applies from the next turn. While a turn is still running on another
+ * window (`reportedIsCurrentTurn`), its numbers are measured against that
+ * window, so the meter keeps it and returns the picked one as `nextWindow`.
+ */
+export function resolveContextWindow(input: {
+	selected: number | null;
+	reported: number | null;
+	capacity: number;
+	reportedIsCurrentTurn: boolean;
+}): ContextWindowResolution {
+	const reported = input.reported != null && input.reported > 0 ? input.reported : null;
+	const next = input.selected ?? reported ?? input.capacity;
+	if (input.reportedIsCurrentTurn && reported != null && reported !== next) {
+		return { window: reported, nextWindow: next };
+	}
+	return { window: next, nextWindow: null };
+}
+
+/**
+ * Re-measure a breakdown against another window: the total percent, every
+ * row's share, the Free space row and the severity. Token counts other than
+ * Free space are facts about the conversation and stay as they are.
+ */
+export function fitBreakdownToWindow(breakdown: ContextBreakdown, contextMax: number): ContextBreakdown {
+	if (contextMax <= 0 || breakdown.contextMax === contextMax) return breakdown;
+	const totalPercent = barPercent(breakdown.totalUsed, contextMax);
+	const freeTokens = Math.max(contextMax - breakdown.totalUsed, 0);
+	return {
+		...breakdown,
+		contextMax,
+		totalPercent,
+		overLimit: breakdown.totalUsed > contextMax,
+		severity: usageSeverity(totalPercent),
+		rows: breakdown.rows.map((row) => {
+			const tokens = row.key === 'freeSpace' || row.key === 'Free space' ? freeTokens : row.tokens;
+			return { ...row, tokens, barPercent: barPercent(tokens, contextMax) };
+		}),
 	};
 }

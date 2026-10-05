@@ -460,6 +460,35 @@ describe('session-switcher · authoritative binding hydration', () => {
 		vi.mocked(api.get).mockReset().mockResolvedValue(null);
 	});
 
+	it('restores the saved context pin rather than a stale acknowledged cache', async () => {
+		_mockSessions.current = [{ id: 'session-B', model: 'fable', context_window: 200_000 }];
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
+		ephemeralStore.set('session-B', { contextWindowChoice: '1m' } as SessionEphemeral);
+		await switcher.switchSession('session-B');
+		expect(getState().contextWindowChoice).toBe('standard');
+		switcher.destroy();
+	});
+
+	it('refreshes a stale restored context choice from metadata on reload', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { context_window: 200_000 } });
+		const { switcher, getState } = makeSwitcher(fullState({ contextWindowChoice: '1m' }));
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState().contextWindowChoice).toBe('standard');
+		switcher.destroy();
+	});
+
+	it('keeps a context choice acknowledged while metadata was in flight', async () => {
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState, deps } = makeSwitcher(fullState({ contextWindowChoice: '1m' }));
+		const pending = switcher.refreshSessionMetadata('session-A');
+		deps.update(s => ({ ...s, contextWindowChoice: 'standard' }));
+		resolve({ session_meta: { context_window: 1_000_000 } });
+		await pending;
+		expect(getState().contextWindowChoice).toBe('standard');
+		switcher.destroy();
+	});
+
 	it('hydrates a hidden worker outside the sidebar with its provider and effort', async () => {
 		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { model: 'gpt-5.6-terra', provider_id: 'openai', effort: 'high' } });
 		const { switcher, getState } = makeSwitcher(fullState());

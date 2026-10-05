@@ -215,3 +215,58 @@ async def test_real_native_turn_uses_changed_parameters_on_next_call():
     finally:
         proceed.set()
         await loop.aclose()
+
+@pytest.mark.asyncio
+async def test_context_pick_is_durable_without_a_message(mock_db, monkeypatch):
+    from app.core import turn_manager
+    from app.db import turns
+    from app.core.query_options import build_options_from_profile
+    from unittest.mock import patch
+
+    # Create through the existing real session/options producer, then save the
+    # picker change independently of a turn or browser-local preference.
+    db.create_profile("role", "Role", None, {"model": "fable"})
+    db.create_session(session_id="window-child", profile_id="role", model="fable", context_window=1_000_000)
+    monkeypatch.setattr(api.control, "_require_owned", db.get_session)
+    monkeypatch.setattr("app.core.session_pool.get_session_pool",
+                        lambda: SimpleNamespace(peek=lambda _: None))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda _: None)
+    result = await api.apply_run_settings("window-child", api.RunSettingsUpdate(context_window=200_000))
+    assert result["context_window"] == 200_000
+    assert db.get_session("window-child")["context_window"] == 200_000
+    # Server-originated turns can inherit stale snapshots, including the old
+    # 1M override. The acknowledged row pin must not be widened by them.
+    for source in ("unpark", "agent_message", "resume", "compact_continue", "failover", "wakeup"):
+        turn_id = turn_manager._submit_blocking("window-child", source,
+            prompt="continue", profile_id="role",
+            overrides={"model": "fable", "context_window": 1_000_000})
+        saved = turns.get_turn(turn_id)["overrides"]
+        assert saved["context_window"] == 200_000, source
+        with patch("app.core.query_options.get_security_instructions", return_value=""):
+            options, _ = build_options_from_profile(db.get_profile("role"),
+                session_id="window-child", overrides=saved)
+        assert options.aih_context_window == 200_000, source
+        assert options.env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "200000"
+
+
+@pytest.mark.asyncio
+async def test_context_pick_does_not_hot_swap_or_interrupt_the_live_leg(live, monkeypatch):
+    state, runtime, save = live
+    state.adapter._options.model = "fable"
+    monkeypatch.setattr(api.control, "_require_owned", lambda sid: {"id": sid, "model": "fable"})
+    old_turn = dict(runtime.turn["overrides"])
+    result = await api.apply_run_settings("s", api.RunSettingsUpdate(context_window=200_000))
+    assert result == {"context_window": 200_000}
+    save.assert_called_once_with("s", context_window=200_000)
+    assert runtime.turn["overrides"] == old_turn
+    assert state.is_streaming
+    assert state.connect_options.effort == "high"
+
+@pytest.mark.asyncio
+async def test_context_pick_on_legacy_session_uses_its_launched_model(mock_db, monkeypatch):
+    db.create_profile("legacy-role", "Legacy", None, {"model": "haiku"})
+    db.create_session("legacy-window", "legacy-role")
+    db.update_session("legacy-window", launched_model="fable")
+    monkeypatch.setattr(api.control, "_require_owned", db.get_session)
+    await api.apply_run_settings("legacy-window", api.RunSettingsUpdate(context_window=200_000))
+    assert db.get_session("legacy-window")["context_window"] == 200_000

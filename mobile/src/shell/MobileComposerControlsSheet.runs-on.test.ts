@@ -122,3 +122,26 @@ describe('Runs on in Chat controls', () => {
 		expect(queueMove).not.toHaveBeenCalled();
 	});
 });
+
+describe('Context and usage row', () => {
+	afterEach(() => { delete (globalThis as { __usageStubOverLimit?: boolean }).__usageStubOverLimit; });
+
+	function renderPanel() {
+		session.store.set({ sessionId: 'chat-1', mode: 'chat', messages: [], activeTasks: [] });
+		appSessions.store.set([]);
+		listInstallsMock.mockResolvedValue({ installs: [] });
+		render(MobileComposerControlsSheet, { props: props() });
+	}
+	const shown = () => document.querySelector('.mcp .usage-row .pct')?.textContent;
+
+	it('reads the shared meter\'s percent', async () => {
+		renderPanel();
+		await waitFor(() => expect(shown()).toBe('42%'));
+	});
+
+	it('says over the limit rather than a capped percent', async () => {
+		(globalThis as { __usageStubOverLimit?: boolean }).__usageStubOverLimit = true;
+		renderPanel();
+		await waitFor(() => expect(shown()).toBe('Over limit'));
+	});
+});

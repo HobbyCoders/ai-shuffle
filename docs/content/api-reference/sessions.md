@@ -286,6 +286,16 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/resume \
 
 `queued` is `true` when the retry waits behind a running turn. If a retry is already queued, that turn is returned with `"duplicate": true`. Claude Code sessions cannot be resumed this way and return `409`. When the provider cut the last reply off mid-stream, that partial reply stays in the transcript marked interrupted. If no tool call in it finished before the error, the retry starts again from the user's message and the partial reply stays on a side branch; if one did, the partial reply and its tool calls stay on the re-sent path, and the model reads them and the calls' error results before it continues.
 
+### PUT /api/v1/sessions/{session_id}/run-settings
+
+Change effort or Fast mode while a chat runs, or save a context-window choice separately:
+
+```json
+{ "context_window": 200000 }
+```
+
+The chosen window must be one of the model's supported choices. The response acknowledges the saved `context_window`. It takes effect on the next turn, including a wake or retry; an in-flight request is not interrupted. A saved pin stays a ceiling when the model changes. An older chat whose picker choice was only remembered in its browser needs that choice selected again to save it on the worker. Unpinned chats keep their model's default window.
+
 ### POST /api/v1/sessions/{session_id}/compact
 
 Compact the chat's context now. This sends the chat a `/compact` turn. A Claude Code chat runs Claude Code's own `/compact`. Any other chat runs the app's compaction: older tool results are trimmed and older turns are summarized, the newest work is kept as it is, and a summarized turn can still be read back with `HistoryExpand`. The chat shows **Context Compacted** when it worked, or **Compaction failed** with the reason.

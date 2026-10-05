@@ -22,6 +22,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 ### Sessions and interface
 
 - Automatic native compactions now leave durable transcript records. Older compaction records remain available after reload even when their conversation prefix has been compacted; records retain their timestamp, trigger and available token counts without exposing summary text.
+- Context-window picks in existing chats are saved immediately, without needing another message. They apply on the next turn and survive wakes, retries and model changes without silently increasing a smaller pin.
 
 ## 0.9.1
 

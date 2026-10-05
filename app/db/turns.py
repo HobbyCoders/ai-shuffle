@@ -337,6 +337,14 @@ def enqueue_turn(
     turn_id = f"turn-{uuid.uuid4().hex}"
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
+        # All producers reach this boundary, including scheduler retries/unpark
+        # and atomic AskUser answers that bypass turn_manager. Snapshot the
+        # acknowledged pin, not an older turn's window. Human sends persist
+        # explicit choices before enqueueing, so their new binding still wins.
+        cursor.execute("SELECT context_window FROM sessions WHERE id = %s", (session_id,))
+        binding = cursor.fetchone()
+        if binding and binding.get("context_window"):
+            overrides = {**(overrides or {}), "context_window": binding["context_window"]}
         if at_front:
             cursor.execute(
                 "SELECT COALESCE(MIN(position), 1) - 1 AS pos FROM turns "
@@ -529,7 +537,18 @@ def start_turn(
                 "RETURNING *",
                 (run_id, instance_id, turn_id),
             )
-            row = cursor.fetchone()
+            row = _row(cursor.fetchone())
+            if row is not None:
+                # A pick may be acknowledged after this turn was queued (or
+                # before a crash recovery retries it). Refresh at the claim,
+                # in the same transaction, so children inherit what it runs.
+                cursor.execute("SELECT context_window FROM sessions WHERE id=%s", (row["session_id"],))
+                binding = cursor.fetchone()
+                if (binding and binding.get("context_window")
+                        and row["overrides"].get("context_window") != binding["context_window"]):
+                    row["overrides"] = {**row["overrides"], "context_window": binding["context_window"]}
+                    cursor.execute("UPDATE turns SET overrides=%s WHERE id=%s",
+                                   (json.dumps(row["overrides"]), turn_id))
         except _INTEGRITY_ERRORS:
             conn.rollback()
             return None

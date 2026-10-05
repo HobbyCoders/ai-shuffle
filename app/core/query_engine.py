@@ -1021,6 +1021,14 @@ async def stream_query(
         _is_new_session = True  # Flag available for future analytics/logging
         logger.debug(f"Created new session {session_id} with title: {title}")
 
+    # This API lane bypasses turn_manager, so save an explicit context-window
+    # pick here as every other human send does: it wins for this turn (the
+    # override) and becomes the chat's pin, so a later wake or retry neither
+    # reverts nor widens it.
+    if (overrides or {}).get("context_window"):
+        await run_sync(database.set_session_run_binding, session_id,
+                       context_window=overrides["context_window"])
+
     # Store user message and broadcast to other devices. Skipped on a failover
     # retry (persist_user_message=False): the original entry already added the
     # user message to the DB and broadcast it — re-doing it here

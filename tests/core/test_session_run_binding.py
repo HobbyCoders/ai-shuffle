@@ -261,6 +261,44 @@ class TestTurnResolution:
         assert opts.aih_context_window == 1_000_000
         assert opts.env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] == "0"
 
+    @pytest.mark.asyncio
+    async def test_explicit_window_on_api_stream_wins_and_is_saved(self, mock_db, tmp_path):
+        """The real producer of an explicit per-message window outside the turn
+        queue: ``POST /conversation/stream`` on an existing chat. Its pick runs
+        this turn and becomes the pin; a later server turn carrying the older
+        200k copy cannot shrink it back, and a newer 200k pick still wins."""
+        from app.api.sessions_permissions import RunSettingsUpdate, apply_run_settings
+        from app.core import credential_gate, query_engine
+        from app.db import turns
+
+        make_profile("agent", {"cwd": str(tmp_path)})
+        db.create_session("s-api", profile_id="agent", model="opus", context_window=200_000)
+        built = []
+
+        async def capture(options):
+            built.append(options)
+            return "stop before spawn"
+
+        with patch.object(qo, "get_security_instructions", return_value=""), \
+                patch.object(credential_gate, "refusal_for_options_async", capture):
+            frames = [frame async for frame in query_engine.stream_query(
+                "hello", "agent", session_id="s-api",
+                overrides={"cwd": str(tmp_path), "context_window": 1_000_000})]
+        assert frames[-1]["message"] == "stop before spawn"
+        assert built[0].aih_context_window == 1_000_000
+        assert db.get_session("s-api")["context_window"] == 1_000_000
+
+        stale = turn_manager._submit_blocking(
+            "s-api", "wakeup", prompt="later", profile_id="agent",
+            overrides={"cwd": str(tmp_path), "context_window": 200_000})
+        assert turns.get_turn(stale)["overrides"]["context_window"] == 1_000_000
+        await apply_run_settings("s-api", RunSettingsUpdate(context_window=200_000))
+        started = turns.start_turn(stale)
+        assert started["overrides"]["context_window"] == 200_000
+        opts = _build_options({"id": "agent", "config": {"cwd": str(tmp_path)}},
+                              session_id="s-api", overrides=started["overrides"])
+        assert opts.aih_context_window == 200_000
+
     def test_stale_window_is_ignored_for_an_ineligible_model(self, mock_db, tmp_path):
         make_profile("agent", {"cwd": str(tmp_path)})
         db.create_session(

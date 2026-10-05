@@ -36,13 +36,14 @@
 	 * Escape listener that closes when the target is outside — works for desktop
 	 * click and mobile tap (tap-away closes).
 	 */
-	import { onMount, tick } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 	import { EyeOff, Eye } from 'lucide-svelte';
 	import { createUsageNumberAnimation } from './usage-number-animation';
 	import { creditNumber as creditsNum, creditText } from './provider-credit';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
+	import { contextWindowForChoice, isContextWindowChoice } from '$lib/constants/model-context';
 	import {
 		getDefaultModel,
 		getModelLabel,
@@ -59,6 +60,8 @@
 		computeContextBreakdown,
 		mapSdkContextUsage,
 		decideBreakdownRefresh,
+		resolveContextWindow,
+		fitBreakdownToWindow,
 		formatTokenCount,
 		usageSeverity,
 		type ContextBreakdown,
@@ -105,9 +108,11 @@
 		showPercent?: boolean;
 		/** Context used, rounded, for a caller that shows it elsewhere. */
 		percent?: number;
+		/** More is in context than the window holds; `percent` stops at 100. */
+		overLimit?: boolean;
 	}
 
-	let { onOpenChange, showPercent = false, percent = $bindable(0) }: Props = $props();
+	let { onOpenChange, showPercent = false, percent = $bindable(0), overLimit = $bindable(false) }: Props = $props();
 
 	// ── Effective model → context window (200k / 1M) ──────────────────────
 	// The session's model pick may be a `prov:<providerId>:<modelId>` composite
@@ -136,21 +141,18 @@
 		if ($activeSession.liveProvider) return $activeSession.liveProvider;
 		return !$activeSession.modelOverride && defaultComposite ? defaultComposite.providerId : null;
 	});
-	const contextMax = $derived(getContextMaxForModel(effectiveModel, effectiveProviderId));
+	const modelCapacity = $derived(getContextMaxForModel(effectiveModel, effectiveProviderId));
+	// The chat's picked window (200k / 1M), resolved exactly as the next send
+	// resolves it, so the meter shows what that turn will run with. Null when
+	// this model offers no choice: its own window applies.
+	const selectedWindow = $derived.by(() => {
+		const choice = $activeSession.contextWindowChoice;
+		if (!isContextWindowChoice(choice)) return null;
+		return contextWindowForChoice($activeSession.modelOverride || getDefaultModel(), choice);
+	});
 
 	// Context usage from activeSession — set by onPollApplied after each poll.
 	const rawContextUsed = $derived($activeSession.contextUsed ?? 0);
-
-	const breakdown = $derived(
-		computeContextBreakdown({
-			rawContextUsed,
-			inputTokens: $activeSession.totalTokensIn ?? 0,
-			outputTokens: $activeSession.totalTokensOut ?? 0,
-			cacheCreationTokens: $activeSession.totalCacheCreationTokens ?? 0,
-			cacheReadTokens: $activeSession.totalCacheReadTokens ?? 0,
-			contextMax,
-		})
-	);
 
 	// ── Popover open/close (click + tap-away) ─────────────────────────────
 	let open = $state(false);
@@ -227,15 +229,47 @@
 
 	// ── SDK/persisted breakdown = the single display source for the context section ─
 	let richBreakdown = $state<ContextBreakdown | null>(null);
+	// True when `richBreakdown` was measured by the turn that is running now
+	// (a pushed per-call snapshot, or a live fetch mid-turn) rather than left
+	// over from the previous turn.
+	let richFromRunningTurn = $state(false);
 	const sessionId = $derived($activeSession.sessionId);
 	const isStreaming = $derived($activeSession.isStreaming);
-	const displayBreakdown = $derived<ContextBreakdown>(richBreakdown ?? breakdown);
+
+	// The denominator for the ring, header, bar, rows and severity alike.
+	const contextWindow = $derived(resolveContextWindow({
+		selected: selectedWindow,
+		reported: richBreakdown?.contextMax ?? null,
+		capacity: modelCapacity,
+		reportedIsCurrentTurn: isStreaming && richFromRunningTurn,
+	}));
+
+	const breakdown = $derived(
+		computeContextBreakdown({
+			rawContextUsed,
+			inputTokens: $activeSession.totalTokensIn ?? 0,
+			outputTokens: $activeSession.totalTokensOut ?? 0,
+			cacheCreationTokens: $activeSession.totalCacheCreationTokens ?? 0,
+			cacheReadTokens: $activeSession.totalCacheReadTokens ?? 0,
+			contextMax: contextWindow.window,
+		})
+	);
+	const displayBreakdown = $derived<ContextBreakdown>(
+		fitBreakdownToWindow(richBreakdown ?? breakdown, contextWindow.window)
+	);
+	const usedOfMax = $derived(
+		`${formatTokenCount(displayBreakdown.totalUsed)} / ${formatTokenCount(displayBreakdown.contextMax)}`
+	);
+	const nextWindowText = $derived(
+		contextWindow.nextWindow != null ? `${formatTokenCount(contextWindow.nextWindow)} from the next turn` : null
+	);
 
 	// The pill ring prefers the rich breakdown when loaded (its totalPercent is
 	// the same figure the popover header shows — so they can't disagree),
 	// falling back to the poller estimate before the first fetch lands.
 	const contextPercent = $derived(displayBreakdown.totalPercent);
 	$effect(() => { percent = Math.round(contextPercent); });
+	$effect(() => { overLimit = displayBreakdown.overLimit; });
 
 	// ── Ring geometry (mirrors TodoList's progress ring) ──────────────────
 	const RING_RADIUS = 6;
@@ -275,6 +309,7 @@
 			if (controller.signal.aborted) return;
 			if (res.available) {
 				richBreakdown = mapSdkContextUsage(res.usage);
+				richFromRunningTurn = res.source === 'live' && untrack(() => isStreaming);
 				loadedSessionId = sid;
 			}
 		} catch {
@@ -297,11 +332,13 @@
 			case 'clear':
 				cancelFetch();
 				richBreakdown = null;
+				richFromRunningTurn = false;
 				loadedSessionId = null;
 				break;
 			case 'session-fetch':
 				cancelFetch();
 				richBreakdown = null;
+				richFromRunningTurn = false;
 				loadedSessionId = null;
 				fetchBreakdown(next.sessionId!);
 				break;
@@ -335,6 +372,7 @@
 		if (live === appliedLiveSnapshot) return;
 		appliedLiveSnapshot = live;
 		richBreakdown = mapSdkContextUsage(live);
+		richFromRunningTurn = true;
 		loadedSessionId = sid;
 	});
 
@@ -676,10 +714,10 @@
 	<button
 		type="button"
 		class="usage-indicator"
-		title="{formatTokenCount(displayBreakdown.totalUsed)} / {formatTokenCount(
-			displayBreakdown.contextMax
-		)} tokens — click for details"
-		aria-label="Context and usage — {Math.round(contextPercent)}% of context window used"
+		title="{usedOfMax} tokens{displayBreakdown.overLimit ? ', over the limit' : ''}{nextWindowText ? ` · ${nextWindowText}` : ''} — click for details"
+		aria-label="Context and usage — {displayBreakdown.overLimit
+			? `over the limit, ${usedOfMax} tokens`
+			: `${Math.round(contextPercent)}% of context window used`}"
 		aria-haspopup="dialog"
 		aria-expanded={open}
 		onclick={toggle}
@@ -698,7 +736,7 @@
 				stroke-dashoffset={ringDashoffset}
 			/>
 		</svg>
-		{#if showPercent}<span class="usage-percent" aria-hidden="true">{Math.round(contextPercent)}%</span>{/if}
+		{#if showPercent}<span class="usage-percent" aria-hidden="true">{displayBreakdown.overLimit ? 'Over' : `${Math.round(contextPercent)}%`}</span>{/if}
 	</button>
 
 	{#if open}
@@ -714,11 +752,9 @@
 				>
 					<span class="row-label">Context window</span>
 					<span class="ctx-value">
-						{formatTokenCount(displayBreakdown.totalUsed)} / {formatTokenCount(
-							displayBreakdown.contextMax
-						)}
+						{usedOfMax}
 						<span class="ctx-pct {displayBreakdown.severity}"
-							use:usageNumber={{ key: `context:${resolvedKey}:${sessionId ?? 'new'}:${effectiveProviderId}:${effectiveModel}`, text: `(${Math.round(displayBreakdown.totalPercent)}%)` }}></span>
+							use:usageNumber={{ key: `context:${resolvedKey}:${sessionId ?? 'new'}:${effectiveProviderId}:${effectiveModel}`, text: displayBreakdown.overLimit ? '(over limit)' : `(${Math.round(displayBreakdown.totalPercent)}%)` }}></span>
 					</span>
 					<svg
 						class="ctx-chevron {breakdownOpen ? '' : 'collapsed'}"
@@ -749,6 +785,11 @@
 						></span>
 					{/if}
 				</div>
+
+				{#if nextWindowText}
+					<!-- A pick applies from the next turn; the running one keeps its window. -->
+					<p class="ctx-next">This turn uses {formatTokenCount(displayBreakdown.contextMax)} · {nextWindowText}</p>
+				{/if}
 
 				{#if breakdownOpen}
 					{#each displayBreakdown.rows as row (row.key)}
@@ -1178,6 +1219,12 @@
 	}
 	.ctx-seg.solid.danger {
 		background: var(--destructive);
+	}
+
+	.ctx-next {
+		margin: 0;
+		font-size: 10.5px;
+		color: var(--muted-foreground);
 	}
 
 	/* Per-category breakdown rows — one line: swatch + label (left) + value (right). */
