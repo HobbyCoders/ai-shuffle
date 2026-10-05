@@ -130,9 +130,10 @@ class ProfileConfig(BaseModel):
     # app.core.agent_provider_models.available_subagents).
     enabled_agents: Optional[List[str]] = None
 
-    # Context-declaration mode — "all" = declare every agent, "custom" =
-    # declare exactly enabled_agents (empty = declare none), None = legacy
-    # (a non-empty enabled_agents declares those ids, empty/absent = all).
+    # Subagent roster mode — "all" = every agent, "custom" = exactly
+    # enabled_agents (empty = no listed agent), "none" = no subagents at all
+    # (Task and Swarm are taken off the agent's surface), None = legacy (a
+    # non-empty enabled_agents declares those ids, empty/absent = all).
     agent_invoke_mode: Optional[str] = None
 
     # Per-agent memory: durable text owned by THIS
@@ -162,13 +163,15 @@ class ProfileConfig(BaseModel):
     @field_validator("agent_invoke_mode")
     @classmethod
     def _check_agent_invoke_mode(cls, value):
-        """Only the three documented declaration modes are storable.
+        """Only the documented roster modes are storable.
 
         None keeps legacy behavior (a non-empty ``enabled_agents`` declares
         exactly those ids, an empty/absent one declares every agent).
         """
-        if value is not None and value not in ("all", "custom"):
-            raise ValueError("agent_invoke_mode must be one of: all, custom (or null)")
+        from app.core.tool_access import AGENT_INVOKE_MODES
+
+        if value is not None and value not in AGENT_INVOKE_MODES:
+            raise ValueError("agent_invoke_mode must be one of: all, custom, none (or null)")
         return value
 
 
@@ -958,7 +961,7 @@ class AgentExportData(BaseModel):
     # carries None and imports by inference.
     tool_selection_mode: Optional[str] = None
     enabled_agents: Optional[List[str]] = None
-    agent_invoke_mode: Optional[str] = None  # None | "all" | "custom" (see ProfileConfig)
+    agent_invoke_mode: Optional[str] = None  # None | "all" | "custom" | "none" (see ProfileConfig)
     ai_tools: Optional[AIToolsConfig] = None
     memory: Optional[str] = None
     include_partial_messages: Optional[bool] = True

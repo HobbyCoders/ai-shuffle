@@ -310,6 +310,12 @@ async def get_all_available_subagents(
                 detail=f"Profile not found: {profile_id}"
             )
 
+        # Subagents "None": this agent can call no subagent, so there is
+        # nothing to mention.
+        from app.core.tool_access import subagents_disabled
+        if subagents_disabled(profile.get("config")):
+            return []
+
         # Track seen IDs for deduplication (profile > project > plugin priority)
         seen_ids: set = set()
         result: List[UnifiedSubagentItem] = []
@@ -940,9 +946,12 @@ async def update_enabled_agents(
                 detail=f"Invalid subagent IDs: {', '.join(invalid_ids)}"
             )
 
-        # Update profile config
+        # Update profile config. Granting agents to a "None" roster makes it a
+        # "Selected only" one, or the grant would have no effect.
         config = profile.get("config", {})
         config["enabled_agents"] = request.enabled_agents
+        if request.enabled_agents and config.get("agent_invoke_mode") == "none":
+            config["agent_invoke_mode"] = "custom"
 
         database.update_profile(profile_id=profile_id, config=config, allow_builtin=True)
 
@@ -984,9 +993,13 @@ async def enable_subagent(
         config = profile.get("config", {})
         enabled_agents = config.get("enabled_agents", [])
 
-        if subagent_id not in enabled_agents:
-            enabled_agents.append(subagent_id)
+        if subagent_id not in enabled_agents or config.get("agent_invoke_mode") == "none":
+            if subagent_id not in enabled_agents:
+                enabled_agents.append(subagent_id)
             config["enabled_agents"] = enabled_agents
+            # A grant on a "None" roster makes it "Selected only".
+            if config.get("agent_invoke_mode") == "none":
+                config["agent_invoke_mode"] = "custom"
             database.update_profile(profile_id=profile_id, config=config, allow_builtin=True)
 
         return {"enabled": True, "subagent_id": subagent_id}
@@ -1250,11 +1263,15 @@ async def import_profile(
             config["tool_selection_mode"] = agent_data.tool_selection_mode
         # Invoke grants (A10). An explicit mode in the file is authoritative: under
         # "custom" the allowlist is exact, so it is written even when it filters to
-        # empty ("may invoke no agents"). Files with no mode keep legacy behavior.
-        invoke_mode = agent_data.agent_invoke_mode if agent_data.agent_invoke_mode in ("all", "custom") else None
+        # empty ("may invoke no agents"); "none" calls no subagents and keeps no
+        # selection. Files with no (or an unknown) mode keep legacy behavior.
+        from app.core.tool_access import AGENT_INVOKE_MODES
+        invoke_mode = agent_data.agent_invoke_mode if agent_data.agent_invoke_mode in AGENT_INVOKE_MODES else None
         if invoke_mode:
             config["agent_invoke_mode"] = invoke_mode
-        if agent_data.enabled_agents or invoke_mode == "custom":
+        if invoke_mode == "none":
+            config["enabled_agents"] = []
+        elif agent_data.enabled_agents or invoke_mode == "custom":
             # Filter out subagent IDs that don't exist in the current environment
             # to prevent ghost agents from inflating the count
             incoming_agents = agent_data.enabled_agents or []

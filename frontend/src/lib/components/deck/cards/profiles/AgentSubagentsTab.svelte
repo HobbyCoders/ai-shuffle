@@ -1,38 +1,47 @@
 <script lang="ts">
 	/**
-	 * The Subagents tab: which agents this one may hand work to. "All agents"
-	 * or "Selected only" (the exact allowlist, empty = none). Each caller's
-	 * provider assignments still narrow the roster at run time.
+	 * The Subagents tab: which agents this one may hand work to. "All agents",
+	 * "Selected only" (the exact allowlist) or "None" (no subagents: the server
+	 * takes Task and Swarm off this agent). Each caller's provider assignments
+	 * still narrow the roster at run time.
 	 */
 	import type { AvatarId } from '$lib/api/assistant';
 	import RowGroup from '$lib/components/settings/rows/RowGroup.svelte';
 	import SettingRow from '$lib/components/settings/rows/SettingRow.svelte';
 	import Segmented from '$lib/components/settings/rows/Segmented.svelte';
 	import Switch from '$lib/components/settings/rows/Switch.svelte';
+	import InlineBanner from '$lib/components/settings/rows/InlineBanner.svelte';
 	import AgentAvatar from '$lib/components/assistant/AgentAvatar.svelte';
-	import type { RosterAgent } from './agentForm';
+	import type { AgentInvokeMode, RosterAgent } from './agentForm';
 	import { pinnedProviders } from './agentList';
 
 	interface Props {
 		/** Every other agent (never the one being edited). */
 		agents: RosterAgent[];
-		mode: 'all' | 'custom';
+		mode: AgentInvokeMode;
 		enabled: string[];
 		/** True when agents with no pinned model run on the subagent default. */
 		hasDefault: boolean;
 		avatarOf: (id: string) => AvatarId;
 		colorOf: (id: string) => string | null;
-		onMode: (mode: 'all' | 'custom') => void;
+		onMode: (mode: AgentInvokeMode) => void;
 		onToggle: (id: string) => void;
 		onSetEnabled: (ids: string[]) => void;
 	}
 
 	let { agents, mode, enabled, hasDefault, avatarOf, colorOf, onMode, onToggle, onSetEnabled }: Props = $props();
 
-	const all = $derived(mode !== 'custom');
+	const MODES: { value: AgentInvokeMode; label: string }[] = [
+		{ value: 'all', label: 'All agents' },
+		{ value: 'custom', label: 'Selected only' },
+		{ value: 'none', label: 'None' }
+	];
+
+	const all = $derived(mode === 'all');
+	const off = $derived(mode === 'none');
 	const selected = $derived(enabled.filter((id) => agents.some((a) => a.id === id)).length);
 	const summary = $derived(
-		agents.length === 0 ? '' : all ? `All ${agents.length}` : `${selected} of ${agents.length}`
+		off ? 'None' : agents.length === 0 ? '' : all ? `All ${agents.length}` : `${selected} of ${agents.length}`
 	);
 
 	function reach(agent: RosterAgent): string {
@@ -45,26 +54,27 @@
 </script>
 
 <RowGroup title="Roster">
-	<SettingRow label="Who it can call" hint="Caller's provider still applies.">
-		<Segmented
-			value={mode}
-			options={[
-				{ value: 'all', label: 'All agents' },
-				{ value: 'custom', label: 'Selected only' }
-			]}
-			onchange={(v) => onMode(v as 'all' | 'custom')}
-		/>
+	<SettingRow label="Who it can call" hint={off ? 'Task and Swarm are off.' : "Caller's provider still applies."}>
+		<div class="roster-mode">
+			<Segmented value={mode} options={MODES} onchange={(v) => onMode(v)} />
+		</div>
 	</SettingRow>
 </RowGroup>
 
+{#if mode === 'custom' && selected === 0 && agents.length > 0}
+	<InlineBanner tone="info">Nothing selected. To turn subagents off, pick None.</InlineBanner>
+{/if}
+
 <RowGroup title="Agents" count={summary}>
 	{#snippet actions()}
-		{#if !all && agents.length > 0}
+		{#if mode === 'custom' && agents.length > 0}
 			<button type="button" class="lnk" onclick={() => onSetEnabled(agents.map((a) => a.id))}>Select all</button>
 			<button type="button" class="lnk muted" onclick={() => onSetEnabled([])}>Clear</button>
 		{/if}
 	{/snippet}
-	{#if agents.length === 0}
+	{#if off}
+		<p class="none">This agent can't hand work to other agents.</p>
+	{:else if agents.length === 0}
 		<p class="none">No other agents yet.</p>
 	{:else}
 		{#each agents as agent (agent.id)}
@@ -131,5 +141,39 @@
 	}
 	.lnk:hover {
 		text-decoration: underline;
+	}
+	.roster-mode {
+		max-width: 100%;
+		min-width: 0;
+	}
+
+	/* Phone (the detail's narrow layout): the three choices share the row's
+	   full width, and each one is a 44px touch target. The visible pill stays
+	   38px; ::after lends the last few pixels without moving anything. */
+	@container agd (max-width: 560px) {
+		/* Outranks AgentDetail's narrow-row `.agd .st-row > .st-rc` sizing. */
+		:global(.agd .st-row:has(.roster-mode) > .st-rc.st-rc) {
+			flex: 1 1 100%;
+		}
+		.roster-mode {
+			width: 100%;
+		}
+		.roster-mode :global(.st-seg) {
+			display: flex;
+			width: 100%;
+			overflow: visible;
+		}
+		.roster-mode :global(.st-seg button) {
+			position: relative;
+			flex: 1 1 0;
+			min-width: 0;
+			height: 38px;
+			padding: 0 6px;
+		}
+		.roster-mode :global(.st-seg button::after) {
+			content: '';
+			position: absolute;
+			inset: -3px 0;
+		}
 	}
 </style>

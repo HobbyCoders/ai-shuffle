@@ -168,6 +168,43 @@ def _clean_description(value: Any, *, limit: int = 240) -> str:
     return text[:cut].rstrip() + "…"
 
 
+def caller_subagents_refusal(caller_profile_id: str | None) -> tuple[str, str] | None:
+    """The reason and message for a disallowed or unreadable caller policy.
+
+    A caller identity whose profile cannot be read fails closed. A stale tool
+    surface or an explicit voice roster must never bypass the stored policy.
+    No identity retains the legacy/default policy, not an unreadable profile.
+    """
+    if not caller_profile_id:
+        return None
+    from app.core.tool_access import subagents_disabled
+    from app.db import database
+
+    try:
+        caller = database.get_profile(caller_profile_id)
+    except Exception:
+        logger.debug("Could not load caller profile for roster mode", exc_info=True)
+        caller = None
+    if not caller:
+        return (
+            "caller_profile_unavailable",
+            "The calling agent profile is unavailable; its subagent policy could not be read. "
+            "Nothing was dispatched; restore the profile or retry when it is readable.",
+        )
+    if subagents_disabled(caller.get("config")):
+        return (
+            "subagents_disabled",
+            "This agent is set to call no subagents (Subagents: None). "
+            "Nothing was dispatched; do the work yourself.",
+        )
+    return None
+
+
+def caller_subagents_disabled(caller_profile_id: str | None) -> bool:
+    """Whether subagents are disallowed or the caller policy is unreadable."""
+    return caller_subagents_refusal(caller_profile_id) is not None
+
+
 def available_subagents(
     caller_profile_id: str | None, provider_id: str | None
 ) -> tuple[SubagentTarget, ...]:
@@ -199,10 +236,14 @@ def available_subagents(
     caller_config = caller.get("config") or {}
     raw_allowlist = caller_config.get("enabled_agents")
     # Current profiles persist the choice explicitly: ``all`` exposes every
-    # provider-compatible target, while ``custom`` exposes exactly the selected
-    # IDs (including an empty set). Older profiles had no mode; preserve their
-    # historical empty-means-all behavior.
+    # provider-compatible target, ``custom`` exposes exactly the selected IDs
+    # (including an empty set) and ``none`` exposes nothing (the delegation
+    # tools are off the surface too, see ``tool_access.resolve_tool_access``).
+    # Older profiles had no mode; preserve their historical empty-means-all
+    # behavior.
     invoke_mode = caller_config.get("agent_invoke_mode")
+    if invoke_mode == "none":
+        return ()
     if invoke_mode == "custom":
         allowlist = {
             str(value)
@@ -635,6 +676,10 @@ def build_task_contract(
     from fluid.tools.fragments import SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
 
     targets = list(available_subagents(caller_profile_id, provider_id))
+    if caller_subagents_disabled(caller_profile_id):
+        # "None" means no subagent at all: file/plugin agents are not offered
+        # either (the tool itself is off this caller's surface as well).
+        additional_targets = ()
 
     # File/plugin agents borrow the caller's provider and selected model. They
     # are valid Task targets too, but a stored DB agent wins every ID/name

@@ -28,7 +28,16 @@
 	import AgentModelsTab from './AgentModelsTab.svelte';
 	import AgentAdvancedTab from './AgentAdvancedTab.svelte';
 	import type { ToolSelectionMode } from './toolSurface';
-	import { AGENT_TABS, type AgentForm, type AgentTab, type AgentTemplate, type GroupState, type RosterAgent } from './agentForm';
+	import {
+		AGENT_TABS,
+		invokeModePatch,
+		type AgentForm,
+		type AgentInvokeMode,
+		type AgentTab,
+		type AgentTemplate,
+		type GroupState,
+		type RosterAgent
+	} from './agentForm';
 
 	interface Props {
 		form: AgentForm;
@@ -161,9 +170,18 @@
 		{ label: 'Chats', value: facts.chats === null ? null : facts.chats.toLocaleString() }
 	]);
 
+	// None: no count on the Subagents tab (the header fact says "None").
 	const tabs = $derived(
-		AGENT_TABS.map((t) => (t.id === 'subagents' ? { ...t, count: others.length } : { ...t }))
+		AGENT_TABS.map((t) =>
+			t.id === 'subagents' ? { ...t, count: form.agent_invoke_mode === 'none' ? undefined : others.length } : { ...t }
+		)
 	);
+
+	function pickInvokeMode(mode: AgentInvokeMode) {
+		for (const [field, value] of Object.entries(invokeModePatch(mode))) {
+			onFormChange(field as keyof AgentForm, value);
+		}
+	}
 
 	/** Header Delete / Restore: open the danger zone with its confirm armed. */
 	async function askDanger(which: 'delete' | 'restore') {
@@ -333,7 +351,7 @@
 					hasDefault={!!subagentDefault}
 					{avatarOf}
 					{colorOf}
-					onMode={(m) => onFormChange('agent_invoke_mode', m)}
+					onMode={pickInvokeMode}
 					onToggle={onToggleAgent}
 					onSetEnabled={(ids) => onFormChange('enabled_agents', ids)}
 				/>

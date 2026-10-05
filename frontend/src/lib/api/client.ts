@@ -364,8 +364,8 @@ export interface ProfileConfig {
 	enable_file_checkpointing?: boolean;  // LEGACY (SDK-era): still read by chat rewind gating for old rows; no longer written
 	ai_tools?: Record<string, boolean>;  // AI tool toggles (image_generation, video_generation, etc.)
 	computer_use?: { enabled?: boolean; target_display?: number | null; require_confirmation?: boolean };  // Host desktop control (native mode only)
-	enabled_agents?: string[];  // Agents declared into this agent's context (name+description); empty/unset = all. NEVER a dispatch restriction
-	agent_invoke_mode?: 'all' | 'custom' | null;  // Context-declaration mode: 'all' = declare every agent, 'custom' = declare exactly enabled_agents (empty = none), null/unset = legacy (non-empty list declares those, empty declares all)
+	enabled_agents?: string[];  // The agents this one may call under agent_invoke_mode 'custom'
+	agent_invoke_mode?: 'all' | 'custom' | 'none' | null;  // Who it can call: 'all' = every agent, 'custom' = exactly enabled_agents (empty = no listed agent), 'none' = no subagents (Task/Swarm off), null/unset = legacy (non-empty list = those, empty = all)
 	memory?: string;  // Per-agent memory (plain text); agent-editable at runtime via the Memory tool, injected into the system prompt
 	cwd?: string;  // Working directory override
 	add_dirs?: string[];  // Additional directories the agent may access
@@ -496,7 +496,7 @@ export interface AgentExportData {
 	allowed_tools: string[] | null;
 	disallowed_tools: string[] | null;
 	enabled_agents: string[] | null;
-	agent_invoke_mode: string | null;  // 'all' | 'custom' | null — see ProfileConfig.agent_invoke_mode
+	agent_invoke_mode: string | null;  // 'all' | 'custom' | 'none' | null — see ProfileConfig.agent_invoke_mode
 	ai_tools: Record<string, boolean> | null;
 	memory?: string | null;
 	include_partial_messages: boolean | null;

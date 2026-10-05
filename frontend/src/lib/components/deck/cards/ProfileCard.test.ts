@@ -213,6 +213,60 @@ describe('detail', () => {
 	});
 });
 
+describe('subagents roster', () => {
+	const fact = () => screen.getByRole('button', { name: /^Subagents: / });
+
+	it('saves None with an empty selection and says None in the header', async () => {
+		agents = agents.map((a) =>
+			a.id === 'agent' ? { ...a, config: { ...a.config, agent_invoke_mode: 'custom', enabled_agents: ['Explore'] } as never } : a
+		);
+		await appData.loadProfiles();
+		render(ProfileCard, { initialSelectedId: 'agent' });
+		await heading('Researcher');
+		expect(fact().getAttribute('aria-label')).toMatch(/^Subagents: 1 of 1\./);
+		await fireEvent.click(tab('Subagents'));
+		await fireEvent.click(screen.getByRole('button', { name: 'None' }));
+		expect(fact().getAttribute('aria-label')).toMatch(/^Subagents: None\./);
+		await waitFor(() => expect(mocks.put).toHaveBeenCalled(), { timeout: 2000 });
+		const [path, payload] = mocks.put.mock.calls.at(-1)!;
+		expect(path).toBe('/agents/agent');
+		expect(payload.config.agent_invoke_mode).toBe('none');
+		expect(payload.config.enabled_agents).toEqual([]);
+		// Back to Selected only: the old pick is gone, nothing is selected.
+		await fireEvent.click(screen.getByRole('button', { name: 'Selected only' }));
+		expect(fact().getAttribute('aria-label')).toMatch(/^Subagents: 0 of 1\./);
+		expect(screen.getByRole('switch', { name: 'Allow Explore' }).getAttribute('aria-checked')).toBe('false');
+		await waitFor(() => expect(mocks.put.mock.calls.at(-1)![1].config.agent_invoke_mode).toBe('custom'), { timeout: 2000 });
+		expect(mocks.put.mock.calls.at(-1)![1].config.enabled_agents).toEqual([]);
+	});
+
+	it('reopens an agent saved as None as None', async () => {
+		agents = agents.map((a) =>
+			a.id === 'agent' ? { ...a, config: { ...a.config, agent_invoke_mode: 'none', enabled_agents: [] } as never } : a
+		);
+		await appData.loadProfiles();
+		render(ProfileCard, { initialSelectedId: 'agent' });
+		await heading('Researcher');
+		expect(fact().getAttribute('aria-label')).toMatch(/^Subagents: None\./);
+		await fireEvent.click(tab('Subagents'));
+		expect(screen.getByRole('button', { name: 'None' }).getAttribute('aria-pressed')).toBe('true');
+		expect(screen.queryAllByRole('switch')).toHaveLength(0);
+	});
+
+	it('keeps an older "Selected only" agent with nothing selected as 0 of N', async () => {
+		agents = agents.map((a) =>
+			a.id === 'agent' ? { ...a, config: { ...a.config, agent_invoke_mode: 'custom', enabled_agents: [] } as never } : a
+		);
+		await appData.loadProfiles();
+		render(ProfileCard, { initialSelectedId: 'agent' });
+		await heading('Researcher');
+		expect(fact().getAttribute('aria-label')).toMatch(/^Subagents: 0 of 1\./);
+		await fireEvent.click(tab('Subagents'));
+		expect(screen.getByRole('button', { name: 'Selected only' }).getAttribute('aria-pressed')).toBe('true');
+		expect(screen.getByText('Nothing selected. To turn subagents off, pick None.')).toBeTruthy();
+	});
+});
+
 describe('autosave and identity', () => {
 	it('omits the stale read-projected avatar after an identity edit', async () => {
 		render(ProfileCard, { initialSelectedId: 'agent' });

@@ -628,6 +628,13 @@ class TestNestingGuardWiring:
         from app.core.config import settings
         from app.core import task_dispatch as td
 
+        from app.db import database
+
+        # A readable, unrestricted caller reaches the depth gate. A missing
+        # identified profile is refused earlier by the caller-policy guard.
+        database.create_profile("caller", "Caller", None, {
+            "model": "opus", "agent_invoke_mode": "all",
+        })
         monkeypatch.setattr(settings, "task_tool_max_depth", 5)
         # Simulate a caller five worker-levels deep.
         monkeypatch.setattr(

@@ -2,6 +2,7 @@
 // replies, for browser checks of #1825 without a worker.
 //
 //   ?theme=vercel            Vercel preset (default: the app's default dark)
+//   ?light=1                 light mode (default: dark)
 //   ?mobile=1                the phone shell (platform 'mobile')
 //   ?default=on|unset|404    GET /settings/subagent-default (default: on)
 //   ?colors=0                the agent API without avatar_color
@@ -200,7 +201,7 @@ const [{ auth }, { platform }, { theme }, { appData }, { default: BuildPage }] =
 	import('../src/lib/components/layout/BuildPage.svelte')
 ]);
 if (params.get('mobile') === '1') platform.set('mobile');
-theme.setTheme('dark');
+theme.setTheme(params.get('light') === '1' ? 'light' : 'dark');
 theme.setPreset(params.get('theme') === 'vercel' ? 'vercel' : null);
 await auth.checkAuth().catch(() => {});
 void appData.loadProfiles();

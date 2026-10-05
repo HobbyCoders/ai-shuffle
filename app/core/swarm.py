@@ -239,6 +239,13 @@ def make_handler(session_id_supplier):
             return ToolOutcome(text="Calling session is not registered", is_error=True)
         try:
             if data.get("action") == "start":
+                from app.core.agent_provider_models import caller_subagents_refusal
+                from app.db import database
+
+                caller = await asyncio.to_thread(database.get_session, session_id)
+                refusal = caller_subagents_refusal((caller or {}).get("profile_id"))
+                if refusal is not None:
+                    return ToolOutcome(text=refusal[1], is_error=True)
                 validate(data)
                 coordinator = coordinators.get(session_id)
                 if coordinator is None:

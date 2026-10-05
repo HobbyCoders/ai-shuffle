@@ -138,8 +138,8 @@ The top-level object has `id`, `name`, `description`, `avatar_color`, `is_builti
 | `allowed_tools` | string[] | The tool surface in `allow` mode. Exact names or `fnmatch` patterns (a whole MCP server saves as `mcp__<server>__*`) |
 | `disallowed_tools` | string[] | The block list in `disallow` mode. Same entry shapes |
 | `enabled_plugins` | string[] | Plugin paths to enable |
-| `enabled_agents` | string[] | IDs of the agents declared into this agent's context — they appear in the prompt's agents index as name + description. This is not an allowlist: the Task tool dispatches any agent that resolves. Read together with `agent_invoke_mode` |
-| `agent_invoke_mode` | string | Context-declaration mode: `all` (declare every agent), `custom` (declare exactly `enabled_agents` — an empty list declares none), or omitted/null (legacy: a non-empty `enabled_agents` declares those ids, an empty/absent one declares all) |
+| `enabled_agents` | string[] | The agents this one may call when `agent_invoke_mode` is `custom` |
+| `agent_invoke_mode` | string | Who it can call: `all` (every other agent), `custom` (exactly `enabled_agents`; an empty list calls none of the listed agents), `none` (no subagents: the Task and Swarm tools are not offered and a Task call is refused), or omitted/null (legacy: a non-empty `enabled_agents` means those ids, an empty/absent one means all). Any other value is rejected with 422 |
 | `memory` | string | Legacy per-agent memory text from old exports. Accepted on import for compatibility, but no longer injected anywhere — memory is the continual learner plus session recall |
 | `setting_sources` | string[] | Config sources: `user`, `project`, `local` |
 | `cwd` | string | Override working directory |

@@ -166,8 +166,8 @@ Controls which Claude Code configuration files are loaded. By default, all sourc
 
 | Field              | Type          | Description                                     |
 |--------------------|---------------|-------------------------------------------------|
-| `enabled_agents`   | list[string]  | Agent IDs declared into this agent's context (name + description in the prompt's agents index). Never a dispatch restriction — read with `agent_invoke_mode` |
-| `agent_invoke_mode`| string        | `all` (declare every agent), `custom` (declare exactly `enabled_agents`; empty = declare none), or null (legacy: a non-empty `enabled_agents` declares those ids, empty/absent declares all). The Task tool can dispatch any agent that resolves by id or name, declared or not |
+| `enabled_agents`   | list[string]  | The agents this one may call when `agent_invoke_mode` is `custom` |
+| `agent_invoke_mode`| string        | Who it can call (the **Subagents** tab): `all` (every other agent), `custom` ("Selected only": exactly `enabled_agents`; an empty list calls none of the listed agents), `none` (no subagents at all: the Task and Swarm tools are not offered, the prompt lists no agents, and choosing it clears `enabled_agents`), or null (legacy: a non-empty `enabled_agents` means those ids, empty/absent means all). The caller's provider still narrows the roster at run time. Under `all` and `custom`, agents defined in files or plugins stay callable |
 | `enabled_plugins`  | list[string]  | Extra plugins (`name@marketplace` or a path) to load for this agent's sessions, on top of the globally enabled ones |
 
 ### Advanced

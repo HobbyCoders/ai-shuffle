@@ -198,13 +198,47 @@ def tool_selection_mode(config: Dict[str, Any]) -> str:
     return infer_tool_selection_mode(config)
 
 
+# The per-agent subagent roster setting (``agent_invoke_mode``): ``all`` = every
+# agent, ``custom`` = exactly ``enabled_agents``, ``none`` = no subagents at all.
+# A missing value is the legacy inference (see
+# ``app.core.agent_provider_models.available_subagents``).
+AGENT_INVOKE_MODES = ("all", "custom", "none")
+
+# The tools an agent delegates with. ``none`` takes them off the surface on both
+# legs: the bare names cover fluid's builtins and the delegated leg's blocklist
+# expansion, the bridged spelling covers the ``builtins`` server's Task.
+SUBAGENT_DELEGATION_TOOLS = ("Task", "Agent", "Swarm", "mcp__builtins__Task")
+
+
+def subagents_disabled(config: Optional[Dict[str, Any]]) -> bool:
+    """Whether this agent config may call no subagents (``agent_invoke_mode: none``)."""
+    return (config or {}).get("agent_invoke_mode") == "none"
+
+
+def _without_delegation(access: ToolAccess) -> ToolAccess:
+    """``access`` with the delegation tools added to its blocklist."""
+    blocked = list(access.disallowed or [])
+    if DENY_ALL in blocked:
+        return access
+    blocked.extend(name for name in SUBAGENT_DELEGATION_TOOLS if name not in blocked)
+    return ToolAccess(allowed=access.allowed, disallowed=blocked)
+
+
 def resolve_tool_access(config: Optional[Dict[str, Any]]) -> ToolAccess:
     """Resolve one agent config into ``ToolAccess``.
 
     The single seam both legs read. Legacy aliases are applied to whichever
-    list survives.
+    list survives. An agent whose subagent roster is ``none`` also loses the
+    delegation tools, whatever its tool selection says.
     """
-    config = config or {}
+    access = _resolve_tool_selection(config or {})
+    if subagents_disabled(config):
+        return _without_delegation(access)
+    return access
+
+
+def _resolve_tool_selection(config: Dict[str, Any]) -> ToolAccess:
+    """``tool_selection_mode`` alone, as the table in the module docstring."""
     mode = tool_selection_mode(config)
 
     if mode == "none":

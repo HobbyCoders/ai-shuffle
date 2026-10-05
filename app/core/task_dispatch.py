@@ -1618,6 +1618,14 @@ async def _dispatch_task_tool(
     )
 
     ref = (args.get("agent") or "").strip()
+    from app.core.agent_provider_models import caller_subagents_refusal
+
+    # Policy refusal precedes target resolution, the nesting gate and admission.
+    # It also applies to explicit rosters (voice) and stale tool surfaces.
+    refusal = caller_subagents_refusal(str(caller_pid))
+    if refusal is not None:
+        reason, error = refusal
+        return {"ok": False, "error": error, "reason": reason}
     if roster is None:
         roster = available_subagents(caller_pid, effective_provider_id)
     target, roster_error = resolve_subagent(ref, roster)

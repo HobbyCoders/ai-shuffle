@@ -51,7 +51,9 @@
 		type AgentTab,
 		type AgentTemplate,
 		type GroupState,
-		type RosterAgent
+		type RosterAgent,
+		invokeModeOf,
+		subagentsFact
 	} from './profiles/agentForm';
 	import {
 		FOLDER_NONE,
@@ -302,7 +304,8 @@
 			allowed_tools: [],
 			disallowed_tools: [],
 			enabled_agents: [],
-			// 'all' = unrestricted; 'custom' = enabled_agents is the exact allowlist.
+			// 'all' = unrestricted; 'custom' = enabled_agents is the exact allowlist;
+			// 'none' = no subagents.
 			agent_invoke_mode: 'all',
 			include_partial_messages: true,
 			system_prompt_content: '',
@@ -412,6 +415,7 @@
 	 * else declares every agent but itself.
 	 */
 	function invokableCount(id: string, mode: string | undefined, enabledIds: string[] | undefined): number {
+		if (mode === 'none') return 0;
 		const enabled = (enabledIds ?? []).filter((x) => allSubagents.some((a) => a.id === x)).length;
 		if (mode === 'custom') return enabled;
 		if (!mode && enabled > 0) return enabled;
@@ -428,7 +432,7 @@
 					: toolSelectionMode === 'none'
 						? 'None'
 						: `${effectiveToolCount} of ${totalTools}`,
-			subagents: n === 0 ? 'None' : profileForm.agent_invoke_mode !== 'custom' ? `All ${n}` : `${reach} of ${n}`,
+			subagents: subagentsFact(profileForm.agent_invoke_mode, n, reach),
 			model: modelFact(profileForm.provider_models),
 			chats: editingProfile ? (editingProfile.session_count ?? null) : null
 		};
@@ -522,16 +526,8 @@
 			// empty match would wipe the allowlist on save. Stale ids of deleted
 			// agents are pruned at save time instead.
 			enabled_agents: ((config as any).enabled_agents || []).filter((id: string) => id !== profile.id),
-			// Stored mode wins; legacy rows (no mode) infer it from the allowlist —
-			// a non-empty list meant "restrict to these", empty meant "any agent".
-			agent_invoke_mode:
-				(config as any).agent_invoke_mode === 'custom'
-					? 'custom'
-					: (config as any).agent_invoke_mode === 'all'
-						? 'all'
-						: ((config as any).enabled_agents?.length ?? 0) > 0
-							? 'custom'
-							: 'all',
+			// Stored mode wins; legacy rows (no mode) infer it from the allowlist.
+			agent_invoke_mode: invokeModeOf((config as any).agent_invoke_mode, (config as any).enabled_agents),
 			include_partial_messages: config.include_partial_messages !== false,
 			// Legacy preset-shaped prompts (`{type:'preset', append}`) surface their
 			// append text as the prompt — per ruling A12 the configured prompt IS
@@ -684,12 +680,15 @@
 		// Invoke allowlist. Prune ids of deleted agents, but only when the agent
 		// list actually loaded — pruning against an empty/unloaded list would wipe
 		// the allowlist.
+		// None keeps no selection.
 		config.enabled_agents =
-			allSubagents.length > 0
+			profileForm.agent_invoke_mode === 'none'
+				? []
+				: allSubagents.length > 0
 				? profileForm.enabled_agents.filter((id) => allSubagents.some((a) => a.id === id))
 				: profileForm.enabled_agents;
 		// Persist the invoke-grant mode explicitly so "custom with nothing selected"
-		// (= may invoke no agents) round-trips instead of reading as unrestricted.
+		// and None round-trip instead of reading as unrestricted.
 		config.agent_invoke_mode = profileForm.agent_invoke_mode;
 		if (profileForm.cwd.trim()) config.cwd = profileForm.cwd;
 		if (profileForm.add_dirs.trim()) {
@@ -978,14 +977,7 @@
 			allowed_tools: agent.allowed_tools || [],
 			disallowed_tools: agent.disallowed_tools || [],
 			enabled_agents: agent.enabled_agents || [],
-			agent_invoke_mode:
-				agent.agent_invoke_mode === 'custom'
-					? 'custom'
-					: agent.agent_invoke_mode === 'all'
-						? 'all'
-						: (agent.enabled_agents?.length ?? 0) > 0
-							? 'custom'
-							: 'all',
+			agent_invoke_mode: invokeModeOf(agent.agent_invoke_mode, agent.enabled_agents),
 			include_partial_messages: agent.include_partial_messages !== false,
 			system_prompt_content: spContent,
 			env_vars: agent.env ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value as string })) : [],

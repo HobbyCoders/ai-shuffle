@@ -2406,6 +2406,117 @@ class TestAgentInvokeMode:
             assert "agent_invoke_mode" not in result["config"]
             assert "enabled_agents" not in result["config"]
 
+    # --- Subagents "None" -------------------------------------------------
+
+    def test_none_is_storable(self):
+        from app.core.models import ProfileConfig
+
+        assert ProfileConfig(agent_invoke_mode="none").agent_invoke_mode == "none"
+
+    @pytest.mark.asyncio
+    async def test_update_profile_round_trips_none(self):
+        """An agent saved as None reads back as None with no selection."""
+        from app.api.agents import update_profile, get_profile
+        from app.core.models import ProfileUpdate, ProfileConfig
+
+        profile = sample_profile()
+        stored = {"model": "sonnet", "agent_invoke_mode": "none", "enabled_agents": []}
+        updated_profile = {**profile, "config": stored}
+
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = profile
+            mock_db.update_profile.return_value = updated_profile
+            request = ProfileUpdate(config=ProfileConfig(
+                model="sonnet", agent_invoke_mode="none", enabled_agents=[]))
+            await update_profile("test-profile", request, token="test-token")
+            saved = mock_db.update_profile.call_args[1]["config"]
+            assert saved["agent_invoke_mode"] == "none"
+            assert saved["enabled_agents"] == []
+
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = updated_profile
+            fetched = await get_profile(create_mock_request(), "test-profile", token="test-token")
+            assert fetched["config"]["agent_invoke_mode"] == "none"
+            assert fetched["config"]["enabled_agents"] == []
+
+    @pytest.mark.asyncio
+    async def test_export_then_import_keeps_none_and_drops_any_selection(self):
+        import json
+        from app.api.agents import export_profile, import_profile
+        from app.core.models import AgentImportRequest
+
+        now = datetime.now(timezone.utc).isoformat()
+        profile = {**sample_profile(), "config": {"agent_invoke_mode": "none", "enabled_agents": []}}
+        with patch("app.api.agents.database") as mock_db, \
+                patch("app.api.agents.get_api_user_from_request", return_value=None):
+            mock_db.get_profile.return_value = profile
+            body = json.loads((await export_profile(
+                create_mock_request(), "test-profile", token="test-token")).body)
+        assert body["agent"]["agent_invoke_mode"] == "none"
+
+        # A hand-edited file may still carry ids; None keeps no selection.
+        body["agent"]["enabled_agents"] = ["test-subagent"]
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = None
+            mock_db.get_all_subagents.return_value = [sample_subagent()]
+            mock_db.create_profile.side_effect = lambda **kw: {
+                "id": kw["profile_id"], "name": kw["name"], "description": kw["description"],
+                "config": kw["config"], "is_builtin": False, "created_at": now, "updated_at": now,
+            }
+            result = await import_profile(AgentImportRequest(**body), token="test-token")
+        assert result["config"]["agent_invoke_mode"] == "none"
+        assert result["config"]["enabled_agents"] == []
+
+    @pytest.mark.asyncio
+    async def test_old_export_with_a_selection_still_imports(self):
+        """A file from before None (no mode, a list) imports as before."""
+        from app.api.agents import import_profile
+        from app.core.models import AgentImportRequest
+
+        now = datetime.now(timezone.utc).isoformat()
+        old_file = {
+            "version": "1.0", "type": "ai-shuffle-agent",
+            "agent": {"name": "Old Agent", "enabled_agents": ["test-subagent"]},
+        }
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = None
+            mock_db.get_all_subagents.return_value = [sample_subagent()]
+            mock_db.create_profile.side_effect = lambda **kw: {
+                "id": kw["profile_id"], "name": kw["name"], "description": kw["description"],
+                "config": kw["config"], "is_builtin": False, "created_at": now, "updated_at": now,
+            }
+            result = await import_profile(AgentImportRequest(**old_file), token="test-token")
+        assert "agent_invoke_mode" not in result["config"]
+        assert result["config"]["enabled_agents"] == ["test-subagent"]
+
+    @pytest.mark.asyncio
+    async def test_legacy_enable_endpoint_turns_none_into_selected_only(self):
+        """Granting one agent through the old endpoint must take effect."""
+        from app.api.agents import enable_subagent
+
+        profile = {**sample_profile(), "config": {"agent_invoke_mode": "none", "enabled_agents": []}}
+        with patch("app.api.agents.database") as mock_db:
+            mock_db.get_profile.return_value = profile
+            mock_db.get_subagent.return_value = sample_subagent()
+            await enable_subagent("test-profile", "test-subagent", token="test-token")
+            saved = mock_db.update_profile.call_args[1]["config"]
+        assert saved["agent_invoke_mode"] == "custom"
+        assert saved["enabled_agents"] == ["test-subagent"]
+
+    @pytest.mark.asyncio
+    async def test_mention_autocomplete_is_empty_under_none(self):
+        from app.api.agents import get_all_available_subagents
+
+        profile = {**sample_profile(), "config": {"agent_invoke_mode": "none", "enabled_agents": ["test-subagent"]}}
+        with patch("app.api.agents.database") as mock_db, \
+                patch("app.api.agents.get_api_user_from_request", return_value=None):
+            mock_db.get_profile.return_value = profile
+            mock_db.get_subagent.return_value = sample_subagent()
+            result = await get_all_available_subagents(
+                create_mock_request(), "test-profile", project_id=None, worktree_id=None,
+                search="", limit=30, token="test-token")
+        assert result == []
+
 
 # =============================================================================
 # API users' assigned agents (profile_ids) on the per-agent endpoints
