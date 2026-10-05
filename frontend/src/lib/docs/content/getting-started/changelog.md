@@ -8,6 +8,17 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
+## Next release
+
+### Action needed
+
+- After updating a worker, use **Agents → General Purpose → Restore defaults** to adopt the new built-in prompt and description. Updates leave saved definitions unchanged; restoring replaces customized fields with defaults.
+
+### Agents and providers
+
+- General Purpose now completes assigned investigations, root-cause diagnosis, code or PR reviews, audits and reproductions, including report-only work, instead of handing the task back to another role.
+- The built-in Explore agent is removed. General Purpose, or the calling agent itself, handles searches and investigations. Updated workers retire the stored built-in and ignore it when synced from older workers; custom agents with the same name are kept. Automations using the removed built-in are preserved on General Purpose but disabled for review before re-enabling. Removing the roster entry and changing prompts costs each affected agent one uncached prompt after workers update.
+
 ## 0.9.1
 
 - The phone chat controls are redesigned: a larger composer, a quick bar for model, effort and access, one "Chat controls" panel, and prompts you approve or deny above the composer. The Android app can switch the worker it shows from the "Connected to" bar.

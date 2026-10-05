@@ -191,6 +191,63 @@ def delete_profile(profile_id: str) -> bool:
         return cursor.rowcount > 0
 
 
+def retire_builtin_explore() -> bool:
+    """Retire the removed built-in, never an owner-created agent with this id.
+
+    Automations have a required/restricted agent FK. Preserve their definitions
+    on General Purpose, but disable them rather than silently run a different
+    prompt or tool surface. Session/history references are unlinked as on delete.
+    """
+    from app.core.config import settings
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM agents WHERE id = %s AND is_builtin = TRUE FOR UPDATE", ("Explore",))
+        if cursor.fetchone() is None:
+            return False
+        cursor.execute(
+            "UPDATE automations SET profile_id = %s, is_enabled = FALSE, last_error = %s, updated_at = %s "
+            "WHERE profile_id = %s",
+            ("general-purpose", "Built-in Explore was removed; review the General Purpose agent before re-enabling.",
+             datetime.now(timezone.utc).isoformat(), "Explore"),
+        )
+        # Persist cancellation notices until the wake service can record them in
+        # the chat. They carry no runnable profile/prompt, and never submit a turn.
+        reason = "Built-in Explore was removed; its scheduled wake/parked continuation was cancelled."
+        cursor.execute(
+            "UPDATE pending_wakeups SET source = %s, reason = %s, profile_id = NULL, prompt = '', model = NULL, fire_at = %s, "
+            "instance_id = COALESCE(instance_id, %s) "
+            "WHERE profile_id = %s OR (profile_id IS NULL AND session_id IN "
+            "(SELECT id FROM sessions WHERE profile_id = %s))",
+            ("profile_cancelled", reason, 0, settings.effective_instance_id, "Explore", "Explore"),
+        )
+        cursor.execute(
+            "UPDATE turns SET state = 'aborted', stop_reason = 'profile_removed', error = %s, ended_at = NOW() "
+            "WHERE state IN ('parked', 'queued') AND (profile_id = %s OR "
+            "(profile_id IS NULL AND session_id IN (SELECT id FROM sessions WHERE profile_id = %s))) "
+            "RETURNING id, session_id, instance_id",
+            (reason, "Explore", "Explore"),
+        )
+        for turn in cursor.fetchall():
+            cursor.execute(
+                "INSERT INTO pending_wakeups (id, session_id, prompt, reason, source, instance_id, fire_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                ("profile-cancelled-" + turn["id"], turn["session_id"], "", reason,
+                 "profile_cancelled", turn["instance_id"] or settings.effective_instance_id, 0),
+            )
+        cursor.execute(
+            "UPDATE sessions SET parked_task_kind = NULL WHERE profile_id = %s", ("Explore",)
+        )
+        for table in ("sessions", "session_messages", "usage_log"):
+            cursor.execute(f"UPDATE {table} SET profile_id = NULL WHERE profile_id = %s", ("Explore",))
+        # Forget the local sync version, not a network tombstone. Publishing an
+        # agent delete ahead of the automation rewrite would hit RESTRICT on
+        # an older worker. Updated peers retire the row independently.
+        cursor.execute("DELETE FROM sync_records WHERE collection = %s AND record_id = %s", ("agents", "Explore"))
+        cursor.execute("DELETE FROM agents WHERE id = %s AND is_builtin = TRUE", ("Explore",))
+        return cursor.rowcount > 0
+
+
 def get_profile_session_count(profile_id: str) -> int:
     """Get the number of sessions associated with a profile"""
     with get_db() as conn:

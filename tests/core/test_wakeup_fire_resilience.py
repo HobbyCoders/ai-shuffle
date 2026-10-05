@@ -24,6 +24,13 @@ from tests.conftest import async_twin
 
 
 @pytest.fixture(autouse=True)
+def _existing_wake_profile(mock_db):
+    from app.db import database
+
+    database.create_profile("pr", "Wake agent", None, {})
+
+
+@pytest.fixture(autouse=True)
 def _reset_wakeup_state():
     from app.core import wakeup_service
 

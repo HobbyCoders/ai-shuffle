@@ -281,7 +281,7 @@ def test_contract_documents_the_sync_result_shape(mock_db):
 
 
 def test_background_default_targets_lose_the_mode_parameter(mock_db):
-    """R4(b): when every reachable target is Explore-class the model cannot
+    """R4(b): when every reachable target is read-only the model cannot
     pass mode at all — the key is simply not in the schema."""
     from app.db import database
 

@@ -178,22 +178,19 @@ async def _resolve_profile_id(row: Dict[str, Any]) -> Optional[str]:
     none to hand) would enqueue a turn the runtime cannot resolve an agent for,
     so the session's own profile is the fallback and "neither" is a drop.
     """
-    profile_id = row.get("profile_id")
-    if profile_id:
-        return profile_id
-    session_id = row.get("session_id")
-    if not session_id:
-        return None
-    try:
-        from app.db import database
+    from app.db import database
 
-        session = await asyncio.to_thread(database.get_session, session_id)
-    except Exception:  # noqa: BLE001 — a lookup failure is just "no fallback".
-        logger.exception(
-            "wakeup profile fallback lookup failed for session %s", session_id
-        )
-        return None
-    return (session or {}).get("profile_id") or None
+    profile_id = row.get("profile_id")
+    session_id = row.get("session_id")
+    try:
+        if not profile_id and session_id:
+            session = await asyncio.to_thread(database.get_session, session_id)
+            profile_id = (session or {}).get("profile_id")
+        if profile_id and await asyncio.to_thread(database.get_profile, profile_id):
+            return profile_id
+    except Exception:  # noqa: BLE001 — a failed lookup must not submit a bad turn.
+        logger.exception("wakeup profile lookup failed for session %s", session_id)
+    return None
 
 
 def _session_api_user_id(session_id: Optional[str]) -> Optional[str]:
@@ -346,6 +343,14 @@ async def _fire(row: Dict[str, Any]) -> None:
     wakeup_id = row.get("id")
     session_id = row.get("session_id")
 
+    # Cancellation is a notice, not execution, so it is also visible on
+    # stopped/archived chats. Never send it through the turn queue.
+    if row.get("source") == "profile_cancelled":
+        if await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id):
+            _retry_attempts.pop(str(wakeup_id), None)
+            await _announce_dropped_wake(row, row.get("reason") or "agent profile was removed")
+        return
+
     # STOP SEMANTICS: a session the user stopped stays stopped until
     # they speak again. Stop already DELETES the session's pending wakeup rows,
     # which is the cross-runner half of this; the latch is the local race-closer
@@ -384,6 +389,20 @@ async def _fire(row: Dict[str, Any]) -> None:
         )
         return
 
+    # Validate before every consumer, including usage-limit resumes and held
+    # peer promotions. An explicit missing ID must never fall back to another agent.
+    profile_id = await _resolve_profile_id(row)
+    if not profile_id:
+        logger.warning(
+            "wakeup %s (session %s) has a missing/unresolvable agent %s — dropping the wake",
+            wakeup_id, session_id, row.get("profile_id"),
+        )
+        _retry_attempts.pop(str(wakeup_id), None)
+        await _announce_dropped_wake(
+            row, f"agent profile no longer exists or could not be resolved: {row.get('profile_id') or session_id}"
+        )
+        return
+
     if row.get("source") == LIMIT_RESUME_SOURCE:
         # A resume after a usage limit reset (#1831): it re-checks the
         # provider's usage, may compact first or continue a Task worker, and
@@ -393,21 +412,6 @@ async def _fire(row: Dict[str, Any]) -> None:
         if wakeup_id:
             _retry_attempts.pop(str(wakeup_id), None)
         await limit_resume.fire(row)
-        return
-
-    profile_id = await _resolve_profile_id(row)
-    if not profile_id:
-        logger.warning(
-            "wakeup %s (session %s, source %s) has no profile and its session "
-            "resolves to none — dropping the wake rather than queueing a turn "
-            "that cannot run",
-            wakeup_id, session_id, row.get("source"),
-        )
-        if wakeup_id:
-            _retry_attempts.pop(str(wakeup_id), None)
-        await _announce_dropped_wake(
-            row, "no agent profile could be resolved for the wake"
-        )
         return
 
     # The wake must run on the scheduling turn's effective model, not the

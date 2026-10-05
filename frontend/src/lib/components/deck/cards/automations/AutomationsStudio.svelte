@@ -242,6 +242,7 @@
 										{#if !a.is_enabled}<span class="as-badge as-badge--warn">Disabled</span>{/if}
 									</h4>
 									{#if rowDesc(a)}<p class="as-desc">{rowDesc(a)}</p>{/if}
+									{#if a.last_error}<p class="as-row-error" role="status" title={a.last_error}>{a.last_error}</p>{/if}
 								</div>
 								<div class="as-meta">
 									{#each triggerTags(a) as tag}<span class="as-tag">{tag}</span>{/each}
@@ -355,7 +356,8 @@
 	.as-btn--danger:hover { background: color-mix(in oklch, var(--destructive) 12%, transparent); }
 
 	/* List + rows */
-	.as-list { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius, 0.75rem); overflow: hidden; background: var(--card); }
+	/* flex-shrink: 0 — .as-scroll scrolls; a shrinking list squeezed rows taller than 60px into overlap. */
+	.as-list { display: flex; flex-direction: column; flex-shrink: 0; border: 1px solid var(--border); border-radius: var(--radius, 0.75rem); overflow: hidden; background: var(--card); }
 	.as-row { display: flex; align-items: center; gap: 14px; padding: 13px 16px; min-height: 60px; border-bottom: 1px solid var(--border-subtle, var(--border)); cursor: pointer; transition: background-color 120ms ease; }
 	.as-row:last-child { border-bottom: none; }
 	.as-row:hover { background: var(--hover-overlay); }
@@ -394,6 +396,9 @@
 	.as-act:hover { color: var(--foreground); background: var(--hover-overlay); }
 	.as-act:disabled { opacity: 0.5; cursor: not-allowed; }
 	.as-act--danger:hover { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 12%, transparent); }
+
+	/* Not .as-error: that class is the page-level error banner above the list. */
+	.as-row-error { margin: 4px 0 0; font-size: 0.78rem; line-height: 1.4; color: var(--warning); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 
 	/* Enable/disable toggle (always visible) */
 	.as-toggle { position: relative; width: 36px; height: 20px; border-radius: 10px; border: none; background: var(--muted); cursor: pointer; flex-shrink: 0; transition: background 200ms ease; }

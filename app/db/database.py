@@ -539,6 +539,9 @@ def _run_column_migrations(cursor):
     - Docker volume has stale schema version
     """
     migrations_applied = []
+    # An authorization allowlist is not an ownership relationship. Cascading
+    # an agent deletion could turn an Explore-only key into an unrestricted key.
+    cursor.execute("ALTER TABLE api_user_profiles DROP CONSTRAINT IF EXISTS api_user_profiles_profile_id_fkey")
     _migrate_preference_revisions(cursor)
     from app.db.assistant import create_schema as create_assistant_schema
     create_assistant_schema(cursor)
@@ -3396,6 +3399,7 @@ from app.db.profiles import (  # noqa: F401
     create_profile,
     update_profile,
     delete_profile,
+    retire_builtin_explore,
     get_profile_session_count,
     get_all_profile_session_counts,
     set_profile_builtin,

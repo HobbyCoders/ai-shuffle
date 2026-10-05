@@ -429,8 +429,8 @@ def create_postgres_schema(cursor) -> None:
             profile_id TEXT NOT NULL,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             PRIMARY KEY (api_user_id, profile_id),
-            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE,
-            FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE CASCADE
+            -- Permission IDs must outlive agents: an empty set means unrestricted.
+            FOREIGN KEY (api_user_id) REFERENCES api_users(id) ON DELETE CASCADE
         )
     """)
 

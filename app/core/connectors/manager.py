@@ -656,7 +656,9 @@ class ConnectorManager:
                 if not api_user:
                     return {"refused": CONNECTOR_NEEDS_API_USER_MESSAGE}
                 profile_ids = api_user.get("profile_ids", []) or []
-                profile_id = profile_ids[0] if profile_ids else None
+                # Assignments outlive deleted/retired agents (the allowlist
+                # stays restricted), so run the first one that still exists.
+                profile_id = next((pid for pid in profile_ids if database.get_profile(pid)), None)
                 if not profile_id:
                     return {"refused": CONNECTOR_NEEDS_PROFILE_MESSAGE}
 

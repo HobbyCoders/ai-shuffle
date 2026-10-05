@@ -121,7 +121,7 @@ Delete an agent. Built-in agents cannot be deleted.
 
 ### POST /api/v1/agents/{agent_id}/restore
 
-Restore a built-in agent (**General Purpose**, **Explore**, **Plan** or **Frontend Designer**) to its original defaults: name, description, prompt, tools and model. Skills, memory and MCP servers you added are kept. A custom agent has no defaults to restore to and returns `400`.
+Restore a built-in agent (**General Purpose**, **Plan** or **Frontend Designer**) to its original defaults: name, description, prompt, tools and model. Skills, memory and MCP servers you added are kept. A custom agent has no defaults to restore to and returns `400`.
 
 **Auth:** Owner only
 
@@ -166,12 +166,12 @@ Get the full nested-agent objects enabled for this agent.
 ```json
 [
   {
-    "id": "Explore",
-    "name": "Explore",
-    "description": "Fast agent specialized for exploring codebases",
-    "prompt": "You are a file search specialist...",
+    "id": "Plan",
+    "name": "Plan",
+    "description": "Software architect agent for designing implementation plans",
+    "prompt": "You are a software architect and planning specialist...",
     "tools": ["Read", "Grep", "Glob", "Bash", "Skill"],
-    "model": "haiku",
+    "model": null,
     "skills": null,
     "memory": null,
     "mcp_servers": null,
@@ -256,7 +256,7 @@ Replace the entire enabled agents list.
 curl -X PUT http://localhost:8000/api/v1/agents/agent_abc123/enabled-agents \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"enabled_agents": ["Explore", "my-custom-agent"]}'
+  -d '{"enabled_agents": ["Plan", "my-custom-agent"]}'
 ```
 
 ### POST /api/v1/agents/{agent_id}/enabled-agents/{subagent_id}

@@ -75,6 +75,9 @@
 					title={automation.model_error || 'Model its runs use'}
 				>{automationModelLabel(automation)}</span>
 			</div>
+			{#if automation.last_error}
+				<p class="auto-detail-desc auto-model-error" role="status">{automation.last_error}</p>
+			{/if}
 			{#if automation.model_error}
 				<p class="auto-detail-desc auto-model-error" role="alert">{automation.model_error}</p>
 			{/if}
@@ -185,6 +188,7 @@
 
 	.auto-detail-desc.auto-model-error {
 		color: var(--destructive);
+		overflow-wrap: anywhere;
 	}
 
 	.auto-detail-header-actions {

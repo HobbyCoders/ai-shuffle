@@ -148,7 +148,7 @@ describe('starter agent', () => {
 
 	it('skips the built-in agents and uses one the owner made', async () => {
 		mocks.get.mockResolvedValue([
-			{ id: 'explore', name: 'Explore', is_builtin: true },
+			{ id: 'general-purpose', name: 'General Purpose', is_builtin: true },
 			{ id: 'coder', name: 'Coder', is_builtin: false },
 		]);
 		expect(await ensureStarterAgent()).toMatchObject({ id: 'coder' });
@@ -156,7 +156,7 @@ describe('starter agent', () => {
 	});
 
 	it('creates an Assistant when only the built-in agents exist', async () => {
-		mocks.get.mockResolvedValue(['explore', 'general-purpose', 'plan', 'frontend-designer']
+		mocks.get.mockResolvedValue(['general-purpose', 'Plan', 'frontend-designer']
 			.map((id) => ({ id, name: id, is_builtin: true })));
 		mocks.post.mockResolvedValue({ id: 'assistant', name: 'Assistant' });
 		expect(await ensureStarterAgent()).toMatchObject({ id: 'assistant' });

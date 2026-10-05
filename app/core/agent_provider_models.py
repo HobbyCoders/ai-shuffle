@@ -130,7 +130,7 @@ class SubagentTarget:
     description: str
     model: str
     # True when the target's declared tool surface cannot write files, i.e. it
-    # is an Explore-class research agent. ``task_dispatch`` dispatches these in
+    # is a read-only research agent. ``task_dispatch`` dispatches these in
     # the background whatever the call asks for, so the contract must not offer
     # ``mode`` as if it were a live choice.
     background_default: bool = False

@@ -40,7 +40,7 @@ function swarm(over: Partial<SwarmSnapshot> = {}): SwarmSnapshot {
 		created_at: '2026-10-04T09:00:00Z',
 		updated_at: '2026-10-04T10:00:00Z',
 		tasks: [
-			{ id: 'code', title: 'Review code', agent: 'Explore', depends_on: [], status: 'running', task_id: 'm1', worker_session_id: 'w-code' },
+			{ id: 'code', title: 'Review code', agent: 'general-purpose', depends_on: [], status: 'running', task_id: 'm1', worker_session_id: 'w-code' },
 			{ id: 'report', title: 'Write report', agent: 'Writer', depends_on: ['code'], status: 'queued' }
 		],
 		...over

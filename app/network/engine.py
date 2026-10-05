@@ -454,10 +454,25 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     """Write (or delete) the domain row. Returns the row as re-read, or None."""
     keys = _local_keys(coll, record_id)
     where = " AND ".join(f"{k} = %s" for k in coll.keys)
+    # Older workers may re-seed and publish the retired built-in. Never
+    # recreate the local row, including through a bootstrap snapshot.
+    # A custom agent with this id is still a normal shared agent.
+    if coll.name == "agents" and keys == ("Explore",) and record and record.get("is_builtin"):
+        return None
     if record is None:
         cursor.execute(f"DELETE FROM {coll.table} WHERE {where}", keys)
         return None
     record = dict(record)
+    retired_automation = False
+    if coll.name == "automations" and record.get("profile_id") == "Explore":
+        cursor.execute("SELECT is_builtin FROM agents WHERE id = %s", ("Explore",))
+        agent = cursor.fetchone()
+        if agent is None or agent["is_builtin"]:
+            # Same safe, disabled replacement as startup retirement. This also
+            # covers bootstrap snapshots, which call materialize directly.
+            record["profile_id"] = "general-purpose"
+            record["is_enabled"] = False
+            retired_automation = True
     if coll.materialize_hook is not None:
         record = coll.materialize_hook(record)
     encrypted_columns = list(record.get("_enc") or [])
@@ -490,6 +505,10 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     sql = (f"INSERT INTO {coll.table} ({', '.join(insert_columns)}) VALUES ({', '.join(['%s'] * len(insert_columns))}) "
            f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}")
     cursor.execute(sql, tuple(insert_values))
+    if retired_automation:
+        # last_error is local-only: never add it to the shared field list.
+        cursor.execute("UPDATE automations SET last_error = %s WHERE id = %s", (
+            "Built-in Explore was removed; review the General Purpose agent before re-enabling.", keys[0]))
     cursor.execute(f"SELECT * FROM {coll.table} WHERE {where}", keys)
     row = cursor.fetchone()
     return dict(row) if row else None
@@ -1056,6 +1075,13 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     except (crypto.CryptoError, envelope_mod.EnvelopeError) as exc:
         raise ApplyError("cannot open payload") from exc
 
+    if (coll.name == "agents" and env.record_id == "Explore" and env.op == OP_UPSERT
+            and plaintext.get("is_builtin")):
+        # Like retired collections, consume without storing/forwarding. In
+        # particular, no absent domain row enters scan's tombstone path, which
+        # would fail an older peer's automation FK before its rewrite arrives.
+        return "applied"
+
     if coll.name == "session_active":
         if env.op == OP_UPSERT and (
                 plaintext.get("session_id") != env.record_id or not isinstance(plaintext.get("is_active"), bool)):
@@ -1620,6 +1646,9 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cursor = conn.cursor()
         for item in body["items"]:
+            if (coll.name == "agents" and item["record_id"] == "Explore" and not item["deleted"]
+                    and (item["record"] or {}).get("is_builtin")):
+                continue
             existing = store.get_record(cursor, coll.name, item["record_id"])
             if existing is not None and existing["origin_device_id"] != item["origin_device_id"] and coll.name != "membership":
                 comparison = envelope_mod.compare(int(item["clock"]), item["origin_device_id"],

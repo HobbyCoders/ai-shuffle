@@ -131,6 +131,21 @@ describe('list', () => {
 	});
 });
 
+describe('removed agent restrictions', () => {
+	it('explains an obsolete restriction and requires a replacement before clearing it', async () => {
+		apiUsers.getApiUsers.mockResolvedValue([user({ profile_ids: ['Explore'] })]);
+		await open('u1', 'Access');
+		expect(await screen.findByText(/Agent Explore was removed/)).toBeTruthy();
+		const remove = screen.getByRole('button', { name: 'Remove Explore restriction' }) as HTMLButtonElement;
+		expect(remove.disabled).toBe(true);
+		await fireEvent.click(screen.getByRole('checkbox', { name: /Planner/ }));
+		await waitFor(() => expect(apiUsers.updateApiUser).toHaveBeenCalledWith('u1', { profile_ids: ['Explore', 'a2'] }));
+		await waitFor(() => expect(remove.disabled).toBe(false));
+		await fireEvent.click(remove);
+		await waitFor(() => expect(apiUsers.updateApiUser).toHaveBeenCalledWith('u1', { profile_ids: ['a2'] }));
+	});
+});
+
 describe('create', () => {
 	it('adds one draft, requires a name, creates and shows the key once', async () => {
 		await open();

@@ -100,6 +100,9 @@
 					{#if automation.description}
 						<span class="fp-item-description">{automation.description}</span>
 					{/if}
+					{#if automation.last_error}
+						<p class="fp-item-description" role="status">{automation.last_error}</p>
+					{/if}
 					<div class="fp-item-meta">
 						<span class="fp-meta-chip">
 							<Clock size={11} />

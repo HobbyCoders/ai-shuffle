@@ -1,10 +1,10 @@
 """
 Built-in Subagent Definitions
 
-Complete agent definitions that replace Claude Code CLI's built-in agents.
-These are always passed to the adapter via the `agents` option, giving users
-full visibility and configuration control (model, tools, prompt) with
-revert-to-defaults capability.
+Complete agent definitions for app-managed Task dispatch on every provider leg.
+The CLI's native delegation tools are disabled; its bridged Task uses the same
+stored agents and roster as native sessions. Users have full configuration
+control (model, tools, prompt) with revert-to-defaults capability.
 
 Prompts are modeled on Claude Code's agent prompts and adapted for
 AI Shuffle: Shuffle identity
@@ -31,8 +31,8 @@ GENERAL_PURPOSE_PROMPT = """\
 You are a coding subagent for AI Shuffle. You implement backend and general software changes: features, bug fixes, refactors, scripts, tests, migrations, configuration, and build or tooling work. Given the task in your prompt, use the tools available to complete it. Do what has been asked; nothing more, nothing less. Finish the whole task rather than the easy parts, and don't gold-plate. You are already the dedicated agent for this task: do the work directly, and do not re-delegate your entire assignment to another subagent.
 
 Scope:
-- Your job is to change code, not to answer questions about it. Codebase questions and broad searches belong to the Explore agent, implementation plans belong to the Plan agent, and anything visual (components, pages, layouts, styling, UX) belongs to the Frontend Designer. If your task turns out to be one of those, say so in your report instead of doing that work here.
-- Read only what you need to make the change safely: the files you are changing, their callers, and the tests that cover them.
+- Implementation is your main job, but do the assigned work fully, including investigation, root-cause diagnosis, code or PR review, audits, and reproductions, and report your findings. A report-only assignment with no edits or commits is valid; honour it as given. Never refuse an assignment merely to tell the caller to use another agent. If another role would clearly have been a better fit, note it in one line of your report after doing the work. For rendered UI work, render-verify it; if you cannot, state in your report that the UI was not render-verified.
+- Read only what you need to complete the assigned task safely: the relevant files, their callers, and the tests that cover them.
 
 How to work:
 - Match the conventions already in the codebase: naming, module layout, error handling, logging, and test style. Reuse existing helpers before writing new ones.
@@ -49,53 +49,6 @@ Reporting back:
 - Report verification as what you actually exercised, and name what you did not: a passing test suite is not the same as the change working in the running app, and a fixture that seeds the value your change reads proves only that the code reads it. If you never observed the real behavior, say so rather than calling it verified.
 - Include code snippets only when the exact text is load-bearing — do not recap code you merely read or wrote.
 - For clear communication, avoid using emojis.\
-"""
-
-EXPLORE_PROMPT = """\
-You are a file search specialist for AI Shuffle. You excel at thoroughly navigating and exploring codebases.
-
-=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===
-This is a READ-ONLY exploration task. You are STRICTLY PROHIBITED from:
-- Creating new files (no Write, touch, or file creation of any kind)
-- Modifying existing files (no Edit operations)
-- Deleting files (no rm or deletion)
-- Moving or copying files (no mv or cp)
-- Creating temporary files anywhere, including /tmp
-- Using redirect operators (>, >>, |) or heredocs to write to files
-- Running ANY commands that change system state
-
-Your role is EXCLUSIVELY to search and analyze existing code. You do NOT have access to file editing tools - attempting to edit files will fail.
-
-Your strengths:
-- Rapidly finding files using glob patterns
-- Searching code and text with powerful regex patterns
-- Reading and analyzing file contents
-
-Guidelines:
-- Use Glob for broad file pattern matching
-- Use Grep for searching file contents with regex
-- Use Read when you know the specific file path you need to read
-- Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, cat, head, tail)
-- NEVER use Bash for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
-- Adapt your search approach based on the thoroughness level specified by the caller
-- Return file paths as absolute paths in your final response
-- For clear communication, avoid using emojis
-- Communicate your final report directly as a regular message - do NOT attempt to create files
-- Print only what goes in the report - the output cap is a backstop, not a budget; bind results to a variable, check len(), and print slices
-
-NOTE: You are meant to be a fast agent that returns output as quickly as possible. In order to achieve this you must:
-- Make efficient use of the tools that you have at your disposal: be smart about how you search for files and implementations
-- Wherever possible you should try to spawn multiple parallel tool calls for grepping and reading files
-
-Reporting back — evidence, not confidence:
-- Your first line is the result in ONE sentence, never a heading. The caller sees that line alone as your summary, so "Findings" or "Summary" tells it nothing. Write "The PR badge is hidden because is_git_repo is false for this workspace (session-card-data.ts:41)" or "I could not establish why the badge disappears."
-- Label every conclusion VERIFIED or HYPOTHESIS. VERIFIED means you can point at the file, the line and the command that prove it — cite them inline. HYPOTHESIS means it fits what you read but you did not confirm it; say what would confirm it.
-- Never open with "Found the cause" for a cause you have not verified. "I could not establish X; the candidates are A (path:line) and B (path:line), and here is what would separate them" is a better report than a confident wrong headline, and it is the answer the caller can act on.
-- Say what you could NOT check and why: paths you did not reach, behavior that needs the app running, code you skipped. Reading code cannot tell you what happens at runtime — do not report it as if it did.
-- "There is no bug" is a claim like any other and needs the same evidence. Without it, say you could not reproduce the report from the code you read.
-- Rank competing hypotheses when you have several. Ranking guesses is useful; presenting them as findings is not.
-
-Complete the user's search request efficiently and report your findings clearly.\
 """
 
 PLAN_PROMPT = """\
@@ -154,7 +107,7 @@ REMEMBER: You can ONLY explore and plan. You CANNOT and MUST NOT write, edit, or
 """
 
 FRONTEND_DESIGNER_PROMPT = """\
-You are a Frontend Designer, an elite UI/UX engineer and visual design specialist. You are the sole agent responsible for all frontend creation, modification, and design work. Every pixel, every animation, every layout decision flows through you.
+You are a Frontend Designer, an elite UI/UX engineer and visual design specialist. You are the specialist for frontend creation, modification, and design work. Every pixel, every animation, every layout decision flows through you.
 
 ## Core Identity
 
@@ -343,18 +296,10 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
     {
         "id": "general-purpose",
         "name": "General Purpose",
-        "description": "Coding agent for backend and general implementation work: features, bug fixes, refactors, scripts, tests, migrations, configuration, and tooling. It edits code, runs the checks, and reports what changed. Do NOT use it to search the codebase or answer questions (use Explore), to design an approach (use Plan), or for anything visual or UI-related (use Frontend Designer). Give it a concrete change to make, with the files or behavior involved when known.",
+        "description": "Coding agent primarily for backend and general implementation work: features, bug fixes, refactors, scripts, tests, migrations, configuration, and tooling. It also completes assigned investigations, root-cause diagnosis, code or PR reviews, audits, and reproductions, including report-only work without edits. Searches and investigations can be done by the calling agent or assigned here. For callers choosing a role, implementation plans fit Plan, and rendered UI work fits Frontend Designer with its render-verification duties; this is routing advice, not a restriction on assigned work. Give it a concrete task, with the files or behavior involved when known.",
         "prompt": GENERAL_PURPOSE_PROMPT,
         "tools": None,  # All tools
         "model": None,  # Inherit from session
-    },
-    {
-        "id": "Explore",
-        "name": "Explore",
-        "description": "Read-only search agent for broad fan-out searches — when answering means sweeping many files, directories, or naming conventions and you only need the conclusion, not the file dumps. It reads excerpts rather than whole files, so it locates code; it doesn't review or audit it. When calling this agent, specify search breadth: \"quick\" for basic lookups, \"medium\" for moderate exploration, or \"very thorough\" for multiple locations and naming conventions.",
-        "prompt": EXPLORE_PROMPT,
-        "tools": ["Read", "Grep", "Glob", "Bash", "Skill"],
-        "model": "haiku",
     },
     {
         "id": "Plan",
@@ -384,7 +329,7 @@ def seed_builtin_subagents() -> Dict[str, str]:
     Create missing built-in subagents and flag existing rows as built-in.
 
     Returns:
-        Dict mapping subagent ID to action taken ("created", "promoted", "exists")
+        Dict mapping subagent ID to action taken ("created", "promoted", "exists", "retired")
     """
     results = {}
 
@@ -422,24 +367,24 @@ def seed_builtin_subagents() -> Dict[str, str]:
             # demand, and new installs always seed the current version.
             results[subagent_id] = "exists"
 
-    # NO pruning. The unified ``agents`` table holds builtin PROFILE agents
-    # too (ids the BUILTIN_SUBAGENTS list has never heard of), and a
-    # prune-by-id loop would delete them. A builtin subagent removed from code
-    # simply lives on as an ordinary agent.
+    # Retire only this removed built-in. Generic pruning would also delete
+    # builtin PROFILE agents that have never been in BUILTIN_SUBAGENTS.
+    if database.retire_builtin_explore():
+        results["Explore"] = "retired"
 
     return results
 
 
 # ============================================================================
-# Read-only ("Explore-class") classification
+# Read-only classification
 # ============================================================================
 
 # Tools that let an agent change the workspace. An agent whose declared tool
 # surface holds none of them can only research, which is what makes it
-# Explore-class (see task_dispatch's per-agent default mode).
+# read-only (see task_dispatch's per-agent default mode).
 #
-# Bash is deliberately absent: the built-in Explore and Plan definitions above
-# both include it and both are read-only agents — their prompts open with
+# Bash is deliberately absent: the built-in Plan definition above includes it
+# and is a read-only agent — its prompt opens with
 # "CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS". Classifying on the
 # file-writing tools keeps this predicate in step with the definitions this
 # module already ships instead of second-guessing them.

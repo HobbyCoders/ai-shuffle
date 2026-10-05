@@ -122,7 +122,7 @@ describe('Swarm session navigation through the actual active-session store', () 
 		render(SwarmCard, { sessionId: 'parent', status: 'complete', result: JSON.stringify({ swarm: {
 			id: 'swarm-nav', session_id: 'parent', title: 'Navigation', status: 'completed',
 			created_at: '2026-09-07', updated_at: '2026-09-07', tasks: [{
-				id: 'child', agent: 'Explore', title: 'Child task', depends_on: [], status: 'completed',
+				id: 'child', agent: 'General Purpose', title: 'Child task', depends_on: [], status: 'completed',
 				worker_session_id: 'worker-child', result: 'done',
 			}],
 		} }) });

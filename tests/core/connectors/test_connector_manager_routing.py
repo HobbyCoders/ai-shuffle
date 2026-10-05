@@ -108,6 +108,7 @@ def db(monkeypatch):
         update_connector_event_dispatched=MagicMock(),
         get_api_user=MagicMock(return_value=None),
         get_connector_session=MagicMock(return_value=None),
+        get_profile=MagicMock(side_effect=lambda pid: {"id": pid}),
         create_connector_session=MagicMock(),
         create_session=MagicMock(),
         update_connector_session_ai_session=MagicMock(),
@@ -647,6 +648,21 @@ class TestIncomingMessage:
         assert [m.text for m in inst.sent] == [expected]
         turns.submit.assert_not_awaited()
         routed.create_connector_session.assert_not_called()
+
+    async def test_removed_first_agent_falls_through_to_next_assigned(self, mgr, routed, not_enrolled, turns):
+        running(mgr)
+        routed.get_profile.side_effect = lambda pid: None if pid == "prof-1" else {"id": pid}
+        await mgr.handle_incoming_message(incoming())
+        assert routed.create_session.call_args.kwargs["profile_id"] == "prof-2"
+        assert turns.submit.await_args.kwargs["profile_id"] == "prof-2"
+
+    async def test_only_removed_agents_is_refused_visibly(self, mgr, routed, not_enrolled, turns):
+        inst = running(mgr)
+        routed.get_profile.side_effect = lambda pid: None
+        await mgr.handle_incoming_message(incoming())
+        assert [m.text for m in inst.sent] == [CONNECTOR_NEEDS_PROFILE_MESSAGE]
+        turns.submit.assert_not_awaited()
+        routed.create_session.assert_not_called()
 
     async def test_revoked_ownership_drops_before_ack(self, mgr, routed, turns, monkeypatch):
         inst = running(mgr)

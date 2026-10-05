@@ -119,7 +119,7 @@ describe('Swarm transcript acceptance', () => {
 		const launch = fixture.launch.map((event) => event.type === 'subagent.started'
 			? { ...event, launch_tool_use_id: undefined, worker_session_id: event.task_id } : event);
 		const independent = [
-			{ type: 'tool.use', tool_use_id: 'standalone-launch', name: 'Task', input: { agent: 'Explore' } },
+			{ type: 'tool.use', tool_use_id: 'standalone-launch', name: 'Task', input: { agent: 'general-purpose' } },
 			{ type: 'subagent.started', task_id: 'standalone-worker', worker_session_id: 'standalone-worker', launch_tool_use_id: 'standalone-launch' }
 		].map((event, index) => ({ ...event, id: `independent-${index}`, session_id: fixture.queued.session_id }));
 		const events = [...launch, ...independent, ...fixture.finish].map((event, index) => ({ ...event, seq: index + 1 }));

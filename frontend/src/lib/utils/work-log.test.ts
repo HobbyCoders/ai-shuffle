@@ -114,7 +114,7 @@ function text(content: string, timestamp?: string): ChatMessage {
 }
 
 function subagent(over: Partial<ChatMessage> = {}): ChatMessage {
-	return msg({ type: 'subagent', agentName: 'Explore', agentStatus: 'completed', ...over });
+	return msg({ type: 'subagent', agentName: 'General Purpose', agentStatus: 'completed', ...over });
 }
 
 function retryCard(systemData: Record<string, unknown> | undefined = undefined): ChatMessage {
@@ -159,7 +159,7 @@ describe('Swarm child deduplication', () => {
 	const snapshot: SwarmSnapshot = {
 		id: 'swarm-1', session_id: 'session-1', title: 'Review', status: 'running',
 		created_at: '2026-09-07T10:00:00Z', updated_at: '2026-09-07T10:01:00Z',
-		tasks: [{ id: 'review', title: 'Review', agent: 'Explore', depends_on: [], status: 'running',
+		tasks: [{ id: 'review', title: 'Review', agent: 'General Purpose', depends_on: [], status: 'running',
 			task_id: 'task-1', worker_session_id: 'worker-1' }]
 	};
 	const allRows = (items: DisplayItem[]) => items.flatMap((item) =>
@@ -214,7 +214,7 @@ describe('Swarm child deduplication', () => {
 	});
 
 	it('does not infer ownership from task labels, malformed payloads, unrelated tools or other sessions', () => {
-		const children = [subagent({ toolId: 'review', agentName: 'Explore' }), subagent({ toolId: 'task-1' }), subagent()];
+		const children = [subagent({ toolId: 'review', agentName: 'General Purpose' }), subagent({ toolId: 'task-1' }), subagent()];
 		const unrelated = tool({ toolName: 'Bash', toolId: 'task-1' });
 		for (const workflow of [
 			tool({ toolName: 'Swarm', toolResult: '{"swarm":', toolInput: {} }),
@@ -357,7 +357,7 @@ describe('buildDisplayItems — settled turns', () => {
 		const messages = [
 			user('go'),
 			tool(),
-			msg({ type: 'subagent', agentName: 'Explore' }),
+			msg({ type: 'subagent', agentName: 'General Purpose' }),
 			tool({ toolName: 'TodoWrite' }),
 			tool({ toolName: 'Task' }),
 			tool({ toolName: 'Agent' }),

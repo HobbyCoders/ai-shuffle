@@ -19,6 +19,13 @@ from app.core.config import settings
 
 
 @pytest.fixture(autouse=True)
+def _existing_wake_profile(mock_db):
+    from app.db import database
+
+    database.create_profile("pr", "Wake agent", None, {})
+
+
+@pytest.fixture(autouse=True)
 def _reset_watchdog_state():
     from app.core import wakeup_service
     wakeup_service._watchdog_cooldown.clear()

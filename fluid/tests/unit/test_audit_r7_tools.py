@@ -125,7 +125,7 @@ async def test_select_respects_the_session_tool_filter_through_leaves() -> None:
 
 
 async def test_background_receipt_from_a_sync_request_is_registered() -> None:
-    """ai-shuffle upgrades read-only agents (Explore) to background.
+    """ai-shuffle upgrades read-only agents (Plan) to background.
 
     fluid branched on the MODEL's ``mode``, so an upgraded worker never entered
     ``_background_pending``: the turn ended with a live worker and no park, and
@@ -147,7 +147,7 @@ async def test_background_receipt_from_a_sync_request_is_registered() -> None:
             "background_task_started": started.append,
         }
     )
-    out = await handler({"agent": "Explore", "prompt": "find it"}, ctx)
+    out = await handler({"agent": "Plan", "prompt": "find it"}, ctx)
     assert not out.is_error
     assert out.background_task is receipt
     assert started == [receipt]
@@ -164,7 +164,7 @@ async def test_sync_dispatch_without_a_receipt_is_unchanged() -> None:
     ctx = ToolCtx(
         extra={"task_dispatch": dispatch, "background_task_started": started.append}
     )
-    out = await handler({"agent": "Explore", "prompt": "p"}, ctx)
+    out = await handler({"agent": "Plan", "prompt": "p"}, ctx)
     assert out.text == "the report" and not started
 
 
@@ -180,7 +180,7 @@ async def test_an_errored_upgrade_is_not_registered() -> None:
     ctx = ToolCtx(
         extra={"task_dispatch": dispatch, "background_task_started": started.append}
     )
-    out = await handler({"agent": "Explore", "prompt": "p"}, ctx)
+    out = await handler({"agent": "Plan", "prompt": "p"}, ctx)
     assert out.is_error and not started
 
 
@@ -195,7 +195,7 @@ async def test_a_sync_dict_receipt_is_registered_too() -> None:
     ctx = ToolCtx(
         extra={"task_dispatch": dispatch, "background_task_started": started.append}
     )
-    out = await handler({"agent": "Explore", "prompt": "p"}, ctx)
+    out = await handler({"agent": "Plan", "prompt": "p"}, ctx)
     assert out.background_task is not None
     assert [r.task_id for r in started] == ["t-3"]
 

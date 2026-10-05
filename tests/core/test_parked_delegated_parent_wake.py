@@ -183,6 +183,11 @@ def _held_rows(session_id):
 async def test_a_scheduled_wakeup_wakes_a_parked_parent(mock_db):
     """ScheduleWakeup's timer fires for a parent parked on other work: the
     ``wakeup`` turn starts at once — a park does not hold it back."""
+    from app.db import database
+
+    # A wake's stored agent must exist: the runtime refuses a turn whose
+    # agent row is gone, so ``_fire`` drops such a wake with a notice.
+    database.create_profile("profile", "Wake agent", None, {})
     _park_on_worker("dp4", "worker-4", "tu-4")
     engine = _Engine()
     row = {"id": "wk-1", "session_id": "dp4", "source": "wakeup",

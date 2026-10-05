@@ -14,6 +14,11 @@ process can open the same file.
 * ``pg_advisory_xact_lock`` — a lock held until the transaction ends. Mapped to
   ``BEGIN IMMEDIATE``, which holds SQLite's single write lock until
   commit/rollback, the same scope.
+* ``ALTER TABLE .. DROP CONSTRAINT IF EXISTS <table>_<column>_fkey`` (the name
+  PostgreSQL gives an unnamed foreign key). SQLite cannot alter a table's
+  constraints, so the clause is removed from the stored table definition; a
+  foreign key does not change the on-disk format (SQLite's documented
+  ``writable_schema`` procedure for removing FOREIGN KEY constraints).
 """
 
 from __future__ import annotations
@@ -33,6 +38,31 @@ _ADD_COLUMN = re.compile(
     r"ALTER\s+TABLE\s+(\w+)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+(\w+)", re.I)
 _DROP_COLUMN = re.compile(
     r"ALTER\s+TABLE\s+(\w+)\s+DROP\s+COLUMN\s+IF\s+EXISTS\s+(\w+)", re.I)
+_DROP_FKEY = re.compile(
+    r"^\s*ALTER\s+TABLE\s+(\w+)\s+DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+(\w+)_fkey\s*$", re.I)
+
+
+def _drop_foreign_key(raw: sqlite3.Connection, table: str, column: str) -> None:
+    """Remove the table-level ``FOREIGN KEY (column) ..`` clause, if present."""
+    row = raw.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                      (table,)).fetchone()
+    if row is None:
+        return
+    clause = re.compile(
+        r",\s*FOREIGN\s+KEY\s*\(\s*" + re.escape(column) + r"\s*\)\s*REFERENCES\s+(?:\w+|\"[^\"]+\")\s*"
+        r"\([^)]*\)(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|RESTRICT|NO\s+ACTION|SET\s+NULL|SET\s+DEFAULT))*",
+        re.I)
+    new_sql, count = clause.subn("", row[0])
+    if not count:
+        return
+    version = raw.execute("PRAGMA schema_version").fetchone()[0]
+    raw.execute("PRAGMA writable_schema = ON")
+    try:
+        raw.execute("UPDATE sqlite_master SET sql = ? WHERE type = 'table' AND name = ?",
+                    (new_sql, table))
+        raw.execute(f"PRAGMA schema_version = {version + 1}")
+    finally:
+        raw.execute("PRAGMA writable_schema = OFF")
 
 
 def connect(path, timeout: float = 5.0) -> sqlite3.Connection:
@@ -55,6 +85,13 @@ def _lifecycle_classes():
             if "pg_advisory_xact_lock" in sql:
                 if not raw.in_transaction:
                     raw.execute("BEGIN IMMEDIATE")
+                return self
+            match = _DROP_FKEY.match(sql)
+            if match:
+                table, name = match.groups()
+                prefix = f"{table.lower()}_"
+                if name.lower().startswith(prefix):
+                    _drop_foreign_key(raw, table, name[len(prefix):])
                 return self
             for pattern, run_when_present in ((_ADD_COLUMN, False), (_DROP_COLUMN, True)):
                 match = pattern.search(sql)

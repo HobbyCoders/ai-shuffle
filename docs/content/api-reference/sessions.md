@@ -465,7 +465,7 @@ A swarm is a set of tasks an agent hands to other agents, some waiting on others
       "created_at": "...",
       "updated_at": "...",
       "tasks": [
-        { "id": "scan", "title": "Scan routes", "agent": "Explore", "depends_on": [], "status": "completed", "worker_session_id": "...", "result": "...", "error": null, "started_at": "...", "finished_at": "..." }
+        { "id": "scan", "title": "Scan routes", "agent": "general-purpose", "depends_on": [], "status": "completed", "worker_session_id": "...", "result": "...", "error": null, "started_at": "...", "finished_at": "..." }
       ]
     }
   ]

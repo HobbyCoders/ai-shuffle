@@ -27,10 +27,10 @@ This module adds:
 * modes: ``sync`` returns ``report_path``, ``report_chars`` and a bounded
   ``report_head``; ``background`` returns a ``BackgroundTaskReceipt`` with the
   worker session id and announces completion. Both write the report under the
-  parent's ``.fluid/task-reports/`` (:func:`write_task_report`). Explore-class
+  parent's ``.fluid/task-reports/`` (:func:`write_task_report`). read-only
   targets (no file-writing tools) always go background, even when a call names
   a ``mode`` (:func:`_effective_task_mode`), and ``build_task_contract`` omits
-  ``mode`` when every target is Explore-class. Others default to ``sync``.
+  ``mode`` when every target is read-only. Others default to ``sync``.
 
 File-defined agents (Claude-ecosystem compat, ruling CE6)
 ---------------------------------------------------------
@@ -1097,7 +1097,7 @@ def _stored_agent_tools(agent_id: str) -> Optional[List[str]]:
     Dispatch deliberately sends no ``tool_allowlist`` for a DB agent — the
     worker's own profile applies its access downstream — so this row lookup
     exists purely to classify the target. A lookup failure is not worth failing
-    a dispatch over; the caller falls back to the non-Explore default.
+    a dispatch over; the caller falls back to the write-capable default.
     """
     try:
         from app.db.subagents import get_subagent
@@ -1120,14 +1120,14 @@ def _stored_agent_tools(agent_id: str) -> Optional[List[str]]:
 def _default_task_mode(declared_tools: Optional[List[str]], agent_label: str) -> str:
     """The mode a Task call takes when it names none.
 
-    Explore-class targets — read-only research agents — default to
+    Read-only research agents default to
     ``background``. A research child produces a report its parent reads when it
     gets to it; blocking the parent on one turns a fan-out into a queue, which
     is exactly what made research children serialize their parents before. Any
     agent that can write defaults to ``sync``, where the parent normally does
     need the result in hand before it continues.
 
-    For an Explore-class target this is not merely a default: see
+    For a read-only target this is not merely a default: see
     :func:`_effective_task_mode`, which refuses to let an explicit ``mode``
     override it.
     """

@@ -80,7 +80,7 @@ const STARTER_AGENT = {
 /**
  * The agent the first run uses: the first agent the owner made, or a new
  * "Assistant". The built-in agents are seeded on every start and list first,
- * so they are skipped (the first of them is the read-only Explore agent).
+ * so they are skipped.
  */
 export async function ensureStarterAgent(): Promise<Profile> {
 	const agents = await api.get<Profile[]>('/agents');

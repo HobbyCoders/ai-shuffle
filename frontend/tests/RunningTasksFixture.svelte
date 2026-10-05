@@ -25,7 +25,7 @@
 		['agent', 'Port: model picker favorites to mobile', 'DesktopWorker', 640],
 		['agent', 'Fix: hub rate limit on live checks', 'Unraid', 177],
 		['agent', 'Draft: release notes for 0.8.24', 'DesktopWorker', 410],
-		['agent', 'Explore: AppImage auto-update feed', 'DesktopWorker', 1902],
+		['agent', 'General Purpose: AppImage auto-update feed', 'DesktopWorker', 1902],
 		['shell', 'npm run dist:linux', 'DesktopWorker', 212],
 		['shell', 'npm ci --prefix frontend', 'DesktopWorker', 31],
 		['shell', 'docker logs -f ai-shuffle', 'Unraid', 4020],
@@ -59,7 +59,7 @@
 			created_at: iso(900),
 			updated_at: iso(5),
 			tasks: [
-				{ id: 'scan', title: 'Scan routes for auth gaps', agent: 'Explore', depends_on: [], status: 'completed', task_id: 'sw-m0', worker_session_id: 'child-scan', started_at: iso(900), finished_at: iso(600) },
+				{ id: 'scan', title: 'Scan routes for auth gaps', agent: 'General Purpose', depends_on: [], status: 'completed', task_id: 'sw-m0', worker_session_id: 'child-scan', started_at: iso(900), finished_at: iso(600) },
 				{ id: 'tests', title: 'Run the full backend suite', agent: 'Tester', depends_on: [], status: 'running', task_id: 'sw-m1', worker_session_id: 'child-tests', started_at: iso(580) },
 				{ id: 'ui', title: 'Check the phone composer at 390px', agent: 'Frontend Designer', depends_on: [], status: 'running', task_id: 'sw-m2', worker_session_id: 'child-ui', started_at: iso(300) },
 				{ id: 'notes', title: 'Write the release notes', agent: 'Writer', depends_on: ['scan', 'tests', 'ui'], status: 'blocked' }

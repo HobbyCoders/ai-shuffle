@@ -332,6 +332,10 @@ def _should_skip(sql: str) -> bool:
         return True
     if "ALTER COLUMN" in up and ("SET DEFAULT" in up or "DROP NOT NULL" in up):
         return True
+    # Fresh shim schemas already omit this FK. Upgrade removal is exercised
+    # on real PostgreSQL; SQLite cannot ALTER a table's FK constraints.
+    if up.strip() == "ALTER TABLE API_USER_PROFILES DROP CONSTRAINT IF EXISTS API_USER_PROFILES_PROFILE_ID_FKEY":
+        return True
     stripped = up.lstrip()
     return stripped.startswith((
         "CREATE EXTENSION",

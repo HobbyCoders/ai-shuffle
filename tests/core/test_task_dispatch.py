@@ -52,12 +52,12 @@ def agents(mock_db):
         "mode-all", "Mode All", None,
         {"model": "opus", "agent_invoke_mode": "all", "enabled_agents": ["helper"]},
     )
-    # Explore-class: an explicit tool surface that cannot write files.
+    # read-only: an explicit tool surface that cannot write files.
     database.create_profile(
         "explorer", "Explorer", None,
         {"model": "sonnet", "allowed_tools": ["Read", "Grep", "Glob", "Bash"]},
     )
-    # Explicit surface that CAN write — not Explore-class.
+    # Explicit surface that CAN write — not read-only.
     database.create_profile(
         "editor", "Editor", None,
         {"model": "sonnet", "allowed_tools": ["Read", "Grep", "Edit"]},
@@ -112,6 +112,26 @@ def test_resolve_unknown(agents):
 
 async def _dispatch(args, session_id, **kw):
     return await td.dispatch_task_tool(args, caller_session_id=session_id, **kw)
+
+
+def test_task_naming_retired_explore_gets_unknown_agent_refusal(agents):
+    from app.core.builtin_subagents import seed_builtin_subagents
+
+    agents.create_profile("Explore", "Explore", None, {"model": "haiku"}, is_builtin=True)
+    agents.update_profile("root-agent", config={
+        "model": "opus", "enabled_agents": ["Explore", "helper"],
+    })
+    _mk_session(agents, "s-retired", "root-agent")
+    seed_builtin_subagents()
+    with patch("app.core.provider_agent.dispatch_worker") as dispatch:
+        payload = asyncio.run(_dispatch({"agent": "Explore", "prompt": "Find it"}, "s-retired"))
+    assert payload["ok"] is False
+    assert td.resolve_target_agent("Explore")[1].startswith("Unknown agent:")
+    # The provider-scoped Task surface uses the same refusal as any absent id.
+    from app.core.agent_provider_models import available_subagents, resolve_subagent
+    assert payload["error"] == resolve_subagent("Explore", available_subagents("root-agent", None))[1]
+    assert "Explore" in payload["error"]
+    dispatch.assert_not_called()
 
 
 def test_missing_prompt(agents):
@@ -545,7 +565,7 @@ def test_background_registration_failure_is_not_returned_as_a_receipt(agents):
     assert "task_id" not in payload
 
 
-# ─── default mode is per-target: Explore-class runs background ───────────────
+# ─── default mode is per-target: read-only runs background ───────────────
 
 
 def _dispatch_watching_mode(args, session_id, **kw):
@@ -584,7 +604,7 @@ def test_read_only_agent_defaults_to_background(agents):
 
 
 def test_explicit_sync_cannot_beat_the_read_only_default(agents):
-    """R4: an Explore-class target is background even when the call says sync.
+    """R4: a read-only target is background even when the call says sync.
 
     The tool schema normally hides ``mode`` for such targets, but a request can
     still arrive from a replayed transcript or a retry built from one. It is
@@ -635,7 +655,7 @@ def test_explicit_sync_on_a_read_only_file_agent_is_also_ignored(agents):
 
 
 def test_write_capable_agent_still_defaults_to_sync(agents):
-    """An explicit surface containing Edit is not Explore-class."""
+    """An explicit surface containing Edit is not read-only."""
     _mk_session(agents, "s-editor", "root-agent")
     payload, _ = _dispatch_watching_mode(
         {"agent": "editor", "prompt": "go"}, "s-editor"
@@ -645,7 +665,7 @@ def test_write_capable_agent_still_defaults_to_sync(agents):
 
 def test_unrestricted_agent_still_defaults_to_sync(agents):
     """No declared tools means "inherit everything", which may well write —
-    never Explore-class."""
+    never read-only."""
     _mk_session(agents, "s-open", "root-agent")
     payload, _ = _dispatch_watching_mode(
         {"agent": "helper", "prompt": "go"}, "s-open"
@@ -686,7 +706,7 @@ def test_read_only_tool_surface_predicate():
     from app.core.builtin_subagents import is_read_only_tool_surface
 
     assert is_read_only_tool_surface(["Read", "Grep", "Glob"]) is True
-    # Bash rides along on the shipped Explore/Plan definitions, which the app
+    # Bash rides along on the shipped Plan definition, which the app
     # declares read-only; the predicate stays in step with them.
     assert is_read_only_tool_surface(["Read", "Grep", "Glob", "Bash", "Skill"]) is True
     assert is_read_only_tool_surface(["read", "GREP"]) is True
@@ -701,14 +721,14 @@ def test_read_only_tool_surface_predicate():
     assert is_read_only_tool_surface(["Read", "MultiEdit"]) is False
 
 
-def test_builtin_explore_and_plan_are_read_only_but_general_purpose_is_not():
+def test_builtin_plan_is_read_only_but_general_purpose_is_not():
     """The shipped definitions land on the side the audit expects."""
     from app.core.builtin_subagents import (
         get_builtin_subagent_definition,
         is_read_only_tool_surface,
     )
 
-    for agent_id in ("Explore", "Plan"):
+    for agent_id in ("Plan",):
         tools = get_builtin_subagent_definition(agent_id)["tools"]
         assert is_read_only_tool_surface(tools) is True, agent_id
 

@@ -6,7 +6,8 @@ def test_templates_listed(authenticated_client):
     assert resp.status_code == 200
     templates = resp.json()
     ids = {t["id"] for t in templates}
-    assert "general-purpose" in ids and "Explore" in ids
+    assert "general-purpose" in ids and "Plan" in ids
+    assert "Explore" not in ids
     for t in templates:
         assert t["prompt"], f"template {t['id']} has an empty prompt"
         assert "name" in t and "description" in t

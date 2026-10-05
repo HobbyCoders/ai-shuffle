@@ -1,8 +1,6 @@
 """What the built-in worker prompts have to say after the round-7 audit.
 
-Three of four Explore reports in bb10c865 opened with "Found …" for causes
-they had not established, and one in db26899c confidently reported "no bug";
-a worker in e8ece32a returned the summary "Findings" (the registry takes the
+A worker in e8ece32a returned the summary "Findings" (the registry takes the
 report's first line, ``provider_agent._completion_summary``); and
 ``frontend-designer`` was handed a pure logic helper twice because it lives
 under ``components/``.
@@ -14,7 +12,6 @@ import pytest
 
 from app.core.builtin_subagents import (
     BUILTIN_SUBAGENTS,
-    EXPLORE_PROMPT,
     FRONTEND_DESIGNER_PROMPT,
     GENERAL_PURPOSE_PROMPT,
     PLAN_PROMPT,
@@ -28,29 +25,11 @@ def _definition(agent_id):
     return definition
 
 
-# ─── Explore: label the evidence ─────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "clause",
-    [
-        "VERIFIED or HYPOTHESIS",
-        "the file, the line and the command that prove it",
-        'Never open with "Found the cause"',
-        "could NOT check and why",
-        '"There is no bug" is a claim like any other',
-        "Ranking guesses is useful; presenting them as findings is not.",
-    ],
-)
-def test_explore_has_to_calibrate_its_confidence(clause):
-    assert clause in EXPLORE_PROMPT
-
-
-def test_explore_still_says_how_to_search(clause=None):
-    """The calibration rules are additive — the search guidance the agent was
-    built for stays."""
-    assert "Use Glob for broad file pattern matching" in EXPLORE_PROMPT
-    assert "READ-ONLY MODE" in EXPLORE_PROMPT
+def test_explore_is_not_a_builtin():
+    assert get_builtin_subagent_definition("Explore") is None
+    assert {agent["id"] for agent in BUILTIN_SUBAGENTS} == {
+        "general-purpose", "Plan", "frontend-designer",
+    }
 
 
 # ─── every worker: the first line IS the summary ─────────────────────────────
@@ -59,7 +38,6 @@ def test_explore_still_says_how_to_search(clause=None):
 @pytest.mark.parametrize(
     "prompt",
     [
-        pytest.param(EXPLORE_PROMPT, id="explore"),
         pytest.param(GENERAL_PURPOSE_PROMPT, id="general-purpose"),
         pytest.param(PLAN_PROMPT, id="plan"),
         pytest.param(FRONTEND_DESIGNER_PROMPT, id="frontend-designer"),
@@ -86,6 +64,46 @@ def test_the_first_line_must_be_a_sentence_not_a_heading(prompt):
 )
 def test_general_purpose_reports_verification_honestly(clause):
     assert clause in GENERAL_PURPOSE_PROMPT
+
+
+def test_general_purpose_completes_assigned_investigation_and_review():
+    assert "Implementation is your main job, but do the assigned work fully" in GENERAL_PURPOSE_PROMPT
+    for work in ("investigation", "root-cause diagnosis", "code or PR review", "audits", "reproductions"):
+        assert work in GENERAL_PURPOSE_PROMPT
+    assert "and report your findings" in GENERAL_PURPOSE_PROMPT
+    assert "Never refuse an assignment merely to tell the caller to use another agent" in GENERAL_PURPOSE_PROMPT
+    assert "after doing the work" in GENERAL_PURPOSE_PROMPT
+    for refusal in (
+        "Your job is to change code, not to answer questions",
+        "instead of doing that work here",
+        "belong to the Explore agent",
+    ):
+        assert refusal not in GENERAL_PURPOSE_PROMPT
+
+
+def test_general_purpose_honours_report_only_assignments():
+    assert "A report-only assignment with no edits or commits is valid; honour it as given" in GENERAL_PURPOSE_PROMPT
+    assert "Do not commit, push, or open pull requests unless the task explicitly asks for it" in GENERAL_PURPOSE_PROMPT
+
+
+def test_general_purpose_reports_missing_ui_render_verification():
+    assert "For rendered UI work, render-verify it" in GENERAL_PURPOSE_PROMPT
+    assert "if you cannot, state in your report that the UI was not render-verified" in GENERAL_PURPOSE_PROMPT
+    assert "sole agent responsible for all frontend" not in FRONTEND_DESIGNER_PROMPT
+
+
+def test_general_purpose_description_advises_callers_without_forbidding_work():
+    description = _definition("general-purpose")["description"]
+    for work in ("investigations", "root-cause diagnosis", "code or PR reviews", "audits", "reproductions"):
+        assert work in description
+    assert "report-only work without edits" in description
+    assert "Searches and investigations can be done by the calling agent or assigned here" in description
+    assert "Explore" not in description
+    assert "implementation plans fit Plan" in description
+    assert "rendered UI work fits Frontend Designer" in description
+    assert "routing advice, not a restriction on assigned work" in description
+    assert "Do NOT use it" not in description
+    assert "Give it a concrete change to make" not in description
 
 
 # ─── frontend designer: routed on what the file produces ─────────────────────

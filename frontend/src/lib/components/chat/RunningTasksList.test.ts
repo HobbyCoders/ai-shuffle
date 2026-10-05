@@ -86,7 +86,7 @@ const swarm: SwarmSnapshot = {
 	created_at: new Date(Date.now() - 120_000).toISOString(),
 	updated_at: new Date().toISOString(),
 	tasks: [
-		{ id: 'code', title: 'Review code', agent: 'Explore', depends_on: [], status: 'running', task_id: 'm1', worker_session_id: 'w-code' },
+		{ id: 'code', title: 'Review code', agent: 'general-purpose', depends_on: [], status: 'running', task_id: 'm1', worker_session_id: 'w-code' },
 		{ id: 'report', title: 'Write report', agent: 'Writer', depends_on: ['code'], status: 'queued' }
 	]
 } as SwarmSnapshot;

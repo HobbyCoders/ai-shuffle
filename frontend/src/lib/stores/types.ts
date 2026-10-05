@@ -119,7 +119,7 @@ export interface ChatMessage {
 	// Subagent-specific fields
 	agentId?: string; // The subagent's unique ID (e.g., '00ed8f4d')
 	agentSessionId?: string; // App worker transcript session; not a native SDK agent ID
-	agentType?: string; // The subagent type (e.g., 'Explore', 'Plan'); for app-dispatched workers this is the MODEL slug
+	agentType?: string; // The subagent type (e.g., 'general-purpose', 'Plan'); for app-dispatched workers this is the MODEL slug
 	agentName?: string; // The dispatched agent's display name (e.g., 'Frontend Designer') — the card's identity
 	agentDescription?: string; // Task description from the Task tool
 	agentPrompt?: string; // The initial prompt sent to the subagent

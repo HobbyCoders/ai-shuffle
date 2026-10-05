@@ -28,6 +28,13 @@ NOW = datetime(2026, 10, 4, 22, 0, tzinfo=timezone.utc).timestamp()
 
 
 @pytest.fixture(autouse=True)
+def _existing_resume_profile(mock_db):
+    from app.db import database
+
+    database.create_profile("pr", "Resume agent", None, {})
+
+
+@pytest.fixture(autouse=True)
 def _reset_wakeup_state():
     from app.core import wakeup_service
 

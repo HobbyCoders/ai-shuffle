@@ -54,7 +54,7 @@ let agents: any[] = [
 			tool_selection_mode: 'allow',
 			allowed_tools: ['Read', 'Grep', 'Glob', 'Bash', 'Edit', 'mcp__github__*'],
 			agent_invoke_mode: 'custom',
-			enabled_agents: ['Explore', 'general-purpose'],
+			enabled_agents: ['Plan', 'general-purpose'],
 			max_turns: 60,
 			cwd: 'D:/Projects/ai-shuffle',
 			system_prompt: { type: 'custom', content: 'You cut AI Shuffle releases.\n\n1. Confirm main is green.\n2. Draft the changelog.\n3. Ask before tagging.' }
@@ -68,15 +68,6 @@ let agents: any[] = [
 		session_count: 311,
 		updated_at: ago(12 * day),
 		config: { provider_models: { __native__: 'opus' }, tool_selection_mode: 'all', system_prompt: { type: 'custom', content: 'You are a coding subagent for AI Shuffle.' } }
-	}),
-	agent({
-		id: 'Explore',
-		name: 'Explore',
-		is_builtin: true,
-		description: 'Read-only search agent for broad fan-out searches across many files.',
-		session_count: 488,
-		updated_at: ago(12 * day),
-		config: { provider_models: { __native__: 'haiku' }, tool_selection_mode: 'allow', allowed_tools: ['Read', 'Grep', 'Glob', 'Bash'], system_prompt: { type: 'custom', content: 'You are a file search specialist.' } }
 	}),
 	agent({
 		id: 'Plan',
@@ -104,7 +95,6 @@ const identities = [
 	{ id: 'juniper', name: 'Juniper', avatar_id: 'fox' },
 	{ id: 'release-captain', name: 'Release Captain', avatar_id: 'bolt' },
 	{ id: 'general-purpose', name: 'General Purpose', avatar_id: 'robot' },
-	{ id: 'Explore', name: 'Explore', avatar_id: 'owl' },
 	{ id: 'Plan', name: 'Plan', avatar_id: 'orbit' },
 	{ id: 'frontend-designer', name: 'Frontend Designer', avatar_id: 'spark' }
 ];

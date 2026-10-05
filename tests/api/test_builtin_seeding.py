@@ -5,6 +5,84 @@ app.core.builtin_subagents over the unified agents table)."""
 from unittest.mock import patch
 
 
+
+
+async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(mock_db):
+    from app.core.builtin_subagents import seed_builtin_subagents
+    from app.core.api_user_scope import worker_refusal
+    from app.core.config import settings
+    from app.core import wakeup_service, turn_scheduler
+    from app.db import database, wakeups, turns, session_events
+
+    database.create_profile("Explore", "Explore", None, {}, is_builtin=True)
+    database.create_profile("retirement-other", "Other", None, {})
+    database.create_api_user("retirement-only", "Explore only", "only-test-hash", profile_ids=["Explore"])
+    database.create_api_user("retirement-mixed", "Mixed", "mixed-test-hash", profile_ids=["Explore", "retirement-other"])
+    database.create_api_user("retirement-open", "Open", "open-test-hash")
+    assert worker_refusal("retirement-only", "general-purpose") is not None
+    database.create_session("retirement-chat", profile_id="Explore")
+    wakeups.create_wakeup(id="retirement-wake", session_id="retirement-chat", profile_id="Explore",
+                         prompt="continue", fire_at=9999999999)
+    turn = turns.enqueue_turn("retirement-chat", "user", profile_id="Explore", prompt="work")
+    with database.get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state = 'parked' WHERE id = %s", (turn["id"],))
+    seed_builtin_subagents()
+    seed_builtin_subagents()
+    assert database.get_api_user("retirement-only")["profile_ids"] == ["Explore"]
+    assert worker_refusal("retirement-only", "general-purpose") is not None
+    assert worker_refusal("retirement-mixed", "retirement-other") is None
+    assert worker_refusal("retirement-mixed", "general-purpose") is not None
+    assert worker_refusal("retirement-open", "general-purpose") is None
+    # The assistant's connector authorization reads the raw junction table,
+    # rather than database.get_api_user. It must stay restricted too.
+    from app.db.assistant import connector_grant_available
+    with patch("app.db.assistant.owner_connector", return_value=True), database.get_db() as conn:
+        assert not connector_grant_available(conn, {"api_user_id": "retirement-only"}, "general-purpose")
+        assert connector_grant_available(conn, {"api_user_id": "retirement-mixed"}, "retirement-other")
+        assert connector_grant_available(conn, {"api_user_id": "retirement-open"}, "general-purpose")
+    assert turns.get_turn(turn["id"])["state"] == "aborted"
+    pending = [r for r in wakeups.get_pending_wakeups() if r["session_id"] == "retirement-chat"]
+    assert len(pending) == 2
+    assert all(r["instance_id"] == settings.effective_instance_id for r in pending)
+    assert all(r["source"] == "profile_cancelled" and not r["profile_id"] and not r["prompt"] for r in pending)
+    with patch("app.core.turn_manager.submit_async") as submit:
+        for row in pending:
+            await wakeup_service._fire(row)
+        submit.assert_not_called()
+    assert not [r for r in wakeups.get_pending_wakeups() if r["session_id"] == "retirement-chat"]
+    notes = session_events.get_events("retirement-chat")
+    assert any("Explore was removed" in str(n["payload"]) for n in notes)
+    successor = await turn_scheduler._enqueue_context_wake("retirement-chat", "unpark", [], [], "continue")
+    assert successor["id"] is None
+    assert not turns.get_queued_turns("retirement-chat")
+    # The owner's explicit reassignment can replace the obsolete restriction.
+    database.update_api_user("retirement-only", profile_ids=["retirement-other"])
+    assert worker_refusal("retirement-only", "retirement-other") is None
+    assert worker_refusal("retirement-only", "general-purpose") is not None
+
+
+async def test_missing_stored_wake_profile_drops_once_with_visible_reason(mock_db):
+    from app.core import wakeup_service
+    from app.core.config import settings
+    from app.db import database, wakeups, session_events
+
+    database.create_profile("wake-fallback", "Existing fallback", None, {})
+    database.create_session("missing-wake-chat", profile_id="wake-fallback")
+    row = wakeups.create_wakeup(id="missing-agent-wake", session_id="missing-wake-chat", profile_id="deleted-agent",
+                               prompt="continue", fire_at=0, instance_id=settings.effective_instance_id)
+    assert await wakeup_service._resolve_profile_id(row) is None
+    assert await wakeup_service._resolve_profile_id({"session_id": "missing-wake-chat"}) == "wake-fallback"
+    with patch("app.core.turn_manager.submit_async") as submit:
+        await wakeup_service._fire(row)
+        await wakeup_service._fire(row)
+        submit.assert_not_called()
+    assert not [r for r in wakeups.get_pending_wakeups() if r["id"] == row["id"]]
+    notes = session_events.get_events("missing-wake-chat")
+    assert len(notes) == 1
+    assert "deleted-agent" in str(notes[0]["payload"])
+    assert wakeup_service._retry_attempts == {}
+
+
 _CHS_DEF = {
     "id": "chat-history-summarizer",
     "name": "Chat History Summarizer",
@@ -13,6 +91,46 @@ _CHS_DEF = {
     "tools": ["Read", "Grep", "Glob"],
     "model": "sonnet",
 }
+
+
+def test_retirement_preserves_history_and_disables_automations(mock_db):
+    from app.core.builtin_subagents import seed_builtin_subagents
+    from app.db import database
+
+    database.create_profile("Explore", "Renamed built-in", None, {
+        "system_prompt": {"type": "custom", "content": "Old search prompt"},
+        "provider_models": {"__native__": "haiku", "__voice__": "opus"},
+    }, is_builtin=True)
+    database.create_session("old-search", profile_id="Explore")
+    database.create_automation("old-search-job", "Saved search", "interval", {"seconds": 300},
+                               "Explore", prompt="Find it", enabled=True)
+    database.create_profile("other-builtin", "Other built-in profile", None, {}, is_builtin=True)
+
+    assert seed_builtin_subagents()["Explore"] == "retired"
+    assert database.get_profile("Explore") is None
+    assert database.get_session("old-search")["profile_id"] is None
+    assert database.get_profile("other-builtin") is not None
+    automation = database.get_automation("old-search-job")
+    assert automation["profile_id"] == "general-purpose"
+    assert not automation["is_enabled"]
+    assert automation["prompt"] == "Find it"
+    assert "Explore was removed" in automation["last_error"]
+    assert "Explore" not in seed_builtin_subagents()  # idempotent
+
+
+def test_retirement_keeps_owner_created_explore(mock_db):
+    from app.core.builtin_subagents import seed_builtin_subagents
+    from app.db import database
+
+    database.create_profile("Explore", "Explore", None, {"model": "opus"})
+    database.create_profile("custom-search", "Explore", None, {"model": "sonnet"})
+    database.create_automation("custom-job", "Custom search", "interval", {"seconds": 300},
+                               "Explore", prompt="Find it", enabled=True)
+    seed_builtin_subagents()
+    assert not database.get_profile("Explore")["is_builtin"]
+    assert database.get_profile("custom-search") is not None
+    assert database.get_automation("custom-job")["profile_id"] == "Explore"
+    assert database.get_automation("custom-job")["is_enabled"]
 
 
 class TestBuiltinSubagentSeeding:

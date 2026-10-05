@@ -4,8 +4,8 @@ export const snapshot: SwarmSnapshot = {
  id: 'sw-1', session_id: 'session-swarm', title: 'Review the release', status: 'running',
  created_at: '2026-09-07T10:00:00Z', updated_at: '2026-09-07T10:01:00Z',
  tasks: [
-  { id: 'code', title: 'Review code', agent: 'Explore', depends_on: [], status: 'running', worker_session_id: 'worker-1' },
-  { id: 'tests', title: 'Review tests', agent: 'Explore', depends_on: [], status: 'completed', result: 'Tests cover the new route.' },
+  { id: 'code', title: 'Review code', agent: 'General Purpose', depends_on: [], status: 'running', worker_session_id: 'worker-1' },
+  { id: 'tests', title: 'Review tests', agent: 'General Purpose', depends_on: [], status: 'completed', result: 'Tests cover the new route.' },
   { id: 'report', title: 'Write release report', agent: 'Writer', depends_on: ['code', 'tests'], status: 'queued' }
  ]
 };

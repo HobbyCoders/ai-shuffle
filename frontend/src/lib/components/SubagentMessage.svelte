@@ -21,7 +21,6 @@
 	// Map known SDK agent types to display labels
 	const KNOWN_AGENT_LABELS: Record<string, string> = {
 		'general-purpose': 'General',
-		'explore': 'Explore',
 		'plan': 'Plan',
 		'frontend-designer': 'Frontend',
 		'statusline-setup': 'Status Line',

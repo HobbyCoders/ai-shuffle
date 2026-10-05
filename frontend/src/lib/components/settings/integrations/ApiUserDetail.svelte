@@ -331,6 +331,14 @@
 
 {#snippet agentRows(selected: string[], onToggle: (id: string) => void)}
 	<RowGroup title="Agents" count="{selected.length} of {model.profiles.length}">
+		{#each selected.filter((id) => !model.profiles.some((profile) => profile.id === id)) as id}
+			<InlineBanner tone="warn">
+				Agent {id} was removed. This key stays restricted; assign an available agent before removing this restriction.
+				{#snippet actions()}
+					<button type="button" class="st-btn ghost sm" disabled={!selected.some((pid) => model.profiles.some((profile) => profile.id === pid))} onclick={() => onToggle(id)}>Remove {id} restriction</button>
+				{/snippet}
+			</InlineBanner>
+		{/each}
 		{#if model.profiles.length === 0}
 			<SettingRow label="No agents yet" />
 		{:else}
