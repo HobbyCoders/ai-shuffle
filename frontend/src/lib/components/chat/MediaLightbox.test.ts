@@ -5,11 +5,12 @@
  * escapes the message area's containment and renders front-of-everything), sits
  * at a high z-index, and the media goes edge-to-edge fullscreen on mobile.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { render, cleanup } from '@testing-library/svelte';
 import MediaLightbox from './MediaLightbox.svelte';
-import { openLightbox, closeLightbox } from '$lib/stores/lightbox';
+import { openLightbox, openMediaGallery, closeLightbox, selectGalleryMedia } from '$lib/stores/lightbox';
+import { IMAGE_RETRY_DELAYS_MS } from '$lib/utils/media';
 
 const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
@@ -129,5 +130,93 @@ describe('MediaLightbox', () => {
 		const img2 = dialog()!.querySelector('img') as HTMLImageElement;
 		expect(img2.style.transform).toContain('scale(1)');
 		expect(img2.className).toContain('cursor-zoom-in');
+	});
+});
+
+describe('an image that is not on this worker yet (#1850)', () => {
+	afterEach(() => vi.useRealTimers());
+	const served = '/api/generated-images/late.png';
+
+	function failThenLoad(img: HTMLImageElement, source: string) {
+		img.dispatchEvent(new Event('error'));
+		vi.advanceTimersByTime(IMAGE_RETRY_DELAYS_MS[0]);
+		expect(img.getAttribute('src')).toBe(`${source}?retry=1`);
+		img.dispatchEvent(new Event('load'));
+		vi.runAllTimers();
+		expect(img.getAttribute('src')).toBe(`${source}?retry=1`);
+	}
+
+	it('reloads the single-image view after a first 404', async () => {
+		render(MediaLightbox);
+		openLightbox('image', served);
+		await tick();
+		vi.useFakeTimers();
+		failThenLoad(dialog()!.querySelector('img')!, served);
+	});
+
+	it('reloads the gallery view and its thumbnails, and stops at the limit', async () => {
+		render(MediaLightbox);
+		const other = '/api/generated-images/other.png';
+		openMediaGallery([
+			{ kind: 'image', src: served, label: 'Late' },
+			{ kind: 'image', src: other, label: 'Other' }
+		]);
+		await tick();
+		vi.useFakeTimers();
+		const gallery = document.querySelector('[role="dialog"][aria-label="Media gallery"]')!;
+		const stage = gallery.querySelector('.gallery-stage img') as HTMLImageElement;
+		failThenLoad(stage, served);
+
+		const thumb = gallery.querySelectorAll('.thumbnail-image img')[1] as HTMLImageElement;
+		for (const delay of IMAGE_RETRY_DELAYS_MS) {
+			thumb.dispatchEvent(new Event('error'));
+			vi.advanceTimersByTime(delay);
+		}
+		const last = `${other}?retry=${IMAGE_RETRY_DELAYS_MS.length}`;
+		expect(thumb.getAttribute('src')).toBe(last);
+		thumb.dispatchEvent(new Event('error'));
+		vi.runAllTimers();
+		expect(thumb.getAttribute('src')).toBe(last);
+	});
+
+	it('does not apply a pending retry to the next gallery item, and closing drops it', async () => {
+		render(MediaLightbox);
+		const other = '/api/generated-images/other.png';
+		openMediaGallery([
+			{ kind: 'image', src: served, label: 'Late' },
+			{ kind: 'image', src: other, label: 'Other' }
+		]);
+		await tick();
+		vi.useFakeTimers();
+		const stageImg = () => document.querySelector('.gallery-stage img') as HTMLImageElement;
+		stageImg().dispatchEvent(new Event('error'));
+		selectGalleryMedia(1);
+		await tick();
+		vi.runAllTimers();
+		expect(stageImg().getAttribute('src')).toBe(other);
+
+		stageImg().dispatchEvent(new Event('error'));
+		closeLightbox();
+		await tick();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it('opens a reply image that recovered on a retry under its real address', async () => {
+		render(MediaLightbox);
+		const host = document.createElement('div');
+		host.innerHTML = `<div class="generated-media-container"><img class="media-zoomable" src="${served}?retry=2" alt="Late" /><button class="media-expand-btn">Expand</button></div>`;
+		document.body.append(host);
+		try {
+			(host.querySelector('img') as HTMLImageElement).click();
+			await tick();
+			expect(dialog()!.querySelector('img')!.getAttribute('src')).toBe(new URL(served, location.href).href);
+			closeLightbox();
+			await tick();
+			(host.querySelector('.media-expand-btn') as HTMLButtonElement).click();
+			await tick();
+			expect(dialog()!.querySelector('img')!.getAttribute('src')).toBe(new URL(served, location.href).href);
+		} finally {
+			host.remove();
+		}
 	});
 });

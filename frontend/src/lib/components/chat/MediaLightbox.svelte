@@ -8,7 +8,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import { lightbox, openLightbox, closeLightbox, selectGalleryMedia } from '$lib/stores/lightbox';
-	import { filenameFromMediaUrl } from '$lib/utils/media';
+	import { filenameFromMediaUrl, retryImage, withoutImageRetry } from '$lib/utils/media';
 	import { ChevronLeft, ChevronRight, X, Download, Minus, Plus, Film } from 'lucide-svelte';
 	let viewportEl = $state<HTMLDivElement | null>(null);
 	let overlayEl: HTMLElement | null = null;
@@ -64,7 +64,8 @@
 				e.preventDefault();
 				const type = media.tagName === 'VIDEO' ? 'video' : 'image';
 				const src = (media as HTMLVideoElement).currentSrc || (media as HTMLImageElement).src;
-				openLightbox(type, src);
+				// A reply image that recovered on a retry carries `retry=N`; open the real address.
+				openLightbox(type, type === 'image' ? withoutImageRetry(src) : src);
 			}
 			return;
 		}
@@ -76,7 +77,7 @@
 		const img = target.closest('img.media-zoomable') as HTMLImageElement | null;
 		if (img) {
 			e.preventDefault();
-			openLightbox('image', img.currentSrc || img.src);
+			openLightbox('image', withoutImageRetry(img.currentSrc || img.src));
 		}
 	}
 
@@ -321,7 +322,7 @@
 								<video src={$lightbox.src} controls playsinline preload="metadata" aria-label={currentItem?.label}></video>
 							{:else}
 								<button type="button" class="contents" aria-label={scale > 1 ? 'Zoom out image' : 'Zoom in image'} onkeydown={handleZoomKey}>
-									<img bind:this={imgEl} src={$lightbox.src} alt={currentItem?.label || 'Preview'} draggable="false"
+									<img bind:this={imgEl} src={$lightbox.src} use:retryImage={$lightbox.src} alt={currentItem?.label || 'Preview'} draggable="false"
 										class:zoomed={scale > 1} style:transform={`translate(${tx}px, ${ty}px) scale(${scale})`}
 										style:transition={animate ? 'transform 200ms ease' : 'none'}
 										onpointerdown={onPointerDown} onpointermove={onPointerMove} onpointerup={onPointerUp} onpointercancel={onPointerUp} onwheel={onWheel} />
@@ -349,7 +350,7 @@
 						{#each $lightbox.items as item, index (item.src)}
 							<button type="button" class="gallery-thumbnail" aria-label={`View ${index + 1}: ${item.label}`}
 								aria-pressed={index === $lightbox.index} use:revealSelected={index === $lightbox.index} onclick={() => selectGalleryMedia(index)}>
-								<span class="thumbnail-image">{#if item.kind === 'image'}<img src={item.src} alt="" loading="lazy" />{:else}<Film size={24} />{/if}</span>
+								<span class="thumbnail-image">{#if item.kind === 'image'}<img src={item.src} alt="" loading="lazy" use:retryImage={item.src} />{:else}<Film size={24} />{/if}</span>
 								<span class="thumbnail-label">{index + 1} · {item.label}</span>
 							</button>
 						{/each}
@@ -422,6 +423,7 @@
 					<img
 						bind:this={imgEl}
 						src={$lightbox.src}
+						use:retryImage={$lightbox.src}
 						alt="Preview"
 						class="max-w-[100vw] max-h-dvh sm:max-w-[92vw] sm:max-h-[88vh] sm:rounded-lg shadow-2xl object-contain select-none {scale > 1 ? 'cursor-grab' : 'cursor-zoom-in'}"
 						style="transform: translate({tx}px, {ty}px) scale({scale}); transition: {animate ? 'transform 200ms ease' : 'none'}; touch-action: none; will-change: transform;"

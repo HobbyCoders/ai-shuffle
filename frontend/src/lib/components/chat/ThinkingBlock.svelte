@@ -8,6 +8,7 @@
 	import { marked } from 'marked';
 	import { onDestroy } from 'svelte';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
+	import { retryImages } from '$lib/utils/media';
 	import { Typewriter } from '$lib/utils/typewriter';
 	import StreamingIndicator from './StreamingIndicator.svelte';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
@@ -220,7 +221,7 @@
 
 	<!-- Expandable Content -->
 	{#if isExpanded && content}
-		<div class="thinking-content prose prose-sm max-w-none">
+		<div class="thinking-content prose prose-sm max-w-none" use:retryImages>
 			{@html renderedHtml}
 		</div>
 	{/if}

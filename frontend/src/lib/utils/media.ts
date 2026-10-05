@@ -155,23 +155,136 @@ export function mediaHtml(kind: MediaKind, rawUrl: string, label = '', filename?
  */
 export const IMAGE_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
 
-/** Reload `img` from `source` on error with backoff; returns a cleanup. */
-export function retryImageLoad(img: HTMLImageElement, source: string): () => void {
-	if (!source || /^(?:data|blob):/.test(source)) return () => {};
+/**
+ * The URL of retry `attempt` for `source`: a `retry=N` query parameter, so the
+ * browser does not reuse the failed response. It goes before any `#fragment`,
+ * where it would otherwise be ignored.
+ */
+function retryImageUrl(source: string, attempt: number): string {
+	const hash = source.indexOf('#');
+	const [base, fragment] = hash >= 0 ? [source.slice(0, hash), source.slice(hash)] : [source, ''];
+	return `${base}${base.includes('?') ? '&' : '?'}retry=${attempt}${fragment}`;
+}
+
+/**
+ * `url` without the `retry=N` a retry added, for code that reads an image's
+ * live `src` back (the lightbox): a recovered image then opens, downloads and
+ * retries under its real address.
+ */
+export function withoutImageRetry(url: string): string {
+	// Only the trailing parameter, which is where retryImageUrl puts it.
+	return url.replace(/\?retry=\d+(?=#|$)/, '').replace(/&retry=\d+(?=#|$)/, '');
+}
+
+/** False for sources a retry cannot help: inline bytes are either there or not. */
+function isRetriable(source: string): boolean {
+	return Boolean(source) && !/^(?:data|blob):/.test(source);
+}
+
+interface ImageRetry {
+	/** The image failed to load: schedule the next attempt, if any are left. */
+	failed(): void;
+	/** Drop a pending attempt. */
+	cancel(): void;
+}
+
+/**
+ * One image's retry budget: after each failure, reload `img` from `source`
+ * with the next delay in {@link IMAGE_RETRY_DELAYS_MS}, then give up. The
+ * delegated form below uses the same delays and retry URL, keyed by source.
+ */
+function imageRetry(img: HTMLImageElement, source: string): ImageRetry {
 	let attempts = 0;
 	let timer: ReturnType<typeof setTimeout> | undefined;
-	const onError = () => {
-		if (attempts >= IMAGE_RETRY_DELAYS_MS.length) return;
-		const delay = IMAGE_RETRY_DELAYS_MS[attempts];
-		attempts += 1;
-		timer = setTimeout(() => {
-			img.src = `${source}${source.includes('?') ? '&' : '?'}retry=${attempts}`;
-		}, delay);
+	return {
+		failed() {
+			if (attempts >= IMAGE_RETRY_DELAYS_MS.length) return;
+			const delay = IMAGE_RETRY_DELAYS_MS[attempts];
+			attempts += 1;
+			const attempt = attempts;
+			timer = setTimeout(() => {
+				timer = undefined;
+				img.src = retryImageUrl(source, attempt);
+			}, delay);
+		},
+		cancel() {
+			if (timer !== undefined) clearTimeout(timer);
+			timer = undefined;
+		}
 	};
+}
+
+/** Reload `img` from `source` on error with backoff; returns a cleanup. */
+export function retryImageLoad(img: HTMLImageElement, source: string): () => void {
+	if (!isRetriable(source)) return () => {};
+	const retry = imageRetry(img, source);
+	const onError = () => retry.failed();
 	img.addEventListener('error', onError);
 	return () => {
 		img.removeEventListener('error', onError);
-		if (timer !== undefined) clearTimeout(timer);
+		retry.cancel();
+	};
+}
+
+/**
+ * Delegated form of {@link retryImageLoad} for markup no component owns, such
+ * as reply text rendered through `{@html}`: the <img> elements are recreated
+ * whenever that string changes, so nothing can be bound to them. `error` does
+ * not bubble, but it does pass `root` in the capture phase, so one listener
+ * there sees every descendant image fail.
+ *
+ * The budget belongs to the SOURCE (the `src` an element first failed with),
+ * not to the element: a streaming reply re-renders its HTML many times, and a
+ * per-element budget would start over on every re-render, so a permanently
+ * missing image would be retried for as long as the reply streamed. Here a
+ * source gets {@link IMAGE_RETRY_DELAYS_MS}.length retries for the life of
+ * `root`, however often it is redrawn. When a timer fires it reloads every
+ * still-attached image that failed with that source (the browser shares one
+ * request between them). Returns a cleanup that also drops pending timers.
+ */
+export function retryImagesWithin(root: HTMLElement): () => void {
+	interface SourceRetry {
+		attempts: number;
+		timer?: ReturnType<typeof setTimeout>;
+		failed: Set<HTMLImageElement>;
+	}
+	const bySource = new Map<string, SourceRetry>();
+	const sourceOf = new WeakMap<HTMLImageElement, string | null>();
+	const onError = (event: Event) => {
+		const img = event.target;
+		if (!(img instanceof HTMLImageElement)) return;
+		let source = sourceOf.get(img);
+		if (source === undefined) {
+			const first = img.getAttribute('src') ?? '';
+			source = isRetriable(first) ? first : null;
+			sourceOf.set(img, source);
+		}
+		if (source === null) return;
+		let state = bySource.get(source);
+		if (!state) bySource.set(source, (state = { attempts: 0, failed: new Set() }));
+		// Spent: hold no reference, so re-rendered copies can be collected.
+		if (state.timer === undefined && state.attempts >= IMAGE_RETRY_DELAYS_MS.length) return;
+		state.failed.add(img);
+		if (state.timer !== undefined) return;
+		const delay = IMAGE_RETRY_DELAYS_MS[state.attempts];
+		state.attempts += 1;
+		const attempt = state.attempts;
+		const retrying = state;
+		const url = retryImageUrl(source, attempt);
+		retrying.timer = setTimeout(() => {
+			retrying.timer = undefined;
+			const targets = [...retrying.failed];
+			retrying.failed.clear();
+			// A re-render can replace an element while it waits, and a
+			// detached <img> would still fetch, for nobody.
+			for (const target of targets) if (target.isConnected && root.contains(target)) target.src = url;
+		}, delay);
+	};
+	root.addEventListener('error', onError, true);
+	return () => {
+		root.removeEventListener('error', onError, true);
+		for (const state of bySource.values()) if (state.timer !== undefined) clearTimeout(state.timer);
+		bySource.clear();
 	};
 }
 
@@ -187,6 +300,11 @@ export function retryImage(img: HTMLImageElement, source: string) {
 			stop();
 		}
 	};
+}
+
+/** Svelte action form of {@link retryImagesWithin}: `<div use:retryImages>{@html html}</div>`. */
+export function retryImages(root: HTMLElement) {
+	return { destroy: retryImagesWithin(root) };
 }
 
 export interface ResultMedia {

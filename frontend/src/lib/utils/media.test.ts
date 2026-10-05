@@ -12,6 +12,8 @@ import {
 	filenameFromMediaUrl,
 	IMAGE_RETRY_DELAYS_MS,
 	retryImageLoad,
+	retryImagesWithin,
+	withoutImageRetry,
 	mediaHtml
 } from './media';
 import { chatFileUrl } from './chat-files';
@@ -237,5 +239,186 @@ describe('retryImageLoad', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe('retryImagesWithin', () => {
+	const source = '/api/generated-images/by-path?path=%2Fw%2Freply.png&session_id=s1';
+
+	function mount(html: string) {
+		const root = document.createElement('div');
+		root.innerHTML = html;
+		document.body.append(root);
+		return { root, stop: retryImagesWithin(root), img: root.querySelector('img')! };
+	}
+
+	it('shows a reply image whose first request 404s once its bytes arrive', () => {
+		vi.useFakeTimers();
+		const { root, stop, img } = mount(`<p>Here:</p><div><img src="${source}" alt="Reply" /></div>`);
+		try {
+			img.dispatchEvent(new Event('error'));
+			vi.advanceTimersByTime(IMAGE_RETRY_DELAYS_MS[0]);
+			expect(img.getAttribute('src')).toBe(`${source}&retry=1`);
+			img.dispatchEvent(new Event('load'));
+			vi.runAllTimers();
+			expect(img.getAttribute('src')).toBe(`${source}&retry=1`);
+		} finally {
+			stop();
+			root.remove();
+			vi.useRealTimers();
+		}
+	});
+
+	it('stops retrying an image that stays missing once the delays run out', () => {
+		vi.useFakeTimers();
+		const { root, stop, img } = mount(`<img src="${source}" alt="" />`);
+		try {
+			const seen: string[] = [];
+			for (const delay of IMAGE_RETRY_DELAYS_MS) {
+				img.dispatchEvent(new Event('error'));
+				vi.advanceTimersByTime(delay);
+				seen.push(img.getAttribute('src') ?? '');
+			}
+			expect(seen).toEqual(IMAGE_RETRY_DELAYS_MS.map((_, i) => `${source}&retry=${i + 1}`));
+			img.dispatchEvent(new Event('error'));
+			vi.runAllTimers();
+			expect(img.getAttribute('src')).toBe(seen[seen.length - 1]);
+		} finally {
+			stop();
+			root.remove();
+			vi.useRealTimers();
+		}
+	});
+
+	it('keeps one budget per source across re-renders and leaves inline images alone', () => {
+		vi.useFakeTimers();
+		const { root, stop } = mount(`<img src="${source}" alt="" /><img src="data:image/png;base64,AAAA" alt="" />`);
+		try {
+			const [served, inline] = [...root.querySelectorAll('img')];
+			inline.dispatchEvent(new Event('error'));
+			served.dispatchEvent(new Event('error'));
+			vi.advanceTimersByTime(IMAGE_RETRY_DELAYS_MS[0]);
+			expect(served.getAttribute('src')).toBe(`${source}&retry=1`);
+			expect(inline.getAttribute('src')).toBe('data:image/png;base64,AAAA');
+
+			// {@html} re-render: the new element continues the source's budget.
+			root.innerHTML = `<img src="${source}" alt="" />`;
+			const fresh = root.querySelector('img')!;
+			fresh.dispatchEvent(new Event('error'));
+			vi.advanceTimersByTime(IMAGE_RETRY_DELAYS_MS[1]);
+			expect(fresh.getAttribute('src')).toBe(`${source}&retry=2`);
+		} finally {
+			stop();
+			root.remove();
+			vi.useRealTimers();
+		}
+	});
+
+	it('retries a missing image at most the limit while a streaming reply keeps re-rendering it', () => {
+		vi.useFakeTimers();
+		const { root, stop } = mount('');
+		const retried: string[] = [];
+		try {
+			// Two minutes of a reply re-rendering its HTML once a second, then
+			// settling: every copy of the image fails, as a missing file does.
+			for (let i = 0; i < 120; i++) {
+				root.innerHTML = `<p>Paragraph ${i}</p><img src="${source}" alt="" />`;
+				const img = root.querySelector('img')!;
+				img.dispatchEvent(new Event('error'));
+				vi.advanceTimersByTime(1000);
+				const now = img.getAttribute('src')!;
+				if (now !== source) {
+					retried.push(now);
+					img.dispatchEvent(new Event('error'));
+				}
+			}
+			vi.runAllTimers();
+			const last = root.querySelector('img')!;
+			if (last.getAttribute('src') !== source) retried.push(last.getAttribute('src')!);
+			expect(new Set(retried).size).toBeLessThanOrEqual(IMAGE_RETRY_DELAYS_MS.length);
+			expect(retried.length).toBeLessThanOrEqual(IMAGE_RETRY_DELAYS_MS.length);
+		} finally {
+			stop();
+			root.remove();
+			vi.useRealTimers();
+		}
+	});
+
+	it('reloads every copy of a failed source on one retry', () => {
+		vi.useFakeTimers();
+		const { root, stop } = mount(`<img src="${source}" alt="a" /><img src="${source}" alt="b" />`);
+		try {
+			const [a, b] = [...root.querySelectorAll('img')];
+			a.dispatchEvent(new Event('error'));
+			b.dispatchEvent(new Event('error'));
+			vi.advanceTimersByTime(IMAGE_RETRY_DELAYS_MS[0]);
+			expect([a.getAttribute('src'), b.getAttribute('src')]).toEqual([`${source}&retry=1`, `${source}&retry=1`]);
+		} finally {
+			stop();
+			root.remove();
+			vi.useRealTimers();
+		}
+	});
+
+	it('drops pending retries on cleanup', () => {
+		vi.useFakeTimers();
+		const { root, stop, img } = mount(`<img src="${source}" alt="" />`);
+		try {
+			img.dispatchEvent(new Event('error'));
+			expect(vi.getTimerCount()).toBe(1);
+			stop();
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			root.remove();
+			vi.useRealTimers();
+		}
+	});
+
+	it('does not refetch for a detached image or after cleanup', () => {
+		vi.useFakeTimers();
+		const { root, stop, img } = mount(`<img src="${source}" alt="" />`);
+		try {
+			img.dispatchEvent(new Event('error'));
+			img.remove();
+			vi.runAllTimers();
+			expect(img.getAttribute('src')).toBe(source);
+
+			root.innerHTML = `<img src="${source}" alt="" />`;
+			const later = root.querySelector('img')!;
+			later.dispatchEvent(new Event('error'));
+			stop();
+			vi.runAllTimers();
+			expect(later.getAttribute('src')).toBe(source);
+			later.dispatchEvent(new Event('error'));
+			vi.runAllTimers();
+			expect(later.getAttribute('src')).toBe(source);
+		} finally {
+			root.remove();
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe('retry URLs', () => {
+	it('puts the retry parameter before a fragment', () => {
+		vi.useFakeTimers();
+		const img = document.createElement('img');
+		const stop = retryImageLoad(img, '/api/generated-images/a.svg#view');
+		try {
+			img.dispatchEvent(new Event('error'));
+			vi.advanceTimersByTime(IMAGE_RETRY_DELAYS_MS[0]);
+			expect(img.getAttribute('src')).toBe('/api/generated-images/a.svg?retry=1#view');
+		} finally {
+			stop();
+			vi.useRealTimers();
+		}
+	});
+
+	it('withoutImageRetry strips only the retry a retry added', () => {
+		expect(withoutImageRetry('/api/generated-images/a.png?retry=3')).toBe('/api/generated-images/a.png');
+		expect(withoutImageRetry('/api/files/by-path?path=%2Fw%2Fa.png&session_id=s1&retry=5')).toBe('/api/files/by-path?path=%2Fw%2Fa.png&session_id=s1');
+		expect(withoutImageRetry('/a.svg?retry=1#view')).toBe('/a.svg#view');
+		expect(withoutImageRetry('/a.png?retry=x')).toBe('/a.png?retry=x');
+		expect(withoutImageRetry('https://cdn.example/a.png?retryable=1')).toBe('https://cdn.example/a.png?retryable=1');
 	});
 });

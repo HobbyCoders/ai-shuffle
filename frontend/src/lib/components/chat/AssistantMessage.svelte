@@ -6,7 +6,7 @@
 	import { onDestroy } from 'svelte';
 	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
-	import { rewriteMediaMarkdown, clampRevealToMediaBoundary } from '$lib/utils/media';
+	import { rewriteMediaMarkdown, clampRevealToMediaBoundary, retryImages } from '$lib/utils/media';
 	import { renderChatMarkdown } from '$lib/utils/chat-markdown';
 	import { routeChatFiles } from '$lib/utils/chat-files';
 	import { rewriteWithGallery } from '$lib/utils/media-gallery';
@@ -534,7 +534,10 @@
 				onclick={handleProseClick}
 				onchange={handleTaskChange}
 				bind:this={proseEl}
+				use:retryImages
 			>
+				<!-- use:retryImages — a reply image can 404 for a few seconds when the
+				     chat is viewed through another worker than the one running it. -->
 				{#if content}
 					<!-- Two blocks: stable prefix (settled media stays mounted) + streaming tail -->
 					{@html rendered.prefix}{@html rendered.tail}

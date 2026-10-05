@@ -6,11 +6,11 @@
  */
 import { cleanup, render, waitFor } from '@testing-library/svelte';
 import { get } from 'svelte/store';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import AssistantMessage from './AssistantMessage.svelte';
 import ToolScreenshot from './ToolScreenshot.svelte';
 import { closeLightbox, lightbox, openMediaGallery } from '$lib/stores/lightbox';
-import { filenameFromMediaUrl } from '$lib/utils/media';
+import { filenameFromMediaUrl, IMAGE_RETRY_DELAYS_MS } from '$lib/utils/media';
 import { galleryMediaForTurn } from '$lib/utils/media-gallery';
 
 afterEach(() => {
@@ -93,4 +93,84 @@ it('leaves external and inline media untouched', async () => {
 	await waitFor(() => expect(view.container.querySelectorAll('img')).toHaveLength(2));
 	const sources = [...view.container.querySelectorAll('img')].map(img => img.getAttribute('src'));
 	expect(sources).toEqual(['https://cdn.example/a.png', 'data:image/png;base64,AAAA']);
+});
+
+describe('a reply image that is not on this worker yet (#1850)', () => {
+	afterEach(() => vi.useRealTimers());
+
+	async function renderReply(markdown: string) {
+		const view = render(AssistantMessage, { content: markdown, streaming: false, sessionId: 'remote-chat' });
+		await waitFor(() => expect(view.container.querySelector('img')).toBeTruthy());
+		vi.useFakeTimers();
+		const img = view.container.querySelector('img')!;
+		return { img, source: img.getAttribute('src')! };
+	}
+
+	it('reloads a generated image after a first 404 and keeps the copy that loaded', async () => {
+		const { img, source } = await renderReply(`Done.\n\n![Sunset](${image})`);
+		img.dispatchEvent(new Event('error'));
+		vi.advanceTimersByTime(IMAGE_RETRY_DELAYS_MS[0]);
+		expect(img.getAttribute('src')).toBe(`${source}&retry=1`);
+		img.dispatchEvent(new Event('load'));
+		vi.runAllTimers();
+		expect(img.getAttribute('src')).toBe(`${source}&retry=1`);
+		expect(img.isConnected).toBe(true);
+	});
+
+	it('retries a plain markdown image too, and gives up at the limit', async () => {
+		const { img, source } = await renderReply('See ![chart](/api/files/by-path?path=%2Fw%2Fchart)');
+		expect(img.classList.contains('media-zoomable')).toBe(false);
+		for (const delay of IMAGE_RETRY_DELAYS_MS) {
+			img.dispatchEvent(new Event('error'));
+			vi.advanceTimersByTime(delay);
+		}
+		const last = img.getAttribute('src');
+		expect(last).toBe(`${source}&retry=${IMAGE_RETRY_DELAYS_MS.length}`);
+		img.dispatchEvent(new Event('error'));
+		vi.runAllTimers();
+		expect(img.getAttribute('src')).toBe(last);
+	});
+});
+
+it('retries a missing reply image at most the limit while the reply streams and re-renders it', async () => {
+	let text = `Start.\n\n![Sunset](${image})`;
+	const view = render(AssistantMessage, { content: text, streaming: true, sessionId: 'remote-chat' });
+	await waitFor(() => expect(view.container.querySelector('img')).toBeTruthy());
+	// Every reload a retry asks for is a write to an <img>'s src attribute.
+	const reloads: string[] = [];
+	const observer = new MutationObserver(records => {
+		for (const r of records) if (r.attributeName === 'src') reloads.push((r.target as HTMLImageElement).getAttribute('src')!);
+	});
+	observer.observe(view.container, { subtree: true, attributes: true, attributeFilter: ['src'] });
+	vi.useFakeTimers();
+	const elements = new Set<HTMLImageElement>();
+	try {
+		// Forty paragraphs, one a second: each one moves the stable prefix, so
+		// the image is re-rendered as a fresh <img> every time, and each copy
+		// fails (and fails again after a reload), as a file that never arrives does.
+		const fail = (img: HTMLImageElement) => {
+			img.dispatchEvent(new Event('error'));
+		};
+		for (let i = 0; i < 40; i++) {
+			const img = view.container.querySelector('img')!;
+			elements.add(img);
+			fail(img);
+			vi.advanceTimersByTime(600);
+			fail(img);
+			vi.advanceTimersByTime(400);
+			text += `\n\nParagraph ${i}.`;
+			await view.rerender({ content: text, streaming: true, sessionId: 'remote-chat' });
+		}
+		await view.rerender({ content: text, streaming: false, sessionId: 'remote-chat' });
+		for (let i = 0; i < 10; i++) {
+			fail(view.container.querySelector('img')!);
+			vi.advanceTimersByTime(8000);
+		}
+		reloads.push(...observer.takeRecords().filter(r => r.attributeName === 'src').map(r => (r.target as HTMLImageElement).getAttribute('src')!));
+		expect(elements.size).toBeGreaterThan(10);
+		expect(reloads.filter(src => /[?&]retry=\d+$/.test(src)).length).toBeLessThanOrEqual(IMAGE_RETRY_DELAYS_MS.length);
+	} finally {
+		observer.disconnect();
+		vi.useRealTimers();
+	}
 });
