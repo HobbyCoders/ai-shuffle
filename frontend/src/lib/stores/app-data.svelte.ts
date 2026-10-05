@@ -613,12 +613,12 @@ export const appData = {
 		}
 	},
 
-	async createProfile(data: { id: string; name: string; description?: string; config: Record<string, unknown> }) {
+	async createProfile(data: { id: string; name: string; description?: string; config: Record<string, unknown>; avatar_color?: string | null }) {
 		await api.post('/agents', data);
 		await appData.loadProfiles();
 	},
 
-	async updateProfile(profileId: string, data: { name: string; description?: string; config: Record<string, unknown> }) {
+	async updateProfile(profileId: string, data: { name: string; description?: string; config: Record<string, unknown>; avatar_color?: string | null }) {
 		await api.put(`/agents/${profileId}`, data);
 		await appData.loadProfiles();
 	},

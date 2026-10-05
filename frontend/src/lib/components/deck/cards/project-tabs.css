@@ -9,7 +9,7 @@
    under `.ptab` so these common class names (.set-group, .set-row,
    .inp, .switch, …) can't leak into the rest of the app.
 
-   Mirrors StudioEditorShell.svelte + ProfileForm.svelte so the Project
+   Mirrors StudioEditorShell.svelte so the Project
    tabs match the Profile editor exactly. Theme tokens only.
    ══════════════════════════════════════════════════════════════════ */
 

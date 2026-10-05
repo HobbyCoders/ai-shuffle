@@ -242,20 +242,29 @@ def _registry_kind(session_id: str, task_id: Any) -> Dict[str, Any]:
 
 
 def _registry_worker(session_id: str, task_id: Any) -> Dict[str, Any]:
-    """The other worker a Task child runs on, for a TaskUpdated frame.
+    """Where and on what a Task child runs, for a TaskUpdated frame.
 
-    Only remote children carry it (``get_task`` returns the wire shape, whose
-    ``worker`` names the device); a local task returns {} so the additive
-    field is absent. The running-tasks list names the worker on every row and
-    on a stopped one (#1816).
+    ``worker_name``: only remote children carry it (``get_task`` returns the
+    wire shape, whose ``worker`` names the device); a local task leaves it
+    absent. The running-tasks list names the worker on every row and on a
+    stopped one (#1816).
+
+    ``model``: the "<provider> · <model>" label a Task worker was started on
+    (``dispatch_worker`` / remote tracking stamp it), so the list can show
+    which model each subagent uses (#1827). Absent for shells and older
+    records, like every other additive field here.
     """
     if not task_id:
         return {}
     try:
         from app.core.task_registry import task_registry
-        worker = (task_registry.get_task(session_id, str(task_id)) or {}).get("worker")
+        record = task_registry.get_task(session_id, str(task_id)) or {}
+        worker = record.get("worker")
         name = worker.get("name") if isinstance(worker, dict) else None
-        return {"worker_name": str(name)} if name else {}
+        labels: Dict[str, Any] = {"worker_name": str(name)} if name else {}
+        if record.get("model"):
+            labels["model"] = str(record["model"])
+        return labels
     except Exception:  # noqa: BLE001 — a label must never break recording
         return {}
 

@@ -1,22 +1,26 @@
 <script lang="ts">
 	/**
-	 * ProfileToolConfig — the agent editor's one tool picker (ruling T6).
+	 * ProfileToolConfig — the agent editor's one tool picker (ruling T6), the
+	 * Agents page's Tools tab.
 	 *
 	 * Every tool a session can be given comes from `GET /tools/surface`, grouped
 	 * by where it lives: the harness builtins, the app's bridged servers, the AI
 	 * tools, the browser, computer use, app config, then each configured MCP
-	 * server. There is no second card and no hardcoded list — a builtin added
+	 * server (in its own card). There is no hardcoded list — a builtin added
 	 * upstream shows up here on the next refresh.
 	 *
-	 * The mode select says what the checkboxes mean. In "all"/"none" they are
+	 * The access control says what the checkboxes mean. In "all"/"none" they are
 	 * read-only and simply show what the agent gets; in "allow"/"disallow" they
 	 * drive that mode's list. Selecting a whole MCP server saves the
 	 * `mcp__<server>__*` pattern; unchecking one of its tools expands the
 	 * pattern back to names.
 	 */
-	import { Wrench, ListChecks, Search, RefreshCw, ChevronDown, Check, Minus, AlertTriangle } from 'lucide-svelte';
+	import { Search, RefreshCw, ChevronDown, Check, Minus, TriangleAlert } from 'lucide-svelte';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
 	import type { ToolSurface, ToolSurfaceGroup, ToolSurfaceTool } from '$lib/api/toolSurface';
+	import RowGroup from '$lib/components/settings/rows/RowGroup.svelte';
+	import SettingRow from '$lib/components/settings/rows/SettingRow.svelte';
+	import InlineBanner from '$lib/components/settings/rows/InlineBanner.svelte';
 	import {
 		type SelectabilityContext,
 		type ToolSelectionMode,
@@ -67,27 +71,20 @@
 	const ctx = $derived<SelectabilityContext>({ computerUseEnabled: computerUse.enabled, isAdmin });
 	const editing = $derived(toolSelectionMode === 'allow' || toolSelectionMode === 'disallow');
 	const list = $derived(
-		toolSelectionMode === 'allow'
-			? allowedTools
-			: toolSelectionMode === 'disallow'
-				? disallowedTools
-				: []
+		toolSelectionMode === 'allow' ? allowedTools : toolSelectionMode === 'disallow' ? disallowedTools : []
 	);
 
 	const groups = $derived(sortGroups(surface.groups));
-	const errorsByGroup = $derived(
-		Object.fromEntries(surface.errors.map((e) => [e.group, e.message]))
-	);
+	const appGroups = $derived(groups.filter((g) => g.kind !== 'mcp'));
+	const mcpGroups = $derived(groups.filter((g) => g.kind === 'mcp'));
+	const errorsByGroup = $derived(Object.fromEntries(surface.errors.map((e) => [e.group, e.message])));
 
 	const totalSelectable = $derived(selectableSurfaceTools(groups, ctx).length);
 	const allowedCount = $derived(countAllowedTools(toolSelectionMode, groups, list, ctx));
 
 	// Searching is the one time every matching group opens on its own.
 	const searching = $derived(search.trim().length > 0);
-
-	function visibleTools(group: ToolSurfaceGroup): ToolSurfaceTool[] {
-		return filterGroupTools(group, search);
-	}
+	const anyMatch = $derived(!searching || groups.some((g) => filterGroupTools(g, search).length > 0));
 
 	function isExpanded(group: ToolSurfaceGroup, matches: number): boolean {
 		if (searching) return matches > 0;
@@ -108,9 +105,7 @@
 	}
 
 	function groupState(group: ToolSurfaceGroup): 'all' | 'some' | 'none' {
-		if (toolSelectionMode === 'all') {
-			return selectableTools(group, ctx).length > 0 ? 'all' : 'none';
-		}
+		if (toolSelectionMode === 'all') return selectableTools(group, ctx).length > 0 ? 'all' : 'none';
 		if (toolSelectionMode === 'none') return 'none';
 		return groupSelectionState(group, list, ctx);
 	}
@@ -119,11 +114,19 @@
 		return group.tools.filter((t) => isChecked(group, t)).length;
 	}
 
+	/** Strip the `mcp__server__` prefix inside a server's own card. */
+	function shortName(group: ToolSurfaceGroup, name: string): string {
+		const server = group.server?.trim();
+		return group.kind === 'mcp' && server && name.startsWith(`mcp__${server}__`)
+			? name.slice(`mcp__${server}__`.length)
+			: name;
+	}
+
 	const MODE_HINTS: Record<ToolSelectionMode, string> = {
-		all: 'Every discovered tool. List is read-only.',
-		none: 'No tools at all. List is read-only.',
+		all: 'Every tool. Read-only list.',
+		none: 'No tools at all.',
 		allow: 'Only the checked tools.',
-		disallow: 'Everything except the checked tools.'
+		disallow: 'All but the checked tools.'
 	};
 	const MODE_OPTIONS: { id: ToolSelectionMode; label: string }[] = [
 		{ id: 'all', label: 'All' },
@@ -131,432 +134,457 @@
 		{ id: 'disallow', label: 'All except selected' },
 		{ id: 'none', label: 'None' }
 	];
+
+	function modeKey(event: KeyboardEvent) {
+		const keys = ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'];
+		if (!keys.includes(event.key)) return;
+		event.preventDefault();
+		const i = MODE_OPTIONS.findIndex((o) => o.id === toolSelectionMode);
+		const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
+		const next = MODE_OPTIONS[(i + step + MODE_OPTIONS.length) % MODE_OPTIONS.length];
+		onToolSelectionModeChange(next.id);
+		const group = (event.currentTarget as HTMLElement).closest('[role="radiogroup"]');
+		queueMicrotask(() => group?.querySelector<HTMLElement>(`[data-mode="${next.id}"]`)?.focus());
+	}
+
+	function hintFor(group: ToolSurfaceGroup, blocked: string | null, error: string | undefined): string {
+		if (error) return error;
+		if (blocked) return blocked;
+		return group.kind === 'mcp' ? 'MCP server' : 'Included with the app';
+	}
 </script>
 
-<div class="set-group">
-	<div class="set-row ts-moderow">
-		<div class="lab"><h4>Access</h4><p>{MODE_HINTS[toolSelectionMode]}</p></div>
-		<div class="ctl">
-			<div class="seg" role="radiogroup" aria-label="Tool access mode">
+{#snippet groupRows(items: ToolSurfaceGroup[])}
+	{#each items as group (group.id)}
+		{@const rows = filterGroupTools(group, search)}
+		{@const open = isExpanded(group, rows.length)}
+		{@const state = groupState(group)}
+		{@const blocked = groupBlockedReason(group, ctx)}
+		{@const error = errorsByGroup[group.id]}
+		{#if rows.length > 0 || !searching}
+			<div class="tg" class:blocked={!!blocked || (!!error && group.tools.length === 0)}>
+				<button
+					type="button"
+					class="chk"
+					class:on={state === 'all'}
+					class:mixed={state === 'some'}
+					role="checkbox"
+					aria-checked={state === 'all' ? 'true' : state === 'some' ? 'mixed' : 'false'}
+					aria-label={`Toggle all ${group.label}${/tools$/i.test(group.label) ? '' : ' tools'}`}
+					disabled={!editing || !!blocked}
+					onclick={() => onToggleGroup(group)}
+				>
+					{#if state === 'all'}<Check />{:else if state === 'some'}<Minus />{/if}
+				</button>
+				<button
+					type="button"
+					class="tt"
+					aria-expanded={open}
+					aria-label={`Toggle ${group.label} section`}
+					onclick={() => toggleExpanded(group)}
+				>
+					<span class="tn">{group.label}</span>
+					<span class="th" class:err={!!error}>
+						{#if error}<TriangleAlert />{/if}{hintFor(group, blocked, error)}
+					</span>
+				</button>
+				<span class="cnt">{selectedInGroup(group)}/{group.tools.length}</span>
+				<span class="chev" class:open aria-hidden="true"><ChevronDown /></span>
+			</div>
+			{#if open}
+				{#if rows.length === 0}
+					<p class="tempty">No tools here.</p>
+				{:else}
+					<div class="tools">
+						{#each rows as tool (tool.name)}
+							{@const reason = toolBlockedReason(group, tool, ctx)}
+							{@const checked = isChecked(group, tool)}
+							<button
+								type="button"
+								class="tool"
+								role="checkbox"
+								aria-checked={checked}
+								aria-label={tool.name}
+								title={reason ?? tool.description}
+								disabled={!editing || !!reason}
+								onclick={() => onToggleTool(group, tool.name)}
+							>
+								<span class="chk box" class:on={checked} aria-hidden="true">{#if checked}<Check />{/if}</span>
+								<span class="tmeta">
+									<span class="tname">
+										{shortName(group, tool.name)}
+										{#if tool.risk}<span class="risk {tool.risk}">{tool.risk}</span>{/if}
+									</span>
+									<span class="tdesc">{reason ?? tool.description}</span>
+								</span>
+							</button>
+						{/each}
+					</div>
+				{/if}
+			{/if}
+		{/if}
+	{/each}
+{/snippet}
+
+<div class="ptc">
+	<RowGroup title="Access">
+		<SettingRow label="Which tools" hint={MODE_HINTS[toolSelectionMode]}>
+			<div class="st-seg" role="radiogroup" aria-label="Tool access mode">
 				{#each MODE_OPTIONS as opt (opt.id)}
 					<button
 						type="button"
 						role="radio"
+						data-mode={opt.id}
 						aria-checked={toolSelectionMode === opt.id}
-						class:on={toolSelectionMode === opt.id}
+						tabindex={toolSelectionMode === opt.id ? 0 : -1}
 						onclick={() => onToolSelectionModeChange(opt.id)}
-					>{opt.label}</button>
+						onkeydown={modeKey}>{opt.label}</button
+					>
 				{/each}
 			</div>
-		</div>
-	</div>
-</div>
+		</SettingRow>
+	</RowGroup>
 
-<div class="set-group">
-	<div class="set-grouphead ts-head">
-		<div class="ts-headtext">
-			<h3><ListChecks />Tools</h3>
-			<p>
-				{allowedCount} of {totalSelectable} tools allowed{#if surface.discovered_at}<span class="hint"> · discovered {new Date(surface.discovered_at).toLocaleTimeString()}</span>{/if}
-			</p>
-		</div>
-		<div class="ts-headacts">
-			<div class="ts-searchbox">
-				<Search size={14} />
-				<input
-					class="ts-search"
-					type="search"
-					placeholder="Search tools…"
-					aria-label="Search tools"
-					bind:value={search}
-				/>
-			</div>
+	{#if toolSelectionMode === 'allow' && list.length === 0}
+		<InlineBanner>Nothing checked, so no tools.</InlineBanner>
+	{/if}
+
+	<RowGroup title="Tools" count={loading ? undefined : `${allowedCount} of ${totalSelectable}`}>
+		{#snippet actions()}
+			<label class="tsearch">
+				<Search />
+				<span class="st-vh">Search tools</span>
+				<input type="search" placeholder="Search tools" aria-label="Search tools" bind:value={search} />
+			</label>
 			<button
 				type="button"
-				class="ts-refresh"
-				title="Re-discover the tool surface"
+				class="st-btn ghost icon sm"
+				title="Rediscover tools"
 				aria-label="Refresh tool list"
 				disabled={refreshing}
 				onclick={onRefresh}
 			>
-				<RefreshCw size={14} class={refreshing ? 'ts-spin' : ''} />
+				<RefreshCw class={refreshing ? 'spin' : ''} />
 			</button>
-		</div>
-	</div>
-
-	<div class="ts-body">
+		{/snippet}
 		{#if loading}
-			<div class="ed-note"><span>Discovering tools…</span></div>
+			<p class="tnote" role="status">Discovering tools…</p>
 		{:else if groups.length === 0}
-			<div class="ed-note"><AlertTriangle /><span>No tools were discovered. Try refreshing.</span></div>
+			<p class="tnote">No tools found. Try refresh.</p>
+		{:else if appGroups.some((g) => !searching || filterGroupTools(g, search).length > 0)}
+			{@render groupRows(appGroups)}
 		{:else}
-			{#each groups as group (group.id)}
-				{@const rows = visibleTools(group)}
-				{@const open = isExpanded(group, rows.length)}
-				{@const state = groupState(group)}
-				{@const blocked = groupBlockedReason(group, ctx)}
-				{@const error = errorsByGroup[group.id]}
-				{#if rows.length > 0 || !searching}
-					<div class="ts-group" class:blocked={!!blocked}>
-						<div class="ts-grouphead">
-							<button
-								type="button"
-								class="ts-chk"
-								class:on={state === 'all'}
-								class:mixed={state === 'some'}
-								role="checkbox"
-								aria-checked={state === 'all' ? 'true' : state === 'some' ? 'mixed' : 'false'}
-								aria-label={`Toggle all ${group.label}${/tools$/i.test(group.label) ? '' : ' tools'}`}
-								disabled={!editing || !!blocked}
-								onclick={() => onToggleGroup(group)}
-							>
-								{#if state === 'all'}<Check size={12} />{:else if state === 'some'}<Minus size={12} />{/if}
-							</button>
-							<button
-								type="button"
-								class="ts-gtitle"
-								aria-expanded={open}
-								aria-label={`Toggle ${group.label} section`}
-								onclick={() => toggleExpanded(group)}
-							>
-								<span class="ts-gname">{group.label}</span>
-								<span class="hint">{group.tools.length}</span>
-								{#if blocked}<span class="pill-s ts-blocked" title={blocked}>unavailable</span>{/if}
-								<ChevronDown size={15} class={open ? 'ts-chev open' : 'ts-chev'} />
-							</button>
-							<span class="pill-s acc">{selectedInGroup(group)}/{group.tools.length}</span>
-						</div>
-
-						{#if error}
-							<div class="ts-err"><AlertTriangle size={14} /><span>{error}</span></div>
-						{/if}
-						{#if blocked}
-							<div class="ts-reason">{blocked}</div>
-						{/if}
-
-						{#if open}
-							{#if rows.length === 0}
-								<div class="ts-empty">No tools in this group.</div>
-							{:else}
-								<div class="ts-tools">
-									{#each rows as tool (tool.name)}
-										{@const reason = toolBlockedReason(group, tool, ctx)}
-										{@const checked = isChecked(group, tool)}
-										<button
-											type="button"
-											class="ts-tool"
-											class:on={checked}
-											role="checkbox"
-											aria-checked={checked}
-											aria-label={tool.name}
-											title={reason ?? tool.description}
-											disabled={!editing || !!reason}
-											onclick={() => onToggleTool(group, tool.name)}
-										>
-											<span class="ts-box" class:on={checked}>{#if checked}<Check size={11} />{/if}</span>
-											<span class="ts-tmeta">
-												<span class="ts-tname">
-													{tool.name}
-													{#if tool.risk}<span class="ts-risk risk-{tool.risk}">{tool.risk}</span>{/if}
-												</span>
-												<span class="ts-tdesc">{reason ?? tool.description}</span>
-											</span>
-										</button>
-									{/each}
-								</div>
-							{/if}
-						{/if}
-					</div>
-				{/if}
-			{/each}
+			<p class="tnote">No matches here.</p>
 		{/if}
-	</div>
+	</RowGroup>
+
+	{#if !loading && mcpGroups.length > 0 && (!searching || mcpGroups.some((g) => filterGroupTools(g, search).length > 0))}
+		<RowGroup title="MCP servers" count={mcpGroups.length}>
+			{@render groupRows(mcpGroups)}
+		</RowGroup>
+	{/if}
+
+	{#if searching && !anyMatch}
+		<p class="st-note">No tools match “{search.trim()}”.</p>
+	{:else if !editing}
+		<p class="st-note">Pick “Only selected” or “All except” to edit.</p>
+	{/if}
+	{#if surface.discovered_at && !loading}
+		<p class="st-note">Discovered {new Date(surface.discovered_at).toLocaleTimeString()}.</p>
+	{/if}
 </div>
 
-{#if toolSelectionMode === 'allow' && list.length === 0}
-	<div class="ed-note">
-		<Wrench />
-		<span>Nothing selected, so this agent has no tools.</span>
-	</div>
-{/if}
-
 <style>
-	/* ── Section header: title + search + refresh ── */
-	.ts-head {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: 14px;
-		flex-wrap: wrap;
+	/* Segmented radios: the Settings Segmented look, with radio semantics. */
+	.st-seg {
+		display: inline-flex;
+		background: var(--st-muted);
+		border: 1px solid var(--st-border);
+		border-radius: var(--st-radius-md);
+		padding: 2px;
+		gap: 2px;
+		max-width: 100%;
+		overflow-x: auto;
+		scrollbar-width: none;
 	}
-	.ts-headtext {
-		min-width: 0;
+	.st-seg::-webkit-scrollbar {
+		display: none;
 	}
-	/* The leading space inside the stamp collapses against the count text. */
-	.ts-headtext :global(.hint) {
-		margin-left: 5px;
-	}
-	.ts-headacts {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex-shrink: 0;
-	}
-	.ts-searchbox {
-		display: flex;
-		align-items: center;
-		gap: 7px;
-		height: 34px;
-		padding: 0 10px;
-		border: 1px solid var(--border);
-		border-radius: 9px;
-		background: var(--background);
-		color: var(--muted-foreground);
-	}
-	.ts-searchbox:focus-within {
-		border-color: var(--ring, var(--primary));
-	}
-	.ts-search {
-		border: none;
+	.st-seg button {
+		border: 0;
 		background: none;
-		outline: none;
-		font: inherit;
-		font-size: 12.5px;
-		color: var(--foreground);
-		width: 170px;
-	}
-	.ts-search::placeholder {
-		color: var(--muted-foreground);
-		opacity: 0.7;
-	}
-	.ts-refresh {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: 34px;
-		height: 34px;
-		border: 1px solid var(--border);
-		border-radius: 9px;
-		background: var(--background);
-		color: var(--muted-foreground);
-		cursor: pointer;
-		transition: background 0.12s, color 0.12s;
-	}
-	.ts-refresh:hover:not(:disabled) {
-		background: var(--muted);
-		color: var(--foreground);
-	}
-	.ts-refresh:disabled {
-		opacity: 0.5;
-		cursor: progress;
-	}
-	.ts-refresh :global(.ts-spin) {
-		animation: ts-spin 0.9s linear infinite;
-	}
-	@keyframes ts-spin {
-		to {
-			transform: rotate(360deg);
-		}
-	}
-
-	/* ── Group list ── */
-	.ts-body {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		padding: 4px 0 0;
-	}
-	.ts-group {
-		border: 1px solid var(--border);
-		border-radius: 10px;
-		background: var(--background);
-		overflow: hidden;
-	}
-	.ts-group.blocked {
-		opacity: 0.72;
-	}
-	.ts-grouphead {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		padding: 10px 12px;
-	}
-	.ts-gtitle {
-		flex: 1;
-		min-width: 0;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		background: none;
-		border: none;
-		padding: 0;
-		font: inherit;
-		color: var(--foreground);
-		text-align: left;
-		cursor: pointer;
-	}
-	.ts-gname {
+		border-radius: var(--st-radius-sm);
+		height: 26px;
+		padding: 0 11px;
 		font-size: 13px;
-		font-weight: 600;
-		overflow: hidden;
-		text-overflow: ellipsis;
+		color: var(--st-mfg);
 		white-space: nowrap;
 	}
-	.ts-gtitle :global(.ts-chev) {
-		color: var(--muted-foreground);
-		flex-shrink: 0;
-		transition: transform 0.18s;
+	.st-seg button:hover:not([aria-checked='true']) {
+		color: var(--st-fg);
 	}
-	.ts-gtitle :global(.ts-chev.open) {
+	.st-seg button[aria-checked='true'] {
+		background: var(--st-card);
+		color: var(--st-fg);
+		box-shadow: 0 0 0 1px var(--st-border-strong);
+	}
+
+	/* Group rows */
+	.tg {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto auto;
+		align-items: center;
+		gap: 12px;
+		min-height: 52px;
+		padding: 8px 14px 8px 16px;
+	}
+	.tg:not(:first-child) {
+		border-top: 1px solid var(--st-border);
+	}
+	.tt {
+		display: grid;
+		gap: 1px;
+		min-width: 0;
+		text-align: left;
+		border: 0;
+		background: none;
+		padding: 0;
+		color: inherit;
+	}
+	.tn {
+		font-size: 14px;
+		font-weight: 450;
+	}
+	.th {
+		font-size: 12.5px;
+		color: var(--st-mfg);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		display: flex;
+		align-items: center;
+		gap: 5px;
+	}
+	.th.err {
+		color: var(--st-warning);
+	}
+	.th :global(svg.lucide) {
+		width: 13px;
+		height: 13px;
+	}
+	.cnt {
+		font-size: 12px;
+		color: var(--st-mfg);
+		font-variant-numeric: tabular-nums;
+		font-family: var(--st-mono);
+	}
+	.chev {
+		display: grid;
+		place-items: center;
+		width: 22px;
+		color: var(--st-mfg);
+		transition: transform 0.15s;
+	}
+	.chev.open {
 		transform: rotate(180deg);
 	}
-	.ts-blocked {
-		background: color-mix(in oklch, var(--destructive) 16%, transparent);
-		color: var(--foreground);
+	.tg.blocked .tn,
+	.tg.blocked .cnt {
+		opacity: 0.55;
 	}
 
-	/* Tri-state group checkbox */
-	.ts-chk {
-		display: flex;
-		align-items: center;
-		justify-content: center;
+	/* Checkboxes */
+	.chk {
 		width: 18px;
 		height: 18px;
-		flex-shrink: 0;
-		border: 1px solid var(--border);
-		border-radius: 5px;
-		background: var(--background);
-		color: var(--primary-foreground);
-		cursor: pointer;
-		transition: background 0.12s, border-color 0.12s;
-	}
-	.ts-chk.on,
-	.ts-chk.mixed {
-		background: var(--primary);
-		border-color: var(--primary);
-	}
-	.ts-chk:disabled {
-		cursor: not-allowed;
-		opacity: 0.55;
-	}
-
-	.ts-err {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		margin: 0 12px 10px;
-		padding: 8px 10px;
-		border-radius: 8px;
-		font-size: 12px;
-		color: var(--foreground);
-		background: color-mix(in oklch, var(--destructive) 14%, transparent);
-	}
-	.ts-reason,
-	.ts-empty {
-		margin: 0 12px 10px;
-		font-size: 11.5px;
-		color: var(--muted-foreground);
-	}
-
-	/* ── Tool rows ── */
-	/* Compact cells, several per line, so a 40-tool server stays short. */
-	.ts-tools {
 		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-		gap: 2px;
-		padding: 6px;
-		border-top: 1px solid var(--border);
+		place-items: center;
+		flex: none;
+		border-radius: 5px;
+		border: 1.5px solid var(--st-border-strong);
+		background: transparent;
+		padding: 0;
+		color: var(--st-pfg);
 	}
-	.ts-tool {
-		display: flex;
-		align-items: flex-start;
-		gap: 10px;
-		width: 100%;
-		min-width: 0;
-		padding: 7px 8px;
-		background: none;
-		border: none;
-		border-radius: 7px;
-		font: inherit;
-		color: var(--foreground);
-		text-align: left;
-		cursor: pointer;
-		transition: background 0.12s;
+	.chk.on,
+	.chk.mixed {
+		background: var(--st-primary);
+		border-color: var(--st-primary);
 	}
-	.ts-tool:hover:not(:disabled) {
-		background: var(--muted);
+	.chk :global(svg.lucide) {
+		width: 12px;
+		height: 12px;
+		stroke-width: 3;
 	}
-	.ts-tool:disabled {
-		cursor: not-allowed;
+	.chk:disabled {
 		opacity: 0.55;
 	}
-	.ts-box {
-		display: flex;
-		align-items: center;
-		justify-content: center;
+	.chk.box {
 		width: 16px;
 		height: 16px;
-		margin-top: 1px;
-		flex-shrink: 0;
-		border: 1px solid var(--border);
 		border-radius: 4px;
-		color: var(--primary-foreground);
+		margin-top: 1px;
 	}
-	.ts-box.on {
-		background: var(--primary);
-		border-color: var(--primary);
+
+	/* Tool cells */
+	.tools {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+		gap: 2px 14px;
+		padding: 0 12px 12px 46px;
 	}
-	.ts-tmeta {
+	.tool {
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr);
+		gap: 10px;
+		align-items: start;
+		padding: 7px 6px;
+		border: 0;
+		background: none;
+		text-align: left;
+		border-radius: var(--st-radius-sm);
+		color: inherit;
 		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
 	}
-	.ts-tname {
+	.tool:hover:not(:disabled) {
+		background: var(--st-hover);
+	}
+	.tool:disabled {
+		opacity: 0.55;
+	}
+	.tool:focus-visible {
+		outline-offset: -2px;
+	}
+	.tmeta {
+		display: grid;
+		gap: 2px;
+		min-width: 0;
+	}
+	.tname {
+		font-family: var(--st-mono);
+		font-size: 12px;
 		display: flex;
 		align-items: center;
-		gap: 7px;
-		font-size: 12.5px;
-		font-weight: 600;
-		font-family: var(--font-mono, monospace);
+		gap: 6px;
+		flex-wrap: wrap;
+		overflow-wrap: anywhere;
 	}
-	.ts-tdesc {
-		font-size: 11.5px;
-		color: var(--muted-foreground);
-		line-height: 1.45;
+	.tdesc {
+		font-size: 12px;
+		color: var(--st-mfg);
+		line-height: 1.4;
 		display: -webkit-box;
 		-webkit-line-clamp: 2;
 		line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
 	}
-	.ts-tname {
-		min-width: 0;
-		overflow-wrap: anywhere;
-	}
-	.ts-risk {
-		font-family: var(--font-mono, monospace);
-		font-size: 9.5px;
+	.risk {
+		font-family: inherit;
+		font-size: 10px;
 		font-weight: 600;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		padding: 2px 5px;
-		border-radius: 4px;
-		background: var(--muted);
-		color: var(--muted-foreground);
+		padding: 0 6px;
+		border-radius: 999px;
+		line-height: 16px;
+		background: var(--st-muted);
+		color: var(--st-mfg);
 	}
-	.ts-risk.risk-exec {
-		background: color-mix(in oklch, var(--destructive) 20%, transparent);
-		color: var(--foreground);
+	.risk.read {
+		color: var(--blue);
+		background: color-mix(in oklch, var(--blue) 14%, transparent);
 	}
-	.ts-risk.risk-write {
-		background: color-mix(in oklch, var(--primary) 22%, transparent);
-		color: var(--foreground);
+	.risk.write {
+		color: var(--warning);
+		background: color-mix(in oklch, var(--warning) 14%, transparent);
+	}
+	.risk.exec {
+		color: var(--rose);
+		background: color-mix(in oklch, var(--rose) 14%, transparent);
+	}
+	.risk.network {
+		color: var(--tool-glob);
+		background: color-mix(in oklch, var(--tool-glob) 14%, transparent);
 	}
 
-	@media (max-width: 620px) {
-		.ts-search {
-			width: 110px;
+	/* Header search */
+	.tsearch {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		height: 28px;
+		width: 170px;
+		padding: 0 9px;
+		border: 1px solid var(--st-input);
+		background: var(--st-muted);
+		border-radius: var(--st-radius-md);
+		color: var(--st-mfg);
+	}
+	.tsearch:focus-within {
+		border-color: var(--st-primary);
+		box-shadow: 0 0 0 3px var(--st-primary-soft);
+	}
+	.tsearch :global(svg.lucide) {
+		width: 14px;
+		height: 14px;
+	}
+	.tsearch input {
+		flex: 1;
+		min-width: 0;
+		border: 0;
+		background: none;
+		outline: none;
+		font-size: 12.5px;
+		color: var(--st-fg);
+	}
+	.tsearch input::placeholder {
+		color: var(--st-subtle);
+	}
+	.tsearch input::-webkit-search-cancel-button {
+		-webkit-appearance: none;
+	}
+	.ptc :global(.spin) {
+		animation: ptc-spin 0.9s linear infinite;
+	}
+	@keyframes ptc-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+	.tnote,
+	.tempty {
+		margin: 0;
+		padding: 14px 16px;
+		font-size: 13px;
+		color: var(--st-mfg);
+	}
+	.tempty {
+		padding: 0 16px 12px 46px;
+		font-size: 12px;
+	}
+	.st-note {
+		margin: 8px 2px 0;
+		font-size: 12.5px;
+		color: var(--st-mfg);
+	}
+
+	@container (max-width: 560px) {
+		.tg {
+			padding-left: 14px;
+		}
+		.tools {
+			grid-template-columns: minmax(0, 1fr);
+			padding-left: 44px;
+		}
+		.tsearch {
+			width: 130px;
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.chev {
+			transition: none;
+		}
+		.ptc :global(.spin) {
+			animation: none;
 		}
 	}
 </style>

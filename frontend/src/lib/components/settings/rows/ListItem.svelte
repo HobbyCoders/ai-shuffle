@@ -47,10 +47,12 @@
 		onselect?: (id: string) => void;
 		/** Monospace name (log messages, ids). */
 		mono?: boolean;
-		/** `log`: a bare status dot instead of a tile, tighter row. */
-		variant?: 'default' | 'log';
+		/** `log`: a bare status dot instead of a tile, tighter row. `pinned`: tinted, outlined row (a pinned item such as the personal assistant). */
+		variant?: 'default' | 'log' | 'pinned';
 		/** Replaces the tile. */
 		lead?: Snippet;
+		/** Chips after the name (Draft, Modified). */
+		badges?: Snippet;
 	}
 
 	let {
@@ -66,7 +68,8 @@
 		onselect,
 		mono = false,
 		variant = 'default',
-		lead
+		lead,
+		badges
 	}: Props = $props();
 
 	const cat = $derived(category ?? settingsNav.category);
@@ -82,6 +85,7 @@
 	type="button"
 	class="st-it"
 	class:log={variant === 'log'}
+	class:pinned={variant === 'pinned'}
 	aria-current={isSelected ? 'true' : undefined}
 	data-settings-item={id}
 	data-settings-nav-item
@@ -96,7 +100,11 @@
 		<Tile {icon} text={glyph} {status} ring={isSelected ? 'accent' : 'bg'} />
 	{/if}
 	<span class="tx">
-		<span class="nm" class:st-mono={mono}>{name}</span>
+		{#if badges}
+			<span class="nml"><span class="nm" class:st-mono={mono}>{name}</span>{@render badges()}</span>
+		{:else}
+			<span class="nm" class:st-mono={mono}>{name}</span>
+		{/if}
 		{#if summary}<span class="sm">{summary}</span>{/if}
 	</span>
 	{#if meta}<span class="meta">{meta}</span>{:else}<span></span>{/if}
@@ -129,6 +137,22 @@
 	}
 	.st-it.log {
 		min-height: 42px;
+	}
+	.st-it.pinned {
+		border: 1px solid var(--st-primary-line);
+		background: var(--st-primary-soft);
+	}
+	.st-it.pinned[aria-current='true'] {
+		background: color-mix(in oklch, var(--st-primary) 20%, var(--st-accent));
+	}
+	.st-it.pinned .meta {
+		color: var(--st-mfg);
+	}
+	.nml {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
 	}
 	.tx {
 		min-width: 0;

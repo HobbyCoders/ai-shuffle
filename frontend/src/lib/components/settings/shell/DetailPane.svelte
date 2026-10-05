@@ -53,6 +53,19 @@
 		/** Custom danger rows (rendered inside the danger zone). */
 		dangerRows?: Snippet;
 		children?: Snippet<[tab: string | null]>;
+		/**
+		 * Controlled tabs for pages outside Settings (the Agents page): the
+		 * current tab and its setter replace the navigation store.
+		 */
+		tab?: string | null;
+		onTabChange?: (tab: string) => void;
+		/** Stacked back button outside Settings. */
+		onBack?: () => void;
+		backLabel?: string;
+		/** Replaces the Saved tick at the top right (a save state). */
+		topStatus?: Snippet;
+		/** Extra badges after the name (several, or with icons). */
+		badges?: Snippet;
 	}
 
 	let {
@@ -72,7 +85,13 @@
 		item,
 		danger = [],
 		dangerRows,
-		children
+		children,
+		tab,
+		onTabChange,
+		onBack,
+		backLabel,
+		topStatus,
+		badges
 	}: Props = $props();
 
 	setInDetail();
@@ -82,23 +101,31 @@
 	const cat = $derived(category ?? settingsNav.category);
 	const itemId = $derived(item ?? settingsNav.selectedItem(cat) ?? '');
 	const tabList = $derived(tabs.map((t): DetailTab => (typeof t === 'string' ? { id: t } : t)));
+	const controlled = $derived(onTabChange !== undefined);
 	const current = $derived(
-		settingsNav.tabOf(
-			cat,
-			itemId,
-			tabList.map((t) => t.id)
-		)
+		controlled
+			? (tabList.find((t) => t.id === tab)?.id ?? tabList[0]?.id ?? null)
+			: settingsNav.tabOf(
+					cat,
+					itemId,
+					tabList.map((t) => t.id)
+				)
 	);
 	const showTabs = $derived(tabList.length > 1);
-	const catLabel = $derived(categoryById(cat).label);
+	const catLabel = $derived(backLabel ?? categoryById(cat).label);
+
+	function selectTab(t: string) {
+		if (onTabChange) onTabChange(t);
+		else if (itemId) settingsNav.setTab(cat, itemId, t);
+	}
 </script>
 
 <div class="st-dwrap">
 	<div class="st-dtop">
-		<button type="button" class="st-back" aria-label="Back to {catLabel}" onclick={() => settingsNav.back()}>
+		<button type="button" class="st-back" aria-label="Back to {catLabel}" onclick={() => (onBack ? onBack() : settingsNav.back())}>
 			<ChevronLeft /><span>{catLabel}</span>
 		</button>
-		<SavedTick />
+		{#if topStatus}{@render topStatus()}{:else}<SavedTick />{/if}
 	</div>
 	<div class="st-dh">
 		{#if tile}{@render tile()}{:else}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}
@@ -106,6 +133,7 @@
 			<div class="st-dhn">
 				<h2 tabindex="-1" data-settings-heading="detail">{name}</h2>
 				{#if badge}<span class="badge">{badge}</span>{/if}
+				{@render badges?.()}
 			</div>
 			{#if (status && statusText) || subtitle}
 				<div class="st-dhs">
@@ -126,7 +154,7 @@
 			{current}
 			label="{name} sections"
 			idPrefix={uid}
-			onselect={(t) => itemId && settingsNav.setTab(cat, itemId, t)}
+			onselect={selectTab}
 		/>
 	{/if}
 	<div

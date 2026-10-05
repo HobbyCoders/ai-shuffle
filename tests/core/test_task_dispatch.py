@@ -332,23 +332,27 @@ def test_worker_budget(agents, monkeypatch):
 
 
 def test_provider_bound_target_admission(agents):
-    """A target bound to an unknown provider row is refused up front."""
+    """A target bound only to another provider row is refused up front.
+
+    It has no assignment for this native caller, so it would need the owner's
+    subagent default (#1827); with none set nothing is dispatched.
+    """
     _mk_session(agents, "s-root2", "root-agent")
     payload = asyncio.run(_dispatch({"agent": "gpt-bound", "prompt": "go"}, "s-root2"))
     assert payload["ok"] is False
-    assert "provider" in payload["error"]
+    assert "subagent default" in payload["error"]
 
 
 def test_native_model_override_refuses_a_non_claude_model(agents):
-    """A native target takes Claude aliases only (see
-    test_task_native_model_choice.py for the accepted choices)."""
+    """A native target takes only Claude models on the owner's subagent list
+    (see test_task_native_model_choice.py for the accepted choices)."""
     _mk_session(agents, "s-model-override", "root-agent")
     payload = asyncio.run(_dispatch(
         {"agent": "helper", "prompt": "go", "model": "gpt-5.6-sol"},
         "s-model-override",
     ))
     assert payload["ok"] is False
-    assert "not a Claude model" in payload["error"]
+    assert "not one the owner allows" in payload["error"]
 
 
 def test_dispatch_stays_on_caller_provider_and_uses_target_assignment(

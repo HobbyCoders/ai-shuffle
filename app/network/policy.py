@@ -182,7 +182,8 @@ _register(Collection(
 
 _register(Collection(
     name="agents", table="agents", keys=("id",),
-    fields=("id", "name", "description", "is_builtin", "config", "mcp_tools", "created_at", "updated_at"),
+    fields=("id", "name", "description", "is_builtin", "config", "mcp_tools", "avatar_color",
+            "created_at", "updated_at"),
     json_fields=("config", "mcp_tools"), resource="agents", priority=20,
     notes="Profiles and their MCP definitions."))
 

@@ -67,8 +67,12 @@ def test_native_roster_applies_allowlist_and_excludes_self(mock_db):
 
     roster = available_subagents("caller", None)
 
-    assert [target.id for target in roster] == ["native-helper"]
+    # openai-only has no native assignment: it is listed (#1827) but has no
+    # model until the owner sets a subagent default, and never the session's.
+    assert [target.id for target in roster] == ["native-helper", "openai-only"]
     assert roster[0].model == "sonnet"
+    assert roster[0].model_source == "pin"
+    assert (roster[1].model, roster[1].model_source) == ("", "unset")
 
 
 def test_provider_roster_rejects_uncurated_assignment(mock_db, monkeypatch):
@@ -100,9 +104,12 @@ def test_provider_roster_rejects_uncurated_assignment(mock_db, monkeypatch):
 
     roster = available_subagents("caller", "provider-1")
 
-    assert [(target.id, target.model) for target in roster] == [("good", "gpt-5")]
-    assert roster[0].provider_pinned is False
-    assert roster[0].provider_id is None
+    # An agent whose own assignment is stale is dropped, not sent to the default.
+    assert "stale" not in {target.id for target in roster}
+    pinned = [target for target in roster if target.model_source == "pin"]
+    assert [(target.id, target.model) for target in pinned] == [("good", "gpt-5")]
+    assert pinned[0].provider_pinned is False
+    assert pinned[0].provider_id is None
 
 
 def test_disabled_provider_has_no_roster(mock_db, monkeypatch):
@@ -138,10 +145,14 @@ def test_task_contract_is_roster_bound_and_offers_claude_models_natively(mock_db
     contract = build_task_contract("caller", None)
 
     assert "reviewer" in contract.input_schema["properties"]["agent"]["enum"]
-    # A native Claude caller picks among the Claude aliases per Task, the way
-    # a provider-row caller picks from its row's curated list.
+    # Task's model offers only the owner's subagent list (#1827): none set,
+    # no model parameter; set, exactly the default and the allowed models.
+    assert "model" not in contract.input_schema["properties"]
+    from app.core import subagent_default
+    subagent_default.write("sonnet", ["haiku", "opus"])
+    contract = build_task_contract("caller", None)
     assert contract.input_schema["properties"]["model"]["enum"] == [
-        "fable", "haiku", "opus", "sonnet",
+        "sonnet", "haiku", "opus",
     ]
     assert "subagent" in contract.description.lower()
     assert "reviewer" in contract.description
@@ -615,7 +626,7 @@ def test_provider_roster_pins_native_alias_and_other_provider(mock_db, monkeypat
     )
 
     roster = available_subagents("caller", "provider-1")
-    by_id = {t.id: t for t in roster}
+    by_id = {t.id: t for t in roster if t.model_source == "pin"}
     assert set(by_id) == {"claude-on-openai", "other-leg", "legacy-same"}
     assert by_id["claude-on-openai"].model == "sonnet"
     assert by_id["claude-on-openai"].provider_id is None

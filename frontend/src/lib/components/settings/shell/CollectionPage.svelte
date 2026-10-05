@@ -21,7 +21,8 @@
 	import ListDivider from './ListDivider.svelte';
 
 	interface Props {
-		category: CategoryId;
+		/** Settings category; pages outside Settings pass `title` instead. */
+		category?: CategoryId;
 		/** Defaults to the category label. */
 		title?: string;
 		/** Shown after the title ("4 connected"). */
@@ -36,6 +37,12 @@
 		/** `search` icon instead of the filter icon (Logs). */
 		filterIcon?: 'filter' | 'search';
 		filter?: string;
+		/** Controls under the filter box (segmented filters, a folder select). */
+		filters?: Snippet;
+		/** Back button in stacked mode; null hides it (the list is the first step). */
+		onBack?: (() => void) | null;
+		/** Accessible name of the list region. */
+		listLabel?: string;
 		list: Snippet;
 		detail: Snippet;
 	}
@@ -51,12 +58,15 @@
 		filterPlaceholder,
 		filterIcon = 'filter',
 		filter = $bindable(''),
+		filters,
+		onBack,
+		listLabel,
 		list,
 		detail
 	}: Props = $props();
 
 	const access = getSettingsAccess();
-	const label = $derived(title ?? categoryById(category).label);
+	const label = $derived(title ?? (category ? categoryById(category).label : ''));
 	const placeholder = $derived(
 		filterPlaceholder === undefined ? `Filter ${label.toLowerCase()}` : filterPlaceholder
 	);
@@ -90,9 +100,11 @@
 	<div class="st-lcol">
 		<div class="st-lhead">
 			<div class="st-lh-top">
-				<button type="button" class="st-back" aria-label="Back to Settings" onclick={() => settingsNav.back()}>
-					<ChevronLeft />
-				</button>
+				{#if onBack !== null}
+					<button type="button" class="st-back" aria-label="Back to Settings" onclick={() => (onBack ? onBack() : settingsNav.back())}>
+						<ChevronLeft />
+					</button>
+				{/if}
 				<h1 tabindex="-1" data-settings-heading="page">{label}</h1>
 				{#if count !== undefined && count !== ''}<span class="n">{count}</span>{/if}
 				<span class="sp"></span>
@@ -115,8 +127,9 @@
 					<input type="search" bind:value={filter} {placeholder} autocomplete="off" />
 				</label>
 			{/if}
+			{#if filters}<div class="st-lfilters">{@render filters()}</div>{/if}
 		</div>
-		<div class="st-lscroll st-scroll" data-settings-list>
+		<div class="st-lscroll st-scroll" data-settings-list role={listLabel ? 'region' : undefined} aria-label={listLabel}>
 			{@render list()}
 		</div>
 	</div>
@@ -174,6 +187,13 @@
 		display: flex;
 		gap: 6px;
 		align-items: center;
+	}
+	.st-lfilters {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex-wrap: wrap;
+		min-width: 0;
 	}
 	.st-filter {
 		display: flex;

@@ -12,6 +12,10 @@ from typing import Optional, List, Dict, Any, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list
 
+# ``update_profile`` leaves a field alone when it is not passed; this marks
+# "not passed" for ``avatar_color``, whose None means "clear it".
+_UNSET: Any = object()
+
 
 # ============================================================================
 # TypedDict definitions
@@ -25,6 +29,7 @@ class ProfileRow(TypedDict):
     is_builtin: bool
     config: Dict[str, Any]
     mcp_tools: List[str]
+    avatar_color: Optional[str]
     created_at: str
     updated_at: str
 
@@ -81,6 +86,7 @@ def create_profile(
     is_builtin: bool = False,
     mcp_tools: Optional[List[str]] = None,
     if_absent: bool = False,
+    avatar_color: Optional[str] = None,
 ) -> ProfileRow:
     """Create a new profile.
 
@@ -92,9 +98,10 @@ def create_profile(
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO agents (id, name, description, config, is_builtin, mcp_tools, created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""" + on_conflict,
-            (profile_id, name, description, json.dumps(config), is_builtin, json.dumps(mcp_tools or []), now, now)
+            """INSERT INTO agents (id, name, description, config, is_builtin, mcp_tools, avatar_color, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""" + on_conflict,
+            (profile_id, name, description, json.dumps(config), is_builtin, json.dumps(mcp_tools or []),
+             avatar_color, now, now)
         )
     return get_profile(profile_id)
 
@@ -106,6 +113,7 @@ def update_profile(
     config: Optional[Dict[str, Any]] = None,
     allow_builtin: bool = False,
     mcp_tools: Optional[List[str]] = None,
+    avatar_color: Any = _UNSET,
 ) -> Optional[ProfileRow]:
     """Update a profile
 
@@ -115,6 +123,7 @@ def update_profile(
         description: Optional new description
         config: Optional new config
         allow_builtin: If True, allows updating builtin profiles (for migrations)
+        avatar_color: New colour token, or None to clear it; omit to keep it
     """
     _refuse_assistant_agent(profile_id)
     existing = get_profile(profile_id)
@@ -138,6 +147,10 @@ def update_profile(
     if mcp_tools is not None:
         updates.append("mcp_tools = %s")
         values.append(json.dumps(mcp_tools))
+
+    if avatar_color is not _UNSET:
+        updates.append("avatar_color = %s")
+        values.append(avatar_color)
 
     if updates:
         updates.append("updated_at = %s")

@@ -627,6 +627,47 @@ curl -X PUT http://localhost:8000/api/v1/settings/text-generation \
   -d '{"text_generation_model": "haiku", "text_generation_effort": "low"}'
 ```
 
+### GET /api/v1/settings/subagent-default
+
+The model every agent runs on when another agent starts it as a subagent and the agent has no model of its own, plus the short list of models a lead agent may pick for one task.
+
+**Auth:** Required
+
+**Response:**
+
+```json
+{
+  "model": "sonnet",
+  "allowed": ["haiku", "opus", "prov:prov-or:openai/gpt-5.6"]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `model` | string or null | The subagent default: a Claude alias (`sonnet`) or a `prov:<providerId>:<modelId>` composite. `null` means none is set |
+| `allowed` | string[] | Models a lead agent may name in the Task tool's `model` for one task, in the same id format. The default and the agent's own pinned model are always accepted as well |
+
+A subagent's model is chosen in this order:
+
+1. A model the lead agent names for this task, only when it is in `allowed`, equals `model`, or equals the agent's pinned model. Anything else is refused. The choice must run on the agent's own provider; it never moves the work to another provider.
+2. The agent's pinned model for the calling session's provider (`config.provider_models` on the [agent](/docs/api-reference/agents#agent-config-fields)).
+3. `model`. When it names another provider than the calling session's, the subagent runs on that provider, the same way a pin that names another provider does.
+4. Nothing. The start is refused, the lead agent is told to ask the owner to set a default, and the owner gets one notification. A subagent never falls back to the session's model.
+
+Voice calls are unchanged: they dispatch only agents with a `__voice__` entry in `config.provider_models`. Agents defined in files or plugins have no pin; they run on `model` when it is on the calling session's provider, and on the session's model otherwise.
+
+### PUT /api/v1/settings/subagent-default
+
+Replace the setting. Send `model` (or `null` to clear it) and the whole `allowed` list.
+
+**Auth:** Owner only
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/settings/subagent-default   -H "Authorization: Bearer $OWNER_TOKEN"   -H "Content-Type: application/json"   -d '{"model": "sonnet", "allowed": ["haiku", "opus"]}'
+```
+
+Every id must be a model this install can run: a Claude alias from `GET /api/v1/models` (a full Claude id such as `claude-opus-4-6` is saved as its alias), or a model in the curated list of an enabled provider. Duplicates are dropped and `allowed` holds at most 24 entries. Any other value returns `400` and nothing is saved. The response has the same shape as the `GET`. The setting is shared with the owner's other workers.
+
 ### Media tool models
 
 Choose the fal.ai model each media tool uses. Any model id is accepted; it is not checked against a catalog. Surrounding whitespace is trimmed, and an empty `model` returns `400`.

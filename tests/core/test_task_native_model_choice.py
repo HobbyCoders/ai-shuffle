@@ -2,7 +2,8 @@
 
 Native targets (no provider) run on Claude: the Claude Code CLI on a
 subscription, or the Anthropic API with a key. Their Task ``model`` choices
-are the model registry's aliases; the worker stays native.
+are the Claude aliases on the owner's subagent list (#1827); the worker stays
+native.
 """
 import pytest
 
@@ -23,6 +24,8 @@ def native(mock_db, monkeypatch, tmp_path):
     db.create_profile("caller", "Caller", None, {"model": "opus"})
     db.create_profile("helper", "Helper", None, {"model": "sonnet"})
     db.create_session(session_id="parent", profile_id="caller", title="Parent")
+    from app.core import subagent_default
+    subagent_default.write(None, ["haiku", "sonnet", "opus", "fable", "prov:chatgpt:gpt-5.6-sol"])
     monkeypatch.setattr(td, "_credential_gap", lambda provider: None)
     monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda row: str(tmp_path))
     seen = []
@@ -35,11 +38,9 @@ def native(mock_db, monkeypatch, tmp_path):
     return db, seen
 
 
-def test_native_caller_contract_offers_the_claude_aliases(native):
+def test_native_caller_contract_offers_the_owners_list(native):
     contract = apm.build_task_contract("caller", None)
-    assert contract.input_schema["properties"]["model"]["enum"] == [
-        "fable", "haiku", "opus", "sonnet",
-    ]
+    assert contract.input_schema["properties"]["model"]["enum"] == ["haiku", "sonnet", "opus", "fable", "prov:chatgpt:gpt-5.6-sol"]
 
 
 @pytest.mark.parametrize("model, expected", [
@@ -78,13 +79,13 @@ async def test_native_dispatch_refuses_a_model_claude_does_not_offer(native, mod
         caller_session_id="parent", caller_provider_id=None,
     )
     assert not result["ok"]
-    assert "not a Claude model" in result["error"]
+    assert "not one the owner allows" in result["error"]
     assert not seen
 
 
 async def test_mixed_roster_keeps_each_providers_own_list(native):
-    """A native caller with one target pinned to a ChatGPT row sees both lists;
-    dispatch still checks the choice against the chosen target's own leg."""
+    """A native caller with one target pinned to a ChatGPT row sees the owner's
+    one list; dispatch still checks the choice against the target's own leg."""
     db, seen = native
     db.create_profile(
         "gpt-helper", "GPT Helper", None,
@@ -92,9 +93,7 @@ async def test_mixed_roster_keeps_each_providers_own_list(native):
     )
     contract = apm.build_task_contract("caller", None)
     assert "gpt-helper" in contract.input_schema["properties"]["agent"]["enum"]
-    assert contract.input_schema["properties"]["model"]["enum"] == [
-        "fable", "gpt-5.6-luna", "gpt-5.6-sol", "haiku", "opus", "sonnet",
-    ]
+    assert contract.input_schema["properties"]["model"]["enum"] == ["haiku", "sonnet", "opus", "fable", "prov:chatgpt:gpt-5.6-sol"]
 
     for agent, model, ok in [
         ("gpt-helper", "haiku", False),       # a Claude alias on the ChatGPT leg
@@ -115,8 +114,8 @@ async def test_mixed_roster_keeps_each_providers_own_list(native):
 
 
 async def test_refusal_lists_choices_and_names_the_settings(native):
-    """A Sol request on a Claude target says what the target CAN take, where
-    Sol is configured, and which settings change either — not just 'no'."""
+    """A Sol request on a Claude target says what the target CAN take from the
+    owner's list and where the owner changes it — not just 'no'."""
     _, seen = native
     result = await td.dispatch_task_tool(
         {"agent": "helper", "prompt": "go", "model": "gpt-5.6-sol", "mode": "sync"},
@@ -125,11 +124,9 @@ async def test_refusal_lists_choices_and_names_the_settings(native):
     assert not result["ok"]
     error = result["error"]
     assert "runs on Claude" in error
-    assert "haiku, sonnet, opus, fable" in error
-    assert "configured on ChatGPT" in error
-    assert "cannot switch providers" in error
-    assert "Agents > (agent) > Models" in error
-    assert "Settings > Providers" in error
+    assert "Choose one of: haiku, sonnet, opus, fable, or omit model" in error
+    assert "never switches providers" in error
+    assert "Agents page" in error
     assert not seen
 
 
@@ -140,10 +137,12 @@ def test_contract_lists_each_targets_leg_and_its_choices(native):
         {"provider_models": {apm.NATIVE_PROVIDER_KEY: "prov:chatgpt:gpt-5.6-luna"}},
     )
     description = apm.build_task_contract("caller", None).description
-    assert "- helper (default model: sonnet; runs on Claude)" in description
-    assert "- gpt-helper (default model: gpt-5.6-luna; runs on ChatGPT)" in description
-    assert "- Claude: haiku, sonnet, opus, fable" in description
-    assert "- ChatGPT: gpt-5.6-luna, gpt-5.6-sol" in description
+    assert "- helper (model: sonnet; runs on Claude)" in description
+    assert "- gpt-helper (model: gpt-5.6-luna; runs on ChatGPT)" in description
+    assert (
+        "Models the owner allows subagents to use (Task's model): haiku, "
+        "sonnet, opus, fable, prov:chatgpt:gpt-5.6-sol." in description
+    )
     assert apm.TASK_MODEL_SETTINGS_HINT in description
 
 

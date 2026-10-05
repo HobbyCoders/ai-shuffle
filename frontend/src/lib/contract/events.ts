@@ -274,6 +274,7 @@ export type CreatedAt20 = string;
 export type Description2 = string | null;
 export type Id20 = string;
 export type Kind4 = string | null;
+export type Model1 = string | null;
 export type RunId20 = string | null;
 export type Seq20 = number;
 export type SessionId20 = string;
@@ -715,6 +716,7 @@ export interface TaskUpdated {
   description?: Description2;
   id: Id20;
   kind?: Kind4;
+  model?: Model1;
   run_id?: RunId20;
   seq: Seq20;
   session_id: SessionId20;

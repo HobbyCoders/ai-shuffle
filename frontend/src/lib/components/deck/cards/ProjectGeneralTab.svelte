@@ -3,7 +3,7 @@
 	 * ProjectGeneralTab - General settings tab for project detail view
 	 *
 	 * Studio-v2 grouped-field design (.set-group / .set-row), mirroring the
-	 * Profile editor (ProfileForm general tab). Field primitives come from
+	 * old Profile editor. Field primitives come from
 	 * project-tabs.css, gated under the `.ptab` wrapper.
 	 *
 	 * - Editable project name + path (inline save)

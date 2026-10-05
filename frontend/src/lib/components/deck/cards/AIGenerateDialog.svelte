@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { untrack } from 'svelte';
 	import {
 		generateProfile,
 		generateSubagent,
@@ -18,9 +19,11 @@
 		isOpen: boolean;
 		onClose: () => void;
 		onGenerated: (data: AgentExport | SubagentExport) => void;
+		/** Text to start with (the Agents page's "Describe it" choice). */
+		initialDescription?: string;
 	}
 
-	let { type, isOpen, onClose, onGenerated }: Props = $props();
+	let { type, isOpen, onClose, onGenerated, initialDescription = '' }: Props = $props();
 
 	// Form state
 	let description = $state('');
@@ -53,7 +56,7 @@
 	// Reset state when dialog opens
 	$effect(() => {
 		if (isOpen) {
-			description = '';
+			description = untrack(() => initialDescription);
 			generationModel = '';
 			referenceMaterial = '';
 			showReferenceMaterial = false;

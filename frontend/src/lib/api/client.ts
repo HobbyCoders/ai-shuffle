@@ -383,6 +383,7 @@ export interface Profile {
 	is_builtin: boolean;
 	is_modified: boolean;
 	session_count?: number;  // Number of conversations using this profile
+	avatar_color?: string | null;  // Avatar colour name (avatar-colors.ts); absent on workers that predate it
 	config: ProfileConfig;
 	created_at: string;
 	updated_at: string;

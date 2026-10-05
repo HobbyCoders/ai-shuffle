@@ -296,13 +296,14 @@ describe('unavailable rows', () => {
 describe('header', () => {
 	it('reports how many of the discovered tools are allowed', () => {
 		// 3 harness + 1 keyed AI tool + 1 computer use + 1 app config + 3 github = 9
+		// The Tools card title reads "Tools  9 of 9".
 		const { getByText } = setup({ toolSelectionMode: 'all' });
-		expect(getByText(/9 of 9 tools allowed/)).toBeTruthy();
+		expect(getByText('9 of 9')).toBeTruthy();
 	});
 
 	it('counts only what the allow list matches', () => {
 		const { getByText } = setup({ allowedTools: ['Read', 'mcp__github__*'] });
-		expect(getByText(/4 of 9 tools allowed/)).toBeTruthy();
+		expect(getByText('4 of 9')).toBeTruthy();
 	});
 
 	it('shows a discovery error on the group it belongs to', () => {
@@ -320,6 +321,31 @@ describe('header', () => {
 		const { getByRole, onToolSelectionModeChange } = setup();
 		const group = getByRole('radiogroup', { name: 'Tool access mode' });
 		await fireEvent.click(within(group).getByRole('radio', { name: 'All except selected' }));
+		expect(onToolSelectionModeChange).toHaveBeenCalledWith('disallow');
+	});
+});
+
+describe('layout', () => {
+	it('gives MCP servers their own card', () => {
+		const { getByRole } = setup();
+		const mcp = getByRole('heading', { name: /MCP servers/ }).closest('section')!;
+		expect(within(mcp as HTMLElement).getByRole('checkbox', { name: 'Toggle all github tools' })).toBeTruthy();
+		expect(within(mcp as HTMLElement).queryByRole('checkbox', { name: 'Toggle all Harness builtins tools' })).toBeNull();
+	});
+
+	it('says how to edit the list in a read-only mode', () => {
+		const { getByText } = setup({ toolSelectionMode: 'all' });
+		expect(getByText(/to edit\./)).toBeTruthy();
+	});
+
+	it('warns when "Only selected" has nothing checked', () => {
+		const { getByText } = setup({ toolSelectionMode: 'allow', allowedTools: [] });
+		expect(getByText('Nothing checked, so no tools.')).toBeTruthy();
+	});
+
+	it('moves the access choice with the arrow keys', async () => {
+		const { getByRole, onToolSelectionModeChange } = setup({ toolSelectionMode: 'allow' });
+		await fireEvent.keyDown(getByRole('radio', { name: 'Only selected' }), { key: 'ArrowRight' });
 		expect(onToolSelectionModeChange).toHaveBeenCalledWith('disallow');
 	});
 });

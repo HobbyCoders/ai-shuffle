@@ -2256,6 +2256,14 @@ def _run_column_migrations(cursor):
             cursor.execute(f"ALTER TABLE api_users ADD COLUMN {_col} TEXT")
             migrations_applied.append(f"api_users.{_col}")
 
+    # Agent colour for the Agents page (#1827): one of the frontend's accent
+    # token names (``app.core.models.AGENT_AVATAR_COLORS``), NULL = the page's
+    # own choice. Additive/nullable, no index, no SCHEMA_VERSION bump (the
+    # migrations fingerprint covers this block).
+    if table_exists(cursor, "agents") and not column_exists(cursor, "agents", "avatar_color"):
+        cursor.execute("ALTER TABLE agents ADD COLUMN avatar_color TEXT")
+        migrations_applied.append("agents.avatar_color")
+
     # Rename sessions.is_favorite -> is_active (v63). Favorites were reworked
     # into an "Active group": the flag now marks the session the user is
     # currently working in. Guarded so the rename runs exactly once (only when

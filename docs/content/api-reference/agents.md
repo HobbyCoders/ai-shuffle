@@ -91,6 +91,8 @@ curl -X POST http://localhost:8000/api/v1/agents \
 
 If `id` is omitted, it is derived from the name (lowercase letters, digits and hyphens).
 
+Optional top-level `avatar_color` sets the colour the Agents page shows for the agent. It is one of `primary`, `emerald`, `rose`, `blue` or `warning` (the app's accent token names, so each theme draws its own shade), or `null` to let the page choose. Any other value returns `422`.
+
 ### PUT /api/v1/agents/{agent_id}
 
 Update an existing agent. All agents (including built-ins) are editable.
@@ -109,6 +111,8 @@ curl -X PUT http://localhost:8000/api/v1/agents/agent_abc123 \
 
 `config` replaces the whole stored config. It is not merged: any field you leave out is removed. To change one setting, read the agent with `GET /api/v1/agents/{agent_id}`, change that field, and send the complete `config` object back. `name` and `description` can be sent on their own.
 
+`avatar_color` can be sent on its own too. Send a colour name to set it, `null` to clear it, or leave the key out to keep the current colour.
+
 ### DELETE /api/v1/agents/{agent_id}
 
 Delete an agent. Built-in agents cannot be deleted.
@@ -123,13 +127,13 @@ Restore a built-in agent (**General Purpose**, **Explore**, **Plan** or **Fronte
 
 ## Agent Config Fields
 
-The top-level object has `id`, `name`, `description`, `is_builtin`, `is_modified`, `session_count`, `created_at`, `updated_at`, and a `config` object. The fields below live under `config`:
+The top-level object has `id`, `name`, `description`, `avatar_color`, `is_builtin`, `is_modified`, `session_count`, `created_at`, `updated_at`, and a `config` object. `avatar_color` is `null` when no colour was chosen. The fields below live under `config`:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `system_prompt` | object | `{type: "preset"\|"custom", preset, content, append, inject_env_details}` |
 | `thinking_mode` | string | `default`, `disabled`, `adaptive`, `think`, `think_harder`, `ultra_think` |
-| `provider_models` | object | Model to run this agent on when another agent dispatches it as a subagent, keyed by the **caller's** provider (`__native__` for Claude). Values are a Claude alias or a `prov:<providerId>:<modelId>` composite and may name any configured provider. Missing key = unavailable to callers on that provider. The one model binding an agent still owns |
+| `provider_models` | object | The model this agent is pinned to when another agent dispatches it as a subagent, keyed by the **caller's** provider (`__native__` for Claude, `__voice__` for voice calls). Values are a Claude alias or a `prov:<providerId>:<modelId>` composite and may name any configured provider. A missing key means the agent runs on the [subagent default](/docs/api-reference/miscellaneous#get-apiv1settingssubagent-default); with no default set, the start is refused. Voice calls still dispatch only agents with a `__voice__` entry |
 | `tool_selection_mode` | string | `all`, `none`, `allow`, or `disallow` — decides what the two lists below mean. `all` and `none` carry no list |
 | `allowed_tools` | string[] | The tool surface in `allow` mode. Exact names or `fnmatch` patterns (a whole MCP server saves as `mcp__<server>__*`) |
 | `disallowed_tools` | string[] | The block list in `disallow` mode. Same entry shapes |

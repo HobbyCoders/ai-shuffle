@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -140,6 +140,11 @@ class SubagentTarget:
     # when its stored value names a different provider than the caller.
     provider_id: str | None = None
     provider_pinned: bool = False
+    # Where ``model`` came from (#1827): ``pin`` (the agent's own assignment
+    # for this caller provider), ``default`` (the owner's subagent default) or
+    # ``unset`` (neither: ``model`` is empty and dispatch refuses unless the
+    # call names an allowed model). File/plugin targets keep ``pin``.
+    model_source: str = "pin"
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -168,11 +173,15 @@ def available_subagents(
 ) -> tuple[SubagentTarget, ...]:
     """Return the exact Task roster for a caller and its current provider.
 
-    Availability is the intersection of the caller's optional invoke allowlist
-    and agents with a valid model assignment **for** the current provider. The
-    assignment itself may name another leg; those targets come back pinned so
-    dispatch runs the worker there. The same function feeds Task's schema and
-    its runtime admission check.
+    Every agent in the caller's optional invoke allowlist is listed. Its model
+    is its own valid assignment **for** the current provider when it has one
+    (``model_source="pin"``), else the owner's subagent default
+    (``"default"``), else nothing (``"unset"``: dispatch refuses and asks the
+    owner, never falling back to the session's model). An assignment or the
+    default may name another leg; those targets come back pinned so dispatch
+    runs the worker there. An agent whose own assignment names a provider that
+    is missing, disabled or no longer lists the model is skipped, as before.
+    The same function feeds Task's schema and its runtime admission check.
     """
     if not caller_profile_id:
         return ()
@@ -226,6 +235,23 @@ def available_subagents(
         return ()
     caller_key = provider_id or None
     map_key = provider_key(provider_id)
+
+    def _valid_on_leg(leg: str | None, model: str) -> bool:
+        if not leg:
+            return True
+        if leg not in provider_cache:
+            provider_cache[leg] = _load_provider_row(leg)
+        return _validated_provider_model(leg, model, provider_cache[leg])
+
+    # The owner's subagent default, decoded once for this caller's key the way
+    # an assignment is: a composite pins its provider, a Claude alias the
+    # native leg. A default that can no longer run reads as no default.
+    from app.core import subagent_default
+
+    default_binding = decode_subagent_binding(map_key, subagent_default.read().model)
+    if default_binding is not None and not _valid_on_leg(*default_binding):
+        default_binding = None
+
     for row in rows:
         target_id = str(row.get("id") or "").strip()
         if not target_id or target_id == caller_profile_id:
@@ -234,22 +260,18 @@ def available_subagents(
             continue
 
         config = row.get("config") or {}
+        source = "pin"
         binding = decode_subagent_binding(
             map_key, model_for_provider(config, provider_id)
         )
-        if binding is None:
-            continue
-        target_provider_id, model = binding
-
-        if target_provider_id:
-            if target_provider_id not in provider_cache:
-                provider_cache[target_provider_id] = _load_provider_row(
-                    target_provider_id
-                )
-            if not _validated_provider_model(
-                target_provider_id, model, provider_cache[target_provider_id]
-            ):
+        if binding is not None:
+            if not _valid_on_leg(*binding):
                 continue
+        elif default_binding is not None:
+            binding, source = default_binding, "default"
+        else:
+            binding, source = (caller_key, ""), "unset"
+        target_provider_id, model = binding
 
         pinned = target_provider_id != caller_key
         targets.append(
@@ -266,6 +288,7 @@ def available_subagents(
                 ),
                 provider_id=target_provider_id if pinned else None,
                 provider_pinned=pinned,
+                model_source=source,
             )
         )
 
@@ -443,10 +466,77 @@ def host_worker_limits_text() -> str:
 # Where the owner changes what Task can dispatch. Named in the contract and in
 # every model refusal so neither the model nor the user has to guess.
 TASK_MODEL_SETTINGS_HINT = (
-    "An agent's subagent model for each caller provider is set in "
-    "Agents > (agent) > Models; each provider's model list is set in "
-    "Settings > Providers."
+    "The owner sets the subagent default and the models agents may choose on "
+    "the Agents page, and can pin one agent to its own model there."
 )
+
+
+def task_model_allowed_choices() -> tuple[str, ...]:
+    """Every model a Task call may name: the default first, then ``allowed``.
+
+    App-format ids (a Claude alias or ``prov:<providerId>:<modelId>``), each
+    still runnable here. An agent's own pin is also accepted at dispatch but
+    is not listed: omitting ``model`` already selects it.
+    """
+    from app.core import subagent_default
+
+    current = subagent_default.effective()
+    choices: list[str] = []
+    for value in ((current.model,) if current.model else ()) + current.allowed:
+        if value and value not in choices:
+            choices.append(value)
+    return tuple(choices)
+
+
+def leg_model_id(leg: str | None, value: str) -> str | None:
+    """The model id ``value`` names on ``leg``, or None when it is another leg's.
+
+    ``leg`` None is native Claude (registry aliases, legacy Claude ids
+    normalized onto them); a provider leg takes its composite or a bare id.
+    """
+    from app.core.query_options import decode_provider_model, is_native_claude_model
+
+    text = (value or "").strip()
+    if not text:
+        return None
+    decoded = decode_provider_model(text)
+    if decoded is not None:
+        return decoded[1] if leg and decoded[0] == leg else None
+    if text.startswith("prov:"):
+        return None
+    if not leg:
+        if not is_native_claude_model(text):
+            return None
+        from app.core.model_registry import model_values, normalize_model
+
+        alias = normalize_model(text)
+        return alias if alias in model_values() else None
+    return None if is_native_claude_model(text) else text
+
+
+def allowed_on_leg(leg: str | None, choices: Sequence[str]) -> tuple[str, ...]:
+    """The subset of ``choices`` that runs on ``leg``, as app-format ids."""
+    return tuple(value for value in choices if leg_model_id(leg, value) is not None)
+
+
+def task_model_not_allowed_error(
+    requested: str, target_name: str, leg: str | None, choices: Sequence[str],
+) -> str:
+    """A Task refusal for a model outside the owner's subagent list (#1827)."""
+    on_leg = allowed_on_leg(leg, choices)
+    label = task_model_choices(leg)[0] if leg else "Claude"
+    text = (
+        f"Model '{(requested or '').strip()}' is not one the owner allows "
+        f"subagents to use for '{target_name}', which runs on {label}. "
+    )
+    if on_leg:
+        text += f"Choose one of: {', '.join(on_leg)}, or omit model. "
+    else:
+        text += (
+            "Omit model: the owner allows no other model on this agent's "
+            "provider. "
+        )
+    return text + "An override never switches providers. " + TASK_MODEL_SETTINGS_HINT
 
 
 def task_model_choices(provider_id: str | None) -> tuple[str, tuple[str, ...]]:
@@ -606,54 +696,69 @@ def build_task_contract(
     except Exception:
         logger.debug("Could not reserve DB agent names for Task contract", exc_info=True)
 
+    # File/plugin agents have no row to pin a model on: they run on the
+    # owner's subagent default when it runs on this caller's leg (they never
+    # switch legs), else on this session's model as before.
+    allowed_choices = task_model_allowed_choices()
+    from app.core import subagent_default as _subagent_default
+
+    file_default = leg_model_id(
+        provider_id or None, _subagent_default.effective().model or ""
+    )
     for target in sorted(additional_targets, key=lambda item: (item.name.casefold(), item.id)):
         if not target.id or target.id in reserved_ids:
             continue
         if target.name.casefold() in reserved_names:
             continue
+        if file_default:
+            target = replace(target, model=file_default, model_source="default")
         targets.append(target)
         reserved_ids.add(target.id)
         reserved_names.add(target.name.casefold())
 
     resolved_targets = tuple(targets)
-    # The enum is a union for mixed-provider rosters. Dispatch revalidates the
-    # selected ID against the chosen target's effective provider, not this union.
-    # A target with no provider runs on native Claude (the Claude Code CLI on a
-    # subscription, or the Anthropic API with a key). Its list is the Claude
-    # model registry's aliases, so a Claude caller can send one Task to haiku
-    # and another to opus, the way a provider-row caller picks from its row.
-    choices: dict[str | None, tuple[str, tuple[str, ...]]] = {}
+    # Task's ``model`` offers the owner's short list (#1827): the subagent
+    # default plus the models agents may choose, not every configured model.
+    # Dispatch revalidates a choice against the chosen target's own leg; an
+    # override never switches providers.
+    model_ids = allowed_choices
+    leg_labels: dict[str | None, str] = {}
     for target in resolved_targets:
-        leg = target.provider_id if target.provider_pinned else provider_id
-        if (leg or None) not in choices:
-            choices[leg or None] = task_model_choices(leg)
-    model_ids = {model for _, ids in choices.values() for model in ids}
+        leg = (target.provider_id if target.provider_pinned else provider_id) or None
+        if leg not in leg_labels:
+            leg_labels[leg] = task_model_choices(leg)[0]
 
     if resolved_targets:
         # IDs and models only — each agent's description already rides the
         # system prompt's "# Available agent types" index (built from the same
         # roster), and repeating it here doubled the tokens for every session.
-        def _leg_label(target: SubagentTarget) -> str:
-            leg = target.provider_id if target.provider_pinned else provider_id
-            return choices[leg or None][0]
+        def _line(target: SubagentTarget) -> str:
+            leg = (target.provider_id if target.provider_pinned else provider_id) or None
+            where = f"runs on {leg_labels[leg]}"
+            if target.model_source == "unset":
+                return (
+                    f"- {target.id} (no model: not pinned and the owner has not "
+                    "chosen a subagent default; a call without an allowed "
+                    f"model is refused) — {target.name}"
+                )
+            if target.model_source == "default":
+                return (
+                    f"- {target.id} (model: {target.model}, the subagent "
+                    f"default; {where}) — {target.name}"
+                )
+            return f"- {target.id} (model: {target.model}; {where}) — {target.name}"
 
-        roster = "\n".join(
-            f"- {target.id} (default model: {target.model}; runs on "
-            f"{_leg_label(target)}) — {target.name}"
-            for target in resolved_targets
-        )
-        # One line per leg, not per target: the user's configured list for
-        # each provider is what Task's ``model`` may pick from.
-        model_lines = "\n".join(
-            f"- {label}: {', '.join(ids)}"
-            for label, ids in choices.values() if ids
-        )
+        roster = "\n".join(_line(target) for target in resolved_targets)
         availability = (
             "Available subagents on this provider (descriptions are under "
             "'# Available agent types' in the system prompt):\n"
             f"{roster}\n"
-            + (f"Task model choices by the target's provider:\n{model_lines}\n"
-               if model_lines else "")
+            + (
+                "Models the owner allows subagents to use (Task's model): "
+                f"{', '.join(model_ids)}. A choice runs only on its own "
+                "provider.\n"
+                if model_ids else ""
+            )
             + "Use only these IDs; do not invent a model or provider. "
             + TASK_MODEL_SETTINGS_HINT
         )
@@ -747,13 +852,15 @@ def build_task_contract(
     if model_ids:
         properties["model"] = {
             "type": "string",
-            "enum": sorted(model_ids),
+            "enum": list(model_ids),
             "description": (
-                "Optional model ID from the user's configured model list on the "
-                "selected target's provider; a target on native Claude takes "
-                "one of the Claude models in this list. Omit to use the "
-                "roster's default model. This cannot switch providers; on mixed "
-                "rosters an ID must belong to the chosen target's provider."
+                "Optional: a model from the owner's list of models subagents "
+                "may use, for this task only. Omitted, the agent runs on its "
+                "own pinned model, else on the owner's subagent default; it "
+                "never runs on this session's model. A choice must run on the "
+                "target's provider (prov:<providerId>:<modelId> names a "
+                "provider's model, a bare name a Claude model); an override "
+                "never switches providers."
             ),
         }
     if offer_mode:

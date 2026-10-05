@@ -736,7 +736,8 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
             name=request.name,
             description=request.description,
             config=request.config.model_dump(exclude_none=True),
-            is_builtin=False
+            is_builtin=False,
+            avatar_color=request.avatar_color,
         )
 
         return profile
@@ -777,12 +778,17 @@ async def update_profile(
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
 
+        extra = (
+            {"avatar_color": request.avatar_color}
+            if "avatar_color" in request.model_fields_set else {}
+        )
         profile = database.update_profile(
             profile_id=profile_id,
             name=request.name,
             description=request.description,
             config=config,
-            allow_builtin=True  # All profiles are editable
+            allow_builtin=True,  # All profiles are editable
+            **extra,
         )
 
         return profile

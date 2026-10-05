@@ -173,6 +173,23 @@ class ProfileConfig(BaseModel):
 
 
 
+# The colours an agent may carry on the Agents page (#1827): the frontend's
+# accent token names (``frontend/src/app.css``: ``--primary`` plus the Studio
+# Noir accent set ``--emerald`` / ``--rose`` / ``--blue`` and ``--warning``),
+# stored by name so each theme renders its own value. None = the page picks.
+AGENT_AVATAR_COLORS = ("primary", "emerald", "rose", "blue", "warning")
+
+
+def _check_avatar_color(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.strip() not in AGENT_AVATAR_COLORS:
+        raise ValueError(
+            "avatar_color must be one of: " + ", ".join(AGENT_AVATAR_COLORS) + " (or null)"
+        )
+    return value.strip()
+
+
 class ProfileBase(BaseModel):
     """Base profile fields"""
     name: str = Field(..., min_length=1, max_length=100)
@@ -183,18 +200,38 @@ class ProfileBase(BaseModel):
 class ProfileCreate(ProfileBase):
     """Profile creation request - id is optional; if omitted, derived from name"""
     id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)
+    avatar_color: Optional[str] = None
+
+    @field_validator("avatar_color")
+    @classmethod
+    def _valid_avatar_color(cls, value):
+        return _check_avatar_color(value)
 
 
 class ProfileUpdate(BaseModel):
-    """Profile update request"""
+    """Profile update request. ``avatar_color`` null clears it; omitted keeps it."""
     name: Optional[str] = None
     description: Optional[str] = None
     config: Optional[ProfileConfig] = None
+    avatar_color: Optional[str] = None
+
+    @field_validator("avatar_color")
+    @classmethod
+    def _valid_avatar_color(cls, value):
+        return _check_avatar_color(value)
 
 
 class Profile(ProfileBase):
     """Full profile response"""
     id: str
+    # Read side is lenient: a value outside the set (a newer peer's colour)
+    # reads as null instead of failing the whole agent list.
+    avatar_color: Optional[str] = None
+
+    @field_validator("avatar_color", mode="before")
+    @classmethod
+    def _known_avatar_color(cls, value):
+        return value if isinstance(value, str) and value in AGENT_AVATAR_COLORS else None
     is_builtin: bool = False
     is_modified: bool = False  # Whether built-in profile has been modified from defaults
     session_count: Optional[int] = None  # Number of sessions using this profile

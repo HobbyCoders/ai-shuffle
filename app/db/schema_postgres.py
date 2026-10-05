@@ -91,6 +91,7 @@ def create_postgres_schema(cursor) -> None:
             is_builtin BOOLEAN DEFAULT FALSE,
             config JSONB NOT NULL,
             mcp_tools JSONB DEFAULT '[]',
+            avatar_color TEXT,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )

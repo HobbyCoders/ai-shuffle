@@ -6,7 +6,7 @@ settings_credentials and settings_updates.
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -998,3 +998,56 @@ async def update_text_generation_settings(
         return get_text_generation_settings()
 
     return TextGenerationSettingsResponse(**await run_sync(_apply))
+
+
+# ============================================================================
+# Subagent default (#1827)
+# ============================================================================
+
+class SubagentDefaultResponse(BaseModel):
+    """The model every unpinned agent runs on, and the models agents may choose.
+
+    Both use the app's model id format: a Claude alias or a
+    ``prov:<providerId>:<modelId>`` composite. ``model`` null means no default
+    is set: an unpinned agent's start is refused until the owner picks one.
+    """
+    model: Optional[str] = None
+    allowed: List[str] = Field(default_factory=list)
+
+
+class SubagentDefaultUpdateRequest(BaseModel):
+    """Replace the whole setting."""
+    model: Optional[str] = None
+    allowed: List[str] = Field(default_factory=list)
+
+
+@router.get("/subagent-default", response_model=SubagentDefaultResponse)
+async def get_subagent_default(token: str = Depends(require_auth)):
+    """The subagent default and the models agents may choose."""
+    from app.core import subagent_default
+
+    return SubagentDefaultResponse(**await run_sync(subagent_default.payload))
+
+
+@router.put("/subagent-default", response_model=SubagentDefaultResponse)
+async def update_subagent_default(
+    request: SubagentDefaultUpdateRequest,
+    token: str = Depends(require_admin),
+):
+    """Save the subagent default and allowed list. Owner only.
+
+    Every id must be a model this install can run: a Claude alias from the
+    registry, or a model in an enabled provider's curated list. A bad id is a
+    400 and nothing is saved. The setting is shared with the owner's other
+    workers through the network's settings sync.
+    """
+    from app.core import subagent_default
+
+    def _apply() -> dict:
+        try:
+            subagent_default.write(request.model, request.allowed)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return subagent_default.payload()
+
+    return SubagentDefaultResponse(**await run_sync(_apply))

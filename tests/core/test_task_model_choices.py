@@ -1,4 +1,5 @@
-"""Task model choices follow persisted provider lists, not one agent default."""
+"""Task model choices follow the owner's subagent list (#1827), checked against
+each provider's persisted model list at dispatch."""
 import pytest
 
 from app.core import agent_provider_models as apm, task_dispatch as td
@@ -18,6 +19,8 @@ def lane(mock_db, monkeypatch, tmp_path):
     db.create_profile("helper", "Helper", None,
                       {"provider_models": {"lane": "astra"}})
     db.create_session(session_id="parent", profile_id="caller", title="Parent")
+    from app.core import subagent_default
+    subagent_default.write(None, ["prov:lane:astra", "prov:lane:sol"])
     monkeypatch.setattr(td, "_credential_gap", lambda provider: None)
     monkeypatch.setattr(project_resolver, "resolve_existing_cwd", lambda row: str(tmp_path))
     seen = []
@@ -52,14 +55,17 @@ async def test_tool_adapters_preserve_selected_model(lane, surface):
     assert seen[0]["provider_id"] == "lane"
 
 
-def test_schema_exposes_every_persisted_model_and_refreshes(lane):
+def test_schema_offers_the_owners_list_not_every_provider_model(lane):
     db, _ = lane
     contract = apm.build_task_contract("caller", "lane")
-    assert contract.input_schema["properties"]["model"]["enum"] == ["astra", "sol"]
-    assert "default model: astra" in contract.description
+    assert contract.input_schema["properties"]["model"]["enum"] == [
+        "prov:lane:astra", "prov:lane:sol"]
+    assert "- helper (model: astra; runs on Lane)" in contract.description
+    # A model the provider adds is not offered until the owner allows it; one
+    # it drops leaves the list at once.
     db.update_model_provider("lane", models_json=[{"id": "astra"}, {"id": "new-model"}])
     refreshed = apm.build_task_contract("caller", "lane")
-    assert refreshed.input_schema["properties"]["model"]["enum"] == ["astra", "new-model"]
+    assert refreshed.input_schema["properties"]["model"]["enum"] == ["prov:lane:astra"]
 
 
 @pytest.mark.parametrize("model, expected", [("sol", "sol"), (None, "astra"), ("", "astra")])
@@ -87,14 +93,14 @@ async def test_invalid_choice_never_launches(lane, model):
 
 async def test_removed_choice_is_revalidated_after_schema_creation(lane):
     db, seen = lane
-    assert "sol" in apm.build_task_contract("caller", "lane").input_schema["properties"]["model"]["enum"]
+    assert "prov:lane:sol" in apm.build_task_contract("caller", "lane").input_schema["properties"]["model"]["enum"]
     db.update_model_provider("lane", models_json=[{"id": "astra"}])
     result = await td.dispatch_task_tool(
         {"agent": "helper", "prompt": "go", "model": "sol"},
         caller_session_id="parent", caller_provider_id="lane",
     )
     assert not result["ok"]
-    assert "curated model list" in result["error"]
+    assert "not one the owner allows" in result["error"]
     assert not seen
 
 
@@ -104,9 +110,11 @@ async def test_pinned_provider_not_callers_list_controls_override(lane):
                              models=[{"id": "other-default"}, {"id": "other-choice"}])
     db.create_profile("pinned", "Pinned", None,
                       {"provider_models": {"lane": "prov:other:other-default"}})
+    from app.core import subagent_default
+    subagent_default.write(None, ["prov:lane:astra", "prov:lane:sol", "prov:other:other-choice"])
     contract = apm.build_task_contract("caller", "lane")
     assert contract.input_schema["properties"]["model"]["enum"] == [
-        "astra", "other-choice", "other-default", "sol"]
+        "prov:lane:astra", "prov:lane:sol", "prov:other:other-choice"]
     for model, ok in [("sol", False), ("other-choice", True)]:
         result = await td.dispatch_task_tool(
             {"agent": "pinned", "prompt": "go", "model": model},
@@ -160,7 +168,7 @@ async def test_uncurated_refusal_lists_the_providers_choices(lane):
         caller_session_id="parent", caller_provider_id="lane",
     )
     assert not result["ok"]
-    assert "curated model list" in result["error"]
-    assert "runs on Lane. Choose one of: astra, sol" in result["error"]
-    assert "Settings > Providers" in result["error"]
+    assert "not one the owner allows" in result["error"]
+    assert "runs on Lane. Choose one of: prov:lane:astra, prov:lane:sol" in result["error"]
+    assert "Agents page" in result["error"]
     assert not seen

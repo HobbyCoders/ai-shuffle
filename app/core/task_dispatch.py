@@ -1586,7 +1586,33 @@ async def _dispatch_task_tool(
         return {"ok": False, "error": roster_error}
 
     # Resolve the target's effective leg first, including owner-configured pins.
-    # A call may choose another curated model, but never another provider.
+    # A call may choose a model only from the owner's subagent list (the
+    # default, the models agents may choose, or this agent's own pin), and
+    # never another provider (#1827).
+    if requested_model:
+        from app.core.agent_provider_models import (
+            leg_model_id,
+            task_model_allowed_choices,
+            task_model_not_allowed_error,
+        )
+
+        leg = effective_provider_id or None
+        choices = await asyncio.to_thread(task_model_allowed_choices)
+        permitted = {
+            bare for bare in (leg_model_id(leg, value) for value in choices) if bare
+        }
+        if target is not None and target.model_source == "pin" and target.model:
+            permitted.add(target.model)
+        bare_request = leg_model_id(leg, requested_model)
+        if bare_request is None or bare_request not in permitted:
+            return {
+                "ok": False,
+                "error": task_model_not_allowed_error(
+                    requested_model, _task_target_label(target, definition, ref),
+                    leg, choices,
+                ),
+            }
+        requested_model = bare_request
     if requested_model and not effective_provider_id:
         # A native target runs on Claude (the Claude Code CLI on a
         # subscription, or the Anthropic API with a key), whose model list is
@@ -1622,8 +1648,19 @@ async def _dispatch_task_tool(
     if definition is not None:
         target_name = str(_def_field(definition, "name", ref) or ref)
         profile_id = str(caller_pid)
+        # A file/plugin agent has no row to pin a model on: the owner's
+        # subagent default when it runs on this leg (file agents never switch
+        # legs), else the caller's binding as before.
+        file_default = None
+        if not requested_model:
+            from app.core import subagent_default
+            from app.core.agent_provider_models import leg_model_id
+
+            stored = (await asyncio.to_thread(subagent_default.effective)).model
+            file_default = leg_model_id(effective_provider_id or None, stored or "")
         model_id, model_error = (
-            (requested_model, None) if requested_model else _file_agent_model_id(
+            (requested_model or file_default, None)
+            if requested_model or file_default else _file_agent_model_id(
                 caller_row, str(caller_pid), effective_provider_id
             )
         )
@@ -1638,6 +1675,24 @@ async def _dispatch_task_tool(
         assert target is not None
         target_name = target.name
         profile_id = target.id
+        if not requested_model and target.model_source == "unset":
+            # Not pinned and no subagent default: never the session's model.
+            # Refuse, tell the lead agent what to ask, and ask the owner once.
+            from app.core import subagent_default
+            from app.core.agent_provider_models import (
+                allowed_on_leg,
+                task_model_allowed_choices,
+            )
+
+            subagent_default.ask_owner_once(caller_session_id)
+            choices = await asyncio.to_thread(task_model_allowed_choices)
+            return {
+                "ok": False,
+                "reason": "subagent_default_missing",
+                "error": subagent_default.missing_default_error(
+                    target.id, allowed_on_leg(effective_provider_id or None, choices),
+                ),
+            }
         model_id = requested_model or target.model
         system_prompt_append = None
         tool_allowlist = None

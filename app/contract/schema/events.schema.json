@@ -1744,6 +1744,18 @@
           "default": null,
           "title": "Kind"
         },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
         "run_id": {
           "anyOf": [
             {

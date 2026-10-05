@@ -245,6 +245,10 @@ class TaskUpdated(EventBase):
     # The other worker a remote Task child runs on (its display name). Absent
     # for local tasks. Optional/additive, like ``kind``.
     worker_name: str | None = None
+    # The "<provider> · <model>" label a Task worker runs on, from the
+    # registry, so the running-tasks list shows each subagent's model (#1827).
+    # Absent for shells and older logs. Optional/additive, like ``kind``.
+    model: str | None = None
 
 
 class SystemNote(EventBase):
