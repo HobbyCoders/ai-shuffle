@@ -75,7 +75,7 @@
 					<button type="button" class="st-btn" disabled={disabled} onclick={() => confirming = true}>Remove</button>
 				</SettingRow>{/if}
 			</RowGroup>
-			{#if status.job?.state === 'succeeded' && status.job.message}<p class="pv-msg" role="status">{status.job.message}</p>{/if}
+			{#if status.job?.state === 'succeeded' && status.job.message && !installer.error}<p class="pv-msg" role="status">{status.job.message}</p>{/if}
 		{/if}
 		{#if installer.error}<p class="pv-msg err" role="alert">{installer.error}</p><button type="button" class="st-btn" onclick={() => installer.load()}>Check again</button>{/if}
 	</div>

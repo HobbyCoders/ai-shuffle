@@ -1,9 +1,16 @@
 <script lang="ts">
-	/** A provider with nothing connected: the kinds it supports, each with Set up. */
+	/**
+	 * A provider with nothing connected: the kinds it supports, each with Set up.
+	 * Claude also shows the installed CLI (version, keep installed, Remove), so
+	 * an owner without a Claude sign-in can still manage or remove it.
+	 */
+	import { providers } from '$lib/stores/providers.svelte';
+	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import DetailPane from '../shell/DetailPane.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
 	import ProviderTile from './ProviderTile.svelte';
+	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
 	import { kindsOf, type ProviderView } from './providers-model';
 	import { startSetup } from './provider-actions';
 
@@ -12,6 +19,8 @@
 	}
 
 	let { provider }: Props = $props();
+	const access = getSettingsAccess();
+	const cliInstalled = $derived(!!provider.claude && !!providers.current.claude?.cli?.installed);
 	const kinds = $derived(kindsOf(provider.id));
 	const models = $derived(
 		provider.claude
@@ -44,4 +53,7 @@
 			</SettingRow>
 		{/each}
 	</RowGroup>
+	{#if cliInstalled}
+		<ClaudeCliInstall manage isAdmin={!access.readOnly} />
+	{/if}
 </DetailPane>

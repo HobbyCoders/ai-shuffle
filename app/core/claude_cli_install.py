@@ -161,9 +161,36 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+# The installer and updater see only what they need to download and place
+# the CLI: the search path, the home and config folders, locale, temp
+# folders, proxies and CA bundles. Credentials and other worker settings in
+# the environment (API keys, database URLs, tokens) are never passed on.
+_PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY")
+_INSTALLER_ENV = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+    "TMPDIR", "TMP", "TEMP", "CLAUDE_CONFIG_DIR",
+    "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+    *_PROXY_ENV, *(name.lower() for name in _PROXY_ENV),
+    # Windows: PowerShell and Anthropic's install.ps1 need these.
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME",
+    "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+    "PROGRAMFILES", "PROGRAMFILES(X86)", "PSMODULEPATH", "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_ARCHITEW6432", "NUMBER_OF_PROCESSORS", "OS",
+})
+
+
+def _installer_env():
+    # Windows environment names are case-insensitive (os.environ uppercases them).
+    fold = str.upper if sys.platform == "win32" else str
+    env = {k: v for k, v in os.environ.items() if fold(k) in _INSTALLER_ENV}
+    path_key = next((k for k in env if fold(k) == "PATH"), "PATH")
+    env[path_key] = str(_launcher().parent) + os.pathsep + env.get(path_key, "")
+    return env
+
+
 def _run_command(command):
-    env = os.environ.copy()
-    env["PATH"] = str(_launcher().parent) + os.pathsep + env.get("PATH", "")
+    env = _installer_env()
     # A file bounds memory even if an installer is noisy. Only the final lines
     # are exposed. No CLI auth commands or credential files are read here.
     with tempfile.TemporaryFile() as output:

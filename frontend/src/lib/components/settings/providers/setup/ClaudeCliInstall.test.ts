@@ -117,3 +117,17 @@ it('shows the update result from the worker', async () => {
 	expect(mocks.post).toHaveBeenCalledWith('/settings/claude-cli/update', {});
 	expect(await screen.findByText('Claude Code updated from 2.1.280 to 2.1.285.')).toBeTruthy();
 });
+it('replaces an earlier success with a later failure', async () => {
+	current = { ...base, installed: true, job: job('succeeded') };
+	render(ClaudeCliInstall, { manage: true });
+	expect(await screen.findByText('Claude Code updated from 2.1.280 to 2.1.285.')).toBeTruthy();
+	mocks.post.mockRejectedValueOnce(new Error('A Claude Code install or update started before the worker restarted is still running.'));
+	await fireEvent.click(screen.getByRole('button', { name: 'Check for update' }));
+	expect(await screen.findByText(/started before the worker restarted/)).toBeTruthy();
+	expect(screen.queryByText('Claude Code updated from 2.1.280 to 2.1.285.')).toBeNull();
+	current = { ...current, job: job('failed', 'update') };
+	await fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+	expect(await screen.findByText('Network connection failed.')).toBeTruthy();
+	expect(screen.queryByText('Claude Code updated from 2.1.280 to 2.1.285.')).toBeNull();
+	await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(1));
+});

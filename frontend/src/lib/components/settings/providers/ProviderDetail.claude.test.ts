@@ -144,3 +144,35 @@ it('is read-only for other devices', async () => {
 	await flush();
 	expect(worker.sent('PUT', '/settings/claude-auth')).toHaveLength(0);
 });
+
+it('manages an installed CLI without a Claude sign-in', async () => {
+	const signedOut = claudeSummary({ api_key: { set: false, last4: null } });
+	signedOut.cli = { ...signedOut.cli, signed_in: false, email: null, org_name: null, plan: null };
+	worker = fakeWorker({
+		claude: signedOut,
+		integrations: { anthropic_api_key_set: false, anthropic_api_key_masked: null, fal_api_key_set: false,
+			fal_api_key_masked: '', fal_enabled: true }
+	});
+	vi.stubGlobal('fetch', worker.fetch);
+	await show();
+	expect(screen.getByRole('region', { name: 'Connect' })).toBeTruthy();
+	expect(await screen.findByRole('switch', { name: 'Keep Claude Code installed' })).toBeTruthy();
+	expect(screen.getByText('Version')).toBeTruthy();
+	expect(screen.getByRole('button', { name: 'Remove' })).toBeTruthy();
+	expect(within(screen.getByRole('region', { name: 'Connect' })).getAllByRole('button', { name: 'Set up' }).length).toBeGreaterThan(0);
+});
+
+it('offers only setup when Claude is not connected and the CLI is absent', async () => {
+	const absent = claudeSummary({ api_key: { set: false, last4: null } });
+	absent.cli = { ...absent.cli, installed: false, signed_in: false, email: null, org_name: null, plan: null };
+	worker = fakeWorker({
+		claude: absent,
+		integrations: { anthropic_api_key_set: false, anthropic_api_key_masked: null, fal_api_key_set: false,
+			fal_api_key_masked: '', fal_enabled: true }
+	});
+	vi.stubGlobal('fetch', worker.fetch);
+	await show();
+	expect(screen.getByRole('region', { name: 'Connect' })).toBeTruthy();
+	expect(screen.queryByRole('switch', { name: 'Keep Claude Code installed' })).toBeNull();
+	expect(screen.queryByRole('button', { name: 'Install Claude Code' })).toBeNull();
+});

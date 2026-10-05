@@ -123,6 +123,43 @@ def test_concurrent_start_returns_current_job(worker, monkeypatch):
     assert ci.payload()["job"]["state"] == "failed"
 
 
+def _parent_env(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:secret@db/app")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy:3128")
+    monkeypatch.setenv("no_proxy", "localhost")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/claude-config")
+
+
+def test_installer_env_is_an_allow_list(worker, monkeypatch):
+    _parent_env(monkeypatch)
+    seen = {}
+
+    def popen(command, **kw):
+        seen.update(kw["env"])
+        return Mock(pid=123, returncode=0)
+    monkeypatch.setattr(ci.subprocess, "Popen", popen)
+    assert ci._run_command(["bash"])[0] == 0
+    assert set(seen) <= ci._INSTALLER_ENV
+    for secret in ("ANTHROPIC_API_KEY", "DATABASE_URL", "GITHUB_TOKEN"):
+        assert secret not in seen
+    assert seen["HTTPS_PROXY"] == "http://proxy:3128" and seen["no_proxy"] == "localhost"
+    assert seen["CLAUDE_CONFIG_DIR"] == "/claude-config"
+    assert seen["PATH"].split(ci.os.pathsep)[0] == str(ci._launcher().parent)
+
+
+@pytest.mark.skipif(ci.sys.platform == "win32", reason="POSIX env(1)")
+def test_installer_child_sees_only_allowed_variables(worker, monkeypatch):
+    import shutil
+    _parent_env(monkeypatch)
+    code, tail, _ = ci._run_command([shutil.which("env")])
+    names = {line.split("=", 1)[0] for line in tail.splitlines() if "=" in line}
+    assert code == 0 and "HTTPS_PROXY" in names
+    assert names <= ci._INSTALLER_ENV
+    assert "sk-ant-secret" not in tail and "user:secret" not in tail
+
+
 def test_hard_timeout_kills_process_group(worker, monkeypatch):
     proc = Mock(pid=123, returncode=-9)
     proc.wait.side_effect = [subprocess.TimeoutExpired("installer", 600), None]
