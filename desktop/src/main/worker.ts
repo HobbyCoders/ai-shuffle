@@ -519,6 +519,8 @@ export class WorkerSupervisor extends EventEmitter {
 	private logBytes = 0;
 	private _state: WorkerState;
 	private stopping = false;
+	/** Other workers running subagents for this worker's chats, from the last activity check. */
+	private _remoteWorkers: string[] = [];
 	private readonly lifecycleToken = randomBytes(32).toString('hex');
 	private recentLog: string[] = [];
 	private crashRestarts: number[] = [];
@@ -778,13 +780,20 @@ export class WorkerSupervisor extends EventEmitter {
 	}
 
 	async activeSessionCount(): Promise<number> {
+		this._remoteWorkers = [];
 		if (this._state.external || this._state.phase !== 'ready') return 0;
 		const reply = await this.lifecycleRequest('active-sessions');
 		if (!Number.isSafeInteger(reply.active_sessions) || (reply.active_sessions as number) < 0) {
 			throw new Error('Invalid active-session response');
 		}
+		// Older workers send no list; quitting leaves these running (#1808).
+		const names = Array.isArray(reply.remote_workers) ? reply.remote_workers : [];
+		this._remoteWorkers = names.filter((name): name is string => typeof name === 'string' && name.trim() !== '').map(name => name.trim().slice(0, 80)).slice(0, 8);
 		return reply.active_sessions as number;
 	}
+
+	/** Workers that keep running this worker's subagents after it quits, as of the last {@link activeSessionCount}. */
+	get remoteWorkers(): string[] { return [...this._remoteWorkers]; }
 
 	private async finishStartup(port: number): Promise<void> {
 		this.set({ startupStep: 'syncing' });

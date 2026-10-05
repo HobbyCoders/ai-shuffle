@@ -114,17 +114,49 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 #: admits nothing but the token redirect and requests carrying a live grant.
 PREVIEW_INGRESS = "preview"
 _listener_port: Optional[int] = None
+#: The address the listener is bound to ("0.0.0.0", "127.0.0.1", ...).
+_listener_host: Optional[str] = None
 
 
-def set_listener_port(port: Optional[int]) -> None:
+def set_listener_port(port: Optional[int], host: Optional[str] = None) -> None:
     """Record the bound preview listener (None when it is off or failed)."""
-    global _listener_port
+    global _listener_port, _listener_host
     _listener_port = int(port) if port else None
+    _listener_host = (host or None) if _listener_port else None
 
 
 def listener_port() -> Optional[int]:
     """The preview listener's port in this process, or None without one."""
     return _listener_port
+
+
+def listener_loopback_only() -> bool:
+    """Whether the preview listener answers on loopback and nowhere else.
+
+    The desktop worker binds 127.0.0.1, so a link naming the LAN address gets
+    an empty response there (#1789). Its agent browser runs on the same
+    machine, so loopback is the address that reaches the listener."""
+    host = (_listener_host or "").strip().strip("[]")
+    if not _listener_port or not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def advertised_host(browser_host: Optional[str]) -> Optional[str]:
+    """The host a preview link should name: one the listener answers on.
+
+    A loopback-only listener is advertised by its loopback address; any other
+    bind (all interfaces, a LAN address) keeps ``browser_host``, the address
+    the agent browser reaches this machine by."""
+    if listener_loopback_only():
+        host = (_listener_host or "").strip().strip("[]")
+        return "127.0.0.1" if host.lower() == "localhost" else host
+    return browser_host
 
 
 @dataclass(frozen=True)

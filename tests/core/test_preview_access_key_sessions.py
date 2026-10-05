@@ -84,7 +84,7 @@ def test_workspace_card_carries_no_token_for_key_sessions(monkeypatch, session_i
 
     monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.135")
     monkeypatch.setattr(environment, "workspace_facts_card",
-                        lambda cwd, *, browser_host, app_port, preview_url: f"card preview={preview_url}")
+                        lambda cwd, *, browser_host, app_port, preview_url, **_: f"card preview={preview_url}")
     adapter = ha.HarnessAdapter()
     adapter._is_delegated = delegated
     monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: session_id)
@@ -157,3 +157,41 @@ def test_workspace_card_has_no_link_without_the_preview_listener(tmp_path, monke
     card = adapter._build_workspace_card(ha.SessionOptions(model="m", cwd=str(root)))
     assert preview_access.REDIRECT_PATH not in card and "token=" not in card
     assert "cannot open the running UI" in card
+
+
+@pytest.mark.parametrize("bind, host_in_link, local_line", [
+    ("127.0.0.1", "127.0.0.1", True),
+    ("localhost", "127.0.0.1", True),
+    ("0.0.0.0", "10.0.0.135", False),
+])
+def test_workspace_card_link_names_an_address_the_listener_answers_on(
+        tmp_path, monkeypatch, bind, host_in_link, local_line):
+    """#1789: the desktop worker binds its preview listener to 127.0.0.1, so a
+    link naming the LAN address got an empty response. A loopback-only
+    listener is advertised by loopback, and the agent-browser fact agrees with
+    it; a listener on every interface keeps the LAN address."""
+    import sys
+
+    import app.core.provider.harness_adapter as ha
+    from app.core import environment, mcp_config
+
+    root = tmp_path / "ai-shuffle"
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "preview.py").write_text("# preview")
+    (root / "fluid").mkdir()
+    monkeypatch.setattr(environment, "_PYTEST_PROBE", {"value": sys.executable})
+    monkeypatch.setattr(mcp_config, "_browser_loopback_host", lambda raw: "10.0.0.135")
+    monkeypatch.setattr(preview_access, "_listener_host", None)
+    preview_access.set_listener_port(8002, bind)
+
+    adapter = ha.HarnessAdapter()
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: OWNER)
+    card = adapter._build_workspace_card(ha.SessionOptions(model="m", cwd=str(root)))
+    assert f"http://{host_in_link}:8002{preview_access.REDIRECT_PATH}" in card
+    browser_line = next(line for line in card.splitlines() if line.startswith("- Agent browser:"))
+    if local_line:
+        assert "10.0.0.135" not in card
+        assert "http://127.0.0.1:<port>" in browser_line
+        assert "different host" not in browser_line
+    else:
+        assert "http://10.0.0.135:<port>" in browser_line

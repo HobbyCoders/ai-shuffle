@@ -354,6 +354,13 @@ class ContextCompaction(Event):
     # including on every event persisted before these fields existed.
     before_tokens: int = 0
     after_tokens: int = 0
+    # The delegated leg only: the summary the claude CLI wrote for this
+    # compaction, read back from its transcript, and ``node_id`` names the
+    # last node the CLI had seen before it (``None`` between turns). The CLI's
+    # transcript lives on one worker; these are what let a CLI elsewhere be
+    # re-seeded from the compacted context instead of the whole tree. "" when
+    # the summary could not be read, and on every older event.
+    summary: str = ""
     decision_reason: str = ""
     first_changed_message: int | None = None
     # What the window decision was sized on: "measured" (the last billed

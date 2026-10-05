@@ -264,7 +264,8 @@ class TestParentTriple:
 
     @pytest.mark.parametrize(
         "status,expected",
-        [("completed", "completed"), ("error", "failed"), ("killed", "failed")],
+        # A stopped worker reads "Stopped", not as a failure (#1806).
+        [("completed", "completed"), ("error", "failed"), ("killed", "killed")],
     )
     def test_failure_statuses_render_as_the_error_card(self, db, status, expected):
         f = _feed()

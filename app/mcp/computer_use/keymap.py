@@ -104,3 +104,37 @@ def parse_chord(text: str) -> tuple[list[Any], Any]:
             raise ValueError(f"{m!r} is not a modifier in chord {text!r}")
         modifiers.append(_resolve(m))
     return modifiers, _resolve(last)
+
+
+def _key_name(token: str) -> str:
+    """A chord token's canonical name: ``"Win"`` -> ``"cmd"``, ``"A"`` -> ``"a"``."""
+    low = token.strip().lower()
+    return _SPECIAL.get(low, low)
+
+
+def is_system_chord(text: str) -> bool:
+    """Whether ``text`` is a system key combination (the ``systemKeyCombos`` grant).
+
+    System chords act on the desktop rather than the focused app: anything
+    with the Windows/Command key (Start menu, Win+R, Win+L, window snapping),
+    switching or closing apps (Alt+Tab, Alt+Esc, Alt+F4), the Start menu and
+    Task Manager (Ctrl+Esc, Ctrl+Shift+Esc) and every Ctrl+Alt chord
+    (Ctrl+Alt+Del style). Unparseable text counts as system: a refusal is the
+    safe answer for a chord that cannot be classified.
+    """
+    raw = (text or "").strip()
+    if raw == "+":
+        return False
+    parts = [p for p in raw.split("+") if p.strip() != ""]
+    if not parts:
+        return True
+    names = [_key_name(p) for p in parts]
+    *mods, main = names
+    held = set(mods)
+    if "cmd" in held or main == "cmd":
+        return True
+    if "alt" in held and main in ("tab", "esc", "f4"):
+        return True
+    if "ctrl" in held and main == "esc":
+        return True
+    return {"ctrl", "alt"} <= held

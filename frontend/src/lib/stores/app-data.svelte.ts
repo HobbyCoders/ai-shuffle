@@ -15,6 +15,7 @@ import { listClusterProjects, type ClusterProject } from '$lib/api/installs';
 import type { Project } from './types';
 import { createSubscribers } from './store-utils';
 import { activeSession } from './active-session';
+import { archivedChats } from './archived-chats';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -895,6 +896,8 @@ export const appData = {
 			...s,
 			sessions: s.sessions.map(x => (x.id === sessionId ? { ...x, ...patch } : x)),
 		}));
+		// An open archived chat loses its composer; a restored one gets it back.
+		archivedChats.mark(sessionId, archived);
 		try {
 			await apiSetSessionArchived(sessionId, archived, isActive);
 			confirmLocalEdits([sessionId]);
@@ -902,6 +905,7 @@ export const appData = {
 		} catch (err) {
 			discardLocalEdits([sessionId]);
 			_update(s => ({ ...s, sessions: prevSessions }));
+			archivedChats.mark(sessionId, !archived);
 			throw err;
 		}
 	},

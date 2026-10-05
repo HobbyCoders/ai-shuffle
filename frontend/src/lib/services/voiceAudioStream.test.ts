@@ -1,18 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('./voicePcm.worklet.js?url&no-inline', () => ({ default: '/voice-pcm.js' }));
+vi.mock('./voicePlayback.worklet.js?url&no-inline', () => ({ default: '/voice-playback.js' }));
 vi.mock('$lib/api/runtime', () => ({
  wsUrl: (path: string, params: Record<string, string | null> = {}) => {
   const query = new URLSearchParams(Object.entries(params).filter((entry): entry is [string, string] => entry[1] != null)).toString();
   return 'ws://localhost' + path + (query ? '?' + query : '');
  },
 }));
-import { DEFAULT_MIC_THRESHOLD_DB, MAX_PLAYBACK_AHEAD_S, MAX_UPLOAD_BUFFER, createInputGate, openVoiceAudioStream } from './voiceAudioStream';
+import { CLIENT_STATS_MS, DEFAULT_MIC_THRESHOLD_DB, MAX_UPLOAD_BUFFER, MIC_SILENT_MS, createInputGate, micProblem, openVoiceAudioStream } from './voiceAudioStream';
 
 const nodes: any[] = [];
 const contexts: any[] = [];
 const sockets: any[] = [];
 class Context {
- state = 'running'; currentTime = 0; destination = {};
+ state = 'running'; currentTime = 0; destination = {}; sampleRate = 48000;
  audioWorklet = { addModule: vi.fn(async () => {}) };
  resume = vi.fn(async () => {});
  close = vi.fn(async () => { this.state = 'closed'; });
@@ -24,8 +25,11 @@ class Context {
 }
 class Worklet {
  port: any = { postMessage: vi.fn() }; disconnect = vi.fn(); connect = vi.fn();
- constructor() { nodes.push(this); }
+ constructor(_context: unknown, public name: string) { nodes.push(this); }
 }
+/** The microphone capture node and the speech playback node. */
+const capture = () => nodes.find(n => n.name === 'voice-pcm');
+const playback = () => nodes.find(n => n.name === 'voice-playback');
 class Socket {
  static OPEN = 1;
  readyState = 1; bufferedAmount = 0; binaryType = '';
@@ -87,8 +91,8 @@ describe('voice PCM stream', () => {
   const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
   const pcm = new Int16Array([12000]).buffer;
   stream.muteInput(true);
-  nodes[0].port.onmessage({ data: { pcm, generation: 0 } });
-  nodes[0].port.onmessage({ data: { pcm, generation: 1 } });
+  capture().port.onmessage({ data: { pcm, generation: 0 } });
+  capture().port.onmessage({ data: { pcm, generation: 1 } });
   expect(sockets[0].send).not.toHaveBeenCalled();
   const text = stream.sendText('Typed while muted');
   const event = JSON.parse(sockets[0].send.mock.calls[0][0]);
@@ -96,12 +100,12 @@ describe('voice PCM stream', () => {
   expect(await text).toBe(true);
   sockets[0].send.mockClear();
   stream.muteInput(false);
-  nodes[0].port.onmessage({ data: { pcm, generation: 0 } });
-  nodes[0].port.onmessage({ data: { pcm, generation: 1 } });
+  capture().port.onmessage({ data: { pcm, generation: 0 } });
+  capture().port.onmessage({ data: { pcm, generation: 1 } });
   expect(sockets[0].send).not.toHaveBeenCalled();
-  nodes[0].port.onmessage({ data: { pcm, generation: 2 } });
+  capture().port.onmessage({ data: { pcm, generation: 2 } });
   expect(sockets[0].send).toHaveBeenCalledExactlyOnceWith(pcm);
-  expect(nodes[0].port.postMessage.mock.calls.map(([m]: any[]) => m)).toEqual([
+  expect(capture().port.postMessage.mock.calls.map(([m]: any[]) => m)).toEqual([
    { type: 'mute', muted: true, generation: 1 }, { type: 'mute', muted: false, generation: 2 }
   ]);
   await stream.close();
@@ -112,18 +116,24 @@ describe('voice PCM stream', () => {
   const stream = await openVoiceAudioStream('session-1', {} as MediaStream, callbacks, new AbortController().signal);
   expect(sockets[0].url).toBe('ws://localhost/api/v1/voice/sessions/session-1/audio');
   expect(contexts[0].audioWorklet.addModule).toHaveBeenCalledWith('/voice-pcm.js');
+  expect(contexts[0].audioWorklet.addModule).toHaveBeenCalledWith('/voice-playback.js');
   const pcm = new Int16Array([3000, -3000]).buffer; // speech level, above the microphone gate
-  nodes[0].port.onmessage({ data: { pcm, generation: 0 } });
+  capture().port.onmessage({ data: { pcm, generation: 0 } });
   expect(sockets[0].send).toHaveBeenCalledWith(pcm);
   sockets[0].onmessage({ data: JSON.stringify({ type: 'caption', id: 'u1', role: 'user', delta: 'Hi' }) });
   expect(callbacks.caption).toHaveBeenCalledWith('u1', 'user', 'Hi');
-  sockets[0].onmessage({ data: pcm });
+  // Speech goes to the audio thread untouched; it reports when it plays.
+  const speech = new Int16Array([3000, -3000]).buffer;
+  sockets[0].onmessage({ data: speech });
+  expect(playback().port.postMessage).toHaveBeenCalledWith({ type: 'pcm', pcm: speech }, [speech]);
+  playback().port.onmessage({ data: { type: 'speaking', active: true } });
   expect(callbacks.speaking).toHaveBeenLastCalledWith(true);
-  sockets[0].onmessage({ data: new Int16Array(4).buffer });
+  playback().port.onmessage({ data: { type: 'speaking', active: false } });
   expect(callbacks.speaking).toHaveBeenLastCalledWith(false);
   await stream.close();
   expect(contexts[0].close).toHaveBeenCalledOnce();
-  expect(nodes[0].disconnect).toHaveBeenCalledOnce();
+  expect(capture().disconnect).toHaveBeenCalledOnce();
+  expect(playback().disconnect).toHaveBeenCalledOnce();
  });
  it('closes the audio graph when a connecting or live call is cancelled', async () => {
   const controller = new AbortController();
@@ -142,12 +152,12 @@ describe('voice PCM stream', () => {
   const info = vi.spyOn(console, 'info').mockImplementation(() => {});
   const stream = await openVoiceAudioStream('s', {} as MediaStream, callbacks, new AbortController().signal);
   sockets[0].bufferedAmount = MAX_UPLOAD_BUFFER + 1;
-  for (let i = 0; i < 3; i++) nodes[0].port.onmessage({ data: { pcm: new Int16Array(1920).buffer, generation: 0 } });
+  for (let i = 0; i < 3; i++) capture().port.onmessage({ data: { pcm: new Int16Array(1920).buffer, generation: 0 } });
   expect(sockets[0].send).not.toHaveBeenCalled();
   expect(info).toHaveBeenCalledOnce();
   // Once the socket drains, the microphone flows again on the same call.
   sockets[0].bufferedAmount = 0;
-  nodes[0].port.onmessage({ data: { pcm: new Int16Array(1920).buffer, generation: 0 } });
+  capture().port.onmessage({ data: { pcm: new Int16Array(1920).buffer, generation: 0 } });
   expect(sockets[0].send).toHaveBeenCalledOnce();
   expect(sockets[0].close).not.toHaveBeenCalled();
   expect(callbacks.closed).not.toHaveBeenCalled();
@@ -180,30 +190,19 @@ describe('voice PCM stream', () => {
   expect(errored.closed).toHaveBeenCalledWith('Session expired.', 'provider-error');
   await first.close();
  });
- // #1671: switching sessions mid-reply stalls the main thread while the agent
- // keeps talking. The frames held in the socket then arrive together; that
- // burst used to end the call as a playback backlog.
- it('keeps the call up through a burst of speech after a main-thread stall', async () => {
+ // #1671/#1824: switching sessions mid-reply stalls the main thread while the
+ // agent keeps talking. The frames held in the socket then arrive together.
+ // They used to be thinned frame by frame (fast, garbled speech, lost final
+ // words); now every frame reaches the playback buffer in order.
+ it('passes a burst of speech after a main-thread stall to playback whole and in order', async () => {
   const callbacks = handlers();
-  const info = vi.spyOn(console, 'info').mockImplementation(() => {});
   const stream = await openVoiceAudioStream('s', {} as MediaStream, callbacks, new AbortController().signal);
-  const frame = () => sockets[0].onmessage({ data: new Int16Array(2400).buffer }); // 100 ms
-  const scheduled: number[] = [];
-  contexts[0].createBufferSource = () => ({ connect: vi.fn(), disconnect: vi.fn(), stop: vi.fn(), buffer: null, onended: null,
-   start: (at: number) => scheduled.push(at) });
-  for (let i = 0; i < 50; i++) frame(); // 5 s of speech delivered at once
+  const frames = Array.from({ length: 50 }, (_, i) => new Int16Array(2400).fill(i + 1).buffer); // 5 s
+  for (const data of frames) sockets[0].onmessage({ data });
+  const sent = playback().port.postMessage.mock.calls.map(([m]: any[]) => m.pcm);
+  expect(sent).toEqual(frames);
   expect(callbacks.closed).not.toHaveBeenCalled();
   expect(sockets[0].close).not.toHaveBeenCalled();
-  // Only about MAX_PLAYBACK_AHEAD_S of it is queued; the stale rest is dropped.
-  const ahead = scheduled.length * 0.1;
-  expect(ahead).toBeGreaterThanOrEqual(MAX_PLAYBACK_AHEAD_S);
-  expect(ahead).toBeLessThanOrEqual(MAX_PLAYBACK_AHEAD_S + 0.2);
-  expect(info).toHaveBeenCalledOnce();
-  // Playback catches up, and new speech is scheduled again on the same call.
-  contexts[0].currentTime = 10;
-  frame();
-  expect(scheduled.at(-1)).toBeCloseTo(10.02);
-  info.mockRestore();
   await stream.close();
  });
  it('keeps the call up when a UI handler throws on a valid event', async () => {
@@ -223,7 +222,7 @@ describe('voice PCM stream', () => {
  it('sends quiet microphone input as silence without dropping frames', async () => {
   const stream = await openVoiceAudioStream('s', {} as MediaStream, handlers(), new AbortController().signal, -42);
   const breath = new Int16Array(1920).fill(120); // about -49 dBFS
-  nodes[0].port.onmessage({ data: { pcm: breath.buffer, generation: 0 } });
+  capture().port.onmessage({ data: { pcm: breath.buffer, generation: 0 } });
   const sent = new Int16Array(sockets[0].send.mock.calls[0][0]);
   expect(sent).toHaveLength(1920); // continuous audio: the provider still hears time pass
   expect(sent.every(v => v === 0)).toBe(true);
@@ -261,5 +260,96 @@ describe('microphone gate', () => {
  });
  it('honours a lower threshold for quiet microphones', () => {
   expect(silent(createInputGate(-60)(frame(120)))).toBe(false);
+ });
+});
+
+// #1824: a call that stops hearing its caller says so and tries to recover.
+describe('microphone watchdog', () => {
+ const fakeTime = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance', 'Date'] });
+ const micStream = (state = 'live') => ({ getAudioTracks: () => [{ readyState: state }] }) as unknown as MediaStream;
+ const speak = () => capture().port.onmessage({ data: { pcm: new Int16Array(1920).fill(3000).buffer, generation: 0 } });
+ afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+ const quiet = () => { vi.spyOn(console, 'warn').mockImplementation(() => {}); vi.spyOn(console, 'info').mockImplementation(() => {}); };
+
+ it('reads the microphone state from capture, track, audio context and server', () => {
+  const base = { now: 10_000, graceUntil: 0, trackEnded: false, contextState: 'running', lastCaptureAt: 9_900, serverMicAgeMs: 100, serverHealthAt: 9_500 };
+  expect(micProblem(base)).toBeNull();
+  expect(micProblem({ ...base, graceUntil: 20_000, trackEnded: true })).toBeNull();
+  expect(micProblem({ ...base, trackEnded: true })).toBe('track-ended');
+  expect(micProblem({ ...base, contextState: 'suspended' })).toBe('audio-suspended');
+  expect(micProblem({ ...base, lastCaptureAt: 10_000 - MIC_SILENT_MS })).toBe('no-capture');
+  expect(micProblem({ ...base, serverMicAgeMs: MIC_SILENT_MS })).toBe('not-reaching-server');
+  // An old reading, or a server that sends none, is never taken as a problem.
+  expect(micProblem({ ...base, serverMicAgeMs: MIC_SILENT_MS, serverHealthAt: 0 })).toBeNull();
+  expect(micProblem({ ...base, serverMicAgeMs: null })).toBeNull();
+ });
+
+ it('shows the problem when no microphone audio is captured, gets the microphone again and clears', async () => {
+  fakeTime(); quiet();
+  const fresh = micStream();
+  const h = { ...handlers(), micHealth: vi.fn(), reacquireMic: vi.fn(async () => fresh) };
+  const stream = await openVoiceAudioStream('s', micStream(), h, new AbortController().signal);
+  await vi.advanceTimersByTimeAsync(MIC_SILENT_MS + 1000);
+  expect(h.micHealth).toHaveBeenLastCalledWith(false);
+  expect(h.reacquireMic).toHaveBeenCalledOnce();
+  for (let i = 0; i < 4; i++) { speak(); await vi.advanceTimersByTimeAsync(1000); }
+  expect(h.micHealth).toHaveBeenLastCalledWith(true);
+  expect(h.closed).not.toHaveBeenCalled();
+  await stream.close();
+ });
+
+ it('reconnects the audio stream when captured audio stops reaching the server', async () => {
+  fakeTime(); quiet();
+  const h = { ...handlers(), micHealth: vi.fn() };
+  await openVoiceAudioStream('s', micStream(), h, new AbortController().signal);
+  for (let i = 0; i < 6; i++) {
+   speak();
+   sockets[0].onmessage({ data: JSON.stringify({ type: 'health', mic_age_ms: 6000 + i * 1000, mic_frames: 10 }) });
+   await vi.advanceTimersByTimeAsync(1000);
+  }
+  expect(h.micHealth).toHaveBeenCalledWith(false);
+  expect(sockets[0].close).toHaveBeenCalledWith(4000, 'microphone not reaching the call');
+  expect(h.closed).toHaveBeenCalledExactlyOnceWith('The microphone stopped reaching the call.', 'connection-dropped');
+ });
+
+ it('resumes a suspended audio context without replacing the microphone', async () => {
+  fakeTime(); quiet();
+  const h = { ...handlers(), micHealth: vi.fn(), reacquireMic: vi.fn(async () => micStream()) };
+  const stream = await openVoiceAudioStream('s', micStream(), h, new AbortController().signal);
+  contexts[0].resume.mockClear();
+  contexts[0].state = 'suspended';
+  await vi.advanceTimersByTimeAsync(MIC_SILENT_MS + 1000);
+  expect(h.micHealth).toHaveBeenLastCalledWith(false);
+  expect(contexts[0].resume).toHaveBeenCalled();
+  expect(h.reacquireMic).not.toHaveBeenCalled();
+  await stream.close();
+ });
+
+ it('stays quiet while the caller is muted', async () => {
+  fakeTime(); quiet();
+  const h = { ...handlers(), micHealth: vi.fn(), reacquireMic: vi.fn(async () => micStream()) };
+  const stream = await openVoiceAudioStream('s', micStream('ended'), h, new AbortController().signal);
+  stream.muteInput(true);
+  await vi.advanceTimersByTimeAsync(3 * MIC_SILENT_MS);
+  expect(h.micHealth).not.toHaveBeenCalled();
+  expect(h.reacquireMic).not.toHaveBeenCalled();
+  await stream.close();
+ });
+
+ it('reports the call figures to the server for its health log', async () => {
+  fakeTime(); quiet();
+  const stream = await openVoiceAudioStream('s', micStream(), handlers(), new AbortController().signal);
+  await vi.advanceTimersByTimeAsync(CLIENT_STATS_MS);
+  expect(sockets[0].send).not.toHaveBeenCalled(); // An older server would reject the report.
+  sockets[0].onmessage({ data: JSON.stringify({ type: 'health', mic_age_ms: 50, mic_frames: 1 }) });
+  speak();
+  playback().port.onmessage({ data: { type: 'stats', underruns: 2, droppedMs: 0, depthMs: 140, maxDepthMs: 300, targetMs: 200 } });
+  await vi.advanceTimersByTimeAsync(CLIENT_STATS_MS);
+  const reports = sockets[0].send.mock.calls.map(([m]: any[]) => m).filter((m: unknown) => typeof m === 'string').map((m: string) => JSON.parse(m));
+  expect(reports).toHaveLength(1);
+  expect(reports[0]).toMatchObject({ type: 'client_stats', stats: {
+   captured: 1, sent: 1, underruns: 2, depth_ms: 140, max_depth_ms: 300, target_ms: 200, muted: false, context: 'running', rate: 48000, track: 'live',
+  } });
+  await stream.close();
  });
 });

@@ -581,6 +581,27 @@ class TestConversation:
         mock_conv_dependencies["submit"].assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_conversation_refuses_an_archived_session(self, mock_conv_dependencies):
+        """An archived chat is read-only until restored (#1822): 409, no turn."""
+        from fastapi import HTTPException
+        from app.api.query import conversation
+        from app.core.models import ConversationRequest
+        from app.db import database
+
+        database.create_api_user("user1", "Key", "hash-user1")
+        database.create_session(session_id="archived-session", profile_id="default",
+                                api_user_id="user1")
+        database.update_session("archived-session", status="archived")
+        request = ConversationRequest(prompt="Wake up", session_id="archived-session")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await conversation(request, {"id": "user1", "profile_ids": ["default"]})
+
+        assert exc_info.value.status_code == 409
+        assert "archived" in exc_info.value.detail
+        mock_conv_dependencies["submit"].assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_conversation_omitted_profile_returns_400(self, mock_conv_dependencies):
         """Should return 400, not 500, when profile is omitted entirely and
         the API user has none configured (regression: the "claude-code"

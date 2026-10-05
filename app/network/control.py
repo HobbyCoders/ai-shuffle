@@ -425,6 +425,11 @@ def _handoff_handler():
     return handle
 
 
+def _session_move_handler():
+    from app.core.session_handoff import handle_control
+    return handle_control
+
+
 def _session_active_handler():
     from app.network.session_active import handle
     return handle
@@ -469,6 +474,7 @@ _LAZY_HANDLERS = {
     "away-mode": _away_mode_handler,
     "session-active": _session_active_handler,
     "handoff": _handoff_handler,
+    "session-move": _session_move_handler,
     "application-update": _application_update_handler,
     "orchestration-start": _orchestration_start_handler,
     "orchestration-report": _orchestration_report_handler,

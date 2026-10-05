@@ -80,6 +80,27 @@ def test_the_single_task_stop_reaches_the_child_on_its_worker(workers, monkeypat
     assert_stopped_on_target(a, b, child)
 
 
+def test_a_stopped_card_reads_stopped_and_names_its_worker(workers, monkeypatch, kicks):
+    """#1806: Stop on the card settles it as stopped, not failed (a failed card
+    folds away), says who stopped it and where it ran."""
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    with b.active():
+        task_registry.update_remote_status("caller", child, worker_state="working")
+        assert task_registry.get_task("caller", child)["workerState"] == "working"
+        asyncio.run(stop_session_task("caller", child))
+        rows = session_events.get_events("caller", 0, 1000)
+        [done] = [r for r in rows if r["event_type"] == "subagent.completed"]
+        assert done["payload"]["status"] == "killed"
+        assert done["payload"]["result_preview"] == "Stopped by the user. Ran on Unraid."
+        settles = [r for r in rows if r["event_type"] == "task.updated"
+                   and r["payload"].get("task_id") == child and r["payload"].get("state") == "killed"]
+        assert settles and settles[-1]["payload"]["summary"] == "Stopped by user. Ran on Unraid."
+        record = task_registry.get_task("caller", child)
+        assert record["status"] == "killed" and record["worker"]["name"] == "Unraid"
+        assert "workerState" not in record  # a stopped child no longer reads "working"
+
+
 def _builtin_handlers(session_id):
     from unittest.mock import patch
 
@@ -117,7 +138,7 @@ def test_the_parent_agent_stops_its_remote_child_with_task_stop(workers, monkeyp
         assert remote_tasks.get_dispatch(child)["stop_reason"] == AGENT_STOP_REASON
         record = task_registry.get_task("caller", child)
         assert record["reason"] == AGENT_STOP_REASON
-        assert record["summary"] == PARENT_AGENT_STOP_SUMMARY
+        assert record["summary"] == f"{PARENT_AGENT_STOP_SUMMARY}. Ran on Unraid."
     assert len(stop_requests(router)) == 1
     assert_stopped_on_target(a, b, child)
 
@@ -470,11 +491,14 @@ def test_a_shutdown_of_the_childs_worker_leaves_it_resumable(workers, monkeypatc
         assert asyncio.run(remote_task.sweep()) == 1
         report = remote_tasks.get_child(child)["report"]
         assert report["status"] == "failed"
+        assert report["reason"] == remote_task.WORKER_SHUTDOWN_REASON
         assert "shut down" in report["report"] and "Nobody stopped it" in report["report"]
     assert stop_requests(router) == []
     with b.active():
         record = task_registry.get_task("caller", child)
         assert record["status"] != "killed" and record.get("reason") != USER_STOP_REASON
+        # Its own reason, not a plain failure (#1808).
+        assert record["reason"] == remote_task.WORKER_SHUTDOWN_REASON
         [wake] = wakes()
         assert "shut down" in wake["prompt"]
     outcome = send(b, child, "Carry on counting.")
@@ -488,8 +512,13 @@ def test_a_shutdown_of_the_childs_worker_leaves_it_resumable(workers, monkeypatc
 def test_a_shutdown_of_the_parents_worker_leaves_the_remote_child_running(
         workers, monkeypatch, kicks):
     """Quitting the parent's worker stops its own work, not the child on Unraid."""
+    from app.core import desktop_lifecycle
+
     a, b, router = network(workers, monkeypatch)
     child = started_child(a, b)
+    with b.active():
+        # The quit dialog names the worker that keeps it running.
+        assert desktop_lifecycle.remote_workers() == ["Unraid"]
     stop_running_sessions = _shutting_down(monkeypatch, ["caller"])
     with b.active():
         asyncio.run(stop_running_sessions())

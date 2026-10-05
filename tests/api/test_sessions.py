@@ -2649,3 +2649,30 @@ class TestGetSessionContextUsage:
 
         assert response.status_code == 200
         assert response.json() == {"available": False, "reason": "not_connected"}
+
+
+# =============================================================================
+# Archived chats are read-only until restored (#1822)
+# =============================================================================
+
+class TestArchivedSessionRefusals:
+    """Resume, "Resume here" (adopt) and worker move refuse an archived chat."""
+
+    @pytest.mark.parametrize("method,path,body", [
+        ("post", "/api/v1/sessions/test-session-id/resume", None),
+        ("post", "/api/v1/sessions/test-session-id/adopt", None),
+        ("post", "/api/v1/sessions/test-session-id/move", {"target_instance_id": "other-worker"}),
+    ])
+    def test_archived_session_is_refused(self, client, mock_database, sample_session, method, path, body):
+        sample_session["status"] = "archived"
+        sample_session["instance_id"] = "other-install-xyz"
+        mock_database.get_session.return_value = sample_session
+
+        with patch("app.core.turn_manager.submit_async", new=AsyncMock()) as submit:
+            response = getattr(client, method)(path, **({"json": body} if body else {}))
+
+        assert response.status_code == 409
+        assert "archived" in response.json()["detail"]
+        submit.assert_not_called()
+        mock_database.adopt_session.assert_not_called()
+        mock_database.unpin_session.assert_not_called()

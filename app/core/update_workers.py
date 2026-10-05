@@ -36,18 +36,88 @@ DISCOVERY_SECONDS = 600
 _discovery = {}
 _discovery_tasks = set()
 NOT_CHECKED = "Not checked yet; will check and download"
+# "Restart when they finish" (#1818): this worker's waiting restart, if any:
+# {"id", "expires_at", "task"}. In memory only; a restart of the worker drops it.
+_deferred = None
+DEFER_SECONDS = 12 * 60 * 60
+DEFER_POLL_SECONDS = 5
+# "Stop them and restart": how long stopped sessions get to wind down.
+STOP_WAIT_SECONDS = 60
+_stop_tasks = set()
 logger = logging.getLogger(__name__)
 
 
-def local_action(action, request_id):
-    if action not in ("check", "download", "install"):
+def _busy_reason(busy):
+    names = ", ".join(row["title"] for row in busy) or "a chat"
+    return f"Busy with running work: {names}"
+
+
+def _cancel_deferred():
+    global _deferred
+    task, _deferred = (_deferred or {}).get("task"), None
+    if task is not None and not task.done() and task is not asyncio.current_task():
+        task.cancel()
+    return task is not None
+
+
+async def _restart_when_idle(request_id):
+    """Install once no session runs here (#1818). Never outlives DEFER_SECONDS."""
+    global _deferred
+    try:
+        while _deferred and _deferred["id"] == request_id and time.time() < _deferred["expires_at"]:
+            await asyncio.sleep(DEFER_POLL_SECONDS)
+            from app.core.desktop_lifecycle import active_session_ids
+            if active_session_ids():
+                continue
+            result = local_action("install", f"{request_id}:idle:{uuid.uuid4().hex[:8]}")
+            if result.get("busy"):
+                continue  # a new turn started between the two reads
+            logger.info("Application update: deferred restart %s", result["reason"])
+            return
+    finally:
+        if _deferred and _deferred["id"] == request_id:
+            _deferred = None
+
+
+async def _stop_then_restart(request_id):
+    """Stop this worker's running work as its Stop buttons do, then install."""
+    from app.core.desktop_lifecycle import active_session_ids, stop_session_work
+    sessions = active_session_ids()
+    results = await asyncio.gather(*(stop_session_work(sid) for sid in sessions), return_exceptions=True)
+    for sid, result in zip(sessions, results):
+        if isinstance(result, BaseException):
+            logger.warning("Application update: could not stop %s before restarting", sid, exc_info=result)
+    deadline = time.monotonic() + STOP_WAIT_SECONDS
+    while active_session_ids() and time.monotonic() < deadline:
+        await asyncio.sleep(1)
+    result = local_action("install", f"{request_id}:stopped")
+    logger.info("Application update after stopping %d session(s): %s", len(sessions), result["reason"])
+
+
+def local_action(action, request_id, mode=None):
+    """One worker's part of an update action. ``mode`` only applies to install.
+
+    A busy install is refused with the running chats named in ``busy``, unless
+    ``mode`` is "when_idle" (restart once they finish) or "stop" (stop them,
+    then restart). "cancel" drops a waiting "when_idle" restart.
+    """
+    global _deferred
+    if action not in ("check", "download", "install", "cancel"):
         raise ValueError("Unknown update action")
+    if mode not in (None, "when_idle", "stop"):
+        raise ValueError("Unknown update mode")
     if not isinstance(request_id, str) or not 1 <= len(request_id) <= 100:
         raise ValueError("Invalid update request id")
     # Called on the event-loop thread: no awaits between dedupe and enqueue.
     previous = _receipts.get(request_id)
     if previous and previous[0] > time.monotonic():
         return previous[1]
+    if action == "cancel":
+        cancelled = _cancel_deferred()
+        result = {"accepted": cancelled, "reason": "Scheduled restart cancelled" if cancelled
+                  else "No restart was scheduled"}
+        _receipts[request_id] = (time.monotonic() + 60, result)
+        return result
     state = updates.status()
     reason = None
     if not state["allow_updates"]:
@@ -64,10 +134,30 @@ def local_action(action, request_id):
         reason = f"Cannot download while the updater is {state['phase']}"
     elif action == "install" and state["phase"] != "ready":
         reason = "No staged update; current version left running"
+    busy = None
     if action == "install" and not reason:
-        from app.core.desktop_lifecycle import active_session_ids
+        from app.core.desktop_lifecycle import active_session_ids, busy_work
         if active_session_ids():
-            reason = "Busy with active sessions; retry when finished"
+            busy = busy_work()
+            if mode is None:
+                reason = _busy_reason(busy)
+            else:
+                # Restart later: when the work ends, or once it is stopped.
+                _cancel_deferred()
+                if mode == "when_idle":
+                    _deferred = {"id": request_id, "expires_at": time.time() + DEFER_SECONDS}
+                    _deferred["task"] = asyncio.ensure_future(_restart_when_idle(request_id))
+                    reason, queued = None, "Restarts when running work finishes"
+                else:
+                    task = asyncio.ensure_future(_stop_then_restart(request_id))
+                    _stop_tasks.add(task)
+                    task.add_done_callback(_stop_tasks.discard)
+                    queued = "Stopping running work, then restarting"
+                result = {"accepted": True, "reason": queued, "phase": state["phase"],
+                          "version": state.get("version"), "busy": busy,
+                          "deferred": mode == "when_idle"}
+                _receipts[request_id] = (time.monotonic() + 60, result)
+                return result
     if not reason:
         try:
             updates.enqueue(action)
@@ -81,6 +171,8 @@ def local_action(action, request_id):
         queued = "Checking for an update to download"
     result = {"accepted": reason is None, "reason": reason or queued, "phase": state["phase"],
               "version": state.get("version")}
+    if busy:
+        result["busy"] = busy
     _receipts[request_id] = (time.monotonic() + 60, result)
     while len(_receipts) > 256:
         _receipts.popitem(last=False)
@@ -101,7 +193,7 @@ async def peer_action(body, from_device):
     if not member or member.kind != membership.KIND_WORKER or member.status != membership.STATUS_ACTIVE:
         raise PermissionError("Only active account workers may request application updates")
     if body.get("operation") == "status":
-        return {**await run_sync(updates.status), **_build()}
+        return {**await run_sync(updates.status), **_build(), "deferred": _deferred is not None}
     if body.get("operation") != "action":
         raise ValueError("Unknown update operation")
     if not isinstance(body.get("request_id"), str) or not body["request_id"]:
@@ -109,7 +201,7 @@ async def peer_action(body, from_device):
     expiry = body.get("expires_at")
     if type(expiry) not in (int, float) or not time.time() <= expiry <= time.time() + 15:
         raise ValueError("Update request expired; offline commands are not replayed")
-    result = local_action(body.get("action"), from_device + ":" + body["request_id"])
+    result = local_action(body.get("action"), from_device + ":" + body["request_id"], body.get("mode"))
     logger.info("Application update %s requested by worker %s: %s", body.get("action"), from_device,
                 result["reason"])
     return result
@@ -122,7 +214,7 @@ async def _remote(row, body):
             raise ValueError("Invalid peer update response")
         fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error",
                   "request_pending", "checked_at", "channel", "release", "notes", "kind",
-                  "revision", "app_version")
+                  "revision", "app_version", "busy", "deferred")
         return {key: result[key] for key in fields if key in result}
     except control.ControlRefused:
         # The peer answered and declined (an older build without the updater
@@ -233,6 +325,8 @@ def classify(row, all_workers, offers=(), refusals=None):
         suffix = f" {round(percent)}%" if isinstance(percent, (int, float)) else ""
         return {"role": "preparing", "label": f"{row.get('message') or 'Downloading update…'}{suffix}"}
     if phase == "ready":
+        if row.get("deferred"):
+            return {"role": "staged", "label": "Restarts when work finishes"}
         error = row.get("error")
         return {"role": "staged", "label": f"Staged, awaiting restart. {error}" if error else "Staged, awaiting restart"}
     if phase == "available":
@@ -294,7 +388,7 @@ async def snapshot(*, fresh=False):
     local = await run_sync(updates.status)
     listing = await run_sync(runners.directory)
     rows = [{"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker", "is_self": True,
-             "online": True, **local}]
+             "online": True, **local, "deferred": _deferred is not None}]
     operation = await run_sync(progress.load)
     # A completed install is terminal (progress.observe returns it as saved), so
     # its cohort no longer needs reading.
@@ -322,7 +416,7 @@ async def snapshot(*, fresh=False):
         _discover(rows, verifying)
     # Only return display fields, never peer endpoints/certificates.
     fields = ("device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error", "reason",
-              "request_pending", "checked_at", "channel", "release", "notes", "role", "label")
+              "request_pending", "checked_at", "channel", "release", "notes", "role", "label", "deferred")
     # server_time lets a browser judge how recent a completion is without
     # trusting its own clock (completed_at is stamped by this worker).
     return {"allow_updates": local["allow_updates"], "update_all_workers": all_workers,
@@ -333,22 +427,26 @@ async def snapshot(*, fresh=False):
             "workers": [{key: row.get(key) for key in fields} for row in rows]}
 
 
-async def dispatch(action):
+async def dispatch(action, mode=None):
     async with _dispatch_lock:
         try:
-            return await _dispatch(action)
+            return await _dispatch(action, mode)
         finally:
             # An action changes peer phases: the next snapshot must read them anew.
             _peer_status.clear()
 
 
-async def _dispatch(action):
+async def _dispatch(action, mode=None):
     global _refusals_at
-    if action not in ("check", "download", "install"):
+    if action not in ("check", "download", "install", "cancel"):
         raise ValueError("Unknown update action")
+    if mode not in (None, "when_idle", "stop") or (mode and action != "install"):
+        raise ValueError("Unknown update mode")
+    if action == "cancel":
+        return await _send_cancel()
     if not await run_sync(updates.allowed):
         raise ValueError("Application updates are disabled in Account settings")
-    result = await _send(action)
+    result = await _send(action, mode)
     refused = {row["device_id"]: row.get("reason") or "Refused" for row in result["results"]
                if not row.get("accepted") and row.get("device_id")}
     _refusals.clear()
@@ -360,7 +458,26 @@ async def _dispatch(action):
     return result
 
 
-async def _send(action):
+async def _send_cancel():
+    """Drop a waiting "Restart when they finish" on every worker in scope."""
+    listing = await run_sync(runners.directory)
+    request_id = uuid.uuid4().hex
+    results = []
+    all_workers = await run_sync(updates.all_workers)
+    if all_workers:
+        results = list(await asyncio.gather(*(_act(row, "cancel", request_id) for row in listing["runners"]
+                                             if not row["is_self"] and row["online"])))
+    self_row = {"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker"}
+    results.append({**self_row, **local_action("cancel", request_id)})
+    return {"scope": "all" if all_workers else "current", "sent": "cancel", "results": results}
+
+
+def _later(result):
+    """A worker that will not restart now: refused while busy, or waiting for its work to end."""
+    return result.get("accepted") is False and bool(result.get("busy")) or bool(result.get("deferred"))
+
+
+async def _send(action, mode=None):
     operation = await run_sync(progress.load)
     if operation and operation["phase"] != "complete":
         previous = await snapshot()
@@ -396,20 +513,32 @@ async def _send(action):
                     if action == "install":
                         state = await _remote(row, {"operation": "status"})
                         await run_sync(progress.record, request_id, row["device_id"], target_version=state.get("version"))
-                    result = await _remote(row, {"operation": "action", "action": action, "request_id": request_id, "expires_at": time.time() + 10})
+                    body = {"operation": "action", "action": action, "request_id": request_id, "expires_at": time.time() + 10}
+                    if mode:
+                        body["mode"] = mode
+                    result = await _remote(row, body)
                     if action == "install":
-                        await run_sync(progress.record, request_id, row["device_id"], result=result)
+                        await run_sync(progress.record, request_id, row["device_id"], result=_tracked(result))
             return {"device_id": row["device_id"], "device_name": row["device_name"], **result}
         results = await asyncio.gather(*(send(row) for row in listing["runners"] if not row["is_self"]))
     # Queue the initiating worker LAST so its restart cannot strand the fanout.
     if action == "install":
         state = await run_sync(updates.status)
         await run_sync(progress.record, request_id, self_row["device_id"], target_version=state.get("version"))
-    local = local_action(action, request_id)
+    local = local_action(action, request_id, mode)
     if action == "install":
-        await run_sync(progress.record, request_id, self_row["device_id"], result=local)
+        await run_sync(progress.record, request_id, self_row["device_id"], result=_tracked(local))
     results.append({**self_row, **local})
+    if action == "install" and all(_later(row) for row in results if row.get("reason") != "Offline; not queued"):
+        # Nothing restarts now: no install to verify, so no "startup could
+        # not be confirmed" error hides the busy reason (#1818).
+        await run_sync(progress.discard, request_id)
     return {"scope": "all" if all_workers else "current", "sent": action, "results": results}
+
+
+def _tracked(result):
+    """What install verification records: a waiting restart is not one to verify now."""
+    return {**result, "accepted": False} if result.get("deferred") else result
 
 
 async def _act(row, action, request_id):

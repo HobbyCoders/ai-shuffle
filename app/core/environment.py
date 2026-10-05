@@ -1406,6 +1406,7 @@ def workspace_facts_card(
     browser_host: Optional[str] = None,
     app_port: Optional[int] = None,
     preview_url: Optional[str] = None,
+    browser_local: bool = False,
 ) -> str:
     """The first-turn bootstrap card. Deterministic for given filesystem
     state: every probe here is either filesystem state at render time or a
@@ -1418,7 +1419,16 @@ def workspace_facts_card(
         is_shuffle = _is_ai_shuffle_checkout(cwd)
         lines.extend(_node_dependency_facts(cwd))
         lines.extend(_python_facts(cwd, is_shuffle))
-        if browser_host:
+        if browser_local:
+            # The worker answers on loopback only (the desktop app), and its
+            # agent browser runs on this same machine: loopback is the address
+            # that works, and the preview link names it (#1789).
+            lines.append(
+                "Agent browser: runs on this machine, and this worker listens on "
+                "loopback only. Open servers you start at "
+                "http://127.0.0.1:<port>."
+            )
+        elif browser_host:
             lines.append(
                 "Agent browser: may run on a different host from this shell (it "
                 "does on the container and shared runners). Bind any server you "

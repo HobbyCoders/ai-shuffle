@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { auth } from '$lib/stores/auth.svelte';
 	import Banner from './Banner.svelte';
+	import NotificationSlot from './NotificationSlot.svelte';
+	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 	const storage = $derived($auth.status?.credential_storage);
 	const message = $derived(storage?.state === 'legacy_unlock_required'
 		? 'Stop Shuffle and adopt the saved credentials with the original encryption password, then restart.'
@@ -10,5 +12,7 @@
 </script>
 
 {#if $auth.status?.is_admin && storage?.ready === false}
-	<Banner title="Saved credentials are locked on this install" {message} severity="error" />
+	<NotificationSlot order={DOCK_ORDER.account}>
+		<Banner title="Saved credentials are locked on this install" {message} severity="error" variant="page" />
+	</NotificationSlot>
 {/if}

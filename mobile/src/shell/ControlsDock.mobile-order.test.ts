@@ -1,5 +1,5 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import ControlsDock from '$lib/components/chat/ControlsDock.svelte';
 import { tick } from 'svelte';
 import '$lib/test-stubs/composer-dom';
@@ -28,56 +28,44 @@ vi.mock('$lib/api/client', async (importOriginal) => {
 	};
 });
 
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); document.querySelectorAll('.mcp-portal').forEach((n) => n.remove()); });
 afterAll(() => vi.unstubAllGlobals());
 
 describe('ControlsDock mobile control order', () => {
-	it('uses the same exported setter for gestures, preserving outside focus and restoring panel focus', async () => {
-		const outside = document.createElement('button');
-		document.body.append(outside);
-		outside.focus();
+	// #1816: the dock's open state drives the Chat controls panel, a dialog
+	// over the chat; it takes focus while open and hands it back to the quick
+	// bar's Controls cell when it closes.
+	it('opens the Chat controls panel through the exported setter and returns focus to Controls', async () => {
 		const onSheetOpenChange = vi.fn();
-		const { component, container } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });
-		const trigger = container.querySelector('.mobile-settings-trigger')!;
+		const { component } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });
+		const panel = document.querySelector<HTMLElement>('.mcp')!;
+		const controls = screen.getByRole('button', { name: /^All chat controls/ });
+		expect(panel.getAttribute('aria-hidden')).toBe('true');
 		component.setMobileSheetOpen(true);
 		await tick();
-		expect(trigger.getAttribute('aria-expanded')).toBe('true');
-		expect(document.activeElement).toBe(outside);
+		expect(panel.getAttribute('aria-hidden')).toBe('false');
+		expect(controls.getAttribute('aria-expanded')).toBe('true');
+		await waitFor(() => expect(panel.contains(document.activeElement)).toBe(true));
 		component.setMobileSheetOpen(false);
 		await tick();
-		expect(document.activeElement).toBe(outside);
-		component.setMobileSheetOpen(true);
-		await tick();
-		(container.querySelector('.controls-panel') as HTMLElement).focus();
-		component.setMobileSheetOpen(false);
-		await tick();
-		expect(trigger.getAttribute('aria-expanded')).toBe('false');
-		expect(document.activeElement).toBe(trigger);
-		expect(onSheetOpenChange.mock.calls).toEqual([[true], [false], [true], [false]]);
-		outside.remove();
+		expect(controls.getAttribute('aria-expanded')).toBe('false');
+		expect(document.activeElement).toBe(controls);
+		expect(onSheetOpenChange.mock.calls).toEqual([[true], [false]]);
 	});
-	it('toggles closed from settings even when the panel is scrolled', async () => {
+
+	it('toggles the panel from Controls and closes it with Escape', async () => {
 		const onSheetOpenChange = vi.fn();
-		const { container } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });
-		const trigger = container.querySelector('.mobile-settings-trigger')!;
-		await fireEvent.click(trigger);
-		expect(trigger.getAttribute('aria-expanded')).toBe('true');
-		const panel = container.querySelector('.controls-panel') as HTMLElement;
-		panel.scrollTop = 160;
-		(trigger as HTMLElement).focus();
-		await fireEvent.click(trigger);
-		expect(trigger.getAttribute('aria-expanded')).toBe('false');
-		expect(screen.queryByRole('button', { name: 'Collapse chat controls' })).toBeNull();
-		expect(document.activeElement).toBe(trigger);
-		await fireEvent.click(trigger);
+		render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn(), onSheetOpenChange } });
+		const controls = screen.getByRole('button', { name: /^All chat controls/ });
+		await fireEvent.click(controls);
 		expect(onSheetOpenChange).toHaveBeenLastCalledWith(true);
-		panel.focus();
-		await fireEvent.keyDown(panel, { key: 'Escape' });
-		expect(document.activeElement).toBe(trigger);
-		expect(trigger.getAttribute('aria-expanded')).toBe('false');
-		await fireEvent.click(trigger);
-		expect(trigger.getAttribute('aria-expanded')).toBe('true');
-		expect(onSheetOpenChange).toHaveBeenLastCalledWith(true);
+		expect(controls.getAttribute('aria-expanded')).toBe('true');
+		await fireEvent.click(controls);
+		expect(onSheetOpenChange).toHaveBeenLastCalledWith(false);
+		await fireEvent.click(controls);
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(onSheetOpenChange).toHaveBeenLastCalledWith(false);
+		expect(controls.getAttribute('aria-expanded')).toBe('false');
 	});
 
 	it('places chat settings first, then browser immediately before attach, with usage on the right', () => {

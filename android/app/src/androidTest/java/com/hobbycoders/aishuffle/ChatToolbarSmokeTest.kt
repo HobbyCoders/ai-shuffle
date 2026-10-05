@@ -83,6 +83,21 @@ class ChatToolbarSmokeTest {
                     }
                     ready
                 }
+                fun page(run: (WebView) -> Unit) = scenario.onActivity { activity ->
+                    val shell = activity.findViewById<TextView>(R.id.screenStatus).parent as LinearLayout
+                    run((0 until shell.childCount).map { shell.getChildAt(it) }.filterIsInstance<WebView>().single())
+                }
+                // The page tells the shell over `shuffleShell` whether it draws its own
+                // "Connected to" bar; post that from the page itself, as the bar does.
+                fun announce(shown: Boolean) {
+                    page { it.evaluateJavascript("window.${MobileUi.SHELL_BRIDGE}.postMessage(JSON.stringify({type: 'worker-bar', shown: $shown}))", null) }
+                    waitFor("The page's worker-bar message did not reach the shell") {
+                        var done = false
+                        scenario.onActivity { done = it.pageRendersWorkerBar == shown }
+                        done
+                    }
+                    instrumentation.waitForIdleSync()
+                }
                 fun checkViewport() {
                     scenario.onActivity { activity ->
                         val density = activity.resources.displayMetrics.density
@@ -94,20 +109,28 @@ class ChatToolbarSmokeTest {
                         val repair = children.filterIsInstance<MaterialButton>().single()
                         assertEquals("Reconnect this worker", repair.text.toString())
                         assertEquals(View.GONE, repair.visibility)
-                        assertEquals(listOf(toolbar, web), children.filter { it.visibility == View.VISIBLE })
-                        assertEquals((56 * density).toInt(), toolbar.height)
                         assertEquals(View.GONE, status.visibility)
-                        assertEquals(shell.height - toolbar.height, web.height)
-                        assertEquals(toolbar.bottom, web.top)
                         assertEquals(shell.height, web.bottom)
-                        val title = (0 until toolbar.childCount).map { toolbar.getChildAt(it) }.filterIsInstance<TextView>().single()
-                        assertEquals(name, title.text.toString())
-                        assertEquals(1, title.lineCount)
-                        assertTrue("Long worker name must ellipsize", title.layout.getEllipsisCount(0) > 0)
-                        for (label in listOf("Back", "More chat options")) {
-                            val action = (0 until toolbar.childCount).map { toolbar.getChildAt(it) }.single { it.contentDescription == label }
-                            assertTrue(action.isClickable && action.isFocusable)
-                            assertTrue(action.width >= (48 * density).toInt() && action.height >= (48 * density).toInt())
+                        if (activity.pageRendersWorkerBar) {
+                            // The page's "Connected to" bar replaces the native one: the WebView gets it all.
+                            assertEquals(View.GONE, toolbar.visibility)
+                            assertEquals(listOf(web), children.filter { it.visibility == View.VISIBLE })
+                            assertEquals(0, web.top)
+                            assertEquals(shell.height, web.height)
+                        } else {
+                            assertEquals(listOf(toolbar, web), children.filter { it.visibility == View.VISIBLE })
+                            assertEquals((56 * density).toInt(), toolbar.height)
+                            assertEquals(shell.height - toolbar.height, web.height)
+                            assertEquals(toolbar.bottom, web.top)
+                            val title = (0 until toolbar.childCount).map { toolbar.getChildAt(it) }.filterIsInstance<TextView>().single()
+                            assertEquals(name, title.text.toString())
+                            assertEquals(1, title.lineCount)
+                            assertTrue("Long worker name must ellipsize", title.layout.getEllipsisCount(0) > 0)
+                            for (label in listOf("Back", "More chat options")) {
+                                val action = (0 until toolbar.childCount).map { toolbar.getChildAt(it) }.single { it.contentDescription == label }
+                                assertTrue(action.isClickable && action.isFocusable)
+                                assertTrue(action.width >= (48 * density).toInt() && action.height >= (48 * density).toInt())
+                            }
                         }
                         assertEquals("Chat must allow user screenshots", 0, activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_SECURE)
                         assertEquals(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE,
@@ -117,8 +140,21 @@ class ChatToolbarSmokeTest {
                         assertEquals(android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW, web.settings.mixedContentMode)
                     }
                 }
-                loaded(Configuration.ORIENTATION_PORTRAIT); checkViewport()
+                loaded(Configuration.ORIENTATION_PORTRAIT)
+                // The page draws its own bar: the native one goes. Until told, or once the page
+                // says it no longer does, the native bar stays (worker UIs without that bar).
+                announce(true); checkViewport()
+                TestScreenshots.capture("chat-page-worker-bar-portrait")
+                announce(false); checkViewport()
                 TestScreenshots.capture("chat-toolbar-portrait")
+                // A switch to a worker this phone is not paired with is refused natively: chat stays.
+                page { it.evaluateJavascript("location.assign('/mobile/?connect=' + encodeURIComponent('https://unpaired.example'))", null) }
+                Thread.sleep(1_000); instrumentation.waitForIdleSync()
+                assertEquals(androidx.lifecycle.Lifecycle.State.RESUMED, scenario.state)
+                page { web ->
+                    assertTrue(MobileUi.isUiUrl(server.baseUrl, web.url))
+                    assertFalse(web.url.orEmpty().contains("connect="))
+                }
                 onView(withText("Refresh chat")).check(doesNotExist())
                 onView(withText("Voice")).check(doesNotExist())
                 onView(withText(server.host)).check(doesNotExist())
@@ -129,6 +165,7 @@ class ChatToolbarSmokeTest {
                 scenario.onActivity { it.findViewById<TextView>(R.id.screenStatus).text = "" }
                 instrumentation.waitForIdleSync(); checkViewport()
                 val beforeRefresh = sessions.get()
+                announce(false)
                 onView(withContentDescription("More chat options")).perform(click())
                 onView(withText("Refresh chat")).perform(click())
                 waitFor("Overflow refresh did not renew the session") { sessions.get() == beforeRefresh + 1 }
@@ -140,6 +177,7 @@ class ChatToolbarSmokeTest {
                 TestScreenshots.capture("chat-toolbar-landscape")
                 scenario.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
                 loaded(Configuration.ORIENTATION_PORTRAIT); checkViewport()
+                announce(false)
                 onView(withContentDescription("Back")).perform(click())
                 waitFor("Back did not finish the chat activity") {
                     scenario.state == androidx.lifecycle.Lifecycle.State.DESTROYED

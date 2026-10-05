@@ -250,12 +250,16 @@
 				const preTokens = metadata.pre_tokens as number;
 
 				// The badge shows the size once it is known, so the sentence is
-				// what says a typed /compact was manual.
+				// what says a typed /compact was manual. A /compact the app sent
+				// (the session sat idle near the limit) reads "manual" from
+				// Claude Code too, so the app marks it requested_by "app".
 				let content = trigger === 'auto'
 					? 'Context was automatically compacted.'
-					: metadata.trigger === 'manual'
-						? 'Context was compacted manually (/compact).'
-						: 'Context was compacted.';
+					: metadata.requested_by === 'app'
+						? 'AI Shuffle asked Claude Code to compact the context because the session was idle near the limit.'
+						: metadata.trigger === 'manual'
+							? 'Context was compacted manually (/compact).'
+							: 'Context was compacted.';
 
 				if (preTokens) {
 					// Format large numbers nicely
@@ -272,6 +276,21 @@
 					content,
 					badge: preTokens ? `${Math.round(preTokens / 1000)}k → compacted` : (trigger === 'auto' ? 'auto' : 'manual'),
 					badgeColor: 'green'
+				};
+			}
+
+			case 'compact_failed': {
+				// A /compact Claude Code did not carry out. No "compacted" card
+				// is shown for it; this one says so, with the CLI's reason.
+				const reason = typeof data.reason === 'string' ? data.reason.trim() : '';
+				const who = data.requested_by === 'app'
+					? 'AI Shuffle asked Claude Code to compact the context, but it did not.'
+					: 'Claude Code did not compact the context.';
+				return {
+					title: 'Compaction Failed',
+					content: reason ? `${who} Reason: ${reason}` : who,
+					badge: 'not compacted',
+					badgeColor: 'red'
 				};
 			}
 

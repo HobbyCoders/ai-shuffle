@@ -355,6 +355,9 @@ class WorkerFeed:
             "tool_id": self.task_id,
             "agent_id": self.task_id,
             "is_error": is_error,
+            # A stopped worker is not a failure: the card reads "Stopped" and
+            # keeps its own row (#1806).
+            "killed": status == "killed",
             "result": _clip(result_preview, MAX_RESULT_PREVIEW_CHARS),
             # The worker's authoritative token counts. Without them the card's
             # usage row renders nothing for workers.

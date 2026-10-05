@@ -26,7 +26,7 @@ async def test_desktop_commands_require_child_secret_and_local_ingress(monkeypat
             response = await client.get("/api/v1/internal/desktop/active-sessions", headers={"Authorization": f"Bearer {token}"})
             assert response.status_code == expected
             if expected == 200:
-                assert response.json() == {"active_sessions": 2}
+                assert response.json() == {"active_sessions": 2, "remote_workers": []}
             response = await client.post("/api/v1/internal/desktop/stop-sessions", headers={"Authorization": f"Bearer {token}"})
             assert response.status_code == expected
             assert stop.await_count == (1 if expected == 200 else 0)
@@ -80,7 +80,7 @@ async def test_lifecycle_routes_work_through_full_app_middleware(monkeypatch):
             headers = {"Authorization": "Bearer secret"}
             active = await client.get("/api/v1/internal/desktop/active-sessions", headers=headers)
             assert active.status_code == 200
-            assert active.json() == {"active_sessions": 1}
+            assert active.json() == {"active_sessions": 1, "remote_workers": []}
             stopped = await client.post("/api/v1/internal/desktop/stop-sessions", headers=headers)
             assert stopped.status_code == 200
             assert stopped.json() == {"stopped": True}

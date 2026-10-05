@@ -717,28 +717,75 @@ async def test_turn_start_revives_on_a_server_originated_wake(mock_db):
     assert _status_of(sid) == "active"
 
 
-async def test_server_wake_leaves_an_archived_session_archived(mock_db):
-    """Archived is not a run verdict — a server-originated wake must not undo it."""
-    sid = "s4archived"
+# Every source that can put a turn row on the queue (#1822). Whatever queued
+# it, a turn never starts in an archived chat.
+_ARCHIVED_WAKE_SOURCES = (
+    "unpark",          # background-task / subagent completion, restart recovery
+    "unpark_pump",
+    "agent_message",   # MessageSession / SendMessage peer messages
+    "promotion",       # held peer messages promoted to a wake
+    "wakeup",          # ScheduleWakeup, idle watchdog
+    "automation",
+    "auto_continue",
+    "failover",
+    "queue",           # queued-message drain
+    "api",             # API conversation start
+    "connector",
+    "resume",
+    "user",
+)
+
+
+@pytest.mark.parametrize("source", _ARCHIVED_WAKE_SOURCES)
+async def test_no_turn_starts_in_an_archived_session(mock_db, source):
+    """THE guard: execute() refuses an archived session for every source, aborts
+    the queued row (and any other queued row of the chat) so nothing drains it
+    later, never reaches the provider and leaves the chat archived."""
+    sid = f"s4archived-{source}"
     _seed_session(sid, "archived")
-    turn = turns_db.enqueue_turn(sid, "unpark", prompt="<task-notification/>")
+    turn = turns_db.enqueue_turn(sid, source, prompt="wake up")
+    other = turns_db.enqueue_turn(sid, "queue", prompt="and this")
+    pump = MagicMock(name="pump")
 
-    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
-        await session_runtime.SessionRuntime(turn).execute()
+    with _runtime_env(pump=pump) as env:
+        outcome = await session_runtime.SessionRuntime(turn).execute()
 
+    assert outcome is None
+    pump.assert_not_called()
+    env["recorder"].start.assert_not_called()
+    assert runs_db.get_active_run(sid) is None
+    for row in (turn, other):
+        settled = turns_db.get_turn(row["id"])
+        assert settled["state"] == "aborted"
+        assert settled["stop_reason"] == "archived"
     assert _status_of(sid) == "archived"
 
 
-async def test_user_turn_brings_an_archived_session_back(mock_db):
-    """The user talking to an archived session again is the one thing that
-    brings it back into the history."""
-    sid = "s4archiveduser"
+async def test_archived_turn_drop_is_logged_with_session_and_source(mock_db, caplog):
+    sid = "s4archivedlog"
     _seed_session(sid, "archived")
-    turn = turns_db.enqueue_turn(sid, "user", prompt="hi")
+    turn = turns_db.enqueue_turn(sid, "unpark", prompt="<task-notification/>")
 
-    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
+    with caplog.at_level("WARNING", logger="app.core.archive_guard"),             _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
         await session_runtime.SessionRuntime(turn).execute()
 
+    assert any(sid in r.getMessage() and "unpark" in r.getMessage()
+               for r in caplog.records)
+
+
+async def test_restored_session_runs_turns_again(mock_db):
+    """Restore (status back to active) makes the chat fully usable."""
+    from app.db import database
+
+    sid = "s4restored"
+    _seed_session(sid, "archived")
+    assert database.set_session_active(sid, True, False)["status"] == "active"
+    turn = turns_db.enqueue_turn(sid, "user", prompt="hi again")
+
+    with _runtime_env(pump=make_pump([{"type": "done", "metadata": {}}])):
+        outcome = await session_runtime.SessionRuntime(turn).execute()
+
+    assert outcome == "completed"
     assert _status_of(sid) == "active"
 
 

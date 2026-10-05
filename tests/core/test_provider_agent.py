@@ -1448,7 +1448,7 @@ class TestDispatchWorkerParentFeed:
         done = [
             e for e in _parent_events() if e["event_type"] == "subagent.completed"
         ][0]
-        assert done["payload"]["status"] == "failed"
+        assert done["payload"]["status"] == "killed"  # stopped, not failed (#1806)
         # [-1]: the first task.updated is the RUNNING frame from feed.started().
         settle = [e for e in _parent_events() if e["event_type"] == "task.updated"][-1]
         assert settle["payload"]["state"] == "killed"

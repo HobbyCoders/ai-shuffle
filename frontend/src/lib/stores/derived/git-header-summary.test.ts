@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import { computeHeaderSummary, computePipeline, computeUnreadableCheckoutSummary, type HeaderSummaryInput } from './git-header-summary';
 
 const base: HeaderSummaryInput = {
-	accessPending: 0,
 	mergeBlocked: false,
 	needsPull: false,
 	commitsBehind: 0,
@@ -79,12 +78,11 @@ describe('computeHeaderSummary priority ladder', () => {
 		expect(s.tone).toBe('idle');
 	});
 
-	it('puts approvals waiting above everything else', () => {
-		const s = computeHeaderSummary({ ...base, accessPending: 2, mergeBlocked: true, prNumber: 9, hasChanges: true, additions: 1, filesChanged: 1 });
-		expect(s.tone).toBe('attn');
-		expect(s.icon).toBe('shield');
-		expect(s.label).toBe('2 to approve');
-		expect(s.summary).toBe('2 access requests waiting for your answer');
+	it('leads with a merge conflict: private access is not Git state (#1816)', () => {
+		const s = computeHeaderSummary({ ...base, mergeBlocked: true, prNumber: 9, hasChanges: true, additions: 1, filesChanged: 1 });
+		expect(s.tone).toBe('blocked');
+		expect(s.label).toBe('PR #9');
+		expect('accessPending' in base).toBe(false);
 	});
 });
 

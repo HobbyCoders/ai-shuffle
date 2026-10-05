@@ -63,6 +63,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     AdoptSessionResponse,
     MoveSessionRequest,
     MoveSessionResponse,
+    QueueMoveRequest,
     apply_sdk_session_keep,
 )
 
@@ -101,6 +102,18 @@ router.add_api_route(
 # ============================================================================
 # Cross-device adopt ("Resume here")
 # ============================================================================
+
+def _refuse_archived(session: dict, action: str) -> None:
+    """409 for an archived chat: it is read-only until the owner restores it."""
+    from app.core import archive_guard
+
+    if archive_guard.is_archived_row(session):
+        archive_guard.log_dropped(session["id"], action, f"{action} refused")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This chat is archived. Restore it before you {action} it.",
+        )
+
 
 def _adopt_device_name(instance_id: Optional[str]) -> Optional[str]:
     """Display name of the install owning a row, via the install registry.
@@ -230,6 +243,7 @@ async def adopt_session_endpoint(
 
     body = await _parse_adopt_request(request)
     session = await require_session(request, session_id)
+    _refuse_archived(session, "resume")
 
     me = settings.effective_instance_id
     from app.network import control
@@ -345,6 +359,7 @@ async def move_session_to(session_id: str, session: dict, target_instance_id: st
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="target_instance_id is required",
         )
+    _refuse_archived({**session, "id": session_id}, "move")
 
     # Already pinned there — nothing to write.
     if target in (session.get("instance_id"), session.get("owner_device_id")):
@@ -471,6 +486,60 @@ async def move_session_to(session_id: str, session: dict, target_instance_id: st
         status="moved" if moved else "already_there",
         pending_live_run=False,
     )
+
+
+# ============================================================================
+# Move when this turn ends (#1819)
+# ============================================================================
+
+async def _queued_move(session: dict, op: str, target: Optional[str] = None, *, stop: bool = False) -> dict:
+    """Run a queued-move operation on the worker that owns ``session``."""
+    from app.core import session_handoff
+    from app.network import control, engine
+
+    try:
+        return await session_handoff.route(session, op, target, stop=stop)
+    except (control.RunnerUnreachable, control.ControlRefused, engine.NotEnrolled,
+            PermissionError, LookupError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.get("/{session_id}/handoff")
+async def queued_move_status(request: Request, session_id: str, token: str = Depends(require_auth)):
+    """What keeps this chat from moving now, and any move already queued.
+
+    ``{"busy": {"running": bool, "tasks": [names]}, "pending": {"worker", "target_id", "by"} | null}``,
+    read on the owning worker. The worker selector and Resume here ask first:
+    a running or parked chat is offered "Move when this turn ends".
+    """
+    session = await require_session(request, session_id)
+    return await _queued_move(session, "status")
+
+
+@router.post("/{session_id}/handoff")
+async def queue_move(request: Request, session_id: str, body: QueueMoveRequest,
+                     token: str = Depends(require_auth)):
+    """Queue the agent's hand-off for this chat: it moves when its turn and background work end.
+
+    The owner's move waits however long the work runs, until it moves or is
+    cancelled. The chat records the queued state, so every device shows it.
+    """
+    session = await require_session(request, session_id)
+    target = (body.target_instance_id or "").strip()
+    if not target:
+        from app.core.config import settings
+        from app.network import engine
+
+        ctx = engine.context()
+        target = ctx.device_id if ctx is not None else settings.effective_instance_id
+    return await _queued_move(session, "queue", target, stop=body.stop)
+
+
+@router.delete("/{session_id}/handoff")
+async def cancel_queued_move(request: Request, session_id: str, token: str = Depends(require_auth)):
+    """Cancel a queued move (the owner's or the agent's)."""
+    session = await require_session(request, session_id)
+    return await _queued_move(session, "cancel")
 
 
 # ============================================================================
@@ -1120,6 +1189,8 @@ async def get_live_session(
         "model": session.get("model") or session.get("launched_model"),
         "provider_id": session.get("provider_id"),
         "effort": session.get("effort"),
+        # An archived chat opens read-only (no composer) until restored (#1822).
+        "status": session.get("status"),
     }
 
     # Always include the title so the frontend header stays in sync
@@ -1692,6 +1763,7 @@ async def resume_session(
     has no head node to hand back, so a non-fluid session is refused outright.
     """
     existing = await require_session(request, session_id)
+    _refuse_archived(existing, "resume")
 
     from app.core import turn_manager, turn_claim
     from app.db import turns as turns_db

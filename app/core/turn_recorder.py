@@ -241,6 +241,25 @@ def _registry_kind(session_id: str, task_id: Any) -> Dict[str, Any]:
         return {}
 
 
+def _registry_worker(session_id: str, task_id: Any) -> Dict[str, Any]:
+    """The other worker a Task child runs on, for a TaskUpdated frame.
+
+    Only remote children carry it (``get_task`` returns the wire shape, whose
+    ``worker`` names the device); a local task returns {} so the additive
+    field is absent. The running-tasks list names the worker on every row and
+    on a stopped one (#1816).
+    """
+    if not task_id:
+        return {}
+    try:
+        from app.core.task_registry import task_registry
+        worker = (task_registry.get_task(session_id, str(task_id)) or {}).get("worker")
+        name = worker.get("name") if isinstance(worker, dict) else None
+        return {"worker_name": str(name)} if name else {}
+    except Exception:  # noqa: BLE001 — a label must never break recording
+        return {}
+
+
 def _registry_tool_use_id(session_id: str, task_id: Any) -> Optional[str]:
     """The launch ``tool_use_id`` the registry bound to ``task_id``, if any.
 
@@ -355,7 +374,8 @@ def _translate_shared(
         return [_build_event(
             contract.SubagentCompleted, session_id,
             task_id=event.get("tool_id") or event.get("agent_id") or "",
-            status="failed" if event.get("is_error") else "completed",
+            status=("killed" if event.get("killed") is True
+                    else "failed" if event.get("is_error") else "completed"),
             result_preview=_truncate(event.get("result")),
             usage=event.get("usage") if isinstance(event.get("usage"), dict) else None,
             **kw,
@@ -394,6 +414,7 @@ def _translate_shared(
             summary=event.get("summary"),
             tool_use_id=tool_use_id,
             **_registry_kind(session_id, task_id),
+            **_registry_worker(session_id, task_id),
             **kw,
         )]
 
@@ -428,6 +449,7 @@ def _translate_shared(
                     summary=data.get("summary"),
                     tool_use_id=tool_use_id,
                     **_registry_kind(session_id, str(task_id)),
+                    **_registry_worker(session_id, str(task_id)),
                     **kw,
                 )]
         if subtype in _COMPACTION_SUBTYPES:
@@ -765,6 +787,7 @@ class TurnRecorder:
                     summary=frame.get("summary"),
                     tool_use_id=tool_use_id,
                     **kind,
+                    **_registry_worker(self.session_id, task_id),
                 ))
             if not events:
                 return 0

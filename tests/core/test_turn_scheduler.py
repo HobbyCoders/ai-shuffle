@@ -155,6 +155,13 @@ async def test_message_resume_rearms_failed_task_and_preserves_context(mock_db):
     from app.core import provider_agent_supervisor
     assert provider_agent_supervisor.get_worker("owner", "child") is not None
     kick.assert_called_once_with("child")
+    # The running-tasks panel is built from the parent's task frames: the
+    # resumed worker gets a running one, so it is listed again (#1758).
+    running = [e for e in se_db.get_events("owner", 0, 100) if e["event_type"] == "task.updated"
+               and e["payload"].get("task_id") == "child" and e["payload"].get("state") == "running"]
+    assert len(running) == 1
+    assert running[0]["payload"].get("tool_use_id") == "child"
+    assert running[0]["payload"].get("description") == "Implement once"
 
 
 @pytest.mark.asyncio

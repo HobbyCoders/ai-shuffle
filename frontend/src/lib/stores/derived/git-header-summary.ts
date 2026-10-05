@@ -5,25 +5,25 @@
  * The chat header shows ONE button for the whole git cluster. Its label is
  * whatever needs the user first, in this order:
  *
- *   1. private-access approvals waiting
- *   2. the open PR has merge conflicts
- *   3. the branch is behind its upstream
- *   4. uncommitted changes (shown as +added −deleted)
- *   5. commits waiting to be pushed
- *   6. an open PR
- *   7. up to date
+ *   1. the open PR has merge conflicts
+ *   2. the branch is behind its upstream
+ *   3. uncommitted changes (shown as +added −deleted)
+ *   4. commits waiting to be pushed
+ *   5. an open PR
+ *   6. up to date
+ *
+ * Private-access approvals are not Git state: they show in the chat above the
+ * composer and on the header's Access button (#1816).
  *
  * The same input also drives the Ship It pipeline strip inside the panel:
  * which steps are already done, which one runs next, and where a conflict
  * stops the pipeline.
  */
 
-export type HeaderTone = 'attn' | 'blocked' | 'behind' | 'changes' | 'push' | 'pr' | 'idle';
-export type HeaderIcon = 'shield' | 'alert' | 'pull' | 'branch' | 'push' | 'pr';
+export type HeaderTone = 'blocked' | 'behind' | 'changes' | 'push' | 'pr' | 'idle';
+export type HeaderIcon = 'alert' | 'pull' | 'branch' | 'push' | 'pr';
 
 export interface HeaderSummaryInput {
-	/** Private-access requests and one-shot actions waiting for an answer. */
-	accessPending: number;
 	/** The open PR reports `mergeable: false`. */
 	mergeBlocked: boolean;
 	/** Behind the upstream branch (pull first). */
@@ -63,7 +63,6 @@ function plural(n: number, word: string): string {
 
 export function computeHeaderSummary(input: HeaderSummaryInput): HeaderSummary {
 	const {
-		accessPending,
 		mergeBlocked,
 		needsPull,
 		commitsBehind,
@@ -78,15 +77,6 @@ export function computeHeaderSummary(input: HeaderSummaryInput): HeaderSummary {
 		defaultBranch
 	} = input;
 
-	if (accessPending > 0) {
-		return {
-			tone: 'attn',
-			icon: 'shield',
-			label: `${accessPending} to approve`,
-			detail: null,
-			summary: `${plural(accessPending, 'access request')} waiting for your answer`
-		};
-	}
 	if (mergeBlocked && prNumber !== null) {
 		return {
 			tone: 'blocked',

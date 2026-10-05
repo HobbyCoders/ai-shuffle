@@ -6,7 +6,7 @@ vi.mock('$lib/api/voice', async (original) => ({...await original<typeof import(
 vi.mock('$lib/services/voiceCall', () => ({
  voiceCallState: writable({sessionId:'call', status:'live', model:'gpt-live-1', startedAt:null,
   micMuted:false, agentMuted:false, agentSpeaking:false, userSpeaking:false, level:0}),
- hangup: vi.fn(), toggleMic: vi.fn(), toggleAgent: vi.fn(),
+ hangup: vi.fn(), toggleMic: vi.fn(), toggleAgent: vi.fn(), MIC_PROBLEM_LABEL: 'Microphone not reaching the call',
 }));
 import { voiceCallState } from '$lib/services/voiceCall';
 import VoiceCallPanel from './VoiceCallPanel.svelte';
@@ -61,4 +61,12 @@ it('does not apply a stale realtime poll to a streaming call', async () => {
  await screen.findByRole('heading', {name:'GPT Live 1'});
  expect(screen.queryByText(/agents working/)).toBeNull();
  expect(screen.queryByText(/~\$4/)).toBeNull();
+});
+it('never shows a healthy call while the microphone is not reaching it', async () => {
+ voiceCallState.update(s => ({...s, model:'gpt-live-1', sessionId:'call', status:'live', micMuted:false, micProblem:true}));
+ render(VoiceCallPanel, {sessionId:'call'});
+ expect(screen.getByRole('status').textContent).toBe('Microphone not reaching the call');
+ expect(screen.queryByText('Listening')).toBeNull();
+ voiceCallState.update(s => ({...s, micProblem:false}));
+ await screen.findByText('Listening');
 });

@@ -83,9 +83,11 @@
 		 * permission or Away menu, effort tag or context ring.
 		 */
 		assistantMode?: boolean;
+		/** The start-a-call button, for a shell whose controls sheet carries it. */
+		callAction?: Snippet;
 	}
 
-	let { isUploading, onAttachClick, voiceActions, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, assistantMode = false }: Props = $props();
+	let { isUploading, onAttachClick, voiceActions, callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, assistantMode = false }: Props = $props();
 
 	// ── Desktop popovers ──────────────────────────────────────────────
 	// Three anchored popovers, one open at a time: the permission menu, the
@@ -696,6 +698,7 @@
 	panelId={mobilePanelId}
 	{inertToolbar}
 	onClose={() => setMobileSheetOpen(false)}
+	onOpenChange={setMobileSheetOpen}
 	{modelOptions}
 	modelGroups={modelCatalog.groups}
 	{modelValue}
@@ -708,6 +711,7 @@
 	effortOptions={effortLevels}
 	effortExplanation={effortCapability.explanation}
 	effortKnown={effortCapability.known}
+	effortDefaultValue={effortCapability.defaultValue}
 	{effortValue}
 	onEffortSelect={(value) => activeSession.setEffortLevelOverride(value)}
 	{fastSupported}
@@ -724,6 +728,12 @@
 	showCodeControls={isCodeLane && !assistantMode}
 	showSetup={!assistantMode}
 	showEffort={!assistantMode}
+	{assistantMode}
+	onUsageOpenChange={onUsageOpenChange}
+	{callAction}
+	{browserOpen}
+	onBrowserToggle={assistantMode ? undefined : onBrowserToggle}
+	{onBrowserPreload}
 />
 {/if}
 

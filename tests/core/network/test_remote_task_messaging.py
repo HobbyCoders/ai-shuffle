@@ -450,3 +450,181 @@ def test_local_messaging_is_unchanged(workers, monkeypatch, kicks):
         assert "Local hello." in queued["prompt"]
     assert MESSAGE_PATH not in router.requests(UNRAID_URL)
     assert MESSAGE_PATH not in router.requests(WINDOWS_URL)
+
+
+# --- one completion, after the child's last turn (#1812) ----------------------------------
+
+def backdate_turns(*workers, keep=None):
+    """Earlier turns sort first: the test store stamps turns to the second."""
+    for worker in workers:
+        with worker.active():
+            with get_db() as conn:
+                conn.cursor().execute("UPDATE turns SET created_at=%s WHERE id != %s",
+                                      ("2000-01-01 00:00:00", keep or ""))
+
+
+def run_turn(child, turn_id, text, outcome="completed"):
+    assert turns.start_turn(turn_id)
+    session_events.append_events(child, [{"type": "assistant.text_delta", "turn_id": turn_id,
+                                          "payload": {"text": text}}])
+    assert turns.settle_turn(turn_id, outcome)
+
+
+def settle_and_deliver(child):
+    asyncio.run(remote_task.on_child_settled(child))
+    return asyncio.run(remote_task.sweep())
+
+
+def test_a_child_that_parks_on_its_monitor_reports_once_after_its_last_turn(
+        workers, monkeypatch, kicks):
+    """The turn that ends to wait on a Monitor is not the report; the turn its
+    completion wakes is, and the parent is woken once, with that one."""
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    with a.active():
+        [first] = [t for t in all_turns(child) if t["source"] == "provider_agent"]
+        task_registry.start_task(child, "mon-tests", "shell", "npm test")
+        task_registry.mark_monitor_shell_task(child, "mon-tests")
+        run_turn(child, first["id"], "The test run is still going; ending the turn so it wakes me.")
+        assert settle_and_deliver(child) == 0
+        assert remote_tasks.get_child(child)["state"] == remote_tasks.RUNNING
+        # The Monitor finishes and queues the child's wake: still not over.
+        task_registry.complete_task(child, "mon-tests", "completed", summary="exit 0")
+        wake = turns.enqueue_turn(child, "unpark", prompt="<task-notification>exit 0</task-notification>")
+        assert settle_and_deliver(child) == 0
+    with b.active():
+        assert wakes() == []
+        assert task_registry.get_task("caller", child)["status"] == "running"
+    backdate_turns(a, keep=wake["id"])
+    with a.active():
+        run_turn(child, wake["id"], "All 120 tests pass. Pushed fix/chat-prompts.")
+        assert settle_and_deliver(child) == 1
+        assert remote_tasks.get_child(child)["completion_id"] == wake["id"]
+    with b.active():
+        [parent_wake] = wakes()
+        assert "All 120 tests pass." in parent_wake["prompt"]
+        assert "still going" not in parent_wake["prompt"]
+        assert task_registry.get_task("caller", child)["status"] == "completed"
+    with a.active():
+        assert asyncio.run(remote_task.sweep()) == 0
+    with b.active():
+        assert len(wakes()) == 1
+
+
+def test_a_message_steered_into_a_running_child_is_not_its_completion(workers, monkeypatch, kicks):
+    """The message's queue row settles the moment the live turn reads it; the
+    child stays running for the parent until that turn ends."""
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    with a.active():
+        [first] = [t for t in all_turns(child) if t["source"] == "provider_agent"]
+        assert turns.start_turn(first["id"])
+    outcome = send(b, child, "How far along are you?")
+    assert not outcome.is_error, outcome.text
+    with a.active():
+        [queued] = message_turns(child)
+        assert turns.absorb_queued_turn(queued["id"])  # the live turn took it as a steer
+        assert settle_and_deliver(child) == 0
+        assert remote_tasks.get_child(child)["state"] == remote_tasks.RUNNING
+    with b.active():
+        assert wakes() == []
+        assert task_registry.get_task("caller", child)["status"] == "running"
+    with a.active():
+        session_events.append_events(child, [{"type": "assistant.text_delta", "turn_id": first["id"],
+                                              "payload": {"text": "Counted all six steps."}}])
+        assert turns.settle_turn(first["id"], "completed")
+        assert settle_and_deliver(child) == 1
+        assert remote_tasks.get_child(child)["completion_id"] == first["id"]
+    with b.active():
+        [parent_wake] = wakes()
+        assert "Counted all six steps." in parent_wake["prompt"]
+        assert "without a written report" not in parent_wake["prompt"]
+
+
+def test_a_child_that_runs_again_after_its_report_reports_again(workers, monkeypatch, kicks):
+    """A later turn (a wake, the owner typing in its chat) replaces the stored
+    report and reaches the parent once more; a stopped child never reopens."""
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    first = deliver(a, child, text="Parked on the batch.")
+    with b.active():
+        [first_wake] = wakes()
+    finish_wake(a, b, first_wake)
+    with a.active():
+        later = turns.enqueue_turn(child, "unpark", prompt="<task-notification>done</task-notification>")
+        run_turn(child, later["id"], "The batch passed; branch pushed.")
+        assert settle_and_deliver(child) == 1
+        row = remote_tasks.get_child(child)
+        assert row["state"] == remote_tasks.DELIVERED and row["completion_id"] == later["id"]
+    with b.active():
+        assert len(wakes()) == 2 and "The batch passed" in wakes()[-1]["prompt"]
+        record = remote_tasks.get_dispatch(child)
+        assert record["completion_id"] == later["id"]
+        assert remote_tasks.past_completions(child) == [first["id"]]
+        assert task_registry.get_task("caller", child)["status"] == "completed"
+        # TaskGet's report is the new one.
+        from pathlib import Path
+        assert Path(record["report_path"]).read_text(encoding="utf-8") == "The batch passed; branch pushed."
+    # Stopped: a later turn changes nothing.
+    with a.active():
+        remote_tasks.mark_child_stopped(child)
+    backdate_turns(a, b)
+    with a.active():
+        again = turns.enqueue_turn(child, "user", prompt="one more thing")
+        run_turn(child, again["id"], "Did one more thing.")
+        assert settle_and_deliver(child) == 0
+        assert remote_tasks.get_child(child)["completion_id"] == later["id"]
+    with b.active():
+        assert len(wakes()) == 2
+
+
+def test_a_report_not_sent_yet_is_replaced_by_the_newer_one(workers, monkeypatch, kicks):
+    a, b, router = network(workers, monkeypatch)
+    child = started_child(a, b)
+    router.down.add(WINDOWS_URL)
+    with a.active():
+        first = finish_child(child, text="First pass.")
+        assert settle_and_deliver(child) == 0
+        assert remote_tasks.get_child(child)["completion_id"] == first["id"]
+    backdate_turns(a)
+    with a.active():
+        later = turns.enqueue_turn(child, "unpark", prompt="<task-notification>done</task-notification>")
+        run_turn(child, later["id"], "Second pass.")
+        asyncio.run(remote_task.on_child_settled(child))
+        row = remote_tasks.get_child(child)
+        assert row["state"] == remote_tasks.OWED and row["completion_id"] == later["id"]
+        assert row["report"]["report"] == "Second pass."
+    router.down.clear()
+    with a.active():
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE remote_task_children SET next_attempt_at=%s",
+                                  ("2000-01-01T00:00:00+00:00",))
+        assert asyncio.run(remote_task.sweep()) == 1
+    with b.active():
+        [parent_wake] = wakes()
+        assert "Second pass." in parent_wake["prompt"] and "First pass." not in parent_wake["prompt"]
+
+
+def test_a_report_arriving_while_the_parent_turn_runs_is_delivered_once(workers, monkeypatch, kicks):
+    """Mid-turn: the completion is steered into the live turn; a turn that ends
+    without reading it enqueues the ordinary wake, so it is never dropped."""
+    from app.core import session_runtime
+
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    steered = []
+
+    async def steer(session_id, prompt, *, notification_id, frames=None, task_ids=None, **_):
+        steered.append({"session_id": session_id, "frames": frames, "task_ids": task_ids})
+        return True
+    monkeypatch.setattr(session_runtime, "try_steer_task_notification", steer)
+    deliver(a, child, text="Done mid-turn.")
+    with b.active():
+        assert [s["session_id"] for s in steered] == ["caller"]
+        assert wakes() == []
+        assert steered[0]["task_ids"] == [child]
+        # The parent's turn ended before fluid delivered it.
+        asyncio.run(turn_scheduler.on_task_notification_stranded(
+            "caller", steered[0]["frames"], steered[0]["task_ids"]))
+        [parent_wake] = wakes()
+        assert "Done mid-turn." in parent_wake["prompt"]

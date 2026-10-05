@@ -548,3 +548,88 @@ async def test_typed_text_in_a_call_is_stored_as_typed_not_spoken(monkeypatch):
     assert stored[0] == ("I'll attach them.", "Okay.", "voice")
     assert stored[1][0].endswith("@WIP_2.png @WIP_1.png") and stored[1][2] == "typed"
     assert stored[2] == ("Did they arrive?", None, "voice")
+
+
+@pytest.mark.asyncio
+async def test_a_reply_in_several_segments_is_stored_whole_in_spoken_order(monkeypatch):
+    """#1798: the next utterance's transcript starts without a space, which glued
+    "...site." to "I've..." in the stored message."""
+    from app.core import turn_recorder
+    record = AsyncMock()
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", record)
+    call = stream()
+    await call.caption("user", "Can you check the site")
+    for delta in ("That mockup", " was a sketch.", "I've got the preview", " running.", " Version 3.", "5 is live."):
+        await call.caption("assistant", delta)
+    await call.flush()
+    record.assert_awaited_once()
+    assert record.await_args.args[1:] == (
+        "Can you check the site",
+        "That mockup was a sketch. I've got the preview running. Version 3.5 is live.",
+    )
+    shown = "".join(c.args[0]["delta"] for c in call.websocket.send_json.await_args_list
+                    if c.args[0]["role"] == "assistant")
+    assert shown == record.await_args.args[2]  # The live caption matches what is stored.
+
+
+@pytest.mark.asyncio
+async def test_client_call_figures_are_kept_for_the_log_only():
+    call = stream()
+    stats = {"underruns": 3, "depth_ms": 140.25, "muted": False, "context": "running",
+             "track": "ended", "Bad Key": 1, "note": "x" * 40, "nested": {"a": 1}, "nan": float("inf")}
+    await call.receive_text(json.dumps({"type": "client_stats", "stats": stats}))
+    assert call.client_stats == {"underruns": 3, "depth_ms": 140.2, "muted": False,
+                                 "context": "running", "track": "ended"}
+    call.websocket.send_json.assert_not_awaited()
+    with pytest.raises(ValueError, match="Only PCM"):
+        await call.receive_text(json.dumps({"type": "client_stats", "stats": {}, "text": "x"}))
+
+
+@pytest.mark.asyncio
+async def test_microphone_and_playback_figures_are_counted_for_the_health_log():
+    call = stream()
+    call.upstream = Upstream([])
+    silence, speech = bytes(3840), b"\x10\x00" * 1920
+    call.websocket.receive = AsyncMock(side_effect=[
+        {"type": "websocket.receive", "bytes": silence}, {"type": "websocket.receive", "bytes": speech},
+        {"type": "websocket.disconnect"}])
+    await call.receive_browser()
+    await call.send_audio(b"\x00\x01" * 2400)
+    assert (call.mic_frames, call.mic_bytes, call.out_frames) == (2, 7680, 1)
+    assert call.mic_voiced_s == pytest.approx(0.08)
+    call.client_stats = {"underruns": 2}
+    line = call.health_line()
+    assert "mic 2 frames 7 KB" in line and "to browser 1 frames" in line and "client underruns=2" in line
+
+
+def test_speech_counts_toward_deafness_only_while_the_voice_is_quiet(monkeypatch):
+    monkeypatch.setattr(voice_stream, "PROVIDER_DEAF_VOICED_S", 1.0)
+    call = stream()
+    speech = b"\x10\x00" * 24_000  # 1 s
+    call.count_mic(speech)
+    assert not call.deaf.is_set()  # Nothing heard yet this session: maybe only noise.
+    call.heard_this_session = True
+    call.last_out_at = time.monotonic()  # The voice is talking; its echo is not the caller.
+    call.count_mic(speech)
+    assert not call.deaf.is_set()
+    call.last_out_at = time.monotonic() - 5
+    call.count_mic(bytes(48_000))  # Gated silence never counts.
+    assert not call.deaf.is_set()
+    call.count_mic(speech)
+    assert call.deaf.is_set()
+
+
+@pytest.mark.asyncio
+async def test_health_tells_the_browser_its_microphone_age_and_warns_once(monkeypatch, caplog):
+    monkeypatch.setattr(voice_stream, "HEALTH_PUSH_S", 0.01)
+    monkeypatch.setattr(voice_stream, "MIC_SILENT_WARN_S", 0.0)
+    call = stream()
+    call.client_stats = {"muted": False}
+    import asyncio
+    with caplog.at_level(logging.WARNING, logger="app.core.voice_stream"):
+        task = asyncio.create_task(call.health())
+        await asyncio.sleep(0.08)
+        task.cancel()
+    health = [c.args[0] for c in call.websocket.send_json.await_args_list if c.args[0]["type"] == "health"]
+    assert health and health[0] == {"type": "health", "mic_age_ms": None, "mic_frames": 0}
+    assert len([r for r in caplog.records if "no microphone audio" in r.message]) == 1

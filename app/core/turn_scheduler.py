@@ -1215,8 +1215,12 @@ async def on_agent_message(
     Returns the queued turn's id, :data:`HELD` when the message was held for
     the receiver's next wake, or None when the receiver was stopped.
     """
+    from app.core import archive_guard
     from app.core.task_registry import task_registry
 
+    if await archive_guard.is_archived_async(session_id):
+        archive_guard.log_dropped(session_id, "agent_message", f"from {sender}")
+        return None
     generation = task_registry.stop_generation(session_id)
     owner_generation = task_registry.stop_generation(reply_to) if reply_to else None
     async with message_resume_lock(session_id):
@@ -1313,6 +1317,13 @@ async def _on_agent_message_locked(
                     task_id=session_id, tool_use_id=session_id, background=True,
                     continuation_turn_id=turn["id"],
                 ))
+            # The running-tasks panel is built from the parent's task frames,
+            # so a resumed worker needs a running one of its own (#1758).
+            from app.core.turn_recorder import record_task_start_frame
+
+            subject = (task_registry.get_task(reply_to, session_id) or {}).get("subject")
+            await record_task_start_frame(reply_to, session_id, description=subject,
+                                          summary=subject, tool_use_id=session_id)
         kick(session_id)
     return turn.get("id")
 
@@ -1344,6 +1355,13 @@ async def _enqueue_context_wake(
             "this session (tasks=%s)",
             source, session_id, task_ids,
         )
+        return {"id": None, "session_id": session_id, "source": source}
+    # An archived chat is read-only until restored (#1822): queue nothing that
+    # SessionRuntime.execute would only abort.
+    from app.core import archive_guard
+
+    if await archive_guard.is_archived_async(session_id):
+        archive_guard.log_dropped(session_id, source, f"tasks={task_ids}")
         return {"id": None, "session_id": session_id, "source": source}
     context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
     payload = _context_payload(context)
@@ -1825,6 +1843,15 @@ async def _on_task_terminal_locked(
         if started_session or task_registry.is_own_background_task(session_id, task_id):
             # Explicit Stop is suppressed above; an unattributed kill is news.
             # ── OWN lane — rich consolidated source=unpark wake ──
+            from app.core import archive_guard
+
+            if await archive_guard.is_archived_async(session_id):
+                # Read-only until restored (#1822): the frame is recorded
+                # everywhere else, only the wake is not scheduled.
+                archive_guard.log_dropped(
+                    session_id, "unpark", f"task {task_id} {frame.get('status')}",
+                )
+                return
             existing = await asyncio.to_thread(_queued_unpark_turn, session_id)
             if existing is not None:
                 existing_payload = dict(existing.get("payload") or {})
@@ -1994,6 +2021,16 @@ async def on_tasks_interrupted_by_restart(
 
     try:
         if task_registry.is_user_stopped(session_id):
+            return None
+        from app.core import archive_guard
+
+        if await archive_guard.is_archived_async(session_id):
+            # The likely source of #1822: the restart notice woke an archived
+            # chat that had been parked on background work when it was archived.
+            archive_guard.log_dropped(
+                session_id, "restart recovery",
+                f"{len(frames or [])} interrupted task(s)",
+            )
             return None
         frames = [
             frame for frame in _dedupe_frames_by_task_id(list(frames or []))

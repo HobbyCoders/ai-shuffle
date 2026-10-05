@@ -6,9 +6,10 @@ import path from 'node:path';
 /**
  * Ask before closing. `error` reports a failed session stop; with
  * `offerForce` (a repeated failure) it also offers "Quit Anyway", and true
- * means the user chose it.
+ * means the user chose it. `remoteWorkers` are named as keeping this
+ * worker's subagents running after it quits.
  */
-export async function showCloseDialog(parent: BrowserWindow | null, activeCount: number | null, error = false, offerForce = false): Promise<boolean> {
+export async function showCloseDialog(parent: BrowserWindow | null, activeCount: number | null, error = false, offerForce = false, remoteWorkers: string[] = []): Promise<boolean> {
     const source = await readFile(path.join(app.getAppPath(), 'src/pages/close.js'), 'utf8');
     let target = parent;
     let fallback: BrowserWindow | null = null;
@@ -38,7 +39,7 @@ export async function showCloseDialog(parent: BrowserWindow | null, activeCount:
         // No renderer IPC capability is added. Only this window's explicit
         // affirmative result permits quitting; navigation/crash keeps it open.
         return (await Promise.race([
-            contents.executeJavaScript(`${source}(${JSON.stringify({ activeCount, error, offerForce })})`, true),
+            contents.executeJavaScript(`${source}(${JSON.stringify({ activeCount, error, offerForce, remoteWorkers })})`, true),
             unavailable,
         ])) === true;
     } finally {

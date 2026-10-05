@@ -134,7 +134,7 @@ def create_computer_use_server(
         return None
 
     from app.mcp.sdk_compat import patch_sdk_server
-    from app.mcp.computer_use.keymap import parse_chord, parse_modifiers
+    from app.mcp.computer_use.keymap import is_system_chord, parse_chord, parse_modifiers
     from app.mcp.computer_use import overlay
 
     mgr = DisplayManager(virtual_size=virtual_size, target_display=target_display)
@@ -239,8 +239,26 @@ def create_computer_use_server(
                 inputs.sleep(_TYPE_DELAY)
         return "paced"
 
+    def _enforce_grant(action: str, p: dict) -> None:
+        # What the access card showed the owner is what the session may do, in
+        # every permission mode (#1700). Checked before any input is sent.
+        if action in ("key", "hold_key"):
+            chord = str(p.get("text") or "")
+            if is_system_chord(chord) and not access.info(session_id).get("system_keys"):
+                raise ValueError(
+                    f"{chord!r} is a system key combination and this session was not granted "
+                    "systemKeyCombos. Call request_access with systemKeyCombos=true first.")
+        elif action == "open_application":
+            name = str(p.get("app") or "")
+            apps = access.info(session_id)["apps"]
+            if name.strip() and not windows.app_granted(name, apps):
+                raise ValueError(
+                    f"{name!r} is not one of this session's granted apps "
+                    f"({', '.join(apps) or 'none'}). Call request_access with apps=[{name!r}] first.")
+
     def _execute(action: str, p: dict) -> list:
         inputs.check()
+        _enforce_grant(action, p)
         _record(action)
 
         if action in ("read_clipboard", "write_clipboard"):

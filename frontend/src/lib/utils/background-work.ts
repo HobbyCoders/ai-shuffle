@@ -74,17 +74,31 @@ function plain(text: string | null | undefined): string {
 	return (text ?? '').replace(/\s+/g, ' ').trim();
 }
 
-export function buildBackgroundJobs({ tasks, messages, sessions, streaming }: BackgroundWorkInput): BackgroundJob[] {
-	// The worker chat each Task card points at, by launch id and by agent id.
+/**
+ * The worker chat each Task card points at, keyed by its launch id, agent id
+ * and launch tool_use id. A running task's `toolUseId` or `id` finds its chat.
+ */
+export function linkedTranscripts(messages: readonly ChatMessage[]): Map<string, string> {
 	const linked = new Map<string, string>();
+	for (const message of messages) {
+		if (message.type !== 'subagent' || !message.agentSessionId) continue;
+		if (message.toolId) linked.set(message.toolId, message.agentSessionId);
+		if (message.agentId) linked.set(message.agentId, message.agentSessionId);
+		if (message.agentLaunchToolUseId) linked.set(message.agentLaunchToolUseId, message.agentSessionId);
+	}
+	return linked;
+}
+
+/** The worker chat a background task's Task card links to, if any. */
+export function transcriptForTask(task: Pick<Task, 'id' | 'toolUseId'>, linked: ReadonlyMap<string, string>): string | null {
+	return (task.toolUseId && linked.get(task.toolUseId)) || linked.get(task.id) || null;
+}
+
+export function buildBackgroundJobs({ tasks, messages, sessions, streaming }: BackgroundWorkInput): BackgroundJob[] {
+	const linked = linkedTranscripts(messages);
 	const started: { id: string; title: string; at: number | null }[] = [];
 	for (const message of messages) {
-		if (message.type === 'subagent' && message.agentSessionId) {
-			if (message.toolId) linked.set(message.toolId, message.agentSessionId);
-			if (message.agentId) linked.set(message.agentId, message.agentSessionId);
-			if (message.agentLaunchToolUseId) linked.set(message.agentLaunchToolUseId, message.agentSessionId);
-			continue;
-		}
+		if (message.type === 'subagent') continue;
 		const id = startedSessionId(message);
 		if (id) {
 			const input = (message.toolInput ?? {}) as { title?: unknown };
@@ -96,7 +110,7 @@ export function buildBackgroundJobs({ tasks, messages, sessions, streaming }: Ba
 	const seen = new Set<string>();
 	for (const task of tasks) {
 		if (task.status !== 'running') continue;
-		const sessionId = (task.toolUseId && linked.get(task.toolUseId)) || linked.get(task.id) || null;
+		const sessionId = transcriptForTask(task, linked);
 		if (sessionId) seen.add(sessionId);
 		jobs.push({
 			key: `task:${task.id}`,

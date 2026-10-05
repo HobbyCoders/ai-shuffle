@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, render, screen } from '@testing-library/svelte';
 import { flushSync } from 'svelte';
 import { swarms } from '$lib/stores/swarms';
 import { reduceAll, type WireEvent } from '$lib/stores/session/v2/reducer';
@@ -37,10 +37,9 @@ it.each([true, false])('settles saved swarm results with grouping=%s and still a
  });
  const view = render(SwarmReplayHarness, { messages: replay.messages, sessionId, groupingEnabled });
  flushSync();
- await fireEvent.click(screen.getByText('Swarm workflows'));
  expect(screen.getAllByTestId('swarm-card')).toHaveLength(2);
  expect(publish).toHaveBeenCalledTimes(2);
- expect(screen.getAllByTestId('swarm-card').every(card => card.closest('.swarm-dropdown'))).toBe(true);
+ expect(screen.getAllByTestId('swarm-card').every(card => card.closest('.swarm-history'))).toBe(true);
 
  // New parent row objects must not republish the same saved text.
  await view.rerender({ messages: replay.messages.map(message => ({ ...message })), sessionId, groupingEnabled });

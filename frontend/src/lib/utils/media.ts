@@ -100,11 +100,15 @@ const DOWNLOAD_ICON =
 const EXPAND_ICON =
 	'<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>';
 
+/** The lightbox button's classes; the sanitizer keeps only buttons built from them. */
+export const MEDIA_EXPAND_BUTTON_CLASS =
+	'media-expand-btn p-1.5 rounded-sm bg-black/60 text-white hover:bg-black/80 transition-colors';
+
 function overlayButtons(url: string, filename: string): string {
 	const u = escapeHtml(url);
 	const f = escapeHtml(filename);
 	return `<div class="media-overlay-buttons absolute top-2 right-2 flex gap-1 transition-opacity">
-			<button type="button" class="media-expand-btn p-1.5 rounded-sm bg-black/60 text-white hover:bg-black/80 transition-colors" title="Expand" aria-label="Expand">${EXPAND_ICON}</button>
+			<button type="button" class="${MEDIA_EXPAND_BUTTON_CLASS}" title="Expand" aria-label="Expand">${EXPAND_ICON}</button>
 			<a href="${u}" download="${f}" class="media-download-btn p-1.5 rounded-sm bg-black/60 text-white hover:bg-black/80 transition-colors no-underline" title="Download" aria-label="Download">${DOWNLOAD_ICON}</a>
 		</div>`;
 }

@@ -2011,6 +2011,10 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				startedAt: existing?.startedAt || createdAt,
 				updatedAt: createdAt || existing?.updatedAt || '',
 			};
+			// A remote Task child names its worker (additive; local tasks carry none).
+			const workerName = str(event.worker_name);
+			if (workerName) summary.worker = { name: workerName };
+			else if (existing?.worker) summary.worker = existing.worker;
 			const activeTaskSummaries = existing
 				? state.activeTaskSummaries.map((t) => (t.id === taskId ? summary : t))
 				: [...state.activeTaskSummaries, summary];

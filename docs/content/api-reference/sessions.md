@@ -552,6 +552,20 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/move \
 
 `status` is `moved`, or `already_there` (`moved: false`) when the device already runs it. Returns `404` for an unknown device and `409` when the device is offline, the session's project is not checked out there, or a turn is running.
 
+### Move when this turn ends
+
+A session that is running a turn, or is parked on background work (subagents, Monitors, background shells), cannot move until that work ends. These endpoints queue the same hand-off the agent's `HandOffSession` tool uses. They run on the worker that owns the session, whichever device you call.
+
+| Method | Path | Body | Result |
+|---|---|---|---|
+| `GET` | `/api/v1/sessions/{session_id}/handoff` | none | `{"busy": {"running": bool, "tasks": [names]}, "pending": {"worker", "target_id", "by"} or null}` |
+| `POST` | `/api/v1/sessions/{session_id}/handoff` | `target_instance_id` (optional; omitted means this device), `stop` (optional bool) | `{"queued": true, "worker": "DesktopWorker"}` |
+| `DELETE` | `/api/v1/sessions/{session_id}/handoff` | none | `{"cancelled": bool}` |
+
+**Auth:** Required
+
+A queued move waits until the turn and its background work end, then commits, pushes and moves the session like `/move`. It waits as long as the work runs, until it moves or is cancelled. `stop: true` stops the work first, as the Stop button does. The session records `handoff` rows for queued, cancelled, started and the outcome, so every device shows the pending move. Returns `409` when a move is already queued, the target is unknown or offline, or the owning worker cannot be reached. Queued moves live in the owning worker's memory; restarting that worker drops them.
+
 ## Session Sync
 
 ### GET /api/v1/sessions/{session_id}/sync

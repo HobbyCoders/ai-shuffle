@@ -97,6 +97,8 @@ export interface VoiceCallStoreState {
 	userSpeaking: boolean;
 	/** Why the last call ended; null while a call is up or none has ended. */
 	endReason: VoiceEndReason | null;
+	/** True while the unmuted microphone is not reaching a streamed call (#1824). */
+	micProblem: boolean;
 }
 
 const INITIAL: VoiceCallStoreState = {
@@ -113,9 +115,13 @@ const INITIAL: VoiceCallStoreState = {
 	agentSpeaking: false,
 	userSpeaking: false,
 	endReason: null,
+	micProblem: false,
 };
 
 export const voiceCallState = writable<VoiceCallStoreState>({ ...INITIAL });
+
+/** Shown instead of a healthy call state while `micProblem` is set (#1824). */
+export const MIC_PROBLEM_LABEL = 'Microphone not reaching the call';
 
 function patch(next: Partial<VoiceCallStoreState>): void {
 	voiceCallState.update((s) => ({ ...s, ...next }));
@@ -744,7 +750,22 @@ export async function startCall(
 					patch(quiet ? { sessionId: sessionIdIn, notice: message } : { sessionId: sessionIdIn, error: message });
 				});
 			};
-			const open = (resume: boolean, signal: AbortSignal) => openVoiceAudioStream(sessionIdIn, acquired, {
+			// A fresh microphone when the call's track ended or went silent
+			// (#1824); the call keeps its socket and provider session.
+			const reacquireMic = async (): Promise<MediaStream> => {
+				const next = await acquireMic();
+				if (myGeneration !== generation) {
+					next.getTracks().forEach(track => track.stop());
+					throw new Error('The call has ended.');
+				}
+				const previous = micStream;
+				micStream = next;
+				applyMicMuted(get(voiceCallState).micMuted);
+				previous?.getTracks().forEach(track => track.stop());
+				startLevelMonitor(next);
+				return next;
+			};
+			const open = (resume: boolean, signal: AbortSignal) => openVoiceAudioStream(sessionIdIn, micStream ?? acquired, {
 				caption: (id, role, delta) => { if (myGeneration === generation) appendCaption(id, role, delta, false); },
 				speaking: active => { if (myGeneration === generation) patch({ agentSpeaking: active }); },
 				// The server is restoring its provider connection; the caller
@@ -753,6 +774,8 @@ export async function startCall(
 					if (myGeneration !== generation || !audioStream) return;
 					patch(active ? { status: 'reconnecting', agentSpeaking: false } : { status: 'live' });
 				},
+				micHealth: ok => { if (myGeneration === generation) patch({ micProblem: !ok }); },
+				reacquireMic,
 				closed: (message, reason) => {
 					if (myGeneration !== generation) return;
 					// Only the socket to this server dropped; the server ends the
@@ -790,7 +813,7 @@ export async function startCall(
 				}
 				const dropped = audioStream;
 				audioStream = null;
-				patch({ status: 'reconnecting', agentSpeaking: false });
+				patch({ status: 'reconnecting', agentSpeaking: false, micProblem: false });
 				console.info('[voice] audio connection dropped; reconnecting');
 				// The dropped stream's microphone audio is discarded with it; the
 				// new socket starts with live audio, never a replayed backlog.

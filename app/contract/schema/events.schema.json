@@ -1813,6 +1813,18 @@
           "default": "task.updated",
           "title": "Type",
           "type": "string"
+        },
+        "worker_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Worker Name"
         }
       },
       "required": [

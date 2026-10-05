@@ -101,9 +101,13 @@
 
 	interface Props {
 		onOpenChange?: (open: boolean) => void;
+		/** Print the percentage under the ring (the phone's quick bar). */
+		showPercent?: boolean;
+		/** Context used, rounded, for a caller that shows it elsewhere. */
+		percent?: number;
 	}
 
-	let { onOpenChange }: Props = $props();
+	let { onOpenChange, showPercent = false, percent = $bindable(0) }: Props = $props();
 
 	// ── Effective model → context window (200k / 1M) ──────────────────────
 	// The session's model pick may be a `prov:<providerId>:<modelId>` composite
@@ -213,6 +217,11 @@
 		setOpen(!open);
 	}
 
+	/** Open the details from another control (the phone's controls panel). */
+	export function openDetails() {
+		if (!open) setOpen(true);
+	}
+
 	// ── SDK/persisted breakdown = the single display source for the context section ─
 	let richBreakdown = $state<ContextBreakdown | null>(null);
 	const sessionId = $derived($activeSession.sessionId);
@@ -223,6 +232,7 @@
 	// the same figure the popover header shows — so they can't disagree),
 	// falling back to the poller estimate before the first fetch lands.
 	const contextPercent = $derived(displayBreakdown.totalPercent);
+	$effect(() => { percent = Math.round(contextPercent); });
 
 	// ── Ring geometry (mirrors TodoList's progress ring) ──────────────────
 	const RING_RADIUS = 6;
@@ -685,6 +695,7 @@
 				stroke-dashoffset={ringDashoffset}
 			/>
 		</svg>
+		{#if showPercent}<span class="usage-percent" aria-hidden="true">{Math.round(contextPercent)}%</span>{/if}
 	</button>
 
 	{#if open}

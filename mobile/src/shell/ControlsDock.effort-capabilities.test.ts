@@ -22,6 +22,10 @@ vi.mock('$lib/api/client', async (importOriginal) => {
 afterEach(() => cleanup());
 import { effortRegistryFixture as payload } from '$lib/test-stubs/effort-registry';
 const renderDock = () => render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
+/** The Chat controls panel's effort bars (#1816), portaled to <body>. */
+const panelEfforts = () => document.querySelectorAll<HTMLButtonElement>('.mcp .bars .bar');
+const openPanel = () => fireEvent.click(screen.getByRole('button', { name: /^All chat controls/ }));
+afterEach(() => document.querySelectorAll('.mcp-portal').forEach((n) => n.remove()));
 
 describe('ControlsDock dynamic effort', () => {
  it.each(['desktop', 'mobile'].flatMap(surface => ['gpt-6-astra', 'gpt-6-luna', 'gpt-6.1-sol', 'gpt-6.1-terra'].map(model => [surface, model])))('preserves fast mode on %s when switching to %s and toggles both ways', async (surface, model) => {
@@ -39,7 +43,7 @@ describe('ControlsDock dynamic effort', () => {
   if (surface === 'desktop') {
    await fireEvent.click(screen.getByRole('button', { name: /^Effort:/ }));
   } else {
-   await fireEvent.click(container.querySelector('.mobile-settings-trigger')!);
+   await openPanel();
   }
   const toggle = screen.getByRole(surface === 'desktop' ? 'button' : 'switch', { name: 'Fast mode' });
   const stateAttribute = surface === 'desktop' ? 'aria-pressed' : 'aria-checked';
@@ -71,8 +75,8 @@ describe('ControlsDock dynamic effort', () => {
    expect(Array.from(container.querySelectorAll('.stops span'), el => el.textContent)).toEqual(['Low', 'Medium', 'High', 'XHigh', 'Max', 'Ultra']);
    await fireEvent.input(screen.getByRole('slider'), { target: { value: '5' } });
   } else {
-   await fireEvent.click(container.querySelector('.mobile-settings-trigger')!);
-   const choices = container.querySelectorAll<HTMLButtonElement>('.effort-choices button');
+   await openPanel();
+   const choices = panelEfforts();
    expect(Array.from(choices, el => el.textContent?.trim())).toEqual(['Low', 'Medium', 'High', 'XHigh', 'Max', 'Ultra']);
    await fireEvent.click(choices[5]);
   }
@@ -89,7 +93,7 @@ describe('ControlsDock dynamic effort', () => {
    expect(screen.getByRole('slider').getAttribute('max')).toBe('2');
    expect(Array.from(container.querySelectorAll('.stops span'), el => el.textContent)).toEqual(['Low', 'High', 'Max']);
   } else {
-   expect(Array.from(container.querySelectorAll('.effort-choices button'), el => el.textContent?.trim())).toEqual(['Low', 'High', 'Max']);
+   expect(Array.from(panelEfforts(), el => el.textContent?.trim())).toEqual(['Low', 'High', 'Max']);
   }
  });
  it('preserves XHigh on Astra after metadata hydration', async () => {
@@ -118,22 +122,22 @@ describe('ControlsDock dynamic effort', () => {
   await tick();
   expect(get(activeSession).effortLevelOverride).toBe('max');
   expect(screen.getByRole('slider').getAttribute('max')).toBe('2');
-  await fireEvent.click(container.querySelector('.mobile-settings-trigger')!);
-  expect(container.querySelectorAll('.effort-choices button')).toHaveLength(3);
+  await openPanel();
+  expect(panelEfforts()).toHaveLength(3);
   activeSession.setModelOverride('prov:or:openai/gpt-5.6-sol');
   await tick();
-  expect(container.querySelectorAll('.effort-choices button')).toHaveLength(6);
+  expect(panelEfforts()).toHaveLength(6);
   activeSession.setModelOverride('prov:or:seven');
   await tick();
-  const choices = container.querySelectorAll<HTMLButtonElement>('.effort-choices button');
+  const choices = panelEfforts();
   expect(choices).toHaveLength(7);
   await fireEvent.click(choices[0]);
   expect(get(activeSession).effortLevelOverride).toBe('none');
-  await fireEvent.click(choices[1]);
+  await fireEvent.click(panelEfforts()[1]);
   expect(get(activeSession).effortLevelOverride).toBe('minimal');
   activeSession.setModelOverride('prov:or:single');
   await tick();
-  expect(container.querySelectorAll('.effort-choices button')).toHaveLength(1);
+  expect(panelEfforts()).toHaveLength(1);
   expect(get(activeSession).effortLevelOverride).toBe('high');
  });
  it('distinguishes unknown from unsupported on both surfaces without wiping unknown pins', async () => {
@@ -145,15 +149,20 @@ describe('ControlsDock dynamic effort', () => {
   const { container } = renderDock();
   await fireEvent.click(screen.getByRole('button', { name: 'Effort: minimal' }));
   expect(screen.queryByRole('slider')).toBeNull();
-  expect(screen.getAllByText(/Reasoning effort capabilities are not known yet/)).toHaveLength(2);
+  expect(screen.getAllByText(/Reasoning effort capabilities are not known yet/)).toHaveLength(1);
   expect(get(activeSession).effortLevelOverride).toBe('minimal');
-  await fireEvent.click(container.querySelector('.mobile-settings-trigger')!);
-  expect(screen.getByText(/Reasoning effort capabilities are not known yet/)).toBeTruthy();
+  // The phone keeps the unknown pin visible and offers no levels to pick.
+  expect(screen.getByRole('button', { name: 'Reasoning effort: minimal' })).toBeTruthy();
+  await openPanel();
+  expect(document.querySelector('.mcp .effort-tile .tile-value')?.textContent).toBe('minimal');
+  expect(panelEfforts()).toHaveLength(0);
   expect(get(activeSession).effortLevelOverride).toBe('minimal');
   activeSession.setModelOverride('prov:or:unsupported');
   await tick();
   expect(get(activeSession).effortLevelOverride).toBeNull();
-  expect(screen.getByText('Adjustable reasoning effort is not available for this model in AI Shuffle.')).toBeTruthy();
-  expect(container.querySelectorAll('.effort-choices button')).toHaveLength(0);
+  // Opening the panel closed the desktop popover that showed the long explanation.
+  expect(screen.getByRole('button', { name: 'Reasoning effort: set by the model' })).toBeTruthy();
+  expect(document.querySelector('.mcp .effort-tile .tile-value')?.textContent).toBe('Set by the model');
+  expect(panelEfforts()).toHaveLength(0);
  });
 });

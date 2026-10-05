@@ -13,6 +13,9 @@ importable, so the fixtures cannot silently drift from what the harness writes.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from app.core.provider.fluid_transcript import (
@@ -763,6 +766,106 @@ def test_reseed_force_writes_without_an_existing_handle(mock_db, tmp_path):
     assert result.status == "reseeded"
     assert get_cli_session_id(session_id) == result.cli_session_id
     assert result.entries_written > 0
+
+
+# ─ re-seed after a Claude Code compaction (#1820) ─
+
+def _cli_compaction(**fields):
+    return _evt(
+        "ContextCompaction", tier=3, reason="cli_manual_compact",
+        before_tokens=900_000, after_tokens=9_000, **fields,
+    )
+
+
+def _reseeded_lines(session_id, tmp_path):
+    from app.core.provider.fluid_transcript import reseed_delegated_cli_session
+
+    result = reseed_delegated_cli_session(session_id, "/workspace", tmp_path, force=True)
+    assert result.status == "reseeded"
+    return _read_jsonl(Path(result.path))
+
+
+def test_reseed_starts_from_the_cli_compaction_summary(mock_db, tmp_path):
+    """A session that compacted on one worker and moved to another must not
+    come back at full size: the CLI gets the summary and what followed."""
+    session_id = _seed()
+    _insert_events(session_id, [
+        _cli_compaction(node_id="n5", summary="SUMMARY of the first turn", ts=1004.5),
+    ])
+    lines = _reseeded_lines(session_id, tmp_path)
+    assert [(line["type"], line["message"]["content"]) for line in lines] == [
+        ("user", "SUMMARY of the first turn"),
+        ("user", "second prompt"),
+        ("assistant", [{"type": "text", "text": "second reply"}]),
+    ]
+    assert lines[0]["isCompactSummary"] is True
+    assert lines[0]["parentUuid"] is None
+    assert "first prompt" not in "".join(json.dumps(line) for line in lines)
+
+
+def test_reseed_takes_the_latest_compaction_with_a_summary(mock_db, tmp_path):
+    session_id = _seed()
+    _insert_events(session_id, [
+        _cli_compaction(node_id="n2", summary="OLD summary"),
+        _cli_compaction(node_id="n5", summary="NEW summary"),
+        # The newest one has no summary (its read failed): the one before
+        # it still applies.
+        _cli_compaction(node_id="n6", summary=""),
+    ])
+    lines = _reseeded_lines(session_id, tmp_path)
+    assert lines[0]["message"]["content"] == "NEW summary"
+    assert [line["type"] for line in lines] == ["user", "user", "assistant"]
+
+
+@pytest.mark.parametrize("event", [
+    # A rewind left its node behind: that branch's compaction does not apply.
+    _cli_compaction(node_id="n-gone", summary="from a discarded branch"),
+    # Recorded before the summary was kept.
+    _cli_compaction(node_id="n5"),
+    # fluid's own (native) compaction is a view-level promotion, not the CLI's.
+    _evt("ContextCompaction", tier=2, reason="trigger", node_id="n5", summary="x"),
+])
+def test_reseed_replays_the_whole_path_without_an_applicable_compaction(
+    mock_db, tmp_path, event,
+):
+    session_id = _seed()
+    _insert_events(session_id, [event])
+    lines = _reseeded_lines(session_id, tmp_path)
+    assert lines[0]["message"]["content"] == "first prompt"
+    assert not any(line.get("isCompactSummary") for line in lines)
+
+
+def test_reseed_places_a_between_turn_compaction_by_its_time(mock_db, tmp_path):
+    """No node on the event (the CLI compacted while idle): nodes written
+    after the event's timestamp follow the summary."""
+    session_id = _seed()  # node ts 1000.0 (n1) .. 1006.0 (n7)
+    _insert_events(session_id, [_cli_compaction(summary="IDLE summary", ts=1004.5)])
+    lines = _reseeded_lines(session_id, tmp_path)
+    assert [line["message"]["content"] for line in lines][:2] == [
+        "IDLE summary", "second prompt",
+    ]
+
+
+def test_a_transcript_starting_at_a_summary_is_not_complete(tmp_path):
+    """A re-seeded transcript has no prompts before its summary, so it cannot
+    prove which of the session's earlier prompts the CLI saw."""
+    from app.core.provider.fluid_transcript import (
+        cli_prompts_cover,
+        cli_transcript_prompt_tail,
+    )
+
+    path = tmp_path / "t.jsonl"
+    path.write_text("\n".join(json.dumps(e) for e in [
+        {"type": "user", "isCompactSummary": True,
+         "message": {"role": "user", "content": "SUMMARY"}},
+        {"type": "user", "message": {"role": "user", "content": "second prompt"}},
+    ]) + "\n", encoding="utf-8")
+    prompts, complete = cli_transcript_prompt_tail(path)
+    assert prompts == ["second prompt"]
+    assert complete is False
+    assert cli_prompts_cover(
+        ["a", "b", "first prompt", "second prompt"], prompts, complete=complete,
+    )
 
 
 def test_fork_reseeds_cli_when_parent_was_delegated(mock_db, tmp_path):

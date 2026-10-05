@@ -242,6 +242,9 @@ class TaskUpdated(EventBase):
     # translation time so the FE tail line shows the right badge instead of
     # defaulting every task to 'agent'. Optional/additive: older logs omit it.
     kind: str | None = None
+    # The other worker a remote Task child runs on (its display name). Absent
+    # for local tasks. Optional/additive, like ``kind``.
+    worker_name: str | None = None
 
 
 class SystemNote(EventBase):

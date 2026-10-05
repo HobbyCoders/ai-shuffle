@@ -1533,6 +1533,16 @@ describe('task.updated summaries', () => {
 		expect(s.activeTaskSummaries[0].kind).toBe('shell');
 	});
 
+	it('a task.updated names the worker of a remote child and later frames keep it', () => {
+		const s = fold([
+			ev('task.updated', { task_id: 'r-1', state: 'running', worker_name: 'Unraid' }),
+			ev('task.updated', { task_id: 'r-1', state: 'killed', summary: 'Stopped by user.' }),
+			ev('task.updated', { task_id: 'l-1', state: 'running' }),
+		]);
+		expect(s.activeTaskSummaries.find((t) => t.id === 'r-1')?.worker).toEqual({ name: 'Unraid' });
+		expect(s.activeTaskSummaries.find((t) => t.id === 'l-1')?.worker).toBeUndefined();
+	});
+
 	it('an unknown kind value falls back to agent', () => {
 		const s = fold([
 			ev('task.updated', { task_id: 'x-1', state: 'running', kind: 'workflow' }),

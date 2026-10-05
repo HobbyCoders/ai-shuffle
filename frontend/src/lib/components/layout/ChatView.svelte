@@ -15,9 +15,13 @@
 	import { platform } from '$lib/stores/platform.svelte';
 	import { createConnectionBannerGrace } from '$lib/stores/session/connection-banner-grace';
 	import Banner from '$lib/components/Banner.svelte';
+	import NotificationSlot from '$lib/components/NotificationSlot.svelte';
+	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 	import { forkOfferedSessionHere } from '$lib/components/chat/fork-here';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
+	import ArchivedChatBar from '$lib/components/chat/ArchivedChatBar.svelte';
+	import { archivedChats } from '$lib/stores/archived-chats';
 	import { assistantState } from '$lib/stores/assistant';
 	import PermissionQueue from '$lib/components/PermissionQueue.svelte';
 	import QuestionTray from '$lib/components/chat/QuestionTray.svelte';
@@ -28,6 +32,8 @@
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { RotateCcw } from 'lucide-svelte';
 	import { classifyChatSurface } from './chat-empty-state';
+	// The phone shell docks prompts above its composer; the web build has none.
+	import { composerShell } from '$lib/components/chat/composer-shell';
 
 	interface Props {
 		/** The open chat is the assistant's home (decided once, in MainPanel). */
@@ -116,6 +122,11 @@
 
 	// Keep the editor mounted through call transitions so drafts and file chips survive.
 	const showComposer = true;
+	// An archived chat is a read-only transcript until restored (#1822): the
+	// composer slot shows export and restore instead of the editor.
+	const archivedSessionId = $derived(
+		$activeSession.sessionId && $archivedChats.has($activeSession.sessionId) ? $activeSession.sessionId : null
+	);
 	let surfaceHeight = $state(0);
 	let composerHeight = $state(0);
 	$effect(() => {
@@ -142,6 +153,9 @@
 	// other request keeps the dialog, in the home too.
 	const dialogPermissions = $derived(($activeSession.pendingPermissions ?? []).filter((request) => !isAssistantConfirm(request)));
 	const showPermissionModal = $derived(!voiceCallActive && dialogPermissions.length > 0);
+	// A shell prompt dock answers permissions, private access and questions
+	// above the composer, so it replaces the modal and the question tray.
+	const PromptDock = composerShell().PromptDock;
 
 	// A call that ends by itself (transport error, or the VW5 length cap) unmounts
 	// the dock that was showing the reason, so surface it as a toast instead —
@@ -318,15 +332,16 @@
 					     give them a manual retry that skips the backoff wait. The
 					     banner itself is gated behind a 3s grace period (see
 					     connectionBannerGrace above) so transient blips don't flash it. -->
-					<div class="connection-banner">
+					<NotificationSlot order={DOCK_ORDER.connection}>
 						<Banner
 							severity="warning"
+							variant="page"
 							message={$activeSession.wsReconnectRequired
 								? 'Chat controls disconnected. Reconnect to send messages.'
-								: 'Chat controls disconnected — trying to reconnect. Running sessions continue.'}
+								: 'Chat controls disconnected. Trying to reconnect; running sessions continue.'}
 							action={{ label: 'Reconnect', onClick: handleReconnect }}
 						/>
-					</div>
+					</NotificationSlot>
 				{/if}
 				<!-- No call surface here any more (VM18): the call controls live in the
 				     composer slot below, so the transcript column looks the same during
@@ -355,11 +370,27 @@
 			{#if assistantMode}
 				<BackgroundWorkStrip jobs={backgroundJobs} onOpen={openJob} onStop={stopJob} />
 			{/if}
-			{#key $sessionOwnerBoundary}
-				<PrivateAccessPrompt sessionId={$activeSession.sessionId} />
-				<QuestionTray requests={$activeSession.pendingQuestions ?? []} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
-				<ChatInput compact={!showEmptyHero} {assistantMode} {onBrowserToggle} {onBrowserPreload} {browserOpen} />
-			{/key}
+			{#if archivedSessionId}
+				<ArchivedChatBar sessionId={archivedSessionId} />
+			{:else}
+				{#key $sessionOwnerBoundary}
+					{#if PromptDock}
+						<PromptDock
+							sessionId={$activeSession.sessionId}
+							permissions={showPermissionModal ? dialogPermissions : []}
+							questions={$activeSession.pendingQuestions ?? []}
+							working={$activeSession.isStreaming}
+							connected={$activeWsConnected}
+							onPermission={handlePermissionResponse}
+							onQuestion={handleQuestionResponse}
+						/>
+					{:else}
+						<PrivateAccessPrompt sessionId={$activeSession.sessionId} />
+						<QuestionTray requests={$activeSession.pendingQuestions ?? []} working={$activeSession.isStreaming} connected={$activeWsConnected} onRespond={handleQuestionResponse} />
+					{/if}
+					<ChatInput compact={!showEmptyHero} {assistantMode} {onBrowserToggle} {onBrowserPreload} {browserOpen} />
+				{/key}
+			{/if}
 		</div>
 	{/if}
 
@@ -371,7 +402,9 @@
 		<div class="empty-bottom-spacer" aria-hidden="true"></div>
 	{/if}
 
-	<!-- Permission gates still block their tool. Questions live above the composer. -->
+	<!-- Permission gates still block their tool. Questions live above the composer.
+	     A shell prompt dock answers them above the composer instead. -->
+	{#if !PromptDock}
 	{#if !showEmptyHero && showPermissionModal}
 		<div class="modal-overlay">
 			<div class="modal-backdrop"></div>
@@ -381,6 +414,7 @@
 				</div>
 			</div>
 		</div>
+	{/if}
 	{/if}
 </div>
 
@@ -451,12 +485,6 @@
 
 	.input-wrapper {
 		flex-shrink: 0;
-	}
-
-	/* Thin, unobtrusive disconnection notice pinned above the message list. */
-	.connection-banner {
-		flex-shrink: 0;
-		padding: 6px 12px 0;
 	}
 
 	.transitioning-from-empty .message-area-wrapper {

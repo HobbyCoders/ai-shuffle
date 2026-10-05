@@ -192,7 +192,7 @@ def run(app, settings) -> None:
                 "Agent preview listener is off: %s. Agents cannot open this worker's UI in their browser.", exc)
         from app.core import preview_access
 
-        preview_access.set_listener_port(preview_port)
+        preview_access.set_listener_port(preview_port, settings.host)
         config = uvicorn.Config(
             IngressApplication(app, local.getsockname()[1], remote.getsockname()[1], preview_port),
             host=settings.host,

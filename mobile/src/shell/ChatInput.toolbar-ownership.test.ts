@@ -65,6 +65,9 @@ async function setup() {
 	return { editor, wrapper };
 }
 
+// Since #1816 the phone composer never collapses: the quick bar under the text
+// field is always there. These cases used to end collapsed; they now pin that
+// the composer and its quick bar stay put, and that focus still moves as before.
 describe('mobile toolbar interaction ownership', () => {
 	it.each(['touch', 'keyboard'])('keeps voice preparation visible after %s activation loses focus', async method => {
 		const { wrapper } = await setup();
@@ -87,12 +90,14 @@ describe('mobile toolbar interaction ownership', () => {
 		expect(wrapper.classList.contains('mobile-collapsed')).toBe(false);
 		await fireEvent.pointerDown(document.body);
 		await settle();
-		expect(wrapper.classList.contains('mobile-collapsed')).toBe(true);
+		expect(wrapper.classList.contains('mobile-collapsed')).toBe(false);
+		expect(wrapper.querySelector('.qbar')).not.toBeNull();
 	});
 
 	it('keeps a non-focusing toolbar tap open until a keyboard move outside', async () => {
 		const { editor, wrapper } = await setup();
-		const attach = screen.getByRole('button', { name: 'Attach file' });
+		// The phone's plus left of the editor (the dock's own attach is hidden there).
+		const attach = wrapper.querySelector<HTMLButtonElement>('.composer-attach')!;
 		await fireEvent.pointerDown(attach);
 		editor.blur();
 		await fireEvent.click(attach);
@@ -103,15 +108,17 @@ describe('mobile toolbar interaction ownership', () => {
 		document.body.append(outside);
 		outside.focus();
 		await settle();
-		expect(wrapper.classList.contains('mobile-collapsed')).toBe(true);
+		expect(wrapper.classList.contains('mobile-collapsed')).toBe(false);
+		expect(wrapper.querySelector('.qbar')).not.toBeNull();
 		outside.remove();
 	});
 
-	it('still collapses after editor-only blur', async () => {
+	it('stays expanded with its quick bar after editor-only blur', async () => {
 		const { editor, wrapper } = await setup();
 		editor.blur();
 		await settle();
-		expect(wrapper.classList.contains('mobile-collapsed')).toBe(true);
+		expect(wrapper.classList.contains('mobile-collapsed')).toBe(false);
+		expect(wrapper.querySelector('.qbar')).not.toBeNull();
 	});
 
 	it('blurs a focused toolbar button on a non-focusable outside tap', async () => {
@@ -122,6 +129,6 @@ describe('mobile toolbar interaction ownership', () => {
 		await fireEvent.pointerDown(document.body);
 		await settle();
 		expect(document.activeElement).not.toBe(mic);
-		expect(wrapper.classList.contains('mobile-collapsed')).toBe(true);
+		expect(wrapper.classList.contains('mobile-collapsed')).toBe(false);
 	});
 });

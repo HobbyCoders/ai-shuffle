@@ -15,12 +15,14 @@ import android.view.ViewGroup
 import android.webkit.*
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.widget.PopupMenu
 import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.ScriptHandler
+import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -53,7 +55,10 @@ import java.io.ByteArrayInputStream
  * need a new APK; this activity owns only the native side.
  *
  * Native capabilities are restricted to the top-level phone UI page on the
- * paired worker; no JavascriptInterface. The paired session is handed to the
+ * paired worker; no JavascriptInterface. The page may ask to connect to
+ * another paired worker (`?connect=`, see WorkerSwitch) and tells the shell
+ * when it draws its own "Connected to" bar (MobileUi.SHELL_BRIDGE), which
+ * replaces the native worker-name bar. The paired session is handed to the
  * page as a Bearer token through a document-start script, never as a cookie.
  * Voice calls are the page's own (the same as the website); the shell only
  * grants the microphone to that page.
@@ -82,6 +87,12 @@ class ChatActivity : NativeScreen() {
     private lateinit var repairButton: MaterialButton
     private lateinit var downloads: ChatDownloads
     private var switchJob: Job? = null
+    /** The native worker-name bar (back, name, menu); hidden while the page draws its own. */
+    private var nativeBar: View? = null
+    private var shellBridgeInstalled = false
+    /** Whether the loaded page said it draws its own "Connected to" bar. False until told. */
+    @androidx.annotation.VisibleForTesting internal var pageRendersWorkerBar = false
+        private set
     @Volatile private var document = 0
     private var fileDocument = -1
     private var fileChooserOpen = false
@@ -132,6 +143,7 @@ class ChatActivity : NativeScreen() {
         chatLayout()
         downloads = ChatDownloads(this, web, server, ::authorized, { sessionToken }) { status.text = it }
         downloads.install()
+        installShellBridge()
         // The page is the worker's own origin and authenticates with the Bearer token;
         // no third-party cookies. A Cloudflare Access worker's CF cookie (installed below)
         // is first-party here and rides the page load and its API calls.
@@ -164,6 +176,11 @@ class ChatActivity : NativeScreen() {
         }
         web.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                // "Connected to" sheet: `/mobile/?connect=<origin>` asks to switch workers. Never loaded.
+                if (WorkerSwitch.isRequest(server.baseUrl, request.url.toString())) {
+                    if (request.isForMainFrame) switchWorker(request.url.toString())
+                    return true
+                }
                 // The phone UI's own routes are the only navigation the page may perform.
                 if (MobileUi.isUiUrl(server.baseUrl, request.url.toString())) return false
                 // Other worker links (attachments, /api files) save through SAF, never
@@ -248,6 +265,8 @@ class ChatActivity : NativeScreen() {
         pageFailure = message
         workerDocumentAllowed = false
         status.text = message
+        // No page bar on a failed page: bring back the native one so Refresh chat stays reachable.
+        applyPageWorkerBar(false)
         // Only if Refresh chat has not started a newer load meanwhile.
         view.post { if (!isDestroyed && load == pageLoads) { view.stopLoading(); view.loadUrl("about:blank") } }
     }
@@ -278,6 +297,7 @@ class ChatActivity : NativeScreen() {
             }
         }
         toolbar.addView(more)
+        nativeBar = toolbar
         (toolbar.parent as ViewGroup).removeView(toolbar)
         (status.parent as ViewGroup).removeView(status)
         status.setPadding(dp(16), dp(4), dp(16), dp(8))
@@ -304,9 +324,52 @@ class ChatActivity : NativeScreen() {
         }
         setContentView(shell)
     }
-    private fun openWorkers() {
+    private fun openWorkers(message: String? = null) {
         startActivity(Intent(this, ServerListActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+            .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            .apply { if (message != null) putExtra("sync_message", message) })
+    }
+    /** Open chat on another paired worker; the same hand-off as the Workers screen and the offline offer. */
+    private fun openChat(target: Server) {
+        startActivity(Intent(this, ChatActivity::class.java).putExtra(EXTRA_SERVER_ID, target.id))
+        finish()
+    }
+    /** Workers this install may open: local pairings and the signed-in account's (as on the Workers screen). */
+    private fun pairedWorkers(): List<Server> {
+        val store = ServerStore.get(this)
+        val account = AccountStore(this).session()
+        return store.orderedByRecentUse(store.getAll().filter {
+            it.accountId == null || (it.accountId == account?.accountId && it.hubUrl == account?.hub)
+        })
+    }
+    /** The page asked to connect to another worker (`?connect=`). Only an already paired one is opened. */
+    private fun switchWorker(url: String) {
+        if (!validDocument()) return
+        when (val decision = WorkerSwitch.decide(server.baseUrl, url, pairedWorkers())) {
+            is WorkerSwitch.Decision.Open -> openChat(decision.server)
+            is WorkerSwitch.Decision.NeedsAuthorization ->
+                openWorkers("Tap ${decision.server.name} to authorize it on this phone, then open chat.")
+            is WorkerSwitch.Decision.Reject -> Toast.makeText(this, decision.message, Toast.LENGTH_LONG).show()
+            is WorkerSwitch.Decision.AlreadyConnected, is WorkerSwitch.Decision.NotASwitch -> Unit
+        }
+    }
+    /** `shuffleShell`: the page reports its own chrome (MobileUi.SHELL_BRIDGE). Same scoping as `shuffleFileSave`. */
+    private fun installShellBridge() {
+        if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) return
+        WebViewCompat.addWebMessageListener(web, MobileUi.SHELL_BRIDGE, setOf(PairingInput.origin(server.baseUrl))) { _, message, origin, mainFrame, _ ->
+            if (isFinishing || isDestroyed || message.type != WebMessageCompat.TYPE_STRING ||
+                !ChatAccessPolicy.message(server.baseUrl, web.url, origin.toString(), mainFrame, authorized())) return@addWebMessageListener
+            when (val parsed = MobileUi.shellMessage(message.data)) {
+                is MobileUi.ShellMessage.WorkerBar -> applyPageWorkerBar(parsed.shown)
+                is MobileUi.ShellMessage.OpenWorkers -> openWorkers()
+                null -> Unit
+            }
+        }
+        shellBridgeInstalled = true
+    }
+    private fun applyPageWorkerBar(shown: Boolean) {
+        pageRendersWorkerBar = shown
+        nativeBar?.visibility = if (shown) View.GONE else View.VISIBLE
     }
     private fun authorized() = ::sessionOwner.isInitialized && sessionOwner.current()
     private fun validDocument() = ::web.isInitialized && !isFinishing && !isDestroyed &&
@@ -412,6 +475,8 @@ class ChatActivity : NativeScreen() {
                 }
                 is ApiResult.Failure -> {
                     status.text = result.message
+                    // Keep Refresh chat and Workers reachable while chat cannot open.
+                    applyPageWorkerBar(false)
                     if (result.statusCode == 401 && server.accountId != null) {
                         try {
                             val snapshot = WorkerRepairSnapshot(this@ChatActivity, server)
@@ -452,11 +517,7 @@ class ChatActivity : NativeScreen() {
             MaterialAlertDialogBuilder(this@ChatActivity)
                 .setTitle("${server.name} is not reachable")
                 .setMessage("Switch to another device that is online?")
-                .setItems(names) { _, index ->
-                    val target = online[index]
-                    startActivity(Intent(this@ChatActivity, ChatActivity::class.java).putExtra(EXTRA_SERVER_ID, target.id))
-                    finish()
-                }
+                .setItems(names) { _, index -> openChat(online[index]) }
                 .setNegativeButton("Stay", null)
                 .show()
         }
@@ -469,6 +530,7 @@ class ChatActivity : NativeScreen() {
         switchJob?.cancel()
         if (::downloads.isInitialized) downloads.close()
         bootstrap?.remove(); bootstrap = null
+        if (shellBridgeInstalled && ::web.isInitialized) runCatching { WebViewCompat.removeWebMessageListener(web, MobileUi.SHELL_BRIDGE) }
         if (::web.isInitialized) { runCatching { unregisterReceiver(signedOut) }; web.stopLoading(); web.clearHistory(); web.destroy() }
         super.onDestroy()
     }

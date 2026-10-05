@@ -3,7 +3,7 @@
 	 * persistent text composer; unmounting this view never ends the call. */
 	import { onDestroy, untrack } from 'svelte';
 	import { Mic, MicOff, PhoneOff, Volume2, VolumeX } from 'lucide-svelte';
-	import { voiceCallState, hangup, toggleAgent, toggleMic } from '$lib/services/voiceCall';
+	import { voiceCallState, hangup, toggleAgent, toggleMic, MIC_PROBLEM_LABEL } from '$lib/services/voiceCall';
 	import { getVoiceCallState, voiceModelLabel, usesDelegation, usesAudioStream } from '$lib/api/voice';
 
 	interface Props {
@@ -26,11 +26,15 @@
 	const engineLabel = $derived(mine && call.model ? voiceModelLabel(call.model) : 'Voice agent');
 	const modeLabel = $derived(delegated ? 'Conversation + your chat agent' : call.model === 'gpt-live-1' ? 'OpenAI Responses delegation' : realtime ? (call.options?.turn_detection === 'server_vad' ? 'Realtime agent tools · Normal VAD' : 'Realtime agent tools') : 'Full-duplex conversation');
 
+	// Never show a healthy call while the microphone is not reaching it (#1824).
+	const micProblem = $derived(status === 'live' && !call.micMuted && call.micProblem);
 	const statusLabel = $derived(
 		status === 'live'
 			? call.micMuted
 				? 'Mic muted'
-				: call.agentSpeaking
+				: call.micProblem
+					? MIC_PROBLEM_LABEL
+					: call.agentSpeaking
 					? 'Speaking…'
 					: call.userSpeaking
 						? 'Hearing you…'
@@ -147,7 +151,7 @@
 			</button>
 		</div>
 	</div>
-	<p class="vp-status" class:speaking={live && call.agentSpeaking} role="status">{statusLabel}</p>
+	<p class="vp-status" class:speaking={live && call.agentSpeaking && !micProblem} class:mic-problem={micProblem} role="status">{statusLabel}</p>
 	{#if realtime && live && workingLabel}<p class="vp-working">{workingLabel}</p>{/if}
 	{#if realtime && costLabel}<span class="vp-cost" title="Estimated OpenAI spend for this call">{costLabel}</span>{/if}
 </div>
@@ -178,6 +182,7 @@
 	.vp-btn.active { color: var(--warning, #d97706); background: color-mix(in oklch, var(--warning, #d97706) 12%, var(--background)); }
 	.vp-status, .vp-working { margin: 0; font-size: 11px; line-height: 1.4; color: var(--muted-foreground); }
 	.vp-status.speaking { color: var(--primary); }
+	.vp-status.mic-problem { color: var(--warning); }
 	.vp-cost { font-size: 10px; color: var(--muted-foreground); }
 	.vp-msg { margin: 0; max-width: 32rem; font-size: 12px; text-align: center; overflow-wrap: anywhere; }
 	.err { color: var(--destructive); } .warn { color: var(--warning, #d97706); }

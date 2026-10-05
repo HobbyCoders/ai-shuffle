@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
 	shouldShowHeaderGitActions,
 	shouldShowGithubGitActions,
 	shouldShowGitPanelTrigger,
-	privateAccessTrigger,
 	type HeaderGitActionsInput
 } from './git-header-visibility';
 
@@ -113,22 +114,23 @@ describe('shouldShowGithubGitActions', () => {
 	});
 });
 
-describe('privateAccessTrigger', () => {
-	it('gives Chat-lane and projectless sessions their own Access button', () => {
-		// Their header has no git cluster, so no "Private access" row exists.
-		expect(privateAccessTrigger(base({ sessionMode: 'chat' }))).toBe('button');
-		expect(privateAccessTrigger(base({ hasProject: false }))).toBe('button');
-		expect(privateAccessTrigger(base({ worktreeDeleted: true }))).toBe('button');
+// #1816: private access left the Git panel. The header's Access button is the
+// one place to approve, review and revoke on every lane, so MainPanel always
+// renders ChatAccess with its own button, and no standalone Swarm button.
+describe('chat header private access and swarms', () => {
+	const mainPanel = readFileSync(resolve(process.cwd(), 'src/lib/components/layout/MainPanel.svelte'), 'utf8')
+		.replace(/<!--[\s\S]*?-->/g, '');
+
+	it('gives every session its own Access button', () => {
+		expect(mainPanel).toContain('<ChatAccess sessionId={activeTab.sessionId} trigger="button" />');
 	});
 
-	it('uses the git panel row when the git cluster is shown', () => {
-		expect(privateAccessTrigger(base({ sessionMode: 'code' }))).toBe('none');
-		expect(privateAccessTrigger(base({ sessionMode: 'voice' }))).toBe('none');
+	it('renders no swarm dropdown in the header', () => {
+		expect(mainPanel).not.toContain('SwarmDropdown');
 	});
 });
 
-// #1615: the standalone Swarm button shows exactly when this is false, so a
-// worktree session must keep the panel through every "not a repo" reading.
+// #1615: a worktree session must keep the panel through every "not a repo" reading.
 describe('shouldShowGitPanelTrigger', () => {
 	it('shows the panel for a repository', () => {
 		expect(shouldShowGitPanelTrigger({ isGitRepo: true, worktreeMode: false, error: null })).toBe(true);

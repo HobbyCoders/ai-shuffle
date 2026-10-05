@@ -795,7 +795,7 @@ Ask the updater to check for, download or install an update.
 
 **Auth:** Owner only. Refused with `403` when the request comes from an agent's in-app browser preview.
 
-**Body (JSON):** `action` (required): `check`, `download` or `install`.
+**Body (JSON):** `action` (required): `check`, `download`, `install` or `cancel`. `mode` (optional, `install` only): `when_idle` or `stop`.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/settings/application-updates \
@@ -813,7 +813,9 @@ curl -X POST http://localhost:8000/api/v1/settings/application-updates \
 }
 ```
 
-With `update_all_workers` on, `scope` is `all` and the action also goes to every other worker on the account; this worker is always queued last. A `download` sent to a worker that has not found the update yet (phase `idle`) is still queued: that worker checks first and downloads only if the check finds an update, and its `reason` says so. Each worker decides for itself and says why in `reason` when it declines: updates disabled, an update already in progress, an update already downloaded, a newer runtime required, nothing downloaded to install, or sessions still running. Offline workers are reported as not queued, and `accepted` is `null` for a worker that could not be reached. Returns `409` when updates are turned off or a previous install is still waiting for workers to finish starting.
+With `update_all_workers` on, `scope` is `all` and the action also goes to every other worker on the account; this worker is always queued last. A `download` sent to a worker that has not found the update yet (phase `idle`) is still queued: that worker checks first and downloads only if the check finds an update, and its `reason` says so. Each worker decides for itself and says why in `reason` when it declines: updates disabled, an update already in progress, an update already downloaded, a newer runtime required, nothing downloaded to install, or sessions still running. Offline workers are reported as not queued, and `accepted` is `null` for a worker that could not be reached.
+
+An `install` on a worker with running chats or background tasks is refused, and that worker's result carries `busy`: a list of `{"session_id", "title", "tasks"}` naming the work. Send `mode: "when_idle"` to restart that worker once its work ends (its result has `deferred: true`, and its status row in `/workers` shows `deferred: true`), or `mode: "stop"` to stop the work the way each chat's Stop button does and then restart. `cancel` drops a waiting `when_idle` restart. A waiting restart lives in the worker's memory: it expires after 12 hours and a worker restart drops it. Returns `409` when updates are turned off or a previous install is still waiting for workers to finish starting.
 
 ### GET /api/v1/settings/application-updates/workers
 

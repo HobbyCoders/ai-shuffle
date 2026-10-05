@@ -98,6 +98,7 @@ from fluid.engine.delegated_proto import (
 )
 from fluid.events.bus import EventBus
 from fluid.events.model import (
+    ContextCompaction,
     DelegatedDiagnostic,
     DelegatedSurface,
     ErrorEvent,
@@ -408,13 +409,12 @@ def _root_outside_deliberate_sandbox(env: dict[str, str]) -> bool:
 _STEER_SCAN_BYTES = 8 * 1024 * 1024
 
 
-def _find_bash_first_steer(config_dir: str, cli_session_id: str) -> dict[str, Any] | None:
-    """The bash-first steer the CLI recorded for ``cli_session_id``, or None.
+def _cli_transcript_path(config_dir: str, cli_session_id: str) -> str | None:
+    """The CLI's transcript for ``cli_session_id``, or None.
 
-    The CLI writes every ``auto_mode`` attachment it adds to a turn into its
-    transcript at ``<config>/projects/<slug>/<session id>.jsonl``. The slug is
-    derived from the working directory, so the file is found by glob. See
-    :func:`bash_first_steer_in_transcript`. Blocking; run it off the loop.
+    The CLI writes it to ``<config>/projects/<slug>/<session id>.jsonl``. The
+    slug is derived from the working directory, so the file is found by glob.
+    Blocking; run it off the loop.
     """
     if not cli_session_id or any(c in cli_session_id for c in "/\\:") or ".." in cli_session_id:
         return None  # an id is a bare name; never let one walk the tree
@@ -423,7 +423,127 @@ def _find_bash_first_steer(config_dir: str, cli_session_id: str) -> dict[str, An
     ))
     if not paths:
         return None
-    return bash_first_steer_in_transcript(max(paths, key=lambda p: os.path.getmtime(p)))
+    return max(paths, key=lambda p: os.path.getmtime(p))
+
+
+def _find_bash_first_steer(config_dir: str, cli_session_id: str) -> dict[str, Any] | None:
+    """The bash-first steer the CLI recorded for ``cli_session_id``, or None.
+
+    The CLI writes every ``auto_mode`` attachment it adds to a turn into its
+    transcript (:func:`_cli_transcript_path`). See
+    :func:`bash_first_steer_in_transcript`. Blocking; run it off the loop.
+    """
+    path = _cli_transcript_path(config_dir, cli_session_id)
+    if path is None:
+        return None
+    return bash_first_steer_in_transcript(path)
+
+
+# A typed ``/compact`` (with or without the CLI's custom summary instructions).
+_COMPACT_COMMAND = re.compile(r"^/compact(?:\s|$)")
+
+# Reading back the summary of a compaction the CLI just reported: it writes
+# the summary entry to its transcript next to the boundary, so the read is
+# retried briefly in case the stream frame beat the file write.
+COMPACTION_SUMMARY_ATTEMPTS = 10
+COMPACTION_SUMMARY_INTERVAL = 0.2
+COMPACTION_SUMMARY_MAX_CHARS = 200_000
+# Without a matching uuid, the transcript's last boundary counts as the one
+# just reported only when it is this recent (seconds); an older one is an
+# earlier compaction whose summary must not be taken for the new one.
+_COMPACTION_SUMMARY_MAX_AGE = 600.0
+
+
+def _entry_epoch(entry: dict[str, Any]) -> float | None:
+    """A transcript entry's ``timestamp`` as epoch seconds, or None."""
+    stamp = entry.get("timestamp")
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(stamp).timestamp()
+    except ValueError:
+        return None
+
+
+def _summary_text(entry: dict[str, Any]) -> str:
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "\n".join(
+            block.get("text") or "" for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
+    return ""
+
+
+def compaction_summary_in_transcript(
+    path: str, boundary_uuid: str | None = None, *, now: float | None = None,
+) -> str:
+    """The summary the CLI wrote for a compaction, from its transcript; "" if
+    it is not (yet) there.
+
+    The CLI records a compaction as a ``system/compact_boundary`` entry
+    followed by a ``user`` entry flagged ``isCompactSummary`` that holds the
+    summary text. The boundary whose ``uuid`` is ``boundary_uuid`` is the one
+    wanted; when no entry carries that uuid (or none was given), the last
+    boundary is taken if it was written within ``_COMPACTION_SUMMARY_MAX_AGE``
+    of ``now``. Reads at most the last ``_STEER_SCAN_BYTES``. Blocking.
+    """
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - _STEER_SCAN_BYTES))
+        tail = fh.read()
+    lines = tail.split(b"\n")
+    if size > _STEER_SCAN_BYTES:
+        lines = lines[1:]  # the first line was cut by the seek
+    # [uuid, epoch, summary] per boundary, in file order.
+    boundaries: list[list[Any]] = []
+    for raw in lines:
+        if b"compact_boundary" not in raw and b"isCompactSummary" not in raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") == "system" and entry.get("subtype") == "compact_boundary":
+            boundaries.append([entry.get("uuid"), _entry_epoch(entry), None])
+        elif (
+            entry.get("type") == "user" and entry.get("isCompactSummary")
+            and boundaries and boundaries[-1][2] is None
+        ):
+            boundaries[-1][2] = _summary_text(entry)
+    if not boundaries:
+        return ""
+    chosen = None
+    if boundary_uuid:
+        chosen = next((b for b in boundaries if b[0] == boundary_uuid), None)
+    if chosen is None:
+        last = boundaries[-1]
+        current = time.time() if now is None else now
+        if last[1] is None or current - last[1] > _COMPACTION_SUMMARY_MAX_AGE:
+            return ""
+        chosen = last
+    summary = chosen[2] or ""
+    if len(summary) > COMPACTION_SUMMARY_MAX_CHARS:
+        summary = summary[:COMPACTION_SUMMARY_MAX_CHARS]
+    return summary
+
+
+def _find_compaction_summary(
+    config_dir: str, cli_session_id: str, boundary_uuid: str | None,
+) -> str | None:
+    """:func:`compaction_summary_in_transcript` for a CLI session; None when
+    the session has no transcript on this machine. Blocking."""
+    path = _cli_transcript_path(config_dir, cli_session_id)
+    if path is None:
+        return None
+    return compaction_summary_in_transcript(path, boundary_uuid)
 
 
 def bash_first_steer_in_transcript(path: str) -> dict[str, Any] | None:
@@ -620,6 +740,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # after the null status, so ``_main_compacting`` is already off by
         # then; this is what says the boundary is the main conversation's.
         self._main_boundary_due = False
+        # The running turn is a typed ``/compact``, how many main-conversation
+        # compactions it reported, and the error a failed one gave. A
+        # ``/compact`` turn that ends without a boundary says why in a
+        # ``compaction_failed`` diagnostic, so no one is told it compacted.
+        self._turn_compact_requested = False
+        self._turn_compactions = 0
+        self._turn_compact_error: str | None = None
         # True once the CLI accepted the ``initialize`` request that registered
         # this loop's hook callbacks (per process; reset on every spawn).
         self.cli_hooks_registered = False
@@ -1646,6 +1773,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 model=self.model, provider=self.provider, source=op.source,
             ))
             self._journal_turn_start(content)
+            self._turn_compact_requested = _is_compact_command(content)
+            self._turn_compactions = 0
+            self._turn_compact_error = None
             mapper = await self._drive_turn(sid, turn_id, user_node, content)
         except asyncio.CancelledError:
             raise
@@ -2362,6 +2492,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self.cli_tools = mapper.cli_tools
                 self.cli_mcp_servers = mapper.cli_mcp_servers
             self._check_claude_mod(mapper)
+            if mapped.is_result and mapped.error is None:
+                await self._report_skipped_compaction(sid, turn_id, mapper)
             # An earlier "allow always" covers this request: answer it without
             # surfacing a prompt the host already answered.
             auto_allow = mapped.permission is not None and self._session_allows(
@@ -2372,6 +2504,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     e for e in mapped.events if not isinstance(e, PermissionRequest)
                 ]
             for event in mapped.events:
+                if isinstance(event, ContextCompaction):
+                    # The main conversation's (subagents' were dropped above).
+                    self._turn_compactions += 1
+                    event = await self._with_compaction_summary(event, frame, parent.node_id)
                 if isinstance(event, TurnComplete) and self._hook_stop_reason is not None:
                     reason, self._hook_stop_reason = self._hook_stop_reason, None
                     event = ErrorEvent(
@@ -3179,6 +3315,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self._main_boundary_due = True
             elif frame.get("compact_result") not in (None, "success"):
                 self._main_boundary_due = False
+                error = frame.get("compact_error")
+                self._turn_compact_error = (
+                    str(error).strip() if error else "the compaction failed"
+                )
 
     def _take_main_boundary(self, frame: dict[str, Any]) -> bool:
         """True when this ``compact_boundary`` is the main conversation's.
@@ -3224,9 +3364,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if self._session is None:
             return True  # nothing to attach it to; not reachable with a CLI running
         try:
-            await self._emit(compaction_from_boundary(
+            await self._emit(await self._with_compaction_summary(compaction_from_boundary(
                 frame, session_id=self._session.session_id, turn_id=self._active_turn_id,
-            ))
+            ), frame, None))
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a notice never fails the next turn
@@ -3234,6 +3374,100 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return True
         logger.info("kept a compaction boundary the CLI wrote between turns")
         return True
+
+    async def _with_compaction_summary(
+        self, event: ContextCompaction, frame: dict[str, Any], node_id: str | None,
+    ) -> ContextCompaction:
+        """``event`` with the CLI's summary and the node it compacted after.
+
+        ``node_id`` is the last node of the turn when the boundary arrived (None
+        between turns). Both are what a re-seed on another worker needs to
+        rebuild the compacted context (see ``ContextCompaction.summary``).
+        Never raises: a summary that cannot be read leaves the field empty.
+        """
+        summary = await self._read_compaction_summary(frame)
+        return replace(
+            event, node_id=node_id if node_id is not None else event.node_id,
+            summary=summary,
+        )
+
+    async def _read_compaction_summary(self, frame: dict[str, Any]) -> str:
+        """The summary the CLI wrote for the compaction ``frame`` reports.
+
+        Read from the CLI's transcript, retried for up to
+        ``COMPACTION_SUMMARY_ATTEMPTS * COMPACTION_SUMMARY_INTERVAL`` seconds in
+        case the frame beat the file write. "" when it cannot be read.
+        """
+        frame_sid = frame.get("session_id")
+        cli_session_id = (
+            (frame_sid if isinstance(frame_sid, str) and frame_sid else None)
+            or getattr(self, "_surface_cli_session_id", None)
+            or self.cli_session_id
+        )
+        if not cli_session_id:
+            return ""
+        boundary_uuid = frame.get("uuid") if isinstance(frame.get("uuid"), str) else None
+        try:
+            config_dir = self._child_env().get("CLAUDE_CONFIG_DIR") or os.path.join(
+                os.path.expanduser("~"), ".claude",
+            )
+        except Exception:  # noqa: BLE001 — a summary never fails a turn
+            logger.debug("no config dir for the compaction summary", exc_info=True)
+            return ""
+        for attempt in range(COMPACTION_SUMMARY_ATTEMPTS):
+            try:
+                summary = await asyncio.to_thread(
+                    _find_compaction_summary, config_dir, cli_session_id, boundary_uuid,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.debug("reading the compaction summary failed", exc_info=True)
+                return ""
+            if summary is None:
+                return ""  # no transcript here: nothing will appear
+            if summary:
+                return summary
+            if attempt + 1 < COMPACTION_SUMMARY_ATTEMPTS:
+                await asyncio.sleep(COMPACTION_SUMMARY_INTERVAL)
+        logger.warning(
+            "claude CLI session %s compacted but its summary was not in its "
+            "transcript; a re-seed on another worker would replay the whole "
+            "conversation", cli_session_id,
+        )
+        return ""
+
+    async def _report_skipped_compaction(
+        self, sid: str, turn_id: str, mapper: StreamJsonMapper,
+    ) -> None:
+        """A ``/compact`` turn ended without a compaction: say why.
+
+        Published as a ``compaction_failed`` diagnostic before the turn's
+        terminal event. The reason is the CLI's ``compact_error``, else the
+        result text (the command's own output, e.g. "Not enough messages to
+        compact."), else a plain statement that no compaction was reported.
+        """
+        if not self._turn_compact_requested or self._turn_compactions:
+            return
+        reason = (
+            self._turn_compact_error
+            or mapper.result_text
+            or "Claude Code finished the /compact turn without reporting a compaction"
+        )
+        logger.warning("/compact did not compact the session: %s", reason)
+        try:
+            await self._emit(DelegatedDiagnostic(
+                session_id=sid, turn_id=turn_id, kind="compaction_failed",
+                message=reason,
+                data={
+                    "compact_error": self._turn_compact_error,
+                    "result": mapper.result_text or None,
+                },
+            ))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — the log line already said it
+            logger.debug("could not publish the compaction failure", exc_info=True)
 
     async def _compact_context_note(self) -> str | None:
         """The host's note for after a compaction, capped, or None.
@@ -3670,6 +3904,21 @@ def _hook_text(value: Any) -> str:
         return json.dumps(value, default=str)
     except (TypeError, ValueError):
         return str(value)
+
+
+def _is_compact_command(content: list[Any]) -> bool:
+    """Whether a turn's content is a typed ``/compact``.
+
+    The CLI reads a command from the last text block (``rL`` in 2.1.x), so
+    that is the block checked.
+    """
+    for block in reversed(content):
+        text = block.text if isinstance(block, Text) else None
+        if text is None and isinstance(block, str):
+            text = block
+        if text is not None:
+            return bool(_COMPACT_COMMAND.match(text.strip()))
+    return False
 
 
 def _content_to_cli(content: list[Any]) -> list[dict[str, Any]]:

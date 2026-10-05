@@ -45,6 +45,7 @@ beforeEach(() => {
 		agentSpeaking: false,
 		userSpeaking: false,
 		endReason: null,
+		micProblem: false,
 	});
 });
 

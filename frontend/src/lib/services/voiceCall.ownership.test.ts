@@ -3,7 +3,7 @@ import { get } from 'svelte/store';
 const api = vi.hoisted(() => ({ prepareConversationCall: vi.fn(), mintVoiceSecret: vi.fn(), attachVoiceCall: vi.fn(), hangupVoiceCall: vi.fn(), getVoiceCallState: vi.fn() }));
 vi.mock('$lib/api/voice', () => api);
 const streamed = vi.hoisted(() => ({ close: vi.fn(), muteInput: vi.fn(), muteOutput: vi.fn(), sendText: vi.fn() }));
-const streamHandlers = vi.hoisted(() => ({ current: null as null | { closed(message: string | null, reason: string): void; reconnecting?(active: boolean): void } }));
+const streamHandlers = vi.hoisted(() => ({ current: null as null | { closed(message: string | null, reason: string): void; reconnecting?(active: boolean): void; micHealth?(ok: boolean): void; reacquireMic?(): Promise<MediaStream> } }));
 vi.mock('./voiceAudioStream', () => ({
 	openVoiceAudioStream: vi.fn(async (_session: string, _mic: unknown, handlers: typeof streamHandlers.current) => {
 		streamHandlers.current = handlers;
@@ -261,6 +261,24 @@ describe('voice owner lifecycle', () => {
 		await hangup();
 		expect(vi.mocked(openVoiceAudioStream).mock.calls[1][3].aborted).toBe(true);
 		expect(get(voiceCallState)).toMatchObject({ status: 'ended', endReason: 'user', error: null });
+	});
+	// #1824: a call whose microphone is not reaching it never looks healthy.
+	it('shows a microphone that is not reaching the call and swaps in a fresh one', async () => {
+		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+		streamHandlers.current!.micHealth!(false);
+		expect(get(voiceCallState)).toMatchObject({ status: 'live', micProblem: true });
+		const old = track;
+		const fresh = { enabled: true, stop: vi.fn() };
+		capture.mockResolvedValueOnce({ getTracks: () => [fresh], getAudioTracks: () => [fresh] });
+		const next = await streamHandlers.current!.reacquireMic!();
+		expect(next.getAudioTracks()[0]).toBe(fresh);
+		expect(old.stop).toHaveBeenCalled();
+		expect(fresh.stop).not.toHaveBeenCalled();
+		streamHandlers.current!.micHealth!(true);
+		expect(get(voiceCallState).micProblem).toBe(false);
+		// The fresh microphone is the one a hangup releases.
+		await hangup();
+		expect(fresh.stop).toHaveBeenCalled();
 	});
 	it('shows reconnecting while the server restores its provider connection', async () => {
 		await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });

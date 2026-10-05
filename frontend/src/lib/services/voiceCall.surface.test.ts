@@ -35,6 +35,7 @@ function stateFor(sessionId: string | null, status: VoiceCallStatus): VoiceCallS
 		agentSpeaking: false,
 		userSpeaking: false,
 		endReason: null,
+		micProblem: false,
 	};
 }
 

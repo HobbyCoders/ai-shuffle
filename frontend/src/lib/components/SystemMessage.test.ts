@@ -469,4 +469,36 @@ describe('SystemMessage — Claude Code compaction', () => {
 		expect(text).toContain('Context was compacted. Previous context');
 		expect(text).not.toContain('manual');
 	});
+
+	it('says the app asked for a /compact it sent itself (#1820)', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_boundary',
+					systemData: {
+						compact_metadata: { trigger: 'manual', requested_by: 'app', pre_tokens: 870000 }
+					}
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Context Compacted');
+		expect(text).toContain('AI Shuffle asked Claude Code to compact the context');
+		expect(text).not.toContain('compacted manually (/compact)');
+	});
+
+	it('shows a failed /compact as failed with its reason, not as compacted (#1820)', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'compact_failed',
+					systemData: { reason: 'Not enough messages to compact.', requested_by: 'user' }
+				})
+			}
+		});
+		const text = container.textContent ?? '';
+		expect(text).toContain('Compaction Failed');
+		expect(text).toContain('Claude Code did not compact the context. Reason: Not enough messages to compact.');
+		expect(text).not.toContain('Context Compacted');
+	});
 });

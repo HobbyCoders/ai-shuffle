@@ -43,10 +43,11 @@ describe('assistant mode flag', () => {
 		for (const source of [chatView, chatInput, messageArea]) expect(source).not.toContain('home_session_id');
 	});
 
-	it('hides the header download, Git and swarm dropdown in the home only', () => {
+	it('hides the header download and Git in the home only', () => {
 		expect(mainPanel).toContain("{#if !assistantMode && $activeView?.type === 'session' && activeTab?.sessionId && activeTab.messages.length > 0}");
 		expect(mainPanel).toContain('{#if activeTab && !assistantMode && shouldShowHeaderGitActions({');
-		expect(mainPanel).toContain('hydrateOnly={assistantMode || shouldShowHeaderGitActions({');
+		// Swarms moved to the running-tasks list (#1816): no header swarm control on any chat.
+		expect(mainPanel).not.toContain('SwarmDropdown');
 	});
 
 	it('drops the context chips and the browser toggle from the composer in the home', () => {
@@ -55,7 +56,7 @@ describe('assistant mode flag', () => {
 	});
 
 	it('replaces the running-tasks tree with the background work strip', () => {
-		expect(messageArea).toMatch(/\{#if !assistantMode\}\s*<ActiveTasks /);
+		expect(messageArea).toMatch(/\{#if !assistantMode\}\s*<RunningTasksList /);
 		expect(chatView).toMatch(/\{#if assistantMode\}\s*<BackgroundWorkStrip /);
 	});
 

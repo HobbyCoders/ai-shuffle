@@ -116,7 +116,9 @@ describe('mobile composer drawer after send', () => {
 		resolveSend(true);
 		await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
 		await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-		expect(container.querySelector('.mobile-collapsed')).not.toBeNull();
+		// Since #1816 the composer stays expanded with its quick bar.
+		expect(container.querySelector('.mobile-collapsed')).toBeNull();
+		expect(container.querySelector('.qbar')).not.toBeNull();
 		expect(document.activeElement).not.toBe(trigger);
 	});
 
@@ -147,7 +149,9 @@ describe('mobile composer drawer after send', () => {
 		await waitFor(() => expect(send).toHaveBeenCalledWith(prompt, undefined));
 		await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
 		expect(container.querySelector('.mobile-controls-open')).toBeNull();
-		if (compact) await waitFor(() => expect(container.querySelector('.mobile-collapsed')).not.toBeNull());
+		// Since #1816 the composer stays expanded with its quick bar.
+		expect(container.querySelector('.mobile-collapsed')).toBeNull();
+		if (compact) expect(container.querySelector('.qbar')).not.toBeNull();
 		await waitFor(() => expect(document.activeElement).not.toBe(editor));
 	});
 

@@ -68,6 +68,47 @@ PAUSE_QUIET_S = 1.5
 PAUSE_AFTER_CALLER_S = 3.0
 MERGED_REQUEST_NOTE = ("This handoff was combined with the request already sent to the chat agent "
                        "while the user was still speaking; its result will follow.")
+# Call health (#1824). The browser is told how long ago the last microphone
+# frame arrived every HEALTH_PUSH_S; one INFO line per HEALTH_LOG_S records the
+# call's audio figures so a report can be diagnosed from the log alone.
+HEALTH_PUSH_S = 2.0
+HEALTH_LOG_S = 30.0
+# No microphone frame for this long while the browser says it is unmuted is
+# logged as a warning (the browser shows its own state after a few seconds).
+MIC_SILENT_WARN_S = 10.0
+# GPT Live that heard the caller earlier in this provider session but has not
+# transcribed this much speech-level microphone audio since is treated as deaf
+# and its session is replaced, at most once per PROVIDER_DEAF_COOLDOWN_S.
+PROVIDER_DEAF_VOICED_S = 20.0
+PROVIDER_DEAF_COOLDOWN_S = 300.0
+# Speech-level microphone audio only counts toward deafness while the voice
+# itself has been quiet this long (its own speech may leak into the mic).
+PROVIDER_DEAF_OUTPUT_QUIET_S = 1.0
+_CLIENT_STAT_KEY = re.compile(r"[a-z0-9_]{1,32}")
+_CLIENT_STAT_TEXT = re.compile(r"[a-z0-9-]{0,24}")
+MAX_CLIENT_STATS = 32
+
+
+def sanitize_client_stats(stats) -> dict:
+    """Keep the browser's numeric call figures; nothing else reaches the log."""
+    import math
+    clean: dict = {}
+    if not isinstance(stats, dict):
+        return clean
+    for key, value in list(stats.items())[:MAX_CLIENT_STATS]:
+        if not isinstance(key, str) or not _CLIENT_STAT_KEY.fullmatch(key):
+            continue
+        if isinstance(value, bool):
+            clean[key] = value
+        elif isinstance(value, (int, float)) and math.isfinite(value):
+            clean[key] = round(value, 1) if isinstance(value, float) else value
+        elif isinstance(value, str) and _CLIENT_STAT_TEXT.fullmatch(value):
+            clean[key] = value
+    return clean
+
+
+def _age(now: float, at: float | None) -> str:
+    return "never" if at is None else f"{now - at:.1f} s ago"
 
 
 def is_backchannel(text: str) -> bool:
@@ -329,6 +370,25 @@ class VoiceStream:
         self.last_user_seq = 0
         # Delegation ids waiting for the caller's words to settle; None when idle.
         self.settling: list[str] | None = None
+        # Call health (#1824): monotonic times, None until the first event.
+        self.mic_frames = 0
+        self.mic_bytes = 0
+        self.mic_voiced_s = 0.0
+        self.last_mic_at: float | None = None
+        self.out_frames = 0
+        self.out_bytes = 0
+        self.last_out_at: float | None = None
+        self.provider_events = 0
+        self.last_provider_at: float | None = None
+        self.heard = 0
+        self.last_heard_at: float | None = None
+        # Caller speech the current provider session has heard / not heard yet.
+        self.heard_this_session = False
+        self.unheard_voiced_s = 0.0
+        self.deaf = asyncio.Event()
+        self.last_deaf_restart = float("-inf")
+        self.client_stats: dict = {}
+        self.mic_warned = False
 
     @property
     def is_live(self):
@@ -510,6 +570,17 @@ class VoiceStream:
                     delta = " " + delta
             else:
                 await self.flush()
+        pending = self.pending[role]
+        if pending and not pending[-1].isspace() and _SENTENCE_END.search(pending) and delta[:1].isupper():
+            # A new utterance after a finished sentence ("…site." + "I've…")
+            # arrives without a leading space; keep the words apart (#1798).
+            delta = " " + delta
+        if role == "user":
+            # GPT Live heard the caller, so the microphone path works (#1824).
+            self.heard += 1
+            self.last_heard_at = time.monotonic()
+            self.heard_this_session = True
+            self.unheard_voiced_s = 0.0
         self.last_caption_role = role
         self.transcript_seq += 1
         self.transcript.append({"role": role, "text": delta, "offset_ms": offset, "seq": self.transcript_seq})
@@ -648,14 +719,15 @@ class VoiceStream:
             if first:
                 logger.info("Voice %s received its first provider frame (%d bytes)", self.session_id, len(raw))
                 first = False
+            self.provider_events += 1
+            self.last_provider_at = time.monotonic()
             if self.is_live:
                 event = json.loads(raw)
                 kind = event.get("type")
                 if kind == "session.output_audio.delta":
                     audio = base64.b64decode(event.get("delta") or "", validate=True)
                     if audio:
-                        async with self.send_lock:
-                            await self.websocket.send_bytes(audio)
+                        await self.send_audio(audio)
                 elif kind in ("session.input_transcript.delta", "session.output_transcript.delta"):
                     role = "user" if kind == "session.input_transcript.delta" else "assistant"
                     await self.caption(role, event.get("delta") or "", event.get("end_ms") or 0)
@@ -698,9 +770,16 @@ class VoiceStream:
                 if isinstance(audio, str):
                     audio = base64.b64decode(audio, validate=True)
                 if audio:
-                    async with self.send_lock:
-                        await self.websocket.send_bytes(audio)
+                    await self.send_audio(audio)
                 await self.caption("assistant", event.get("text") or "")
+
+    async def send_audio(self, audio: bytes) -> None:
+        """Pass provider speech to the browser, counting it for the health log."""
+        async with self.send_lock:
+            await self.websocket.send_bytes(audio)
+        self.out_frames += 1
+        self.out_bytes += len(audio)
+        self.last_out_at = time.monotonic()
 
     async def receive_text(self, raw: str):
         """Admit user input only, never browser-supplied provider/tool events."""
@@ -709,6 +788,10 @@ class VoiceStream:
         if len(raw.encode("utf-8")) > MAX_TEXT_BYTES * 6 + 512:
             raise ValueError("Voice text frame is too large.")
         event = json.loads(raw)
+        if isinstance(event, dict) and set(event) == {"type", "stats"} and event["type"] == "client_stats":
+            # The browser's playback and microphone figures, for the health log only.
+            self.client_stats = sanitize_client_stats(event["stats"])
+            return
         if (not isinstance(event, dict) or set(event) != {"type", "id", "text"}
                 or event["type"] != "input_text" or not isinstance(event["id"], str)
                 or not re.fullmatch(r"[a-zA-Z0-9-]{1,80}", event["id"])
@@ -763,6 +846,7 @@ class VoiceStream:
             audio_bytes += len(data)
             if audio_bytes > 48_000 * (time.monotonic() - audio_started + 5):
                 raise ValueError("Audio arrived faster than realtime.")
+            self.count_mic(data)
             if self.is_live:
                 await self.send({"type": "session.input_audio.append", "audio": base64.b64encode(data).decode()})
             else:
@@ -787,6 +871,70 @@ class VoiceStream:
         hold = HOLD_UNANSWERED_S if unanswered else HOLD_MID_REPLY_S if mid_reply else 2
         return time.monotonic() - self.last_caption_at >= hold
 
+    def count_mic(self, data: bytes) -> None:
+        """Count one microphone frame and watch for a provider that stopped hearing.
+
+        The browser sends gated quiet as exact zeros, so a frame with any
+        non-zero sample is speech-level audio.
+        """
+        now = time.monotonic()
+        self.mic_frames += 1
+        self.mic_bytes += len(data)
+        self.last_mic_at = now
+        if data.count(0) == len(data):
+            return
+        seconds = len(data) / 48_000
+        self.mic_voiced_s += seconds
+        if not self.is_live or self.restoring:
+            return
+        if self.last_out_at is not None and now - self.last_out_at < PROVIDER_DEAF_OUTPUT_QUIET_S:
+            return  # The voice is talking; its own speech may be what the mic hears.
+        self.unheard_voiced_s += seconds
+        if (self.heard_this_session and not self.deaf.is_set()
+                and self.unheard_voiced_s >= PROVIDER_DEAF_VOICED_S
+                and now - self.last_deaf_restart >= PROVIDER_DEAF_COOLDOWN_S):
+            logger.warning("Voice %s: GPT Live has not heard %.0f s of speech from the microphone "
+                           "(last heard %s); replacing the provider session",
+                           self.session_id, self.unheard_voiced_s, _age(now, self.last_heard_at))
+            self.last_deaf_restart = now
+            self.deaf.set()
+
+    def health_line(self) -> str:
+        now = time.monotonic()
+        client = " ".join(f"{key}={value}" for key, value in sorted(self.client_stats.items())) or "none"
+        return (f"Voice {self.session_id} health: up {int(time.time() - self.started_at)} s; "
+                f"mic {self.mic_frames} frames {self.mic_bytes // 1024} KB, last {_age(now, self.last_mic_at)}, "
+                f"speech {self.mic_voiced_s:.0f} s, unheard {self.unheard_voiced_s:.0f} s; "
+                f"to browser {self.out_frames} frames {self.out_bytes // 1024} KB, last {_age(now, self.last_out_at)}; "
+                f"provider events {self.provider_events}, last {_age(now, self.last_provider_at)}; "
+                f"heard {self.heard}, last {_age(now, self.last_heard_at)}; "
+                f"reconnects {self.reconnects}; client {client}")
+
+    async def health(self) -> None:
+        """Tell the browser how fresh its microphone audio is; log the call's figures."""
+        last_log = time.monotonic()
+        while True:
+            await asyncio.sleep(HEALTH_PUSH_S)
+            now = time.monotonic()
+            mic_age = None if self.last_mic_at is None else now - self.last_mic_at
+            try:
+                await self.emit({"type": "health",
+                                 "mic_age_ms": None if mic_age is None else int(mic_age * 1000),
+                                 "mic_frames": self.mic_frames})
+            except (RuntimeError, WebSocketDisconnect, OSError):
+                pass  # The browser leg ends the call on its own.
+            if now - last_log >= HEALTH_LOG_S:
+                last_log = now
+                logger.info(self.health_line())
+            unmuted = self.client_stats.get("muted") is False
+            if unmuted and (mic_age is None or mic_age >= MIC_SILENT_WARN_S):
+                if not self.mic_warned:
+                    self.mic_warned = True
+                    logger.warning("Voice %s: no microphone audio for %s while the caller is unmuted",
+                                   self.session_id, "the whole call" if mic_age is None else f"{mic_age:.0f} s")
+            elif mic_age is not None and mic_age < MIC_SILENT_WARN_S:
+                self.mic_warned = False
+
     async def start_live(self, history: list[dict]) -> None:
         live_config = live_session_config(self.config, history)
         if self.config.get("conversation_surface"):
@@ -802,6 +950,10 @@ class VoiceStream:
         self.expires_at = float(expires_at) if isinstance(expires_at, (int, float)) and not isinstance(expires_at, bool) else None
         logger.info("Voice %s: GPT Live session started (expires in %s s)", self.session_id,
                     int(self.expires_at - time.time()) if self.expires_at else "unknown")
+        # A new provider session has heard nothing yet.
+        self.heard_this_session = False
+        self.unheard_voiced_s = 0.0
+        self.deaf.clear()
         if self.restoring:
             return  # Never greet again after a reconnect.
         if self.options["opening"] and not history and self.config.get("greet", True):
@@ -839,7 +991,7 @@ class VoiceStream:
         if self.closed or not self.is_live:
             return None
         if reader not in done:
-            return "renew"
+            return "unresponsive" if self.deaf.is_set() else "renew"
         if reader.cancelled():
             return None
         exc = reader.exception()
@@ -1011,14 +1163,18 @@ class VoiceStream:
                     await run_sync(database.update_session, self.session_id, launched_model=self.config["model"])
                 await run_sync(database.set_session_active, self.session_id, True)
                 await self.emit({"type": "ready", "model": self.config["model"], "sample_rate": 24000})
-                tasks = [asyncio.create_task(self.receive_browser()), asyncio.create_task(self.checkpoint())]
+                tasks = [asyncio.create_task(self.receive_browser()), asyncio.create_task(self.checkpoint()),
+                         asyncio.create_task(self.health())]
                 if self.progress is not None:
                     tasks.append(asyncio.create_task(self.progress.run()))
                 while True:
                     reader = asyncio.create_task(self.receive_upstream())
-                    provider = [reader]
+                    provider: list[asyncio.Task] = [reader]
                     if self.is_live and self.expires_at:
                         provider.append(asyncio.create_task(self.renew_when_due()))
+                    if self.is_live:
+                        # A session that stopped hearing the caller is replaced (#1824).
+                        provider.append(asyncio.create_task(self.deaf.wait()))
                     done, _ = await asyncio.wait(tasks + provider, return_when=asyncio.FIRST_COMPLETED)
                     for task in provider:
                         if task not in done:
@@ -1071,6 +1227,8 @@ class VoiceStream:
                 for task in tasks + provider:
                     task.cancel()
                 await asyncio.gather(*tasks, *provider, return_exceptions=True)
+                if tasks:
+                    logger.info(self.health_line())  # The call's final figures.
                 if self.progress is not None:
                     self.progress.close()
                 await self.close()

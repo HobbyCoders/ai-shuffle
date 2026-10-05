@@ -9,6 +9,11 @@ vi.mock('./AppTopBar.svelte', async () => ({
 }));
 vi.mock('$lib/components/CredentialStorageBanner.svelte', () => ({ default: () => {} }));
 vi.mock('$lib/stores/layout.svelte', () => ({ layout: { setSidebarOverlay: vi.fn() } }));
+vi.mock('$lib/api/installs', () => ({
+	listInstalls: vi.fn().mockResolvedValue({ installs: [
+		{ id: 'pc', device_name: 'DesktopWorker', base_url: 'https://pc.test', platform: null, version: null, capabilities: {}, last_seen: null, online: true, is_self: true }
+	], self_instance_id: 'pc' })
+}));
 // PageHeader's own stores: voice input off, idle.
 vi.mock('$lib/stores/hotkeyPreferences.svelte', async () => {
 	const { writable } = await import('svelte/store');
@@ -58,17 +63,23 @@ describe('MobileAppLayout', () => {
 		expect(props.onOpenSpotlight).toHaveBeenCalledTimes(1);
 	});
 
-	it('puts download left and Git right in a second row, outside the session title bar', () => {
+	it('opens with the "Connected to" bar, above the app bar', async () => {
+		const { container } = renderLayout();
+		const bar = await screen.findByRole('button', { name: 'Connected to DesktopWorker. Switch worker' });
+		expect(container.firstElementChild?.contains(bar)).toBe(true);
+		expect(bar.compareDocumentPosition(screen.getByTestId('app-top-bar')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	});
+
+	// #1816: export moved into the composer's Chat controls; the chat-action row keeps Git.
+	it('puts Git right in a second row, outside the session title bar, with no export there', () => {
 		mainPanelView.isSessionView = true;
 		mainPanelView.embedded = true;
 		const { container } = renderLayout();
 		const header = screen.getByTestId('app-top-bar');
-		const download = screen.getByRole('button', { name: 'Download chat' });
 		const git = screen.getByRole('button', { name: 'Commit' });
-		expect(header.contains(download)).toBe(false);
+		expect(screen.queryByRole('button', { name: 'Download chat' })).toBeNull();
 		expect(header.contains(git)).toBe(false);
 		const actions = screen.getByRole('banner', { name: 'Chat actions' });
-		expect(actions.querySelector('.hdr-meta')?.contains(download)).toBe(true);
 		expect(actions.querySelector('.hdr-right')?.contains(git)).toBe(true);
 		expect(header.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 		expect(container.querySelectorAll('header')).toHaveLength(2);

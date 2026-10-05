@@ -7,7 +7,7 @@ const controls = vi.hoisted(() => ({ toggleMic: vi.fn(), toggleAgent: vi.fn(), h
 vi.mock('$lib/stores/active-session', () => ({ activeSession: stores.active }));
 vi.mock('$lib/stores/layout.svelte', () => ({ layout: stores.layout }));
 vi.mock('$lib/stores/app-data.svelte', () => ({ sessions: stores.sessions }));
-vi.mock('$lib/services/voiceCall', () => ({ ...controls, voiceCallState: stores.call,
+vi.mock('$lib/services/voiceCall', () => ({ ...controls, voiceCallState: stores.call, MIC_PROBLEM_LABEL: 'Microphone not reaching the call',
 	isCallSurfaceActive: (s: any, id: string) => !!id && s.sessionId === id && ['live', 'connecting', 'reconnecting'].includes(s.status) }));
 stores.active = writable({ sessionId: 'other' });
 stores.layout = writable({ activeView: { type: 'session' } });
@@ -38,6 +38,17 @@ describe('global voice call bar', () => {
 		stores.layout.set({ activeView: { type: 'settings' } });
 		await tick();
 		expect(screen.getByRole('complementary', { name: 'Active voice call' })).toBeTruthy();
+	});
+	it('says when the microphone is not reaching the call instead of showing it live', async () => {
+		stores.active.set({ sessionId: 'other' });
+		stores.call.set({ sessionId: 'owner', status: 'live', micMuted: false, agentMuted: false, micProblem: true });
+		render(ActiveVoiceCallBar, { onReturn: vi.fn() });
+		expect(screen.getByText('Microphone not reaching the call')).toBeTruthy();
+		expect(screen.queryByText('Voice call · live')).toBeNull();
+		stores.call.set({ sessionId: 'owner', status: 'live', micMuted: true, agentMuted: false, micProblem: true });
+		await tick();
+		expect(screen.queryByText('Microphone not reaching the call')).toBeNull();
+		stores.call.set({ sessionId: 'owner', status: 'live', micMuted: false, agentMuted: false });
 	});
 	it('reconciles on visibility return without starting another call', async () => {
 		render(ActiveVoiceCallBar, { onReturn: vi.fn() });

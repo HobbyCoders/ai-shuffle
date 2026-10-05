@@ -155,8 +155,10 @@ async def handle(body: dict, from_device: str) -> dict:
         # with us. The asking peer's view of our stream is that comparison
         # (#1621); without it the request is refused below as before.
         await run_sync(transport.release_hold_for_peer_view, from_device, view)
+    restoring = archived is False and await _is_archived(session_id)
     row, envelope = await run_sync(lambda: _write(session_id, active, archived=archived))
     await _broadcast(row, session_id)
+    await _apply_archive_change(session_id, archived, restoring)
     # Only the signed catalog representation crosses the worker boundary.
     return {"envelope": envelope}
 
@@ -181,14 +183,43 @@ async def update_membership(existing: dict, active: bool, archived: Optional[boo
     if row is None:
         raise MembershipUpdateFailed("Failed to update active status")
     await _broadcast(row, session_id)
+    await _apply_archive_change(session_id, archived, existing.get("status") == "archived")
     return row
 
 
 async def set_local(session_id: str, active: bool, archived: Optional[bool] = None) -> dict:
     """Settle, reopen, archive or restore a session this worker owns, for its own UI."""
+    restoring = archived is False and await _is_archived(session_id)
     row, _envelope = await run_sync(lambda: _write(session_id, active, archived=archived, local=True))
     await _broadcast(row, session_id)
+    await _apply_archive_change(session_id, archived, restoring)
     return row
+
+
+async def _is_archived(session_id: str) -> bool:
+    from app.core import archive_guard
+
+    return await archive_guard.is_archived_async(session_id)
+
+
+async def _apply_archive_change(session_id: str, archived: Optional[bool],
+                                restored: bool = False) -> None:
+    """On the execution owner, after an archive or restore committed (#1822).
+
+    Archive stops the chat's running and parked work so nothing is left to wake
+    it; it runs after the write, so every wake producer already reads the chat
+    as archived while the stop is in progress. Restore makes the chat fully
+    usable again by releasing the Stop latch archiving set; ``restored`` says the
+    chat really was archived, so an ``archived=False`` write to a chat that was
+    not leaves a Stop the owner pressed alone. ``None`` (a plain settle or
+    reopen) changes nothing.
+    """
+    from app.core import archive_guard
+
+    if archived:
+        await archive_guard.stop_work(session_id)
+    elif archived is False and restored:
+        archive_guard.release_after_restore(session_id)
 
 
 async def _broadcast(row: dict, session_id: str) -> None:

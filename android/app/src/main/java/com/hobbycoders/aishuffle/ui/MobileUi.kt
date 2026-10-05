@@ -11,8 +11,8 @@ import java.net.URI
  * `mobile/` at the repository root builds it; every worker ships it beside the
  * desktop UI (app/mobile_ui.py), so a UI change reaches this app with a worker
  * update and never needs a new APK. The app owns only the native side: pairing,
- * phone tools, permissions and the bridge described by [BRIDGE_VERSION] and
- * [CAPABILITIES]. The paired session reaches the page as a Bearer token through
+ * phone tools, permissions and the bridge described by [BRIDGE_VERSION],
+ * [CAPABILITIES] and [SHELL_BRIDGE]. The paired session reaches the page as a Bearer token through
  * [bootstrapScript], installed before any page script runs (contract:
  * frontend/src/lib/api/runtime.ts). See docs/mobile-desktop-ui-split.md.
  */
@@ -26,7 +26,36 @@ object MobileUi {
      * newer worker UI can tell an older app apart and degrade.
      */
     const val BRIDGE_VERSION = 1
-    val CAPABILITIES = listOf("file-save", "file-chooser", "microphone", "device-tools")
+    val CAPABILITIES = listOf("file-save", "file-chooser", "microphone", "device-tools", WorkerSwitch.CAPABILITY)
+
+    /**
+     * Web-message bridge the page uses to tell the shell about its own chrome
+     * (`window.shuffleShell.postMessage(json)`), scoped like `shuffleFileSave`
+     * to the top-level phone UI page. Messages ([shellMessage]):
+     *  - `{"type":"worker-bar","shown":true|false}`: the page draws its own
+     *    "Connected to" bar, so the shell hides its worker-name bar. The shell
+     *    shows its bar until told, so an older worker UI keeps it.
+     *  - `{"type":"workers"}`: open the native Workers screen (pair, rename,
+     *    remove), which the hidden bar's menu used to reach.
+     */
+    const val SHELL_BRIDGE = "shuffleShell"
+    private const val MAX_SHELL_MESSAGE = 256
+
+    sealed class ShellMessage {
+        data class WorkerBar(val shown: Boolean) : ShellMessage()
+        object OpenWorkers : ShellMessage()
+    }
+
+    /** Parses one `shuffleShell` message; null for anything unknown or malformed. */
+    fun shellMessage(raw: String?): ShellMessage? {
+        if (raw == null || raw.length > MAX_SHELL_MESSAGE) return null
+        val json = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+        return when (json.optString("type")) {
+            "worker-bar" -> (json.opt("shown") as? Boolean)?.let { ShellMessage.WorkerBar(it) }
+            "workers" -> ShellMessage.OpenWorkers
+            else -> null
+        }
+    }
 
     /** The document the chat WebView loads from a worker. */
     fun indexUrl(base: String): String = PairingInput.origin(base) + PATH

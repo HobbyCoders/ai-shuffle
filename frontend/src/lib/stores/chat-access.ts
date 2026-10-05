@@ -32,6 +32,11 @@ export interface ChatAccessSummary {
 	error: boolean;
 	/** Open the private-access dialog. No-op when there is nothing to show. */
 	open: () => void;
+	/**
+	 * Answer a waiting one-shot approval (`kind: 'action'`) without opening the
+	 * dialog. Requests that need private inputs still go through `open`.
+	 */
+	decide?: (id: string, allow: boolean) => Promise<boolean>;
 }
 
 /** Summary for the mounted ChatAccess instance, or null when none is mounted. */

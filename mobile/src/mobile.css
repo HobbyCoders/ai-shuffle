@@ -154,9 +154,13 @@ html:root[data-platform='mobile'] .chat-input-wrapper {
 	background: linear-gradient(to top, var(--background) 68%, transparent);
 }
 
+/* The composer card (issue #1816): + | text | mic · send/stop, with the
+   quick bar (MobileComposerControlsSheet) as its bottom edge. */
 html:root[data-platform='mobile'] .chat-island {
-	border-radius: 20px;
-	background: var(--popover);
+	border-radius: calc(var(--radius) * 1.6);
+	border-color: var(--border-strong);
+	background: var(--card);
+	box-shadow: var(--shadow-m);
 	transition:
 	border-radius 180ms ease,
 	border-color 180ms ease;
@@ -167,25 +171,85 @@ html:root[data-platform='mobile'] .context-pill-row {
 	display: none;
 }
 
+/* A 52px field with a 24px line; the 44px buttons sit 4px off the bottom,
+   so they centre on the first line and stay pinned as the text grows. */
 html:root[data-platform='mobile'] .input-area {
-	min-height: 56px;
-	padding: 10px 10px 4px 12px;
-	background: var(--card);
-	border-radius: 20px 20px 0 0;
+	min-height: 0;
+	align-items: flex-end;
+	gap: 4px;
+	padding: 6px;
+	background: transparent;
+	border-radius: calc(var(--radius) * 1.6) calc(var(--radius) * 1.6) 0 0;
 }
 
-/* Leave room for the integrated panel while a draft grows above the
-   software keyboard. The editor keeps its own text scrolling. */
-html:root[data-platform='mobile'] .mobile-controls-open .textarea-wrapper .tiptap-editor {
-	max-height: min(150px, calc(var(--app-viewport-height, 100dvh) * 0.15));
+html:root[data-platform='mobile'] .input-area .textarea-wrapper {
+	align-self: stretch;
+	padding: 14px 8px 14px 6px;
 }
 
-/* Thumb-sized primary action: a full 44px touch target. */
+html:root[data-platform='mobile'] .composer-attach,
+html:root[data-platform='mobile'] .send-cluster .voice-btn {
+	display: grid;
+	place-items: center;
+	width: 44px;
+	height: 44px;
+	flex: none;
+	margin-bottom: 4px;
+	padding: 0;
+	border: 0;
+	border-radius: var(--radius);
+	background: transparent;
+	color: var(--muted-foreground);
+	cursor: pointer;
+	-webkit-tap-highlight-color: transparent;
+}
+
+html:root[data-platform='mobile'] .composer-attach:hover:not(:disabled),
+html:root[data-platform='mobile'] .send-cluster .voice-btn:hover:not(:disabled) {
+	background: var(--hover-overlay);
+	color: var(--foreground);
+}
+
+html:root[data-platform='mobile'] .composer-attach:active:not(:disabled) { background: var(--active-overlay); }
+html:root[data-platform='mobile'] .composer-attach:disabled { opacity: 0.4; cursor: not-allowed; }
+html:root[data-platform='mobile'] .composer-attach:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+html:root[data-platform='mobile'] .composer-attach-spin { animation: composer-attach-spin 0.9s linear infinite; }
+@keyframes composer-attach-spin { to { transform: rotate(360deg); } }
+
+html:root[data-platform='mobile'] .send-cluster .voice-btn-wrapper { margin-bottom: 4px; border-radius: var(--radius); }
+html:root[data-platform='mobile'] .send-cluster .voice-btn-wrapper .voice-btn { margin-bottom: 0; }
+html:root[data-platform='mobile'] .send-cluster .voice-btn svg { width: 20px; height: 20px; }
+
+/* The mic gives way to send while there is a draft, unless it is dictating. */
+html:root[data-platform='mobile'] .chat-input-wrapper.has-draft:not(.dictating) .send-cluster .voice-btn-wrapper {
+	display: none;
+}
+
+/* Drafts save and restore by themselves; the phone shows no stash control. */
+html:root[data-platform='mobile'] .send-cluster .stash {
+	display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html:root[data-platform='mobile'] .composer-attach-spin { animation: none; }
+}
+
+/* Thumb-sized primary action: a full 44px touch target, the same size and
+   radius as + and the mic, pinned to the bottom with them. */
+html:root[data-platform='mobile'] .send-cluster {
+	align-self: flex-end;
+	gap: 4px;
+}
+
 html:root[data-platform='mobile'] .send-btn, html:root[data-platform='mobile'] .send-cluster .stop-btn {
 	width: 44px;
 	height: 44px;
-	border-radius: 12px;
+	margin-bottom: 4px;
+	border-radius: var(--radius);
 }
+
+html:root[data-platform='mobile'] .send-btn svg { width: 20px; height: 20px; }
+html:root[data-platform='mobile'] .send-cluster .stop-btn svg { width: 18px; height: 18px; }
 
 /* Composer text at 16px: readable on a phone, and mobile browsers do not zoom
    into an editor whose text is at least 16px. The suggestion ghost text sits
@@ -221,9 +285,9 @@ html:root[data-platform='mobile'] .chat-input-wrapper .ProseMirror p.is-editor-e
 	}
 }
 
-/* Expanded, the editor offers a comfortable target even before any text. */
+/* The field's padding makes the target; the editor grows to five lines. */
 html:root[data-platform='mobile'] .chat-input-wrapper:not(.mobile-collapsed) .textarea-wrapper .tiptap-editor {
-	min-height: 44px;
+	min-height: 24px;
 }
 
 html:root[data-platform='mobile'] .mobile-collapsed .chat-island {
@@ -263,14 +327,12 @@ html:root[data-platform='mobile'] .mobile-collapsed .input-area {
 
 /* ── frontend/src/lib/components/chat/ControlsDock.svelte ──────────────────── */
 
-/* Mobile shell only: the dock becomes the composer's bottom edge and swaps
-   the desktop control row for the settings-sheet trigger. */
+/* Mobile shell only: the quick bar (MobileComposerControlsSheet) is the
+   composer's bottom edge. The dock stays mounted for its state (usage
+   polling, effort range, Away) but shows nothing: attach and the mic sit in
+   the input row, call and browser in Chat controls (issue #1816). */
 html:root[data-platform='mobile'] .controls-dock {
-	gap: 3px;
-	padding: 5px 6px 7px;
-	background: var(--card);
-	border-radius: 0 0 20px 20px;
-	box-shadow: 0 6px 10px -8px color-mix(in oklch, var(--foreground) 20%, transparent);
+	display: none;
 }
 
 html:root[data-platform='mobile'] .desktop-controls {
@@ -386,7 +448,7 @@ html:root[data-platform='mobile'] .selector-dropdown {
    bounds. ChatInput applies the taller min-height to .tiptap-editor on the
    desktop shell only, so this compact cap covers the mobile counterpart. */
 html:root[data-platform='mobile'] .tiptap-editor {
-	max-height: 150px;
+	max-height: 120px;
 }
 
 /* ── frontend/src/lib/components/deck/cards/StatsCard.svelte ───────────────── */

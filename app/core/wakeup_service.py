@@ -14,10 +14,14 @@ parks forever because no next turn arrives:
 
 2. **Idle-at-edge watchdog.** :func:`scan_once` (run on a timer by
    :func:`watchdog_loop`) finds sessions sitting IDLE above the context-window
-   edge and arms a synthetic nudge through the SAME wakeup machinery. Firing a
-   real turn is what makes the CLI run its deferred compaction — the
-   belt-and-braces backstop that covers the cases the opt-in ScheduleWakeup and
-   the turn scheduler's boundary auto-continue miss.
+   edge and arms a wake through the SAME wakeup machinery. For a Claude Code
+   session the wake is a ``/compact`` command, which the CLI carries out at
+   once: a plain new turn compacts nothing until the context crosses the CLI's
+   own threshold (well above this watchdog's fraction on a 1M window), so the
+   old nudge announced a compaction that never ran (#1820). Other sessions get
+   the plain continuation nudge. The belt-and-braces backstop that covers the
+   cases the opt-in ScheduleWakeup and the turn scheduler's boundary
+   auto-continue miss.
 
 A wake does NOT run a query of its own. :func:`_fire` enrolls the prompt in the
 v2 turn queue (``await turn_manager.submit_async(..., source="wakeup")``), so the wake goes
@@ -50,16 +54,34 @@ from app.db import wakeups as wakeups_db
 
 logger = logging.getLogger(__name__)
 
-# The nudge a watchdog wake fires. Honest + explicitly labeled so it never reads
-# as a human instruction when it renders in chat. Its purpose is simply to BE a
-# new turn (which triggers the CLI's deferred compaction); the wording steers a
-# session with nothing left to do toward a quiet stop.
+# The nudge a watchdog wake fires for a session that is not Claude Code's.
+# Honest + explicitly labeled so it never reads as a human instruction when it
+# renders in chat. It is only a new turn: it claims no compaction, because
+# nothing here asks the provider for one. The wording steers a session with
+# nothing left to do toward a quiet stop.
 WATCHDOG_NUDGE_PROMPT = (
-    "[auto-continue] This session was idle near the context-window limit; a "
-    "compaction has now been triggered. If you had unfinished work, continue it "
-    "exactly where you left off. If everything is already complete, stop after a "
-    "brief acknowledgement — do not invent new work."
+    "[auto-continue] This session was idle near the context-window limit. If "
+    "you had unfinished work, continue it exactly where you left off. If "
+    "everything is already complete, stop after a brief acknowledgement — do not "
+    "invent new work."
 )
+
+# The wake for a Claude Code session: the CLI's own command, sent bare. The
+# chat shows its "Context Compacted" card only when the CLI reports the
+# compaction, or a "Compaction failed" card with the CLI's reason.
+WATCHDOG_COMPACT_PROMPT = "/compact"
+
+
+def _watchdog_prompt(usage: Optional[Dict[str, Any]]) -> str:
+    """The wake for a session idle at the edge: ``/compact`` for Claude Code.
+
+    Only the Claude Code CLI reports ``isAutoCompactEnabled: true`` in its
+    context-usage breakdown (fluid's native legs report False and are skipped
+    before this), so that flag is what says the session runs the CLI.
+    """
+    if usage is not None and usage.get("isAutoCompactEnabled") is True:
+        return WATCHDOG_COMPACT_PROMPT
+    return WATCHDOG_NUDGE_PROMPT
 
 # Overdue-wake rehydrate stagger: on boot, wakes whose fire_at already passed are
 # re-armed a few seconds apart (capped) instead of all firing at once, so a long
@@ -336,6 +358,19 @@ async def _fire(row: Dict[str, Any]) -> None:
             _retry_attempts.pop(str(wakeup_id), None)
         return
 
+    # An archived chat is read-only until the owner restores it (#1822).
+    # Dropped like a stopped session's wake, never re-armed.
+    from app.core import archive_guard
+
+    if await archive_guard.is_archived_async(session_id):
+        archive_guard.log_dropped(
+            session_id, "wakeup", f"wakeup {wakeup_id}, {row.get('source')}",
+        )
+        if wakeup_id:
+            await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
+            _retry_attempts.pop(str(wakeup_id), None)
+        return
+
     claimed = await asyncio.to_thread(wakeups_db.claim_wakeup, wakeup_id)
     if not claimed:
         logger.info(
@@ -392,6 +427,11 @@ async def _fire(row: Dict[str, Any]) -> None:
             )
     except asyncio.CancelledError:
         raise
+    except archive_guard.SessionArchived:
+        # Archived between the check above and the submit: drop, never re-arm.
+        if wakeup_id:
+            _retry_attempts.pop(str(wakeup_id), None)
+        return
     except Exception as exc:  # noqa: BLE001 — a raise must not lose the wake.
         logger.warning(
             "wakeup %s (session %s) submit raised", wakeup_id, session_id,
@@ -817,7 +857,7 @@ async def scan_once() -> List[str]:
                 session_id=session_id,
                 profile_id=cand.get("profile_id"),
                 project_id=cand.get("project_id"),
-                prompt=WATCHDOG_NUDGE_PROMPT,
+                prompt=_watchdog_prompt(usage),
                 delay_seconds=0.0,
                 reason="idle-at-edge watchdog (#598)",
                 source="idle_watchdog",

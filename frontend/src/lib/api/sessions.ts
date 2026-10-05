@@ -301,6 +301,44 @@ export async function moveSession(
 	});
 }
 
+/** What keeps a chat from moving now, read on the worker that runs it (#1819). */
+export interface QueuedMoveBusy {
+	/** A turn is running. */
+	running: boolean;
+	/** Names of its running background tasks (subagents, Monitors, shells). */
+	tasks: string[];
+}
+
+export interface QueuedMoveState {
+	busy: QueuedMoveBusy;
+	/** A move already queued by the owner or the agent. */
+	pending: { worker: string; target_id: string; by: 'owner' | 'agent' | (string & {}) } | null;
+}
+
+export async function getQueuedMove(sessionId: string): Promise<QueuedMoveState> {
+	return api.get<QueuedMoveState>(`/sessions/${sessionId}/handoff`);
+}
+
+/**
+ * "Move when this turn ends": queue the hand-off the agent's HandOffSession
+ * uses. No target means this worker (Resume here). `stop` stops the chat's
+ * work first, as its Stop button does.
+ */
+export async function queueMove(
+	sessionId: string,
+	targetInstanceId?: string,
+	stop = false
+): Promise<{ queued: boolean; worker: string }> {
+	return api.post<{ queued: boolean; worker: string }>(`/sessions/${sessionId}/handoff`, {
+		...(targetInstanceId ? { target_instance_id: targetInstanceId } : {}),
+		stop
+	});
+}
+
+export async function cancelQueuedMove(sessionId: string): Promise<void> {
+	await api.delete(`/sessions/${sessionId}/handoff`);
+}
+
 // ============================================================================
 // Context usage (live SDK breakdown)
 // ============================================================================

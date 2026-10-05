@@ -115,6 +115,36 @@ def is_granted(win: WindowInfo, apps: Iterable[str]) -> bool:
     return any(name_matches(a, win.names) for a in apps)
 
 
+def app_granted(name: str, apps: Iterable[str]) -> bool:
+    """Whether ``open_application(name)`` launches an app the session was granted.
+
+    Stricter than window matching: the name is typed into Start-menu search,
+    which launches whatever it best matches, so only a name equal to a granted
+    one (ignoring case, punctuation and spacing) may be typed. 'Edge' does not
+    launch under a grant for 'Microsoft Edge'; request the exact name.
+    """
+    want = "".join(_tokens(name))
+    return bool(want) and any("".join(_tokens(app)) == want for app in apps)
+
+
+#: The AI Shuffle desktop app's identity for grants. Its source-updated build
+#: runs Electron's own ``electron.exe`` (file description "Electron") from the
+#: app's data folder, so the executable alone does not name the app.
+AI_SHUFFLE_APP = "AI Shuffle"
+_AI_SHUFFLE_DATA_DIR = "ai-shuffle-desktop"
+
+
+def identity_names(path: str, desc: str, product: str) -> tuple[str, ...]:
+    """Names a window's app is granted under: executable, version strings, aliases."""
+    parts = re.split(r"[\\/]", path or "")
+    stem = os.path.splitext(parts[-1])[0]
+    names = [stem, desc, product, *_ALIASES.get(stem.lower(), ())]
+    folders = {part.lower() for part in parts[:-1]}
+    if stem.lower() == "electron" and _AI_SHUFFLE_DATA_DIR in folders:
+        names.append(AI_SHUFFLE_APP)
+    return tuple(n for n in names if n)
+
+
 # ---------------------------------------------------------------------------
 # Win32 plumbing
 # ---------------------------------------------------------------------------
@@ -323,7 +353,7 @@ def _describe(hwnd, displays, foreground) -> WindowInfo:
     exe = os.path.basename(path) if path else ""
     stem = os.path.splitext(exe)[0]
     desc, product = _version_strings(path)
-    names = tuple(n for n in (stem, desc, product, *_ALIASES.get(stem.lower(), ())) if n)
+    names = identity_names(path, desc, product)
     if user32.IsIconic(hwnd):
         state, bounds, display = "minimized", None, None
     else:

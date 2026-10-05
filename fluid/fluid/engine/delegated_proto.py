@@ -548,6 +548,10 @@ class StreamJsonMapper:
         # and its short explanation; None when it gave neither.
         self.failed_status: int | None = None
         self.failed_provider_message: str | None = None
+        # The result frame's own text: for a turn that ran a local command
+        # (``/compact``) it is the command's output, the only place a refusal
+        # such as "Not enough messages to compact." shows up.
+        self.result_text = ""
         # The CLI's ``total_cost_usd`` is the running total of its process,
         # not the turn's cost. ``cost_baseline`` is that total after the last
         # turn the loop booked on this process (0.0 on a fresh process, None
@@ -1117,6 +1121,8 @@ class StreamJsonMapper:
             turn_usage["cli_total_cost_usd"] = self.cli_total_cost_usd
         if cost_from_table:
             turn_usage["cost_from_table"] = True
+        result_text = frame.get("result")
+        self.result_text = result_text.strip() if isinstance(result_text, str) else ""
         if frame.get("is_error") and subtype != "error_max_turns":
             # A failed turn: no TurnComplete. The loop turns this into an
             # ErrorEvent, or retries when a stale --resume handle caused it.

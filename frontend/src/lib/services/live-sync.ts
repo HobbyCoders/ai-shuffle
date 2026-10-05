@@ -14,7 +14,6 @@ import '$lib/stores/expansion-preferences';
 import '$lib/stores/install-prompt-preference.svelte';
 import '$lib/stores/sessionMode.svelte';
 import '$lib/stores/browser-panel.svelte';
-import './notificationSound';
 import { getOrCreateDeviceId } from '$lib/stores/device-id';
 import { bindSessionOwner } from '$lib/stores/session-owner';
 import { promptStash } from '$lib/stores/session/prompt-stash';

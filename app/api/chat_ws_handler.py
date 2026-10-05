@@ -1210,12 +1210,33 @@ class ChatWebSocketHandler:
         })
         return False
 
+    async def _refuse_archived(self, session_id: Optional[str], source: str) -> bool:
+        """Send one error frame and return True when ``session_id`` is archived.
+
+        An archived chat is read-only until the owner restores it (#1822), so a
+        message or queue item sent to it is refused here, before anything is
+        persisted or queued.
+        """
+        from app.core import archive_guard
+
+        if not session_id or not await archive_guard.is_archived_async(session_id):
+            return False
+        archive_guard.log_dropped(session_id, source, "message refused")
+        await self.send_json({
+            "type": "error",
+            "session_id": session_id,
+            "message": str(archive_guard.SessionArchived(session_id)),
+        })
+        return True
+
     async def handle_query(self, data: dict) -> None:
         """Handle 'query' message type."""
 
         prompt = data.get("prompt", "").strip()
         session_id = data.get("session_id")
         if session_id and not await self._may_act_on_session(session_id):
+            return
+        if await self._refuse_archived(session_id, "user"):
             return
         if session_id and not await self._authorize_mobile_session(
                 session_id, claim=data.get("claim_mobile_authority") is True):
@@ -2429,6 +2450,8 @@ class ChatWebSocketHandler:
             return
 
         if not await self._may_act_on_session(session_id):
+            return
+        if await self._refuse_archived(session_id, "queue"):
             return
         if not await self._authorize_mobile_session(session_id):
             return

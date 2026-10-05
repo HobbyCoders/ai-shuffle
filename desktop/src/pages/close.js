@@ -1,6 +1,6 @@
 // Evaluated by the desktop main process in the app page (or bundled fallback).
 // Keep this aligned with ConfirmDialog.svelte: inherit the user's live theme tokens.
-(async function showCloseDialog({ activeCount = null, error = false, offerForce = false } = {}) {
+(async function showCloseDialog({ activeCount = null, error = false, offerForce = false, remoteWorkers = [] } = {}) {
     const previousFocus = document.activeElement;
     const style = document.createElement('style');
     style.textContent = `
@@ -39,8 +39,14 @@
     const activity = activeCount === null ? 'Unable to check for active sessions.' :
         `You have ${activeCount} active session${activeCount === 1 ? '' : 's'}.`;
     dialog.querySelector('h2').textContent = title;
+    // Subagents on other workers keep running when this app closes (#1808).
+    const names = (Array.isArray(remoteWorkers) ? remoteWorkers : []).filter(name => typeof name === 'string' && name);
+    const where = names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}` : names[0];
+    const stops = names.length
+        ? `Closing the app will stop work on this computer. Subagents on ${where} keep running there, and their reports arrive when you open the app again.`
+        : `Closing the app will stop ${activeCount === 1 ? "it" : "any active sessions"}.`;
     dialog.querySelector('p').textContent = !error
-        ? `${activity} Closing the app will stop ${activeCount === 1 ? "it" : "any active sessions"}. Are you sure you want to close?`
+        ? `${activity} ${stops} Are you sure you want to close?`
         : offerForce
             ? 'AI Shuffle still could not confirm that every session has stopped. The worker may be stuck. Quit Anyway ends it now; sessions that were running may be interrupted.'
             : 'AI Shuffle could not confirm that every session has stopped. The app will stay open. Wait a moment, then try closing again.';

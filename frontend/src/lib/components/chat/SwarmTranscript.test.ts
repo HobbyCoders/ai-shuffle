@@ -7,7 +7,7 @@ import { buildDisplayItems } from '$lib/utils/work-log';
 import type { SwarmSnapshot } from '$lib/utils/swarm';
 import SystemMessage from '../SystemMessage.svelte';
 import ToolUseMessage from './ToolUseMessage.svelte';
-import SwarmDropdown from './SwarmDropdown.svelte';
+import SwarmHistory from './SwarmHistory.svelte';
 
 // Recorded transport shape from the real ten-child acceptance run: a nested
 // code-mode Swarm call, a 3,000-character result preview, eleven worker receipts
@@ -91,8 +91,7 @@ describe('Swarm transcript acceptance', () => {
 			result: row!.toolResult, status: row!.toolStatus!,
 		});
 		expect(screen.queryByTestId('swarm-card')).toBeNull();
-		render(SwarmDropdown, { sessionId: fixture.queued.session_id });
-		await fireEvent.click(screen.getByText('Swarm workflows'));
+		render(SwarmHistory, { sessionId: fixture.queued.session_id });
 		expect(screen.getAllByTestId('swarm-card')).toHaveLength(1);
 		await fireEvent.click(screen.getByRole('button', { name: 'Swarm Swarm' }));
 		expect(screen.getByText('Stage 1')).toBeTruthy();

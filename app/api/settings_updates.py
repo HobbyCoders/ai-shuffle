@@ -17,7 +17,10 @@ class UpdatePolicy(BaseModel):
 
 
 class UpdateAction(BaseModel):
-    action: Literal["check", "download", "install"]
+    action: Literal["check", "download", "install", "cancel"]
+    # Install only, when sessions are running: restart once they finish, or
+    # stop them first. "cancel" drops a waiting "when_idle" restart.
+    mode: Literal["when_idle", "stop"] | None = None
 
 
 def require_update_owner(request: Request, token=Depends(require_admin)):
@@ -48,7 +51,7 @@ async def set_application_updates(body: UpdatePolicy, _=Depends(require_update_o
 async def application_update_action(body: UpdateAction, _=Depends(require_update_owner)):
     from app.core.update_workers import dispatch
     try:
-        return await dispatch(body.action)
+        return await dispatch(body.action, body.mode)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 

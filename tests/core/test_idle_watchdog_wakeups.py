@@ -487,6 +487,39 @@ async def test_watchdog_nudges_when_autocompact_flag_absent(mock_db, monkeypatch
 
     assert sid in nudged
     assert len(scheduled) == 1
+    # Not known to be Claude Code: the plain nudge, which claims no compaction.
+    assert scheduled[0]["prompt"] == wakeup_service.WATCHDOG_NUDGE_PROMPT
+
+
+async def test_watchdog_sends_claude_code_a_real_compact(mock_db, monkeypatch):
+    """#1820: the wake for a Claude Code session is the CLI's own /compact.
+    A plain new turn compacts nothing below the CLI's threshold, which on a
+    1M window sits well above the watchdog's fraction."""
+    from app.core import wakeup_service
+    from app.db import database
+
+    sid = "wd-cli"
+    database.create_session(session_id=sid, profile_id="default")
+    database.set_session_context_usage(
+        session_id=sid, data=_usage(880_000, max_tokens=1_000_000),
+    )
+    scheduled = []
+
+    async def _fake_schedule(**kwargs):
+        scheduled.append(kwargs)
+        return {"id": "x", "fire_at": 0}
+
+    monkeypatch.setattr(wakeup_service, "schedule", _fake_schedule)
+
+    assert await wakeup_service.scan_once() == [sid]
+    assert scheduled[0]["prompt"] == "/compact"
+
+
+def test_watchdog_nudge_does_not_claim_a_compaction():
+    from app.core import wakeup_service
+
+    assert "compaction has now been triggered" not in wakeup_service.WATCHDOG_NUDGE_PROMPT
+    assert "compact" not in wakeup_service.WATCHDOG_NUDGE_PROMPT.lower()
 
 
 async def test_watchdog_cooldown_blocks_immediate_renudge(mock_db, monkeypatch):

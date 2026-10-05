@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { pwa, isInstallable } from '$lib/stores/pwa.svelte';
 	import { installPromptPreference } from '$lib/stores/install-prompt-preference.svelte';
+	import NotificationSlot from './NotificationSlot.svelte';
+	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 
 	let showPrompt = $state(false);
 	const isDismissed = $derived(installPromptPreference.isSuppressed());
@@ -36,86 +38,57 @@
 </script>
 
 {#if showPrompt}
-	<div
-		class="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 md:w-96 z-50
-			   bg-(--color-bg-secondary) border border-border
-			   rounded-lg shadow-lg p-4 animate-slide-up"
-		role="dialog"
-		aria-label="Install AI Shuffle"
-	>
-		<div class="flex items-start gap-3">
-			<!-- App Icon -->
-			<div class="shrink-0 w-12 h-12 rounded-lg bg-(--color-bg-primary) flex items-center justify-center">
-				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" class="w-8 h-8">
-					<rect width="100" height="100" rx="20" fill="#1a1a1a"/>
-					<circle cx="50" cy="50" r="35" fill="none" stroke="#e5604d" stroke-width="6"/>
-					<circle cx="50" cy="50" r="15" fill="#e5604d"/>
-				</svg>
+	<!-- Draws in the shared notification dock (#1823), like every other notice. -->
+	<NotificationSlot order={DOCK_ORDER.install}>
+		<div class="install-card" role="dialog" aria-label="Install AI Shuffle">
+			<div class="install-copy">
+				<strong>Install AI Shuffle</strong>
+				<span>Add it to your home screen for quick access.</span>
 			</div>
-
-			<!-- Content -->
-			<div class="flex-1 min-w-0">
-				<h3 class="text-sm font-semibold text-(--color-text-primary)">
-					Install AI Shuffle
-				</h3>
-				<p class="text-xs text-(--color-text-secondary) mt-1">
-					Add to your home screen for quick access and offline support.
-				</p>
+			<div class="install-actions">
+				<button type="button" class="primary" onclick={handleInstall}>Install</button>
+				<button type="button" onclick={handleDismiss}>Not now</button>
+				<button type="button" class="quiet" onclick={handleNeverShow}>Don't show again</button>
 			</div>
-
-			<!-- Close button -->
-			<button
-				onclick={handleDismiss}
-				class="shrink-0 p-1 text-(--color-text-secondary) hover:text-(--color-text-primary) transition-colors"
-				aria-label="Dismiss"
-			>
-				<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-				</svg>
-			</button>
 		</div>
-
-		<!-- Actions -->
-		<div class="flex gap-2 mt-3">
-			<button
-				onclick={handleDismiss}
-				class="flex-1 px-4 py-2 text-sm font-medium text-(--color-text-secondary)
-					   bg-(--color-bg-primary) hover:bg-(--color-bg-tertiary)
-					   rounded-lg transition-colors min-h-[44px]"
-			>
-				Not now
-			</button>
-			<button
-				onclick={handleInstall}
-				class="flex-1 px-4 py-2 text-sm font-medium text-white
-					   bg-primary hover:opacity-90
-					   rounded-lg transition-opacity min-h-[44px]"
-			>
-				Install
-			</button>
-		</div>
-		<button
-			onclick={handleNeverShow}
-			class="w-full mt-1 py-1.5 text-xs text-(--color-text-tertiary) hover:text-(--color-text-secondary) transition-colors"
-		>
-			Don't show again
-		</button>
-	</div>
+	</NotificationSlot>
 {/if}
 
 <style>
-	@keyframes slide-up {
-		from {
-			transform: translateY(100%);
-			opacity: 0;
-		}
-		to {
-			transform: translateY(0);
-			opacity: 1;
-		}
+	.install-card {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 10px 16px;
+		width: 100%;
+		padding: 12px 16px;
+		border: 1px solid var(--border);
+		border-radius: calc(var(--radius, 0.75rem) * 0.66);
+		background: var(--card);
+		color: var(--card-foreground, var(--foreground));
+		box-shadow: var(--shadow-l);
+		font-size: 0.875rem;
+		line-height: 1.4;
 	}
-
-	.animate-slide-up {
-		animation: slide-up 0.3s ease-out;
+	.install-copy { display: flex; flex-direction: column; gap: 2px; flex: 1 1 200px; min-width: 0; }
+	.install-copy span { color: var(--muted-foreground); font-size: 0.8125rem; }
+	.install-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+	button {
+		min-height: 32px;
+		padding: 4px 12px;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		background: var(--secondary);
+		color: var(--secondary-foreground, var(--foreground));
+		font-size: 0.75rem;
+		font-weight: 600;
+		cursor: pointer;
+		transition: opacity 0.15s ease;
 	}
+	button:hover { opacity: 0.88; }
+	button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+	.primary { background: var(--primary); color: var(--primary-foreground); border-color: transparent; }
+	.quiet { background: transparent; border-color: transparent; color: var(--muted-foreground); }
+	@media (max-width: 639px), (pointer: coarse) { button { min-height: 44px; } }
+	@media (prefers-reduced-motion: reduce) { button { transition: none; } }
 </style>

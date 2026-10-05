@@ -237,7 +237,9 @@ def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
             "deviceId": record.get("remote_device_id"),
             "name": record.get("worker_name") or record.get("remote_device_id"),
         }
-        if record.get("worker_state"):
+        # What the child is doing there means nothing once its record here
+        # settled: a stopped child does not read "working" (#1806).
+        if record.get("worker_state") and record.get("status") == "running":
             wire["workerState"] = record.get("worker_state")
         if record.get("unreachable_since"):
             wire["unreachableSince"] = record.get("unreachable_since")

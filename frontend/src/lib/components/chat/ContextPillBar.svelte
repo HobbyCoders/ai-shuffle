@@ -31,16 +31,23 @@
 	import { computeContextBadge, shouldShowBranchPill, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { gitStateQuery, runnerBadgeMenuItems } from './runner-badge-menu';
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
-	import { pendingHandoff } from './pending-handoff';
+	import { pendingHandoff, handoffActivitySince } from './pending-handoff';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git, gitStatus } from '$lib/stores/git.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
-	import { adoptSession, moveSession } from '$lib/api/sessions';
+	import {
+		adoptSession,
+		moveSession,
+		getQueuedMove,
+		queueMove,
+		cancelQueuedMove,
+		type QueuedMoveBusy
+	} from '$lib/api/sessions';
 	import { notify } from '$lib/stores/notifications';
-	import { GitBranch, Monitor, MonitorOff, Check, Loader2 } from 'lucide-svelte';
+	import { GitBranch, Monitor, MonitorOff, Check, Loader2, X } from 'lucide-svelte';
 	import { checkoutEligibility, type EligibilityMap } from '$lib/components/layout/execution-mode-eligibility';
 
 	interface Props {
@@ -158,28 +165,53 @@
 	/** Why the last move/continue was refused, shown inside the reopened menu. */
 	let runnerActionError = $state('');
 	let pendingResume = $state<{ item: RunnerBadgeMenuItem; sessionId: string } | null>(null);
+	/**
+	 * A running or parked chat cannot move now (#1819). The menu then says what
+	 * is running and offers "Move when this turn ends" instead of the move.
+	 */
+	let busyChoice = $state<{ item: RunnerBadgeMenuItem; sessionId: string; busy: QueuedMoveBusy } | null>(null);
+	let runnerChecking = $state(false);
+	/**
+	 * A move queued from this chip, shown until the chat's own hand-off rows
+	 * (from `seen` on) take over. `cancelled` hides a queued row the owning
+	 * worker has not yet answered with its `cancelled` row.
+	 */
+	let ownerQueued = $state<{ sessionId: string; worker: string; seen: number } | null>(null);
+	let queueCancelled = $state<{ sessionId: string; seen: number } | null>(null);
 
 	/**
-	 * A hand-off the agent queued with HandOffSession (#1809). It runs on the
-	 * owning worker when the turn ends, so the chip learns of it from the chat,
-	 * and shows the same pending state as a move the owner started here.
+	 * A queued hand-off: the agent's HandOffSession (#1809) or the owner's
+	 * "Move when this turn ends" (#1819). It runs on the owning worker when the
+	 * turn ends, so the chip learns of it from the chat, and shows the same
+	 * pending state as a move the owner started here.
 	 */
-	const agentHandoff = $derived(pendingHandoff($activeSession.messages));
+	const handoff = $derived.by(() => {
+		const sid = $activeSession.sessionId;
+		const messages = $activeSession.messages;
+		if (queueCancelled?.sessionId === sid && !handoffActivitySince(messages, queueCancelled.seen)) return null;
+		const fromChat = pendingHandoff(messages);
+		if (fromChat) return fromChat;
+		if (ownerQueued?.sessionId === sid && !handoffActivitySince(messages, ownerQueued.seen)) {
+			return { worker: ownerQueued.worker, phase: 'queued' as const };
+		}
+		return null;
+	});
 	const MOVE_TITLE = 'Committing, pushing and syncing this session. This can take a minute.';
 	const runnerBusy = $derived.by((): { label: string; title: string } | null => {
 		if (runnerAction && runnerAction.sessionId === $activeSession.sessionId) {
 			return { label: runnerAction.label, title: MOVE_TITLE };
 		}
-		if (!agentHandoff) return null;
-		return agentHandoff.phase === 'moving'
-			? { label: `Moving to ${agentHandoff.worker}…`, title: MOVE_TITLE }
+		if (!handoff) return null;
+		return handoff.phase === 'moving'
+			? { label: `Moving to ${handoff.worker}…`, title: MOVE_TITLE }
 			: {
-					label: `Moving to ${agentHandoff.worker} after this turn`,
-					title: `The agent queued a move to ${agentHandoff.worker}. When this turn and its background work end, the app commits, pushes and moves this session there.`
+					label: `Moving to ${handoff.worker} after this turn`,
+					title: `A move to ${handoff.worker} is queued. When this turn and its background work end, the app commits, pushes and moves this session there.`
 				};
 	});
 	/** No second move while one is running or queued. */
-	const runnerLocked = $derived(runnerActionPending || !!agentHandoff);
+	const runnerLocked = $derived(runnerActionPending || !!handoff);
+	const canCancelQueued = $derived(handoff?.phase === 'queued' && !runnerActionPending);
 	const runnerDone = $derived(
 		!runnerBusy && runnerActionDone && runnerActionDone.sessionId === $activeSession.sessionId
 			? runnerActionDone
@@ -230,6 +262,7 @@
 		// The chip is disabled while a move runs or is queued; never start a second one.
 		if (runnerLocked) return;
 		runnerActionError = '';
+		busyChoice = null;
 		if (showRunnerMenu) {
 			closeDropdown('runner');
 			return;
@@ -239,9 +272,26 @@
 	}
 
 	async function runMenuAction(item: RunnerBadgeMenuItem, confirmed = false) {
-		if (!item.action || item.disabled || runnerLocked) return;
+		if (!item.action || item.disabled || runnerLocked || runnerChecking) return;
 		const sessionId = $activeSession.sessionId;
 		if (!sessionId) return;
+		if (!confirmed) {
+			// A running or parked chat moves when its work ends, never mid-turn.
+			runnerChecking = true;
+			let busy: QueuedMoveBusy | null = null;
+			try {
+				busy = (await getQueuedMove(sessionId)).busy;
+			} catch {
+				// An older owner cannot say: the move itself still refuses a busy chat.
+			} finally {
+				runnerChecking = false;
+			}
+			if (sessionId !== $activeSession.sessionId) return;
+			if (busy && (busy.running || busy.tasks.length)) {
+				busyChoice = { item, sessionId, busy };
+				return;
+			}
+		}
 		// Only Git projects commit and push on the way; plain chats move history alone.
 		if (sessionHasProject && !confirmed) {
 			pendingResume = { item, sessionId };
@@ -282,6 +332,50 @@
 		}
 	}
 
+	async function queueChoice(stop: boolean) {
+		const choice = busyChoice;
+		if (!choice?.item.action || runnerLocked) return;
+		busyChoice = null;
+		closeDropdown('runner');
+		const target = choice.item.action.kind === 'move' ? choice.item.action.targetInstanceId : undefined;
+		const seen = $activeSession.messages.length;
+		try {
+			const result = await queueMove(choice.sessionId, target, stop);
+			ownerQueued = { sessionId: choice.sessionId, worker: result.worker, seen };
+			queueCancelled = null;
+			notify.info(stop ? `Stopping its work, then moving to ${result.worker}.` : `Moves to ${result.worker} when this turn ends.`);
+		} catch (e) {
+			const detail =
+				e && typeof e === 'object' && 'detail' in e && typeof (e as { detail: unknown }).detail === 'string'
+					? (e as { detail: string }).detail
+					: 'Could not queue the move';
+			notify.error(detail);
+			if (choice.sessionId === $activeSession.sessionId) {
+				runnerActionError = detail;
+				openDropdown('runner');
+				void loadRunnerMenu();
+			}
+		}
+	}
+
+	async function cancelQueued() {
+		const sessionId = $activeSession.sessionId;
+		if (!sessionId || !canCancelQueued) return;
+		const seen = $activeSession.messages.length;
+		try {
+			await cancelQueuedMove(sessionId);
+			ownerQueued = null;
+			queueCancelled = { sessionId, seen };
+			notify.info('Move cancelled.');
+		} catch (e) {
+			const detail =
+				e && typeof e === 'object' && 'detail' in e && typeof (e as { detail: unknown }).detail === 'string'
+					? (e as { detail: string }).detail
+					: 'Could not cancel the move';
+			notify.error(detail);
+		}
+	}
+
 	function showRunnerDone(sessionId: string, label: string) {
 		if (runnerDoneTimer) clearTimeout(runnerDoneTimer);
 		runnerActionDone = { sessionId, label };
@@ -306,7 +400,10 @@
 	}
 
 	function handleRunnerKeydown(e: KeyboardEvent) {
-		if (e.key === 'Escape' && showRunnerMenu) closeDropdown('runner');
+		if (e.key === 'Escape' && showRunnerMenu) {
+			busyChoice = null;
+			closeDropdown('runner');
+		}
 	}
 
 	onDestroy(() => {
@@ -399,9 +496,44 @@
 						<span class="ctx-chip-label">{badge?.runner?.deviceName ?? 'Local'}</span>
 					{/if}
 				</button>
+				{#if canCancelQueued}
+					<button
+						type="button"
+						class="queued-cancel"
+						title="Cancel move"
+						aria-label="Cancel queued move"
+						onclick={cancelQueued}
+					>
+						<X size={12} strokeWidth={2} aria-hidden="true" />
+					</button>
+				{/if}
 				<span class="sr-only" aria-live="polite">{runnerBusy?.label ?? runnerDone?.label ?? ''}</span>
 				{#if showRunnerMenu}
 					<div class="runner-dropdown" role="menu" aria-label="Move this session">
+						{#if busyChoice}
+							<div class="runner-busy">
+								<strong>{busyChoice.busy.running ? 'This chat is running' : 'Background work is running'}</strong>
+								{#if busyChoice.busy.tasks.length}
+									<ul class="runner-busy-tasks">
+										{#each busyChoice.busy.tasks as task, i (i)}
+											<li>{task}</li>
+										{/each}
+									</ul>
+								{/if}
+								<span class="runner-hint">{sessionHasProject ? 'Commits, pushes, then moves.' : 'Moves when it finishes.'}</span>
+							</div>
+							<button type="button" class="runner-item primary" role="menuitem" onclick={() => queueChoice(false)}>
+								<span class="ctx-chip-label">Move when this turn ends</span>
+							</button>
+							{#if !busyChoice.busy.running}
+								<button type="button" class="runner-item danger" role="menuitem" onclick={() => queueChoice(true)}>
+									<span class="ctx-chip-label">Stop them and move now</span>
+								</button>
+							{/if}
+							<button type="button" class="runner-item" role="menuitem" onclick={() => (busyChoice = null)}>
+								<span class="ctx-chip-label">Back</span>
+							</button>
+						{:else}
 						{#if runnerActionError}
 							<div class="runner-error" role="alert">{runnerActionError}</div>
 						{/if}
@@ -422,13 +554,14 @@
 									class="runner-item"
 									class:disabled={item.disabled}
 									role="menuitem"
-									disabled={item.disabled || runnerActionPending}
+									disabled={item.disabled || runnerActionPending || runnerChecking}
 									title={item.title}
 									onclick={() => runMenuAction(item)}
 								>
 									<span class="ctx-chip-label">{item.label}</span>
 								</button>
 							{/each}
+						{/if}
 						{/if}
 					</div>
 				{/if}
@@ -511,6 +644,15 @@
 
 	.runner-badge-wrap {
 		position: relative;
+		min-width: 0;
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+	}
+
+	.sheet-mode .runner-badge-wrap > .ctx-chip.runner {
+		width: auto;
+		flex: 1 1 auto;
 		min-width: 0;
 	}
 
@@ -627,6 +769,68 @@
 
 	.runner-item:hover:not(:disabled) {
 		background: var(--hover-overlay);
+	}
+
+	.runner-item.primary {
+		color: var(--primary);
+		font-weight: 500;
+	}
+
+	.runner-item.danger {
+		color: var(--destructive);
+	}
+
+	.runner-busy {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding: 8px 10px 6px;
+		font-size: 0.75rem;
+		line-height: 1.35;
+		border-bottom: 1px solid var(--border);
+		margin-bottom: 4px;
+	}
+
+	.runner-busy strong {
+		color: var(--foreground);
+		font-weight: 600;
+	}
+
+	.runner-busy-tasks {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		color: var(--foreground);
+		overflow-wrap: anywhere;
+	}
+
+	.runner-hint {
+		color: var(--muted-foreground);
+	}
+
+	/* Cancels a queued move; sits on the busy chip's trailing edge. */
+	.queued-cancel {
+		display: inline-grid;
+		place-items: center;
+		width: 22px;
+		height: 22px;
+		margin-left: 2px;
+		vertical-align: middle;
+		border: none;
+		border-radius: 999px;
+		color: var(--muted-foreground);
+		background: color-mix(in oklch, var(--muted) 70%, transparent);
+		cursor: pointer;
+	}
+
+	.queued-cancel:hover {
+		color: var(--foreground);
+		background: var(--hover-overlay, var(--muted));
+	}
+
+	.queued-cancel:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
 	}
 
 	.runner-item.disabled,

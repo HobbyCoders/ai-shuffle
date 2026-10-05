@@ -25,7 +25,7 @@
  *     native: {                              // what this app build offers;
  *       platform: 'android',                 // absent before bridge 1
  *       bridge: 1,
- *       capabilities: ['file-save', 'file-chooser', 'microphone', 'device-tools']
+ *       capabilities: ['file-save', 'file-chooser', 'microphone', 'device-tools', 'worker-switch']
  *     }
  *   };
  *   ```
@@ -72,7 +72,8 @@ export interface ShuffleMobileRuntime {
 /**
  * What the app build showing this page offers. Names are added, never
  * renamed: `file-save` (shuffleFileSave download bridge), `file-chooser`,
- * `microphone`, `device-tools`. `bridge` increases when one changes shape.
+ * `microphone`, `device-tools`, `worker-switch` (the app handles
+ * `/mobile/?connect=<origin>`). `bridge` increases when one changes shape.
  */
 export interface ShuffleNativeBridge {
 	platform?: string;

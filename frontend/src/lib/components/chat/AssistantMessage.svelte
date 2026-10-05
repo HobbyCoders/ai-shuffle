@@ -16,6 +16,7 @@
 	import HtmlPreviews from './HtmlPreviews.svelte';
 	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
 	import { formatMessageTime } from '$lib/utils/message-time';
+	import { taskChecks, taskMessageKey, type TaskChecks } from '$lib/stores/task-checks';
 
 	interface Props {
 		content: string;
@@ -178,6 +179,37 @@
 		prefix: routeChatFiles(unscopedRendered.prefix, sessionId),
 		tail: routeChatFiles(unscopedRendered.tail, sessionId)
 	});
+
+	// Task-list checkboxes (#1813). The markdown renders them disabled; a
+	// settled message enables them and lays the owner's ticks, kept as account
+	// data, over what the text says. A still-streaming message stays read-only:
+	// its text, and so its key, is not final yet.
+	let proseEl = $state<HTMLElement | null>(null);
+	let taskState = $state.raw<TaskChecks>(taskChecks.store.current);
+	$effect(() => taskChecks.store.subscribe((value) => { taskState = value; }));
+	const taskKey = $derived(!streaming && sessionId && content ? taskMessageKey(sessionId, content) : null);
+
+	function taskBoxes(): HTMLInputElement[] {
+		return proseEl ? Array.from(proseEl.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) : [];
+	}
+
+	$effect(() => {
+		void rendered; // the {@html} blocks replaced the boxes; re-apply
+		const key = taskKey;
+		const ticks = key ? taskState[key] : undefined;
+		taskBoxes().forEach((box, index) => {
+			box.disabled = !key;
+			const tick = ticks?.[String(index)];
+			if (tick !== undefined) box.checked = tick;
+		});
+	});
+
+	function handleTaskChange(e: Event) {
+		const box = e.target as HTMLInputElement | null;
+		if (!taskKey || box?.type !== 'checkbox') return;
+		const index = taskBoxes().indexOf(box);
+		if (index >= 0) taskChecks.setChecked(taskKey, index, box.checked);
+	}
 
 	// `_epoch` is unused by the body: it exists so the $derived above tracks the
 	// highlighter-readiness signal as a dependency.
@@ -500,6 +532,8 @@
 				class="prose prose-sm abody max-w-none wrap-break-word"
 				style="overflow-wrap: anywhere; word-break: break-word;"
 				onclick={handleProseClick}
+				onchange={handleTaskChange}
+				bind:this={proseEl}
 			>
 				{#if content}
 					<!-- Two blocks: stable prefix (settled media stays mounted) + streaming tail -->
@@ -562,6 +596,18 @@
 </div>
 
 <style>
+	/* A task item shows its checkbox in place of the list bullet (#1813). */
+	.abody :global(li:has(> input[type='checkbox'])),
+	.abody :global(li:has(> p > input[type='checkbox'])) {
+		list-style: none;
+	}
+	.abody :global(li input[type='checkbox']) {
+		margin: 0 0.45em 0 0;
+		vertical-align: -0.1em;
+	}
+	.abody :global(li input[type='checkbox']:not(:disabled)) {
+		cursor: pointer;
+	}
 	.message-container {
 		position: relative;
 	}

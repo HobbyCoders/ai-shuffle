@@ -398,7 +398,7 @@ async function main(): Promise<void> {
 	};
 	const quitGuard = new QuitGuard({
 		activeSessionCount: () => supervisor?.activeSessionCount() ?? Promise.resolve(0),
-		confirm: (activeCount) => showCloseDialog(window.browserWindow, activeCount),
+		confirm: (activeCount) => showCloseDialog(window.browserWindow, activeCount, false, false, supervisor?.remoteWorkers ?? []),
 		stop: async () => {
 			quitting = true;
 			try {

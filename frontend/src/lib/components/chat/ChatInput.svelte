@@ -36,7 +36,7 @@
 
 	import { api, type FileUploadResponse } from '$lib/api/client';
 	import { notify } from '$lib/stores/notifications';
-	import { evaluateSubmitGuards, projectRulesLane, sendButtonState } from './submit-guards';
+	import { evaluateSubmitGuards, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON } from './submit-guards';
 	import { attachmentBlockReason } from './attach-disable';
 	// Collapse / gesture / sheet behaviour is the mobile app's; the web build
 	// gets the desktop no-op defaults (see composer-shell.ts).
@@ -52,7 +52,7 @@
 	import StopButton from './StopButton.svelte';
 	import ControlsDock from './ControlsDock.svelte';
 	import ContextPillBar from './ContextPillBar.svelte';
-	import { CornerDownLeft } from 'lucide-svelte';
+	import { CornerDownLeft, Plus } from 'lucide-svelte';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips } from './tiptap/serialization';
 
 	interface Command {
@@ -437,6 +437,9 @@
 	}
 
 	let fileInputRef = $state<HTMLInputElement | null>(null);
+	// The phone shell's plus button sits left of the editor. A blocked attach
+	// stays tappable there so the tap can say why (triggerFileUpload).
+	const phoneAttachDisabled = $derived(!$anyCredential || isUploading);
 
 	// Voice recording state (bindable from VoiceRecorder) is declared with
 	// isUploading above, since the send button's state reads all three.
@@ -1200,6 +1203,8 @@
 
 <div
 	class="chat-input-wrapper"
+	class:has-draft={hasMessageContent}
+	class:dictating={isRecording || isTranscribing}
 	class:mobile-collapsed={mobileCollapsed}
 	class:mobile-toolbar-blocked={toolbarPointerBlocked}
 	class:mobile-controls-open={mobileControlsOpen}
@@ -1273,9 +1278,13 @@
 
 			     Chat still requires an agent. ContextPillBar keeps its selector
 			     visible while hiding the repository and execution controls. -->
+			<!-- The phone shell carries these selectors in its controls panel; a
+			     second, hidden copy would share their dropdown state. -->
+			{#if !mobileViewport}
 			{#if !assistantMode}
 				<!-- The assistant picks project, branch and runner itself. -->
 				<div class="context-pill-row"><ContextPillBar /></div>
+			{/if}
 			{/if}
 
 			<!-- The box: a flat hairline rectangle holding the editor, the send
@@ -1289,6 +1298,17 @@
 				<!-- svelte-ignore a11y_click_events_have_key_events -->
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<div class="input-area" onclick={handleEditorAreaClick}>
+					{#if mobileViewport}
+						<!-- Phone shell: attach is a plus left of the editor. -->
+						<button type="button" class="composer-attach" onclick={triggerFileUpload} disabled={phoneAttachDisabled}
+							aria-label={isUploading ? 'Uploading' : 'Attach file'} title={!$anyCredential ? NO_CREDENTIAL_REASON : 'Attach file'}>
+							{#if isUploading}
+								<svg class="composer-attach-spin" width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke-width="2" stroke-dasharray="40" stroke-dashoffset="12" /></svg>
+							{:else}
+								<Plus size={22} strokeWidth={2} aria-hidden="true" />
+							{/if}
+						</button>
+					{/if}
 					<!-- Textarea with autocomplete -->
 					<div class="textarea-wrapper">
 						<CommandAutocomplete
@@ -1347,6 +1367,10 @@
 					     including with a draft. Send can queue that draft independently.
 					     StopButton confirms first when background agents are live. -->
 					<div class="send-cluster">
+						{#if mobileViewport}
+							<!-- Phone shell: dictate sits beside send and gives way to it while typing. -->
+							{@render recorder()}
+						{/if}
 						<PromptStashMenu
 							entries={$promptStash}
 							open={stashOpen}
@@ -1399,44 +1423,55 @@
 					{isUploading}
 					inertToolbar={toolbarPointerBlocked}
 					onAttachClick={triggerFileUpload}
+					voiceActions={mobileViewport ? undefined : voiceActions}
+					callAction={mobileViewport ? caller : undefined}
 					onSheetOpenChange={(open) => {
 						mobileControlsOpen = open;
 						if (open) keepMobileComposerExpanded();
 						else scheduleMobileComposerReconciliation();
 					}}
-				>
-					{#snippet voiceActions()}
-						<!-- Voice Input (delegated to VoiceRecorder component) -->
-						<VoiceRecorder
-							onTranscription={handleTranscription}
-							onLiveText={handleLiveText}
-							onLiveCommit={handleLiveCommit}
-							onLiveDiscard={handleLiveDiscard}
-							getOwner={() => get(activeSession).sessionId}
-							sessionId={$activeSession.sessionId}
-							onStart={() => {
-								const editor = editorRef?.getEditor();
-								if (editor) startComposerDictation(editor, get(activeSession).sessionId);
-							}}
-							disabled={!$anyCredential || isUploading}
-							bind:isRecording
-							bind:isTranscribing
-						/>
-
-						<!-- Voice call (VM19): starts a call on this conversation. On a
-						     fresh composer it creates the conversation from the
-						     composer's picks first (#1616); it shows disabled with the
-						     reason while the session is working or parked. -->
-						<VoiceCallButton
-							disabled={isUploading || isRecording || isTranscribing}
-							disabledReason={isUploading ? 'Uploading files...' : isRecording ? 'Recording...' : isTranscribing ? 'Transcribing...' : null}
-						/>
-					{/snippet}
-				</ControlsDock>
+				/>
 			</div>
 		</form>
 	</div>
 </div>
+
+<!-- The dictate mic and voice-call buttons. The desktop dock shows both in its
+     row; the phone shell puts the mic beside send and the call in its controls. -->
+{#snippet recorder()}
+	<!-- Voice Input (delegated to VoiceRecorder component) -->
+	<VoiceRecorder
+		onTranscription={handleTranscription}
+		onLiveText={handleLiveText}
+		onLiveCommit={handleLiveCommit}
+		onLiveDiscard={handleLiveDiscard}
+		getOwner={() => get(activeSession).sessionId}
+		sessionId={$activeSession.sessionId}
+		onStart={() => {
+			const editor = editorRef?.getEditor();
+			if (editor) startComposerDictation(editor, get(activeSession).sessionId);
+		}}
+		disabled={!$anyCredential || isUploading}
+		bind:isRecording
+		bind:isTranscribing
+	/>
+{/snippet}
+
+{#snippet caller()}
+	<!-- Voice call (VM19): starts a call on this conversation. On a
+	     fresh composer it creates the conversation from the
+	     composer's picks first (#1616); it shows disabled with the
+	     reason while the session is working or parked. -->
+	<VoiceCallButton
+		disabled={isUploading || isRecording || isTranscribing}
+		disabledReason={isUploading ? 'Uploading files...' : isRecording ? 'Recording...' : isTranscribing ? 'Transcribing...' : null}
+	/>
+{/snippet}
+
+{#snippet voiceActions()}
+	{@render recorder()}
+	{@render caller()}
+{/snippet}
 
 <style>
 	/* ===== DOCK =====

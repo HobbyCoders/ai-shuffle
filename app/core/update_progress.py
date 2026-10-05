@@ -37,6 +37,14 @@ def begin(request_id, rows):
         atomic_json(_path(), value)
 
 
+def discard(request_id):
+    """Forget an operation that never started any install (every worker busy)."""
+    with _lock:
+        value = load()
+        if value and value["id"] == request_id:
+            _path().unlink(missing_ok=True)
+
+
 def record(request_id, device_id, *, target_version=None, result=None):
     # Persist the target BEFORE enqueueing. A lost reply must not lose the cohort.
     with _lock:

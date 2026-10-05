@@ -646,7 +646,9 @@ def settle_turn(
     return result
 
 
-def remove_queued_turn(turn_id: str) -> Optional[Dict[str, Any]]:
+def remove_queued_turn(
+    turn_id: str, stop_reason: str = "removed_from_queue",
+) -> Optional[Dict[str, Any]]:
     """Atomically abort a still-``queued`` turn (queue-chip removal).
 
     The ``state='queued'`` guard lives in the UPDATE itself so a turn that
@@ -656,11 +658,11 @@ def remove_queued_turn(turn_id: str) -> Optional[Dict[str, Any]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE turns SET state='aborted', stop_reason='removed_from_queue', "
+            "UPDATE turns SET state='aborted', stop_reason=%s, "
             "ended_at=NOW() "
             "WHERE id=%s AND state='queued' "
             "RETURNING *",
-            (turn_id,),
+            (stop_reason, turn_id),
         )
         row = cursor.fetchone()
     return _row(row)
@@ -862,6 +864,25 @@ def get_latest_turn(session_id: str) -> Optional[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT * FROM turns WHERE session_id=%s "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+    return _row(row)
+
+
+def get_latest_run_turn(session_id: str) -> Optional[Dict[str, Any]]:
+    """The session's most recent turn that ran (or will run), or ``None``.
+
+    Like :func:`get_latest_turn`, minus the rows :func:`absorb_queued_turn`
+    retired: a message steered into a live turn settles its queue row
+    ``completed`` at once, while the turn that read it is still running.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM turns WHERE session_id=%s "
+            "AND NOT (state='completed' AND COALESCE(stop_reason, '')='steered') "
             "ORDER BY created_at DESC, id DESC LIMIT 1",
             (session_id,),
         )

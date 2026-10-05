@@ -4,14 +4,20 @@
 	import { api, getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
 	import { notify } from '$lib/stores/notifications';
+	import NotificationSlot from '$lib/components/NotificationSlot.svelte';
+	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 
-	type Worker = { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null; request_pending?: boolean; channel?: string | null; checked_at?: number | null; role?: Role; label?: string };
+	type Worker = { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null; request_pending?: boolean; channel?: string | null; checked_at?: number | null; role?: Role; label?: string; deferred?: boolean };
 	type Operation = { id: string; phase: 'waiting' | 'complete' | 'error'; completed_at?: number; workers: { device_id: string; device_name: string; status: string; message: string }[] };
 	type Snapshot = { allow_updates: boolean; update_all_workers: boolean; server_time?: number; workers: Worker[]; operation?: Operation | null };
 	// excluded: not part of this update (offline, no updater, disabled, current, nothing offered).
 	// unknown: an included worker whose state cannot be trusted; restart waits for it.
 	type Role = 'excluded' | 'preparing' | 'available' | 'staged' | 'unknown';
-	type Receipt = { results: { device_id?: string; device_name: string; accepted: boolean | null; reason: string }[] };
+	/** A chat still running on a worker that refused to restart (#1818). */
+	type Busy = { session_id: string; title: string; tasks: string[] };
+	type Receipt = { results: { device_id?: string; device_name: string; accepted: boolean | null; reason: string; busy?: Busy[]; deferred?: boolean }[] };
+	/** The restart panel: work that kept a restart from running, or a restart waiting on it. */
+	type Panel = { kind: 'busy'; workers: { device_name: string; busy: Busy[] }[] } | { kind: 'deferred' };
 	// Older container supervisors leave "Application update is running." on an
 	// idle status after an install; a message like that does not fit idle.
 	const IN_PROGRESS = /\b(?:update is running|checking|downloading|building|preparing|installing)\b/i;
@@ -40,6 +46,9 @@
 	let refusals = $state<Record<string, string>>({});
 	let tipOpen = $state(false);
 	let tipPosition = $state({ top: 0, left: 0 });
+	let panel = $state<Panel | null>(null);
+	let buttonEl = $state<HTMLButtonElement | null>(null);
+	const panelId = `${tooltipId}-panel`;
 	let acknowledged = '';
 	let watched = '';
 	let active = false;
@@ -54,6 +63,8 @@
 	// A worker picks a check up within seconds; never call a check finished sooner.
 	const MANUAL_CHECK_SETTLE_MS = 5000;
 	const operation = $derived(snapshot?.operation);
+	// A worker waiting to restart until its running work ends ("Restart when they finish").
+	const deferred = $derived(!!snapshot?.workers.some(w => w.deferred));
 	const waiting = $derived(operation?.phase === 'waiting' || installRequested);
 	const celebrating = $derived(celebration !== 'none');
 	// The worker classifies (app/core/update_workers.py classify()); the copy
@@ -82,7 +93,7 @@
 	const reports = $derived(showOperation
 		? operation!.workers.map(w => `${w.device_name}: ${w.message}`).join('; ')
 		: rows.map(row => `${row.worker.device_name}: ${row.label}`).join('; '));
-	const headline = $derived(celebrating ? 'Update complete' : waiting ? 'Waiting on all workers to finish startup' : error ? 'Update needs attention' : busy ? 'Preparing updates…' : action);
+	const headline = $derived(celebrating ? 'Update complete' : waiting ? 'Waiting on all workers to finish startup' : deferred ? 'Restarts when work finishes' : error ? 'Update needs attention' : busy ? 'Preparing updates…' : action);
 	const progressNote = $derived(targets.length > 1 ? ` ${staged} of ${targets.length} staged.` : '');
 	const summary = $derived(error || (busy ? `Preparing updates…${progressNote}` : ready ? 'Update ready. Click to install and restart.' : 'Update available. Click to download.'));
 	const status = $derived(waiting || celebrating ? `${headline}. ${reports}` : `${scope}: ${summary}${receipt ? ` Last request: ${receipt}.` : ''} ${reports}`);
@@ -135,10 +146,72 @@
 		}
 	}
 
+	function anchor(rect: DOMRect) {
+		return { top: rect.bottom + 12, left: Math.max(8, Math.min(rect.left - 170, window.innerWidth - 288)) };
+	}
 	function showTip(event: MouseEvent | FocusEvent) {
-		const rect = (event.currentTarget as HTMLButtonElement).getBoundingClientRect();
-		tipPosition = { top: rect.bottom + 12, left: Math.max(8, Math.min(rect.left - 170, window.innerWidth - 288)) };
+		if (panel) return;
+		tipPosition = anchor((event.currentTarget as HTMLButtonElement).getBoundingClientRect());
 		tipOpen = true;
+	}
+	/** The restart notice draws in the shared notification dock (#1823), not under this button. */
+	function openPanel(next: Panel) {
+		tipOpen = false;
+		panel = next;
+	}
+	function closePanel() { panel = null; }
+	function panelKey(event: KeyboardEvent) {
+		if (panel && event.key === 'Escape') { closePanel(); buttonEl?.focus(); }
+	}
+	/** Plain text of what is running, for the bell: "Fix login (Run tests); Update docs". */
+	function busyText(workers: { device_name: string; busy: Busy[] }[]): string {
+		return workers.map(w => `${workers.length > 1 ? `${w.device_name}: ` : ''}${w.busy.map(b => b.tasks.length ? `${b.title} (${b.tasks.join(', ')})` : b.title).join('; ')}`).join('. ');
+	}
+	/** A restart refused because work is running: say so at once, here and in the bell (#1818). */
+	function refusedForWork(result: Receipt): boolean {
+		const workers = result.results.filter(w => w.accepted === false && w.busy?.length).map(w => ({ device_name: w.device_name, busy: w.busy! }));
+		if (!workers.length) return false;
+		openPanel({ kind: 'busy', workers });
+		notify.warning(`Restart would stop running work: ${busyText(workers)}.`, {
+			title: 'Restart is waiting', persist: false,
+			action: { label: 'Restart when they finish', onClick: () => void restartLater('when_idle') },
+			secondaryAction: { label: 'Stop them and restart', onClick: () => void restartLater('stop') }
+		});
+		return true;
+	}
+	/** "Restart when they finish" or "Stop them and restart". */
+	async function restartLater(mode: 'when_idle' | 'stop') {
+		closePanel();
+		if (pending) return;
+		pending = true; requestError = '';
+		try {
+			const result = await api.post<Receipt>('/settings/application-updates', { action: 'install', mode });
+			if (!active) return;
+			const refused = result.results.filter(w => !w.accepted);
+			receipt = refused.map(w => `${w.device_name}: ${w.reason}`).join('; ');
+			refusals = Object.fromEntries(refused.filter(w => w.device_id).map(w => [w.device_id!, w.reason]));
+			if (refused.length) notify.warning(receipt, { title: 'Update needs attention', persist: false });
+			else notify.info(mode === 'stop' ? 'Stopping running work, then restarting.' : 'Restarts when running work finishes.',
+				{ title: mode === 'stop' ? 'Restarting' : 'Restart scheduled', persist: false });
+		} catch (cause) {
+			if (active) { requestError = getErrorMessage(cause, 'Could not schedule the restart'); notify.error(requestError); }
+		} finally { if (active) { pending = false; watchUntil = Date.now() + REQUEST_WATCH_MS; void refresh(); } }
+	}
+	async function cancelRestart() {
+		closePanel();
+		if (pending) return;
+		pending = true;
+		try {
+			await api.post<Receipt>('/settings/application-updates', { action: 'cancel' });
+			if (active) notify.info('The update stays staged.', { title: 'Restart cancelled', persist: false });
+		} catch (cause) {
+			if (active) notify.error(getErrorMessage(cause, 'Could not cancel the restart'));
+		} finally { if (active) { pending = false; void refresh(); } }
+	}
+	function clicked() {
+		if (panel) { closePanel(); return; }
+		if (deferred && !busy) { openPanel({ kind: 'deferred' }); return; }
+		void activate();
 	}
 	function applySnapshot(next: Snapshot) {
 		snapshot = next;
@@ -283,6 +356,7 @@
 			receipt = refused.map(w => `${w.device_name}: ${w.reason}`).join('; ');
 			refusals = Object.fromEntries(refused.filter(w => w.device_id).map(w => [w.device_id!, w.reason]));
 			if (!result.results.some(w => w.accepted)) installRequested = false;
+			if (requestedAction === 'install' && refusedForWork(result)) return result;
 			if (announce) {
 				const message = `${scope}. ${result.results.map(w => `${w.device_name}: ${w.reason}`).join('; ')}${requestedAction === 'download' ? ' When preparation finishes, choose Update and restart to install.' : ''}`;
 				if (result.results.some(w => !w.accepted)) notify.warning(message, { title: 'Update needs attention', persist: false });
@@ -300,12 +374,15 @@
 	}
 </script>
 
+<svelte:window onkeydown={panelKey} />
+
 {#if visible}
 	<div class="update-slot" class:complete={celebrating} class:leaving={celebration === 'leaving'}>
-		<button class="update-button" class:ready class:failed={!!error && !waiting && !celebrating}
-			type="button" onclick={() => activate()} aria-disabled={busy} aria-busy={busy && !celebrating}
-			aria-label={waiting || celebrating ? headline : busy ? 'Downloading update' : action}
-			title={status} aria-describedby={tipOpen ? tooltipId : undefined}
+		<button class="update-button" class:ready class:failed={!!error && !waiting && !celebrating && !deferred}
+			type="button" onclick={clicked} aria-disabled={busy} aria-busy={busy && !celebrating} bind:this={buttonEl}
+			aria-label={waiting || celebrating || deferred ? headline : busy ? 'Downloading update' : action}
+			aria-haspopup="dialog" aria-expanded={!!panel} aria-controls={panel ? panelId : undefined}
+			title={panel ? undefined : status} aria-describedby={tipOpen ? tooltipId : undefined}
 			onmouseenter={showTip} onmouseleave={() => tipOpen = false} onfocus={showTip} onblur={() => tipOpen = false}
 			onkeydown={(event) => { if (event.key === 'Escape') tipOpen = false; }}>
 			{#if waiting || celebrating}
@@ -318,6 +395,36 @@
 			{:else if ready}<RefreshCw size={16} strokeWidth={1.85} />
 			{:else}<Download size={16} strokeWidth={1.85} />{/if}
 		</button>
+		{#if panel}
+			<NotificationSlot order={DOCK_ORDER.restart}>
+			<div class="update-panel" id={panelId} role="dialog" aria-label={panel.kind === 'busy' ? 'Work is still running' : 'Restart scheduled'}>
+				{#if panel.kind === 'busy'}
+					<strong>Work is still running</strong>
+					<p class="panel-hint">Restart would stop it.</p>
+					{#each panel.workers as group (group.device_name)}
+						{#if panel.workers.length > 1}<span class="panel-worker">{group.device_name}</span>{/if}
+						<ul class="busy-list">
+							{#each group.busy as item (item.session_id)}
+								<li><span class="busy-title">{item.title}</span>{#if item.tasks.length}<span class="busy-tasks">{item.tasks.join(', ')}</span>{/if}</li>
+							{/each}
+						</ul>
+					{/each}
+					<div class="panel-actions">
+						<button type="button" class="panel-primary" onclick={() => restartLater('when_idle')}>Restart when they finish</button>
+						<button type="button" class="panel-danger" onclick={() => restartLater('stop')}>Stop them and restart</button>
+						<button type="button" class="panel-quiet" onclick={closePanel}>Not now</button>
+					</div>
+				{:else}
+					<strong>Restart scheduled</strong>
+					<p class="panel-hint">Restarts when work finishes.</p>
+					<div class="panel-actions">
+						<button type="button" class="panel-danger" onclick={cancelRestart}>Cancel restart</button>
+						<button type="button" class="panel-quiet" onclick={closePanel}>Close</button>
+					</div>
+				{/if}
+			</div>
+			</NotificationSlot>
+		{/if}
 		{#if tipOpen}
 			<div class="update-tooltip" id={tooltipId} role="tooltip" style:top={`${tipPosition.top}px`} style:left={`${tipPosition.left}px`}>
 				<strong>{headline}</strong>
@@ -376,6 +483,24 @@
 	.release-notes strong { margin-bottom: 4px; }
 	.notes-text { white-space: pre-line; color: var(--muted-foreground); display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 12; line-clamp: 12; overflow: hidden; }
 	.update-tooltip p { margin: 10px 0 0; padding-top: 8px; border-top: 1px solid var(--border); color: var(--muted-foreground); }
+	.update-panel { width: 100%; max-width: 100%; padding: 12px 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--card); color: var(--card-foreground, var(--foreground)); box-shadow: var(--shadow-l); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+	.update-panel strong { display: block; font-size: 14px; }
+	.panel-hint { margin: 2px 0 8px; color: var(--muted-foreground); }
+	.panel-worker { display: block; margin-top: 6px; font-size: 11px; color: var(--muted-foreground); }
+	.busy-list { margin: 4px 0 0; padding: 0; list-style: none; max-height: 160px; overflow-y: auto; }
+	.busy-list li { display: flex; flex-direction: column; padding: 5px 8px; border-radius: 6px; background: color-mix(in oklch, var(--muted) 60%, transparent); }
+	.busy-list li + li { margin-top: 4px; }
+	.busy-title { color: var(--foreground); }
+	.busy-tasks { font-size: 11px; color: var(--muted-foreground); }
+	.panel-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+	.panel-actions button { min-height: 32px; padding: 0 10px; border-radius: 7px; border: 1px solid transparent; font-size: 12px; text-align: center; cursor: pointer; }
+	.panel-actions button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+	.panel-primary { color: var(--primary-foreground); background: var(--primary); }
+	.panel-primary:hover { background: color-mix(in oklch, var(--primary) 88%, var(--foreground)); }
+	.panel-actions .panel-danger { color: var(--destructive); background: color-mix(in oklch, var(--destructive) 10%, transparent); border-color: color-mix(in oklch, var(--destructive) 30%, transparent); }
+	.panel-danger:hover { background: color-mix(in oklch, var(--destructive) 18%, transparent); }
+	.panel-quiet { color: var(--muted-foreground); background: transparent; }
+	.panel-quiet:hover { background: var(--hover-overlay, color-mix(in oklch, var(--muted) 60%, transparent)); color: var(--foreground); }
 	@keyframes update-spin { to { transform: rotate(360deg); } }
 	@keyframes ring-out { to { opacity: 0; transform: scale(.5) rotate(90deg); } }
 	@keyframes check-in { from { opacity: 1; stroke-dashoffset: 25; } to { opacity: 1; stroke-dashoffset: 0; } }
@@ -385,6 +510,7 @@
 	@keyframes update-leave { to { opacity: 0; transform: scale(.65); } }
 	@keyframes close-gap { to { width: 0; margin-left: calc(-1 * var(--update-gap, 8px)); } }
 	.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+	@media (max-width: 639px), (pointer: coarse) { .panel-actions button { min-height: 44px; } }
 	@media (hover: none) { .update-slot { width: 40px; height: 40px; } .update-button { border-radius: 11px; } }
 	@media (prefers-reduced-motion: reduce) {
 		.update-button :global(.update-spinner), .completion-ring, .complete .update-button, .leaving { animation: none; }

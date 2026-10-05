@@ -22,6 +22,7 @@ import { openHeaderDropdown } from '../header-dropdowns';
 import { getPersistedDeviceIntent } from '../worker-selection';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
+import { archivedChats } from '../archived-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
 import { resolveNewChatProject, resolveSessionProject } from './session-project';
@@ -81,6 +82,8 @@ interface LiveSnapshot {
 		worktree_id?: string | null;
 		worktree_branch?: string | null;
 		worktree_deleted?: boolean;
+		/** 'archived' opens the chat read-only (#1822). */
+		status?: string | null;
 	};
 	/** Durable background-task view (task registry `get_visible`), already in
 	 *  the `Task` wire shape. Used to SEED the chip strip on switch-in. */
@@ -772,6 +775,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		const meta = snap.session_meta;
 		if (meta) {
+			// Reloads and deep links have no row to tell an archived chat apart.
+			if (meta.status !== undefined) archivedChats.mark(sessionId, meta.status === 'archived');
 			// A deep link or reload need not have a sidebar row. The persisted
 			// lane is authoritative; missing fields from older workers are not.
 			if (meta.mode !== undefined) {

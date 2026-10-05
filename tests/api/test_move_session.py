@@ -368,3 +368,36 @@ def test_live_checkout_query_refusal_keeps_its_reason(client, mock_database, moc
     assert str(error) in response.json()["detail"]
     mock_handoff.assert_not_called()
     mock_database.adopt_session.assert_not_called()
+
+
+# #1819: "Move when this turn ends" is queued on the owning worker.
+
+def test_queued_move_routes_status_queue_and_cancel(client, mock_database):
+    mock_database.get_session.return_value = _session()
+    route = AsyncMock(side_effect=lambda session, op, target=None, stop=False: {"op": op, "target": target, "stop": stop})
+    with patch("app.core.session_handoff.route", route):
+        assert client.get("/api/v1/sessions/test-session-id/handoff").json()["op"] == "status"
+        queued = client.post("/api/v1/sessions/test-session-id/handoff",
+                             json={"target_instance_id": TARGET, "stop": True}).json()
+        assert queued == {"op": "queue", "target": TARGET, "stop": True}
+        assert client.delete("/api/v1/sessions/test-session-id/handoff").json()["op"] == "cancel"
+
+
+def test_resume_here_queues_a_move_to_this_worker(client, mock_database):
+    from types import SimpleNamespace
+    mock_database.get_session.return_value = _session()
+    route = AsyncMock(return_value={"queued": True, "worker": "DesktopWorker"})
+    with patch("app.core.session_handoff.route", route), \
+            patch("app.network.engine.context", return_value=SimpleNamespace(device_id="dev-here")):
+        response = client.post("/api/v1/sessions/test-session-id/handoff", json={})
+    assert response.status_code == 200
+    assert route.await_args.args[2] == "dev-here"
+
+
+def test_queued_move_refusal_is_a_409_with_the_reason(client, mock_database):
+    mock_database.get_session.return_value = _session()
+    with patch("app.core.session_handoff.route",
+               AsyncMock(side_effect=ValueError("A move to DesktopWorker is already queued. Cancel it first."))):
+        response = client.post("/api/v1/sessions/test-session-id/handoff", json={"target_instance_id": TARGET})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "A move to DesktopWorker is already queued. Cancel it first."

@@ -2,10 +2,11 @@
 	/**
 	 * MobileAppLayout - the mobile app shell.
 	 *
+	 * The "Connected to <worker>" bar (which worker this phone shows), then
 	 * AppTopBar's compact bar plus its slide-in drawer (which hosts the same
 	 * Sidebar the desktop shell docks), over the shared MainPanel. MainPanel's
-	 * header snippet renders the title bar, then a dedicated chat-action row:
-	 * transcript download on the left, Git on the right at every mobile width.
+	 * header snippet renders the title bar, then a chat-action row with Git on
+	 * the right. Export lives in the composer's Chat controls (issue #1816).
 	 */
 	import { onMount } from 'svelte';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -14,6 +15,7 @@
 	import CredentialStorageBanner from '$lib/components/CredentialStorageBanner.svelte';
 	import AppTopBar from './AppTopBar.svelte';
 	import PageHeader from './PageHeader.svelte';
+	import ConnectedWorkerBar from './ConnectedWorkerBar.svelte';
 
 	let {
 		isAdmin,
@@ -32,6 +34,7 @@
 
 <div class="app-shell mobile">
 	<CredentialStorageBanner />
+	<ConnectedWorkerBar />
 	<div class="app-body">
 		<MainPanel {onOpenSession}>
 			{#snippet header(ctx)}
@@ -46,7 +49,6 @@
 				/>
 				{#if ctx.isSessionView}
 					<PageHeader hideGlobalStt>
-						{#snippet leftActions()}{@render ctx.downloadAction()}{/snippet}
 						{#snippet actions()}{@render ctx.headerActions()}{/snippet}
 					</PageHeader>
 				{/if}

@@ -392,6 +392,14 @@ async def conversation(
                     detail="Unknown session_id",
                 )
             check_session_access_for_api_user(api_user, existing)
+            from app.core import archive_guard
+
+            if archive_guard.is_archived_row(existing):
+                archive_guard.log_dropped(session_id, "api", "conversation refused")
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=str(archive_guard.SessionArchived(session_id)),
+                )
         # The queued turn is refused by the engine too, but only as a failed
         # outcome after the wait; refuse here, before a session row is made.
         await _refuse_unready_leg(profile_id, overrides, session_id)

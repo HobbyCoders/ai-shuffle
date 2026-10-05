@@ -14,9 +14,11 @@
  * components) is what lets the web build ship without a single line of the
  * mobile UI.
  */
-import type { Component } from 'svelte';
+import type { Component, Snippet } from 'svelte';
 import type { PickerGroup } from '$lib/constants/model-picker';
 import type { ContextWindowChoice } from '$lib/constants/model-context';
+import type { PermissionRequestData } from '$lib/components/PermissionRequest.svelte';
+import type { UserQuestionData, QuestionResponse } from '$lib/components/UserQuestion.svelte';
 
 // ─── Collapse state ─────────────────────────────────────────────────────────
 
@@ -90,6 +92,8 @@ export interface ComposerModelOption extends ComposerControlOption {
 export interface ComposerSheetProps {
 	open: boolean;
 	onClose: () => void;
+	/** Ask the dock to open (true) or close (false) the controls; the dock owns the state. */
+	onOpenChange?: (open: boolean) => void;
 	panelId?: string;
 	inertToolbar?: boolean;
 	modelOptions: ComposerModelOption[];
@@ -104,6 +108,8 @@ export interface ComposerSheetProps {
 	effortOptions: ComposerControlOption[];
 	effortExplanation?: string;
 	effortKnown?: boolean;
+	/** The level the model runs at when no pick is pinned ("Auto"). */
+	effortDefaultValue?: string | null;
 	effortValue: string | null;
 	onEffortSelect: (value: string) => void;
 	fastSupported?: boolean;
@@ -125,6 +131,39 @@ export interface ComposerSheetProps {
 	awayAvailable?: boolean;
 	awayBusy?: boolean;
 	onToggleAway?: () => void;
+	/** The assistant's home: no agent, project, branch or worktree; effort is the model's own. */
+	assistantMode?: boolean;
+	/** The usage details opened or closed (the dock polls provider limits while open). */
+	onUsageOpenChange?: (open: boolean) => void;
+	/** The composer's start-a-call button, for the controls' action row. */
+	callAction?: Snippet;
+	browserOpen?: boolean;
+	onBrowserToggle?: () => void;
+	onBrowserPreload?: () => void;
+}
+
+// ─── Prompt dock ────────────────────────────────────────────────────────────
+
+export interface PermissionAnswer {
+	request_id: string;
+	decision: 'allow' | 'deny';
+	remember?: 'none' | 'session' | 'profile';
+	pattern?: string;
+}
+
+/**
+ * Props ChatView hands a shell's prompt dock: everything waiting on the owner
+ * in the open chat, answered above the composer instead of in a modal.
+ */
+export interface PromptDockProps {
+	sessionId: string | null;
+	/** Permission prompts the GUI answers (voice-relayed ones are already removed). */
+	permissions: PermissionRequestData[];
+	questions: UserQuestionData[];
+	working?: boolean;
+	connected?: boolean;
+	onPermission: (detail: PermissionAnswer) => void;
+	onQuestion: (detail: QuestionResponse) => void;
 }
 
 // ─── Registry ───────────────────────────────────────────────────────────────
@@ -144,6 +183,12 @@ export interface ComposerShellHooks {
 	attachComposerOpen: (composer: HTMLElement, options: ComposerOpenOptions) => ComposerGestureHandle | undefined;
 	/** The controls sheet component, or `null` when this build has none. */
 	ControlsSheet: Component<ComposerSheetProps> | null;
+	/**
+	 * Docks permission prompts, private-access requests and agent questions
+	 * above the composer, replacing the permission modal and the question tray.
+	 * `null` (desktop) keeps those.
+	 */
+	PromptDock: Component<PromptDockProps> | null;
 }
 
 const DESKTOP_HOOKS: ComposerShellHooks = {
@@ -151,7 +196,8 @@ const DESKTOP_HOOKS: ComposerShellHooks = {
 	reconcileExpanded: (currentExpanded) => currentExpanded,
 	shouldBlockToolbarPointer: () => false,
 	attachComposerOpen: () => undefined,
-	ControlsSheet: null
+	ControlsSheet: null,
+	PromptDock: null
 };
 
 let hooks: ComposerShellHooks = DESKTOP_HOOKS;

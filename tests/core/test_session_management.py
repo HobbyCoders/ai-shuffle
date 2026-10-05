@@ -27,6 +27,8 @@ async def invoke(ctx, name, **data):
 
 
 async def test_native_round_trip_keeps_work_and_transcript(chats, monkeypatch):
+    """Settling never touches work; archiving stops it (#1822: an archived chat
+    is read-only, so nothing may be left running to wake it)."""
     from app.core import turn_scheduler
     from app.core.sync_engine import sync_engine
     kick = Mock()
@@ -47,8 +49,12 @@ async def test_native_round_trip_keeps_work_and_transcript(chats, monkeypatch):
         assert (row["status"] == "archived") is archived
         assert receipt["is_active"] is active
         assert receipt["status"] == row["status"]
-        assert turns.get_turn(turn["id"]) == before
+        if not archived:
+            assert turns.get_turn(turn["id"]) == before
         assert broadcast.await_args.kwargs["updates"] == {"is_active": active, "status": row["status"]}
+    # The archive stopped the running turn the way the Stop button does.
+    assert turns.get_turn(turn["id"])["state"] in turns.TERMINAL_STATES
+    assert "stopped" in receipt["note"]
     kick.assert_not_called()
     for name in ("SettleSession", "UnsettleSession"):
         outcome = await invoke(chats, name, session_id="target")

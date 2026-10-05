@@ -27,7 +27,6 @@ vi.mock('$lib/stores/layout.svelte',()=>({}));
 vi.mock('$lib/stores/sidebar-prefs.svelte',()=>({}));
 vi.mock('$lib/stores/sessionMode.svelte',()=>({}));
 vi.mock('$lib/stores/browser-panel.svelte',()=>({}));
-vi.mock('./notificationSound',()=>({}));
 const access = vi.hoisted(() => ({get: vi.fn()}));
 vi.mock('$lib/api/client', async (importOriginal) => {
  const actual = await importOriginal<typeof import('$lib/api/client')>();

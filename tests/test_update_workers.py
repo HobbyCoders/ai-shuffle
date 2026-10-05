@@ -656,3 +656,86 @@ def test_desktop_bridge_converts_the_shells_check_time(setup):
     assert updates.status()["checked_at"] == 1000.0
     updates.desktop_exchange({"phase": "idle", "checkedAt": "not a time"})
     assert updates.status()["checked_at"] is None
+
+
+# #1818: a restart refused because work is running says why, names the work,
+# and can wait for it or stop it first.
+BUSY = [{"session_id": "s1", "title": "Fix login", "tasks": ["Run tests"]}]
+
+
+@pytest.fixture
+def busy(setup, monkeypatch):
+    running = ["s1"]
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: list(running))
+    monkeypatch.setattr(desktop_lifecycle, "busy_work", lambda: BUSY if running else [])
+    monkeypatch.setattr(fleet, "DEFER_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(fleet, "_deferred", None)
+    return running
+
+
+def test_refused_restart_names_the_running_work_and_leaves_no_failed_install(busy):
+    result = asyncio.run(fleet.dispatch("install"))
+    row = result["results"][-1]
+    assert row["accepted"] is False
+    assert row["reason"] == "Busy with running work: Fix login"
+    assert row["busy"] == BUSY
+    assert updates._desktop_request is None
+    # Nothing restarted, so there is no install whose startup "could not be confirmed".
+    assert fleet.progress.load() is None
+    assert asyncio.run(fleet.snapshot())["operation"] is None
+
+
+def test_restart_when_work_finishes_waits_then_installs(busy):
+    async def scenario():
+        result = await fleet.dispatch("install", "when_idle")
+        row = result["results"][-1]
+        assert row["accepted"] and row["deferred"] and row["reason"] == "Restarts when running work finishes"
+        assert fleet.progress.load() is None  # nothing to verify yet
+        state = await fleet.snapshot()
+        assert state["workers"][0]["label"] == "Restarts when work finishes"
+        await asyncio.sleep(0.05)
+        assert updates._desktop_request is None  # still busy: no restart
+        busy.clear()
+        for _ in range(100):
+            if updates._desktop_request:
+                break
+            await asyncio.sleep(0.01)
+        assert updates._desktop_request["action"] == "install"
+        assert fleet._deferred is None
+    asyncio.run(scenario())
+
+
+def test_cancel_drops_a_waiting_restart(busy):
+    async def scenario():
+        await fleet.dispatch("install", "when_idle")
+        assert fleet._deferred is not None
+        result = await fleet.dispatch("cancel")
+        assert result["results"][-1] == {"device_id": "self", "device_name": "Current worker",
+                                         "accepted": True, "reason": "Scheduled restart cancelled"}
+        busy.clear()
+        await asyncio.sleep(0.05)
+        assert fleet._deferred is None and updates._desktop_request is None
+    asyncio.run(scenario())
+
+
+def test_stop_them_and_restart_stops_each_session_then_installs(busy, monkeypatch):
+    stopped = []
+    async def stop(sid):
+        stopped.append(sid)
+        busy.clear()
+    monkeypatch.setattr(desktop_lifecycle, "stop_session_work", stop)
+    async def scenario():
+        result = await fleet.dispatch("install", "stop")
+        assert result["results"][-1]["reason"] == "Stopping running work, then restarting"
+        for _ in range(100):
+            if updates._desktop_request:
+                break
+            await asyncio.sleep(0.01)
+    asyncio.run(scenario())
+    assert stopped == ["s1"]
+    assert updates._desktop_request["action"] == "install"
+
+
+def test_a_mode_only_applies_to_install(setup):
+    with pytest.raises(ValueError, match="Unknown update mode"):
+        asyncio.run(fleet.dispatch("download", "stop"))

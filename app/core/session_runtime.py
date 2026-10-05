@@ -856,6 +856,19 @@ class SessionRuntime:
             )
             return None
 
+        # 0-archived. THE guard for #1822: an archived chat is a read-only
+        #     transcript until the owner restores it, so no turn starts in it,
+        #     whatever queued it (a task-completion or restart wake, a scheduled
+        #     wake-up, a peer message, an automation, an API call or the user).
+        #     The session's queued rows are aborted, not left queued, so no later
+        #     kick or claim pass picks one up.
+        from app.core import archive_guard
+
+        if archive_guard.is_archived_row(session_row):
+            archive_guard.log_dropped(sid, self.source, f"turn {tid}")
+            await asyncio.to_thread(archive_guard.drop_queued_turns, sid, tid)
+            return None
+
         # 0a. Principal. Fail-closed: a turn whose principal cannot be settled
         #     stays queued rather than running as the owner.
         try:
@@ -1083,18 +1096,17 @@ class SessionRuntime:
             try:
                 from app.core.provider_agent import WORKER_FAILED_STATUS
 
-                # Archived is a user choice, not a run verdict: only the user
-                # talking to the session again brings it back. A server-side
-                # wake (task notification, scheduler) leaves it archived.
+                # Archived is the owner's choice, not a run verdict: step 0
+                # refused this turn, and only Restore brings the chat back.
                 status = (session_row or {}).get("status")
-                if status == WORKER_FAILED_STATUS or (status == "archived" and self.source == "user"):
+                if status == WORKER_FAILED_STATUS:
                     from app.db import database as _database
 
                     await asyncio.to_thread(
                         _database.update_session, sid, status="active"
                     )
                     logger.info(
-                        "SessionRuntime: revived failed/archived session %s to active at "
+                        "SessionRuntime: revived failed session %s to active at "
                         "turn %s start", sid, tid,
                     )
             except Exception:

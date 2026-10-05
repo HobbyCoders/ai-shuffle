@@ -5,8 +5,8 @@
  * These mount the real header with its git/github stores mocked (but the real
  * header-dropdowns and gitActionPreferences singletons) so we can drive the
  * panel and its option popovers end-to-end. Covered:
- *  - the header button's label follows the priority ladder (approvals waiting,
- *    conflicts, behind, uncommitted changes, to push, open PR, up to date)
+ *  - the header button's label follows the priority ladder (conflicts,
+ *    behind, uncommitted changes, to push, open PR, up to date)
  *  - the row-visibility matrix inside the panel (Commit / Create PR / Ship It /
  *    Push / Pull enable for the right repo state)
  *  - the panel opens from the button; Escape and outside-click close it; a
@@ -21,7 +21,8 @@
  *  - the panel opens when an operation starts after mount, never on mount
  *    for one already active (a pinned failure, a resumed Ship It)
  *  - everything disables under actionsBusy (isStreaming)
- *  - the private-access row reads chatAccessSummary and opens the dialog
+ *  - the panel is Git only: no swarms, agent transcripts or private access
+ *    (#1816; those live in the running-tasks list and the Access button)
  */
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -352,12 +353,12 @@ describe('GitHeaderActions header label', () => {
 		expect(trigger().title).toBe('Up to date with main');
 	});
 
-	it('puts approvals waiting above every git state', () => {
+	it('ignores waiting access approvals: they are not Git state (#1816)', () => {
 		cleanAheadBranch();
 		chatAccessSummary.set({ sessionId: 's1', pending: 2, active: 1, saved: 0, error: false, open: vi.fn() });
 		renderHeader({ openPR: { number: 42, title: 'x', url: 'http://x', mergeable: false } });
-		expect(trigger().textContent).toContain('2 to approve');
-		expect(trigger().textContent).not.toContain('conflicts');
+		expect(trigger().textContent).not.toContain('to approve');
+		expect(trigger().textContent).toContain('conflicts');
 	});
 
 	// Owner decision on #1615: the phone sheet layout shows a truncated label,
@@ -412,7 +413,6 @@ describe('GitHeaderActions panel rows', () => {
 	});
 
 	it('pauses actions while a hydrated worktree reads as unreadable, then restores them', async () => {
-		chatAccessSummary.set({ sessionId: 's1', pending: 0, active: 1, saved: 0, error: false, open: vi.fn() });
 		dirtyFeatureBranch();
 		const { rerender } = renderHeader({ worktreeBranch: 'feature/x' });
 		await openPanel();
@@ -431,7 +431,7 @@ describe('GitHeaderActions panel rows', () => {
 		expect(queryPanel()).toBeTruthy();
 		expect(queryRow('Commit')).toBeNull();
 		expect(queryRow('Ship It')).toBeNull();
-		expect(row('Private access').disabled).toBe(false);
+		expect(row('Close Git panel')).toBeTruthy();
 
 		dirtyFeatureBranch();
 		await rerender({ isGitRepo: true });
@@ -1271,32 +1271,30 @@ describe('GitHeaderActions handler wiring', () => {
 		await vi.waitFor(() => expect(document.activeElement).toBe(within(panel()).getByRole('button', { name: 'Review all' })));
 	});
 
-	it('the private-access row opens the access dialog', async () => {
+	// #1816: the panel is Git only. Swarms and agent transcripts moved to the
+	// running-tasks list; private access lives on the header's Access button
+	// and in the chat's own prompt.
+	it('renders no private-access row, even with grants and requests waiting', async () => {
 		dirtyFeatureBranch();
-		const open = vi.fn();
-		chatAccessSummary.set({ sessionId: 's1', pending: 0, active: 1, saved: 0, error: false, open });
-		renderHeader();
-		await openPanel();
-		const accessRow = row('Private access');
-		expect(accessRow.textContent).toContain('1 active grant');
-		await fireEvent.click(accessRow);
-		expect(open).toHaveBeenCalledOnce();
-		expect(queryPanel()).toBeNull();
-	});
-
-	it('disables the private-access row when the chat has none', async () => {
-		dirtyFeatureBranch();
-		chatAccessSummary.set({ sessionId: 's1', pending: 0, active: 0, saved: 0, error: false, open: vi.fn() });
-		renderHeader();
-		await openPanel();
-		expect(row('Private access').disabled).toBe(true);
-	});
-
-	it('omits the private-access row when no chat is mounted', async () => {
-		dirtyFeatureBranch();
+		chatAccessSummary.set({ sessionId: 's1', pending: 2, active: 1, saved: 1, error: false, open: vi.fn() });
 		renderHeader();
 		await openPanel();
 		expect(queryRow('Private access')).toBeNull();
+		expect(within(panel()).queryByText(/active grant|to approve|saved connection/)).toBeNull();
+	});
+
+	it('renders no swarm workflows or agent transcript links', async () => {
+		dirtyFeatureBranch();
+		renderHeader();
+		await openPanel();
+		expect(within(panel()).queryByText(/swarm/i)).toBeNull();
+		expect(within(panel()).queryByRole('link', { name: /transcript/i })).toBeNull();
+		expect(panel().querySelector('[data-testid="swarm-card"], .swarm-dropdown')).toBeNull();
+	});
+
+	it('does not mount the swarm list or read swarm state', () => {
+		const source = readFileSync(resolve(process.cwd(), 'src/lib/components/git/GitHeaderActions.svelte'), 'utf8');
+		expect(source).not.toMatch(/SwarmDropdown|SwarmCard|stores\/swarms|chat-access/);
 	});
 });
 

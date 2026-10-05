@@ -383,3 +383,32 @@ async def test_failed_renewal_attempt_shows_reconnecting(harness, monkeypatch):
                                                 {"type": "status", "state": "live"}]
     await harness.call.close()
     await asyncio.wait_for(run, 3)
+
+
+@pytest.mark.asyncio
+async def test_a_provider_that_stops_hearing_the_caller_is_replaced(harness, monkeypatch):
+    """#1824: GPT Live heard the caller, then transcribed nothing for many
+    seconds of speech. The call says it is reconnecting and gets a new session."""
+    monkeypatch.setattr(voice_stream, "PROVIDER_DEAF_VOICED_S", 1.0)
+    first = FakeProvider([json.dumps({"type": "session.input_transcript.delta", "delta": "Hello there"})])
+    second = FakeProvider()
+    harness.script += [first, second]
+    run = asyncio.create_task(harness.call.run())
+    await until(lambda: harness.call.heard_this_session)
+    speech = b"\x10\x00" * 12_000  # 0.5 s of speech-level audio
+    for _ in range(3):
+        await harness.browser.inbox.put({"type": "websocket.receive", "bytes": speech})
+    await until(lambda: second.started() and harness.call.connected)
+
+    assert harness.browser.events("status") == [{"type": "status", "state": "reconnecting"},
+                                                {"type": "status", "state": "live"}]
+    assert not harness.call.deaf.is_set() and not harness.call.heard_this_session
+    # A second deaf spell inside the cooldown does not churn sessions.
+    for _ in range(3):
+        await harness.browser.inbox.put({"type": "websocket.receive", "bytes": speech})
+    harness.call.heard_this_session = True
+    await harness.browser.inbox.put({"type": "websocket.receive", "bytes": speech})
+    await until(lambda: harness.call.mic_frames == 7)
+    assert not harness.call.deaf.is_set() and len(harness.attempts) == 2
+    await harness.call.close()
+    await asyncio.wait_for(run, 3)

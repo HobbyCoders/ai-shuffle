@@ -57,7 +57,8 @@
 			active: data.grants.length,
 			saved: data.saved_connections.length,
 			error: !!error,
-			open: openDialog
+			open: openDialog,
+			decide
 		});
 	});
 	onDestroy(() => chatAccessSummary.update((cur) => (cur?.sessionId === sessionId ? null : cur)));
@@ -208,10 +209,10 @@
 		catch (e) { error = getErrorMessage(e, 'Could not revoke access.'); }
 		finally { busy = false; }
 	}
-	async function decide(id: string, allow: boolean) {
+	async function decide(id: string, allow: boolean): Promise<boolean> {
 		busy = true; error = '';
-		try { await api.post(`${base}/actions/${id}`, {allow}); await refresh(); }
-		catch (e) { error = getErrorMessage(e, 'Could not answer this request.'); }
+		try { await api.post(`${base}/actions/${id}`, {allow}); await refresh(); return true; }
+		catch (e) { error = getErrorMessage(e, 'Could not answer this request.'); return false; }
 		finally { busy = false; }
 	}
 </script>

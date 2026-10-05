@@ -2,6 +2,7 @@ import { activeSession } from '$lib/stores/active-session';
 import { appData } from '$lib/stores/app-data.svelte';
 import { appMode, normalizeSessionMode } from '$lib/stores/sessionMode.svelte';
 import { layout } from '$lib/stores/layout.svelte';
+import { archivedChats } from '$lib/stores/archived-chats';
 import type { Session } from '$lib/api/client';
 
 /** Shared session selection for the sidebar, deep links and in-app links. */
@@ -15,6 +16,8 @@ export function openSession(sessionId: string, openedSession?: Session): void {
 		worktreeIntent: 'worktree' as const,
 	} : null;
 	appMode.set(normalizeSessionMode(session?.mode), false);
+	// An archived chat opens read-only; /live corrects a row this tab lacks.
+	if (session) archivedChats.mark(sessionId, session.status === 'archived');
 	const select = () => {
 		activeSession.switchSession(sessionId, session?.project_id, worktreeInfo,
 			session?.title || null, session?.project_v2_id ?? null);

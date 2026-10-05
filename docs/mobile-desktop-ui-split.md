@@ -190,7 +190,7 @@ window.__SHUFFLE_MOBILE__ = {
   native: {                            // what this app build offers
     platform: 'android',               // or 'ios'
     bridge: 1,                         // bumped when a capability changes shape
-    capabilities: ['file-save', 'file-chooser', 'microphone', 'device-tools']
+    capabilities: ['file-save', 'file-chooser', 'microphone', 'device-tools', 'worker-switch']
   }
 };
 ```
@@ -232,6 +232,7 @@ true only when the app showing the page offers `name`:
 | `file-chooser` | yes | yes | `<input type=file>` opens the system picker |
 | `microphone` | yes | yes | `getUserMedia` audio for the page's own voice mode |
 | `device-tools` | yes | no | phone tools the worker can call on this device |
+| `worker-switch` | yes | no | the app connects to another paired worker when the page navigates to `/mobile/?connect=<origin>` |
 
 Both are false on the web UI and in app builds from before the descriptor.
 Those builds bundle their own UI, so they never show a worker page anyway.
@@ -242,6 +243,42 @@ The rules for changing the contract:
 - Changing a bridge's shape incompatibly means bumping `BRIDGE_VERSION` /
   `bridgeVersion` on both platforms.
 - Names are never renamed or reused.
+
+### Switching workers and the worker bar
+
+The phone UI's "Connected to" bar (`mobile/src/shell/ConnectedWorkerBar.svelte`)
+names the worker the app is connected to and lists the owner's other workers.
+Tapping one in an Android build with `worker-switch` navigates the page to
+`/mobile/?connect=<worker origin>`. The app's WebView client catches that
+navigation and never loads it (`ui/WorkerSwitch.kt`):
+
+- The URL must be exactly `/mobile/?connect=<value>` on the current worker,
+  with no other parameter and no fragment.
+- The value must be a bare HTTPS origin: no path, query, fragment or
+  credentials.
+- It must equal, after normalisation, the saved origin of a worker this phone
+  is already paired with (local pairings and the signed-in account's).
+
+A known worker opens the same way the Workers screen opens it, landing on its
+chat list. An account worker this phone holds no key for opens the Workers
+screen to authorize it. Anything else shows a short message and the app stays
+where it is. The URL never carries credentials, and this path never pairs a
+new worker.
+
+The app draws its own bar (back, worker name, menu with Refresh chat and
+Workers) until the page says it draws the "Connected to" bar itself. The page
+says so over the `shuffleShell` web-message bridge, which is scoped like
+`shuffleFileSave` to the top-level phone UI page:
+
+- `{"type":"worker-bar","shown":true}` when the bar mounts, `false` when it
+  goes. The app hides or restores its bar.
+- `{"type":"workers"}` from the sheet's "Pair, rename or remove workers"
+  button, which opens the app's Workers screen.
+
+A worker UI from before the "Connected to" bar sends nothing, so the app keeps
+its own bar there. The app also restores its bar when the page fails to load
+or chat cannot open, so Refresh chat stays reachable. The page side is in
+`mobile/src/shell/native-shell.ts` and `worker-connection.ts`.
 
 Worker-hosted media on Android uses `WorkerAssetLoader` in the native WebView
 client. It intercepts approved file/media URLs and supplies the paired Bearer

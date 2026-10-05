@@ -888,6 +888,10 @@ def build_cli_transcript_entries(
             "uuid": entry_uuid,
             "timestamp": _cli_timestamp(entry.get("timestamp")),
         }
+        if role == "user" and entry.get("isCompactSummary"):
+            # The summary of an earlier CLI compaction, flagged the way the
+            # CLI flags its own (see :func:`_after_cli_compaction`).
+            line["isCompactSummary"] = True
         if role == "user":
             line["message"] = {"role": "user", "content": content}
         else:
@@ -1043,7 +1047,10 @@ def cli_transcript_prompt_tail(
     The prompts come from the last ``tail_bytes``, oldest first. A partial
     first line and lines that are not JSON are skipped, and so are the CLI's
     meta and compaction-summary entries. The flag is False when the file is
-    longer than ``tail_bytes``, so earlier prompts were not read.
+    longer than ``tail_bytes``, so earlier prompts were not read, and when it
+    holds a compaction summary: a transcript re-seeded from a compacted
+    context starts at that summary, so the prompts before it are not in the
+    file at all (:func:`_after_cli_compaction`).
     """
     with open(path, "rb") as handle:
         handle.seek(0, os.SEEK_END)
@@ -1055,6 +1062,7 @@ def cli_transcript_prompt_tail(
     if start > 0 and lines:
         lines = lines[1:]
     prompts: List[str] = []
+    summarized = False
     for raw in lines:
         raw = raw.strip()
         if not raw:
@@ -1065,12 +1073,15 @@ def cli_transcript_prompt_tail(
             continue
         if not isinstance(entry, dict) or entry.get("type") != "user":
             continue
-        if entry.get("isMeta") or entry.get("isCompactSummary"):
+        if entry.get("isCompactSummary"):
+            summarized = True
+            continue
+        if entry.get("isMeta"):
             continue
         text = prompt_text((entry.get("message") or {}).get("content"))
         if text:
             prompts.append(text)
-    return prompts, start == 0
+    return prompts, start == 0 and not summarized
 
 
 #: How many of fluid's latest prompts :func:`cli_prompts_cover` lines up.
@@ -1165,6 +1176,95 @@ def _write_cli_transcript(
     return target
 
 
+def _entry_epoch(entry: Dict[str, Any]) -> Optional[float]:
+    """An entry's ISO ``timestamp`` as epoch seconds, or None."""
+    stamp = entry.get("timestamp")
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _after_cli_compaction(
+    sdk_session_id: str, entries: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """``entries`` as the Claude Code CLI last held them: from its latest
+    compaction on, when the session has one.
+
+    fluid's node tree keeps the whole conversation; a compaction is only an
+    event. Re-seeding a CLI from the tree alone handed it back everything a
+    ``/compact`` (or the CLI's own compaction) had folded away, which is how a
+    session that moved to another worker came back at full size (#1820). The
+    delegated leg's ``ContextCompaction`` carries the CLI's summary and the
+    node it compacted after, so the transcript becomes that summary (flagged
+    ``isCompactSummary``, as the CLI flags its own) followed by the entries
+    after that node.
+
+    The newest compaction with a summary whose node is on the current path
+    wins. One whose node is off the path belongs to a branch a rewind left
+    behind and is skipped; one recorded between turns (no node) is placed by
+    its timestamp. Returns ``entries`` unchanged when no compaction applies.
+    Never raises.
+    """
+    if not entries:
+        return entries
+    try:
+        if not _has_event_of_class(sdk_session_id, "ContextCompaction"):
+            return entries
+        rows = _event_rows_of_class(sdk_session_id, ("ContextCompaction",))
+    except Exception:
+        logger.warning(
+            "fluid re-seed could not read %s's compactions; replaying the "
+            "whole conversation", sdk_session_id, exc_info=True,
+        )
+        return entries
+    index = {entry.get("uuid"): i for i, entry in enumerate(entries)}
+    for row in reversed(rows):
+        event = _as_dict(row.get("event"))
+        if not str(event.get("reason") or "").startswith("cli_"):
+            continue
+        summary = event.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            continue
+        node_id = event.get("node_id")
+        if node_id:
+            if node_id not in index:
+                continue
+            cut = index[node_id] + 1
+        else:
+            try:
+                at = float(event.get("ts") or 0.0)
+            except (TypeError, ValueError):
+                at = 0.0
+            if at <= 0:
+                continue
+            cut = next(
+                (
+                    i for i, entry in enumerate(entries)
+                    if (_entry_epoch(entry) or 0.0) > at
+                ),
+                len(entries),
+            )
+        stamp = _iso(event.get("ts")) or entries[min(cut, len(entries)) - 1].get("timestamp")
+        summary_entry = {
+            "uuid": None,
+            "type": "user",
+            "timestamp": stamp,
+            "sessionId": sdk_session_id,
+            "isCompactSummary": True,
+            "message": {"role": "user", "content": summary},
+        }
+        logger.info(
+            "fluid re-seed: session %s starts from its Claude Code compaction "
+            "(%d of %d entries kept after the summary)",
+            sdk_session_id, len(entries) - cut, len(entries),
+        )
+        return [summary_entry, *entries[cut:]]
+    return entries
+
+
 def reseed_delegated_cli_session(
     sdk_session_id: str,
     working_dir: str,
@@ -1207,7 +1307,9 @@ def reseed_delegated_cli_session(
         return ReseedResult(status="skipped")
 
     try:
-        entries = fluid_transcript_entries(sdk_session_id)
+        entries = _after_cli_compaction(
+            sdk_session_id, fluid_transcript_entries(sdk_session_id)
+        )
         new_cli_session_id = str(_uuid.uuid4())
         lines = build_cli_transcript_entries(
             entries, new_cli_session_id, working_dir

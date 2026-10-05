@@ -198,11 +198,54 @@ async def test_clipboard_grants_and_open_application(desktop, monkeypatch):
     assert result["method"] == "focused_existing_window"
     assert desktop.native.focused == [101]
     assert result["window"]["id"] == 101
-    # Edge is open but not granted, Paint is not open: both launch via Start.
-    for app in ("Microsoft Edge", "Paint"):
-        assert payload(await desktop.tools["open_application"]({"app": app}))["method"] == "start_menu"
+    assert ("cmd",) not in [c.args for c in desktop.keyboard.press.call_args_list]
+    # Paint is granted but not open: it launches via Start.
+    await desktop.tools["request_access"]({"apps": ["Paint"], "reason": "test"})
+    assert payload(await desktop.tools["open_application"]({"app": "Paint"}))["method"] == "start_menu"
     assert desktop.native.focused == [101]
     desktop.keyboard.press.assert_any_call("cmd")
+
+
+@pytest.mark.parametrize("app", ["Microsoft Edge", "Calculator", "cmd", "Note", "Notepad 2"])
+async def test_open_application_refuses_apps_outside_the_grant(desktop, monkeypatch, app):
+    """#1700: a session approved for Notepad cannot launch other apps by name,
+    in bypass mode too, and nothing is typed or focused."""
+    await desktop.tools["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    monkeypatch.setattr(sdk.sys, "platform", "win32")
+    result = await desktop.tools["open_application"]({"app": app})
+    assert result["isError"]
+    message = json.loads(result["content"][0]["text"])["error"]
+    assert "request_access" in message and "Notepad" in message
+    assert desktop.keyboard.press.call_count == 0 and desktop.keyboard.type.call_count == 0
+    assert desktop.native.focused == []
+    batch = await desktop.tools["computer_batch"]({"actions": [{"action": "open_application", "app": app}]})
+    assert batch["isError"] and desktop.keyboard.press.call_count == 0
+
+
+@pytest.mark.parametrize("tool,chord", [
+    ("key", "cmd"), ("key", "win+r"), ("key", "super+l"), ("key", "alt+Tab"),
+    ("key", "alt+shift+tab"), ("key", "alt+F4"), ("key", "alt+Escape"), ("key", "ctrl+Escape"),
+    ("key", "ctrl+shift+Escape"), ("key", "ctrl+alt+Delete"), ("hold_key", "win"),
+])
+async def test_system_key_chords_need_the_system_keys_grant(desktop, tool, chord):
+    """#1700: system chords are refused until systemKeyCombos is granted."""
+    args = {"text": chord, "duration": 0.01}
+    result = await desktop.tools[tool](args)
+    assert result["isError"]
+    assert "systemKeyCombos" in json.loads(result["content"][0]["text"])["error"]
+    batch = await desktop.tools["computer_batch"]({"actions": [{"action": tool, **args}]})
+    assert batch["isError"]
+    assert desktop.keyboard.press.call_count == 0
+    await desktop.tools["request_access"]({"apps": [], "reason": "test", "systemKeyCombos": True})
+    assert payload(await desktop.tools["list_granted_applications"]({}))["system_keys"] is True
+    if chord in ("alt+Tab", "cmd", "win", "ctrl+Escape"):  # keys the fake keyboard knows
+        assert payload(await desktop.tools[tool](args))["success"]
+        assert desktop.keyboard.press.call_count == desktop.keyboard.release.call_count > 0
+
+
+@pytest.mark.parametrize("chord", ["ctrl+c", "ctrl+Tab", "shift+Tab", "alt+f", "Return", "Escape", "alt", "+"])
+async def test_ordinary_chords_need_no_system_keys_grant(desktop, chord):
+    assert payload(await desktop.tools["key"]({"text": chord}))["success"]
 
 
 async def test_cursor_reports_actual_display_without_fabricated_coordinates(desktop):
@@ -434,6 +477,52 @@ async def test_batch_supports_window_actions_and_zoom(desktop):
 ])
 def test_grant_names_match_windows(grant, names, expected):
     assert windows.name_matches(grant, names) is expected
+
+
+@pytest.mark.parametrize("chord,expected", [
+    ("cmd", True), ("Win", True), ("super+d", True), ("meta+shift+s", True), ("alt+tab", True),
+    ("alt+F4", True), ("alt+esc", True), ("ctrl+esc", True), ("ctrl+shift+escape", True),
+    ("ctrl+alt+del", True), ("ctrl+alt+t", True), ("", True), ("++", True),
+    ("ctrl+c", False), ("ctrl+tab", False), ("alt+f", False), ("shift+tab", False), ("F4", False),
+    ("Escape", False), ("alt", False), ("ctrl", False), ("+", False),
+])
+def test_system_chord_classification(chord, expected):
+    from app.mcp.computer_use.keymap import is_system_chord
+
+    assert is_system_chord(chord) is expected
+
+
+@pytest.mark.parametrize("name,apps,expected", [
+    ("Notepad", ["Notepad"], True),
+    ("notepad", ["Notepad"], True),
+    ("Windows Terminal", ["WindowsTerminal"], True),
+    ("AI Shuffle", ["AI Shuffle"], True),
+    ("Edge", ["Microsoft Edge"], False),
+    ("Microsoft Edge", ["Edge"], False),
+    ("Notepad 2", ["Notepad"], False),
+    ("Calculator", ["Notepad"], False),
+    ("Notepad", [], False),
+    ("", ["Notepad"], False),
+])
+def test_open_application_name_must_equal_a_grant(name, apps, expected):
+    assert windows.app_granted(name, apps) is expected
+
+
+@pytest.mark.parametrize("path,desc,expected", [
+    (r"C:\Users\me\AppData\Roaming\ai-shuffle-desktop\updates\dependencies\x\node\desktop\y"
+     r"\node_modules\electron\dist\electron.exe", "Electron", True),
+    (r"C:\Users\me\AppData\Local\Programs\AI Shuffle\AI Shuffle.exe", "AI Shuffle", True),
+    (r"C:\tools\other-app\node_modules\electron\dist\electron.exe", "Electron", False),
+    (r"C:\ai-shuffle-desktop\Discord.exe", "Discord", False),
+])
+def test_ai_shuffle_desktop_window_matches_its_grant(path, desc, expected):
+    """#1700: the source-updated desktop app runs electron.exe, which reports
+    "Electron"; it still matches a grant for "AI Shuffle", and no other
+    Electron app does."""
+    names = windows.identity_names(path, desc, desc)
+    win = windows.WindowInfo(id=1, title="AI Shuffle", app=desc, process="", pid=1, state="normal",
+                             foreground=False, bounds=None, display=None, names=names)
+    assert windows.is_granted(win, ["AI Shuffle"]) is expected
 
 
 def test_window_functions_refuse_other_platforms(monkeypatch):

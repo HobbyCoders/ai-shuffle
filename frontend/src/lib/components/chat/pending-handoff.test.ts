@@ -31,6 +31,13 @@ describe('pendingHandoff', () => {
 		expect(pendingHandoff([call(queued), note('timeout')])).toBeNull();
 	});
 
+	it('reads an owner-queued move and its cancel (#1819)', () => {
+		expect(pendingHandoff([said('working'), note('queued')])).toEqual({ worker: 'DesktopWorker', phase: 'queued' });
+		expect(pendingHandoff([note('queued'), note('started')])).toEqual({ worker: 'DesktopWorker', phase: 'moving' });
+		expect(pendingHandoff([note('queued'), note('cancelled')])).toBeNull();
+		expect(pendingHandoff([call(queued), note('cancelled', '')])).toBeNull();
+	});
+
 	it('ends on a cancel, and a refused call leaves an earlier request standing', () => {
 		expect(pendingHandoff([call(queued), call(JSON.stringify({ cancelled: true }), { cancel: true })])).toBeNull();
 		expect(pendingHandoff([call(queued), call('Unknown worker', { worker: 'Nope' }, { toolStatus: 'error' })]))

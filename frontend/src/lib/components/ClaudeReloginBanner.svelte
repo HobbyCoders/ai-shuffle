@@ -9,6 +9,8 @@
 	import { auth, isAdmin } from '$lib/stores/auth.svelte';
 	import { dismissClaudeReloginNotice } from '$lib/api/claude-cli';
 	import Banner from './Banner.svelte';
+	import NotificationSlot from './NotificationSlot.svelte';
+	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 
 	let hidden = $state(false);
 	const notice = $derived($auth.status?.claude_cli?.relogin_notice ?? null);
@@ -24,11 +26,14 @@
 </script>
 
 {#if notice && $isAdmin && !hidden}
-	<Banner
-		title="Sign in to the Claude Code CLI again"
-		message={`${notice.message}`}
-		severity="warning"
-		dismissible
-		onDismiss={dismiss}
-	/>
+	<NotificationSlot order={DOCK_ORDER.account}>
+		<Banner
+			variant="page"
+			title="Sign in to the Claude Code CLI again"
+			message={`${notice.message}`}
+			severity="warning"
+			dismissible
+			onDismiss={dismiss}
+		/>
+	</NotificationSlot>
 {/if}

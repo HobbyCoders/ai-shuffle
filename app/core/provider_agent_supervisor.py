@@ -536,6 +536,19 @@ async def _cancel_worker_prompts(record: WorkerRecord) -> None:
         )
 
 
+def _with_worker(text: str, record: WorkerRecord) -> str:
+    """``text`` plus the worker a remote child ran on ("Stopped by user. Ran on Unraid.")."""
+    try:
+        from app.core.remote_task import worker_display_name
+
+        name = worker_display_name(record.remote_device_id)
+    except Exception:  # noqa: BLE001 — a name is cosmetic
+        name = record.remote_device_id or ""
+    if not name or not text:
+        return text
+    return f"{text.rstrip().rstrip('.')}. Ran on {name}."
+
+
 async def teardown_worker(
     record: WorkerRecord,
     *,
@@ -564,6 +577,9 @@ async def teardown_worker(
         # clear its queue or stop descendants when the interrupt is delivered.
         from app.core.query_session_lifecycle import stop_all_background_tasks
         await stop_all_background_tasks(record.worker_session_id, user_stop=True, source=reason)
+    if record.remote_device_id:
+        # The stopped card names the worker it ran on (#1806).
+        summary, preview = _with_worker(summary, record), _with_worker(preview, record)
     await _settle_card(record, preview, summary)
 
     outcome = "remote"

@@ -45,6 +45,23 @@ test('attached workers are neither counted nor sent a shutdown request', async (
     await worker.stop();
 });
 
+test('the activity check keeps the workers that run its subagents, for the quit dialog (#1808)', async () => {
+    const worker = supervisor();
+    worker._state = {...worker.state, phase: 'ready'};
+    worker.lifecycleRequest = async () => ({active_sessions: 1, remote_workers: ['Unraid', '', 7, '  NAS ']});
+    assert.equal(await worker.activeSessionCount(), 1);
+    assert.deepEqual(worker.remoteWorkers, ['Unraid', 'NAS']);
+    // An older worker sends no list; a failed check forgets the last one.
+    worker.lifecycleRequest = async () => ({active_sessions: 1});
+    assert.equal(await worker.activeSessionCount(), 1);
+    assert.deepEqual(worker.remoteWorkers, []);
+    worker.lifecycleRequest = async () => ({active_sessions: 1, remote_workers: ['Unraid']});
+    await worker.activeSessionCount();
+    worker.lifecycleRequest = async () => { throw Error('offline'); };
+    await assert.rejects(worker.activeSessionCount());
+    assert.deepEqual(worker.remoteWorkers, []);
+});
+
 test('the source lease comes from the owned worker only, and a worker without the endpoint means no lease', async t => {
     const lease = 'e'.repeat(4096);
     const port = await server(t, (req, res) => {

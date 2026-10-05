@@ -210,7 +210,18 @@ def _submit_blocking(
     who just typed is the newer instruction, and the agent can re-arm on its
     next turn. Without this a parked session with an armed wake would take the
     user's turn and then a second, stale one on top of it.
+
+    An archived session takes no turn from any source: this raises
+    :class:`app.core.archive_guard.SessionArchived` before anything is written,
+    so a refused send neither queues a row nor lifts a Stop. The start-time
+    check in ``SessionRuntime.execute`` is the guard for rows queued before
+    the chat was archived.
     """
+    from app.core import archive_guard
+
+    if archive_guard.is_archived(session_id):
+        archive_guard.log_dropped(session_id, source, "refused at submit")
+        raise archive_guard.SessionArchived(session_id)
     overrides = _without_home_effort(session_id, overrides)
     if source in _BINDING_SOURCES and overrides:
         try:

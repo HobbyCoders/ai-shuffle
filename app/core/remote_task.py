@@ -865,24 +865,35 @@ def _lock_for_loop() -> asyncio.Lock:
 def _settled_outcome(session_id: str) -> Optional[Dict[str, Any]]:
     """The child's last turn when its work is over, else None. Blocking.
 
-    Over means nothing queued or running and the last turn completed or
-    aborted, or parked with no background work left behind it (a stranded
-    park: nothing will ever wake it, so what it has is the report).
+    Over means nothing queued or running, the last turn completed, aborted or
+    parked, and none of the child's own background work still running (#1812).
+
+    * A turn ends ``completed`` while a Monitor it started still runs: the
+      Monitor's completion wakes the child, so that turn's text is a parking
+      remark, not the report.
+    * A message steered into the running turn settles its own queue row
+      ``completed`` at once; that row is not the child's last turn.
+    * A park with no background work left is stranded: nothing will wake it,
+      so what it has is the report.
+
+    The owner's Stop on this worker ends the child's work too, so a
+    user-stopped child is over as soon as its turn is.
     """
     from app.core.provider_agent import _active_worker_background_work
+    from app.core.task_registry import task_registry
     from app.db import turns
 
-    latest = turns.get_latest_turn(session_id)
+    latest = turns.get_latest_run_turn(session_id)
     if not latest:
         return None
     state = latest.get("state")
-    if state == "parked":
-        if _active_worker_background_work(session_id):
-            return None
-        return {**latest, "_outcome": "completed"}
-    if state in ("completed", "aborted"):
-        return {**latest, "_outcome": state}
-    return None
+    if state not in ("parked", "completed", "aborted"):
+        return None
+    if turns.session_has_unsettled_turns(session_id):
+        return None
+    if not task_registry.is_user_stopped(session_id) and _active_worker_background_work(session_id):
+        return None
+    return {**latest, "_outcome": "completed" if state == "parked" else state}
 
 
 def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
@@ -916,12 +927,15 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
             origin = cursor.fetchone()
         origin_id = origin["id"] if origin else settled["id"]
     status, report, needs = _turn_report(session_id, settled["id"], settled["_outcome"], origin_id)
+    reason = None
     if status == "failed" and settled.get("stop_reason") == LEASE_EXPIRED:
         report = _cut_off_report(report)
+        reason = WORKER_RESTART_REASON
     elif status == "failed" and _shut_down(settled):
         report = _cut_off_report(report, shutdown=True)
+        reason = WORKER_SHUTDOWN_REASON
     from app.core.provider_agent import MAX_REPORT_CHARS
-    return {
+    body = {
         "version": WIRE_VERSION,
         "worker_session_id": session_id,
         "completion_id": settled["id"],
@@ -930,11 +944,21 @@ def build_child_report(session_id: str) -> Optional[Dict[str, Any]]:
         "truncated": len(report) >= MAX_REPORT_CHARS,
         "needs_owner": needs,
     }
+    if reason:
+        # Additive: an older parent ignores it and records a plain failure.
+        body["reason"] = reason
+    return body
 
 
 #: ``turns.stop_reason`` of a turn the boot reap (or a lapsed run lease) aborted.
 LEASE_EXPIRED = "lease_expired"
 _NO_REPORT = "The chat ended without a written report."
+#: ``reason`` on a report, and on the parent's record, when the worker that
+#: ran the child shut down (docker stop, quitting the desktop app) or
+#: restarted mid-run. Neither is a stop: a message resumes the child (#1808).
+WORKER_SHUTDOWN_REASON = "worker_shutdown"
+WORKER_RESTART_REASON = "worker_restarted"
+_REPORT_REASONS = frozenset({WORKER_SHUTDOWN_REASON, WORKER_RESTART_REASON})
 
 
 def _shut_down(turn: Mapping[str, Any]) -> bool:
@@ -967,19 +991,51 @@ def _cut_off_report(partial: str, *, shutdown: bool = False) -> str:
     return bound_report(text)[0]
 
 
+def _child_stopped(session_id: str, child: Mapping[str, Any]) -> bool:
+    """Whether the parent or the owner stopped this child. Blocking."""
+    from app.core.task_registry import task_registry
+
+    report = child.get("report") if isinstance(child.get("report"), dict) else {}
+    return bool(child.get("stop_requested_at") or report.get("status") == "stopped"
+                or task_registry.is_user_stopped(session_id))
+
+
 def owe_if_finished(session_id: str) -> bool:
-    """Store the report of a finished child once. True when one is now owed."""
+    """Store the report of a finished child. True when one is now owed.
+
+    A child that ran again after its report was stored (a wake, a held
+    message, the owner typing in its chat) owes the newer report instead:
+    it replaces one not sent yet, or reopens the row under a new completion
+    id, which the parent takes as a resumed run's report (#1812). A stopped
+    child never reopens.
+    """
     from app.db import remote_tasks
 
     child = remote_tasks.get_child(session_id)
-    if not child or child["state"] != remote_tasks.RUNNING:
-        return bool(child and child["state"] == remote_tasks.OWED)
-    report = build_child_report(session_id)
-    if report is None:
+    if not child:
         return False
+    state = child["state"]
+    if state != remote_tasks.RUNNING:
+        if state not in (remote_tasks.OWED, remote_tasks.DELIVERED, remote_tasks.REFUSED):
+            return False
+        if _child_stopped(session_id, child):
+            return state == remote_tasks.OWED
+        settled = _settled_outcome(session_id)
+        if settled is None or settled["id"] == child.get("completion_id"):
+            return state == remote_tasks.OWED
+    report = build_child_report(session_id)
+    if report is None or (state != remote_tasks.RUNNING
+                          and report["completion_id"] == child.get("completion_id")):
+        return state == remote_tasks.OWED
     report["git"] = git_summary(session_id)
-    remote_tasks.owe_report(session_id, report["completion_id"], report)
-    return True
+    if state == remote_tasks.RUNNING:
+        remote_tasks.owe_report(session_id, report["completion_id"], report)
+        return True
+    if state == remote_tasks.OWED:
+        return remote_tasks.replace_owed_report(session_id, child.get("completion_id"),
+                                                report["completion_id"], report)
+    logger.info("remote_task: child %s ran again after its report; a new one is owed", session_id)
+    return remote_tasks.reowe_report(session_id, state, report["completion_id"], report)
 
 
 def _retry_at(attempts: int) -> str:
@@ -1002,13 +1058,16 @@ async def deliver_due() -> int:
     async with _lock_for_loop():
         for row in await asyncio.to_thread(remote_tasks.due_reports):
             worker_id = row["worker_session_id"]
+            # A newer report may replace this one while it is on the wire; only
+            # the one sent is settled (#1812).
+            sent = row.get("completion_id")
             try:
                 answer = await control.call(row["parent_device_id"], TASK_REPORT_ACTION,
                                             row["report"], timeout=REPORT_TIMEOUT)
             except control.ControlRefused as exc:
                 logger.warning("remote_task: parent refused the report of %s: %s", worker_id, exc)
                 await asyncio.to_thread(remote_tasks.settle_report, worker_id, remote_tasks.REFUSED,
-                                        error=str(exc)[:500])
+                                        error=str(exc)[:500], completion_id=sent)
                 continue
             except Exception as exc:  # noqa: BLE001 — unreachable, off-network: try again later
                 logger.info("remote_task: report of %s not delivered yet: %s", worker_id, exc)
@@ -1017,7 +1076,8 @@ async def deliver_due() -> int:
                                         error=str(exc) or type(exc).__name__)
                 continue
             if isinstance(answer, dict) and answer.get("delivered") is True:
-                await asyncio.to_thread(remote_tasks.settle_report, worker_id, remote_tasks.DELIVERED)
+                await asyncio.to_thread(remote_tasks.settle_report, worker_id, remote_tasks.DELIVERED,
+                                        completion_id=sent)
                 delivered += 1
             else:
                 await asyncio.to_thread(remote_tasks.retry_report_later, worker_id,
@@ -1166,6 +1226,8 @@ class _Report:
     needs_owner: List[str]
     dispatch: Dict[str, Any]
     worker_name: str
+    #: Why a failed run ended, when its worker shut down or restarted.
+    reason: Optional[str] = None
 
 
 def accept_task_report(body: Mapping[str, Any], from_device: str) -> _Report:
@@ -1191,8 +1253,9 @@ def accept_task_report(body: Mapping[str, Any], from_device: str) -> _Report:
     if not isinstance(needs, list):
         raise ValueError("Invalid needs_owner")
     needs = [defang_harness_markers(str(item)[:300]) for item in needs[:MAX_NEEDS_OWNER] if str(item).strip()]
+    reason = body.get("reason") if body.get("reason") in _REPORT_REASONS and status == "failed" else None
     return _Report(worker_id, completion_id, status, report, bool(cut or body.get("truncated") is True),
-                   needs, dispatch, member.name or from_device)
+                   needs, dispatch, member.name or from_device, reason)
 
 
 def _wake_summary(report: _Report, report_path: Optional[str]) -> str:
@@ -1258,7 +1321,8 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
         if owner_row is not None:
             git_text = await bring_commits_here(owner_row, key, report.worker_name, body.get("git"))
             path = await run_sync(write_task_report, owner_row, key, report.report)
-            if (await _settle_tracked(report.dispatch, report, path, noticed=noticed)
+            if (await _settle_tracked(report.dispatch, report, path, noticed=noticed,
+                                      reason=report.reason)
                     and not stopped_here):
                 summary = _wake_summary(report, path) + git_text
                 if noticed:

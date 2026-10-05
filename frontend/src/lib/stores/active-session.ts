@@ -21,7 +21,6 @@ import { api, recheckAuthOn401 } from '$lib/api/client';
 import { acceptUserEvent } from '$lib/services/user-event-dedupe';
 import type { SessionAttention } from './session/ws-message-handlers';
 import type { SdkContextUsage } from '$lib/api/sessions';
-import { notifySessionComplete, notifyWaitingForResponse } from '$lib/services/notifications';
 
 // Session infrastructure
 import { createWsConnection, type WsConnection } from './session/ws-connection';
@@ -636,8 +635,8 @@ const { handleMessage } = createMessageHandlers({
 	internal,
 	onNewChat: () => activeSession.newChat(),
 	onPersistSession: () => persistSession(),
-	onNotifySessionComplete: (info) => notifySessionComplete(info),
-	onNotifyWaitingForResponse: (type, details) => notifyWaitingForResponse(type, details),
+	onNotifySessionComplete: () => {},
+	onNotifyWaitingForResponse: () => {},
 	wsIsConnected: () => wsConn.isConnected(),
 	clearStopTimeout: () => { if (stopTimeout) { clearTimeout(stopTimeout); stopTimeout = null; } },
 });

@@ -63,6 +63,8 @@ export interface Task {
 	updatedAt: string;
 	/** Display name of the dispatched agent (Task-tool workers only; additive). */
 	agent?: string | null;
+	/** The other worker a remote Task child runs on. Absent for local tasks (additive). */
+	worker?: { deviceId?: string; name: string } | null;
 }
 
 // Todo item for task tracking

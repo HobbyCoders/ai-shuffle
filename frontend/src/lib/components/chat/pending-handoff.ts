@@ -11,6 +11,10 @@
  * Only the newest of those decides, so this walks back from the end and stops
  * at the first one. A worker restart drops a queued request without a row
  * (the backend keeps it in memory); that case is not visible here.
+ *
+ * The owner's "Move when this turn ends" (#1819) queues the same hand-off on
+ * the owning worker, which records a `queued` row; cancelling it records
+ * `cancelled`. Both read the same way here, whoever queued the move.
  */
 import type { ChatMessage } from '$lib/stores/types';
 
@@ -22,7 +26,14 @@ export interface PendingHandoff {
 }
 
 const HAND_OFF_TOOL = /(^|__)HandOffSession$/;
-const TERMINAL = new Set(['moved', 'failed', 'timeout']);
+const TERMINAL = new Set(['moved', 'failed', 'timeout', 'cancelled']);
+
+/** True when a hand-off row or HandOffSession call follows index `from`. */
+export function handoffActivitySince(messages: readonly ChatMessage[], from: number): boolean {
+	return messages
+		.slice(from)
+		.some((m) => m.systemSubtype === 'handoff' || (m.type === 'tool_use' && HAND_OFF_TOOL.test(m.toolName ?? '')));
+}
 
 function resultObject(result: unknown): Record<string, unknown> | null {
 	if (result && typeof result === 'object') return result as Record<string, unknown>;
@@ -46,6 +57,7 @@ export function pendingHandoff(messages: readonly ChatMessage[]): PendingHandoff
 			const worker = typeof data.worker === 'string' ? data.worker : '';
 			if (TERMINAL.has(status)) return null;
 			if (status === 'started' && worker) return { worker, phase: 'moving' };
+			if (status === 'queued' && worker) return { worker, phase: 'queued' };
 			continue;
 		}
 		if (m.type !== 'tool_use' || !HAND_OFF_TOOL.test(m.toolName ?? '')) continue;

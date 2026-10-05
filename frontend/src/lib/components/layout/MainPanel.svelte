@@ -16,7 +16,6 @@
 	import {
 		git,
 		gitStatus,
-		gitMode,
 		gitPrState,
 		githubFeaturesAvailable,
 		branches as branchStore
@@ -55,14 +54,14 @@
 	import { sessionOwnerBoundary } from '$lib/stores/session-owner';
 	import { assistantState, isAssistantHome } from '$lib/stores/assistant';
 	import ChatAccess from '$lib/components/chat/ChatAccess.svelte';
-	import SwarmDropdown from '$lib/components/chat/SwarmDropdown.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import type { MainPanelHeaderContext } from './main-panel-header';
 	import StudioTopBar from './StudioTopBar.svelte';
+	import NotificationDock from '$lib/components/NotificationDock.svelte';
 	import FeaturePanelHost from './FeaturePanelHost.svelte';
 	import { pageHeader } from '$lib/stores/page-header.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
-	import { privateAccessTrigger, shouldShowGitPanelTrigger, shouldShowHeaderGitActions } from './git-header-visibility';
+	import { shouldShowHeaderGitActions } from './git-header-visibility';
 	import { chatHeaderTitle } from './chat-empty-state';
 	import { warmHighlighter } from '$lib/utils/shiki';
 	import {
@@ -329,6 +328,8 @@
 	const panelScope = $derived(activeTab?.sessionId ? sessionPanelKey(activeTab.sessionId)
 		: activeProject ? `draft:${JSON.stringify([activeProject, selectedWorkerTarget, activeWorktreeId])}` : null);
 	const activeSidePanel = $derived(sidePanel.forScope(panelScope));
+	/** The chat column's width: the notification dock centres on it, not on the side panel. */
+	let chatColumnWidth = $state(0);
 	// Session-scoped Git requests are executed by the owning worker.
 	const activeIsRemote = $derived(
 		activeSessionRow?.is_remote ?? false
@@ -880,25 +881,13 @@
 {#snippet headerActions()}
 	{#if $activeView?.type === 'session' && activeTab?.sessionId}
 		{#key activeTab.sessionId}
-			<!-- With the git cluster shown, its panel's "Private access" row opens
-			     the dialog and its button reads the pending count
-			     (chatAccessSummary). Chat-lane and projectless sessions have no git
-			     cluster, so ChatAccess renders its own Access button there. -->
-			<ChatAccess sessionId={activeTab.sessionId} trigger={assistantMode ? 'button' : privateAccessTrigger(headerGitInput)} />
-			<!-- The home keeps swarm state hydrated but shows no dropdown. -->
-			<SwarmDropdown
-				sessionId={activeTab.sessionId}
-				standalone
-				hydrateOnly={assistantMode || shouldShowHeaderGitActions({
-					viewType: $activeView?.type, hasProject: !!activeProject,
-					githubAvailable: activeGithubAvailable, worktreeDeleted: activeWorktreeDeleted,
-					isRemote: activeIsRemote, sessionMode: activeTab.mode
-				}) && shouldShowGitPanelTrigger({
-					isGitRepo: $gitStatus?.is_git_repo !== false,
-					worktreeMode: !!activeWorktreeBranch || $gitMode === 'worktree',
-					error: $git.error
-				})}
-			/>
+			<!-- Private access is managed here on every lane: the Access button
+			     shows when the chat has a request, a grant or a saved connection,
+			     and opens the dialog to approve, review or revoke. Waiting requests
+			     also show in the chat above the composer (PrivateAccessPrompt).
+			     The Git panel no longer carries it (#1816). Swarms show in the
+			     running-tasks list, which keeps their state hydrated. -->
+			<ChatAccess sessionId={activeTab.sessionId} trigger="button" />
 		{/key}
 	{/if}
 	{#if activeTab && !assistantMode && shouldShowHeaderGitActions({
@@ -967,7 +956,7 @@
 	{/if}
 
 	<div class="main-content">
-		<div class="main-surface" inert={!!activeSidePanel.active && (activeSidePanel.expanded || panelOverlay)}>
+		<div class="main-surface" inert={!!activeSidePanel.active && (activeSidePanel.expanded || panelOverlay)} bind:clientWidth={chatColumnWidth}>
 		{#if $activeView}
 			{#if showAssistantSurface && $isAdmin}
 				<div class="assistant-surface">{#key `${$sessionOwnerBoundary}:${assistantAgentId ?? ''}`}<AssistantHome requestedAgentId={assistantAgentId} />{/key}</div>
@@ -1054,6 +1043,9 @@
 				{/snippet}
 			</SessionSidePanel>
 		{/if}
+		<!-- Every notification draws here (#1823): under the header, centred on
+		     the chat column (not the side panel), outside the inert surface. -->
+		<NotificationDock span={chatColumnWidth} />
 	</div>
 </div>
 

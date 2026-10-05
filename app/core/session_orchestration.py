@@ -88,6 +88,13 @@ def _target(caller, session_id, *, allow_stopped=False):
     from app.db import sessions
     from app.core.task_registry import task_registry
     row = sessions.get_session(session_id)
+    if (row and session_id != caller["id"] and row.get("status") == "archived"
+            and _owner(row) == _owner(caller)):
+        # Named, unlike the generic refusal below: the caller may have found it
+        # through ListSessions(state='archived') and needs the reason (#1822).
+        from app.core import archive_guard
+        label = f"Session {session_id}" + (f" ({row['title']})" if row.get("title") else "")
+        raise ValueError(archive_guard.refusal(label, "receive messages"))
     if (session_id == caller["id"] or not _local_top_level(row)
             or _owner(row) != _owner(caller)):
         raise ValueError("Session is not an eligible peer; use ListSessions.")

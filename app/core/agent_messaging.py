@@ -210,6 +210,14 @@ def make_message(supplier):
             else:
                 outcome = await remote_task.send_to_child(session_id, row, text, urgent=urgent)
             return ToolOutcome(text=outcome["text"], is_error=outcome["is_error"])
+        from app.core import archive_guard
+
+        if await archive_guard.is_archived_async(target):
+            archive_guard.log_dropped(target, "agent_message", f"SendMessage from {session_id}")
+            return ToolOutcome(
+                text=archive_guard.refusal(row["name"], "receive messages or be resumed"),
+                is_error=True,
+            )
         resuming = row["status"] != "running"
         if resuming:
             error = await resume_unavailable(target, row)

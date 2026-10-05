@@ -39,3 +39,25 @@ Chromium binary.
 npx vite dev --config tests/vite.composer-gesture.config.js --port 5181 --strictPort
 CHROMIUM_PATH=/usr/bin/chromium node tests/verify-composer-gesture.mjs
 ```
+
+## Browser review for the chat controls (#1816)
+
+`tests/chat-controls.html` mounts the phone's chat controls on fixture data:
+the "Connected to" bar, the docked prompts (permission, one-shot access,
+question), the composer with its quick bar and the Chat controls panel. Every
+request is answered inside the page. `tests/shoot-chat-controls.mjs` drives it
+at 390x844 in both themes (rest, pickers, panel, model page, keyboard up,
+sliding a prompt, Runs on while running, the assistant, Connected to, usage,
+dragging the bar up) and writes screenshots to `tests/.shots`.
+
+```sh
+npx vite dev --config tests/vite.chat-controls.config.js --port 5191 --strictPort
+CHROMIUM_PATH=/usr/bin/chromium node tests/shoot-chat-controls.mjs
+```
+
+Query options on the page: `?theme=vercel`, `?view=assistant`, `?turn=idle`,
+`?prompt=question|access|all|none`.
+
+Since #1816 the composer no longer collapses and the sheet owns the pull-up
+gesture, so `tests/verify-composer-gesture.mjs` (the old swipe-to-open sheet)
+no longer describes the phone UI; the chat-controls fixture above replaces it.

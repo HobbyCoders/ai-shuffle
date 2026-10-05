@@ -283,6 +283,7 @@ export type TaskId3 = string;
 export type ToolUseId3 = string | null;
 export type TurnId20 = string | null;
 export type Type20 = 'task.updated';
+export type WorkerName = string | null;
 export type CommandId21 = string | null;
 export type CreatedAt21 = string;
 export type Id21 = string;
@@ -723,6 +724,7 @@ export interface TaskUpdated {
   tool_use_id?: ToolUseId3;
   turn_id?: TurnId20;
   type?: Type20;
+  worker_name?: WorkerName;
   [k: string]: unknown;
 }
 export interface SwarmUpdated {

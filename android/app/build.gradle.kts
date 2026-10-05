@@ -11,7 +11,7 @@ android {
         applicationId = "com.hobbycoders.aishuffle"
         minSdk = 26
         targetSdk = 36
-        versionCode = System.getenv("ANDROID_VERSION_CODE")?.toInt() ?: 12
+        versionCode = System.getenv("ANDROID_VERSION_CODE")?.toInt() ?: 13
         versionName = System.getenv("ANDROID_VERSION_NAME") ?: "0.9.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

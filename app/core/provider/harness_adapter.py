@@ -75,6 +75,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -212,6 +213,18 @@ def fluid_turn_source(app_source: Optional[str]) -> str:
     return _FLUID_TURN_SOURCES.get(str(app_source or ""), "user")
 
 
+# A typed ``/compact``, with or without the CLI's custom summary instructions.
+_COMPACT_COMMAND = re.compile(r"^/compact(?:\s|$)")
+
+
+def _is_cli_command(prompt: str) -> bool:
+    """Whether a delegated prompt is a slash command for Claude Code
+    ("/name args"; "/some/path ..." is not one)."""
+    from app.core.provider.fluid_transcript import is_slash_command_prompt
+
+    return is_slash_command_prompt((prompt or "").strip())
+
+
 # app permission_mode → fluid PermissionEngine approval policy: fluid's own
 # mode table, policy only. The app's native leg deliberately does NOT install
 # fluid's ``acceptEdits`` edit-tool allow rules (``fluid.permissions.modes``):
@@ -282,6 +295,9 @@ class HarnessAdapter(ProviderAdapter):
         # Fluid turn source for the next send_query/send_resume; see
         # set_turn_source. Reset to "user" after each submit.
         self._next_turn_source: str = "user"
+        # Who sent the running turn's ``/compact`` ("user" or "app"), or None
+        # when the turn is not one. Labels the delegated leg's compaction card.
+        self._compact_requested_by: Optional[str] = None
         # receive_events replay cursor: fluid's EventBus replays from ``since_seq``,
         # so we advance this per delivered event to avoid re-yielding prior turns.
         self._event_cursor: int = 0
@@ -1512,13 +1528,26 @@ class HarnessAdapter(ProviderAdapter):
         # because a clock ticked past midnight or another session wrote a
         # memory. Rendered fresh on every send, so nothing the model reads is
         # older than this turn.
-        note = await asyncio.to_thread(self._turn_context_note)
+        source = self._take_turn_source()
+        command = self._is_delegated and _is_cli_command(prompt)
+        # A slash command goes to Claude Code exactly as typed. The CLI takes
+        # everything after the command name as its arguments, so the note
+        # appended to a "/compact" became the summarizer's custom
+        # instructions (#1820, #1794). The note rides the next prompt instead,
+        # and a compaction puts it back through the SessionStart hook.
+        note = None if command else await asyncio.to_thread(self._turn_context_note)
         content = f"{prompt}\n\n{note}" if note else prompt
+        if command and _COMPACT_COMMAND.match(prompt.strip()):
+            # Who asked, for the card: the owner typed it, or a wake the app
+            # armed (the idle-at-the-limit watchdog) sent it.
+            self._compact_requested_by = "user" if source == "user" else "app"
+        else:
+            self._compact_requested_by = None
         # fluid annotates ``UserTurn.content`` as a list, but its own callers and
         # tests pass the prompt string straight through (the loops normalize it),
         # so the cast bridges the vendor annotation without touching the value.
         await self._engine.submit(UserTurn(
-            content=cast(Any, content), source=self._take_turn_source(),
+            content=cast(Any, content), source=source,
         ))
 
     def set_turn_source(self, app_source: Optional[str]) -> None:
@@ -1594,11 +1623,16 @@ class HarnessAdapter(ProviderAdapter):
             # The agent browser is refused the worker's own ports; the preview
             # listener is its only door, so no listener means no URL.
             preview_port = preview_access.listener_port()
-            if session_id and browser_host and preview_port and self._session_runs_as_owner(session_id):
+            # The link must name an address the listener answers on: a
+            # loopback-only listener (the desktop worker) is not reachable by
+            # the LAN address (#1789).
+            preview_host = preview_access.advertised_host(browser_host)
+            browser_local = preview_access.listener_loopback_only()
+            if session_id and preview_host and preview_port and self._session_runs_as_owner(session_id):
                 try:
                     token, expires = preview_access.session_token_with_expiry(session_id)
                     preview_url = preview_access.preview_url(
-                        session_id, browser_host, preview_port, token=token,
+                        session_id, preview_host, preview_port, token=token,
                     )
                     preview_expires_at = expires
                 except Exception:  # noqa: BLE001 — the card still renders
@@ -1608,6 +1642,7 @@ class HarnessAdapter(ProviderAdapter):
                 browser_host=browser_host,
                 app_port=int(settings.port),
                 preview_url=preview_url,
+                browser_local=browser_local,
             )
             if session_id:
                 _store_workspace_snapshot(session_id, {
@@ -3284,6 +3319,17 @@ class HarnessAdapter(ProviderAdapter):
             # not conversation.
             return []
 
+        if cls == "DelegatedDiagnostic":
+            if getattr(event, "kind", "") != "compaction_failed":
+                # Audit-only findings (the bash-first steer): not conversation.
+                return []
+            # A /compact that Claude Code did not carry out: say so, with its
+            # reason, instead of leaving the owner to assume it worked.
+            failure: Dict[str, Any] = {"reason": getattr(event, "message", "") or ""}
+            if self._compact_requested_by:
+                failure["requested_by"] = self._compact_requested_by
+            return [SystemMessage(subtype="compact_failed", data=failure)]
+
         if cls == "SafetyWarning":
             # Legacy replay compatibility only; NativeLoop no longer emits
             # inferred safety warnings or stops.
@@ -3570,6 +3616,9 @@ class HarnessAdapter(ProviderAdapter):
             value = getattr(event, attr, 0)
             if isinstance(value, int) and value > 0:
                 metadata[key] = value
+        if trigger == "manual" and self._compact_requested_by == "app":
+            # The CLI reports any /compact as manual; this one the app sent.
+            metadata["requested_by"] = "app"
         return [SystemMessage(
             subtype="compact_boundary", data={"compact_metadata": metadata},
         )]

@@ -4,11 +4,14 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { sessions } from '$lib/stores/app-data.svelte';
-	import { voiceCallState, isCallSurfaceActive, toggleMic, toggleAgent, hangup, reconcileVoiceCall } from '$lib/services/voiceCall';
+	import NotificationSlot from '$lib/components/NotificationSlot.svelte';
+	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
+	import { voiceCallState, isCallSurfaceActive, toggleMic, toggleAgent, hangup, reconcileVoiceCall, MIC_PROBLEM_LABEL } from '$lib/services/voiceCall';
 
 	let { onReturn }: { onReturn: (sessionId: string) => void } = $props();
 	const call = $derived($voiceCallState);
 	const owner = $derived($sessions.find(s => s.id === call.sessionId));
+	const micProblem = $derived(call.status === 'live' && !call.micMuted && call.micProblem);
 	const visible = $derived(isCallSurfaceActive(call, call.sessionId) &&
 		($activeSession.sessionId !== call.sessionId || $layout.activeView?.type !== 'session'));
 
@@ -26,9 +29,10 @@
 </script>
 
 {#if visible && call.sessionId}
+	<NotificationSlot order={DOCK_ORDER.voiceCall}>
 	<aside class="active-call" aria-label="Active voice call" data-testid="active-voice-call-bar">
 		<button class="return" onclick={() => call.sessionId && onReturn(call.sessionId)} title="Return to voice conversation">
-			<span><strong>Voice call · {call.status}</strong><span class="owner">{owner?.title || 'Voice session'}</span></span>
+			<span><strong class:mic-problem={micProblem}>{micProblem ? MIC_PROBLEM_LABEL : `Voice call · ${call.status}`}</strong><span class="owner">{owner?.title || 'Voice session'}</span></span>
 			<ArrowUpRight size={16} />
 		</button>
 		<button aria-label={call.micMuted ? 'Unmute microphone' : 'Mute microphone'} aria-pressed={call.micMuted} onclick={toggleMic}>
@@ -39,10 +43,12 @@
 		</button>
 		<button class="end" aria-label="End voice call" onclick={() => hangup()}><PhoneOff size={18} /></button>
 	</aside>
+	</NotificationSlot>
 {/if}
 
 <style>
-	.active-call { position: fixed; z-index: 80; top: max(12px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 4px; max-width: calc(100vw - 24px); padding: 6px; border: 1px solid var(--primary); border-radius: var(--radius); background: var(--background); color: var(--foreground); box-shadow: 0 4px 20px #0002; }
+	/* Placed by the notification dock (#1823): it used to sit 12px from the window top, inside the desktop title bar's drag strip. */
+	.active-call { display: flex; align-items: center; gap: 4px; max-width: 100%; padding: 6px; border: 1px solid var(--primary); border-radius: var(--radius); background: var(--background); color: var(--foreground); box-shadow: var(--shadow-l); }
 	button { display: flex; align-items: center; justify-content: center; flex-shrink: 0; min-width: 40px; min-height: 40px; padding: 8px; border: 0; border-radius: var(--radius); background: transparent; color: inherit; cursor: pointer; }
 	button:hover, button[aria-pressed='true'] { background: var(--muted); }
 	button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
@@ -51,4 +57,5 @@
 	strong, .owner { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
 	.owner { color: var(--muted-foreground); max-width: min(260px, 35vw); }
 	.end { color: var(--destructive); }
+	.mic-problem { color: var(--warning); }
 </style>

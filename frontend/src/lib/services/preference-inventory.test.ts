@@ -10,7 +10,7 @@ async function stores() {
   await import('$lib/stores/gitActionPreferences.svelte'), await import('$lib/stores/modelFavorites.svelte'),
   await import('$lib/stores/files.svelte'), await import('$lib/stores/groups.svelte'),
   await import('$lib/stores/layout.svelte'), await import('$lib/stores/sidebar-prefs.svelte'), await import('$lib/stores/sessionMode.svelte'),
-  await import('$lib/stores/browser-panel.svelte'), await import('./notificationSound')
+  await import('$lib/stores/browser-panel.svelte')
  ] as const;
 }
 beforeEach(() => { vi.resetModules(); localStorage.clear(); bindings.clear(); save.mockClear();
@@ -31,7 +31,7 @@ describe('persistent semantic preference inventory', () => {
  });
  it('registers every semantic preference, never navigation, auth, drafts, or device IDs', async () => {
   const loaded = await stores(); expect(bindings.size).toBe(loaded.length);
-  expect([...bindings.keys()].sort()).toEqual(['theme','timezone','chat_behavior','hotkey_settings','git_action_settings','model_favorites','files_preferences','groups','layout','sidebar_workspace','session_mode','notification_sound','browser_panel'].sort());
+  expect([...bindings.keys()].sort()).toEqual(['theme','timezone','chat_behavior','hotkey_settings','git_action_settings','model_favorites','files_preferences','groups','layout','sidebar_workspace','session_mode','browser_panel'].sort());
   expect(Object.keys(bindings.get('files_preferences')!.read() as object).sort()).toEqual(['showHidden','sortAsc','sortBy','viewMode']);
   expect(Object.keys(bindings.get('layout')!.read() as object).sort()).toEqual(['sidebarCollapsed','sidebarWidth']);
   expect(Object.keys(bindings.get('browser_panel')!.read() as object).sort()).toEqual(['autoOpen','defaultViewport','width']);

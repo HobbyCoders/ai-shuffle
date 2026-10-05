@@ -3,12 +3,14 @@
 	 * GitHeaderActions - the chat header's git cluster, folded into one button.
 	 *
 	 * The header shows a single button whose label is whatever needs the user
-	 * first (approvals waiting, merge conflicts, commits behind, uncommitted
+	 * first (merge conflicts, commits behind, uncommitted
 	 * changes, commits to push, an open PR, or "up to date" — see
 	 * computeHeaderSummary). It opens a panel that tells the whole story in
 	 * order: the branch against its base, the Ship It pipeline with the next
-	 * step lit, each git action as a row with an in-panel editor, the changed
-	 * files, and the chat's private access.
+	 * step lit, each git action as a row with an in-panel editor, and the
+	 * changed files. It is Git only: swarms and agent transcripts live in the
+	 * running-tasks list, and private access on the header's Access button and
+	 * in the chat's own prompt (#1816).
 	 *
 	 * Each mutating action (Commit / Push / Pull / Create PR / Ship It) keeps
 	 * its split shape inside the panel: the row runs the action immediately
@@ -24,16 +26,14 @@
 	import { onDestroy, onMount, tick, untrack } from 'svelte';
 	import GitProgressPopover from './GitProgressPopover.svelte';
 	import { gitOperationState } from '$lib/stores/gitOperations.svelte';
-	import SwarmDropdown from '../chat/SwarmDropdown.svelte';
 	import ChatExportActions from '../layout/ChatExportActions.svelte';
 	import { buildShell } from '$lib/utils/platform';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ChevronRight, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ShieldCheck, ExternalLink, X, GitMerge } from 'lucide-svelte';
+	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ExternalLink, X, GitMerge } from 'lucide-svelte';
 	import { autoMerge } from '$lib/stores/auto-merge.svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
 	import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 	import { openHeaderDropdown, openDropdown } from '$lib/stores/header-dropdowns';
-	import { chatAccessSummary } from '$lib/stores/chat-access';
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
 	import { isCurrentHeadMerged } from '$lib/stores/derived/merged-pr';
 	import { computePrimaryAction, mergeBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
@@ -368,15 +368,10 @@
 	// Local branch names offered as PR base targets in the Create PR popover.
 	const baseBranchNames = $derived(snapshot.branches.filter(b => !b.remote).map(b => b.name));
 
-	// Private access for this chat, published by the mounted ChatAccess.
-	const access = $derived($chatAccessSummary);
-	const accessPending = $derived(access?.pending ?? 0);
-
 	// ── What the one header button says ─────────────────────────────────────
 	// An unreadable worktree checkout names its branch (the tab's branch first:
 	// a carried-over placeholder's branch belongs to the previous session).
 	const summary = $derived(!isGitRepo ? computeUnreadableCheckoutSummary(worktreeBranch ?? currentBranch, snapshotPending) : computeHeaderSummary({
-		accessPending,
 		mergeBlocked: mergeBlocked && showShipIt,
 		needsPull,
 		commitsBehind: commitsBehindUpstream,
@@ -519,8 +514,7 @@
 		aria-label="Git actions: {summary.summary}{lastKnownSuffix}"
 		title="{summary.summary}{lastKnownSuffix}"
 	>
-		{#if summary.icon === 'shield'}<ShieldCheck size={14} strokeWidth={1.8} />
-		{:else if summary.icon === 'alert'}<TriangleAlert size={14} strokeWidth={1.6} />
+		{#if summary.icon === 'alert'}<TriangleAlert size={14} strokeWidth={1.6} />
 		{:else if summary.icon === 'pull'}<ArrowDownToLine size={14} strokeWidth={1.6} />
 		{:else if summary.icon === 'push'}<ArrowUpFromLine size={14} strokeWidth={1.6} />
 		{:else if summary.icon === 'pr'}<GitPullRequest size={14} strokeWidth={1.6} />
@@ -795,34 +789,11 @@
 			</div>
 			{/if}
 
-			<SwarmDropdown {sessionId} />
-
-			{#if access || (showChatExports && sessionId)}
-				<div class="gp-foot">
-					{#if access}
-						{@const hasAny = access.pending > 0 || access.active > 0 || access.saved > 0 || access.error}
-						<div class="row-group" class:off={!hasAny}>
-							<button class="row" aria-label="Private access" disabled={!hasAny} onclick={() => { closePanel(); access.open(); }}>
-								<ShieldCheck size={14} strokeWidth={1.5} />
-								<span class="row-text">
-									<span class="row-title">Private access</span>
-									<span class="row-sub">
-										{#if access.pending > 0}<span class="count attn">{access.pending} to approve</span>
-										{:else if access.error}<span class="count warn">unavailable</span>
-										{:else if access.active > 0}{access.active} active grant{access.active === 1 ? '' : 's'}
-										{:else if access.saved > 0}{access.saved} saved connection{access.saved === 1 ? '' : 's'}
-										{:else}none in this chat{/if}
-									</span>
-								</span>
-								{#if hasAny}<ChevronRight size={12} strokeWidth={1.5} class="row-trail" />{/if}
-							</button>
-						</div>
-					{/if}
-					{#if showChatExports && sessionId}
-						<div class="row-group narrow-only">
-							<ChatExportActions {sessionId} menu onStart={closePanel} />
-						</div>
-					{/if}
+			{#if showChatExports && sessionId}
+				<div class="gp-foot narrow-only">
+					<div class="row-group">
+						<ChatExportActions {sessionId} menu onStart={closePanel} />
+					</div>
 				</div>
 			{/if}
 			{/if}
@@ -980,17 +951,6 @@
 	}
 
 	/* Tone: the colour says what kind of attention the branch needs. */
-	.trigger.tone-attn {
-		color: var(--primary);
-		border-color: color-mix(in oklch, var(--primary) 55%, transparent);
-		background: color-mix(in oklch, var(--primary) 8%, transparent);
-	}
-
-	.trigger.tone-attn:hover:not(:disabled) {
-		background: color-mix(in oklch, var(--primary) 16%, transparent);
-		color: var(--primary);
-	}
-
 	.trigger.tone-blocked {
 		color: var(--destructive);
 		border-color: color-mix(in oklch, var(--destructive) 50%, transparent);
@@ -1110,7 +1070,7 @@
 		background: var(--subtle-foreground, var(--muted-foreground));
 	}
 
-	.light.tone-attn, .light.tone-changes, .light.tone-push { background: var(--primary); }
+	.light.tone-changes, .light.tone-push { background: var(--primary); }
 	.light.tone-behind { background: var(--warning); }
 	.light.tone-blocked { background: var(--destructive); }
 	.light.tone-pr { background: var(--success); }
@@ -1363,11 +1323,6 @@
 	.count.warn {
 		color: var(--warning);
 		background: color-mix(in oklch, var(--warning) 14%, transparent);
-	}
-
-	.count.attn {
-		color: var(--primary-foreground);
-		background: var(--primary);
 	}
 
 	.row-opts {

@@ -128,6 +128,17 @@ class MoveSessionRequest(BaseModel):
     target_instance_id: str = Field(..., min_length=1)
 
 
+class QueueMoveRequest(BaseModel):
+    """Request body for "Move when this turn ends" (POST /sessions/{id}/handoff).
+
+    ``target_instance_id`` names the destination worker; omitted, it is this
+    worker ("Resume here"). ``stop`` stops the chat's work first, as the Stop
+    button does, then moves ("Stop and move now").
+    """
+    target_instance_id: Optional[str] = Field(default=None, max_length=200)
+    stop: bool = False
+
+
 class MoveSessionResponse(BaseModel):
     """Response for the cross-device 'Move to device' action.
 

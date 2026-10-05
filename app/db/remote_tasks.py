@@ -385,6 +385,36 @@ def owe_report(worker_session_id: str, completion_id: str, report: Dict[str, Any
         return cursor.fetchone() is not None
 
 
+def replace_owed_report(worker_session_id: str, old_completion_id: Optional[str],
+                        completion_id: str, report: Dict[str, Any]) -> bool:
+    """A report not sent yet is replaced by the child's newer one (#1812)."""
+    with get_db() as conn:
+        init_schema(conn)
+        cursor = conn.cursor()
+        now = utc_now_iso()
+        cursor.execute(
+            "UPDATE remote_task_children SET completion_id=%s, report=%s, attempts=0, "
+            "next_attempt_at=%s, last_error=NULL, updated_at=%s "
+            "WHERE worker_session_id=%s AND state=%s AND completion_id=%s RETURNING worker_session_id",
+            (completion_id, json.dumps(report), now, now, worker_session_id, OWED, old_completion_id))
+        return cursor.fetchone() is not None
+
+
+def reowe_report(worker_session_id: str, state: str, completion_id: str,
+                 report: Dict[str, Any]) -> bool:
+    """A child ran again after its report was delivered or refused: owe the new one."""
+    with get_db() as conn:
+        init_schema(conn)
+        cursor = conn.cursor()
+        now = utc_now_iso()
+        cursor.execute(
+            "UPDATE remote_task_children SET state=%s, completion_id=%s, report=%s, attempts=0, "
+            "next_attempt_at=%s, last_error=NULL, updated_at=%s "
+            "WHERE worker_session_id=%s AND state=%s RETURNING worker_session_id",
+            (OWED, completion_id, json.dumps(report), now, now, worker_session_id, state))
+        return cursor.fetchone() is not None
+
+
 def due_reports(now: Optional[str] = None) -> List[Dict[str, Any]]:
     with get_db() as conn:
         init_schema(conn)
@@ -396,13 +426,21 @@ def due_reports(now: Optional[str] = None) -> List[Dict[str, Any]]:
         return [_row(row) for row in cursor.fetchall()]
 
 
-def settle_report(worker_session_id: str, state: str, *, error: Optional[str] = None) -> None:
+def settle_report(worker_session_id: str, state: str, *, error: Optional[str] = None,
+                  completion_id: Optional[str] = None) -> None:
+    """``completion_id``: settle only that report, not a newer one that replaced it."""
     with get_db() as conn:
         init_schema(conn)
-        conn.cursor().execute(
-            "UPDATE remote_task_children SET state=%s, last_error=%s, updated_at=%s "
-            "WHERE worker_session_id=%s AND state=%s",
-            (state, error, utc_now_iso(), worker_session_id, OWED))
+        if completion_id is None:
+            conn.cursor().execute(
+                "UPDATE remote_task_children SET state=%s, last_error=%s, updated_at=%s "
+                "WHERE worker_session_id=%s AND state=%s",
+                (state, error, utc_now_iso(), worker_session_id, OWED))
+        else:
+            conn.cursor().execute(
+                "UPDATE remote_task_children SET state=%s, last_error=%s, updated_at=%s "
+                "WHERE worker_session_id=%s AND state=%s AND completion_id=%s",
+                (state, error, utc_now_iso(), worker_session_id, OWED, completion_id))
 
 
 def retry_report_later(worker_session_id: str, *, next_attempt_at: str, error: str) -> None:

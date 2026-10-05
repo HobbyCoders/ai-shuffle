@@ -8,6 +8,8 @@
 	import { getLicense, LICENSE_CHANGED_EVENT, type LicenseStatus } from '$lib/api/license';
 	import { openSettings } from '$lib/settings/navigation.svelte';
 	import Banner from './Banner.svelte';
+	import NotificationSlot from './NotificationSlot.svelte';
+	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 
 	const POLL_MS = 30 * 60 * 1000;
 	let status = $state<LicenseStatus | null>(null);
@@ -30,12 +32,15 @@
 </script>
 
 {#if banner && visible}
-	<Banner
-		title={banner.severity === 'error' ? 'License' : 'License notice'}
-		message={banner.message}
-		action={{ label: 'Open license', onClick: () => openSettings({ category: 'system', anchor: 'system.license' }) }}
-		severity={banner.severity}
-		dismissible={banner.severity !== 'error'}
-		onDismiss={() => (dismissed = banner.message)}
-	/>
+	<NotificationSlot order={DOCK_ORDER.account}>
+		<Banner
+			variant="page"
+			title={banner.severity === 'error' ? 'License' : 'License notice'}
+			message={banner.message}
+			action={{ label: 'Open license', onClick: () => openSettings({ category: 'system', anchor: 'system.license' }) }}
+			severity={banner.severity}
+			dismissible={banner.severity !== 'error'}
+			onDismiss={() => (dismissed = banner.message)}
+		/>
+	</NotificationSlot>
 {/if}

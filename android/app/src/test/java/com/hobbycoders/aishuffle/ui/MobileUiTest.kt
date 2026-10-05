@@ -3,6 +3,7 @@ package com.hobbycoders.aishuffle.ui
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -60,6 +61,15 @@ class MobileUiTest {
         assertFalse(json.has("version"))
         assertFalse(json.has("deviceName"))
         assertTrue(json.getBoolean("sendCookies"))
+    }
+
+    @Test fun shellMessagesAreParsedStrictly() {
+        assertEquals(MobileUi.ShellMessage.WorkerBar(true), MobileUi.shellMessage("{\"type\":\"worker-bar\",\"shown\":true}"))
+        assertEquals(MobileUi.ShellMessage.WorkerBar(false), MobileUi.shellMessage("{\"type\":\"worker-bar\",\"shown\":false}"))
+        assertEquals(MobileUi.ShellMessage.OpenWorkers, MobileUi.shellMessage("{\"type\":\"workers\"}"))
+        for (raw in listOf(null, "", "not json", "[]", "{}", "{\"type\":\"worker-bar\"}", "{\"type\":\"worker-bar\",\"shown\":\"true\"}",
+                "{\"type\":\"worker-bar\",\"shown\":1}", "{\"type\":\"connect\",\"url\":\"https://evil.example\"}",
+                "{\"type\":\"workers\",\"pad\":\"" + "x".repeat(300) + "\"}")) assertNull(raw.toString(), MobileUi.shellMessage(raw))
     }
 
     @Test fun tokenUpdateQuotesTheToken() {

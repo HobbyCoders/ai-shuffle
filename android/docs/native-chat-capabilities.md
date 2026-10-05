@@ -18,6 +18,8 @@ If Android stops chat before its initial web session is ready, returning to chat
 
 Account sync treats a changed HTTPS tunnel address from the authenticated hub as an endpoint update for the same worker. It reuses a saved device key only when hub, account, worker and device identity all match. Foreign identities must enroll normally. Optional Cloudflare Access service headers configured for the old origin are cleared when the origin changes; they are not carried to a new host. This avoids duplicate-enrollment conflicts while keeping unrelated credentials separate.
 
+The page's "Connected to" bar replaces the app's own worker bar and can switch which worker the app shows. A navigation to `/mobile/?connect=<origin>` (capability `worker-switch`) is never loaded: `ui/WorkerSwitch.kt` accepts only that exact URL on the current worker, with a bare HTTPS origin that equals, after normalisation, a worker this phone is already paired with. A known worker opens the way the Workers screen opens it; anything else shows a short message and chat stays. The page reports its bar over the `shuffleShell` web-message bridge (`{"type":"worker-bar","shown":true|false}`, and `{"type":"workers"}` to open the Workers screen), scoped and checked like `shuffleFileSave`. The native bar shows until the page says otherwise, and returns when the page fails to load or chat cannot open. Details: "Switching workers and the worker bar" in `docs/mobile-desktop-ui-split.md`.
+
 Voice calls are the page's own, the same as on the website: the shell installs no voice bridge and never holds a voice credential. Its only part is the microphone grant described above, so a call lasts as long as the chat document and ends when the WebView pauses.
 
 ## Verification

@@ -57,6 +57,21 @@ test('only the explicit destructive button returns confirmation', async () => {
     assert.equal(await pending, true);
 });
 
+test('workers that keep running subagents are named, and the local stop is still said (#1808)', async () => {
+    const p = page();
+    const pending = p.show({activeCount: 1, remoteWorkers: ['Unraid']});
+    const text = p.dialog.querySelector('p').textContent;
+    assert.match(text, /stop work on this computer/);
+    assert.match(text, /Subagents on Unraid keep running there/);
+    p.dialog.close();
+    assert.equal(await pending, false);
+    const q = page();
+    const two = q.show({activeCount: 2, remoteWorkers: ['NAS', 'Unraid', 'Laptop']});
+    assert.match(q.dialog.querySelector('p').textContent, /Subagents on NAS, Unraid and Laptop keep running/);
+    q.dialog.close();
+    await two;
+});
+
 test('native Escape dismissal never confirms', async () => {
     const p = page();
     const pending = p.show({activeCount: 2});

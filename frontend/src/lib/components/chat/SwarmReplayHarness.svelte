@@ -3,7 +3,7 @@
  import { buildDisplayItems } from '$lib/utils/work-log';
  import type { ChatMessage } from '$lib/stores/types';
  import ToolUseMessage from './ToolUseMessage.svelte';
- import SwarmDropdown from './SwarmDropdown.svelte';
+ import SwarmHistory from './SwarmHistory.svelte';
  import WorkLogGroup from './WorkLogGroup.svelte';
  let { messages, sessionId, groupingEnabled }: {
   messages: ChatMessage[]; sessionId: string; groupingEnabled: boolean;
@@ -17,7 +17,7 @@
    result={message.toolResult} status={message.toolStatus!} />
  {/if}
 {/snippet}
-<SwarmDropdown {sessionId} />
+<SwarmHistory {sessionId} />
 {#each items as item, index (index)}
  {#if item.kind === 'message'}
   {@render row(item.message)}

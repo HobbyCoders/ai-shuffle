@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { writable } from 'svelte/store';
 import ContextPillBar from './ContextPillBar.svelte';
-import { adoptSession, moveSession } from '$lib/api/sessions';
+import { adoptSession, moveSession, getQueuedMove, queueMove, cancelQueuedMove } from '$lib/api/sessions';
 import { notify } from '$lib/stores/notifications';
 
 const { session, execution, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
@@ -44,12 +44,20 @@ vi.mock('$lib/api/installs', () => ({
 	listInstalls: listInstallsMock,
 	getClusterGitState: getClusterGitStateMock
 }));
-vi.mock('$lib/api/sessions', () => ({ adoptSession: vi.fn(), moveSession: vi.fn() }));
+vi.mock('$lib/api/sessions', () => ({
+	adoptSession: vi.fn(), moveSession: vi.fn(),
+	getQueuedMove: vi.fn(), queueMove: vi.fn(), cancelQueuedMove: vi.fn()
+}));
+const IDLE = { busy: { running: false, tasks: [] as string[] }, pending: null };
 
 afterEach(() => {
 	cleanup();
 	vi.mocked(adoptSession).mockClear();
 	vi.mocked(moveSession).mockReset();
+	vi.mocked(getQueuedMove).mockReset();
+	vi.mocked(getQueuedMove).mockResolvedValue(IDLE);
+	vi.mocked(queueMove).mockReset();
+	vi.mocked(cancelQueuedMove).mockReset();
 	execution.mockClear();
 	appSessions.store?.set([]);
 	listInstallsMock.mockReset();
@@ -110,7 +118,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		const view = render(ContextPillBar, { sheetMode });
 		await fireEvent.click(view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!);
 		await fireEvent.click(await view.findByRole('menuitem', { name: 'Continue here' }));
-		expect(view.getByRole('dialog')).toBeTruthy();
+		expect(await view.findByRole('dialog')).toBeTruthy();
 		expect(view.getByText(/commit and push are not undone/)).toBeTruthy();
 		expect(adoptSession).not.toHaveBeenCalled();
 		if (action === 'cancel') {
@@ -147,7 +155,8 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect((view.getByRole('menuitem', { name: 'Offline worker' }) as HTMLButtonElement).disabled).toBe(true);
 		expect((view.getByRole('menuitem', { name: 'Missing checkout' }) as HTMLButtonElement).disabled).toBe(true);
 		await fireEvent.click(destination);
-		expect(view.getByRole('dialog')).toBeTruthy();
+		expect(await view.findByRole('dialog')).toBeTruthy();
+		expect(getQueuedMove).toHaveBeenCalledExactlyOnceWith(base.sessionId);
 		expect(moveSession).not.toHaveBeenCalled();
 		if (action === 'cancel') await fireEvent.click(view.getAllByRole('button', { name: 'Cancel' }).at(-1)!);
 		else {
@@ -174,7 +183,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		const view = render(ContextPillBar, { sheetMode });
 		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
 		await fireEvent.click(await view.findByRole('menuitem', { name: 'Other worker' }));
-		await fireEvent.click(view.getByRole('button', { name: 'Commit, push and move' }));
+		await fireEvent.click(await view.findByRole('button', { name: 'Commit, push and move' }));
 		const alert = await view.findByRole('alert');
 		expect(alert.textContent).toBe(reason);
 		expect(view.getByRole('menu', { name: 'Move this session' })).toBeTruthy();
@@ -193,7 +202,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		const view = render(ContextPillBar, { sheetMode });
 		await fireEvent.click(view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!);
 		await fireEvent.click(await view.findByRole('menuitem', { name: 'Continue here' }));
-		await fireEvent.click(view.getByRole('button', { name: 'Commit, push and continue' }));
+		await fireEvent.click(await view.findByRole('button', { name: 'Commit, push and continue' }));
 		return view;
 	}
 
@@ -270,6 +279,87 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect(chip.textContent).toContain('Other worker');
 		expect(chip.classList.contains('done')).toBe(false);
 		error.mockRestore();
+	});
+
+	// #1819: a running or parked chat is offered "Move when this turn ends".
+	async function openMoveTo(busy: { running: boolean; tasks: string[] }) {
+		session.store.set({ ...base, messages: [...base.messages], projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
+			instance_id: 'local', is_remote: false, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [
+			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'peer', is_self: false, online: true, device_name: 'Other worker' }
+		] });
+		getClusterGitStateMock.mockResolvedValue({ project_v2_id: 'pv2-project', installs: [
+			{ id: 'peer', online: true, eligible: true }
+		] });
+		vi.mocked(getQueuedMove).mockResolvedValue({ busy, pending: null });
+		const view = render(ContextPillBar, { sheetMode });
+		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
+		await fireEvent.click(await view.findByRole('menuitem', { name: 'Other worker' }));
+		return view;
+	}
+
+	it('queues the move while a turn runs and says what is running', async () => {
+		vi.mocked(queueMove).mockResolvedValue({ queued: true, worker: 'Other worker' });
+		const view = await openMoveTo({ running: true, tasks: ['Run tests'] });
+		expect(await view.findByText('This chat is running')).toBeTruthy();
+		expect(view.getByText('Run tests')).toBeTruthy();
+		expect(view.queryByRole('menuitem', { name: 'Stop them and move now' })).toBeNull();
+		expect(view.queryByRole('dialog')).toBeNull();
+		await fireEvent.click(view.getByRole('menuitem', { name: 'Move when this turn ends' }));
+		expect(queueMove).toHaveBeenCalledExactlyOnceWith(base.sessionId, 'peer', false);
+		expect(moveSession).not.toHaveBeenCalled();
+		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
+		await waitFor(() => expect(chip.textContent).toContain('Moving to Other worker after this turn'));
+		expect(chip.disabled).toBe(true);
+		expect(view.getByRole('button', { name: 'Cancel queued move' })).toBeTruthy();
+	});
+
+	it('offers to stop parked work and move now', async () => {
+		vi.mocked(queueMove).mockResolvedValue({ queued: true, worker: 'Other worker' });
+		const view = await openMoveTo({ running: false, tasks: ['Watch CI'] });
+		expect(await view.findByText('Background work is running')).toBeTruthy();
+		expect(view.getByText('Watch CI')).toBeTruthy();
+		await fireEvent.click(view.getByRole('menuitem', { name: 'Stop them and move now' }));
+		expect(queueMove).toHaveBeenCalledExactlyOnceWith(base.sessionId, 'peer', true);
+	});
+
+	it('moves an idle chat at once, as before', async () => {
+		const view = await openMoveTo({ running: false, tasks: [] });
+		await fireEvent.click(await view.findByRole('button', { name: 'Commit, push and move' }));
+		expect(moveSession).toHaveBeenCalledExactlyOnceWith(base.sessionId, 'peer');
+		expect(queueMove).not.toHaveBeenCalled();
+	});
+
+	it('cancels a queued move from the chip', async () => {
+		vi.mocked(queueMove).mockResolvedValue({ queued: true, worker: 'Other worker' });
+		vi.mocked(cancelQueuedMove).mockResolvedValue(undefined);
+		const view = await openMoveTo({ running: true, tasks: [] });
+		await fireEvent.click(await view.findByRole('menuitem', { name: 'Move when this turn ends' }));
+		const cancel = await view.findByRole('button', { name: 'Cancel queued move' });
+		await fireEvent.click(cancel);
+		expect(cancelQueuedMove).toHaveBeenCalledExactlyOnceWith(base.sessionId);
+		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
+		await waitFor(() => expect(chip.disabled).toBe(false));
+		expect(chip.textContent).toContain('Local');
+		expect(view.queryByRole('button', { name: 'Cancel queued move' })).toBeNull();
+	});
+
+	it('shows a move the owner queued on another device from the chat (#1819)', async () => {
+		const row = (status: string) => ({ id: `handoff-${status}`, role: 'system', type: 'system', content: '',
+			systemSubtype: 'handoff', systemData: { status, worker: 'DesktopWorker', by: 'owner' } });
+		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, row('queued')] });
+		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner',
+			device_name: 'Unraid', device_online: true, is_remote: true, controllable: true }]);
+		const view = render(ContextPillBar, { sheetMode });
+		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
+		expect(chip.textContent).toContain('Moving to DesktopWorker after this turn');
+		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project',
+			messages: [...base.messages, row('queued'), row('cancelled')] });
+		await tick();
+		expect(chip.textContent).toContain('Unraid');
+		expect(chip.disabled).toBe(false);
 	});
 
 	it('explains empty and failed local worker discovery and supports retry', async () => {

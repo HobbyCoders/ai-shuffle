@@ -7,11 +7,9 @@ vi.mock('./preferences', () => ({ preferenceSync: {
 } }));
 let panel: typeof import('../stores/browser-panel.svelte').browserPanel;
 let flush: typeof import('../stores/browser-panel.svelte').flushWidthPersist;
-let sound: typeof import('./notificationSound').notificationSound;
 beforeAll(async () => {
 	const browser = await import('../stores/browser-panel.svelte');
 	panel = browser.browserPanel; flush = browser.flushWidthPersist;
-	sound = (await import('./notificationSound')).notificationSound;
 });
 beforeEach(() => { transport.save.mockClear(); localStorage.clear(); });
 describe('remaining persistent display preferences', () => {
@@ -45,19 +43,5 @@ describe('remaining persistent display preferences', () => {
 		expect(JSON.parse(localStorage.getItem('ai-shuffle-browser-panel')!).width).toBe(650);
 		transport.adapters.get('browser_panel')!.apply(undefined);
 		expect(panel.current.width).toBe(480);
-	});
-	it('applies sound enablement without unlocking audio or echoing', () => {
-		sound.setEnabled(false);
-		expect(transport.save).toHaveBeenCalledWith('notification_sound', false);
-		expect(transport.adapters.get('notification_sound')!.read()).toBe(false);
-		const unlock = vi.spyOn(sound, 'unlock');
-		transport.save.mockClear();
-		transport.adapters.get('notification_sound')!.apply(true);
-		expect(sound.isEnabled()).toBe(true);
-		expect(unlock).not.toHaveBeenCalled();
-		expect(transport.save).not.toHaveBeenCalled();
-		transport.adapters.get('notification_sound')!.apply(undefined);
-		expect(sound.isEnabled()).toBe(true);
-		unlock.mockRestore();
 	});
 });

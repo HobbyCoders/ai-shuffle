@@ -3,6 +3,7 @@ import { promises as fs, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { buildEnvironment } from './source-build';
+import { DISCLOSURE_ACCEPTED_ENV } from './disclosure';
 import type { SourceApplication } from './source-updates';
 
 export interface InstalledHost { executable: string; userData: string; name: string }
@@ -41,6 +42,10 @@ export function sourceLaunch(application: SourceApplication, root: string, args:
       // windows, suppressing the splash until a later tray activation.
       cwd: application.desktopDir, windowsHide: false, detached: true,
       env: { ...buildEnvironment(application.node, application.python),
+        // An unattended acceptance run accepts the first-run disclosure through
+        // this variable. The allowlisted environment above would drop it, and the
+        // updated app would wait on the dialog before starting its worker (#1801).
+        ...(process.env[DISCLOSURE_ACCEPTED_ENV] === '1' ? { [DISCLOSURE_ACCEPTED_ENV]: '1' } : {}),
         SHUFFLE_SOURCE_ROOT: root, SHUFFLE_SOURCE_REVISION: application.revision, SHUFFLE_SOURCE_NODE: application.node },
     },
   };

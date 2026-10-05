@@ -492,3 +492,45 @@ describe('manual check from the host', () => {
   await waitFor(() => expect(notice.warning).toHaveBeenCalledWith(expect.stringContaining('Updater offline'), expect.objectContaining({ title:'Update check needs attention' })));
  });
 });
+
+// #1818: a restart refused because work is running says why at once.
+const busyReceipt = {results:[{device_id:'local',device_name:'Current worker',accepted:false,reason:'Busy with running work: Fix login',
+ busy:[{session_id:'s1',title:'Fix login',tasks:['Run tests']}]}]};
+it('shows the reason, the running work and both actions when a restart is refused', async () => {
+ api.get.mockResolvedValue({...state, workers:[{...worker,phase:'ready'}]});
+ api.post.mockResolvedValue(busyReceipt);
+ render(DesktopUpdateButton);
+ await fireEvent.click(await screen.findByRole('button',{name:'Update and restart'}));
+ const panel = await screen.findByRole('dialog',{name:'Work is still running'});
+ expect(panel.textContent).toContain('Restart would stop it.');
+ expect(panel.textContent).toContain('Fix login');
+ expect(panel.textContent).toContain('Run tests');
+ expect(notice.warning).toHaveBeenCalledWith(expect.stringContaining('Fix login (Run tests)'),
+  expect.objectContaining({title:'Restart is waiting', action:expect.objectContaining({label:'Restart when they finish'}),
+   secondaryAction:expect.objectContaining({label:'Stop them and restart'})}));
+ api.post.mockResolvedValue({results:[{device_name:'Current worker',accepted:true,reason:'Restarts when running work finishes',deferred:true}]});
+ await fireEvent.click(screen.getByRole('button',{name:'Restart when they finish'}));
+ expect(api.post).toHaveBeenLastCalledWith('/settings/application-updates',{action:'install',mode:'when_idle'});
+ await waitFor(()=>expect(notice.info).toHaveBeenCalledWith('Restarts when running work finishes.',expect.objectContaining({title:'Restart scheduled'})));
+ expect(screen.queryByRole('dialog')).toBeNull();
+});
+it('stops the running work and restarts from the bell action', async () => {
+ api.get.mockResolvedValue({...state, workers:[{...worker,phase:'ready'}]});
+ api.post.mockResolvedValue(busyReceipt);
+ render(DesktopUpdateButton);
+ await fireEvent.click(await screen.findByRole('button',{name:'Update and restart'}));
+ await waitFor(()=>expect(notice.warning).toHaveBeenCalled());
+ api.post.mockResolvedValue({results:[{device_name:'Current worker',accepted:true,reason:'Stopping running work, then restarting'}]});
+ notice.warning.mock.calls.at(-1)![1].secondaryAction.onClick();
+ await waitFor(()=>expect(api.post).toHaveBeenLastCalledWith('/settings/application-updates',{action:'install',mode:'stop'}));
+});
+it('offers to cancel a restart that waits for running work', async () => {
+ api.get.mockResolvedValue({...state, workers:[{...worker,phase:'ready',role:'staged',label:'Restarts when work finishes',deferred:true}]});
+ render(DesktopUpdateButton);
+ await fireEvent.click(await screen.findByRole('button',{name:'Restarts when work finishes'}));
+ const panel = await screen.findByRole('dialog',{name:'Restart scheduled'});
+ expect(api.post).not.toHaveBeenCalled();
+ await fireEvent.click(screen.getByRole('button',{name:'Cancel restart'}));
+ expect(api.post).toHaveBeenLastCalledWith('/settings/application-updates',{action:'cancel'});
+ await waitFor(()=>expect(panel.isConnected).toBe(false));
+});

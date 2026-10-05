@@ -406,6 +406,28 @@ async def test_system_task_updated_enriches_tool_use_id_from_registry(mock_db):
     task_registry.reset_all()
 
 
+async def test_system_task_updated_names_a_remote_childs_worker(mock_db):
+    # The running-tasks list names each task's worker (#1816). A Task child on
+    # another worker carries that worker's name; a local task carries none.
+    from app.core.task_registry import task_registry
+    task_registry.reset_all()
+    task_registry.start_task(SID, "t-remote", "agent", "bg", tool_use_id="tu_r",
+                             remote_device_id="dev_unraid", worker_name="Unraid")
+    task_registry.start_task(SID, "t-local", "agent", "bg", tool_use_id="tu_l")
+    _mk_session()
+    rec = await _recorder()
+    for task_id in ("t-remote", "t-local"):
+        await rec.on_event({
+            "type": "system", "subtype": "task_updated",
+            "data": {"task_id": task_id, "patch": {"status": "running"}},
+        })
+    remote, local = _rows()[-2:]
+    assert remote["payload"]["worker_name"] == "Unraid"
+    assert "worker_name" not in local["payload"] or local["payload"]["worker_name"] is None
+    await rec.close()
+    task_registry.reset_all()
+
+
 async def test_system_task_updated_data_tool_use_id_wins_over_registry(mock_db):
     # A tool_use_id already on the data wins over the registry fallback.
     from app.core.task_registry import task_registry

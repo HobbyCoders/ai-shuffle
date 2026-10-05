@@ -36,6 +36,19 @@ test('D5: the source-managed relaunch keeps the user\'s home and Claude Code con
  assert.equal(env.ANTHROPIC_API_KEY,undefined);
 });
 
+test('#1801: an accepted agent-access disclosure survives the installed launcher\'s source launch',t=>{
+ const saved=process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS;t.after(()=>{if(saved===undefined)delete process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS;else process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS=saved;});
+ const app={electron:'/r/electron.exe',desktopDir:'/r/desktop',revision:'c'.repeat(40),node:'/r/node.exe',python:'/r/python.exe'};
+ // Without it the updated app shows the first-run dialog and never starts its worker.
+ process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS='1';
+ assert.equal(sourceLaunch(app,'/r',[]).options.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS,'1');
+ // Only the exact acceptance value is forwarded; anything else leaves the dialog in place.
+ for(const value of ['0','yes',undefined]){
+  if(value===undefined)delete process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS;else process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS=value;
+  assert.equal('SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS' in sourceLaunch(app,'/r',[]).options.env,false,String(value));
+ }
+});
+
 test('a corrupt or foreign installed-host.json fails closed instead of choosing a profile',async t=>{
  const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-installed-host-'));t.after(()=>fs.rm(userData,{recursive:true,force:true}));
  const root=path.join(userData,'updates');await fs.mkdir(root);const file=path.join(root,'installed-host.json');

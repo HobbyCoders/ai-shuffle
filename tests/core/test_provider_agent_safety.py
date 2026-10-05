@@ -502,7 +502,7 @@ class TestCardsSettle:
         assert "subagent.completed" in types
         done = next(r for r in se.get_events(PARENT)
                     if r["event_type"] == "subagent.completed")
-        assert done["payload"]["status"] == "failed"
+        assert done["payload"]["status"] == "killed"  # a stopped card, not a failed one (#1806)
         assert done["payload"]["task_id"] == "w1"
         # The task.updated settle frame joins the card through tool_use_id. It
         # is the LAST such frame: the first is the RUNNING one feed.started()

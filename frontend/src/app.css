@@ -1087,6 +1087,20 @@ html.desktop .topbar :is(button, a, input, [role='button'], [role='menu'], [role
 	app-region: no-drag;
 }
 
+/* Electron applies drag and no-drag regions in document order and ignores
+   stacking, so a later drag region wins over an earlier no-drag one drawn on
+   top of it. Two consequences (#1823):
+   - Notifications draw in the NotificationDock, which sits under the top bar
+     in both layout and document order and is no-drag itself.
+   - In a narrow window the floating sidebar covers the start of the top bar
+     but comes before it in the document, so its header buttons (bell, update)
+     lost their clicks to the strip. While it floats, the strip stops dragging;
+     its scrim covers the page anyway. */
+html.desktop .app-body:has(> .sidebar-slot.floating) .topbar {
+	-webkit-app-region: no-drag;
+	app-region: no-drag;
+}
+
 /* Keep the drag strips exactly as tall as the OS title-bar area so
    double-click-to-maximise and drag hit the same band everywhere. */
 html.desktop .sb-head {

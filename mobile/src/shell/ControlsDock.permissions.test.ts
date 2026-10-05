@@ -24,6 +24,7 @@ beforeEach(async () => {
 });
 afterEach(() => {
 	cleanup();
+	document.querySelectorAll('.mcp-portal').forEach((n) => n.remove());
 	vi.restoreAllMocks();
 	delete window.__SHUFFLE_MOBILE__;
 	activeSession.current.sessionId = null;
@@ -31,24 +32,28 @@ afterEach(() => {
 });
 afterAll(() => vi.unstubAllGlobals());
 
+/** The Chat controls panel's Tool access radios (#1816). */
+const panelAccess = () => within(document.querySelector<HTMLElement>('.mcp [role="radiogroup"][aria-label="Tool access"]')!);
 async function openControls() {
 	const view = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
 	view.component.setMobileSheetOpen(true);
 	await tick();
-	return { ...view, access: within(screen.getByRole('group', { name: 'Tool access' })) };
+	return { ...view, access: panelAccess() };
 }
 
 describe('mobile tool-access persistence', () => {
-	it.each([['Ask', 'default'], ['Accept Edits', 'acceptEdits'], ['Bypass', 'bypassPermissions']])('carries the explicit %s choice across sheet reopen and a new compose screen', async (label, mode) => {
+	it.each([['Ask', 'default'], ['Accept edits', 'acceptEdits'], ['Bypass', 'bypassPermissions']])('carries the explicit %s choice across sheet reopen and a new compose screen', async (label, mode) => {
 		const { component, access } = await openControls();
-		await fireEvent.click(access.getByRole('button', { name: new RegExp(`^${label}:`) }));
+		await fireEvent.click(access.getByRole('radio', { name: label }));
 		await waitFor(() => expect(activeSession.current.permissionModeOverride).toBe(mode));
 		component.setMobileSheetOpen(false);
 		await tick();
 		activeSession.newChat();
 		component.setMobileSheetOpen(true);
 		await tick();
-		expect(screen.getByRole('button', { name: new RegExp(`^${label}:`) }).getAttribute('aria-pressed')).toBe('true');
+		expect(panelAccess().getByRole('radio', { name: label }).getAttribute('aria-checked')).toBe('true');
+		// The quick bar names the same choice.
+		expect(screen.getByRole('button', { name: new RegExp(`^Tool access: ${label}`, 'i') })).toBeTruthy();
 	});
 
 	it('keeps the saved selection while saving and disables ignored repeat taps until acknowledgement', async () => {
@@ -56,15 +61,15 @@ describe('mobile tool-access persistence', () => {
 		let acknowledge!: (value: { permission_mode: string }) => void;
 		const put = vi.spyOn(api, 'put').mockImplementation(() => new Promise(resolve => { acknowledge = resolve; }));
 		const { access } = await openControls();
-		await fireEvent.click(access.getByRole('button', { name: /^Accept Edits:/ }));
+		await fireEvent.click(access.getByRole('radio', { name: 'Accept edits' }));
 		expect(put).toHaveBeenCalledWith('/sessions/mobile-permissions/permission-mode', { permission_mode: 'acceptEdits' });
-		expect(access.getByRole('button', { name: /^Ask:/ }).getAttribute('aria-pressed')).toBe('true');
-		expect(access.getByText('Saving tool access…')).toBeTruthy();
-		for (const button of access.getAllByRole('button')) expect((button as HTMLButtonElement).disabled).toBe(true);
+		expect(access.getByRole('radio', { name: 'Ask' }).getAttribute('aria-checked')).toBe('true');
+		expect(access.getAllByRole('radio')[0].closest('.tile')!.querySelector('.access-help')).toBeTruthy();
+		for (const button of access.getAllByRole('radio')) expect((button as HTMLButtonElement).disabled).toBe(true);
 		acknowledge({ permission_mode: 'acceptEdits' });
-		await waitFor(() => expect(access.getByRole('button', { name: /^Accept Edits:/ }).getAttribute('aria-pressed')).toBe('true'));
-		for (const button of access.getAllByRole('button')) expect((button as HTMLButtonElement).disabled).toBe(false);
-		expect(screen.queryByText('Saving tool access…')).toBeNull();
+		await waitFor(() => expect(access.getByRole('radio', { name: 'Accept edits' }).getAttribute('aria-checked')).toBe('true'));
+		for (const button of access.getAllByRole('radio')) expect((button as HTMLButtonElement).disabled).toBe(false);
+		expect(document.querySelector('.mcp .access-help')).toBeNull();
 	});
 
 	it('sends the mobile selection to the paired worker with the bundled runtime authentication', async () => {
@@ -76,8 +81,8 @@ describe('mobile tool-access persistence', () => {
 				: new Response('{}', { status: 404 })
 		);
 		const { access } = await openControls();
-		await fireEvent.click(access.getByRole('button', { name: /^Accept Edits:/ }));
-		await waitFor(() => expect(access.getByRole('button', { name: /^Accept Edits:/ }).getAttribute('aria-pressed')).toBe('true'));
+		await fireEvent.click(access.getByRole('radio', { name: 'Accept edits' }));
+		await waitFor(() => expect(access.getByRole('radio', { name: 'Accept edits' }).getAttribute('aria-checked')).toBe('true'));
 		expect(fetch).toHaveBeenCalledWith('https://paired-worker.test/api/v1/sessions/mobile-permissions/permission-mode', expect.objectContaining({
 			method: 'PUT', credentials: 'omit', redirect: 'error',
 			headers: expect.objectContaining({ Authorization: 'Bearer test-paired-session' }),
@@ -90,13 +95,13 @@ describe('mobile tool-access persistence', () => {
 		const put = vi.spyOn(api, 'put').mockRejectedValueOnce(new Error('Worker unavailable'))
 			.mockResolvedValueOnce({ permission_mode: 'acceptEdits' });
 		const { access } = await openControls();
-		const edits = access.getByRole('button', { name: /^Accept Edits:/ }) as HTMLButtonElement;
+		const edits = access.getByRole('radio', { name: 'Accept edits' }) as HTMLButtonElement;
 		await fireEvent.click(edits);
 		await waitFor(() => expect(edits.disabled).toBe(false));
-		expect(access.getByRole('button', { name: /^Ask:/ }).getAttribute('aria-pressed')).toBe('true');
+		expect(access.getByRole('radio', { name: 'Ask' }).getAttribute('aria-checked')).toBe('true');
 		expect(activeSession.current.permissionModeOverride).toBe('default');
 		await fireEvent.click(edits);
-		await waitFor(() => expect(edits.getAttribute('aria-pressed')).toBe('true'));
+		await waitFor(() => expect(edits.getAttribute('aria-checked')).toBe('true'));
 		expect(put).toHaveBeenCalledTimes(2);
 	});
 });

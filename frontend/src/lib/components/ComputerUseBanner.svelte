@@ -1,13 +1,15 @@
 <script lang="ts">
 	/**
-	 * Computer-use status bar: a compact bar at the top center of the window,
-	 * shown while an agent controls the host desktop. It sits just below the
-	 * title-bar strip, so it never lands under the desktop app's window
-	 * controls or over the composer. Hiding it shrinks it in place to a chip
-	 * that keeps Stop within reach; it does not move.
+	 * Computer-use status bar: a compact bar shown while an agent controls the
+	 * host desktop. It draws in the shared notification dock (#1823), under the
+	 * page header and centred on the chat column, so it never lands under the
+	 * desktop app's window controls or over the composer. Hiding it shrinks it
+	 * in place to a chip that keeps Stop within reach; it does not move.
 	 */
 	import { ChevronDown, ChevronUp, Square, X } from 'lucide-svelte';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
+	import NotificationSlot from './NotificationSlot.svelte';
+	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 
 	$effect(() => {
 		computerUse.start();
@@ -37,6 +39,7 @@
 </script>
 
 {#if computerUse.active}
+	<NotificationSlot order={DOCK_ORDER.computerUse}>
 	<aside class="cu-bar" class:collapsed aria-label="Computer use controls" data-testid="computer-use-banner">
 		<span class="cu-dot" class:lost={computerUse.connectionLost} aria-hidden="true"></span>
 		{#if collapsed}
@@ -59,7 +62,9 @@
 			{#if collapsed}<ChevronDown size={15} aria-hidden="true" />{:else}<ChevronUp size={15} aria-hidden="true" />{/if}
 		</button>
 	</aside>
+	</NotificationSlot>
 {:else if stopped && !dismissed}
+	<NotificationSlot order={DOCK_ORDER.computerUse}>
 	<aside class="cu-bar stopped" aria-label="Computer use stopped">
 		<span class="cu-dot idle" aria-hidden="true"></span>
 		<div class="cu-copy" role="status">
@@ -68,23 +73,19 @@
 		</div>
 		<button class="cu-icon" aria-label="Dismiss computer use status" onclick={() => dismissed = true}><X size={15} aria-hidden="true" /></button>
 	</aside>
+	</NotificationSlot>
 {/if}
 
 <style>
 	/* Agent-control accent, shared with the on-screen overlay and agent cursor. */
 	.cu-bar {
 		--cu-accent: #8b6cff;
-		position: fixed;
-		z-index: 150;
-		/* Below the top bar, which doubles as the desktop title bar. */
-		top: calc(var(--titlebar-height, 52px) + 8px + env(safe-area-inset-top, 0px));
-		left: 50%;
-		transform: translateX(-50%);
+		/* Placed by the notification dock; no position of its own. */
 		display: flex;
 		align-items: center;
 		gap: 10px;
 		width: max-content;
-		max-width: min(640px, calc(100vw - 24px));
+		max-width: 100%;
 		padding: 6px 6px 6px 12px;
 		border: 1px solid color-mix(in oklab, var(--cu-accent) 55%, var(--border-strong, #444));
 		border-radius: 12px;

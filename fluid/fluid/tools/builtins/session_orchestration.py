@@ -118,7 +118,9 @@ SPECS = (
         "Move a settled chat back to Active without starting a turn or clearing a user stop. "
         "Archived chats must first be restored in the app."),
     _management_tool("ArchiveSession", "archive",
-        "Archive a chat and remove it from Active without deleting its conversation or stopping work. "
+        "Archive a chat and remove it from Active without deleting its conversation. An archived chat "
+        "is read-only until the owner restores it in the app: archiving stops its running and parked "
+        "work, and nothing can message, resume or wake it. A chat cannot archive itself. "
         "Its execution worker must be reachable.",
         filter_text=(
             "all_settled=true archives every settled chat without listing first; scope is "

@@ -11,6 +11,8 @@ declare global {
 		interface PageState {
 			/** Set while the navigation drawer's Back entry is on the stack. */
 			mobileDrawer?: boolean;
+			/** Set while the chat controls panel's Back entry is on the stack. */
+			mobileControls?: boolean;
 		}
 		// interface Platform {}
 	}
