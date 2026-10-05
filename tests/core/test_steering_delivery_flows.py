@@ -152,7 +152,7 @@ def _pump_env(pump, *, background_work=(), broadcaster=None):
     registry.is_user_stopped.return_value = False
     registry.stop_generation.return_value = 0
     registry.stop_invalidated.return_value = False
-    registry.get_active_background_work.return_value = [
+    registry.get_parking_background_work.return_value = [
         {"id": t} for t in background_work
     ]
     registry.get_background_launches.return_value = set()

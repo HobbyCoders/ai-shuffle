@@ -63,7 +63,7 @@ def quiet_parked_marker(monkeypatch):
     calls = []
     monkeypatch.setattr(
         task_registry_mod.task_registry,
-        "get_active_background_work",
+        "get_parking_background_work",
         lambda _sid: [],
     )
     monkeypatch.setattr(

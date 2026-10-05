@@ -195,7 +195,7 @@ async def clear_parked_marker_if_idle(session_id: str) -> bool:
     try:
         from app.core.task_registry import task_registry
 
-        if task_registry.get_active_background_work(session_id):
+        if task_registry.get_parking_background_work(session_id):
             return False
         from app.db import database
 
@@ -214,13 +214,39 @@ async def clear_parked_marker_if_idle(session_id: str) -> bool:
     return cleared
 
 
+async def settle_stopped_monitor_parks(session_id: str) -> bool:
+    """Settle an idle park whose Monitor wake was deliberately suppressed.
+
+    Called both by per-task Stop and after the park write: Stop can finish
+    while finalize's off-thread write has not committed yet. Neither side
+    alone closes that race. Other live work (including durable agents) must
+    keep its park; this cleanup never schedules a wake.
+    """
+    try:
+        from app.core.task_registry import task_registry
+        from app.core import pending_reconcile
+        from app.db import turns as turns_db
+
+        if (task_registry.get_parking_background_work(session_id)
+                or task_registry.has_unresolved_background_launches(session_id)):
+            return False
+        if await asyncio.to_thread(pending_reconcile.nonterminal_agent_task_ids, session_id):
+            return False
+        settled = await asyncio.to_thread(turns_db.settle_parked_turns, session_id)
+        await clear_parked_marker_if_idle(session_id)
+        return bool(settled)
+    except Exception:
+        logger.debug("stopped Monitor park cleanup failed for %s", session_id, exc_info=True)
+        return False
+
+
 async def persist_turn_end_state(session_id: str, *, resync_branch: bool = True) -> None:
     """Persist turn-end state; a refused checkout must not adopt another HEAD."""
     # 1. Durable parked marker (set or clear).
     try:
         from app.core.task_registry import task_registry
 
-        work = task_registry.get_active_background_work(session_id)
+        work = task_registry.get_parking_background_work(session_id)
         kind = (work[0].get("kind") or "agent") if work else None
         await _write_parked_task_kind(session_id, kind)
     except Exception:

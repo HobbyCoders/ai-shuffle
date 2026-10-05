@@ -47,6 +47,17 @@ def test_completed_turn_sets_terminal_found_and_usage():
     assert outcome["error"] is None
 
 
+def test_park_does_not_borrow_usage_across_an_abort_or_older_park():
+    for boundary in ("turn.aborted", "turn.parked"):
+        with _events(
+            {"seq": 1, "turn_id": "old", "event_type": "turn.completed",
+             "payload": {"usage": {"tokens_out": 99}}},
+            {"seq": 2, "event_type": boundary, "payload": {}},
+            {"seq": 3, "event_type": "turn.parked", "payload": {}},
+        ):
+            assert turn_outcome.final_turn_outcome("s1")["usage"] == {}
+
+
 def test_aborted_and_parked_turns_set_terminal_found():
     with _events(
         {"seq": 1, "turn_id": "t1", "event_type": "turn.aborted",

@@ -37,7 +37,7 @@ def _marker(test_db, session_id):
 
 def _registry(work):
     registry = MagicMock(name="task_registry")
-    registry.get_active_background_work.return_value = work
+    registry.get_parking_background_work.return_value = work
     return registry
 
 

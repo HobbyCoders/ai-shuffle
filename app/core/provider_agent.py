@@ -1134,11 +1134,10 @@ def _worker_still_working(worker_session_id: str) -> bool:
     tasks drain and the park is stranded, in which case there is nothing left to
     wait for and the caller settles on what it has.
 
-    Deliberately narrow — a PARKED latest turn with live background work behind
-    it, and nothing else. The caller has just come back from
-    ``_await_worker_idle``, so a running or queued turn is already its problem,
-    and anything this predicate is unsure about must answer "finished": it gates
-    a wait, and a wait that never ends is worse than the settle it replaces.
+    A parked turn with live work OR a Monitor's unpublished completion is
+    still working. So is a wake queued/running since ``_await_worker_idle``
+    returned. Unknown or genuinely stranded parks still answer "finished";
+    a wait that never ends is worse than the settle it replaces.
 
     "Latest" skips the rows of messages steered into the worker's turn: each
     settles its own queue row ``completed`` the moment it is delivered, so it is
@@ -1157,9 +1156,35 @@ def _worker_still_working(worker_session_id: str) -> bool:
             worker_session_id, exc_info=True,
         )
         return False
+    if (row or {}).get("state") in ("queued", "running", "interrupting", "draining"):
+        # The wake may have been published since _await_worker_idle returned.
+        return True
     if (row or {}).get("state") != "parked":
         return False
-    return bool(_active_worker_background_work(worker_session_id))
+    if _active_worker_background_work(worker_session_id):
+        return True
+    # A Monitor watcher records its terminal status BEFORE it awaits the
+    # scheduler's durable wake write. In that gap the turn is idle and the
+    # registry has no running work, but its parking remark is not a report.
+    # Once the wake is published, wait for that queued/running turn as well.
+    try:
+        from app.core.task_registry import task_registry
+
+        if turns_db.session_has_unsettled_turns(worker_session_id):
+            return True
+        if task_registry.is_user_stopped(worker_session_id):
+            return False
+        return any(
+            task_registry.is_monitor_shell_task(worker_session_id, task_id)
+            and task_registry.get_task(worker_session_id, task_id) is not None
+            and not task_registry.is_serving_monitor(worker_session_id, task_id)
+            and not task_registry.is_wake_suppressed(worker_session_id, task_id)
+            and not task_registry.is_woken(worker_session_id, task_id)
+            for task_id in ((row.get("payload") or {}).get("task_ids") or [])
+        )
+    except Exception:
+        logger.debug("ProviderAgent: pending Monitor wake probe failed for %s", worker_session_id, exc_info=True)
+        return False
 
 
 def _worker_deadlines(

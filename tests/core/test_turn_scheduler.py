@@ -1370,7 +1370,8 @@ async def test_own_shell_completion_still_enqueues_unpark(mock_db):
     assert "<task-id>shell-1</task-id>" in wake["prompt"]
 
 
-async def test_app_monitor_shell_completion_enqueues_unpark(mock_db):
+@pytest.mark.parametrize("state", ["parked", "completed"])
+async def test_app_monitor_shell_completion_enqueues_unpark(mock_db, state):
     # Regression (live E2E 2026-08-24): an APP-spawned Monitor shell — the MCP
     # Monitor tool or the fluid monitor_spawn spawner — registers with NO
     # tool_use_id and is never mark_sdk_background_task'ed, so the ownership
@@ -1378,7 +1379,12 @@ async def test_app_monitor_shell_completion_enqueues_unpark(mock_db):
     # parked parent stranded forever. The monitor-shell lane admits it.
     parked = turns_db.enqueue_turn("ms1", "user", prompt="monitor a build")
     turns_db.start_turn(parked["id"], None, "runner")
-    turns_db.park_turn(parked["id"], ["shell-ms"])
+    if state == "parked":
+        turns_db.park_turn(parked["id"], ["shell-ms"])
+    else:
+        # Main sessions already woke through this lane even when the app's
+        # durable finalizer incorrectly completed the engine's parked turn.
+        turns_db.settle_turn(parked["id"], "completed")
     task_registry.start_task("ms1", "shell-ms", "shell", "make build")
     task_registry.mark_monitor_shell_task("ms1", "shell-ms")
     frame = {"task_id": "shell-ms", "status": "completed",

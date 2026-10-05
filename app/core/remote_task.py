@@ -924,7 +924,7 @@ def _settled_outcome(session_id: str) -> Optional[Dict[str, Any]]:
     The owner's Stop on this worker ends the child's work too, so a
     user-stopped child is over as soon as its turn is.
     """
-    from app.core.provider_agent import _active_worker_background_work
+    from app.core.provider_agent import _active_worker_background_work, _worker_still_working
     from app.core.task_registry import task_registry
     from app.db import turns
 
@@ -936,7 +936,9 @@ def _settled_outcome(session_id: str) -> Optional[Dict[str, Any]]:
         return None
     if turns.session_has_unsettled_turns(session_id):
         return None
-    if not task_registry.is_user_stopped(session_id) and _active_worker_background_work(session_id):
+    if not task_registry.is_user_stopped(session_id) and (
+        _active_worker_background_work(session_id) or _worker_still_working(session_id)
+    ):
         return None
     return {**latest, "_outcome": "completed" if state == "parked" else state}
 

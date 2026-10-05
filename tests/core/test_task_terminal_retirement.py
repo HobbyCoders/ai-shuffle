@@ -503,12 +503,11 @@ class TestParkedWorkerIsNotComplete:
         task_registry.start_task("w-1", "mon-1", "shell", "npm test")
         assert provider_agent._worker_still_working("w-1") is False
 
-    def test_a_queued_turn_is_the_callers_problem_not_this_one(self, mock_db):
-        # The caller has just returned from ``_await_worker_idle``, which is
-        # what blocks on live turns. This predicate gates a WAIT, so anything
-        # it is unsure about answers "finished" rather than looping forever.
-        turns_db.enqueue_turn("w-1", "user", prompt="go", profile_id="p1")
-        assert provider_agent._worker_still_working("w-1") is False
+    def test_a_wake_queued_since_the_idle_read_is_still_working(self, mock_db):
+        # _await_worker_idle may have returned just before the Monitor's
+        # scheduler handoff published this wake. Dispatch must wait again.
+        turns_db.enqueue_turn("w-1", "unpark", prompt="tests finished", profile_id="p1")
+        assert provider_agent._worker_still_working("w-1") is True
 
     def test_a_message_steered_in_before_the_park_does_not_hide_it(self, mock_db):
         # A message steered into the worker's running turn settles its own

@@ -60,7 +60,7 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
       (a genuine stop that settled before the timeout);
     * any other ``turn.aborted`` (error / crash / escalation / lease) →
       ``error`` = the aborted ``message`` or a reason-derived string;
-    * ``turn.parked`` → treated as a clean, empty run.
+    * ``turn.parked`` → clean run, retaining the preceding completion usage.
 
     ``terminal_found`` says whether a terminal event existed AT ALL (mirrors
     ``provider_agent.final_turn_outcome``). It is the difference between "the
@@ -91,6 +91,24 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
     if etype == "turn.completed":
         usage = payload.get("usage")
         result["usage"] = usage if isinstance(usage, dict) else {}
+    elif etype == "turn.parked":
+        # Runtime appends an unfenced park marker AFTER the recorder's done
+        # event. The marker has no turn_id or usage, but must not erase the
+        # completed model call's accounting in automation/connector/REST intake.
+        # Only the immediately preceding terminal can belong to this park;
+        # never borrow usage across an abort or an older park.
+        before_park = False
+        for ev in reversed(events):
+            if ev is terminal:
+                before_park = True
+                continue
+            if before_park and ev.get("event_type") in (
+                "turn.completed", "turn.aborted", "turn.parked",
+            ):
+                if ev.get("event_type") == "turn.completed":
+                    usage = (ev.get("payload") or {}).get("usage")
+                    result["usage"] = usage if isinstance(usage, dict) else {}
+                break
     elif etype == "turn.aborted":
         reason = payload.get("reason")
         if reason == "interrupt":

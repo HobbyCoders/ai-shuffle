@@ -961,6 +961,9 @@ async def _retire_stopped_shell(session_id: str, task_id: str) -> None:
             "summary": record.get("summary") or "",
             "kind": "shell",
         }])
+        from app.core.turn_finalize import settle_stopped_monitor_parks
+
+        await settle_stopped_monitor_parks(session_id)
     except Exception:  # noqa: BLE001 — bookkeeping never fails a stop.
         logger.debug(
             "engine retirement failed for stopped shell %s/%s",

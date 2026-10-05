@@ -1421,7 +1421,7 @@ class TaskRegistry:
         )
 
     def get_active_background_work(self, session_id: str) -> List[Dict[str, Any]]:
-        """Running tasks that PARK the parent, newest-first, each as a wire dict.
+        """Running tasks that pin the pooled adapter, newest-first as wire dicts.
 
         Superset of the agent-only ``has_active_background_agent`` view: includes
         BOTH background sub-agents (``kind=="agent"``) AND SDK-backgrounded shell
@@ -1430,7 +1430,7 @@ class TaskRegistry:
         app-managed Monitor shell). Both flavours are in-flight work whose terminal
         TaskNotificationMessage lands LATER on the pooled adapter and which the
         parent turn has parked awaiting — so both must pin the session in the pool.
-        The session pool busy signal and ``turn_finalize`` read this view.
+        The session pool busy signal reads this view; parking uses the view below.
         """
         bucket = self._tasks.get(session_id)
         if not bucket:
@@ -1443,6 +1443,28 @@ class TaskRegistry:
         ]
         records.sort(key=lambda r: r.get("started_at") or "", reverse=True)
         return [to_wire(r) for r in records]
+
+    def get_parking_background_work(self, session_id: str) -> List[Dict[str, Any]]:
+        """Wake-capable work a turn must park on, without pinning the pool.
+
+        App-managed Monitors deliver through the durable scheduler, independently
+        of the pooled adapter. Include non-serving ones alongside the existing
+        adapter-owned work; serving processes intentionally never hold a turn.
+        """
+        work = self.get_active_background_work(session_id)
+        seen = {r["id"] for r in work}
+        bucket = self._tasks.get(session_id, {})
+        for tid in self._monitor_shell_tasks.get(session_id, set()):
+            record = bucket.get(tid)
+            if (
+                tid not in seen
+                and record
+                and record.get("status") == "running"
+                and not self.is_serving_monitor(session_id, tid)
+            ):
+                work.append(to_wire(record))
+        work.sort(key=lambda r: r.get("startedAt") or "", reverse=True)
+        return work
 
     def has_active_background_work(self, session_id: str) -> bool:
         """True iff a background sub-agent OR an SDK-backgrounded shell is running.

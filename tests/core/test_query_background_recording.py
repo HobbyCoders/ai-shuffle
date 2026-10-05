@@ -597,7 +597,7 @@ async def test_background_provider_config_error_records_aborted_no_escape(mock_d
 
 async def test_persist_turn_end_state_records_parked_kind():
     registry = MagicMock()
-    registry.get_active_background_work = MagicMock(
+    registry.get_parking_background_work = MagicMock(
         return_value=[{"kind": "shell"}]
     )
     set_kind = MagicMock()
@@ -613,7 +613,7 @@ async def test_persist_turn_end_state_records_parked_kind():
 
 async def test_persist_turn_end_state_clears_marker_when_idle_and_never_raises():
     registry = MagicMock()
-    registry.get_active_background_work = MagicMock(return_value=[])
+    registry.get_parking_background_work = MagicMock(return_value=[])
     set_kind = MagicMock(side_effect=RuntimeError("boom"))
 
     from app.core import task_registry as task_registry_module
@@ -641,7 +641,7 @@ async def test_persist_turn_end_state_pushes_marker_after_write(kind, api_user_i
     async def broadcast(**kwargs):
         writes_at_broadcast.append(set_kind.call_count)
 
-    with patch.object(task_registry, "get_active_background_work", return_value=work), \
+    with patch.object(task_registry, "get_parking_background_work", return_value=work), \
          patch.object(database, "set_session_parked_task_kind", new=set_kind), \
          patch.object(database, "get_session", return_value={"api_user_id": api_user_id}), \
          patch.object(sync_engine, "broadcast_user_session_updated",
@@ -667,7 +667,7 @@ async def test_persist_turn_end_state_does_not_push_failed_write(write_result):
     if isinstance(write_result, Exception):
         set_kind.side_effect = write_result
 
-    with patch.object(task_registry, "get_active_background_work", return_value=[]), \
+    with patch.object(task_registry, "get_parking_background_work", return_value=[]), \
          patch.object(database, "set_session_parked_task_kind", new=set_kind), \
          patch.object(sync_engine, "broadcast_user_session_updated", new=AsyncMock()) as push:
         await persist_turn_end_state("sess-idle")

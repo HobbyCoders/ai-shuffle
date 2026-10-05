@@ -12,9 +12,9 @@ A :class:`SessionRuntime` executes exactly one ``turns`` row end-to-end:
    internals are untouched; the recorder observes every yielded event (SSE is the
    delivery path) and a broadcast adapter carries the WS frames;
 6. **finalize** (always, in a ``finally``): decide ``completed | aborted |
-   parked`` — the park gate is ``task_registry.get_active_background_work`` OR
-   ``get_background_launches`` — settle/park the turn and release the reader
-   token;
+   parked`` — the park gate is ``task_registry.get_parking_background_work`` OR
+   ``has_unresolved_background_launches`` — settle/park the turn and release
+   the reader token;
 7. release the run lease in the outer ``finally`` and fire the injectable
    ``on_turn_settled`` scheduler seam (``turn_scheduler`` registers it) — but
    ONLY when finalize actually performed the DB transition (a racer that
@@ -1084,7 +1084,7 @@ class SessionRuntime:
             try:
                 from app.core.task_registry import task_registry
 
-                if not task_registry.has_active_background_work(sid):
+                if not task_registry.get_parking_background_work(sid):
                     settled = await asyncio.to_thread(
                         turns_db.settle_parked_turns, sid, tid
                     )
@@ -2480,7 +2480,7 @@ class SessionRuntime:
         try:
             from app.core.task_registry import task_registry
 
-            bg_work = task_registry.get_active_background_work(sid)
+            bg_work = task_registry.get_parking_background_work(sid)
             has_unresolved_launches = task_registry.has_unresolved_background_launches(sid)
         except Exception:
             logger.debug("SessionRuntime: park-gate read failed for %s", sid, exc_info=True)
@@ -2557,6 +2557,22 @@ class SessionRuntime:
             except Exception:
                 logger.warning("SessionRuntime: park_turn failed for %s", tid, exc_info=True)
             if parked is not None:
+                # A per-task Stop can suppress the only wake while park_turn
+                # is off-thread. Its cleanup may have run before this write;
+                # re-check AFTER it so we never leave an unwakeable park.
+                from app.core.task_registry import task_registry
+
+                if (task_registry.is_user_stopped(sid) or any(
+                    task_registry.is_wake_suppressed(sid, task_id)
+                    for task_id in task_ids
+                )):
+                    from app.core.turn_finalize import settle_stopped_monitor_parks
+
+                    if await settle_stopped_monitor_parks(sid):
+                        return "completed", True
+                    row = await asyncio.to_thread(turns_db.get_turn, tid)
+                    if row and row.get("state") == "completed":
+                        return "completed", True
                 # turn.parked event — only when the park actually happened.
                 try:
                     await record_parked(sid, task_ids)

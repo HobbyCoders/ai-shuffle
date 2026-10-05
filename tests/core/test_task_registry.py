@@ -373,6 +373,20 @@ class TestSdkBackgroundWork:
         assert reg.has_active_background_work("s1") is False
         assert reg.get_active_background_work("s1") == []
 
+    @pytest.mark.parametrize("serves", [False, True])
+    def test_monitor_parking_does_not_pin_pool(self, reg, serves):
+        reg.start_task("s1", "mon1", "shell", "build")
+        reg.mark_monitor_shell_task("s1", "mon1", serves=serves)
+        assert reg.get_active_background_work("s1") == []
+        assert reg.has_active_background_work("s1") is False
+        assert reg.has_active_background_agent("s1") is False
+        assert [r["id"] for r in reg.get_parking_background_work("s1")] == (
+            [] if serves else ["mon1"]
+        )
+        reg.complete_task("s1", "mon1", "completed")
+        assert reg.get_parking_background_work("s1") == []
+        assert reg.get_parking_background_work("missing") == []
+
     def test_completed_marked_shell_excluded(self, reg):
         reg.start_task("s1", "sh1", "shell", "build")
         reg.mark_sdk_background_task("s1", "sh1")
