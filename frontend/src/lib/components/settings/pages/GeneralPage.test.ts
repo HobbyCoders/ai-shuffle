@@ -40,7 +40,7 @@ describe('General page', () => {
 	it('groups the chat preferences under Conversation and Thinking and tools', () => {
 		render(GeneralPage);
 		const groups = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent?.trim());
-		expect(groups).toEqual(['Appearance', 'Conversation', 'Thinking and tools', 'Region']);
+		expect(groups).toEqual(['Appearance', 'Conversation', 'Usage limits', 'Thinking and tools', 'Region']);
 		expect(screen.getByText('Uses an extra model call')).toBeTruthy();
 	});
 

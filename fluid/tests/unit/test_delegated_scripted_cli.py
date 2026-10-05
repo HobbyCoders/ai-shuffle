@@ -341,6 +341,30 @@ async def test_stop_on_the_first_turn_of_a_resumed_cli_does_not_replay_it(tmp_pa
         await run.aclose()
 
 
+@pytest.mark.parametrize("status", [429, None])
+async def test_a_usage_limit_on_a_resumed_cli_is_not_replayed(tmp_path, status) -> None:
+    """A resumed CLI that refuses its first turn at the session limit, before
+    any frame, has not rejected its --resume handle: the turn stops on the
+    limit. No fresh CLI, no second ask, and the conversation handle stays."""
+    limit = {"type": "result", "subtype": "success", "is_error": True,
+             "result": "You've hit your session limit · resets 11:10pm (America/New_York)",
+             "num_turns": 1, "total_cost_usd": 0.0, "usage": {}}
+    if status is not None:
+        limit["api_error_status"] = status
+    run = Scripted(tmp_path, {"turns": [[{"op": "frame", "frame": limit}]]},
+                   cli_session_id="cli-prev")
+    try:
+        events = await run.turn("hello again")
+        error = events[-1]
+        assert isinstance(error, ErrorEvent), error
+        assert "session limit" in error.message
+        assert len(run.records("start")) == 1  # no respawn
+        assert len(run.stdin_frames("user")) == 1  # no replay
+        assert run.loop.cli_session_id == "cli-prev"
+    finally:
+        await run.aclose()
+
+
 async def test_stop_before_the_turn_reaches_the_cli_keeps_it_from_running(tmp_path) -> None:
     """A Stop that lands while the CLI is still starting must not let the
     turn run its tools once the CLI is up (the native loop honours an early

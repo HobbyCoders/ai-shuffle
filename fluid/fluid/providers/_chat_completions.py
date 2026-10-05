@@ -39,6 +39,7 @@ from fluid.providers._retry import (
     billing_error_code,
     coerce_status,
     is_retriable_status,
+    is_usage_limit,
 )
 from fluid.providers._sse import sse_events
 from fluid.providers._transport import (
@@ -54,6 +55,7 @@ from fluid.providers._transport import (
     open_stream,
     provider_error_summary,
     refusal_payload,
+    usage_limit_summary,
 )
 from fluid.providers.base import StreamChunk, flatten_system
 from fluid.tools.images import condition_image
@@ -384,9 +386,12 @@ class ChatCompletionsNormalizer:
             status = SYMBOLIC_CODE_STATUS.get(code)
         summary = provider_error_summary(message)
         billing = billing_error_code(err)
+        usage_limit = billing is None and is_usage_limit(status, err)
         if billing is not None:
             status = 402
             summary = billing_summary(billing, summary)
+        elif usage_limit:
+            summary = usage_limit_summary(summary)
         return {
             # A symbolic code ("rate_limit_exceeded") is kept for logs;
             # ``status`` is only ever an HTTP status.
@@ -394,7 +399,8 @@ class ChatCompletionsNormalizer:
             "code": code,
             "message": message[:2000],
             "provider_message": summary,
-            "retriable": is_retriable_status(status),
+            # A usage limit keeps its 429 but is never retried.
+            "retriable": is_retriable_status(status) and not usage_limit,
         }
 
     def consume(self, name: str, data: dict[str, Any]) -> list[StreamChunk]:
@@ -630,7 +636,8 @@ async def stream_chat_completions(
                         )
                     if resp.status_code != 200:
                         text = (await resp.aread()).decode(errors="replace")
-                        refusal = refusal_payload(resp.status_code, text)
+                        refusal = refusal_payload(
+                            resp.status_code, text, resp.headers.get("retry-after"))
                         if refusal["retriable"] and attempt < retry.max_retries:
                             await asyncio.sleep(
                                 retry.delay(attempt, resp.headers.get("retry-after"))

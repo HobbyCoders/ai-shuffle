@@ -891,6 +891,56 @@ class TestRateLimitReschedule:
         assert outcome.ok is False
         assert len(calls) == 3, "the original plus two reschedules, then stop"
 
+    @pytest.mark.parametrize("error", [
+        "claude reported success: You've hit your session limit · resets "
+        "11:10pm (America/New_York)",
+        "claude reported success: Claude AI usage limit reached|1790812800",
+        "provider returned HTTP 429: The usage limit has been reached",
+        "provider returned HTTP 429: Usage limit reached: Rate limited",
+    ])
+    def test_a_usage_limit_is_never_re_dispatched(self, monkeypatch, error):
+        """A spent usage allowance is not capacity: re-dispatching the worker
+        only asks the provider again before the reset. The worker fails once,
+        says it was a usage limit, and is not reworded as capacity."""
+        from app.core import config as cfg
+
+        monkeypatch.setattr(
+            cfg.settings, "task_worker_rate_limit_retries", 3, raising=False
+        )
+        monkeypatch.setattr(cfg.settings, "task_worker_start_retries", 1, raising=False)
+        calls = []
+
+        async def dispatcher(**kwargs):
+            calls.append(kwargs)
+            return WorkerOutcome(
+                ok=False, session_id=kwargs["worker_session_id"],
+                error=error, frames_forwarded=0,
+            )
+
+        outcome = _run(td._dispatch_worker_with_retries(
+            kwargs=dict(
+                parent_session_id="root-1", profile_id="p1", prompt="go",
+                label="x", worker_session_id="w-1",
+            ),
+            background=True,
+            lane="native",
+            provider_id=None,
+            parent_session_id="root-1",
+            dispatcher=dispatcher,
+        ))
+
+        assert outcome.ok is False
+        assert len(calls) == 1, "a usage limit is not retried"
+        assert outcome.error == error
+        assert pa._failure_summary("error", error, 0).startswith(
+            "worker stopped by a usage limit (not retried):"
+        )
+
+    def test_a_per_minute_rate_limit_still_reads_as_capacity(self):
+        text = "Rate limit reached for gpt-5.6-luna. Please try again in 3s."
+        assert pa.looks_usage_limited(text) is False
+        assert pa.looks_rate_limited(text) is True
+
 
 class TestProviderOrgAdmission:
     """C: session ceilings say nothing about a credential's token budget."""

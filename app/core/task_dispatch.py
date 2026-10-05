@@ -660,7 +660,11 @@ async def _reserve_admission(
 #   reschedules with backoff seeded from the provider's own retry-after, which
 #   is what "reschedule, do not terminate" means for a 429;
 # * a failure that will read identically on the tenth attempt — no credentials,
-#   no such provider, an unresolvable model — is never retried.
+#   no such provider, an unresolvable model — is never retried;
+# * a USAGE limit (a spent session, 5-hour, weekly or plan allowance) is never
+#   re-dispatched either: it carries a 429 like a capacity refusal, but nothing
+#   clears it before its reset. The opt-in resume after the reset
+#   (``limit_resume``) is the only thing that continues such a worker.
 #
 # Each attempt is its own worker session and its own visible task row, labelled
 # "· retry N", and only the attempt that SETTLES the dispatch spends a wake on
@@ -714,6 +718,8 @@ def _retry_kind(
     if status != "error" or frames_forwarded:
         return None
     text = error_text or ""
+    if provider_agent.looks_usage_limited(text):
+        return None
     if provider_agent.looks_rate_limited(text):
         return "rate" if used["rate"] < rate_max else None
     lowered = text.lower()
@@ -752,6 +758,9 @@ def _capacity_worded(outcome, reschedules: int):
     from dataclasses import replace
 
     if outcome.ok or outcome.frames_forwarded:
+        return outcome
+    if provider_agent.looks_usage_limited(outcome.error):
+        # Not capacity: "wait a minute and re-dispatch" would be wrong advice.
         return outcome
     if not provider_agent.looks_rate_limited(outcome.error):
         return outcome

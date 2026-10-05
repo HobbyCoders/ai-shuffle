@@ -1,7 +1,8 @@
 /**
- * Usage limits and costly sends (#1831): the per-provider "Resume when the
- * limit resets" switches, a chat's scheduled resume and its Cancel, Compact
- * now, and the cold-cache check the composer runs before a send.
+ * Usage limits and costly sends (#1831): the "Resume when the limit resets"
+ * and "Compact before resuming" switches (one pair for every provider), a
+ * chat's scheduled resume and its Cancel, Compact now, and the cold-cache
+ * check the composer runs before a send.
  */
 import { api } from './client';
 
@@ -10,9 +11,8 @@ export interface LimitResumeSwitches {
 	compact_before_resume: boolean;
 }
 
-export interface LimitResumeSettings {
-	/** Keyed by `claude` (Claude Code) or a model provider's id. */
-	providers: Record<string, LimitResumeSwitches>;
+/** The switches, which apply to every provider, and their defaults. */
+export interface LimitResumeSettings extends LimitResumeSwitches {
 	defaults: LimitResumeSwitches;
 }
 
@@ -20,11 +20,8 @@ export function getLimitResume(): Promise<LimitResumeSettings> {
 	return api.get('/settings/limit-resume', { cache: 'no-store' });
 }
 
-export function updateLimitResume(
-	providerKey: string,
-	patch: Partial<LimitResumeSwitches>
-): Promise<LimitResumeSettings> {
-	return api.put(`/settings/limit-resume/${encodeURIComponent(providerKey)}`, patch);
+export function updateLimitResume(patch: Partial<LimitResumeSwitches>): Promise<LimitResumeSettings> {
+	return api.put('/settings/limit-resume', patch);
 }
 
 export interface CancelLimitResumeResult {

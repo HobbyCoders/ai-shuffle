@@ -32,6 +32,8 @@ from fluid.providers._retry import (
     BILLING_STATUS,
     RETRIABLE_STATUSES,
     billing_error_code,
+    is_usage_limit,
+    is_usage_limit_text,
 )
 
 # Generous by design: this is a runaway guard, not a latency budget. A long
@@ -248,16 +250,42 @@ def billing_summary(code: str | None, detail: str | None) -> str | None:
     )
 
 
-def refusal_payload(status: int, text: str) -> dict[str, Any]:
+def usage_limit_summary(detail: str | None) -> str | None:
+    """The short explanation carried on a usage-limit refusal: says it is a
+    usage limit (unless the provider's own words already do), then those
+    words, so a reader and the host's limit handling both see it."""
+    text = detail or "the provider gave no detail"
+    if is_usage_limit_text(text):
+        return provider_error_summary(text)
+    return provider_error_summary(f"Usage limit reached: {text}")
+
+
+def refusal_payload(
+    status: int, text: str, retry_after: str | None = None,
+) -> dict[str, Any]:
     """The ``error`` chunk payload for a non-200 response.
 
     Whether it is retried follows the status, except for a billing refusal:
     an ``insufficient_quota`` 429 (or any 402) is reported as 402 and is never
     retried, because no wait clears it. Only a billing code in the body is
     called "out of credit"; a bare 402 carries the provider's explanation.
+    A usage limit (see fluid.providers._retry.is_usage_limit; ``retry_after``
+    is the response's Retry-After header) keeps its 429 but is never retried
+    either: the turn stops on it and the user sees the limit.
     """
     summary = provider_error_summary(text)
     code = billing_error_code(text)
+    if code is None and status != BILLING_STATUS and is_usage_limit(status, text, retry_after):
+        return {
+            "status": status,
+            "message": (
+                f"the provider refused the request with HTTP {status}: a usage "
+                "limit was reached, so it was not retried. " + text[:2000]
+            ),
+            "provider_message": usage_limit_summary(summary),
+            "retriable": False,
+            "usage_limit": True,
+        }
     if code is None and status != BILLING_STATUS:
         return {
             "status": status,

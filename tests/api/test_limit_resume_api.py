@@ -1,5 +1,6 @@
-"""Routes for #1831: the per-provider resume settings, Compact now, the
-cold-send check and a chat's scheduled resume (status and Cancel)."""
+"""Routes for #1831: the resume settings (one pair for every provider),
+Compact now, the cold-send check and a chat's scheduled resume (status and
+Cancel)."""
 
 from unittest.mock import AsyncMock, patch
 
@@ -14,34 +15,41 @@ SETTINGS = "/api/v1/settings/limit-resume"
 
 # ─── Settings ───────────────────────────────────────────────────────────────
 
+DEFAULTS = {"resume_on_reset": False, "compact_before_resume": True}
 
-def test_settings_list_every_provider_with_defaults(authenticated_client):
+
+def test_settings_are_one_pair_with_defaults(authenticated_client):
     body = authenticated_client.get(SETTINGS).json()
-    assert body["defaults"] == {"resume_on_reset": False, "compact_before_resume": True}
-    assert body["providers"]["claude"] == body["defaults"]
+    assert body == {**DEFAULTS, "defaults": DEFAULTS}
+    assert "providers" not in body
 
 
 def test_settings_update_one_switch_and_keep_the_other(authenticated_client):
-    r = authenticated_client.put(f"{SETTINGS}/claude", json={"resume_on_reset": True})
+    r = authenticated_client.put(SETTINGS, json={"resume_on_reset": True})
     assert r.status_code == 200, r.text
-    assert r.json()["providers"]["claude"] == {"resume_on_reset": True, "compact_before_resume": True}
-    r = authenticated_client.put(f"{SETTINGS}/claude", json={"compact_before_resume": False})
-    assert r.json()["providers"]["claude"] == {"resume_on_reset": True, "compact_before_resume": False}
+    assert r.json()["resume_on_reset"] is True and r.json()["compact_before_resume"] is True
+    r = authenticated_client.put(SETTINGS, json={"compact_before_resume": False})
+    assert r.json()["resume_on_reset"] is True and r.json()["compact_before_resume"] is False
+    assert limit_resume.get_settings() == {"resume_on_reset": True, "compact_before_resume": False}
+
+
+def test_an_older_per_provider_put_changes_the_global_switches(authenticated_client):
+    """Older clients PUT per provider: the provider is ignored, an unknown one
+    included, and so is a key the API no longer has."""
+    r = authenticated_client.put(f"{SETTINGS}/no-such-provider",
+                                 json={"resume_on_reset": True, "providers": {}})
+    assert r.status_code == 200, r.text
+    assert authenticated_client.get(SETTINGS).json()["resume_on_reset"] is True
 
 
 @pytest.mark.parametrize("body", [{}, {"resume_on_reset": None}])
 def test_settings_refuse_an_empty_change(authenticated_client, body):
-    assert authenticated_client.put(f"{SETTINGS}/claude", json=body).status_code == 400
+    assert authenticated_client.put(SETTINGS, json=body).status_code == 400
 
 
 @pytest.mark.parametrize("body", [{"resume_on_reset": "yes"}, {"compact_before_resume": 1}])
 def test_settings_refuse_a_value_that_is_not_a_bool(authenticated_client, body):
-    assert authenticated_client.put(f"{SETTINGS}/claude", json=body).status_code == 422
-
-
-def test_settings_refuse_an_unknown_provider(authenticated_client):
-    r = authenticated_client.put(f"{SETTINGS}/no-such-provider", json={"resume_on_reset": True})
-    assert r.status_code == 404
+    assert authenticated_client.put(SETTINGS, json=body).status_code == 422
 
 
 # ─── Session routes ─────────────────────────────────────────────────────────

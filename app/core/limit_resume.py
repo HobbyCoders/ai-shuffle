@@ -3,9 +3,9 @@
 A provider usage limit (HTTP 429, "You've hit your session limit · resets
 11:10pm (America/New_York)") ends the turn: the turn scheduler's failover
 policy sees ``api_error_status == 429`` on the settled turn and only posts the
-"usage limit reached" notice (``account_failover``). With the per-provider
-setting "Resume when the limit resets" on, this module also arranges one
-resume shortly after the reset:
+"usage limit reached" notice (``account_failover``). With the setting "Resume
+when the limit resets" on (one switch for every provider, :func:`get_settings`),
+this module also arranges one resume shortly after the reset:
 
 * **Reset time.** Structured readings first: the Claude windows the CLI
   reported (``usage_limits``: a ``rejected`` window is stored at 0% remaining
@@ -38,6 +38,11 @@ resume shortly after the reset:
   session whose leg can compact (:data:`COMPACTING_LEGS`) gets a real
   ``/compact`` turn queued ahead of the continuation, so the continuation
   re-reads a small context instead of the whole conversation.
+* **One try, and nothing before the reset.** The resume's own turns are
+  marked (:data:`PAYLOAD_KEY`); one that hits a limit again schedules no
+  further resume. Until the reset the chat's automatic turns (wakes, peer
+  messages, automations) stay queued (:func:`hold_until`, read by
+  ``turn_scheduler``); the owner's own messages and the marked resume run.
 * **Task workers.** A background worker stopped by the limit keeps its row in
   the parent's running tasks (marked paused) and its parent is not woken. The
   resume continues the worker through the same path a SendMessage to a
@@ -64,8 +69,11 @@ logger = logging.getLogger(__name__)
 LIMIT_RESUME_SOURCE = "limit_resume"
 #: ``system`` row subtype recorded on the chat's log.
 SYSTEM_SUBTYPE = "limit_resume"
-#: ``system_settings`` key prefix; the provider key follows.
-SETTING_PREFIX = "limit_resume:"
+#: ``system_settings`` key of the two switches, which apply to every provider.
+SETTING_KEY = "limit_resume"
+#: Key prefix of the per-provider switches they replaced (read once, by
+#: :func:`_migrate_settings`, then deleted).
+LEGACY_SETTING_PREFIX = "limit_resume:"
 #: The provider key of Claude Code (the delegated leg, which has no
 #: ``model_providers`` row).
 CLAUDE_KEY = "claude"
@@ -137,10 +145,6 @@ _rng = random.Random()
 # ─── Settings ───────────────────────────────────────────────────────────────
 
 
-def _setting_key(provider_key: str) -> str:
-    return SETTING_PREFIX + provider_key
-
-
 def _parse_setting(raw: Optional[str]) -> Dict[str, bool]:
     out = dict(DEFAULTS)
     if not raw:
@@ -156,17 +160,64 @@ def _parse_setting(raw: Optional[str]) -> Dict[str, bool]:
     return out
 
 
-def get_settings(provider_key: Optional[str]) -> Dict[str, bool]:
-    """One provider's two switches (defaults when never set). Sync (DB)."""
-    if not provider_key:
-        return dict(DEFAULTS)
+def _legacy_settings() -> Dict[str, Optional[str]]:
+    """The per-provider rows (``limit_resume:<provider>``) still stored."""
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT key, value FROM system_settings WHERE key LIKE %s",
+            (LEGACY_SETTING_PREFIX + "%",),
+        )
+        rows = cursor.fetchall()
+    return {row["key"]: row["value"] for row in rows}
+
+
+def _migrate_settings() -> Dict[str, bool]:
+    """Fold the per-provider switches into the global ones, once.
+
+    A switch starts on when it was on for any provider, counting a provider
+    with no stored row at its default (so "Compact before resuming" stays on
+    unless every provider had turned it off). The global row is written and
+    the per-provider rows are deleted, so they are never read again.
+    """
     from app.db import database
 
-    return _parse_setting(database.get_system_setting_cached(_setting_key(provider_key)))
+    legacy = _legacy_settings()
+    if not legacy:
+        return dict(DEFAULTS)
+    stored = {key[len(LEGACY_SETTING_PREFIX):]: _parse_setting(raw) for key, raw in legacy.items()}
+    every = [stored.get(key, dict(DEFAULTS)) for key in provider_keys()]
+    every += [value for key, value in stored.items() if key not in provider_keys()]
+    merged = {name: any(s[name] for s in every) for name in DEFAULTS}
+    database.set_system_setting(SETTING_KEY, json.dumps(merged, sort_keys=True))
+    for key in legacy:
+        database.delete_system_setting(key)
+    logger.info("limit_resume: per-provider switches folded into the global ones: %s", merged)
+    return merged
+
+
+def get_settings() -> Dict[str, bool]:
+    """The two switches, which apply to every provider. Sync (DB).
+
+    Defaults when never set. The first read after an upgrade folds the old
+    per-provider rows in (:func:`_migrate_settings`).
+    """
+    from app.db import database
+
+    raw = database.get_system_setting_cached(SETTING_KEY)
+    if raw is None:
+        try:
+            return _migrate_settings()
+        except Exception:  # noqa: BLE001 — a failed migration serves the defaults
+            logger.warning("limit_resume: settings migration failed", exc_info=True)
+            return dict(DEFAULTS)
+    return _parse_setting(raw)
 
 
 def provider_keys() -> List[str]:
-    """Every provider a setting can be kept for: Claude and each provider row."""
+    """Every provider key: Claude and each provider row."""
     from app.db import database
 
     keys = [CLAUDE_KEY]
@@ -177,33 +228,19 @@ def provider_keys() -> List[str]:
     return keys
 
 
-def valid_provider_key(provider_key: str) -> bool:
-    if provider_key == CLAUDE_KEY:
-        return True
-    from app.db import database
-
-    return database.get_model_provider(provider_key, include_token=False) is not None
-
-
 def all_settings() -> Dict[str, Any]:
-    """The settings payload: every provider's switches and the defaults."""
-    return {
-        "providers": {key: get_settings(key) for key in provider_keys()},
-        "defaults": dict(DEFAULTS),
-    }
+    """The settings payload: the two switches and their defaults."""
+    return {**get_settings(), "defaults": dict(DEFAULTS)}
 
 
-def update_settings(provider_key: str, **changes: Optional[bool]) -> Dict[str, bool]:
-    """Change one provider's switches. ``None`` leaves a switch alone.
+def update_settings(**changes: Optional[bool]) -> Dict[str, bool]:
+    """Change the switches. ``None`` leaves a switch alone.
 
-    Raises ``KeyError`` for an unknown provider and ``ValueError`` for an
-    empty change or a value that is not a bool. Stored as one shared
-    ``system_settings`` row, so it reaches the owner's other workers like the
-    loop guard's settings.
+    Raises ``ValueError`` for an empty change or a value that is not a bool.
+    Stored as one shared ``system_settings`` row, so it reaches the owner's
+    other workers like the loop guard's settings.
     """
-    if not valid_provider_key(provider_key):
-        raise KeyError(provider_key)
-    current = get_settings(provider_key)
+    current = get_settings()
     touched = False
     for name in DEFAULTS:
         value = changes.get(name)
@@ -217,7 +254,7 @@ def update_settings(provider_key: str, **changes: Optional[bool]) -> Dict[str, b
         raise ValueError("Nothing to change: send resume_on_reset or compact_before_resume")
     from app.db import database
 
-    database.set_system_setting(_setting_key(provider_key), json.dumps(current, sort_keys=True))
+    database.set_system_setting(SETTING_KEY, json.dumps(current, sort_keys=True))
     return current
 
 
@@ -675,6 +712,18 @@ async def _on_limit_stop(
     session: Any = await run_sync(database.get_session, session_id)
     if session and session.get("parent_session_id") and not worker_owner:
         return None  # a Task worker: provider_agent decides for it
+    if ((turn or {}).get("payload") or {}).get(PAYLOAD_KEY):
+        # The resume itself hit a limit: it had its one try. Nothing more is
+        # scheduled, so a limit never turns into a loop of resumes.
+        for sid in [session_id] + ([worker_owner] if worker_owner else []):
+            await _record(sid, _STATUS_NO_RESET, {
+                "content": "Stopped by the usage limit again after resuming, so it "
+                           "will not resume by itself.",
+                **({"task_id": session_id} if sid != session_id else {}),
+            })
+        logger.info("limit_resume: %s hit a limit again after its resume — not again",
+                    session_id)
+        return None
     refused = await _refused(session_id, session)
     if refused is None and worker_owner:
         owner_row = await run_sync(database.get_session, worker_owner)
@@ -684,8 +733,10 @@ async def _on_limit_stop(
         return None
     leg = await run_sync(session_leg, session)
     provider_key = session_provider_key(session, leg)
-    switches = await run_sync(get_settings, provider_key)
-    if not provider_key or not switches["resume_on_reset"]:
+    if not provider_key:
+        return None
+    switches = await run_sync(get_settings)
+    if not switches["resume_on_reset"]:
         return None
 
     current = time.time() if now is None else now
@@ -744,6 +795,81 @@ async def _on_limit_stop(
         session_id, provider_key, int(reset.at), reset.source, max(0.0, fire_at - current),
     )
     return {**data, "fire_at": data["resume_at"], "wakeup_id": row.get("id")}
+
+
+# ─── Holding automatic work while the limit is in force ────────────────────
+
+#: How long automatic turns stay held after a usage-limit stop whose reset
+#: time is unknown: Claude's session window, the most common limit.
+HOLD_FALLBACK_SECONDS = 5 * 3600.0
+
+
+def _epoch(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.timestamp()
+    return None
+
+
+def _last_settled_turn(session_id: str) -> Optional[Dict[str, Any]]:
+    """The session's most recent turn that ran and came to rest, or None."""
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, ended_at FROM turns WHERE session_id=%s "
+            "AND state IN ('completed','aborted','parked') "
+            "AND started_at IS NOT NULL AND ended_at IS NOT NULL "
+            "AND COALESCE(stop_reason, '') <> 'steered' "
+            "ORDER BY ended_at DESC, id DESC LIMIT 1",
+            (session_id,),
+        )
+        row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def hold_until(session_id: str, *, now: Optional[float] = None) -> Optional[float]:
+    """Until when automatic turns of ``session_id`` are held, or None.
+
+    The session's last turn stopped on a usage limit: a wake, a peer message,
+    an automation or any other turn nobody typed would only ask the provider
+    again before the reset, so it waits (``turn_scheduler`` does not start it)
+    until the reset, or :data:`HOLD_FALLBACK_SECONDS` after the stop when the
+    reset time is unknown. A 429 that is not a usage limit (a per-minute rate
+    limit the client already retried) holds nothing. Sync (DB).
+    """
+    from app.core import account_failover
+    from app.core.turn_scheduler import _turn_terminal_payload
+    from app.db import database
+    from fluid.providers._retry import is_usage_limit_text
+
+    last = _last_settled_turn(session_id)
+    if not last:
+        return None
+    terminal = _turn_terminal_payload(session_id, last["id"])
+    if not account_failover.is_usage_limit_error(terminal):
+        return None
+    current = time.time() if now is None else now
+    ended = _epoch(last.get("ended_at")) or current
+    text = _errors_text(terminal)
+    session = database.get_session(session_id)
+    reset = find_reset(session_provider_key(session, session_leg(session)), text, now=ended)
+    if reset is not None:
+        until = reset.at
+    elif is_usage_limit_text(text):
+        until = ended + HOLD_FALLBACK_SECONDS
+    else:
+        return None
+    return until if current < until else None
 
 
 # ─── Firing ─────────────────────────────────────────────────────────────────
@@ -843,13 +969,18 @@ async def _resume_chat(row: Dict[str, Any], meta: Dict[str, Any]) -> Optional[st
         return None
     api_user_id = await asyncio.to_thread(wakeup_service._session_api_user_id, session_id)
     overrides = {"model": row["model"]} if row.get("model") else None
-    payload = {"api_user_id": api_user_id} if api_user_id else None
+    # Marked, so the hold on automatic turns lets them through and a limit
+    # they hit again is not resumed a second time.
+    payload: Dict[str, Any] = {PAYLOAD_KEY: {"limit_key": meta.get("limit_key"),
+                                             "reset_at": meta.get("reset_at")}}
+    if api_user_id:
+        payload["api_user_id"] = api_user_id
 
     async def submit(prompt: str) -> Optional[str]:
         return await turn_manager.submit_async(
             session_id, "wakeup", prompt=prompt, profile_id=profile_id,
             project_id=row.get("project_id"), overrides=overrides,
-            payload=dict(payload) if payload else None,
+            payload=dict(payload),
         )
 
     compacted = bool(meta.get("compact")) and meta.get("leg") in COMPACTING_LEGS

@@ -175,7 +175,7 @@ class _Env:
         monkeypatch.setattr(database, "get_session", lambda sid: dict(self.session, id=sid)
                             if self.session else None)
         monkeypatch.setattr(lr, "session_leg", lambda session: leg)
-        monkeypatch.setattr(lr, "get_settings", lambda key: dict(
+        monkeypatch.setattr(lr, "get_settings", lambda: dict(
             lr.DEFAULTS, **(switches if switches is not None else {"resume_on_reset": True})))
         monkeypatch.setattr(lr, "handled_limit_keys", lambda sid: set(self.handled))
         monkeypatch.setattr(archive_guard, "is_archived_async",
@@ -259,6 +259,22 @@ async def test_no_reset_time_says_so_and_schedules_nothing(monkeypatch):
     assert [s for _, s, _ in env.recorded] == ["no_reset"]
 
 
+async def test_a_resume_that_hits_the_limit_again_is_not_resumed_again(monkeypatch):
+    """The resume is the one try: if the continuation is stopped by a usage
+    limit again (a new reset minute, so a new limit key), nothing more is
+    scheduled and the chat says so."""
+    from app.db import wakeups as wdb
+
+    env = _Env(monkeypatch)
+    _no_structured(monkeypatch)
+    resumed = dict(TURN, payload={lr.PAYLOAD_KEY: {"limit_key": "claude:1"}})
+    assert await lr.on_limit_stop("s1", resumed, TERMINAL) is None
+    assert wdb.get_session_wakeups("s1", lr.LIMIT_RESUME_SOURCE) == []
+    [(sid, status, data)] = env.recorded
+    assert sid == "s1" and status == "no_reset"
+    assert "will not resume by itself" in data["content"]
+
+
 async def test_compact_first_only_on_a_leg_that_compacts(monkeypatch):
     _Env(monkeypatch, leg="voice")
     _no_structured(monkeypatch)
@@ -290,6 +306,9 @@ async def test_fire_compacts_then_continues_in_queue_order(monkeypatch):
     assert prompts == [lr.COMPACT_PROMPT, lr.RESUME_PROMPT]
     assert all(c.args[1] == "wakeup" for c in submit.await_args_list)
     assert all(c.kwargs["overrides"] == {"model": "opus"} for c in submit.await_args_list)
+    # Both turns are marked as the resume, so the usage-limit hold lets them
+    # through and a limit they hit is not resumed again.
+    assert all(lr.PAYLOAD_KEY in c.kwargs["payload"] for c in submit.await_args_list)
     assert [s for _, s, _ in env.recorded] == ["resumed"]
     assert env.recorded[0][2]["compacted_first"] is True
 
@@ -472,18 +491,87 @@ async def test_wakeup_fire_hands_a_limit_resume_to_this_module(monkeypatch):
     assert wakeup_service.LIMIT_RESUME_SOURCE == lr.LIMIT_RESUME_SOURCE
 
 
+# ─── Holding automatic turns while the limit is in force ────────────────────
+
+
+def _held(monkeypatch, errors, *, ended=NOW, status=429):
+    from app.core import turn_scheduler
+    from app.db import database
+
+    monkeypatch.setattr(lr, "_last_settled_turn", lambda sid: {"id": "t1", "ended_at": ended})
+    monkeypatch.setattr(turn_scheduler, "_turn_terminal_payload", lambda sid, tid: {
+        "api_error_status": status, "is_error": True, "errors": errors})
+    monkeypatch.setattr(database, "get_session", lambda sid: None)
+    _no_structured(monkeypatch)
+
+
+def test_hold_lasts_until_the_stated_reset(monkeypatch):
+    _held(monkeypatch, ["You've hit your session limit · resets 11:10pm (America/New_York)"])
+    reset = datetime(2026, 10, 5, 3, 10, tzinfo=timezone.utc).timestamp()
+    assert lr.hold_until("s1", now=NOW + 60) == reset
+    assert lr.hold_until("s1", now=reset + 1) is None
+
+
+def test_hold_without_a_reset_time_uses_the_fallback(monkeypatch):
+    _held(monkeypatch, ["provider returned HTTP 429: Usage limit reached: Rate limited"])
+    assert lr.hold_until("s1", now=NOW + 60) == NOW + lr.HOLD_FALLBACK_SECONDS
+    assert lr.hold_until("s1", now=NOW + lr.HOLD_FALLBACK_SECONDS + 1) is None
+
+
+@pytest.mark.parametrize("errors,status", [
+    (["provider returned HTTP 429: Rate limit reached. Please try again in 1s."], 429),
+    (["You've hit your session limit · resets 11:10pm"], 500),
+])
+def test_no_hold_without_a_usage_limit(monkeypatch, errors, status):
+    _held(monkeypatch, errors, status=status)
+    assert lr.hold_until("s1", now=NOW + 60) is None
+
+
 # ─── Settings ───────────────────────────────────────────────────────────────
 
 
 def test_settings_default_off_with_compact_on():
-    assert lr.get_settings(lr.CLAUDE_KEY) == {"resume_on_reset": False, "compact_before_resume": True}
+    assert lr.get_settings() == {"resume_on_reset": False, "compact_before_resume": True}
 
 
 def test_settings_update_and_validation():
-    out = lr.update_settings(lr.CLAUDE_KEY, resume_on_reset=True)
+    out = lr.update_settings(resume_on_reset=True)
     assert out == {"resume_on_reset": True, "compact_before_resume": True}
-    assert lr.get_settings(lr.CLAUDE_KEY)["resume_on_reset"] is True
+    assert lr.get_settings()["resume_on_reset"] is True
     with pytest.raises(ValueError):
-        lr.update_settings(lr.CLAUDE_KEY)
-    with pytest.raises(KeyError):
-        lr.update_settings("no-such-provider", resume_on_reset=True)
+        lr.update_settings()
+    with pytest.raises(ValueError):
+        lr.update_settings(resume_on_reset="yes")
+
+
+def _legacy(key: str, **switches: bool) -> None:
+    from app.db import database
+
+    database.set_system_setting(lr.LEGACY_SETTING_PREFIX + key, json.dumps(switches))
+
+
+@pytest.mark.parametrize("rows,expected", [
+    # One provider had resume on: it is on for every provider now.
+    ({"claude": {"resume_on_reset": False}, "prov-1": {"resume_on_reset": True}},
+     {"resume_on_reset": True, "compact_before_resume": True}),
+    # Nobody turned resume on; compact was on (by default) for some provider.
+    ({"prov-1": {"resume_on_reset": False, "compact_before_resume": False}},
+     {"resume_on_reset": False, "compact_before_resume": True}),
+    # Every provider turned compact off.
+    ({"claude": {"compact_before_resume": False}},
+     {"resume_on_reset": False, "compact_before_resume": False}),
+])
+def test_per_provider_switches_are_folded_in_once(monkeypatch, rows, expected):
+    from app.db import database
+
+    monkeypatch.setattr(lr, "provider_keys", lambda: ["claude"])
+    for key, switches in rows.items():
+        _legacy(key, **switches)
+    assert lr.get_settings() == expected
+    # Written once as the global row; the per-provider rows are gone, so they
+    # are never read as overrides again.
+    assert json.loads(database.get_system_setting(lr.SETTING_KEY)) == expected
+    assert lr._legacy_settings() == {}
+    _legacy("claude", resume_on_reset=not expected["resume_on_reset"])
+    database.invalidate_system_setting_memo()
+    assert lr.get_settings() == expected

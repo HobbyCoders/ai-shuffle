@@ -477,6 +477,136 @@ async def test_chained_failover_exhaustion_terminates(mock_db):
     execute.assert_not_awaited()               # nothing queued, nothing started
 
 
+_SESSION_LIMIT = ("claude reported success: You've hit your session limit · resets "
+                  "11:10pm (America/New_York)")
+
+
+def _limit_settled_turn(session_id, error=_SESSION_LIMIT):
+    """A turn that settled on a 429 whose words say what kind it was."""
+    turn = _settled_turn(session_id, terminal_event=False)
+    se_db.append_events(session_id, [{
+        "type": "turn.completed", "turn_id": turn["id"],
+        "payload": {"stop_reason": None, "usage": {}, "api_error_status": 429,
+                    "is_error": True, "errors": [error]},
+    }])
+    return turn
+
+
+@contextmanager
+def _limit_settlement():
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        stack.enter_context(patch(
+            "app.core.account_failover.attempt_failover", new=AsyncMock()))
+        stack.enter_context(patch(
+            "app.core.limit_resume.on_limit_stop", new=AsyncMock(return_value=None)))
+        stack.enter_context(patch(
+            "app.core.limit_resume.structured_reset", return_value=None))
+        yield execute
+
+
+@pytest.mark.parametrize("source", ["unpark", "agent_message", "automation", "wakeup"])
+async def test_a_usage_limit_holds_automatic_turns_until_the_reset(mock_db, source):
+    """Once a provider says a usage limit is hit, nothing continues the chat by
+    itself: a wake, a peer message or an automation stays queued instead of
+    asking the provider again before the reset."""
+    settled = _limit_settled_turn("ul1")
+    held = turns_db.enqueue_turn("ul1", source, prompt="carry on")
+
+    with _limit_settlement() as execute:
+        await turn_scheduler.on_turn_settled("ul1", settled["id"], "completed")
+        turn_scheduler.kick("ul1")  # a later nudge (another wake) holds too
+        await _drain_kicks()
+
+    execute.assert_not_awaited()
+    assert [t["id"] for t in turns_db.get_queued_turns("ul1")] == [held["id"]]
+
+
+async def test_a_held_turn_starts_by_itself_once_the_limit_resets(mock_db):
+    """Nothing else nudges a chat whose only queued work is held, so the
+    scheduler kicks it again at the reset: the held wake must not wait for
+    the owner's next message."""
+    import time as _time
+
+    settled = _limit_settled_turn("ul5")
+    held = turns_db.enqueue_turn("ul5", "unpark", prompt="report")
+    reset_at = _time.time() + 0.05
+    lapsed = {"now": False}
+
+    def hold_until(session_id, **_):
+        return None if lapsed["now"] else reset_at
+
+    with _limit_settlement() as execute, \
+            patch("app.core.limit_resume.hold_until", side_effect=hold_until), \
+            patch.object(turn_scheduler, "_HOLD_REKICK_GRACE_SECONDS", 0.0):
+        await turn_scheduler.on_turn_settled("ul5", settled["id"], "completed")
+        await _drain_kicks()
+        execute.assert_not_awaited()
+        assert "ul5" in turn_scheduler._hold_rekicks
+
+        lapsed["now"] = True
+        await asyncio.sleep(0.2)
+        await _drain_kicks()
+
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == held["id"]
+    assert "ul5" not in turn_scheduler._hold_rekicks
+
+
+@pytest.mark.parametrize("source", ["user", "queue", "api", "connector"])
+async def test_an_owner_message_runs_through_the_hold(mock_db, source):
+    """Whatever way the owner sends it (the app, the REST API, whose caller
+    waits on it, or a chat connector), their message is not held."""
+    settled = _limit_settled_turn("ul2")
+    wake = turns_db.enqueue_turn("ul2", "unpark", prompt="report")
+
+    with _limit_settlement() as execute:
+        await turn_scheduler.on_turn_settled("ul2", settled["id"], "completed")
+        await _drain_kicks()
+        execute.assert_not_awaited()
+        turns_db.enqueue_turn("ul2", source, prompt="try again now")
+        turn_scheduler.kick("ul2")
+        await _drain_kicks()
+
+    # The owner asked: the queue runs in order, the held wake first.
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == wake["id"]
+
+
+async def test_the_opt_in_resume_after_the_reset_is_not_held(mock_db):
+    from app.core import limit_resume
+
+    settled = _limit_settled_turn("ul3")
+    resume = turns_db.enqueue_turn(
+        "ul3", "wakeup", prompt=limit_resume.RESUME_PROMPT,
+        payload={limit_resume.PAYLOAD_KEY: {"limit_key": "claude:1"}},
+    )
+
+    with _limit_settlement() as execute:
+        await turn_scheduler.on_turn_settled("ul3", settled["id"], "completed")
+        await _drain_kicks()
+
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == resume["id"]
+
+
+async def test_a_transient_429_holds_nothing(mock_db):
+    """A per-minute rate limit the client already retried is not a usage
+    limit: queued automatic work still runs."""
+    settled = _limit_settled_turn(
+        "ul4", error="provider returned HTTP 429: Rate limit reached for gpt-5 "
+                     "on tokens per min (TPM). Please try again in 1.8s.",
+    )
+    wake = turns_db.enqueue_turn("ul4", "unpark", prompt="report")
+
+    with _limit_settlement() as execute:
+        await turn_scheduler.on_turn_settled("ul4", settled["id"], "completed")
+        await _drain_kicks()
+
+    execute.assert_awaited_once()
+    assert execute.await_args.args[0]["id"] == wake["id"]
+
+
 async def test_non_429_completion_never_calls_failover(mock_db):
     settled = _settled_turn("f4", prompt="fine")
 
@@ -2094,6 +2224,20 @@ def _fake_pool():
     pool.remove = AsyncMock(return_value=None)
     with patch("app.core.session_pool.get_session_pool", return_value=pool):
         yield pool
+
+
+async def test_a_wake_that_died_on_a_usage_limit_is_not_re_run(mock_db):
+    dead = _dead_wake_turn("wr-limit", error="Claude AI usage limit reached|1790812800")
+
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        pool = stack.enter_context(_fake_pool())
+        await turn_scheduler.on_turn_settled("wr-limit", dead["id"], "aborted")
+        await _drain_kicks()
+
+    assert _by_source("wr-limit", "unpark") == []
+    pool.remove.assert_not_awaited()
+    execute.assert_not_awaited()
 
 
 async def test_failed_wake_with_no_model_calls_is_re_enqueued_once(mock_db):

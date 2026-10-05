@@ -547,7 +547,7 @@ async def dismiss_loop_guard_turn(held_id: str, token: str = Depends(require_adm
 
 
 # ============================================================================
-# Resume when a usage limit resets (per provider)
+# Resume when a usage limit resets (every provider)
 # ============================================================================
 
 class LimitResumeUpdate(BaseModel):
@@ -557,33 +557,40 @@ class LimitResumeUpdate(BaseModel):
 
 @router.get("/limit-resume")
 async def get_limit_resume(token: str = Depends(require_auth)):
-    """Each provider's "Resume when the limit resets" and "Compact before
-    resuming" switches, keyed by provider (``claude`` for Claude Code, else
-    the model provider's id), plus the defaults."""
+    """The "Resume when the limit resets" and "Compact before resuming"
+    switches, which apply to every provider, plus their defaults."""
     from app.core import limit_resume
 
     return await run_sync(limit_resume.all_settings)
 
 
-@router.put("/limit-resume/{provider_key}")
-async def set_limit_resume(
-    provider_key: str, request: LimitResumeUpdate, token: str = Depends(require_admin),
-):
-    """Change one provider's switches (admin only). Omitted fields keep their
-    value; an empty body is a 400 and an unknown provider a 404."""
+async def _update_limit_resume(request: LimitResumeUpdate):
     from app.core import limit_resume
 
     try:
         await run_sync(lambda: limit_resume.update_settings(
-            provider_key,
             resume_on_reset=request.resume_on_reset,
             compact_before_resume=request.compact_before_resume,
         ))
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Unknown provider")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return await run_sync(limit_resume.all_settings)
+
+
+@router.put("/limit-resume")
+async def set_limit_resume(request: LimitResumeUpdate, token: str = Depends(require_admin)):
+    """Change the switches (admin only). Omitted fields keep their value; an
+    empty body is a 400."""
+    return await _update_limit_resume(request)
+
+
+@router.put("/limit-resume/{provider_key}", include_in_schema=False)
+async def set_limit_resume_for_provider(
+    provider_key: str, request: LimitResumeUpdate, token: str = Depends(require_admin),
+):
+    """Older clients set the switches per provider; they are global now, so
+    the provider in the path is ignored."""
+    return await _update_limit_resume(request)
 
 
 # ============================================================================

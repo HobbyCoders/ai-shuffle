@@ -1,11 +1,17 @@
 /**
- * General: Appearance, Conversation, Thinking and tools, Region.
+ * General: Appearance, Conversation, Usage limits, Thinking and tools, Region.
  *
  * GeneralPage.svelte renders one `<SettingRow id>` per entry. Defaults match
- * the stores (chatPreferences, theme, timezonePreference) so the modified edge
- * and reset follow them.
+ * the stores (chatPreferences, theme, timezonePreference) and, for Usage
+ * limits, the server's (one pair of switches for every provider), so the
+ * modified edge and reset follow them.
  */
 import type { SettingEntry } from '../types';
+
+export const LIMIT_RESUME_HELP =
+	'When any provider stops a chat or a background worker at its usage limit and says when the limit resets, the chat resumes by itself shortly after that time, once. Either way, a usage limit is never retried before it resets. A chat you stopped, archived or moved is not resumed, and sending a message cancels it. Without a reset time nothing is scheduled.';
+export const LIMIT_COMPACT_HELP =
+	'Resuming does not make the next turn cheaper: by then the provider cache has expired, so it reads the whole conversation again. Compacting first makes that read much smaller. Applies only while Resume when the limit resets is on.';
 
 export const entries: SettingEntry[] = [
 	{
@@ -55,6 +61,26 @@ export const entries: SettingEntry[] = [
 		label: 'Compact message view',
 		keywords: ['density', 'spacing'],
 		default: false
+	},
+	{
+		id: 'general.limitResume',
+		category: 'general',
+		section: 'Usage limits',
+		label: 'Resume when the limit resets',
+		hint: 'Every provider, once',
+		help: LIMIT_RESUME_HELP,
+		keywords: ['usage limit', 'session limit', 'rate limit', 'resume', 'reset', '429', 'auto resume', 'providers'],
+		default: false
+	},
+	{
+		id: 'general.limitCompact',
+		category: 'general',
+		section: 'Usage limits',
+		label: 'Compact before resuming',
+		hint: 'Recommended',
+		help: LIMIT_COMPACT_HELP,
+		keywords: ['usage limit', 'compact', 'resume', 'cache', 'cost'],
+		default: true
 	},
 	{
 		id: 'general.showThinking',

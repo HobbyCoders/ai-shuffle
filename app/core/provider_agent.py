@@ -1485,6 +1485,22 @@ def looks_rate_limited(text: Optional[str]) -> bool:
     return bool(_HTTP_429_RE.search(lowered))
 
 
+def looks_usage_limited(text: Optional[str]) -> bool:
+    """True when ``text`` says a provider USAGE limit stopped the worker.
+
+    A spent session, 5-hour, weekly or plan allowance ("You've hit your
+    session limit · resets 11:10pm", "Usage limit reached: ...") is not a
+    capacity refusal: no re-dispatch clears it before the reset, so it is
+    never retried. Checked before :func:`looks_rate_limited`, which also
+    matches it (it carries a 429).
+    """
+    if not text:
+        return False
+    from fluid.providers._retry import is_usage_limit_text
+
+    return is_usage_limit_text(text)
+
+
 def rate_limit_retry_after(text: Optional[str]) -> Optional[float]:
     """Seconds the provider asked us to wait, or ``None``.
 
@@ -1645,6 +1661,8 @@ def _failure_summary(
         # example by capping its own workers' tool calls.
         if "forwarded no output within" in text:
             prefix = "worker stopped before first output"
+        elif looks_usage_limited(text):
+            prefix = "worker stopped by a usage limit (not retried)"
         elif looks_rate_limited(text):
             prefix = "worker failed to start (provider at capacity, already retried)"
         else:

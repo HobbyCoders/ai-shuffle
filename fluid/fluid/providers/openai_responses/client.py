@@ -570,7 +570,8 @@ class OpenAIResponsesClient:
                             await self._auth.on_401()
                             refreshed_401 = True
                             continue
-                        refusal = refusal_payload(resp.status_code, text)
+                        refusal = refusal_payload(
+                            resp.status_code, text, resp.headers.get("retry-after"))
                         if (
                             refusal["retriable"] and not native_image
                             and attempt < self._retry.max_retries

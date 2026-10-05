@@ -24,7 +24,6 @@
 	import BuiltInModels from './tabs/BuiltInModels.svelte';
 	import ClaudeUsage from './tabs/ClaudeUsage.svelte';
 	import ClaudePolicy from './tabs/ClaudePolicy.svelte';
-	import LimitResumeRows from './LimitResumeRows.svelte';
 	import { ClaudeCliLogin } from './claude-cli-login.svelte';
 	import { LoopGuard } from './loop-guard.svelte';
 	import { ClaudeResets } from './claude-resets.svelte';
@@ -148,9 +147,6 @@
 			<ClaudeUsage {guard} resets={signedIn ? resets : null} />
 		{:else if tab === 'Policy'}
 			<ClaudePolicy {guard} {mode} />
-			{#if mode !== 'off'}
-				<LimitResumeRows providerKey="claude" ids={{ resume: 'providers.limitResume', compact: 'providers.limitCompact' }} />
-			{/if}
 		{:else if cli.terminalOpen}
 			<RowGroup title="Sign in" bare>
 				<ClaudeCliTerminal {cli} />

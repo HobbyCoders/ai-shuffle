@@ -147,7 +147,8 @@ class AnthropicClient:
                         diagnostics.received_headers(resp)
                         if resp.status_code != 200:
                             text = (await resp.aread()).decode(errors="replace")
-                            refusal = refusal_payload(resp.status_code, text)
+                            refusal = refusal_payload(
+                                resp.status_code, text, resp.headers.get("retry-after"))
                             if refusal["retriable"] and attempt < self._retry.max_retries:
                                 await asyncio.sleep(self._retry.delay(
                                     attempt, resp.headers.get("retry-after")))

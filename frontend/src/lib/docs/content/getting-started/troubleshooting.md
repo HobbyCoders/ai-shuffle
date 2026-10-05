@@ -79,7 +79,7 @@ The message in the app says which of these it is.
 
 **The Claude Code CLI is missing.** The installer runs on first start and needs `claude.ai` and Anthropic's download servers. Check the host can reach them, then restart the container. The CLI is kept in its own folder (`/home/appuser/.local`); make sure it is mapped.
 
-**Your plan's usage limit was reached** (subscription mode): agents pause until the limit resets. Wait, or switch to API key mode for heavy or unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
+**Your plan's usage limit was reached** (subscription mode): agents pause until the limit resets, and nothing is retried before then. Wait, or switch to API key mode for heavy or unattended work. To have the chat continue by itself after the reset, turn on **Settings → General → Usage limits → Resume when the limit resets**. See [Modes and costs](/docs/getting-started/modes-and-costs).
 
 **An automation, wake-up, connector or background agent waits for confirmation** (subscription mode): the loop guard held it because unattended turns reached their hourly budget. Confirm or dismiss it under **Settings → Providers → Claude subscription → Policy**, raise the budget there, or switch to API key mode for unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
 

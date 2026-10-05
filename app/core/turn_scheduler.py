@@ -309,6 +309,76 @@ def _kick_after_batch_window(session_id: str) -> None:
     task.add_done_callback(_kick_done)
 
 
+#: Turn sources a person started: typed, queued or Retry in the app, a
+#: request to the REST API (whose caller waits on it), a message through a chat
+#: connector, a new worktree chat's first message. Never held.
+_OWNER_SOURCES = ("user", "queue", "resume", "api", "connector", "worktree")
+
+
+def _held_by_usage_limit(session_id: str, front: Dict[str, Any]) -> Optional[float]:
+    """Until when ``front`` waits because the session's last turn hit a usage
+    limit (epoch seconds), or None when it may start now.
+
+    Once a provider reports a usage limit the chat does not try to continue by
+    itself: a wake, a peer message, an automation or any other automatic turn
+    stays queued until the limit resets (``limit_resume.hold_until``). The
+    owner's own messages always run (with everything queued ahead of them),
+    and so does the opt-in "Resume when the limit resets" turn, which fires
+    after the reset. :func:`_kick_impl` kicks the session again at the reset
+    (:func:`_kick_at_reset`), so the held rows start then.
+    """
+    from app.core import limit_resume
+
+    if (front.get("source") or "") in _OWNER_SOURCES:
+        return None
+    if (front.get("payload") or {}).get(limit_resume.PAYLOAD_KEY):
+        return None
+    try:
+        until = limit_resume.hold_until(session_id)
+        if until is None:
+            return None
+        queued = turns_db.get_queued_turns(session_id)
+    except Exception:  # noqa: BLE001 — a failed check never strands a turn
+        logger.warning("turn_scheduler: usage-limit hold check failed for %s",
+                       session_id, exc_info=True)
+        return None
+    if any((row.get("source") or "") in _OWNER_SOURCES for row in queued):
+        return None
+    logger.info(
+        "turn_scheduler: %s stopped on a usage limit — %s turn %s held until "
+        "the limit resets (%d)", session_id, front.get("source"), front.get("id"),
+        int(until),
+    )
+    return until
+
+
+#: Seconds after the reset before a held session is kicked again.
+_HOLD_REKICK_GRACE_SECONDS = 5.0
+#: One pending re-kick per held session (the latest hold wins).
+_hold_rekicks: Dict[str, asyncio.TimerHandle] = {}
+
+
+def _kick_at_reset(session_id: str, until: float) -> None:
+    """Kick ``session_id`` again once its usage-limit hold has lapsed.
+
+    Nothing else nudges a chat whose only queued work is held, so without
+    this a held wake or peer message would wait for the owner's next message
+    instead of starting at the reset. In memory only: a restart drops it, and
+    the held rows then start on the session's next kick.
+    """
+    loop = asyncio.get_running_loop()
+    previous = _hold_rekicks.pop(session_id, None)
+    if previous is not None:
+        previous.cancel()
+    delay = max(0.0, until - time.time()) + _HOLD_REKICK_GRACE_SECONDS
+
+    def _fire() -> None:
+        _hold_rekicks.pop(session_id, None)
+        kick(session_id)
+
+    _hold_rekicks[session_id] = loop.call_later(delay, _fire)
+
+
 async def _kick_impl(session_id: str) -> None:
     """Peek the front queued turn and execute it. Ownership is DB-raced inside
     ``execute`` (run lease + guarded ``start_turn``) — a lost race returns
@@ -320,6 +390,10 @@ async def _kick_impl(session_id: str) -> None:
     try:
         row = await asyncio.to_thread(turns_db.pop_ready, session_id)
         if row is None or task_registry.stop_invalidated(session_id, generation):
+            return
+        held_until = await asyncio.to_thread(_held_by_usage_limit, session_id, row)
+        if held_until is not None:
+            _kick_at_reset(session_id, held_until)
             return
         from app.core import session_runtime
         await session_runtime.execute(row)
@@ -542,6 +616,11 @@ async def _maybe_recover_failed_wake(
     if settled.get("state") != "aborted":
         return False
     if (settled.get("stop_reason") or "") != "error":
+        return False
+
+    from fluid.providers._retry import is_usage_limit_text
+    if is_usage_limit_text(settled.get("error")):
+        # A usage limit is never retried, wake or not.
         return False
 
     payload = dict(settled.get("payload") or {})

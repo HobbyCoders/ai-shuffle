@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -34,6 +35,100 @@ BILLING_ERROR_CODES = frozenset((
     "insufficient_credits",        # symbolic spelling; OpenRouter sends ``code: 402``
     "billing_error",               # Anthropic error type
 ))
+
+# A usage limit, not a rate limit: a subscription's session, 5-hour, weekly or
+# plan allowance is spent ("You've hit your session limit · resets 11:10pm",
+# Codex's ``usage_limit_reached``). It arrives as HTTP 429 like a per-minute
+# rate limit, but no backoff clears it, so it is never retried: the turn stops
+# and the user sees the limit. A per-minute 429 ("Rate limit reached ... try
+# again in 1.8s", a Retry-After of seconds) is still a blip and retried.
+#
+# Told apart by, in order: an error code naming a usage limit; a wait the
+# provider asks for (Retry-After header or ``resets_in_seconds``) longer than
+# USAGE_LIMIT_MIN_WAIT_SECONDS; the provider's own words.
+USAGE_LIMIT_ERROR_CODES = frozenset((
+    "usage_limit_reached",  # ChatGPT/Codex backend
+    "usage_not_included",   # ChatGPT/Codex: the plan has no allowance at all
+))
+#: A 429 that asks for a longer wait than this is a spent allowance, not a
+#: blip. Matches the ceiling task re-dispatch already treats as "not a retry".
+USAGE_LIMIT_MIN_WAIT_SECONDS = 600.0
+_USAGE_LIMIT_TEXT = re.compile(
+    r"usage[ _-]limit"
+    r"|session limit"
+    r"|weekly limit"
+    r"|(?:5|five)[ -]hour limit"
+    # "You've hit your limit", "... your session limit", never "your rate
+    # limit" or "your request limit for this minute" (a per-minute blip).
+    r"|hit your (?!(?:rate|request|requests|token|tokens)[ -])(?:[a-z0-9-]+ )?limit"
+    r"|limit reached\s*\|\s*\d{9,13}",
+    re.IGNORECASE,
+)
+
+
+def _error_objects(body: object) -> list[dict]:
+    if isinstance(body, (str, bytes)):
+        text = body.decode(errors="replace") if isinstance(body, bytes) else body
+        if "{" not in text:
+            return []
+        try:
+            body = json.loads(text.strip())
+        except ValueError:
+            return []
+    if not isinstance(body, dict):
+        return []
+    out = [body]
+    if isinstance(body.get("error"), dict):
+        out.insert(0, body["error"])
+    return out
+
+
+def is_usage_limit_text(text: object) -> bool:
+    """True when an error's own words say a usage allowance is spent."""
+    if isinstance(text, bytes):
+        text = text.decode(errors="replace")
+    return isinstance(text, str) and bool(_USAGE_LIMIT_TEXT.search(text))
+
+
+def is_usage_limit(
+    status: object, body: object = None, retry_after: str | None = None,
+) -> bool:
+    """True when a provider refusal is a usage limit (never retried).
+
+    ``status`` is the HTTP status or in-stream code (None when the error gave
+    none: an in-stream ``usage_limit_reached`` still counts). ``body`` is the
+    response body, its text, or an error object; ``retry_after`` the header.
+    A status other than 429 is never a usage limit.
+    """
+    code = coerce_status(status)
+    if code is not None and code != 429:
+        return False
+    objects = _error_objects(body)
+    for obj in objects:
+        for key in ("code", "type"):
+            value = obj.get(key)
+            if isinstance(value, str) and value in USAGE_LIMIT_ERROR_CODES:
+                return True
+    if isinstance(status, str) and status in USAGE_LIMIT_ERROR_CODES:
+        return True
+    if code is None:
+        return False
+    wait = parse_retry_after(retry_after)
+    if wait is not None and wait > USAGE_LIMIT_MIN_WAIT_SECONDS:
+        return True
+    for obj in objects:
+        resets_in = obj.get("resets_in_seconds")
+        if (
+            isinstance(resets_in, (int, float)) and not isinstance(resets_in, bool)
+            and resets_in > USAGE_LIMIT_MIN_WAIT_SECONDS
+        ):
+            return True
+        if is_usage_limit_text(obj.get("message")) or is_usage_limit_text(obj.get("detail")):
+            return True
+    if isinstance(body, (str, bytes)) and not objects:
+        return is_usage_limit_text(body)
+    return False
+
 
 # Symbolic in-stream error codes whose HTTP twin is unambiguous (OpenRouter
 # and OpenAI-compatible servers spell some codes as names, not numbers).

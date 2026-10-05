@@ -51,9 +51,14 @@ from fluid.providers._retry import (
     billing_error_code,
     coerce_status,
     is_retriable_status,
+    is_usage_limit,
 )
 from fluid.providers._sse import KEEPALIVE_EVENT
-from fluid.providers._transport import billing_summary, provider_error_summary
+from fluid.providers._transport import (
+    billing_summary,
+    provider_error_summary,
+    usage_limit_summary,
+)
 from fluid.providers.base import (
     INTERNAL_EXTRA_PREFIX,
     ErrorClass,
@@ -325,9 +330,13 @@ def retry_after_hint(err: Any) -> float | None:
 # In-stream error codes whose HTTP twin is unambiguous, so a host reads an
 # in-stream rate limit exactly like a 429 response. Only codes that are
 # already retried are mapped: the status also feeds classify_error, and a
-# mapping must not make a fatal code retriable.
+# mapping must not make a fatal code retriable. A usage limit is mapped to its
+# 429 too (the host's usage-limit handling keys on it); classify_error checks
+# it first, so it stays fatal.
 _CODE_STATUS = {
     "rate_limit_exceeded": 429,
+    "usage_limit_reached": 429,
+    "usage_not_included": 429,
     "server_error": 500,
     "server_is_overloaded": 503,
 }
@@ -359,6 +368,9 @@ def classify_error(err: Any) -> ErrorClass:
     ``drop_sticky`` is always False.
     """
     code, etype, status = _error_fields(err)
+    if is_usage_limit(status if status is not None else code, err):
+        # A spent allowance: no backoff clears it, so the turn stops on it.
+        return ErrorClass(retriable=False, code=code)
     if code == OVERLOAD_CODE:
         return ErrorClass(
             retriable=True, code=code,
@@ -760,6 +772,7 @@ class ResponsesStreamNormalizer:
                 "message": str(err), "retriable": classify_error(err).retriable,
             }
             code, etype, status = _error_fields(err)
+            usage_limit = is_usage_limit(status if status is not None else code, err)
             if code is not None:
                 payload["code"] = code
             if etype is not None:
@@ -774,6 +787,8 @@ class ResponsesStreamNormalizer:
                 # ``insufficient_quota`` 429: a 402, never a rate limit.
                 status = BILLING_STATUS
                 summary = billing_summary(billing, summary)
+            elif usage_limit:
+                summary = usage_limit_summary(summary)
             if status is not None:
                 payload["status"] = status
             payload["provider_message"] = summary

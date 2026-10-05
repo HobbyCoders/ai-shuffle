@@ -40,7 +40,7 @@ from fluid.events.ops import Interrupt
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.permissions.engine import PermissionEngine
 from fluid.providers import _chat_completions
-from fluid.providers._retry import RetryPolicy
+from fluid.providers._retry import RetryPolicy, is_usage_limit_text
 from fluid.providers.anthropic.client import AnthropicClient
 from fluid.providers.base import ProviderRequest
 from fluid.providers.local.client import LocalClient
@@ -1757,6 +1757,66 @@ async def test_a_true_rate_limit_is_still_retried_and_reported_as_429(server, ki
 
     assert isinstance(_terminal(events), TurnComplete)
     assert len(server.requests) == 2
+
+
+# ─── a usage limit is never retried ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("kind", DIALECTS)
+@pytest.mark.parametrize("body,retry_after", [
+    # ChatGPT/Codex backend: the allowance is spent until its window resets.
+    ({"error": {"type": "usage_limit_reached", "message": "The usage limit has been reached",
+                "plan_type": "plus", "resets_in_seconds": 9000}}, "0"),
+    # Claude-style session limit, said only in words.
+    ({"error": {"type": "rate_limit_error",
+                "message": "You've hit your session limit · resets 11:10pm (America/New_York)"}}, "0"),
+    # No words at all, but the provider asks for an hour.
+    ({"error": {"type": "rate_limit_error", "message": "Rate limited"}}, "3600"),
+])
+async def test_a_usage_limit_stops_the_turn_without_a_retry(server, kind, body, retry_after):
+    """Once a provider says a usage limit is hit, the turn stops: no backoff
+    clears a spent allowance, so the client must not ask again. The 429 is
+    kept so the host shows the limit (and can schedule the opt-in resume)."""
+    server.script(*[fps.error_reply(429, body=body, retry_after=retry_after) for _ in range(4)])
+    run = Harness(server, kind)
+    try:
+        events = await run.turn()
+    finally:
+        await run.aclose()
+
+    error = _terminal(events)
+    assert isinstance(error, ErrorEvent) and not error.retriable
+    assert error.status == 429
+    # What the user reads names the limit, even when the provider's words did not.
+    assert is_usage_limit_text(error.provider_message)
+    assert len(server.requests) == 1
+
+
+@pytest.mark.parametrize("status,body,retry_after,expected", [
+    # Usage limits.
+    (429, {"error": {"code": "usage_limit_reached"}}, None, True),
+    (None, {"code": "usage_limit_reached", "message": "x"}, None, True),
+    (429, "Claude AI usage limit reached|1790812800", None, True),
+    (429, {"error": {"message": "You've hit your limit · resets 3pm"}}, None, True),
+    (429, {"error": {"message": "Weekly limit reached"}}, None, True),
+    (429, {"error": {"message": "slow down", "resets_in_seconds": 7200}}, None, True),
+    (429, {"error": {"message": "slow down"}}, "86400", True),
+    # Transient: a per-minute rate limit, a short wait, any other status.
+    (429, {"error": {"message": "Rate limit reached for gpt-5 in organization org-x on "
+                                "tokens per min (TPM). Please try again in 1.8s.",
+                     "code": "rate_limit_exceeded"}}, None, False),
+    (429, {"error": {"message": "This request would exceed your account's rate limit."}}, "30", False),
+    (429, {"error": {"message": "slow down"}}, "600", False),
+    (429, {"error": {"message": "You have hit your rate limit. Retry in 2s."}}, None, False),
+    (429, {"detail": "You have hit your request limit for this minute"}, None, False),
+    (429, {"error": {"message": "You've hit your Opus limit · resets 3pm"}}, None, True),
+    (503, {"error": {"message": "usage limit"}}, None, False),
+    (500, "Internal error", None, False),
+])
+def test_usage_limits_are_told_apart_from_transient_429s(status, body, retry_after, expected):
+    from fluid.providers._retry import is_usage_limit
+
+    assert is_usage_limit(status, body, retry_after) is expected
 
 
 # ─── first-byte timeout is a provider setting ───────────────────────────────

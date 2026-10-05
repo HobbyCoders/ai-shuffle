@@ -959,36 +959,38 @@ Drop a held turn without running it. Returns `{"success": true}`, or `404`.
 
 ### GET /api/v1/settings/limit-resume
 
-The per-provider **Resume when the limit resets** and **Compact before resuming** switches (Settings > Providers). With the first on, a chat or background Task worker that the provider's usage limit stopped is resumed once, shortly after the limit resets. With the second on, the chat is compacted first, so the resumed turn reads a smaller context. Keys are `claude` for Claude Code and a model provider's `id` for any other provider.
+The **Resume when the limit resets** and **Compact before resuming** switches (Settings > General > Usage limits). One pair applies to every provider. With the first on, a chat or background Task worker that a provider's usage limit stopped is resumed once, shortly after the limit resets. With the second on, the chat is compacted first, so the resumed turn reads a smaller context.
 
 **Auth:** Required
 
 ```json
 {
-  "providers": {
-    "claude": {"resume_on_reset": false, "compact_before_resume": true},
-    "8d1f...": {"resume_on_reset": true, "compact_before_resume": true}
-  },
+  "resume_on_reset": false,
+  "compact_before_resume": true,
   "defaults": {"resume_on_reset": false, "compact_before_resume": true}
 }
 ```
 
-The reset time comes from the provider's usage readings when they show the window that stopped the turn, and otherwise from the error text, for example `resets 11:10pm (America/New_York)`. Without a reset time nothing is scheduled, and the chat says so. The resume runs a minute or two after the reset, a little later for each other chat due at the same time. Just before it runs, the provider's usage is read again, and a limit still in force moves it to the next reset, at most three times. A chat is resumed once per limit. A chat the owner stopped, archived or moved to another worker is not resumed, and a message from the owner cancels the scheduled resume. The schedule is stored, so it survives a restart.
+A usage limit is never retried, whatever these are set to. When a provider says a session, 5-hour, weekly or plan allowance is spent, the turn stops and the chat shows the limit. Wake-ups, peer messages, automations and other turns nobody typed stay queued until the reset; a message you send runs at once. A short rate limit (HTTP 429 asking for a wait of seconds) is still retried a few times.
 
-### PUT /api/v1/settings/limit-resume/{provider_key}
+The reset time comes from the provider's usage readings when they show the window that stopped the turn, and otherwise from the error text, for example `resets 11:10pm (America/New_York)`. Without a reset time nothing is scheduled, and the chat says so. The resume runs a minute or two after the reset, a little later for each other chat due at the same time. Just before it runs, the stored usage readings are checked again, and a limit still in force moves it to the next reset, at most three times. A chat is resumed once per limit, and a resumed turn that hits a limit again is not resumed a second time. A chat the owner stopped, archived or moved to another worker is not resumed, and a message from the owner cancels the scheduled resume. The schedule is stored, so it survives a restart.
 
-Change one provider's switches. Send `resume_on_reset`, `compact_before_resume` or both, as `true` or `false`. A field you leave out keeps its value. Returns the same body as `GET`.
+Before this pair existed each provider had its own switches. On the first read after an upgrade they are folded in: a switch starts on when it was on for any provider, and the per-provider values are then removed.
+
+### PUT /api/v1/settings/limit-resume
+
+Change the switches. Send `resume_on_reset`, `compact_before_resume` or both, as `true` or `false`. A field you leave out keeps its value. Returns the same body as `GET`. The older per-provider path, `PUT /api/v1/settings/limit-resume/{provider_key}`, still works and changes the same switches; the provider in it is ignored.
 
 **Auth:** Owner only
 
 ```bash
-curl -X PUT http://localhost:8000/api/v1/settings/limit-resume/claude \
+curl -X PUT http://localhost:8000/api/v1/settings/limit-resume \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"resume_on_reset": true}'
 ```
 
-**Errors:** `400` when the body changes nothing, `422` for a value that is not `true` or `false`, `404` for an unknown provider.
+**Errors:** `400` when the body changes nothing, `422` for a value that is not `true` or `false`.
 
 ### Import Claude and Codex settings
 

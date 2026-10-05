@@ -137,6 +137,7 @@ from fluid.hooks.bus import (
     TURN_START,
 )
 from fluid.messages import Image, Message, Text
+from fluid.providers._retry import is_usage_limit_text
 from fluid.store.base import (
     SessionMeta,
     SessionNode,
@@ -1858,7 +1859,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 return mapper
             self._peer_admission_open = False
             self._drop_pending_peers()
-            if attempt == 1 and self._resume_handle_rejected(mapper):
+            if attempt == 1 and self._resume_handle_rejected(mapper, failure):
                 logger.warning(
                     "claude did not accept --resume %s (%s); starting a fresh "
                     "CLI conversation", self._spawn_resume, failure,
@@ -1889,8 +1890,16 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         except Exception:  # noqa: BLE001 — the result frame still ends the turn
             logger.debug("interrupt after hook stop failed", exc_info=True)
 
-    def _resume_handle_rejected(self, mapper: StreamJsonMapper) -> bool:
-        """A first turn on a resumed process failed before mapping any frame."""
+    def _resume_handle_rejected(self, mapper: StreamJsonMapper, failure: str | None = None) -> bool:
+        """A first turn on a resumed process failed before mapping any frame.
+
+        Never a usage limit: the CLI refuses a resumed turn at the session or
+        weekly limit before any frame too, and replaying it into a fresh
+        conversation would ask again (and throw the conversation away). The
+        turn stops on the limit instead.
+        """
+        if mapper.failed_status == 429 or is_usage_limit_text(failure):
+            return False
         return (
             self._spawn_resume is not None
             and self._proc_results == 0

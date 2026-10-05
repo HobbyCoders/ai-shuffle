@@ -20,7 +20,6 @@
 	import ModelCuration from './ModelCuration.svelte';
 	import DeviceCodeSetup from './setup/DeviceCodeSetup.svelte';
 	import SubscriptionUsage from './tabs/SubscriptionUsage.svelte';
-	import LimitResumeRows from './LimitResumeRows.svelte';
 	import { BankedResets, isGrokSubscription } from './banked-resets.svelte';
 	import { planLabel, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
 	import { setCredentialEnabled } from './provider-actions';
@@ -148,7 +147,6 @@
 					</SettingRow>
 				</RowGroup>
 			{/if}
-			{#key row.id}<LimitResumeRows providerKey={row.id} />{/key}
 		{/if}
 	{/snippet}
 </DetailPane>
