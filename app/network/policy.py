@@ -79,6 +79,7 @@ _LOCAL_SETTING_PATTERNS = [
         r"^chat_connection:",
         r"^plugin_oauth:",
         r"^claude_cli_relogin_notice(:|$)",
+        r"^claude_cli_(keep_installed|installed_by_app)(:|$)",
         r"^encryption_salt$",
         r"^owner_preference_identity$",
         r"^owner_auth_",

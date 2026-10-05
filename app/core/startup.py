@@ -287,7 +287,12 @@ def check_prerequisites() -> None:
     """Phase 4: Verify external dependencies are available."""
     # Ask the CLI itself (`claude auth status`); this also warms the probe
     # cache that /health and the runner capabilities read.
+    import os
+    from pathlib import Path
     from app.core import claude_cli_status
+    native_bin = str(Path.home() / ".local" / "bin")
+    if native_bin not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = native_bin + os.pathsep + os.environ.get("PATH", "")
     cli = claude_cli_status.get_status(force=True)
     if cli.signed_in:
         logger.info("Claude Code CLI %s: signed in", cli.cli_version or "")
@@ -298,7 +303,17 @@ def check_prerequisites() -> None:
                     "(Settings > Providers > Claude, or `claude auth login` on this worker)")
     else:
         logger.info("Claude Code CLI: %s", cli.error or "not installed")
-    from app.core import claude_relogin_notice
+    from app.core import claude_cli_install, claude_relogin_notice
+    # Never fatal: a worker that cannot record or act on the setting still boots.
+    try:
+        marker_was_absent = not (settings.effective_data_dir / claude_cli_install.MARKER).exists()
+        keep = claude_cli_install.ensure_recorded(cli)
+        # Docker's entrypoint installs while the marker is on; before migration
+        # wrote it, it could not know an API key or legacy marker means "on".
+        if keep and not cli.installed and (claude_cli_install.platform() != "docker" or marker_was_absent):
+            claude_cli_install.start("install")
+    except Exception:
+        logger.warning("Could not apply Keep Claude Code installed", exc_info=True)
     claude_relogin_notice.mark_if_needed()
 
     # Record the Claude Code auth mode once for an install that has none, so a

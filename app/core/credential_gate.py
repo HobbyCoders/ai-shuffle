@@ -41,9 +41,7 @@ SETUP_CODE = "agent_setup_required"
 # Claude-leg messages: they refuse a turn that runs on Claude and say so.
 NO_CLI_MESSAGE = (
     "Claude cannot run on this worker: the Claude Code CLI is not installed. "
-    "See Settings > Providers > Claude for how to install it, or switch Claude "
-    "to API key mode there and add your Anthropic API key. You can also pick a "
-    "model from another provider."
+    "Install it in Settings > Providers > Claude. You can also pick a model from another provider."
 )
 NOT_SIGNED_IN_MESSAGE = (
     "Claude cannot run on this worker: Claude is set to subscription mode and the "

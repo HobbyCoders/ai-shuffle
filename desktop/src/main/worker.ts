@@ -207,7 +207,7 @@ export function claudeCliSetupMessage(platform: NodeJS.Platform = process.platfo
 	const install = platform === 'win32'
 		? 'irm https://claude.ai/install.ps1 | iex   (in PowerShell)'
 		: 'curl -fsSL https://claude.ai/install.sh | bash';
-	return `Claude Code CLI not found. Only a Claude subscription needs it. To use one, install it with Anthropic's installer, then sign in with \`claude\`:\n  ${install}\nRestart AI Shuffle afterwards.`;
+	return `Claude cannot run on this worker: the Claude Code CLI is not installed. Install it in Settings > Providers > Claude.\nManual fallback:\n  ${install}`;
 }
 
 /**

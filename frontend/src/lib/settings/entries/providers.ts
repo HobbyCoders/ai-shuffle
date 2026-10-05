@@ -36,6 +36,22 @@ export const NATIVE_IMAGE_HELP =
 
 export const entries: SettingEntry[] = [
 	{
+		id: 'providers.cliKeepInstalled', category: 'providers', section: 'Claude Code CLI',
+		label: 'Keep Claude Code installed', item: CLAUDE_PROVIDER_ITEM,
+		help: 'When on, this worker reinstalls the CLI at start if it is missing. When off, starting the worker never downloads it.',
+		keywords: ['claude cli', 'install', 'startup', 'download']
+	},
+	{
+		id: 'providers.cliUpdate', category: 'providers', section: 'Claude Code CLI',
+		label: 'Update Claude Code', item: CLAUDE_PROVIDER_ITEM,
+		keywords: ['claude cli', 'version', 'check for update']
+	},
+	{
+		id: 'providers.cliRemove', category: 'providers', section: 'Claude Code CLI',
+		label: 'Remove Claude Code', item: CLAUDE_PROVIDER_ITEM,
+		keywords: ['claude cli', 'uninstall', 'remove']
+	},
+	{
 		id: 'providers.claudeMode',
 		category: 'providers',
 		section: 'Claude Code mode',

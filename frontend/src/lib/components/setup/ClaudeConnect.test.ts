@@ -44,9 +44,10 @@ describe('setup Claude connect flow', () => {
 		expect((await screen.findByTestId('setup-claude-unattended')).textContent).toContain('Use an API key for unattended runs');
 	});
 
-	it('saves an Anthropic key for Claude and reports ready', async () => {
-		mocks.creds.mockResolvedValueOnce(creds())
-			.mockResolvedValue(creds({ mode: 'api_key', ready: true, credentialReady: true, reason: null, apiKey: { set: true, last4: 'abcd' } }));
+	it('saves an Anthropic key without the CLI and reports ready', async () => {
+		const missingCli = { installed: false, signed_in: false, email: null, org_name: null, plan: null, auth_method_label: null, error: null };
+		mocks.creds.mockResolvedValueOnce(creds({ cli: missingCli }))
+			.mockResolvedValue(creds({ mode: 'api_key', ready: true, credentialReady: true, reason: null, apiKey: { set: true, last4: 'abcd' }, cli: missingCli }));
 		mocks.save.mockResolvedValue({ masked: 'sk-ant-...abcd' });
 		const onReady = vi.fn();
 		render(ClaudeConnect, { isAdmin: true, onReady, pollMs: 60_000 });

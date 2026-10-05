@@ -14,6 +14,7 @@ import pytest
 
 from app.core.provider import harness_adapter as ha
 from fluid.engine.delegated import CLAUDE_CLI_MISSING_MESSAGE, ClaudeCliMissingError
+from app.core.credential_gate import NO_CLI_MESSAGE
 
 _CLI_NAME = "claude.exe" if os.name == "nt" else "claude"
 
@@ -53,7 +54,7 @@ def test_missing_cli_raises_typed_setup_error(bundled_dir, monkeypatch):
     monkeypatch.setenv("PATH", str(bundled_dir))
     with pytest.raises(ClaudeCliMissingError) as caught:
         ha._resolve_claude_cmd()
-    assert str(caught.value) == CLAUDE_CLI_MISSING_MESSAGE
+    assert str(caught.value) == NO_CLI_MESSAGE
 
 
 def test_empty_path_raises_typed_setup_error(monkeypatch):

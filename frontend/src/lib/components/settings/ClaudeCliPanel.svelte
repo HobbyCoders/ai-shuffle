@@ -14,7 +14,8 @@
 	 * An Anthropic API key is offered as the alternative. The terminal state
 	 * machine is `ClaudeCliLogin`, shared with Settings > Providers > Claude.
 	 */
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy, onMount, tick } from 'svelte';
+	import ClaudeCliInstall from './providers/setup/ClaudeCliInstall.svelte';
 	import { ExternalLink, Loader2, RefreshCw, SquareTerminal } from 'lucide-svelte';
 	import { claudePlanLabel, type ClaudeCliStatus } from '$lib/api/claude-cli';
 	import { platform } from '$lib/stores/platform.svelte';
@@ -38,6 +39,12 @@
 	const inputClass = $derived(variant === 'setup' ? 'input mono' : 'inp mono');
 
 	let outputEl = $state<HTMLPreElement | null>(null);
+	let heading = $state<HTMLHeadingElement | null>(null);
+	async function installed() {
+		const wasInstalled = cli.status?.installed;
+		await cli.load(true);
+		if (!wasInstalled && cli.status?.installed) { await tick(); heading?.focus(); }
+	}
 	const cli = new ClaudeCliLogin({
 		onStatus: (s) => onStatus?.(s),
 		onOutput: () => {
@@ -59,7 +66,11 @@
 <div class="cli-panel" data-testid="claude-cli-panel">
 	{#if !status}
 		<p class="hint">{cli.loadError || 'Asking the Claude Code CLI…'}</p>
+	{:else if !status.installed}
+		<ClaudeCliInstall {isAdmin} onFinished={installed} />
+		{#if onUseApiKey}<div class="actions"><button type="button" class={btn} onclick={onUseApiKey}>Use an API key</button></div>{/if}
 	{:else}
+		<h3 bind:this={heading} tabindex="-1" class="pad">Sign in to Claude Code</h3>
 		<dl class="facts">
 			<div>
 				<dt>Status</dt>
@@ -149,13 +160,7 @@
 
 		{#if !status.signed_in && !cli.terminalOpen}
 			<div class="howto" data-testid="claude-cli-instructions">
-				{#if !status.installed}
-					{#if status.login.surface === 'docker'}
-						<p class="hint">The container installs the CLI with Anthropic's installer on first start. Check the container log, make sure <code>/home/appuser/.local</code> is mapped, and restart it.</p>
-					{:else}
-						<p class="hint">Install the CLI with Anthropic's installer, sign in with <code>claude auth login</code>, then restart AI Shuffle.</p>
-					{/if}
-				{:else if status.login.surface === 'docker'}
+				{#if status.login.surface === 'docker'}
 					<p class="hint">{canUseTerminal ? 'Or sign in from the host:' : 'Sign in from the host:'} open a terminal on the machine running Docker (on Unraid, the >_ Terminal) and run</p>
 					<pre class="cmd">{cli.hostCommand}</pre>
 					<p class="hint">with your container name for <code>&lt;container&gt;</code>: <code>ai-shuffle</code> with Docker Compose, <code>AI-Shuffle</code> on Unraid. Then choose Check again.</p>

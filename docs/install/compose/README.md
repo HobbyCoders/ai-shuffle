@@ -26,8 +26,10 @@ For a Linux server, a NAS or a desktop running Docker. On Unraid, use the
    docker compose up -d
    ```
 
-   The first start downloads the image and sets it up (including the Claude
-   Code CLI), so it can take a few minutes. `docker compose ps` shows `healthy` when it is ready.
+   The first start downloads the image and sets it up, so it can take a few minutes.
+   If you choose Claude, install Claude Code from setup or Settings > Providers > Claude.
+   Anthropic's own installer downloads it. It is reinstalled at start only while
+   Keep Claude Code installed is on. `docker compose ps` shows `healthy` when it is ready.
 4. Open <http://localhost:8000> on the same computer and follow the setup
    wizard.
 

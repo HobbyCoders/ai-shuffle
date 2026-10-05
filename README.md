@@ -19,6 +19,8 @@ It runs AI agents with **your own** AI account. You connect any supported provid
 
 ## Install
 
+If you choose Claude, install Claude Code from setup or **Settings > Providers > Claude**. Anthropic's own installer downloads it; no Claude Code binary is bundled. It is reinstalled at worker start only while **Keep Claude Code installed** is on.
+
 AI Shuffle is sold as a license with a 14-day trial. Your license email has your license key and your pull token.
 
 - [Requirements](docs/content/getting-started/requirements.md): a 64-bit Intel or AMD machine with Docker, 8 GB of memory recommended.

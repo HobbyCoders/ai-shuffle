@@ -21,6 +21,7 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ClaudeCliTerminal from './setup/ClaudeCliTerminal.svelte';
+	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
 	import BuiltInModels from './tabs/BuiltInModels.svelte';
 	import ClaudeUsage from './tabs/ClaudeUsage.svelte';
 	import ClaudePolicy from './tabs/ClaudePolicy.svelte';
@@ -153,6 +154,8 @@
 			</RowGroup>
 		{:else if !status}
 			<p class="pv-msg" role="status">{cli.loadError || 'Asking the Claude Code CLI'}</p>
+		{:else if !status.installed}
+			<ClaudeCliInstall isAdmin={!access.readOnly} onFinished={() => cli.load(true)} />
 		{:else if signedIn}
 			<RowGroup title="Claude CLI">
 				{#if status.auth_method_label}

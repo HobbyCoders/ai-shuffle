@@ -21,7 +21,7 @@ AI Shuffle runs as one Docker container. The machine that runs it is called a **
 - **Swap matters.** Each agent is its own process with its own memory. Without swap on the host, a burst of agents can run the whole machine out of memory.
 - **Unraid** works with its built-in Docker support; see [Install on Unraid](/docs/getting-started/install-unraid).
 
-The container carries everything else it needs: its own private PostgreSQL database, the built-in browser (Chromium), Node.js and the GitHub CLI. On first start it also installs the Claude Code CLI, used for Claude subscriptions, with Anthropic's own installer, and the CLI keeps itself up to date after that.
+The container carries everything else it needs: its own private PostgreSQL database, the built-in browser (Chromium), Node.js and the GitHub CLI. If you choose Claude, install the Claude Code CLI from setup or **Settings > Providers > Claude**. Anthropic's own installer downloads it. It is reinstalled at worker start only while **Keep Claude Code installed** is on, and the CLI keeps itself up to date.
 
 ## Network access
 

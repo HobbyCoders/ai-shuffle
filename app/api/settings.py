@@ -6,7 +6,7 @@ settings_credentials and settings_updates.
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -468,6 +468,32 @@ async def claude_auth_payload(refresh: bool = False) -> dict:
                 "claude_reason": claude_reason}
 
     return await run_sync(_load)
+
+
+class ClaudeCliUpdate(BaseModel):
+    keep_installed: StrictBool
+
+
+@router.get("/claude-cli")
+async def get_claude_cli(token: str = Depends(require_admin)):
+    from app.core import claude_cli_install
+    return await run_sync(claude_cli_install.payload)
+
+
+@router.put("/claude-cli")
+async def put_claude_cli(request: ClaudeCliUpdate, token: str = Depends(require_admin)):
+    from app.core import claude_cli_install
+    await run_sync(claude_cli_install.set_keep_installed, request.keep_installed)
+    return await run_sync(claude_cli_install.payload)
+
+
+@router.post("/claude-cli/{kind}")
+async def manage_claude_cli(kind: Literal["install", "update", "remove"], token: str = Depends(require_admin)):
+    from app.core import claude_cli_install
+    try:
+        return await run_sync(claude_cli_install.start, kind)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/claude-auth")

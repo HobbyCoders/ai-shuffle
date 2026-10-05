@@ -105,8 +105,9 @@ services:
       # Provider CLI sign-in (the Claude Code CLI, for a Claude subscription),
       # kept when the container is replaced.
       - claude-home:/home/appuser/.claude
-      # Provider CLI programs (the Claude Code CLI, installed on first start;
-      # it updates itself).
+      # Provider CLI programs (Claude Code installed on demand from Settings
+      # or setup with Anthropic's installer; it updates itself). Reinstalled
+      # at start only while Keep Claude Code installed is on.
       - local-home:/home/appuser/.local
       # GitHub CLI sign-in.
       - gh-auth:/home/appuser/.config/gh
@@ -258,7 +259,7 @@ Keep `COOKIE_SECURE=false` for plain `http://` on your LAN. Set it to `true` onl
 docker compose up -d
 ```
 
-The first start downloads the image and sets it up, so it can take a few minutes. Setup includes installing the Claude Code CLI with Anthropic's installer, used if you connect a Claude subscription. `docker compose ps` shows `healthy` when AI Shuffle is ready; `docker compose logs -f` shows progress.
+The first start downloads the image and sets it up, so it can take a few minutes. Claude Code is downloaded with Anthropic's own installer only when you choose Claude and install it from setup or **Settings > Providers > Claude**. It is reinstalled at start only while **Keep Claude Code installed** is on. `docker compose ps` shows `healthy` when AI Shuffle is ready; `docker compose logs -f` shows progress.
 
 ## 6. First launch
 

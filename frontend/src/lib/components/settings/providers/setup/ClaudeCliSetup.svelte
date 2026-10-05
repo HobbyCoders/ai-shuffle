@@ -19,6 +19,7 @@
 	import { ClaudeCliLogin } from '../claude-cli-login.svelte';
 	import { CLAUDE_SUB_ITEM } from '../providers-model';
 	import ClaudeCliTerminal from './ClaudeCliTerminal.svelte';
+	import ClaudeCliInstall from './ClaudeCliInstall.svelte';
 
 	interface Props {
 		/** Claude has no other credential: the subscription becomes the active one. */
@@ -64,6 +65,9 @@
 
 {#if !cli.status}
 	<p class="pv-msg" role="status">{cli.loadError || 'Asking the Claude Code CLI'}</p>
+{:else if !cli.status.installed}
+	<ClaudeCliInstall isAdmin={!access.readOnly} onFinished={() => cli.load(true)} />
+	<div class="pv-acts"><button type="button" class="st-btn ghost" onclick={cancel}>Cancel</button></div>
 {:else if signedIn}
 	<div class="st-card pv-card">
 		<div class="pv-flow">

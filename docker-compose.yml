@@ -65,8 +65,9 @@ services:
       # Never mount an external provider home over /home/appuser/.fluid.
       # Persist GitHub CLI authentication
       - gh-auth:/home/appuser/.config/gh
-      # Persist the Claude Code CLI that entrypoint installs with Anthropic's
-      # installer (~/.local/bin/claude and ~/.local/share/claude), so it keeps
+      # Persist Claude Code, downloaded on demand from Settings or setup with
+      # Anthropic's installer. Startup reinstalls only with Keep Claude Code
+      # installed on. (~/.local/bin/claude and ~/.local/share/claude) keeps
       # its self-updates across container recreation.
       - local-home:/home/appuser/.local
       # Persist the browser-automation Chrome profile (logged-in sessions the

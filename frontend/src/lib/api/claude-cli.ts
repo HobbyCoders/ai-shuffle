@@ -96,6 +96,43 @@ export function dismissClaudeReloginNotice(): Promise<{ success: boolean }> {
 	return api.post('/auth/claude/relogin-notice/dismiss', {});
 }
 
+export interface ClaudeCliJob {
+	kind: 'install' | 'update' | 'remove';
+	state: 'running' | 'succeeded' | 'failed';
+	started_at: string;
+	finished_at: string | null;
+	message: string | null;
+	output_tail: string | null;
+}
+
+export interface ClaudeCliInstallation {
+	installed: boolean;
+	version: string | null;
+	path: string | null;
+	keep_installed: boolean;
+	installed_by_app: boolean;
+	can_install: boolean;
+	can_remove: boolean;
+	platform: 'docker' | 'desktop' | 'local';
+	job: ClaudeCliJob | null;
+}
+
+export function getClaudeCliInstallation(): Promise<ClaudeCliInstallation> {
+	return api.get('/settings/claude-cli', { cache: 'no-store' });
+}
+export function installClaudeCli(): Promise<ClaudeCliInstallation> {
+	return api.post('/settings/claude-cli/install', {});
+}
+export function updateClaudeCli(): Promise<ClaudeCliInstallation> {
+	return api.post('/settings/claude-cli/update', {});
+}
+export function removeClaudeCli(): Promise<ClaudeCliInstallation> {
+	return api.post('/settings/claude-cli/remove', {});
+}
+export function setClaudeCliKeepInstalled(keep_installed: boolean): Promise<ClaudeCliInstallation> {
+	return api.put('/settings/claude-cli', { keep_installed });
+}
+
 /** Human name for the plan code the CLI prints, when it prints one. */
 export function claudePlanLabel(plan: string | null | undefined): string | null {
 	const value = (plan ?? '').trim().toLowerCase();

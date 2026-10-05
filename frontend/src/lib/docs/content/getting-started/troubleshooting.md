@@ -29,7 +29,7 @@ In the commands below, the container is called `ai-shuffle` with Docker Compose 
 
 ## The container does not become healthy
 
-- **First start:** setting up, including installing the Claude Code CLI, takes a few minutes. Wait for the log to settle.
+- **First start:** setting up takes a few minutes. Wait for the log to settle. Claude Code is downloaded only when you choose Claude and install it from setup or **Settings > Providers > Claude**.
 - **Check readiness from inside:** `docker exec ai-shuffle curl -fsS http://localhost:8000/health/ready`. An answer means the app is up and the problem is the address or network (next section).
 - **It restarts in a loop:** look for the first error in the log. `Killed`, `out of memory` or a sudden stop usually means the host ran out of memory; add swap, run fewer agents at once, or give the host more memory.
 - **`Permission denied` on `/workspace` or `/data`:** set `PUID` and `PGID` to the owner of those folders (Unraid: 99 and 100).
@@ -87,7 +87,7 @@ The message in the app says which of these it is.
 - Check whose account it uses: `docker exec -u appuser ai-shuffle claude auth status`.
 - The login is kept in the Claude Code folder (`/home/appuser/.claude`). If that volume or appdata folder was removed or not mapped, the login is lost on every update; check the mapping.
 
-**The Claude Code CLI is missing.** The installer runs on first start and needs `claude.ai` and Anthropic's download servers. Check the host can reach them, then restart the container. The CLI is kept in its own folder (`/home/appuser/.local`); make sure it is mapped.
+**The Claude Code CLI is missing.** Install it in **Settings > Providers > Claude**. Anthropic's installer needs `claude.ai` and Anthropic's download servers. Check the host can reach them, then try Install again. It is reinstalled at worker start only while **Keep Claude Code installed** is on. The CLI is kept in its own folder (`/home/appuser/.local`); make sure it is mapped.
 
 **An automation, wake-up, connector or background agent waits for confirmation** (subscription mode): the loop guard held it because unattended turns reached their hourly budget. Confirm or dismiss it under **Settings → Providers → Claude subscription → Policy**, raise the budget there, or switch to API key mode for unattended work. See [Modes and costs](/docs/getting-started/modes-and-costs).
 

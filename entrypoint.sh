@@ -1,12 +1,25 @@
 #!/bin/bash
 set -e
 
+# PostgreSQL is not up yet. This atomic marker mirrors the worker setting.
+# Until migration writes it, retain only an existing Claude user's install.
+claude_cli_keep_installed() {
+    local marker="${DATA_DIR:-/data}/claude-cli-keep-installed"
+    if [ -f "$marker" ]; then
+        [ "$(cat "$marker")" = "1" ]
+    else
+        command -v claude >/dev/null 2>&1 ||
+            [ -n "$(find "${HOME}/.claude" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ] ||
+            [ -n "$(find "${HOME}/.config/claude" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]
+    fi
+}
+
 # Direct --user launches cannot mutate accounts. The Python runtime validates
 # identity and mount ownership and gives a clear error instead of chowning data.
 if [ "$(id -u)" != "0" ]; then
     case "${1:-run}" in
         dump|restore) ;;
-        *) bash /app/docker/install-claude-cli.sh || true ;;
+        *) if claude_cli_keep_installed; then bash /app/docker/install-claude-cli.sh || true; fi ;;
     esac
     exec python /app/docker/container_runtime.py "$@"
 fi
@@ -59,12 +72,14 @@ chown -R appuser:appuser /home/appuser/.fluid /home/appuser/.config /home/appuse
 # Claude Code CLI
 # =============================================================================
 # The delegated Claude leg runs the stock `claude` from PATH and nothing else.
-# Install it with Anthropic's installer as appuser when it is missing; the CLI
-# then updates itself in ~/.local. Never pinned, patched or wrapped here.
+# Download only while Keep Claude Code installed is on. The CLI then updates
+# itself in ~/.local. Never pinned, patched or wrapped here.
 mkdir -p /home/appuser/.local/bin
 chown appuser:appuser /home/appuser/.local /home/appuser/.local/bin
-setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
-    bash /app/docker/install-claude-cli.sh || true
+if HOME=/home/appuser claude_cli_keep_installed; then
+    setpriv --reuid=appuser --regid=appuser --init-groups env HOME=/home/appuser \
+        bash /app/docker/install-claude-cli.sh || true
+fi
 
 # =============================================================================
 # Provider configuration compatibility

@@ -68,7 +68,7 @@ The template also sets `--shm-size=1g` (the built-in browser needs more shared m
 
 ## 6. Apply and wait for the first start
 
-Choose **Apply**. Unraid downloads the image and starts the container. The first start sets up the container, including installing the Claude Code CLI with Anthropic's installer, and can take a few minutes. Follow it in the log (click the container icon, then **Logs**); the web interface opens once setup is done.
+Choose **Apply**. Unraid downloads the image and starts the container. The first start sets up the container and can take a few minutes. Claude Code is downloaded with Anthropic's own installer only when you choose Claude and install it from setup or **Settings > Providers > Claude**. It is reinstalled at start only while **Keep Claude Code installed** is on. Follow it in the log (click the container icon, then **Logs**); the web interface opens once setup is done.
 
 ## 7. First launch
 

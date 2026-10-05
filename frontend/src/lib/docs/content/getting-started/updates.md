@@ -42,7 +42,7 @@ Updating the image is always safe even when an in-app update would have worked, 
 
 ## The Claude Code CLI updates itself
 
-The Claude Code CLI inside the container is installed with Anthropic's installer on first start and keeps itself up to date, as it does on any computer. It is stored in its own volume or appdata folder, so image updates do not reinstall it, and AI Shuffle never modifies it.
+The Claude Code CLI is downloaded with Anthropic's own installer when you choose Claude and install it from setup or **Settings > Providers > Claude**. It is reinstalled at worker start only while **Keep Claude Code installed** is on. The CLI keeps itself up to date, as it does on any computer. It is stored in its own volume or appdata folder, so image updates do not reinstall it, and AI Shuffle never modifies it.
 
 ## Upgrading from a version that signed in to Claude for you
 

@@ -105,10 +105,12 @@ it('Sign out runs the CLI logout and asks again', async () => {
 
 it('reports a missing CLI and offers the API key', async () => {
 	const onUseApiKey = vi.fn();
-	mocks.get.mockResolvedValue(status({ installed: false, signed_in: null, cli_version: null, binary_path: null, error: 'Claude Code CLI not found.' }));
+	mocks.get.mockImplementation(async (path: string) => path === '/settings/claude-cli'
+		? { installed: false, version: null, path: null, keep_installed: false, installed_by_app: false, can_install: true, can_remove: false, platform: 'docker', job: null }
+		: status({ installed: false, signed_in: null, cli_version: null, binary_path: null, error: 'Claude Code CLI not found.' }));
 	render(ClaudeCliPanel, { isAdmin: true, onUseApiKey });
-	expect((await screen.findByTestId('claude-cli-state')).textContent?.trim()).toBe('CLI not installed');
-	expect(screen.getByText('Claude Code CLI not found.')).toBeTruthy();
+	expect(await screen.findByRole('button', { name: 'Install Claude Code' })).toBeTruthy();
+	expect(screen.getByText(/It is not installed on this worker/)).toBeTruthy();
 	await fireEvent.click(screen.getByRole('button', { name: 'Use an API key' }));
 	expect(onUseApiKey).toHaveBeenCalled();
 });

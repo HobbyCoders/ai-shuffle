@@ -4340,7 +4340,8 @@ def _resolve_claude_cmd(*, windows: Optional[bool] = None) -> list:
                         found,
                     )
                 return [found]
-    raise ClaudeCliMissingError()
+    from app.core.credential_gate import NO_CLI_MESSAGE
+    raise ClaudeCliMissingError(NO_CLI_MESSAGE)
 
 
 def _workflow_prompt_blocks(

@@ -95,7 +95,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 - The Docker image is now private. You download it from `registry.hobbycoders.com` with the pull token from your license email; the token is part of the image name, so there is no `docker login` and pulls keep working after a reboot.
 - New buyer compose file with a pinned version, the right shared-memory size for the built-in browser, a 90-second clean shutdown, and a volume for the built-in browser's profile. It listens on this computer only until you choose an address.
 - New Unraid template (v2): pinned version, everything under `appdata/ai-shuffle`, the web interface bound to one address, a browser-profile path, and the shared-memory and shutdown settings the image needs.
-- The Claude Code CLI is now installed on first start with Anthropic's own installer and kept in its own volume, so it updates itself and survives image updates. AI Shuffle runs only that standard CLI and no longer carries a copy of its own.
+- The Claude Code CLI is installed on demand from setup or Settings > Providers > Claude with Anthropic's own installer and kept in its own volume, so it updates itself and survives image updates. It is reinstalled at start only while Keep Claude Code installed is on. AI Shuffle runs only that standard CLI and no longer carries a copy of its own.
 - The app shows its real version everywhere, taken from the release.
 - Third-party license notices now ship with the app.
 - A new setup wizard: welcome, owner password, license, Claude Code mode, sign-in or API key, workspace and a first agent run. See [First run](/docs/getting-started/first-run).

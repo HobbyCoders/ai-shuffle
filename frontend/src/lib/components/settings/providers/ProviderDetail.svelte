@@ -20,6 +20,8 @@
 	import LinkValue from '../rows/LinkValue.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ProviderTile from './ProviderTile.svelte';
+	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
+	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import {
 		addableKinds,
 		claudeGateNotice,
@@ -36,6 +38,7 @@
 	}
 
 	let { provider }: Props = $props();
+	const access = getSettingsAccess();
 
 	const claude = $derived(providers.current.claude);
 	const mode = $derived<ClaudeAuthMode>(claude?.mode ?? 'subscription');
@@ -143,6 +146,7 @@
 				/>
 			</SettingRow>
 		</RowGroup>
+		<ClaudeCliInstall manage isAdmin={!access.readOnly} />
 	{/if}
 
 	<RowGroup title="Credentials" count={credsCount} id="providers-credentials">

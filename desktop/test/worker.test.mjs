@@ -11,7 +11,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
-const { resolveRuntime, buildWorkerEnv, isPortFree, fetchHealth, HEALTH_TOTAL_TIMEOUT_MS, attachTokenHash, readWorkerProcessRecord, requestBrowserHandoff, WorkerSupervisor, ATTACH_ANY_ENV, DEFAULT_PORT, PROTECTED_PORT } = require('../dist/main/worker.js');
+const { resolveRuntime, buildWorkerEnv, claudeCliSetupMessage, isPortFree, fetchHealth, HEALTH_TOTAL_TIMEOUT_MS, attachTokenHash, readWorkerProcessRecord, requestBrowserHandoff, WorkerSupervisor, ATTACH_ANY_ENV, DEFAULT_PORT, PROTECTED_PORT } = require('../dist/main/worker.js');
 const { writePrivateFile } = require('../dist/main/private-file.js');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -26,6 +26,16 @@ async function fakeBundle(root, platform) {
 	await writeFile(path.join(root, 'manifest.json'), JSON.stringify({ stub: false, python: { version: '3.12.14' } }));
 	return python;
 }
+
+test('missing Claude message points to the worker action and keeps official manual fallbacks', () => {
+	for (const platform of ['win32', 'linux', 'darwin']) {
+		const message = claudeCliSetupMessage(platform);
+		assert.match(message, /Claude cannot run on this worker/);
+		assert.match(message, /Install it in Settings > Providers > Claude/);
+		assert.match(message, /Manual fallback:/);
+		assert.ok(message.includes(platform === 'win32' ? 'irm https://claude.ai/install.ps1 | iex' : 'curl -fsSL https://claude.ai/install.sh | bash'));
+	}
+});
 
 test('resolveRuntime finds a bundled runtime under resources/worker', async () => {
 	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-worker-'));

@@ -370,14 +370,15 @@ def check_claude_cli():
     """Check that the stock Claude Code CLI is on PATH.
 
     Claude sessions run the ``claude`` binary installed by Anthropic's own
-    installer. The app never installs, bundles or falls back to another copy.
+    installer. The worker installs on request from Settings; it never bundles
+    or falls back to another copy.
     """
     found = shutil.which("claude")
     if found:
         print_status(f"Claude Code CLI found: {found}", "success")
         return True
-    print_status("Claude Code CLI not found", "warning")
-    print_status("  Install it with Anthropic's installer, then run `claude auth login`:", "info")
+    print_status("Claude cannot run on this worker: the Claude Code CLI is not installed.", "warning")
+    print_status("  Install it in Settings > Providers > Claude. Manual fallback:", "info")
     if sys.platform == "win32":
         print_status("    irm https://claude.ai/install.ps1 | iex   (PowerShell)", "info")
     else:
