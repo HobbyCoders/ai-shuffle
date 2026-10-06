@@ -2133,7 +2133,6 @@ def create_builtin_tools_server(
     async def monitor(args: dict) -> dict:
         from types import SimpleNamespace
         from app.core.monitor_spawn import make_fluid_monitor_spawner
-        from fluid.tools.hardening import fence_shell_output
         from fluid.tools.registry import current_tool_use_id
 
         # The CLI's id for this call (forwarded by the bundled bridge) keys
@@ -2147,10 +2146,10 @@ def create_builtin_tools_server(
             if outcome.is_error:
                 return _err(outcome.text)
             payload = dict(outcome.ui or {})
-            if "output" in payload:
-                payload["output"] = fence_shell_output(
-                    payload["output"], "Monitor", exit_code=payload.get("exit_code"),
-                )
+            # An inline-settled command's receipt (``outcome.text``) already
+            # carries its output inside the untrusted-result fence. Sending
+            # the ui copy as well handed the model the same output twice.
+            payload.pop("output", None)
             return _ok({**payload, "message": outcome.text})
         except Exception as e:
             logger.exception("Monitor spawn failed")

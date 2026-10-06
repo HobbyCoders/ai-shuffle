@@ -240,6 +240,39 @@ async def test_bridged_monitor_registers_its_shell_with_the_tool_use_id(mock_db,
     assert spawned == ["toolu_M", None]
 
 
+async def test_bridged_monitor_inline_result_carries_its_output_once(mock_db, monkeypatch):
+    """A command that settles inside its wait hands the model ONE fenced copy."""
+    import json
+
+    from app.core import monitor_spawn
+    from fluid.tools.registry import ToolOutcome
+
+    output = "collected 3 items\nPASSED-MARKER-42"
+    text = monitor_spawn.monitor_inline_receipt_text("t-inline", 0, output)
+
+    def fake_spawner(_session_id):
+        async def spawn(_args, _ctx):
+            return ToolOutcome(text=text, ui={
+                "task_id": "t-inline", "exit_code": 0, "status": "completed",
+                "failed": False, "output": output,
+            })
+        return spawn
+
+    monkeypatch.setattr(monitor_spawn, "make_fluid_monitor_spawner", fake_spawner)
+    reg = _registry(_builtins_server())
+
+    result = await reg.dispatch(
+        "mcp__builtins__Monitor", {"command": "pytest", "wait_seconds": 30}, ToolCtx(),
+    )
+
+    body = result.text if hasattr(result, "text") else str(result)
+    assert body.count("PASSED-MARKER-42") == 1
+    payload = json.loads(body)
+    assert payload["task_id"] == "t-inline" and payload["exit_code"] == 0
+    assert '<untrusted-tool-result source="Monitor"' in payload["message"]
+    assert "PASSED-MARKER-42" in payload["message"]
+
+
 # ─── agent messaging ─────────────────────────────────────────────────────────
 
 

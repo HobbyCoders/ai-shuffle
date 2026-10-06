@@ -639,6 +639,12 @@ def start_background_tasks() -> List[asyncio.Task]:
     tasks.append(asyncio.create_task(wakeup_service.rehydrate_pending()))
     logger.info("Durable-wakeup rehydrate scheduled")
 
+    # Queued hand-offs to another worker live in memory, so the restart
+    # dropped them: say so in each chat instead of leaving it showing a queued
+    # move nothing will run.
+    from app.core import session_handoff
+    tasks.append(asyncio.create_task(session_handoff.announce_dropped()))
+
     # Idle-at-edge watchdog: periodic sweep that nudges sessions sitting
     # idle above the context-window edge so the CLI runs its deferred compaction
     # instead of parking forever. Flag-gated (IDLE_WATCHDOG_ENABLED).

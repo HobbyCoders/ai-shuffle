@@ -14,11 +14,13 @@ DIRECTORY = {"runners": [
 
 
 @pytest.fixture(autouse=True)
-def _clean():
+def _clean(tmp_path):
     sh._pending.clear()
     sh._running.clear()
     sh._waiting.clear()
-    with patch.object(sh, "_workers", return_value=DIRECTORY):
+    store = tmp_path / "pending-handoffs.json"
+    with patch.object(sh, "_workers", return_value=DIRECTORY), \
+            patch.object(sh, "_store_path", lambda: store, create=True):
         yield
     sh._pending.clear()
     sh._waiting.clear()
@@ -191,8 +193,33 @@ async def test_route_asks_the_owning_worker():
 def test_busy_state_names_running_tasks():
     from app.core.task_registry import task_registry
     with patch("app.core.streaming_status.has_active_run", return_value=False), \
+            patch("app.db.turns.session_has_unsettled_turns", return_value=False), \
             patch.object(task_registry, "get_active", return_value=[{"subject": "Run tests"}, {"agent": "explore"}]):
         assert sh.busy_state("s1") == {"running": False, "tasks": ["Run tests", "explore"]}
+
+
+def test_a_queued_turn_keeps_the_session_busy():
+    """A message waiting in the turn queue holds the hand-off like a live turn.
+
+    The move itself refuses while a turn is queued (network/handoff._idle), so
+    treating the session as idle made a queued hand-off fail instead of wait.
+    """
+    from app.core.task_registry import task_registry
+    with patch("app.core.streaming_status.has_active_run", return_value=False), \
+            patch("app.db.turns.get_live_turn", return_value=None), \
+            patch("app.db.turns.get_queued_turns", return_value=[{"id": "t1", "state": "queued"}]), \
+            patch("app.db.turns.session_has_unsettled_turns", return_value=True), \
+            patch.object(task_registry, "get_active", return_value=[]):
+        assert sh.busy_state("s1") == {"running": True, "tasks": []}
+        assert sh._busy("s1") is True
+
+
+def test_an_unreadable_turn_queue_does_not_hold_the_hand_off_forever():
+    from app.core.task_registry import task_registry
+    with patch("app.core.streaming_status.has_active_run", return_value=False), \
+            patch("app.db.turns.session_has_unsettled_turns", side_effect=RuntimeError("db down")), \
+            patch.object(task_registry, "get_active", return_value=[]):
+        assert sh.busy_state("s1") == {"running": False, "tasks": []}
 
 @pytest.mark.parametrize("stop", [False, True])
 async def test_peer_owner_move_refuses_subagent_on_owning_worker(stop):
@@ -250,3 +277,65 @@ async def test_agent_subagent_handoff_still_runs():
             patch("app.db.database.get_session", return_value=row):
         assert (await sh.run_pending("child")).startswith("Handed off to DesktopWorker")
     move.assert_awaited_once_with("child", row, "dev-gaming")
+
+
+# A restart drops the in-memory request; the chat must not keep showing it.
+
+def _stored():
+    return sh._load_store()
+
+
+def _restart():
+    sh._pending.clear()
+    sh._waiting.clear()
+    sh._running.clear()
+
+
+async def test_a_queued_hand_off_is_kept_on_disk_until_it_settles():
+    sh.request("s1", "DesktopWorker", "halfway")
+    assert _stored() == {"s1": {"worker": "DesktopWorker", "by": "agent"}}
+    with patch.object(sh, "_busy", return_value=False), \
+            patch.object(sh, "_record", AsyncMock()), \
+            patch("app.api.sessions.move_session_to", AsyncMock()), \
+            patch("app.db.database.get_session", return_value={"id": "s1"}):
+        await sh.run_pending("s1")
+    assert _stored() == {}
+
+
+def test_cancelling_forgets_the_stored_request():
+    sh.request("s1", "DesktopWorker")
+    assert sh.cancel("s1")
+    assert _stored() == {}
+
+
+async def test_a_restart_marks_the_dropped_hand_off_cancelled_in_the_chat():
+    sh.request("s1", "DesktopWorker", "halfway")
+    # Not started here: the restart below lands before the session goes idle.
+    with patch.object(sh, "schedule"), patch.object(sh, "_record", AsyncMock()):
+        await sh.queue_move("s2", "DesktopWorker")
+    _restart()
+    rows = {"s1": {"id": "s1"}, "s2": {"id": "s2"}}
+    with patch.object(sh, "_record", AsyncMock()) as record, \
+            patch("app.db.database.get_session", side_effect=rows.get), \
+            patch("app.network.control.owner_of", return_value=None):
+        assert await sh.announce_dropped() == 2
+    recorded = {call.args[0]: call.args[2] for call in record.await_args_list}
+    assert recorded == {
+        "s1": {"status": "cancelled", "worker": "DesktopWorker", "by": "agent", "reason": "restart"},
+        "s2": {"status": "cancelled", "worker": "DesktopWorker", "by": "owner", "reason": "restart"},
+    }
+    assert "restarted" in record.await_args_list[0].args[1]
+    assert _stored() == {}
+
+
+async def test_a_session_now_run_elsewhere_or_deleted_gets_no_row():
+    sh.request("gone", "DesktopWorker")
+    sh.request("moved", "DesktopWorker")
+    _restart()
+    rows = {"moved": {"id": "moved", "owner_device_id": "dev-gaming"}}
+    with patch.object(sh, "_record", AsyncMock()) as record, \
+            patch("app.db.database.get_session", side_effect=rows.get), \
+            patch("app.network.control.owner_of", return_value="dev-gaming"):
+        assert await sh.announce_dropped() == 0
+    record.assert_not_awaited()
+    assert _stored() == {}

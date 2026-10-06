@@ -10,8 +10,9 @@ restart. ``settle_stale_background_task_rows`` runs from
 rows older than the grace window whose task the in-memory registry no longer
 knows: flip to killed + emit the terminal ``task.updated`` frame.
 
-Rows the registry still tracks — any status — are skipped: a running record is
-genuinely live work (e.g. a Monitor surviving an eviction deferral).
+Rows whose task the registry still RUNS are skipped: that is genuinely live
+work (e.g. a Monitor surviving an eviction deferral). Rows whose task the
+registry already finished take the registry's terminal status.
 """
 
 from unittest.mock import AsyncMock, patch
@@ -149,3 +150,44 @@ async def test_sweep_settles_at_most_once(mock_db):
 
     assert (first, second) == (1, 0)
     assert frame.await_count == 1
+
+
+async def test_sweep_settles_a_row_whose_finished_task_never_reached_the_db(mock_db):
+    """The registry holds the task as FINISHED but the row still says running.
+
+    The terminal snapshot is fire-and-forget and a failed write is dropped
+    (task_persistence: "the next transition re-mirrors" — a terminal task has
+    none). The live record stays in the registry until the session is removed,
+    so skipping every registry-known task left the row, task lists and the
+    active-work check showing it as running indefinitely.
+    """
+    sid = "sw-lost-terminal"
+    _seed(sid, "t-done", "running", tool_use_id="toolu_d")
+    task_registry.start_task(sid, "t-done", "shell", "loop")
+    with patch("app.core.task_persistence.enqueue_task_snapshot"):  # the write is lost
+        task_registry.complete_task(sid, "t-done", "error", summary="exit code 2")
+
+    with _patch_frame() as frame:
+        settled = await settle_stale_background_task_rows()
+
+    assert settled == 1
+    assert get_background_task("t-done", sid)["status"] == "error"
+    frame.assert_awaited_once()
+    assert frame.await_args.args[:3] == (sid, "t-done", "error")
+    assert frame.await_args.kwargs.get("tool_use_id") == "toolu_d"
+    # The registry record is unchanged: it was already the truth.
+    assert task_registry.get_task(sid, "t-done")["status"] == "error"
+
+
+async def test_sweep_never_settles_a_task_the_registry_still_runs(mock_db):
+    sid = "sw-still-live"
+    _seed(sid, "t-run", "running")
+    task_registry.start_task(sid, "t-run", "shell", "loop")
+
+    with _patch_frame() as frame:
+        assert await settle_stale_background_task_rows() == 0
+
+    assert get_background_task("t-run", sid)["status"] == "running"
+    assert task_registry.get_task(sid, "t-run")["status"] == "running"
+    assert sid in task_registry.active_session_ids()
+    frame.assert_not_awaited()

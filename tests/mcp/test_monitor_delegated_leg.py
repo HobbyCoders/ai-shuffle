@@ -139,7 +139,10 @@ def test_a_command_that_finishes_in_the_wait_settles_inline(mock_db, fake_shell)
     assert body["success"] is True
     assert body["exit_code"] == 0
     assert body["status"] == "completed"
-    assert "4 passed in 5.91s" in body["output"]
+    # The output arrives once, fenced, inside the receipt text.
+    assert "output" not in body
+    assert '<untrusted-tool-result source="Monitor"' in body["message"]
+    assert body["message"].count("4 passed in 5.91s") == 1
     # No park instruction: there is nothing left to be woken for.
     assert "End the turn now" not in body["message"]
 
@@ -161,7 +164,8 @@ def test_an_inline_failure_is_reported_as_one(mock_db, fake_shell):
     assert body["failed"] is True
     assert body["exit_code"] == 1
     assert body["status"] == "error"
-    assert "FAILED tests/test_a.py::test_b" in body["output"]
+    assert "output" not in body
+    assert body["message"].count("FAILED tests/test_a.py::test_b") == 1
 
 
 def test_a_command_still_running_after_the_wait_parks_as_before(

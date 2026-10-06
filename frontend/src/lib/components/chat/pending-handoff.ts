@@ -9,8 +9,9 @@
  * `moved`, `failed` or `timeout`. A later call with `cancel` drops the request.
  *
  * Only the newest of those decides, so this walks back from the end and stops
- * at the first one. A worker restart drops a queued request without a row
- * (the backend keeps it in memory); that case is not visible here.
+ * at the first one. A worker restart drops a queued request (the backend
+ * keeps it in memory); the next boot records a `cancelled` row for it, so the
+ * chat stops showing it as queued.
  *
  * The owner's "Move when this turn ends" (#1819) queues the same hand-off on
  * the owning worker, which records a `queued` row; cancelling it records

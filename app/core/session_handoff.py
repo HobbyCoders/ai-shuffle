@@ -16,12 +16,17 @@ the work runs, until it moves or is cancelled; the agent's waits IDLE_TIMEOUT_S.
 "Stop and move now" stops the work as the Stop button does, then moves.
 
 Pending requests live in memory on the owning worker: a restart drops them and
-the session simply stays where it is.
+the session simply stays where it is. Each one is also noted in a small file in
+the data dir, so the next boot records a "cancelled" row in every chat whose
+queued move the restart dropped (``announce_dropped``); otherwise the chat kept
+showing a queued move that nothing would ever run.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -49,6 +54,46 @@ _pending: Dict[str, PendingHandoff] = {}
 _running: set[str] = set()
 # Hand-offs taken from _pending that are waiting for the session to go idle.
 _waiting: Dict[str, PendingHandoff] = {}
+_store_lock = threading.Lock()
+
+
+def _store_path():
+    from app.core.config import settings
+
+    return settings.data_dir / "pending-handoffs.json"
+
+
+def _load_store() -> Dict[str, Dict[str, str]]:
+    """``{session_id: {"worker", "by"}}`` for the queued hand-offs on disk."""
+    try:
+        value = json.loads(_store_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {str(sid): {"worker": str(entry.get("worker") or ""), "by": str(entry.get("by") or "agent")}
+            for sid, entry in value.items() if isinstance(entry, dict)}
+
+
+def _update_store(session_id: str, pending: Optional[PendingHandoff]) -> None:
+    """Note (or forget, when ``pending`` is None) a queued hand-off on disk."""
+    try:
+        from app.core.application_updates import atomic_json
+
+        with _store_lock:
+            stored = _load_store()
+            if pending is None:
+                if stored.pop(session_id, None) is None:
+                    return
+            else:
+                stored[session_id] = {"worker": pending.label, "by": pending.by}
+            path = _store_path()
+            if stored:
+                atomic_json(path, stored)
+            else:
+                path.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 — the note only improves the post-restart chat
+        logger.warning("Could not note the queued hand-off for %s", session_id, exc_info=True)
 
 
 def _workers() -> Dict[str, Any]:
@@ -81,6 +126,7 @@ def request(session_id: str, worker: str, note: str = "") -> Dict[str, Any]:
     pending = PendingHandoff(row["device_id"], str(row.get("device_name") or row["device_id"]),
                              " ".join((note or "").split())[:2000], time.time())
     _pending[session_id] = pending
+    _update_store(session_id, pending)
     return {"queued": True, "worker": pending.label,
             "message": (f"Hand-off to {pending.label} is queued. Finish this turn now with a short "
                         "summary of where the work stands; once the turn and any background work end, "
@@ -93,11 +139,13 @@ def pending_for(session_id: str) -> Optional[PendingHandoff]:
 
 def cancel(session_id: str) -> bool:
     if _pending.pop(session_id, None) is not None:
+        _update_store(session_id, None)
         return True
     waiting = _waiting.get(session_id)
     if waiting is None or waiting.cancelled:
         return False
     waiting.cancelled = True
+    _update_store(session_id, None)
     return True
 
 
@@ -114,16 +162,27 @@ async def _record(session_id: str, content: str, data: Dict[str, Any]) -> None:
 def busy_state(session_id: str) -> Dict[str, Any]:
     """What keeps ``session_id`` from moving now: ``{"running", "tasks"}``.
 
-    ``running`` is a live turn; ``tasks`` names its running background tasks
-    (subagents, Monitors, background shells). The handoff's own idle gate
-    refuses a move while any of them runs.
+    ``running`` is a live turn or one waiting in the turn queue; ``tasks``
+    names its running background tasks (subagents, Monitors, background
+    shells). The handoff's own idle gate refuses a move while any of them runs
+    or a turn is queued, so a queued turn must hold the hand-off too: treated
+    as idle, the move started and was refused instead of waiting.
     """
     from app.core import streaming_status
     from app.core.task_registry import task_registry
+    from app.db import turns as turns_db
 
     tasks = [str(task.get("subject") or task.get("agent") or "Background task")
              for task in task_registry.get_active(session_id)]
-    return {"running": bool(streaming_status.has_active_run(session_id)), "tasks": tasks}
+    try:
+        # One SELECT over queued/running/interrupting/draining, so a turn
+        # flipping from queued to running is never missed between two reads.
+        unsettled = bool(turns_db.session_has_unsettled_turns(session_id))
+    except Exception:
+        logger.warning("Could not read the turn queue for %s", session_id, exc_info=True)
+        unsettled = False
+    running = unsettled or bool(streaming_status.has_active_run(session_id))
+    return {"running": running, "tasks": tasks}
 
 
 def _busy(session_id: str) -> bool:
@@ -185,6 +244,8 @@ async def run_pending(session_id: str) -> Optional[str]:
     finally:
         _waiting.pop(session_id, None)
         _running.discard(session_id)
+        if session_id not in _pending:
+            _update_store(session_id, None)
         # A move queued while a cancelled one was still winding down.
         schedule(session_id)
 
@@ -210,7 +271,9 @@ async def queue_move(session_id: str, target: str, *, stop: bool = False) -> Dic
         raise ValueError(f"A move to {current.label} is already queued. Cancel it first.")
     row = await asyncio.to_thread(resolve_worker, runners.resolve_runner_id(target) or target)
     label = str(row.get("device_name") or row["device_id"])
-    _pending[session_id] = PendingHandoff(row["device_id"], label, "", time.time(), by="owner")
+    pending = PendingHandoff(row["device_id"], label, "", time.time(), by="owner")
+    _pending[session_id] = pending
+    await asyncio.to_thread(_update_store, session_id, pending)
     await _record(session_id, f"Move to {label} queued for when this turn ends.",
                   {"status": "queued", "worker": label, "by": "owner"})
     if stop:
@@ -282,6 +345,47 @@ async def route(session: Dict[str, Any], op: str, target: Optional[str] = None, 
     if stop:
         body["stop"] = True
     return await control.call(owner, "session-move", body)
+
+
+async def announce_dropped() -> int:
+    """Boot: say in each chat that the restart dropped its queued hand-off.
+
+    The request lived only in this worker's memory, so nothing will run it; a
+    ``cancelled`` row ends the chat's queued state the same way the owner's
+    Cancel does. A session that now runs on another worker, or no longer
+    exists, gets no row. Returns how many chats were told.
+    """
+    from app.db import database
+    from app.network import control
+
+    def _take() -> Dict[str, Dict[str, str]]:
+        with _store_lock:
+            stored = _load_store()
+            try:
+                _store_path().unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Could not clear the queued hand-off notes", exc_info=True)
+            return stored
+
+    told = 0
+    for session_id, entry in (await asyncio.to_thread(_take)).items():
+        if pending_for(session_id) is not None:
+            continue  # queued again since boot: still live
+        try:
+            session = await asyncio.to_thread(database.get_session, session_id)
+            if not session or control.owner_of(session) is not None:
+                continue
+        except Exception:  # noqa: BLE001 — one unreadable row must not stop the rest
+            logger.warning("Could not check dropped hand-off for %s", session_id, exc_info=True)
+            continue
+        label = entry["worker"]
+        target = f" to {label}" if label else ""
+        await _record(session_id,
+                      f"Queued move{target} cancelled: the app restarted before the move ran. "
+                      "Queue it again if you still want to move this chat.",
+                      {"status": "cancelled", "worker": label, "by": entry["by"], "reason": "restart"})
+        told += 1
+    return told
 
 
 def schedule(session_id: str) -> None:

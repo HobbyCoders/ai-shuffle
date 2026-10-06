@@ -314,6 +314,29 @@ def get_background_task(task_id: str, session_id: str) -> Optional[Dict[str, Any
     return dict(row) if row is not None else None
 
 
+def settle_background_task_row(task_id: str, session_id: str, status: str) -> bool:
+    """Write a terminal ``status`` to ONE row that is still non-terminal.
+
+    For a task the in-memory registry already finished whose terminal snapshot
+    never landed (the persistence queue drops a failed write). A row that is
+    already terminal is left alone. Returns True when a row changed.
+    """
+    if status not in TERMINAL_STATUSES:
+        raise ValueError(f"not a terminal status: {status!r}")
+    _ph = ph()
+    terminal_list = ", ".join(f"'{s}'" for s in TERMINAL_STATUSES)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""UPDATE background_tasks
+                   SET status = {_ph}, updated_at = CURRENT_TIMESTAMP
+                 WHERE task_id = {_ph} AND session_id = {_ph}
+                   AND status NOT IN ({terminal_list})""",
+            (status, task_id, session_id),
+        )
+        return (cursor.rowcount or 0) > 0
+
+
 def mark_background_task_killed(task_id: str, session_id: str) -> None:
     """Flip ONE durable task row to ``killed`` by its (task_id, session_id) key.
 

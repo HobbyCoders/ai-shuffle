@@ -340,16 +340,22 @@ async def settle_stale_background_task_rows(
     registry no longer knows: flip the row to killed and emit the terminal
     ``task.updated`` frame the frontend needs to settle the chip.
 
-    A row whose task the registry still tracks — ANY status — is skipped: a
-    running record is genuinely live work (e.g. a long Monitor surviving an
-    eviction deferral), and a terminal record persists its own truth. Returns
-    the number of rows settled; never raises.
+    A row whose task the registry still RUNS is skipped: that is genuinely
+    live work (e.g. a long Monitor surviving an eviction deferral), and the
+    self-update active-work check reads the same registry. A row whose task the
+    registry already FINISHED gets the registry's terminal status: its terminal
+    snapshot is fire-and-forget and a failed write is dropped, and the live
+    record stays in the registry until the session is removed, so skipping it
+    left the row "running" indefinitely. Returns the number of rows settled;
+    never raises.
     """
     from app.core.task_registry import task_registry
     from app.core.turn_recorder import record_task_settle_frame
     from app.db.background_tasks import (
+        TERMINAL_STATUSES,
         list_stale_nonterminal_background_tasks,
         mark_background_task_killed,
+        settle_background_task_row,
     )
 
     try:
@@ -366,18 +372,29 @@ async def settle_stale_background_task_rows(
         task_id = _row_value(row, "task_id", 0)
         tool_use_id = _row_value(row, "tool_use_id", 2)
         try:
-            if task_registry.get_task(session_id, task_id) is not None:
+            known = task_registry.get_task(session_id, task_id)
+            if known is None:
+                status, summary = "killed", "Background task stopped (stale)"
+                await asyncio.to_thread(
+                    mark_background_task_killed, task_id, session_id
+                )
+            elif known.get("status") in TERMINAL_STATUSES:
+                # Finished in memory; only its terminal write was lost.
+                status = known["status"]
+                summary = known.get("summary") or "Background task finished"
+                if not await asyncio.to_thread(
+                    settle_background_task_row, task_id, session_id, status
+                ):
+                    continue
+            else:
                 continue
-            await asyncio.to_thread(
-                mark_background_task_killed, task_id, session_id
-            )
             from app.core.task_persistence import broadcast_running_task_presence
             await broadcast_running_task_presence([session_id])
             if task_registry.mark_chipped(session_id, task_id, "terminal"):
                 await record_task_settle_frame(
-                    session_id, task_id, "killed",
-                    "Background task stopped (stale)",
-                    reason="stale_reap", tool_use_id=tool_use_id,
+                    session_id, task_id, status, summary,
+                    reason="stale_reap" if known is None else known.get("reason"),
+                    tool_use_id=tool_use_id,
                 )
             settled += 1
             # The session may have been parked on exactly this row. Nothing
@@ -386,9 +403,10 @@ async def settle_stale_background_task_rows(
             from app.core.turn_finalize import clear_parked_marker_if_idle
             await clear_parked_marker_if_idle(session_id)
             logger.warning(
-                "Stale-task sweep: settled orphaned background task %s "
-                "(session %s) — row was non-terminal with no registry record",
-                task_id, session_id,
+                "Stale-task sweep: settled background task %s (session %s) as "
+                "%s — row was non-terminal with %s",
+                task_id, session_id, status,
+                "no registry record" if known is None else "a finished registry record",
             )
         except Exception:  # noqa: BLE001 — one bad row must not block the rest
             logger.warning(
