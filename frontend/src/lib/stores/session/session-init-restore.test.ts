@@ -118,6 +118,27 @@ describe('session-init · deep link replaces the restored chat (#1923 follow-up)
 		expect(getState().project).toBe('');
 	});
 
+	it('opens the linked chat on its own binding, not the tab\'s last-used picks', async () => {
+		// A fresh tab is seeded with the last compose picks (aihub_lastModel …).
+		const { init, getState, deps } = makeInit(null);
+		deps.setState(baseState({
+			modelOverride: 'fable', effortLevelOverride: 'high', permissionModeOverride: 'acceptEdits',
+			contextWindowChoice: 'standard', contextWindowPin: 200_000,
+		} as Partial<ActiveSessionState>));
+		let atRefresh: Partial<ActiveSessionState> | null = null;
+		vi.mocked(deps.switcher.refreshSessionMetadata).mockImplementation(async () => {
+			const { modelOverride, effortLevelOverride, permissionModeOverride, contextWindowChoice, contextWindowPin } = getState();
+			atRefresh = { modelOverride, effortLevelOverride, permissionModeOverride, contextWindowChoice, contextWindowPin };
+		});
+		await init({ deepLinkSessionId: 'chat-b' });
+		// Cleared before /live snapshots them, so the row fills every one.
+		expect(atRefresh).toEqual({
+			modelOverride: null, effortLevelOverride: null, permissionModeOverride: null,
+			contextWindowChoice: '1m', contextWindowPin: undefined,
+		});
+		expect(getState()).toMatchObject({ sessionId: 'chat-b', modelOverride: null, effortLevelOverride: null });
+	});
+
 	it('wins over a pending skip-restore from an earlier New Chat', async () => {
 		sessionStorage.setItem('__aihub_skipSessionRestore', '1');
 		const { init, getState } = makeInit(null);
@@ -135,6 +156,15 @@ describe('session-init · isRestoringSession on persisted restore', () => {
 		const { init, deps } = makeInit({ sessionId: 'restored-parent', modelOverride: null, effortLevelOverride: null } as PersistedSession);
 		await init();
 		expect(deps.switcher.refreshSessionMetadata).toHaveBeenCalledWith('restored-parent');
+	});
+
+	it('a reloaded chat with no saved binding never takes the tab\'s last-used picks', async () => {
+		const { init, getState, deps } = makeInit({ sessionId: 'restored-parent', title: 'Chat' } as PersistedSession);
+		deps.setState(baseState({ modelOverride: 'fable', effortLevelOverride: 'high', contextWindowChoice: 'standard' } as Partial<ActiveSessionState>));
+		await init();
+		expect(getState()).toMatchObject({
+			sessionId: 'restored-parent', modelOverride: null, effortLevelOverride: null, contextWindowChoice: '1m',
+		});
 	});
 
 	it('explicitly reactivates transport after each owner remount', async () => {

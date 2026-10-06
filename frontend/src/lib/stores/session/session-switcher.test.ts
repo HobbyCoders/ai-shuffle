@@ -546,6 +546,60 @@ describe('session-switcher · authoritative binding hydration', () => {
 		expect(getState()).toMatchObject({ modelOverride: null, effortLevelOverride: null });
 	});
 
+	// A deep-linked chat opens with its binding cleared (session-init), so /live
+	// is the whole truth: model, provider, window choice and pin all come from it.
+	it('fills a deep-linked chat\'s model and window from its own row', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: {
+			model: 'gpt-6.1-sol', provider_id: 'prov-gpt', effort: null, context_window: 272_000,
+		} });
+		const { switcher, getState } = makeSwitcher(fullState({
+			sessionId: 'chat-b', modelOverride: null, effortLevelOverride: null,
+			contextWindowChoice: '1m', contextWindowPin: undefined,
+		}));
+		await switcher.refreshSessionMetadata('chat-b');
+		expect(getState()).toMatchObject({
+			modelOverride: 'prov:prov-gpt:gpt-6.1-sol', contextWindowChoice: 'standard', contextWindowPin: 272_000,
+		});
+		switcher.destroy();
+	});
+
+	it('switching away from a deep-linked chat and back keeps that chat\'s model', async () => {
+		_mockSessions.current = [
+			{ id: 'chat-c', model: 'sonnet', context_window: null },
+			{ id: 'chat-a', model: 'gpt-6.1-sol', provider_id: 'prov-gpt', context_window: 272_000 },
+		];
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { model: 'sonnet', provider_id: null, context_window: null } });
+		const { switcher, getState } = makeSwitcher(fullState({
+			sessionId: 'chat-c', modelOverride: null, effortLevelOverride: null, contextWindowPin: undefined,
+		}));
+		await switcher.refreshSessionMetadata('chat-c');
+		expect(getState().modelOverride).toBe('sonnet');
+		await switcher.switchSession('chat-a');
+		expect(getState()).toMatchObject({ modelOverride: 'prov:prov-gpt:gpt-6.1-sol', contextWindowChoice: 'standard' });
+		await switcher.switchSession('chat-c');
+		// The switch-back cache holds the row's model, never a tab default.
+		expect(getState().modelOverride).toBe('sonnet');
+		switcher.destroy();
+		_mockSessions.current = [];
+	});
+
+	it('keeps a window pushed while a deep link\'s metadata was in flight', async () => {
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState, deps } = makeSwitcher(fullState({
+			sessionId: 'chat-b', modelOverride: null, contextWindowChoice: '1m', contextWindowPin: undefined,
+		}));
+		const pending = switcher.refreshSessionMetadata('chat-b');
+		// session_updated from another client (ws-message-handlers adopts it so).
+		deps.update(s => ({ ...s, contextWindowChoice: 'standard', contextWindowPin: 272_000 }));
+		resolve({ session_meta: { model: 'gpt-6.1-sol', provider_id: 'prov-gpt', context_window: null } });
+		await pending;
+		expect(getState()).toMatchObject({
+			modelOverride: 'prov:prov-gpt:gpt-6.1-sol', contextWindowChoice: 'standard', contextWindowPin: 272_000,
+		});
+		switcher.destroy();
+	});
+
 	it('retains unsent picks while restoring metadata and canonicalizes sidebar models', async () => {
 		_mockSessions.current = [{ id: 'child', model: 'gpt-5.6-terra', provider_id: 'openai', effort: 'high' }];
 		const { switcher, getState, deps } = makeSwitcher(fullState());

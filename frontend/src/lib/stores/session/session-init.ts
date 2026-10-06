@@ -124,6 +124,19 @@ export function createSessionInit(deps: SessionInitDeps) {
 				// Same restore window as a reload: the surface shows its loading
 				// state and a send waits until the linked chat's history is in.
 				isRestoringSession: true,
+				// Run binding: the linked chat is an EXISTING session, so it
+				// opens on its own row's model, effort and window, exactly as a
+				// reload does. The state here is the fresh-tab seed, which holds
+				// the last-used compose picks (`aihub_lastModel` and friends);
+				// keeping them showed another chat's model in the picker, sized
+				// the context meter for it and sent it with the next message.
+				// Cleared BEFORE refreshSessionMetadata below snapshots them, so
+				// /live treats them as holes and fills them from the session row.
+				modelOverride: null,
+				permissionModeOverride: null,
+				effortLevelOverride: null,
+				contextWindowChoice: DEFAULT_CONTEXT_WINDOW_CHOICE,
+				contextWindowPin: undefined,
 			}));
 			feedController.start(deepLinkSessionId);
 			void switcher.refreshSessionMetadata(deepLinkSessionId);
