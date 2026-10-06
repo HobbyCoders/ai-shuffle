@@ -28,6 +28,14 @@ describe('Subagent transcript card', () => {
   await fireEvent.click(link);
   expect(openSubagentLink).toHaveBeenCalledWith(expect.any(MouseEvent), 'worker-session');
  });
+ it('shows the model the worker runs on, as the model pickers name it (#1827)', async () => {
+  const { rerender } = render(SubagentMessage, { message });
+  expect(screen.getByText('gpt-test')).toBeTruthy();
+  await rerender({ message: { ...message, agentModel: 'agent · sonnet' } });
+  const chip = screen.getByText('Sonnet');
+  expect(chip.getAttribute('title')).toBe('Model: agent · sonnet');
+  expect(screen.queryByText('gpt-test')).toBeNull();
+ });
  it('honors active tasks even when the saved agent status says completed', async () => {
   const { rerender } = render(SubagentMessage, { message: { ...message, agentStatus: 'completed' }, runningToolIds: new Set(['worker']) });
   expect(screen.getByRole('status').textContent).toBe('Running');

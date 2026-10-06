@@ -344,8 +344,13 @@ class UserQuestionHandler:
         fanout_func: Optional[callable] = None,
         *,
         nonblocking: bool = False,
+        ttl_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Persist and publish a question, optionally waiting for its answer."""
+        """Persist and publish a question, optionally waiting for its answer.
+
+        ``ttl_seconds`` shortens a blocking question's lifetime below the
+        configured question timeout (never lengthens it).
+        """
         from app.core import interaction_wait
         from app.db import interactions
 
@@ -357,6 +362,8 @@ class UserQuestionHandler:
         if nonblocking:
             payload["nonblocking"] = True
         ttl = None if nonblocking else _question_ttl_seconds()
+        if ttl is not None and ttl_seconds:
+            ttl = max(1, min(ttl, int(ttl_seconds)))
         create_kwargs = {}
         if nonblocking:
             # Engine replay and reconnect must recover one card, not post a copy.

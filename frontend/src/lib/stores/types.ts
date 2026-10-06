@@ -65,6 +65,8 @@ export interface Task {
 	agent?: string | null;
 	/** The other worker a remote Task child runs on. Absent for local tasks (additive). */
 	worker?: { deviceId?: string; name: string } | null;
+	/** The "<provider> · <model>" label a Task worker runs on (#1827; additive). */
+	model?: string | null;
 }
 
 // Todo item for task tracking
@@ -125,6 +127,7 @@ export interface ChatMessage {
 	agentPrompt?: string; // The initial prompt sent to the subagent
 	agentStatus?: 'pending' | 'running' | 'completed' | 'error' | 'stopped'; // Current status ('stopped': deliberately stopped, e.g. the user's Stop)
 	agentChildren?: SubagentChildMessage[]; // Nested messages from subagent execution
+	agentModel?: string; // The "<provider> · <model>" label the worker runs on, from task.updated (#1827)
 	agentStopNote?: string; // Who stopped a 'stopped' card, as the task registry recorded it ("Stopped by user")
 	agentLaunchToolUseId?: string; // The model's Task launch tool_use_id absorbed into this card (fluid-leg worker cards)
 	agentUsage?: { total_tokens?: number; tool_uses?: number; duration_ms?: number; input_tokens?: number; output_tokens?: number }; // Task progress stats

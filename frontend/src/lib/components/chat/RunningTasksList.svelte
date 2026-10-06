@@ -470,7 +470,7 @@
 					<ChevronDown size={14} class={open ? 'swarm-chev open' : 'swarm-chev'} aria-hidden="true" />
 				</button>
 			{:else}
-				<span class="row-name" class:mono={row.kind === 'shell'} title={row.name}><span class="name-text">{row.name}</span></span>
+				<span class="row-name" class:mono={row.kind === 'shell'} title={row.name}><span class="name-text">{row.name}</span>{#if row.model}<span class="model-chip" title="Model: {row.model.raw}">{row.model.label}</span>{/if}</span>
 			{/if}
 			<span class="row-meta">
 				<b class="meta-time">{row.state === 'stopped' ? 'Stopped' : elapsedOf(row)}</b>
@@ -523,6 +523,7 @@
 						<span class="row-name" title={member.agent ? `${member.title} · ${member.agent}` : member.title}>
 							<span class="name-text">{member.title}</span>
 							{#if member.agent}<span class="member-agent">{member.agent}</span>{/if}
+							{#if member.model}<span class="model-chip" title="Model: {member.model.raw}">{member.model.label}</span>{/if}
 						</span>
 						<span class="row-meta">
 							<b class="meta-time">{member.status === 'running' ? formatElapsed(member.startedAt, member.endedAt ?? now) : memberStateLabel(member.status)}</b>
@@ -826,6 +827,24 @@
 	.member[data-status='cancelled'] .member-dot, .member[data-status='interrupted'] .member-dot { border-color: var(--muted-foreground); background: var(--muted-foreground); opacity: 0.6; }
 	.member[data-status='failed'] .meta-time { color: var(--destructive); }
 	.member:not([data-status='running']) .meta-time { font-weight: 500; color: var(--muted-foreground); }
+	/* The model a subagent runs on (#1827). Inline on the name line, so the
+	   row keeps its height when the label arrives; the name gives way. */
+	.model-chip {
+		flex: none;
+		max-width: 45%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 0.6875rem;
+		font-weight: 500;
+		line-height: 1.5;
+		padding: 0 6px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		color: var(--muted-foreground);
+		font-variant-numeric: tabular-nums;
+	}
+	.size-compact .model-chip { font-size: 0.625rem; padding: 0 5px; }
 	.member-agent { flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; font-size: 0.92em; color: var(--muted-foreground); }
 	.member-empty { color: var(--muted-foreground); }
 

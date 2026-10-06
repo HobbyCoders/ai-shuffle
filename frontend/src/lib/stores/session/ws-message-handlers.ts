@@ -1228,6 +1228,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						description: typeof opt === 'object' && opt !== null ? (opt as Record<string, unknown>).description as string || '' : '',
 					})) : [],
 					multiSelect: Boolean(q.multiSelect),
+					// A question answered with a picker instead of options (#1827).
+					...(q.picker === 'model' ? { picker: 'model' as const } : {}),
 				}));
 
 				const request = {

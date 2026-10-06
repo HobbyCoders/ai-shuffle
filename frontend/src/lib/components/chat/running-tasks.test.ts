@@ -58,6 +58,22 @@ describe('buildRows', () => {
 		expect(countRows(rows)).toEqual({ running: 3, agents: 2, shell: 1 });
 	});
 
+	it('names the model each subagent runs on and finds rows by it (#1827)', () => {
+		const rows = buildRows({
+			...base,
+			tasks: [
+				task('a', { model: 'agent · sonnet (you asked for it)' }),
+				task('b'),
+				task('c', { kind: 'shell', model: 'agent · sonnet' })
+			]
+		});
+		const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+		expect(byId.a.type === 'task' && byId.a.model?.label).toBe('Sonnet');
+		expect(byId.b.type === 'task' && byId.b.model).toBeNull();
+		expect(byId.c.type === 'task' && byId.c.model).toBeNull();
+		expect(visibleRows(rows, 'all', 'sonnet').map((r) => r.id)).toEqual(['a']);
+	});
+
 	it('ignores tasks that are no longer running', () => {
 		const rows = buildRows({ ...base, tasks: [task('a'), task('b', { status: 'completed' })] });
 		expect(rows.map((r) => r.id)).toEqual(['a']);

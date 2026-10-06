@@ -24,6 +24,16 @@ Task, Swarm tasks and `StartSession` take an optional `model`. Leave it out and
 a subagent runs on its pinned model, else on the subagent default; a chat
 started with `StartSession` runs on the caller's model. That is the normal case.
 
+The first time an agent delegates while no subagent default is set, the chat
+asks you "Which model should subagents use?" with a picker of your models. Your
+pick becomes the subagent default (change it later on the Agents page) and the
+subagent starts on it. "Not now" refuses that start and the question comes back
+at a later one. Only you answer it: in an automation run, an API key's chat or
+Away mode the start is refused and you get one notification instead.
+
+The running-tasks list and each subagent card name the model the subagent runs
+on, as the model pickers name it.
+
 `model` is for when you name a model yourself, for example "spin up a general
 agent on GPT-6 Astra" when that agent is pinned to Opus. Any model the app can
 run is accepted: a Claude model (`opus`) or a model on an enabled provider's

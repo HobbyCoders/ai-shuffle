@@ -2,6 +2,19 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup, fireEvent } from '@testing-library/svelte';
 import UserQuestion, { type UserQuestionData, type Question } from './UserQuestion.svelte';
 
+// The owner's model list, as the pickers build it from the hydrated registry.
+const catalog = vi.hoisted(() => ({
+	groups: [{ key: '__claude__', name: 'Claude', subtext: null, glyph: 'claude' as const, isApi: false }],
+	options: [
+		{ value: 'sonnet', label: 'Sonnet', description: 'sonnet', groupKey: '__claude__', group: 'Claude', groupSubtext: null },
+		{ value: 'opus', label: 'Opus', description: 'opus', groupKey: '__claude__', group: 'Claude', groupSubtext: null }
+	]
+}));
+vi.mock('$lib/constants/model-picker', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/constants/model-picker')>()),
+	buildModelPickerCatalog: () => catalog
+}));
+
 const question = (over: Partial<Question> = {}): Question => ({
 	question: 'Which database should we use?', header: 'Database', multiSelect: false,
 	options: [{ label: 'Postgres', description: 'Relational' }, { label: 'SQLite', description: 'Embedded' }], ...over
@@ -135,6 +148,53 @@ describe('UserQuestion — nonmodal answer form', () => {
 	it('does not submit while disconnected', async () => {
 		const onRespond = vi.fn(); render(UserQuestion, { data: data(), onRespond, disabled: true });
 		await fireEvent.submit(screen.getByRole('form'));
+		expect(onRespond).not.toHaveBeenCalled();
+	});
+});
+
+describe('UserQuestion — model picker question (#1827)', () => {
+	const modelQuestion = (): UserQuestionData => ({
+		request_id: 'subagent-default-1', tool_use_id: 'subagent-default-1', questions: [{
+			question: 'Which model should subagents use?', header: 'Subagent model',
+			options: [], multiSelect: false, picker: 'model'
+		}]
+	});
+	const option = (label: string) => screen.getAllByRole('option')
+		.find((row) => row.textContent?.trim().startsWith(label)) as HTMLElement;
+
+	it('lists the owner\'s models instead of options and a free-text answer', () => {
+		render(UserQuestion, { data: modelQuestion() });
+		expect(screen.getByRole('heading', { name: 'Which model should subagents use?' })).toBeTruthy();
+		expect(screen.getByRole('listbox', { name: 'Subagent model' })).toBeTruthy();
+		expect(option('Sonnet')).toBeTruthy();
+		expect(screen.queryByLabelText('Your answer')).toBeNull();
+		expect(screen.queryByText('Skip this question')).toBeNull();
+		expect((screen.getByRole('button', { name: 'Use this model' }) as HTMLButtonElement).disabled).toBe(true);
+		expect(screen.getByText('Choose a model above')).toBeTruthy();
+	});
+
+	it('answers with the chosen model id', async () => {
+		const onRespond = vi.fn(); render(UserQuestion, { data: modelQuestion(), onRespond });
+		await fireEvent.click(option('Sonnet'));
+		expect(screen.getByText('Sonnet', { selector: '.picked strong' })).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Use this model' }));
+		expect(onRespond).toHaveBeenCalledWith({
+			request_id: 'subagent-default-1', tool_use_id: 'subagent-default-1',
+			answers: { 'Which model should subagents use?': 'sonnet' }, skipped: []
+		});
+	});
+
+	it('"Not now" dismisses the question', async () => {
+		const onRespond = vi.fn(); render(UserQuestion, { data: modelQuestion(), onRespond });
+		await fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
+		expect(onRespond).toHaveBeenCalledWith({
+			request_id: 'subagent-default-1', tool_use_id: 'subagent-default-1', answers: {}, dismissed: true
+		});
+	});
+
+	it('cannot be answered while disconnected', async () => {
+		const onRespond = vi.fn(); render(UserQuestion, { data: modelQuestion(), onRespond, disabled: true });
+		await fireEvent.click(screen.getByRole('button', { name: 'Not now' }));
 		expect(onRespond).not.toHaveBeenCalled();
 	});
 });

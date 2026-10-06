@@ -10,6 +10,7 @@
 import type { ChatMessage, Task } from '$lib/stores/types';
 import { isSwarmActive, type SwarmSnapshot, type SwarmTask } from '$lib/utils/swarm';
 import { linkedTranscripts, transcriptForTask } from '$lib/utils/background-work';
+import { taskModel, type TaskModel } from '$lib/utils/task-model';
 
 export type RunFilter = 'all' | 'agents' | 'shell';
 export type RowState = 'running' | 'stopping' | 'stopped';
@@ -19,6 +20,8 @@ export interface SwarmMemberRow {
 	id: string;
 	title: string;
 	agent: string;
+	/** The model the member runs on, once its task reports one (#1827). */
+	model: TaskModel | null;
 	status: SwarmTask['status'];
 	/** Registry task id, which the stop endpoint takes. */
 	taskId: string | null;
@@ -42,6 +45,8 @@ interface RowBase {
 export interface TaskRow extends RowBase {
 	type: 'task';
 	agent: string | null;
+	/** The model the subagent runs on, as the model pickers name it (#1827). */
+	model: TaskModel | null;
 	transcriptSessionId: string | null;
 }
 
@@ -119,6 +124,7 @@ export function buildRows({ tasks, swarms, messages, stopping, stopped, defaultW
 				id: member.id,
 				title: plain(member.title) || member.id,
 				agent: plain(member.agent),
+				model: live ? taskModel(live.model) : null,
 				status: member.status,
 				taskId: member.task_id ?? null,
 				transcriptSessionId: member.worker_session_id
@@ -154,6 +160,7 @@ export function buildRows({ tasks, swarms, messages, stopping, stopped, defaultW
 			kind: task.kind === 'shell' ? 'shell' : 'agent',
 			name: plain(task.subject) || plain(task.summary) || (task.kind === 'shell' ? 'Shell task' : 'Agent task'),
 			agent: plain(task.agent) || null,
+			model: task.kind === 'shell' ? null : taskModel(task.model),
 			worker: taskWorker(task, defaultWorker),
 			startedAt: time(task.startedAt),
 			endedAt: null,
@@ -189,6 +196,7 @@ export function matchesQuery(row: RunRow, query: string): boolean {
 	if (!q) return true;
 	const parts = [row.name, row.worker];
 	if (row.type === 'task' && row.agent) parts.push(row.agent);
+	if (row.type === 'task' && row.model) parts.push(row.model.label);
 	if (row.type === 'swarm') for (const m of row.members) parts.push(m.title, m.agent);
 	return parts.join(' ').toLowerCase().includes(q);
 }

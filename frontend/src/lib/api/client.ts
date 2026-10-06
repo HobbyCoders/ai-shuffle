@@ -444,6 +444,8 @@ export interface UserQuestion {
 	header: string;
 	options: UserQuestionOption[];
 	multiSelect: boolean;
+	/** Answer with this picker instead of options: 'model' answers a model id (#1827). */
+	picker?: 'model';
 }
 
 export interface UserQuestionRequest {

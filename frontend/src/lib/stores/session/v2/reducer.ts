@@ -249,6 +249,16 @@ function findByToolId(
 	return undefined;
 }
 
+/** The model label a task summary already carries for a subagent card's keys. */
+function taskModelFor(summaries: Task[], ...keys: (string | undefined)[]): string | undefined {
+	for (const key of keys) {
+		if (!key) continue;
+		const hit = summaries.find((t) => t.model && (t.toolUseId === key || t.id === key));
+		if (hit?.model) return hit.model;
+	}
+	return undefined;
+}
+
 function findSubagentByTask(
 	messages: ChatMessage[],
 	taskId: string,
@@ -1836,6 +1846,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				agentStatus: 'running',
 				agentChildren: absorbedCard?.agentChildren ?? [],
 				agentLaunchToolUseId: launchToolUseId || undefined,
+				// A task.updated that landed before the card already named the model.
+				agentModel: taskModelFor(next.activeTaskSummaries, taskId, launchToolUseId) ?? absorbedCard?.agentModel,
 				timestamp: createdAt || undefined,
 			};
 			return appendMessage(next, msg, seq);
@@ -2018,6 +2030,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const workerName = str(event.worker_name);
 			if (workerName) summary.worker = { name: workerName };
 			else if (existing?.worker) summary.worker = existing.worker;
+			// The model a Task worker runs on (#1827): kept across later frames
+			// that omit it, so the label never flickers off a running row.
+			const model = str(event.model);
+			if (model) summary.model = model;
+			else if (existing?.model) summary.model = existing.model;
 			const activeTaskSummaries = existing
 				? state.activeTaskSummaries.map((t) => (t.id === taskId ? summary : t))
 				: [...state.activeTaskSummaries, summary];
@@ -2025,6 +2042,16 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			let messages = state.messages;
 			let speculativelySettledCardIds = state.speculativelySettledCardIds;
 			let speculativelySettledTaskIds = state.speculativelySettledTaskIds;
+			// The joined subagent card shows the model too (#1827).
+			if (summary.model) {
+				const card =
+					(summary.toolUseId
+						? findSubagentByTask(messages, summary.toolUseId, state.messageOriginSeq)
+						: undefined) ?? findSubagentByTask(messages, taskId, state.messageOriginSeq);
+				if (card && card.agentModel !== summary.model) {
+					messages = replaceById(messages, card.id, { agentModel: summary.model });
+				}
+			}
 			// A background subagent finishing BETWEEN turns reports only via this
 			// chip (the drain pump dispatches no subagent.completed), so a
 			// terminal update must also settle the joined subagent card — else a

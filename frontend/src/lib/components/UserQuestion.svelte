@@ -1,8 +1,15 @@
 <script lang="ts">
 	import { ArrowUpRight, Check, SkipForward } from 'lucide-svelte';
+	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
+	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
+	import { getModelLabel } from '$lib/constants/models';
 
 	export interface QuestionOption { label: string; description: string; }
-	export interface Question { question: string; header: string; options: QuestionOption[]; multiSelect: boolean; }
+	export interface Question {
+		question: string; header: string; options: QuestionOption[]; multiSelect: boolean;
+		/** Answer with this picker instead of options; 'model' answers a model id (#1827). */
+		picker?: 'model';
+	}
 	export interface UserQuestionData {
 		request_id: string;
 		tool_use_id: string;
@@ -37,6 +44,10 @@
 	const questions = $derived(data.questions ?? []);
 	const current = $derived(questions[active]);
 	const canSubmit = $derived(questions.length > 0 && questions.every((_, i) => skipped[i] || answer(i)));
+	// A model question lists the owner's own models: every model this install can run.
+	const picksModel = $derived(current?.picker === 'model');
+	const catalog = $derived(picksModel ? buildModelPickerCatalog({}) : null);
+	const pickedModel = $derived(picksModel ? (selections[active] ?? [])[0] ?? '' : '');
 
 	function answer(index: number): string {
 		return written[index]?.trim() || (selections[index] ?? []).join(', ');
@@ -58,6 +69,15 @@
 	function toggleSkip() {
 		skipped[active] = !skipped[active];
 		if (skipped[active]) { selections[active] = []; written[active] = ''; }
+	}
+	function pickModel(value: string) {
+		selections[active] = value ? [value] : [];
+		written[active] = '';
+		skipped[active] = false;
+	}
+	function dismiss() {
+		if (disabled) return;
+		onRespond?.({ request_id: data.request_id, tool_use_id: data.tool_use_id, answers: {}, dismissed: true });
 	}
 	function submit(event: SubmitEvent) {
 		event.preventDefault();
@@ -86,6 +106,26 @@
 	{/if}
 	{#if current}
 		<h3 id={`${id}-question`}>{current.question}</h3>
+		{#if picksModel && catalog}
+			<p class="picker-hint">Saved as the subagent default for every agent without a model of its own. You can change it later on the Agents page.</p>
+			{#if catalog.options.length}
+				<div class="model-panel" role="group" aria-labelledby={`${id}-question`}>
+					<ModelPickerPanel groups={catalog.groups} options={catalog.options} value={pickedModel}
+						onSelect={pickModel} startOnAll ariaLabel="Subagent model" />
+				</div>
+			{:else}
+				<p class="picker-empty">No models are available yet. Connect a provider in Settings, then delegate again.</p>
+			{/if}
+			<div class="picker-actions">
+				<span class="picked" aria-live="polite">
+					{#if pickedModel}Subagents will run on <strong>{getModelLabel(pickedModel)}</strong>{:else}Choose a model above{/if}
+				</span>
+				<button type="button" class="not-now" onclick={dismiss} {disabled}>Not now</button>
+				<button class="submit-btn picker-submit" type="submit" disabled={disabled || !pickedModel}>
+					Use this model<ArrowUpRight size={14} />
+				</button>
+			</div>
+		{:else}
 		{#if current.multiSelect}<p class="selection-hint">Choose one or more.</p>{/if}
 		<fieldset aria-labelledby={`${id}-question`}>
 			<legend class="sr-only">{current.multiSelect ? 'Select all that apply' : 'Choose one answer'}</legend>
@@ -119,6 +159,7 @@
 				<SkipForward size={12} />{skipped[active] ? 'Skipped — undo' : 'Skip this question'}
 			</button>
 		</div>
+		{/if}
 	{/if}
 </form>
 
@@ -150,5 +191,22 @@
 	.question-tabs button.chosen { color: var(--foreground); background: var(--muted); border-color: var(--border); }
 	button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid var(--ring, var(--foreground)); outline-offset: 2px; }
 	.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+	.picker-hint { margin: -0.375rem 0 0.625rem; color: var(--muted-foreground); font-size: 0.6875rem; line-height: 1.45; }
+	.picker-empty { margin: 0; padding: 0.75rem; border: 1px dashed var(--border); border-radius: calc(var(--radius, 10px) - 4px); color: var(--muted-foreground); font-size: 0.75rem; }
+	/* A fixed-height panel: picking a model never moves the buttons below it. */
+	.model-panel { --mpp-width: 100%; --mpp-height: clamp(150px, 24dvh, 216px); border: 1px solid var(--border); border-radius: calc(var(--radius, 10px) - 4px); overflow: hidden; background: var(--popover, var(--background)); }
+	/* Pinned to the bottom of the tray's scroll box: the answer buttons stay
+	   in view on a short screen while the list scrolls above them. */
+	.picker-actions { position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center; gap: 0.5rem; margin: 0.625rem 0 -0.75rem; padding: 0.5rem 0 0.75rem; background: var(--card); }
+	.picked { flex: 1; min-width: 0; font-size: 0.6875rem; color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+	.picked strong { color: var(--foreground); font-weight: 600; }
+	.not-now { min-height: 44px; padding: 0 0.875rem; border: 1px solid var(--border); border-radius: calc(var(--radius, 10px) - 4px); background: none; color: var(--foreground); font-size: 0.75rem; flex-shrink: 0; }
+	.not-now:hover:not(:disabled) { background: var(--muted); }
+	.picker-submit { min-height: 44px; padding: 0 0.875rem; font-size: 0.75rem; flex-shrink: 0; }
+	@media (max-width: 480px) {
+		.picker-actions { flex-wrap: wrap; }
+		.picked { flex-basis: 100%; }
+		.not-now, .picker-submit { flex: 1 1 0; }
+	}
 	@media (max-width: 480px) { .choices label { flex-basis: 100%; } .question-footer { align-items: flex-start; } }
 </style>

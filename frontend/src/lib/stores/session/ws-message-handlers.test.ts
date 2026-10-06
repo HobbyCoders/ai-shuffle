@@ -1566,6 +1566,21 @@ describe('ws-message-handlers', () => {
 			expect(applied?.isStreaming).toBe(true);
 		});
 
+		it('keeps the model picker on a live question and on a reconnect resync (#1827)', () => {
+			const state = mockState(); state.sessionId = 'session-1';
+			const applied: ActiveSessionState[] = [];
+			deps = createMockDeps({ getState: vi.fn(() => state), update: vi.fn(fn => { const next = fn(state); applied.push(next); return next; }) });
+			handlers = createMessageHandlers(deps);
+			const question = { question: 'Which model should subagents use?', header: 'Subagent model', options: [], multiSelect: false, picker: 'model' };
+			handlers.handleMessage({ type: 'user_question', session_id: 'session-1', request_id: 'subagent-default-1', tool_use_id: 'subagent-default-1', questions: [question, { question: 'Other?', header: 'Other', picker: 'colour' }] });
+			const live = applied.at(-1)!.pendingQuestions[0].questions;
+			expect(live[0].picker).toBe('model');
+			// Only a picker the card knows is passed on.
+			expect(live[1].picker).toBeUndefined();
+			handlers.handleMessage({ type: 'pending_questions', session_id: 'session-1', questions: [{ request_id: 'subagent-default-2', tool_use_id: 'subagent-default-2', questions: [question] }] });
+			expect(applied.at(-1)!.pendingQuestions.find(q => q.request_id === 'subagent-default-2')?.questions[0].picker).toBe('model');
+		});
+
 		it('hydrates durable nonblocking questions after the originating turn ended', () => {
 			const state = mockState(); state.sessionId = 'session-1'; state.isStreaming = false;
 			let applied: ActiveSessionState | undefined;

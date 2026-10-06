@@ -358,12 +358,19 @@ def test_worker_budget(agents, monkeypatch):
     dispatch.assert_not_called()
 
 
-def test_provider_bound_target_admission(agents):
+def test_provider_bound_target_admission(agents, monkeypatch):
     """A target bound only to another provider row is refused up front.
 
     It has no assignment for this native caller, so it would need the owner's
-    subagent default (#1827); with none set nothing is dispatched.
+    subagent default (#1827); with none set, and the owner declining to choose
+    one in the chat, nothing is dispatched.
     """
+    from app.core import subagent_default
+
+    async def declined(session_id):
+        return subagent_default.AskOutcome(reason="the owner dismissed the question.")
+
+    monkeypatch.setattr(subagent_default, "ask_in_chat", declined)
     _mk_session(agents, "s-root2", "root-agent")
     payload = asyncio.run(_dispatch({"agent": "gpt-bound", "prompt": "go"}, "s-root2"))
     assert payload["ok"] is False

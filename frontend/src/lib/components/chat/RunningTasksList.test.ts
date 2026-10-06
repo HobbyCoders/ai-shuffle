@@ -127,6 +127,15 @@ describe('RunningTasksList grouping and counts', () => {
 		expect(within(dialog).queryByText(/1 agents/)).toBeNull();
 	});
 
+	it('shows the model each subagent runs on, once its task names it (#1827)', async () => {
+		setTasks([task('a', { subject: 'Review code' })]);
+		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });
+		expect(rowOf('Review code').querySelector('.model-chip')).toBeNull();
+		setTasks([task('a', { subject: 'Review code', model: 'agent · opus' })]);
+		await waitFor(() => expect(within(rowOf('Review code')).getByText('Opus')).toBeTruthy());
+		expect(within(rowOf('Review code')).getByText('Opus').getAttribute('title')).toBe('Model: agent · opus');
+	});
+
 	it('shows elapsed time and the worker on each row', () => {
 		setTasks([task('a', { subject: 'Remote job', worker: { name: 'Unraid' } }), task('b', { subject: 'Local job' })]);
 		render(RunningTasksList, { sessionId: 's1', variant: 'sheet' });

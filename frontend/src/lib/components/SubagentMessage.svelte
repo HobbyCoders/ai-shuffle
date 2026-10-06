@@ -2,6 +2,7 @@
 	import type { ChatMessage } from '$lib/stores/types';
 	import { isSubagentRunning } from '$lib/utils/subagent-status';
 	import { openSubagentLink } from '$lib/services/session-navigation';
+	import { taskModel } from '$lib/utils/task-model';
 
 	let { message, runningToolIds }: {
 		message: ChatMessage;
@@ -16,6 +17,8 @@
 	});
 	const statusLabel = $derived(statusInfo.isRunning ? 'Running' : statusInfo.isError ? 'Failed' : statusInfo.isStopped ? 'Stopped' : message.agentStatus === 'pending' ? 'Pending' : 'Completed');
 	// Who stopped it, as the task registry recorded it ("Stopped by user").
+	// The model the worker runs on, named as the model pickers name it (#1827).
+	const model = $derived(taskModel(message.agentModel));
 	const stopNote = $derived(statusInfo.isStopped && !statusInfo.isRunning ? message.agentStopNote?.trim() || '' : '');
 
 	// Map known SDK agent types to display labels
@@ -66,14 +69,17 @@
 		     (2026-08-17 ruling), otherwise the historical model/type badge. -->
 		{#if message.agentName}
 			<span class="sa-name">{message.agentName}</span>
-			<!-- The model slug stays visible, demoted to a secondary chip. -->
-			{#if message.agentType}
+			<!-- The model stays visible, demoted to a secondary chip. -->
+			{#if model}
+				<span class="sa-chip sa-model" title="Model: {model.raw}">{model.label}</span>
+			{:else if message.agentType}
 				<span class="sa-chip" title="Model: {message.agentType}">
 					{getModelBadge(message.agentType).label}
 				</span>
 			{/if}
 		{:else if message.agentType}
 			<span class="sa-name">{getModelBadge(message.agentType).label}</span>
+			{#if model}<span class="sa-chip sa-model" title="Model: {model.raw}">{model.label}</span>{/if}
 		{/if}
 
 		<!-- Description or default label -->
@@ -195,6 +201,19 @@
 		padding: 1px 5px;
 	}
 
+	/* A model label reads as the pickers write it, and stays on a phone. */
+	.sa-model {
+		flex: 0 1 auto;
+		min-width: 0;
+		max-width: 40%;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		letter-spacing: 0;
+		text-transform: none;
+		font-size: 10.5px;
+	}
+
 	.sa-desc {
 		min-width: 0;
 		font-size: 12px;
@@ -219,7 +238,9 @@
 	.transcript-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 	.transcript-unavailable { padding: 10px 0; margin: 0; color: var(--muted-foreground); font-size: 12px; }
 	@media (max-width: 639px) {
-		.sa-chip { display: none; }
+		.sa-chip:not(.sa-model) { display: none; }
+		/* The description gives way first; the model keeps its label. */
+		.sa-model { flex-shrink: 0; max-width: 32%; }
 		.sa-name { flex-shrink: 0; max-width: 45%; }
 		.transcript-link { min-height: 44px; }
 	}

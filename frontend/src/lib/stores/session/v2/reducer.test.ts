@@ -1560,6 +1560,29 @@ describe('task.updated summaries', () => {
 		expect(s.activeTaskSummaries.find((t) => t.id === 'l-1')?.worker).toBeUndefined();
 	});
 
+	it('a task.updated keeps the model a subagent runs on and later frames keep it (#1827)', () => {
+		const s = fold([
+			ev('task.updated', { task_id: 'm-1', state: 'running', model: 'OpenRouter · openai/gpt-5.6' }),
+			ev('task.updated', { task_id: 'm-1', state: 'running', summary: 'Working' }),
+			ev('task.updated', { task_id: 'sh-1', state: 'running', kind: 'shell' }),
+		]);
+		expect(s.activeTaskSummaries.find((t) => t.id === 'm-1')?.model).toBe('OpenRouter · openai/gpt-5.6');
+		expect(s.activeTaskSummaries.find((t) => t.id === 'sh-1')?.model).toBeUndefined();
+	});
+
+	it('the subagent card takes the model whether its card or its task frame lands first (#1827)', () => {
+		const cardFirst = fold([
+			ev('subagent.started', { task_id: 'w-1', description: 'Review', agent_name: 'Helper' }),
+			ev('task.updated', { task_id: 'w-1', state: 'running', model: 'agent · sonnet' }),
+		]);
+		expect(cardFirst.messages.find((m) => m.type === 'subagent')?.agentModel).toBe('agent · sonnet');
+		const taskFirst = fold([
+			ev('task.updated', { task_id: 'w-2', state: 'running', tool_use_id: 'tu-2', model: 'agent · opus' }),
+			ev('subagent.started', { task_id: 'tu-2', description: 'Review', agent_name: 'Helper' }),
+		]);
+		expect(taskFirst.messages.find((m) => m.type === 'subagent')?.agentModel).toBe('agent · opus');
+	});
+
 	it('an unknown kind value falls back to agent', () => {
 		const s = fold([
 			ev('task.updated', { task_id: 'x-1', state: 'running', kind: 'workflow' }),

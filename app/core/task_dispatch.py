@@ -1626,6 +1626,8 @@ async def _dispatch_task_tool(
     if refusal is not None:
         reason, error = refusal
         return {"ok": False, "error": error, "reason": reason}
+    # A supplied roster (voice) has no chat to ask the owner in.
+    roster_supplied = roster is not None
     if roster is None:
         roster = available_subagents(caller_pid, effective_provider_id)
     target, roster_error = resolve_subagent(ref, roster)
@@ -1746,15 +1748,40 @@ async def _dispatch_task_tool(
         profile_id = target.id
         if not requested_model and target.model_source == "unset":
             # Not pinned and no subagent default: never the session's model.
-            # Refuse, tell the lead agent what to ask, and ask the owner once.
+            # Ask the owner in their chat (#1827); their choice becomes the
+            # default and this dispatch carries on with it. With nobody to
+            # ask, refuse and leave one bell notice as before.
             from app.core import subagent_default
 
-            subagent_default.ask_owner_once(caller_session_id)
-            return {
-                "ok": False,
-                "reason": "subagent_default_missing",
-                "error": subagent_default.missing_default_error(target.id),
-            }
+            why: Optional[str] = None
+            chosen = None
+            if not roster_supplied:
+                outcome = await subagent_default.ask_in_chat(caller_session_id)
+                chosen = outcome.model
+                if chosen is None:
+                    why = outcome.reason
+                    if outcome.notify:
+                        subagent_default.ask_owner_once(caller_session_id)
+            else:
+                subagent_default.ask_owner_once(caller_session_id)
+            if chosen:
+                roster = await asyncio.to_thread(
+                    available_subagents, caller_pid, effective_provider_id)
+                retarget, _ = resolve_subagent(ref, roster)
+                if retarget is not None and retarget.model_source != "unset":
+                    target = retarget
+                    target_name = target.name
+                    profile_id = target.id
+                    if getattr(target, "provider_pinned", False):
+                        effective_provider_id = target.provider_id or None
+                else:
+                    why = "the model they chose cannot run this agent here."
+            if target.model_source == "unset":
+                return {
+                    "ok": False,
+                    "reason": "subagent_default_missing",
+                    "error": subagent_default.missing_default_error(target.id, why),
+                }
         model_id = requested_model or target.model
         system_prompt_append = None
         tool_allowlist = None
