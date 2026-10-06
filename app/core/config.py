@@ -615,6 +615,19 @@ class Settings(BaseSettings):
     # container. Range 1..1000; 0 = disabled.
     sdk_subprocess_oom_score_adj: int = 300
 
+    # CPU priority of the shell commands agents run through Bash (fluid's
+    # tool) and Monitor (this app's background shells). Without it a test
+    # suite or build competes with the server's own event loop at equal
+    # priority, and the UI and other sessions lag while it runs. On POSIX each
+    # command's process group gets the server's nice value plus this many
+    # steps (capped at 19), inherited by everything it forks; on Windows any
+    # positive value means BELOW_NORMAL_PRIORITY_CLASS. The children still get
+    # all idle CPU; this orders the scheduler, it does not cap usage. Range
+    # 0..19; 0 = disabled; an invalid value falls back to 10. Copied to
+    # FLUID_CHILD_NICE at startup (app.core.startup.propagate_child_priority),
+    # which is the variable fluid's Bash reads. Env: CHILD_PROCESS_NICE.
+    child_process_nice: int = 10
+
     # Boot-time stray-CLI sweep (app.core.startup_reconcile). The session pool
     # tracks its CLI subprocesses in memory only, so a server crash/restart
     # leaks any still-running Claude CLI processes from the previous run. At
@@ -944,6 +957,18 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip() and not _is_text(field.annotation):
             return field.get_default(call_default_factory=True)
         return value
+
+    @field_validator("child_process_nice", mode="before")
+    @classmethod
+    def _child_process_nice_or_default(cls, value):
+        """Out-of-range or unparsable values fall back to the default
+        instead of stopping start-up."""
+        default = cls.model_fields["child_process_nice"].default
+        try:
+            nice = int(str(value).strip())
+        except (TypeError, ValueError):
+            return default
+        return nice if 0 <= nice <= 19 else default
 
     @field_validator("version", mode="before")
     @classmethod

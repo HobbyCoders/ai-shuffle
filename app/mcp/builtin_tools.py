@@ -1277,12 +1277,14 @@ async def _spawn_background(
     # shell the environment block declares. stdin is closed so a command
     # that prompts exits instead of inheriting the server's stdin.
     from fluid.tools.shell import resolve_shell
-    from app.core.process_tree import child_env, spawn_kwargs
+    from app.core.process_tree import child_env, lower_priority, spawn_kwargs
 
     # Its own process group on BOTH platforms (POSIX session / Windows
     # CREATE_NEW_PROCESS_GROUP) so the stop path can address the whole tree,
     # and a UTF-8 environment so a child Python printing anything outside
-    # cp1252 doesn't die before it binds its port.
+    # cp1252 doesn't die before it binds its port. The tree runs below the
+    # server's CPU priority (child_process_nice) so a test run or build
+    # cannot starve the event loop.
     proc = await asyncio.create_subprocess_exec(
         *resolve_shell().argv_prefix,
         command,
@@ -1293,6 +1295,7 @@ async def _spawn_background(
         stderr=asyncio.subprocess.STDOUT,
         **spawn_kwargs(),
     )
+    lower_priority(proc)
     task.process = proc
     task.own_process_group = True
     # On disk, so a restart after an abrupt server death can find this shell

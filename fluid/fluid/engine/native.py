@@ -5238,9 +5238,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         except OSError:
             covered = set()
         blocks: list[str] = []
+        # A relative target lives under the tool cwd; resolving it keeps the
+        # directory comparable with ``covered`` (absolute), so the cwd's own
+        # AGENTS.md is not injected a second time for "a.txt".
+        base = Path(self.ctx.cwd or ".")
         for target in targets:
             try:
-                for f in nested_instructions(target):
+                for f in nested_instructions((base / target).resolve()):
                     directory = str(Path(f.path).parent)
                     if directory in covered or f.path in self._nested_injected:
                         continue

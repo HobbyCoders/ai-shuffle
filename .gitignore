@@ -109,7 +109,6 @@ tools/mockups/profile-design-1-sidebar.html
 # Remember plugin temp files
 .remember/tmp/
 .codex/config.toml
-AGENTS.md
 docs/REWRITE_PLAN.md
 /frontend/codegen/node_modules
 /frontend/codegen

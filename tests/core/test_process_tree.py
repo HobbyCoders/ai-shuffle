@@ -37,15 +37,133 @@ _IS_WINDOWS = sys.platform == "win32"
 
 class TestSpawnKwargs:
     def test_windows_gets_its_own_process_group(self, monkeypatch):
+        from app.core.config import settings
+
         monkeypatch.setattr(pt, "_IS_WINDOWS", True)
+        monkeypatch.setattr(settings, "child_process_nice", 10)
         kwargs = pt.spawn_kwargs()
-        assert kwargs == {"creationflags": pt._CREATE_NEW_PROCESS_GROUP}
+        assert kwargs == {
+            "creationflags": pt._CREATE_NEW_PROCESS_GROUP
+            | pt._BELOW_NORMAL_PRIORITY_CLASS
+        }
         # Never start_new_session on Windows — the kwarg does not exist there.
         assert "start_new_session" not in kwargs
+
+    def test_windows_priority_off_when_nice_is_zero(self, monkeypatch):
+        from app.core.config import settings
+
+        monkeypatch.setattr(pt, "_IS_WINDOWS", True)
+        monkeypatch.setattr(settings, "child_process_nice", 0)
+        assert pt.spawn_kwargs() == {"creationflags": pt._CREATE_NEW_PROCESS_GROUP}
 
     def test_posix_gets_a_new_session(self, monkeypatch):
         monkeypatch.setattr(pt, "_IS_WINDOWS", False)
         assert pt.spawn_kwargs() == {"start_new_session": True}
+
+
+# ---------------------------------------------------------------------------
+# child priority
+# ---------------------------------------------------------------------------
+
+class _PriorityRecorder:
+    """Stands in for os.getpriority / os.setpriority on any platform."""
+
+    def __init__(self, base: int = 0, error: Exception | None = None):
+        self.base = base
+        self.error = error
+        self.calls: list[tuple[int, int, int]] = []
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(os, "getpriority", lambda which, who: self.base, raising=False)
+        monkeypatch.setattr(os, "setpriority", self.setpriority, raising=False)
+        return self
+
+    def setpriority(self, which, who, value):
+        self.calls.append((which, who, value))
+        if self.error is not None:
+            raise self.error
+
+
+class TestChildPriority:
+    @pytest.mark.parametrize("value", ["abc", -1, 20, 99, None, True])
+    def test_bad_setting_falls_back_to_default(self, monkeypatch, value):
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "child_process_nice", value)
+        assert pt.child_nice() == 10
+
+    def test_lower_priority_sets_the_process_group(self, monkeypatch):
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "child_process_nice", 7)
+        rec = _PriorityRecorder(base=2).install(monkeypatch)
+        pt.lower_priority(MagicMock(pid=4321))
+        assert rec.calls == [(getattr(os, "PRIO_PGRP", 1), 4321, 9)]
+
+    def test_lower_priority_caps_at_19(self, monkeypatch):
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "child_process_nice", 10)
+        rec = _PriorityRecorder(base=15).install(monkeypatch)
+        pt.lower_priority(MagicMock(pid=4321))
+        assert rec.calls[0][2] == 19
+
+    def test_lower_priority_off_when_zero(self, monkeypatch):
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "child_process_nice", 0)
+        rec = _PriorityRecorder().install(monkeypatch)
+        pt.lower_priority(MagicMock(pid=4321))
+        assert rec.calls == []
+
+    @pytest.mark.parametrize("error", [ProcessLookupError(), PermissionError()])
+    def test_lower_priority_never_raises(self, monkeypatch, error):
+        from app.core.config import settings
+
+        monkeypatch.setattr(settings, "child_process_nice", 10)
+        rec = _PriorityRecorder(error=error).install(monkeypatch)
+        pt.lower_priority(MagicMock(pid=4321))
+        assert len(rec.calls) == 1
+
+    async def test_monitor_spawn_survives_a_failing_setpriority(self, monkeypatch, tmp_path):
+        """The Monitor spawn site applies the priority and still runs the command."""
+        from app.core.config import settings
+        from app.mcp import builtin_tools as bt
+
+        monkeypatch.setattr(settings, "child_process_nice", 10)
+        rec = _PriorityRecorder(error=ProcessLookupError()).install(monkeypatch)
+        task = await bt._spawn_background(
+            f'"{sys.executable}" -c "print(1)"', str(tmp_path), None
+        )
+        try:
+            await asyncio.wait_for(task.process.wait(), timeout=60)
+            assert task.process.returncode == 0
+            assert [who for _, who, _ in rec.calls] == [task.process.pid]
+        finally:
+            bt._background_tasks.pop(task.task_id, None)
+            if task._reader_task is not None:
+                task._reader_task.cancel()
+
+    def test_setting_validator_falls_back_to_default(self):
+        from app.core.config import Settings
+
+        validate = Settings._child_process_nice_or_default
+        assert validate("5") == 5
+        assert validate(0) == 0
+        assert validate("abc") == 10
+        assert validate("-3") == 10
+        assert validate(25) == 10
+
+    def test_startup_copies_the_setting_for_fluid(self, monkeypatch):
+        from app.core import startup
+        from app.core.config import settings
+        from fluid.tools.priority import CHILD_NICE_ENV, child_nice
+
+        monkeypatch.setenv(CHILD_NICE_ENV, "3")  # restored after the test
+        monkeypatch.setattr(settings, "child_process_nice", 0)
+        startup.propagate_child_priority()
+        assert os.environ[CHILD_NICE_ENV] == "0"
+        assert child_nice() == 0
 
 
 class TestChildEnv:
@@ -342,3 +460,51 @@ async def test_windows_child_python_can_print_non_cp1252(tmp_path):
         from app.mcp import builtin_tools as bt
 
         bt._background_tasks.pop(task.task_id, None)
+
+
+_PRIORITY_PROBE = (
+    "import os, sys\n"
+    "if sys.platform == 'win32':\n"
+    "    import ctypes\n"
+    "    k = ctypes.windll.kernel32\n"
+    "    k.GetCurrentProcess.restype = ctypes.c_void_p\n"
+    "    k.GetPriorityClass.argtypes = [ctypes.c_void_p]\n"
+    "    print('class', hex(k.GetPriorityClass(k.GetCurrentProcess())))\n"
+    "else:\n"
+    "    print('nice', os.getpriority(os.PRIO_PROCESS, 0))\n"
+)
+
+
+async def test_monitor_command_runs_below_the_server(monkeypatch, tmp_path):
+    """A real Monitor shell: the Python it starts reports its own priority.
+
+    The probe is a grandchild (shell, then Python), so this also checks that
+    the priority reaches what the shell forks.
+    """
+    from app.core.config import settings
+    from app.mcp import builtin_tools as bt
+
+    monkeypatch.setattr(settings, "child_process_nice", 10)
+    script = tmp_path / "prio.py"
+    script.write_text(_PRIORITY_PROBE, encoding="utf-8")
+    task = await bt._spawn_background(
+        f'sleep 0.2; "{sys.executable}" "{script}"', str(tmp_path), None
+    )
+    try:
+        await asyncio.wait_for(task.process.wait(), timeout=60)
+        for _ in range(100):
+            if any(line.startswith(("class", "nice")) for line in task.lines):
+                break
+            await asyncio.sleep(0.05)
+        reported = next(
+            line.strip() for line in task.lines if line.startswith(("class", "nice"))
+        )
+        if _IS_WINDOWS:
+            assert reported == f"class {hex(pt._BELOW_NORMAL_PRIORITY_CLASS)}"
+        else:
+            expected = min(19, os.getpriority(os.PRIO_PROCESS, 0) + 10)
+            assert reported == f"nice {expected}"
+    finally:
+        bt._background_tasks.pop(task.task_id, None)
+        if task._reader_task is not None:
+            task._reader_task.cancel()

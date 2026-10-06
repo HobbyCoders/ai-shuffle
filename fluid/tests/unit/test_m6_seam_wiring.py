@@ -156,6 +156,36 @@ async def test_project_root_instructions_not_reinjected(tmp_path) -> None:
     assert "Root rule." not in joined  # covered by the system-prompt stack
 
 
+async def test_project_root_instructions_not_reinjected_for_relative_path(tmp_path) -> None:
+    """A relative tool path resolves against the tool cwd, so the cwd's own
+    AGENTS.md (already in the project stack) does not ride the result."""
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / ".git").mkdir()
+    (project / "AGENTS.md").write_text("Root rule.")
+    (project / "f.txt").write_text("data")
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    provider = ScriptedProvider([
+        _tool_call("t1", "Read", json.dumps({"file_path": "f.txt"})),
+        _text("done"),
+    ])
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=provider, store=store, model="m", session_id=sid,
+        registry=registry, permissions=PermissionEngine("never_ask"),
+        ctx=ToolCtx(cwd=str(project)),
+    )
+    await loop.submit(UserTurn(content="read"))
+    await loop.wait_turn()
+
+    path = await store.load_path(sid)
+    joined = "\n".join(_all_text(n.message) for n in path)
+    assert "Root rule." not in joined
+
+
 # ─── 3. Skill builtin (progressive loading) ──────────────────────────────────
 
 

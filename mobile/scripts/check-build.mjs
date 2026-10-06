@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Post-build guard for the bundle the Android app ships.
+ * Post-build guard for the phone UI bundle every worker serves at /mobile/
+ * (the Android and iOS apps load it from the paired worker).
  *
  * The shared `$lib` reads build-time constants (`__APP_VERSION__`) that Vite
  * only replaces when this package's vite.config.js passes the web build's

@@ -157,6 +157,12 @@ services:
           cpus: '1.0'
           memory: 512M
 
+    # Relative CPU weight (Docker's default is 1024). 512 halves this
+    # container's share only while the host CPU is contended; an idle host
+    # still lets it use every core. Unraid: add `--cpu-shares=512` to the
+    # container template's Extra Parameters.
+    cpu_shares: 512
+
     # Logging configuration
     logging:
       driver: "json-file"

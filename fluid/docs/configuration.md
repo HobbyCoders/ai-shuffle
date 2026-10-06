@@ -604,6 +604,7 @@ Read outside the config loader:
 | Variable | Effect |
 |---|---|
 | `FLUID_SHELL` | Windows only: path to the shell for `Bash`, `Monitor`, and hook commands. Otherwise fluid finds Git Bash itself and falls back to `cmd.exe`. |
+| `FLUID_CHILD_NICE` | CPU priority of commands run through `Bash`, read on each call. On POSIX the command's process group (the shell and everything it forks) runs this many nice steps below fluid's own process, capped at 19; on Windows any positive value starts the shell with `BELOW_NORMAL_PRIORITY_CLASS`, which its children inherit. The commands still get idle CPU; only contention with fluid's process is affected. Default `10`; `0` turns it off; a value outside 0..19 or not an integer means the default. A command can still raise its own priority if it has the privilege to (for example under `sudo`). |
 | `FLUID_TRACE_REQUESTS` | Directory that receives a JSON dump of every outbound model request. Unset means no tracing. |
 | `FLUID_CLAUDE_MOD` | `delegated_claude` only: whether the child CLI loads AI Shuffle's Claude Code mod (see the provider section). Unset means on; otherwise `1`, `true`, `yes`, `on` are on and anything else is off. |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY` | Default key sources for the matching provider kinds, and the defaults for `api_key_env`. |

@@ -16,6 +16,7 @@ from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi, truncate
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
 from fluid.tools.fragments import CWD_PARAM, FRESH_PROCESS
+from fluid.tools.priority import lower_process_group_priority, priority_creationflags
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 from fluid.tools.shell import resolve_shell
 
@@ -178,10 +179,14 @@ def _spawn_kwargs() -> dict[str, Any]:
     POSIX: a fresh session (= fresh process group) lets ``os.killpg`` take out
     the shell *and* everything it spawned. Windows has no equivalent that
     ``asyncio`` exposes; ``kill_tree`` uses ``taskkill /T`` there instead.
+    On Windows the command also starts below normal priority unless
+    ``FLUID_CHILD_NICE=0`` (see ``fluid.tools.priority``); on POSIX the
+    handler lowers the new group's priority right after the spawn.
     """
     if sys.platform != "win32":
         return {"start_new_session": True}
-    return {}
+    flags = priority_creationflags()
+    return {"creationflags": flags} if flags else {}
 
 
 async def kill_tree(proc: asyncio.subprocess.Process) -> None:
@@ -295,6 +300,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         env=env,
         **_spawn_kwargs(),
     )
+    # Below the host's priority so a test run or build cannot starve the
+    # host's event loop; it still gets all idle CPU. No-op on Windows (the
+    # creationflags above do it there) and when FLUID_CHILD_NICE=0.
+    lower_process_group_priority(proc.pid)
     assert proc.stdout is not None
     try:
         stdout = await asyncio.wait_for(_read_capped(proc.stdout), timeout=timeout)

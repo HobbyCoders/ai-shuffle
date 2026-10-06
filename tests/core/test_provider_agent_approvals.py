@@ -701,21 +701,19 @@ class TestDispatchWiring:
 
         created = {}
 
-        def _submit(session_id, source, **kwargs):
+        async def _submit_async(session_id, source, **kwargs):
             created["worker"] = session_id
             return "turn-1"
-
-        async def _submit_async(session_id, source, **kwargs):
-            return _submit(session_id, source, **kwargs)
 
         async def _idle(session_id, timeout=300.0):
             return True
 
-        # dispatch_worker submits through submit_async. Left unpatched it
-        # queues a real worker turn that nothing here runs, and the dispatch
-        # then waits on it forever unless an earlier test in the same process
-        # left the real turn scheduler's kick registered.
-        monkeypatch.setattr(tm_mod, "submit", _submit)
+        # dispatch_worker submits through submit_async. Left unstubbed it
+        # writes a real ``queued`` turn row, and _worker_still_working treats a
+        # queued turn as work in progress (#1868), so the dispatch waited until
+        # something ran that turn. Only a scheduler kick installed by an
+        # earlier test in the same process did, so the test passed or hung on
+        # the 120 s timeout depending on xdist test order.
         monkeypatch.setattr(tm_mod, "submit_async", _submit_async)
         monkeypatch.setattr(tm_mod, "wait_session_idle", _idle)
         monkeypatch.setattr(tm_mod, "interrupt", lambda *a, **k: None)
@@ -740,6 +738,8 @@ class TestDispatchWiring:
             label="reviewer",
         ))
 
+        assert created["worker"] == outcome.session_id
+        assert outcome.ok, outcome.error
         route = approvals.get_route(outcome.session_id)
         assert route is not None
         assert route.parent_session_id == PARENT

@@ -77,6 +77,7 @@ from fluid.events.ops import (
 )
 from fluid.store.base import new_id
 from fluid.tools.builtins._util import strip_ansi
+from fluid.tools.priority import lower_process_group_priority, priority_creationflags
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
 from fluid.tools.shell import resolve_shell
 
@@ -442,6 +443,11 @@ class CliHost:
         spawn_kwargs: dict[str, Any] = {}
         if sys.platform != "win32":
             spawn_kwargs["start_new_session"] = True  # own process group for cancel
+        else:
+            # Below normal priority unless FLUID_CHILD_NICE=0, as Bash does.
+            flags = priority_creationflags()
+            if flags:
+                spawn_kwargs["creationflags"] = flags
         process = await asyncio.create_subprocess_exec(
             *resolve_shell().argv_prefix,
             command,
@@ -456,6 +462,9 @@ class CliHost:
             env=dict(os.environ, NO_COLOR="1", FORCE_COLOR="0"),
             **spawn_kwargs,
         )
+        # POSIX: the new process group runs below the host's priority so a
+        # monitored test run cannot starve the host's event loop.
+        lower_process_group_priority(process.pid)
         serves = bool(input.get("serves"))
         worker = Worker(
             task_id=new_id("mon"),

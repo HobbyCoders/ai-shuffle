@@ -39,6 +39,10 @@ _IS_WINDOWS = sys.platform == "win32"
 #: ``CREATE_NEW_PROCESS_GROUP`` — only defined in ``subprocess`` on Windows.
 _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 
+#: ``BELOW_NORMAL_PRIORITY_CLASS`` — likewise Windows-only; child processes
+#: inherit it.
+_BELOW_NORMAL_PRIORITY_CLASS = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+
 #: How long a graceful signal gets before the forceful escalation.
 DEFAULT_GRACE_S = 5.0
 
@@ -65,10 +69,41 @@ def spawn_kwargs() -> Dict[str, Any]:
     stop a console app on Windows understands — and, just as importantly, it
     keeps any console signal aimed at that group from travelling back up into
     the server process that spawned it.
+
+    Windows also gets ``BELOW_NORMAL_PRIORITY_CLASS`` unless
+    ``child_process_nice`` is 0; POSIX callers lower the priority with
+    :func:`lower_priority` right after the spawn instead.
     """
     if _IS_WINDOWS:
-        return {"creationflags": _CREATE_NEW_PROCESS_GROUP}
+        flags = _CREATE_NEW_PROCESS_GROUP
+        if child_nice() > 0:
+            flags |= _BELOW_NORMAL_PRIORITY_CLASS
+        return {"creationflags": flags}
     return {"start_new_session": True}
+
+
+def child_nice() -> int:
+    """The ``child_process_nice`` setting as a nice increment; 0 means off."""
+    from app.core.config import settings  # noqa: PLC0415 — keep this module import-light
+    from fluid.tools.priority import parse_child_nice  # noqa: PLC0415
+
+    return parse_child_nice(getattr(settings, "child_process_nice", None))
+
+
+def lower_priority(proc: Any) -> None:
+    """Run a shell spawned with :func:`spawn_kwargs` below the server's priority.
+
+    POSIX only: sets the nice value of the child's whole process group (its
+    pgid is its pid because of ``start_new_session``) to the server's own nice
+    plus ``child_process_nice``, so the shell and everything it forks later
+    yield the CPU to the server's event loop. Windows got its priority class
+    from :func:`spawn_kwargs` (``os.setpriority`` does not exist there, so this
+    is a no-op). Never raises; a child that already exited is logged at debug
+    level.
+    """
+    from fluid.tools.priority import lower_process_group_priority  # noqa: PLC0415
+
+    lower_process_group_priority(getattr(proc, "pid", None), child_nice())
 
 
 def child_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:

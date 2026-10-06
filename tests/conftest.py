@@ -783,3 +783,21 @@ def async_twin(sync_double):
         return sync_double(*args, **kwargs)
 
     return _twin
+
+
+# ─── One ``pytest -n`` run per machine ─────────────────────────────────────
+# Parallel runs from several agent sessions have saturated the shared worker
+# host. The xdist controller waits for a machine-wide file lock before its
+# workers start; see tests/_xdist_gate.py. Off on CI, without -n, and with
+# AI_SHUFFLE_PYTEST_GATE=0.
+
+def pytest_configure(config):
+    from tests import _xdist_gate
+
+    _xdist_gate.configure(config)
+
+
+def pytest_unconfigure(config):
+    from tests import _xdist_gate
+
+    _xdist_gate.unconfigure(config)

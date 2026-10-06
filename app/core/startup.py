@@ -201,8 +201,23 @@ def _adopt_orphaned_instance_data() -> None:
         logger.warning(f"Orphaned instance data adoption failed (non-fatal): {e}")
 
 
+def propagate_child_priority() -> None:
+    """Make ``child_process_nice`` govern fluid's Bash as well as Monitor.
+
+    fluid's Bash runs in this process and reads ``FLUID_CHILD_NICE`` from the
+    environment on each spawn, so the setting is copied there. The app's
+    value replaces one an operator put in ``FLUID_CHILD_NICE`` directly, so
+    both tools always use the same priority.
+    """
+    from app.core.process_tree import child_nice
+    from fluid.tools.priority import CHILD_NICE_ENV
+
+    os.environ[CHILD_NICE_ENV] = str(child_nice())
+
+
 def init_core() -> None:
     """Phase 1: Initialize core infrastructure (directories, database, encryption)."""
+    propagate_child_priority()
     _reject_legacy_sqlite()
     ensure_directories()
 

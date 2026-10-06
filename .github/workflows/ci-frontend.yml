@@ -1,11 +1,13 @@
 name: CI JavaScript
 run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '4' }} vCPU)"
 
-# One runner checks only the JavaScript packages changed by a PR. Manual runs
-# check all three packages. The mobile UI (mobile/) compiles
-# frontend/src/lib, so its own job runs for either package. A PR that changes only docs/content gets
-# the two cheap docs checks (the two docs copies match, and the website's
-# rendered docs.json is current) and nothing else.
+# One job on one runner checks only the JavaScript packages changed by a PR;
+# manual runs check all of them. The mobile UI (mobile/) compiles
+# frontend/src/lib, so its checks run when either mobile/ or frontend/
+# changes, after the frontend checks and on the same frontend/node_modules.
+# A PR that changes only docs/content gets the two cheap docs checks (the two
+# docs copies match, and the website's rendered docs.json is current) and
+# nothing else.
 #
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
@@ -39,7 +41,7 @@ concurrency:
 jobs:
   frontend:
     name: JavaScript package checks
-    # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
+    # Cap well below the 6-hour default (paid runners).
     timeout-minutes: 20
     # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
     runs-on: ${{ inputs.runner_cpus == '2' && 'blacksmith-2vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
@@ -58,6 +60,10 @@ jobs:
             frontend:
               - 'frontend/**'
               - 'app/contract/schema/**'
+              - '.github/workflows/ci-frontend.yml'
+            mobile:
+              - 'mobile/**'
+              - 'frontend/**'
               - '.github/workflows/ci-frontend.yml'
             tools:
               - 'tools/**'
@@ -90,11 +96,16 @@ jobs:
             browser-mcp/package-lock.json
             android/site/package-lock.json
 
+      # mobile/ has no lockfile of its own: it links ../frontend/node_modules,
+      # so a mobile-only PR installs the frontend dependencies too.
       - name: Install dependencies
-        if: github.event_name != 'pull_request' || steps.changes.outputs.frontend == 'true'
+        if: github.event_name != 'pull_request' || steps.changes.outputs.frontend == 'true' || steps.changes.outputs.mobile == 'true'
         run: npm ci
 
+      # postbuild also builds mobile/ into build/mobile
+      # (scripts/build-mobile-ui.mjs), which runs mobile's own postbuild check.
       - name: Build
+        id: build
         if: github.event_name != 'pull_request' || steps.changes.outputs.frontend == 'true'
         run: npm run build
 
@@ -105,6 +116,38 @@ jobs:
       - name: Frontend tests and contract consistency
         if: github.event_name != 'pull_request' || steps.changes.outputs.frontend == 'true'
         run: npm test && npm run contract:check && npm audit --audit-level=high
+
+      # mobile/ is the phone UI every worker serves at /mobile/; the Android
+      # and iOS apps load it from the paired worker (the APK keeps one copy
+      # only for its offline demo). It compiles the same frontend/src/lib with
+      # its own shell, so a frontend change can break its type check, tests or
+      # build, and android.yml and ios.yml do not start for frontend/** or
+      # mobile/**. `npm run deps` links mobile/node_modules to the
+      # frontend/node_modules installed above; it is a no-op when the frontend
+      # build already linked it.
+      - name: Link mobile dependencies
+        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
+        working-directory: mobile
+        run: npm run deps
+
+      - name: Mobile Svelte type-check
+        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
+        working-directory: mobile
+        run: npm run check
+
+      - name: Mobile tests
+        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
+        working-directory: mobile
+        run: npx vitest run
+
+      # The frontend Build step above already built mobile/ when it ran, so
+      # this runs only on a PR that changes mobile/ but not frontend/.
+      # postbuild (scripts/check-build.mjs) fails if a build-time constant such
+      # as __APP_VERSION__ was left unreplaced in the bundle.
+      - name: Mobile build
+        if: (github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true') && steps.build.outcome == 'skipped'
+        working-directory: mobile
+        run: npm run build
 
       - name: Build AI tools from source
         if: github.event_name != 'pull_request' || steps.changes.outputs.tools == 'true'
@@ -140,54 +183,3 @@ jobs:
         if: github.event_name != 'pull_request' || steps.changes.outputs.docs == 'true'
         working-directory: android/site
         run: npm ci && node scripts/render-docs.mjs --check
-
-  # mobile/ is the UI bundled into the Android app. It compiles the same
-  # frontend/src/lib with its own shell, so a frontend change can break its
-  # type check, tests or build; android.yml does not start for frontend/**.
-  mobile:
-    name: Mobile UI checks
-    timeout-minutes: 20
-    runs-on: ${{ inputs.runner_cpus == '2' && 'blacksmith-2vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
-    defaults:
-      run:
-        working-directory: mobile
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: changes
-        with:
-          filters: |
-            mobile:
-              - 'mobile/**'
-              - 'frontend/**'
-              - '.github/workflows/ci-frontend.yml'
-
-      - name: Set up Node 22
-        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: frontend/package-lock.json
-
-      # mobile/ has no lockfile of its own: it links ../frontend/node_modules.
-      - name: Install dependencies
-        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
-        run: (cd ../frontend && npm ci) && npm run deps
-
-      - name: Svelte type-check
-        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
-        run: npm run check
-
-      - name: Mobile tests
-        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
-        run: npx vitest run
-
-      # postbuild (scripts/check-build.mjs) fails if a build-time constant such
-      # as __APP_VERSION__ was left unreplaced in the bundle.
-      - name: Build
-        if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
-        run: npm run build
