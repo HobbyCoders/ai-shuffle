@@ -3020,10 +3020,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     self._turn_peer_ids.discard(op.id)
             return
         if peers:
+            # A user steer names the tool result it rode on: the CLI keeps the
+            # text as a hook attachment and never echoes it on stream-json, so
+            # this receipt is the only record that places it in the transcript.
+            tool_use_id = request.tool_use_id or request.input.get("tool_use_id")
             await self._emit(SteerDelivered(
                 session_id=self.session_id, turn_id=self._active_turn_id,
                 steers=[
-                    {"id": op.id, "text": op.text} if isinstance(op, Steer)
+                    {"id": op.id, "text": op.text, "tool_use_id": tool_use_id}
+                    if isinstance(op, Steer)
                     else {"id": op.id, "text": op.text, "from": op.sender}
                     for op in peers
                 ],

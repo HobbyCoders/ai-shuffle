@@ -258,7 +258,10 @@ class SteerDelivered(Event):
     ``AgentMessage``, which shares this queue and this receipt, carries an
     extra ``"from"`` naming the sender; a ``Steer`` submitted with a non-default
     ``origin`` (a harness notice) carries ``"origin"`` instead. Neither key on a
-    record marks the user's own words.
+    record marks the user's own words. A user steer the delegated engine
+    carried on a PostToolUse hook answer also names that tool's
+    ``"tool_use_id"``: the CLI never echoes hook text, so transcript readers
+    place the steer from this receipt.
 
     A host with a durable queue retires an entry the moment its id shows up
     here. An id that never arrives was never seen by the model: the engine

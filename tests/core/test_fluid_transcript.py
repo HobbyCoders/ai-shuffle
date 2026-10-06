@@ -475,6 +475,248 @@ def test_steers_never_shift_the_rewind_checkpoints(mock_db):
     ]
 
 
+def _seed_delegated(session_id="ses_delegated", result_text="file body"):
+    """A delegated (Claude CLI) turn: the steer rode a hook answer, so the
+    tool result node carries no record of it — only the event log does."""
+    _insert(session_id, [
+        ("n1", None, _user("first prompt")),
+        ("n2", "n1", fluid_message("assistant", [{
+            "kind": "tooluseblock", "id": "t1", "name": "Bash",
+            "input": {"command": "sleep 45"},
+        }])),
+        ("n3", "n2", fluid_message("user", [{
+            "kind": "toolresultblock", "tool_use_id": "t1",
+            "content": [{"kind": "text", "text": result_text}],
+            "is_error": False,
+            "delivered_steers": [],
+            "delivery_metadata_version": 0,
+        }])),
+        ("n4", "n3", _assistant("finished STEERED")),
+        ("n5", "n4", _user("second prompt")),
+        ("n6", "n5", _assistant("second reply")),
+    ])
+    return session_id
+
+
+def _steer_receipt(steers, turn_id="t1", ts=1001.5, node_id=None):
+    return _evt("SteerDelivered", turn_id=turn_id, ts=ts, node_id=node_id, steers=steers)
+
+
+def _user_contents(session_id):
+    messages, _usage = fluid_live_messages(session_id, "/workspace")
+    return [m for m in messages if m["role"] == "user"]
+
+
+def _assert_after_tool_before_reply(session_id, text, reply="finished STEERED"):
+    messages, _usage = fluid_live_messages(session_id, "/workspace")
+    position = [i for i, m in enumerate(messages) if m.get("content") == text]
+    assert len(position) == 1, "the steer must appear exactly once"
+    tool = [i for i, m in enumerate(messages) if m["type"] == "tool_use"]
+    answer = [i for i, m in enumerate(messages) if m.get("content") == reply]
+    assert tool[0] < position[0] < answer[0]
+
+
+def test_delegated_steer_named_by_its_receipt_is_read_back(mock_db):
+    """The hook lane's receipt names the tool result the steer rode on."""
+    session_id = _seed_delegated()
+    _insert_events(session_id, [
+        _evt("TurnStarted", node_id="n1"),
+        _steer_receipt([{"id": "q1", "text": "end with STEERED", "tool_use_id": "t1"}]),
+        _evt("ToolResult", tool_use_id="t1"),
+    ])
+
+    users = _user_contents(session_id)
+    assert [m["content"] for m in users] == [
+        "first prompt", "end with STEERED", "second prompt",
+    ]
+    assert [m["checkpoint_backed"] for m in users] == [True, False, True]
+    _assert_after_tool_before_reply(session_id, "end with STEERED")
+    # Not a checkpoint, and the node-aligned entries keep their positions.
+    assert len(fluid_transcript_entries(session_id, include_inner_calls=False)) == len(
+        load_fluid_path(session_id)
+    )
+    assert [cp.uuid for cp in get_fluid_checkpoints(session_id) if cp.role == "user"] == [
+        "n1", "n5",
+    ]
+
+
+def test_delegated_steer_from_before_receipts_named_a_tool(mock_db):
+    """The live-tested shape: a receipt with only id and text, logged just
+    before the ToolResult it rode on (the hook answer precedes the result)."""
+    session_id = _seed_delegated()
+    _insert_events(session_id, [
+        _evt("TurnStarted", node_id="n1"),
+        _evt("ToolUse", tool_use_id="t1", name="Bash", input={}),
+        _steer_receipt([{"id": "q1", "text": "end with STEERED"}]),
+        _evt("ToolResult", tool_use_id="t1"),
+        _evt("TurnComplete", node_id="n4"),
+    ])
+
+    _assert_after_tool_before_reply(session_id, "end with STEERED")
+
+
+def test_steer_recorded_on_the_node_and_in_the_log_shows_once(mock_db):
+    """A native turn writes both records; the read must not double it."""
+    session_id = _seed_steered()
+    _insert_events(session_id, [
+        _evt("TurnStarted", node_id="n1"),
+        _evt("ToolResult", tool_use_id="t1"),
+        _steer_receipt([{"id": "s1", "text": "also end with STEERED"}]),
+    ])
+
+    assert [m["content"] for m in _user_contents(session_id)] == [
+        "first prompt", "also end with STEERED", "second prompt",
+    ]
+
+
+def test_steer_without_an_id_is_matched_by_text_against_the_node(mock_db):
+    session_id = "ses_steer_noid"
+    _insert(session_id, [
+        ("n1", None, _user("first prompt")),
+        ("n2", "n1", fluid_message("assistant", [{
+            "kind": "tooluseblock", "id": "t1", "name": "Read", "input": {},
+        }])),
+        ("n3", "n2", _steered_result([
+            {"text": "same words", "origin": "user", "sender": None, "id": None},
+        ])),
+        ("n4", "n3", _assistant("done")),
+    ])
+    _insert_events(session_id, [
+        _evt("TurnStarted", node_id="n1"),
+        _evt("ToolResult", tool_use_id="t1"),
+        _steer_receipt([{"id": None, "text": "same words"}]),
+        _steer_receipt([{"id": None, "text": "same words"}]),
+    ])
+
+    # One node record absorbs one receipt; the second receipt was a second
+    # steer with the same words and is shown too.
+    assert [m["content"] for m in _user_contents(session_id)] == [
+        "first prompt", "same words", "same words",
+    ]
+
+
+def test_peer_and_harness_receipts_are_not_user_messages(mock_db):
+    session_id = _seed_delegated()
+    _insert_events(session_id, [
+        _evt("TurnStarted", node_id="n1"),
+        _steer_receipt([
+            {"id": "p1", "text": "peer says hi", "from": "worker-a"},
+            {"id": "h1", "text": "task finished", "origin": "system"},
+        ]),
+        _evt("ToolResult", tool_use_id="t1"),
+    ])
+
+    assert [m["content"] for m in _user_contents(session_id)] == [
+        "first prompt", "second prompt",
+    ]
+
+
+def test_receipt_for_a_peer_delivered_as_its_own_node_is_skipped(mock_db):
+    """A receipt whose node is on the path is already an entry of its own."""
+    session_id = _seed_delegated()
+    _insert_events(session_id, [
+        _steer_receipt([{"id": "q9", "text": "second prompt"}], node_id="n5"),
+    ])
+
+    assert [m["content"] for m in _user_contents(session_id)] == [
+        "first prompt", "second prompt",
+    ]
+
+
+def test_steer_on_a_rewound_tool_result_is_not_shown(mock_db):
+    session_id = _seed_delegated()
+    _insert_events(session_id, [
+        _evt("TurnStarted", node_id="n1"),
+        _steer_receipt([{"id": "q1", "text": "gone", "tool_use_id": "t_off_path"}]),
+        _steer_receipt([{"id": "q2", "text": "also gone"}], turn_id="t_off_path"),
+    ])
+
+    assert [m["content"] for m in _user_contents(session_id)] == [
+        "first prompt", "second prompt",
+    ]
+
+
+def test_steer_in_a_turn_without_tool_calls_follows_its_time(mock_db):
+    """A stdin steer in a turn with no tool result goes after the last node
+    of that turn written before it (node ts are 1000.0 + index)."""
+    session_id = "ses_steer_notool"
+    _insert(session_id, [
+        ("n1", None, _user("first prompt")),
+        ("n2", "n1", _assistant("first reply")),
+        ("n3", "n2", _user("second prompt")),
+        ("n4", "n3", _assistant("second reply")),
+    ])
+    _insert_events(session_id, [
+        _evt("TurnStarted", node_id="n1"),
+        _steer_receipt([{"id": "q1", "text": "late words"}], ts=1001.5),
+        _evt("TurnStarted", node_id="n3", turn_id="t2"),
+    ])
+
+    messages, _usage = fluid_live_messages(session_id, "/workspace")
+    order = [m["content"] for m in messages if m["type"] in (None, "text")]
+    assert order == ["first prompt", "first reply", "late words",
+                     "second prompt", "second reply"]
+
+
+def test_old_native_steer_is_placed_by_its_inline_marker(mock_db):
+    """A native turn from before nodes recorded ``delivered_steers`` still
+    shows the interjection inside the tool output that carried it."""
+    session_id = "ses_steer_inline"
+    marked = "out\n\n[user interjection]\nuse staging\n[/user interjection]"
+    _insert(session_id, [
+        ("n1", None, _user("first prompt")),
+        ("n2", "n1", fluid_message("assistant", [
+            {"kind": "tooluseblock", "id": "t1", "name": "Read", "input": {}},
+            {"kind": "tooluseblock", "id": "t2", "name": "Read", "input": {}},
+        ])),
+        ("n3", "n2", fluid_message("user", [
+            {"kind": "toolresultblock", "tool_use_id": "t1",
+             "content": [{"kind": "text", "text": "plain"}], "is_error": False,
+             "delivered_steers": [], "delivery_metadata_version": 0},
+        ])),
+        ("n4", "n3", _assistant("between")),
+        ("n5", "n4", fluid_message("user", [
+            {"kind": "toolresultblock", "tool_use_id": "t2",
+             "content": [{"kind": "text", "text": marked}], "is_error": False,
+             "delivered_steers": [], "delivery_metadata_version": 0},
+        ])),
+        ("n6", "n5", _assistant("done")),
+    ])
+    _insert_events(session_id, [
+        _evt("TurnStarted", node_id="n1"),
+        _steer_receipt([{"id": "q1", "text": "use staging"}]),
+        _evt("ToolResult", tool_use_id="t1"),
+        _evt("ToolResult", tool_use_id="t2"),
+    ])
+
+    entries = fluid_transcript_entries(session_id, include_inner_calls=True)
+    steer = [e for e in entries if e.get("fluidSteer")]
+    assert len(steer) == 1
+    assert steer[0]["parentUuid"] == "n5"
+
+
+def test_export_entries_carry_the_delegated_steer(mock_db):
+    session_id = _seed_delegated()
+    _insert_events(session_id, [
+        _evt("TurnStarted", node_id="n1"),
+        _steer_receipt([{"id": "q1", "text": "end with STEERED", "tool_use_id": "t1"}]),
+    ])
+
+    entries = fluid_transcript_entries(session_id, include_inner_calls=True)
+    steers = [e for e in entries if e.get("fluidSteer")]
+    assert [s["message"]["content"][0]["text"] for s in steers] == ["end with STEERED"]
+    assert steers[0]["parentUuid"] == "n3"
+
+
+def test_steer_close_marker_matches_fluid():
+    pytest.importorskip("fluid")
+    from fluid.context.steering import STEER_CLOSE
+
+    from app.core.provider.fluid_transcript import _STEER_CLOSE
+
+    assert _STEER_CLOSE == STEER_CLOSE
+
+
 def test_live_messages_empty_for_unknown_session(mock_db):
     assert fluid_live_messages("ses_missing") == ([], {})
 

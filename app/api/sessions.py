@@ -9,6 +9,7 @@ This module was split for maintainability. Sub-modules:
 """
 
 import asyncio
+import uuid
 from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, Response, status, Request
@@ -1423,6 +1424,17 @@ async def update_workspace_folders(
     return {"workspace_project_ids": ids}
 
 
+def _is_cli_session_id(sdk_sid: Optional[str]) -> bool:
+    """True when ``sdk_sid`` can name a Claude CLI transcript (a UUID)."""
+    if not isinstance(sdk_sid, str) or not sdk_sid:
+        return False
+    try:
+        uuid.UUID(sdk_sid)
+    except ValueError:
+        return False
+    return True
+
+
 @router.patch("/{session_id}")
 async def update_session(
     request: Request,
@@ -1434,9 +1446,11 @@ async def update_session(
     """Update session title or status. API users can only modify their accessible sessions."""
     existing = await require_session(request, session_id)
 
-    # Sync title rename to Claude SDK session if available
+    # Sync title rename to Claude SDK session if available. Only a Claude CLI
+    # conversation id (a UUID) names a transcript the CLI owns; a fluid
+    # session's ``ses_...`` id never does, so there is nothing to rename there.
     sdk_sid = existing.get("sdk_session_id")
-    if title and sdk_sid:
+    if title and _is_cli_session_id(sdk_sid):
         try:
             sdk_rename_session(session_id=sdk_sid, title=title)
             logger.debug(f"Renamed SDK session {sdk_sid} to '{title}'")

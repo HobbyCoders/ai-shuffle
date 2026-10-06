@@ -661,7 +661,7 @@ def fluid_transcript_entries(
     entries = [_node_to_entry(node, sdk_session_id) for node in nodes]
     if not include_inner_calls:
         return entries
-    entries = _splice_delivered_steers(entries, nodes)
+    entries = _splice_delivered_steers(entries, nodes, sdk_session_id)
     return _splice_compaction_cards(
         _splice_inner_calls(entries, sdk_session_id), sdk_session_id
     )
@@ -675,37 +675,210 @@ def fluid_transcript_entries(
 # the user typed while a turn ran, although the event log (and the live chat)
 # showed it. The read-only renderers get each user steer back as its own user
 # entry, right after the tool result that carried it.
+#
+# The delegated (Claude CLI) engine leaves no such record on its nodes: the
+# steer rides a PostToolUse hook answer as ``additionalContext``, which the CLI
+# keeps as a ``hook_additional_context`` attachment in its own transcript and
+# never echoes on stream-json, so the tool result node fluid stores holds only
+# the tool's output. Its only durable trace in fluid is the ``SteerDelivered``
+# receipt in the event log, so the splice reads those receipts as well and
+# places each one the nodes do not already account for.
 
 #: Marks a spliced steer entry. Not a rewind checkpoint: it has no node.
 STEER_ENTRY_FLAG = "fluidSteer"
 
+#: ``fluid.context.steering.STEER_CLOSE``: the marker a native tool result
+#: closes a user's interjection with. Copied, not imported (this module never
+#: imports fluid); ``tests/core/test_fluid_transcript.py`` pins the two.
+_STEER_CLOSE = "[/user interjection]"
+
+
+def _is_user_steer(steer: Any) -> bool:
+    """True for a delivery record of the user's own words.
+
+    A peer agent's message (``sender`` on a node record, ``from`` on a
+    receipt) and a harness notice (``origin`` other than ``user``) share the
+    delivery queue but were never typed by the user, and the event log does
+    not show them as user messages.
+    """
+    return (
+        isinstance(steer, dict)
+        and (steer.get("origin") or "user") == "user"
+        and steer.get("sender") is None
+        and steer.get("from") is None
+        and isinstance(steer.get("text"), str)
+        and bool(steer["text"].strip())
+    )
+
+
+def _tool_result_blocks(node: Dict[str, Any]) -> List[Dict[str, Any]]:
+    blocks = _as_dict(node.get("message")).get("content") or []
+    return [
+        b for b in blocks
+        if isinstance(b, dict) and b.get("kind") == "toolresultblock"
+    ]
+
+
+def _steer_anchor_rows(sdk_session_id: str) -> List[Dict[str, Any]]:
+    """``ToolResult`` and ``TurnStarted`` rows reduced to the fields the steer
+    placement needs. Extracted in SQL: a tool result's output can be large and
+    a long session logs thousands of them."""
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            "SELECT seq, event ->> '_cls' AS cls, event ->> 'turn_id' AS turn_id, "
+            "event ->> 'tool_use_id' AS tool_use_id, event ->> 'node_id' AS node_id "
+            f"FROM fluid_session_events WHERE session_id = {ph()} "
+            "AND event ->> '_cls' IN ('ToolResult', 'TurnStarted') ORDER BY seq",
+            (sdk_session_id,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def _logged_steers(
+    sdk_session_id: str,
+    nodes: Sequence[Dict[str, Any]],
+    recorded_ids: set,
+    recorded_texts: Dict[str, int],
+) -> List[Tuple[int, str]]:
+    """``(node index, text)`` for each user steer whose only record is its
+    ``SteerDelivered`` receipt, in delivery order.
+
+    A receipt the nodes already account for is skipped, so a steer is never
+    shown twice: matched by id, or by text when the steer has no id. The
+    steer goes after the node holding the tool result it joined the turn on:
+
+    1. the ``tool_use_id`` the receipt names (the delegated engine's hook lane);
+    2. otherwise a tool result of the same turn whose text carries the steer
+       in the user's interjection marker (a native turn written before nodes
+       recorded ``delivered_steers``);
+    3. otherwise the turn's first tool result logged after the receipt (the
+       hook answer is written, and receipted, before the CLI emits the result
+       it rides on; a stdin frame joins at the next tool boundary), else its
+       last one before it (a stdin frame that found no later tool call);
+    4. otherwise, for a turn with no tool result on the path, the last node of
+       that turn written before the receipt.
+
+    A receipt whose tool result or turn is not on the path (rewound away, or
+    past a fork point) is not shown: that steer is no longer part of this
+    transcript.
+    """
+    pending: List[Tuple[int, Dict[str, Any], Dict[str, Any]]] = []
+    node_index = {node.get("node_id"): i for i, node in enumerate(nodes)}
+    for row in _event_rows_of_class(sdk_session_id, ["SteerDelivered"]):
+        event = row["event"]
+        if event.get("node_id") and event["node_id"] in node_index:
+            continue  # delivered as a node of its own: already an entry
+        for steer in event.get("steers") or []:
+            if not _is_user_steer(steer):
+                continue
+            steer_id = steer.get("id")
+            if steer_id is not None:
+                if steer_id in recorded_ids:
+                    continue
+                recorded_ids.add(steer_id)
+            elif recorded_texts.get(steer["text"]):
+                recorded_texts[steer["text"]] -= 1
+                continue
+            pending.append((row["seq"] or 0, event, steer))
+    if not pending:
+        return []
+
+    result_index: Dict[str, int] = {}
+    result_text: Dict[str, str] = {}
+    for i, node in enumerate(nodes):
+        for block in _tool_result_blocks(node):
+            tool_use_id = block.get("tool_use_id")
+            if not tool_use_id:
+                continue
+            result_index[tool_use_id] = i
+            result_text[tool_use_id] = "".join(
+                part.get("text") or ""
+                for part in (block.get("content") or [])
+                if isinstance(part, dict)
+            )
+    turn_results: Dict[str, List[Tuple[int, str]]] = {}
+    turn_start: Dict[str, int] = {}
+    for row in _steer_anchor_rows(sdk_session_id):
+        turn = row.get("turn_id")
+        if not turn:
+            continue
+        if row.get("cls") == "ToolResult":
+            if row.get("tool_use_id") in result_index:
+                turn_results.setdefault(turn, []).append(
+                    (row.get("seq") or 0, row["tool_use_id"])
+                )
+        elif row.get("node_id") in node_index:
+            turn_start[turn] = node_index[row["node_id"]]
+
+    placed: List[Tuple[int, str]] = []
+    for seq, event, steer in pending:
+        text = steer["text"]
+        named = steer.get("tool_use_id")
+        if named:
+            if named in result_index:
+                placed.append((result_index[named], text))
+            continue  # its tool result is off the path, and so is the steer
+        turn = event.get("turn_id")
+        results = turn_results.get(turn, []) if turn else []
+        marked = f"{text}\n{_STEER_CLOSE}"
+        inline = [t for _, t in results if marked in result_text.get(t, "")]
+        later = [t for s, t in results if s > seq]
+        earlier = [t for s, t in results if s < seq]
+        chosen = (inline or later or earlier[-1:] or [None])[0]
+        anchor: Optional[int] = None
+        if chosen is not None:
+            anchor = result_index[chosen]
+        elif turn in turn_start:
+            anchor = turn_start[turn]
+            stamp = event.get("ts")
+            if isinstance(stamp, (int, float)) and stamp > 0:
+                for i in range(anchor + 1, len(nodes)):
+                    node_ts = nodes[i].get("ts")
+                    if not isinstance(node_ts, (int, float)) or node_ts > stamp:
+                        break
+                    anchor = i
+        if anchor is not None:
+            placed.append((anchor, text))
+    return placed
+
 
 def _splice_delivered_steers(
-    entries: List[Dict[str, Any]], nodes: Sequence[Dict[str, Any]]
+    entries: List[Dict[str, Any]],
+    nodes: Sequence[Dict[str, Any]],
+    sdk_session_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Insert a user entry for each steer a node's tool results delivered.
+    """Insert a user entry for each steer the user typed into a running turn.
 
-    ``entries`` must still be index-aligned with ``nodes``. Only the user's own
-    words come back: a peer agent's message (``sender``) and a harness notice
-    (``origin`` other than ``user``) share the delivery queue but were never
-    typed by the user, and the event log does not show them as user messages.
+    ``entries`` must still be index-aligned with ``nodes``. A native turn
+    records its steers on the tool result that carried them; a steer only the
+    event log knows about (the delegated engine's) is placed by
+    :func:`_logged_steers` when ``sdk_session_id`` is given.
     """
+    steers_at: List[List[str]] = [[] for _ in nodes]
+    recorded_ids: set = set()
+    recorded_texts: Dict[str, int] = {}
+    for i, node in enumerate(nodes):
+        for block in _tool_result_blocks(node):
+            for steer in block.get("delivered_steers") or []:
+                if not _is_user_steer(steer):
+                    continue
+                steers_at[i].append(steer["text"])
+                if steer.get("id") is not None:
+                    recorded_ids.add(steer["id"])
+                else:
+                    recorded_texts[steer["text"]] = recorded_texts.get(steer["text"], 0) + 1
+    if sdk_session_id:
+        for i, text in _logged_steers(sdk_session_id, nodes, recorded_ids, recorded_texts):
+            steers_at[i].append(text)
+
     out: List[Dict[str, Any]] = []
-    for entry, node in zip(entries, nodes):
+    for entry, steers in zip(entries, steers_at):
         out.append(entry)
-        blocks = _as_dict(node.get("message")).get("content") or []
-        steers = [
-            steer
-            for block in blocks
-            if isinstance(block, dict) and block.get("kind") == "toolresultblock"
-            for steer in (block.get("delivered_steers") or [])
-            if isinstance(steer, dict)
-            and (steer.get("origin") or "user") == "user"
-            and steer.get("sender") is None
-            and isinstance(steer.get("text"), str)
-            and steer["text"].strip()
-        ]
-        for index, steer in enumerate(steers):
+        for index, text in enumerate(steers):
             out.append({
                 "uuid": f"{entry.get('uuid')}_steer_{index}",
                 "parentUuid": entry.get("uuid"),
@@ -714,7 +887,7 @@ def _splice_delivered_steers(
                 "sessionId": entry.get("sessionId"),
                 "message": {
                     "role": "user",
-                    "content": [{"type": "text", "text": steer["text"]}],
+                    "content": [{"type": "text", "text": text}],
                 },
                 STEER_ENTRY_FLAG: True,
             })

@@ -754,7 +754,16 @@ async def test_user_steer_rides_the_next_tool_boundary_instead_of_a_stdin_frame(
     assert len(_user_frames(frames)) == 1
     receipts = [e for e in events if isinstance(e, SteerDelivered)]
     assert len(receipts) == 1
-    assert receipts[0].steers == [{"id": "q1", "text": "use the staging config"}]
+    # The receipt names the tool result the steer rode on: the CLI never
+    # echoes hook text, so this is what places the steer in the transcript.
+    # That result is emitted after the hook answer, i.e. after the receipt.
+    assert receipts[0].steers == [
+        {"id": "q1", "text": "use the staging config", "tool_use_id": "toolu_peer_1"},
+    ]
+    carrier = next(
+        e for e in events if isinstance(e, ToolResult) and e.tool_use_id == "toolu_peer_1"
+    )
+    assert receipts[0].seq < carrier.seq
     complete = next(e for e in events if isinstance(e, TurnComplete))
     assert receipts[0].seq < complete.seq
     assert receipts[0].turn_id == complete.turn_id
@@ -786,7 +795,7 @@ async def test_user_steer_and_peer_share_one_boundary_in_arrival_order() -> None
     receipts = [e for e in events if isinstance(e, SteerDelivered)]
     assert [r.steers for r in receipts] == [[
         {"id": "peer-1", "text": "peer first", "from": "reviewer"},
-        {"id": "q1", "text": "user second"},
+        {"id": "q1", "text": "user second", "tool_use_id": "toolu_peer_1"},
     ]]
 
 

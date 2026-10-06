@@ -1225,6 +1225,46 @@ class TestUpdateSession:
         assert kwargs["updates"] == {"title": "New Title"}
         assert kwargs["source_device_id"] is None
 
+    def test_rename_of_a_fluid_session_skips_the_cli_rename_quietly(
+        self, client, mock_database, sample_session, monkeypatch, caplog
+    ):
+        """A ``ses_...`` id names no Claude CLI transcript: no CLI rename, no warning."""
+        import logging
+        from unittest.mock import MagicMock
+        import app.api.sessions as sessions_api
+
+        cli_rename = MagicMock()
+        monkeypatch.setattr(sessions_api, "sdk_rename_session", cli_rename)
+        session = {**sample_session, "sdk_session_id": "ses_6991f569d95f"}
+        mock_database.get_session.return_value = session
+        mock_database.update_session.return_value = {**session, "title": "New Title"}
+
+        with caplog.at_level(logging.WARNING, logger="app.api.sessions"):
+            response = client.patch("/api/v1/sessions/test-session-id?title=New%20Title")
+
+        assert response.status_code == 200
+        assert mock_database.update_session.call_args[1]["title"] == "New Title"
+        cli_rename.assert_not_called()
+        assert not [r for r in caplog.records if "rename SDK session" in r.getMessage()]
+
+    def test_rename_of_a_cli_session_renames_its_transcript(
+        self, client, mock_database, sample_session, monkeypatch
+    ):
+        from unittest.mock import MagicMock
+        import app.api.sessions as sessions_api
+
+        cli_rename = MagicMock()
+        monkeypatch.setattr(sessions_api, "sdk_rename_session", cli_rename)
+        cli_id = "912334ed-08c2-4645-85bc-3f6240265a09"
+        session = {**sample_session, "sdk_session_id": cli_id}
+        mock_database.get_session.return_value = session
+        mock_database.update_session.return_value = {**session, "title": "New Title"}
+
+        response = client.patch("/api/v1/sessions/test-session-id?title=New%20Title")
+
+        assert response.status_code == 200
+        cli_rename.assert_called_once_with(session_id=cli_id, title="New Title")
+
     def test_rename_survives_a_failed_broadcast(self, client, mock_database, sample_session, monkeypatch):
         from unittest.mock import AsyncMock
         from app.core.sync_engine import sync_engine
