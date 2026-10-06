@@ -28,7 +28,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 
 from psycopg2.extras import Json
 
-from app.core import api_user_scope
+from app.core import api_user_scope, artifact_access
 from app.db.async_database import run_sync
 from app.db.base import get_db
 
@@ -326,6 +326,17 @@ def _roots_for(cur, session_ids: List[str]) -> Dict[str, str]:
     }
 
 
+def _first_readable(items: List[Any], reader: Dict[str, Any], cap: int, *, key) -> List[Any]:
+    """The first ``cap`` of ``items`` (in order) whose chat ``reader`` may read."""
+    kept: List[Any] = []
+    for item in items:
+        if len(kept) >= cap:
+            break
+        if artifact_access.readable_store_ids([key(item)], reader):
+            kept.append(item)
+    return kept
+
+
 def _search_sync(
     terms: List[str], limit: int, exclude_session_id: Optional[str]
 ) -> List[SessionSearchHit]:
@@ -396,6 +407,12 @@ def _search_sync(
         if slot["score"] > 0
     ]
     hits.sort(key=lambda h: (-h.score, -h.last_ts))
+    # A chat a member's device started recalls only what that device may
+    # read over REST (#1897). Checked best-first, so only the hits that make
+    # the cut cost a lookup.
+    reader = artifact_access.chat_reader(exclude_session_id)
+    if reader is not None:
+        hits = _first_readable(hits, reader, _SEARCH_SESSION_CAP, key=lambda h: h.session_id)
     hits = hits[:_SEARCH_SESSION_CAP]
     if hits:
         with get_db() as conn:
@@ -419,6 +436,10 @@ def _search_sync(
 # store the session actually wrote.
 
 _RECENT_LIMIT_CAP = 25
+# A member's chat lists what its device may read, so its listing pages
+# through newer chats it may not; bounded so a long history stays cheap.
+_READER_PAGE = 50
+_READER_SCAN_CAP = 500
 _PREVIEW_SCAN_ROWS = 25       # newest transcript rows scanned for a preview
 _PREVIEW_CHARS = 120
 _TOOL_LINE_CAP = 200
@@ -582,27 +603,45 @@ def _recent_sync(
 ) -> List[SessionSummary]:
     limit = max(1, min(int(limit), _RECENT_LIMIT_CAP))
     api_user_id = api_user_scope.viewer_api_user_id(exclude_session_id)
+    # A chat a member's device started lists only what that device may read
+    # over REST (#1897); the rule needs the whole row.
+    reader = artifact_access.chat_reader(exclude_session_id)
+    sql = (
+        f"SELECT {'*' if reader is not None else 'sdk_session_id, title, updated_at'} "
+        "FROM sessions "
+        "WHERE sdk_session_id IS NOT NULL "
+        "AND COALESCE(hidden, FALSE) = FALSE "
+        "AND status NOT IN ('archived', 'failed')"
+    )
+    params: List[Any] = []
+    if project_id is not None:
+        sql += " AND project_id = %s"
+        params.append(project_id)
+    if api_user_id:
+        # (Workers are hidden, so the column alone is the key's listing.)
+        sql += " AND api_user_id = %s"
+        params.append(api_user_id)
+    if exclude_session_id:
+        sql += " AND sdk_session_id != %s"
+        params.append(exclude_session_id)
+    sql += " ORDER BY updated_at DESC LIMIT %s OFFSET %s"
+    rows: List[Dict[str, Any]] = []
+    page = limit if reader is None else _READER_PAGE
+    offset = 0
+    while True:
+        with get_db() as conn:
+            cur = conn.cursor()
+            cur.execute(sql, params + [page, offset])
+            batch = [dict(r) for r in cur.fetchall()]
+        rows += [r for r in batch
+                 if artifact_access.chat_reader_may_read(reader, r)]
+        offset += page
+        if (reader is None or len(rows) >= limit or len(batch) < page
+                or offset >= _READER_SCAN_CAP):
+            break
+    rows = rows[:limit]
     with get_db() as conn:
         cur = conn.cursor()
-        sql = (
-            "SELECT sdk_session_id, title, updated_at FROM sessions "
-            "WHERE sdk_session_id IS NOT NULL "
-            "AND COALESCE(hidden, FALSE) = FALSE "
-            "AND status NOT IN ('archived', 'failed')"
-        )
-        params: List[Any] = []
-        if project_id is not None:
-            sql += " AND project_id = %s"
-            params.append(project_id)
-        if api_user_id:
-            # (Workers are hidden, so the column alone is the key's listing.)
-            sql += " AND api_user_id = %s"
-            params.append(api_user_id)
-        if exclude_session_id:
-            sql += " AND sdk_session_id != %s"
-            params.append(exclude_session_id)
-        cur.execute(sql + " ORDER BY updated_at DESC LIMIT %s", params + [limit])
-        rows = [dict(r) for r in cur.fetchall()]
         roots = _roots_for(cur, [r["sdk_session_id"] for r in rows])
         out: List[SessionSummary] = []
         for row in rows:
@@ -627,6 +666,10 @@ def _slice_sync(
         [session_id], api_user_id
     ):
         return None  # another principal's session reads as unknown
+    # A member's device's chat opens only what that device may read (#1897).
+    reader = artifact_access.chat_reader(viewer_session_id)
+    if reader is not None and not artifact_access.readable_store_ids([session_id], reader):
+        return None
     with get_db() as conn:
         cur = conn.cursor()
         messages = _fluid_recall_rows(cur, session_id)

@@ -66,6 +66,105 @@ def paired_client_may_read(client, session):
     return _paired_client_allowed(client, session, session_provenance(session))
 
 
+_CHAT_PARENT_DEPTH = 8
+
+
+def _chat_provenance(session):
+    """:func:`session_provenance`, inherited from the parent chat by a subagent.
+
+    A worker (``is_worker``) a chat spawns has no account record of its own;
+    its transcript belongs to whoever owns the chat that spawned it.
+    """
+    for _ in range(_CHAT_PARENT_DEPTH):
+        if not session:
+            return None
+        provenance = session_provenance(session)
+        if provenance or not session.get('is_worker') or not session.get('parent_session_id'):
+            return provenance
+        session = sessions.get_session(session['parent_session_id'])
+    return None
+
+
+def _reader_owner_authority(provenance):
+    """Whether a paired principal holds this install's owner authority. Fails closed."""
+    from app.core.mobile_tool_identity import _owner_authority
+    try:
+        if provenance.get('principal_id'):
+            return bool(_owner_authority(provenance))
+        if provenance.get('account_id'):
+            # A synced label: the device is paired with another worker.
+            from app.core.preference_identity import local_owner_account
+            return provenance['account_id'] == local_owner_account()
+    except Exception:  # noqa: BLE001 - an unreadable account fails closed
+        return False
+    return False
+
+
+def chat_reader(session_id):
+    """The paired principal a chat's own recall tools read as (#1897), or None.
+
+    ``session_id`` is the calling chat (its app id or its transcript-store id).
+    A chat a paired controller started (an account member's phone or a direct
+    controller) reads past chats only as that device may over REST
+    (:func:`paired_client_may_read`). None means no device rule applies: the
+    owner's chats and legacy chats read as before, and an API key's chat is
+    scoped by :mod:`app.core.api_user_scope`. Blocking.
+    """
+    if not session_id:
+        return None
+    row = sessions.get_session(session_id) or sessions.get_session_by_sdk_id(session_id)
+    provenance = _chat_provenance(row)
+    if not provenance or provenance.get('kind') != 'paired':
+        return None
+    return dict(provenance, owner_authority=_reader_owner_authority(provenance))
+
+
+def chat_reader_may_read(reader, session):
+    """:func:`paired_client_may_read` for a :func:`chat_reader` principal.
+
+    The same answer the device gets for ``session``'s transcript over REST:
+    its own account's chats; the owner's chats only while the device holds
+    the install owner's authority. Blocking.
+    """
+    if not session:
+        return False
+    if reader is None:
+        return True
+    provenance = _chat_provenance(session)
+    if provenance:
+        if provenance['owner'] == reader['owner']:
+            return True
+        # ``mobile_tool_identity.same_install_owner``: an owner-labelled chat
+        # for a device that holds the owner's authority.
+        from app.core.mobile_tool_identity import _network_mirror as _running_mirror
+        return bool(provenance['kind'] == 'admin' and reader['owner_authority']
+                    and not session.get('api_user_id')
+                    and (session.get('instance_id') == settings.effective_instance_id
+                         or _running_mirror(session)))
+    return bool(reader['owner_authority']
+                and (session.get('instance_id') == settings.effective_instance_id
+                     or _network_mirror(session))
+                and not session.get('api_user_id'))
+
+
+def readable_store_ids(store_ids, reader):
+    """The transcript-store ids whose app chat ``reader`` may read.
+
+    A store id with no app session row is nobody's account's, so a paired
+    reader never sees it. Blocking.
+    """
+    ids = sorted({sid for sid in store_ids if sid})
+    if not ids:
+        return set()
+    if reader is None:
+        return set(ids)
+    readable = set()
+    for sid in ids:
+        if chat_reader_may_read(reader, sessions.get_session_by_sdk_id(sid)):
+            readable.add(sid)
+    return readable
+
+
 def authorize_session_artifact(request, row, digest, session_id=None):
     owner_session = (row or {}).get('created_by_session')
     target = session_id or owner_session

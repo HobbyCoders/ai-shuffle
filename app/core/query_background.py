@@ -707,6 +707,11 @@ async def start_background_query(
         session = await run_sync(database.get_session, session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
+        # This lane bypasses SessionRuntime.execute's archive guard (#1822).
+        from app.core import archive_guard
+        if archive_guard.is_archived_row(session):
+            archive_guard.log_dropped(session_id, "api", "background query refused")
+            raise archive_guard.SessionArchived(session_id)
         resume_id = session.get("sdk_session_id")
         logger.debug(f"Resuming session {session_id} with SDK session {resume_id}")
     else:

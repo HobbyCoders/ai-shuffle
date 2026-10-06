@@ -554,6 +554,11 @@ async def execute_query(
         session = await run_sync(database.get_session, session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
+        # This lane bypasses SessionRuntime.execute's archive guard (#1822).
+        from app.core import archive_guard
+        if archive_guard.is_archived_row(session):
+            archive_guard.log_dropped(session_id, "api", "execute_query refused")
+            raise archive_guard.SessionArchived(session_id)
         resume_id = session.get("sdk_session_id")
     else:
         session_id = str(uuid.uuid4())
@@ -997,6 +1002,12 @@ async def stream_query(
         session = await run_sync(database.get_session, session_id)
         if not session:
             yield {"type": "error", "message": f"Session not found: {session_id}"}
+            return
+        # This lane bypasses SessionRuntime.execute's archive guard (#1822).
+        from app.core import archive_guard
+        if archive_guard.is_archived_row(session):
+            archive_guard.log_dropped(session_id, "api", "stream_query refused")
+            yield {"type": "error", "message": str(archive_guard.SessionArchived(session_id))}
             return
         resume_id = session.get("sdk_session_id")
         logger.debug(f"Resuming session {session_id} with SDK session {resume_id}")

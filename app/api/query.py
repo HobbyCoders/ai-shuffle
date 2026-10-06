@@ -335,13 +335,23 @@ async def stream_one_shot_query(
 async def _check_continued_session(api_user: dict, session_id: str | None) -> None:
     """403 when an API user names an existing session it may not access.
 
-    An id with no row is left to the engine, which refuses it.
+    409 when that session is archived: these lanes run the engine directly,
+    around ``SessionRuntime.execute``'s archive guard (#1822). An id with no
+    row is left to the engine, which refuses it.
     """
     if not session_id:
         return
     session = await run_sync(database.get_session, session_id)
     if session:
         check_session_access_for_api_user(api_user, session)
+        from app.core import archive_guard
+
+        if archive_guard.is_archived_row(session):
+            archive_guard.log_dropped(session_id, "api", "conversation refused")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(archive_guard.SessionArchived(session_id)),
+            )
 
 
 @router.post("/conversation", response_model=QueryResponse)

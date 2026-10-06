@@ -373,16 +373,24 @@ def hydrate(session_id: str) -> int:
 # Mirror-side hooks (called by the engine after materializing a record)
 # ---------------------------------------------------------------------------
 
+#: Session columns only the worker that runs the chat may set through sync:
+#: its account label (#1849, #1873) and its permission binding (#1887). A
+#: device that does not run the chat changes the binding through the owner's
+#: control channel (``permission-mode``, ``run-settings``), never its copy.
+OWNER_ONLY_SESSION_FIELDS = ("provenance_owner", "permission_mode", "permission_ceiling")
+
+
 def _provenance_from(cursor, record: Dict[str, Any], origin_device_id: Optional[str],
                      device_id: Optional[str]) -> bool:
-    """True when this copy may set the chat's account label (#1849).
+    """True when this copy may set the chat's owner-only columns (#1849, #1887).
 
     Only the worker that runs the chat knows whose it is, so only a copy that
     worker signed carries the label. The worker that runs the chat keeps its
     own column (written from its own record); a mirror takes the label from
     the owner it already knows, or for a chat it has not seen yet, from the
     worker the copy names as its owner. A copy from any other worker, or one
-    whose sender cannot be identified, never sets, clears or changes it.
+    whose sender cannot be identified, never sets, clears or changes it. The
+    permission binding (:data:`OWNER_ONLY_SESSION_FIELDS`) follows the same rule.
     """
     if not origin_device_id or origin_device_id == device_id:
         return False
@@ -433,10 +441,12 @@ def prepare_session_mirror(cursor, record: Dict[str, Any], *, origin_device_id: 
         if local is not None and local["api_user_id"]:
             record["api_user_id"] = local["api_user_id"]
     if record.get("id") and not _provenance_from(cursor, record, origin_device_id, device_id):
-        # Only the owning worker labels the chat (#1849): any other copy
-        # leaves the column as this worker holds it (none for a new row). An
-        # owner on an older build omits the field, with the same effect.
-        record.pop("provenance_owner", None)
+        # Only the owning worker labels the chat (#1849) and sets its
+        # permission binding (#1887): any other copy leaves those columns as
+        # this worker holds them (none for a new row). An owner on an older
+        # build omits the label, with the same effect.
+        for field in OWNER_ONLY_SESSION_FIELDS:
+            record.pop(field, None)
     # A later owner catalog update must not undo an offline sidebar edit.
     # Keep this independent of the owner's stream, including when membership
     # arrives before the session catalog during bootstrap.
