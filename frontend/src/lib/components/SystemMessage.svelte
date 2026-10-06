@@ -256,11 +256,18 @@
 					typeof value === 'number' && Number.isFinite(value) && value > 0
 						? formatTokenCount(value) : null;
 				const before = knownTokens(metadata.pre_tokens ?? metadata.preTokens ?? legacy.preTokens);
-				const after = knownTokens(metadata.post_tokens ?? metadata.postTokens ?? legacy.postTokens);
+				// A Claude CLI card's post_tokens counts the summary alone;
+				// context_post_tokens adds the fixed overhead, so "after" reads
+				// what the context meter shows right after the compaction.
+				const meterAfter = knownTokens(metadata.context_post_tokens);
+				const after = meterAfter ?? knownTokens(metadata.post_tokens ?? metadata.postTokens ?? legacy.postTokens);
 				const window = knownTokens(metadata.context_window ?? metadata.contextWindow ?? legacy.contextWindow);
 				let size = before && after ? `${before} → ${after}`
 					: before ? `${before} before` : after ? `${after} after` : '';
 				if (window) size += `${size ? ' of ' : 'Window: '}${window}`;
+				if (after && !meterAfter && metadata.post_tokens_basis === 'history') {
+					size += ' (after: conversation only)';
+				}
 
 				// An idle-near-limit /compact also reads "manual" from the CLI.
 				const appRequested = metadata.requested_by === 'app';

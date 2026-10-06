@@ -77,6 +77,9 @@ async def test_recorded_native_compaction_in_all_exports_and_transcript_pages(cl
         # not just that today's producer happens to omit them.
         record["payload"]["data"]["summary"] = "summary-must-not-appear"
         record["payload"]["data"]["compact_metadata"]["summary"] = "summary-must-not-appear"
+        # The display fields a delegated card adds (#1886, #1907) survive.
+        record["payload"]["data"]["compact_metadata"]["requested_by"] = "app"
+        record["payload"]["data"]["compact_metadata"]["context_post_tokens"] = 70000
         with get_db() as conn:
             cursor = conn.cursor()
             cursor.execute("UPDATE session_events SET payload = %s WHERE id = %s",
@@ -101,7 +104,8 @@ async def test_recorded_native_compaction_in_all_exports_and_transcript_pages(cl
         for card in cards:
             assert set(card["systemData"]) == {"compact_metadata"}
             assert set(card["systemData"]["compact_metadata"]) == {
-                "trigger", "pre_tokens", "post_tokens", "context_window"}
+                "trigger", "pre_tokens", "post_tokens", "context_window",
+                "requested_by", "context_post_tokens"}
             assert card["content"] == ""
         raw = client.get(f"/api/v1/sessions/{sid}/export", headers=AUTH,
                          params={"format": "jsonl", "share_safe": share_safe})
@@ -114,9 +118,14 @@ async def test_recorded_native_compaction_in_all_exports_and_transcript_pages(cl
         assert all("summary-must-not-appear" not in response.text for response in (r, raw, md))
         detail = client.get(f"/api/v1/sessions/{sid}", headers=AUTH)
         assert detail.status_code == 200, detail.text
-        assert any(m.get("subtype") == "compact_boundary" for m in detail.json()["messages"])
-        # Detail's response model separately drops systemData/systemSubtype;
-        # the shared projection supplies them, but that schema is out of scope.
+        [detail_card] = [m for m in detail.json()["messages"] if m.get("subtype") == "compact_boundary"]
+        # #1886: the detail response keeps the card's display metadata.
+        assert detail_card["systemSubtype"] == "compact_boundary"
+        detail_metadata = detail_card["systemData"]["compact_metadata"]
+        assert {"trigger", "pre_tokens", "post_tokens", "context_window"} <= set(detail_metadata)
+        assert detail_metadata["requested_by"] == "app"
+        assert detail_metadata["context_post_tokens"] == 70000
+        assert "summary-must-not-appear" not in detail.text
         page = client.get(f"/api/v1/sessions/{sid}/live", headers=AUTH, params={"message_limit": 1})
         assert page.status_code == 200, page.text
         pagination = page.json()["message_pagination"]

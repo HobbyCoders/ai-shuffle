@@ -60,7 +60,13 @@ describe('SystemMessage — compact_boundary', () => {
 		[{ pre_tokens: 0, post_tokens: 0, context_window: 0 }, 'Context compacted automatically.'],
 		[{ pre_tokens: NaN, post_tokens: Infinity, context_window: -1 }, 'Context compacted automatically.'],
 		[{ pre_tokens: '182000', post_tokens: null }, 'Context compacted automatically.'],
-		[{ pre_tokens: 1_500_000, post_tokens: 999 }, 'Context compacted automatically: 1.5M → 999']
+		[{ pre_tokens: 1_500_000, post_tokens: 999 }, 'Context compacted automatically: 1.5M → 999'],
+		// #1907: a Claude CLI card's "after" is the meter's reading, overhead included.
+		[{ pre_tokens: 169_400, post_tokens: 19_600, context_post_tokens: 70_000, context_window: 200_000 },
+			'Context compacted automatically: 169.4k → 70k of 200k'],
+		// No overhead known: the summary-only count says so.
+		[{ pre_tokens: 169_400, post_tokens: 19_600, post_tokens_basis: 'history', context_window: 200_000 },
+			'Context compacted automatically: 169.4k → 19.6k of 200k (after: conversation only)']
 	])('renders known sizes once: %j', (metadata, expected) => {
 		render(SystemMessage, { message: makeMessage({ systemSubtype: 'compact_boundary',
 			systemData: { compact_metadata: { trigger: 'auto', ...metadata } } }) });

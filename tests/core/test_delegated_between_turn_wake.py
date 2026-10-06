@@ -292,7 +292,10 @@ def _compaction_cards(messages) -> list:
     ]
 
 
-_CARD = {"compact_metadata": {"trigger": "auto", "pre_tokens": 150000, "post_tokens": 30000}}
+# The fake CLI answers /context with an empty breakdown, so no overhead is
+# known and the "after" count is labelled as the history only (#1907).
+_CARD = {"compact_metadata": {"trigger": "auto", "pre_tokens": 150000, "post_tokens": 30000,
+                              "post_tokens_basis": "history"}}
 
 
 async def _expected_card(adapter) -> dict:

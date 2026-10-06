@@ -567,8 +567,11 @@ def test_a_cli_compaction_becomes_the_compact_boundary_card(reason, trigger):
     assert isinstance(card, SystemMessage)
     assert card.subtype == "compact_boundary"
     # The CLI's own boundary shape, which the chat's card reads; no summary.
+    # No /context snapshot was seen, so the "after" count is labelled as the
+    # history only (#1907).
     assert card.data == {"compact_metadata": {
         "trigger": trigger, "pre_tokens": 166_397, "post_tokens": 34_856,
+        "post_tokens_basis": "history",
     }}
 
 

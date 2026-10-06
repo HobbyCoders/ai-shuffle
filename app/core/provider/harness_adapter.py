@@ -272,6 +272,47 @@ def _usage_has_estimate(usage: Dict[str, Any]) -> bool:
     )
 
 
+def _epoch_seconds(value: Any) -> Optional[float]:
+    """A database timestamp (datetime, or ISO text from the SQLite test shim)
+    as epoch seconds, or None."""
+    from datetime import datetime, timezone
+
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
+
+
+def _context_overhead_tokens(breakdown: Any) -> Optional[int]:
+    """Tokens of a Claude CLI ``/context`` breakdown that are not the
+    conversation: its ``totalTokens`` (what the context meter shows) less the
+    "Messages" category (system prompt, tools, memory, skills and so on).
+
+    None when the breakdown lacks either number. The CLI's ``compact_boundary``
+    ``post_tokens`` counts the history alone, so this overhead added to it is
+    the reading the meter takes right after the compaction (#1907).
+    """
+    if not isinstance(breakdown, dict):
+        return None
+    total = breakdown.get("totalTokens")
+    categories = breakdown.get("categories")
+    if not isinstance(total, int) or isinstance(total, bool) or not isinstance(categories, list):
+        return None
+    for category in categories:
+        if isinstance(category, dict) and str(category.get("name", "")).strip().lower() == "messages":
+            tokens = category.get("tokens")
+            if isinstance(tokens, int) and not isinstance(tokens, bool) and 0 <= tokens <= total:
+                return total - tokens
+            return None
+    return None
+
+
 class HarnessAdapter(ProviderAdapter):
     """ProviderAdapter implementation backed by the fluid harness."""
 
@@ -298,6 +339,13 @@ class HarnessAdapter(ProviderAdapter):
         # Who sent the running turn's ``/compact`` ("user" or "app"), or None
         # when the turn is not one. Labels the delegated leg's compaction card.
         self._compact_requested_by: Optional[str] = None
+        # Non-conversation tokens of the latest Claude CLI ``/context``
+        # snapshot (see _context_overhead_tokens), or None before one. Puts
+        # the delegated leg's compaction card on the meter's basis (#1907).
+        self._context_overhead: Optional[int] = None
+        # Whether the persisted snapshot was read for that overhead yet (a
+        # reconnected adapter has seen no live snapshot).
+        self._context_overhead_loaded: bool = False
         # receive_events replay cursor: fluid's EventBus replays from ``since_seq``,
         # so we advance this per delivered event to avoid re-yielding prior turns.
         self._event_cursor: int = 0
@@ -1065,6 +1113,7 @@ class HarnessAdapter(ProviderAdapter):
                         exc_info=True,
                     )
             await self._anchor_replay_cursor(meta.session_id)
+            await self._recover_compaction_cards(meta.session_id)
 
         self._connected = True
 
@@ -1939,6 +1988,14 @@ class HarnessAdapter(ProviderAdapter):
             if getattr(event, "seq", -1) >= 0:
                 self._event_cursor = event.seq
 
+            if (
+                self._context_overhead is None
+                and not self._context_overhead_loaded
+                and type(event).__name__ == "ContextCompaction"
+                and getattr(event, "reason", None) in self._CLI_COMPACTION_TRIGGERS
+            ):
+                # The card's meter-basis "after" needs the overhead (#1907).
+                await self._load_persisted_context_overhead()
 
             for translated in self._translate(event):
                 if isinstance(translated, PermissionRequestEvent) and self._can_use_tool:
@@ -2273,6 +2330,84 @@ class HarnessAdapter(ProviderAdapter):
         except Exception:  # noqa: BLE001 — a frozen meta only misses the cache update
             pass
         return reseeded
+
+    async def _recover_compaction_cards(self, session_id: str) -> None:
+        """Record a compaction card the last turn's engine persisted but the
+        app never recorded (#1886).
+
+        The engine writes its ``ContextCompaction`` first; the turn recorder
+        appends the card when the translated event passes through the query
+        engine. A crash between the two left the engine compacted and the chat
+        with no card, and the replay cursor (anchored at the durable head just
+        before this) never re-translates the event. Only the last turn can be
+        affected: the next one starts with this connect. The card's stable id
+        (``compaction_event_id``) makes the append a no-op for a card that is
+        there already. Never fails a connect.
+        """
+        if self._store is None or not callable(getattr(self._store, "last_event_seq", None)):
+            # Only the PostgreSQL store keeps events where these queries look.
+            return
+        try:
+            from types import SimpleNamespace
+
+            from app.core.provider import fluid_transcript
+
+            events = await asyncio.to_thread(fluid_transcript.latest_turn_compactions, session_id)
+            if not events:
+                return
+            app_session_id = await asyncio.to_thread(self._resolve_app_session_id)
+            if not app_session_id:
+                return
+            recorded = await asyncio.to_thread(
+                fluid_transcript.recorded_compaction_cards, app_session_id
+            )
+            have = {row["compaction_event_id"] for row in recorded if row["compaction_event_id"]}
+            first_ts = min(float(e.get("ts") or 0) for e in events)
+            if any(
+                row["compaction_event_id"] is None
+                and (_epoch_seconds(row["created_at"]) or 0) >= first_ts
+                for row in recorded
+            ):
+                # A card recorded without an event id after this turn's first
+                # compaction: an older recorder wrote it. Adding another
+                # would show the compaction twice.
+                return
+            # A fork copies the cards with the source's event ids and
+            # renumbers the engine events, keeping their timestamps.
+            have_ts = {row["compaction_event_ts"] for row in recorded if row["compaction_event_ts"]}
+            events = [
+                e for e in events
+                if f"{session_id}:{e.get('seq')}" not in have and e.get("ts") not in have_ts
+            ]
+            if not events:
+                return
+            if any(e.get("reason") in self._CLI_COMPACTION_TRIGGERS for e in events):
+                # The card's meter-basis "after" count (#1907).
+                await self._load_persisted_context_overhead()
+            missing = []
+            for event in events:
+                fields = {k: v for k, v in event.items() if k != "_cls"}
+                fields["session_id"] = session_id
+                for card in self._compaction_card(SimpleNamespace(**fields)):
+                    if card.data.get("compaction_event_id"):
+                        missing.append(card)
+            if not missing:
+                return
+            from app.core.turn_recorder import record_drained_event
+
+            for card in missing:
+                await record_drained_event(app_session_id, {
+                    "type": "system", "subtype": card.subtype, "data": card.data,
+                })
+            logger.info(
+                "[HarnessAdapter] recovered %d compaction card(s) for session %s",
+                len(missing), app_session_id,
+            )
+        except Exception:  # noqa: BLE001 — recovery never fails a connect.
+            logger.warning(
+                "[HarnessAdapter] compaction card recovery failed for %s",
+                session_id, exc_info=True,
+            )
 
     async def _anchor_replay_cursor(self, session_id: str) -> None:
         """Anchor this adapter's replay cursor at the durable head.
@@ -2854,6 +2989,9 @@ class HarnessAdapter(ProviderAdapter):
             logger.warning(f"[HarnessAdapter] get_context_usage() failed: {exc}")
             return None
         if isinstance(result, dict):
+            overhead = _context_overhead_tokens(result)
+            if overhead is not None:
+                self._context_overhead = overhead
             if self._cache_miss_base is None:
                 self._cache_miss_base = await self._persisted_cache_miss_counts()
             if self._cache_miss_counts or self._cache_miss_base:
@@ -2883,6 +3021,30 @@ class HarnessAdapter(ProviderAdapter):
         except Exception:  # noqa: BLE001 — accounting never breaks a report.
             logger.debug("[HarnessAdapter] persisted cache-miss counts unreadable", exc_info=True)
             return {}
+
+    async def _load_persisted_context_overhead(self) -> None:
+        """Seed ``_context_overhead`` from this session's persisted
+        context-usage snapshot, once, when no live snapshot was seen yet (a
+        reconnected adapter whose first event is a CLI compaction). Never
+        raises; the card then labels its count as the history alone."""
+        if self._context_overhead_loaded or self._context_overhead is not None:
+            return
+        self._context_overhead_loaded = True
+        try:
+            app_session_id = await asyncio.to_thread(self._resolve_app_session_id)
+            if not app_session_id:
+                return
+            from app.db import database
+            from app.db.async_database import run_sync
+
+            snapshot = await run_sync(
+                database.get_session_context_usage_snapshot, app_session_id
+            )
+            overhead = _context_overhead_tokens((snapshot or {}).get("data"))
+            if overhead is not None and self._context_overhead is None:
+                self._context_overhead = overhead
+        except Exception:  # noqa: BLE001 — a card label never breaks the stream.
+            logger.debug("[HarnessAdapter] persisted context overhead unreadable", exc_info=True)
 
     def _cache_miss_report(self) -> Dict[str, Any]:
         """Prompt-cache misses so far in this session, by class, with the
@@ -3268,6 +3430,9 @@ class HarnessAdapter(ProviderAdapter):
             context_usage = getattr(event, "context_usage", None)
             if context_usage:
                 usage["context_usage"] = context_usage
+                overhead = _context_overhead_tokens(context_usage)
+                if overhead is not None:
+                    self._context_overhead = overhead
             self._record_cache_miss(usage)
             # One key for "a count in this record was guessed", so the durable
             # ``turn.usage`` row and the recovery paths need not know fluid's
@@ -3612,6 +3777,8 @@ class HarnessAdapter(ProviderAdapter):
         if not getattr(event, "batch_final", True):
             return []
         reason = getattr(event, "reason", None)
+        # The Claude CLI's own counts (not a native summary relabelled below).
+        from_cli = reason in self._CLI_COMPACTION_TRIGGERS
         if reason == MANUAL_COMPACT_REASON:
             # A native session compacted on request (``/compact``): its engine
             # follows the decisions with one summary event carrying the sizes.
@@ -3642,6 +3809,16 @@ class HarnessAdapter(ProviderAdapter):
             value = getattr(event, attr, 0)
             if isinstance(value, int) and value > 0:
                 metadata[key] = value
+        if from_cli and "post_tokens" in metadata:
+            # The CLI's pre_tokens is the whole prompt (the meter's basis), its
+            # post_tokens the summary alone. ``context_post_tokens`` is what the
+            # meter reads right after: the summary plus the fixed overhead of
+            # the latest /context snapshot (#1907). ``post_tokens`` stays the
+            # CLI's raw count so older readers keep their meaning.
+            if self._context_overhead is not None:
+                metadata["context_post_tokens"] = metadata["post_tokens"] + self._context_overhead
+            else:
+                metadata["post_tokens_basis"] = "history"
         window = getattr(event, "context_window", 0)
         if not window and self._options is not None:
             window = getattr(self._engine, "context_window", None) or (self._options.extra or {}).get("context_window")

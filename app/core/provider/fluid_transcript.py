@@ -550,7 +550,8 @@ def _splice_compaction_cards(
         data = _as_dict(payload.get("data"))
         metadata = _as_dict(data.get("compact_metadata"))
         safe = {k: metadata[k] for k in (
-            "trigger", "pre_tokens", "post_tokens", "context_window"
+            "trigger", "pre_tokens", "post_tokens", "context_window",
+            "requested_by", "context_post_tokens", "post_tokens_basis",
         ) if k in metadata}
         stamp = _iso(data.get("compaction_event_ts")) or str(row["created_at"])
         cards.append({
@@ -573,6 +574,65 @@ def _splice_compaction_cards(
             index += 1
         out.append(entry)
     out.extend(cards[index:])
+    return out
+
+
+def latest_turn_compactions(sdk_session_id: str) -> List[Dict[str, Any]]:
+    """The engine's ``ContextCompaction`` events since its last
+    ``TurnStarted``, as stored event dicts (``seq`` included), oldest first.
+
+    Feeds the connect-time card recovery (#1886): only the last turn can have
+    died between the engine persisting a compaction and the recorder writing
+    its card, because the next turn starts with a connect.
+    """
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT seq, event FROM fluid_session_events "
+            f"WHERE session_id = {ph()} AND event ->> '_cls' = 'ContextCompaction' "
+            f"AND seq > COALESCE((SELECT MAX(seq) FROM fluid_session_events "
+            f"WHERE session_id = {ph()} AND event ->> '_cls' = 'TurnStarted'), -1) "
+            f"ORDER BY seq",
+            (sdk_session_id, sdk_session_id),
+        )
+        rows = cursor.fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        event = dict(_as_dict(dict(row).get("event")))
+        event["seq"] = dict(row).get("seq")
+        out.append(event)
+    return out
+
+
+def recorded_compaction_cards(app_session_id: str) -> List[Dict[str, Any]]:
+    """The session's recorded ``system.compaction_boundary`` rows: ``id``,
+    the card's ``compaction_event_id`` and ``compaction_event_ts`` (None on a
+    card recorded without them) and ``created_at``."""
+    from app.db.base import get_cursor, get_db
+    from app.db.compat import ph
+
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT id, payload, created_at FROM session_events "
+            f"WHERE session_id = {ph()} AND event_type = 'system.compaction_boundary'",
+            (app_session_id,),
+        )
+        rows = cursor.fetchall()
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        data = _as_dict(_as_dict(row["payload"]).get("data"))
+        identity = data.get("compaction_event_id")
+        stamp = data.get("compaction_event_ts")
+        out.append({
+            "id": str(row["id"]),
+            "compaction_event_id": identity if isinstance(identity, str) and identity else None,
+            "compaction_event_ts": stamp if isinstance(stamp, (int, float)) and stamp else None,
+            "created_at": row["created_at"],
+        })
     return out
 
 

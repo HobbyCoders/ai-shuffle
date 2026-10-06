@@ -36,6 +36,7 @@ FAKE_CLI = textwrap.dedent(
     MODE = os.environ["COMPACT_MODE"]  # "ok" or "refuse"
     RECORD = os.environ["COMPACT_RECORD"]
     SID = "cli-compact-req"
+    CONTEXT = int(os.environ.get("COMPACT_CONTEXT") or 0)  # Messages tokens, 0: no breakdown
 
     def emit(obj):
         sys.stdout.write(json.dumps(obj) + "\n")
@@ -56,6 +57,22 @@ FAKE_CLI = textwrap.dedent(
             return content
         return "".join(b.get("text", "") for b in content or [] if isinstance(b, dict))
 
+    def answer_control(msg):
+        answer = {}
+        if (msg.get("request") or {}).get("subtype") == "get_context_usage" and CONTEXT:
+            # The CLI's /context breakdown: 61k of fixed overhead.
+            answer = {"totalTokens": 61000 + CONTEXT, "maxTokens": 200000,
+                      "categories": [
+                          {"name": "System prompt", "tokens": 9000},
+                          {"name": "System tools", "tokens": 40000},
+                          {"name": "Memory files", "tokens": 12000},
+                          {"name": "Messages", "tokens": CONTEXT},
+                          {"name": "Free space", "tokens": 100000},
+                          {"name": "Autocompact buffer", "tokens": 33000}]}
+        emit({"type": "control_response", "response": {
+            "subtype": "success", "request_id": msg.get("request_id"),
+            "response": answer}})
+
     if "--version" in sys.argv:
         print("claude 9.9.9 (fake compact)")
         sys.exit(0)
@@ -67,9 +84,7 @@ FAKE_CLI = textwrap.dedent(
             continue
         msg = json.loads(line)
         if msg.get("type") == "control_request":
-            emit({"type": "control_response", "response": {
-                "subtype": "success", "request_id": msg.get("request_id"),
-                "response": {}}})
+            answer_control(msg)
             continue
         if msg.get("type") != "user":
             continue
@@ -97,6 +112,11 @@ FAKE_CLI = textwrap.dedent(
             "id": "msg_%d" % time.time_ns(), "model": "claude-fake",
             "content": [{"type": "text", "text": "ANSWER"}], "usage": usage(),
             "stop_reason": "end_turn"}})
+        if CONTEXT:
+            # The engine asks the call's /context snapshot; answer it before
+            # the result ends the turn, as the real CLI does mid-turn.
+            asked = json.loads(sys.stdin.readline())
+            answer_control(asked)
         emit(result())
     '''
 )
@@ -113,7 +133,7 @@ def _isolated_home(monkeypatch, tmp_path):
     monkeypatch.setenv(guidance_surface.GUIDANCE_HOME_ENV, str(home))
 
 
-async def _adapter(monkeypatch, tmp_path, mode: str):
+async def _adapter(monkeypatch, tmp_path, mode: str, *, context: int = 0):
     script = tmp_path / "fake_compact_claude.py"
     script.write_text(FAKE_CLI)
     monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(script)])
@@ -125,6 +145,7 @@ async def _adapter(monkeypatch, tmp_path, mode: str):
         env={
             "COMPACT_MODE": mode,
             "COMPACT_RECORD": str(tmp_path / "record.jsonl"),
+            "COMPACT_CONTEXT": str(context),
             "CLAUDE_CONFIG_DIR": str(tmp_path / "config"),
         },
         extra={"fluid_registry": ToolRegistry()},
@@ -174,9 +195,65 @@ async def test_compact_reaches_the_cli_bare_and_shows_its_card(monkeypatch, tmp_
     cards = _system(messages, "compact_boundary")
     assert cards == [{"compact_metadata": {
         "trigger": "manual", "pre_tokens": 870000, "post_tokens": 9000,
+        # No /context breakdown seen: the count is labelled as history only.
+        "post_tokens_basis": "history",
     }, "compaction_event_id": f"{boundary.session_id}:{boundary.seq}",
         "compaction_event_ts": boundary.ts}]
     assert _system(messages, "compact_failed") == []
+
+
+@pytest.mark.asyncio
+async def test_the_cards_after_count_is_on_the_meters_basis(monkeypatch, tmp_path):
+    """#1907: the CLI's post_tokens counts the summary alone, the meter the
+    whole prompt. The card carries the meter's reading after the compaction:
+    the summary plus the overhead of the latest /context snapshot."""
+    adapter = await _adapter(monkeypatch, tmp_path, "ok", context=20000)
+    try:
+        await _turn(adapter, "hello")
+        messages = await _turn(adapter, "/compact")
+    finally:
+        await adapter.disconnect()
+    [card] = _system(messages, "compact_boundary")
+    metadata = card["compact_metadata"]
+    assert metadata["post_tokens"] == 9000  # the CLI's raw count, unchanged
+    assert metadata["context_post_tokens"] == 9000 + 61000
+    assert "post_tokens_basis" not in metadata
+
+
+@pytest.mark.asyncio
+async def test_a_reconnected_adapter_takes_the_overhead_from_the_saved_snapshot(monkeypatch, tmp_path):
+    """#1907: with no live /context snapshot yet, the persisted one supplies
+    the overhead before the compaction card is built."""
+    from app.db import database
+
+    adapter = await _adapter(monkeypatch, tmp_path, "ok")
+    snapshot = {"captured_at": "2026-10-06T00:00:00Z", "data": {
+        "totalTokens": 75000, "maxTokens": 200000,
+        "categories": [{"name": "System prompt", "tokens": 50000},
+                       {"name": "Messages", "tokens": 25000}]}}
+    asked = []
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "app-sess")
+    monkeypatch.setattr(database, "get_session_context_usage_snapshot",
+                        lambda sid: asked.append(sid) or snapshot)
+    try:
+        messages = await _turn(adapter, "/compact")
+    finally:
+        await adapter.disconnect()
+    [card] = _system(messages, "compact_boundary")
+    assert card["compact_metadata"]["context_post_tokens"] == 9000 + 50000
+    assert asked == ["app-sess"]
+
+
+@pytest.mark.parametrize("breakdown, expected", [
+    ({"totalTokens": 70000, "categories": [{"name": "Messages", "tokens": 20000}]}, 50000),
+    ({"totalTokens": 70000, "categories": [{"name": "System prompt", "tokens": 9000}]}, None),
+    ({"categories": [{"name": "Messages", "tokens": 20000}]}, None),
+    ({"totalTokens": 10, "categories": [{"name": "Messages", "tokens": 20}]}, None),
+    ({}, None),
+    (None, None),
+])
+def test_context_overhead_is_the_total_less_the_messages(breakdown, expected):
+    assert ha._context_overhead_tokens(breakdown) == expected
 
 
 @pytest.mark.asyncio

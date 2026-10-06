@@ -313,6 +313,10 @@ class SessionMessage(BaseModel):
     content: str
     type: Optional[str] = None  # text, tool_use, tool_result, subagent, system - critical for rendering
     subtype: Optional[str] = None  # For system messages (e.g., local_command, compact_boundary)
+    # The frontend's system-message keys. Without them on the model the detail
+    # response stripped a compaction card's sizes and trigger (#1886).
+    systemSubtype: Optional[str] = None
+    systemData: Optional[Dict[str, Any]] = None
     tool_name: Optional[str] = None  # snake_case for DB compatibility
     tool_input: Optional[Dict[str, Any]] = None  # snake_case for DB compatibility
     toolName: Optional[str] = None  # camelCase for frontend compatibility
