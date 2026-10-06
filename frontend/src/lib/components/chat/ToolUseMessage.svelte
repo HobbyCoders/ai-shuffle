@@ -20,6 +20,7 @@
 	import { displayToolName } from '$lib/utils/tool-icons';
 	import { liveToolLabel, toolPreview, toolStateLabel } from '$lib/utils/tool-preview';
 	import { isDismissedQuestion, QUESTION_DISMISSED_LABEL } from './question-outcome';
+	import { stripUntrustedFence } from '$lib/utils/untrusted-fence';
 
 	interface Props {
 		name: string;
@@ -65,6 +66,9 @@
 		userToggled = true;
 		expanded = !expanded;
 	}
+
+	// The harness's model-facing "treat as data" wrapper, removed for display.
+	const shownResult = $derived(stripUntrustedFence(result));
 
 	const preview = $derived(
 		toolPreview({ name, input, partialInput, result, streaming })
@@ -178,12 +182,12 @@
 				<div class="wl-panel-label">Result</div>
 				<div class="wl-pane">
 					{#if dismissedQuestion}
-						<pre class="is-muted" data-testid="tool-dismissed-result">{result}</pre>
+						<pre class="is-muted" data-testid="tool-dismissed-result">{shownResult}</pre>
 					{:else if result}
 						{#if toolResultHasMedia(result)}
 							<span class="wl-media-note">{toolResultMediaLabel(result)} generated</span>
 						{:else}
-							<pre>{result}</pre>
+							<pre>{shownResult}</pre>
 						{/if}
 					{:else if status === 'error'}
 						<pre class="is-error">[Interrupted]</pre>

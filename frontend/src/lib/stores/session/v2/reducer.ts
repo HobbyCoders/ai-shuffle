@@ -20,6 +20,7 @@ import { apiBase } from '$lib/api/runtime';
 import type { SessionEvent } from '$lib/contract/events';
 import { isSwarmTool } from '$lib/utils/swarm';
 import { heldAgentDeliveries, type AgentDelivery } from '$lib/utils/agent-delivery';
+import { stripUntrustedFence } from '$lib/utils/untrusted-fence';
 
 // ─── Wire event shape ─────────────────────────────────────────────────────────
 
@@ -875,8 +876,10 @@ function parseTaskNotification(block: string): Record<string, unknown> {
 		task_id: extractTag(block, 'task-id'),
 		tool_use_id: extractTag(block, 'tool-use-id'),
 		status: extractTag(block, 'status'),
-		summary: extractTag(block, 'summary'),
-		result: extractTag(block, 'result'),
+		// A shell task's output arrives inside the model-facing untrusted-data
+		// fence; the card shows the output alone.
+		summary: stripUntrustedFence(extractTag(block, 'summary')),
+		result: stripUntrustedFence(extractTag(block, 'result')),
 		output_file: extractTag(block, 'output-file'),
 		// `own` (a task the parent itself launched → normal notification card) or
 		// `pump` (an internal step of a still-running background agent → compact
