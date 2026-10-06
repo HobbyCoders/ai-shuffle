@@ -101,6 +101,19 @@ class TestGetProfile:
         assert body["config"]["model"] == "claude-haiku-4-20250514"
 
     @pytest.mark.asyncio
+    async def test_get_profile_hides_the_builtin_defaults_record(self, admin_tools):
+        profile = _make_profile(
+            id="general-purpose", is_builtin=True,
+            config={"model": "opus", "builtin_defaults": {"revision": 1, "sha256": {}}},
+        )
+        tool = get_tool(admin_tools, "getProfile")
+        with patch("app.db.database.get_profile", return_value=profile):
+            result = await tool.handler({"profile_id": "general-purpose"})
+        body = tool_result_json(result)
+        assert body["config"] == {"model": "opus"}
+        assert "builtin_defaults" in profile["config"]  # the stored row is not mutated
+
+    @pytest.mark.asyncio
     async def test_get_profile_serializes_datetime_fields(self, admin_tools):
         """Regression: the DB layer returns real datetime objects (psycopg),
         so the result serializer must ISO-normalize them rather than crash with

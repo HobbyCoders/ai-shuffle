@@ -65,7 +65,9 @@ def _create_profile_tools(is_admin: bool) -> list:
         profile = await run_sync(database.get_profile, args["profile_id"])
         if not profile:
             return _error(f"Profile not found: {args['profile_id']}")
-        return _tool_result(cast(dict, profile))
+        from app.core.builtin_subagents import DEFAULTS_RECORD_KEY  # internal seeding record
+        config = {k: v for k, v in (profile.get("config") or {}).items() if k != DEFAULTS_RECORD_KEY}
+        return _tool_result(cast(dict, {**profile, "config": config}))
 
     tools.append(get_profile)
 

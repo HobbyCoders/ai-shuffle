@@ -12,6 +12,7 @@ definitions in ``app.core.builtin_subagents.BUILTIN_SUBAGENTS`` — the old
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Optional, List, Dict, TypedDict
 
@@ -147,11 +148,19 @@ def create_subagent(
 ) -> SubagentRow:
     """Create an agent row from subagent-shaped fields.
 
-    ``store_defaults`` is accepted for signature compatibility and ignored —
-    built-in defaults live in code (``BUILTIN_SUBAGENTS``) since v71.
+    Built-in defaults live in code (``BUILTIN_SUBAGENTS``) since v71.
+    ``store_defaults`` stamps the row with the record of which shipped
+    defaults it holds, so a later default change can refresh it (see
+    ``app.core.builtin_subagents.plan_default_refresh``).
     ``if_absent`` keeps an existing row with this id (see ``create_profile``).
     """
     config = _subagent_config(prompt, tools, model, skills, memory, mcp_servers)
+    definition = _code_defaults(subagent_id) if store_defaults else None
+    if definition:
+        from app.core.builtin_subagents import DEFAULTS_RECORD_KEY, defaults_record
+
+        config[DEFAULTS_RECORD_KEY] = defaults_record(
+            definition, {"name": name, "description": description, "prompt": prompt})
     _agents_db.create_profile(
         subagent_id, name, description, config, is_builtin=is_builtin,
         if_absent=if_absent,
@@ -169,10 +178,12 @@ def update_subagent(
     skills: Optional[List[str]] = ...,  # type: ignore[assignment]
     memory: Optional[str] = ...,  # type: ignore[assignment]
     mcp_servers: Optional[List[Any]] = ...,  # type: ignore[assignment]
+    defaults_record: Optional[Dict[str, Any]] = None,
 ) -> Optional[SubagentRow]:
     """Update the agent row behind a subagent-shaped view.
 
     Uses Ellipsis (...) to distinguish "not provided" from "explicitly None".
+    ``defaults_record`` replaces the built-in's shipped-defaults record.
     """
     agent = _agents_db.get_profile(subagent_id)
     if not agent:
@@ -187,6 +198,10 @@ def update_subagent(
         mcp_servers=current["mcp_servers"] if mcp_servers is ... else mcp_servers,
         base=agent.get("config"),
     )
+    if defaults_record is not None:
+        from app.core.builtin_subagents import DEFAULTS_RECORD_KEY
+
+        config[DEFAULTS_RECORD_KEY] = defaults_record
     _agents_db.update_profile(
         subagent_id,
         name=None if name is ... else name,
@@ -222,6 +237,8 @@ def revert_subagent_to_defaults(subagent_id: str) -> Optional[SubagentRow]:
     defaults = _code_defaults(subagent_id)
     if not defaults:
         return None
+    from app.core.builtin_subagents import defaults_record as shipped_record
+
     return update_subagent(
         subagent_id,
         name=defaults.get("name"),
@@ -229,7 +246,61 @@ def revert_subagent_to_defaults(subagent_id: str) -> Optional[SubagentRow]:
         prompt=defaults.get("prompt"),
         tools=defaults.get("tools"),
         model=defaults.get("model"),
+        defaults_record=shipped_record(defaults, defaults),
     )
+
+
+def refresh_builtin_subagent_defaults(subagent_id: str) -> List[str]:
+    """Move a built-in's uncustomised default text to the current definition.
+
+    Start-up seeding calls this for every existing built-in. Which fields move
+    is decided by ``app.core.builtin_subagents.plan_default_refresh``; only
+    name, description and the prompt content are written, plus the row's
+    shipped-defaults record. Everything else in the config is kept. The write
+    is not published to peers (``engine.keep_local_rewrite``): each updated
+    worker refreshes its own copy, and a peer's edit always wins. Returns
+    the refreshed field names (empty when nothing changed, so a second run
+    writes nothing).
+    """
+    from app.core.builtin_subagents import (
+        DEFAULTS_RECORD_KEY, DEFAULT_TEXT_FIELDS, defaults_record, plan_default_refresh,
+    )
+
+    definition = _code_defaults(subagent_id)
+    if not definition:
+        return []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        # Locked so an edit committed meanwhile is decided on, not overwritten.
+        cursor.execute(
+            "SELECT * FROM agents WHERE id = %s AND is_builtin = TRUE FOR UPDATE", (subagent_id,))
+        agent = row_to_dict(cursor.fetchone())
+        if not agent:
+            return []
+        config = agent.get("config")
+        config = json.loads(config) if isinstance(config, str) else dict(config or {})
+        current = _agent_to_subagent({**agent, "config": config})
+        changes = plan_default_refresh(definition, current, config.get(DEFAULTS_RECORD_KEY))
+        if not changes:
+            return []
+        values = {field: changes.get(field, current[field]) for field in DEFAULT_TEXT_FIELDS}
+        if "prompt" in changes:
+            system_prompt = config.get("system_prompt")
+            system_prompt = dict(system_prompt) if isinstance(system_prompt, dict) else {"type": "custom"}
+            system_prompt["content"] = changes["prompt"]
+            config["system_prompt"] = system_prompt
+        config[DEFAULTS_RECORD_KEY] = defaults_record(definition, values)
+        cursor.execute(
+            "UPDATE agents SET name = %s, description = %s, config = %s, updated_at = %s WHERE id = %s",
+            (changes.get("name", agent["name"]), changes.get("description", agent["description"]),
+             json.dumps(config),
+             datetime.now(timezone.utc).isoformat(), subagent_id),
+        )
+        # Local upkeep, not an edit: never publish it to peers, where this
+        # replica's (possibly stale) row could beat an owner's newer edit.
+        from app.network import engine
+        engine.keep_local_rewrite(cursor, "agents", subagent_id, agent)
+    return sorted(changes)
 
 
 def builtin_subagent_is_modified(agent: Optional[dict]) -> Optional[bool]:
@@ -332,6 +403,6 @@ from app.core.resource_sync import install_database_mutations as _install_resour
 
 _install_resource_sync(
     globals(), 'agents',
-    'create_subagent update_subagent delete_subagent set_subagent_builtin revert_subagent_to_defaults add_permission_rule delete_permission_rule delete_profile_permission_rules',
+    'create_subagent update_subagent delete_subagent set_subagent_builtin revert_subagent_to_defaults refresh_builtin_subagent_defaults add_permission_rule delete_permission_rule delete_profile_permission_rules',
     scope='shared',
 )

@@ -12,12 +12,13 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ### Action needed
 
-- After updating a worker, use **Agents → General Purpose → Restore defaults** to adopt the new built-in prompt and description. Updates leave saved definitions unchanged; restoring replaces customized fields with defaults.
+- If you edited the description or prompt of General Purpose, review it after updating: updates keep edited text, which may still send work to the removed Explore agent. Use **Agents → General Purpose → Restore defaults** to adopt the new text; restoring replaces customized fields with defaults.
 
 ### Agents and providers
 
 - General Purpose now completes assigned investigations, root-cause diagnosis, code or PR reviews, audits and reproductions, including report-only work, instead of handing the task back to another role.
 - The built-in Explore agent is removed. General Purpose, or the calling agent itself, handles searches and investigations. Updated workers retire the stored built-in and ignore it when synced from older workers; custom agents with the same name are kept. Automations using the removed built-in are preserved on General Purpose but disabled for review before re-enabling. Removing the roster entry and changing prompts costs each affected agent one uncached prompt after workers update.
+- On startup, workers move a built-in agent's name, description and prompt to the current default when you never edited that field. Edited fields, tools, model, memory, skills and subagent settings are kept, and a second start changes nothing. Each worker updates only its own copy, so this never overrides an edit you made on another worker. A worker on an older release leaves text written by a newer one alone.
 
 ### Sessions and interface
 

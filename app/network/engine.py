@@ -659,6 +659,34 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
     return data
 
 
+def keep_local_rewrite(cursor, collection: str, record_id: str, before_row: Mapping[str, Any]) -> bool:
+    """Accept a local rewrite of a row without publishing it.
+
+    For upkeep every updated worker repeats on its own at start-up (the
+    built-in default refresh). Publishing it would stamp this replica's whole
+    row with a fresh clock and could beat a peer's edit not yet received
+    here. When the network already knew ``before_row``, the rewritten row's
+    hash is filed under the same clock and origin, so the scanner sees no
+    change and any peer write still wins. Returns False (the scanner then
+    publishes as usual) when this worker had an unpublished change of its own.
+    """
+    coll = policy.collection(collection)
+    existing = store.get_record(cursor, collection, record_id)
+    if existing is None or bool(existing["deleted"]):
+        return False
+    before = serialize_row(coll, before_row)
+    if before is None or content_hash(coll, before) != existing["content_hash"]:
+        return False
+    after_row = _read_row(cursor, coll, record_id)
+    after = serialize_row(coll, after_row) if after_row is not None else None
+    if after is None:
+        return False
+    store.put_record(cursor, collection, record_id, clock=int(existing["clock"]),
+                     origin_device_id=existing["origin_device_id"], content_hash=content_hash(coll, after),
+                     deleted=False, order_seq=existing.get("order_seq"))
+    return True
+
+
 def record_membership(cursor, membership_record: Mapping[str, Any], *, ctx: Optional[NetworkContext] = None) -> Optional[dict]:
     """Store a membership record locally and publish it."""
     kind = membership_record.get("type")

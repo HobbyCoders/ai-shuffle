@@ -3557,6 +3557,7 @@ from app.db.subagents import (  # noqa: F401
     delete_subagent,
     set_subagent_builtin,
     revert_subagent_to_defaults,
+    refresh_builtin_subagent_defaults,
     builtin_subagent_is_modified,
     add_permission_rule,
     get_permission_rule,
