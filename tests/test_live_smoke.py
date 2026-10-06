@@ -6,6 +6,7 @@ worker's HTTP API, and the client's own wire behaviour is checked against
 """
 import json
 import threading
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -27,8 +28,9 @@ PEER_REV = "b" * 40
 class FakeWorker:
     """In-memory stand-in for the endpoints the runner calls."""
 
-    def __init__(self, *, peer_online=True, peer=True, answer=None, tokens=100):
+    def __init__(self, *, peer_online=True, peer=True, answer=None, tokens=100, default_agent="coding"):
         self.peer_online, self.has_peer = peer_online, peer
+        self.prefs = {"composer.profile": default_agent} if default_agent is not None else {}
         self.answer = answer or (lambda prompt: ("OK", []))
         self.tokens = tokens
         self.sessions = {}
@@ -57,6 +59,13 @@ class FakeWorker:
 
     def projects(self):
         return [{"id": "proj1", "name": "ai-shuffle"}]
+
+    def agents(self):
+        return [{"id": "coding", "is_builtin": False}, {"id": "general-purpose", "is_builtin": True},
+                {"id": "Plan", "is_builtin": True}]
+
+    def preference(self, key):
+        return self.prefs.get(key)
 
     def send(self, prompt, *, session_id=None, target_instance_id=None, **kw):
         if self.raise_on_send and self.raise_on_send(prompt):
@@ -297,6 +306,67 @@ def test_message_as_turn_ends_and_compact(tmp_path):
     assert worker.compacted == ["s2"]
 
 
+def _two_message_row(rid="t.1"):
+    return {"id": rid, "check": "x", "kind": "script", "steps": [
+        {"op": "start", "as": "a", "prompt": "reply OK", "expect_reply": "OK"},
+        {"op": "message", "session": "a", "prompt": "reply OK again", "expect_reply": "OK"},
+        {"op": "message", "session": "a", "when": "reply_seen", "prompt": "reply OK once more"}]}
+
+
+def test_default_agent_is_sent_on_start_and_every_message(tmp_path):
+    # The web UI starts a chat with the account's default agent and sends the
+    # session's agent on every later message; the worker refuses a query
+    # that carries none ("That agent no longer exists" / "Profile not found").
+    worker = FakeWorker()
+    result, _ = _run(worker, _data(_two_message_row()), tmp_path)
+    assert result["rows"][0]["status"] == "pass", result["rows"]
+    assert [(s["session_id"], s.get("profile")) for s in worker.sent] == [
+        (None, "coding"), ("s1", "coding"), ("s1", "coding")]
+    assert result["agent"] == {"agent": "coding", "why": "account default"}
+
+
+def test_agent_flag_is_sent_on_start_and_every_message(tmp_path):
+    worker = FakeWorker()
+    result, _ = _run(worker, _data(_two_message_row()), tmp_path, agent="general-purpose")
+    assert result["rows"][0]["status"] == "pass", result["rows"]
+    assert [s.get("profile") for s in worker.sent] == ["general-purpose"] * 3
+    assert result["agent"] == {"agent": "general-purpose", "why": "given"}
+
+
+def test_stale_default_agent_falls_back_like_the_ui(tmp_path):
+    worker = FakeWorker(default_agent="deleted-agent")
+    result, _ = _run(worker, _data(_script("t.1")), tmp_path)
+    assert worker.sent[0]["profile"] == "general-purpose"  # first built-in, as validateSelectedProfile
+    assert result["agent"] == {"agent": "general-purpose", "why": "account default 'deleted-agent' no longer exists"}
+
+
+@pytest.mark.parametrize("kwargs, agent, msg", [
+    ({"default_agent": None}, None, r"no default agent: pick an agent .* --agent ID \(available: coding, general-purpose, Plan\)"),
+    ({"default_agent": ""}, None, "no default agent"),
+    ({}, "nope", r"agent 'nope' does not exist on this worker \(--agent; available: coding"),
+])
+def test_missing_agent_stops_before_any_session(tmp_path, kwargs, agent, msg):
+    worker = FakeWorker(**kwargs)
+    with pytest.raises(SetupError, match=msg):
+        _run(worker, _data(_script("t.1")), tmp_path, agent=agent)
+    assert worker.sent == [] and worker.sessions == {}
+    assert not any(tmp_path.iterdir())
+
+
+def test_no_agents_on_the_worker_is_a_setup_error(tmp_path):
+    worker = FakeWorker()
+    worker.agents = lambda: []
+    with pytest.raises(SetupError, match="no agents are configured"):
+        _run(worker, _data(_script("t.1")), tmp_path)
+    assert worker.sent == []
+
+
+def test_runs_without_script_rows_need_no_agent(tmp_path):
+    worker = FakeWorker(default_agent=None)
+    result, _ = _run(worker, _data({"id": "t.1", "check": "Stop", "kind": "browser"}), tmp_path)
+    assert result["agent"] is None and result["rows"][0]["reason"] == "needs browser"
+
+
 def test_placeholders_and_image(tmp_path):
     worker = FakeWorker()
     row = {"id": "t.1", "check": "x", "kind": "script", "steps": [
@@ -523,14 +593,66 @@ def test_http_client_maps_errors():
         client.compact("s1")
 
 
+def _real_routes():
+    from app.main import app
+
+    def walk(routes):
+        for route in routes:
+            if hasattr(route, "effective_candidates"):  # FastAPI's included routers
+                yield from walk(route.effective_candidates())
+                yield from route.effective_low_priority_routes()
+            else:
+                yield route
+    return list(walk(app.routes))
+
+
+def _routed(routes, kind, method, path):
+    from starlette.routing import Match
+
+    scope = {"type": kind, "path": path, "method": method, "root_path": ""}
+    return any(route.matches(scope)[0] == Match.FULL for route in routes)
+
+
+def test_client_calls_exist_on_the_real_worker():
+    """Every path the client calls is a route of the real app (a fake client cannot catch a 404/403)."""
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        return httpx.Response(200, json={})
+    client = HttpWorkerClient("http://127.0.0.1:8000", transport=httpx.MockTransport(handler))
+    client.deploy_status()
+    client.installs()
+    client.models()
+    client.projects()
+    client.agents()
+    client.preference("composer.profile")
+    client.session("s1")
+    client.state("s1")
+    client.compact("s1")
+    client.archive("s1")
+    ws_path = urlsplit(client._ws_url()).path
+
+    assert seen[0] == ("GET", "/api/v1/settings/application-updates/deploy-status")
+    assert ("GET", "/api/v1/agents") in seen and ("GET", "/api/v1/preferences/composer.profile") in seen
+    assert ws_path == "/api/v1/ws/chat"
+    routes = _real_routes()
+    assert not _routed(routes, "http", "GET", "/api/v1/application-updates/deploy-status")  # the old 404
+    assert not _routed(routes, "websocket", "GET", "/ws/chat")  # the old 403
+    missing = [f"{m} {p}" for m, p in seen if not _routed(routes, "http", m, p)]
+    assert missing == []
+    assert _routed(routes, "websocket", "GET", ws_path)
+
+
 @pytest.fixture()
 def ws_stub():
     from websockets.sync.server import serve
 
-    frames, origins = [], []
+    frames, origins, paths = [], [], []
 
     def handler(ws):
         origins.append(ws.request.headers.get("Origin"))
+        paths.append(ws.request.path)
         assert ws.request.headers.get("Authorization") is None
         for raw in ws:
             frame = json.loads(raw)
@@ -546,12 +668,12 @@ def ws_stub():
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.socket.getsockname()[1]
-    yield f"http://127.0.0.1:{port}", frames, origins
+    yield f"http://127.0.0.1:{port}", frames, origins, paths
     server.shutdown()
 
 
 def test_ws_send_starts_session_with_origin(ws_stub):
-    url, frames, origins = ws_stub
+    url, frames, origins, paths = ws_stub
     client = HttpWorkerClient(url, ack_timeout=5)
     client.linger_s = 0.2
     sid = client.send("hello", model="haiku", permission_mode="bypassPermissions", target_instance_id="dev_peer")
@@ -562,6 +684,16 @@ def test_ws_send_starts_session_with_origin(ws_stub):
     assert query["target_instance_id"] == "dev_peer"
     assert {"type": "pong"} in frames
     assert origins == [url]
+    assert paths == ["/api/v1/ws/chat"]
     with pytest.raises(ClientError, match="Session not found"):
         client.send("refuse", session_id="old")
+    assert frames[-1]["session_id"] == "old"
+
+
+def test_ws_follow_up_carries_the_agent(ws_stub):
+    url, frames, _origins, _paths = ws_stub
+    client = HttpWorkerClient(url, ack_timeout=5)
+    client.linger_s = 0.2
+    assert client.send("again", session_id="new1", model="sonnet", profile="coding") == "new1"
+    assert frames[0]["session_id"] == "new1" and frames[0]["profile"] == "coding"
 

@@ -19,6 +19,7 @@ from scripts.live_smoke import results as results_mod
 from scripts.live_smoke import scenarios as scen
 from scripts.live_smoke.client import ClientError
 
+DEFAULT_AGENT_PREF = "composer.profile"
 CHEAP_HINTS = ("haiku", "nano", "flash-lite", "mini", "lite", "flash", "small")
 BUSY_REMOTE = {"working", "parked", "permission", "question"}
 IDLE_GRACE_S = 45.0
@@ -129,7 +130,9 @@ class Runner:
         self.peer_flag = peer
         self.only = only
         self.project_flag = project or self.defaults.get("project")
-        self.agent = agent
+        self.agent_flag = agent
+        self.agent: str | None = None
+        self.agent_choice: dict = {}
         self.poll_s, self.sleep, self.clock, self.log = poll_s, sleep, clock, log
         self.run_id = run_id or secrets.token_hex(3)
         self.created: list = []          # [{"session_id", "row", "alias", "on"}]
@@ -182,6 +185,38 @@ class Runner:
         except ClientError as exc:
             value, why = None, f"worker default (models list failed: {exc})"
         return {"model": value, "why": why}
+
+    def resolve_agent(self) -> dict:
+        """The agent every session and message carries, chosen as the web UI does.
+
+        The composer starts a new chat with the account's default agent (the
+        ``composer.profile`` preference) and puts the open session's agent on
+        every later message. When that default names a deleted agent it falls
+        back to the first built-in, then the first agent. With no default the
+        UI would send no agent and the worker refuses the chat, so the run
+        stops here instead of creating refused sessions.
+        """
+        try:
+            agents = self.client.agents()
+            default = None if self.agent_flag else self.client.preference(DEFAULT_AGENT_PREF)
+        except ClientError as exc:
+            raise SetupError(f"could not read the worker's agents: {exc}") from None
+        ids = [a.get("id") for a in agents if a.get("id")]
+        listing = ", ".join(ids) or "none"
+        if not ids:
+            raise SetupError("no agents are configured on this worker; create one before the smoke")
+        if self.agent_flag:
+            if self.agent_flag not in ids:
+                raise SetupError(f"agent {self.agent_flag!r} does not exist on this worker "
+                                 f"(--agent; available: {listing})")
+            return {"agent": self.agent_flag, "why": "given"}
+        if isinstance(default, str) and default in ids:
+            return {"agent": default, "why": "account default"}
+        if isinstance(default, str) and default:
+            fallback = next((a["id"] for a in agents if a.get("is_builtin") and a.get("id")), ids[0])
+            return {"agent": fallback, "why": f"account default {default!r} no longer exists"}
+        raise SetupError("no default agent: pick an agent in the web UI composer once, or pass "
+                         f"--agent ID (available: {listing})")
 
     def resolve_project(self) -> str | None:
         if not self.project_flag:
@@ -337,7 +372,10 @@ class Runner:
                     if step.get("when") == "reply_seen":
                         self._wait(sid, within, until="reply")
                     users_at_least = _user_count(self._snapshot(sid).get("messages") or []) + 1
-                    self.client.send(self._fmt(step["prompt"], sessions), session_id=sid, model=self.model)
+                    # Like the web UI, every message carries the session's agent;
+                    # the worker refuses a query without one.
+                    self.client.send(self._fmt(step["prompt"], sessions), session_id=sid, model=self.model,
+                                     profile=self.agent)
             if step.get("wait", True) is False:
                 continue
             s = self._wait(sid, within, users_at_least=users_at_least)
@@ -386,6 +424,9 @@ class Runner:
         if self.only and len(selected) != len(set(self.only)):
             unknown = sorted(set(self.only) - {r["id"] for r in selected})
             raise SetupError(f"unknown row ids: {', '.join(unknown)}")
+        if any(r["kind"] == "script" for r in selected):
+            self.agent_choice = self.resolve_agent()
+            self.agent = self.agent_choice["agent"]
         out_rows = [{"id": r["id"], "kind": r["kind"], "check": r["check"], "status": "not_run",
                      "reason": "not reached", "evidence": {}} for r in selected]
         project = None
@@ -482,6 +523,7 @@ class Runner:
             "started_at": started,
             "finished_at": results_mod.now_iso(),
             "model": choice,
+            "agent": self.agent_choice or None,
             "token_cap": self.cap,
             "tokens": {**usage, "counted": self.total_tokens()},
             "cap_exceeded": self.cap_exceeded,

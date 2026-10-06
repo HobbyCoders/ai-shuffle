@@ -74,13 +74,23 @@ class HttpWorkerClient:
         return resp.json() if resp.content else {}
 
     def deploy_status(self) -> dict:
-        return self._req("GET", "/application-updates/deploy-status")
+        # Mounted under the settings router (app/api/settings.py, prefix /api/v1/settings).
+        return self._req("GET", "/settings/application-updates/deploy-status")
 
     def installs(self) -> dict:
         return self._req("GET", "/cluster/installs")
 
     def models(self) -> dict:
         return self._req("GET", "/models")
+
+    def agents(self) -> list:
+        data = self._req("GET", "/agents")
+        return data if isinstance(data, list) else []
+
+    def preference(self, key: str):
+        """An account preference's value, or None when it was never set."""
+        data = self._req("GET", f"/preferences/{key}")
+        return data.get("value") if isinstance(data, dict) else None
 
     def projects(self) -> list:
         data = self._req("GET", "/projects")
@@ -101,7 +111,8 @@ class HttpWorkerClient:
     # -- chat WebSocket (the same frames the web UI sends) --------------------
 
     def _ws_url(self) -> str:
-        return "ws" + self.base_url[len("http"):] + "/ws/chat"
+        # app/api/websocket.py: router prefix /api/v1, route /ws/chat.
+        return "ws" + self.base_url[len("http"):] + API + "/ws/chat"
 
     def _exchange(self, frame: dict, done, wait_s: float, linger_s: float = 0.0) -> dict | None:
         """Send one frame and read replies until ``done(reply)`` or ``wait_s`` passes.

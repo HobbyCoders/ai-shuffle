@@ -130,7 +130,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--peer", help="the other worker's name (default: the only other paired worker)")
     run.add_argument("--rows", help="comma-separated row ids; writes a partial file the gate ignores")
     run.add_argument("--project", help="project name or id for rows that need one (default from scenarios)")
-    run.add_argument("--agent", help="agent (profile) id for the sessions (default: the worker's default)")
+    run.add_argument("--agent", help="agent (profile) id for every session and message (default: the account's "
+                     "default agent, the one the web UI composer starts new chats with)")
     run.set_defaults(fn=cmd_run)
 
     rec = sub.add_parser("record", help="record a browser or owner row result")
