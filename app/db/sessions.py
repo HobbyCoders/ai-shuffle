@@ -944,6 +944,7 @@ def set_session_run_binding(
     preserve_provider: bool = False,
     clear_effort: bool = False,
     away_mode: Optional[bool] = None,
+    fast_pinned: Optional[bool] = None,
 ) -> None:
     """Persist the run binding a turn actually used onto its session.
 
@@ -968,6 +969,8 @@ def set_session_run_binding(
     user picked and is written through — only ``None`` (the field was absent)
     leaves the row alone. ``clear_effort`` explicitly removes the session's
     effort binding (the live settings endpoint's model-default choice).
+    ``fast_pinned`` marks a delegated worker whose fast mode the owner set in
+    the worker's own chat, so a parent's later toggle leaves it alone.
     """
     _ph = ph()
     updates: List[str] = []
@@ -1006,6 +1009,9 @@ def set_session_run_binding(
     if away_mode is not None:
         updates.append(f"away_mode = {_ph}")
         values.append(bool(away_mode))
+    if fast_pinned is not None:
+        updates.append(f"fast_pinned = {_ph}")
+        values.append(bool(fast_pinned))
 
     # An empty list explicitly removes every additional folder.
     if workspace_project_ids is not None:
@@ -1751,6 +1757,23 @@ def set_session_hidden(session_id: str, hidden: bool) -> Optional[SessionRow]:
             (hidden, datetime.now(timezone.utc).isoformat(), session_id)
         )
         return row_to_dict(cursor.fetchone())
+
+
+def list_worker_children(session_id: str) -> List[Dict[str, Any]]:
+    """The delegated workers (Task/Swarm) whose parent is ``session_id``.
+
+    Workers only: a fork or a peer chat also records a parent, but it is the
+    owner's own chat, not a subagent. Nested workers record the ROOT as their
+    parent (``provider_agent.dispatch_worker``), so the root's list is the
+    whole delegation tree.
+    """
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT * FROM sessions WHERE parent_session_id = {ph()} AND is_worker = TRUE",
+            (session_id,)
+        )
+        return rows_to_list(cursor.fetchall())
 
 
 def session_has_forks(session_id: str) -> bool:

@@ -106,12 +106,15 @@ _BODY_KEYS = frozenset({
     "version", "worker_session_id", "agent", "agent_name", "prompt", "label",
     "name", "provider_id", "model", "effort", "permission_mode",
     "tool_allowlist", "mode", "origin", "depth", "checkout", "parent",
-    "context_window",
+    "context_window", "fast",
 })
 #: The ``remote_task`` capability that accepts ``context_window`` in the body.
 #: An older target refuses unknown fields, so the parent sends it only to
 #: targets at this version or later.
 CONTEXT_WINDOW_VERSION = 2
+#: The ``remote_task`` capability that accepts ``fast`` (the caller's fast
+#: mode) in the body; sent only to targets at this version or later.
+FAST_VERSION = 3
 #: Upper bound for a requested window; real choices are at most 1M.
 MAX_CONTEXT_WINDOW = 10_000_000
 _PARENT_KEYS = frozenset({
@@ -227,11 +230,13 @@ def start_body(
     owner_session_id: str,
     tool_use_id: Optional[str],
     context_window: Optional[int] = None,
+    fast: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """The ``task-start`` body. Identifiers only; never a path or credential.
 
-    ``context_window`` (the caller's window choice) is sent only when set, so
-    a request without one is byte-identical to the version-1 wire.
+    ``context_window`` (the caller's window choice) and ``fast`` (its fast
+    mode) are sent only when set, so a request without them is
+    byte-identical to the version-1 wire.
     """
     body = {
         "version": WIRE_VERSION,
@@ -260,29 +265,42 @@ def start_body(
     }
     if context_window:
         body["context_window"] = int(context_window)
+    if fast is not None:
+        body["fast"] = bool(fast)
     return body
 
 
 def _caller_bindings(caller_row: Mapping[str, Any], caller_session_id: str):
-    """``(permission mode, loop-guard origin, context window)`` the child
-    inherits. Blocking."""
+    """``(permission mode, loop-guard origin, context window, fast mode)`` the
+    child inherits. Blocking."""
     from app.core import loop_guard
-    from app.core.provider_agent import _caller_context_window, _caller_permission_mode
+    from app.core.provider_agent import (
+        _caller_context_window, _caller_fast, _caller_permission_mode,
+    )
 
     return (
         _caller_permission_mode(caller_row),
         loop_guard.session_origin(caller_session_id),
         _caller_context_window(caller_row),
+        _caller_fast(caller_row),
     )
+
+
+def _remote_task_version(worker: Mapping[str, Any]) -> int:
+    try:
+        return int((worker.get("capabilities") or {}).get("remote_task") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _accepts_context_window(worker: Mapping[str, Any]) -> bool:
     """Whether the target's ``remote_task`` capability takes ``context_window``."""
-    try:
-        version = int((worker.get("capabilities") or {}).get("remote_task") or 0)
-    except (TypeError, ValueError):
-        return False
-    return version >= CONTEXT_WINDOW_VERSION
+    return _remote_task_version(worker) >= CONTEXT_WINDOW_VERSION
+
+
+def _accepts_fast(worker: Mapping[str, Any]) -> bool:
+    """Whether the target's ``remote_task`` capability takes ``fast``."""
+    return _remote_task_version(worker) >= FAST_VERSION
 
 
 def _link_job(caller_session_id: str, worker_id: str, device_id: str, label: str) -> None:
@@ -363,8 +381,13 @@ async def dispatch_remote(
         return {"ok": False, "error": refusal}
 
     worker_id = str(uuid.uuid4())
-    permission_mode, origin, context_window = await asyncio.to_thread(
+    permission_mode, origin, context_window, fast = await asyncio.to_thread(
         _caller_bindings, caller_row, caller_session_id)
+    if fast is not None and not _accepts_fast(worker):
+        # Same rule as the window: an older target refuses unknown fields, and
+        # its child runs at standard speed.
+        logger.info("remote_task: %s predates fast; the child runs at its default speed", name)
+        fast = None
     if context_window and not _accepts_context_window(worker):
         # An older target would refuse the whole start over the unknown field;
         # its child runs at its model's default window instead.
@@ -395,7 +418,7 @@ async def dispatch_remote(
         mode=mode, origin=origin, depth=depth, checkout=state.to_wire(),
         parent_device_id=ctx.device_id, parent_session_id=root_session_id,
         owner_session_id=caller_session_id, tool_use_id=launch_tool_use_id,
-        context_window=context_window,
+        context_window=context_window, fast=fast,
     )
     if stop_generation is not None and task_registry.stop_invalidated(root_session_id, stop_generation):
         await release()
@@ -524,6 +547,7 @@ class _Start:
     tool_use_id: Optional[str]
     fingerprint: str
     context_window: Optional[int] = None
+    fast: Optional[bool] = None
 
 
 def _text(body: Mapping[str, Any], key: str, limit: int) -> str:
@@ -585,6 +609,9 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
     if context_window is not None and (
             type(context_window) is not int or not 0 < context_window <= MAX_CONTEXT_WINDOW):
         raise ValueError("context_window must be a positive token count")
+    fast = body.get("fast")
+    if fast is not None and type(fast) is not bool:
+        raise ValueError("fast must be true or false")
     tools = body.get("tool_allowlist")
     if tools is not None and (
             not isinstance(tools, list) or not tools or len(tools) > MAX_TOOLS
@@ -622,6 +649,7 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
         tool_use_id=_optional_text(parent, "tool_use_id", 200),
         fingerprint=_fingerprint(body),
         context_window=context_window,
+        fast=fast,
     )
 
 
@@ -783,6 +811,8 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
     # Fitted to the child's model on THIS worker's provider rows.
     context_window = provider_agent.worker_context_window(
         start.context_window, start.provider_id, start.model)
+    # Fitted to the child's model on THIS worker, as the window is.
+    fast = provider_agent.worker_fast(start.fast, start.provider_id, start.model, start.agent)
     fields = provider_agent.worker_session_fields(
         worker_session_id=start.worker_session_id, profile_id=start.agent, title=start.label,
         parent_session_id=start.parent_session_id, provider_id=start.provider_id,
@@ -790,12 +820,12 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
         worktree_branch=checkout.branch if checkout else None,
         worktree_path=checkout.path if checkout else None,
         permission_mode=permission_mode, context_window=context_window,
-        permission_ceiling=permission_mode,
+        permission_ceiling=permission_mode, fast=fast,
     )
     overrides = provider_agent.worker_turn_overrides(
         provider_id=start.provider_id, model_id=start.model, effort=start.effort,
         cwd=received.cwd, permission_mode=permission_mode, checkout=checkout,
-        tool_allowlist=tools, context_window=context_window,
+        tool_allowlist=tools, context_window=context_window, fast=fast,
     )
     payload: Dict[str, Any] = {
         REPORT_DEVICE_KEY: from_device,

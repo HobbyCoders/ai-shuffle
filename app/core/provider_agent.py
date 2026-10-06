@@ -759,6 +759,64 @@ def _caller_context_window(caller_row: Optional[Mapping[str, Any]]) -> Optional[
     return _positive_window(row.get("context_window"))
 
 
+def _caller_fast(caller_row: Optional[Mapping[str, Any]]) -> Optional[bool]:
+    """The direct caller's fast mode, for worker inheritance.
+
+    Resolved like :func:`_caller_effort`: the running turn's override (a live
+    toggle writes it there), else the latest configured turn's, else the
+    session binding (voice reads only its live binding). ``None`` means the
+    caller never picked one.
+    """
+    from app.db import turns
+
+    row = caller_row or {}
+    if row.get("id") and row.get("mode") != "voice":
+        try:
+            turn = turns.get_live_turn(str(row["id"]))
+            if turn is None:
+                turn = turns.get_latest_turn(str(row["id"])) or {}
+                if turn.get("state") == "queued":
+                    turn = {}
+            value = (turn.get("overrides") or {}).get("fast")
+            if value is not None:
+                return bool(value)
+        except Exception:  # noqa: BLE001 — session binding fallback
+            logger.debug("ProviderAgent: caller fast-mode turn read failed", exc_info=True)
+    value = row.get("fast")
+    return None if value is None else bool(value)
+
+
+def worker_fast(
+    fast: Optional[bool], provider_id: Optional[str], model_id: Optional[str],
+    profile_id: Optional[str] = None,
+) -> Optional[bool]:
+    """The caller's fast mode as the worker should carry it.
+
+    Off passes through. On passes through only when the worker's model
+    supports it (:func:`app.core.model_override.fast_mode_supported`); a
+    worker on any other model gets ``None`` and runs at its standard speed.
+    A worker with no model of its own runs on its agent's saved model.
+    """
+    if fast is None or not fast:
+        return fast
+    from app.core.model_override import fast_mode_supported
+
+    model = model_id
+    if not model and profile_id:
+        try:
+            from app.db import database
+
+            model = ((database.get_profile(profile_id) or {}).get("config") or {}).get("model")
+        except Exception:  # noqa: BLE001 — unknown model: no fast mode
+            logger.debug("ProviderAgent: worker profile read failed", exc_info=True)
+            model = None
+    try:
+        return True if fast_mode_supported(model, provider_id) else None
+    except Exception:  # noqa: BLE001 — inheritance is best-effort
+        logger.debug("ProviderAgent: fast-mode support check failed", exc_info=True)
+        return None
+
+
 def worker_context_window(
     window: Optional[int], provider_id: Optional[str], model_id: Optional[str],
 ) -> Optional[int]:
@@ -894,6 +952,7 @@ def worker_session_fields(
     permission_mode: Optional[str] = None,
     context_window: Optional[int] = None,
     permission_ceiling: Optional[str] = None,
+    fast: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """``database.create_session`` keywords for a Task worker's own row.
 
@@ -906,7 +965,8 @@ def worker_session_fields(
     ``context_window`` (the caller's window choice, fitted to this worker by
     :func:`worker_context_window`) is stamped on the row, so every later turn
     of the worker — a message, a restart, a limit-reset resume — runs with
-    the same window as its first.
+    the same window as its first. ``fast`` (the caller's fast mode, fitted
+    by :func:`worker_fast`) is stamped the same way when it is set.
     """
     fields: Dict[str, Any] = dict(
         session_id=worker_session_id,
@@ -936,6 +996,8 @@ def worker_session_fields(
         fields["permission_ceiling"] = permission_ceiling
     if context_window:
         fields["context_window"] = context_window
+    if fast is not None:
+        fields["fast"] = bool(fast)
     return fields
 
 
@@ -950,16 +1012,16 @@ def worker_turn_overrides(
     checkout: Any = None,
     tool_allowlist: Optional[List[str]] = None,
     tool_denylist: Optional[List[str]] = None,
-    voice_row: Optional[Mapping[str, Any]] = None,
     context_window: Optional[int] = None,
+    fast: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """The overrides a Task worker's turn is submitted with, local or remote.
 
     ``checkout`` is a :class:`app.core.worker_checkout.WorkerCheckout`; its
     instructions follow ``system_prompt_append``. ``context_window`` is the
     caller's window choice fitted to the worker (see
-    :func:`worker_context_window`). ``voice_row`` is a voice caller, whose
-    fast mode the worker keeps.
+    :func:`worker_context_window`). ``fast`` is the caller's fast mode fitted
+    to the worker (see :func:`worker_fast`).
     """
     overrides: Dict[str, Any] = {}
     if provider_id:
@@ -975,8 +1037,8 @@ def worker_turn_overrides(
     overrides["_permission_ceiling"] = permission_mode or "default"
     if context_window:
         overrides["context_window"] = context_window
-    if voice_row and voice_row.get("fast") is not None:
-        overrides["fast"] = voice_row.get("fast")
+    if fast is not None:
+        overrides["fast"] = bool(fast)
     # A role definition the worker's profile does not carry — today: an agent
     # defined in a ``.fluid/agents`` markdown file or a plugin, dispatched on
     # the caller's profile because it has no ``agents`` row of its own (ruling
@@ -2227,6 +2289,8 @@ async def dispatch_worker(
     #: The caller's effective mode, inherited as the worker's binding AND its
     #: durable ceiling (``None``: the caller resolved to nothing — Ask).
     dispatch_mode: Optional[str] = None
+    #: The caller's fast mode fitted to this worker (see ``worker_fast``).
+    selected_fast: Optional[bool] = None
 
     def _prepare_worker_blocking() -> Tuple[
         Optional[SessionRow], Optional[str], Optional[str], Optional[str],
@@ -2240,7 +2304,7 @@ async def dispatch_worker(
         caller can refuse launch before registration or provider submission.
         Nothing here needs a running loop.
         """
-        nonlocal worker_checkout, worker_window, dispatch_mode
+        nonlocal worker_checkout, worker_window, dispatch_mode, selected_fast
         # Inheritance (project/worktree/cwd) reads the DIRECT caller's session;
         # ``parent_session_id`` is the ROUTING parent — for nested Task-tool
         # dispatch it is the ROOT session, whose UI renders the card and answers
@@ -2268,6 +2332,9 @@ async def dispatch_worker(
             _caller_context_window(parent_row), provider_id, model_id,
         )
         dispatch_mode = _caller_permission_mode(parent_row)
+        # The caller's fast mode, as it stands now: a worker started after the
+        # owner turned it on runs fast too (when its model can).
+        selected_fast = worker_fast(_caller_fast(parent_row), provider_id, model_id, profile_id)
         project_v2_id = (parent_row or {}).get("project_v2_id")
         branch = (parent_row or {}).get("branch")
         target_instance_id = (parent_row or {}).get("instance_id")
@@ -2323,6 +2390,7 @@ async def dispatch_worker(
                 # turn (wake, resume, message) resolves from the row.
                 permission_mode=dispatch_mode or "default",
                 permission_ceiling=dispatch_mode or "default",
+                fast=selected_fast,
             ))
             # The parent's creator reads its worker as it reads the parent,
             # and other account members do not (#1877). Label only: no record.
@@ -2403,8 +2471,8 @@ async def dispatch_worker(
         checkout=worker_checkout,
         tool_allowlist=tool_allowlist,
         tool_denylist=tool_denylist,
-        voice_row=parent_row if (parent_row or {}).get("mode") == "voice" else None,
         context_window=worker_window,
+        fast=selected_fast,
     )
 
     # ONE join key for the whole surface: the worker's session id is the

@@ -16,6 +16,8 @@ from app.network import control
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _locks = WeakValueDictionary()
+#: Running fast-mode hand-downs (strong references until they finish).
+_fast_propagations: set = set()
 
 
 class RunSettingsUpdate(BaseModel):
@@ -46,7 +48,86 @@ async def _store_live_overrides(session_id: str, runtime) -> None:
                        turn_id, session_id, exc_info=True)
 
 
-async def apply_run_settings(session_id: str, body: RunSettingsUpdate) -> dict:
+def _inherited_fast_skip(session: dict) -> Optional[str]:
+    """Why a parent's fast-mode change leaves this subagent alone, or None.
+
+    ``pinned``: the owner set this subagent's fast mode in its own chat.
+    ``unsupported``: its model has no fast mode, so it keeps its own setting.
+    Blocking.
+    """
+    from app.core.model_override import fast_mode_supported
+
+    if session.get("fast_pinned"):
+        return "pinned"
+    model = session.get("model") or session.get("launched_model")
+    if not model and session.get("profile_id"):
+        model = ((database.get_profile(session["profile_id"]) or {}).get("config") or {}).get("model")
+    if not fast_mode_supported(model, session.get("provider_id")):
+        return "unsupported"
+    return None
+
+
+async def propagate_fast(session_id: str, fast: bool, _seen: Optional[set] = None) -> None:
+    """Hand a fast-mode change down to the session's subagents.
+
+    Every delegated worker under ``session_id`` takes the same setting from
+    its next model request, as the parent does, except one the owner pinned
+    in its own chat and one whose model has no fast mode. A worker run by
+    another worker gets it through that worker's ``run-settings`` action,
+    which hands it on to its own subagents there. Never raises: a subagent
+    that cannot take the change keeps its setting.
+    """
+    seen = _seen if _seen is not None else {session_id}
+    try:
+        children = await run_sync(database.list_worker_children, session_id)
+    except Exception:  # noqa: BLE001 — the parent's own change stands
+        logger.warning("Could not list the subagents of %s for fast mode", session_id, exc_info=True)
+        return
+    for child in children:
+        child_id = child.get("id")
+        if not child_id or child_id in seen:
+            continue
+        seen.add(child_id)
+        try:
+            owner = await run_sync(control.owner_of, child)
+            if owner is not None:
+                await control.call(owner, "run-settings", {
+                    "session_id": child_id, "fast": fast, "inherited": True,
+                })
+                continue
+            result = await apply_run_settings(
+                child_id, RunSettingsUpdate(fast=fast), inherited=True, propagate=False)
+            if "skipped" not in result:
+                await propagate_fast(child_id, fast, seen)
+        except Exception:  # noqa: BLE001 — one subagent never blocks the rest
+            logger.info("Fast mode was not handed to subagent %s of %s", child_id, session_id,
+                        exc_info=True)
+
+
+def _start_propagation(session_id: str, fast: bool) -> None:
+    task = asyncio.get_running_loop().create_task(propagate_fast(session_id, fast))
+    _fast_propagations.add(task)
+    task.add_done_callback(_fast_propagations.discard)
+
+
+async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *,
+                             inherited: bool = False, propagate: bool = True) -> dict:
+    """Change a session's live run settings.
+
+    A fast-mode change is then handed down to the session's subagents in the
+    background (:func:`propagate_fast`), unless ``propagate`` is False.
+    ``inherited`` marks a change handed down from a parent: it carries only
+    fast mode, and a subagent the owner pinned, or one whose model has no
+    fast mode, answers ``{"skipped": reason}`` and is left unchanged. The
+    owner's own change to a subagent pins it.
+    """
+    result = await _apply_run_settings(session_id, body, inherited=inherited)
+    if propagate and "fast" in body.model_fields_set and "skipped" not in result:
+        _start_propagation(session_id, bool(result["fast"]))
+    return result
+
+
+async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inherited: bool) -> dict:
     from app.core.session_pool import get_session_pool
     from app.core.session_runtime import get_live_runtime
     from app.core.model_effort import normalize_effort
@@ -62,6 +143,12 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate) -> dict:
     lock = _locks.setdefault(session_id, asyncio.Lock())
     async with lock:
         session = await run_sync(control._require_owned, session_id)
+        if inherited:
+            if set(changes) != {"fast"}:
+                raise ValueError("A parent hands down only fast mode")
+            skip = await run_sync(_inherited_fast_skip, session)
+            if skip:
+                return {"skipped": skip}
         if "context_window" in changes:
             # Unlike effort, a window is connect-time state on BOTH legs. Save
             # it now, but never interrupt/reconfigure an in-flight request. The
@@ -108,9 +195,13 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate) -> dict:
             selected["effort"] = effort
         # The home never stores an effort; its turns carry none either.
         stored = {**selected, "effort": None} if home else selected
+        # The owner's own pick on a subagent pins it: a parent's later toggle
+        # leaves it alone.
+        pin = ({"fast_pinned": True}
+               if not inherited and "fast" in changes and session.get("is_worker") else {})
         try:
             await run_sync(database.set_session_run_binding, session_id, **stored,
-                           clear_effort=stored["effort"] is None)
+                           clear_effort=stored["effort"] is None, **pin)
         except Exception:
             if connected:
                 await state.adapter.set_run_settings(**old)
@@ -152,7 +243,8 @@ async def handle_run_settings(body: dict, from_device: str) -> dict:
     if not isinstance(session_id, str) or not session_id:
         raise ValueError("session_id is required")
     result = await apply_run_settings(session_id, RunSettingsUpdate.model_validate(
-        {key: value for key, value in body.items() if key != "session_id"}))
+        {key: value for key, value in body.items() if key not in ("session_id", "inherited")}),
+        inherited=body.get("inherited") is True)
     await _announce_context_window(session_id, result)
     return result
 

@@ -618,6 +618,54 @@ def test_an_invalid_context_window_is_refused(world, value):
             remote_task.prepare_task_start({**body, "context_window": value}, PARENT)
 
 
+# --- the caller's fast mode -----------------------------------------------------
+
+@pytest.mark.parametrize("supported", [True, False])
+def test_the_child_runs_fast_when_the_caller_does(world, monkeypatch, supported):
+    from app.core import model_override
+    checked = []
+    monkeypatch.setattr(model_override, "fast_mode_supported",
+                        lambda model, provider: checked.append(model) or supported)
+    _target_version(monkeypatch, remote_task.FAST_VERSION)
+    database.set_session_run_binding("parent", fast=True)
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    result = dispatch({})
+    assert result["ok"] is True, result
+    [(_, _, body)] = calls
+    assert body["fast"] is True
+    # The target decides for the model the child really runs on.
+    assert "sonnet" in checked
+    row = database.get_session(result["worker_session_id"])
+    [turn] = child_turns(result["worker_session_id"])
+    if supported:
+        assert bool(row["fast"]) is True and turn["overrides"]["fast"] is True
+    else:
+        assert not row["fast"] and "fast" not in turn["overrides"]
+
+
+def test_an_older_target_gets_no_fast_mode_and_still_starts(world, monkeypatch):
+    from app.core import model_override
+    monkeypatch.setattr(model_override, "fast_mode_supported", lambda model, provider: True)
+    _target_version(monkeypatch, remote_task.CONTEXT_WINDOW_VERSION)
+    database.set_session_run_binding("parent", fast=True)
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    result = dispatch({})
+    assert result["ok"] is True, result
+    [(_, _, body)] = calls
+    assert "fast" not in body
+    assert not database.get_session(result["worker_session_id"])["fast"]
+
+
+@pytest.mark.parametrize("value", ["true", 1, 0, "false"])
+def test_an_invalid_fast_value_is_refused(world, value):
+    body = body_for(world, state=RemoteWorkerBranch("none"))
+    with world.net.as_target():
+        with pytest.raises(ValueError, match="fast"):
+            remote_task.prepare_task_start({**body, "fast": value}, PARENT)
+
+
 # --- chains on the target -----------------------------------------------------
 
 def test_a_remote_child_is_the_root_here_and_keeps_its_depth(world):

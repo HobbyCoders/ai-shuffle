@@ -310,3 +310,132 @@ async def test_context_pick_is_announced_to_open_clients(mock_db, monkeypatch):
     monkeypatch.setattr(api.control, "call", AsyncMock(return_value={"effort": "low", "fast": False}))
     await api.update_run_settings(None, "announce", api.RunSettingsUpdate(effort="low"))
     broadcast.assert_not_awaited()
+
+
+# --- fast mode handed down the delegation tree --------------------------------
+
+@pytest.fixture
+def tree(mock_db, monkeypatch):
+    """A parent with subagents, all idle on this worker.
+
+    ``w1``/``w2`` are Opus workers (``w2`` under ``w1``), ``w-sonnet`` runs a
+    model without fast mode, ``w-pinned`` was set by the owner in its own chat
+    and ``fork`` is the owner's fork of the parent, not a subagent.
+    """
+    make_profile("agent", {})
+    db.create_session("p", profile_id="agent", model="opus")
+    worker = dict(profile_id="agent", hidden=True, is_worker=True)
+    db.create_session("w1", parent_session_id="p", model="opus", **worker)
+    db.create_session("w2", parent_session_id="w1", model="opus", **worker)
+    db.create_session("w-sonnet", parent_session_id="p", model="sonnet", **worker)
+    db.create_session("w-pinned", parent_session_id="p", model="opus", fast=False, **worker)
+    db.set_session_run_binding("w-pinned", fast_pinned=True)
+    db.create_session("fork", profile_id="agent", parent_session_id="p", model="opus")
+    monkeypatch.setattr(api.control, "_require_owned", db.get_session)
+    monkeypatch.setattr(api.control, "owner_of", lambda row: None)
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(peek=lambda sid: None))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda sid: None)
+
+
+async def _toggle(session_id, fast):
+    result = await api.apply_run_settings(session_id, api.RunSettingsUpdate(fast=fast))
+    await asyncio.gather(*list(api._fast_propagations))
+    return result
+
+
+def _fast(session_id):
+    value = db.get_session(session_id)["fast"]
+    return None if value is None else bool(value)
+
+
+@pytest.mark.asyncio
+async def test_parent_fast_toggle_reaches_its_subagents_and_reverses(tree):
+    assert (await _toggle("p", True))["fast"] is True
+    assert [_fast(s) for s in ("p", "w1", "w2")] == [True, True, True]
+    # A model without fast mode, the owner's pin and a fork are left alone.
+    assert _fast("w-sonnet") is None
+    assert _fast("w-pinned") is False
+    assert _fast("fork") is None
+    await _toggle("p", False)
+    assert [_fast(s) for s in ("p", "w1", "w2")] == [False, False, False]
+    assert _fast("w-sonnet") is None and _fast("fork") is None
+    # Handing it down never pins: the subagents keep following the parent.
+    assert not db.get_session("w1")["fast_pinned"]
+
+
+@pytest.mark.asyncio
+async def test_owner_pick_in_a_subagents_chat_pins_it(tree):
+    await _toggle("w1", False)
+    assert db.get_session("w1")["fast_pinned"]
+    await _toggle("p", True)
+    assert _fast("p") is True
+    assert _fast("w1") is False
+    # Its own pick still reaches its subagents: w1's toggle handed False to w2,
+    # and the root's later change reaches w2 only through w1, which is pinned.
+    assert _fast("w2") is False
+    # A non-worker chat is never pinned.
+    assert not db.get_session("p")["fast_pinned"]
+
+
+@pytest.mark.asyncio
+async def test_running_subagent_takes_the_change_on_its_next_request(tree, monkeypatch):
+    adapter = HarnessAdapter()
+    adapter._is_delegated = True
+    adapter._options = SessionOptions(model="opus", effort="high", fast=False)
+    adapter._engine = SimpleNamespace(set_run_settings=AsyncMock())
+    adapter._sdk_options = SimpleNamespace(effort="high", aih_fast=False)
+    state = SessionState(adapter=adapter, is_connected=True, is_streaming=True,
+                         connect_options=adapter._sdk_options)
+    runtime = SimpleNamespace(turn={"overrides": {"effort": "high", "fast": False}})
+    monkeypatch.setattr("app.core.session_pool.get_session_pool",
+                        lambda: SimpleNamespace(peek=lambda sid: state if sid == "w1" else None))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime",
+                        lambda sid: runtime if sid == "w1" else None)
+    await _toggle("p", True)
+    adapter._engine.set_run_settings.assert_awaited_once_with(effort="high", fast=True)
+    assert adapter._options.fast is True
+    assert state.connect_options.aih_fast is True
+    assert runtime.turn["overrides"]["fast"] is True
+    assert state.is_streaming
+    assert _fast("w1") is True and _fast("w2") is True
+
+
+@pytest.mark.asyncio
+async def test_subagent_on_another_worker_gets_the_change_through_its_owner(tree, monkeypatch):
+    monkeypatch.setattr(api.control, "owner_of", lambda row: "gaming-pc" if row.get("id") == "w1" else None)
+    remote = AsyncMock(return_value={"effort": None, "fast": True})
+    monkeypatch.setattr(api.control, "call", remote)
+    await _toggle("p", True)
+    remote.assert_awaited_once_with("gaming-pc", "run-settings",
+                                    {"session_id": "w1", "fast": True, "inherited": True})
+
+
+@pytest.mark.asyncio
+async def test_handed_down_change_skips_a_pinned_or_unsupported_subagent(tree):
+    assert await api.handle_run_settings(
+        {"session_id": "w-pinned", "fast": True, "inherited": True}, "parent-worker") == {"skipped": "pinned"}
+    assert await api.handle_run_settings(
+        {"session_id": "w-sonnet", "fast": True, "inherited": True}, "parent-worker") == {"skipped": "unsupported"}
+    assert _fast("w-pinned") is False and _fast("w-sonnet") is None
+    with pytest.raises(ValueError, match="only fast mode"):
+        await api.apply_run_settings("w1", api.RunSettingsUpdate(effort="low"), inherited=True)
+    result = await api.handle_run_settings({"session_id": "w1", "fast": True, "inherited": True}, "parent-worker")
+    await asyncio.gather(*list(api._fast_propagations))
+    assert result["fast"] is True and _fast("w2") is True
+    assert not db.get_session("w1")["fast_pinned"]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_subagent_does_not_stop_the_others(tree, monkeypatch):
+    real = api._apply_run_settings
+
+    async def flaky(session_id, body, *, inherited):
+        if session_id == "w1":
+            raise ValueError("The session is still connecting. Try again in a moment.")
+        return await real(session_id, body, inherited=inherited)
+
+    monkeypatch.setattr(api, "_apply_run_settings", flaky)
+    db.create_session("w3", parent_session_id="p", model="opus", profile_id="agent", hidden=True, is_worker=True)
+    assert (await _toggle("p", True))["fast"] is True
+    assert _fast("w1") is None
+    assert _fast("w3") is True

@@ -590,6 +590,42 @@ class TestDispatchWorker:
         assert overrides["context_window"] == 200000
         assert overrides["fast"] is False
 
+    @pytest.mark.parametrize("supported", [True, False])
+    def test_worker_started_after_fast_mode_was_turned_on_runs_fast(
+            self, dispatch_env, monkeypatch, supported):
+        from app.core import model_override
+        from app.db import database
+
+        original = database.get_session
+        monkeypatch.setattr(database, "get_session", lambda sid: {**original(sid), "fast": True})
+        checked = []
+        monkeypatch.setattr(model_override, "fast_mode_supported",
+                            lambda model, provider: checked.append((model, provider)) or supported)
+        _dispatch()
+        assert checked == [("gpt-5.5", "prov-openai")]
+        overrides = dispatch_env.tm.submitted[0]["overrides"]
+        if supported:
+            assert dispatch_env.create_kwargs["fast"] is True
+            assert overrides["fast"] is True
+        else:
+            # A worker whose model has no fast mode keeps its standard speed.
+            assert "fast" not in dispatch_env.create_kwargs
+            assert "fast" not in overrides
+
+    def test_worker_of_a_caller_with_fast_mode_off_is_off(self, dispatch_env, monkeypatch):
+        from app.db import database
+
+        original = database.get_session
+        monkeypatch.setattr(database, "get_session", lambda sid: {**original(sid), "fast": False})
+        _dispatch()
+        assert dispatch_env.create_kwargs["fast"] is False
+        assert dispatch_env.tm.submitted[0]["overrides"]["fast"] is False
+
+    def test_caller_without_fast_mode_leaves_the_worker_unset(self, dispatch_env):
+        _dispatch()
+        assert "fast" not in dispatch_env.create_kwargs
+        assert "fast" not in dispatch_env.tm.submitted[0]["overrides"]
+
     def test_turn_carries_provider_and_model_overrides(self, dispatch_env):
         _dispatch()
 

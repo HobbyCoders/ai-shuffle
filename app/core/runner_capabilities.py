@@ -154,9 +154,10 @@ def _detect_claude_cli_signed_in() -> bool:
 
 
 # The remote subagent wire this release understands. Version 2 adds the
-# optional ``context_window`` start field; a parent sends it only to a target
-# at version 2 or later (an older target refuses unknown fields).
-REMOTE_TASK_VERSION = 2
+# optional ``context_window`` start field, version 3 the optional ``fast``
+# field; a parent sends each only to a target at that version or later (an
+# older target refuses unknown fields).
+REMOTE_TASK_VERSION = 3
 
 
 def _detect_provider_kinds() -> List[str]:

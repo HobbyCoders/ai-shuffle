@@ -780,3 +780,41 @@ def settings_for_model(model: str, provider_id: Optional[str], *, effort: Any = 
                            and window in context_window_choices(bare, provider) else None),
         "fast": fast if not fast or route in ("delegated", "openai_responses") else None,
     }
+
+
+# GPT-5 and versioned GPT-6 models, including the named ChatGPT variants: the
+# same rule as the composer's toggle (frontend ``isFastModeCapable``).
+_FAST_OPENAI_MODEL = re.compile(r"^(?:gpt-5|gpt-6(?:\.\d+)*(?:-(?:astra|sol|luna|terra))?$)", re.I)
+
+
+def fast_mode_supported(model: Optional[str], provider_id: Optional[str]) -> bool:
+    """Whether fast mode applies to ``model`` on ``provider_id``.
+
+    The rule the composer uses to offer the toggle: an Opus model on the
+    Claude CLI (its ``fastMode`` setting), or a GPT-5/GPT-6 model on the
+    OpenAI Responses lane (``service_tier: priority``). Every other model, and
+    an unknown one, is False. Used when fast mode is inherited rather than
+    picked, so a subagent on such a model keeps its own setting.
+    """
+    from app.core.model_registry import get_model_family
+    from app.core.provider.harness_adapter import _decide_provider_kind
+    from app.core.provider.types import SessionOptions
+    from app.core.query_options import decode_provider_model
+
+    model = (model or "").strip()
+    if not model:
+        return False
+    decoded = decode_provider_model(model)
+    if decoded:
+        provider_id, model = decoded
+    try:
+        route = _decide_provider_kind(SessionOptions(
+            model=model, extra={"provider_id": provider_id} if provider_id else {}))
+    except Exception:  # noqa: BLE001 — an unresolvable route cannot run fast
+        logger.debug("fast mode: could not resolve the route for %s", model, exc_info=True)
+        return False
+    if route == "openai_responses":
+        return bool(_FAST_OPENAI_MODEL.match(model))
+    if route == "delegated":
+        return get_model_family(model) == "opus"
+    return False

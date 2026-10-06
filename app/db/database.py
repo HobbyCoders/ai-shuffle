@@ -2255,6 +2255,15 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE sessions ADD COLUMN away_mode BOOLEAN")
         migrations_applied.append("sessions.away_mode")
 
+    # A delegated worker whose fast mode the owner set in the worker's own
+    # chat: its parent's later fast-mode toggles skip it
+    # (app/api/sessions_permissions.py). NULL/FALSE on every pre-existing row =
+    # follows its parent. Additive, no index, no SCHEMA_VERSION bump (the
+    # migrations fingerprint covers this block).
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "fast_pinned"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN fast_pinned BOOLEAN")
+        migrations_applied.append("sessions.fast_pinned")
+
     # The chat's account record (#1849): the owner of its mobile_tool_identity
     # row, copied onto the session so the catalog carries it to the workers
     # that mirror the chat. Additive/nullable, no index, no SCHEMA_VERSION
@@ -3455,6 +3464,7 @@ from app.db.sessions import (  # noqa: F401
     update_session,
     set_session_context_usage,
     set_session_run_binding,
+    list_worker_children,
     patch_voice_session_context,
     get_session_context_usage_snapshot,
     get_session_workspace_facts,

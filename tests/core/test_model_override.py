@@ -1048,3 +1048,46 @@ def test_the_owner_prompt_reads_as_one_question_in_the_assistant():
         "model": "prov:lane:astra", "model_switch": "start pinned on GPT-6 Astra (Lane) instead of Opus"})
     assert question == ("Do you authorize me to start pinned on GPT-6 Astra (Lane) instead of Opus? "
                         "Please answer yes or no.")
+
+
+# ---------------------------------------------------------------------------
+# Which models fast mode applies to (inherited fast mode)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("model, route, expected", [
+    ("opus", "delegated", True),
+    ("claude-opus-4-7", "delegated", True),
+    ("opus[1m]", "delegated", True),
+    ("sonnet", "delegated", False),
+    ("haiku", "delegated", False),
+    ("prov:lane:gpt-5.5", "openai_responses", True),
+    ("prov:lane:gpt-6-astra", "openai_responses", True),
+    ("prov:lane:gpt-6.1", "openai_responses", True),
+    ("prov:lane:gpt-6-mini", "openai_responses", False),
+    ("prov:grok:grok-4.5", "openai_chat", False),
+    ("opus", "native", False),
+    ("", "delegated", False),
+])
+def test_fast_mode_applies_only_where_the_composer_offers_it(monkeypatch, model, route, expected):
+    from app.core.provider import harness_adapter
+
+    seen = []
+
+    def decide(options):
+        seen.append((options.model, (options.extra or {}).get("provider_id")))
+        return route
+    monkeypatch.setattr(harness_adapter, "_decide_provider_kind", decide)
+    assert mo.fast_mode_supported(model, None) is expected
+    if model.startswith("prov:"):
+        # The composite is unpacked before the route is decided.
+        _, provider, bare = model.split(":", 2)
+        assert seen == [(bare, provider)]
+
+
+def test_an_unresolvable_route_is_not_fast(monkeypatch):
+    from app.core.provider import harness_adapter
+
+    def decide(options):
+        raise RuntimeError("no such provider")
+    monkeypatch.setattr(harness_adapter, "_decide_provider_kind", decide)
+    assert mo.fast_mode_supported("opus", "gone") is False

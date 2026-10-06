@@ -282,6 +282,10 @@ def create_postgres_schema(cursor) -> None:
             -- with their recommended option instead of parking, and approval
             -- prompts are deferred (never granted). NULL/FALSE = present.
             away_mode BOOLEAN,
+            -- A delegated worker whose fast mode the owner set in its own
+            -- chat; a parent's fast-mode toggle skips it. NULL/FALSE =
+            -- follows its parent.
+            fast_pinned BOOLEAN,
             -- Who the chat belongs to (``mobile_tool_identity.owner``:
             -- 'install-admin', 'account:<id>', 'paired:<id>' or
             -- 'api_user:<id>'). Written with that record on the worker that

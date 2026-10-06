@@ -105,7 +105,7 @@ def test_presence_carries_remote_task_and_provider_kinds(workers):
         model_providers.create_model_provider("p-off", "Off", "custom", "https://c.example.invalid",
                                               auth_token="enc:y", enabled=False)
         capabilities = transport._capabilities()
-        assert capabilities["remote_task"] == runner_capabilities.REMOTE_TASK_VERSION == 2
+        assert capabilities["remote_task"] == runner_capabilities.REMOTE_TASK_VERSION == 3
         assert capabilities["provider_kinds"] == ["openai"]
         engine.publish_presence(capabilities=capabilities, version="test")
     converge([a, b])
