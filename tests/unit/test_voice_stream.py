@@ -572,6 +572,85 @@ async def test_a_reply_in_several_segments_is_stored_whole_in_spoken_order(monke
     assert shown == record.await_args.args[2]  # The live caption matches what is stored.
 
 
+def stored(capture):
+    """What record_voice_exchange keeps: it strips each side."""
+    return [tuple(t.strip() if t else t for t in (a.args[1], a.args[2])) for a in capture.call_args_list]
+
+
+def live_event(role, delta, start_ms):
+    kind = "session.input_transcript.delta" if role == "user" else "session.output_transcript.delta"
+    return json.dumps({"type": kind, "delta": delta, "start_ms": start_ms, "end_ms": start_ms + 400})
+
+
+@pytest.mark.asyncio
+async def test_a_late_transcribed_answer_is_stored_before_the_reply_to_it(monkeypatch):
+    """#1798: "Do you authorize…? Thanks, that's approved." was one message and
+    the caller's "Yes." came after it: GPT Live transcribes the caller late."""
+    capture = recorder(monkeypatch)
+    call = stream()
+    call.upstream = Upstream([
+        live_event("assistant", "Do you authorize me to run grep?", 1000),
+        live_event("assistant", "Thanks, that's approved.", 6000),
+        live_event("user", "Yes.", 4500),
+    ])
+    await call.receive_upstream()
+    await call.flush()
+    assert stored(capture) == [(None, "Do you authorize me to run grep?"), ("Yes.", "Thanks, that's approved.")]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_split_by_a_late_answer_is_stored_whole_after_it(monkeypatch):
+    """#1798: stored as "Thanks," then "that's approved. And do you authorize…?"."""
+    capture = recorder(monkeypatch)
+    call = stream()
+    call.upstream = Upstream([
+        live_event("assistant", "Do you authorize me to run grep?", 1000),
+        live_event("assistant", "Thanks,", 6000),
+        live_event("user", "Yes.", 4500),
+        live_event("assistant", " that's approved. And do you authorize me to read the file?", 6400),
+    ])
+    await call.receive_upstream()
+    await call.flush()
+    assert stored(capture) == [
+        (None, "Do you authorize me to run grep?"),
+        ("Yes.", "Thanks, that's approved. And do you authorize me to read the file?"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_late_end_of_a_request_joins_the_request(monkeypatch):
+    capture = recorder(monkeypatch)
+    call = stream()
+    await call.caption("user", "Can you check", start_ms=1000)
+    await call.caption("assistant", "Sure, checking now.", start_ms=3000)
+    await call.caption("user", " the logs?", start_ms=1800)  # transcribed after the reply began
+    await call.flush()
+    assert stored(capture) == [("Can you check the logs?", "Sure, checking now.")]
+
+
+@pytest.mark.asyncio
+async def test_speech_after_the_whole_reply_still_starts_a_new_exchange(monkeypatch):
+    capture = recorder(monkeypatch)
+    call = stream()
+    await call.caption("user", "What time is it?", start_ms=0)
+    await call.caption("assistant", "It's noon.", start_ms=2000)
+    await call.caption("assistant", " Anything else?", start_ms=2600)
+    await call.caption("user", "No, thanks.", start_ms=5000)  # barge-in or next turn
+    await call.flush()
+    assert stored(capture) == [("What time is it?", "It's noon. Anything else?"), ("No, thanks.", None)]
+
+
+@pytest.mark.asyncio
+async def test_captions_without_timing_keep_arrival_order(monkeypatch):
+    capture = recorder(monkeypatch)
+    call = stream()
+    await call.caption("assistant", "Do you authorize it?")  # e.g. the fal.ai path
+    await call.caption("assistant", " Thanks.", start_ms=6000)
+    await call.caption("user", "Yes.", start_ms=4500)
+    await call.flush()
+    assert stored(capture) == [(None, "Do you authorize it? Thanks."), ("Yes.", None)]
+
+
 @pytest.mark.asyncio
 async def test_client_call_figures_are_kept_for_the_log_only():
     call = stream()

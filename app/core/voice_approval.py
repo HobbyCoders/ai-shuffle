@@ -174,6 +174,9 @@ class Outcome:
     verdict: str  # yes / no / unclear
     text: str
     final: bool
+    # False when the voice already answered the caller, so the result is
+    # quiet context rather than something to say again (#1798).
+    spoken: bool = True
 
 
 class SpokenApprovals:
@@ -241,7 +244,7 @@ class SpokenApprovals:
         while self.retries:
             request_id, ask = self.retries.popitem(last=False)
             self.handled.add(request_id)
-            text = await self._answer(ask, "allow", second_unclear=False, retry=True)
+            text, _ = await self._answer(ask, "allow", second_unclear=False, retry=True)
             notes.append((request_id, text))
         return notes
 
@@ -279,8 +282,12 @@ class SpokenApprovals:
         self.handled.add(request_id)
         return None
 
-    async def hear(self, transcript: str) -> Optional[Outcome]:
-        """Decide the waiting request from the caller's own spoken answer."""
+    async def hear(self, transcript: str, *, replied: bool = False) -> Optional[Outcome]:
+        """Decide the waiting request from the caller's own spoken answer.
+
+        ``replied``: the voice already started answering the caller (GPT Live
+        hears the yes itself), so a recorded decision is not confirmed twice.
+        """
         ask = self.current
         if ask is None or not ask.delivered or is_noise(transcript):
             return None
@@ -295,11 +302,12 @@ class SpokenApprovals:
         self.current = None
         self.handled.add(ask.request_id)
         decision: Literal["allow", "deny"] = "allow" if verdict == YES else "deny"
-        text = await self._answer(ask, decision, second_unclear=verdict == UNCLEAR)
-        return Outcome(ask.request_id, verdict, text, True)
+        text, recorded = await self._answer(ask, decision, second_unclear=verdict == UNCLEAR, replied=replied)
+        return Outcome(ask.request_id, verdict, text, True, spoken=not (recorded and replied))
 
     async def _answer(self, ask: Ask, decision: Literal["allow", "deny"], *, second_unclear: bool,
-                      retry: bool = False) -> str:
+                      retry: bool = False, replied: bool = False) -> tuple[str, bool]:
+        """Record the decision: ``(note for the voice, recorded as the caller said)``."""
         from app.core.permission_handler import permission_handler
         from app.db.async_database import run_sync
 
@@ -307,13 +315,13 @@ class SpokenApprovals:
         if refusal:
             logger.info("Voice approval for %s refused (%s)", self.session_id, refusal)
             return (f"The spoken answer could not be recorded: {refusal} Tell the user to answer it "
-                    f"on screen: {ask.summary}")
+                    f"on screen: {ask.summary}"), False
         result = await permission_handler.respond(
             request_id=ask.request_id, session_id=self.session_id, decision=decision,
             remember=None, broadcast_func=None,
         )
         if not isinstance(result, dict) or result.get("error"):
-            return f"The approval for {ask.summary} was already settled or has expired. Nothing more to do."
+            return f"The approval for {ask.summary} was already settled or has expired. Nothing more to do.", False
         logger.info("Voice approval %s for %s answered %s %s", ask.request_id, self.session_id, decision,
                     "as a retry of an action the caller approved" if retry else "by the caller's voice")
         await self._record_confirm(ask, decision)
@@ -321,11 +329,14 @@ class SpokenApprovals:
             self.approved[ask.retry] = time.monotonic()
         if retry:
             return (f"Approved without asking again: the user already said yes to this action on the same "
-                    f"target during this call: {ask.summary}. Do not ask about it.")
+                    f"target during this call: {ask.summary}. Do not ask about it."), False
         if second_unclear:
-            return f"No firm yes was heard, so the request was declined: {ask.summary}. Tell the user briefly."
+            return f"No firm yes was heard, so the request was declined: {ask.summary}. Tell the user briefly.", False
         verb = "approved" if decision == "allow" else "declined"
-        return f"The user {verb} it by voice and the app recorded it: {ask.summary}. Confirm in a few words."
+        if replied:
+            return (f"The user {verb} it by voice and the app recorded it: {ask.summary}. You already "
+                    "answered them, so do not confirm it again."), True
+        return f"The user {verb} it by voice and the app recorded it: {ask.summary}. Confirm in a few words.", True
 
     async def _record_confirm(self, ask: Ask, decision: str) -> None:
         """Record an answer to the assistant's own question as a typed one is.

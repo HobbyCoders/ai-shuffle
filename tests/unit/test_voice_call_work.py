@@ -480,6 +480,78 @@ async def test_live_answer_is_heard_when_the_voice_starts_replying(monkeypatch):
     assert calls[0]["decision"] == "deny"
 
 
+async def _asked_live_call(monkeypatch):
+    """A Live call whose voice has just asked the waiting approval aloud."""
+    from app.core import turn_recorder
+    desk, calls, _ = _desk(monkeypatch)
+    call = _live_call(monkeypatch, desk=desk)
+    order = []
+
+    async def record(session_id, user, assistant, **kwargs):
+        order.append(("exchange", (user or "").strip() or None, (assistant or "").strip() or None))
+
+    async def confirm(ask, decision):
+        order.append(("decision", decision))
+
+    monkeypatch.setattr(turn_recorder, "record_voice_exchange", record)
+    monkeypatch.setattr(desk, "_record_confirm", confirm)
+    call.progress.consume(_requested())
+    await call.progress.flush(force=True)
+    return call, calls, order
+
+
+@pytest.mark.asyncio
+async def test_the_spoken_answer_is_stored_before_the_decision_it_made(monkeypatch):
+    """#1798: the "Authorized" row came before the caller's "Yes", which was
+    held pending and stored only at hang-up."""
+    call, calls, order = await _asked_live_call(monkeypatch)
+    await call.caption("assistant", "Do you authorize me to run the tests?")
+    await call.caption("user", "Yes.")
+    await call.hear_approval()
+    assert calls[0]["decision"] == "allow"
+    assert order == [("exchange", None, "Do you authorize me to run the tests?"),
+                     ("exchange", "Yes.", None), ("decision", "allow")]
+
+
+@pytest.mark.asyncio
+async def test_a_decision_the_voice_already_confirmed_is_not_confirmed_again(monkeypatch):
+    """#1798: "Thanks. That's approved. Thanks again. That's approved." The
+    voice answered the caller's yes itself, then was told to confirm it."""
+    call, calls, _ = await _asked_live_call(monkeypatch)
+    await call.caption("assistant", "Do you authorize me to run the tests?")
+    await call.caption("user", "Yes.")
+    await call.caption("assistant", "Thanks, that's approved.")  # hears the answer now
+    await asyncio.wait_for(call.approval_task, 2)
+    assert calls[0]["decision"] == "allow"
+    call.send.reset_mock()
+    await call.progress.flush(force=True)
+    (note,) = [c.args[0] for c in call.send.await_args_list]
+    assert note["type"] == "session.thinking.append" and "do not confirm it again" in note["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_late_transcribed_answer_the_voice_confirmed_is_not_confirmed_again(monkeypatch):
+    call, calls, _ = await _asked_live_call(monkeypatch)
+    await call.caption("assistant", "Do you authorize me to run the tests?", start_ms=1000)
+    await call.caption("assistant", "Thanks, that's approved.", start_ms=6000)
+    await call.caption("user", "Yes.", start_ms=4500)  # transcribed after the reply
+    outcome = await call.hear_approval()
+    assert calls[0]["decision"] == "allow" and not outcome.spoken
+
+
+@pytest.mark.asyncio
+async def test_a_decision_the_voice_has_not_answered_yet_is_confirmed_aloud(monkeypatch):
+    call, calls, _ = await _asked_live_call(monkeypatch)
+    await call.caption("assistant", "Do you authorize me to run the tests?")
+    await call.caption("user", "Yes.")
+    outcome = await call.hear_approval()
+    assert calls[0]["decision"] == "allow" and outcome.spoken
+    call.send.reset_mock()
+    await call.progress.flush(force=True)
+    (note,) = [c.args[0] for c in call.send.await_args_list]
+    assert note["type"] == "session.commentary.append" and "Confirm in a few words" in note["content"]
+
+
 @pytest.mark.asyncio
 async def test_live_voice_words_are_never_an_answer(monkeypatch):
     desk, calls, _ = _desk(monkeypatch)

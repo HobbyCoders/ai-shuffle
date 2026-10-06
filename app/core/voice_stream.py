@@ -360,6 +360,11 @@ class VoiceStream:
         self.finished = asyncio.Event()
         self.transcript: deque[dict] = deque(maxlen=200)
         self.pending = {"user": "", "assistant": ""}
+        # Where each pending reply fragment starts: (start_ms on the session
+        # timeline, offset into pending["assistant"]). False once a fragment
+        # arrived without timing, so arrival order is all there is to go by.
+        self.reply_starts: list[tuple[float, int]] = []
+        self.reply_timed = True
         self.last_caption_at = 0.0
         self.caption_ids = {"user": 0, "assistant": 0}
         self.delegations: set[str] = set()
@@ -474,7 +479,6 @@ class VoiceStream:
         ``keep_reply`` stores only the caller's words and keeps a reply that is
         still being spoken pending, so a handoff never cuts it in two (#1798).
         """
-        from app.core.turn_recorder import record_voice_exchange
         # Checkpoint, handoff and speaker changes can flush concurrently. Keep
         # their durable turns in arrival order, including during barge-in.
         async with self.flush_lock:
@@ -484,15 +488,52 @@ class VoiceStream:
                 self.pending = {"user": "", "assistant": self.pending["assistant"]}
             else:
                 self.pending = {"user": "", "assistant": ""}
-            typed, self.pending_typed = self.pending_typed, False
-            if is_noise(user):
-                user = ""  # Breath or background sound, not something the caller said.
-            if user or assistant:
-                self.caption_ids["user"] += 1
-                if not keep_reply:
-                    self.caption_ids["assistant"] += 1
-                await record_voice_exchange(self.session_id, user or None, assistant or None, model=self.config["model"],
-                                            user_source="typed" if typed else "voice")
+                self.reply_starts, self.reply_timed = [], True
+            await self._store(user, assistant, new_reply=not keep_reply)
+
+    async def _store(self, user: str, assistant: str, *, new_reply: bool) -> None:
+        """Record one exchange; the caller holds ``flush_lock``."""
+        from app.core.turn_recorder import record_voice_exchange
+        typed, self.pending_typed = self.pending_typed, False
+        if is_noise(user):
+            user = ""  # Breath or background sound, not something the caller said.
+        if user or assistant:
+            self.caption_ids["user"] += 1
+            if new_reply:
+                self.caption_ids["assistant"] += 1
+            await record_voice_exchange(self.session_id, user or None, assistant or None, model=self.config["model"],
+                                        user_source="typed" if typed else "voice")
+
+    def _reply_cut(self, start_ms: float | None) -> int | None:
+        """Where the pending reply starts to come after caller words at ``start_ms``.
+
+        GPT Live transcribes the caller late: the voice often answers (and
+        its transcript arrives) before the words it is answering do. Both
+        transcripts carry times on one session timeline, so the fragments that
+        start at or after the caller's words belong after them (#1798). None
+        when the whole reply came first, or when there is no timing to go by.
+        """
+        if start_ms is None or not self.reply_timed:
+            return None
+        return next((at for begins, at in self.reply_starts if begins >= start_ms), None)
+
+    async def _store_before(self, start_ms: float | None) -> bool:
+        """Store what was said before late caller words; keep the rest of the reply.
+
+        Returns False when the caller's words came after the whole pending
+        reply (a normal next exchange, or a barge-in), which the caller of
+        this method flushes as before.
+        """
+        async with self.flush_lock:
+            cut = self._reply_cut(start_ms)
+            if cut is None:
+                return False
+            if cut:
+                user, before = self.pending["user"], self.pending["assistant"][:cut]
+                self.pending = {"user": "", "assistant": self.pending["assistant"][cut:]}
+                self.reply_starts = [(begins, at - cut) for begins, at in self.reply_starts if at >= cut]
+                await self._store(user, before, new_reply=True)
+            return True
 
     def is_quiet(self) -> bool:
         """A natural pause: nobody is mid-sentence, so a held note may be spoken."""
@@ -537,11 +578,26 @@ class VoiceStream:
             if not text:
                 return None
             self.approval_consumed.update(e["seq"] for e in entries)
+            # The decision is recorded the moment the desk hears it, so store
+            # the caller's answer first: otherwise the hold rules can keep it
+            # pending until hang-up, after the "Authorized" row (#1798).
+            await self.flush(keep_reply=True)
+            first = entries[0]
+            replied = any(self._after(e, first) for e in self.transcript if e["role"] == "assistant")
             try:
-                return await self.progress.hear(text)
+                return await self.progress.hear(text, replied=replied)
             except Exception:  # noqa: BLE001 - a failed answer must not end the call
                 logger.warning("Voice %s: spoken approval failed", self.session_id, exc_info=True)
                 return None
+
+    @staticmethod
+    def _after(entry: dict, first: dict) -> bool:
+        """``entry`` was spoken after ``first``: by the session timeline when
+        both carry it, since GPT Live transcribes the caller late; else by
+        arrival."""
+        if entry.get("start_ms") is not None and first.get("start_ms") is not None:
+            return entry["start_ms"] >= first["start_ms"]
+        return entry.get("seq", 0) > first.get("seq", 0)
 
     async def answer_status(self, delegation_id: str | None) -> None:
         """Answer "what are you working on" from the app's task state; no chat turn."""
@@ -552,7 +608,9 @@ class VoiceStream:
         for content in commentary_chunks(text):
             await self.send({"type": "session.commentary.append", "delegation_id": delegation_id, "content": content})
 
-    async def caption(self, role: str, delta: str, offset: int = 0):
+    async def caption(self, role: str, delta: str, offset: int = 0, *, start_ms: float | None = None):
+        """One transcript fragment. ``start_ms`` is where it starts on the
+        provider session's timeline (GPT Live), None when unknown."""
         if not delta:
             return
         if role == "assistant" and self.last_caption_role == "user" and self.approval_waiting():
@@ -567,6 +625,7 @@ class VoiceStream:
         if role == "user" and self.last_caption_role == "assistant":
             if self._is_mid_thought_backchannel():
                 self.pending["assistant"] = ""
+                self.reply_starts, self.reply_timed = [], True
                 self.caption_ids["assistant"] += 1
                 self.transcript = deque(
                     (e for e in self.transcript if not (e["role"] == "assistant" and e.get("seq", 0) > self.last_user_seq)),
@@ -574,7 +633,7 @@ class VoiceStream:
                 )
                 if not self.pending["user"][-1:].isspace() and not delta[:1].isspace():
                     delta = " " + delta
-            else:
+            elif not await self._store_before(start_ms):
                 await self.flush()
         pending = self.pending[role]
         if pending and not pending[-1].isspace() and _SENTENCE_END.search(pending) and delta[:1].isupper():
@@ -589,7 +648,13 @@ class VoiceStream:
             self.unheard_voiced_s = 0.0
         self.last_caption_role = role
         self.transcript_seq += 1
-        self.transcript.append({"role": role, "text": delta, "offset_ms": offset, "seq": self.transcript_seq})
+        self.transcript.append({"role": role, "text": delta, "offset_ms": offset, "start_ms": start_ms,
+                                "seq": self.transcript_seq})
+        if role == "assistant":
+            if start_ms is None:
+                self.reply_timed = False
+            else:
+                self.reply_starts.append((start_ms, len(self.pending["assistant"])))
         self.pending[role] += delta
         self.last_caption_at = time.monotonic()
         if role == "user":
@@ -736,7 +801,9 @@ class VoiceStream:
                         await self.send_audio(audio)
                 elif kind in ("session.input_transcript.delta", "session.output_transcript.delta"):
                     role = "user" if kind == "session.input_transcript.delta" else "assistant"
-                    await self.caption(role, event.get("delta") or "", event.get("end_ms") or 0)
+                    start = event.get("start_ms")
+                    await self.caption(role, event.get("delta") or "", event.get("end_ms") or 0,
+                                       start_ms=start if isinstance(start, (int, float)) and not isinstance(start, bool) else None)
                 elif kind == "session.instructions.appended" and self.opening_event_id and event.get("client_event_id") == self.opening_event_id:
                     self.opening_event_id = None
                     await self.send({"type": "session.commentary.append", "delegation_id": None,

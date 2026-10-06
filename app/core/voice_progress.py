@@ -104,7 +104,7 @@ class VoiceProgress:
         if text:
             self.note("approval:" + str(request.get("request_id")), text, urgent=True)
 
-    async def hear(self, transcript):
+    async def hear(self, transcript, *, replied: bool = False):
         """The caller spoke while an approval question was waiting.
 
         Returns the desk's ``Outcome`` (None when nothing was waiting or the
@@ -113,11 +113,11 @@ class VoiceProgress:
         """
         if self.approvals is None or not self.approvals.awaiting:
             return None
-        outcome = await self.approvals.hear(transcript)
+        outcome = await self.approvals.hear(transcript, replied=replied)
         if outcome is None:
             return None
         self.pending.pop("approval:" + outcome.request_id, None)
-        self.note("approval-result:" + outcome.request_id, outcome.text, urgent=True)
+        self.note("approval-result:" + outcome.request_id, outcome.text, urgent=outcome.spoken)
         self._promote()
         return outcome
 
