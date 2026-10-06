@@ -774,11 +774,24 @@ class TestAgentArgStripHandler:
     async def test_strips_when_only_isolation_present(self):
         handler = create_agent_arg_strip_hook_handler()
         result = await handler(
-            {"tool_name": "Task", "tool_input": {"prompt": "x", "isolation": "remote"}},
+            {"tool_name": "Agent", "tool_input": {"prompt": "x", "isolation": "remote"}},
             None,
             {"signal": None},
         )
         assert result["hookSpecificOutput"]["updatedInput"] == {"prompt": "x"}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name", ["Task", "mcp__builtins__Task"])
+    async def test_never_touches_the_app_task_model(self, tool_name):
+        """The app's Task ``model`` is a user-requested override (#1830)."""
+        handler = create_agent_arg_strip_hook_handler()
+        result = await handler(
+            {"tool_name": tool_name,
+             "tool_input": {"agent": "a", "prompt": "x", "model": "prov:p:gpt-6.1-sol"}},
+            None,
+            {"signal": None},
+        )
+        assert result.get("hookSpecificOutput") is None
 
     @pytest.mark.asyncio
     async def test_preserves_all_other_keys(self):
@@ -842,7 +855,7 @@ class TestBuildHooksConfigTranslatedMain:
     def test_registers_agent_strip_matcher_when_translated(self, tmp_path):
         result = build_hooks_config(str(tmp_path), "test-project", translated_main=True)
         assert "PreToolUse" in result
-        matchers = [m for m in result["PreToolUse"] if m.matcher == "Agent|Task"]
+        matchers = [m for m in result["PreToolUse"] if m.matcher == "Agent"]
         assert len(matchers) == 1
 
     def test_default_false_does_not_register_agent_strip(self, tmp_path):
@@ -854,7 +867,7 @@ class TestBuildHooksConfigTranslatedMain:
     def test_translated_strip_coexists_with_db_pretooluse(self, tmp_path):
         with patch("app.core.hook_service._project_has_db_pretooluse_hooks", return_value=True):
             result = build_hooks_config(str(tmp_path), "test-project", translated_main=True)
-        agent_matchers = [m for m in result["PreToolUse"] if m.matcher == "Agent|Task"]
+        agent_matchers = [m for m in result["PreToolUse"] if m.matcher == "Agent"]
         assert len(agent_matchers) == 1
         # DB handler (no matcher) is still present alongside.
         assert len(result["PreToolUse"]) >= 2

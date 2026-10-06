@@ -1091,3 +1091,70 @@ def test_an_unresolvable_route_is_not_fast(monkeypatch):
         raise RuntimeError("no such provider")
     monkeypatch.setattr(harness_adapter, "_decide_provider_kind", decide)
     assert mo.fast_mode_supported("opus", "gone") is False
+
+
+# ---------------------------------------------------------------------------
+# A translated (ChatGPT/Codex-served) main keeps the requested model
+# ---------------------------------------------------------------------------
+
+async def _through_translated_main_hooks(tool_name, args, tmp_path):
+    """``args`` after the PreToolUse hooks a translated main's session runs.
+
+    The native leg runs the app's SDK hooks on fluid's HookBus, and both its
+    JSON path and code mode apply a ``modify`` before the Task dispatcher.
+    """
+    from fluid.hooks.bus import PRE_TOOL_USE
+
+    from app.core.hook_service import build_hooks_config
+    from app.core.provider.sdk_hook_bridge import sdk_hooks_bus
+
+    bus = sdk_hooks_bus(build_hooks_config(str(tmp_path), None, translated_main=True), str(tmp_path))
+    decision = await bus.emit(PRE_TOOL_USE, {"name": tool_name, "input": dict(args)})
+    assert decision.action != "deny"
+    if decision.action == "modify" and decision.replacement_input is not None:
+        return decision.replacement_input
+    return args
+
+
+@pytest.mark.parametrize("default, requested, provider, model_id", [
+    # Cross-provider: the agent would run on Claude, the user asked for a lane model.
+    ("sonnet", "prov:lane:sol", "lane", "sol"),
+    # Same provider: the agent would run on lane's astra, the user asked for sol.
+    ("prov:lane:astra", "prov:lane:sol", "lane", "sol"),
+])
+async def test_a_translated_main_starts_the_native_task_on_the_named_model(
+    world, tmp_path, default, requested, provider, model_id,
+):
+    """Live ov6: a ChatGPT-served chat's Task(model=...) ran on the default.
+
+    The translated-main PreToolUse hook stripped ``model`` from every
+    ``Task`` call, so the worker silently started on the agent's default.
+    """
+    _, seen, prompts, _ = world
+    subagent_default.write(default)
+    _turn("parent", "user", f'Use the Task tool with model "{requested}"')
+    args = await _through_translated_main_hooks(
+        "Task", {"agent": "pinned", "prompt": "go", "mode": "sync", "model": requested}, tmp_path)
+    assert args.get("model") == requested
+
+    dispatch = td.make_fluid_dispatcher("parent", "caller", "lane")
+    out = await dispatch(args, ToolCtx())
+    payload = json.loads(out.text)
+    assert payload["ok"], payload
+    assert payload["model"] == model_id
+    assert payload["provider"]["id"] == provider
+    assert payload["model_override"]["source"] == mo.NAMED
+    assert (seen[-1]["provider_id"], seen[-1]["model_id"]) == (provider, model_id)
+    assert prompts == []
+
+
+async def test_the_delegated_task_keeps_its_model_through_the_same_hooks(world, tmp_path):
+    """The Claude Code leg's Task is ``mcp__builtins__Task``: never stripped."""
+    _, seen, _, _ = world
+    _turn("parent", "user", "run it on prov:lane:sol")
+    args = await _through_translated_main_hooks(
+        "mcp__builtins__Task", {"agent": "pinned", "model": "prov:lane:sol"}, tmp_path)
+    payload = await _task(args)
+    assert payload["ok"], payload
+    assert (payload["model"], payload["provider"]["id"]) == ("sol", "lane")
+    assert (seen[-1]["provider_id"], seen[-1]["model_id"]) == ("lane", "sol")

@@ -871,14 +871,21 @@ def create_agent_arg_strip_hook_handler(
 ) -> Callable[[HookInput, Optional[str], HookContext], Awaitable[SyncHookJSONOutput]]:
     """
     Create a PreToolUse handler that strips coerced ``model``/``isolation`` args
-    from Agent/Task tool calls on translated (ChatGPT/Codex-served) mains.
+    from the Claude Code CLI's own ``Agent`` tool on translated
+    (ChatGPT/Codex-served) mains.
 
-    A translated main's Responses backend coerces every tool schema
-    to strict:true + all-props-required, so the model is grammar-forced to fill
+    A translated main's Responses backend coerced the CLI's tool schemas
+    to strict:true + all-props-required, so the model was grammar-forced to fill
     ``model`` and ``isolation`` on every Agent call. Both are enums with no neutral
     value, so the filled value carries no intent — and on a translated main every
     ``model`` alias is an unservable claude id. Stripping both is lossless and
     restores the stamped-frontmatter subagent pins.
+
+    The app's ``Task`` tool is deliberately NOT touched. Its ``model`` is
+    optional, is never force-filled, and is the user's model override, which
+    the host validates and confirms (``app.core.model_override``, #1830).
+    Stripping it here silently started the agent on its default model instead
+    of the one the user asked for.
     """
 
     async def handler(
@@ -890,7 +897,7 @@ def create_agent_arg_strip_hook_handler(
         if not isinstance(tool_input, dict):
             return SyncHookJSONOutput()
 
-        if (hook_input or {}).get("tool_name") not in ("Agent", "Task"):
+        if (hook_input or {}).get("tool_name") != "Agent":
             return SyncHookJSONOutput()
 
         if "model" not in tool_input and "isolation" not in tool_input:
@@ -1068,12 +1075,13 @@ def build_hooks_config(
         )
         logger.debug(f"[HookService] Registered DB {event} handler for project {project_id}")
 
-    # On a translated (ChatGPT/Codex-served) main the backend coerces the Agent
-    # tool schema to all-props-required, force-filling `model`/`isolation`. Strip
-    # them so stamped-frontmatter subagent pins survive.
+    # On a translated (ChatGPT/Codex-served) main the backend coerces the CLI's
+    # Agent tool schema to all-props-required, force-filling `model`/`isolation`.
+    # Strip them so stamped-frontmatter subagent pins survive. Never the app's
+    # Task: its `model` is a user-requested override the host validates.
     if translated_main:
         hooks_config.setdefault("PreToolUse", []).append(
-            HookMatcher(matcher="Agent|Task", hooks=[create_agent_arg_strip_hook_handler(stderr_callback)])
+            HookMatcher(matcher="Agent", hooks=[create_agent_arg_strip_hook_handler(stderr_callback)])
         )
         logger.debug("[HookService] Registered S8-R1 Agent-arg-strip PreToolUse handler (translated main)")
 

@@ -968,9 +968,10 @@ def parent_subagent_guidance(
         parts.append(
             "# Subagent delegation\n"
             "Use only the roster IDs exposed by the current provider. "
-            "Defaults may run on another provider. When Task offers a model "
-            "parameter, choose only listed models on the target's provider; "
-            "otherwise omit it. An override never switches providers. "
+            "Defaults may run on another provider. Pass Task's model only "
+            "when the user named a model for that work, otherwise omit it; "
+            "the host checks the user asked (or asks the owner) and may run "
+            "the worker on that model's provider. "
             "Never invent a subagent ID, model, or provider. "
             "If the roster is empty, do not delegate. Give an isolated worker "
             "a self-contained brief, verified checkout/prerequisites, allowed "
