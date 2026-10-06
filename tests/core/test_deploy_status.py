@@ -181,3 +181,78 @@ def test_deploy_status_never_raises(monkeypatch):
     monkeypatch.setattr(ds, "collect_workers", boom)
     report = asyncio.run(ds.deploy_status(pr=1))
     assert report["workers"] == [] and "network down" in report["reason"]
+
+
+def _gate_api(main, annotations, *, published=False):
+    """gh api answers for the edge gate's check runs on ``main`` (#1940)."""
+    runs = [{"id": 1, "name": "gate", "app": {"slug": "github-actions"}, "check_suite": {"id": 7},
+             "output": {"annotations_count": 2}},
+            {"id": 2, "name": "publish", "app": {"slug": "github-actions"}, "check_suite": {"id": 7},
+             "conclusion": "success" if published else "skipped"},
+            # A newer gate run refused for an unrelated PR completion: platform notes only.
+            {"id": 3, "name": "gate", "app": {"slug": "github-actions"}, "check_suite": {"id": 8},
+             "output": {"annotations_count": 1}},
+            # Another workflow's successful publish job never counts as the edge publication.
+            {"id": 4, "name": "publish", "app": {"slug": "github-actions"}, "check_suite": {"id": 9},
+             "conclusion": "success"}]
+    answers = {
+        f"repos/HobbyCoders/ai-shuffle/commits/{main}/check-runs?per_page=100&filter=all": {"check_runs": runs},
+        "repos/HobbyCoders/ai-shuffle/check-runs/1/annotations": annotations,
+        "repos/HobbyCoders/ai-shuffle/check-runs/3/annotations": [
+            {"annotation_level": "warning", "title": "", "message": "Node.js 20 is deprecated."}],
+    }
+    calls = []
+
+    def run_gh(args, timeout=None):
+        calls.append(args)
+        assert args[0] == "api"
+        return subprocess.CompletedProcess(args, 0, json.dumps(answers[args[1]]), "")
+    return run_gh, calls
+
+
+def test_publish_edge_first_names_the_refused_gate_and_dispatch_commands(repo, monkeypatch):
+    root, shas = repo
+    monkeypatch.setattr(ds, "_edge_refusals", {})
+    message = ("Combined main tree was not tested by PR CI; edge publication needs owner-dispatched CI on main. "
+               "CI missing, pending, or unsuccessful: .github/workflows/ci-backend.yml\n"
+               "Dispatch on main:\ngh workflow run ci-backend.yml --ref main")
+    run_gh, calls = _gate_api(shas["c"], [{"annotation_level": "warning", "title": ds.EDGE_REFUSAL_TITLE,
+                                           "message": message}])
+    with patch("app.core.github_service.github_service._run_gh", side_effect=run_gh):
+        report = ds.assess([_row("Unraid", shas["a"], offered=shas["b"][:12]), _row("DesktopWorker", shas["c"])],
+                           commit=shas["c"], repo=root, refresh=False)
+        unraid, gaming = report["workers"]
+        assert unraid["action"] == (
+            "publish edge first (merged after the latest published build). Edge refused "
+            f"{shas['c'][:9]}: Combined main tree was not tested by PR CI; edge publication needs "
+            "owner-dispatched CI on main. CI missing, pending, or unsuccessful: .github/workflows/ci-backend.yml; "
+            "Dispatch on main: gh workflow run ci-backend.yml --ref main")
+        assert gaming["action"] == "up to date"
+        # Drift without a change carries the same next step; the lookup is cached.
+        drift = ds.assess([_row("Unraid", shas["a"])], repo=root, refresh=False)
+        assert drift["workers"][0]["action"].endswith("gh workflow run ci-backend.yml --ref main")
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("published,annotations", [
+    (True, [{"title": "Edge publication refused", "message": "stale refusal"}]),
+    (False, [{"title": "", "message": "Node.js 20 is deprecated."}]),
+])
+def test_publish_edge_first_without_a_refusal_stays_plain(repo, monkeypatch, published, annotations):
+    root, shas = repo
+    monkeypatch.setattr(ds, "_edge_refusals", {})
+    run_gh, _ = _gate_api(shas["c"], annotations, published=published)
+    with patch("app.core.github_service.github_service._run_gh", side_effect=run_gh):
+        report = ds.assess([_row("Unraid", shas["a"], offered=shas["b"][:12])], commit=shas["c"],
+                           repo=root, refresh=False)
+    assert report["workers"][0]["action"] == "publish edge first (merged after the latest published build)"
+
+
+def test_edge_refusal_title_matches_the_gate():
+    import importlib.util
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[2] / "scripts/ci/edge_publication_gate.py"
+    spec = importlib.util.spec_from_file_location("edge_gate_title", path)
+    gate = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gate)
+    assert gate.REFUSAL_TITLE == ds.EDGE_REFUSAL_TITLE

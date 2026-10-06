@@ -178,6 +178,78 @@ def test_main_ci_event_produces_entrypoint_authorization(main_evidence, monkeypa
     assert output.read_text().splitlines()[-1] == "ready=false"
 
 
+def test_combined_tree_refusal_names_the_workflows_to_dispatch_on_main(main_evidence):
+    (main_evidence.directory / "extra.yml").write_text(
+        "name: Extra\non:\n  pull_request:\n    paths: ['app/**']\n", encoding="utf-8")
+    (main_evidence.directory / "late.yml").write_text(
+        "name: Late\non:\n  pull_request:\n    paths: ['app/**']\n", encoding="utf-8")
+    # ci.yml passed; late.yml is still running for the owner; extra.yml never ran.
+    late = {**main_evidence.main_run, "id": 22, "path": ".github/workflows/late.yml", "status": "in_progress",
+            "conclusion": None}
+    main_evidence.main_runs.update(workflow_runs=[main_evidence.main_run, late], total_count=2)
+    ready, reason = check(main_evidence)
+    assert not ready
+    assert reason.splitlines() == [
+        gate.COMBINED_TREE_REFUSAL + ". CI missing, pending, or unsuccessful: "
+        ".github/workflows/extra.yml, .github/workflows/late.yml",
+        "Dispatch on main:",
+        "gh workflow run extra.yml --ref main",
+        "Still running on main: late.yml",
+    ]
+    # A failed or non-owner run is re-dispatched, never reported as running.
+    late.update(status="completed", conclusion="failure")
+    assert "gh workflow run late.yml --ref main" in check(main_evidence)[1].splitlines()
+    # The refusal names commands; it still never authorizes publication.
+    late.update(conclusion="success")
+    main_evidence.main_runs.update(workflow_runs=[main_evidence.main_run, late,
+                                                  {**late, "id": 23, "path": ".github/workflows/extra.yml"}],
+                                   total_count=3)
+    assert check(main_evidence)[0]
+
+
+def test_exact_tree_refusal_is_not_a_combined_tree_refusal(evidence):
+    evidence.run["conclusion"] = "failure"
+    ready, reason = check(evidence)
+    assert not ready and reason == "CI missing, pending, or unsuccessful: " + PATH
+    assert not reason.startswith(gate.COMBINED_TREE_REFUSAL)
+
+
+@pytest.mark.parametrize("combined", [True, False])
+def test_entrypoint_annotates_only_a_combined_tree_refusal(evidence, monkeypatch, tmp_path, capsys, combined):
+    if combined:
+        evidence.data[f"git/commits/{REVISION}"]["tree"]["sha"] = "d" * 40
+    else:
+        evidence.run["conclusion"] = "failure"
+    root = tmp_path / "repo"
+    directory = root / ".github/workflows"
+    directory.mkdir(parents=True)
+    (directory / "ci.yml").write_text((evidence.directory / "ci.yml").read_text(), encoding="utf-8")
+    event_file = tmp_path / "push.json"
+    event_file.write_text("{}", encoding="utf-8")
+    output, summary = tmp_path / "output", tmp_path / "summary"
+    for name, value in {**event_env("push"), "GITHUB_SHA": REVISION, "GITHUB_EVENT_PATH": str(event_file),
+                        "GITHUB_OUTPUT": str(output), "GITHUB_STEP_SUMMARY": str(summary)}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(gate, "ROOT", root)
+    monkeypatch.setattr(gate, "GitHub", lambda: evidence.data.__getitem__)
+    monkeypatch.setattr(gate.subprocess, "check_output", lambda *a, **k: REVISION + "\n")
+    gate.main()
+    assert output.read_text().strip() == "ready=false"
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("::warning")]
+    if not combined:
+        assert warnings == []
+        return
+    assert warnings == ["::warning title=Edge publication refused::" + gate.COMBINED_TREE_REFUSAL
+                        + ". CI missing, pending, or unsuccessful: .github/workflows/ci.yml"
+                        + "%0ADispatch on main:%0Agh workflow run ci.yml --ref main"]
+    assert "gh workflow run ci.yml --ref main" in summary.read_text()
+
+
+def test_annotation_escapes_workflow_command_data():
+    assert gate.warning_annotation("50% done\r\nnext") == (
+        "::warning title=Edge publication refused::50%25 done%0D%0Anext")
+
+
 def test_green_exact_merged_tree_can_publish(evidence):
     assert check(evidence)[0]
     assert check(evidence, HEAD)[0]

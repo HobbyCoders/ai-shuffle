@@ -25,6 +25,11 @@ LABEL_FILTERED_WORKFLOWS = {
     ".github/workflows/ci-browser-workspace.yml": "CI Browser Workspace",
 }
 UNRELATED_LABEL_SUFFIX = " (unrelated label event)"
+# A combined main tree (another PR merged while this PR's CI ran) publishes only
+# after the owner dispatches CI on main (#1505). That refusal needs the owner, so
+# it is annotated on the run; app/core/deploy_status.py reads it by this title.
+COMBINED_TREE_REFUSAL = "Combined main tree was not tested by PR CI; edge publication needs owner-dispatched CI on main"
+REFUSAL_TITLE = "Edge publication refused"
 UNRELATED_LABEL_RUN_NAME = (
     "${{ github.workflow }}${{ github.event_name == 'pull_request' && "
     "(github.event.action == 'labeled' || github.event.action == 'unlabeled') && "
@@ -211,12 +216,35 @@ def publication_readiness(api, revision, directory, trigger_head=None):
                or latest[path]["status"] != "completed" or latest[path]["conclusion"] != "success"
                or (main_ci and not owner_main_ci(latest[path]))]
     if blocked:
-        return False, "CI missing, pending, or unsuccessful: " + ", ".join(blocked)
+        reason = "CI missing, pending, or unsuccessful: " + ", ".join(blocked)
+        if main_ci:
+            reason = combined_tree_refusal(blocked, latest)
+        return False, reason
     # Recheck after the API reads. The publisher also checks main before writing its pointer.
     if api("branches/main")["commit"]["sha"] != revision:
         return False, "main moved during CI verification; skipping superseded revision"
     source = "Combined main revision" if main_ci else f"PR #{pr['number']}"
     return True, f"{source}: all {len(expected)} applicable workflows passed for the exact merged tree"
+
+
+def combined_tree_refusal(blocked, latest):
+    """The refusal plus the exact owner commands that would unblock it."""
+    running = [path for path in blocked if path in latest and latest[path]["status"] != "completed"
+               and owner_main_ci(latest[path])]
+    dispatch = [path for path in blocked if path not in running]
+    lines = [f"{COMBINED_TREE_REFUSAL}. CI missing, pending, or unsuccessful: {', '.join(blocked)}"]
+    if dispatch:
+        lines.append("Dispatch on main:")
+        lines.extend(f"gh workflow run {Path(path).name} --ref main" for path in dispatch)
+    if running:
+        lines.append("Still running on main: " + ", ".join(Path(path).name for path in running))
+    return "\n".join(lines)
+
+
+def warning_annotation(reason):
+    # Workflow command data must escape %, CR and LF; each line stays readable.
+    data = reason.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return f"::warning title={REFUSAL_TITLE}::{data}"
 
 
 def owner_main_ci(run):
@@ -254,11 +282,14 @@ def main():
     trigger = event["workflow_run"]["head_sha"] if env["GITHUB_EVENT_NAME"] == "workflow_run" else None
     ready, reason = publication_readiness(GitHub(), revision, ROOT / ".github/workflows", trigger)
     print(reason)
+    if not ready and reason.startswith(COMBINED_TREE_REFUSAL):
+        # The gate job still succeeds; this is what makes the refusal visible.
+        print(warning_annotation(reason))
     with Path(env["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
         output.write(f"ready={str(ready).lower()}\n")
     if env.get("GITHUB_STEP_SUMMARY"):
         with Path(env["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
-            summary.write(reason + "\n")
+            summary.write(reason.replace("\n", "  \n") + "\n")
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ on:
       - "Android CI"
       - "CI artifact storage policy"
       - "CI Backend"
+      - "Container PostgreSQL"
       - "CI Browser Workspace"
       - "CI fluid"
       - "CI JavaScript"

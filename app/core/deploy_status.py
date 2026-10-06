@@ -13,6 +13,7 @@ Android loads its UI from the worker it connects to, so only a change under
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -160,6 +161,60 @@ def _pr_merge_commit(repo: Path, pr: int) -> Dict[str, Any]:
     if sha:
         return {"sha": sha}
     return {"sha": None, "reason": f"PR #{pr} not found on {MAIN} (gh unavailable or not merged)"}
+
+
+# scripts/ci/edge_publication_gate.py annotates a refusal that only the owner
+# can clear (a combined main tree needs owner-dispatched CI) with this title and
+# the exact `gh workflow run` commands (#1940). The gate job itself stays green.
+EDGE_REFUSAL_TITLE = "Edge publication refused"
+# Unrelated PR CI completions re-run the gate on the same main revision; bound
+# how many of its runs are read for the annotation.
+EDGE_GATE_RUNS = 10
+_edge_refusals: Dict[str, tuple] = {}
+
+
+def _gh_api(endpoint: str) -> Any:
+    from app.core.github_service import github_service
+    result = github_service._run_gh(["api", endpoint], timeout=20)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr or f"gh api {endpoint} failed")
+    return json.loads(result.stdout or "null")
+
+
+def edge_refusal(repo: Path, revision: str) -> Optional[str]:
+    """Why the edge gate refused to publish ``revision`` and what unblocks it.
+
+    Read from the gate job's annotation. None when the gate passed for this
+    revision, never annotated it, or GitHub cannot be reached.
+    """
+    cached = _edge_refusals.get(revision)
+    if cached and time.monotonic() - cached[0] < FETCH_TTL:
+        return cached[1]
+    try:
+        from app.core.github_service import github_service
+        slug = github_service.get_repo_from_remote(str(repo)) or _DEFAULT_REPO
+        listing = _gh_api(f"repos/{slug}/commits/{revision}/check-runs?per_page=100&filter=all")
+        runs = [run for run in (listing or {}).get("check_runs") or []
+                if (run.get("app") or {}).get("slug") == "github-actions"]
+        gates = sorted((run for run in runs if run.get("name") == "gate"),
+                       key=lambda run: run.get("id") or 0, reverse=True)
+        suites = {(run.get("check_suite") or {}).get("id") for run in gates}
+        value = None
+        # The publish job runs only after the gate passed: the refusal is obsolete.
+        if not any(run.get("name") == "publish" and run.get("conclusion") == "success"
+                   and (run.get("check_suite") or {}).get("id") in suites for run in runs):
+            for run in [run for run in gates if (run.get("output") or {}).get("annotations_count")][:EDGE_GATE_RUNS]:
+                notes = _gh_api(f"repos/{slug}/check-runs/{run['id']}/annotations") or []
+                message = next((note.get("message") for note in notes if isinstance(note, dict)
+                                and note.get("title") == EDGE_REFUSAL_TITLE and note.get("message")), None)
+                if message:
+                    value = message.strip().replace(":\n", ": ").replace("\n", "; ")
+                    break
+    except Exception:  # noqa: BLE001 — gh is optional; the action still stands without it
+        logger.debug("deploy status: edge gate lookup failed", exc_info=True)
+        return None
+    _edge_refusals[revision] = (time.monotonic(), value)
+    return value
 
 
 def android_build(files: Optional[List[str]]) -> Dict[str, Any]:
@@ -327,6 +382,14 @@ def assess(rows: List[Dict[str, Any]], *, pr: Optional[int] = None, commit: Opti
             action = _not_live_action(row, None)
             item["action"] = f"{item['behind']} behind; {action}"
         workers.append(item)
+
+    # Edge publishes only origin/main: say why the gate refused it and how to unblock it.
+    if main and any("publish edge first" in item["action"] for item in workers):
+        refusal = edge_refusal(repo, main)
+        if refusal:
+            for item in workers:
+                if "publish edge first" in item["action"]:
+                    item["action"] += f". Edge refused {main[:9]}: {refusal}"
 
     android = None
     if change is not None:

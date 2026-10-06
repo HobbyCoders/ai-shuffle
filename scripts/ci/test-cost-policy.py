@@ -201,11 +201,25 @@ class CostPolicyTests(unittest.TestCase):
         self.assertIn("CODE_SIGNING_ALLOWED=NO", text)
 
     def test_costly_single_purpose_suites_are_manual_only(self):
-        # Releases re-run the container check in docker-publish.yml; Linux
-        # identity coverage stays in CI Backend.
-        for name in ["container-postgres.yml", "ci-instance-identity.yml"]:
-            with self.subTest(workflow=name):
-                self.assertEqual(set(workflow(name)["on"]), {"workflow_dispatch"})
+        # Linux identity coverage stays in CI Backend.
+        self.assertEqual(set(workflow("ci-instance-identity.yml")["on"]), {"workflow_dispatch"})
+
+    def test_container_check_runs_only_on_packaging_and_setup_prs(self):
+        # #1941: a full image build, so only PRs that can break the container
+        # smoke start it. Releases still re-run it in docker-publish.yml.
+        config = workflow("container-postgres.yml")
+        self.assertEqual(set(config["on"]), {"pull_request", "workflow_dispatch"})
+        self.assertEqual(set(config["on"]["pull_request"]), {"paths"})
+        self.assertEqual(config["on"]["pull_request"]["paths"], [
+            "Dockerfile", "docker/**", "entrypoint.sh", "scripts/verify_container_postgres.py",
+            "tests/integration/container_ui_smoke.mjs", "frontend/src/routes/setup/**",
+            "frontend/src/lib/components/setup/**",
+        ])
+        self.assertIsNone(config["on"]["workflow_dispatch"] or None)
+        self.assertEqual(config["concurrency"]["cancel-in-progress"], "true")
+        for path in config["on"]["pull_request"]["paths"]:
+            with self.subTest(path=path):
+                self.assertTrue(any(ROOT.glob(path)), f"{path} matches no file")
 
     def test_benchmark_defaults_and_worker_count_match(self):
         backend = workflow("ci-backend.yml")

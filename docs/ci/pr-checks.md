@@ -29,6 +29,14 @@ The slow platform suites run when someone asks for them, and before a release.
   Docker image fails until the owner adds the label `update-reach:docker-image`
   (each failing group has its own `update-reach:GROUP` label) and re-runs the
   job; it reads the labels when it runs. Label events do not start it.
+- Container PostgreSQL (`container-postgres.yml`), on PRs that touch
+  `Dockerfile`, `docker/**`, `entrypoint.sh`,
+  `scripts/verify_container_postgres.py`,
+  `tests/integration/container_ui_smoke.mjs` or the setup wizard
+  (`frontend/src/routes/setup/**`, `frontend/src/lib/components/setup/**`):
+  builds the image and checks a real container, the buyer Compose install and
+  the setup wizard in a browser. It is a full image build, so other PRs never
+  start it. Like every PR check, edge publication waits for it when it ran.
 
 Nothing runs on a schedule.
 
@@ -55,14 +63,22 @@ bridge tests. Native, mobile, shared frontend and unknown paths still build the
 APK. Renames check both old and new paths; missing or stale file evidence fails
 readiness. Manual and release runs always build and verify the APK.
 
+## Edge publication of a combined main tree
+
+When a PR merges while its branch is behind `main` (another PR merged during
+its CI), the tree on `main` is one no PR CI tested. Edge publication then waits for the owner to run CI on
+`main`. The gate job stays green but adds an "Edge publication refused"
+warning to the "Publish desktop source update" run that lists the exact
+commands, for example `gh workflow run ci-backend.yml --ref main`. DeployStatus
+repeats them in its "publish edge first" next step.
+
 ## Manual only
 
 Run these with `gh workflow run <file> --ref <branch>`:
 
-- `container-postgres.yml` builds the image and checks a real container,
-  the buyer Compose install and the UI. Run it on PRs that change the
-  Dockerfile, the entrypoint or the Compose files. Every release runs the
-  same container verification in `docker-publish.yml`.
+- `container-postgres.yml` on a PR it does not start by itself, for example
+  one that changes only the Compose files or `scripts/ci/verify_buyer_compose.py`.
+  Every release runs the same container verification in `docker-publish.yml`.
 - `ci-instance-identity.yml` runs the identity tests on native Windows and
   macOS. Run it on PRs that change instance identity in `app/core/config.py`.
   Linux coverage is in CI Backend.

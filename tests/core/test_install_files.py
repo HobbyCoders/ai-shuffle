@@ -68,8 +68,10 @@ def test_env_example_lists_only_what_a_buyer_sets():
 
 def test_buyer_compose_is_verified_in_ci():
     workflow = yaml.safe_load((ROOT / ".github/workflows/container-postgres.yml").read_text())
-    # Manual on branches (paid image build); every release runs buyer-install below.
-    assert set(workflow[True]) == {"workflow_dispatch"}
+    # Paid image build: manual, or a PR that changes packaging or the setup
+    # wizard (#1941); every release runs buyer-install below.
+    assert set(workflow[True]) == {"pull_request", "workflow_dispatch"}
+    assert set(workflow[True]["pull_request"]) == {"paths"}
     steps = workflow["jobs"]["container-postgres"]["steps"]
     assert any("verify_buyer_compose.py" in step.get("run", "") for step in steps)
     release = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())

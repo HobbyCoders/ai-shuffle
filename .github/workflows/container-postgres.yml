@@ -2,13 +2,23 @@ name: Container PostgreSQL
 
 # Builds the production image and exercises a real container: PostgreSQL
 # bootstrap, lifecycle, the buyer Compose install and the UI through a browser.
-# That is a full image build on a paid runner, so it is manual only
-# (`gh workflow run container-postgres.yml --ref <branch>`). Run it on PRs that
-# change container packaging. Every release runs the same container
-# verification in docker-publish.yml before the image is pushed.
+# That is a full image build on a paid runner, so pull requests run it only
+# when they change container packaging, this check or the first-run setup
+# wizard (#1941); otherwise run it by hand
+# (`gh workflow run container-postgres.yml --ref <branch>`). Every release runs
+# the same container verification in docker-publish.yml before the image is pushed.
 #
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'docker/**'
+      - 'entrypoint.sh'
+      - 'scripts/verify_container_postgres.py'
+      - 'tests/integration/container_ui_smoke.mjs'
+      - 'frontend/src/routes/setup/**'
+      - 'frontend/src/lib/components/setup/**'
   workflow_dispatch:
 
 permissions:
