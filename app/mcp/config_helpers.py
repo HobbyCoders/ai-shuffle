@@ -52,7 +52,12 @@ def _sanitize_hook(hook: dict) -> dict:
 
 
 def _sanitize_automation(auto: dict) -> dict:
-    """Strip secrets from automation data before returning to the agent."""
+    """Strip secrets from automation data before returning to the agent.
+
+    Copies every level it changes, so the caller's dict is never mutated.
+    The stored trigger shape is ``{"type", "config": {"secret", ...}}``; the
+    flat ``triggers[i].secret`` form is masked too for older rows.
+    """
     safe = dict(auto)
     # Mask secrets in trigger_config
     tc = safe.get("trigger_config")
@@ -65,9 +70,17 @@ def _sanitize_automation(auto: dict) -> dict:
     if triggers and isinstance(triggers, list):
         safe_triggers = []
         for t in triggers:
+            if not isinstance(t, dict):
+                safe_triggers.append(t)
+                continue
             t = dict(t)
             if t.get("secret"):
                 t["secret"] = "••••••••"
+            config = t.get("config")
+            if isinstance(config, dict) and config.get("secret"):
+                config = dict(config)
+                config["secret"] = "••••••••"
+                t["config"] = config
             safe_triggers.append(t)
         safe["triggers"] = safe_triggers
     return safe

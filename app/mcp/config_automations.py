@@ -268,7 +268,17 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                     return "Interval must be at least 60 seconds.", None, None, None
                 trigger_config = {"seconds": args["interval_seconds"]}
             elif trigger_type == "webhook":
-                trigger_config = {"secret": _secrets.token_urlsafe(32)}
+                # Stored encrypted, as the REST create path stores it; this
+                # tool writes through the DB layer and would otherwise
+                # persist the signing secret in plaintext.
+                from app.core.automation_service import encrypt_webhook_secret
+
+                try:
+                    trigger_config = encrypt_webhook_secret(
+                        {"secret": _secrets.token_urlsafe(32)}
+                    )
+                except ValueError as e:
+                    return str(e), None, None, None
 
             from app.core.automation_service import normalize_model_choice
 
