@@ -309,6 +309,30 @@ def test_paste_lands_at_the_prompt_and_never_executes(ctx):
     assert tc.post("/api/v1/terminals/term_nope/paste", json={"text": "x"}).status_code == 404
 
 
+def test_sh_refuses_a_multiline_paste_even_after_output_turned_bracketed_paste_on(ctx):
+    # sh can't hold a bracketed paste; ESC[?2004h in earlier output (here a
+    # printf) must not make the server send one, or every line but the last runs.
+    tc = owner(ctx)
+    term = create(tc, cwd=str(ctx.tmp), shell="sh")
+    wait_live(tc, term["id"])
+    marker = ctx.tmp / "sh-paste-ran"
+    with wsc(tc, ws_url(term["id"])) as ws:
+        attach(ws)
+        ws.send_text(json.dumps({"type": "input", "data": "printf '\\033[?2004h'; echo STALE_$((40+2))\r"}))
+        read_until(ws, b"STALE_42")
+        time.sleep(0.5)
+        response = tc.post(f"/api/v1/terminals/{term['id']}/paste",
+                           json={"text": f"touch {marker}-1\ntouch {marker}-2\ntouch {marker}-3\n"})
+        assert response.status_code == 422, response.text
+        assert response.json() == {
+            "detail": "This shell can't hold a multi-line command without running it. Paste one line, or use bash.",
+            "code": "paste_multiline_unsupported"}
+        single = tc.post(f"/api/v1/terminals/{term['id']}/paste", json={"text": f"touch {marker}-1\n"})
+        assert single.status_code == 200 and single.json()["mode"] == "plain"
+        time.sleep(1.0)
+    assert not list(ctx.tmp.glob("sh-paste-ran*"))
+
+
 def test_restart_an_exited_terminal(ctx):
     tc = owner(ctx)
     term = create(tc, shell="sh")

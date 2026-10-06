@@ -118,6 +118,10 @@ def test_paste_bytes_plain_mode_refuses_multiline():
     with pytest.raises(T.TerminalError) as err:
         T.paste_bytes("one\ntwo", bracketed=False)
     assert err.value.code == "paste_multiline_unsupported"
+    assert "use bash" in err.value.message
+    with pytest.raises(T.TerminalError) as err:
+        T.paste_bytes("one\ntwo", bracketed=False, shell="bash")
+    assert err.value.code == "paste_multiline_unsupported" and "use bash" not in err.value.message
 
 
 # ---------------------------------------------------------------------------
@@ -314,13 +318,119 @@ async def test_plain_paste_in_sh_never_executes(reg, tmp_path):
     term = await reg.create(created_by="owner", cwd=str(tmp_path), shell="sh")
     await _ready(term)
     marker = tmp_path / "plain-ran"
-    assert await reg.paste(term.id, f"touch {marker}\n") in ("plain", "bracketed")
+    assert await reg.paste(term.id, f"touch {marker}\n") == "plain"
     await asyncio.sleep(0.8)
     assert not marker.exists()
-    if not term.bracketed:
-        with pytest.raises(T.TerminalError) as err:
-            await reg.paste(term.id, "echo a\necho b")
-        assert err.value.code == "paste_multiline_unsupported"
+    with pytest.raises(T.TerminalError) as err:
+        await reg.paste(term.id, "echo a\necho b")
+    assert err.value.code == "paste_multiline_unsupported"
+
+
+# A paste must never run before the owner presses Enter, whatever the shell
+# printed before. ``ESC[?2004h`` in output (a cat, a printf, a program killed
+# with the mode on) is not proof the shell holds a bracketed paste.
+
+STALE_ON = r"printf '\033[?2004h'"
+
+
+async def _run(term, command: str, n: int) -> None:
+    """Type ``command`` + Enter and wait until it has finished. The token is
+    computed by the shell so the echoed command line cannot match it."""
+    await term.write(f"{command}; echo DONE_$((1000+{n}))\n".encode())
+    assert await _until(lambda: f"DONE_{1000 + n}".encode() in term.scrollback.snapshot())
+    await asyncio.sleep(0.3)
+    await term.wait_ready()
+
+
+def _ran(tmp_path):
+    return sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("ran"))
+
+
+async def _paste_three_lines(reg, term, tmp_path):
+    lines = "\n".join(f"touch {tmp_path / f'ran{i}'}" for i in (1, 2, 3))
+    try:
+        return await reg.paste(term.id, lines + "\n")
+    finally:
+        await asyncio.sleep(1.0)
+
+
+async def test_sh_with_a_stale_bracketed_on_refuses_a_multiline_paste(reg, tmp_path):
+    term = await reg.create(created_by="owner", cwd=str(tmp_path), shell="sh")
+    await _ready(term)
+    await _run(term, STALE_ON, 1)
+    assert term.bracketed  # the output switched the mode "on"; sh cannot honour it
+    with pytest.raises(T.TerminalError) as err:
+        await _paste_three_lines(reg, term, tmp_path)
+    assert err.value.code == "paste_multiline_unsupported" and err.value.status == 422
+    assert "Paste one line" in err.value.message
+    assert _ran(tmp_path) == []
+
+
+async def test_sh_with_a_stale_bracketed_on_pastes_one_line_plain(reg, tmp_path):
+    term = await reg.create(created_by="owner", cwd=str(tmp_path), shell="sh")
+    await _ready(term)
+    await _run(term, STALE_ON, 2)
+    before = len(term.scrollback.snapshot())
+    assert await reg.paste(term.id, f"touch {tmp_path / 'ran1'}\n") == "plain"
+    await asyncio.sleep(0.8)
+    assert _ran(tmp_path) == []
+    # Written bare: no bracketed-paste markers reach sh's line.
+    assert b"200~" not in term.scrollback.snapshot()[before:]
+    await term.write(b"\r")
+    assert await _until(lambda: _ran(tmp_path) == ["ran1"])
+
+
+async def test_bash_holds_a_multiline_paste_until_enter(reg, tmp_path):
+    term = await reg.create(created_by="owner", cwd=str(tmp_path), shell="bash")
+    await _ready(term)
+    assert await _until(lambda: term.bracketed)
+    assert await _paste_three_lines(reg, term, tmp_path) == "bracketed"
+    assert _ran(tmp_path) == []
+    await term.write(b"\r")
+    assert await _until(lambda: _ran(tmp_path) == ["ran1", "ran2", "ran3"])
+
+
+async def test_bash_single_line_paste_does_not_run(reg, tmp_path):
+    term = await reg.create(created_by="owner", cwd=str(tmp_path), shell="bash")
+    await _ready(term)
+    assert await reg.paste(term.id, f"touch {tmp_path / 'ran1'}") == "bracketed"
+    await asyncio.sleep(0.8)
+    assert _ran(tmp_path) == []
+
+
+async def test_bash_with_bracketed_paste_off_refuses_a_multiline_paste(reg, tmp_path):
+    term = await reg.create(created_by="owner", cwd=str(tmp_path), shell="bash")
+    await _ready(term)
+    await _run(term, "bind 'set enable-bracketed-paste off'", 3)
+    assert not term.bracketed  # readline's last word was ESC[?2004l
+    with pytest.raises(T.TerminalError) as err:
+        await _paste_three_lines(reg, term, tmp_path)
+    assert err.value.code == "paste_multiline_unsupported"
+    assert "Paste one line" in err.value.message and "use bash" not in err.value.message
+    assert _ran(tmp_path) == []
+    assert await reg.paste(term.id, f"touch {tmp_path / 'ran1'}") == "plain"
+    await asyncio.sleep(0.8)
+    assert _ran(tmp_path) == []
+
+
+@pytest.mark.parametrize("setup", ["set +o emacs", "exec sh"])
+async def test_bash_without_readline_ignores_a_stale_bracketed_on(reg, tmp_path, setup):
+    # No line editor (or no bash any more) reads the line, so the PTY stays
+    # in canonical mode; output claiming the mode is on must not count.
+    term = await reg.create(created_by="owner", cwd=str(tmp_path), shell="bash")
+    await _ready(term)
+    if setup == "exec sh":
+        await term.write(b"exec sh\n")
+        await asyncio.sleep(0.5)
+        await term.wait_ready()
+    else:
+        await _run(term, setup, 4)
+    await _run(term, STALE_ON, 5)
+    assert term.bracketed
+    with pytest.raises(T.TerminalError) as err:
+        await _paste_three_lines(reg, term, tmp_path)
+    assert err.value.code == "paste_multiline_unsupported"
+    assert _ran(tmp_path) == []
 
 
 async def test_busy_terminal_refuses_paste(reg, tmp_path):

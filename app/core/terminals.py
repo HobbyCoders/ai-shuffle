@@ -80,7 +80,8 @@ STATE_EXITED = "exited"
 TARGET_WORKER = "worker"
 
 # Bracketed paste (xterm DECSET 2004): readline turns it on while it waits
-# for a line and off before running it.
+# for a line and off before running it. Any program's output can carry these
+# too, so the flag alone never decides a paste (Terminal.holds_bracketed_paste).
 _BRACKETED_ON = b"\x1b[?2004h"
 _BRACKETED_OFF = b"\x1b[?2004l"
 _PASTE_START = "\x1b[200~"
@@ -704,12 +705,45 @@ class Terminal:
                 except OSError:
                     raise TerminalError("terminal_exited", "This terminal has exited. Restart it to type again.", 409)
 
+    def holds_bracketed_paste(self) -> bool:
+        """Whether a bracketed paste will certainly sit at the prompt unrun.
+
+        ``bracketed`` alone is not enough: any program's output can carry
+        ``ESC[?2004h`` (a ``cat``, a ``printf``, a program killed with the mode
+        on), and a shell without bash's readline runs every pasted line but the
+        last. So all of these must hold, each checked now, not remembered:
+
+        - the terminal was created as bash (sh/dash never get the wrapper);
+        - the most recent mode sequence seen was "on";
+        - the PTY is in readline's mode (ICANON and ECHO off), which output
+          cannot fake: it is off when line editing is off (``set +o emacs``)
+          or another shell reads the line;
+        - on Linux, the shell process is still that bash (not ``exec sh``).
+        """
+        fd, proc = self._fd, self._proc
+        if self.shell != "bash" or not self.bracketed or fd is None or proc is None \
+                or self.state == STATE_EXITED:
+            return False
+        try:
+            lflag = termios.tcgetattr(fd)[3]
+        except (OSError, termios.error):
+            return False
+        if lflag & (termios.ICANON | termios.ECHO):
+            return False
+        if os.path.isdir("/proc"):
+            try:
+                if os.readlink(f"/proc/{proc.pid}/exe") != os.path.realpath(self.shell_path):
+                    return False
+            except OSError:
+                return False
+        return True
+
     async def wait_ready(self, timeout: float = PASTE_READY_TIMEOUT_SECONDS) -> None:
-        """Wait until the shell is at its prompt: bracketed paste switched on,
-        or output seen and then quiet for a moment."""
+        """Wait until the shell is at its prompt: bash's readline holding
+        bracketed paste, or output seen and then quiet for a moment."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and self.state != STATE_EXITED:
-            if self.bracketed:
+            if self.holds_bracketed_paste():
                 return
             quiet = time.monotonic() - self._last_output
             if self._last_output and quiet >= PASTE_QUIET_SECONDS:
@@ -733,18 +767,22 @@ def clean_paste(text: str) -> str:
     return text.rstrip("\n")
 
 
-def paste_bytes(text: str, bracketed: bool) -> Tuple[bytes, str]:
+def paste_bytes(text: str, bracketed: bool, shell: str = "") -> Tuple[bytes, str]:
     """The exact bytes written for a paste and the mode used. Refuses a
-    multi-line paste when the shell cannot hold it without running it."""
+    multi-line paste when the shell cannot hold it without running it.
+
+    ``bracketed`` must mean the shell will certainly hold the paste
+    (:meth:`Terminal.holds_bracketed_paste`), never just that some output
+    switched the mode on. ``shell`` only picks the refusal's wording."""
     cleaned = clean_paste(text)
     if bracketed:
         return (_PASTE_START + cleaned + _PASTE_END).encode("utf-8"), "bracketed"
     if "\n" in cleaned:
-        raise TerminalError(
-            "paste_multiline_unsupported",
-            "This shell can't hold a multi-line command without running it. Paste one line, or use bash.",
-            422,
-        )
+        message = ("This shell can't hold a multi-line command without running it. Paste one line, or use bash."
+                   if shell != "bash" else
+                   "This terminal can't hold a multi-line command without running it right now "
+                   "(bash's line editor or its bracketed paste is off). Paste one line.")
+        raise TerminalError("paste_multiline_unsupported", message, 422)
     return cleaned.replace("\t", " ").encode("utf-8"), "plain"
 
 
@@ -960,7 +998,7 @@ class TerminalRegistry:
         if terminal.busy:
             raise TerminalError("terminal_busy",
                                 "A command is running in this terminal. Paste when it's back at the prompt.", 409)
-        data, mode = paste_bytes(text, terminal.bracketed)
+        data, mode = paste_bytes(text, terminal.holds_bracketed_paste(), terminal.shell)
         if data:
             await terminal.write(data)
         return mode
