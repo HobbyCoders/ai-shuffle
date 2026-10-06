@@ -194,12 +194,20 @@ describe('deriveStatus', () => {
 
 	it('keeps background work ahead of PR and done fallbacks', () => {
 		for (const prState of [null, 'open', 'merged', 'closed'] as const) {
-			expect(deriveStatus({ ...base, backgroundWork: true, prState, openPr: true })).toBe('working');
+			expect(deriveStatus({ ...base, backgroundWork: true, prState, openPr: true })).toBe('parked');
 		}
 		expect(deriveStatus({ ...base, backgroundWork: false })).toBe('done');
 		expect(deriveStatus({ ...base, backgroundWork: false, prState: 'open' })).toBe('pr');
 		expect(deriveStatus({ ...base, backgroundWork: false, prState: 'merged' })).toBe('pr_merged');
-		expect(deriveStatus({ ...base, backgroundWork: true, isActive: false })).toBe('working');
+		expect(deriveStatus({ ...base, backgroundWork: true, isActive: false })).toBe('parked');
+	});
+
+	it('shows a turn that ended on a running shell as Parked, not Working, without a marker', () => {
+		// The owner's report: a chat parked on a background shell (Monitor) read
+		// "Working". Some park paths never write the marker, so the running-task
+		// summary alone must read as Parked; only a running turn is Working.
+		expect(deriveStatus({ ...base, backgroundWork: true, parked: false })).toBe('parked');
+		expect(deriveStatus({ ...base, backgroundWork: true, streaming: true })).toBe('working');
 	});
 
 	it.each(['permission', 'question'] as const)('keeps %s ahead of background work', (kind) => {

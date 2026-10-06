@@ -149,9 +149,13 @@ export function deriveStatus(input: {
 	if (input.attention && input.attention.count > 0) {
 		return input.attention.kind === 'question' ? 'has_question' : 'needs_permission';
 	}
+	// Working means a turn is actually running. A turn that ended with live
+	// background work (a Monitor shell, a sub-agent) is parked even when the
+	// durable marker is missing: some park paths never write it (durable agent
+	// ids, unresolved launches), serving Monitors never set it, and the write
+	// is best-effort.
 	if (input.streaming) return 'working';
-	if (input.parked) return 'parked';
-	if (input.backgroundWork) return 'working';
+	if (input.parked || input.backgroundWork) return 'parked';
 	if (input.prState === 'open' || (!input.prState && input.openPr)) return 'pr';
 	if (input.prState === 'merged') return 'pr_merged';
 	if (input.isActive) return 'done';

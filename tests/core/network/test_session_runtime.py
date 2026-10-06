@@ -58,7 +58,9 @@ def test_owner_runtime_transitions_and_project_label_on_mirror(workers):
         runs.release_run(run["id"], run["fence_token"])
         background_tasks.upsert_background_task({"task_id": "monitor", "session_id": "remote-runtime",
                                                  "status": "running", "kind": "shell"})
-    assert_state("working")
+    # The turn ended on a running shell: parked, not working, even before (or
+    # without) the durable marker.
+    assert_state("parked")
     with a.active():
         database.set_session_parked_task_kind("remote-runtime", "shell")
     assert_state("parked")
@@ -90,7 +92,8 @@ def test_owner_runtime_transitions_and_project_label_on_mirror(workers):
 
 
 @pytest.mark.parametrize("mode, expected", [("queued", "working"), ("blocked_setup", "working"),
-                                             ("expired_run", "idle"), ("terminal_task", "idle")])
+                                             ("expired_run", "idle"), ("terminal_task", "idle"),
+                                             ("running_task", "parked"), ("running_task_and_turn", "working")])
 def test_runtime_uses_live_owner_work_not_terminal_history(workers, mode, expected):
     a = workers("runtime-cases")
     with a.active():
@@ -103,8 +106,13 @@ def test_runtime_uses_live_owner_work_not_terminal_history(workers, mode, expect
                 a.sql("UPDATE turns SET state = 'blocked_setup' WHERE id = ?", (turn["id"],))
         elif mode == "expired_run":
             runs.claim_run("case", "expired-owner", -1)
-        else:
+        elif mode == "terminal_task":
             background_tasks.upsert_background_task({"task_id": "done", "session_id": "case",
                                                      "kind": "shell", "status": "completed"})
+        else:
+            background_tasks.upsert_background_task({"task_id": "shell", "session_id": "case",
+                                                     "kind": "shell", "status": "running"})
+            if mode == "running_task_and_turn":
+                runs.claim_run("case", "live-owner", 600)
         catalog.publish_owned()
         assert session_runtime.for_sessions(["case"])["case"]["state"] == expected

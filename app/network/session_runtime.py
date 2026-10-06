@@ -44,9 +44,10 @@ def publish_owned(ctx: engine.NetworkContext, *, session_ids: Optional[List[str]
                     AND r.state = 'active' AND r.lease_expires_at > NOW())
                     OR EXISTS (SELECT 1 FROM turns t WHERE t.session_id = s.id
                         AND t.state IN ('queued', 'running', 'blocked_setup')) THEN 'working'
-                WHEN s.parked_task_kind IS NOT NULL THEN 'parked'
-                WHEN EXISTS (SELECT 1 FROM background_tasks b WHERE b.session_id = s.id
-                    AND b.status = 'running') THEN 'working'
+                -- No turn is running: live background work (a Monitor shell,
+                -- a sub-agent) means the chat is parked on it, marker or not.
+                WHEN s.parked_task_kind IS NOT NULL OR EXISTS (SELECT 1 FROM background_tasks b
+                    WHERE b.session_id = s.id AND b.status = 'running') THEN 'parked'
                 ELSE 'idle' END AS state
             FROM sessions s
             WHERE (s.owner_device_id = %s OR
