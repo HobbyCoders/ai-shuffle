@@ -296,11 +296,14 @@ it('lists excluded workers with a reason without counting them ready or letting 
   {...peer,device_id:'old',device_name:'Old',supported:false,phase:'unsupported',version:null},
   {...peer,device_id:'off2',device_name:'Locked',allow_updates:false,phase:'available'},
   {...peer,device_id:'idle',device_name:'Idle',phase:'idle',version:null},
+  // The container updater names the running revision on this phase (#1901).
+  {...peer,device_id:'img',device_name:'Docker',phase:'image-required',message:null,version:'bbbbbbbbbbbb',running_version:'b'.repeat(40)},
  ]});
  render(DesktopUpdateButton);
  const button=await screen.findByRole('button',{name:'Update and restart'});
  for (const text of ['Laptop: Offline; not queued','Desk: Already up to date','Old: No application updater; not included',
-  'Locked: Updates disabled on this worker; not included','Idle: No update offered']) expect(button.title).toContain(text);
+  'Locked: Updates disabled on this worker; not included','Idle: No update offered','Docker: Needs a new Docker image; not included']) expect(button.title).toContain(text);
+ expect(button.title).not.toContain('Docker: Already up to date');
 });
 it.each([
  ['an unreadable status',{phase:'unknown',supported:false,reason:'Worker unavailable or does not support application updates'},'Unraid (Status unavailable)'],

@@ -836,7 +836,7 @@ Ask the updater to check for, download or install an update.
 
 **Auth:** Owner only. Refused with `403` when the request comes from an agent's in-app browser preview.
 
-**Body (JSON):** `action` (required): `check`, `download`, `install` or `cancel`. `mode` (optional, `install` only): `when_idle` or `stop`.
+**Body (JSON):** `action` (required): `check`, `download`, `install` or `cancel`. `mode` (optional, `install` only): `when_idle` or `stop`. `scope` (optional): `current` acts on this worker only, even when "Update all workers" is on; omitted follows that setting.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/settings/application-updates \

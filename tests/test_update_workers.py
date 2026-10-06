@@ -67,6 +67,34 @@ def test_all_scope_targets_online_once_and_local_last(setup, monkeypatch):
     assert remote.await_count == 3
 
 
+@pytest.mark.parametrize("action", ["check", "download", "install", "cancel"])
+def test_current_scope_never_calls_peers_even_when_updating_all_workers(setup, action):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    result = asyncio.run(fleet.dispatch(action, scope="current"))
+    assert result["scope"] == "current"
+    assert [r["device_id"] for r in result["results"]] == ["self"]
+    remote.assert_not_called()
+    if action == "install":
+        assert updates._desktop_request["action"] == "install"
+
+
+def test_current_scope_still_refuses_a_restart_while_work_runs(setup, monkeypatch):
+    values, remote = setup
+    values[updates.ALL_KEY] = "true"
+    monkeypatch.setattr(desktop_lifecycle, "active_session_ids", lambda: ["s1"])
+    monkeypatch.setattr(desktop_lifecycle, "busy_work", lambda: [{"session_id": "s1", "title": "Fix login", "tasks": []}])
+    row = asyncio.run(fleet.dispatch("install", scope="current"))["results"][-1]
+    assert row["accepted"] is False and row["reason"] == "Busy with running work: Fix login"
+    assert updates._desktop_request is None
+    remote.assert_not_called()
+
+
+def test_unknown_scope_is_refused(setup):
+    with pytest.raises(ValueError, match="Unknown update scope"):
+        asyncio.run(fleet.dispatch("install", scope="peer"))
+
+
 def test_disabled_busy_and_unavailable_do_not_receive_commands(setup, monkeypatch):
     values, _ = setup
     values[updates.KEY] = "false"
@@ -572,6 +600,18 @@ def test_not_checked_rule(change, role):
            "checked_at": 1.0, **change}
     assert fleet.classify(row, True, offers)["role"] == role
     assert fleet.classify(row, True, [])["role"] == "excluded"
+
+
+@pytest.mark.parametrize("version", [A[:12], B[:12], None])
+def test_image_required_is_never_up_to_date(version):
+    # #1901: the container updater writes the RUNNING revision as the
+    # version of an image-required status; it must not read as current.
+    row = {"device_id": "self", "is_self": True, "online": True, "supported": True, "allow_updates": True,
+           "phase": "image-required", "message": "A new Docker image is required for this update.",
+           "version": version, "running_version": A}
+    assert fleet.classify(row, True) == {"role": "excluded",
+                                         "label": "A new Docker image is required for this update."}
+    assert fleet.classify({**row, "message": None}, False)["label"] == "Needs a new Docker image; not included"
 
 
 def test_discovery_checks_a_behind_peer_at_most_once_per_interval(setup):

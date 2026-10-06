@@ -121,6 +121,20 @@ def test_action_accepts_only_known_verbs(c, updater, action):
     assert not (updater / "request.json").exists()
 
 
+def test_current_scope_acts_on_this_worker_only(c, updater, monkeypatch):
+    seen = []
+    async def dispatch(action, mode=None, scope=None):
+        seen.append((action, mode, scope))
+        return {"scope": scope or "all", "sent": action, "results": []}
+    monkeypatch.setattr("app.core.update_workers.dispatch", dispatch)
+    r = c.post(URL, json={"action": "install", "mode": "when_idle", "scope": "current"})
+    assert r.status_code == 200, r.text
+    assert seen == [("install", "when_idle", "current")]
+    for scope in ("all", "peer", ""):
+        assert c.post(URL, json={"action": "install", "scope": scope}).status_code == 422
+    assert len(seen) == 1
+
+
 def test_workers_lists_this_worker_without_peer_endpoints(c):
     body = c.get(f"{URL}/workers").json()
     assert body["operation"] is None

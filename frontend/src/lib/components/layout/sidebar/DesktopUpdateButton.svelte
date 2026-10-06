@@ -124,6 +124,8 @@
 		if (w.phase === 'unknown') return { role: 'unknown', label: 'Status unavailable' };
 		if (!w.supported) return { role: 'excluded', label: w.reason || 'No application updater; not included' };
 		if (!w.allow_updates) return { role: 'excluded', label: 'Updates disabled on this worker; not included' };
+		// Before the same-version test: the container updater reports the running revision here (#1901).
+		if (w.phase === 'image-required') return { role: 'excluded', label: w.message || 'Needs a new Docker image; not included' };
 		if (w.version && w.running_version && (w.running_version.startsWith(w.version) || w.version.startsWith(w.running_version))) {
 			return { role: 'excluded', label: 'Already up to date' };
 		}
@@ -139,7 +141,6 @@
 			case 'ready': return { role: 'staged', label: w.error ? `Staged, awaiting restart. ${w.error}` : 'Staged, awaiting restart' };
 			case 'available': return w.version ? { role: 'available', label: 'Update available; not downloaded' } : { role: 'excluded', label: 'No update offered' };
 			case 'error': return w.version ? { role: 'available', label: w.error || 'Download failed; retry' } : { role: 'unknown', label: w.error || 'Update check failed' };
-			case 'image-required': return { role: 'excluded', label: w.message || 'Needs a new Docker image; not included' };
 			case 'idle': if (notChecked(w, found)) return { role: 'available', label: 'Not checked yet; will check and download' };
 			// fall through
 			default: return { role: 'excluded', label: (w.message && !IN_PROGRESS.test(w.message) ? w.message : '') || 'No update offered' };

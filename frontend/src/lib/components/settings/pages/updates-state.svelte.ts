@@ -63,6 +63,8 @@ export function describeWorker(worker: UpdateWorker, receipt?: UpdateReceipt): {
 	if (receipt && receipt.accepted === false) return { tone: 'off', text: receipt.reason || 'Not checked' };
 	if (!worker.online) return { tone: 'off', text: 'Offline' };
 	if (worker.request_pending) return { tone: 'busy', text: 'Checking' };
+	// The container updater reports the running revision with this phase (#1901).
+	if (worker.phase === 'image-required') return { tone: 'err', text: worker.message || 'Needs a new Docker image' };
 	if (worker.phase !== 'checking' && sameVersion(worker.version, worker.running_version)) {
 		return { tone: 'ok', text: 'Up to date' };
 	}
@@ -77,8 +79,6 @@ export function describeWorker(worker: UpdateWorker, receipt?: UpdateReceipt): {
 			return { tone: 'warn', text: 'Update downloaded, ready to install' };
 		case 'error':
 			return { tone: 'err', text: worker.error || 'Check failed' };
-		case 'image-required':
-			return { tone: 'err', text: worker.message || 'Needs a new Docker image' };
 		case 'unsupported':
 			return { tone: 'off', text: worker.reason || 'Status unavailable' };
 		default:

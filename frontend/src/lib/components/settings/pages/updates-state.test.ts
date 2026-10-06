@@ -154,6 +154,11 @@ describe('describeWorker', () => {
 		expect(describeWorker(self('ready'))).toEqual({ tone: 'warn', text: 'Update downloaded, ready to install' });
 		expect(describeWorker(self('image-required'))).toEqual({ tone: 'err', text: 'Needs a new Docker image' });
 		expect(describeWorker(self('image-required', { message: 'Pull 0.9' }))).toEqual({ tone: 'err', text: 'Pull 0.9' });
+		// The container updater names the running revision on this phase (#1901).
+		expect(describeWorker(self('image-required', { version: '0.8.23', running_version: '0.8.23+abc' }))).toEqual({
+			tone: 'err',
+			text: 'Needs a new Docker image'
+		});
 		expect(describeWorker(self('available', { version: '0.8.23', running_version: '0.8.23+abc' }))).toEqual({ tone: 'ok', text: 'Up to date' });
 		expect(describeWorker(self('idle', { request_pending: true }))).toEqual({ tone: 'busy', text: 'Checking' });
 		expect(describeWorker(self('error', { error: 'Signature mismatch' }))).toEqual({ tone: 'err', text: 'Signature mismatch' });

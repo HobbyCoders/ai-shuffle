@@ -21,6 +21,9 @@ class UpdateAction(BaseModel):
     # Install only, when sessions are running: restart once they finish, or
     # stop them first. "cancel" drops a waiting "when_idle" restart.
     mode: Literal["when_idle", "stop"] | None = None
+    # "current" acts on this worker only, even when "Update all workers" is on.
+    # Omitted follows that setting.
+    scope: Literal["current"] | None = None
 
 
 def require_update_owner(request: Request, token=Depends(require_admin)):
@@ -51,7 +54,7 @@ async def set_application_updates(body: UpdatePolicy, _=Depends(require_update_o
 async def application_update_action(body: UpdateAction, _=Depends(require_update_owner)):
     from app.core.update_workers import dispatch
     try:
-        return await dispatch(body.action, body.mode)
+        return await dispatch(body.action, body.mode, body.scope)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 

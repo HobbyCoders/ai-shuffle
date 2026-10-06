@@ -310,6 +310,10 @@ def classify(row, all_workers, offers=(), refusals=None):
         return {"role": "excluded", "label": row.get("reason") or "No application updater; not included"}
     if not row.get("allow_updates"):
         return {"role": "excluded", "label": "Updates disabled on this worker; not included"}
+    # Before the same-version test: the container updater fills ``version``
+    # with the RUNNING revision on this phase, so it would read as current (#1901).
+    if phase == "image-required":
+        return {"role": "excluded", "label": row.get("message") or "Needs a new Docker image; not included"}
     if _same(row.get("version"), row.get("running_version")):
         return {"role": "excluded", "label": "Already up to date"}
     # Queued but not yet taken (a desktop takes requests on its 30 s report).
@@ -335,8 +339,6 @@ def classify(row, all_workers, offers=(), refusals=None):
     if phase == "error":
         return ({"role": "available", "label": row.get("error") or "Download failed; retry"} if row.get("version")
                 else {"role": "unknown", "label": row.get("error") or "Update check failed"})
-    if phase == "image-required":
-        return {"role": "excluded", "label": row.get("message") or "Needs a new Docker image; not included"}
     if phase == "idle" and _not_checked(row, offers):
         return {"role": "available", "label": NOT_CHECKED}
     message = row.get("message")
@@ -427,26 +429,30 @@ async def snapshot(*, fresh=False):
             "workers": [{key: row.get(key) for key in fields} for row in rows]}
 
 
-async def dispatch(action, mode=None):
+async def dispatch(action, mode=None, scope=None):
+    """``scope`` "current" acts on this worker only, even when "Update all
+    workers" is on (an agent updating its own worker must not restart peers)."""
     async with _dispatch_lock:
         try:
-            return await _dispatch(action, mode)
+            return await _dispatch(action, mode, scope)
         finally:
             # An action changes peer phases: the next snapshot must read them anew.
             _peer_status.clear()
 
 
-async def _dispatch(action, mode=None):
+async def _dispatch(action, mode=None, scope=None):
     global _refusals_at
     if action not in ("check", "download", "install", "cancel"):
         raise ValueError("Unknown update action")
     if mode not in (None, "when_idle", "stop") or (mode and action != "install"):
         raise ValueError("Unknown update mode")
+    if scope not in (None, "current"):
+        raise ValueError("Unknown update scope")
     if action == "cancel":
-        return await _send_cancel()
+        return await _send_cancel(scope)
     if not await run_sync(updates.allowed):
         raise ValueError("Application updates are disabled in Account settings")
-    result = await _send(action, mode)
+    result = await _send(action, mode, scope)
     refused = {row["device_id"]: row.get("reason") or "Refused" for row in result["results"]
                if not row.get("accepted") and row.get("device_id")}
     _refusals.clear()
@@ -458,12 +464,17 @@ async def _dispatch(action, mode=None):
     return result
 
 
-async def _send_cancel():
+async def _in_scope(scope):
+    """Whether an action fans out to every worker: the policy, unless the caller asked for this one."""
+    return scope != "current" and await run_sync(updates.all_workers)
+
+
+async def _send_cancel(scope=None):
     """Drop a waiting "Restart when they finish" on every worker in scope."""
     listing = await run_sync(runners.directory)
     request_id = uuid.uuid4().hex
     results = []
-    all_workers = await run_sync(updates.all_workers)
+    all_workers = await _in_scope(scope)
     if all_workers:
         results = list(await asyncio.gather(*(_act(row, "cancel", request_id) for row in listing["runners"]
                                              if not row["is_self"] and row["online"])))
@@ -477,14 +488,14 @@ def _later(result):
     return result.get("accepted") is False and bool(result.get("busy")) or bool(result.get("deferred"))
 
 
-async def _send(action, mode=None):
+async def _send(action, mode=None, scope=None):
     operation = await run_sync(progress.load)
     if operation and operation["phase"] != "complete":
         previous = await snapshot()
         if previous.get("operation") and previous["operation"]["phase"] == "waiting":
             raise ValueError("Waiting on workers to finish the previous update")
     listing = await run_sync(runners.directory)
-    all_workers = await run_sync(updates.all_workers)
+    all_workers = await _in_scope(scope)
     request_id = uuid.uuid4().hex
     self_row = {"device_id": listing.get("self_device_id") or "local", "device_name": "Current worker"}
     if action == "install" and all_workers:
