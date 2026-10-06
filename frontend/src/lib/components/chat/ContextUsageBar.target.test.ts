@@ -104,7 +104,8 @@ describe('ContextUsageBar — resolved target', () => {
 		await openPopover(container);
 		// A single section + row for the resolved remote install — never the self one.
 		expect(container.querySelectorAll('.popover-section').length).toBe(1);
-		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		// One reported row; the weekly row keeps its place as a placeholder.
+		expect(container.querySelectorAll('.popover-row:not(.placeholder)').length).toBe(1);
 		// Header is the fixed "Claude" label + the resolved install's device name;
 		// the account email never appears (ChatGPT-provider parity).
 		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
@@ -123,7 +124,8 @@ describe('ContextUsageBar — resolved target', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.querySelectorAll('.popover-section').length).toBe(1);
-		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		// One reported row; the weekly row keeps its place as a placeholder.
+		expect(container.querySelectorAll('.popover-row:not(.placeholder)').length).toBe(1);
 		// Header is the fixed "Claude" label + the resolved self install's device name.
 		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
 		expect(container.querySelector('.section-account')?.textContent).toBe('Studio');
@@ -157,9 +159,10 @@ describe('ContextUsageBar — resolved target', () => {
 		expect(container.querySelector('.usage-indicator')).not.toBeNull();
 		await openPopover(container);
 		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
-		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Not reported from Unraid yet');
-		expect(container.textContent).toContain('Unraid has not shared its Claude usage with this');
-		expect(container.querySelectorAll('.popover-row').length).toBe(0);
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Not reported from Unraid yet');
+		// Same skeleton as a reported section: placeholder rows, no figures.
+		expect(container.querySelectorAll('.popover-row:not(.placeholder)').length).toBe(0);
+		expect(container.querySelectorAll('.popover-row.placeholder').length).toBe(2);
 		// Never borrow the self install's window/label.
 		expect(container.textContent).not.toContain('Studio');
 		expect(container.textContent).not.toContain('12%');

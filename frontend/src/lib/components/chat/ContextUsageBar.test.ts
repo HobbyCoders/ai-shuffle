@@ -175,13 +175,12 @@ describe('ContextUsageBar — collapsed Claude row and passed resets', () => {
 		expect(fable.querySelector('.row-pct')?.textContent).toBe('100% left');
 		expect((fable.querySelector('.row-fill') as HTMLElement).style.width).toBe('100%');
 		expect(fable.querySelector('.row-reset-inline')?.textContent?.trim()).toBe('reset · awaiting next report');
-		expect(fable.querySelector('.row-as-of')).toBeNull();
-		// The other windows are current, so the header claims no staleness.
-		expect(container.querySelector('.usage-as-of')).toBeNull();
+		// No per-row age: one meta line carries the check time.
+		expect(fable.textContent).not.toMatch(/reported \d|age unknown/);
 		expect(container.textContent).not.toContain('19% left');
 	});
 
-	it('keeps the Claude row with a "Last reported" age when its reports have gone stale', async () => {
+	it('keeps a stale Claude reading on screen with a quiet "Checked" age', async () => {
 		const twoHoursAgo = Date.now() - 2 * 3_600_000;
 		rateLimit.applySnapshot({
 			available: true, windows: [], self_instance_id: 'self',
@@ -192,7 +191,8 @@ describe('ContextUsageBar — collapsed Claude row and passed resets', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
-		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 2h ago');
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Checked 2h ago');
+		expect(container.querySelector('.sec-header')?.textContent).not.toMatch(/reported|Checked/i);
 		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('55% left');
 	});
 
@@ -622,8 +622,12 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container, getByRole } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.provider-status')?.textContent ?? null).toEqual(cached ? (status === 'stale' ? expect.stringMatching(/^Last reported /) : null) : 'Credit balance not available for this key');
-		expect(container.textContent).not.toMatch(/Last known|Refresh pending|Refresh timed out|Usage unavailable/);
+		// No guidance to act on: the credits line says what is known, and the
+		// meta line only says when it was checked.
+		expect(container.querySelector('.provider-status')).toBeNull();
+		expect(container.querySelector('.usage-credits')?.textContent).toBe(cached ? '$12.34 left' : 'Credit balance not available for this key');
+		expect(container.querySelector('.usage-meta-text')?.textContent).toMatch(/^(Checked |Not checked yet$)/);
+		expect(container.textContent).not.toMatch(/Last known|Last reported|Refresh pending|Refresh timed out|Usage unavailable/);
 		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
 		if (cached) {
 			expect(container.textContent).toContain('$12.34 left');
@@ -634,8 +638,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 			expect(container.textContent).not.toContain('$0.00');
 		}
 		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
-		expect(container.querySelector('.provider-status')?.textContent ?? null).toEqual(cached ? (status === 'stale' ? expect.stringMatching(/^Last reported /) : null) : 'Credit balance not available for this key');
-		if (cached) expect(container.textContent).toContain('$12.34 left');
+		expect(container.querySelector('.sec-summary')?.textContent).toBe(cached ? '$12.34 left' : 'Balance unavailable');
 	});
 
 	it.each(['stale', 'unavailable', 'never_fetched'] as const)('preserves sign-in guidance for %s credentials', async (status) => {
@@ -661,8 +664,9 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
 		const header = getByRole('button', { name: 'OpenAI usage — expand' });
 		expect(header.textContent).not.toContain('extra credits');
-		expect(container.querySelector('.sec-credits')).toBeNull();
 		if (withWindows) expect(header.textContent).toContain('70% left');
+		// Nothing to summarize yet: the summary slot holds a dash, not a credit count.
+		else expect(container.querySelector('.sec-summary')?.textContent).toBe('—');
 		expect(container.textContent).not.toContain('extra credits');
 	});
 
@@ -685,9 +689,11 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container, getByRole, queryByRole } = render(ContextUsageBar);
 		await openPopover(container);
-		// Keep long guidance in the wrapping prose class, not just an account label.
-		const guidance = container.querySelector('.provider-status');
-		expect(guidance?.textContent).toBe(status === 'stale' ? 'Billing access required' : 'Credit balance not available for this key');
+		// The action rides the one meta line; the credits line says what is known.
+		// No billing access can expose an API key's prepaid balance, so a key
+		// without one is not asked for it.
+		expect(container.querySelector('.provider-status')?.textContent ?? null).toBe(status === 'stale' ? 'Billing access required' : null);
+		expect(container.querySelector('.usage-credits')?.textContent).toBe(status === 'stale' ? '$12.34 left' : 'Credit balance not available for this key');
 		expect(container.textContent).not.toContain('Last known usage');
 		expect(container.textContent).not.toContain('Sign in');
 		expect(container.textContent).not.toContain('$0.00');
@@ -733,7 +739,8 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.provider-status')?.textContent).toBe('Balance unavailable for this key');
+		expect(container.querySelector('.usage-credits')?.textContent).toBe('Balance unavailable for this key');
+		expect(container.querySelector('.provider-status')).toBeNull();
 		expect(container.textContent).not.toContain('Billing access required');
 		expect(container.textContent).not.toContain('$0.00');
 	});
@@ -774,14 +781,14 @@ describe('ContextUsageBar — context breakdown', () => {
 		await fireEvent.click(header);
 
 		// Rows hidden; the segmented bar collapses to a single severity-coloured
-		// fill; the plan-limits section (data rows / "No usage data yet") stays
-		// visible even though the "Plan usage limits" title is gone.
+		// fill; the plan-limits section (its rows, placeholders before a report)
+		// stays visible even though the "Plan usage limits" title is gone.
 		expect(container.querySelectorAll('.breakdown-row').length).toBe(0);
 		const segs = container.querySelectorAll('.ctx-seg');
 		expect(segs.length).toBe(1);
 		expect(segs[0].classList.contains('solid')).toBe(true);
 		expect(container.textContent).not.toContain('Plan usage limits');
-		expect(container.textContent).toContain('No usage data yet');
+		expect(container.textContent).toContain('5-hour limit');
 		expect(header.getAttribute('aria-expanded')).toBe('false');
 		expect(localStorage.getItem('aihub.contextBreakdownOpen')).toBe('0');
 	});
@@ -1137,14 +1144,18 @@ describe('ContextUsageBar — plan usage limits', () => {
 		await waitFor(() => expect(container.querySelector('.popover-section')).toBeNull());
 	});
 
-	it.each(['api', 'subscription'])('shows "No usage data yet" for %s credentials before a usage snapshot arrives', async (authKind) => {
+	it.each(['api', 'subscription'])('says nothing is reported yet for %s credentials before a usage snapshot arrives', async (authKind) => {
 		mocks.claudeAuth = { auth_kind: authKind, plan_type: null };
 		mocks.claudeAuthenticated = authKind === 'subscription';
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		expect(container.querySelector('.usage-popover')).not.toBeNull();
-		expect(container.textContent).toContain('No usage data yet');
-		expect(container.querySelectorAll('.popover-row').length).toBe(0);
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Not reported yet');
+		// A plan login holds its 5-hour and weekly rows for the first report; an
+		// API-key login reports no windows, so it has none to hold.
+		const placeholders = Array.from(container.querySelectorAll('.popover-row.placeholder'), (row) => row.querySelector('.row-label')?.textContent);
+		expect(placeholders).toEqual(authKind === 'api' ? [] : ['5-hour limit', 'Weekly (all models)']);
+		expect(container.querySelectorAll('.popover-row:not(.placeholder)').length).toBe(0);
 	});
 
 	it('never shows the "Plan usage limits" title, whether the section is empty or has rows', async () => {
@@ -1152,7 +1163,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		const { container: empty } = render(ContextUsageBar);
 		await openPopover(empty);
 		expect(empty.textContent).not.toContain('Plan usage limits');
-		expect(empty.textContent).toContain('No usage data yet');
+		expect(empty.querySelectorAll('.popover-row.placeholder').length).toBe(2);
 		cleanup();
 
 		rateLimit.applySnapshot({
@@ -1162,7 +1173,9 @@ describe('ContextUsageBar — plan usage limits', () => {
 		const { container: withRows } = render(ContextUsageBar);
 		await openPopover(withRows);
 		expect(withRows.textContent).not.toContain('Plan usage limits');
-		expect(withRows.querySelectorAll('.popover-row').length).toBe(1);
+		// The reported window fills its row; the weekly one still holds its place.
+		expect(withRows.querySelectorAll('.popover-row').length).toBe(2);
+		expect(withRows.querySelectorAll('.popover-row:not(.placeholder)').length).toBe(1);
 	});
 
 	it('preserves the Claude feed as quota remaining', async () => {
@@ -1217,7 +1230,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		);
 	});
 
-	it('says when a stale Claude reading was last reported, without "not live"', async () => {
+	it('says when a stale Claude reading was checked in the meta line only, without "not live"', async () => {
 		rateLimit.applySnapshot({
 			available: true, windows: [], self_instance_id: 'self',
 			snapshots: [{ instance_id: 'self', available: true, fetched_at: Date.now() - 2 * 86_400_000,
@@ -1226,12 +1239,15 @@ describe('ContextUsageBar — plan usage limits', () => {
 		const { container, getByRole } = render(ContextUsageBar);
 		await openPopover(container);
 		const header = getByRole('button', { name: /Plan usage limits/ });
-		expect(header.querySelector('.usage-as-of')?.textContent).toBe('Last reported 2d ago');
-		expect(container.querySelectorAll('.usage-as-of')).toHaveLength(1);
-		expect(container.textContent).not.toContain('not live');
-		// Collapsed, the header still carries the freshness.
+		expect(header.textContent).not.toMatch(/reported|Checked/i);
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Checked 2d ago');
+		expect(container.textContent).not.toMatch(/not live|Last reported/);
+		// The figure stays the last report's.
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('42% left');
+		// Collapsed, the header shows the figure, not the age.
 		await fireEvent.click(header);
-		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 2d ago');
+		expect(container.querySelector('.sec-summary')?.textContent).toBe('42% left');
+		expect(header.textContent).not.toMatch(/reported|Checked/i);
 	});
 
 	it('keeps the as-of line when a live event refreshes only one window', async () => {
@@ -1248,10 +1264,10 @@ describe('ContextUsageBar — plan usage limits', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		// The weekly window is still two days old.
-		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 2d ago');
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Checked 2d ago');
 	});
 
-	it('marks an undated Claude window as age unknown instead of borrowing a newer report (#1661)', async () => {
+	it('says the check time is unknown for an undated Claude window instead of borrowing a newer report (#1661)', async () => {
 		const now = Date.now();
 		rateLimit.applySnapshot({
 			available: true, windows: [], self_instance_id: 'self',
@@ -1265,17 +1281,15 @@ describe('ContextUsageBar — plan usage limits', () => {
 		const { container, getByRole } = render(ContextUsageBar);
 		await openPopover(container);
 		const header = getByRole('button', { name: /Plan usage limits/ });
-		expect(header.querySelector('.usage-as-of')?.textContent).toBe('Last reported · age unknown');
+		expect(header.textContent).not.toMatch(/unknown|Checked/);
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Check time unknown');
 		const rows = [...container.querySelectorAll('.popover-row')];
 		const fable = rows.find((row) => row.textContent?.includes('Fable 5 limit'))!;
-		const fiveHour = rows.find((row) => row.textContent?.includes('5-hour limit'))!;
-		expect(fable.querySelector('.row-as-of')?.textContent).toBe('age unknown ·');
 		// The value is shown as reported, not inverted.
 		expect(fable.querySelector('.row-pct')?.textContent).toBe('64% left');
-		expect(fiveHour.querySelector('.row-as-of')).toBeNull();
 	});
 
-	it('keeps a stale provider reading on screen with when it can next refresh', async () => {
+	it('keeps a stale provider reading on screen with a quiet "Checked" age and no countdown', async () => {
 		const fetched = Date.now() - 10 * 60_000;
 		rateLimit.applySnapshot({ windows: [], available: false, providers: [
 			{ provider_id: 'or', provider_type: 'openrouter', provider_name: 'Router', status: 'stale',
@@ -1284,15 +1298,15 @@ describe('ContextUsageBar — plan usage limits', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		// Same freshness as the Claude header: the age once, in the header.
+		// Same freshness line as Claude: the age once, in the meta line.
 		const header = container.querySelector('[aria-label^="Router usage"]') as HTMLElement;
-		expect(header.querySelector('.usage-as-of')?.textContent).toBe('Last reported 10m ago');
-		expect(container.querySelectorAll('.usage-as-of')).toHaveLength(1);
-		expect(container.querySelector('.usage-next-check')?.textContent).toMatch(/^Next check in 2m \d+s$/);
-		expect(container.textContent).not.toMatch(/not live|Updated/);
-		// Collapsed, the header still carries the freshness.
+		expect(header.textContent).not.toMatch(/reported|Checked/i);
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Checked 10m ago');
+		expect(container.textContent).not.toMatch(/not live|Updated|Next check|Last reported/);
+		expect(container.querySelector('.usage-credits')?.textContent).toBe('Balance unavailable for this key');
+		// Collapsed, the header shows the figure, never the age.
 		await fireEvent.click(header);
-		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 10m ago');
+		expect(header.textContent).not.toMatch(/reported|Checked/i);
 	});
 
 	it('lists all windows with humanised labels on open', async () => {
@@ -1342,9 +1356,9 @@ describe('ContextUsageBar — plan usage limits', () => {
 		});
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		// A single section + row for the resolved (self) install only.
+		// A single section + reported row for the resolved (self) install only.
 		expect(container.querySelectorAll('.popover-section').length).toBe(1);
-		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		expect(container.querySelectorAll('.popover-row:not(.placeholder)').length).toBe(1);
 		// Header is "Claude" + the resolved device name; the account email is never shown.
 		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
 		expect(container.textContent).toContain('Studio');
@@ -1409,7 +1423,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.textContent).not.toContain('This device');
 		expect(container.textContent).not.toContain('Other device');
 		// Only the self window is shown (12% left), not the worker's live 50%.
-		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		expect(container.querySelectorAll('.popover-row:not(.placeholder)').length).toBe(1);
 		expect(container.textContent).not.toContain('50%');
 	});
 
@@ -1462,9 +1476,10 @@ describe('ContextUsageBar — plan usage limits', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 
-		// Open by default → the Claude header plus its single window row.
+		// Open by default → the Claude header, its reported 5-hour row and the
+		// weekly row held for its first report.
 		expect(container.querySelector('.section-device')?.textContent).toBe('Claude');
-		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		expect(container.querySelectorAll('.popover-row').length).toBe(2);
 
 		const secHeader = container.querySelector('.sec-header') as HTMLButtonElement;
 		await fireEvent.click(secHeader); // collapse
@@ -1475,7 +1490,7 @@ describe('ContextUsageBar — plan usage limits', () => {
 		expect(container.querySelector('.sec-summary')?.textContent).toBe('42% left');
 
 		await fireEvent.click(secHeader); // expand again
-		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		expect(container.querySelectorAll('.popover-row').length).toBe(2);
 		expect(secHeader.getAttribute('aria-expanded')).toBe('true');
 		expect(localStorage.getItem('aihub.usageSectionOpen:plan')).toBe('1');
 	});
@@ -1548,20 +1563,20 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 
-		// The Claude header always renders (self, empty windows → just "Claude");
-		// the provider adds its own section header below it.
+		// The Claude header always renders (self, empty windows → just "Claude").
+		// Both are subscriptions, so the Settings order applies: OpenAI first.
 		expect(container.querySelectorAll('.popover-section').length).toBe(2);
 		// A ChatGPT-subscription row displays under the OpenAI brand.
 		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
 			(e) => e.textContent
 		);
-		expect(deviceLabels).toEqual(['Claude', 'OpenAI']);
+		expect(deviceLabels).toEqual(['OpenAI', 'Claude']);
 		// The only .section-account belongs to the provider header (Claude self is unlabeled).
 		expect(container.querySelector('.section-account')?.textContent).toBe('PROLITE');
 
-		// One row per provider window (the empty Claude section shows a
-		// non-.popover-row "No usage data yet" line, not counted here).
-		const rows = container.querySelectorAll('.popover-row');
+		// One row per provider window (the empty Claude section's placeholder
+		// rows are not counted here).
+		const rows = container.querySelectorAll('.popover-row:not(.placeholder)');
 		expect(rows.length).toBe(2);
 		expect(rows[0].querySelector('.row-label')?.textContent).toBe('5-hour limit');
 		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('70% left');
@@ -1655,11 +1670,12 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
 			(e) => e.textContent
 		);
-		expect(deviceLabels).toEqual(['Claude', 'Grok']);
+		// Both are subscriptions: Grok comes before Claude in the Settings order.
+		expect(deviceLabels).toEqual(['Grok', 'Claude']);
 		expect(container.querySelector('.section-account')?.textContent).toBe('SuperGrok');
 
 		// SuperGrok billing reports used-%, converted to "% left" for display.
-		const rows = container.querySelectorAll('.popover-row');
+		const rows = container.querySelectorAll('.popover-row:not(.placeholder)');
 		expect(rows.length).toBe(2);
 		expect(rows[0].querySelector('.row-label')?.textContent).toBe('Weekly (all models)');
 		expect(rows[0].querySelector('.row-pct')?.textContent).toBe('66% left');
@@ -1724,7 +1740,8 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
 			(e) => e.textContent
 		);
-		expect(deviceLabels).toEqual(['Claude', 'OpenAI', 'OpenAI']);
+		// Subscriptions (ChatGPT, then the Claude plan) above the API key.
+		expect(deviceLabels).toEqual(['OpenAI', 'Claude', 'OpenAI']);
 		const accounts = Array.from(container.querySelectorAll('.section-account:not(.provider-status)')).map(
 			(e) => e.textContent
 		);
@@ -1750,7 +1767,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
         expect(container.textContent).not.toContain('$3.00 used');
     });
 
-	it('sorts subscription rows A–Z above API rows A–Z', async () => {
+	it('sorts subscriptions above API accounts, each in the Settings > Providers order, Claude included (#1845)', async () => {
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -1803,10 +1820,11 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const accounts = Array.from(container.querySelectorAll('.section-account:not(.provider-status)')).map(
 			(e) => e.textContent
 		);
-		// Claude (native) stays first; then subs A–Z (Grok, OpenAI prolite);
-		// then APIs A–Z (fal.ai, OpenAI API, OpenRouter).
-		expect(labels).toEqual(['Claude', 'Grok', 'OpenAI', 'fal.ai', 'OpenAI', 'OpenRouter']);
-		expect(accounts).toEqual(['SuperGrok', 'PROLITE', 'API', 'API', 'API']);
+		// Subscriptions in the Settings order (OpenAI, Grok, Claude), then API
+		// accounts in the same order (OpenAI, OpenRouter, then fal.ai). Claude is
+		// ordered by the rule like any other provider, not pinned first.
+		expect(labels).toEqual(['OpenAI', 'Grok', 'Claude', 'OpenAI', 'OpenRouter', 'fal.ai']);
+		expect(accounts).toEqual(['PROLITE', 'SuperGrok', 'API', 'API', 'API']);
 	});
 
 	it('does not show Codex extra-credit $0 on the ChatGPT subscription row', async () => {
@@ -1852,11 +1870,10 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 			(e) => e.textContent
 		);
 		expect(deviceLabels).toEqual(['Claude', 'OpenRouter']);
-		// Empty windows → no provider window rows and no bars anywhere (Claude
-		// section is also empty).
-		expect(container.querySelectorAll('.popover-row').length).toBe(0);
-		expect(container.querySelectorAll('.row-bar').length).toBe(0);
-		expect(container.querySelectorAll('.row-fill').length).toBe(0);
+		// Empty windows → no provider window rows and no bars; the only rows are
+		// the empty Claude section's placeholders.
+		expect(container.querySelectorAll('.popover-row:not(.placeholder)').length).toBe(0);
+		expect(container.querySelectorAll('.row-bar').length).toBe(container.querySelectorAll('.popover-row.placeholder').length);
 		// The credits line renders from usage / limit_remaining.
 		expect(container.textContent).toContain('$6.90 left on this key');
 	});
@@ -1877,7 +1894,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
 		// A window row (with bar) AND the credits line coexist.
-		expect(container.querySelectorAll('.popover-row').length).toBe(1);
+		expect(container.querySelectorAll('.popover-row:not(.placeholder)').length).toBe(1);
 		expect(container.textContent).toContain('Credits: unlimited');
 	});
 
@@ -2165,8 +2182,8 @@ describe('ContextUsageBar — usage source details', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.usage-source')?.textContent?.trim())
-			.toBe('Compare on the provider dashboard');
+		// The link shares the section's one meta line with the guidance.
+		expect(container.querySelector('.usage-meta .provider-dashboard-link')?.textContent?.trim()).toBe('Dashboard');
 		expect(container.textContent).not.toMatch(/Source:|Reports:|Last successful update:|Last attempt:|Not reported by this source:/);
 		expect(container.textContent).not.toContain(grokSource.support_label);
 		expect(container.textContent).not.toContain(grokSource.scope_label);
@@ -2185,7 +2202,9 @@ describe('ContextUsageBar — usage source details', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.querySelector('.usage-source')).toBeNull();
+		// The meta line stays (it says when usage was checked); only the link goes.
+		expect(container.querySelector('.usage-meta')).not.toBeNull();
+		expect(container.querySelector('.usage-meta a')).toBeNull();
 		expect(container.textContent).not.toContain('Last attempt');
 	});
 
@@ -2214,7 +2233,7 @@ describe('ContextUsageBar — usage source details', () => {
 		mocks.claudeAuthenticated = true;
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.textContent).toContain('No usage data yet');
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Not reported yet');
 		expect(screen.getByRole('link', { name: 'See all usage on claude.ai' }).getAttribute('href'))
 			.toBe('https://claude.ai/settings/usage');
 	});

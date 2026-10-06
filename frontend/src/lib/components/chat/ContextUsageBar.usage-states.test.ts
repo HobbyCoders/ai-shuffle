@@ -146,29 +146,28 @@ describe('provider rows', () => {
 		expect(text).not.toContain('Updated');
 	});
 
-	it('stale from the backend: age and next check, which clears once the cooldown passes', async () => {
+	it('stale from the backend: one quiet "Checked" age, no next-check countdown', async () => {
 		snapshot([row({
 			provider_id: 'Router', status: 'stale', fetched_at: T0 - 12 * 60_000, cooldown_until: T0 + 90_000,
 			credits: { usage: 1.5 },
 		})]);
 		const container = await open();
 		let text = sectionText(container, 'Router');
-		expect(text).toContain('Last reported 12m ago');
-		expect(text).toContain('Next check in 1m 30s');
-		expect(text).not.toMatch(/Updated|not live/);
+		expect(text).toContain('Checked 12m ago');
+		expect(text).not.toMatch(/Updated|not live|next check|Last reported/i);
 		await vi.advanceTimersByTimeAsync(91_000);
 		text = sectionText(container, 'Router');
-		expect(text).toContain('Last reported 13m ago');
+		expect(text).toContain('Checked 13m ago');
 		expect(text).not.toMatch(/next check/i);
 	});
 
-	it('a persisted "fresh" row that has aged reads as stale', async () => {
+	it('a persisted "fresh" row that has aged shows its age, nothing louder', async () => {
 		snapshot([row({ provider_id: 'Router', status: 'fresh', fetched_at: T0, credits: { usage: 1.5 } })]);
 		vi.setSystemTime(T0 + 2 * 3_600_000);
-		expect(sectionText(await open(), 'Router')).toContain('Last reported 2h ago');
+		expect(sectionText(await open(), 'Router')).toContain('Checked 2h ago');
 	});
 
-	it('stale with a key refusal: guidance in the header, the age once in the rows', async () => {
+	it('stale with a key refusal: the note on the credits line, the age once on the meta line', async () => {
 		snapshot([row({
 			provider_id: 'Router', status: 'stale', fetched_at: T0 - 30 * 60_000,
 			last_error_kind: 'billing_access_denied', credits: { usage: 1.5 },
@@ -176,9 +175,12 @@ describe('provider rows', () => {
 		const container = await open();
 		const section = Array.from(container.querySelectorAll('.popover-section'))
 			.find((s) => s.querySelector('.section-device')?.textContent === 'Router') as HTMLElement;
-		expect(section.querySelector('.provider-status')?.textContent).toBe('Balance unavailable for this key');
-		const ages = Array.from(container.querySelectorAll('.usage-as-of')).map((e) => e.textContent);
-		expect(ages).toEqual(['Last reported 30m ago']);
+		// The header carries only the name and account; nothing is added there.
+		expect(section.querySelector('.provider-status')).toBeNull();
+		expect(sectionText(container, 'Router')).toContain('Balance unavailable for this key');
+		const ages = Array.from(container.querySelectorAll('.usage-meta-text'))
+			.map((e) => e.textContent).filter((t) => t?.startsWith('Checked'));
+		expect(ages).toEqual(['Checked 30m ago']);
 	});
 
 	it('error: one provider’s failure is labelled and the others still render', async () => {
@@ -255,12 +257,102 @@ describe('Claude rows', () => {
 		expect(container.textContent).toContain('65% left');
 	});
 
-	it('shows how old the oldest window is once it passes five minutes', async () => {
+	it('shows how old the oldest window is on the quiet meta line', async () => {
 		rateLimit.applySnapshot({ available: true, fetched_at: T0 / 1000, windows: [
 			{ type: 'five_hour', utilization: 80, resets_at: null, observed_at: T0 },
 			{ type: 'seven_day', utilization: 50, resets_at: null, observed_at: T0 - 20 * 60_000 },
 		] });
 		const container = await open();
-		expect(container.querySelector('.usage-as-of')?.textContent).toBe('Last reported 20m ago');
+		expect(container.querySelector('.usage-meta-text')?.textContent).toBe('Checked 20m ago');
+	});
+});
+
+/**
+ * The layout must not shift between states: each section renders the same
+ * lines (rows, credits line, one meta line) whether its usage is fresh,
+ * stale, undated, refreshing, failed or not reported yet. A state change
+ * swaps text inside those lines; it never adds or removes one.
+ */
+function skeleton(container: HTMLElement, name: string): string[] {
+	const sections = Array.from(container.querySelectorAll('.popover-section'));
+	const header = sections.find((s) => s.querySelector('.section-device')?.textContent === name);
+	if (!header) return ['<missing section>'];
+	// The header holds the name, the account subtext and nothing else.
+	const labels = header.querySelector('.sec-head-labels') as HTMLElement;
+	const parts = [`header:${Array.from(labels.children).map((c) => c.classList[0]).join('+')}`];
+	for (let el = header.nextElementSibling; el && !el.classList.contains('popover-section'); el = el.nextElementSibling) {
+		if (el.classList.contains('popover-row')) parts.push(`row:${el.querySelector('.row-label')?.textContent}`);
+		else if (el.classList.contains('usage-credits')) parts.push('credits');
+		else if (el.classList.contains('usage-meta')) parts.push(`meta:${el.querySelectorAll('.usage-meta-text').length}`);
+		else if (el.classList.contains('popover-divider')) break;
+		else parts.push(`other:${el.className}`);
+	}
+	return parts;
+}
+
+const inHour = () => String(Math.floor(Date.now() / 1000) + 3600);
+
+describe('structural skeleton', () => {
+	const CLAUDE = ['header:section-device+section-account', 'row:5-hour limit', 'row:Weekly (all models)', 'meta:1'];
+
+	it.each([
+		['fresh', () => rateLimit.applySnapshot({ available: true, fetched_at: T0 / 1000, windows: [
+			{ type: 'five_hour', utilization: 80, resets_at: inHour(), observed_at: T0 },
+			{ type: 'seven_day', utilization: 50, resets_at: inHour(), observed_at: T0 },
+		] })],
+		['stale', () => rateLimit.applySnapshot({ available: true, fetched_at: T0 / 1000 - 172_800, windows: [
+			{ type: 'five_hour', utilization: 80, resets_at: null, observed_at: T0 - 172_800_000 },
+			{ type: 'seven_day', utilization: 50, resets_at: null, observed_at: T0 - 172_800_000 },
+		] })],
+		['undated', () => rateLimit.applySnapshot({ available: true, fetched_at: T0 / 1000, windows: [
+			{ type: 'five_hour', utilization: 80, resets_at: inHour(), observed_at: T0 },
+			{ type: 'seven_day', utilization: 50, resets_at: inHour() },
+		] })],
+		['partly reported', () => rateLimit.applySnapshot({ available: true, fetched_at: T0 / 1000, windows: [
+			{ type: 'five_hour', utilization: 80, resets_at: inHour(), observed_at: T0 },
+		] })],
+		['rolled over', () => rateLimit.applySnapshot({ available: true, fetched_at: T0 / 1000, windows: [
+			{ type: 'five_hour', utilization: 80, resets_at: String(Math.floor(T0 / 1000) - 60), observed_at: T0 },
+			{ type: 'seven_day', utilization: 50, resets_at: inHour(), observed_at: T0 },
+		] })],
+		['not reported yet', () => rateLimit.applySnapshot({ available: false, windows: [] })],
+	])('Claude %s: the 5-hour and weekly rows plus one meta line', async (_state, apply) => {
+		apply();
+		expect(skeleton(await open(), 'Claude')).toEqual(CLAUDE);
+	});
+
+	const CHATGPT = ['header:section-device+section-account', 'row:5-hour limit', 'row:Weekly (all models)', 'meta:1'];
+	const chatgpt = (overrides: Partial<ProviderUsageEntry> = {}) => row({
+		provider_id: 'ChatGPT', provider_type: 'chatgpt',
+		windows: [
+			{ type: 'five_hour', utilization: 30, resets_at: inHour() },
+			{ type: 'seven_day', utilization: 10, resets_at: inHour() },
+		],
+		...overrides,
+	});
+
+	it.each([
+		['fresh', () => snapshot([chatgpt()])],
+		['stale', () => snapshot([chatgpt({ status: 'stale', fetched_at: T0 - 12 * 60_000, cooldown_until: T0 + 90_000 })])],
+		['aged', () => { snapshot([chatgpt()]); vi.setSystemTime(T0 + 2 * 3_600_000); }],
+		['unavailable, never fetched', () => snapshot([chatgpt({ status: 'unavailable', fetched_at: null, windows: [] })])],
+		['signed out', () => snapshot([chatgpt({ status: 'stale', last_error_kind: 'missing_credentials' })])],
+		['only the weekly window', () => snapshot([chatgpt({ windows: [{ type: 'seven_day', utilization: 10, resets_at: inHour() }] })])],
+		['refreshing', () => snapshot([chatgpt()], { provider_refreshing: true })],
+		['providers: null after a snapshot', () => { snapshot([chatgpt()]); snapshot(null); }],
+	])('ChatGPT %s: the same rows and one meta line', async (_state, apply) => {
+		apply();
+		expect(skeleton(await open(), 'OpenAI')).toEqual(CHATGPT);
+	});
+
+	const ROUTER = ['header:section-device+section-account', 'credits', 'meta:1'];
+	it.each([
+		['fresh with a balance', () => snapshot([row({ provider_id: 'Router', credits: { limit_remaining: 2 } })])],
+		['stale', () => snapshot([row({ provider_id: 'Router', status: 'stale', fetched_at: T0 - 12 * 60_000, credits: { limit_remaining: 2 } })])],
+		['balance refused', () => snapshot([row({ provider_id: 'Router', status: 'stale', last_error_kind: 'billing_access_denied', credits: { usage: 1.5 } })])],
+		['never fetched', () => snapshot([row({ provider_id: 'Router', status: 'unavailable', fetched_at: null })])],
+	])('OpenRouter %s: the credits line and one meta line', async (_state, apply) => {
+		apply();
+		expect(skeleton(await open(), 'Router')).toEqual(ROUTER);
 	});
 });

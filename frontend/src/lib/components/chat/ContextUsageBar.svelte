@@ -22,9 +22,16 @@
 	 *      (final snapshot from the session's last turn end) is treated as a valid
 	 *      rich breakdown. The poller estimate is the fallback before the first
 	 *      fetch lands — a fresh session shows em-dash rows.
-	 *   2. Plan usage limits — the resolved install's rate-limit windows (from the
-	 *      `rateLimit` store, resolved via `usage-target.ts`), each with a bar, %,
-	 *      and reset text inline. "No usage data yet" when the bucket is empty.
+	 *   2. Usage sections — Claude's plan limits (the resolved install's windows
+	 *      from the `rateLimit` store, via `usage-target.ts`) and each provider's
+	 *      usage, in one order (subscriptions first, then the Settings order).
+	 *      Every section has a FIXED skeleton whatever its state (fresh, stale,
+	 *      refreshing, unavailable, error, nothing reported yet): its header, its
+	 *      baseline window rows (placeholders until reported), a credits line for
+	 *      credit-billed providers, and one meta line ("Checked 4m ago" or the
+	 *      action to take, plus the dashboard link). A state change swaps text in
+	 *      place; it never adds or removes a line. Figures stay those of the last
+	 *      report.
 	 *
 	 * Usage comes from $activeSession (contextUsed + per-type token fields), all
 	 * set by the SSE-fed reducer. Rate-limit windows come from the `rateLimit`
@@ -36,9 +43,10 @@
 	 * Escape listener that closes when the target is outside — works for desktop
 	 * click and mobile tap (tap-away closes).
 	 */
-	import { onMount, tick, untrack } from 'svelte';
+	import { onMount, tick, untrack, type Snippet } from 'svelte';
 	import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
-	import { EyeOff, Eye } from 'lucide-svelte';
+	import { EyeOff, Eye, ExternalLink } from 'lucide-svelte';
+	import { AGENT_PROVIDER_ORDER } from '$lib/components/settings/providers/providers-model';
 	import { createUsageNumberAnimation } from './usage-number-animation';
 	import { creditNumber as creditsNum, creditText } from './provider-credit';
 	import { activeSession } from '$lib/stores/active-session';
@@ -79,10 +87,6 @@
 		formatAsOf,
 		bucketObservedAt,
 		bucketHasUndatedWindow,
-		isBucketStale,
-		windowObservedAtKnown,
-		BUCKET_STALE_MS,
-		providerStatusAt,
 		resolveBucket,
 		resolveBucketKey,
 		selfBucketKey,
@@ -91,7 +95,6 @@
 		claudeUsageSource,
 		type UsageBucket,
 		type ProviderUsageBucket,
-		type UsageSourceInfo,
 		type UsageWindow,
 	} from '$lib/stores/rate-limit';
 	import { usageTargetInstance, usageTargetDeviceName } from '$lib/stores/usage-target';
@@ -409,8 +412,79 @@
 		countdown: string;
 		hasReset: boolean;
 		rolledOver: boolean;
-		/** Per-row report age when it is unknown or stale; null when current. */
-		asOf: string | null;
+	}
+
+	/**
+	 * A window row as drawn: a reported window, or a placeholder for a baseline
+	 * window that has no reading yet. Placeholders keep the section's rows in
+	 * place, so a first report fills a row in rather than adding one.
+	 */
+	interface RowSlot {
+		type: string;
+		label: string;
+		/** Null for a placeholder: the row shows "—" and an empty bar. */
+		pct: number | null;
+		severity: UsageSeverity;
+		resetText: string;
+	}
+
+	/**
+	 * Windows a section always shows, reported or not. Claude and ChatGPT/Codex
+	 * subscriptions report a 5-hour and a weekly window; SuperGrok a weekly one.
+	 */
+	const CLAUDE_BASELINE_WINDOWS = ['five_hour', 'seven_day'] as const;
+	function providerBaselineWindows(pb: { providerType: string | null }, showsRemaining: boolean): readonly string[] {
+		if (!showsRemaining) return [];
+		if (pb.providerType === 'chatgpt') return CLAUDE_BASELINE_WINDOWS;
+		if (pb.providerType === 'grok') return ['seven_day'];
+		return [];
+	}
+
+	/** Reported windows plus a placeholder for each missing baseline window, baseline first. */
+	function withBaseline<T extends { type: string }>(
+		reported: T[],
+		baseline: readonly string[],
+		toSlot: (w: T) => RowSlot
+	): RowSlot[] {
+		const placeholders = baseline
+			.filter((type) => !reported.some((w) => w.type === type))
+			.map<RowSlot>((type) => ({
+				type,
+				label: windowLabel(type),
+				pct: null,
+				severity: 'neutral' as UsageSeverity,
+				resetText: 'not reported yet',
+			}));
+		const slots = [...reported.map(toSlot), ...placeholders];
+		const rank = (type: string) => {
+			const i = baseline.indexOf(type);
+			return i < 0 ? baseline.length : i;
+		};
+		// Stable sort: baseline windows in their fixed order, then the rest as reported.
+		return slots
+			.map((slot, i) => ({ slot, i }))
+			.sort((a, b) => rank(a.slot.type) - rank(b.slot.type) || a.i - b.i)
+			.map(({ slot }) => slot);
+	}
+
+	function providerSlots(
+		pb: { providerType: string | null },
+		windows: UsageWindow[],
+		showsRemaining: boolean,
+		nowMs: number
+	): RowSlot[] {
+		return withBaseline(windows, providerBaselineWindows(pb, showsRemaining), (w) => {
+			const display = providerWindowPercent(w, nowMs, showsRemaining);
+			return { type: w.type, label: windowLabel(w.type), pct: display.pct, severity: display.severity, resetText: resetText(w, nowMs) };
+		});
+	}
+
+	function resetText(usageWindow: UsageWindow, nowMs: number): string {
+		const countdown = formatCountdown(usageWindow.resets_at, nowMs);
+		if (countdown) return `resets in ${countdown}`;
+		if (isRolledOver(usageWindow, nowMs)) return 'reset · awaiting next report';
+		if (usageWindow.resets_at != null) return 'resets soon';
+		return 'no reset window';
 	}
 
 	/** Mirror the used-quota thresholds against a remaining-quota value. */
@@ -447,48 +521,81 @@
 				countdown: formatCountdown(usageWindow.resets_at, now),
 				hasReset: usageWindow.resets_at != null,
 				rolledOver: isRolledOver(usageWindow, now),
-				asOf: windowAsOfText(usageWindow, now),
 			};
 		});
 	}
 
 	/**
-	 * A plan row's report age when it should not be read as current: "age
-	 * unknown" for a window with no observation time (persisted before windows
-	 * were dated), or "reported <age>" once it is older than the stale threshold.
-	 * Another window's report never re-dates this one.
+	 * Each expanded section ends in ONE fixed meta line: a quiet "Checked <age>"
+	 * (or the one thing the user must do), plus the dashboard link. Staleness is
+	 * not announced elsewhere: the figures stay those of the last report, and
+	 * the line beside them says when that was. The provider dashboards are the
+	 * place to confirm a figure.
 	 */
-	function windowAsOfText(usageWindow: UsageWindow, nowMs: number): string | null {
-		// Past its reset the row shows the refilled window, not the old report.
-		if (isRolledOver(usageWindow, nowMs)) return null;
-		if (!windowObservedAtKnown(usageWindow)) return 'age unknown';
-		if (nowMs - usageWindow.received_at <= BUCKET_STALE_MS) return null;
-		return `reported ${formatAsOf(usageWindow.received_at, nowMs)}`;
+	interface MetaLine {
+		text: string;
+		/** Guidance the user can act on, rather than the check time. */
+		guidance: boolean;
+		/** The full text plus the check time, for the tooltip. */
+		title: string;
 	}
 
-	/** The plan header's "Last reported" text for a stale bucket. */
-	function planStaleText(bucket: UsageBucket, nowMs: number): string {
+	function checkedText(at: number | null, nowMs: number): string | null {
+		return at != null ? `Checked ${formatAsOf(at, nowMs)}` : null;
+	}
+
+	function claudeMeta(bucket: UsageBucket | null, nowMs: number): MetaLine {
+		if (remoteUnreported) {
+			const text = `Not reported from ${deviceLabel ?? 'that device'} yet`;
+			return { text, guidance: false, title: `${text}. It appears after that device's next Claude turn.` };
+		}
+		if (!bucket || Object.keys(bucket.windows ?? {}).length === 0) {
+			return { text: 'Not reported yet', guidance: false, title: 'Usage appears after the next Claude turn.' };
+		}
 		const observedAt = bucketObservedAt(bucket, nowMs);
-		if (bucketHasUndatedWindow(bucket, nowMs) || observedAt == null) return 'Last reported · age unknown';
-		return `Last reported ${formatAsOf(observedAt, nowMs)}`;
+		if (bucketHasUndatedWindow(bucket, nowMs) || observedAt == null) {
+			return { text: 'Check time unknown', guidance: false, title: 'Check time unknown' };
+		}
+		const text = checkedText(observedAt, nowMs) as string;
+		return { text, guidance: false, title: text };
 	}
 
-	/** "Last reported <age>" for a stale provider row, like the Claude header; null when it is not stale. */
-	function providerStaleText(pb: ProviderUsageBucket, nowMs: number): string | null {
-		if (providerStatusAt(pb, nowMs) !== 'stale') return null;
-		return pb.fetchedAt != null ? `Last reported ${formatAsOf(pb.fetchedAt, nowMs)}` : 'Last reported · age unknown';
-	}
-
-	function providerStatusText(pb: ProviderUsageBucket, nowMs: number): string | null {
-		// No source can read an OpenAI API prepaid balance: the Admin API reports
-		// spend only, and the billing endpoints refuse API and Admin keys.
-		if (pb.providerType === 'openai' && creditsNum(pb.credits, 'balance_remaining') == null) return 'Credit balance not available for this key';
+	/** Something the user can act on for this provider row, or null. */
+	function providerGuidance(pb: ProviderUsageBucket): string | null {
+		// An OpenAI API key never has a readable balance (see `creditsLine`):
+		// no sign-in or billing access would change that, so ask for nothing.
+		if (pb.providerType === 'openai' && creditsNum(pb.credits, 'balance_remaining') == null) return null;
 		// OpenRouter and fal.ai read the balance with the key already saved; no
-		// extra billing access exists to add, so a refusal is about that key.
-		if (pb.lastErrorKind === 'billing_access_denied') return pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal' ? 'Balance unavailable for this key' : 'Billing access required';
+		// extra billing access exists to add, so a refusal is about that key
+		// and the always-present credits line already says so.
+		if (pb.lastErrorKind === 'billing_access_denied') {
+			return pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal' ? null : 'Billing access required';
+		}
 		if (pb.lastErrorKind === 'missing_credentials') return 'Sign in to view usage';
 		if (pb.lastErrorKind === 'unsupported') return 'Not supported for this credential; polling paused';
-		return providerStaleText(pb, nowMs);
+		return null;
+	}
+
+	function providerMeta(pb: ProviderUsageBucket, nowMs: number): MetaLine {
+		const checked = checkedText(pb.fetchedAt, nowMs) ?? 'Not checked yet';
+		const guidance = providerGuidance(pb);
+		if (guidance) return { text: guidance, guidance: true, title: `${guidance} · ${checked}` };
+		return { text: checked, guidance: false, title: checked };
+	}
+
+	/**
+	 * Providers that bill against a credit balance always show a credits line,
+	 * so a balance that cannot be read swaps text in place instead of removing
+	 * the line.
+	 */
+	function creditsLine(pb: ProviderUsageBucket): string | null {
+		const text = creditsSummary(pb.credits, pb.providerType);
+		if (text) return text;
+		// No source can read an OpenAI API prepaid balance: the Admin API reports
+		// spend only, and the billing endpoints refuse API and Admin keys.
+		if (pb.providerType === 'openai') return 'Credit balance not available for this key';
+		if (pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal') return 'Balance unavailable for this key';
+		return null;
 	}
 
 	function creditsSummary(credits: Record<string, unknown> | null, type: string | null): string | null {
@@ -502,6 +609,23 @@
 	const resolvedBucket = $derived(resolveBucket($rateLimit, target));
 	const resolvedKey = $derived(resolveBucketKey($rateLimit, target));
 	const items = $derived.by<WindowItem[]>(() => (resolvedBucket ? itemsFor(resolvedBucket) : []));
+	// Claude plan rows: the 5-hour and weekly windows always hold a row (an
+	// API-key login reports none, so it gets no placeholders).
+	const claudeSlots = $derived.by<RowSlot[]>(() =>
+		withBaseline(items, claudeDisplay.subtext === 'API' ? [] : CLAUDE_BASELINE_WINDOWS, (item) => ({
+			type: item.type,
+			label: item.label,
+			pct: item.pct,
+			severity: item.severity,
+			resetText: item.countdown
+				? `resets in ${item.countdown}`
+				: item.rolledOver
+					? 'reset · awaiting next report'
+					: item.hasReset
+						? 'resets soon'
+						: 'no reset window',
+		}))
+	);
 
 	const ringSeverity = $derived<UsageSeverity>(usageSeverity(contextPercent));
 
@@ -564,12 +688,46 @@
 		});
 	}
 
-	// Subscriptions (ChatGPT / SuperGrok) first, A–Z, then API accounts
-	// (OpenAI API, OpenRouter, fal.ai, …) A–Z. Brand-only alpha parked
-	// OpenAI · API next to OpenAI · prolite, which read as one section.
+	// One order for every usage section, Claude included (#1845):
+	// subscriptions (ChatGPT, SuperGrok, a Claude plan) above API accounts, so
+	// OpenAI · API never sits next to OpenAI · prolite and reads as one section
+	// (#1087); within each group, the Settings > Providers order (OpenAI, xAI
+	// Grok, Claude, OpenRouter), then fal.ai and anything else, by name.
 	function isSubscriptionProvider(pb: { providerType: string | null }): boolean {
 		const t = (pb.providerType || '').toLowerCase();
 		return t === 'chatgpt' || t === 'grok';
+	}
+
+	function providerFamily(type: string | null): string {
+		const t = (type || '').toLowerCase();
+		if (t === 'chatgpt' || t === 'openai') return 'openai';
+		if (t === 'grok' || t === 'xai') return 'grok';
+		if (t.startsWith('openrouter')) return 'openrouter';
+		return t;
+	}
+
+	function familyRank(family: string): number {
+		const i = (AGENT_PROVIDER_ORDER as readonly string[]).indexOf(family);
+		if (i >= 0) return i;
+		return family === 'fal' ? AGENT_PROVIDER_ORDER.length : AGENT_PROVIDER_ORDER.length + 1;
+	}
+
+	interface SectionEntry {
+		id: string;
+		kind: 'claude' | 'provider';
+		pb: ProviderUsageBucket | null;
+		name: string;
+		subscription: boolean;
+		rank: number;
+	}
+
+	function compareSections(a: SectionEntry, b: SectionEntry): number {
+		return (
+			Number(!a.subscription) - Number(!b.subscription) ||
+			a.rank - b.rank ||
+			a.name.localeCompare(b.name) ||
+			a.id.localeCompare(b.id)
+		);
 	}
 
 	function sortedProviderBuckets() {
@@ -582,13 +740,7 @@
 				return !buckets.some(key => key.providerId === pb.providerId.replace(/^openrouter-account:/, ''));
 			}
 			return true;
-		}).map((pb) => ({
-				pb,
-				name: providerDisplayFor(pb).name,
-				group: isSubscriptionProvider(pb) ? 0 : 1
-			}))
-			.sort((a, b) => a.group - b.group || a.name.localeCompare(b.name))
-			.map((entry) => entry.pb);
+		});
 	}
 
 	/**
@@ -634,11 +786,30 @@
 		});
 	}
 
-	const providerRows = $derived(sortedProviderBuckets());
-	const hiddenRows = $derived([
-		...(hasClaude ? [{ id: 'plan', name: claudeDisplay.name }] : []),
-		...providerRows.map(pb => ({ id: `provider:${pb.providerId}`, name: providerDisplayFor(pb).name }))
-	].filter(row => $hiddenUsageProviders[row.id]));
+	const sections = $derived.by<SectionEntry[]>(() => {
+		const entries: SectionEntry[] = sortedProviderBuckets().map((pb) => ({
+			id: `provider:${pb.providerId}`,
+			kind: 'provider',
+			pb,
+			name: providerDisplayFor(pb).name,
+			subscription: isSubscriptionProvider(pb),
+			rank: familyRank(providerFamily(pb.providerType)),
+		}));
+		if (hasClaude) {
+			entries.push({
+				id: 'plan',
+				kind: 'claude',
+				pb: null,
+				name: claudeDisplay.name,
+				// A plan login is a subscription; an API-key login is an API account.
+				subscription: claudeDisplay.subtext !== 'API',
+				rank: familyRank('claude'),
+			});
+		}
+		return entries.sort(compareSections);
+	});
+	const hiddenRows = $derived(sections.filter((s) => $hiddenUsageProviders[s.id]));
+	const hasUsageSections = $derived(sections.length > 0);
 
 	function setProviderHidden(id: string, hidden: boolean) {
 		hiddenUsageProviders.update(current => {
@@ -699,14 +870,141 @@
 	</button>
 {/snippet}
 
-<!-- Expanded usage rows keep only the provider dashboard comparison link. -->
-{#snippet sourceDetails(info: UsageSourceInfo | null | undefined)}
-	{#if info?.dashboard_url}
-		<div class="usage-source">
-			<a class="provider-dashboard-link" href={info.dashboard_url} target="_blank" rel="noopener noreferrer"
-				>Compare on the provider dashboard</a
-			>
+<!-- A window row: label, reset text and percent on one line over a thin bar.
+     A placeholder (pct null) keeps the same shape with "—" and an empty bar. -->
+{#snippet windowRow(slot: RowSlot, numberKey: string, suffix: string)}
+	<div class="popover-row" class:placeholder={slot.pct == null}>
+		<div class="row-line">
+			<span class="row-label">{slot.label}</span>
+			<span class="row-value">
+				<span class="row-reset-inline">{slot.resetText}</span>
+				{#if slot.pct == null}
+					<span class="row-pct row-pct-empty">—</span>
+				{:else}
+					<span class="row-pct {slot.severity}" use:usageNumber={{ key: numberKey, text: `${slot.pct}%${suffix}` }}></span>
+				{/if}
+			</span>
 		</div>
+		<div class="row-bar">
+			<div class="row-fill {slot.severity}" style="width: {slot.pct ?? 0}%"></div>
+		</div>
+	</div>
+{/snippet}
+
+<!-- The one fixed meta line closing an expanded section: when the figures were
+     last checked (or what the user must do) on the left, the dashboard link on
+     the right. One line whatever the state; the tooltip holds the full text. -->
+{#snippet metaLine(meta: MetaLine, href: string | null | undefined, linkText: string, linkLabel: string)}
+	<div class="usage-meta">
+		<span class="usage-meta-text" class:usage-checked={!meta.guidance} class:provider-status={meta.guidance} title={meta.title}>{meta.text}</span>
+		{#if href}
+			<a class="provider-dashboard-link" {href} target="_blank" rel="noopener noreferrer" aria-label={linkLabel} title={linkLabel}
+				>{linkText}<ExternalLink size={10} aria-hidden="true" /></a
+			>
+		{/if}
+	</div>
+{/snippet}
+
+{#snippet sectionHeader(id: string, name: string, subtext: string | null, isOpen: boolean, ariaName: string, summary: Snippet)}
+	<div class="popover-section">
+		<div class="provider-header">
+			<button
+				type="button"
+				class="sec-header"
+				aria-expanded={isOpen}
+				aria-label="{ariaName} — {isOpen ? 'collapse' : 'expand'}"
+				onclick={() => toggleSection(id)}
+			>
+				<span class="sec-head-labels">
+					<span class="section-device">{name}</span>
+					{#if subtext}
+						<span class="section-account">{subtext}</span>
+					{/if}
+				</span>
+				{#if !isOpen}{@render summary()}{/if}
+				<svg
+					class="ctx-chevron {isOpen ? '' : 'collapsed'}"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					aria-hidden="true"
+				>
+					<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+				</svg>
+			</button>
+			{@render hideProvider(id, name)}
+		</div>
+	</div>
+{/snippet}
+
+<!-- ═══ Plan usage limits (Claude) ═══
+     Brand + auth-kind subtext (plan / "API"), else the resolved device name or
+     "Other device". Collapsed: the 5-hour window's remaining quota ("—" before
+     a report). Expanded: the 5-hour and weekly rows always (placeholders until
+     reported), any other reported window, then the meta line. -->
+{#snippet claudeSummary()}
+	{#if planSummaryRemaining != null}
+		<span class="row-pct {remainingSeverity(planSummaryRemaining)} sec-summary"
+			use:usageNumber={{ key: `plan:${resolvedKey}:summary`, text: `${planSummaryRemaining}% left` }}></span>
+	{:else}
+		<span class="sec-summary sec-credits sec-empty">—</span>
+	{/if}
+{/snippet}
+
+{#snippet claudeSection()}
+	{@render sectionHeader('plan', claudeDisplay.name, claudeSubtext, planRowsVisible, 'Plan usage limits', claudeSummary)}
+	{#if planRowsVisible}
+		{#each claudeSlots as slot (slot.type)}
+			{@render windowRow(slot, `plan:${resolvedKey}:${slot.type}`, ' left')}
+		{/each}
+		<!-- AI Shuffle only sees the windows the CLI reports during a run;
+		     the full picture is on the user's own claude.ai usage page. -->
+		{@render metaLine(claudeMeta(resolvedBucket, now), CLAUDE_USAGE_URL, 'claude.ai', 'See all usage on claude.ai')}
+	{/if}
+{/snippet}
+
+<!-- ═══ Provider usage (non-Claude) ═══
+     ChatGPT/Codex and SuperGrok subscription windows show quota remaining;
+     their collapsed summary uses the 5-hour window when there is one, else the
+     least remaining window. xAI API-key, other API-key and credit windows keep
+     used-of-100 and summarize the highest-utilization window. -->
+{#snippet providerSection(pb: ProviderUsageBucket)}
+	{@const sectionId = `provider:${pb.providerId}`}
+	{@const pbDisplay = providerDisplayFor(pb)}
+	{@const pbOpen = isSectionOpen(sectionId)}
+	{@const pbWindows = displayWindows(pb.windows)}
+	{@const pbShowsRemaining = providerShowsRemaining(pb)}
+	{@const suffix = pbShowsRemaining ? ' left' : ''}
+	{#snippet providerSummary()}
+		{@const pbSummary = providerWindowSummary(pbWindows, now, pbShowsRemaining)}
+		{@const pbCreditsShort = creditsShort(pb.credits, pb.providerType)}
+		<!-- An account credit balance is the headline the user cares about, so
+		     it outranks the window pct (which an OpenRouter key-spend limit
+		     would otherwise produce). -->
+		{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
+			<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
+		{:else if pbSummary}
+			<span class="row-pct {pbSummary.severity} sec-summary"
+				use:usageNumber={{ key: `${resolvedKey}:${sectionId}:summary`, text: `${pbSummary.pct}%${suffix}` }}></span>
+		{:else if pbCreditsShort && pb.providerType !== 'chatgpt'}
+			<!-- ChatGPT extra credits live in the expanded rows only. -->
+			<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
+		{:else if pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal' || pb.providerType === 'openai'}
+			<span class="sec-summary sec-credits">Balance unavailable</span>
+		{:else}
+			<span class="sec-summary sec-credits sec-empty">—</span>
+		{/if}
+	{/snippet}
+	{@render sectionHeader(sectionId, pbDisplay.name, pbDisplay.subtext, pbOpen, `${pbDisplay.name} usage`, providerSummary)}
+	{#if pbOpen}
+		{#each providerSlots(pb, pbWindows, pbShowsRemaining, now) as slot (slot.type)}
+			{@render windowRow(slot, `${resolvedKey}:${sectionId}:${slot.type}`, suffix)}
+		{/each}
+		{@const credits = creditsLine(pb)}
+		{#if credits}
+			<div class="row-reset usage-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits`, text: credits }}></div>
+		{/if}
+		{@render metaLine(providerMeta(pb, now), pb.sourceInfo?.dashboard_url, 'Dashboard', 'Compare on the provider dashboard')}
 	{/if}
 {/snippet}
 
@@ -822,214 +1120,16 @@
 				{/if}
 			</div>
 
-			{#if hasClaude || Object.keys($rateLimit.providerBuckets ?? {}).length > 0}
+			{#if hasUsageSections}
 				<div class="popover-divider"></div>
 			{/if}
 
-			<!-- ═══ Plan usage limits (Claude) ═══ -->
-			{#if hasClaude && !$hiddenUsageProviders.plan}
-				<!-- The configured account's header shows the "Claude" brand +
-				     its auth-kind subtext (plan / "API"), falling back to the resolved
-				     device name or "Other device". It is the collapse toggle for the window rows;
-				     collapsed shows the 5-hour window's remaining quota and hides the rows +
-				     "No usage data" line. No account naming; the expanded rows end with the
-				     source details (source, scope, last successful update). -->
-				<div class="popover-section">
-					<div class="provider-header">
-						<button
-							type="button"
-							class="sec-header"
-							aria-expanded={planRowsVisible}
-							aria-label="Plan usage limits — {planRowsVisible ? 'collapse' : 'expand'}"
-							onclick={() => toggleSection('plan')}
-						>
-							<span class="sec-head-labels">
-								<span class="section-device">{claudeDisplay.name}</span>
-								{#if remoteUnreported}
-									<span class="section-account provider-status usage-as-of">Not reported from {deviceLabel ?? 'that device'} yet</span>
-								{:else if resolvedBucket && isBucketStale(resolvedBucket, now)}
-									<span class="section-account provider-status usage-as-of">{planStaleText(resolvedBucket, now)}</span>
-								{/if}
-								{#if claudeSubtext}
-									<span class="section-account">{claudeSubtext}</span>
-								{/if}
-							</span>
-							{#if !planRowsVisible && planSummaryRemaining != null}
-								<span class="row-pct {remainingSeverity(planSummaryRemaining)} sec-summary"
-									use:usageNumber={{ key: `plan:${resolvedKey}:summary`, text: `${planSummaryRemaining}% left` }}></span
-								>
-							{/if}
-							<svg
-								class="ctx-chevron {planRowsVisible ? '' : 'collapsed'}"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								aria-hidden="true"
-							>
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-							</svg>
-						</button>
-						{@render hideProvider('plan', claudeDisplay.name)}
-					</div>
-				</div>
-				{#if planRowsVisible}
-					{#if items.length > 0}
-						{#each items as item (item.type)}
-							<div class="popover-row">
-								<div class="row-line">
-									<span class="row-label">{item.label}</span>
-									<span class="row-value">
-										<span class="row-reset-inline">
-											{#if item.asOf}
-												<span class="row-as-of">{item.asOf} ·</span>
-											{/if}
-											{#if item.countdown}
-												resets in {item.countdown}
-											{:else if item.rolledOver}
-												reset · awaiting next report
-											{:else if item.hasReset}
-												resets soon
-											{:else}
-												no reset window
-											{/if}
-										</span>
-										<span class="row-pct {item.severity}" use:usageNumber={{ key: `plan:${resolvedKey}:${item.type}`, text: `${item.pct}% left` }}></span>
-									</span>
-								</div>
-								<div class="row-bar">
-									<div class="row-fill {item.severity}" style="width: {item.pct}%"></div>
-								</div>
-							</div>
-						{/each}
-					{:else if remoteUnreported}
-						<div class="row-reset no-data">
-							{deviceLabel ?? 'The device running this session'} has not shared its Claude usage with this
-							device yet. It appears after that device's next Claude turn.
-						</div>
-					{:else}
-						<div class="row-reset no-data">No usage data yet. It appears after the next Claude turn.</div>
-					{/if}
-					<!-- AI Shuffle only sees the windows the CLI reports during a run;
-					     the full picture is on the user's own claude.ai usage page. -->
-					<a
-						class="provider-dashboard-link claude-usage-link"
-						href={CLAUDE_USAGE_URL}
-						target="_blank"
-						rel="noopener noreferrer">See all usage on claude.ai</a
-					>
-				{/if}
-			{/if}
-
-			<!-- ═══ Provider usage (non-Claude) ═══ -->
-			<!-- Each bucket's head is its collapse toggle (name + planType stay).
-			     ChatGPT/Codex and SuperGrok subscription windows show quota remaining;
-			     their collapsed summary uses the 5-hour window when there is one, else
-			     the least remaining window. xAI API-key,
-			     other API-key and credit windows keep used-of-100 and summarize the
-			     highest-utilization window. -->
-			{#each providerRows.filter(pb => !$hiddenUsageProviders[`provider:${pb.providerId}`]) as pb (pb.providerId)}
-				{@const sectionId = `provider:${pb.providerId}`}
-				{@const pbDisplay = providerDisplayFor(pb)}
-				{@const pbOpen = isSectionOpen(sectionId)}
-				{@const pbWindows = displayWindows(pb.windows)}
-				{@const pbShowsRemaining = providerShowsRemaining(pb)}
-				{@const pbSummary = providerWindowSummary(pbWindows, now, pbShowsRemaining)}
-				{@const pbStatus = providerStatusText(pb, now)}
-				{@const pbAge = providerStaleText(pb, now)}
-				<!-- The age shows once: in the header when nothing more urgent is there,
-				     otherwise in the expanded rows. -->
-				{@const pbAgeInHeader = pbAge != null && pbStatus === pbAge}
-				<div class="popover-section">
-					<div class="provider-header">
-						<button
-							type="button"
-							class="sec-header"
-							aria-expanded={pbOpen}
-							aria-label="{pbDisplay.name} usage — {pbOpen ? 'collapse' : 'expand'}"
-							onclick={() => toggleSection(sectionId)}
-						>
-							<span class="sec-head-labels">
-								<span class="section-device">{pbDisplay.name}</span>
-								{#if pbStatus}<span class="section-account provider-status" class:usage-as-of={pbAgeInHeader}>{pbStatus}</span>{/if}
-								{#if pbDisplay.subtext}
-									<span class="section-account">{pbDisplay.subtext}</span>
-								{/if}
-							</span>
-							{#if !pbOpen}
-								{@const pbCreditsShort = creditsShort(pb.credits, pb.providerType)}
-								<!-- An account credit balance is the headline the user cares
-								     about, so it outranks the window pct (which an OpenRouter
-								     key-spend limit would otherwise produce). -->
-								{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
-									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
-								{:else if pbSummary}
-									<span class="row-pct {pbSummary.severity} sec-summary"
-										use:usageNumber={{ key: `${resolvedKey}:${sectionId}:summary`, text: `${pbSummary.pct}%${pbShowsRemaining ? ' left' : ''}` }}></span
-									>
-								{:else if pbCreditsShort && pb.providerType !== 'chatgpt'}
-									<!-- ChatGPT extra credits live in the expanded rows only. -->
-									<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
-								{:else if pb.providerType === 'openrouter'}
-									<span class="sec-summary sec-credits">Balance unavailable</span>
-								{/if}
-							{/if}
-							<svg
-								class="ctx-chevron {pbOpen ? '' : 'collapsed'}"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								aria-hidden="true"
-							>
-								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-							</svg>
-						</button>
-						{@render hideProvider(sectionId, pbDisplay.name)}
-					</div>
-				</div>
-				{#if pbOpen}
-					{@render sourceDetails(pb.sourceInfo)}
-					{#each pbWindows as w (w.type)}
-						{@const display = providerWindowPercent(w, now, pbShowsRemaining)}
-						{@const countdown = formatCountdown(w.resets_at, now)}
-						<div class="popover-row">
-							<div class="row-line">
-								<span class="row-label">{windowLabel(w.type)}</span>
-								<span class="row-value">
-									<span class="row-reset-inline">
-										{#if countdown}
-											resets in {countdown}
-										{:else if isRolledOver(w, now)}
-											reset · awaiting next report
-										{:else if w.resets_at != null}
-											resets soon
-										{:else}
-											no reset window
-										{/if}
-									</span>
-									<span class="row-pct {display.severity}"
-										use:usageNumber={{ key: `${resolvedKey}:${sectionId}:${w.type}`, text: `${display.pct}%${pbShowsRemaining ? ' left' : ''}` }}></span
-									>
-								</span>
-							</div>
-							<div class="row-bar">
-								<div class="row-fill {display.severity}" style="width: {display.pct}%"></div>
-							</div>
-						</div>
-					{/each}
-					{@const credits = creditsSummary(pb.credits, pb.providerType)}
-					{#if credits}
-						<div class="row-reset usage-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits`, text: credits }}></div>
-					{:else if pb.providerType?.startsWith('openrouter') && pbWindows.length === 0}
-						<div class="row-reset usage-credits">Balance unavailable for this key</div>
-					{/if}
-					{#if pbAge}
-						{@const nextCheck = pb.cooldownUntil != null ? formatCountdown(String(pb.cooldownUntil), now) : ''}
-						{#if !pbAgeInHeader}
-							<div class="row-reset usage-as-of">{pbAge}{nextCheck ? ` · next check in ${nextCheck}` : ''}</div>
-						{:else if nextCheck}
-							<div class="row-reset usage-next-check">Next check in {nextCheck}</div>
-						{/if}
-					{/if}
+			<!-- ═══ Usage sections, one order for all (#1845) ═══ -->
+			{#each sections.filter((s) => !$hiddenUsageProviders[s.id]) as section (section.id)}
+				{#if section.kind === 'claude'}
+					{@render claudeSection()}
+				{:else if section.pb}
+					{@render providerSection(section.pb)}
 				{/if}
 			{/each}
 			{#if hiddenRows.length > 0}
@@ -1313,10 +1413,6 @@
 		color: var(--muted-foreground);
 	}
 
-	.row-as-of {
-		font-style: italic;
-	}
-
 	.row-pct {
 		font-family: var(--font-mono);
 		font-size: 11px;
@@ -1329,6 +1425,11 @@
 	}
 	.row-pct.danger {
 		color: var(--destructive);
+	}
+	/* A baseline window with no reading yet: same row, muted dash. */
+	.row-pct-empty {
+		font-weight: 400;
+		color: var(--muted-foreground);
 	}
 
 	/* Thin full-width track — same foreground-mix as the pill ring so unfilled
@@ -1356,10 +1457,6 @@
 	.row-reset {
 		font-size: 10.5px;
 		color: var(--muted-foreground);
-	}
-	.row-reset.no-data {
-		font-style: italic;
-		opacity: 0.8;
 	}
 
 	/* Resolved-install header — device/account label (shown when named or remote). */
@@ -1457,31 +1554,47 @@
 		color: inherit;
 		cursor: pointer;
 	}
-	/* Guidance is prose, not a single-line account label. Allow it to shrink
-	   beside collapsed balances and wrap inside the viewport-clamped panel. */
-	.provider-status {
-		min-width: 0;
-		max-width: 100%;
-		white-space: normal;
-		overflow-wrap: anywhere;
-	}
-	.usage-source {
+	/* The section's one meta line: check time (or guidance) left, dashboard
+	   link right. Never wraps, so no state adds a line; the full text is in
+	   the tooltip. A fixed height keeps it identical with or without a link. */
+	.usage-meta {
 		display: flex;
-		flex-direction: column;
-		gap: 1px;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
 		min-width: 0;
-		overflow-wrap: anywhere;
+		height: 16px;
+		font-size: 10.5px;
+		line-height: 16px;
+		color: var(--muted-foreground);
+	}
+	.usage-meta-text {
+		flex: 1 1 auto;
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		font-variant-numeric: tabular-nums;
+	}
+	/* Guidance the user can act on reads a step brighter than the check time. */
+	.usage-meta-text.provider-status {
+		color: var(--foreground);
+		opacity: 0.85;
 	}
 	.provider-dashboard-link {
-		align-self: flex-start;
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		flex-shrink: 0;
 		font-size: 10.5px;
 		color: var(--muted-foreground);
 		text-decoration: underline;
 		text-underline-offset: 2px;
+		border-radius: 3px;
+		transition: color 160ms ease;
 	}
-	.claude-usage-link {
-		display: inline-block;
-		margin-top: 2px;
+	.provider-dashboard-link:hover {
+		color: var(--foreground);
 	}
 	.provider-dashboard-link:focus-visible {
 		outline: 2px solid var(--ring, var(--primary));
@@ -1507,6 +1620,9 @@
 		flex-shrink: 0;
 	}
 	/* Credits fallback summary — dollars carry no severity, so stay neutral. */
+	.sec-credits.sec-empty {
+		font-weight: 400;
+	}
 	.sec-credits {
 		font-family: var(--font-mono);
 		font-size: 11px;
