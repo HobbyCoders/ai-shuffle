@@ -161,6 +161,16 @@ jobs:
           # useblacksmith/setup-docker-builder persists /var/lib/buildkit across
           # runs, so no cache-from/cache-to registry round-trip is needed.
 
+      # The sticky disk is billed by the blocks its snapshot holds, not by what
+      # the filesystem uses. Backend GC frees filesystem space, but that alone does
+      # not discard its blocks from the underlying snapshot. The action
+      # commits the ext4 volume without discarding the blocks GC freed, so
+      # the snapshot still accounts for freed blocks. Trim free blocks before the
+      # post step unmounts and commits. Harmless on the local-builder fallback,
+      # where the path is not a mount and fstrim fails.
+      - name: Discard freed blocks on the layer cache disk
+        run: sudo fstrim -v /var/lib/buildkit || echo "fstrim skipped"
+
       # The container verification (boot the image, PostgreSQL bootstrap, UI
       # through a browser) roughly triples the job. Release tags get it;
       # manual `latest` rebuilds, which happen several times a day, do not —
