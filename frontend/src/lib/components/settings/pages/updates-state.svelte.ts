@@ -37,6 +37,8 @@ export interface UpdateWorker {
 	reason?: string | null;
 	/** The check request is queued and the worker has not taken it yet. */
 	request_pending?: boolean;
+	/** A coming update needs a newer Docker image (docker/application_updates.py). */
+	notice?: string | null;
 }
 
 /** One worker's answer to POST /settings/application-updates {action: 'check'}. */
@@ -52,6 +54,20 @@ export interface UpdateResultRow {
 	name: string;
 	tone: StatusTone;
 	text: string;
+	/** What to do about it, shown once under the list. */
+	hint?: string;
+}
+
+const IMAGE_HOW =
+	'To get a newer Docker image: in Unraid, choose Force update on the AI Shuffle container; with Docker Compose, run docker compose pull, then docker compose up -d. Your data stays on the data volume.';
+
+/** How to replace a Docker image, for a worker whose update needs one now (#1821). */
+export const IMAGE_HINT = `Your current version keeps working. ${IMAGE_HOW}`;
+
+/** The image hint for a worker that needs a newer image now, or for a coming update. */
+export function imageHint(worker: UpdateWorker): string | undefined {
+	if (worker.phase === 'image-required') return IMAGE_HINT;
+	return worker.notice ? `${worker.notice} ${IMAGE_HOW}` : undefined;
 }
 
 /**
@@ -234,7 +250,7 @@ export class UpdatesState {
 								elapsed >= CHECK_IDLE_SETTLE_MS));
 					if (!done) settled = false;
 					const view = done ? describeWorker(worker, receipt) : { tone: 'busy' as const, text: 'Checking' };
-					rows.push({ id, name, ...view });
+					rows.push({ id, name, ...view, ...(done && imageHint(worker) ? { hint: imageHint(worker) } : {}) });
 				}
 				this.rows = rows;
 			} else settled = false;

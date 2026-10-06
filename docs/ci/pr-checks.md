@@ -20,6 +20,15 @@ The slow platform suites run when someone asks for them, and before a release.
   runner. It never signs or uploads.
 - The small policy and service checks (artifact policy, desktop source
   update checks, license server, registry, Android Play)
+- In-app update reach, on PRs that touch the Docker image, `docker/`, the
+  desktop main process or the update archive: fails when a change cannot reach
+  installed apps through the in-app update (`scripts/ci/update_reach.py`). The
+  failure says what to do. The usual fix for a changed `Dockerfile`,
+  `entrypoint.sh` or `docker/install-claude-cli.sh` is
+  `python docker/update_contract.py --pin`. A release that really needs a new
+  Docker image fails until the owner adds the label `update-reach:docker-image`
+  (each failing group has its own `update-reach:GROUP` label) and re-runs the
+  job; it reads the labels when it runs. Label events do not start it.
 
 Nothing runs on a schedule.
 

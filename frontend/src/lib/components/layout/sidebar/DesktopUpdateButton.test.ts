@@ -537,3 +537,17 @@ it('offers to cancel a restart that waits for running work', async () => {
  expect(api.post).toHaveBeenLastCalledWith('/settings/application-updates',{action:'cancel'});
  await waitFor(()=>expect(panel.isConnected).toBe(false));
 });
+it('tells a Docker worker ahead of time that a coming update needs a newer image, and still updates it', async()=>{
+ const coming='A coming update needs a newer Docker image.';
+ api.get.mockResolvedValue({...state,update_all_workers:true,workers:[
+  {...worker,phase:'ready'},
+  {...peer,device_id:'dock',device_name:'Docker',phase:'ready',notice:coming},
+  {...peer,device_id:'img',device_name:'Old',phase:'image-required',message:null,notice:coming},
+ ]});
+ render(DesktopUpdateButton);
+ const button=await screen.findByRole('button',{name:'Update and restart'});
+ expect(button.title).toContain('Docker: Staged, awaiting restart; a coming update needs a newer Docker image');
+ // A worker that needs it now says so once, not twice.
+ expect(button.title).toContain('Old: Needs a new Docker image; not included');
+ expect(button.title).not.toContain('Old: Needs a new Docker image; not included; a coming');
+});

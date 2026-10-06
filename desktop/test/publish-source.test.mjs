@@ -26,7 +26,7 @@ for(const scenario of ['new','reuse','moved','corrupt','stable','offmain','older
  }else{
   const row=JSON.parse(await fs.readFile(path.join(root,'record.json'),'utf8')),signed=JSON.parse(row.manifest);
   assert.equal(row.asset_id,123);assert(verify(null,Buffer.from(signed.payload,'base64'),await fs.readFile(path.join(root,'public.pem'),'utf8'),Buffer.from(signed.signature,'base64')));
-  const manifest=JSON.parse(Buffer.from(signed.payload,'base64'));assert.equal(manifest.format,2);assert.equal(manifest.revision,'a'.repeat(40));assert.deepEqual(manifest.container,{sequence:42,runtime:'b'.repeat(64)});assert(events.includes('publish'));
+  const manifest=JSON.parse(Buffer.from(signed.payload,'base64'));assert.equal(manifest.format,2);assert.equal(manifest.revision,'a'.repeat(40));assert.deepEqual(manifest.container,{sequence:42,runtime:'b'.repeat(64),requires:['base-1'],recommends:[]});assert(events.includes('publish'));
   assert.equal(manifest.tree,'c'.repeat(64));assert(events.includes('archive'));
   if(stable(scenario)){
    assert.equal(row.channel,'stable');assert.equal(manifest.channel,'stable');assert.equal(manifest.version,'1.2.3');assert.equal(manifest.notes,'Faster startup.');

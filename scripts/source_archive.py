@@ -3,7 +3,8 @@
 The Docker and desktop updaters rebuild the application from this archive, so
 it carries only what they build and run: the backend, fluid, the Node
 packages (including mobile/, the phone UI the frontend build emits at
-/mobile/), the desktop launcher, the in-app docs and the dependency lists.
+/mobile/), the desktop launcher, the container supervisor (docker/), the in-app
+docs and the dependency lists.
 Internal docs, reviews, mockups, videos, tests, the Android app, CI and owner
 tooling (scripts/, including scripts/unraid-lab) never leave the repository
 through the update feed.
@@ -45,6 +46,10 @@ RUNTIME_PATHS = (
     "tools",
     "browser-mcp",
     "desktop",
+    # The container supervisor, updater and Chromium scripts. Images that hand
+    # over (docker/update_contract.py "source-supervisor") run them from the
+    # verified update instead of their own copies (#1821).
+    "docker",
     "docs/content",
     "requirements.txt",
     "requirements.lock",

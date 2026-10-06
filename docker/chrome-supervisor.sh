@@ -53,6 +53,9 @@ CHROME_SLOW_RETRY_SECS="${CHROME_SLOW_RETRY_SECS:-300}"
 # Initial fast-retry backoff. Overridable only so tests can shrink it; the image
 # default matches the historical flat-5s starting point.
 CHROME_BACKOFF_INITIAL="${CHROME_BACKOFF_INITIAL:-5}"
+# The launcher to run. The container supervisor passes its own copy of
+# start-chrome.sh (from the running update after a hand-over, #1821).
+START_CHROME_COMMAND="${START_CHROME_COMMAND:-start-chrome}"
 
 # Launch one Chrome instance (a single bounded process, foreground — we wait for
 # it and capture its real exit status). As root we drop to appuser via setpriv,
@@ -67,14 +70,14 @@ launch_chrome() {
                 CHROME_DEBUG="${CHROME_DEBUG:-0}" \
                 CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-9222}" \
                 CHROME_EXECUTABLE="${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" \
-                start-chrome
+                "$START_CHROME_COMMAND"
     else
         CHROME_CDP="${CHROME_CDP:-1}" \
         CHROME_CDP_PORT="${CHROME_CDP_PORT:-9221}" \
         CHROME_DEBUG="${CHROME_DEBUG:-0}" \
         CHROME_DEBUG_PORT="${CHROME_DEBUG_PORT:-9222}" \
         CHROME_EXECUTABLE="${CHROME_EXECUTABLE:-/usr/bin/google-chrome-stable}" \
-            start-chrome
+            "$START_CHROME_COMMAND"
     fi
 }
 

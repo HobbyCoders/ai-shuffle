@@ -23,6 +23,7 @@ on:
       - "Desktop CI"
       - "iOS CI"
       - "Folder confinement (macOS)"
+      - "In-app update reach"
 
 permissions:
   contents: read

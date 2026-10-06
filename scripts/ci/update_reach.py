@@ -6,15 +6,23 @@ image or the installed Windows launcher, so a change to them needs a new image
 or installer to take effect, and some changes stop the update for older
 installs altogether. See docs/reviews/in-app-update-coverage-2026-10.md.
 
-Groups that fail the check (each can be acknowledged with --allow GROUP):
+Groups that fail the check (each can be acknowledged with --allow GROUP, or
+in CI with a pull request label named update-reach:GROUP and a re-run of the
+check, .github/workflows/ci-update-reach.yml):
 
-  docker-image      The image contract fingerprint (docker/update_contract.py)
-                    differs between base and head. Every Docker worker on the
-                    base image shows "A new Docker image is required" and stops
-                    taking in-app updates until its image is replaced.
+  docker-image      The runtime string the release publishes
+                    (docker/update_contract.py: REQUIRES) differs between base
+                    and head. Docker workers on older images show "Needs a newer
+                    Docker image" for this release and keep their version until
+                    the image is replaced. Only the owner accepts that.
+  image-pin         The image inputs (docker/update_contract.py: IMAGE_INPUTS:
+                    the Dockerfile, the root entrypoint and the CLI installer)
+                    changed in more than comments and IMAGE_INPUTS_PIN was not
+                    updated. Run python docker/update_contract.py --pin to
+                    confirm that older images may keep running without it.
   docker-image-copy A file the image copies and runs from /app or /usr/local/bin
-                    that is neither fingerprinted nor in the update archive. The
-                    change never reaches an existing container.
+                    that is neither an image input nor in the update archive.
+                    The change never reaches an existing container.
   windows-launcher  Code the installed AI Shuffle.exe runs from its app.asar on
                     every launch before it hands over to the updated source. The
                     change never reaches an existing install.
@@ -22,10 +30,13 @@ Groups that fail the check (each can be acknowledged with --allow GROUP):
                     apps verify updates with the key they shipped; a new key
                     makes them refuse every later update.
 
-Groups that are only reported: owner tooling copied into the image (scripts/),
-Windows packaging (icons, NSIS options), Android native code (needs a Play
-build, which the owner accepts), and the macOS and Linux desktop apps, which
-have no in-place update and need a new installer for every change.
+Groups that are only reported: image inputs whose change was pinned (only new
+images get it), the container supervisor and Chromium scripts (images built
+before the source-supervisor hand-over run their own copy; newer images run the
+updated one), owner tooling copied into the image (scripts/), Windows packaging
+(icons, NSIS options), Android native code (needs a Play build, which the owner
+accepts), and the macOS and Linux desktop apps, which have no in-place update
+and need a new installer for every change.
 
 Read-only: runs git diff and git show, never fetches, tags or writes.
 
@@ -34,6 +45,7 @@ Usage::
     python scripts/ci/update_reach.py                      # newest final tag .. HEAD
     python scripts/ci/update_reach.py --base v0.9.0 --head origin/main
     python scripts/ci/update_reach.py --allow docker-image # owner accepted a new base
+    python scripts/ci/update_reach.py --base origin/main --labels "$LABELS"  # CI
     python scripts/ci/update_reach.py --json
 
 Exit status: 0 when nothing unacknowledged is out of reach, 1 otherwise.
@@ -41,12 +53,12 @@ Exit status: 0 when nothing unacknowledged is out of reach, 1 otherwise.
 from __future__ import annotations
 
 import argparse
-import ast
 import fnmatch
 import hashlib
 import importlib.util
 import json
 import posixpath
+import types
 import re
 import subprocess
 import sys
@@ -69,8 +81,15 @@ ANDROID_NATIVE = ("android/*",)
 # Cloudflare Workers deployed by their own workflows, not part of the Play app.
 ANDROID_SERVER = ("android/hub/*", "android/site/*")
 
-FAILING = ("docker-image", "docker-image-copy", "windows-launcher", "update-trust-key")
-GROUPS = FAILING + ("image-tooling", "windows-packaging", "android-native", "macos-linux-desktop")
+# The supervisor, updater and Chromium scripts the image runs. In the update
+# archive (docker/), so images that hand over to the active update run the new
+# copy; images built before that run their own.
+IMAGE_SUPERVISOR = ("docker/*",)
+LABEL = "update-reach:"
+
+FAILING = ("docker-image", "image-pin", "docker-image-copy", "windows-launcher", "update-trust-key")
+GROUPS = FAILING + ("image-inputs", "image-supervisor", "image-tooling", "windows-packaging", "android-native",
+                    "macos-linux-desktop")
 
 Reader = Callable[[str], Optional[bytes]]
 
@@ -98,27 +117,18 @@ def matches(path: str, patterns: Iterable[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
-def contract_files(read: Reader) -> Optional[tuple]:
-    """The FILES tuple of docker/update_contract.py at a revision, without running it."""
+def contract(read: Reader) -> Optional[types.ModuleType]:
+    """docker/update_contract.py as committed at a revision (stdlib only, no side effects on import)."""
     text = read(CONTRACT)
     if text is None:
         return None
-    for node in ast.parse(text.decode()).body:
-        if isinstance(node, ast.Assign) and any(getattr(t, "id", None) == "FILES" for t in node.targets):
-            return tuple(ast.literal_eval(node.value))
-    return None
+    module = types.ModuleType("update_contract_at_revision")
+    exec(compile(text, CONTRACT, "exec"), module.__dict__)
+    return module
 
 
-def contract_fingerprint(read: Reader) -> Optional[str]:
-    """The same digest docker/update_contract.py computes, over committed bytes.
-
-    The image bakes it into /app/docker/image.json; publish-source.mjs signs it
-    into every manifest. A mismatch makes the container updater refuse the
-    update ("A new Docker image is required").
-    """
-    files = contract_files(read)
-    if files is None:
-        return None
+def legacy_fingerprint(read: Reader, files: Iterable[str]) -> Optional[str]:
+    """The runtime string before #1821: sha256 over whole files (FILES)."""
     digest = hashlib.sha256()
     for name in files:
         data = read(name)
@@ -126,6 +136,31 @@ def contract_fingerprint(read: Reader) -> Optional[str]:
             return None
         digest.update(name.encode() + b"\0" + data + b"\0")
     return digest.hexdigest()
+
+
+def published_runtime(read: Reader) -> Optional[str]:
+    """The ``container.runtime`` a release built from this revision signs.
+
+    Images compare it with the one they carry; images built before #1821
+    compare nothing else. A change means older images refuse the release.
+    """
+    module = contract(read)
+    if module is None:
+        return None
+    if hasattr(module, "FILES"):
+        return legacy_fingerprint(read, module.FILES)
+    return module.runtime(module.REQUIRES)
+
+
+def image_inputs(module: Optional[types.ModuleType]) -> tuple:
+    return tuple(getattr(module, "IMAGE_INPUTS", ()) or ())
+
+
+def stale_pin(module: Optional[types.ModuleType], read: Reader) -> bool:
+    """IMAGE_INPUTS changed beyond comments and IMAGE_INPUTS_PIN was not updated."""
+    if module is None or not hasattr(module, "IMAGE_INPUTS_PIN"):
+        return False
+    return module.image_inputs_digest(read) != module.IMAGE_INPUTS_PIN
 
 
 def dockerfile_copies(dockerfile: str) -> list:
@@ -141,17 +176,17 @@ def dockerfile_copies(dockerfile: str) -> list:
     return sources
 
 
-def image_only_copies(dockerfile: str, fingerprinted: Iterable[str], runtime_paths: Iterable[str]) -> list:
-    """Image files no update replaces: copied, not fingerprinted, not in the update archive.
+def image_only_copies(dockerfile: str, inputs: Iterable[str], runtime_paths: Iterable[str]) -> list:
+    """Image files no update replaces: copied, not image inputs, not in the update archive.
 
     A directory the archive carries in part (fluid/: the package, not its
     tests) counts as carried: the update rebuilds everything that runs from it.
     """
-    fingerprinted = set(fingerprinted)
+    inputs = set(inputs)
     runtime_paths = tuple(runtime_paths)
     result = []
     for source in dockerfile_copies(dockerfile):
-        if source in fingerprinted or source == TRUST_KEY:
+        if source in inputs or source == TRUST_KEY:
             continue
         if any(source == p or source.startswith(p + "/") or p.startswith(source + "/") for p in runtime_paths):
             continue
@@ -193,13 +228,20 @@ def classify(changed: Iterable[str], base: Reader, head: Reader) -> dict:
     archive = _load("source_archive", "scripts/source_archive.py")
     groups = {name: [] for name in GROUPS}
 
-    base_files, head_files = contract_files(base) or (), contract_files(head) or ()
-    if contract_fingerprint(base) != contract_fingerprint(head):
-        contract = set(base_files) | set(head_files) | {CONTRACT}
-        groups["docker-image"] = [p for p in changed if p in contract] or [CONTRACT]
+    base_contract, head_contract = contract(base), contract(head)
+    if published_runtime(base) != published_runtime(head):
+        groups["docker-image"] = [p for p in changed if p == CONTRACT] or [CONTRACT]
+    inputs = set(image_inputs(base_contract)) | set(image_inputs(head_contract))
+    changed_inputs = [p for p in changed if p in inputs]
+    if stale_pin(head_contract, head):
+        groups["image-pin"] = changed_inputs or [CONTRACT]
+    else:
+        groups["image-inputs"] = changed_inputs
+    groups["image-supervisor"] = [p for p in changed if matches(p, IMAGE_SUPERVISOR) and p not in inputs
+                                  and p != CONTRACT]
 
     dockerfile = (head("Dockerfile") or b"").decode()
-    copies = image_only_copies(dockerfile, head_files, archive.RUNTIME_PATHS)
+    copies = image_only_copies(dockerfile, image_inputs(head_contract), archive.RUNTIME_PATHS)
     for path in changed:
         for source in copies:
             if path == source or path.startswith(source + "/"):
@@ -211,7 +253,9 @@ def classify(changed: Iterable[str], base: Reader, head: Reader) -> dict:
     groups["update-trust-key"] = [p for p in changed if p == TRUST_KEY]
     groups["windows-packaging"] = [p for p in changed if matches(p, WINDOWS_PACKAGING) and p != TRUST_KEY]
     groups["android-native"] = [p for p in changed if matches(p, ANDROID_NATIVE) and not matches(p, ANDROID_SERVER)]
-    groups["macos-linux-desktop"] = [p for p in changed if in_archive(p, archive.RUNTIME_PATHS, archive.EXCLUDED)]
+    # docker/ rides in the archive for containers only; desktops never run it.
+    groups["macos-linux-desktop"] = [p for p in changed if in_archive(p, archive.RUNTIME_PATHS, archive.EXCLUDED)
+                                     and not matches(p, IMAGE_SUPERVISOR)]
     return groups
 
 
@@ -229,10 +273,18 @@ def verdict(groups: dict, allowed: Iterable[str] = ()) -> list:
 
 
 EXPLAIN = {
-    "docker-image": "Docker workers on the base image will refuse every later in-app update until their image is replaced.",
+    "docker-image": "This release requires more than older Docker images provide (docker/update_contract.py: REQUIRES). "
+                    "Those workers will show \"Needs a newer Docker image\" and keep their version until the image is "
+                    "replaced. Warn a release ahead with RECOMMENDS; only the owner accepts this.",
+    "image-pin": "These files are baked into the Docker image and no update replaces them. If the app does not "
+                 "depend on the change, run: python docker/update_contract.py --pin and commit. If it does, also "
+                 "add a capability to REQUIRES.",
     "docker-image-copy": "The image runs its own copy; existing containers never see this change.",
     "windows-launcher": "Installed Windows apps run their installer's copy before every hand-over; they never see this change.",
     "update-trust-key": "Images and installed apps verify updates with the key they shipped; they will refuse every later update.",
+    "image-inputs": "Only new Docker images get this (pinned: older images keep taking updates without it).",
+    "image-supervisor": "Images that hand over to the updated supervisor get this with the update; older images keep "
+                        "their own copy until the image is replaced. Keep it compatible with both.",
     "image-tooling": "Owner tools inside the image stay at the image's version (not used by the running app).",
     "windows-packaging": "Only new Windows installs get packaging changes (icons, installer options).",
     "android-native": "Needs a Play build.",
@@ -260,11 +312,18 @@ def render(base: str, head: str, groups: dict, failing: list, allowed: Iterable[
         if len(paths) > 8:
             lines.append(f"    ... and {len(paths) - 8} more")
     if failing:
-        lines.append("FAILED: move the change into the updated source, add a migration path, "
-                     "or acknowledge it with --allow " + " --allow ".join(failing) + ".")
+        lines.append("FAILED: move the change into the updated source, add a migration path, or have the owner "
+                     "accept it (pull request label " + ", ".join(LABEL + name for name in failing)
+                     + ", then re-run this check; locally --allow " + " --allow ".join(failing) + ").")
     else:
         lines.append("Passed: every change that existing Docker and Windows installs need reaches them in-app.")
     return "\n".join(lines)
+
+
+def allowed_by_labels(labels: str) -> list:
+    """Failing groups acknowledged by update-reach:GROUP labels."""
+    names = [label.strip().removeprefix(LABEL) for label in labels.split(",") if label.strip().startswith(LABEL)]
+    return [name for name in names if name in FAILING]
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -273,8 +332,11 @@ def main(argv: Optional[list] = None) -> int:
     parser.add_argument("--head", default="HEAD", help="candidate revision (default: HEAD)")
     parser.add_argument("--allow", action="append", default=[], choices=FAILING,
                         help="acknowledge an out-of-reach group the owner accepted (repeatable)")
+    parser.add_argument("--labels", default="",
+                        help="comma-separated pull request labels; update-reach:GROUP acknowledges GROUP")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+    args.allow += allowed_by_labels(args.labels)
     base = args.base or latest_final_tag()
     if not base:
         parser.error("no final release tag found; pass --base")

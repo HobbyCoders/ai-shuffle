@@ -1,6 +1,8 @@
 """scripts/ci/update_reach.py: which changes the in-app update cannot deliver (no git calls)."""
+import hashlib
 import importlib.util
 from pathlib import Path
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,25 +35,86 @@ def groups_for(changes):
     return reach.classify(changes, tree(), tree(head))
 
 
-def test_fingerprint_matches_the_image_contract():
-    # The image bakes update_contract.fingerprint into image.json; the check
-    # must compute the same digest or it would miss the "image required" case.
-    assert reach.contract_fingerprint(tree()) == contract.fingerprint(ROOT)
-    assert reach.contract_files(tree()) == contract.FILES
+def contract_with(**names):
+    """docker/update_contract.py with some declarations replaced (Python literals)."""
+    text = (ROOT / "docker/update_contract.py").read_text()
+    for name, value in names.items():
+        assert re.search(rf"(?m)^{name} = ", text), name
+        text += f"\n{name} = {value!r}\n"  # module globals: the last assignment wins
+    return text
 
 
-def test_any_contract_file_edit_requires_a_new_image_even_a_comment():
-    dockerfile = (ROOT / "Dockerfile").read_text() + "\n# comment only\n"
-    groups = groups_for({"Dockerfile": dockerfile})
-    assert groups["docker-image"] == ["Dockerfile"]
+def test_published_runtime_matches_the_image_contract():
+    # Images compare this string with the one they carry; the check must
+    # compute what publish-source.mjs signs (update_contract --manifest).
+    assert reach.published_runtime(tree()) == contract.manifest_fields()["runtime"] == contract.LEGACY_RUNTIME
+
+
+def test_published_runtime_of_a_revision_before_the_capability_contract():
+    # Before #1821 the runtime was a hash of whole files (FILES).
+    legacy = b'FILES = ("a.txt", "b.txt")\n'
+    read = tree({reach.CONTRACT: legacy, "a.txt": b"one", "b.txt": b"two"})
+    expected = hashlib.sha256(b"a.txt\0one\0b.txt\0two\0").hexdigest()
+    assert reach.published_runtime(read) == expected
+    # A file missing at that revision leaves it unknown rather than guessed.
+    assert reach.published_runtime(tree({reach.CONTRACT: legacy, "a.txt": None})) is None
+
+
+def test_comment_only_edits_to_formerly_fingerprinted_files_pass():
+    # Any byte of these eight files used to force a new image (#1754, #1865).
+    changes = {name: (ROOT / name).read_text() + "\n# comment only\n"
+               for name in ("Dockerfile", "entrypoint.sh", "docker/container_runtime.py",
+                            "docker/application_updates.py", "docker/start-chrome.sh",
+                            "docker/chrome-supervisor.sh", "docker/chrome-doctor.sh")}
+    groups = groups_for(changes)
+    assert groups["docker-image"] == [] and groups["image-pin"] == []
+    assert reach.verdict(groups) == []
+
+
+def test_supervisor_and_chrome_script_changes_are_reported_not_failed():
+    # #1754 changed start-chrome.sh and the Unraid worker needed a new image;
+    # now the updated copy runs on images with the hand-over.
+    groups = groups_for({"docker/start-chrome.sh": "#!/bin/sh\nexit 0\n", "docker/application_updates.py": "x = 1\n"})
+    assert groups["image-supervisor"] == ["docker/application_updates.py", "docker/start-chrome.sh"]
+    assert groups["docker-image"] == [] and groups["docker-image-copy"] == []
+    assert groups["macos-linux-desktop"] == []
+    assert reach.verdict(groups) == []
+
+
+def test_requiring_a_new_capability_fails_until_the_owner_accepts_it():
+    text = contract_with(CAPABILITIES={**contract.CAPABILITIES, "python-3.13": "Python 3.13"},
+                         PROVIDES=(*contract.PROVIDES, "python-3.13"), REQUIRES=("base-1", "python-3.13"))
+    groups = groups_for({reach.CONTRACT: text})
+    assert groups["docker-image"] == [reach.CONTRACT]
     assert reach.verdict(groups) == ["docker-image"]
-    assert reach.verdict(groups, ["docker-image"]) == []
+    assert reach.verdict(groups, reach.allowed_by_labels("bug, update-reach:docker-image")) == []
+    message = reach.render("base", "head", groups, ["docker-image"], [])
+    assert "Needs a newer Docker image" in message and "update-reach:docker-image" in message
 
 
-def test_chrome_launch_script_change_requires_a_new_image():
-    # #1754 changed this file and the Unraid worker needed a new edge image.
-    groups = groups_for({"docker/start-chrome.sh": "#!/bin/sh\n"})
-    assert groups["docker-image"] == ["docker/start-chrome.sh"]
+def test_recommending_a_capability_does_not_fail():
+    text = contract_with(CAPABILITIES={**contract.CAPABILITIES, "python-3.13": "Python 3.13"},
+                         PROVIDES=(*contract.PROVIDES, "python-3.13"), RECOMMENDS=("python-3.13",))
+    assert reach.verdict(groups_for({reach.CONTRACT: text})) == []
+
+
+def test_unpinned_image_input_change_fails_with_what_to_do():
+    dockerfile = (ROOT / "Dockerfile").read_text() + "\nRUN true\n"
+    groups = groups_for({"Dockerfile": dockerfile})
+    assert groups["image-pin"] == ["Dockerfile"]
+    assert reach.verdict(groups) == ["image-pin"]
+    assert "python docker/update_contract.py --pin" in reach.render("b", "h", groups, ["image-pin"], [])
+
+
+def test_pinned_image_input_change_is_reported_only():
+    dockerfile = (ROOT / "Dockerfile").read_text() + "\nRUN true\n"
+    head = tree({"Dockerfile": dockerfile.encode()})
+    pin = contract.image_inputs_digest(head)
+    text = contract_with(IMAGE_INPUTS_PIN=pin)
+    groups = groups_for({"Dockerfile": dockerfile, reach.CONTRACT: text})
+    assert groups["image-pin"] == [] and groups["image-inputs"] == ["Dockerfile"]
+    assert groups["docker-image"] == []
+    assert reach.verdict(groups) == []
 
 
 def test_application_code_reaches_docker_and_windows_installs():
@@ -100,9 +163,9 @@ def test_trust_key_change_fails_for_every_platform():
 
 
 def test_image_only_copies_fail_but_owner_tooling_is_reported():
-    groups = groups_for({"docker/install-claude-cli.sh": "x", "requirements-dev.txt": "x",
-                         "scripts/credential_keys.py": "x", "fluid/tests/unit/test_x.py": "x"})
-    assert groups["docker-image-copy"] == ["docker/install-claude-cli.sh", "requirements-dev.txt"]
+    groups = groups_for({"requirements-dev.txt": "x", "scripts/credential_keys.py": "x",
+                         "fluid/tests/unit/test_x.py": "x"})
+    assert groups["docker-image-copy"] == ["requirements-dev.txt"]
     assert groups["image-tooling"] == ["scripts/credential_keys.py"]
     # fluid/ ships in the archive in part; its tests never run in the image.
     assert reach.verdict(groups) == ["docker-image-copy"]

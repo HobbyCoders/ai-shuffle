@@ -119,9 +119,13 @@ try {
   const sequence = Date.now();
   const containerSequence = Number(git('rev-list', '--first-parent', '--count', revision));
   if (!Number.isSafeInteger(containerSequence) || containerSequence <= 1 || git('rev-parse', '--is-shallow-repository') !== 'false') throw Error('Container publishing requires complete main history');
-  const runtime = execFileSync('python', ['docker/update_contract.py'], { encoding: 'utf8' }).trim();
-  if (!/^[a-f0-9]{64}$/.test(runtime)) throw Error('Invalid container runtime contract');
-  const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size, container: { sequence: containerSequence, runtime },
+  // What the revision needs from the Docker image (docker/update_contract.py,
+  // #1821). runtime is all that images built before capabilities compare.
+  const contract = JSON.parse(execFileSync('python', ['docker/update_contract.py', '--manifest'], { encoding: 'utf8' }));
+  const { runtime, requires, recommends } = contract;
+  const capabilities = list => Array.isArray(list) && list.length <= 32 && list.every(name => typeof name === 'string' && /^[a-z0-9][a-z0-9.-]{0,39}$/.test(name));
+  if (!/^[a-f0-9]{64}$/.test(runtime) || !capabilities(requires) || !capabilities(recommends)) throw Error('Invalid container runtime contract');
+  const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size, container: { sequence: containerSequence, runtime, requires, recommends },
    channel, version, notes, tree }));
   const signature = sign(null, payload, key);
   if (!verify(null, payload, await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8'), signature)) throw new Error('Signing key does not match launcher trust key');

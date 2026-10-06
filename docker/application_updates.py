@@ -43,6 +43,12 @@ CHANNELS = ("stable", "edge")
 # base64url (app/core/license.py lease_header), within the hub's 4 KiB limit.
 LEASE_HEADER = "X-Shuffle-Lease"
 LEASE_VALUE = re.compile(r"[A-Za-z0-9_-]{1,4096}")
+# Image capabilities (docker/update_contract.py): a source update lists what it
+# requires, an image what it provides.
+CAPABILITY = re.compile(r"[a-z0-9][a-z0-9.-]{0,39}")
+IMAGE_REQUIRED = "Needs a newer Docker image. This version keeps working."
+IMAGE_NOTICE = ("A coming update needs a newer Docker image. This version keeps working; "
+                "update the image when convenient.")
 
 
 class UpdateError(Exception):
@@ -111,11 +117,80 @@ def verify_manifest(text, public_key):
         if (type(container.get("sequence")) is not int or not 0 < container["sequence"] < 2**53
                 or not DIGEST.fullmatch(container.get("runtime", ""))):
             raise UpdateError("This source update needs a newer container release")
+        for field in ("requires", "recommends"):
+            if field in container and not (isinstance(container[field], list) and len(container[field]) <= 32
+                                           and all(isinstance(n, str) and CAPABILITY.fullmatch(n) for n in container[field])):
+                raise ValueError("invalid container capabilities")
         return result
     except UpdateError:
         raise
     except Exception as exc:
         raise UpdateError("Invalid or unsigned source manifest") from exc
+
+
+def missing_capabilities(container, image):
+    """What this image lacks to run the source, as a list; empty when it can.
+
+    Manifests and images from before capabilities (#1821) compare the runtime
+    string, as those images themselves still do. A base-1 release publishes
+    the frozen string old images carry, so both sides agree.
+    """
+    requires, provides = container.get("requires"), image.get("provides")
+    if requires is None or not isinstance(provides, list):
+        return [] if container["runtime"] == image.get("runtime") else ["runtime"]
+    return sorted(set(requires) - set(provides))
+
+
+# What a hand-over runs from the update's source (docker/container_runtime.py).
+HANDOVER_FILES = ("docker/container_runtime.py", "docker/application_updates.py",
+                  "docker/chrome-supervisor.sh", "docker/start-chrome.sh")
+
+
+def handover_target(root, image, public_key):
+    """The active update whose own supervisor this image may start, or None.
+
+    Read-only. Only a healthy, verified, compatible active update qualifies:
+    never while a first boot is pending or blocked, never for a revision whose
+    supervisor did not reach a healthy app last time (handover.json), and never
+    when the image is newer than the update (the image's code then runs, and
+    ContainerUpdates resets the state). Returns (revision, python, script).
+    """
+    root = Path(root)
+    try:
+        state = json.loads((root / "state.json").read_text())
+    except FileNotFoundError:
+        return None
+    if not isinstance(state, dict):
+        raise UpdateError("Invalid container update state")
+    revision = state.get("active")
+    if (not isinstance(revision, str) or not REVISION.fullmatch(revision) or state.get("booting")
+            or state.get("blocked") or revision in (state.get("failed") or [])):
+        return None
+    try:
+        trial = json.loads((root / "handover.json").read_text())
+    except FileNotFoundError:
+        trial = None
+    if isinstance(trial, dict) and trial.get("revision") == revision:
+        raise UpdateError(f"The supervisor of update {revision[:12]} did not reach a healthy start before")
+    directory = root / "versions" / revision
+    if directory.is_symlink():
+        raise UpdateError("Linked application directory is not supported")
+    manifest = verify_manifest((directory / "release.json").read_bytes(), public_key)
+    if manifest["revision"] != revision:
+        raise UpdateError("Installed revision mismatch")
+    if image["sequence"] > manifest["container"]["sequence"] or missing_capabilities(manifest["container"], image):
+        return None
+    source, python = directory / "source", directory / "venv/bin/python"
+    script = source / "docker/container_runtime.py"
+    if not (directory / "complete").is_file() or not python.is_file() or not script.is_file():
+        return None
+    verify_tree(directory, manifest)
+    # verify_tree checks the files the signed listing names; what the image
+    # will run must be among them, not merely present beside them.
+    listed = {line.split("\0")[0] for line in (directory / "tree.txt").read_text().splitlines()}
+    if not set(HANDOVER_FILES) <= listed:
+        return None
+    return revision, python, script
 
 
 def extract_source(archive, target, revision):
@@ -185,6 +260,8 @@ class ContainerUpdates:
         # token-protected /api/v1/internal/desktop/source-lease.
         self.lease = lease
         self.offer = {}
+        # Set when the feed's release recommends a capability this image lacks.
+        self.notice = None
         self.root = Path(root)
         self.image = image
         self.public_key = public_key
@@ -225,7 +302,7 @@ class ContainerUpdates:
         if pending:
             staged_manifest = self.manifest(pending)
             staged = staged_manifest["container"]
-            if (staged["sequence"] <= self.image["sequence"] or staged["runtime"] != self.image["runtime"]
+            if (staged["sequence"] <= self.image["sequence"] or missing_capabilities(staged, self.image)
                     or staged_manifest.get("channel") != self.channel):
                 self.state.pop("pending")
                 self.save()
@@ -267,7 +344,7 @@ class ContainerUpdates:
         atomic_json(self.root / "status.json", {"phase": phase, "message": message,
                     "error": error, "version": (version or self.state.get("pending") or self.running or "")[:12] or None,
                     "release": offered.get("release"), "notes": offered.get("notes"), "channel": self.channel,
-                    "checked_at": self.checked_at})
+                    "checked_at": self.checked_at, "notice": self.notice})
 
     def failed(self):
         revision = self.state.pop("booting", None)
@@ -312,7 +389,7 @@ class ContainerUpdates:
         if not revision:
             return [sys.executable, "-m", "app.main"], None, env
         manifest = self.manifest(revision)
-        if manifest["container"]["runtime"] != self.image["runtime"]:
+        if missing_capabilities(manifest["container"], self.image):
             raise UpdateError(self.runtime_mismatch(manifest))
         directory = self.directory(revision)
         source = directory / "source"
@@ -451,12 +528,17 @@ class ContainerUpdates:
         if not manifest.get("tree"):
             raise UpdateError("The update has no signed source tree; install a newer image")
         revision = manifest["revision"]
+        # Said ahead of the release that needs it, while this one still installs.
+        lacking = set(manifest["container"].get("recommends") or []) - set(self.image.get("provides") or [])
+        self.notice = IMAGE_NOTICE if lacking else None
         active = self.manifest(self.state["active"])["container"] if self.state.get("active") else self.image
         if revision in (self.state.get("active"), self.image["revision"]) or manifest["container"]["sequence"] <= active["sequence"]:
             self.publish("idle", "You are up to date.")
             return
-        if manifest["container"]["runtime"] != self.image["runtime"]:
-            self.publish("image-required", "A new Docker image is required for this update.")
+        if missing_capabilities(manifest["container"], self.image):
+            # The offered revision, not the running one: a status naming the
+            # running revision reads as "Already up to date" (#1901).
+            self.publish("image-required", IMAGE_REQUIRED, version=revision)
             return
         self.remember(manifest)
         if not download:

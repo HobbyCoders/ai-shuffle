@@ -1,10 +1,12 @@
 import base64
 import hashlib
+import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import stat
+import subprocess
 import zipfile
 
 import httpx
@@ -38,7 +40,8 @@ def feed(tmp_path, monkeypatch):
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
     responses, requests = {}, []
-    def publish(revision=B, sequence=2, runtime=RUNTIME, entries=None, channel="stable", tree=None, **fields):
+    def publish(revision=B, sequence=2, runtime=RUNTIME, entries=None, channel="stable", tree=None, container=None,
+                **fields):
         output = io.BytesIO()
         entries = entries or {f"ai-shuffle-{revision}/source.txt": "content"}
         with zipfile.ZipFile(output, "w") as archive:
@@ -49,7 +52,7 @@ def feed(tmp_path, monkeypatch):
                  for name, value in entries.items() if not name.endswith("/")]
         release = {"format": 2, "revision": revision, "sequence": sequence,
                    "sha256": hashlib.sha256(archive).hexdigest(), "size": len(archive),
-                   "container": {"sequence": sequence, "runtime": runtime},
+                   "container": {"sequence": sequence, "runtime": runtime, **(container or {})},
                    "channel": channel, "tree": tree or hashlib.sha256(tree_lines(files)).hexdigest(), **fields}
         payload = json.dumps({key: value for key, value in release.items() if value is not None}).encode()
         envelope = json.dumps({"payload": base64.b64encode(payload).decode(),
@@ -605,3 +608,203 @@ def test_published_tree_digest_matches_what_the_updater_extracts(tmp_path):
     files = extract_source(tmp_path / "source.zip", tmp_path / "source", revision)
     assert hashlib.sha256(tree_lines(files)).hexdigest() == result["tree"]
     assert not (tmp_path / "source/docs/reviews").exists()
+
+
+# --- The image/source contract (#1821) ---------------------------------------
+
+from docker import update_contract as contract  # noqa: E402
+from docker.application_updates import (HANDOVER_FILES, IMAGE_NOTICE, IMAGE_REQUIRED,  # noqa: E402
+                                        handover_target, missing_capabilities)
+
+ROOT = Path(__file__).resolve().parents[1]
+LEGACY = contract.LEGACY_RUNTIME
+# /app/docker/image.json of the images installed today (format 1, ce7c7fde7).
+TODAYS_IMAGE = {"format": 1, "revision": A, "sequence": 1, "runtime": LEGACY}
+NEW_IMAGE = contract.image_record(A, 1)
+NEEDS_NEW_BASE = {"runtime": contract.runtime(("base-1", "python-3.13")), "requires": ["base-1", "python-3.13"],
+                  "recommends": []}
+
+
+def on_image(updater, image, module=None):
+    """The fixture's updater state, read by an updater running on ``image``."""
+    factory = module.ContainerUpdates if module else ContainerUpdates
+    other = factory(updater.root, image, updater.public_key, lambda: True, lambda _: {})
+    other.build = updater.build
+    return other
+
+
+def status_of(updater):
+    return json.loads((updater.root / "status.json").read_text())
+
+
+@pytest.fixture
+def baked_updater(tmp_path):
+    """docker/application_updates.py as baked into the images installed today."""
+    shown = subprocess.run(["git", "show", "ce7c7fde7:docker/application_updates.py"], cwd=ROOT, capture_output=True)
+    if shown.returncode:
+        pytest.skip("the installed image's revision ce7c7fde7 is not in this clone")
+    path = tmp_path / "baked_application_updates.py"
+    path.write_bytes(shown.stdout)
+    spec = importlib.util.spec_from_file_location("baked_application_updates", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_todays_image_takes_a_release_published_under_the_new_contract(feed, baked_updater):
+    # The updater baked into today's images compares container.runtime and
+    # nothing else; base-1 releases publish the frozen string it carries.
+    updater, publish, _, _, _ = feed
+    publish(container=contract.manifest_fields())
+    old = on_image(updater, TODAYS_IMAGE, baked_updater)
+    old.check(download=True)
+    assert old.state == {"pending": B}
+
+
+def test_todays_image_refuses_a_release_that_needs_a_new_base(feed, baked_updater):
+    updater, publish, _, _, _ = feed
+    publish(container=NEEDS_NEW_BASE)
+    old = on_image(updater, TODAYS_IMAGE, baked_updater)
+    old.check(download=True)
+    assert old.state == {} and status_of(old)["phase"] == "image-required"
+
+
+def test_new_updater_on_todays_image_takes_base_1_releases(feed):
+    updater, publish, _, _, _ = feed
+    publish(container=contract.manifest_fields())
+    current = on_image(updater, TODAYS_IMAGE)
+    current.check(download=True)
+    assert current.state == {"pending": B}
+
+
+@pytest.mark.parametrize("image", [TODAYS_IMAGE, NEW_IMAGE])
+def test_release_needing_a_new_base_is_refused_in_plain_words_naming_it(feed, image, monkeypatch):
+    updater, publish, _, _, _ = feed
+    publish(revision=C, sequence=3, container=NEEDS_NEW_BASE)
+    current = on_image(updater, image)
+    current.check(download=True)
+    assert current.state == {}
+    status = status_of(current)
+    # The offered revision, not the running one, or it reads as up to date (#1901).
+    assert (status["phase"], status["message"], status["version"]) == ("image-required", IMAGE_REQUIRED, C[:12])
+    monkeypatch.setenv("SHUFFLE_CONTAINER_UPDATES", str(updater.root))
+    monkeypatch.setattr(policy.database, "get_system_setting", lambda key: None)
+    assert policy.status()["message"] == "Needs a newer Docker image. This version keeps working."
+
+
+def test_releases_published_before_capabilities_still_install_on_new_images(feed):
+    updater, publish, _, _, _ = feed
+    publish(runtime=LEGACY)
+    current = on_image(updater, NEW_IMAGE)
+    current.check(download=True)
+    assert current.state == {"pending": B}
+    publish(revision=C, sequence=3, runtime="e" * 64)
+    other = on_image(updater, dict(NEW_IMAGE, sequence=2))
+    other.check()
+    assert status_of(other)["phase"] == "image-required"
+
+
+def test_a_coming_requirement_is_announced_ahead_and_this_update_still_installs(feed, monkeypatch):
+    updater, publish, _, _, _ = feed
+    publish(container={**contract.manifest_fields(), "recommends": ["python-3.13"]})
+    current = on_image(updater, NEW_IMAGE)
+    current.check(download=True)
+    assert current.state == {"pending": B}
+    assert status_of(current)["notice"] == IMAGE_NOTICE
+    monkeypatch.setenv("SHUFFLE_CONTAINER_UPDATES", str(updater.root))
+    monkeypatch.setattr(policy.database, "get_system_setting", lambda key: None)
+    assert policy.status()["notice"] == IMAGE_NOTICE
+    # An image that already provides it is told nothing.
+    publish(container={**contract.manifest_fields(), "recommends": ["source-supervisor"]})
+    on_image(updater, NEW_IMAGE).check()
+    assert status_of(updater)["notice"] is None
+
+
+@pytest.mark.parametrize("requires", ["base-1", ["Base 1"], [1], ["x"] * 33, {"base-1": True}])
+def test_manifest_with_malformed_capabilities_is_rejected(feed, requires):
+    updater, publish, _, _, _ = feed
+    envelope = publish(container={"requires": requires})
+    with pytest.raises((UpdateError, ValueError)):
+        verify_manifest(envelope, updater.public_key)
+
+
+@pytest.mark.parametrize(("container", "image", "missing"), [
+    ({"runtime": LEGACY}, TODAYS_IMAGE, []),
+    ({"runtime": LEGACY, "requires": ["base-1"]}, TODAYS_IMAGE, []),
+    (NEEDS_NEW_BASE, TODAYS_IMAGE, ["runtime"]),
+    (NEEDS_NEW_BASE, NEW_IMAGE, ["python-3.13"]),
+    ({"runtime": LEGACY, "requires": ["base-1"]}, NEW_IMAGE, []),
+    ({"runtime": "e" * 64}, NEW_IMAGE, ["runtime"]),
+])
+def test_missing_capabilities(container, image, missing):
+    assert missing_capabilities(container, image) == missing
+
+
+def installed(updater, publish, image=NEW_IMAGE, files=HANDOVER_FILES):
+    """An active, healthy update whose source carries ``files``."""
+    publish(container=contract.manifest_fields(),
+            entries={**{f"ai-shuffle-{B}/source.txt": "content"},
+                     **{f"ai-shuffle-{B}/{name}": "# " + name for name in files}})
+    current = on_image(updater, image)
+    current.check(download=True)
+    current.launch({}, activate=True)
+    current.activating()
+    current.healthy()
+    assert current.state == {"active": B}
+    return current
+
+
+def test_handover_target_is_the_verified_healthy_active_update(feed):
+    updater, publish, _, _, _ = feed
+    current = installed(updater, publish)
+    directory = current.directory(B)
+    assert handover_target(current.root, NEW_IMAGE, current.public_key) == (
+        B, directory / "venv/bin/python", directory / "source/docker/container_runtime.py")
+
+
+def test_no_handover_without_an_active_update_or_while_it_is_unproven(feed):
+    updater, publish, _, _, _ = feed
+    assert handover_target(updater.root, NEW_IMAGE, updater.public_key) is None
+    current = installed(updater, publish)
+    state = current.root / "state.json"
+    for extra in ({"booting": B}, {"blocked": B}, {"failed": [B]}):
+        state.write_text(json.dumps({"active": B, **extra}))
+        assert handover_target(current.root, NEW_IMAGE, current.public_key) is None, extra
+    state.write_text(json.dumps({"active": B}))
+    # A newer image runs its own code (ContainerUpdates then resets the state).
+    assert handover_target(current.root, dict(NEW_IMAGE, sequence=3), current.public_key) is None
+    # An image without what the update requires.
+    container = dict(NEEDS_NEW_BASE)
+    assert missing_capabilities(container, {"provides": ["base-1"], "runtime": LEGACY})
+    assert handover_target(current.root, dict(NEW_IMAGE, provides=[]), current.public_key) is None
+
+
+def test_a_supervisor_that_never_reached_ready_is_not_handed_over_to_again(feed):
+    updater, publish, _, _, _ = feed
+    current = installed(updater, publish)
+    (current.root / "handover.json").write_text(json.dumps({"revision": B}))
+    with pytest.raises(UpdateError, match="did not reach a healthy start"):
+        handover_target(current.root, NEW_IMAGE, current.public_key)
+    # A marker for another revision does not block this one.
+    (current.root / "handover.json").write_text(json.dumps({"revision": C}))
+    assert handover_target(current.root, NEW_IMAGE, current.public_key)[0] == B
+
+
+def test_handover_refuses_changed_or_unsigned_supervisor_code(feed):
+    updater, publish, _, _, _ = feed
+    current = installed(updater, publish)
+    script = current.directory(B) / "source/docker/container_runtime.py"
+    script.write_text("import os; os.system('evil')")
+    with pytest.raises(UpdateError, match="changed after download"):
+        handover_target(current.root, NEW_IMAGE, current.public_key)
+
+
+def test_handover_needs_the_supervisor_files_in_the_signed_listing(feed):
+    updater, publish, _, _, _ = feed
+    current = installed(updater, publish, files=("docker/application_updates.py",))
+    # Present on disk but not signed: never run.
+    script = current.directory(B) / "source/docker/container_runtime.py"
+    script.write_text("planted")
+    for name in ("chrome-supervisor.sh", "start-chrome.sh"):
+        (script.parent / name).write_text("planted")
+    assert handover_target(current.root, NEW_IMAGE, current.public_key) is None

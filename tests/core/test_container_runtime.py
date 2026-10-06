@@ -382,7 +382,10 @@ def test_chrome_gets_no_secrets_or_lifecycle_token(settings_factory, tmp_path, m
     spawned = {}
 
     def spawn(args, *, env, **kwargs):
-        spawned["chrome-supervisor" if args[0] == "chrome-supervisor" else "app"] = env
+        chrome = Path(args[0]).name in ("chrome-supervisor", "chrome-supervisor.sh")
+        spawned["chrome-supervisor" if chrome else "app"] = env
+        if chrome:
+            spawned["command"] = args
         return Mock()
 
     monkeypatch.setattr(runtime.subprocess, "Popen", spawn)
@@ -395,6 +398,12 @@ def test_chrome_gets_no_secrets_or_lifecycle_token(settings_factory, tmp_path, m
     for name in ("CHROME_CDP_PORT", "BROWSER_SSRF_ALLOW", "HTTPS_PROXY", "HOME", "PATH", "LANG", "TZ"):
         assert chrome[name] == os.environ[name]
     assert chrome["DATA_DIR"] == str(tmp_path)
+    # Chromium's launch scripts run from this source's private copy (#1821),
+    # removed when the supervisor ends.
+    private = Path(spawned["command"][0]).parent
+    assert spawned["command"] == [str(private / "chrome-supervisor.sh")]
+    assert chrome["START_CHROME_COMMAND"] == str(private / "start-chrome.sh")
+    assert not private.exists()
     # The app itself still gets what it needs.
     assert app["SECRET_KEY"] == "synthetic-secret-key"
     assert app["SHUFFLE_DESKTOP_LIFECYCLE_TOKEN"] == "synthetic-lifecycle-token"
@@ -979,3 +988,113 @@ def test_real_pg_wrong_retained_password_never_resets(settings_factory, tmp_path
         assert (retry.pg / "password").read_text() == "f" * 96
     finally:
         retry.close()
+
+
+# --- Hand-over to the active update's supervisor (#1821) ---------------------
+
+PRODUCTION = {"format": 2, "revision": "a" * 40, "sequence": 5, "runtime": "r", "provides": ["base-1", "source-supervisor"]}
+
+
+@pytest.fixture
+def image_here(tmp_path, monkeypatch):
+    """This file running as /app/docker/container_runtime.py of an image."""
+    here = tmp_path / "app" / "docker"
+    here.mkdir(parents=True)
+    (here / "application-update-key.pem").write_bytes(b"key")
+    monkeypatch.setattr(runtime, "__file__", str(here / "container_runtime.py"))
+    for name in ("SHUFFLE_HANDED_OVER", "SHUFFLE_SOURCE_SUPERVISOR", "SHUFFLE_IMAGE_DIR", "SHUFFLE_HANDOVER"):
+        monkeypatch.delenv(name, raising=False)
+
+    def image(record):
+        (here / "image.json").write_text(json.dumps(record))
+    image(PRODUCTION)
+    return here, image
+
+
+def updater_with(target=None, error=None):
+    def handover_target(root, image, key):
+        assert key == b"key"
+        if error:
+            raise error
+        return target
+    module = type("Updater", (), {"handover_target": staticmethod(handover_target)})
+    return lambda: module
+
+
+def test_handover_starts_the_verified_update_with_a_trial_marker(settings_factory, image_here, tmp_path, monkeypatch):
+    here, _ = image_here
+    settings = settings_factory()
+    (tmp_path / "application-updates").mkdir()
+    python, script = tmp_path / "venv/bin/python", tmp_path / "source/docker/container_runtime.py"
+    monkeypatch.setattr(runtime, "load_updater", updater_with(("b" * 40, python, script)))
+    monkeypatch.setenv("PYTHONPATH", "/somewhere")
+    execve = Mock()
+    assert runtime.handover(settings, execve=execve) is True
+    path, argv, env = execve.call_args.args
+    assert (path, argv) == (str(python), [str(python), str(script), "run"])
+    assert env["SHUFFLE_HANDED_OVER"] == "b" * 40 and env["SHUFFLE_IMAGE_DIR"] == str(here)
+    assert "PYTHONPATH" not in env and env["PYTHONNOUSERSITE"] == "1"
+    marker = tmp_path / "application-updates" / runtime.HANDOVER_TRIAL
+    assert json.loads(marker.read_text()) == {"revision": "b" * 40}
+    # The handed-over supervisor reads image.json and the key from the image.
+    monkeypatch.setenv("SHUFFLE_HANDED_OVER", "b" * 40)
+    monkeypatch.setenv("SHUFFLE_IMAGE_DIR", str(here))
+    assert runtime.image_dir() == here
+    # ...and never hands over again.
+    assert runtime.handover(settings, execve=execve) is False and execve.call_count == 1
+
+
+@pytest.mark.parametrize("record", [
+    dict(PRODUCTION, provides=["base-1"]),  # an image without the hand-over
+    dict(PRODUCTION, sequence=0),  # a development image
+    dict(PRODUCTION, revision="dev"),
+])
+def test_images_without_the_handover_run_their_own_supervisor(settings_factory, image_here, monkeypatch, record):
+    _, image = image_here
+    image(record)
+    monkeypatch.setattr(runtime, "load_updater", updater_with(error=AssertionError("not consulted")))
+    execve = Mock()
+    assert runtime.handover(settings_factory(), execve=execve) is False
+    execve.assert_not_called()
+
+
+def test_handover_can_be_switched_off(settings_factory, image_here, monkeypatch):
+    monkeypatch.setenv("SHUFFLE_SOURCE_SUPERVISOR", "0")
+    monkeypatch.setattr(runtime, "load_updater", updater_with(error=AssertionError("not consulted")))
+    assert runtime.handover(settings_factory(), execve=Mock()) is False
+
+
+@pytest.mark.parametrize("error", [None, RuntimeError("boom"), type("UpdateError", (Exception,), {})("blocked")])
+def test_no_target_or_any_failure_falls_back_to_the_image_supervisor(settings_factory, image_here, monkeypatch, error, capsys):
+    monkeypatch.setattr(runtime, "load_updater", updater_with(None, error))
+    execve = Mock()
+    assert runtime.handover(settings_factory(), execve=execve) is False
+    execve.assert_not_called()
+    if error is not None:
+        assert "running this image's supervisor" in capsys.readouterr().err
+
+
+def test_confirm_handover_clears_only_its_own_marker(tmp_path, monkeypatch):
+    marker = tmp_path / runtime.HANDOVER_TRIAL
+    marker.write_text(json.dumps({"revision": "c" * 40}))
+    monkeypatch.setattr(runtime, "_handover_confirmed", False)
+    monkeypatch.setenv("SHUFFLE_HANDED_OVER", "b" * 40)
+    runtime.confirm_handover(tmp_path)
+    assert marker.exists()
+    monkeypatch.setattr(runtime, "_handover_confirmed", False)
+    marker.write_text(json.dumps({"revision": "b" * 40}))
+    runtime.confirm_handover(tmp_path)
+    assert not marker.exists()
+
+
+def test_confirm_handover_is_a_no_op_for_the_image_supervisor(tmp_path, monkeypatch):
+    marker = tmp_path / runtime.HANDOVER_TRIAL
+    marker.write_text(json.dumps({"revision": "b" * 40}))
+    monkeypatch.setattr(runtime, "_handover_confirmed", False)
+    monkeypatch.delenv("SHUFFLE_HANDED_OVER", raising=False)
+    runtime.confirm_handover(tmp_path)
+    assert marker.exists()
+
+
+def test_chrome_falls_back_to_the_image_command_without_scripts_beside_it(image_here):
+    assert runtime.chrome_command({"A": "1"}) == (["chrome-supervisor"], {"A": "1"}, None)

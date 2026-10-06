@@ -1,0 +1,55 @@
+name: In-app update reach
+# Fails a pull request whose change cannot reach installed apps through the
+# in-app update without a migration path: a release that older Docker images
+# refuse, an unpinned change to what the image bakes in, a file the image runs
+# from its own copy, the installed Windows launcher, or the update trust key
+# (scripts/ci/update_reach.py, issue #1821). The owner accepts one on purpose
+# with a pull request label named update-reach:GROUP and then re-runs this job:
+# it reads the labels the pull request has when it runs. Label events do not
+# trigger it (see docs/ci/pr-checks.md on label events).
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - 'entrypoint.sh'
+      - 'docker/**'
+      - 'requirements*.txt'
+      - 'requirements*.lock'
+      - 'desktop/src/main/**'
+      - 'desktop/scripts/**'
+      - 'desktop/build/**'
+      - 'desktop/electron-builder.yml'
+      - 'scripts/source_archive.py'
+      - 'scripts/ci/update_reach.py'
+      - '.github/workflows/ci-update-reach.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: ci-update-reach-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  reach:
+    name: Update reach
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The check diffs against the merge base and reads files at the base.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check what installed apps can take in-app
+        env:
+          BASE: ${{ github.base_ref || 'main' }}
+          PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          labels=""
+          if [ -n "$PR" ]; then
+            labels=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json labels --jq '[.labels[].name] | join(",")')
+          fi
+          python scripts/ci/update_reach.py --base "origin/$BASE" --head HEAD --labels "$labels"

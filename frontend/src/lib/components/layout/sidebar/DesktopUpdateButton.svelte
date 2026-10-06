@@ -7,7 +7,7 @@
 	import NotificationSlot from '$lib/components/NotificationSlot.svelte';
 	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 
-	type Worker = { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null; request_pending?: boolean; channel?: string | null; checked_at?: number | null; role?: Role; label?: string; deferred?: boolean };
+	type Worker = { device_id: string; device_name: string; is_self?: boolean; phase: string; supported: boolean; online: boolean; allow_updates: boolean; version?: string; running_version?: string; percent?: number; message?: string; error?: string; reason?: string; release?: string | null; notes?: string | null; request_pending?: boolean; channel?: string | null; checked_at?: number | null; role?: Role; label?: string; deferred?: boolean; notice?: string | null };
 	type Operation = { id: string; phase: 'waiting' | 'complete' | 'error'; completed_at?: number; workers: { device_id: string; device_name: string; status: string; message: string }[] };
 	type Snapshot = { allow_updates: boolean; update_all_workers: boolean; server_time?: number; workers: Worker[]; operation?: Operation | null };
 	// excluded: not part of this update (offline, no updater, disabled, current, nothing offered).
@@ -70,8 +70,12 @@
 	// The worker classifies (app/core/update_workers.py classify()); the copy
 	// below only covers a snapshot without roles.
 	const offers = $derived(offeredUpdates(snapshot));
-	const rows = $derived(snapshot?.workers.map(worker => ({ worker, ...(worker.role && typeof worker.label === 'string'
-		? { role: worker.role, label: worker.label } : classify(worker, snapshot!.update_all_workers, offers)) })) ?? []);
+	const rows = $derived(snapshot?.workers.map(worker => withNotice(worker, worker.role && typeof worker.label === 'string'
+		? { role: worker.role, label: worker.label } : classify(worker, snapshot!.update_all_workers, offers))) ?? []);
+	// A Docker worker told ahead that a coming update needs a newer image (#1821).
+	function withNotice(worker: Worker, row: { role: Role; label: string }) {
+		return { worker, role: row.role, label: worker.notice && worker.phase !== 'image-required' ? `${row.label}; a coming update needs a newer Docker image` : row.label };
+	}
 	const targets = $derived(rows.filter(row => row.role !== 'excluded'));
 	const downloading = $derived(targets.some(row => row.role === 'preparing'));
 	const available = $derived(targets.some(row => row.role === 'available'));

@@ -32,7 +32,7 @@ cp.execFileSync=(exe,args)=>{
   if(args[0]==='tag'&&args[2]==='--format=%(contents:body)')return 'Faster startup.\n-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----\n';
   throw Error('Unexpected git command '+args.join(' '));
  }
- if(exe==='python'&&args[0]==='docker/update_contract.py')return 'b'.repeat(64)+'\n';
+ if(exe==='python'&&args[0]==='docker/update_contract.py')return JSON.stringify({runtime:'b'.repeat(64),requires:['base-1'],recommends:[]})+'\n';
  if(exe==='python'&&args[0]==='android/ci/resolve-version-name.py')return '0.8.18-dev.4+gaaaaaaa\n';
  if(exe==='python'&&args[0]==='scripts/source_archive.py'){
   if(args[1]!==revision)throw Error('Archive built for the wrong revision');

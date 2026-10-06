@@ -14,6 +14,7 @@ from pathlib import Path
 import pwd
 import re
 import secrets
+import shutil
 import signal
 import stat
 import subprocess
@@ -38,6 +39,15 @@ APP_USER = "ai_shuffle"
 APP_DB = "ai_shuffle"
 ADMIN = "shuffle_admin"
 STOP = threading.Event()
+# Hand-over (#1821). An image that provides "source-supervisor" starts the
+# active update's own copy of this file, passing SHUFFLE_HANDED_OVER (the
+# revision), SHUFFLE_IMAGE_DIR (its image.json and trust key) and
+# SHUFFLE_HANDOVER (this protocol number). Every later copy of this file must
+# keep accepting what protocol 1 images pass, because those images stay in the
+# field. SHUFFLE_SOURCE_SUPERVISOR=0 in the container settings turns it off.
+HANDOVER_PROTOCOL = "1"
+HANDOVER_TRIAL = "handover.json"
+_handover_confirmed = False
 
 
 class RuntimeFailure(Exception):
@@ -513,6 +523,102 @@ class Database:
                 self.lock.close()
 
 
+def image_dir():
+    """The image's own /app/docker: image.json and the update trust key. Under
+    a hand-over this file runs from an update, but those stay the image's."""
+    if os.environ.get("SHUFFLE_HANDED_OVER") and os.environ.get("SHUFFLE_IMAGE_DIR"):
+        return Path(os.environ["SHUFFLE_IMAGE_DIR"])
+    return Path(__file__).resolve().parent
+
+
+def is_production(image):
+    """A provenance-free development image stays pinned to its own code."""
+    return image.get("sequence", 0) > 0 and bool(re.fullmatch(r"[a-f0-9]{40}", image.get("revision", "")))
+
+
+def load_updater():
+    """The updater beside this file (the image's, or the update's after a hand-over)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("shuffle_container_updates", Path(__file__).with_name("application_updates.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def handover(settings, execve=os.execve):
+    """Start the active update's own supervisor in place of this image's copy.
+
+    Runs once at container start, as appuser, before PostgreSQL or anything
+    else starts. The update qualifies only when its signed manifest and every
+    source file verify against this image's key, it runs on this image, and it
+    is healthy (no first boot pending or blocked). A trial marker names it until
+    its supervisor reports a ready app; if that never happens, the next start
+    runs this image's supervisor instead, over the same update. Returns False
+    when this image's supervisor should run; on success it does not return.
+    """
+    if os.environ.get("SHUFFLE_HANDED_OVER") or os.environ.get("SHUFFLE_SOURCE_SUPERVISOR", "1").strip() == "0":
+        return False
+    here = Path(__file__).resolve().parent
+    try:
+        image = json.loads((here / "image.json").read_text())
+    except (OSError, ValueError):
+        return False
+    if not is_production(image) or "source-supervisor" not in (image.get("provides") or []):
+        return False
+    root = safe_path(Path(settings.effective_data_dir) / "application-updates")
+    try:
+        module = load_updater()
+        target = module.handover_target(root, image, (here / "application-update-key.pem").read_bytes())
+    except Exception as exc:
+        reason = str(exc) if type(exc).__name__ == "UpdateError" else f"{type(exc).__name__} while checking the update"
+        log(f"running this image's supervisor: {reason}")
+        return False
+    if target is None:
+        return False
+    revision, python, script = target
+    write_private(root / HANDOVER_TRIAL, json.dumps({"revision": revision}), replace=True)
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
+    env.update(SHUFFLE_HANDED_OVER=revision, SHUFFLE_IMAGE_DIR=str(here),
+               SHUFFLE_HANDOVER=HANDOVER_PROTOCOL, PYTHONNOUSERSITE="1")
+    log(f"starting the supervisor of application update {revision[:12]}")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    execve(str(python), [str(python), str(script), "run"], env)
+    return True
+
+
+def confirm_handover(root):
+    """This handed-over supervisor got the app ready: clear its trial marker."""
+    global _handover_confirmed
+    revision = os.environ.get("SHUFFLE_HANDED_OVER")
+    if _handover_confirmed or not revision:
+        return
+    _handover_confirmed = True
+    marker = Path(root) / HANDOVER_TRIAL
+    try:
+        if json.loads(marker.read_text()).get("revision") == revision:
+            marker.unlink()
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def chrome_command(env):
+    """chrome-supervisor and start-chrome from beside this file, copied to a
+    private directory for this container's life: an in-place update prunes old
+    builds while Chromium keeps running and relaunching from these scripts.
+    Returns (command, env, directory or None)."""
+    here = Path(__file__).resolve().parent
+    scripts = [here / "chrome-supervisor.sh", here / "start-chrome.sh"]
+    if not all(script.is_file() for script in scripts):
+        return ["chrome-supervisor"], env, None
+    private = Path(tempfile.mkdtemp(prefix="ai-shuffle-chrome-"))
+    for script in scripts:
+        shutil.copyfile(script, private / script.name)
+        (private / script.name).chmod(0o700)
+    return ([str(private / "chrome-supervisor.sh")],
+            dict(env, START_CHROME_COMMAND=str(private / "start-chrome.sh")), private)
+
+
 def drop_privileges(settings):
     """Root may prepare mount roots, never recursively repair database files."""
     if os.geteuid() == 0:
@@ -598,6 +704,7 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None):
                 return 1
             if updates is not None and monitor.ever_ready and monitor.failures == 0:
                 updates.healthy()
+                confirm_handover(updates.root)
         if updates is not None and time.monotonic() >= next_update:
             next_update = time.monotonic() + 1
             if updates.install_requested.is_set():
@@ -635,7 +742,7 @@ def shutdown(app, chrome, db):
 
 def run(settings, action, filename=None):
     db = Database(settings)
-    app = chrome = chrome_log = source = updates = None
+    app = chrome = chrome_log = chrome_scripts = source = updates = None
     try:
         if action == "restore":
             # pg_restore inherits the OS descriptor, not Python's buffered
@@ -662,16 +769,13 @@ def run(settings, action, filename=None):
                if not k.startswith(("DATABASE_", "POSTGRES_", "PG"))}
         env["DATA_DIR"] = str(settings.effective_data_dir)
         # A provenance-free development image stays pinned. Production images
-        # carry a main-history ordinal and the immutable runtime fingerprint.
-        image_file = Path(__file__).with_name("image.json")
+        # carry a main-history ordinal and what they provide (update_contract).
+        image_file = image_dir() / "image.json"
         if image_file.is_file():
             image = json.loads(image_file.read_text())
-            if image.get("sequence", 0) > 0 and re.fullmatch(r"[a-f0-9]{40}", image.get("revision", "")):
+            if is_production(image):
                 import httpx
-                import importlib.util
-                spec = importlib.util.spec_from_file_location("shuffle_container_updates", Path(__file__).with_name("application_updates.py"))
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                module = load_updater()
                 ContainerUpdates, UpdateError = module.ContainerUpdates, module.UpdateError
                 token = secrets.token_hex(32)
                 env["SHUFFLE_DESKTOP_LIFECYCLE_TOKEN"] = token
@@ -701,7 +805,7 @@ def run(settings, action, filename=None):
                     return value if isinstance(value, str) and value else None
 
                 try:
-                    updates = ContainerUpdates(root, image, Path(__file__).with_name("application-update-key.pem").read_bytes(),
+                    updates = ContainerUpdates(root, image, (image_dir() / "application-update-key.pem").read_bytes(),
                                                lambda: lifecycle("update-policy").get("allow_updates") is True, lifecycle,
                                                channel=channel, lease=lease)
                 except UpdateError as exc:
@@ -711,7 +815,8 @@ def run(settings, action, filename=None):
             logdir.mkdir(parents=True, exist_ok=True)
             chrome_log = open(logdir / "chrome.log", "ab")
             # Only the app's copy carries secrets and the lifecycle token.
-            chrome = subprocess.Popen(["chrome-supervisor"], env=chrome_env(env), stdout=chrome_log, stderr=chrome_log, start_new_session=True)
+            command, child_env, chrome_scripts = chrome_command(chrome_env(env))
+            chrome = subprocess.Popen(command, env=child_env, stdout=chrome_log, stderr=chrome_log, start_new_session=True)
         if STOP.is_set():
             return 0
         try:
@@ -750,6 +855,8 @@ def run(settings, action, filename=None):
                 source.close()
             if chrome_log is not None:
                 chrome_log.close()
+            if chrome_scripts is not None:
+                shutil.rmtree(chrome_scripts, ignore_errors=True)
 
 
 def main(argv=None):
@@ -767,6 +874,8 @@ def main(argv=None):
         drop_privileges(settings)
         # After the drop: setuid() resets the flag to suid_dumpable.
         harden_process_introspection(settings)
+        if (args.action or "run") == "run":
+            handover(settings)
         return run(settings, args.action or "run", getattr(args, "file", None))
     except RuntimeFailure as error:
         log(str(error))

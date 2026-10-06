@@ -6,7 +6,7 @@ vi.mock('$lib/api/client', () => ({
 	getErrorMessage: (e: { detail?: string }, fallback: string) => e?.detail ?? fallback
 }));
 
-import { CHECK_POLL_MS, CHECK_TIMEOUT_MS, UpdatesState, describeWorker } from './updates-state.svelte';
+import { CHECK_POLL_MS, CHECK_TIMEOUT_MS, IMAGE_HINT, UpdatesState, describeWorker, imageHint } from './updates-state.svelte';
 
 const self = (phase: string, extra: Record<string, unknown> = {}) => ({
 	device_id: 'self',
@@ -168,5 +168,28 @@ describe('describeWorker', () => {
 			tone: 'off',
 			text: 'Updates disabled'
 		});
+	});
+});
+
+describe('newer Docker image hint (#1821)', () => {
+	it('says the current version keeps working and how to get a newer image', () => {
+		expect(IMAGE_HINT).toMatch(/^Your current version keeps working\. /);
+		expect(IMAGE_HINT).toContain('Force update');
+		expect(IMAGE_HINT).toContain('docker compose pull');
+		expect(imageHint(self('image-required'))).toBe(IMAGE_HINT);
+		expect(imageHint(self('ready', { notice: 'A coming update needs a newer Docker image.' }))).toMatch(
+			/^A coming update needs a newer Docker image\. To get a newer Docker image:/
+		);
+		expect(imageHint(self('idle'))).toBeUndefined();
+	});
+
+	it('shows the hint once under the results of a check', async () => {
+		await ready();
+		transport.post.mockResolvedValue({ results: [] });
+		snapshots = [[self('image-required'), { ...self('image-required'), device_id: 'peer', device_name: 'Unraid' }]];
+		await state.check();
+		expect(state.checking).toBe(false);
+		expect(state.rows?.map((row) => row.hint)).toEqual([IMAGE_HINT, IMAGE_HINT]);
+		expect(state.rows?.[0]).toMatchObject({ tone: 'err', text: 'Needs a new Docker image' });
 	});
 });

@@ -214,7 +214,7 @@ async def _remote(row, body):
             raise ValueError("Invalid peer update response")
         fields = ("accepted", "reason", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error",
                   "request_pending", "checked_at", "channel", "release", "notes", "kind",
-                  "revision", "app_version", "busy", "deferred")
+                  "revision", "app_version", "busy", "deferred", "notice")
         return {key: result[key] for key in fields if key in result}
     except control.ControlRefused:
         # The peer answered and declined (an older build without the updater
@@ -418,7 +418,7 @@ async def snapshot(*, fresh=False):
         _discover(rows, verifying)
     # Only return display fields, never peer endpoints/certificates.
     fields = ("device_id", "device_name", "is_self", "online", "supported", "allow_updates", "phase", "version", "running_version", "percent", "message", "error", "reason",
-              "request_pending", "checked_at", "channel", "release", "notes", "role", "label", "deferred")
+              "request_pending", "checked_at", "channel", "release", "notes", "role", "label", "deferred", "notice")
     # server_time lets a browser judge how recent a completion is without
     # trusting its own clock (completed_at is stamped by this worker).
     return {"allow_updates": local["allow_updates"], "update_all_workers": all_workers,

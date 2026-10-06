@@ -16,6 +16,8 @@
 	}
 
 	let { rows, running, error = '' }: Props = $props();
+	// One copy of each hint, however many workers share it.
+	const hints = $derived([...new Set(rows.flatMap((row) => (row.hint ? [row.hint] : [])))]);
 </script>
 
 {#if rows.length === 0 && running}
@@ -30,5 +32,6 @@
 			</SettingRow>
 		{/each}
 	</div>
+	{#each hints as hint (hint)}<p class="st-msg">{hint}</p>{/each}
 {/if}
 {#if error}<p class="st-msg err" role="alert">{error}</p>{/if}
