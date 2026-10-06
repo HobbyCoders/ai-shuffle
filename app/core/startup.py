@@ -639,11 +639,11 @@ def start_background_tasks() -> List[asyncio.Task]:
     tasks.append(asyncio.create_task(wakeup_service.rehydrate_pending()))
     logger.info("Durable-wakeup rehydrate scheduled")
 
-    # Queued hand-offs to another worker live in memory, so the restart
-    # dropped them: say so in each chat instead of leaving it showing a queued
-    # move nothing will run.
+    # Queued moves to another worker are kept in the database: they wait
+    # again with their held messages, or expire as usual (#1819). Moves noted
+    # by an older version only in a file are announced as cancelled.
     from app.core import session_handoff
-    tasks.append(asyncio.create_task(session_handoff.announce_dropped()))
+    tasks.append(asyncio.create_task(session_handoff.on_boot()))
 
     # Idle-at-edge watchdog: periodic sweep that nudges sessions sitting
     # idle above the context-window edge so the CLI runs its deferred compaction

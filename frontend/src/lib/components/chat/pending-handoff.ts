@@ -9,21 +9,25 @@
  * `moved`, `failed` or `timeout`. A later call with `cancel` drops the request.
  *
  * Only the newest of those decides, so this walks back from the end and stops
- * at the first one. A worker restart drops a queued request (the backend
- * keeps it in memory); the next boot records a `cancelled` row for it, so the
- * chat stops showing it as queued.
+ * at the first one. A queued request survives a restart of the owning worker,
+ * which resumes it; one it cannot resume ends with a `cancelled` or `timeout`
+ * row, so the chat never shows a queued move that no longer exists.
  *
  * The owner's "Move when this turn ends" (#1819) queues the same hand-off on
- * the owning worker, which records a `queued` row; cancelling it records
- * `cancelled`. Both read the same way here, whoever queued the move.
+ * the owning worker, which records a `queued` row (`after: 'queued'` when
+ * queued messages run first); cancelling it records `cancelled`. Both read the
+ * same way here, whoever queued the move.
  */
 import type { ChatMessage } from '$lib/stores/types';
+import type { QueuedMoveBusy } from '$lib/api/sessions';
 
 export interface PendingHandoff {
 	/** The target worker's label, as the tool reported it. */
 	worker: string;
 	/** 'queued': waiting for the turn to end. 'moving': commit, push and move running. */
 	phase: 'queued' | 'moving';
+	/** Queued messages run before the move (#1819). */
+	afterQueued?: boolean;
 }
 
 const HAND_OFF_TOOL = /(^|__)HandOffSession$/;
@@ -58,7 +62,9 @@ export function pendingHandoff(messages: readonly ChatMessage[]): PendingHandoff
 			const worker = typeof data.worker === 'string' ? data.worker : '';
 			if (TERMINAL.has(status)) return null;
 			if (status === 'started' && worker) return { worker, phase: 'moving' };
-			if (status === 'queued' && worker) return { worker, phase: 'queued' };
+			if (status === 'queued' && worker) {
+				return data.after === 'queued' ? { worker, phase: 'queued', afterQueued: true } : { worker, phase: 'queued' };
+			}
 			continue;
 		}
 		if (m.type !== 'tool_use' || !HAND_OFF_TOOL.test(m.toolName ?? '')) continue;
@@ -72,4 +78,21 @@ export function pendingHandoff(messages: readonly ChatMessage[]): PendingHandoff
 		}
 	}
 	return null;
+}
+
+/**
+ * The composer's placeholder while a move waits or runs (#1819). Messages sent
+ * meanwhile are held and sent on the new worker after the move.
+ */
+export function handoffPlaceholder(handoff: PendingHandoff | null): string | null {
+	if (!handoff) return null;
+	if (handoff.phase === 'moving') return `Moving to ${handoff.worker}…`;
+	return handoff.afterQueued
+		? `Moves to ${handoff.worker} after the queued messages`
+		: `Moves to ${handoff.worker} after this turn`;
+}
+
+/** Whether `busy` keeps the chat from moving now: it then queues the move. */
+export function moveBlocked(busy: QueuedMoveBusy): boolean {
+	return busy.running || busy.tasks.length > 0 || !!busy.wake;
 }

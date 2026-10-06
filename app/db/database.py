@@ -2370,6 +2370,25 @@ def _run_column_migrations(cursor):
         "ON upload_blobs(session_id)"
     )
 
+    # session_moves (#1819) — a queued move to another worker and the owner's
+    # messages held for it, so a restart resumes the move. Same idempotent
+    # guard as git_ops above; no SCHEMA_VERSION bump (the migrations
+    # fingerprint re-runs this pass).
+    if not table_exists(cursor, "session_moves"):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS session_moves (
+                session_id TEXT PRIMARY KEY,
+                target_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                requested_by TEXT NOT NULL DEFAULT 'agent',
+                requested_at DOUBLE PRECISION NOT NULL,
+                expires_at DOUBLE PRECISION NOT NULL,
+                held JSONB NOT NULL DEFAULT '[]'
+            )
+        """)
+        migrations_applied.append("session_moves")
+
     # Tool access (v82). Stamp ``tool_selection_mode`` into
     # every agent config so the runtime rule has no legacy branch, and fold the
     # two retired switches (``ai_tools`` / ``app_config_tools``) into the tool

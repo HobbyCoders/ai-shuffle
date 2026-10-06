@@ -325,6 +325,10 @@ export interface QueuedMoveBusy {
 	running: boolean;
 	/** Names of its running background tasks (subagents, Monitors, shells). */
 	tasks: string[];
+	/** Messages waiting in its queue; they run before the move. Older owners omit it. */
+	queued?: number;
+	/** A scheduled wake-up is about to fire. Older owners omit it. */
+	wake?: boolean;
 }
 
 export interface QueuedMoveState {
@@ -346,7 +350,7 @@ export async function queueMove(
 	sessionId: string,
 	targetInstanceId?: string,
 	stop = false
-): Promise<{ queued: boolean; worker: string }> {
+): Promise<{ queued: boolean; worker: string; after?: 'turn' | 'queued' }> {
 	return api.post<{ queued: boolean; worker: string }>(`/sessions/${sessionId}/handoff`, {
 		...(targetInstanceId ? { target_instance_id: targetInstanceId } : {}),
 		stop

@@ -1,6 +1,7 @@
 """Online, leased checkout and transcript handoff between authenticated workers."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -65,12 +66,123 @@ def _has_live_tasks(cursor, sid):
     return False
 
 
+OPEN_PROMPT = "Answer or dismiss the open prompt first."
+
+
+def open_prompt(cursor, sid):
+    """Whether ``sid`` shows the owner an open approval, question or access card.
+
+    Those cards live only on this worker and do not move (#1819), so a move
+    with one open would leave the agent waiting for an answer nobody can give.
+    """
+    cursor.execute("SELECT 1 FROM pending_interactions WHERE session_id=%s AND state='pending' "
+                   "AND (expires_at IS NULL OR expires_at >= NOW()) LIMIT 1", (sid,))
+    if cursor.fetchone():
+        return True
+    from app.core.chat_access import broker
+
+    return broker.pending_count(sid) > 0
+
+
 def _idle(cursor, sid):
     if _has_live_tasks(cursor, sid):
         raise ValueError("Wait for this session's background work to finish before resuming here.")
     cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND state IN ('queued','running','interrupting','draining') LIMIT 1", (sid,))
     if cursor.fetchone():
         raise ValueError("Wait for this session's queued or active turn to finish before resuming here.")
+    if open_prompt(cursor, sid):
+        raise ValueError(OPEN_PROMPT)
+
+
+# Pending wake-ups (ScheduleWakeup, usage-limit resumes, held peer messages)
+# move with the chat (#1819): ``begin`` sends them, ``_commit`` deletes them
+# here and the receiver re-creates and arms them once it owns the session. A
+# receiver whose capabilities lack ``move_wakes`` ignores them, so the chat is
+# told which ones will not run (``uncarried_wakes``). ``move_wakes`` version 1
+# also means the receiver drops a repeated ``command_id`` on a forwarded turn
+# and accepts the ``note`` operation of ``session-move`` (session_handoff).
+WAKE_COLUMNS = ("id", "prompt", "fire_at", "profile_id", "project_id", "reason", "model", "source")
+
+
+def _session_wakes(sid):
+    from app.db import wakeups
+
+    return [{column: row.get(column) for column in WAKE_COLUMNS}
+            for row in wakeups.get_session_wakeups(sid)]
+
+
+def wake_carry(target):
+    """True when ``target`` keeps moved wakes, False when it cannot, None when unknown."""
+    from app.network import runners
+
+    capabilities = (runners.find(target) or {}).get("capabilities") or {}
+    if not capabilities:
+        return None
+    return int(capabilities.get("move_wakes") or 0) >= 1
+
+
+def carries_wakes(target):
+    return wake_carry(target) is True
+
+
+def wake_label(row):
+    """Plain words for one wake: what it does and when, for the chat."""
+    from datetime import datetime, timezone
+    from app.core import wakeup_service
+
+    when = datetime.fromtimestamp(float(row.get("fire_at") or 0), timezone.utc).strftime("%H:%M UTC")
+    source = row.get("source")
+    if source == wakeup_service.LIMIT_RESUME_SOURCE:
+        return f"the resume after the usage limit at {when}"
+    if source == wakeup_service.HELD_PEER_SOURCE:
+        return f"a held message from another chat due at {when}"
+    return f"the scheduled wake-up at {when}"
+
+
+def uncarried_wakes(sid, target):
+    """The wakes a move of ``sid`` to ``target`` may drop, and whether that is certain.
+
+    ``([], True)`` when the receiver keeps them; ``(wakes, False)`` when its
+    capabilities are not known yet, so it may or may not.
+    """
+    carry = wake_carry(target)
+    if carry:
+        return [], True
+    return _session_wakes(sid), carry is False
+
+
+def _moving_wakes(data):
+    """Commit field naming the wakes this receiver installs (begin's snapshot)."""
+    if "wakes" not in data:
+        return {}
+    return {"wake_ids": [str(w.get("id")) for w in data.get("wakes") or [] if w.get("id")]}
+
+
+def install_wakes(sid, wakes):
+    """Receiver: re-create the moved wakes here. Returns the rows to arm."""
+    from app.db import wakeups
+
+    rows = []
+    for wake in wakes or []:
+        if not isinstance(wake, dict) or not wake.get("id"):
+            continue
+        try:
+            rows.append(wakeups.create_wakeup(
+                id=str(wake["id"]), session_id=sid, prompt=str(wake.get("prompt") or ""),
+                fire_at=float(wake.get("fire_at") or 0), profile_id=wake.get("profile_id"),
+                project_id=wake.get("project_id"), reason=wake.get("reason"), model=wake.get("model"),
+                source=str(wake.get("source") or "schedule_wakeup"),
+                instance_id=settings.effective_instance_id))
+        except Exception:  # noqa: BLE001 — already here (a shared database); keep the rest
+            logger.warning("Could not install moved wake %s for %s", wake.get("id"), sid, exc_info=True)
+    return rows
+
+
+async def _arm_moved_wakes(sid, wakes):
+    from app.core import wakeup_service
+
+    for row in await run_sync(install_wakes, sid, wakes):
+        wakeup_service.arm_persisted(row)
 
 
 HANDOFF = "handoff:"
@@ -239,7 +351,9 @@ def _lease(cur, sid, target, token):
     return dict(row)
 
 
-def begin(sid, target, remote=None):
+def begin(sid, target, remote=None, note=None):
+    """Owner: export the chat for ``target``. ``note`` runs once every check passed,
+    before the history is read, so what it records travels with the chat."""
     control._require_owned(sid)
     session = database.get_session(sid)
     project = project_resolver.resolve_project_v2(session)
@@ -266,8 +380,11 @@ def begin(sid, target, remote=None):
             # sessions working there; they keep their files and work.
             _hold_checkout(session, project, cwd, branch, HOLD + run["id"], held)
         state = checkout_transfer.export_checkout(cwd, branch, remote) if project else None
+        if note is not None:
+            note()
         data = dict(checkout=state, history=_history(session), sdk_session_id=session.get("sdk_session_id"),
-                    project_id=project["id"] if project else None, token=run["id"])
+                    project_id=project["id"] if project else None, token=run["id"],
+                    wakes=_session_wakes(sid))
         raw = json.dumps(data, default=str).encode()
         ctx = engine.require_context()
         return {"payload": crypto.encrypt_payload(ctx.network_key, raw, _aad(sid, target)), "key_version": ctx.key_version}
@@ -334,6 +451,14 @@ def _commit(sid, target, payload, token):
         cur = conn.cursor()
         _lease(cur, sid, target, token)
         _idle(cur, sid)
+        moving = payload.get("wake_ids")
+        if moving is not None:
+            # The receiver installs only the wakes begin sent. One created or
+            # replaced since would be deleted here without running anywhere.
+            cur.execute("SELECT id FROM pending_wakeups WHERE session_id=%s", (sid,))
+            if {row["id"] for row in cur.fetchall()} != set(moving):
+                raise ValueError("A wake-up of this chat changed during the move; ownership was not moved. "
+                                 "Try again.")
         cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, branch=%s, updated_at=NOW() WHERE id=%s",
                     (target, target, json.dumps({"where": "runner:" + target}), session_branch, sid))
         if session_branch is None:
@@ -342,6 +467,21 @@ def _commit(sid, target, payload, token):
         engine.record(cur, "sessions", sid, dict(cur.fetchone()), force=True)
         cur.execute("UPDATE runs SET state='transferred' WHERE id=%s", (token,))
         _release_holds(cur, HOLD + token)
+        # The receiver re-creates them (``wakes`` in begin's data); none may
+        # also fire here. A receiver that names them gets exactly those
+        # deleted; an older one sends no list and keeps the old behaviour.
+        if moving is None:
+            cur.execute("DELETE FROM pending_wakeups WHERE session_id=%s RETURNING id", (sid,))
+            moved_wakes = [row["id"] for row in cur.fetchall()]
+        else:
+            moved_wakes = list(dict.fromkeys(moving))
+            if moved_wakes:
+                cur.execute("DELETE FROM pending_wakeups WHERE session_id=%s AND id IN ("
+                            + ", ".join(["%s"] * len(moved_wakes)) + ")", (sid, *moved_wakes))
+    if moved_wakes:
+        from app.core import wakeup_service
+
+        wakeup_service._disarm(moved_wakes)
     engine.kick()
     return {"committed": True}
 
@@ -369,8 +509,17 @@ async def handle(payload, peer_device_id):
         invalidate_working_dir_cache(session_id=sid)
         return {"moved": cwd is not None}
     if payload.get("phase") == "begin":
+        loop = asyncio.get_running_loop()
+
+        def note():
+            # The wakes note is written only once begin's checks passed (a
+            # refused move keeps every wake here) and never blocks the move.
+            try:
+                asyncio.run_coroutine_threadsafe(_note_uncarried_wakes(sid, peer_device_id), loop).result(30)
+            except Exception:  # noqa: BLE001
+                logger.warning("Could not note the wakes of %s before a move", sid, exc_info=True)
         try:
-            return await run_sync(begin, sid, peer_device_id, payload.get("remote"))
+            return await run_sync(begin, sid, peer_device_id, payload.get("remote"), note)
         except BaseException:
             _wake_queued()
             raise
@@ -380,6 +529,43 @@ async def handle(payload, peer_device_id):
         finally:
             _wake_queued()
     raise ValueError("Unknown handoff phase")
+
+
+# (session, wake id, target) already named in the chat: a retried move does
+# not repeat the note.
+_noted_wakes: set = set()
+
+
+async def _note_uncarried_wakes(sid, target):
+    """Before an older receiver takes the chat: say which wakes will not run there.
+
+    Recorded before ``begin`` reads the history, so the note travels with it.
+    """
+    try:
+        wakes, certain = await run_sync(uncarried_wakes, sid, target)
+    except Exception:  # noqa: BLE001 — the note must never block the move
+        logger.warning("Could not check the wakes of %s before a move", sid, exc_info=True)
+        return
+    from app.core import wakeup_service
+    from app.core.turn_recorder import record_drained_event
+    from app.network import runners
+
+    label = str((runners.find(target) or {}).get("device_name") or "the other worker")
+    for wake in wakes:
+        key = (sid, str(wake.get("id")), target)
+        if key in _noted_wakes:
+            continue
+        _noted_wakes.add(key)
+        if certain:
+            message = (f"Moving to {label}, which runs an older version that cannot keep "
+                       f"{wake_label(wake)}. It will not run. Send a message there to continue.")
+        else:
+            message = (f"Moving to {label}. This worker cannot tell whether {label} can keep "
+                       f"{wake_label(wake)}; if it runs an older version, it will not run. "
+                       "Send a message there to continue.")
+        await record_drained_event(sid, {"type": "system", "subtype": wakeup_service.DROPPED_NOTE_SUBTYPE,
+                                         "data": {"message": message, "reason": "moved",
+                                                  "source": wake.get("source"), "wakeup_id": wake.get("id")}})
 
 
 def install_history(sid, data, cwd):
@@ -555,11 +741,13 @@ async def _pull(session, owner, ctx, project, base, remote, held, holder):
             result = await control.call(owner, "handoff", {"session_id": sid,
                 "phase": "commit", "token": token,
                 "fingerprint": None, "branch": None, "session_branch": None,
+                **_moving_wakes(data),
             }, timeout=180)
             if not result.get("committed"):
                 raise ValueError("The owning worker did not confirm the transfer.")
             committed = True
             await run_sync(_accept_owner, sid, ctx.device_id, None)
+            await _arm_moved_wakes(sid, data.get("wakes"))
             return cwd
         if not state or (expected_branch and state["branch"] != expected_branch):
             raise ValueError("The owning worker's branch changed; refresh before resuming.")
@@ -584,11 +772,13 @@ async def _pull(session, owner, ctx, project, base, remote, held, holder):
             "fingerprint": state["fingerprint"],
             "branch": state["branch"],
             "session_branch": session_branch,
+            **_moving_wakes(data),
         }, timeout=180)
         if not result.get("committed"):
             raise ValueError("The owning worker did not confirm the transfer.")
         committed = True
         await run_sync(_accept_owner, sid, ctx.device_id, session_branch)
+        await _arm_moved_wakes(sid, data.get("wakes"))
         return cwd
     finally:
         if not committed:

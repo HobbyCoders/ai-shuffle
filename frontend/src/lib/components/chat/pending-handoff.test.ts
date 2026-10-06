@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
-import { pendingHandoff } from './pending-handoff';
+import { handoffPlaceholder, moveBlocked, pendingHandoff } from './pending-handoff';
 
 const call = (result: unknown, input: Record<string, unknown> = { worker: 'DesktopWorker' }, extra: Partial<ChatMessage> = {}): ChatMessage => ({
 	id: `call-${Math.random()}`, role: 'assistant', type: 'tool_use', content: '', toolStatus: 'complete',
@@ -48,5 +48,42 @@ describe('pendingHandoff', () => {
 	it('a newer queued hand-off after a finished one is pending again', () => {
 		const other = JSON.stringify({ queued: true, worker: 'Unraid' });
 		expect(pendingHandoff([call(queued), note('moved'), call(other)])).toEqual({ worker: 'Unraid', phase: 'queued' });
+	});
+});
+
+describe('#1819 move waits', () => {
+	const row = (data: Record<string, unknown>): ChatMessage => ({
+		id: `row-${Math.random()}`, role: 'system', type: 'system', content: '', systemSubtype: 'handoff', systemData: data
+	});
+
+	it('reads a move queued behind queued messages', () => {
+		expect(pendingHandoff([row({ status: 'queued', worker: 'DesktopWorker', after: 'queued' })])).toEqual({
+			worker: 'DesktopWorker', phase: 'queued', afterQueued: true
+		});
+		expect(pendingHandoff([row({ status: 'queued', worker: 'DesktopWorker', after: 'turn' })])).toEqual({
+			worker: 'DesktopWorker', phase: 'queued'
+		});
+	});
+
+	it('tells the composer where new messages go', () => {
+		expect(handoffPlaceholder(null)).toBeNull();
+		expect(handoffPlaceholder({ worker: 'DesktopWorker', phase: 'queued' })).toBe('Moves to DesktopWorker after this turn');
+		expect(handoffPlaceholder({ worker: 'DesktopWorker', phase: 'queued', afterQueued: true })).toBe(
+			'Moves to DesktopWorker after the queued messages'
+		);
+		expect(handoffPlaceholder({ worker: 'DesktopWorker', phase: 'moving' })).toBe('Moving to DesktopWorker…');
+	});
+
+	it('ends the wait on a timeout, a refusal or a restart it could not resume', () => {
+		const queuedRow = row({ status: 'queued', worker: 'DesktopWorker' });
+		for (const status of ['timeout', 'failed', 'cancelled']) {
+			expect(pendingHandoff([queuedRow, row({ status, worker: 'DesktopWorker' })])).toBeNull();
+		}
+	});
+
+	it('counts a wake-up about to fire as busy', () => {
+		expect(moveBlocked({ running: false, tasks: [] })).toBe(false);
+		expect(moveBlocked({ running: false, tasks: [], queued: 0, wake: true })).toBe(true);
+		expect(moveBlocked({ running: true, tasks: [], queued: 2 })).toBe(true);
 	});
 });

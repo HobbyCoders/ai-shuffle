@@ -31,7 +31,7 @@
 	import { computeContextBadge, shouldShowBranchPill, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { gitStateQuery, runnerBadgeMenuItems } from './runner-badge-menu';
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
-	import { pendingHandoff, handoffActivitySince } from './pending-handoff';
+	import { pendingHandoff, handoffActivitySince, moveBlocked } from './pending-handoff';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
@@ -182,7 +182,7 @@
 	 * (from `seen` on) take over. `cancelled` hides a queued row the owning
 	 * worker has not yet answered with its `cancelled` row.
 	 */
-	let ownerQueued = $state<{ sessionId: string; worker: string; seen: number } | null>(null);
+	let ownerQueued = $state<{ sessionId: string; worker: string; seen: number; afterQueued: boolean } | null>(null);
 	let queueCancelled = $state<{ sessionId: string; seen: number } | null>(null);
 
 	/**
@@ -198,7 +198,7 @@
 		const fromChat = pendingHandoff(messages);
 		if (fromChat) return fromChat;
 		if (ownerQueued?.sessionId === sid && !handoffActivitySince(messages, ownerQueued.seen)) {
-			return { worker: ownerQueued.worker, phase: 'queued' as const };
+			return { worker: ownerQueued.worker, phase: 'queued' as const, afterQueued: ownerQueued.afterQueued };
 		}
 		return null;
 	});
@@ -211,8 +211,10 @@
 		return handoff.phase === 'moving'
 			? { label: `Moving to ${handoff.worker}…`, title: MOVE_TITLE }
 			: {
-					label: `Moving to ${handoff.worker} after this turn`,
-					title: `A move to ${handoff.worker} is queued. When this turn and its background work end, the app commits, pushes and moves this session there.`
+					label: handoff.afterQueued
+						? `Moving to ${handoff.worker} after the queued messages`
+						: `Moving to ${handoff.worker} after this turn`,
+					title: `A move to ${handoff.worker} is queued. When this turn, the queued messages and background work end, the app moves this session there. Messages you send now are sent there after the move.`
 				};
 	});
 	/** No second move while one is running or queued. */
@@ -293,7 +295,7 @@
 				runnerChecking = false;
 			}
 			if (sessionId !== $activeSession.sessionId) return;
-			if (busy && (busy.running || busy.tasks.length)) {
+			if (busy && moveBlocked(busy)) {
 				busyChoice = { item, sessionId, busy };
 				return;
 			}
@@ -347,9 +349,16 @@
 		const seen = $activeSession.messages.length;
 		try {
 			const result = await queueMove(choice.sessionId, target, stop);
-			ownerQueued = { sessionId: choice.sessionId, worker: result.worker, seen };
+			const afterQueued = result.after === 'queued';
+			ownerQueued = { sessionId: choice.sessionId, worker: result.worker, seen, afterQueued };
 			queueCancelled = null;
-			notify.info(stop ? `Stopping its work, then moving to ${result.worker}.` : `Moves to ${result.worker} when this turn ends.`);
+			notify.info(
+				stop
+					? `Stopping its work, then moving to ${result.worker}.`
+					: afterQueued
+						? `Moves to ${result.worker} after the queued messages.`
+						: `Moves to ${result.worker} when this turn ends.`
+			);
 		} catch (e) {
 			const detail =
 				e && typeof e === 'object' && 'detail' in e && typeof (e as { detail: unknown }).detail === 'string'
@@ -519,17 +528,23 @@
 						{#if busyChoice}
 							<div class="runner-busy">
 								<strong>{busyChoice.busy.running ? 'This chat is running' : 'Background work is running'}</strong>
-								{#if busyChoice.busy.tasks.length}
+								{#if busyChoice.busy.tasks.length || busyChoice.busy.queued || busyChoice.busy.wake}
 									<ul class="runner-busy-tasks">
+										{#if busyChoice.busy.queued}
+											<li>{busyChoice.busy.queued === 1 ? '1 queued message' : `${busyChoice.busy.queued} queued messages`}</li>
+										{/if}
 										{#each busyChoice.busy.tasks as task, i (i)}
 											<li>{task}</li>
 										{/each}
+										{#if busyChoice.busy.wake}
+											<li>A scheduled wake-up</li>
+										{/if}
 									</ul>
 								{/if}
 								<span class="runner-hint">{sessionHasProject ? 'Commits, pushes, then moves.' : 'Moves when it finishes.'}</span>
 							</div>
 							<button type="button" class="runner-item primary" role="menuitem" onclick={() => queueChoice(false)}>
-								<span class="ctx-chip-label">Move when this turn ends</span>
+								<span class="ctx-chip-label">{busyChoice.busy.queued ? 'Move after the queued messages' : 'Move when this turn ends'}</span>
 							</button>
 							{#if !busyChoice.busy.running}
 								<button type="button" class="runner-item danger" role="menuitem" onclick={() => queueChoice(true)}>

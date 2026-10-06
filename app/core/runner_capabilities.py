@@ -23,6 +23,7 @@ Shape::
         "claude_cli_signed_in": bool,
         "provider_kinds": ["openai", ...],
         "remote_task": int,
+        "move_wakes": int,
         "terminal": int,
     }
 
@@ -40,7 +41,9 @@ worker signs in to its CLI separately, so placement can require it with a
 providers that hold a credential (presence only, never an identity, account
 name or token). ``remote_task`` is the version of remote subagent dispatch this
 release can run (0 or absent: none), so a parent refuses an older worker by
-name before any round trip.
+name before any round trip. ``move_wakes`` is the version of moving a chat's
+pending wake-ups with it (0 or absent: they are not kept); version 1 also drops
+a repeated forwarded-turn ``command_id`` and accepts the hand-off ``note`` op.
 """
 
 from __future__ import annotations
@@ -160,6 +163,13 @@ def _detect_claude_cli_signed_in() -> bool:
 # older target refuses unknown fields).
 REMOTE_TASK_VERSION = 3
 
+# A moved chat's pending wake-ups move with it (#1819): version 1 receivers
+# re-create the ``wakes`` a move sends. Older ones ignore them, so the owner
+# tells the chat which wakes will not run there. Version 1 also means the
+# receiver drops a forwarded turn whose ``command_id`` it already took and
+# accepts the hand-off ``note`` control op, so a held message may be resent.
+MOVE_WAKES_VERSION = 1
+
 
 def _detect_provider_kinds() -> List[str]:
     """Sorted provider types with an enabled, credentialed row (no decryption)."""
@@ -208,5 +218,6 @@ def detect_capabilities() -> Dict[str, Any]:
         "claude_cli_signed_in": _detect_claude_cli_signed_in(),
         "provider_kinds": _detect_provider_kinds(),
         "remote_task": REMOTE_TASK_VERSION,
+        "move_wakes": MOVE_WAKES_VERSION,
         "terminal": _detect_terminal(),
     }

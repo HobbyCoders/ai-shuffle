@@ -2840,7 +2840,7 @@ def create_builtin_tools_server(
         from app.core import session_handoff
 
         if args.get("cancel"):
-            return _ok({"cancelled": session_handoff.cancel(session_id)})
+            return _ok({"cancelled": await session_handoff.cancel_async(session_id)})
         try:
             from app.db.async_database import run_sync
             return _ok(await run_sync(session_handoff.request, session_id,

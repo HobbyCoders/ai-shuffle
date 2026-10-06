@@ -1996,6 +1996,27 @@ def create_postgres_schema(cursor) -> None:
         "ON upload_blobs(session_id)"
     )
 
+    # ------------------------------------------------------------------
+    # 59. session_moves — a move to another worker queued until the chat is
+    #     idle (#1819), kept here so a restart of the owning worker resumes
+    #     it. ``held`` lists the owner's messages sent while it waits, in
+    #     order; they are delivered after the move, or here when it is
+    #     cancelled, fails or expires. Times are unix epochs, as in
+    #     pending_wakeups. See app/db/session_moves.py.
+    # ------------------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS session_moves (
+            session_id TEXT PRIMARY KEY,
+            target_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            requested_by TEXT NOT NULL DEFAULT 'agent',
+            requested_at DOUBLE PRECISION NOT NULL,
+            expires_at DOUBLE PRECISION NOT NULL,
+            held JSONB NOT NULL DEFAULT '[]'
+        )
+    """)
+
     from app.db.assistant import create_schema as create_assistant_schema
     create_assistant_schema(cursor)
     from app.db.assistant_limits import create_schema as create_assistant_limits_schema

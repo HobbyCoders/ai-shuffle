@@ -53,6 +53,12 @@ class RunnerUnreachable(RuntimeError):
     pass
 
 
+class MaybeApplied(RunnerUnreachable):
+    """The request reached the peer but no answer came back (a timeout, a
+    dropped connection, or a server error): it may have been applied. Resend
+    it only to a peer that drops a repeated ``command_id``."""
+
+
 class UnknownControlAction(LookupError):
     """No handler is registered for the requested control action."""
 
@@ -142,7 +148,7 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
                         peer, me = await run_sync(_names, ctx, device_id)
                         what = ("did not answer in time" if isinstance(exc, httpx.TimeoutException)
                                 else "dropped the connection")
-                        raise RunnerUnreachable(
+                        raise MaybeApplied(
                             f"{peer} {what} while handling a request from {me}. "
                             "It may still have been applied; check before retrying.") from exc
                     transport.note_contact(device_id)
@@ -172,7 +178,8 @@ def _refusal(exc: "transport.PeerError") -> Exception:
     message = str(exc)
     if message.startswith("HTTP 4"):
         return ControlRefused(message.split(" ", 2)[-1] if " " in message else message)
-    return RunnerUnreachable(message)
+    # A server error can come after the handler did its work.
+    return MaybeApplied(message)
 
 
 class _RouteFailed(Exception):
@@ -286,13 +293,17 @@ def _unreachable_message(peer: str, me: str, failures: List[BaseException], rout
 async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: str = "user",
                       profile_id: Optional[str] = None, project_id: Optional[str] = None,
                       overrides: Optional[Dict[str, Any]] = None, payload: Optional[Dict[str, Any]] = None,
-                      owner_send: bool = False) -> Dict[str, Any]:
+                      owner_send: bool = False, command_id: Optional[str] = None) -> Dict[str, Any]:
     """Forward a turn to the session's owner device.
 
     ``owner_send`` states that this is the owner's own fresh message (the
     composer's send, queue or worktree start), so the owner honours the
     permission mode picked for it (see :func:`_turns`). Anything else runs in
     the session's current mode there.
+
+    ``command_id`` makes the send safe to repeat: an owner that already has a
+    turn with this id for the session answers with it instead of queueing the
+    message again. An owner older than that ignores the field.
     """
     body = {
         "session_id": session_id, "source": source, "prompt": prompt, "profile_id": profile_id,
@@ -300,6 +311,8 @@ async def submit_turn(device_id: str, session_id: str, *, prompt: str, source: s
     }
     if owner_send:
         body["owner_send"] = True
+    if command_id:
+        body["command_id"] = command_id
     blob_ids = (payload or {}).get("upload_blob_ids")
     if blob_ids:
         from app.network import git
@@ -603,7 +616,43 @@ def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
 _OWNER_SEND_SOURCES = frozenset({"user", "queue", "worktree"})
 
 
+#: Serialises the duplicate check and the enqueue of a forwarded turn that
+#: names a ``command_id``, so a resend racing its first copy is still dropped.
+#: Made for the running loop on first use.
+_turn_command_lock: Optional[asyncio.Lock] = None
+_turn_command_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _command_lock() -> asyncio.Lock:
+    global _turn_command_lock, _turn_command_loop
+    loop = asyncio.get_running_loop()
+    if _turn_command_lock is None or _turn_command_loop is not loop:
+        _turn_command_lock, _turn_command_loop = asyncio.Lock(), loop
+    return _turn_command_lock
+
+
+def _command_id(body: Dict[str, Any]) -> Optional[str]:
+    value = body.get("command_id")
+    return value if isinstance(value, str) and 0 < len(value) <= 200 else None
+
+
 async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    command_id = _command_id(body)
+    if command_id is None:
+        return await _submit_forwarded_turn(body, from_device, None)
+    async with _command_lock():
+        from app.db import turns as turns_db
+        session_id = str(body.get("session_id") or "")
+        _require_owned(session_id)
+        existing = await run_sync(turns_db.get_turn_by_command, session_id, command_id)
+        if existing is not None:
+            # A resend after the first copy's reply was lost: it already ran or waits.
+            return {"turn_id": existing["id"], "session_id": session_id, "duplicate": True}
+        return await _submit_forwarded_turn(body, from_device, command_id)
+
+
+async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
+                                 command_id: Optional[str]) -> Dict[str, Any]:
     from app.core import turn_manager
     session_id = str(body.get("session_id") or "")
     row = _require_owned(session_id)
@@ -647,7 +696,7 @@ async def _turns(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
         # message or a sender that predates the statement runs in the
         # session's current mode.
         explicit_permission=body.get("owner_send") is True and source in _OWNER_SEND_SOURCES,
-        payload=payload or None)
+        payload=payload or None, command_id=command_id)
     if had_live:
         # A message sent from another device while this worker's turn runs
         # gets the same mid-turn delivery as a local send: steered in at the

@@ -19,6 +19,7 @@
 	import { tick, onDestroy, onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
+	import { pendingHandoff, handoffPlaceholder } from './pending-handoff';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { composerSuggestion, suggestionKey, hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
@@ -117,8 +118,11 @@
 	// The invitation has to match the lane. Code mode dispatches work against a
 	// repository; chat and voice are plain conversations with nothing to point
 	// work at, so promising "a task" there would be a lie.
+	// A queued move (#1819) holds new messages until it runs: say so.
+	const moveWait = $derived(handoffPlaceholder(pendingHandoff($activeSession.messages)));
 	const composerPlaceholder = $derived(
-		assistantMode ? 'What can I do for you?' : composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything'
+		moveWait ??
+			(assistantMode ? 'What can I do for you?' : composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything')
 	);
 
 	// Voice passes local file references to its worker rather than uploading

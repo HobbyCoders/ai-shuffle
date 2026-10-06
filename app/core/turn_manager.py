@@ -256,6 +256,22 @@ def _active_worker_turn(session_id: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _supersede_wakeups(session_id: str) -> None:
+    """A person's message supersedes the session's pending wakeups."""
+    try:
+        from app.core import wakeup_service
+
+        # Held peer messages are not a wake the agent armed; their row is
+        # the only copy of the messages, so the user's turn keeps it.
+        wakeup_service.cancel_session_wakeups(
+            session_id, exclude_source=wakeup_service.HELD_PEER_SOURCE,
+        )
+    except Exception:  # noqa: BLE001 — never let this break an enqueue.
+        logger.exception(
+            "wakeup supersede failed for session %s", session_id
+        )
+
+
 def _submit_blocking(
     session_id: str,
     source: str,
@@ -310,6 +326,27 @@ def _submit_blocking(
     if archive_guard.is_archived(session_id):
         archive_guard.log_dropped(session_id, source, "refused at submit")
         raise archive_guard.SessionArchived(session_id)
+    from app.core import session_handoff
+
+    # A move to another worker waits for this chat (#1819): the owner's
+    # message waits with it and is sent after the move, or here when the move
+    # does not happen. The returned id is a queue-chip id, not a turn id.
+    held_id = session_handoff.hold(session_id, source, {
+        "prompt": prompt, "profile_id": profile_id, "project_id": project_id,
+        "worktree_id": worktree_id, "overrides": overrides,
+        "explicit_permission": explicit_permission, "payload": payload, "command_id": command_id,
+    })
+    if held_id is not None:
+        if source in _WAKEUP_SUPERSEDING_SOURCES and not session_handoff.moving(session_id):
+            # The person's newer instruction supersedes the agent's wakes now,
+            # so none fires here before it. The Stop latch stays: lifting it
+            # here would let a wake start work here and hold the move. The
+            # message lifts it where it runs. Once the move is under way the
+            # wakes are left alone: begin sent them to the new worker and the
+            # commit refuses a changed set. The message supersedes them where
+            # it runs (the new worker, or here if the move fails).
+            _supersede_wakeups(session_id)
+        return held_id
     overrides, window_base, has_window_base = _split_window_base(overrides)
     overrides = _without_home_effort(session_id, overrides)
     if source == "connector":
@@ -387,18 +424,7 @@ def _submit_blocking(
                 "run-binding persist failed for session %s", session_id
             )
     if source in _WAKEUP_SUPERSEDING_SOURCES:
-        try:
-            from app.core import wakeup_service
-
-            # Held peer messages are not a wake the agent armed; their row is
-            # the only copy of the messages, so the user's turn keeps it.
-            wakeup_service.cancel_session_wakeups(
-                session_id, exclude_source=wakeup_service.HELD_PEER_SOURCE,
-            )
-        except Exception:  # noqa: BLE001 — never let this break an enqueue.
-            logger.exception(
-                "wakeup supersede failed for session %s", session_id
-            )
+        _supersede_wakeups(session_id)
         # ...and release the Stop latch. Stop means "nothing wakes this session
         # until the user sends a new message"; this IS that message,
         # so every wake producer is live again from here on. The same source set

@@ -22,6 +22,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ### Sessions and interface
 
+- Moving a chat to another worker while it works: the move also waits for queued messages and a wake-up about to fire, and gives up after 10 minutes. Messages you send meanwhile are held and run after the move, or here if it is cancelled. Scheduled wake-ups move with the chat, a queued move survives a restart, and an open approval or question must be answered first.
 - Automatic native compactions now leave durable transcript records. Older compaction records remain available after reload even when their conversation prefix has been compacted; records retain their timestamp, trigger and available token counts without exposing summary text.
 - Context-window picks in existing chats are saved immediately, without needing another message. They apply on the next turn and survive wakes, retries and model changes without silently increasing a smaller pin.
 

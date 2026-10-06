@@ -931,6 +931,18 @@ def get_turn(turn_id: str) -> Optional[Dict[str, Any]]:
     return _row(row)
 
 
+def get_turn_by_command(session_id: str, command_id: str) -> Optional[Dict[str, Any]]:
+    """The session's first turn queued with ``command_id``, or ``None``."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM turns WHERE session_id=%s AND command_id=%s ORDER BY created_at LIMIT 1",
+            (session_id, command_id),
+        )
+        row = cursor.fetchone()
+    return _row(row)
+
+
 def get_live_turn(session_id: str) -> Optional[Dict[str, Any]]:
     """Return the session's single live (running|interrupting|draining) turn, or
     ``None``."""

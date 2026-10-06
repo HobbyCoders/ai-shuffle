@@ -152,6 +152,26 @@ def _v2_queue_view(session_id: str) -> List[Dict[str, Any]]:
             "created_at": created,
         })
         pos += 1
+    from datetime import datetime, timezone
+
+    from app.core import session_handoff
+
+    # Messages held for a queued move (#1819) are sent after the queue.
+    for held in session_handoff.held_view(session_id):
+        if held.get("source") not in _V2_QUEUE_SOURCES:
+            continue
+        held_at = held.get("held_at")
+        rows.append({
+            "id": held.get("id"),
+            "session_id": session_id,
+            "content": held.get("prompt") or "",
+            "profile_id": held.get("profile_id"),
+            "project_id": held.get("project_id"),
+            "position": pos,
+            "created_at": (datetime.fromtimestamp(float(held_at), timezone.utc).isoformat()
+                           if held_at else None),
+        })
+        pos += 1
     return rows
 
 def _v2_peer_queue_view(session_id: str) -> List[Dict[str, Any]]:
@@ -1627,7 +1647,13 @@ class ChatWebSocketHandler:
         # written where it is actually delivered — mid-turn by the steer receipt
         # (``session_runtime._on_steer_delivered``) or at the start of the turn
         # the row becomes (``payload.deferred_user_record``).
-        if not had_live:
+        # A move to another worker waits for this chat (#1819): the message is
+        # held and sent after the move, so it is recorded where it runs, as a
+        # message queued behind a live turn is.
+        from app.core import session_handoff
+
+        held_for_move = session_handoff.holds(session_id)
+        if not had_live and not held_for_move:
             try:
                 if not is_new_session:
                     _msg_role = "user"
@@ -1665,7 +1691,7 @@ class ChatWebSocketHandler:
         payload: Dict[str, Any] = {}
         if request_id and is_new_session:
             payload["request_id"] = request_id
-        if had_live:
+        if had_live or held_for_move:
             # The persist above was skipped — tell the turn to write it when it
             # runs. Harmless if the turn is instead absorbed by a mid-turn
             # steer: that path records the message itself and the row never
@@ -1735,7 +1761,7 @@ class ChatWebSocketHandler:
         # supersede, enqueue). ``submit_async`` pays ONE thread hop for all
         # three and still fires the kick on this loop, so the send path never
         # blocks the worker's other sockets.
-        await turn_manager.submit_async(
+        turn_id = await turn_manager.submit_async(
             session_id,
             "user",
             prompt=prompt,
@@ -1746,6 +1772,12 @@ class ChatWebSocketHandler:
             payload=payload or None,
             no_kick=placed_remote,
         )
+
+        if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
+            # Held for the queued move: a pending bubble until it is sent.
+            await self._v2_broadcast_queue(session_id)
+            await self.send_json({"type": "query_queued", "session_id": session_id})
+            return
 
         if placed_remote:
             # Wake the owning runner's claim loop NOW (latency only — its 5s
@@ -2595,6 +2627,14 @@ class ChatWebSocketHandler:
                     "message": SESSION_ACCESS_DENIED,
                 })
                 return
+
+        if session_id and str(message_id).startswith("held-"):
+            # A message held for a queued move (#1819): never a turn or a steer.
+            from app.core import session_handoff
+
+            await run_sync(session_handoff.drop_held, session_id, message_id)
+            await self._v2_broadcast_queue(session_id)
+            return
 
         # A pending message sent into a busy session is handed to the running
         # turn as a fluid steer straight away, so × has to un-send that steer

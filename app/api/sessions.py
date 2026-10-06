@@ -519,7 +519,7 @@ async def _queued_move(session: dict, op: str, target: Optional[str] = None, *, 
 async def queued_move_status(request: Request, session_id: str, token: str = Depends(require_auth)):
     """What keeps this chat from moving now, and any move already queued.
 
-    ``{"busy": {"running": bool, "tasks": [names]}, "pending": {"worker", "target_id", "by"} | null}``,
+    ``{"busy": {"running", "tasks", "queued", "wake"}, "pending": {"worker", "target_id", "by", "moving"} | null}``,
     read on the owning worker. The worker selector and Resume here ask first:
     a running or parked chat is offered "Move when this turn ends".
     """
@@ -532,8 +532,9 @@ async def queue_move(request: Request, session_id: str, body: QueueMoveRequest,
                      token: str = Depends(require_auth)):
     """Queue the agent's hand-off for this chat: it moves when its turn and background work end.
 
-    The owner's move waits however long the work runs, until it moves or is
-    cancelled. The chat records the queued state, so every device shows it.
+    The owner's move waits at most 10 minutes; messages sent meanwhile are
+    held and run after it, or here if it ends without moving (#1819). The
+    chat records the queued state, so every device shows it.
     """
     session = await require_session(request, session_id)
     refuse_subagent_git(session)

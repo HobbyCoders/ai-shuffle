@@ -246,16 +246,22 @@ def merge_session_wakeup(
     return row, [str(r["id"]) for r in kept]
 
 
-def get_session_wakeups(session_id: str, source: str) -> List[Dict[str, Any]]:
-    """A session's pending wakeups of one ``source``, oldest ``fire_at`` first."""
+def get_session_wakeups(session_id: str, source: Optional[str] = None) -> List[Dict[str, Any]]:
+    """A session's pending wakeups (all, or of one ``source``), oldest ``fire_at`` first."""
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
-        cursor.execute(
-            f"SELECT * FROM pending_wakeups WHERE session_id = {_ph} "
-            f"AND source = {_ph} ORDER BY fire_at ASC",
-            (session_id, source),
-        )
+        if source is None:
+            cursor.execute(
+                f"SELECT * FROM pending_wakeups WHERE session_id = {_ph} ORDER BY fire_at ASC",
+                (session_id,),
+            )
+        else:
+            cursor.execute(
+                f"SELECT * FROM pending_wakeups WHERE session_id = {_ph} "
+                f"AND source = {_ph} ORDER BY fire_at ASC",
+                (session_id, source),
+            )
         return rows_to_list(list(cursor.fetchall() or []))
 
 

@@ -58,7 +58,7 @@ def pair(tmp_path, repositories, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_model_receipts_move_under_the_handoff_lease_but_live_prompts_do_not(pair, monkeypatch):
+async def test_model_receipts_move_under_the_handoff_lease_but_stale_prompts_do_not(pair, monkeypatch):
     from app.core import model_override as mo
     from app.db import interactions
 
@@ -75,7 +75,9 @@ async def test_model_receipts_move_under_the_handoff_lease_but_live_prompts_do_n
                                     payload={"orchestration_sender": "origin-chat"})
         with get_db() as conn:
             conn.cursor().execute("UPDATE turns SET state='completed' WHERE id=%s", (launch["id"],))
-        interactions.create_interaction("handoff-test", "permission", {"tool_name": "Bash"}, None,
+        # Expired but never answered: it no longer refuses the move (#1819),
+        # and it stays on this worker.
+        interactions.create_interaction("handoff-test", "permission", {"tool_name": "Bash"}, -1,
                                         interaction_id="live-prompt")
     phases = []
 
@@ -264,6 +266,231 @@ def test_a_stranded_task_row_does_not_pin_the_session(pair):
         _task_row("remote-child", remote=b.device_id)
         with get_db() as conn, pytest.raises(ValueError, match="background work"):
             handoff._idle(conn.cursor(), "handoff-test")
+
+
+def _owner_calls(a, b, monkeypatch):
+    async def call(device, action, body, **kwargs):
+        with a.active():
+            return await control.handle(action, body, from_device=b.device_id)
+    monkeypatch.setattr(control, "call", call)
+
+
+@pytest.mark.asyncio
+async def test_an_open_prompt_refuses_the_move(pair, monkeypatch):
+    """#1819 rule 4: an open approval card cannot follow the chat."""
+    from app.db import interactions
+    a, b, _, _ = pair
+    with a.active():
+        interactions.create_interaction("handoff-test", "permission", {"tool_name": "Bash"}, None,
+                                        interaction_id="open-card")
+    _owner_calls(a, b, monkeypatch)
+    with b.active():
+        with pytest.raises(ValueError, match="Answer or dismiss the open prompt first"):
+            await handoff.receive(database.get_session("handoff-test"))
+    with a.active():
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+        with get_db() as conn:
+            assert handoff.open_prompt(conn.cursor(), "handoff-test")
+        assert interactions.cancel_interaction("open-card")
+        with get_db() as conn:
+            assert not handoff.open_prompt(conn.cursor(), "handoff-test")
+
+
+@pytest.mark.asyncio
+async def test_pending_wakes_move_with_the_chat(pair, monkeypatch):
+    """#1819 rule 3: a ScheduleWakeup and a limit resume run on the new worker, not here."""
+    import time
+    from app.core import wakeup_service
+    from app.db import wakeups
+    a, b, _, _ = pair
+    fire_at = time.time() + 3600
+    with a.active():
+        wakeups.create_wakeup(id="wake-1", session_id="handoff-test", prompt="check CI", fire_at=fire_at,
+                              reason="CI", instance_id=settings.effective_instance_id)
+        wakeups.create_wakeup(id="wake-2", session_id="handoff-test", prompt="continue", fire_at=fire_at + 60,
+                              source=wakeup_service.LIMIT_RESUME_SOURCE,
+                              instance_id=settings.effective_instance_id)
+    _owner_calls(a, b, monkeypatch)
+    monkeypatch.setattr(handoff, "wake_carry", lambda target: True)
+    armed = []
+    monkeypatch.setattr(wakeup_service, "arm_persisted", lambda row: armed.append(row["id"]))
+    with b.active():
+        await handoff.receive(database.get_session("handoff-test"))
+        moved = {row["id"]: row for row in wakeups.get_session_wakeups("handoff-test")}
+        assert set(moved) == {"wake-1", "wake-2"}
+        assert moved["wake-1"]["prompt"] == "check CI" and moved["wake-1"]["fire_at"] == pytest.approx(fire_at)
+        assert moved["wake-2"]["source"] == wakeup_service.LIMIT_RESUME_SOURCE
+        assert {row["instance_id"] for row in moved.values()} == {settings.effective_instance_id}
+    assert sorted(armed) == ["wake-1", "wake-2"]
+    with a.active():
+        assert wakeups.get_session_wakeups("handoff-test") == []
+
+
+@pytest.mark.asyncio
+async def test_a_wake_an_older_worker_cannot_keep_is_named_in_the_chat(pair, monkeypatch):
+    """#1819 rule 3: never drop a wake silently."""
+    import time
+    from app.core import wakeup_service
+    from app.db import wakeups
+    a, b, _, _ = pair
+    with a.active():
+        wakeups.create_wakeup(id="wake-old", session_id="handoff-test", prompt="check CI",
+                              fire_at=time.time() + 3600, instance_id=settings.effective_instance_id)
+    monkeypatch.setattr(handoff, "wake_carry", lambda target: False)
+    monkeypatch.setattr(handoff, "_noted_wakes", set())
+    recorded = []
+
+    async def record(sid, event):
+        recorded.append((sid, event))
+    monkeypatch.setattr("app.core.turn_recorder.record_drained_event", record)
+    with a.active():
+        await handoff._note_uncarried_wakes("handoff-test", b.device_id)
+        # A retried move does not repeat it.
+        await handoff._note_uncarried_wakes("handoff-test", b.device_id)
+    assert len(recorded) == 1
+    sid, event = recorded[0]
+    assert sid == "handoff-test" and event["subtype"] == wakeup_service.DROPPED_NOTE_SUBTYPE
+    assert "the scheduled wake-up at" in event["data"]["message"]
+    assert "It will not run" in event["data"]["message"]
+
+
+def _wake_notes(monkeypatch):
+    from app.core import wakeup_service
+    recorded = []
+    original = __import__("app.core.turn_recorder", fromlist=["record_drained_event"]).record_drained_event
+
+    async def record(sid, event):
+        if event.get("subtype") == wakeup_service.DROPPED_NOTE_SUBTYPE:
+            recorded.append(event["data"]["message"])
+        return await original(sid, event)
+    monkeypatch.setattr("app.core.turn_recorder.record_drained_event", record)
+    monkeypatch.setattr(handoff, "_noted_wakes", set())
+    return recorded
+
+
+@pytest.mark.asyncio
+async def test_a_refused_move_says_nothing_about_wakes(pair, monkeypatch):
+    """F9: begin refuses the move (an open prompt): every wake stays here, so no note."""
+    import time
+    from app.db import interactions, wakeups
+    a, b, _, _ = pair
+    with a.active():
+        wakeups.create_wakeup(id="wake-old", session_id="handoff-test", prompt="check CI",
+                              fire_at=time.time() + 3600, instance_id=settings.effective_instance_id)
+        interactions.create_interaction("handoff-test", "permission", {"tool_name": "Bash"}, None,
+                                        interaction_id="open-card")
+    monkeypatch.setattr(handoff, "wake_carry", lambda target: False)
+    notes = _wake_notes(monkeypatch)
+    _owner_calls(a, b, monkeypatch)
+    with b.active():
+        with pytest.raises(ValueError, match="Answer or dismiss the open prompt first"):
+            await handoff.receive(database.get_session("handoff-test"))
+    assert notes == []
+    with a.active():
+        assert [row["id"] for row in wakeups.get_session_wakeups("handoff-test")] == ["wake-old"]
+
+
+def test_unknown_capabilities_are_not_read_as_an_older_worker(monkeypatch):
+    """F9: no runner row (or no capabilities) is unknown, not "cannot keep"."""
+    from app.network import runners
+    monkeypatch.setattr(runners, "find", lambda target: None)
+    assert handoff.wake_carry("dev-x") is None
+    monkeypatch.setattr(runners, "find", lambda target: {"capabilities": {}})
+    assert handoff.wake_carry("dev-x") is None
+    monkeypatch.setattr(runners, "find", lambda target: {"capabilities": {"git_resume": 1}})
+    assert handoff.wake_carry("dev-x") is False
+    monkeypatch.setattr(runners, "find", lambda target: {"capabilities": {"move_wakes": 1}})
+    assert handoff.wake_carry("dev-x") is True
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_receiver_gets_a_conditional_wake_note(pair, monkeypatch):
+    import time
+    from app.db import wakeups
+    a, b, _, _ = pair
+    with a.active():
+        wakeups.create_wakeup(id="wake-old", session_id="handoff-test", prompt="check CI",
+                              fire_at=time.time() + 3600, instance_id=settings.effective_instance_id)
+    monkeypatch.setattr(handoff, "wake_carry", lambda target: None)
+    notes = _wake_notes(monkeypatch)
+    with a.active():
+        await handoff._note_uncarried_wakes("handoff-test", b.device_id)
+    assert len(notes) == 1 and "cannot tell whether" in notes[0] and "It will not run" not in notes[0]
+
+
+@pytest.mark.asyncio
+async def test_a_wake_created_during_the_move_refuses_the_commit(pair, monkeypatch):
+    """F4: begin sent its snapshot of the wakes; one added since would be deleted
+    by the commit without running anywhere. The commit is refused instead."""
+    import time
+    from app.db import wakeups
+    a, b, _, _ = pair
+    fire_at = time.time() + 3600
+    with a.active():
+        wakeups.create_wakeup(id="wake-1", session_id="handoff-test", prompt="check CI", fire_at=fire_at,
+                              instance_id=settings.effective_instance_id)
+    _owner_calls(a, b, monkeypatch)
+    monkeypatch.setattr(handoff, "wake_carry", lambda target: True)
+    original = handoff.install_history
+
+    def install_history(sid, data, cwd):
+        # Between begin and commit, the agent on the owner schedules a wake.
+        with a.active():
+            wakeups.create_wakeup(id="wake-late", session_id="handoff-test", prompt="later",
+                                  fire_at=fire_at + 60, instance_id=settings.effective_instance_id)
+        return original(sid, data, cwd)
+    monkeypatch.setattr(handoff, "install_history", install_history)
+    with b.active():
+        with pytest.raises(ValueError, match="A wake-up of this chat changed during the move"):
+            await handoff.receive(database.get_session("handoff-test"))
+        assert wakeups.get_session_wakeups("handoff-test") == []
+    with a.active():
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+        assert sorted(row["id"] for row in wakeups.get_session_wakeups("handoff-test")) == ["wake-1", "wake-late"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_held_during_the_move_does_not_refuse_it(pair, monkeypatch):
+    """N1: the person types while the move is under way. The held message
+    leaves the moved wake alone (the commit would refuse a changed set) and
+    supersedes it on the new worker once it arrives there."""
+    import time
+    from app.core import session_handoff as sh, turn_manager, wakeup_service
+    from app.db import session_moves, wakeups
+    a, b, _, _ = pair
+    with a.active():
+        wakeups.create_wakeup(id="wake-1", session_id="handoff-test", prompt="check CI",
+                              fire_at=time.time() + 3600, instance_id=settings.effective_instance_id)
+    _owner_calls(a, b, monkeypatch)
+    monkeypatch.setattr(handoff, "wake_carry", lambda target: True)
+    monkeypatch.setattr(wakeup_service, "arm_persisted", lambda row: None)
+    monkeypatch.setattr(turn_manager, "_kick", lambda session_id: None)
+    pending = sh.PendingHandoff(b.device_id, "B", "", time.time(), by="owner")
+    monkeypatch.setitem(sh._moving, "handoff-test", pending)
+    original = handoff.install_history
+    held = []
+
+    def install_history(sid, data, cwd):
+        # Between begin and commit, the person sends a message on the owner.
+        with a.active():
+            session_moves.save("handoff-test", target_id=b.device_id, label="B", note="", requested_by="owner",
+                               requested_at=pending.requested_at, expires_at=pending.expires_at)
+            held.append(turn_manager._submit_blocking("handoff-test", "user", prompt="next step",
+                                                      profile_id="default"))
+        return original(sid, data, cwd)
+    monkeypatch.setattr(handoff, "install_history", install_history)
+    with b.active():
+        await handoff.receive(database.get_session("handoff-test"))
+        assert [row["id"] for row in wakeups.get_session_wakeups("handoff-test")] == ["wake-1"]
+    assert held[0].startswith(sh.HELD_PREFIX)
+    with a.active():
+        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
+        entry = session_moves.get("handoff-test")["held"][0]
+    # The held message reaches the new worker as deliver_held sends it.
+    with b.active():
+        await control._turns({"session_id": "handoff-test", "source": entry["source"], "prompt": entry["prompt"],
+                              "profile_id": entry["profile_id"], "command_id": entry["id"]}, a.device_id)
+        assert wakeups.get_session_wakeups("handoff-test") == []
 
 
 @pytest.mark.asyncio

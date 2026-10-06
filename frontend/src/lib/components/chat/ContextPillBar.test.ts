@@ -282,7 +282,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 	});
 
 	// #1819: a running or parked chat is offered "Move when this turn ends".
-	async function openMoveTo(busy: { running: boolean; tasks: string[] }) {
+	async function openMoveTo(busy: { running: boolean; tasks: string[]; queued?: number; wake?: boolean }) {
 		session.store.set({ ...base, messages: [...base.messages], projectV2Id: 'pv2-project' });
 		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
 			instance_id: 'local', is_remote: false, controllable: true }]);
@@ -314,6 +314,24 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		await waitFor(() => expect(chip.textContent).toContain('Moving to Other worker after this turn'));
 		expect(chip.disabled).toBe(true);
 		expect(view.getByRole('button', { name: 'Cancel queued move' })).toBeTruthy();
+	});
+
+	it('moves after the queued messages and names what waits (#1819)', async () => {
+		vi.mocked(queueMove).mockResolvedValue({ queued: true, worker: 'Other worker', after: 'queued' });
+		const view = await openMoveTo({ running: true, tasks: [], queued: 2, wake: true });
+		expect(await view.findByText('2 queued messages')).toBeTruthy();
+		expect(view.getByText('A scheduled wake-up')).toBeTruthy();
+		await fireEvent.click(view.getByRole('menuitem', { name: 'Move after the queued messages' }));
+		expect(queueMove).toHaveBeenCalledExactlyOnceWith(base.sessionId, 'peer', false);
+		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
+		await waitFor(() => expect(chip.textContent).toContain('Moving to Other worker after the queued messages'));
+	});
+
+	it('queues the move when only a wake-up is about to fire', async () => {
+		const view = await openMoveTo({ running: false, tasks: [], queued: 0, wake: true });
+		expect(await view.findByText('A scheduled wake-up')).toBeTruthy();
+		expect(view.getByRole('menuitem', { name: 'Move when this turn ends' })).toBeTruthy();
+		expect(moveSession).not.toHaveBeenCalled();
 	});
 
 	it('offers to stop parked work and move now', async () => {

@@ -622,17 +622,25 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/move \
 
 ### Move when this turn ends
 
-A session that is running a turn, or is parked on background work (subagents, Monitors, background shells), cannot move until that work ends. These endpoints queue the same hand-off the agent's `HandOffSession` tool uses. They run on the worker that owns the session, whichever device you call.
+A session that is running a turn, has messages queued behind it, has a scheduled wake-up about to fire, or is parked on background work (subagents, Monitors, background shells), cannot move until that work ends. These endpoints queue the same hand-off the agent's `HandOffSession` tool uses. They run on the worker that owns the session, whichever device you call.
 
 | Method | Path | Body | Result |
 |---|---|---|---|
-| `GET` | `/api/v1/sessions/{session_id}/handoff` | none | `{"busy": {"running": bool, "tasks": [names]}, "pending": {"worker", "target_id", "by"} or null}` |
-| `POST` | `/api/v1/sessions/{session_id}/handoff` | `target_instance_id` (optional; omitted means this device), `stop` (optional bool) | `{"queued": true, "worker": "DesktopWorker"}` |
+| `GET` | `/api/v1/sessions/{session_id}/handoff` | none | `{"busy": {"running": bool, "tasks": [names], "queued": int, "wake": bool}, "pending": {"worker", "target_id", "by", "moving"} or null}` |
+| `POST` | `/api/v1/sessions/{session_id}/handoff` | `target_instance_id` (optional; omitted means this device), `stop` (optional bool) | `{"queued": true, "worker": "DesktopWorker", "after": "turn" or "queued"}` |
 | `DELETE` | `/api/v1/sessions/{session_id}/handoff` | none | `{"cancelled": bool}` |
 
 **Auth:** Required
 
-A queued move waits until the turn and its background work end, then commits, pushes and moves the session like `/move`. It waits as long as the work runs, until it moves or is cancelled. `stop: true` stops the work first, as the Stop button does. The session records `handoff` rows for queued, cancelled, started and the outcome, so every device shows the pending move. Returns `409` when a move is already queued, the target is unknown or offline, or the owning worker cannot be reached. Queued moves live in the owning worker's memory; restarting that worker drops them.
+A queued move waits until the turn, the queued messages and the background work end, then commits, pushes and moves the session like `/move`. `after` is `queued` when queued messages run first. It waits at most 10 minutes; after that it is cancelled and the chat says what was still running. `stop: true` stops the work first, as the Stop button does.
+
+Messages you send while a move waits are held, not run. They run on the new worker after the move, in order. If the move is cancelled, fails or runs out of time, they run on the current worker instead; if a failed move did in fact reach the new worker, they follow the session there. Held messages stay stored on the old worker until the new one has taken each of them, so a restart loses none; delivery is retried for 5 minutes, and a new worker drops a message it already took, so none runs twice. A message the new worker refuses, never takes, or (on an older release) does not confirm is named in the chat, or in a notification when the chat cannot be reached; an older worker gets each message once and is never sent it again. Messages held for a chat archived meanwhile are named the same way rather than run. A held message also cancels the session's pending wake-ups, as a sent message does.
+
+Scheduled wake-ups, such as a resume after a usage limit, move with the session. A worker on an older release cannot keep them; the chat then names each one that will not run (once, and only after the new worker accepted the move). If a wake-up is added or changed while the move is in flight, the move is refused and can be retried.
+
+Known limits: if the new worker stops between taking ownership and storing the moved wake-ups, those wake-ups are lost. Files attached to held messages stay on the old worker. A message sent to the new worker while the old one is still delivering held messages there can run before them.
+
+The session records `handoff` rows for queued, cancelled, started and the outcome (`moved`, `failed`, `timeout`), so every device shows the pending move; the `moved` row is written on the new worker, which then owns the session. A queued move is stored on the owning worker, so it survives a restart of that worker; a move that cannot resume is recorded as cancelled. Returns `409` when a move is already queued, the target is unknown or offline, the owning worker cannot be reached, or an approval, question or access card is open ("Answer or dismiss the open prompt first.").
 
 ## Session Sync
 
