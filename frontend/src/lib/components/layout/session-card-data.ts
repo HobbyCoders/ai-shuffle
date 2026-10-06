@@ -433,9 +433,18 @@ export function formatAge(ms: number): string {
 	return `${Math.floor(days / 7)}w`;
 }
 
-/** Bucket key for the device filter. A local session buckets as `__local__`. */
+/** Device-filter bucket for a remote session that names no device. */
+export const UNKNOWN_REMOTE_DEVICE = '__remote_unknown__';
+
+/**
+ * Bucket key for the device filter. A local session buckets as `__local__`.
+ * A remote session keys by its owner device first: one worker can carry a
+ * legacy install id, its network device id or no instance id at all, and all
+ * of them must land in one bucket. A remote session never reads as local.
+ */
 export function sessionDeviceId(s: Session): string {
-	return s.is_remote && s.instance_id ? s.instance_id : '__local__';
+	if (!s.is_remote) return '__local__';
+	return s.owner_device_id || s.instance_id || UNKNOWN_REMOTE_DEVICE;
 }
 
 /** Human label for the device icon (title + aria-label; no longer shown as text). */

@@ -15,8 +15,10 @@ import {
 	isVisibleSidebarSession,
 	liveProjectKeys,
 	prStateText,
+	sessionDeviceId,
 	sessionModeOf,
 	sessionTimestamp,
+	UNKNOWN_REMOTE_DEVICE,
 	sessionWorkMs,
 	GIT_STAGE_LABELS,
 	GIT_STAGE_TONES,
@@ -151,6 +153,39 @@ describe('isRemovedDeviceSession', () => {
 			instance_id: 'gone',
 			device_name: null,
 		}))).toBe(true);
+	});
+});
+
+describe('sessionDeviceId', () => {
+	const owner = 'dev_0bb34fe0a39d6fac01558ea5';
+
+	it('keys a legacy install id by its owner device', () => {
+		expect(sessionDeviceId(session({ is_remote: true, instance_id: 'ai-shuffle-43cb45e0',
+			owner_device_id: owner, device_name: 'Unraid' }))).toBe(owner);
+	});
+
+	it('keys a remote session with no instance id by its owner device, not as local', () => {
+		expect(sessionDeviceId(session({ is_remote: true, instance_id: null,
+			owner_device_id: owner, device_name: 'Unraid' }))).toBe(owner);
+	});
+
+	it('puts every instance id shape of one worker in the same bucket', () => {
+		const ids = new Set(['ai-shuffle-43cb45e0', owner, null].map((instance_id) =>
+			sessionDeviceId(session({ is_remote: true, instance_id, owner_device_id: owner }))));
+		expect(ids).toEqual(new Set([owner]));
+	});
+
+	it('falls back to the instance id when no owner device is known', () => {
+		expect(sessionDeviceId(session({ is_remote: true, instance_id: 'peer', owner_device_id: null }))).toBe('peer');
+	});
+
+	it('keys a local session as __local__', () => {
+		expect(sessionDeviceId(session({ is_remote: false, instance_id: 'self', owner_device_id: owner }))).toBe('__local__');
+	});
+
+	it('keys a remote session with neither id as an unknown remote device', () => {
+		expect(sessionDeviceId(session({ is_remote: true, instance_id: null, owner_device_id: null })))
+			.toBe(UNKNOWN_REMOTE_DEVICE);
 	});
 });
 
