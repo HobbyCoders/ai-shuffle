@@ -3,14 +3,18 @@
 Gathers every gate the owner otherwise has to be walked through one question at
 a time: what changed since the last final tag, whether ``main`` CI is green on
 the release candidate, whether edge publication caught up, the Play gates, and
-which platforms actually need a new build. Nothing is tagged, dispatched or
-published. Worker running revisions are NOT visible from here; the skill gets
-those from the ``DeployStatus`` agent tool.
+which platforms actually need a new build, and the live smoke gate: a passing
+smoke result file for the candidate revision on every covered worker (see
+``docs/internal/live-smoke.md``). Nothing is tagged, dispatched or published.
+Worker running revisions are NOT visible from here; the skill gets those from
+the ``DeployStatus`` agent tool.
 
 Usage::
 
     python scripts/ci/ship_release_status.py            # human summary
     python scripts/ci/ship_release_status.py --json     # machine-readable
+    python scripts/ci/ship_release_status.py --smoke-worker Unraid --smoke-worker DesktopWorker
+    python scripts/ci/ship_release_status.py --skip-smoke "DesktopWorker away this week"
 """
 from __future__ import annotations
 
@@ -23,6 +27,13 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.live_smoke import gate as smoke_gate_mod
+from scripts.live_smoke import results as smoke_results
+from scripts.live_smoke import scenarios as smoke_scenarios
+
 REPOSITORY = "HobbyCoders/ai-shuffle"
 FINAL_TAG = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 # Workflows whose latest run on the candidate must be green before tagging.
@@ -103,7 +114,21 @@ def _variable(name: str, env: Optional[str] = None) -> Optional[str]:
     return _try(*args)
 
 
-def collect() -> dict:
+def smoke_gate(revision: str, workers: Optional[list] = None, skip_reason: Optional[str] = None,
+               smoke_dir: Optional[str] = None, scenario_rows: Optional[list] = None) -> dict:
+    """Live smoke verdict for the candidate (``pass``, ``block`` or ``skipped``).
+
+    ``workers`` are the covered workers; when omitted, every worker with a
+    result file for ``revision`` counts, and none at all blocks.
+    """
+    base = smoke_results.smoke_dir(smoke_dir)
+    if scenario_rows is None:
+        scenario_rows = smoke_scenarios.rows(smoke_scenarios.load())
+    return smoke_gate_mod.evaluate(base, revision, workers, scenario_rows, skip_reason=skip_reason)
+
+
+def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = None,
+            smoke_dir: Optional[str] = None) -> dict:
     _try("git", "fetch", "--quiet", "--tags", "origin", "main")
     head = _try("git", "rev-parse", "origin/main") or ""
     tag = latest_final_tag((_try("git", "tag", "--list") or "").splitlines())
@@ -127,6 +152,8 @@ def collect() -> dict:
     for name in REQUIRED_CI:
         if ci.get(name) != "success":
             blockers.append(f"{name} on {head[:9]} is {ci.get(name)}.")
+    smoke = smoke_gate(head, smoke_workers, skip_smoke, smoke_dir)
+    blockers += [f"Live smoke: {b}" for b in smoke["blockers"]]
     return {
         "main_head": head,
         "last_release": {"tag": tag, "sha": tag_sha},
@@ -137,6 +164,8 @@ def collect() -> dict:
         "edge_published": ci.get(EDGE_WORKFLOW) == "success",
         "platform_builds": platforms_needing_builds(changed),
         "play_gates": gates,
+        "smoke": smoke,
+        "release_notes_lines": smoke["release_notes_lines"],
         "blockers": blockers,
         "ready": not blockers,
     }
@@ -150,6 +179,13 @@ def render(report: dict) -> str:
         "CI on candidate: " + ", ".join(f"{k}={v}" for k, v in report["ci_on_main_head"].items()),
         "Play gates: " + ", ".join(f"{k}={v}" for k, v in report["play_gates"].items()),
     ]
+    smoke = report.get("smoke")
+    if smoke:
+        lines.append(f"Live smoke: {smoke['verdict']}"
+                     + (f" ({smoke['skip_reason']})" if smoke.get("skip_reason") else ""))
+        lines += [f"  owner to-do: {t}" for t in smoke.get("owner_todo", [])]
+        lines += [f"  skipped blocker: {b}" for b in smoke.get("would_block", [])]
+        lines += [f"  release notes must say: {line}" for line in smoke.get("release_notes_lines", [])]
     for name, info in report["platform_builds"].items():
         lines.append(f"{name}: {'changed' if info['needed'] else 'no changes'}"
                      + (f" (e.g. {', '.join(info['example_paths'][:3])})" if info["needed"] else ""))
@@ -160,8 +196,15 @@ def render(report: dict) -> str:
 def main(argv: Optional[list] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--json", action="store_true", help="print JSON instead of a summary")
+    parser.add_argument("--smoke-worker", action="append", default=None, metavar="LABEL",
+                        help="worker that must have a passing live smoke file (repeat; default: "
+                             "every worker with a file for the candidate)")
+    parser.add_argument("--skip-smoke", metavar="REASON", default=None,
+                        help="tag without a passing live smoke; the reason goes into the release notes")
+    parser.add_argument("--smoke-dir", default=None,
+                        help="smoke results folder (default $AI_SHUFFLE_SMOKE_DIR or <data dir>/smoke)")
     args = parser.parse_args(argv)
-    report = collect()
+    report = collect(args.smoke_worker, args.skip_smoke, args.smoke_dir)
     print(json.dumps(report, indent=2) if args.json else render(report))
     return 0
 

@@ -37,6 +37,7 @@
 - [ ] I tested manually in the browser
 - [ ] I tested on Docker deployment
 - [ ] I added new tests for this functionality
+- [ ] If this PR says it was "not tried on real workers", it adds a row to `.fluid/skills/live-test/scenarios.json` that would catch the bug live (see `docs/internal/live-smoke.md`)
 
 ## Screenshots
 
