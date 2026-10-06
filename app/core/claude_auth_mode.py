@@ -1,6 +1,7 @@
-"""Which credential Claude Code runs on: the user's subscription, their API key, or none.
+"""Which credential Claude Code runs on: the user's subscription, their API key,
+a cloud provider or gateway, or none.
 
-AI Shuffle runs the stock Claude Code CLI in one of two modes, or not at all,
+AI Shuffle runs the stock Claude Code CLI in one of three modes, or not at all,
 and the user picks it:
 
 - ``subscription``: the CLI uses its own sign-in, which the user completed in
@@ -8,6 +9,11 @@ and the user picks it:
   key in the host or profile environment is kept away from the CLI.
 - ``api_key``: the Anthropic API key the user stored in Settings is passed to
   the CLI as ``ANTHROPIC_API_KEY``, and nothing else credential-like is.
+- ``cloud``: "Cloud provider or gateway". The CLI runs on the one method the
+  owner set up in Settings (Amazon Bedrock, Google Vertex AI, Microsoft Foundry
+  or an LLM gateway), with only that method's stored values
+  (:mod:`app.core.claude_cloud_auth`). Off by default; the startup default
+  never picks it and nothing is detected from the environment.
 - ``off``: Claude is turned off on this worker. Claude models leave the model
   pickers, every Claude turn is refused with a setup message, and no Anthropic
   credential reaches a CLI child. Only the user turns this on; the startup
@@ -37,12 +43,14 @@ logger = logging.getLogger(__name__)
 
 MODE_SUBSCRIPTION = "subscription"
 MODE_API_KEY = "api_key"
+MODE_CLOUD = "cloud"
 MODE_OFF = "off"
-MODES = (MODE_SUBSCRIPTION, MODE_API_KEY, MODE_OFF)
+MODES = (MODE_SUBSCRIPTION, MODE_API_KEY, MODE_CLOUD, MODE_OFF)
 
 MODE_LABELS = {
     MODE_SUBSCRIPTION: "Claude subscription",
     MODE_API_KEY: "Anthropic API key",
+    MODE_CLOUD: "Cloud provider or gateway",
     MODE_OFF: "Off",
 }
 
@@ -141,6 +149,12 @@ def set_mode(mode: str) -> str:
     if mode not in MODES:
         raise ValueError(f"Unknown Claude Code auth mode: {mode!r}. Use one of: {', '.join(MODES)}")
     database.set_system_setting(setting_key(), mode)
+    if mode != MODE_CLOUD:
+        # A credential file written for the CLI in cloud mode does not outlive
+        # it; the saved settings stay, so switching back needs no re-entry.
+        from app.core import claude_cloud_auth
+
+        claude_cloud_auth.remove_materialized_files()
     logger.info("Claude Code auth mode set to %s", mode)
     return mode
 
@@ -185,4 +199,19 @@ def summary(cli: Optional[dict] = None) -> dict:
             "error": cli.get("error"),
         },
         "api_key": {"set": bool(key), "last4": key_last4(key)},
+        "cloud": cloud_status(),
     }
+
+
+def cloud_status() -> dict:
+    """Which cloud method is saved and whether its required values are present.
+
+    Names and presence only; never a value."""
+    from app.core import claude_cloud_auth
+
+    try:
+        return claude_cloud_auth.status()
+    except Exception:  # noqa: BLE001 — a status read must not break Settings
+        logger.warning("Could not read the Claude cloud provider status", exc_info=True)
+        return {"method": None, "method_label": None, "configured": False, "ready": False,
+                "missing": [], "storage_locked": False}

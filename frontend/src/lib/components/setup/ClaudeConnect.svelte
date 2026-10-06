@@ -58,6 +58,7 @@
 		return who || (plan ? plan + ' plan' : '');
 	});
 	const readyText = $derived.by(() => {
+		if (way === 'cloud') return 'Claude is connected through the cloud provider or gateway set in Settings.';
 		if (way === 'subscription') return account ? 'Claude is connected with the subscription of ' + account + '.' : 'Claude is connected with your subscription.';
 		const last4 = creds?.apiKey.last4;
 		return last4 ? 'Claude is connected with your Anthropic API key (ending in ' + last4 + ').' : 'Claude is connected with your Anthropic API key.';

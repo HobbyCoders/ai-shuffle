@@ -35,10 +35,14 @@ import {
 	type FetchModelsResult
 } from '$lib/api/model-providers';
 import {
+	clearClaudeCloud as apiClearClaudeCloud,
 	getClaudeAuth,
+	saveClaudeCloud as apiSaveClaudeCloud,
 	setClaudeAuthMode,
 	type ClaudeAuthMode,
-	type ClaudeAuthSummary
+	type ClaudeAuthSummary,
+	type ClaudeCloudConfig,
+	type ClaudeCloudMethodId
 } from '$lib/api/claude-auth';
 
 // ============================================================================
@@ -63,8 +67,8 @@ interface ProvidersState {
 	falEnabled: boolean;
 	/** Masked form of the stored key, or null when none is set. */
 	anthropicKeyMasked: string | null;
-	/** Which auth method Claude Code runs with: 'api_key', 'account' or 'off'. */
-	claudeCodeAuthMethod: 'account' | 'api_key' | 'off' | null;
+	/** Which auth method Claude Code runs with: 'api_key', 'account', 'cloud' or 'off'. */
+	claudeCodeAuthMethod: 'account' | 'api_key' | 'cloud' | 'off' | null;
 	/** Non-null when the integrations load failed unexpectedly. */
 	integrationsError: string | null;
 	/** True once `/settings/integrations` answered. */
@@ -321,11 +325,37 @@ export const providers = {
 	 * Store the mode (owner only): subscription, API key, or off. The model
 	 * registry is re-read so the pickers add or drop Claude. Throws.
 	 */
-	async setClaudeMode(mode: ClaudeAuthMode) {
-		const claude = await setClaudeAuthMode(mode);
+	async setClaudeMode(mode: ClaudeAuthMode, acknowledgeWarning = false) {
+		const claude = await setClaudeAuthMode(mode, acknowledgeWarning);
 		_update((s) => ({ ...s, claude }));
 		auth.checkAuth().catch(() => {});
 		await Promise.all([hydrateModelRegistry(), providers.loadIntegrations()]);
+	},
+
+	/**
+	 * Save the cloud provider or gateway (owner only; the warning was
+	 * acknowledged in the form). `activate` also switches Claude to it, and
+	 * then the pickers are re-read like a mode change. Throws.
+	 */
+	async saveClaudeCloud(
+		method: ClaudeCloudMethodId,
+		values: Record<string, string>,
+		activate = false
+	): Promise<ClaudeCloudConfig> {
+		const { auth: claude, ...config } = await apiSaveClaudeCloud(method, values, { activate });
+		_update((s) => ({ ...s, claude }));
+		if (activate) {
+			auth.checkAuth().catch(() => {});
+			await Promise.all([hydrateModelRegistry(), providers.loadIntegrations()]);
+		}
+		return config;
+	},
+
+	/** Delete the cloud method and its secrets. The mode stays as it is. Throws. */
+	async clearClaudeCloud() {
+		const { auth: claude } = await apiClearClaudeCloud();
+		_update((s) => ({ ...s, claude }));
+		await hydrateModelRegistry();
 	},
 
 	// ------------------------------------------------------------------------

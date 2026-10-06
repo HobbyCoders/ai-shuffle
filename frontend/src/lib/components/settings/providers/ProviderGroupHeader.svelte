@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * A connected provider's header: tile and name (opens the provider), then
-	 * Claude's "Subscription | API key | Off" or the "N on" count with the "+".
+	 * Claude's "Subscription | API key | Cloud | Off" or the "N on" count with the "+".
 	 * The connector line starts under the tile.
 	 */
 	import { settingsNav } from '$lib/settings/navigation.svelte';
@@ -12,7 +12,7 @@
 	import AddKindMenu from './AddKindMenu.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import { addableKinds, MODE_OPTIONS, type ProviderView } from './providers-model';
-	import { changeClaudeMode, startSetup } from './provider-actions';
+	import { pickClaudeMode, startSetup } from './provider-actions';
 
 	interface Props {
 		provider: ProviderView;
@@ -49,7 +49,7 @@
 				options={MODE_OPTIONS}
 				value={mode}
 				disabled={!providers.current.claude}
-				onchange={(v: ClaudeAuthMode) => changeClaudeMode(v)}
+				onchange={(v: ClaudeAuthMode) => pickClaudeMode(provider, v)}
 			/>
 		</span>
 	{:else}

@@ -79,6 +79,14 @@ PROVIDER_OVERLAY_ENV_KEYS = (
 )
 
 
+def _claude_cloud_identity_keys() -> tuple:
+    """The Claude cloud methods' variables: a change (switching the auth mode,
+    the method, a region or a key) is a different account, so a respawn."""
+    from app.core.claude_cloud_auth import CLOUD_IDENTITY_ENV_KEYS
+
+    return tuple(k for k in CLOUD_IDENTITY_ENV_KEYS if k not in PROVIDER_IDENTITY_ENV_KEYS)
+
+
 def provider_env_requires_reconnect(
     old_env: Optional[Dict[str, str]], new_env: Optional[Dict[str, str]]
 ) -> bool:
@@ -112,7 +120,7 @@ def provider_env_requires_reconnect(
     old_env = old_env or {}
     new_env = new_env or {}
 
-    for key in PROVIDER_IDENTITY_ENV_KEYS:
+    for key in PROVIDER_IDENTITY_ENV_KEYS + _claude_cloud_identity_keys():
         if old_env.get(key) != new_env.get(key):
             logger.debug(
                 f"[SessionPool] requires_reconnect: provider identity env key differs: {key}"

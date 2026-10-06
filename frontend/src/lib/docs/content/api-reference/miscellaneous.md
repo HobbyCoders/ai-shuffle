@@ -879,7 +879,7 @@ Update status of this worker and, when `update_all_workers` is on or an install 
 
 ### GET /api/v1/settings/claude-auth
 
-Which credential Claude Code agents run on: your Claude subscription (the signed-in CLI) or an Anthropic API key.
+Which credential Claude Code agents run on: your Claude subscription (the signed-in CLI), an Anthropic API key, or a cloud provider or gateway you set up.
 
 **Auth:** Required. Add `?refresh=true` to ask the CLI again instead of using its last answer.
 
@@ -910,7 +910,37 @@ curl -X PUT http://localhost:8000/api/v1/settings/claude-auth \
   -d '{"mode": "api_key"}'
 ```
 
-`mode` is `subscription` or `api_key` (other values return `400`). Store the key with `POST /api/v1/settings/integrations/anthropic`. Returns the same body as `GET`.
+`mode` is `subscription`, `api_key` or `cloud` (other values return `400`). Store the key with `POST /api/v1/settings/integrations/anthropic`. `cloud` also needs `"acknowledge_warning": true` and a method saved with `PUT /api/v1/settings/claude-auth/cloud`. Returns the same body as `GET`, which in every mode includes `cloud`: `{"method", "method_label", "configured", "ready", "missing", "storage_locked"}`, with no values.
+
+### GET /api/v1/settings/claude-auth/cloud
+
+The saved cloud provider or gateway method (see [Claude through a cloud provider or gateway](/docs/getting-started/modes-and-costs#claude-through-a-cloud-provider-or-gateway)). Secrets are never returned, only whether each is stored.
+
+**Auth:** Owner only
+
+```json
+{
+  "method": "gateway",
+  "values": {"base_url": "https://gateway.example.com"},
+  "secrets": {"auth_token": {"set": true}},
+  "status": {"method": "gateway", "method_label": "LLM gateway", "configured": true, "ready": true, "missing": [], "storage_locked": false},
+  "methods": [{"id": "gateway", "label": "LLM gateway", "allowlist": ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"], "fields": [], "choices": [], "docs": "https://code.claude.com/docs/en/llm-gateway-connect"}],
+  "warning": "Agents on this worker can run shell commands and can read these credentials. ...",
+  "gateway_warning": "All Claude traffic from this worker goes to the address you enter."
+}
+```
+
+### PUT /api/v1/settings/claude-auth/cloud
+
+Save one method and its values. Body: `method` (`bedrock`, `vertex`, `foundry` or `gateway`), `values`, `"acknowledge_warning": true`, and optional `activate` (default `false`; `true` also switches Claude to `cloud` mode). Value names per method: `bedrock`: `region`, then `access_key_id`, `secret_access_key` and optional `session_token`, or `bearer_token`. `vertex`: `region`, `project_id`, `credentials_json`. `foundry`: `resource` or `base_url`, and `api_key`. `gateway`: `base_url`, `auth_token`. A secret left out keeps the stored one when the method is the same; saving a different method replaces everything. Invalid values return `400` without repeating them. A malformed body (a missing `method`, a value of the wrong type) returns `422` naming the field and the problem, never the values sent. `409` when the credential store is locked. Returns the `GET` body plus `auth` (the claude-auth summary).
+
+**Auth:** Owner only
+
+### DELETE /api/v1/settings/claude-auth/cloud
+
+Delete the saved method and its secrets. The mode is not changed. Returns `{"success": true, "auth": {...}}`.
+
+**Auth:** Owner only
 
 ### GET /api/v1/settings/loop-guard
 

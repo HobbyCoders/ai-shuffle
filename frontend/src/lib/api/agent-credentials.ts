@@ -46,7 +46,7 @@ export interface AgentCredentials {
 }
 
 export function isClaudeAuthMode(value: unknown): value is ClaudeAuthMode {
-	return value === 'subscription' || value === 'api_key' || value === 'off';
+	return value === 'subscription' || value === 'api_key' || value === 'cloud' || value === 'off';
 }
 
 /** The wizard's view of the worker's `claude-auth` summary. */
@@ -56,7 +56,13 @@ export function credentialsFromSummary(summary: ClaudeAuthSummary): AgentCredent
 	// Off: Claude is turned off on this worker, so no credential is in use.
 	const credentialReady = gate
 		? gate.claude_credential_ready === true
-		: mode === 'subscription' ? summary.cli.signed_in : mode === 'api_key' ? summary.api_key.set : false;
+		: mode === 'subscription'
+			? summary.cli.signed_in
+			: mode === 'api_key'
+				? summary.api_key.set
+				: mode === 'cloud'
+					? !!summary.cloud?.ready
+					: false;
 	const licenseAllowsRuns = gate?.license_allows_runs !== false;
 	return {
 		mode,

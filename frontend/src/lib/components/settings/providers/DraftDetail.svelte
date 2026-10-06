@@ -16,6 +16,7 @@
 	import FalKeySetup from './setup/FalKeySetup.svelte';
 	import GatewaySetup from './setup/GatewaySetup.svelte';
 	import ClaudeCliSetup from './setup/ClaudeCliSetup.svelte';
+	import ClaudeCloudSetup from './setup/ClaudeCloudSetup.svelte';
 	import { providerDrafts, type Draft } from './drafts.svelte';
 	import { rowItem, type ProviderView } from './providers-model';
 
@@ -36,7 +37,13 @@
 			? provider.name === 'New provider'
 				? 'New provider'
 				: `${provider.name}, new provider`
-			: `${provider?.name}, new ${draft.flavor === 'cli' || draft.flavor === 'device' ? 'subscription' : 'API key'}`
+			: `${provider?.name}, new ${
+					draft.flavor === 'cli' || draft.flavor === 'device'
+						? 'subscription'
+						: draft.flavor === 'cloud'
+							? 'cloud provider or gateway'
+							: 'API key'
+				}`
 	);
 
 	async function finish(item: string) {
@@ -90,6 +97,8 @@
 		{/if}
 	{:else if draft.flavor === 'cli'}
 		<ClaudeCliSetup makeActive={claudeFirst} onFinish={finish} onCancel={cancel} />
+	{:else if draft.flavor === 'cloud'}
+		<ClaudeCloudSetup onFinish={finish} onCancel={cancel} />
 	{:else if draft.flavor === 'gateway'}
 		<GatewaySetup {draft} onFinish={finish} onCancel={cancel} />
 	{:else if draft.flavor === 'fal'}

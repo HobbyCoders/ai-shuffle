@@ -98,7 +98,7 @@ def test_put_off_turns_claude_off(authenticated_client):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["mode"] == "off" and body["mode_label"] == "Off"
-    assert [m["value"] for m in body["modes"]] == ["subscription", "api_key", "off"]
+    assert [m["value"] for m in body["modes"]] == ["subscription", "api_key", "cloud", "off"]
     assert body["gate"]["mode"] == "off"
     assert body["gate"]["claude_credential_ready"] is False
     assert body["gate"]["reason"] == credential_gate.NO_PROVIDER_MESSAGE

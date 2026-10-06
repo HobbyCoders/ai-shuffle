@@ -35,6 +35,7 @@ export const rowItem = (rowId: string): string => `mp:${rowId}`;
 /** Stable item ids of the credentials that are not model_providers rows. */
 export const CLAUDE_SUB_ITEM = 'claude:subscription';
 export const CLAUDE_KEY_ITEM = 'claude:api-key';
+export const CLAUDE_CLOUD_ITEM = 'claude:cloud';
 export const FAL_KEY_ITEM = 'fal:key';
 export const CLAUDE_PROVIDER_ITEM = 'provider:claude';
 
@@ -53,11 +54,13 @@ export function parseRowItem(item: string | null | undefined): string | null {
 
 /**
  * How a credential authenticates:
- * cli (Claude subscription), anthropic (Anthropic API key), device
+ * cli (Claude subscription), anthropic (Anthropic API key), cloud (Claude
+ * through Amazon Bedrock, Google Vertex AI, Microsoft Foundry or an LLM
+ * gateway, chosen by the owner), device
  * (ChatGPT/SuperGrok sign-in), key (OpenAI/xAI/OpenRouter API key),
  * gateway (custom endpoint), fal (fal.ai media key).
  */
-export type CredentialFlavor = 'cli' | 'anthropic' | 'device' | 'key' | 'gateway' | 'fal';
+export type CredentialFlavor = 'cli' | 'anthropic' | 'cloud' | 'device' | 'key' | 'gateway' | 'fal';
 
 export interface CredentialKindDef {
 	/** Menu and row label: "Subscription", "API key". */
@@ -72,7 +75,8 @@ export interface CredentialKindDef {
 const KINDS: Record<BuiltInProviderId | 'gateway', CredentialKindDef[]> = {
 	claude: [
 		{ label: 'Subscription', flavor: 'cli', multiple: false, hint: 'Claude Code CLI sign-in' },
-		{ label: 'API key', flavor: 'anthropic', multiple: false, hint: 'Pay per use' }
+		{ label: 'API key', flavor: 'anthropic', multiple: false, hint: 'Pay per use' },
+		{ label: 'Cloud provider or gateway', flavor: 'cloud', multiple: false, hint: 'Bedrock, Vertex, Foundry, gateway' }
 	],
 	openai: [
 		{ label: 'Subscription', flavor: 'device', multiple: false, hint: 'ChatGPT sign-in, no key' },
@@ -238,11 +242,13 @@ export const AGENT_PROVIDER_ORDER: readonly Exclude<BuiltInProviderId, 'fal'>[] 
 export const MODE_LABEL: Record<ClaudeAuthMode, string> = {
 	subscription: 'Subscription',
 	api_key: 'API key',
+	cloud: 'Cloud provider or gateway',
 	off: 'Off'
 };
 export const MODE_OPTIONS: { value: ClaudeAuthMode; label: string }[] = [
 	{ value: 'subscription', label: 'Subscription' },
 	{ value: 'api_key', label: 'API key' },
+	{ value: 'cloud', label: 'Cloud' },
 	{ value: 'off', label: 'Off' }
 ];
 
@@ -252,14 +258,14 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 /**
  * Whether the owner uses Claude on this worker, from what the worker reports:
- * the CLI is signed in, a key is stored, or Claude plan usage was observed
+ * the CLI is signed in, a key or a cloud method is stored, or Claude plan usage was observed
  * here recently (`claudeUsageRecorded`). A mode alone says nothing: the
  * worker records "subscription" by default, and an "API key" mode whose key
  * is gone is a leftover, not a choice. Off is never in use.
  */
 export function claudeInUse(claude: ClaudeAuthSummary | null, usageRecorded = false): boolean {
 	if (!claude) return false;
-	if (claude.cli?.signed_in || claude.api_key?.set) return true;
+	if (claude.cli?.signed_in || claude.api_key?.set || claude.cloud?.configured || claude.mode === 'cloud') return true;
 	return claude.mode !== 'off' && usageRecorded;
 }
 
@@ -344,6 +350,36 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 			switchable: false,
 			enabled: keyActive,
 			attention: keyActive && !ready
+		});
+	}
+	const cloud = claude.cloud;
+	const cloudActive = mode === 'cloud';
+	if (cloud?.configured || cloudActive) {
+		const ready = !!cloud?.ready;
+		const status: StatusTone = !ready ? 'warn' : mode === 'off' ? 'off' : cloudActive ? 'ok' : 'standby';
+		const statusText = !ready
+			? cloud?.configured
+				? 'Values missing'
+				: 'Not set up'
+			: mode === 'off'
+				? 'Off'
+				: cloudActive
+					? 'Active for Claude'
+					: 'Standby';
+		const label = cloud?.method_label || 'Cloud provider or gateway';
+		out.push({
+			item: CLAUDE_CLOUD_ITEM,
+			providerId: 'claude',
+			flavor: 'cloud',
+			name: label,
+			kind: 'Cloud',
+			summary: ready ? (cloudActive ? 'Active' : statusText) : statusText,
+			status,
+			statusText,
+			on: cloudActive && ready,
+			switchable: false,
+			enabled: cloudActive,
+			attention: cloudActive && !ready
 		});
 	}
 	return out;
@@ -623,6 +659,7 @@ export const hasPlusMenu = (p: Pick<ProviderView, 'claude'>): boolean => !p.clau
 const DRAFT_BASE: Record<CredentialFlavor, (p: ProviderId) => string> = {
 	cli: () => 'Claude subscription',
 	anthropic: () => 'Anthropic API key',
+	cloud: () => 'Cloud provider or gateway',
 	device: (p) => (p === 'openai' ? 'ChatGPT subscription' : 'SuperGrok subscription'),
 	key: (p) => `${p === 'openai' ? 'OpenAI' : p === 'grok' ? 'Grok' : 'OpenRouter'} API key`,
 	gateway: () => 'Gateway key',
@@ -663,8 +700,11 @@ export function claudeHeaderStatus(claude: ClaudeAuthSummary | null): { status: 
 		? claude.gate.claude_credential_ready
 		: claude.mode === 'subscription'
 			? !!claude.cli.signed_in
-			: claude.api_key.set;
+			: claude.mode === 'cloud'
+				? !!claude.cloud?.ready
+				: claude.api_key.set;
 	if (!ready) return { status: 'warn', text: 'Not ready' };
+	if (claude.mode === 'cloud') return { status: 'ok', text: `Runs on ${claude.cloud?.method_label || 'cloud provider'}` };
 	return { status: 'ok', text: claude.mode === 'subscription' ? 'Runs on subscription' : 'Runs on API key' };
 }
 
@@ -679,6 +719,12 @@ export function claudeGateNotice(claude: ClaudeAuthSummary | null): string | nul
 	if (!claude || !gate || claude.mode === 'off') return null;
 	if (gate.license_allows_runs === false) return gate.reason || 'The license does not allow new agent runs.';
 	if (gate.claude_credential_ready !== false) return null;
+	if (claude.mode === 'cloud') {
+		const missing = claude.cloud?.missing ?? [];
+		return claude.cloud?.configured && missing.length
+			? `Claude cannot run: ${claude.cloud.method_label} needs ${missing.join(' and ')}.`
+			: 'Claude cannot run: no cloud provider or gateway is saved on this worker.';
+	}
 	return claude.mode === 'api_key'
 		? 'Claude cannot run: no Anthropic API key is stored on this worker.'
 		: 'Claude cannot run: the Claude Code CLI is not signed in on this worker.';

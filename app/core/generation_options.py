@@ -220,10 +220,22 @@ def _resolve_env(
     # (same precedence as chat sessions). For provider sessions this early-returns
     # without injecting. Imported lazily to keep this module free of the heavier
     # environment wiring at import time.
+    #
+    # Best-effort in the subscription and API-key modes, as before. In cloud
+    # mode a failure ends the call (ClaudeCloudSetupError, a
+    # ProviderConfigError): continuing would run the CLI on the host's own
+    # credentials instead of the owner's chosen cloud provider or gateway.
+    from app.core.environment import ClaudeCloudSetupError, inject_claude_code_auth
     try:
-        from app.core.environment import inject_claude_code_auth
         inject_claude_code_auth(env, provider_id)
-    except Exception as e:  # noqa: BLE001 - auth injection is best-effort
+    except ClaudeCloudSetupError:
+        raise
+    except Exception as e:  # noqa: BLE001 - auth injection is best-effort outside cloud mode
+        from app.core import claude_auth_mode
+        if not provider_id and claude_auth_mode.current_mode() == claude_auth_mode.MODE_CLOUD:
+            logger.warning("Claude cloud provider settings could not be applied for generation (%s)",
+                           type(e).__name__)
+            raise ClaudeCloudSetupError() from None
         logger.debug(f"Could not inject Claude Code auth for generation: {e}")
 
     # Overlay the model-provider env when a provider is set. NOT wrapped

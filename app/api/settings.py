@@ -6,11 +6,11 @@ settings_credentials and settings_updates.
 """
 
 import logging
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, StrictBool
+from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel, Field, StrictBool, ValidationError
 
 from app.db import database
 from app.db.async_database import run_sync
@@ -260,7 +260,7 @@ async def get_integration_settings(token: str = Depends(require_auth)):
             anthropic_api_key_masked=mask_api_key(anthropic_key) if anthropic_key else "",
             # The explicit mode decides, never the key's mere presence.
             claude_code_auth_method=(
-                auth_mode if auth_mode in ("api_key", "off") else "account"
+                auth_mode if auth_mode in ("api_key", "cloud", "off") else "account"
             ),
             claude_auth_mode=auth_mode,
             image_model=image_model,
@@ -441,11 +441,35 @@ async def remove_anthropic_api_key(token: str = Depends(require_admin)):
 
 
 # ============================================================================
-# Claude Code auth mode (subscription, API key or off)
+# Claude Code auth mode (subscription, API key, cloud provider or gateway, off)
 # ============================================================================
 
 class ClaudeAuthModeRequest(BaseModel):
-    mode: str = Field(..., description="'subscription', 'api_key' or 'off'")
+    mode: str = Field(..., description="'subscription', 'api_key', 'cloud' or 'off'")
+    # Required for 'cloud': the owner saw the warning (see claude_cloud_auth).
+    acknowledge_warning: StrictBool = False
+
+
+class ClaudeCloudRequest(BaseModel):
+    method: str = Field(..., description="'bedrock', 'vertex', 'foundry' or 'gateway'")
+    # Field name -> value. Secrets left empty keep their stored value. Typed
+    # loosely on purpose: a 422 would echo the submitted value; save() checks
+    # the types and names only the field.
+    values: Any = Field(default_factory=dict)
+    acknowledge_warning: StrictBool = False
+    # Also switch Claude to cloud mode after saving.
+    activate: StrictBool = False
+
+    def __repr__(self) -> str:  # never print the values
+        return f"ClaudeCloudRequest(method={self.method!r}, fields={sorted(self.values)!r})"
+
+    __str__ = __repr__
+
+
+_CLOUD_ACK_DETAIL = (
+    "Confirm the warning first: agents on this worker can run shell commands and "
+    "can read these credentials."
+)
 
 
 async def claude_auth_payload(refresh: bool = False) -> dict:
@@ -500,11 +524,13 @@ async def manage_claude_cli(kind: Literal["install", "update", "remove"], token:
 async def get_claude_auth(refresh: bool = False, token: str = Depends(require_auth)):
     """Which credential Claude Code runs on.
 
-    ``mode`` is ``subscription``, ``api_key`` or ``off`` (Claude turned off on
-    this worker); ``explicit`` is false only before startup has recorded the
+    ``mode`` is ``subscription``, ``api_key``, ``cloud`` (cloud provider or
+    gateway) or ``off`` (Claude turned off on this worker); ``explicit`` is false only before startup has recorded the
     default. ``cli`` is what `claude auth status` reports (account shown only
     when signed in); ``api_key`` says
-    whether a key is stored and its last four characters; ``gate`` is the
+    whether a key is stored and its last four characters; ``cloud`` names the
+    saved cloud method and whether its required values are present (no
+    values); ``gate`` is the
     credential gate (``ready``, ``reason``, ``license_allows_runs``...).
     """
     return await claude_auth_payload(refresh)
@@ -517,13 +543,101 @@ async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(r
     ``off`` turns Claude off on this worker: Claude models leave the pickers
     and Claude runs are refused with the gate's off message (``gate.reason``).
     """
-    from app.core import claude_auth_mode
+    from app.core import claude_auth_mode, claude_cloud_auth
 
+    if request.mode == claude_auth_mode.MODE_CLOUD:
+        if not request.acknowledge_warning:
+            raise HTTPException(status_code=400, detail=_CLOUD_ACK_DETAIL)
+        cloud = await run_sync(claude_cloud_auth.status)
+        if not cloud["configured"]:
+            raise HTTPException(status_code=400,
+                                detail="Save a cloud provider or gateway first.")
     try:
         await run_sync(claude_auth_mode.set_mode, request.mode)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return await claude_auth_payload()
+
+
+@router.get("/claude-auth/cloud")
+async def get_claude_cloud(token: str = Depends(require_admin)):
+    """The saved cloud provider or gateway (owner only).
+
+    Non-secret values (region, project, resource, base URL) are returned;
+    secrets only as ``{"set": true|false}``. Also lists the methods with the
+    exact variables each passes to the Claude Code CLI, and the warning text.
+    """
+    from app.core import claude_cloud_auth
+
+    return await run_sync(claude_cloud_auth.public_config)
+
+
+def _parse_cloud_request(payload: Any) -> ClaudeCloudRequest:
+    """The PUT body as :class:`ClaudeCloudRequest`, or a 422 that never holds a value.
+
+    FastAPI's own validation error echoes the submitted body (``input``),
+    secrets included, so this route reads the raw body and reports only the
+    field names and what is wrong with them.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail=[
+            {"loc": ["body"], "msg": "Send a JSON object.", "type": "model_attributes_type"}])
+    try:
+        return ClaudeCloudRequest.model_validate(payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=[
+            {"loc": ["body", *[str(part) for part in err["loc"]]], "msg": err["msg"], "type": err["type"]}
+            for err in exc.errors(include_url=False, include_context=False, include_input=False)
+        ]) from None
+
+
+@router.put("/claude-auth/cloud", openapi_extra={"requestBody": {"content": {"application/json": {
+    "schema": ClaudeCloudRequest.model_json_schema()}}, "required": True}})
+async def put_claude_cloud(payload: Any = Body(None), token: str = Depends(require_admin)):
+    """Save the cloud provider or gateway (owner only). Write-only secrets.
+
+    Needs ``acknowledge_warning``. Secrets are stored encrypted like the
+    Anthropic API key (409 when credential storage is locked). With
+    ``activate`` Claude is switched to cloud mode in the same call. A body
+    that does not validate gets a 422 naming the fields, never their values.
+    """
+    from app.core import claude_auth_mode, claude_cloud_auth
+
+    request = _parse_cloud_request(payload)
+
+    if not request.acknowledge_warning:
+        raise HTTPException(status_code=400, detail=_CLOUD_ACK_DETAIL)
+
+    if not isinstance(request.values, dict):
+        raise HTTPException(status_code=400, detail="values must be an object of field names to text.")
+
+    def _apply() -> dict:
+        try:
+            config = claude_cloud_auth.save(request.method, request.values)
+        except claude_cloud_auth.CloudStorageLocked:
+            raise HTTPException(status_code=409, detail=encryption.credential_storage_error()) from None
+        except claude_cloud_auth.CloudConfigError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        if request.activate:
+            claude_auth_mode.set_mode(claude_auth_mode.MODE_CLOUD)
+        return config
+
+    config = await run_sync(_apply)
+    return {**config, "auth": await claude_auth_payload()}
+
+
+@router.delete("/claude-auth/cloud")
+async def delete_claude_cloud(token: str = Depends(require_admin)):
+    """Delete the saved cloud provider or gateway and its secrets (owner only).
+
+    The auth mode is left as it is, like removing the Anthropic API key: in
+    cloud mode new Claude runs are then refused until the owner sets one up
+    again or picks another mode. Nothing falls back to another credential.
+    """
+    from app.core import claude_cloud_auth
+
+    await run_sync(claude_cloud_auth.clear)
+    return {"success": True, "auth": await claude_auth_payload()}
 
 
 # ============================================================================

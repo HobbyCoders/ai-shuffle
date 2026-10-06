@@ -16,7 +16,8 @@ Claude Code CLI leg needs the active Claude auth mode's credential
 (``app.core.claude_auth_mode``): in ``subscription`` mode the stock CLI reports
 a sign-in (``claude auth status``, via ``claude_cli_status``; the CLI's
 credential files are never read); in ``api_key`` mode an Anthropic API key is
-stored on this worker; in ``off`` mode Claude is turned off and every Claude
+stored on this worker; in ``cloud`` mode the owner's chosen cloud provider or
+gateway has its required values stored (``claude_cloud_auth``); in ``off`` mode Claude is turned off and every Claude
 run is refused with :data:`OFF_MESSAGE`. There is no fallback: a Claude turn
 with no Claude credential does not borrow another one, it is refused with a
 Claude setup message. The refusal applies whatever the turn's source: chat,
@@ -65,6 +66,23 @@ CHECK_FAILED_MESSAGE = (
     "Claude cannot run on this worker: AI Shuffle could not check the Claude "
     "credential. See the server log, or pick a model from another provider."
 )
+CLOUD_NOT_SET_MESSAGE = (
+    "Claude cannot run on this worker: Claude is set to Cloud provider or gateway "
+    "mode and no cloud provider or gateway is set up here. Set one up in Settings > "
+    "Providers > Claude, or switch Claude to another mode. You can also pick a model "
+    "from another provider."
+)
+CLOUD_MISSING_MESSAGE = (
+    "Claude cannot run on this worker: Claude is set to Cloud provider or gateway "
+    "mode with {method}, and {missing} is missing. Add it in Settings > Providers > "
+    "Claude, or switch Claude to another mode. You can also pick a model from "
+    "another provider."
+)
+CLOUD_LOCKED_MESSAGE = (
+    "Claude cannot run on this worker: Claude is set to Cloud provider or gateway "
+    "mode and its saved credentials cannot be read because credential storage is "
+    "locked. Unlock it, or pick a model from another provider."
+)
 OFF_MESSAGE = (
     "Claude is off on this worker. Turn it on in Settings > Providers > Claude, "
     "or pick a model from another provider."
@@ -103,6 +121,20 @@ def claude_credential_ready(cli=None) -> Tuple[bool, Optional[str]]:
         if claude_auth_mode.has_stored_api_key():
             return True, None
         return False, NO_KEY_MESSAGE
+    if mode == claude_auth_mode.MODE_CLOUD:
+        # A presence check of the owner's stored values; no network call.
+        # The subscription sign-in and the Anthropic key never stand in.
+        from app.core import claude_cloud_auth
+
+        cloud = claude_cloud_auth.status()
+        if cloud["ready"]:
+            return True, None
+        if not cloud["configured"]:
+            return False, CLOUD_NOT_SET_MESSAGE
+        if cloud.get("storage_locked"):
+            return False, CLOUD_LOCKED_MESSAGE
+        return False, CLOUD_MISSING_MESSAGE.format(
+            method=cloud["method_label"], missing=" and ".join(cloud["missing"]))
 
     if cli is None:
         from app.core import claude_cli_status

@@ -31,7 +31,7 @@
 		type CredentialView,
 		type ProviderView
 	} from './providers-model';
-	import { changeClaudeMode, setCredentialEnabled, startSetup } from './provider-actions';
+	import { pickClaudeMode, setCredentialEnabled, startSetup } from './provider-actions';
 
 	interface Props {
 		provider: ProviderView;
@@ -110,6 +110,9 @@
 				]
 	);
 
+	/** "Cloud" opens its page (the warning is there); the control stays on the current mode. */
+	const pickMode = (v: ClaudeAuthMode) => pickClaudeMode(provider, v);
+
 	function hintFor(c: CredentialView): string {
 		const models = c.row && c.on && c.flavor !== 'fal' ? `, ${c.row.models.length} in picker` : '';
 		return `${c.kind}${models}`;
@@ -142,7 +145,7 @@
 					options={MODE_OPTIONS}
 					value={mode}
 					disabled={!claude}
-					onchange={(v: ClaudeAuthMode) => changeClaudeMode(v)}
+					onchange={pickMode}
 				/>
 			</SettingRow>
 		</RowGroup>

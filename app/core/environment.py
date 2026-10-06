@@ -344,6 +344,21 @@ class ProviderConfigError(ValueError):
     """
 
 
+class ClaudeCloudSetupError(ProviderConfigError):
+    """Cloud mode is on but the CLI environment for the saved method could not
+    be prepared (a disk or database error, an unwritable key file). The run
+    fails with this; it never continues on the host's own credentials."""
+
+    MESSAGE = (
+        "Claude could not start: the cloud provider or gateway settings could not be "
+        "prepared on this worker, and no other credential is used in their place. "
+        "Try again; if it keeps failing, save the method again in Settings > Providers."
+    )
+
+    def __init__(self) -> None:
+        super().__init__(self.MESSAGE)
+
+
 def inject_claude_code_auth(
     env: Dict[str, str], provider_id: Optional[str] = None
 ) -> Dict[str, str]:
@@ -360,6 +375,15 @@ def inject_claude_code_auth(
       ``ANTHROPIC_AUTH_TOKEN`` from the host or the profile env is kept away,
       so the CLI runs on the sign-in the user completed with ``claude auth
       login``. The CLI's own credential files are never read or touched here.
+    - ``cloud``: the owner's chosen cloud provider or gateway
+      (``app.core.claude_cloud_auth``). Every ``AWS_``, ``GOOGLE_``,
+      ``AZURE_``, ``ANTHROPIC_`` and provider-switch variable, plus
+      ``CLAUDE_CODE_OAUTH_TOKEN`` and ``NODE_TLS_REJECT_UNAUTHORIZED``, is
+      removed from the host and profile env, then only the chosen method's
+      stored values are set. With nothing complete stored, nothing is set and
+      the credential gate refuses. When the stored values cannot be prepared,
+      :class:`ClaudeCloudSetupError` is raised (the host names are already
+      marked for removal), so the run fails instead of falling back.
     - ``off``: Claude is turned off. Nothing is injected and every Anthropic
       credential variable (``ANTHROPIC_API_KEY``, ``ANTHROPIC_AUTH_TOKEN``,
       ``CLAUDE_CODE_OAUTH_TOKEN``) is kept away; the credential gate refuses
@@ -393,6 +417,27 @@ def inject_claude_code_auth(
             env.pop("ANTHROPIC_API_KEY", None)
     elif mode == claude_auth_mode.MODE_OFF:
         unset = claude_auth_mode.OFF_UNSET
+    elif mode == claude_auth_mode.MODE_CLOUD:
+        from app.core import claude_cloud_auth
+
+        # Every method's variables and every other Claude credential go,
+        # whether they came from the host or the profile; then only the
+        # chosen method's STORED values are put back.
+        # The removal marker is set first, so even a caller that swallows the
+        # error below cannot hand the CLI the host's own credentials.
+        unset = tuple(claude_cloud_auth.host_names_to_unset())
+        for name in [n for n in env if claude_cloud_auth.is_cloud_unset_name(n)]:
+            env.pop(name, None)
+        existing = [n for n in (env.get(UNSET_ENV) or "").split(",") if n.strip()]
+        env[UNSET_ENV] = ",".join(dict.fromkeys(existing + list(unset)))
+        try:
+            cloud_env = claude_cloud_auth.env_for_cli()
+        except Exception as exc:  # noqa: BLE001 — fail the run, never fall back
+            logger.warning("Claude cloud provider settings could not be prepared for the CLI (%s); "
+                           "refusing the run", type(exc).__name__)
+            raise ClaudeCloudSetupError() from None
+        env.update(cloud_env)
+        return env
     else:
         unset = claude_auth_mode.SUBSCRIPTION_UNSET
     for name in unset:

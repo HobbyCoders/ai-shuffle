@@ -57,7 +57,10 @@ def claude_billing() -> Optional[str]:
     except Exception:  # noqa: BLE001 — attribution must never break booking
         logger.debug("usage attribution: Claude auth mode unreadable", exc_info=True)
         return None
-    return BILLING_API if mode == claude_auth_mode.MODE_API_KEY else BILLING_SUBSCRIPTION
+    # A cloud provider or gateway bills per token, like an API key.
+    if mode in (claude_auth_mode.MODE_API_KEY, claude_auth_mode.MODE_CLOUD):
+        return BILLING_API
+    return BILLING_SUBSCRIPTION
 
 
 def usage_attribution(provider_id: Optional[str]) -> UsageAttribution:

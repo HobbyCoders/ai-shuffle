@@ -12,7 +12,7 @@ AI Shuffle includes no AI usage. You pay HobbyCoders for the app, and you pay yo
 
 Connect any of these, one or several. Each uses your own account and bills you under its own terms.
 
-- **Claude:** a Claude subscription (Pro or Max) through the Claude Code CLI, or an Anthropic API key.
+- **Claude:** a Claude subscription (Pro or Max) through the Claude Code CLI, an Anthropic API key, or, if you turn it on, your own cloud provider or gateway (see [Claude through a cloud provider or gateway](#claude-through-a-cloud-provider-or-gateway)).
 - **OpenAI:** a ChatGPT subscription sign-in, or an OpenAI API key.
 - **OpenRouter:** an OpenRouter API key, one key for many models.
 - **xAI Grok:** a SuperGrok subscription sign-in, or an xAI API key.
@@ -73,7 +73,52 @@ If you run much of this kind of work, an API key is the safer choice. The setup 
 
 ## Claude: subscription or API key mode
 
-Claude runs in exactly one mode at a time, the one you chose: **Subscription**, **API key** or **Off**. Change it at any time in **Settings → Providers → Claude**, which also shows the account the Claude Code CLI is signed in to and the last four characters of your key. If both a sign-in and a key are set up, the mode you picked decides; AI Shuffle never switches on its own.
+Claude runs in exactly one mode at a time, the one you chose: **Subscription**, **API key**, **Cloud** or **Off**. Change it at any time in **Settings → Providers → Claude**, which also shows the account the Claude Code CLI is signed in to and the last four characters of your key. If both a sign-in and a key are set up, the mode you picked decides; AI Shuffle never switches on its own.
+
+## Claude through a cloud provider or gateway
+
+The Claude Code CLI can also run Claude through Amazon Bedrock, Google Vertex AI, Microsoft Foundry, or an LLM gateway that you run. In AI Shuffle this is a third Claude method, **Cloud provider or gateway**. It is off by default, and nothing turns it on except you.
+
+- **Off unless you choose it.** AI Shuffle never picks up cloud credentials or a gateway address on its own, whether from the worker's environment, a profile, a project or a plugin. With the Subscription or API key mode, these variables are removed before the CLI starts, as before.
+- **Owner only.** Only the owner of the worker can view, set or remove it.
+- **One method at a time.** You choose one, enter its values in **Settings → Providers → Claude → Add → Cloud provider or gateway**, and AI Shuffle passes the CLI only that method's variables. Your Claude subscription sign-in and Anthropic API key are not passed in this mode, and AI Shuffle never falls back to them.
+- **Secrets stay on the worker.** Keys, tokens and the service account file are stored encrypted, the same way as the Anthropic API key. The app never shows them again; a stored secret shows as "Stored", and you can replace it but not read it. The region, project, resource name and base URL are shown.
+- **This worker only.** Like the Claude mode itself, the method and its secrets apply to the worker you set them on. They are not copied to your other paired workers; set each worker up on its own.
+- **Turning it on.** **Save and use for Claude** turns it on. **Save** only stores the values. Choosing **Cloud** under **Runs on** opens this page; it does not switch on its own.
+- **Turning it off.** Pick **Subscription** or **API key** under **Runs on** to go back to exactly what you had before. **Remove this credential** deletes the stored values and secrets. If Cloud is still the mode, Claude then waits until you set it up again or choose another mode.
+
+Before you can save, you must confirm that you have read this warning. It stays on the page while the method is set up:
+
+> Agents on this worker can run shell commands and can read these credentials, including the Vertex AI key file on this worker's disk, with their own tools and in terminals. A project's or your own .claude/settings.json can still change where Claude connects, and this worker's proxy and certificate settings still apply. Use an account with the smallest permissions that work, and only on a worker you trust.
+
+For a gateway, also:
+
+> All Claude traffic from this worker goes to the address you enter. The browser tool also receives this address and token.
+
+The warning is accurate:
+
+- The Claude Code CLI passes its environment to the commands its agents run, to hooks and to MCP servers, so an agent's Bash tool can read these values.
+- For Vertex AI, the service account key is written to a file in the worker's data folder that only the app's user can read. Agents' Bash and Read tools and the in-app terminals run as that same user, so they can read it too. Only a key of type `service_account` is accepted.
+- The CLI still reads `.claude/settings.json` in a project and in your home folder. An `env` block there can point Claude at another address.
+- With a gateway, the browser tool receives the gateway address and token, the same way it receives Claude credentials in the other modes.
+- The worker's own proxy and certificate settings (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`) still apply, since a company network may need them. `NODE_TLS_REJECT_UNAUTHORIZED` is always removed in this mode, so certificate checks stay on.
+
+Give the account only the permissions it needs to call Claude.
+
+In this mode every variable starting with `AWS_`, `GOOGLE_`, `AZURE_`, `ANTHROPIC_`, `CLOUD_ML_`, `CLAUDE_CODE_USE_` or `CLAUDE_CODE_SKIP_`, plus `CLAUDE_CODE_OAUTH_TOKEN`, is removed from what the CLI inherits from the worker and the profile, then only the chosen method's stored values are set. That includes model overrides such as `ANTHROPIC_MODEL` set on the worker or in a profile. If the stored values cannot be prepared (for example the key file cannot be written), the run stops with an error; it never continues on the worker's own credentials.
+
+| Method | Values you enter | What the CLI gets | Setup guide |
+|---|---|---|---|
+| Amazon Bedrock | Region, and either access keys (an optional session token) or a Bedrock API key | `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION`, then `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, or `AWS_BEARER_TOKEN_BEDROCK` | [Amazon Bedrock](https://code.claude.com/docs/en/amazon-bedrock) |
+| Google Vertex AI | Region, project ID, and the service account key file pasted as JSON | `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`, `GOOGLE_APPLICATION_CREDENTIALS` (a file only the app's user can read) | [Google Vertex AI](https://code.claude.com/docs/en/google-vertex-ai) |
+| Microsoft Foundry | Resource name or base URL, and an API key | `CLAUDE_CODE_USE_FOUNDRY=1`, `ANTHROPIC_FOUNDRY_RESOURCE` or `ANTHROPIC_FOUNDRY_BASE_URL`, `ANTHROPIC_FOUNDRY_API_KEY` | [Microsoft Foundry](https://code.claude.com/docs/en/microsoft-foundry) |
+| LLM gateway | Base URL and auth token | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` | [LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect) |
+
+A base URL must start with `https://`. Plain `http://` is accepted only for an address on the worker itself, such as `http://127.0.0.1:4000`. It cannot contain a user name, password, query or fragment.
+
+Usage on this method is billed by your cloud provider or gateway, not by a Claude plan, so the loop guard does not apply. The status in Settings checks only that the values are present; it does not call your cloud account. A wrong key shows up as an error on the first run.
+
+Limits: other ways the CLI can sign in to these clouds (AWS profiles and SSO, Google's default login, Microsoft Entra ID) are not offered here. This method has not been tested against a real Amazon Bedrock, Google Vertex AI or Microsoft Foundry account.
 
 ## The loop guard
 
