@@ -372,12 +372,26 @@ _register(Collection(
     notes="Content-addressed; bytes fetched from any holder."))
 
 
+def _materialize_usage_snapshot(record: Dict[str, Any]) -> Dict[str, Any]:
+    """A row from a publisher on an older build carries no ``account_key``.
+
+    Its absence means "no key", so it clears a key the row held before (a
+    device that went back to an older build) instead of leaving it in place.
+    """
+    if "account_key" in record:
+        return record
+    return {**record, "account_key": None}
+
+
 _register(Collection(
     name="usage_snapshots", table="usage_snapshots", keys=("instance_id",),
-    fields=("instance_id", "windows", "available", "generation", "fetched_at", "updated_at"),
-    json_fields=("windows",), priority=97,
+    fields=("instance_id", "windows", "available", "generation", "fetched_at", "account_key",
+            "updated_at"),
+    json_fields=("windows",), priority=97, materialize_hook=_materialize_usage_snapshot,
     notes="Each device's Claude subscription windows, as its own CLI reported them. Only that device "
-          "writes its row, so a peer can show the usage of the device that owns a session."))
+          "writes its row, so a peer can show the usage of the device that owns a session. "
+          "account_key is an opaque hash of the Claude account (never an email, org id or token) "
+          "so devices on one account share the freshest reading."))
 
 #: Collections a peer transfer may lack: a publisher on an older build does
 #: not serve them, and they refill from the next local report.

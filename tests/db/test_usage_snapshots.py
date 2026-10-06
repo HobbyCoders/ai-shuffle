@@ -10,6 +10,16 @@ from app.db import database as db
 
 
 class TestUpsertUsageSnapshot:
+    def test_account_key_round_trips_and_bad_values_read_as_none(self, mock_db):
+        db.upsert_usage_snapshot("inst-K", [], True, 1, 1, account_key="a" * 32)
+        db.upsert_usage_snapshot("inst-L", [], True, 1, 1, account_key="x" * 500)
+        keys = {r["instance_id"]: r["account_key"] for r in db.get_all_usage_snapshots()}
+        assert keys == {"inst-K": "a" * 32, "inst-L": None}
+        # A later write without a key clears it (the CLI signed out).
+        db.upsert_usage_snapshot("inst-K", [], True, 2, 2)
+        keys = {r["instance_id"]: r["account_key"] for r in db.get_all_usage_snapshots()}
+        assert keys["inst-K"] is None
+
     def test_insert_then_replace_on_conflict(self, mock_db):
         db.upsert_usage_snapshot(
             "inst-A",
@@ -26,7 +36,8 @@ class TestUpsertUsageSnapshot:
         assert row["available"] is True
         assert row["generation"] == 1000
         assert row["fetched_at"] == 1234567890000
-        assert not any(k.startswith("account_") for k in row)
+        assert not {"account_id", "account_email", "account_name"} & set(row)
+        assert row["account_key"] is None
 
         # A second upsert for the same instance_id REPLACES the row (no dup).
         db.upsert_usage_snapshot(

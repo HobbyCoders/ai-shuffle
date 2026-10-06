@@ -28,6 +28,7 @@ import {
 	isBucketStale,
 	bucketObservedAt,
 	bucketHasUndatedWindow,
+	bucketReporters,
 	BUCKET_STALE_MS,
 	windowLabel,
 	displayWindows,
@@ -1052,5 +1053,75 @@ describe('network devices and refilled windows', () => {
 		const saved = JSON.parse(localStorage.getItem('usage-limit-buckets-v3') ?? '{}');
 		expect(saved.selfDeviceId).toBe('dev_local');
 		expect(saved.buckets['ai-shuffle-unraid'].deviceId).toBe('dev_unraid');
+	});
+});
+
+describe('installs sharing one Claude account (#1980)', () => {
+	beforeEach(() => {
+		localStorage.clear();
+		rateLimit.__resetForTests();
+	});
+
+	const HOUR = 3_600_000;
+
+	/** Unraid ran its last Claude turn hours ago; DesktopWorker just reported. */
+	function sharedAccountSnapshot(accountKeys: [string | null, string | null] = ['acct', 'acct']) {
+		const now = Date.now();
+		const reset = String(now + HOUR);
+		const unraid = { type: 'five_hour', utilization: 90, resets_at: reset, observed_at: now - 4 * HOUR };
+		const gaming = { type: 'five_hour', utilization: 35, resets_at: reset, observed_at: now - 30_000 };
+		const merged = accountKeys[0] && accountKeys[0] === accountKeys[1];
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'ai-shuffle-unraid',
+			self_device_id: 'dev_unraid',
+			snapshots: [
+				{ instance_id: 'ai-shuffle-unraid', device_id: 'dev_unraid', device_name: 'Unraid', available: true,
+					account_key: accountKeys[0], windows: [unraid] },
+				{ instance_id: 'ai-shuffle-gaming', device_id: 'dev_gaming', device_name: 'DesktopWorker', available: true,
+					account_key: accountKeys[1], windows: [gaming] },
+			],
+			accounts: merged
+				? [{ account_key: 'acct', instance_ids: ['ai-shuffle-unraid', 'ai-shuffle-gaming'],
+					device_ids: ['dev_unraid', 'dev_gaming'], available: true, fetched_at: now,
+					windows: [{ ...gaming, instance_id: 'ai-shuffle-gaming', device_id: 'dev_gaming', device_name: 'DesktopWorker' }] }]
+				: [],
+		});
+	}
+
+	it('a new chat on the stale install shows the other install\'s fresher reading', () => {
+		sharedAccountSnapshot();
+		const shown = resolveBucket(rateLimit.current, null);
+		expect(shown?.windows.five_hour.utilization).toBe(35);
+		// Still this install's bucket: its labels and self-ness are unchanged.
+		expect(shown?.deviceName).toBe('Unraid');
+		expect(resolveBucketKey(rateLimit.current, null)).toBe('ai-shuffle-unraid');
+		expect(isBucketStale(shown!, Date.now())).toBe(false);
+		expect(bucketReporters(shown!)).toEqual(['DesktopWorker']);
+		// A session owned by the other install on the same account: same reading.
+		expect(resolveBucket(rateLimit.current, 'dev_gaming')?.windows.five_hour.utilization).toBe(35);
+	});
+
+	it('different accounts, or no account, keep each install\'s own reading', () => {
+		sharedAccountSnapshot(['acct-a', 'acct-b']);
+		const own = resolveBucket(rateLimit.current, null);
+		expect(own?.windows.five_hour.utilization).toBe(90);
+		expect(bucketReporters(own!)).toEqual([]);
+		rateLimit.__resetForTests();
+		sharedAccountSnapshot([null, null]);
+		expect(resolveBucket(rateLimit.current, null)?.windows.five_hour.utilization).toBe(90);
+		expect(resolveBucket(rateLimit.current, 'dev_gaming')?.windows.five_hour.utilization).toBe(35);
+	});
+
+	it('a live reading on the stale install takes over the shared window and names it', () => {
+		sharedAccountSnapshot();
+		rateLimit.applyLiveEvent({ rate_limit_type: 'five_hour', utilization: 0.2, instance_id: 'ai-shuffle-unraid' });
+		const shown = resolveBucket(rateLimit.current, 'dev_gaming');
+		expect(shown?.windows.five_hour.utilization).toBe(80);
+		expect(bucketReporters(shown!)).toEqual(['Unraid']);
+		// A later snapshot that has not seen the live reading yet keeps it.
+		sharedAccountSnapshot();
+		expect(resolveBucket(rateLimit.current, null)?.windows.five_hour.utilization).toBe(80);
 	});
 });

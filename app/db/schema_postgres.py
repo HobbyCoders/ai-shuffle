@@ -837,7 +837,9 @@ def create_postgres_schema(cursor) -> None:
     #      keyed by instance_id: the windows that install's Claude Code CLI
     #      reported in its rate-limit events, so the usage endpoint can serve
     #      every install's snapshot (joined to the installs registry for
-    #      device_name/online). No Claude account identity.
+    #      device_name/online). ``account_key`` is an opaque hash naming the
+    #      Claude account the CLI is signed in to, so devices on one account
+    #      share a reading; never an email, org id or token.
     # ------------------------------------------------------------------
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS usage_snapshots (
@@ -846,6 +848,7 @@ def create_postgres_schema(cursor) -> None:
             available BOOLEAN DEFAULT FALSE,
             generation BIGINT,
             fetched_at BIGINT,
+            account_key TEXT,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)

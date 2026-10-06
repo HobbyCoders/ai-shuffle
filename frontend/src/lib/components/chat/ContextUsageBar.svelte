@@ -87,6 +87,7 @@
 		formatAsOf,
 		bucketObservedAt,
 		bucketHasUndatedWindow,
+		bucketReporters,
 		resolveBucket,
 		resolveBucketKey,
 		selfBucketKey,
@@ -556,8 +557,20 @@
 		if (bucketHasUndatedWindow(bucket, nowMs) || observedAt == null) {
 			return { text: 'Check time unknown', guidance: false, title: 'Check time unknown' };
 		}
-		const text = checkedText(observedAt, nowMs) as string;
-		return { text, guidance: false, title: text };
+		const checked = checkedText(observedAt, nowMs) as string;
+		// Installs on one Claude account share the freshest reading: name the
+		// install(s) it came from, since it may not be the target itself.
+		const reporters = bucketReporters(bucket);
+		if (reporters.length === 0) return { text: checked, guidance: false, title: checked };
+		const text = `${checked} · from ${reporters.join(' and ')}`;
+		const detail = Object.values(bucket.windows)
+			.filter((w) => w.reportedBy)
+			.map((w) => {
+				const who = w.reportedBy?.deviceName || w.reportedBy?.deviceId || 'another device';
+				const when = w.received_at != null ? formatAsOf(w.received_at, nowMs) : 'at an unknown time';
+				return `${windowLabel(w.type)}: reported from ${who} ${when}`;
+			});
+		return { text, guidance: false, title: [text, ...detail].join('\n') };
 	}
 
 	/** Something the user can act on for this provider row, or null. */

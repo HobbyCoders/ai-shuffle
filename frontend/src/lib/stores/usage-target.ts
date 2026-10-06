@@ -2,12 +2,15 @@
  * Usage target — resolves WHICH install's usage bucket the widget should show
  * for the currently viewed/composed session.
  *
- * The 5-hour usage window is per Claude account, and in a clustered deployment
- * each install runs a different account. A session can be offloaded to another
- * install, so the usage a viewer cares about is the OWNING install's — not
- * necessarily the local one. This store derives that owning `instance_id`
- * (null = local/self) and updates whenever the active session or the sessions
- * list changes, so the pill follows session switches.
+ * The 5-hour usage window is per Claude account. Installs on a network may run
+ * different accounts, and a session can be offloaded to another install, so the
+ * usage a viewer cares about is the OWNING install's — not necessarily the
+ * local one. This store derives that owning `instance_id` (null = local/self)
+ * and updates whenever the active session or the sessions list changes, so the
+ * pill follows session switches. Several installs can share ONE account: the
+ * usage store's `resolveBucket` then serves the account's merged reading (the
+ * freshest window from any of them), so a new chat on an install that has not
+ * run a Claude turn for hours still shows the other install's current numbers.
  *
  * Resolution order:
  *   1. `activeSession.sessionId` set → look the row up in the sessions store;

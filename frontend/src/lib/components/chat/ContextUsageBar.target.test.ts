@@ -193,3 +193,33 @@ describe('ContextUsageBar — resolved target', () => {
 		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('40% left');
 	});
 });
+
+describe('ContextUsageBar — installs sharing one Claude account (#1980)', () => {
+	function sharedAccount() {
+		const now = Date.now();
+		const fresh = { type: 'five_hour', utilization: 35, resets_at: future(), observed_at: now - 120_000 };
+		rateLimit.applySnapshot({
+			available: true,
+			windows: [],
+			self_instance_id: 'primary',
+			snapshots: [
+				{ instance_id: 'primary', device_name: 'Studio', available: true, account_key: 'acct',
+					windows: [{ type: 'five_hour', utilization: 90, resets_at: future(), observed_at: now - 4 * 3_600_000 }] },
+				{ instance_id: 'worker', device_name: 'Worker', available: true, account_key: 'acct', windows: [fresh] },
+			],
+			accounts: [{ account_key: 'acct', instance_ids: ['primary', 'worker'], available: true, fetched_at: now,
+				windows: [{ ...fresh, instance_id: 'worker', device_name: 'Worker' }] }],
+		});
+	}
+
+	it('a new chat shows the fresher reading and names the install it came from', async () => {
+		sharedAccount();
+		setTarget(null);
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.querySelector('.popover-row .row-pct')?.textContent).toBe('35% left');
+		const meta = container.querySelector('.usage-meta-text');
+		expect(meta?.textContent).toBe('Checked 2m ago · from Worker');
+		expect(meta?.getAttribute('title')).toContain('5-hour limit: reported from Worker 2m ago');
+	});
+});

@@ -168,8 +168,10 @@ class TestPersistence:
         assert rows[0]["instance_id"] == settings.effective_instance_id
         assert rows[0]["available"] is False
         assert rows[0]["windows"] == []
-        # Snapshots carry no Claude account identity.
-        assert not any(k.startswith("account_") for k in rows[0])
+        # The retired account columns are gone; a CLI that could not report a
+        # sign-in gives no account key.
+        assert not {"account_id", "account_email", "account_name"} & set(rows[0])
+        assert rows[0]["account_key"] is None
 
     @pytest.mark.asyncio
     async def test_apply_live_event_and_broadcast_persists(self, monitor, mock_db):
@@ -652,6 +654,162 @@ class TestNetworkCopy:
             snap = monitor._cluster_snapshot()
         assert snap["self_device_id"] is None
         assert snap["snapshots"][-1]["instance_id"] == settings.effective_instance_id
+
+
+# ---------------------------------------------------------------------------
+# One Claude account on several devices (#1980)
+# ---------------------------------------------------------------------------
+
+# Made-up identities; never a real address or org.
+_EMAIL = "someone@example.test"
+_ORG = "org-made-up-0001"
+
+
+def _signed_in(email=_EMAIL, org_id=_ORG):
+    from app.core.claude_cli_status import ClaudeCliStatus
+    return ClaudeCliStatus(installed=True, signed_in=True, email=email, org_id=org_id, plan="max")
+
+
+def _window(kind, remaining, observed_at, resets_in=3600):
+    return {"type": kind, "utilization": remaining,
+            "resets_at": str(int(time.time()) + resets_in), "observed_at": observed_at,
+            "source": "cli_stream"}
+
+
+def _cluster(monitor, peers, self_key):
+    """Cluster snapshot with ``peers`` rows (instance_id -> (windows, key)) and
+    this device signed in to ``self_key``'s account (None = not signed in)."""
+    from app.core import claude_cli_status
+    from app.db import database as db
+    installs = {settings.effective_instance_id: {"id": "dev_self", "device_name": "Unraid", "online": True}}
+    for peer_id, (windows, key) in peers.items():
+        db.upsert_usage_snapshot(peer_id, windows, True, 1, 1, account_key=key)
+        installs[peer_id] = {"id": peer_id, "device_name": "DesktopWorker", "online": True}
+    status = _signed_in(org_id=self_key) if self_key else _signed_out()
+    keys = {id(status): self_key}
+    with patch.object(db, "get_installs_map", return_value=installs), \
+            patch.object(claude_cli_status, "peek", return_value=status), \
+            patch.object(usage_limits, "account_key_for", side_effect=lambda s: keys[id(s)]):
+        return monitor._cluster_snapshot()
+
+
+def _signed_out():
+    from app.core.claude_cli_status import ClaudeCliStatus
+    return ClaudeCliStatus(installed=True, signed_in=False)
+
+
+class TestAccountKey:
+    def test_key_is_an_opaque_hash_of_the_sign_in(self):
+        key = usage_limits.account_key_for(_signed_in())
+        assert isinstance(key, str) and len(key) == 32
+        assert _EMAIL not in key and _ORG not in key
+        # Same account, however the CLI cased the email: the same key.
+        assert usage_limits.account_key_for(_signed_in(email=_EMAIL.upper())) == key
+        assert usage_limits.account_key_for(_signed_in(org_id="org-other")) != key
+        # Email only (no org printed) still names the account.
+        assert usage_limits.account_key_for(_signed_in(org_id=None))
+
+    def test_no_sign_in_gives_no_key(self):
+        from app.core.claude_cli_status import ClaudeCliStatus
+        assert usage_limits.account_key_for(None) is None
+        assert usage_limits.account_key_for(ClaudeCliStatus(installed=True, signed_in=False)) is None
+        assert usage_limits.account_key_for(ClaudeCliStatus(installed=True, signed_in=None)) is None
+        assert usage_limits.account_key_for(_signed_in(email=None, org_id=None)) is None
+
+    @pytest.mark.asyncio
+    async def test_published_row_carries_the_key_and_no_secret(self, monitor, mock_db):
+        from app.core import claude_cli_status
+        from app.network import engine, policy
+        monitor._broadcast = AsyncMock()
+        with patch.object(claude_cli_status, "peek", return_value=_signed_in()):
+            await monitor.apply_live_event_and_broadcast("five_hour", 0.25, None)
+        row = _own_row()
+        assert row["account_key"] == usage_limits.account_key_for(_signed_in())
+        record = engine.serialize_row(policy.collection("usage_snapshots"), row)
+        assert set(record) == {"instance_id", "windows", "available", "generation",
+                               "fetched_at", "account_key", "updated_at"}
+        text = repr(record).lower()
+        assert _EMAIL not in text and _ORG not in text
+        for word in ("token", "secret", "credential", "email", "org_id"):
+            assert word not in text
+
+    def test_old_build_row_without_key_reads_as_no_key(self):
+        from app.network import policy
+        coll = policy.collection("usage_snapshots")
+        old = {"instance_id": "dev_old", "windows": [], "available": True,
+               "generation": 1, "fetched_at": 1, "updated_at": "x"}
+        assert coll.materialize_hook(old)["account_key"] is None
+        assert coll.materialize_hook({**old, "account_key": "k"})["account_key"] == "k"
+
+
+class TestAccountMerge:
+    def test_same_account_takes_the_newest_reading_per_window(self, monitor, mock_db):
+        now = int(time.time() * 1000)
+        # This device ran its last turn hours ago; the peer just reported.
+        monitor._windows = [_window("five_hour", 90.0, now - 4 * 3600_000),
+                            _window("seven_day", 50.0, now - 60_000)]
+        monitor._available = True
+        snap = _cluster(monitor, {"dev_peer": ([_window("five_hour", 40.0, now - 1000),
+                                                _window("seven_day", 55.0, now - 3600_000)], "acct")},
+                        "acct")
+        assert len(snap["accounts"]) == 1
+        account = snap["accounts"][0]
+        assert account["account_key"] == "acct"
+        assert set(account["instance_ids"]) == {"dev_peer", settings.effective_instance_id}
+        merged = {w["type"]: w for w in account["windows"]}
+        assert merged["five_hour"]["utilization"] == 40.0
+        assert merged["five_hour"]["device_id"] == "dev_peer"
+        assert merged["five_hour"]["device_name"] == "DesktopWorker"
+        assert merged["seven_day"]["utilization"] == 50.0
+        assert merged["seven_day"]["device_id"] == "dev_self"
+        # The per-device buckets are still served unchanged.
+        by_id = {s["instance_id"]: s for s in snap["snapshots"]}
+        assert by_id[settings.effective_instance_id]["windows"][0]["utilization"] == 90.0
+        assert by_id["dev_peer"]["account_key"] == "acct"
+
+    def test_different_accounts_stay_separate(self, monitor, mock_db):
+        now = int(time.time() * 1000)
+        monitor._windows = [_window("five_hour", 90.0, now - 4 * 3600_000)]
+        snap = _cluster(monitor, {"dev_peer": ([_window("five_hour", 40.0, now)], "acct-b")}, "acct-a")
+        assert snap["accounts"] == []
+        keys = {s["instance_id"]: s["account_key"] for s in snap["snapshots"]}
+        assert keys == {"dev_peer": "acct-b", settings.effective_instance_id: "acct-a"}
+
+    def test_a_device_with_no_sign_in_stays_separate(self, monitor, mock_db):
+        now = int(time.time() * 1000)
+        monitor._windows = [_window("five_hour", 90.0, now - 4 * 3600_000)]
+        # Peer has no key (signed out, or an older build); self is signed in.
+        snap = _cluster(monitor, {"dev_peer": ([_window("five_hour", 40.0, now)], None)}, "acct")
+        assert snap["accounts"] == []
+        # Neither signed in: no key on either, still nothing merged.
+        monitor._cluster_cache = None
+        snap = _cluster(monitor, {}, None)
+        assert snap["accounts"] == []
+        assert all(s["account_key"] is None for s in snap["snapshots"]
+                   if s["instance_id"] != "dev_peer")
+
+    def test_a_stale_device_that_reports_again_wins_the_window(self, monitor, mock_db):
+        now = int(time.time() * 1000)
+        monitor._windows = [_window("five_hour", 90.0, now - 4 * 3600_000)]
+        monitor._available = True
+        peers = {"dev_peer": ([_window("five_hour", 40.0, now - 60_000)], "acct")}
+        merged = {w["type"]: w for w in _cluster(monitor, peers, "acct")["accounts"][0]["windows"]}
+        assert merged["five_hour"]["device_id"] == "dev_peer"
+        # This device now runs a turn: its fresh reading takes the window.
+        monitor.apply_live_event("five_hour", 0.7, None)
+        merged = {w["type"]: w for w in _cluster(monitor, peers, "acct")["accounts"][0]["windows"]}
+        assert merged["five_hour"]["device_id"] == "dev_self"
+        assert merged["five_hour"]["utilization"] == 30.0
+
+    def test_api_model_keeps_accounts_and_reporters(self, monitor, mock_db):
+        from app.api.usage import UsageSnapshot
+        now = int(time.time() * 1000)
+        monitor._windows = [_window("five_hour", 90.0, now - 4 * 3600_000)]
+        monitor._available = True
+        snap = _cluster(monitor, {"dev_peer": ([_window("five_hour", 40.0, now)], "acct")}, "acct")
+        body = UsageSnapshot(**snap).model_dump(mode="json")
+        assert body["accounts"][0]["windows"][0]["device_name"] == "DesktopWorker"
+        assert {s["account_key"] for s in body["snapshots"]} == {"acct"}
 
 
 # ---------------------------------------------------------------------------

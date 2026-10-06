@@ -38,14 +38,25 @@ On a worker network each device keeps its own database. The ``usage_snapshots``
 row is a shared network collection (``app.network.policy``), so a peer serves
 the windows of the device that owns a session; ``device_id`` on each cluster
 entry lets clients match a session's ``owner_device_id``.
+
+Several devices can be signed in to the same Claude account, and each one's
+reading only moves when that device runs a Claude turn. Each row therefore
+carries ``account_key``: an opaque hash of the account the device's CLI is
+signed in to (``claude auth status``: org id and email), never the email, org
+id or any token. The cluster snapshot merges the rows that share a key into
+one ``accounts`` entry, window by window, keeping the reading with the newest
+``observed_at`` and naming the device that reported it. Rows with no key
+(not signed in, or written by an older build) or a key of their own stay
+separate, exactly as before; the per-device entries are always served too.
 """
 
 import asyncio
+import hashlib
 import logging
 import math
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.db.async_database import run_sync
 
@@ -72,6 +83,89 @@ NETWORK_COLLECTION = "usage_snapshots"
 # Each window's ``source``: the route that last reported it.
 SOURCE_CLI_STREAM = "cli_stream"
 SOURCE_CLAUDE_MOD = "claude_mod"
+
+# Domain prefix hashed with the account identity (``account_key_for``).
+_ACCOUNT_KEY_DOMAIN = "ai-shuffle:claude-usage-account:v1:"
+
+
+def account_key_for(status: Any) -> Optional[str]:
+    """Opaque key naming the Claude account a CLI status is signed in to.
+
+    Built from the org id and the email ``claude auth status`` printed (both
+    when present, else whichever is present), lower-cased and hashed, so equal
+    accounts give equal keys while the row carries neither value. None when
+    the CLI is not signed in or reports neither. Never reads a token or the
+    credential file.
+    """
+    if status is None or getattr(status, "signed_in", None) is not True:
+        return None
+    parts = []
+    org_id = getattr(status, "org_id", None)
+    if isinstance(org_id, str) and org_id.strip():
+        parts.append("org:" + org_id.strip().lower())
+    email = getattr(status, "email", None)
+    if isinstance(email, str) and email.strip():
+        parts.append("email:" + email.strip().lower())
+    if not parts:
+        return None
+    digest = hashlib.sha256((_ACCOUNT_KEY_DOMAIN + "|".join(parts)).encode("utf-8"))
+    return digest.hexdigest()[:32]
+
+
+def _observed_stamp(window: Dict[str, Any]) -> float:
+    """A window's ``observed_at`` for comparison; an undated one sorts first."""
+    seen = window.get("observed_at")
+    if isinstance(seen, bool) or not isinstance(seen, (int, float)) or not math.isfinite(seen):
+        return -1.0
+    return float(seen)
+
+
+def merge_account_snapshots(snapshots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One entry per Claude account reported by two or more devices.
+
+    Window by window, the reading with the newest ``observed_at`` wins, and the
+    window names the device that reported it (``instance_id``, ``device_id``,
+    ``device_name``). Entries without an ``account_key``, or with a key no other
+    entry shares, are left out: they stay the separate per-device buckets.
+    """
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in snapshots:
+        key = entry.get("account_key")
+        if isinstance(key, str) and key:
+            groups.setdefault(key, []).append(entry)
+    accounts: List[Dict[str, Any]] = []
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        best: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        for member in members:
+            for window in member.get("windows") or []:
+                if not isinstance(window, dict) or not window.get("type"):
+                    continue
+                stamp = _observed_stamp(window)
+                current = best.get(window["type"])
+                if current is not None and current[0] >= stamp:
+                    continue
+                best[window["type"]] = (stamp, {
+                    **window,
+                    "instance_id": member.get("instance_id"),
+                    "device_id": member.get("device_id"),
+                    "device_name": member.get("device_name"),
+                })
+        fetched = [m["fetched_at"] for m in members
+                   if isinstance(m.get("fetched_at"), int) and not isinstance(m.get("fetched_at"), bool)]
+        generations = [m["generation"] for m in members
+                       if isinstance(m.get("generation"), int) and not isinstance(m.get("generation"), bool)]
+        accounts.append({
+            "account_key": key,
+            "instance_ids": [m.get("instance_id") for m in members],
+            "device_ids": [m.get("device_id") for m in members if m.get("device_id")],
+            "windows": [w for _stamp, w in best.values()],
+            "fetched_at": max(fetched) if fetched else None,
+            "available": any(bool(m.get("available")) for m in members),
+            "generation": max(generations) if generations else None,
+        })
+    return accounts
 
 
 def reset_epoch_seconds(resets_at: Any) -> Optional[float]:
@@ -157,6 +251,9 @@ class UsageLimitsMonitor:
         # Set by ``apply_mod_report`` when an unchanged report re-dated the
         # windows and the shared row is due the new dates.
         self._mod_persist_due: bool = False
+        # ``account_key_for`` of the CLI's sign-in, once a status could read it.
+        self._account_key: Optional[str] = None
+        self._account_key_known: bool = False
 
     def current_generation(self) -> int:
         return self._generation
@@ -207,6 +304,26 @@ class UsageLimitsMonitor:
         except Exception:  # noqa: BLE001 — background refresh is best-effort
             logger.debug("Claude usage refresh failed")
 
+    def _current_account_key(self, probe: bool) -> Optional[str]:
+        """This device's Claude account key, from the CLI status cache.
+
+        ``probe`` runs ``claude auth status`` when nothing is cached yet
+        (blocking; only from ``run_sync`` paths). A status that could not read
+        the sign-in keeps the last known key.
+        """
+        status = None
+        try:
+            from app.core import claude_cli_status
+            status = claude_cli_status.peek()
+            if status is None and probe:
+                status = claude_cli_status.get_status()
+        except Exception as e:  # noqa: BLE001 — the key is best-effort
+            logger.debug("Claude account key unavailable: %s", e)
+        if status is not None and getattr(status, "signed_in", None) is not None:
+            self._account_key = account_key_for(status)
+            self._account_key_known = True
+        return self._account_key
+
     def _persist_snapshot(self) -> None:
         """Persist this install's snapshot row to the shared DB (best-effort).
 
@@ -226,6 +343,7 @@ class UsageLimitsMonitor:
                 self._available,
                 self._generation,
                 fetched_ms,
+                account_key=self._current_account_key(probe=True),
             )
             # Our own row changed — drop the cluster cache so the next assembly
             # re-reads and reflects it immediately.
@@ -401,6 +519,7 @@ class UsageLimitsMonitor:
                 "fetched_at": row.get("fetched_at"),
                 "available": bool(row.get("available")),
                 "generation": row.get("generation"),
+                "account_key": row.get("account_key"),
             })
         self._cluster_cache = (now + _CLUSTER_CACHE_TTL_SECONDS, snapshots)
         return snapshots
@@ -429,6 +548,9 @@ class UsageLimitsMonitor:
         # Memory is authoritative for our own entry: the (cached) DB row can
         # lag a just-applied live event.
         own = next((s for s in snapshots if s["instance_id"] == self_id), None)
+        account_key = self._current_account_key(probe=False)
+        if not self._account_key_known:
+            account_key = (own or {}).get("account_key")
         own = {
             "instance_id": self_id,
             "device_id": (own or {}).get("device_id") or self._self_device_id,
@@ -438,10 +560,12 @@ class UsageLimitsMonitor:
             "fetched_at": int(self._fetched_at * 1000) if self._fetched_at else None,
             "available": self._available,
             "generation": self._generation,
+            "account_key": account_key,
         }
         base["snapshots"] = [s for s in snapshots if s["instance_id"] != self_id] + [own]
         base["self_instance_id"] = self_id
         base["self_device_id"] = own["device_id"]
+        base["accounts"] = merge_account_snapshots(base["snapshots"])
         return base
 
     def apply_live_event(

@@ -58,6 +58,7 @@
 	import { getUsageLimits } from '$lib/api/client';
 	import {
 		rateLimit,
+		resolveBucket,
 		resolveBucketKey,
 		isBucketStale,
 		BUCKET_STALE_MS
@@ -373,7 +374,8 @@
 		handledTarget = target;
 		const state = rateLimit.current;
 		const key = resolveBucketKey(state, target);
-		const bucket = key ? state.buckets[key] : null;
+		// The merged reading when other installs share this one's Claude account.
+		const bucket = resolveBucket(state, target);
 		const now = Date.now();
 		const isStale =
 			(key != null && (state.staleByInstance[key] ?? false)) ||

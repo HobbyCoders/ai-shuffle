@@ -84,7 +84,9 @@ class InstallUsageSnapshot(BaseModel):
 
     Each install's CLI may be signed in differently, so on a shared database
     each install publishes the windows its own CLI reported, joined to the
-    installs registry for ``device_name``/``online``. No account identity.
+    installs registry for ``device_name``/``online``. ``account_key`` is an
+    opaque hash of the Claude account the install's CLI is signed in to (never
+    the email, org id or a token); null when unknown or from an older build.
     """
     instance_id: str
     # Network device id of this install (sessions name their owner by it).
@@ -92,6 +94,29 @@ class InstallUsageSnapshot(BaseModel):
     device_name: Optional[str] = None
     online: bool = False
     windows: List[UsageWindow] = []
+    fetched_at: Optional[int] = None
+    available: bool = False
+    generation: Optional[int] = None
+    account_key: Optional[str] = None
+
+
+class AccountUsageWindow(UsageWindow):
+    """A merged window, naming the install whose reading it is."""
+    instance_id: Optional[str] = None
+    device_id: Optional[str] = None
+    device_name: Optional[str] = None
+
+
+class AccountUsageSnapshot(BaseModel):
+    """Installs signed in to one Claude account, merged window by window.
+
+    Each window is the reading with the newest ``observed_at`` among the
+    installs listed; only accounts reported by two or more installs appear.
+    """
+    account_key: str
+    instance_ids: List[Optional[str]] = []
+    device_ids: List[str] = []
+    windows: List[AccountUsageWindow] = []
     fetched_at: Optional[int] = None
     available: bool = False
     generation: Optional[int] = None
@@ -200,6 +225,9 @@ class UsageSnapshot(BaseModel):
     snapshots: List[InstallUsageSnapshot] = []
     self_instance_id: Optional[str] = None
     self_device_id: Optional[str] = None
+    # Installs sharing a Claude account, merged (additive; see
+    # ``app.core.usage_limits.merge_account_snapshots``).
+    accounts: List[AccountUsageSnapshot] = []
     # Non-Claude provider usage (Codex/ChatGPT, OpenRouter, OpenAI credits,
     # fal.ai credits, SuperGrok, ...). Additive. Null when the cached rows could
     # not be read, so clients keep their last-good rows instead of blanking.

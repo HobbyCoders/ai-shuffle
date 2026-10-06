@@ -53,6 +53,15 @@ export interface UsageWindow {
 	 */
 	received_at: number | null;
 	source: 'poll' | 'live';
+	/** In a merged account bucket: the install whose reading this is. */
+	reportedBy?: UsageReporter | null;
+}
+
+/** The install that reported a window of a merged account bucket. */
+export interface UsageReporter {
+	instanceId: string | null;
+	deviceId: string | null;
+	deviceName: string | null;
 }
 
 /** One install's usage snapshot: its window set plus where it belongs. */
@@ -70,6 +79,22 @@ export interface UsageBucket {
 	online?: boolean | null;
 	/** Monotonic generation tag from the backend for THIS install (see below). */
 	generation?: number | null;
+	/** Opaque key of the Claude account this install's CLI is signed in to;
+	 *  null/absent = unknown (not signed in, or an older backend). */
+	accountKey?: string | null;
+}
+
+/**
+ * Installs signed in to one Claude account, merged by the backend window by
+ * window (newest `observed_at` wins). Each window names its reporter.
+ */
+export interface AccountBucket {
+	accountKey: string;
+	/** Bucket keys (install ids) of the member installs. */
+	instanceIds: string[];
+	windows: Record<string, UsageWindow>;
+	fetchedAt: number | null;
+	available: boolean;
 }
 
 /**
@@ -143,6 +168,8 @@ interface RateLimitState {
 	buckets: Record<string, UsageBucket>;
 	/** Keyed by `provider_id`. Provider-scoped (see `ProviderUsageBucket`). */
 	providerBuckets: Record<string, ProviderUsageBucket>;
+	/** Keyed by account key: installs sharing one Claude account, merged. */
+	accountBuckets?: Record<string, AccountBucket>;
 	/** The local install's instance id, when the backend reports it. null in the
 	 *  legacy path — the self bucket is then keyed `'__self__'`. */
 	selfInstanceId: string | null;
@@ -181,6 +208,24 @@ export interface SnapshotWindow {
 	observed_at?: number | null;
 }
 
+/** A merged account window: also names the install that reported it. */
+export interface SnapshotAccountWindow extends SnapshotWindow {
+	instance_id?: string | null;
+	device_id?: string | null;
+	device_name?: string | null;
+}
+
+/** One entry of the snapshot's `accounts` array (two or more installs). */
+export interface SnapshotAccount {
+	account_key: string;
+	instance_ids?: (string | null)[];
+	device_ids?: string[];
+	windows: SnapshotAccountWindow[];
+	fetched_at?: number | null;
+	available: boolean;
+	generation?: number | null;
+}
+
 /** One install's entry in the modern `snapshots` array. */
 export interface SnapshotInstance {
 	instance_id: string;
@@ -193,6 +238,8 @@ export interface SnapshotInstance {
 	fetched_at?: number | null;
 	available: boolean;
 	generation?: number | null;
+	/** Opaque Claude account key (absent from older backends = no key). */
+	account_key?: string | null;
 }
 
 /**
@@ -246,6 +293,9 @@ export interface UsageSnapshot {
 	self_instance_id?: string | null;
 	/** The local install's network device id. */
 	self_device_id?: string | null;
+	/** Installs on one Claude account, merged by the backend. Replaces
+	 *  `accountBuckets` with every modern (`snapshots`) payload. */
+	accounts?: SnapshotAccount[];
 	/** Non-Claude provider usage. Full-replaces `providerBuckets` when present;
 	 *  when the key is ABSENT the store leaves the existing map untouched (so a
 	 *  WS-only payload without providers can't wipe it). Additive; empty for old
@@ -454,7 +504,42 @@ export function selfBucketKey(state: RateLimitState): string {
  */
 export function resolveBucket(state: RateLimitState, instanceId: string | null): UsageBucket | null {
 	const key = resolveBucketKey(state, instanceId);
-	return key != null ? state.buckets[key] : null;
+	if (key == null) return null;
+	const bucket = state.buckets[key];
+	const account = accountBucketFor(state, key);
+	if (!bucket || !account) return bucket ?? null;
+	// The same Claude account on several installs: show the freshest reading
+	// of each window, whichever install reported it. The target's own
+	// device fields stay, so labels and staleness still name the target.
+	return {
+		...bucket,
+		windows: account.windows,
+		fetchedAt: account.fetchedAt ?? bucket.fetchedAt,
+		available: account.available || bucket.available,
+	};
+}
+
+/** The merged account bucket an install's bucket belongs to, if any. */
+export function accountBucketFor(state: RateLimitState, bucketKey: string): AccountBucket | null {
+	const accountKey = state.buckets[bucketKey]?.accountKey;
+	if (!accountKey) return null;
+	const account = state.accountBuckets?.[accountKey];
+	return account && account.instanceIds.includes(bucketKey) ? account : null;
+}
+
+/**
+ * Names of the installs whose readings a bucket shows, newest first; empty
+ * for a plain per-install bucket (its windows carry no reporter).
+ */
+export function bucketReporters(bucket: UsageBucket): string[] {
+	const newest = new Map<string, number>();
+	for (const w of Object.values(bucket.windows ?? {})) {
+		const name = w.reportedBy?.deviceName || w.reportedBy?.deviceId || w.reportedBy?.instanceId;
+		if (!name) continue;
+		const at = windowObservedAtKnown(w) ? w.received_at : -1;
+		newest.set(name, Math.max(newest.get(name) ?? -Infinity, at));
+	}
+	return [...newest.entries()].sort((a, b) => b[1] - a[1]).map(([name]) => name);
 }
 
 /**
@@ -551,6 +636,7 @@ interface PersistedShape {
 	selfInstanceId: string | null;
 	selfDeviceId?: string | null;
 	providerBuckets?: Record<string, ProviderUsageBucket>;
+	accountBuckets?: Record<string, AccountBucket>;
 }
 
 interface LoadedShape {
@@ -558,6 +644,7 @@ interface LoadedShape {
 	selfInstanceId: string | null;
 	selfDeviceId?: string | null;
 	providerBuckets: Record<string, ProviderUsageBucket>;
+	accountBuckets?: Record<string, AccountBucket>;
 }
 
 function _load(): LoadedShape {
@@ -571,6 +658,7 @@ function _load(): LoadedShape {
 					selfInstanceId: parsed.selfInstanceId ?? null,
 					selfDeviceId: parsed.selfDeviceId ?? null,
 					providerBuckets: parsed.providerBuckets ?? {},
+					accountBuckets: parsed.accountBuckets ?? {},
 				};
 			}
 			return { buckets: {}, selfInstanceId: null, providerBuckets: {} };
@@ -602,6 +690,7 @@ function _save(state: RateLimitState) {
 			selfInstanceId: state.selfInstanceId,
 			selfDeviceId: state.selfDeviceId ?? null,
 			providerBuckets: state.providerBuckets,
+			accountBuckets: state.accountBuckets ?? {},
 		};
 		localStorage.setItem(STORAGE_KEY_V3, JSON.stringify(payload));
 	} catch {
@@ -623,6 +712,7 @@ const _store = createStore<RateLimitState>({
 	selfInstanceId: _loaded.selfInstanceId,
 	selfDeviceId: _loaded.selfDeviceId ?? null,
 	providerBuckets: _loaded.providerBuckets,
+	accountBuckets: _loaded.accountBuckets ?? {},
 	staleByInstance: {},
 });
 
@@ -674,6 +764,49 @@ function _windowsFromSnapshot(
 	return windows;
 }
 
+/**
+ * Account buckets from a snapshot's `accounts`. A window the previous bucket
+ * of the same account holds with a strictly newer reading (a live event that
+ * arrived since, or a straggling older snapshot) is kept.
+ */
+function _accountBucketsFromSnapshot(
+	raw: SnapshotAccount[] | undefined,
+	prev: Record<string, AccountBucket> | undefined,
+	now: number
+): Record<string, AccountBucket> {
+	const accounts: Record<string, AccountBucket> = {};
+	for (const a of raw ?? []) {
+		if (!a?.account_key) continue;
+		const windows = _windowsFromSnapshot(a.windows, now, a.fetched_at, true);
+		for (const w of a.windows ?? []) {
+			if (!w?.type || !windows[w.type]) continue;
+			windows[w.type].reportedBy = {
+				instanceId: w.instance_id ?? null,
+				deviceId: w.device_id ?? null,
+				deviceName: w.device_name ?? null,
+			};
+		}
+		for (const old of Object.values(prev?.[a.account_key]?.windows ?? {})) {
+			const incoming = windows[old.type];
+			if (
+				incoming &&
+				windowObservedAtKnown(old) &&
+				(!windowObservedAtKnown(incoming) || old.received_at > incoming.received_at)
+			) {
+				windows[old.type] = old;
+			}
+		}
+		accounts[a.account_key] = {
+			accountKey: a.account_key,
+			instanceIds: (a.instance_ids ?? []).filter((id): id is string => !!id),
+			windows,
+			fetchedAt: a.fetched_at ?? null,
+			available: !!a.available,
+		};
+	}
+	return accounts;
+}
+
 export const rateLimit = {
 	get current(): RateLimitState {
 		return _store.current;
@@ -717,7 +850,26 @@ export const rateLimit = {
 				available: true,
 			};
 			const buckets = { ...s.buckets, [key]: bucket };
-			const next = { ...s, buckets };
+			// A live reading is the newest of its account: it takes that window
+			// of the merged bucket too, naming this install as the reporter.
+			let accountBuckets = s.accountBuckets;
+			const account = accountBucketFor({ ...s, buckets }, key);
+			if (account && accountBuckets) {
+				const reportedBy: UsageReporter = {
+					instanceId: key,
+					deviceId: bucket.deviceId ?? null,
+					deviceName: bucket.deviceName ?? null,
+				};
+				accountBuckets = {
+					...accountBuckets,
+					[account.accountKey]: {
+						...account,
+						windows: { ...account.windows, [rate_limit_type]: { ...win, reportedBy } },
+						available: true,
+					},
+				};
+			}
+			const next = { ...s, buckets, accountBuckets };
 			_save(next);
 			return next;
 		});
@@ -826,6 +978,7 @@ export const rateLimit = {
 						online: entry.online ?? null,
 						generation: gen ?? null,
 						fetchedAt: entry.fetched_at ?? null,
+						accountKey: entry.account_key ?? null,
 					};
 
 					if (!entry.available) {
@@ -867,6 +1020,7 @@ export const rateLimit = {
 				const next: RateLimitState = {
 					buckets,
 					providerBuckets: s.providerBuckets,
+					accountBuckets: _accountBucketsFromSnapshot(snapshot.accounts, s.accountBuckets, now),
 					selfInstanceId: snapshot.self_instance_id ?? null,
 					selfDeviceId: snapshot.self_device_id ?? null,
 					staleByInstance,
@@ -925,6 +1079,7 @@ export const rateLimit = {
 			const next: RateLimitState = {
 				buckets: { ...s.buckets, [key]: bucket },
 				providerBuckets: s.providerBuckets,
+				accountBuckets: s.accountBuckets,
 				selfInstanceId: s.selfInstanceId,
 				selfDeviceId: s.selfDeviceId ?? null,
 				staleByInstance,
@@ -943,7 +1098,14 @@ export const rateLimit = {
 	 */
 	__resetForTests(): void {
 		for (const k of Object.keys(_lastGenByInstance)) delete _lastGenByInstance[k];
-		_store.set({ buckets: {}, providerBuckets: {}, selfInstanceId: null, selfDeviceId: null, staleByInstance: {} });
+		_store.set({
+			buckets: {},
+			providerBuckets: {},
+			accountBuckets: {},
+			selfInstanceId: null,
+			selfDeviceId: null,
+			staleByInstance: {},
+		});
 		_claudeSource.set({ source: null, attemptedAt: null, lastErrorKind: null });
 		_save(_store.current);
 	},

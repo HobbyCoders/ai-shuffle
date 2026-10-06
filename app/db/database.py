@@ -821,6 +821,12 @@ def _run_column_migrations(cursor):
         cursor.execute("ALTER TABLE automations ADD COLUMN action_steps TEXT DEFAULT NULL")
         migrations_applied.append("automations.action_steps")
 
+    # (#1980) Opaque Claude account key per device usage row, so devices on
+    # one account share the freshest reading. NULL = no key (older rows).
+    if table_exists(cursor, "usage_snapshots") and not column_exists(cursor, "usage_snapshots", "account_key"):
+        cursor.execute("ALTER TABLE usage_snapshots ADD COLUMN account_key TEXT")
+        migrations_applied.append("usage_snapshots.account_key")
+
     # (v92) Per-automation run model choice. NULL = fall back as before.
     if table_exists(cursor, "automations"):
         for column in ("model", "provider_id"):
@@ -1368,6 +1374,7 @@ def _run_column_migrations(cursor):
                 available BOOLEAN DEFAULT FALSE,
                 generation BIGINT,
                 fetched_at BIGINT,
+                account_key TEXT,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
         """)
