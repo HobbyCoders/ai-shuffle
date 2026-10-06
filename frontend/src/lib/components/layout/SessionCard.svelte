@@ -54,7 +54,7 @@
 		GIT_STAGE_TONES,
 		GIT_STAGE_TIPS,
 		RUNTIME_STATUS_TONES,
-		RUNTIME_STATUS_WORDS,
+		runtimeStatusWord,
 		deriveGitStage,
 		diffCounts,
 		isAttentionStatus,
@@ -86,6 +86,9 @@
 		projectLabel: string;
 		/** True when this session is the one open in the main panel. */
 		active?: boolean;
+		/** Its conversation is being compacted right now (known for the open
+		 *  session only): the status word reads "Compacting". */
+		compacting?: boolean;
 		/** Current clock (ms) supplied by the sidebar's shared ticker. */
 		now: number;
 		/** Last-activity time (ms) precomputed by the sidebar's row builder, so a
@@ -112,6 +115,7 @@
 		openPr = false,
 		projectLabel,
 		active = false,
+		compacting = false,
 		now,
 		timestamp,
 		compact = false,
@@ -141,7 +145,7 @@
 	const title = $derived(session.title?.trim() || 'Untitled');
 	const device = $derived(deviceLabel(session));
 	const branch = $derived(branchLabel(session));
-	const statusWord = $derived(RUNTIME_STATUS_WORDS[status]);
+	const statusWord = $derived(runtimeStatusWord(status, compacting));
 	const statusTone = $derived(RUNTIME_STATUS_TONES[status]);
 	const attention = $derived(isAttentionStatus(status));
 	// In-flight (working) rows that aren't the open session recede so the list

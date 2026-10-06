@@ -169,7 +169,36 @@ export interface V2SessionState {
 	 *  connection-drop retry folds into its card (see foldDroppedAttempt).
 	 *  Optional so a cached state from before the field reads as 0. */
 	attemptStartSeq?: number;
+	/** A compaction of the main conversation in progress (`running`) or one
+	 *  that just failed (`failed`), from `system.compaction_status`. Shown as
+	 *  "Compacting context…" where the working indicator lives. Cleared by the
+	 *  boundary card, a `compact_failed` note, every turn boundary and a
+	 *  rewind, so a lost close can never leave it stuck. Optional so a cached
+	 *  state from before the field reads as none. */
+	compaction?: LiveCompaction | null;
 }
+
+/** See `V2SessionState.compaction`. */
+export interface LiveCompaction {
+	phase: 'running' | 'failed';
+	/** "auto" | "manual" when the engine knows. */
+	trigger: string | null;
+	/** "user" | "app" for a /compact turn. */
+	requestedBy: string | null;
+	error: string | null;
+	/** created_at of the status event (ISO), for elapsed time / fade-out. */
+	at: string | null;
+}
+
+/** Events that end any compaction progress line (see `compaction`). */
+const COMPACTION_CLEARING_EVENTS = new Set([
+	'turn.started',
+	'turn.parked',
+	'turn.completed',
+	'turn.aborted',
+	'system.compaction_boundary',
+	'transcript.rewound',
+]);
 
 export function initialState(): V2SessionState {
 	return {
@@ -198,6 +227,7 @@ export function initialState(): V2SessionState {
 		speculativelySettledCardIds: [],
 		speculativelySettledTaskIds: [],
 		attemptStartSeq: 0,
+		compaction: null,
 	};
 }
 
@@ -1008,6 +1038,15 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 	const syntheticTranscript = turnId.startsWith('voice-') || turnId.startsWith('brief-');
 	if (syntheticTranscript &&['turn.started', 'turn.completed', 'turn.aborted'].includes(event.type)) {
 		return state;
+	}
+
+	if (
+		state.compaction &&
+		(COMPACTION_CLEARING_EVENTS.has(event.type) ||
+			(event.type === 'system.note' && str(event.subtype) === 'compact_failed'))
+	) {
+		// The boundary card / failure card / turn end replaces the progress line.
+		state = { ...state, compaction: null };
 	}
 
 	switch (event.type) {
@@ -2220,6 +2259,26 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				timestamp: createdAt || undefined,
 			};
 			return appendMessage(closeOpen(state), msg, seq);
+		}
+
+		case 'system.compaction_status': {
+			// Progress only: never a transcript message. `started` shows the
+			// "Compacting context…" line; `failed` shows the reason briefly;
+			// `ended` closes it (a success also closes via the boundary card).
+			const phase = str(event.state);
+			if (phase === 'started' || phase === 'failed') {
+				return {
+					...state,
+					compaction: {
+						phase: phase === 'started' ? 'running' : 'failed',
+						trigger: str(event.trigger) || null,
+						requestedBy: str(event.requested_by) || null,
+						error: str(event.error) || null,
+						at: createdAt || null,
+					},
+				};
+			}
+			return state.compaction ? { ...state, compaction: null } : state;
 		}
 
 		// ── Transcript rewind (replay-deterministic truncation) ─────────

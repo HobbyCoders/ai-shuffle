@@ -2418,6 +2418,65 @@ describe('system + unknown events', () => {
 		});
 	});
 
+	describe('compaction progress (system.compaction_status)', () => {
+		const started = (fields: Record<string, unknown> = {}) =>
+			ev('system.compaction_status', { state: 'started', trigger: 'auto', ...fields });
+
+		it('a started compaction is live state, never a transcript message', () => {
+			const s = fold([ev('turn.started'), started({ requested_by: 'user', trigger: 'manual' })]);
+			expect(s.compaction).toEqual({
+				phase: 'running',
+				trigger: 'manual',
+				requestedBy: 'user',
+				error: null,
+				at: '2026-07-12T00:00:00.000Z',
+			});
+			expect(s.messages).toEqual([]);
+		});
+
+		it('the Context Compacted card replaces it', () => {
+			const s = fold([
+				ev('turn.started'),
+				started(),
+				ev('system.compaction_boundary', {
+					subtype: 'compact_boundary',
+					data: { compact_metadata: { trigger: 'auto' } },
+				}),
+			]);
+			expect(s.compaction).toBeNull();
+			expect(s.messages.map((m) => m.systemSubtype)).toEqual(['compact_boundary']);
+		});
+
+		it('a failure keeps its reason until the failed card or the turn end', () => {
+			let s = fold([
+				ev('turn.started'),
+				started(),
+				ev('system.compaction_status', { state: 'failed', trigger: 'auto', error: 'Prompt is too long' }),
+			]);
+			expect(s.compaction).toMatchObject({ phase: 'failed', error: 'Prompt is too long' });
+			s = reduce(s, ev('system.note', { subtype: 'compact_failed', data: { reason: 'Prompt is too long' } }));
+			expect(s.compaction).toBeNull();
+		});
+
+		it('an ended status closes it', () => {
+			const s = fold([ev('turn.started'), started(), ev('system.compaction_status', { state: 'ended' })]);
+			expect(s.compaction).toBeNull();
+		});
+
+		it.each(['turn.completed', 'turn.aborted', 'turn.parked', 'turn.started'])(
+			'%s clears it so it can never stick',
+			(type) => {
+				const s = fold([ev('turn.started'), started(), ev(type, { reason: 'interrupt' })]);
+				expect(s.compaction).toBeNull();
+			}
+		);
+
+		it('a replay mid-compaction restores it', () => {
+			const events = [ev('turn.started'), ev('assistant.text_delta', { text: 'x' }), started()];
+			expect(fold(events).compaction?.phase).toBe('running');
+		});
+	});
+
 	it("the replay's elided-prefix marker stays the plain marker", () => {
 		const s = fold([
 			ev('system.compaction_boundary', {

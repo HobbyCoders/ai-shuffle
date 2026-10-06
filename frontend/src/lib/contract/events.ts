@@ -25,6 +25,7 @@ export type SessionEvent =
   | SwarmUpdated
   | SystemNote
   | SystemCompactionBoundary
+  | SystemCompactionStatus
   | InteractionRequested
   | InteractionAnswered
   | InteractionExpired
@@ -331,66 +332,78 @@ export type TurnId23 = string | null;
 export type Type23 = 'system.compaction_boundary';
 export type CommandId24 = string | null;
 export type CreatedAt25 = string;
+export type Error1 = string | null;
 export type Id26 = string;
-export type InteractionId = string;
-export type Kind5 = 'permission' | 'question';
-export type RequestId = string | null;
+export type RequestedBy = string | null;
 export type RunId24 = string | null;
 export type Seq24 = number;
 export type SessionId25 = string;
+export type State1 = 'started' | 'ended' | 'failed';
+export type Trigger = string | null;
 export type TurnId24 = string | null;
-export type Type24 = 'interaction.requested';
+export type Type24 = 'system.compaction_status';
 export type CommandId25 = string | null;
 export type CreatedAt26 = string;
 export type Id27 = string;
-export type InteractionId1 = string;
-export type RequestId1 = string | null;
+export type InteractionId = string;
+export type Kind5 = 'permission' | 'question';
+export type RequestId = string | null;
 export type RunId25 = string | null;
 export type Seq25 = number;
 export type SessionId26 = string;
 export type TurnId25 = string | null;
-export type Type25 = 'interaction.answered';
+export type Type25 = 'interaction.requested';
 export type CommandId26 = string | null;
 export type CreatedAt27 = string;
 export type Id28 = string;
-export type InteractionId2 = string;
-export type Reason1 = string | null;
-export type RequestId2 = string | null;
+export type InteractionId1 = string;
+export type RequestId1 = string | null;
 export type RunId26 = string | null;
 export type Seq26 = number;
 export type SessionId27 = string;
 export type TurnId26 = string | null;
-export type Type26 = 'interaction.expired';
+export type Type26 = 'interaction.answered';
 export type CommandId27 = string | null;
 export type CreatedAt28 = string;
-export type FromSeq = number;
 export type Id29 = string;
+export type InteractionId2 = string;
+export type Reason1 = string | null;
+export type RequestId2 = string | null;
 export type RunId27 = string | null;
 export type Seq27 = number;
 export type SessionId28 = string;
 export type TurnId27 = string | null;
-export type Type27 = 'transcript.rewound';
+export type Type27 = 'interaction.expired';
 export type CommandId28 = string | null;
 export type CreatedAt29 = string;
-export type Filename = string | null;
-export type Hash = string;
+export type FromSeq = number;
 export type Id30 = string;
-export type Mime = string | null;
 export type RunId28 = string | null;
 export type Seq28 = number;
 export type SessionId29 = string;
-export type Size = number;
 export type TurnId28 = string | null;
-export type Type28 = 'artifact.created';
+export type Type28 = 'transcript.rewound';
 export type CommandId29 = string | null;
 export type CreatedAt30 = string;
+export type Filename = string | null;
+export type Hash = string;
 export type Id31 = string;
+export type Mime = string | null;
 export type RunId29 = string | null;
 export type Seq29 = number;
 export type SessionId30 = string;
-export type Signal = string | null;
+export type Size = number;
 export type TurnId29 = string | null;
-export type Type29 = 'turn.provider_alive';
+export type Type29 = 'artifact.created';
+export type CommandId30 = string | null;
+export type CreatedAt31 = string;
+export type Id32 = string;
+export type RunId30 = string | null;
+export type Seq30 = number;
+export type SessionId31 = string;
+export type Signal = string | null;
+export type TurnId30 = string | null;
+export type Type30 = 'turn.provider_alive';
 
 export interface TurnQueued {
   command_id?: CommandId;
@@ -793,31 +806,37 @@ export interface SystemCompactionBoundary {
   type?: Type23;
   [k: string]: unknown;
 }
-export interface InteractionRequested {
+/**
+ * A compaction of the main conversation started or stopped.
+ *
+ * Progress, not a record: ``started`` shows "Compacting context..." until
+ * the ``system.compaction_boundary`` card (success) or a ``failed`` status
+ * (with ``error``) replaces it; ``ended`` closes it without a verdict. The
+ * turn's end clears it too, so a lost close can never leave it stuck.
+ */
+export interface SystemCompactionStatus {
   command_id?: CommandId24;
   created_at: CreatedAt25;
+  error?: Error1;
   id: Id26;
-  interaction_id: InteractionId;
-  kind: Kind5;
-  request?: Request;
-  request_id?: RequestId;
+  requested_by?: RequestedBy;
   run_id?: RunId24;
   seq: Seq24;
   session_id: SessionId25;
+  state: State1;
+  trigger?: Trigger;
   turn_id?: TurnId24;
   type?: Type24;
   [k: string]: unknown;
 }
-export interface Request {
-  [k: string]: unknown;
-}
-export interface InteractionAnswered {
-  answer?: Answer;
+export interface InteractionRequested {
   command_id?: CommandId25;
   created_at: CreatedAt26;
   id: Id27;
-  interaction_id: InteractionId1;
-  request_id?: RequestId1;
+  interaction_id: InteractionId;
+  kind: Kind5;
+  request?: Request;
+  request_id?: RequestId;
   run_id?: RunId25;
   seq: Seq25;
   session_id: SessionId26;
@@ -825,16 +844,16 @@ export interface InteractionAnswered {
   type?: Type25;
   [k: string]: unknown;
 }
-export interface Answer {
+export interface Request {
   [k: string]: unknown;
 }
-export interface InteractionExpired {
+export interface InteractionAnswered {
+  answer?: Answer;
   command_id?: CommandId26;
   created_at: CreatedAt27;
   id: Id28;
-  interaction_id: InteractionId2;
-  reason?: Reason1;
-  request_id?: RequestId2;
+  interaction_id: InteractionId1;
+  request_id?: RequestId1;
   run_id?: RunId26;
   seq: Seq26;
   session_id: SessionId27;
@@ -842,11 +861,16 @@ export interface InteractionExpired {
   type?: Type26;
   [k: string]: unknown;
 }
-export interface TranscriptRewound {
+export interface Answer {
+  [k: string]: unknown;
+}
+export interface InteractionExpired {
   command_id?: CommandId27;
   created_at: CreatedAt28;
-  from_seq: FromSeq;
   id: Id29;
+  interaction_id: InteractionId2;
+  reason?: Reason1;
+  request_id?: RequestId2;
   run_id?: RunId27;
   seq: Seq27;
   session_id: SessionId28;
@@ -854,19 +878,31 @@ export interface TranscriptRewound {
   type?: Type27;
   [k: string]: unknown;
 }
-export interface ArtifactCreated {
+export interface TranscriptRewound {
   command_id?: CommandId28;
   created_at: CreatedAt29;
-  filename?: Filename;
-  hash: Hash;
+  from_seq: FromSeq;
   id: Id30;
-  mime?: Mime;
   run_id?: RunId28;
   seq: Seq28;
   session_id: SessionId29;
-  size: Size;
   turn_id?: TurnId28;
   type?: Type28;
+  [k: string]: unknown;
+}
+export interface ArtifactCreated {
+  command_id?: CommandId29;
+  created_at: CreatedAt30;
+  filename?: Filename;
+  hash: Hash;
+  id: Id31;
+  mime?: Mime;
+  run_id?: RunId29;
+  seq: Seq29;
+  session_id: SessionId30;
+  size: Size;
+  turn_id?: TurnId29;
+  type?: Type29;
   [k: string]: unknown;
 }
 /**
@@ -879,14 +915,14 @@ export interface ArtifactCreated {
  * reason ("accepted", "reasoning", "keepalive").
  */
 export interface TurnProviderAlive {
-  command_id?: CommandId29;
-  created_at: CreatedAt30;
-  id: Id31;
-  run_id?: RunId29;
-  seq: Seq29;
-  session_id: SessionId30;
+  command_id?: CommandId30;
+  created_at: CreatedAt31;
+  id: Id32;
+  run_id?: RunId30;
+  seq: Seq30;
+  session_id: SessionId31;
   signal?: Signal;
-  turn_id?: TurnId29;
-  type?: Type29;
+  turn_id?: TurnId30;
+  type?: Type30;
   [k: string]: unknown;
 }

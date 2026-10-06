@@ -111,6 +111,7 @@ from fluid.events.model import (
     BlockStart,
     BlockStop,
     CacheMissAlert,
+    ContextCompacting,
     ContextCompaction,
     DelegatedDiagnostic,
     ErrorEvent,
@@ -2508,6 +2509,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             session_id=sid, node_id="", turn_id=turn_id, model=self.model,
             provider=self.provider.name, source=source,
             thinking=self._session_thinking.get(sid),
+        ))
+        # Shown until the summary card or the failure below replaces it.
+        await self._emit(ContextCompacting(
+            session_id=sid, turn_id=turn_id, active=True, trigger="manual",
         ))
         nodes = await self.store.load_path(sid)
         promotions: list[Promotion] = []

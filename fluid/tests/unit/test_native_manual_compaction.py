@@ -19,7 +19,7 @@ from fluid.context.compaction import MANUAL_COMPACT_REASON, CompactionConfig
 from fluid.context.trim import TrimConfig
 from fluid.engine.native import NativeLoop
 from fluid.events import ContextCompaction, UserTurn
-from fluid.events.model import DelegatedDiagnostic, TurnComplete
+from fluid.events.model import ContextCompacting, DelegatedDiagnostic, TurnComplete
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.jsonl import JsonlStore
 
@@ -90,6 +90,11 @@ async def test_compact_now_reduces_the_view_without_a_model_call(tmp_path) -> No
     terminal = [e for e in events if isinstance(e, TurnComplete)][-1]
     assert terminal.num_model_calls == 0
     assert not [e for e in events if isinstance(e, DelegatedDiagnostic)]
+    # "Compacting context..." is announced first; the summary card replaces it.
+    [progress] = [e for e in events if isinstance(e, ContextCompacting)]
+    assert (progress.active, progress.trigger) == (True, "manual")
+    assert progress.turn_id == summary[0].turn_id
+    assert events.index(progress) < min(events.index(e) for e in decisions)
 
     # The decisions are durable: a fresh engine renders the same compacted view.
     view = loop._compactor.view(nodes_after)
@@ -109,6 +114,8 @@ async def test_compact_now_with_nothing_to_reclaim_reports_failure(tmp_path) -> 
     events = loop.bus.log(loop.session_id)
     [failure] = [e for e in events if isinstance(e, DelegatedDiagnostic)]
     assert failure.kind == "compaction_failed" and "nothing could be compacted" in failure.message
+    [progress] = [e for e in events if isinstance(e, ContextCompacting)]
+    assert progress.active and events.index(progress) < events.index(failure)
     assert not [e for e in events if isinstance(e, ContextCompaction)]
     assert [e for e in events if isinstance(e, TurnComplete)][-1].stop_reason == "end_turn"
     await loop.aclose()

@@ -52,6 +52,8 @@ RUN_LEASE_RENEW_SECONDS = 20
 
 # Pump ``system`` subtypes recorded as system.compaction_boundary (passthrough).
 _COMPACTION_SUBTYPES = ("compact_boundary", "microcompact_boundary")
+# Pump ``system`` subtype recorded as system.compaction_status.
+_COMPACTION_STATUS_SUBTYPE = "compaction_status"
 
 # Envelope fields of EventBase — everything else on a model is its payload.
 _ENVELOPE_FIELDS = {
@@ -459,6 +461,21 @@ def _translate_shared(
                     tool_use_id=tool_use_id,
                     **_registry_kind(session_id, str(task_id)),
                     **_registry_worker(session_id, str(task_id)),
+                    **kw,
+                )]
+        if subtype == _COMPACTION_STATUS_SUBTYPE:
+            # Progress of a compaction ("Compacting context..."): recorded so
+            # a reload mid-compaction still shows it.
+            data = _as_dict(event.get("data"))
+            state = data.get("state")
+            if state in ("started", "ended", "failed"):
+                return [_build_event(
+                    contract.SystemCompactionStatus, session_id,
+                    state=state,
+                    trigger=data.get("trigger") or None,
+                    requested_by=data.get("requested_by") or None,
+                    error=data.get("error") or None,
+                    exclude_none=True,
                     **kw,
                 )]
         if subtype in _COMPACTION_SUBTYPES:

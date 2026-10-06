@@ -29,6 +29,7 @@ import {
 	GIT_STAGE_TIPS,
 	RUNTIME_STATUS_TONES,
 	RUNTIME_STATUS_WORDS,
+	runtimeStatusWord,
 	STATUS_LABELS,
 	type GitStage,
 } from './session-card-data';
@@ -88,6 +89,15 @@ describe('owner runtime state', () => {
 	it('keeps git stage independent after a remote turn settles', () => {
 		expect(deriveStatus({ remoteRuntimeState: 'idle', streaming: true,
 			attention: null, isActive: true, prState: 'open' })).toBe('pr');
+	});
+});
+
+describe('runtimeStatusWord', () => {
+	it('says Compacting for a working session whose context is being compacted', () => {
+		expect(runtimeStatusWord('working', true)).toBe('Compacting');
+		expect(runtimeStatusWord('working')).toBe(RUNTIME_STATUS_WORDS.working);
+		// Only a running turn can be compacting; other states keep their word.
+		expect(runtimeStatusWord('done', true)).toBe(RUNTIME_STATUS_WORDS.done);
 	});
 });
 

@@ -21,6 +21,7 @@ import { api, recheckAuthOn401 } from '$lib/api/client';
 import { acceptUserEvent } from '$lib/services/user-event-dedupe';
 import type { SessionAttention } from './session/ws-message-handlers';
 import type { SdkContextUsage } from '$lib/api/sessions';
+import type { LiveCompaction } from './session/v2/reducer';
 
 // Session infrastructure
 import { createWsConnection, type WsConnection } from './session/ws-connection';
@@ -164,6 +165,11 @@ export interface ActiveSessionState {
 	 *  model never matches a Claude family). Transient — same lifecycle as
 	 *  `liveModel`. */
 	liveProvider: string | null;
+	/** Compaction in progress (or just failed) on the live turn, from the v2
+	 *  feed's `system.compaction_status`. Drives the "Compacting context…"
+	 *  indicator and the sidebar's "Compacting" word. Transient — same
+	 *  lifecycle as `liveModel`. */
+	liveCompaction?: LiveCompaction | null;
 	wsConnected: boolean;
 	wsReconnectRequired: boolean;
 	error: string | null;
@@ -343,6 +349,7 @@ function defaultState(): ActiveSessionState {
 		liveModel: null,
 		liveRequestedModel: null,
 		liveProvider: null,
+		liveCompaction: null,
 		wsConnected: false,
 		wsReconnectRequired: false,
 		error: null,

@@ -28,7 +28,7 @@ from fluid.engine.delegated import (
     compaction_summary_in_transcript,
 )
 from fluid.events import ContextCompaction, TurnComplete, UserTurn
-from fluid.events.model import DelegatedDiagnostic
+from fluid.events.model import ContextCompacting, DelegatedDiagnostic
 from fluid.messages import Text
 from fluid.store.base import MemoryStore
 
@@ -219,6 +219,13 @@ async def test_a_failed_compaction_reports_the_cli_compact_error(tmp_path) -> No
     assert [(f.kind, f.message) for f in failures] == [
         ("compaction_failed", "Prompt is too long"),
     ]
+    # The progress line was opened as a manual compaction and closed with
+    # the CLI's reason, ahead of the failure report.
+    progress = [e for e in events if isinstance(e, ContextCompacting)]
+    assert [(e.active, e.trigger, e.error) for e in progress] == [
+        (True, "manual", ""), (False, "manual", "Prompt is too long"),
+    ]
+    assert events.index(progress[-1]) < events.index(failures[0])
 
 
 async def test_an_ordinary_turn_reports_no_compaction_failure(tmp_path) -> None:

@@ -99,6 +99,7 @@ from fluid.engine.delegated_proto import (
 from fluid.events.bus import EventBus
 from fluid.events.model import (
     ContextCompaction,
+    ContextCompacting,
     DelegatedDiagnostic,
     DelegatedSurface,
     ErrorEvent,
@@ -2492,7 +2493,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # even while terminal publication or storage is still pending.
                 self._peer_admission_open = False
                 self._drop_pending_peers()
-            self._track_main_compaction(frame)
+            progress = self._track_main_compaction(frame)
+            if progress is not None:
+                # Shown while the CLI compacts; the boundary (or the failure)
+                # that follows replaces it.
+                await self._emit(replace(progress, session_id=sid, turn_id=turn_id))
+                continue
             if is_compact_boundary(frame) and not self._take_main_boundary(frame):
                 # Not the parent conversation's compaction: no event, so no
                 # "Context Compacted" card in the parent's chat.
@@ -3354,26 +3360,44 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             "hookEventName": "SessionStart", "additionalContext": "\n\n".join(parts),
         }}
 
-    def _track_main_compaction(self, frame: dict[str, Any]) -> None:
+    def _track_main_compaction(self, frame: dict[str, Any]) -> ContextCompacting | None:
         """Follow the main thread's ``system/status`` frames: ``compacting``
         while its compaction runs, null (with ``compact_result``) after.
 
         A ``compacting`` frame also makes the next ``compact_boundary`` the
         main conversation's (``_main_boundary_due``); a compaction that ends
-        in anything but success has no boundary coming, so it clears that."""
-        if (
+        in anything but success has no boundary coming, so it clears that.
+
+        Returns the progress event a turn's reader publishes (session and turn
+        ids left for it to fill in): ``active`` when the compaction starts,
+        inactive (with ``error`` on a failure) when it stops. None for every
+        other frame, and for a status frame that changes nothing."""
+        if not (
             frame.get("type") == "system" and frame.get("subtype") == "status"
             and not frame.get("parent_tool_use_id")
         ):
-            self._main_compacting = frame.get("status") == "compacting"
-            if self._main_compacting:
-                self._main_boundary_due = True
-            elif frame.get("compact_result") not in (None, "success"):
-                self._main_boundary_due = False
-                error = frame.get("compact_error")
-                self._turn_compact_error = (
-                    str(error).strip() if error else "the compaction failed"
-                )
+            return None
+        was_compacting = self._main_compacting
+        self._main_compacting = frame.get("status") == "compacting"
+        trigger = "manual" if self._turn_compact_requested else "auto"
+        if self._main_compacting:
+            self._main_boundary_due = True
+            if was_compacting:
+                return None
+            return ContextCompacting(
+                session_id="", turn_id=None, active=True, trigger=trigger,
+            )
+        error = ""
+        if frame.get("compact_result") not in (None, "success"):
+            self._main_boundary_due = False
+            reported = frame.get("compact_error")
+            error = str(reported).strip() if reported else "the compaction failed"
+            self._turn_compact_error = error
+        if not was_compacting and not error:
+            return None  # a status frame about something else
+        return ContextCompacting(
+            session_id="", turn_id=None, active=False, trigger=trigger, error=error,
+        )
 
     def _take_main_boundary(self, frame: dict[str, Any]) -> bool:
         """True when this ``compact_boundary`` is the main conversation's.
@@ -3408,9 +3432,21 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         the other stale frames, and the chat would never learn of it. The
         main conversation's boundary is published as the same
         ``ContextCompaction`` a turn's reader would publish (the host picks
-        it up with the next turn's events); a subagent's is dropped.
+        it up with the next turn's events); a subagent's is dropped. Its
+        progress (``ContextCompacting``) is published the same way, so a
+        compaction the next turn's drain waits on shows while it runs.
         """
-        self._track_main_compaction(frame)
+        progress = self._track_main_compaction(frame)
+        if progress is not None and self._session is not None:
+            try:
+                await self._emit(replace(
+                    progress, session_id=self._session.session_id,
+                    turn_id=self._active_turn_id,
+                ))
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — progress never fails the next turn
+                logger.debug("could not publish between-turn compaction progress", exc_info=True)
         if not is_compact_boundary(frame):
             return False
         if not self._take_main_boundary(frame):

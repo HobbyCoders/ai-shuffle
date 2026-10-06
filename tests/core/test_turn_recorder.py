@@ -624,6 +624,30 @@ async def test_system_compaction_boundary_passthrough(mock_db):
     await rec.close()
 
 
+async def test_compaction_progress_is_recorded_as_compaction_status(mock_db):
+    """"Compacting context..." is a contract event of its own, so a reload
+    mid-compaction still shows it; a failure keeps its reason."""
+    _mk_session()
+    rec = await _recorder()
+    await rec.on_event({
+        "type": "system", "subtype": "compaction_status",
+        "data": {"state": "started", "trigger": "auto"},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "system.compaction_status"
+    assert row["payload"] == {"state": "started", "trigger": "auto"}
+    await rec.on_event({
+        "type": "system", "subtype": "compaction_status",
+        "data": {"state": "failed", "trigger": "manual", "requested_by": "app",
+                 "error": "Prompt is too long"},
+    })
+    row = _rows()[-1]
+    assert row["event_type"] == "system.compaction_status"
+    assert row["payload"] == {"state": "failed", "trigger": "manual",
+                              "requested_by": "app", "error": "Prompt is too long"}
+    await rec.close()
+
+
 async def test_a_claude_code_compaction_card_is_recorded_for_reload(mock_db):
     """The delegated leg's card (the CLI's ``compact_metadata``) is kept
     whole, so the reloaded chat shows the same card as the live one."""

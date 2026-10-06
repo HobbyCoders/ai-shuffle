@@ -81,6 +81,15 @@ def test_round_trip_discriminated_dispatch():
             "status": "completed",
         },
         {
+            "type": "system.compaction_status",
+            "id": "e7",
+            "session_id": "s1",
+            "seq": 7,
+            "created_at": "2026-07-11T00:00:06Z",
+            "state": "started",
+            "trigger": "auto",
+        },
+        {
             "type": "artifact.created",
             "id": "e6",
             "session_id": "s1",

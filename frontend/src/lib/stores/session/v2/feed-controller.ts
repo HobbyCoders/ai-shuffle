@@ -498,6 +498,7 @@ function transcriptPatch(
 		liveModel: rs.liveModel,
 		liveRequestedModel: rs.liveRequestedModel,
 		liveProvider: rs.liveProvider,
+		liveCompaction: rs.compaction ?? null,
 		activeTasks: deriveActiveTasks(rs.activeTaskSummaries),
 		// Passed through with the same "extra fields may be present" contract the
 		// /context-usage fetch uses; the mapper is what validates it.

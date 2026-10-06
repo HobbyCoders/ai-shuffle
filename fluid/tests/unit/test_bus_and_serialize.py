@@ -12,6 +12,7 @@ import pytest
 
 from fluid.events import (
     WAKE_AUTO,
+    ContextCompacting,
     WAKE_NOT_APPLICABLE,
     WAKE_SUPPRESSED,
     Event,
@@ -214,6 +215,14 @@ def test_unpublished_events_are_unstamped_not_epoch_zero_in_disguise() -> None:
 
 def test_ts_round_trips_through_the_durable_codec() -> None:
     event = TextDelta(session_id="s", index=0, text="x", seq=3, ts=1700000000.25)
+    assert event_from_dict(event_to_dict(event)) == event
+
+
+def test_compaction_progress_round_trips_through_the_durable_codec() -> None:
+    """Stored with the session, so a replay knows a compaction was running."""
+    event = ContextCompacting(session_id="s", turn_id="t", active=False,
+                              trigger="manual", error="too long", seq=5)
+    assert event.type == "context_compacting"
     assert event_from_dict(event_to_dict(event)) == event
 
 

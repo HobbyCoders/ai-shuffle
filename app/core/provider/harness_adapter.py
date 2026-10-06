@@ -3756,6 +3756,25 @@ class HarnessAdapter(ProviderAdapter):
         if cls == "ContextCompaction":
             return self._compaction_card(event)
 
+        if cls == "ContextCompacting":
+            # Progress of the main conversation's compaction: "Compacting
+            # context..." while it runs, replaced by the boundary card (or the
+            # failure) when it stops.
+            error = str(getattr(event, "error", "") or "").strip()
+            if getattr(event, "active", False):
+                state = "started"
+            else:
+                state = "failed" if error else "ended"
+            status: Dict[str, Any] = {"state": state}
+            trigger = getattr(event, "trigger", "") or ""
+            if trigger:
+                status["trigger"] = trigger
+            if self._compact_requested_by:
+                status["requested_by"] = self._compact_requested_by
+            if error:
+                status["error"] = error
+            return [SystemMessage(subtype="compaction_status", data=status)]
+
         # Unknown / no-analog fluid event — skip.
         return []
 

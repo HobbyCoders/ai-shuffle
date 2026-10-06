@@ -408,6 +408,27 @@ class ContextCompaction(Event):
     rewrite_tail_tokens_est: int | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class ContextCompacting(Event):
+    """The main conversation's compaction started (``active``) or stopped.
+
+    A progress signal, not a record: the ``ContextCompaction`` that follows a
+    successful run is the durable boundary. It lets a host show that the
+    context is being compacted while that runs, which on the delegated leg
+    (the claude CLI summarizing a large context) can take tens of seconds.
+
+    ``active=True`` opens it; ``active=False`` closes it, with ``error`` set
+    when the compaction failed (no boundary follows then). ``trigger`` is
+    ``"auto"`` or ``"manual"`` (a ``/compact``), "" when unknown. Native
+    compaction is mechanical and immediate, so only a requested ``/compact``
+    announces itself there. Never terminal, never part of the conversation.
+    """
+
+    active: bool = True
+    trigger: str = ""
+    error: str = ""
+
+
 # ─── Accounting / signals ────────────────────────────────────────────────────
 
 
@@ -716,7 +737,7 @@ _EVENT_TYPES: dict[str, type[Event]] = {
         BlockStart, BlockStop, TextDelta, ThinkingDelta, ToolArgsDelta,
         ToolUse, ToolResult, SteerDelivered,
         PermissionRequest, QuestionRequest, QuestionAnswered, QuestionDelivered, HandoffCreated,
-        ContextCompaction, Usage, RateLimit, ProviderRetry, ProviderAlive,
+        ContextCompaction, ContextCompacting, Usage, RateLimit, ProviderRetry, ProviderAlive,
         SubagentEvent, HookEvent,
         CacheMissAlert,
         ContinualUpdate, DelegatedSurface, DelegatedDiagnostic, SwarmUpdated,

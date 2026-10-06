@@ -58,14 +58,23 @@ async def test_native_compact_shows_the_compacted_card(mock_db, monkeypatch):
         assert meta["trigger"] == "manual"
         assert meta["pre_tokens"] > meta["post_tokens"] > 0
         assert not _cards(events, "compact_failed")
+        # "Compacting context..." came first, as a manual compaction the user asked for.
+        [status] = _cards(events, "compaction_status")
+        assert status.data == {"state": "started", "trigger": "manual", "requested_by": "user"}
+        assert events.index(status) < events.index(card)
         assert isinstance(events[-1], ResultMessage) and not events[-1].is_error
         # The command went to the engine bare: no note became part of it.
         nodes = await loop.store.load_path(loop.session_id)
         assert not any("/compact" in str(n.message.content) for n in nodes)
         rec = await TurnRecorder.maybe_create("native-manual-compact")
-        for card in _cards(events, "compact_boundary"):
+        for card in _cards(events, "compaction_status") + _cards(events, "compact_boundary"):
             await rec.on_event({"type": "system", "subtype": card.subtype, "data": card.data})
         await rec.close()
+        # Recorded, so a reload mid-compaction still shows it.
+        [recorded] = [r for r in session_events.get_events("native-manual-compact")
+                      if r["event_type"] == "system.compaction_status"]
+        assert recorded["payload"]["state"] == "started"
+        assert recorded["payload"]["requested_by"] == "user"
         before = [r for r in session_events.get_events("native-manual-compact")
                   if r["event_type"] == "system.compaction_boundary"]
         assert len(before) == 1
@@ -96,8 +105,29 @@ async def test_native_compact_with_nothing_to_reclaim_shows_the_failed_card(monk
         assert card.data["requested_by"] == "app"
         assert card.data["reason"]
         assert not _cards(events, "compact_boundary")
+        [status] = _cards(events, "compaction_status")
+        assert status.data["state"] == "started" and status.data["requested_by"] == "app"
+        assert events.index(status) < events.index(card)
     finally:
         await adapter.disconnect()
+
+def test_compaction_progress_translates_to_a_status_message():
+    """The CLI's compaction (delegated leg) reaches the chat as the same
+    status: started, then failed with its reason, or ended."""
+    from fluid.events import ContextCompacting
+
+    adapter = HarnessAdapter()
+    [started] = adapter._translate(ContextCompacting(session_id="s", active=True, trigger="auto"))
+    assert (started.subtype, started.data) == (
+        "compaction_status", {"state": "started", "trigger": "auto"})
+    [ended] = adapter._translate(ContextCompacting(session_id="s", active=False, trigger="auto"))
+    assert ended.data == {"state": "ended", "trigger": "auto"}
+    adapter._compact_requested_by = "user"
+    [failed] = adapter._translate(ContextCompacting(
+        session_id="s", active=False, trigger="manual", error="Prompt is too long"))
+    assert failed.data == {"state": "failed", "trigger": "manual", "requested_by": "user",
+                           "error": "Prompt is too long"}
+
 
 @pytest.mark.asyncio
 async def test_native_automatic_compaction_is_recorded_for_reload(mock_db, monkeypatch):

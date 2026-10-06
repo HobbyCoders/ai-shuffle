@@ -262,6 +262,22 @@ class SystemCompactionBoundary(EventBase):
     type: Literal["system.compaction_boundary"] = "system.compaction_boundary"
 
 
+class SystemCompactionStatus(EventBase):
+    """A compaction of the main conversation started or stopped.
+
+    Progress, not a record: ``started`` shows "Compacting context..." until
+    the ``system.compaction_boundary`` card (success) or a ``failed`` status
+    (with ``error``) replaces it; ``ended`` closes it without a verdict. The
+    turn's end clears it too, so a lost close can never leave it stuck.
+    """
+
+    type: Literal["system.compaction_status"] = "system.compaction_status"
+    state: Literal["started", "ended", "failed"]
+    trigger: str | None = None  # "auto" | "manual" when the engine knows
+    requested_by: str | None = None  # "user" | "app" for a /compact turn
+    error: str | None = None
+
+
 class InteractionRequested(EventBase):
     type: Literal["interaction.requested"] = "interaction.requested"
     interaction_id: str
@@ -352,6 +368,7 @@ SessionEvent = Annotated[
         SwarmUpdated,
         SystemNote,
         SystemCompactionBoundary,
+        SystemCompactionStatus,
         InteractionRequested,
         InteractionAnswered,
         InteractionExpired,
@@ -387,6 +404,7 @@ EVENT_TYPES: tuple[str, ...] = (
     "swarm.updated",
     "system.note",
     "system.compaction_boundary",
+    "system.compaction_status",
     "interaction.requested",
     "interaction.answered",
     "interaction.expired",

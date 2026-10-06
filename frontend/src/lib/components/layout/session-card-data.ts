@@ -61,6 +61,12 @@ export const RUNTIME_STATUS_WORDS: Record<SessionCardStatus, string> = {
 	unknown: 'Status unavailable'
 };
 
+/** The row's status word: a working session whose conversation is being
+ *  compacted says so (only the open session knows — see Sidebar). */
+export function runtimeStatusWord(status: SessionCardStatus, compacting = false): string {
+	return compacting && status === 'working' ? 'Compacting' : RUNTIME_STATUS_WORDS[status];
+}
+
 export const RUNTIME_STATUS_TONES: Record<SessionCardStatus, StatusTone> = {
 	working: 'accent',
 	parked: 'muted',

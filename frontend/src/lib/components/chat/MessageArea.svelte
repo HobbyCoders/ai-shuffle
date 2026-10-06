@@ -1936,8 +1936,12 @@
 
 			<!-- The gap predicate guarantees this does not duplicate a prose cursor,
 			     running-tool spinner, visible thinking state, or active subagent row. -->
-			{#if showGapIndicator}
-				<TurnActivity startedAt={liveTurnStartedAt} />
+			{#if showGapIndicator || $activeSession.liveCompaction}
+				<TurnActivity
+					startedAt={liveTurnStartedAt}
+					compaction={$activeSession.liveCompaction ?? null}
+					working={showGapIndicator}
+				/>
 			{/if}
 
 			<!-- Error -->

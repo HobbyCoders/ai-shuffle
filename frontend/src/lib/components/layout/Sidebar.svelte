@@ -675,6 +675,7 @@
 		openPr={row.openPr}
 		projectLabel={projectLabel(row.session)}
 		active={row.session.id === activeId}
+		compacting={row.session.id === activeId && $activeSession.liveCompaction?.phase === 'running'}
 		{now}
 		timestamp={row.ts}
 		{compact}

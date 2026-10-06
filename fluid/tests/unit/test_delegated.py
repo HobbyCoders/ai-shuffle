@@ -33,6 +33,7 @@ from fluid.engine.delegated_proto import StreamJsonMapper, stop_reason_from_subt
 from fluid.events import (
     BlockStart,
     BlockStop,
+    ContextCompacting,
     ContextCompaction,
     DelegatedSurface,
     ErrorEvent,
@@ -2427,6 +2428,71 @@ async def test_a_compaction_between_turns_is_kept_for_the_next_turn(tmp_path) ->
     assert compactions[0].turn_id == starts[1].turn_id
     assert _compactions(await store.events_since(sid, 0)) == compactions
     assert not any(isinstance(e, ErrorEvent) for e in events)
+
+
+def _progress(events) -> list[tuple[bool, str, str]]:
+    return [(e.active, e.trigger, e.error) for e in events if isinstance(e, ContextCompacting)]
+
+
+async def test_a_compaction_in_a_turn_is_announced_while_it_runs(tmp_path) -> None:
+    """The CLI's ``compacting`` status is published as it arrives, so the chat
+    can say "Compacting context..." before the boundary card; the status that
+    ends it closes it, ahead of the boundary."""
+    loop = _scripted_loop(tmp_path, [[
+        {"op": "text", "text": "working"},
+        *_main_compaction(200_000),
+        {"op": "text", "text": "done"},
+        {"op": "result"},
+    ]])
+    try:
+        await loop.submit(UserTurn(content="go"))
+        await loop.wait_turn()
+        events = loop.bus.log(loop.session_id)
+    finally:
+        await loop.aclose()
+    assert _progress(events) == [(True, "auto", ""), (False, "auto", "")]
+    started = next(e for e in events if isinstance(e, ContextCompacting))
+    turn = next(e for e in events if isinstance(e, TurnStarted))
+    assert started.turn_id == turn.turn_id and started.session_id == loop.session_id
+    assert events.index(started) < events.index(_compactions(events)[0])
+
+
+def test_a_failed_compaction_closes_its_progress_with_the_error() -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="m", claude_cmd=["true"])
+    assert loop._track_main_compaction(_STATUS_ON).active is True
+    # A repeated "compacting" frame is not a second start.
+    assert loop._track_main_compaction(_STATUS_ON) is None
+    closed = loop._track_main_compaction(
+        {**_STATUS_OFF, "compact_result": "failed", "compact_error": "Prompt is too long"},
+    )
+    assert (closed.active, closed.error) == (False, "Prompt is too long")
+    # A status frame about something else says nothing about compaction.
+    assert loop._track_main_compaction(
+        {"type": "system", "subtype": "status", "status": None}) is None
+    # A subagent's compaction is not the chat's.
+    assert loop._track_main_compaction({**_STATUS_ON, "parent_tool_use_id": "toolu_1"}) is None
+
+
+async def test_a_compaction_between_turns_publishes_its_progress(tmp_path) -> None:
+    """A compaction read between turns (by the next turn's drain) publishes its
+    progress with the next turn, the same way it publishes the boundary."""
+    loop = _scripted_loop(tmp_path, [
+        [{"op": "text", "text": "one"}, {"op": "result"}, *_main_compaction(150_000)],
+        [{"op": "text", "text": "two"}, {"op": "result"}],
+    ])
+    try:
+        await loop.submit(UserTurn(content="first"))
+        await loop.wait_turn()
+        await asyncio.sleep(0.2)  # the frames land after the result
+        await loop.submit(UserTurn(content="second"))
+        await loop.wait_turn()
+        events = loop.bus.log(loop.session_id)
+    finally:
+        await loop.aclose()
+    assert _progress(events) == [(True, "auto", ""), (False, "auto", "")]
+    starts = [e for e in events if isinstance(e, TurnStarted)]
+    progress = [e for e in events if isinstance(e, ContextCompacting)]
+    assert all(e.turn_id == starts[1].turn_id for e in progress)
 
 
 async def test_a_compaction_read_by_a_control_wait_between_turns_is_kept(tmp_path) -> None:

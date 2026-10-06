@@ -1603,6 +1603,124 @@
       "title": "SystemCompactionBoundary",
       "type": "object"
     },
+    "SystemCompactionStatus": {
+      "description": "A compaction of the main conversation started or stopped.\n\nProgress, not a record: ``started`` shows \"Compacting context...\" until\nthe ``system.compaction_boundary`` card (success) or a ``failed`` status\n(with ``error``) replaces it; ``ended`` closes it without a verdict. The\nturn's end clears it too, so a lost close can never leave it stuck.",
+      "properties": {
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Id"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "requested_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requested By"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Run Id"
+        },
+        "seq": {
+          "title": "Seq",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "started",
+            "ended",
+            "failed"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "trigger": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trigger"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Turn Id"
+        },
+        "type": {
+          "const": "system.compaction_status",
+          "default": "system.compaction_status",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "session_id",
+        "seq",
+        "created_at",
+        "state"
+      ],
+      "title": "SystemCompactionStatus",
+      "type": "object"
+    },
     "SystemNote": {
       "properties": {
         "command_id": {
@@ -3313,6 +3431,7 @@
       "subagent.started": "#/$defs/SubagentStarted",
       "swarm.updated": "#/$defs/SwarmUpdated",
       "system.compaction_boundary": "#/$defs/SystemCompactionBoundary",
+      "system.compaction_status": "#/$defs/SystemCompactionStatus",
       "system.note": "#/$defs/SystemNote",
       "task.updated": "#/$defs/TaskUpdated",
       "team.member_completed": "#/$defs/TeamMemberCompleted",
@@ -3405,6 +3524,9 @@
     },
     {
       "$ref": "#/$defs/SystemCompactionBoundary"
+    },
+    {
+      "$ref": "#/$defs/SystemCompactionStatus"
     },
     {
       "$ref": "#/$defs/InteractionRequested"
