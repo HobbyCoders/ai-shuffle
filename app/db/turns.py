@@ -73,6 +73,44 @@ def _rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [d for r in rows if (d := _row(r)) is not None]
 
 
+# Sources whose folder list the owner named on this send. ``turn_manager``
+# saves that list to the session row before enqueueing (``_BINDING_SOURCES``
+# there), so the turn keeps exactly what it was sent with. Every other row
+# (peer message, wake, failover, auto-continue, retry) copied its list from an
+# earlier turn and runs with the chat's stored folders instead (#1852).
+OWNER_NAMED_FOLDER_SOURCES = frozenset({"user", "queue", "api", "worktree", "connector"})
+
+
+def _session_bound_overrides(
+    overrides: Dict[str, Any], source: Optional[str], binding: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """``overrides`` with the session row's run binding applied, where the row
+    is authoritative over a value copied from an earlier turn.
+
+    ``context_window``: the acknowledged pin always wins (#1866).
+    ``workspace_project_ids``: a row not from :data:`OWNER_NAMED_FOLDER_SOURCES`
+    that names a list gets the chat's stored list, so a folder the owner
+    removed after the copied turn started never comes back. A row naming no
+    list is left alone (``query_options`` reads the stored list itself).
+    """
+    if not binding:
+        return overrides
+    result = overrides
+    if binding.get("context_window"):
+        result = {**result, "context_window": binding["context_window"]}
+    if "workspace_project_ids" in result and source not in OWNER_NAMED_FOLDER_SOURCES:
+        from app.core.workspace_folders import normalize_workspace_project_ids
+
+        result = dict(result)
+        try:
+            result["workspace_project_ids"] = normalize_workspace_project_ids(
+                binding.get("workspace_project_ids"))
+        except ValueError:
+            # Unreadable stored list: name none, so the run path reports it.
+            result.pop("workspace_project_ids")
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Session working time (sessions.work_ms / sessions.work_started_at)
 # ---------------------------------------------------------------------------
@@ -339,12 +377,14 @@ def enqueue_turn(
         cursor = conn.cursor()
         # All producers reach this boundary, including scheduler retries/unpark
         # and atomic AskUser answers that bypass turn_manager. Snapshot the
-        # acknowledged pin, not an older turn's window. Human sends persist
-        # explicit choices before enqueueing, so their new binding still wins.
-        cursor.execute("SELECT context_window FROM sessions WHERE id = %s", (session_id,))
-        binding = cursor.fetchone()
-        if binding and binding.get("context_window"):
-            overrides = {**(overrides or {}), "context_window": binding["context_window"]}
+        # acknowledged pin and the stored folders, not an older turn's copy.
+        # Human sends persist explicit choices before enqueueing, so their new
+        # binding still wins.
+        cursor.execute(
+            "SELECT context_window, workspace_project_ids FROM sessions WHERE id = %s",
+            (session_id,),
+        )
+        overrides = _session_bound_overrides(overrides, source, cursor.fetchone())
         if at_front:
             cursor.execute(
                 "SELECT COALESCE(MIN(position), 1) - 1 AS pos FROM turns "
@@ -539,14 +579,18 @@ def start_turn(
             )
             row = _row(cursor.fetchone())
             if row is not None:
-                # A pick may be acknowledged after this turn was queued (or
-                # before a crash recovery retries it). Refresh at the claim,
-                # in the same transaction, so children inherit what it runs.
-                cursor.execute("SELECT context_window FROM sessions WHERE id=%s", (row["session_id"],))
-                binding = cursor.fetchone()
-                if (binding and binding.get("context_window")
-                        and row["overrides"].get("context_window") != binding["context_window"]):
-                    row["overrides"] = {**row["overrides"], "context_window": binding["context_window"]}
+                # A pick may be acknowledged, or a folder removed, after this
+                # turn was queued (or before a crash recovery retries it).
+                # Refresh at the claim, in the same transaction, so the turn
+                # and its children run with what the session row holds now.
+                cursor.execute(
+                    "SELECT context_window, workspace_project_ids FROM sessions WHERE id=%s",
+                    (row["session_id"],),
+                )
+                refreshed = _session_bound_overrides(
+                    row["overrides"], row.get("source"), cursor.fetchone())
+                if refreshed != row["overrides"]:
+                    row["overrides"] = refreshed
                     cursor.execute("UPDATE turns SET overrides=%s WHERE id=%s",
                                    (json.dumps(row["overrides"]), turn_id))
         except _INTEGRITY_ERRORS:

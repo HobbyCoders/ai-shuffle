@@ -358,3 +358,75 @@ async def test_a_worker_row_built_by_the_composer_is_refused_by_the_live_turn(mo
     assert runtime._steer_refusal(composer_row) == "profile_id differs"
     composer_row["profile_id"] = live["profile_id"]
     assert runtime._steer_refusal(composer_row) == "permission_mode differs"
+
+
+async def test_a_message_to_a_worker_never_keeps_a_folder_removed_since_its_turn_began(mock_db):
+    """#1852: the row copies the worker turn's binding, but not its folder list,
+    which the owner may have narrowed since that turn started. Naming none, it
+    runs with the chat's stored folders (and joins only while they match)."""
+    _worker_session("w1")
+    database.set_session_run_binding("w1", workspace_project_ids=["docs", "api"])
+    live = _start("w1", provider_agent.WORKER_TURN_SOURCE, profile_id="general-purpose",
+                  overrides={**_worker_overrides(), "workspace_project_ids": ["docs", "api"]},
+                  payload={"api_user_id": None})
+    session_runtime._live_runtimes["w1"] = session_runtime.SessionRuntime(live)
+    database.set_session_run_binding("w1", workspace_project_ids=["docs"])
+
+    row = _send("w1")
+
+    assert row["profile_id"] == "general-purpose"
+    assert "workspace_project_ids" not in row["overrides"]
+    assert {k: v for k, v in live["overrides"].items() if k != "workspace_project_ids"} == row["overrides"]
+    assert session_runtime._live_runtimes["w1"]._steer_refusal(row) == "workspace_project_ids differs"
+    # Run as its own turn once the worker's ends, it gets exactly the chat's
+    # stored folders.
+    turns_db.settle_turn(live["id"], "completed")
+    assert _folders_options_resolve("w1", turns_db.start_turn(row["id"])["overrides"]) == ["docs"]
+
+
+def _folders_options_resolve(session_id, overrides):
+    """The folder list ``build_options_from_profile`` resolves for a turn (its
+    worker checkout ``cwd`` aside: no such directory exists here)."""
+    from app.core import query_options as qo
+    from app.core.workspace_folders import normalize_workspace_project_ids
+
+    with patch.object(qo, "get_security_instructions", return_value=""), patch(
+        "app.core.workspace_folders.workspace_directories", return_value=[],
+    ) as resolve:
+        qo.build_options_from_profile(
+            profile={"id": "general-purpose", "config": {"model": "opus"}},
+            overrides={k: v for k, v in (overrides or {}).items() if k != "cwd"},
+            session_id=session_id)
+    return normalize_workspace_project_ids(resolve.call_args.args[0])
+
+
+async def test_a_voice_follow_up_to_a_finished_worker_keeps_its_stored_folders(mock_db, monkeypatch):
+    """#1852: a voice follow-up is a ``queue`` row built from the worker's latest
+    turn. The copied folder list must neither run nor be saved back on the chat
+    after the owner removed a folder from it."""
+    from app.core import voice_bridge
+    from app.core.task_registry import task_registry
+    from app.core.workspace_folders import normalize_workspace_project_ids
+
+    _worker_session("w-voice")
+    database.set_session_run_binding("w-voice", workspace_project_ids=["docs", "api"])
+    # The person resumed the finished worker's chat as an ordinary one.
+    earlier = _start("w-voice", "user", overrides={"model": "opus", "workspace_project_ids": ["docs", "api"]})
+    turns_db.settle_turn(earlier["id"], "completed")
+    database.set_session_run_binding("w-voice", workspace_project_ids=["docs"])
+    monkeypatch.setattr(task_registry, "get_task",
+                        lambda sid, tid: {"id": tid, "kind": "agent", "status": "completed"})
+    monkeypatch.setattr(session_runtime, "try_steer_pending", AsyncMock(return_value=0))
+    bridge = object.__new__(voice_bridge.VoiceBridge)
+    bridge.session_id = "parent"
+    bridge._start_watcher = lambda *a, **k: None
+    bridge._ensure_approval_poller = lambda: None
+
+    with patch.object(turn_manager, "_kick"):
+        out = await bridge._tool_message_agent({"task_id": "w-voice", "message": "one more thing"})
+
+    assert out["ok"] is True, out
+    assert normalize_workspace_project_ids(database.get_session("w-voice")["workspace_project_ids"]) == ["docs"]
+    (row,) = [t for t in turns_db.get_queued_turns("w-voice") if t["source"] == "queue"]
+    assert row["overrides"] == {"model": "opus"}
+    assert _folders_options_resolve("w-voice", turns_db.start_turn(row["id"])["overrides"]) == ["docs"]

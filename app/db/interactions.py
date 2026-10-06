@@ -103,13 +103,17 @@ def answer_question_and_enqueue(
     """Accept an answer and its user turn in one commit; retries cannot enqueue twice."""
     from app.db import turns
 
+    # A "user" row keeps the folder list it names, but this one would be the
+    # context turn's copy: name none, so it runs with the chat's stored folders.
+    overrides = {key: value for key, value in (context.get("overrides") or {}).items()
+                 if key != "workspace_project_ids"}
     with get_db() as conn:
         if not answer_interaction(row["id"], answer, answered_by_device, _conn=conn):
             return False
         turns.enqueue_turn(
             row["session_id"], "user", prompt=prompt,
             profile_id=context.get("profile_id"), project_id=context.get("project_id"),
-            worktree_id=context.get("worktree_id"), overrides=context.get("overrides"),
+            worktree_id=context.get("worktree_id"), overrides=overrides,
             payload={**(context.get("payload") or {}), "deferred_user_record": True,
                      "question_request_id": (row.get("payload") or {}).get("request_id")},
             command_id=f"question-answer-{row['id']}", _conn=conn,

@@ -297,7 +297,11 @@ def _submit_blocking(
         profile_id = worker_turn.get("profile_id")
         project_id = worker_turn.get("project_id")
         worktree_id = worker_turn.get("worktree_id")
-        overrides = dict(worker_turn.get("overrides") or {}) or None
+        overrides = dict(worker_turn.get("overrides") or {})
+        # A copied folder list would survive as this "user" row's own pick;
+        # naming none runs it with the chat's stored folders (#1852).
+        overrides.pop("workspace_project_ids", None)
+        overrides = overrides or None
         payload = {**(payload or {}), WORKER_BOUND: True}
         explicit_permission = False
     elif source in _BINDING_SOURCES and overrides:

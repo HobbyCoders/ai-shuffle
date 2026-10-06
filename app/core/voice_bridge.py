@@ -1954,7 +1954,12 @@ class VoiceBridge:
                 profile_id=latest.get("profile_id"),
                 project_id=latest.get("project_id"),
                 worktree_id=latest.get("worktree_id"),
-                overrides=dict(latest.get("overrides") or {}),
+                # Not the copied folder list: this "queue" row would keep it as
+                # the owner's pick and save it back on the chat, undoing a
+                # folder removed since (#1852). Naming none, it runs with the
+                # chat's stored folders.
+                overrides={key: value for key, value in (latest.get("overrides") or {}).items()
+                           if key != "workspace_project_ids"},
                 # The voice model wrote this message: never an owner answer.
                 payload={"voice_delegation": True, **({"api_user_id": api_user_id} if api_user_id else {})},
             )

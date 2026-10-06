@@ -825,6 +825,21 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
             )
             if sender.get("branch") and placement is None:
                 cursor.execute("UPDATE sessions SET branch=%s WHERE id=%s", (sender["branch"], new_id))
+            if "workspace_project_ids" in overrides:
+                # The first turn copies the caller's folder list, and a copied
+                # list runs as the chat's STORED one (#1852): store the
+                # caller's current folders on the new chat so it keeps them.
+                from app.core.workspace_folders import normalize_workspace_project_ids
+                try:
+                    inherited = normalize_workspace_project_ids(sender.get("workspace_project_ids"))
+                except ValueError:
+                    inherited = []
+                # The new chat's own project is its primary, never an extra
+                # folder (as ``PUT /workspace-folders`` saves it).
+                own = {target.get("project_id"), target.get("project_v2_id")} - {None}
+                inherited = [item for item in inherited if item not in own]
+                cursor.execute("UPDATE sessions SET workspace_project_ids=%s WHERE id=%s",
+                               (json.dumps(inherited), new_id))
             mobile_tool_identity.bind(new_id, principals[sender_id], new=True, conn=conn)
             # A sender with only a label (a worker, or a chat run here after a
             # handoff) passes that on (#1877); a recorded sender's was stamped.

@@ -738,3 +738,49 @@ async def test_native_tool_to_durable_queue(peers, monkeypatch):
     assert not result.is_error, result.text
     assert json.loads(result.text)["status"] == "queued"
     assert kicks == ["peer"]
+
+
+def _folder_turn(sid, folders):
+    """A settled turn of ``sid`` that named ``folders`` (newest context turn)."""
+    turn = turns.enqueue_turn(sid, "user", prompt="work", profile_id="agent",
+                              overrides={"model": "sonnet", "workspace_project_ids": folders})
+    assert turns.start_turn(turn["id"])
+    assert turns.settle_turn(turn["id"], "completed")
+
+
+def test_message_after_folder_removal_runs_with_receivers_stored_folders(peers):
+    # #1852: the receiver's owner removed "api" after its last turn named it.
+    _folder_turn("peer", ["docs", "api"])
+    sessions.set_session_run_binding("peer", workspace_project_ids=["docs"])
+    result = orch._queue("caller", {"session_id": "peer", "message": "go", "request_id": "folders"}, "message")
+    turn = turns.get_turn(result["turn_id"])
+    assert turn["overrides"]["workspace_project_ids"] == ["docs"]
+    assert turns.start_turn(turn["id"])["overrides"]["workspace_project_ids"] == ["docs"]
+
+
+def test_started_chat_keeps_the_callers_stored_folders(peers):
+    # The new chat's first turn copies the caller's context; the caller's
+    # stored set (not that turn's stale copy) is stored on the new chat.
+    _folder_turn("caller", ["docs", "api"])
+    sessions.set_session_run_binding("caller", workspace_project_ids=["docs"])
+    result = orch._queue("caller", {"title": "Work", "prompt": "go", "request_id": "fold"}, "start")
+    child = sessions.get_session(result["session_id"])
+    from app.core.workspace_folders import normalize_workspace_project_ids
+    assert normalize_workspace_project_ids(child["workspace_project_ids"]) == ["docs"]
+    turn = turns.get_turn(result["turn_id"])
+    assert turns.start_turn(turn["id"])["overrides"]["workspace_project_ids"] == ["docs"]
+
+
+def test_started_chat_never_stores_its_own_project_as_an_extra_folder(peers):
+    # The caller's stored list names its own project (an owner send saves the
+    # list as sent). The new chat runs in that project; it is its primary.
+    database.create_project("main", "Main", None, "/work/main")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET project_id='main' WHERE id='caller'")
+    _folder_turn("caller", ["main", "docs"])
+    sessions.set_session_run_binding("caller", workspace_project_ids=["main", "docs"])
+    result = orch._queue("caller", {"title": "Work", "prompt": "go", "request_id": "own"}, "start")
+    child = sessions.get_session(result["session_id"])
+    assert child["project_id"] == "main"
+    from app.core.workspace_folders import normalize_workspace_project_ids
+    assert normalize_workspace_project_ids(child["workspace_project_ids"]) == ["docs"]

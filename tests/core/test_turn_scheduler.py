@@ -691,6 +691,156 @@ async def test_queued_before_picker_change_starts_with_acknowledged_pin(mock_db)
     assert _caller_context_window(database.get_session("queued-pin")) == 200_000
 
 
+# ---------------------------------------------------------------------------
+# #1852 — a turn the owner did not start runs with the chat's STORED folders,
+# never a list copied from the earlier turn it continues.
+# ---------------------------------------------------------------------------
+
+_BOTH = ["docs", "api"]
+
+
+def _chat_with_two_folders(session_id):
+    """A chat whose owner picked two extra workspace folders."""
+    from app.db import database
+
+    database.create_profile(f"{session_id}-role", "Folder role", None, {"model": "fable"})
+    database.create_session(session_id, f"{session_id}-role", model="fable")
+    database.set_session_run_binding(session_id, workspace_project_ids=_BOTH)
+    return f"{session_id}-role"
+
+
+def _owner_removes_api_folder(session_id):
+    """The write ``PUT /sessions/{id}/workspace-folders`` makes."""
+    from app.db import database
+
+    database.set_session_run_binding(session_id, workspace_project_ids=["docs"])
+
+
+def _folders_it_runs_with(turn):
+    """Claim the queued row the way ``SessionRuntime`` does; its overrides are
+    what the run's options are built from."""
+    started = turns_db.start_turn(turn["id"], None, "runner")
+    assert started is not None
+    assert turns_db.get_turn(turn["id"])["overrides"] == started["overrides"]
+    return started["overrides"].get("workspace_project_ids")
+
+
+async def test_peer_message_after_folder_removal_runs_with_stored_folders(mock_db):
+    profile = _chat_with_two_folders("f-peer")
+    _settled_turn("f-peer", profile_id=profile,
+                  overrides={"model": "fable", "workspace_project_ids": _BOTH})
+    _owner_removes_api_folder("f-peer")
+    with patch.object(turn_scheduler, "kick"):
+        await turn_scheduler.on_agent_message("f-peer", "worker", "progress")
+    (peer,) = _by_source("f-peer", "agent_message")
+    assert peer["overrides"] == {"model": "fable", "workspace_project_ids": ["docs"]}
+    assert _folders_it_runs_with(peer) == ["docs"]
+
+
+async def test_wake_after_folder_removal_runs_with_stored_folders(mock_db):
+    profile = _chat_with_two_folders("f-wake")
+    parked = turns_db.enqueue_turn("f-wake", "user", prompt="work", profile_id=profile,
+                                   overrides={"model": "fable", "workspace_project_ids": _BOTH})
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["task-f"])
+    _owner_removes_api_folder("f-wake")
+    wake = await turn_scheduler._enqueue_context_wake(
+        "f-wake", "unpark", [_terminal_frame("task-f", "done")], ["task-f"], "<task-notification/>",
+    )
+    assert wake["overrides"]["workspace_project_ids"] == ["docs"]
+    assert _folders_it_runs_with(wake) == ["docs"]
+
+
+async def test_failover_row_after_folder_removal_runs_with_stored_folders(mock_db):
+    # No producer enqueues ``failover`` any more (account rotation is retired),
+    # but rows already queued or replayed still take the shared boundary.
+    profile = _chat_with_two_folders("f-fail")
+    settled = _settled_turn("f-fail", profile_id=profile, outcome="aborted",
+                            overrides={"model": "fable", "workspace_project_ids": _BOTH})
+    _owner_removes_api_folder("f-fail")
+    retry = turn_scheduler._enqueue(
+        "f-fail", "failover", prompt="hi", profile_id=profile,
+        overrides=settled["overrides"], parent_turn_id=settled["id"], at_front=True,
+    )
+    assert retry["overrides"]["workspace_project_ids"] == ["docs"]
+    assert _folders_it_runs_with(retry) == ["docs"]
+
+
+async def test_auto_continue_after_folder_removal_runs_with_stored_folders(mock_db):
+    profile = _chat_with_two_folders("f-cont")
+    settled = _settled_turn("f-cont", profile_id=profile, stop_reason="tool_use",
+                            overrides={"model": "fable", "workspace_project_ids": _BOTH})
+    _owner_removes_api_folder("f-cont")
+    with ExitStack() as stack:
+        execute = stack.enter_context(_patch_execute())
+        _patch_over_threshold(stack)
+        await turn_scheduler.on_turn_settled("f-cont", settled["id"], "completed")
+        await _drain_kicks()
+    (cont,) = _by_source("f-cont", "auto_continue")
+    assert cont["overrides"]["workspace_project_ids"] == ["docs"]
+    execute.assert_awaited_once()
+    assert _folders_it_runs_with(cont) == ["docs"]
+
+
+async def test_peer_message_queued_before_folder_removal_starts_with_stored_folders(mock_db):
+    # Removed between enqueue and claim: the claim refreshes the row.
+    profile = _chat_with_two_folders("f-late")
+    _settled_turn("f-late", profile_id=profile,
+                  overrides={"model": "fable", "workspace_project_ids": _BOTH})
+    with patch.object(turn_scheduler, "kick"):
+        await turn_scheduler.on_agent_message("f-late", "worker", "progress")
+    (peer,) = _by_source("f-late", "agent_message")
+    assert peer["overrides"]["workspace_project_ids"] == _BOTH
+    _owner_removes_api_folder("f-late")
+    assert _folders_it_runs_with(peer) == ["docs"]
+
+
+@pytest.mark.parametrize("source", [
+    "agent_message", "unpark", "unpark_pump", "failover", "auto_continue", "wakeup",
+    "promotion", "automation", "provider_agent",
+])
+async def test_every_scheduler_row_runs_with_stored_folders(mock_db, source):
+    _chat_with_two_folders("f-any")
+    _owner_removes_api_folder("f-any")
+    row = turns_db.enqueue_turn("f-any", source, prompt="go",
+                                overrides={"workspace_project_ids": _BOTH})
+    assert row["overrides"]["workspace_project_ids"] == ["docs"]
+    with patch("app.db.turns._session_bound_overrides", side_effect=lambda o, *_: o):
+        stale = turns_db.enqueue_turn("f-any", source, prompt="go",
+                                      overrides={"workspace_project_ids": _BOTH})
+    turns_db.remove_queued_turn(row["id"])
+    assert _folders_it_runs_with(stale) == ["docs"]
+
+
+async def test_owner_send_keeps_the_folders_it_names(mock_db):
+    # Two sends queued behind a running turn: the first keeps its own pick even
+    # after the second (or the picker) narrows the stored set.
+    profile = _chat_with_two_folders("f-own")
+    tid = turn_manager.submit("f-own", "user", prompt="use both", profile_id=profile,
+                              overrides={"workspace_project_ids": _BOTH}, no_kick=True)
+    _owner_removes_api_folder("f-own")
+    assert turns_db.get_turn(tid)["overrides"]["workspace_project_ids"] == _BOTH
+    assert _folders_it_runs_with(turns_db.get_turn(tid)) == _BOTH
+
+
+async def test_scheduler_row_naming_no_folders_still_names_none(mock_db):
+    # #1848: no list means "the chat's folders", read when options are built.
+    profile = _chat_with_two_folders("f-none")
+    _settled_turn("f-none", profile_id=profile, overrides={"model": "fable"})
+    _owner_removes_api_folder("f-none")
+    with patch.object(turn_scheduler, "kick"):
+        await turn_scheduler.on_agent_message("f-none", "worker", "progress")
+    (peer,) = _by_source("f-none", "agent_message")
+    assert "workspace_project_ids" not in peer["overrides"]
+    started = turns_db.start_turn(peer["id"], None, "runner")
+    assert "workspace_project_ids" not in started["overrides"]
+
+
+def test_owner_named_folder_sources_match_the_binding_sources():
+    # A source whose send persists its folders must also keep them on the row.
+    assert turns_db.OWNER_NAMED_FOLDER_SOURCES == frozenset(turn_manager._BINDING_SOURCES)
+
+
 async def test_auto_continue_skipped_below_threshold(mock_db):
     settled = _settled_turn("a2", stop_reason="tool_use")
 
@@ -2389,3 +2539,33 @@ async def test_enqueueing_a_wake_holds_the_pool_and_settlement_releases_it(mock_
         await turn_scheduler.on_turn_settled("wr6", context["id"], "completed")
 
     pool.clear_wake_pending.assert_called_with("wr6")
+
+
+async def test_question_answer_after_folder_removal_names_no_copied_folders(mock_db):
+    # An answer is a "user" row built from the context turn: its copied list
+    # must not survive as the owner's pick. Naming none, it runs with the
+    # chat's stored folders (query_options reads them).
+    from app.db import interactions
+
+    profile = _chat_with_two_folders("f-ask")
+    parked = turns_db.enqueue_turn("f-ask", "user", prompt="work", profile_id=profile,
+                                   overrides={"model": "fable", "workspace_project_ids": _BOTH})
+    turns_db.start_turn(parked["id"], None, "runner")
+    turns_db.park_turn(parked["id"], ["task-q"])
+    _owner_removes_api_folder("f-ask")
+    context = turn_scheduler._latest_context_turn("f-ask")
+    question = interactions.create_interaction("f-ask", "question", {"request_id": "q"}, None)
+    assert interactions.answer_question_and_enqueue(question, {"answer": "yes"}, None, "yes", context)
+    (answer,) = _by_source("f-ask", "user")
+    assert answer["overrides"] == {"model": "fable"}
+    started = turns_db.start_turn(answer["id"], None, "runner")
+    assert "workspace_project_ids" not in started["overrides"]
+    # Built into options, it runs with exactly the chat's stored folders.
+    from app.core import query_options as qo
+    from app.core.workspace_folders import normalize_workspace_project_ids
+    with patch.object(qo, "get_security_instructions", return_value=""), patch(
+        "app.core.workspace_folders.workspace_directories", return_value=[],
+    ) as resolve:
+        qo.build_options_from_profile(profile={"id": profile, "config": {"model": "fable"}},
+                                      overrides=started["overrides"], session_id="f-ask")
+    assert normalize_workspace_project_ids(resolve.call_args.args[0]) == ["docs"]
