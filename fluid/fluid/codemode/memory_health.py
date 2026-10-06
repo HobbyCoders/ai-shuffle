@@ -47,7 +47,11 @@ CHURN_PER_WEEK = 3.0
 # shared environment facts kept the signal raised long after their rewrites
 # stopped, because lifetime revisions only fall below the rate with age).
 CHURN_QUIET = 7 * DAY
-UNCONFIRMED_PILE = 15
+# How many unconfirmed facts there are is reported, not counted as needing
+# attention (#1814): they are the learner's tool-derived facts and the
+# environment harvests, held until a session confirms them or one goes
+# unused long enough for the repair below to archive it. Nothing the owner
+# can do changes the count.
 STALE_UNCONFIRMED_AGE = 30 * DAY
 STALE_UNCONFIRMED_QUIET = 14 * DAY
 # Near-duplicates: shared content words.
@@ -354,9 +358,12 @@ def _unconfirmed_signal(live, now) -> dict:
         verb = "keeps" if len(churny) == 1 else "keep"
         return _signal("unconfirmed", True,
                        f"{_plural(len(churny), 'harvested fact')} {verb} getting rewritten.", **detail)
-    if len(tool) >= UNCONFIRMED_PILE:
-        return _signal("unconfirmed", True, f"{len(tool)} unconfirmed facts are piling up.", **detail)
-    return _signal("unconfirmed", False, f"{_plural(len(tool), 'unconfirmed fact')}.", **detail)
+    if tool:
+        days = round(STALE_UNCONFIRMED_AGE / DAY)
+        return _signal("unconfirmed", False,
+                       f"{_plural(len(tool), 'unconfirmed fact')}; unused ones are archived "
+                       f"after {days} days.", **detail)
+    return _signal("unconfirmed", False, "No unconfirmed facts.", **detail)
 
 
 def _duplicates_signal(live) -> dict:

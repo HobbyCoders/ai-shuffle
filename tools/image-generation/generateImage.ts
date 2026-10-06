@@ -13,6 +13,7 @@
 import { registry } from '../providers/registry.js';
 import { ImageResult, ProviderCredentials, GeneratedImage as ProviderGeneratedImage } from '../providers/types.js';
 import { parseModelParamsEnv } from '../providers/shared/fal-helpers.js';
+import { catalogGenerateCheck } from '../providers/image/fal-ai.js';
 
 export interface GenerateImageInput {
   /**
@@ -169,9 +170,12 @@ function toResponse(
 
   // Determine which providers can edit this image
   const supportsEdit = capabilities.includes('image-edit');
+  // Point at the configured edit model, never a fixed list: naming Nano
+  // Banana here steered agents to pick it themselves (#1796).
+  const configuredEdit = process.env.IMAGE_EDIT_MODEL || process.env.IMAGE_MODEL;
   const editWith = supportsEdit
     ? providerId
-    : 'fal-ai (use fal-ai/flux-pro/kontext, fal-ai/nano-banana-2/edit, or fal-ai/nano-banana-pro/edit)';
+    : `editImage${configuredEdit ? ` (configured edit model ${configuredEdit})` : ''}`;
 
   return {
     success: true,
@@ -248,6 +252,16 @@ export async function generateImage(input: GenerateImageInput): Promise<Generate
   // Get model
   const modelId = getModelId(providerId, input.model);
   const modelInfo = provider.models.find(m => m.id === modelId);
+
+  // A model outside the built-in list must be a fal.ai text-to-image
+  // endpoint: another provider's id, or an edit endpoint that needs a source
+  // image, is refused here instead of failing at fal.ai (#1796).
+  if (!modelInfo) {
+    const refused = await catalogGenerateCheck(modelId);
+    if (refused) {
+      return { success: false, error: refused.error };
+    }
+  }
 
   // Build credentials
   const credentials: ProviderCredentials = { apiKey };

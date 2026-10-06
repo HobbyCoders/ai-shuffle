@@ -133,6 +133,28 @@ def _agent_credentials_ready_by_default(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_turn_scheduler_seams():
+    """No test inherits the turn scheduler's seams from an earlier test.
+
+    ``turn_scheduler.install()`` (direct, or through the app lifespan of a
+    ``with TestClient(app)``) registers a kick, a settlement hook and an
+    interrupt executor at module level. Left behind, the kick runs queued
+    turns for every later test on the same worker, so results depend on
+    test order (#1892). Clear them before and after every test.
+    """
+    from app.core import session_runtime, turn_manager
+
+    def _clear():
+        turn_manager.register_kick(None)
+        turn_manager.register_interrupt_executor(None)
+        session_runtime.register_scheduler(None)
+
+    _clear()
+    yield
+    _clear()
+
+
+@pytest.fixture(autouse=True)
 def _test_only_memory_store(monkeypatch):
     from app.core.provider.harness_adapter import HarnessAdapter, MemoryStore
     monkeypatch.setattr(HarnessAdapter, "_test_memory_store_factory", MemoryStore)

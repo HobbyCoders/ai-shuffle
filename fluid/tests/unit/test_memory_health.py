@@ -134,12 +134,19 @@ def test_harvested_fact_no_longer_rewritten_is_not_churn(tmp_path):
     assert s["detail"]["max_revision"] == 74
 
 
-def test_a_pile_of_unconfirmed_facts_needs_attention(tmp_path):
+def test_many_unconfirmed_facts_are_reported_not_flagged(tmp_path):
+    # #1814: with the churn fixed, Unraid's row still read "needs attention"
+    # for 21 unconfirmed facts, mostly recent learner facts in use. The count
+    # is the designed flow (confirm, or archived unused after a month), and
+    # nothing the owner can do changes it.
     store = SkillStore(tmp_path)
-    for i in range(memory_health.UNCONFIRMED_PILE):
+    for i in range(21):
         store.save_memory(f"Harvested detail {i}", provenance="tool", key=f"env.item{i}")
     s = signal(memory_health.check(store), "unconfirmed")
-    assert s["state"] == "attention" and "piling up" in s["reason"]
+    assert s["state"] == "healthy"
+    assert s["reason"] == "21 unconfirmed facts; unused ones are archived after 30 days."
+    assert s["detail"]["unconfirmed"] == 21
+    assert memory_health.check(store)["state"] == "healthy"
 
 
 def _replica_duplicates(tmp_path, text, *, protect_b=False, protect_a=False):

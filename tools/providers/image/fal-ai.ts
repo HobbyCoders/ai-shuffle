@@ -134,6 +134,36 @@ function configuredEditModelNote(): string {
     : ' Omit model to use the configured one.';
 }
 
+function configuredImageModelNote(): string {
+  const configured = process.env.IMAGE_MODEL;
+  return configured
+    ? ` The configured image model is '${configured}'; omit model to use it.`
+    : ' Omit model to use the configured one.';
+}
+
+/**
+ * The published OpenAPI document of a fal.ai catalog endpoint, or a plain
+ * refusal: a model fal.ai does not know (for example another provider's id)
+ * is never sent to fal.ai to fail there with an unrelated error.
+ */
+async function catalogOpenapi(model: string, note: string, action: string): Promise<{ openapi: any } | { error: string }> {
+  try {
+    const url = `${FAL_MODELS_API}?endpoint_id=${encodeURIComponent(model)}&expand=openapi-3.0`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      return { error: `Could not read the fal.ai input schema for '${model}' (HTTP ${response.status}). No ${action} was attempted.` };
+    }
+    const body: any = await response.json();
+    const entry = (body?.models || []).find((m: any) => m?.endpoint_id === model);
+    if (!entry) {
+      return { error: `'${model}' is not a fal.ai model, and image ${action} here runs on fal.ai.${note}` };
+    }
+    return { openapi: entry.openapi };
+  } catch (error) {
+    return { error: `Could not read the fal.ai input schema for '${model}': ${error instanceof Error ? error.message : 'request failed'}. No ${action} was attempted.` };
+  }
+}
+
 /**
  * Route an edit to a fal.ai catalog endpoint (any model picked in Settings,
  * e.g. 'openai/gpt-image-2.5/flare/edit') by reading its published input
@@ -141,27 +171,75 @@ function configuredEditModelNote(): string {
  * sent to the wrong endpoint.
  */
 export async function catalogEditRoute(model: string): Promise<EditRoute | { error: string }> {
-  let openapi: any;
-  try {
-    const url = `${FAL_MODELS_API}?endpoint_id=${encodeURIComponent(model)}&expand=openapi-3.0`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      return { error: `Could not read the fal.ai input schema for '${model}' (HTTP ${response.status}). No edit was attempted.` };
-    }
-    const body: any = await response.json();
-    const entry = (body?.models || []).find((m: any) => m?.endpoint_id === model);
-    if (!entry) {
-      return { error: `'${model}' is not a fal.ai model, and image editing here runs on fal.ai.${configuredEditModelNote()}` };
-    }
-    openapi = entry.openapi;
-  } catch (error) {
-    return { error: `Could not read the fal.ai input schema for '${model}': ${error instanceof Error ? error.message : 'request failed'}. No edit was attempted.` };
-  }
-  const field = editImageFieldFromOpenapi(openapi);
+  const found = await catalogOpenapi(model, configuredEditModelNote(), 'editing');
+  if ('error' in found) return found;
+  const field = editImageFieldFromOpenapi(found.openapi);
   if (!field) {
     return { error: `fal.ai model '${model}' does not take a source image, so it cannot edit one.${configuredEditModelNote()}` };
   }
   return { endpoint: model, field };
+}
+
+/** The source-image fields a fal.ai endpoint's input schema requires. */
+export function requiredImageFieldsFromOpenapi(openapi: any): string[] {
+  const schemas = openapi?.components?.schemas;
+  if (!schemas || typeof schemas !== 'object') return [];
+  for (const [name, schema] of Object.entries<any>(schemas)) {
+    if (!name.endsWith('Input')) continue;
+    const required: unknown = schema?.required;
+    return Array.isArray(required) ? required.filter((f) => f === 'image_url' || f === 'image_urls') : [];
+  }
+  return [];
+}
+
+/**
+ * Check a model outside the built-in list before text-to-image generation:
+ * it must be a fal.ai catalog endpoint, and not one that needs a source
+ * image (an edit endpoint called without one fails with a 422).
+ */
+export async function catalogGenerateCheck(model: string): Promise<{ error: string } | null> {
+  const found = await catalogOpenapi(model, configuredImageModelNote(), 'generation');
+  if ('error' in found) return found;
+  if (requiredImageFieldsFromOpenapi(found.openapi).length) {
+    return { error: `fal.ai model '${model}' edits an existing image and needs a source image; use editImage or generateWithReference for it.${configuredImageModelNote()}` };
+  }
+  return null;
+}
+
+/**
+ * Endpoint and input for reference-based generation. The built-in families
+ * keep their endpoints; any other model (a catalog pick in Settings) goes to
+ * its own endpoint with the image field its input schema declares, and is
+ * refused plainly when it takes no image, never swapped for Kontext.
+ */
+export async function referenceRoute(
+  model: string,
+  prompt: string,
+  refs: string[],
+): Promise<{ endpoint: string; input: Record<string, any> } | { error: string }> {
+  const multi = refs.length > 1;
+  if (model === 'fal-ai/nano-banana-2' || model === 'fal-ai/nano-banana-2/edit') {
+    return { endpoint: 'fal-ai/nano-banana-2/edit', input: { prompt, image_urls: refs } };
+  }
+  if (model.includes('nano-banana')) {
+    return { endpoint: 'fal-ai/nano-banana-pro/edit', input: { prompt, image_urls: refs } };
+  }
+  if (model.includes('kontext')) {
+    // Kontext has a dedicated multi-image endpoint
+    return multi
+      ? { endpoint: 'fal-ai/flux-pro/kontext/multi', input: { prompt, image_urls: refs } }
+      : { endpoint: model, input: { prompt, image_url: refs[0] } };
+  }
+  const found = await catalogOpenapi(model, configuredEditModelNote(), 'generation from references');
+  if ('error' in found) return found;
+  const field = editImageFieldFromOpenapi(found.openapi);
+  if (!field) {
+    return { error: `fal.ai model '${model}' does not take a reference image.${configuredEditModelNote()}` };
+  }
+  if (field === 'image_url' && multi) {
+    return { error: `fal.ai model '${model}' takes one reference image; ${refs.length} were given.` };
+  }
+  return { endpoint: model, input: field === 'image_urls' ? { prompt, image_urls: refs } : { prompt, image_url: refs[0] } };
 }
 
 // ============================================================================
@@ -395,33 +473,14 @@ export const falImageProvider: ImageProvider = {
         refDataUris.push(dataUri);
       }
 
-      // Route to the correct reference endpoint based on the selected model.
-      // Reference-based generation uses the edit/multi endpoints for each
-      // model family; respecting the caller's model selection is required so
-      // that the user's configured image-edit model is actually invoked.
-      const isMulti = refDataUris.length > 1;
-      let referenceModel: string;
-      let falInput: Record<string, any>;
-
-      if (model === 'fal-ai/nano-banana-2' || model === 'fal-ai/nano-banana-2/edit') {
-        referenceModel = 'fal-ai/nano-banana-2/edit';
-        falInput = { prompt: input.prompt.trim(), image_urls: refDataUris };
-      } else if (model.includes('nano-banana')) {
-        referenceModel = 'fal-ai/nano-banana-pro/edit';
-        falInput = { prompt: input.prompt.trim(), image_urls: refDataUris };
-      } else if (model.includes('kontext')) {
-        // Kontext has a dedicated multi-image endpoint
-        referenceModel = isMulti ? 'fal-ai/flux-pro/kontext/multi' : model;
-        falInput = isMulti
-          ? { prompt: input.prompt.trim(), image_urls: refDataUris }
-          : { prompt: input.prompt.trim(), image_url: refDataUris[0] };
-      } else {
-        // Unknown model — fall back to Kontext (safe default that supports references)
-        referenceModel = isMulti ? 'fal-ai/flux-pro/kontext/multi' : 'fal-ai/flux-pro/kontext';
-        falInput = isMulti
-          ? { prompt: input.prompt.trim(), image_urls: refDataUris }
-          : { prompt: input.prompt.trim(), image_url: refDataUris[0] };
+      // Route to the selected model's reference endpoint; respecting the
+      // caller's model is required so the configured edit model is invoked.
+      const route = await referenceRoute(model, input.prompt.trim(), refDataUris);
+      if ('error' in route) {
+        return { success: false, error: route.error };
       }
+      const referenceModel = route.endpoint;
+      const falInput: Record<string, any> = route.input;
 
       if (input.seed !== undefined) {
         falInput.seed = input.seed;
