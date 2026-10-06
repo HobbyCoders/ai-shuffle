@@ -256,17 +256,16 @@
 	// Follow-up edits do not erase the PR history. Show both facts.
 	const showPr = $derived(Boolean(prText));
 	let prListOpen = $state(false);
-	let prChipRef = $state<HTMLElement | null>(null);
-	let prButtonRef = $state<HTMLButtonElement | null>(null);
-	let prReturnFocus = $state<HTMLElement | null>(null);
+	// The chip is the one control for the list: a button, so the keyboard
+	// and screen readers reach it too, and focus returns to it on close.
+	let prChipRef = $state<HTMLButtonElement | null>(null);
 	const prListLabel = $derived(
 		prSummary ? `Pull requests: ${prSummary.text.replace(/ · /g, ', ')}` : 'Pull requests'
 	);
 
-	function togglePrList(event: MouseEvent, from: HTMLElement | null) {
+	function togglePrList(event: MouseEvent) {
 		event.stopPropagation();
 		event.preventDefault();
-		prReturnFocus = from === prChipRef ? prButtonRef ?? frameRef : from;
 		prListOpen = !prListOpen;
 	}
 	$effect(() => {
@@ -542,7 +541,7 @@
 			pointerType !== '' && pointerType !== 'mouse' &&
 			withinTapTarget(prChipRef.getBoundingClientRect(), event.clientX, event.clientY)
 		) {
-			togglePrList(event, prChipRef);
+			togglePrList(event);
 			return;
 		}
 		if (selecting) {
@@ -662,17 +661,19 @@
 			     session's state: the status line on active rows, the meta line
 			     on settled ones. The title keeps the full width. -->
 			{#snippet multiPrChip()}
-				<!-- A pointer shortcut to the list. Keyboard and screen readers
-				     reach it through the "Pull requests" row action. -->
-				<!-- svelte-ignore a11y_click_events_have_key_events -->
-				<!-- svelte-ignore a11y_no_static_element_interactions -->
-				<span
+				<!-- The one control for the PR list: pointer, keyboard and
+				     screen readers all use the chip itself. -->
+				<button
 					bind:this={prChipRef}
+					type="button"
 					class="st pr pr-chip multi"
 					class:open={prListOpen}
 					title={`${prText} — show the list`}
-					onclick={(e) => togglePrList(e, prChipRef)}
-				>{#each prSummary?.parts ?? [] as part, i (part.state)}{#if i > 0}<span class="sep">{' · '}</span>{/if}<span class:green={part.state === 'open'} class:purple={part.state === 'merged'} class:muted={part.state === 'closed'}>{part.text}</span>{/each}</span>
+					aria-label={prListLabel}
+					aria-haspopup="dialog"
+					aria-expanded={prListOpen}
+					onclick={togglePrList}
+				>{#each prSummary?.parts ?? [] as part, i (part.state)}{#if i > 0}<span class="sep">{' · '}</span>{/if}<span class:green={part.state === 'open'} class:purple={part.state === 'merged'} class:muted={part.state === 'closed'}>{part.text}</span>{/each}</button>
 			{/snippet}
 			{#snippet timerChip()}
 				<span class="timer" class:live={turnLive} title={timerTitle}>{timer}</span>
@@ -734,20 +735,6 @@
 		<!-- Hover actions on a pointer that hovers. On touch they stay in the
 		     DOM for assistive tech, visually hidden: the swipe is the gesture. -->
 		<span class="hover-acts" aria-label="Session actions">
-			{#if multiPr}
-				<button
-					bind:this={prButtonRef}
-					type="button"
-					class="row-action"
-					title="Pull requests"
-					aria-label={prListLabel}
-					aria-haspopup="dialog"
-					aria-expanded={prListOpen}
-					onclick={(e) => togglePrList(e, prButtonRef)}
-				>
-					<GitPullRequest size={15} strokeWidth={1.9} />
-				</button>
-			{/if}
 			{#each hoverActions as action (action)}
 				<button
 					type="button"
@@ -773,8 +760,8 @@
 		<SessionPrList
 			{prs}
 			summary={prSummary}
-			anchor={prChipRef ?? prButtonRef}
-			returnFocus={prReturnFocus}
+			anchor={prChipRef}
+			returnFocus={prChipRef}
 			onClose={() => (prListOpen = false)}
 		/>
 	{/if}
@@ -989,7 +976,27 @@
 	.l2 .st.pr,
 	.l3 .st.pr { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
 	/* Several PRs: each count keeps its state's tone; the chip opens the list. */
-	.pr-chip.multi { cursor: pointer; position: relative; }
+	/* A button that reads as inline text: no box, no font or line-height of
+	   its own, so the row keeps its height in the normal and compact lines. */
+	.pr-chip.multi {
+		cursor: pointer;
+		position: relative;
+		margin: 0;
+		padding: 0;
+		border: 0;
+		border-radius: 3px;
+		background: none;
+		font: inherit;
+		font-weight: 500;
+		line-height: inherit;
+		letter-spacing: inherit;
+		color: inherit;
+		text-align: inherit;
+		text-transform: none;
+		appearance: none;
+	}
+	.l3 .pr-chip.multi { font-weight: 400; }
+	.pr-chip.multi:focus-visible { outline: 2px solid var(--ring); outline-offset: -1px; }
 	.pr-chip.multi .sep { color: var(--subtle-foreground); }
 	.pr-chip.multi:hover > span:not(.sep),
 	.pr-chip.multi.open > span:not(.sep) { text-decoration: underline dotted; text-underline-offset: 2px; }

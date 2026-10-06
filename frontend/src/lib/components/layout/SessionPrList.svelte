@@ -115,7 +115,7 @@
 					href={pr.url ?? undefined}
 					target={pr.url ? '_blank' : undefined}
 					rel={pr.url ? 'noopener noreferrer' : undefined}
-					aria-label={`#${pr.number} ${label}, ${STATE_WORD[pr.state].toLowerCase()}${pr.source === 'subagent' ? ', by a sub-agent' : ''}`}
+					aria-label={`#${pr.number} ${label}, ${STATE_WORD[pr.state].toLowerCase()}`}
 				>
 					<span class="pr-icon {TONE[pr.state]}" aria-hidden="true">
 						{#if pr.state === 'open'}
@@ -128,7 +128,6 @@
 					</span>
 					<span class="pr-num" aria-hidden="true">#{pr.number}</span>
 					<span class="pr-title" aria-hidden="true" title={label}>{label}</span>
-					{#if pr.source === 'subagent'}<span class="pr-tag" aria-hidden="true">sub-agent</span>{/if}
 					<span class="pr-state {TONE[pr.state]}" aria-hidden="true">{STATE_WORD[pr.state]}</span>
 				</svelte:element>
 			</li>
@@ -203,15 +202,6 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-	}
-	.pr-tag {
-		flex: none;
-		padding: 0 5px;
-		border: 1px solid var(--border);
-		border-radius: 999px;
-		font-size: 10px;
-		line-height: 15px;
-		color: var(--muted-foreground);
 	}
 	.pr-state { flex: none; font-size: 11px; font-weight: 500; }
 	.green { color: var(--success); }

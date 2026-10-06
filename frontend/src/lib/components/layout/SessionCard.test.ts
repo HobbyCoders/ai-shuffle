@@ -952,13 +952,18 @@ describe('SessionCard several pull requests', () => {
 		expect(chip?.querySelector('.purple')?.textContent).toBe('1 merged');
 	});
 
-	it('lists every PR from the keyboard button and closes on Escape', async () => {
+	it('lists every PR from the chip and closes on Escape', async () => {
 		const { container, onOpen } = renderCard({
 			pr_state: 'merged',
 			pr_number: 3,
 			pull_requests: [pr(1, 'open'), pr(2, 'open', { source: 'subagent', title: 'Worker fix' }), pr(3, 'merged')],
 		});
 		const button = screen.getByRole('button', { name: 'Pull requests: 2 PRs open, 1 merged' });
+		// The chip itself is the control; no separate row action duplicates it.
+		expect(button.classList.contains('pr-chip')).toBe(true);
+		expect(screen.getAllByRole('button', { name: /Pull requests/ })).toHaveLength(1);
+		expect(container.querySelector('.hover-acts button[aria-haspopup]')).toBeNull();
+		expect(button.getAttribute('aria-haspopup')).toBe('dialog');
 		expect(button.getAttribute('aria-expanded')).toBe('false');
 		await fireEvent.click(button);
 		expect(onOpen).not.toHaveBeenCalled();
@@ -972,12 +977,40 @@ describe('SessionCard several pull requests', () => {
 			'https://github.com/o/r/pull/2',
 			'https://github.com/o/r/pull/1',
 		]);
-		expect(links[1].getAttribute('aria-label')).toBe('#2 Worker fix, open, by a sub-agent');
+		// A sub-agent's PR reads like any other: no tag taking room from the title.
+		expect(links[1].getAttribute('aria-label')).toBe('#2 Worker fix, open');
+		expect(dialog.querySelector('.pr-tag')).toBeNull();
+		expect(dialog.textContent).not.toContain('sub-agent');
 		expect(links[0].getAttribute('target')).toBe('_blank');
 
 		await fireEvent.keyDown(dialog, { key: 'Escape' });
 		expect(screen.queryByRole('dialog')).toBeNull();
 		expect(document.activeElement).toBe(button);
+	});
+
+	it('opens the list with Enter on the focused chip and returns focus on Escape', async () => {
+		const { onOpen } = renderCard({
+			pull_requests: [pr(1, 'open'), pr(2, 'merged')],
+			pr_state: 'merged',
+			pr_number: 2,
+		});
+		const chip = screen.getByRole('button', { name: 'Pull requests: 1 PR open, 1 merged' });
+		expect(chip.tagName).toBe('BUTTON');
+		expect(chip.classList.contains('pr-chip')).toBe(true);
+		expect(chip.getAttribute('type')).toBe('button');
+		chip.focus();
+		expect(document.activeElement).toBe(chip);
+		// A native button turns Enter into a click; jsdom does not, so mirror it.
+		const enter = await fireEvent.keyDown(chip, { key: 'Enter' });
+		expect(enter).toBe(true);
+		await fireEvent.click(chip);
+		expect(onOpen).not.toHaveBeenCalled();
+		expect(chip.getAttribute('aria-expanded')).toBe('true');
+		const dialog = screen.getByRole('dialog', { name: 'Pull requests' });
+		await fireEvent.keyDown(dialog, { key: 'Escape' });
+		expect(screen.queryByRole('dialog')).toBeNull();
+		expect(chip.getAttribute('aria-expanded')).toBe('false');
+		expect(document.activeElement).toBe(chip);
 	});
 
 	it('opens the list from the chip without opening the session', async () => {
