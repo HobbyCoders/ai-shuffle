@@ -874,12 +874,14 @@ async def create_voice_session(
             create_new_branch=not bool(selected_branch),
             target_instance_id=target_instance_id,
         )
+        from app.core.mobile_tool_identity import request_principal
         created = await _create_v2_branch_session(
             branch_request,
             access.get("legacy"),
             api_user_id,
             access.get("project_v2"),
             session_create_overrides=session_create_overrides,
+            creator=await run_sync(request_principal, http_request),
         )
         session_id = created.session_id
     else:
@@ -940,6 +942,9 @@ async def create_voice_session(
             target_instance_id=target_instance_id,
             **session_create_overrides,
         )
+        # A paired device keeps the call it started (#1877).
+        from app.core.mobile_tool_identity import record_creator
+        await run_sync(record_creator, session_id, http_request)
     logger.info(
         "Voice: created session %s on provider %s (model %s)",
         session_id, provider_row["id"], model,

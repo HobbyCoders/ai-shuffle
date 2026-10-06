@@ -109,6 +109,11 @@ async def test_access_checked_before_forwarding(pair, monkeypatch):
     def denied(*args):
         raise HTTPException(403, "not yours")
     monkeypatch.setattr(commands, "check_session_access", denied)
+
+    async def denied_transcript(*args):  # checkpoints use the transcript rule (#1877)
+        denied()
+
+    monkeypatch.setattr(commands, "check_transcript_access", denied_transcript)
     call = AsyncMock()
     monkeypatch.setattr(control, "call", call)
     with mirror.active():

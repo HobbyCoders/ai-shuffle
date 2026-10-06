@@ -136,6 +136,9 @@ class _HandlerHarness:
             user_id="admin",
             api_user_id=None,
         )
+        # Registration is what these tests pin; the account check is stubbed
+        # (its refusal is test_watch_session_refused_by_the_account_check).
+        handler._authorize_mobile_session = AsyncMock(return_value=True)
         real_send = handler.send_json
 
         async def _send_and_drain(data):
@@ -243,6 +246,27 @@ async def test_watch_session_registers_and_binds_current_session():
     assert pend and pend[0]["session_id"] == "sess-1", (
         "watch_session must bind current_session_id"
     )
+
+
+async def test_watch_session_refused_by_the_account_check():
+    """Watching streams a chat's live frames and queued messages, so it is
+    refused exactly as ``load_session`` is (``bind_session``, #1877): nothing
+    is registered or bound and no queue snapshot is sent."""
+    with _HandlerHarness() as h, patch(
+        "app.core.mobile_tool_identity.bind_session",
+        side_effect=PermissionError("Session principal mismatch"),
+    ) as bind:
+        handler = h.make_handler()
+        # The real check, not the harness stub.
+        handler._authorize_mobile_session = cwh.ChatWebSocketHandler._authorize_mobile_session.__get__(handler)
+        h.queue_view.return_value = [{"id": "q1", "content": "secret queued text"}]
+        await handler.handle_watch_session(dict(WATCH))
+
+    assert bind.call_args.args[0] == "sess-1"
+    h.sync.register_device.assert_not_awaited()
+    assert handler.current_session_id is None
+    assert _queue_frames(h.ws) == []
+    assert [f["message"] for f in _errors(h.ws)] == ["Session authorization denied"]
 
 
 async def test_watch_session_is_in_dispatch_table():

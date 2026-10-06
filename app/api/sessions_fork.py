@@ -11,10 +11,11 @@ from fastapi import APIRouter, HTTPException, Depends, status, Request
 
 from app.db import database
 from app.db.async_database import run_sync
+from app.core.mobile_tool_identity import record_creator
 from app.api.auth import require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
 from app.api.sessions_helpers import (
-    require_session,
+    require_transcript_session,
     ForkSessionRequest,
     ForkSessionResponse,
 )
@@ -184,6 +185,9 @@ async def _fork_fluid_session(
         **_fork_inherited_fields(original_session),
     )
 
+    # The fork is the caller's chat: a paired device keeps it (#1877).
+    await run_sync(record_creator, new_session_id, request)
+
     # create_session cannot carry the logical v2 branch (no parameter) — a
     # branch-bound parent must hand it to the fork or the fork resolves its cwd
     # to the base checkout.
@@ -245,7 +249,7 @@ async def fork_session(
     from app.core.jsonl_parser import get_session_jsonl_path, parse_jsonl_file
 
     # Get the original session
-    original_session = await require_session(request, session_id)
+    original_session = await require_transcript_session(request, session_id)
 
     sdk_session_id = original_session.get("sdk_session_id")
     if not sdk_session_id:
@@ -361,6 +365,9 @@ async def fork_session(
         is_active=True,
         **_fork_inherited_fields(original_session),
     )
+
+    # The fork is the caller's chat: a paired device keeps it (#1877).
+    await run_sync(record_creator, new_session_id, request)
 
     # Same branch hand-off as the fluid path above.
     parent_branch = (original_session.get("branch") or "").strip()

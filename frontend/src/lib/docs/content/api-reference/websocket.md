@@ -202,5 +202,5 @@ WebSocket close codes:
 - `1009` — Frame larger than 10 MiB
 - `1013` — Authorization temporarily unavailable; retry later
 - `4001` — Authentication failed, the API key was disabled, deleted or rotated while connected, or the paired device was unpaired, logged out or had its session token replaced
-- `4003` — Access denied: for an API key, the session is not one it started, or it belongs to another project or agent (`/ws/sessions/{session_id}`)
+- `4003` — Access denied (`/ws/sessions/{session_id}`): for an API key, the session is not one it started, or it belongs to another project or agent; for a paired device, the chat is one it may not read (the same account rule as the chat's transcript and images)
 - `4004` — Session not found

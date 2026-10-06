@@ -72,6 +72,39 @@ def revalidate(value):
         raise
 
 
+def request_principal(request):
+    """The paired controller a REST request acts as, shaped like :func:`principal`.
+
+    None for the owner login, an API key or a preview: a chat they create
+    over REST stays without a record, as before (#1877). ``require_auth``
+    already checked the device live; this only names it. Blocking.
+    """
+    state = getattr(request, 'state', None)
+    client = getattr(state, 'paired_client', None)
+    if not isinstance(client, dict) or not client.get('id'):
+        return None
+    owner = mobile_hub.ownership(paired_client_id=client['id'])
+    account_id = owner['account_id'] if owner else None
+    return dict(kind='paired', principal_id=client['id'], account_id=account_id,
+                credential_hash=getattr(state, 'paired_credential_hash', None) or '',
+                owner='account:' + account_id if account_id else 'paired:' + client['id'])
+
+
+def record_creator(session_id, request, *, conn=None):
+    """Record the paired controller that created a chat over REST (#1877).
+
+    The same record the chat socket writes for a chat it creates
+    (``bind_session(..., new=True)``), so the creator keeps the chat's
+    images, transcript and socket, on this worker and on mirrors, and other
+    account members do not. Nothing for the owner login or an API key.
+    Blocking.
+    """
+    value = request_principal(request)
+    if value:
+        store.bind(session_id, value, new=True, conn=conn)
+    return value
+
+
 def bind_session(session_id, value, *, new=False, claim=False, conn=None):
     validate(value)
     return store.bind(session_id, value, new=new, claim=claim, conn=conn)
@@ -108,11 +141,57 @@ def same_install_owner(previous, value, session):
     if {previous['kind'], value['kind']} != {'admin', 'paired'}:
         return False
     paired_value = value if value['kind'] == 'paired' else previous
-    client = pairing.get_paired_client(paired_value['principal_id'])
+    if paired_value.get('principal_id') is None:
+        # A synced label (``store.mirrored``): the device that started the
+        # chat is paired with the worker that runs it, not here. Where that
+        # worker checks the device's owner authority, this worker checks
+        # that the account is its owner's, as the admin's image check does.
+        if not paired_value.get('account_id'):
+            return False
+        from app.core.preference_identity import local_owner_account
+        return paired_value['account_id'] == local_owner_account()
+    return _owner_authority(paired_value)
+
+
+def admit_labelled(label, value, session):
+    """Continue a chat whose owner is only known from its synced label (#1877).
+
+    ``label`` is ``store.mirrored(session)``: on a worker that mirrors the
+    chat, or that runs it without a record of its own (after a handoff). The
+    principal that started it, or a principal :func:`same_install_owner`
+    accepts in its place, may continue it; anyone else is refused as the
+    worker with the record refuses them.
+    """
+    if value and value['owner'] == label['owner']:
+        return
+    if not same_install_owner(label, value, session):
+        raise PermissionError('Session principal mismatch')
+
+
+def admit_unrecorded(value, session):
+    """Continue a chat with no account record or label (a legacy chat).
+
+    The admin and API keys keep using it (an API key's own scope is checked
+    by the socket). A paired device needs this install's owner authority, the
+    rule the chat's images use: another member's phone or a direct controller
+    is refused.
+    """
+    if not value or value['kind'] != 'paired':
+        return
+    from app.core.config import settings
+    if (session['api_user_id'] or (session['instance_id'] != settings.effective_instance_id
+                                   and not _network_mirror(session))
+            or not _owner_authority(value)):
+        raise PermissionError('Session principal mismatch')
+
+
+def _owner_authority(value):
+    """True when a paired principal's device holds this install's owner authority."""
+    client = pairing.get_paired_client(value['principal_id'])
     if not client or client.get('revoked_at'):
         return False
     owner = mobile_hub.ownership(paired_client_id=client['id'])
-    return bool(owner and owner['account_id'] == paired_value.get('account_id')
+    return bool(owner and owner['account_id'] == value.get('account_id')
                 and account_hub.check_paired_client(client) is True)
 
 

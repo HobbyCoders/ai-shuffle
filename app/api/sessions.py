@@ -46,7 +46,10 @@ logger = logging.getLogger(__name__)
 from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     parse_session_history_via_store,
     check_session_access,
+    check_transcript_access,
+    filter_readable_sessions,
     require_session,
+    require_transcript_session,
     enrich_sessions_with_tags,
     fetch_and_enrich_sessions,
     fetch_and_enrich_search_results,
@@ -744,6 +747,10 @@ async def search_sessions(
         limit=limit
     )
 
+    # Snippets quote message bodies: a paired controller gets only the chats
+    # whose transcript it may read (#1877).
+    if getattr(request.state, "paired_client", None):
+        results = await run_sync(filter_readable_sessions, request, results)
     return results
 
 
@@ -790,6 +797,12 @@ async def search_sessions_paginated(
 
     enriched = results
     has_more = offset + len(results) < total
+    # Snippets quote message bodies: a paired controller gets only the chats
+    # whose transcript it may read (#1877). ``total`` drops the ones refused
+    # on this page; refused chats on other pages still count there.
+    if getattr(request.state, "paired_client", None):
+        enriched = await run_sync(filter_readable_sessions, request, results)
+        total -= len(results) - len(enriched)
 
     return PaginatedSessionSearchResults(
         items=enriched,
@@ -823,7 +836,7 @@ async def get_composer_suggestion(
     request: Request, session_id: str, token: str = Depends(require_auth),
 ):
     """Read the latest eligible hint. Never triggers generation or changes a draft."""
-    await require_session(request, session_id)
+    await require_transcript_session(request, session_id)
     from app.core.composer_suggestions import _eligible
     from app.db import composer_suggestions
 
@@ -890,7 +903,7 @@ async def get_session(
             detail=f"Session not found: {session_id}"
         )
 
-    check_session_access(request, session)
+    await check_transcript_access(request, session)
 
     # Try to load messages from JSONL file first (source of truth for consistency)
     sdk_session_id = session.get("sdk_session_id")
@@ -1159,7 +1172,7 @@ async def get_live_session(
     """
 
     # Check session exists and user has access
-    session = await require_session(request, session_id)
+    session = await require_transcript_session(request, session_id)
 
     # Derived lifecycle snapshot; ``compute`` also logs any cross-source
     # disagreement (pool, idle reader, parked marker) as ``lifecycle-drift``.
@@ -2055,7 +2068,7 @@ async def get_sync_changes(
         - latest_id: The most recent sync ID (use for next poll)
         - is_streaming: Whether the session is currently streaming
     """
-    await require_session(request, session_id)
+    await require_transcript_session(request, session_id)
 
     changes = await run_sync(database.get_sync_logs, session_id, since_id=since_id)
     latest_id = await run_sync(database.get_latest_sync_id, session_id)

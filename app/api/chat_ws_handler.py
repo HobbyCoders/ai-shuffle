@@ -1482,6 +1482,9 @@ class ChatWebSocketHandler:
                             "permission_mode": (overrides or {}).get("permission_mode"),
                             "context_window": (overrides or {}).get("context_window"),
                             "fast": (overrides or {}).get("fast"), "mode": session_mode,
+                            # Who started it, recorded above; the worker that
+                            # runs it labels it at creation (#1877).
+                            "provenance_owner": (self.trusted_principal or {}).get("owner"),
                         }, None)
                     except control.RunnerUnreachable as exc:
                         await self._forward_unreachable(session_id, exc)
@@ -2115,6 +2118,10 @@ class ChatWebSocketHandler:
         # Refuse BEFORE registering: ``current_session_id`` is what
         # get_pending_permissions / get_pending_questions read.
         if not await self._may_act_on_session(session_id):
+            return
+        # Watching streams the chat's live frames and queued messages: the
+        # same account check as ``load_session`` (#1877).
+        if not await self._authorize_mobile_session(session_id):
             return
 
         # Unregister from old session if switching

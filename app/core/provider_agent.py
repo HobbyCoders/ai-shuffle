@@ -2324,6 +2324,10 @@ async def dispatch_worker(
                 permission_mode=dispatch_mode or "default",
                 permission_ceiling=dispatch_mode or "default",
             ))
+            # The parent's creator reads its worker as it reads the parent,
+            # and other account members do not (#1877). Label only: no record.
+            from app.db import mobile_tool_identity
+            mobile_tool_identity.inherit_label(worker_session_id, parent_session_id)
             from app.core.assistant_service import home_for_session, link_job
             home = home_for_session(context_session_id or parent_session_id)
             if home:

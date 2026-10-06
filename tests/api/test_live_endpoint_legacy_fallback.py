@@ -41,7 +41,7 @@ def _lifecycle_stub(active_tasks=None, unpark_pending=False):
 
 def _owner_path_patches(session, lifecycle=None):
     return [
-        patch("app.api.sessions.require_session", new=AsyncMock(return_value=session)),
+        patch("app.api.sessions.require_transcript_session", new=AsyncMock(return_value=session)),
         patch("app.api.sessions.enrich_session_worktree_meta", new=MagicMock(return_value={})),
         patch("app.core.lifecycle_state.compute",
               new=AsyncMock(return_value=lifecycle or _lifecycle_stub())),

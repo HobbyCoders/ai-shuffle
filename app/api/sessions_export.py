@@ -16,7 +16,7 @@ from app.api.auth import require_admin, require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
 from app.api.sessions_helpers import (
     api_user_may_use_profile,
-    require_session,
+    require_transcript_session,
     resolve_api_user_profile,
     SessionImportResponse,
     ImportJSONLRequest,
@@ -194,7 +194,7 @@ async def export_session(
             detail="Invalid format. Must be 'markdown', 'json' or 'jsonl'"
         )
 
-    session = await require_session(request, session_id)
+    session = await require_transcript_session(request, session_id)
 
     from app.core.message_resolver import resolve_working_dir
 

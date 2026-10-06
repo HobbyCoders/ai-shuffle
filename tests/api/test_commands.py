@@ -1771,6 +1771,7 @@ class TestCommandsSessionOwnership:
         req = MagicMock()
         req.state = MagicMock()
         req.state.api_user = None
+        req.state.paired_client = None  # the admin login, not a paired device
 
         response = await get_rewind_checkpoints("session-1", req)
         # No 403 raised; handler proceeds (returns the no-sdk-session response).

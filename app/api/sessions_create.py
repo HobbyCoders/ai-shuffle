@@ -137,6 +137,9 @@ async def create_empty_session(
                 _conn=txn,
                 **worktree_fields,
             )
+            # A paired device keeps the chat it created (#1877).
+            from app.core.mobile_tool_identity import record_creator
+            record_creator(session_id, request, conn=txn)
         if mode != "chat" and overrides.get("workspace_project_ids") is not None:
             persist_promptless_run_binding(
                 session_id,

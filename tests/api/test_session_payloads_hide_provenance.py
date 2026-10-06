@@ -4,6 +4,8 @@
 device id). It syncs between workers for the image check, but the raw session
 rows a few endpoints return must not hand it to a client.
 """
+from unittest.mock import AsyncMock
+
 from app.core.session_payload import client_view
 from app.db import database
 from app.db.base import get_db
@@ -65,6 +67,9 @@ async def test_websocket_history_frame_has_no_label(mock_db):
     _label("sess-1")
     with _LoadSessionPatches():
         handler = _make_handler()
+        # The label names an account this test's socket is not: who may open
+        # the chat is tests/core/network/test_mirrored_chat_image_access.py.
+        handler._authorize_mobile_session = AsyncMock(return_value=True)
         await handler.handle_load_session({"session_id": "sess-1"})
     history = [c.args[0] for c in handler.send_json.call_args_list
                if c.args and isinstance(c.args[0], dict) and c.args[0].get("type") == "history"]

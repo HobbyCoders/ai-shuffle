@@ -1,7 +1,7 @@
 """Owner-authorized workflow snapshot and cancellation endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, Request
 from app.api.auth import require_auth, get_api_user_from_request
-from app.api.sessions_helpers import require_session
+from app.api.sessions_helpers import check_transcript_access, require_session
 from app.core import swarm
 
 router = APIRouter()
@@ -18,7 +18,8 @@ async def owned_session(request: Request, session_id: str) -> dict:
 
 @router.get("/{session_id}/swarms")
 async def list_swarms(session_id: str, request: Request, token: str = Depends(require_auth)):
-    await owned_session(request, session_id)
+    # Snapshots carry task briefs and reports: the transcript rule (#1877).
+    await check_transcript_access(request, await owned_session(request, session_id))
     return {"swarms": await swarm.snapshots(session_id)}
 
 @router.post("/{session_id}/swarms/{swarm_id}/cancel")

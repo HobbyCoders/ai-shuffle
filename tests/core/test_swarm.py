@@ -202,6 +202,8 @@ async def test_endpoints_require_ownership(monkeypatch):
         await swarms.cancel_swarm("parent", "swarm", SimpleNamespace())
     monkeypatch.setattr(swarms, "get_api_user_from_request", lambda _: {"id": "owner"})
     monkeypatch.setattr(swarm, "snapshots", AsyncMock(return_value=[]))
+    # The account rule for paired devices is test_auth_identities_use_existing_session_access.
+    monkeypatch.setattr(swarms, "check_transcript_access", AsyncMock())
     assert await swarms.list_swarms("parent", SimpleNamespace()) == {"swarms": []}
 
 
@@ -364,6 +366,14 @@ async def test_auth_identities_use_existing_session_access(agents, monkeypatch, 
         assert exc.value.status_code == 403
         with pytest.raises(HTTPException):
             await swarms.cancel_swarm("auth-parent", "swarm", request)
+    elif identity in {"paired", "owner-paired"}:
+        # Snapshots carry task briefs and reports: a paired device gets the
+        # transcript rule (#1877), which refuses it an API key's chat.
+        # Cancelling is a control route and keeps the session access.
+        with pytest.raises(HTTPException) as exc:
+            await swarms.list_swarms("auth-parent", request)
+        assert exc.value.status_code == 403
+        assert await swarms.cancel_swarm("auth-parent", "swarm", request) == {"swarm": {"status": "cancelled"}}
     else:
         assert await swarms.list_swarms("auth-parent", request) == {"swarms": []}
         assert await swarms.cancel_swarm("auth-parent", "swarm", request) == {"swarm": {"status": "cancelled"}}

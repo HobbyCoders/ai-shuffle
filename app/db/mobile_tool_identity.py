@@ -43,13 +43,31 @@ def bind(session_id, principal, *, new=False, claim=False, conn=None):
         with get_db() as connection:
             return bind(session_id, principal, new=new, claim=claim, conn=connection)
     c = conn.cursor()
-    c.execute("SELECT api_user_id, instance_id, owner_device_id FROM sessions WHERE id = %s FOR UPDATE",
-              (session_id,))
+    c.execute("SELECT id, api_user_id, instance_id, owner_device_id, provenance_owner "
+              "FROM sessions WHERE id = %s FOR UPDATE", (session_id,))
     session = c.fetchone()
     if not session:
         raise PermissionError('Unknown session')
     c.execute("SELECT * FROM mobile_tool_identity WHERE session_id = %s", (session_id,))
     previous = c.fetchone()
+    if not new and not claim:
+        # Continuing a chat: decide from the record the image check uses
+        # (``artifact_access.session_provenance``), so the transcript and the
+        # images of a chat get one answer (#1877). A chat another worker runs
+        # is decided by that worker's synced label; a chat with no record here
+        # by its label when it has one. Neither writes anything.
+        carried = mirrored(dict(session))
+        if carried is not None and (not previous or _runs_elsewhere(session)):
+            from app.core.mobile_tool_identity import admit_labelled
+            admit_labelled(carried, principal, dict(session))
+            return
+        if not previous:
+            # Unmapped legacy sessions remain usable but never acquire
+            # authority; a paired device needs the owner's authority, as
+            # for their images.
+            from app.core.mobile_tool_identity import admit_unrecorded
+            admit_unrecorded(principal, dict(session))
+            return
     if previous:
         if not principal or previous['owner'] != principal['owner']:
             from app.core.mobile_tool_identity import same_install_owner
@@ -59,9 +77,6 @@ def bind(session_id, principal, *, new=False, claim=False, conn=None):
                 return
             raise PermissionError('Session principal mismatch')
     elif not new:
-        if not claim:
-            # Unmapped legacy sessions remain usable but never acquire authority.
-            return
         from app.core.config import settings
         if (not principal or principal['kind'] != 'admin' or session['api_user_id']
                 or session['instance_id'] != settings.effective_instance_id):
@@ -86,6 +101,44 @@ def bind(session_id, principal, *, new=False, claim=False, conn=None):
             c.execute("UPDATE sessions SET provenance_owner = %s WHERE id = %s "
                       "AND (provenance_owner IS NULL OR provenance_owner <> %s)",
                       (owner, session_id, owner))
+
+
+def owner_label(session_id, conn=None):
+    """Who started ``session_id``, as its row says (``provenance_owner``).
+
+    Where the chat runs, ``bind`` and the migration keep the column equal to
+    the local record's owner; elsewhere it is the running worker's label.
+    """
+    if conn is None:
+        with get_db() as connection:
+            return owner_label(session_id, connection)
+    c = conn.cursor()
+    c.execute("SELECT provenance_owner FROM sessions WHERE id = %s", (session_id,))
+    row = c.fetchone()
+    return row['provenance_owner'] if row else None
+
+
+def inherit_label(session_id, parent_session_id, conn=None):
+    """Give a chat started by another chat (a Task or Swarm worker, a peer) the
+    parent's label, at creation (#1877).
+
+    The parent's creator then reads the child as it reads the parent, and other
+    account members do not, on this worker and on mirrors. Only the label: the
+    child gets no record, so no Android tool authority. A parent with no label
+    leaves the child without one (the same rule as the parent). Returns the
+    label written, or None.
+    """
+    if conn is None:
+        with get_db() as connection:
+            return inherit_label(session_id, parent_session_id, connection)
+    if not parent_session_id:
+        return None
+    owner = owner_label(parent_session_id, conn)
+    if mirrored({'id': session_id, 'provenance_owner': owner}) is None:
+        return None
+    conn.cursor().execute("UPDATE sessions SET provenance_owner = %s WHERE id = %s "
+                          "AND provenance_owner IS NULL", (owner, session_id))
+    return owner
 
 
 def _runs_elsewhere(session):

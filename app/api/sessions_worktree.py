@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Depends, status, Request
 
-from app.db import database
+from app.db import database, mobile_tool_identity
 from app.core.session_title import derive_session_title
 from app.db.async_database import run_sync
 from app.api.auth import require_auth, get_api_user_from_request
@@ -316,6 +316,7 @@ async def _create_remote_branch_session(
     pv2: dict,
     target_instance_id: str,
     session_create_overrides: Optional[dict] = None,
+    creator: Optional[dict] = None,
 ) -> WorktreeSessionResponse:
     """Create a branch session that will materialize on ANOTHER install.
 
@@ -405,6 +406,10 @@ async def _create_remote_branch_session(
                 create_kwargs, session_create_overrides
             )
             database.create_session(**create_kwargs)
+            if creator:
+                # A paired device keeps the chat it created (#1877); the
+                # worker that runs it gets the label with the row below.
+                mobile_tool_identity.bind(session_id, creator, new=True)
             database.set_session_branch(session_id, branch_name, pv2["id"])
             if not prompt:
                 persist_promptless_run_binding(session_id, body.overrides)
@@ -421,8 +426,11 @@ async def _create_remote_branch_session(
     if ctx and remote_device != ctx.device_id:
         row = await run_sync(database.get_session, session_id)
         try:
+            # The label travels in the request, not the copy: the worker that
+            # runs a chat never takes its label from a copy (#1873, #1877).
+            label = (creator or {}).get("owner") or row.get("provenance_owner")
             await control.call(remote_device, "sessions", {
-                "session": {**row, "branch": branch_name},
+                "session": {**row, "branch": branch_name, "provenance_owner": label},
                 "uploads": await network_git.export_uploads(upload_blob_ids),
             })
         except (control.RunnerUnreachable, control.ControlRefused) as exc:
@@ -527,8 +535,13 @@ async def _create_v2_branch_session(
     pv2: Optional[dict] = None,
     *,
     session_create_overrides: Optional[dict] = None,
+    creator: Optional[dict] = None,
 ) -> WorktreeSessionResponse:
     """V2 branch-intake: create a branch session WITHOUT a legacy worktree row.
+
+    ``creator`` (``mobile_tool_identity.request_principal``) is the paired
+    device that asked, recorded on the new chat as the chat socket records
+    the chats it creates (#1877); None for the owner login or an API key.
 
     The session records only its logical ``sessions.branch`` + origin-keyed
     ``project_v2_id``; the deterministic per-runner checkout
@@ -592,6 +605,7 @@ async def _create_v2_branch_session(
             pv2,
             target_instance_id,
             session_create_overrides,
+            creator,
         )
 
     # 2. Materialize the deterministic (project, branch) checkout. Idempotent with
@@ -664,6 +678,9 @@ async def _create_v2_branch_session(
             create_kwargs, session_create_overrides
         )
         database.create_session(**create_kwargs)
+        if creator:
+            # A paired device keeps the chat it created (#1877).
+            mobile_tool_identity.bind(session_id, creator, new=True)
         database.set_session_branch(session_id, branch_name, pv2["id"])
         if not (body.prompt or "").strip():
             persist_promptless_run_binding(session_id, body.overrides)
@@ -779,6 +796,8 @@ async def create_session_with_worktree(
             "profile_id": resolve_api_user_profile(api_user, body.profile_id),
         })
 
+    from app.core.mobile_tool_identity import request_principal
+    creator = await run_sync(request_principal, request)
     return await _create_v2_branch_session(
-        body, project, api_user_id, access["project_v2"]
+        body, project, api_user_id, access["project_v2"], creator=creator,
     )

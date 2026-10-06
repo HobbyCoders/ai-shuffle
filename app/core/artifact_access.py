@@ -17,6 +17,55 @@ def _network_mirror(session):
         return False
 
 
+def session_provenance(session, session_id=None):
+    """The account record that decides who may read ``session``, or None.
+
+    A chat another worker runs has no local record here; its session row
+    carries the owner from that worker (#1849), so the account rules apply to
+    a mirror exactly as they do where the chat runs. A worker the chat moved
+    away from keeps its old record, so there the running worker's label comes
+    first: it may have changed since (a claim there).
+    """
+    carried = mobile_tool_identity.mirrored(session)
+    if carried is not None and _network_mirror(session):
+        return carried
+    return mobile_tool_identity.read(session_id or session.get('id')) or carried
+
+
+def _paired_client_allowed(client, session, provenance):
+    """Whether a paired controller may read this chat (its images and transcript)."""
+    owner = mobile_hub.ownership(paired_client_id=client['id'])
+    expected = 'account:' + owner['account_id'] if owner else 'paired:' + client['id']
+    allowed = bool(provenance and provenance['owner'] == expected)
+    if provenance and not allowed:
+        from app.core.mobile_tool_identity import same_install_owner
+        allowed = same_install_owner(provenance, {
+            'kind': 'paired', 'principal_id': client['id'],
+            'account_id': owner['account_id'] if owner else None,
+        }, session)
+    if not provenance:
+        # The owner's own device has this install's admin authority. A chat
+        # run by another worker of this network is a mirror here: its
+        # instance_id is local-only (unset) and its provenance stays on the
+        # worker that runs it, so accept that worker's mirror as well.
+        allowed = bool(client.get('account_owner_admin') is True
+                       and (session.get('instance_id') == settings.effective_instance_id
+                            or _network_mirror(session))
+                       and not session.get('api_user_id'))
+    return allowed
+
+
+def paired_client_may_read(client, session):
+    """The account rule tool images use, for a chat's transcript too (#1877).
+
+    A paired controller (an account phone or a directly paired device) gets
+    the same answer for a chat's transcript as for its images, on the worker
+    that runs the chat and on a worker that mirrors it. Blocking: call it off
+    the event loop.
+    """
+    return _paired_client_allowed(client, session, session_provenance(session))
+
+
 def authorize_session_artifact(request, row, digest, session_id=None):
     owner_session = (row or {}).get('created_by_session')
     target = session_id or owner_session
@@ -58,16 +107,7 @@ def authorize_session_artifact(request, row, digest, session_id=None):
                         break
             if not referenced:
                 raise HTTPException(404, 'Not found')
-    # A chat another worker runs has no local record here; its session row
-    # carries the owner from that worker (#1849), so the account rules below
-    # apply to a mirror exactly as they do where the chat runs. A worker the
-    # chat moved away from keeps its old record, so there the running
-    # worker's label comes first: it may have changed since (a claim there).
-    carried = mobile_tool_identity.mirrored(session)
-    if carried is not None and _network_mirror(session):
-        provenance = carried
-    else:
-        provenance = mobile_tool_identity.read(target) or carried
+    provenance = session_provenance(session, target)
     api_user = getattr(request.state, 'api_user', None)
     client = getattr(request.state, 'paired_client', None)
     allowed = False
@@ -82,24 +122,7 @@ def authorize_session_artifact(request, row, digest, session_id=None):
         if allowed:
             check_session_access_for_api_user(api_user, session)
     elif client:
-        owner = mobile_hub.ownership(paired_client_id=client['id'])
-        expected = 'account:' + owner['account_id'] if owner else 'paired:' + client['id']
-        allowed = bool(provenance and provenance['owner'] == expected)
-        if provenance and not allowed:
-            from app.core.mobile_tool_identity import same_install_owner
-            allowed = same_install_owner(provenance, {
-                'kind': 'paired', 'principal_id': client['id'],
-                'account_id': owner['account_id'] if owner else None,
-            }, session)
-        if not provenance:
-            # The owner's own device has this install's admin authority. A chat
-            # run by another worker of this network is a mirror here: its
-            # instance_id is local-only (unset) and its provenance stays on the
-            # worker that runs it, so accept that worker's mirror as well.
-            allowed = bool(client.get('account_owner_admin') is True
-                           and (session.get('instance_id') == settings.effective_instance_id
-                                or _network_mirror(session))
-                           and not session.get('api_user_id'))
+        allowed = _paired_client_allowed(client, session, provenance)
     elif getattr(request.state, 'is_admin', False):
         if provenance and provenance.get('account_id'):
             from app.core.preference_identity import local_owner_account

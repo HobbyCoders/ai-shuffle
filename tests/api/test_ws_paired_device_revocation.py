@@ -93,6 +93,9 @@ def paired(ws_env):
     m.setattr(ws_sync, "sync_engine", sync)
     m.setattr(ws_sync, "database", SimpleNamespace(
         get_session=lambda sid: {"id": sid}, get_session_messages=lambda sid: []))
+    # Revocation is what these tests pin, on a stub chat with no account
+    # record; the transcript rule is tests/api/test_session_transcript_account_rule.py.
+    m.setattr(ws_sync, "socket_may_read_transcript", lambda principal, session: True)
     _pair("pcl_a", TOKEN_A)
     _pair("pcl_b", TOKEN_B)
     ws_key_watch._watches.clear()

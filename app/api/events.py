@@ -44,7 +44,7 @@ from fastapi.responses import StreamingResponse
 from starlette.requests import ClientDisconnect
 
 from app.api.auth import require_auth
-from app.api.sessions_helpers import require_session
+from app.api.sessions_helpers import require_transcript_session
 from app.api.sse_utils import is_client_disconnect
 from app.core.event_gateway import get_gateway
 from app.core.history_backfill import ensure_backfilled
@@ -862,7 +862,7 @@ async def stream_session_events(
     ``epoch`` is the log epoch from the client's last ``caught_up``; a resume
     whose epoch is stale gets ``event: reset`` and a full reload.
     """
-    await require_session(request, session_id)
+    await require_transcript_session(request, session_id)
     return StreamingResponse(
         _batch_backfill(event_stream(session_id, from_seq, epoch)),
         media_type="text/event-stream",

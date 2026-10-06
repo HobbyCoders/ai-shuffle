@@ -19,7 +19,7 @@ from app.core.detached_tasks import spawn_detached
 from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
-from app.api.sessions import check_session_access
+from app.api.sessions import check_session_access, check_transcript_access
 from app.api.common import resolve_project_path
 from app.api.command_context import command_context, command_provider_kind, command_setting_sources
 from app.core.slash_commands import (
@@ -288,7 +288,8 @@ async def get_rewind_checkpoints(session_id: str, http_request: Request = None):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if http_request is not None:
-        check_session_access(http_request, session)
+        # Checkpoints quote every user message: the transcript rule (#1877).
+        await check_transcript_access(http_request, session)
     from app.api.rewind_owner import forward_rewind
     remote = await forward_rewind(session, "checkpoints")
     if remote is not None:

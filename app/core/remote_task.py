@@ -822,6 +822,11 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
     try:
         with transaction() as conn:
             database.create_session(**fields, _conn=conn)
+            # The label of the parent (mirrored here from the worker that runs
+            # it): the parent's creator reads this child as it reads the
+            # parent, on every worker (#1877). Label only: no record.
+            from app.db import mobile_tool_identity
+            mobile_tool_identity.inherit_label(start.worker_session_id, start.parent_session_id, conn)
             # Permission prompts travel to the parent (remote_task_approvals);
             # Away handling still defers what cannot (private-access requests).
             conn.cursor().execute(

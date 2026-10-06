@@ -674,6 +674,8 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     if "permission_mode" in fields:
         fields["permission_mode"] = _valid_permission_mode(fields["permission_mode"])
     branch = _valid_branch(session.get("branch"))
+    label = session.get("provenance_owner")
+    label = label if isinstance(label, str) and label else None
 
     def _create():
         existing = database.get_session(session_id)
@@ -683,8 +685,20 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
             raise ValueError(f"Unknown profile: {profile_id}")
         api_user_id = requested_api_user if (
             requested_api_user and database.get_api_user(requested_api_user) is not None) else None
-        return database.create_session(session_id=session_id, profile_id=profile_id, project_id=None,
-                                       is_active=True, api_user_id=api_user_id, **fields)
+        row = database.create_session(session_id=session_id, profile_id=profile_id, project_id=None,
+                                      is_active=True, api_user_id=api_user_id, **fields)
+        if label:
+            # Who started the chat on the member (#1877): set once, when this
+            # worker creates the chat it will run. A later copy never labels
+            # it (#1873); this worker publishes the label to the mirrors.
+            from app.db import mobile_tool_identity
+            from app.db.base import get_db
+            if mobile_tool_identity.mirrored({"id": session_id, "provenance_owner": label}) is not None:
+                with get_db() as conn:
+                    conn.cursor().execute("UPDATE sessions SET provenance_owner = %s WHERE id = %s",
+                                          (label, session_id))
+                row = database.get_session(session_id) or row
+        return row
 
     row = await run_sync(_create)
     _require_owned(session_id)
@@ -763,8 +777,14 @@ _HANDLERS = {
 # Fork on offline
 # ---------------------------------------------------------------------------
 
-def fork_here(session_id: str, *, title: Optional[str] = None, api_user_id: Optional[str] = None) -> Dict[str, Any]:
-    """New local session seeded with the mirrored transcript; the original is untouched."""
+def fork_here(session_id: str, *, title: Optional[str] = None, api_user_id: Optional[str] = None,
+              creator: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """New local session seeded with the mirrored transcript; the original is untouched.
+
+    ``creator`` is the paired device that forked (``request_principal``):
+    the copy is its chat and records it, as the chat socket records the
+    chats it creates (#1877). None for the owner login or an API key.
+    """
     import uuid
     from app.db import database
     from app.db.base import transaction
@@ -783,6 +803,9 @@ def fork_here(session_id: str, *, title: Optional[str] = None, api_user_id: Opti
             effort=original.get("effort"), permission_mode=original.get("permission_mode"),
             context_window=original.get("context_window"), fast=original.get("fast"), mode=original.get("mode"),
             _conn=txn)
+        if creator:
+            from app.db import mobile_tool_identity
+            mobile_tool_identity.bind(new_id, creator, new=True, conn=txn)
         if context_text:
             database.add_session_message(
                 session_id=new_id, role="user", content=(

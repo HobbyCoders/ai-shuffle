@@ -826,6 +826,9 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
             if sender.get("branch") and placement is None:
                 cursor.execute("UPDATE sessions SET branch=%s WHERE id=%s", (sender["branch"], new_id))
             mobile_tool_identity.bind(new_id, principals[sender_id], new=True, conn=conn)
+            # A sender with only a label (a worker, or a chat run here after a
+            # handoff) passes that on (#1877); a recorded sender's was stamped.
+            mobile_tool_identity.inherit_label(new_id, sender_id, conn)
         turn = turns.enqueue_turn(
             target["id"], "agent_message", prompt=prompt,
             profile_id=target["profile_id"], project_id=target.get("project_id"),

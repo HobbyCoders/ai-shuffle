@@ -102,6 +102,9 @@ def _set_paired_request_state(request: Request, token: str, client: dict) -> str
     request.state.is_admin = owner_admin
     request.state.api_user = None
     request.state.paired_client = client
+    # Names the credential in the record of a chat this device creates over
+    # REST (``mobile_tool_identity.record_creator``), as the chat socket does.
+    request.state.paired_credential_hash = hashlib.sha256(token.encode()).hexdigest()
     request.state.auth_token = f"paired_client:{client['id']}"
     return f"paired_client:{client['id']}"
 

@@ -421,6 +421,69 @@ async def require_session(request: Request, session_id: str) -> dict:
     return session
 
 
+TRANSCRIPT_ACCESS_DENIED = "Access denied to this session"
+
+
+async def check_transcript_access(request: Request, session: dict) -> None:
+    """:func:`check_session_access`, plus the account rule tool images use.
+
+    For a paired controller (an account phone or a directly paired device)
+    the transcript follows ``app.core.artifact_access.paired_client_may_read``,
+    on the worker that runs the chat and on a mirror (#1877): another
+    member's phone or a direct controller is refused a chat it may not see
+    the images of. The owner login and API keys are unchanged.
+    """
+    check_session_access(request, session)
+    client = getattr(request.state, "paired_client", None)
+    if not client:
+        return
+    from app.core.artifact_access import paired_client_may_read
+    if not await run_sync(paired_client_may_read, client, session):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=TRANSCRIPT_ACCESS_DENIED)
+
+
+async def require_transcript_session(request: Request, session_id: str) -> dict:
+    """:func:`require_session` for a route that returns transcript content."""
+    session = await require_session(request, session_id)
+    await check_transcript_access(request, session)
+    return session
+
+
+def socket_may_read_transcript(principal: Optional[dict], session: dict) -> bool:
+    """:func:`check_transcript_access`'s account rule for a socket's principal.
+
+    Blocking (call it off the event loop). Only a paired controller is
+    checked; the owner login and API keys get True (their own checks apply).
+    The device is looked up by the credential that opened the socket.
+    """
+    if not principal or principal.get("kind") != "paired":
+        return True
+    client = database.get_paired_client_by_session_hash(principal["credential_hash"])
+    if not client or client["id"] != principal["principal_id"]:
+        return False
+    from app.core.artifact_access import paired_client_may_read
+    return bool(paired_client_may_read(client, session))
+
+
+def filter_readable_sessions(request: Request, items: list) -> list:
+    """Drop the chats a paired controller may not read (search results).
+
+    Blocking (call it off the event loop). Items are session-shaped dicts;
+    the owner login and API keys get ``items`` back unchanged.
+    """
+    client = getattr(request.state, "paired_client", None)
+    if not client:
+        return items
+    from app.core.artifact_access import paired_client_may_read
+    readable = []
+    for item in items:
+        row = item if isinstance(item, dict) else item.model_dump()
+        session = database.get_session(row.get("id")) if row.get("id") else None
+        if session and paired_client_may_read(client, session):
+            readable.append(item)
+    return readable
+
+
 # ---------------------------------------------------------------------------
 # Enrichment helpers
 # ---------------------------------------------------------------------------

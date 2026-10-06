@@ -594,12 +594,21 @@ async def peer_control(action: str, request: Request, device_id: str = Depends(t
 @router.post("/sessions/{session_id}/fork-here", status_code=status.HTTP_201_CREATED)
 async def fork_session_here(session_id: str, request: Request, _: str = Depends(require_auth)) -> dict:
     """Continue a session whose owner is offline: a new local session with the mirrored transcript."""
-    from app.api.sessions_helpers import require_session
+    from app.api.sessions_helpers import require_transcript_session
     from app.network import control
-    await require_session(request, session_id)  # 404 unknown, 403 outside the API user's scope
+    # 404 unknown, 403 outside the API user's scope or the transcript rule
+    # (#1877): the copy carries the whole transcript.
+    await require_transcript_session(request, session_id)
     api_user = getattr(request.state, "api_user", None)
+
+    def _fork() -> dict:
+        from app.core.mobile_tool_identity import request_principal
+        # The copy is the caller's chat: a paired device keeps it (#1877).
+        return control.fork_here(session_id, api_user_id=(api_user or {}).get("id") if api_user else None,
+                                 creator=request_principal(request))
+
     try:
-        result = await run_sync(control.fork_here, session_id, api_user_id=(api_user or {}).get("id") if api_user else None)
+        result = await run_sync(_fork)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
     engine.kick()

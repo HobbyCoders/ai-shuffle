@@ -474,6 +474,7 @@ async def test_heartbeat_pings_carry_the_documented_shape(ws_env, monkeypatch):
 
 
 async def test_idle_timeout_keeps_a_healthy_socket_and_drops_a_dead_one(ws_env):
+    _make_session("sess-idle")  # watch_session checks the chat's account (#1877)
     async with _connect(ws_env) as conn:
         # The 60 s receive timeout on a healthy, connected socket just loops.
         conn.wire.inbound.put_nowait(asyncio.TimeoutError())

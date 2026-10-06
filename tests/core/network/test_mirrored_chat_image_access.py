@@ -8,6 +8,7 @@ that only mirrors the chat applies the same account check to its images.
 Every mirror here is produced by the real publish/apply path between two
 in-process workers; the viewer never gets a hand-written local record.
 """
+import asyncio
 import dataclasses
 from types import SimpleNamespace
 
@@ -37,6 +38,11 @@ CHATS = {
 DEVICES = {
     "owner-phone": (OWNER_ACCOUNT, True),
     "member-phone": (MEMBER_ACCOUNT, False),
+    # A controller paired directly (no account): never the owner's authority.
+    "direct-phone": (None, False),
+    # The phones that started the chats, paired with the worker that runs them.
+    "pcl_owner_phone_on_a": (OWNER_ACCOUNT, True),
+    "pcl_member_phone_on_a": (MEMBER_ACCOUNT, False),
 }
 
 
@@ -321,6 +327,167 @@ def test_after_a_handoff_an_admin_claim_relabels_the_chat_everywhere(workers, ca
         assert _matrix(worker, admin, ["member-chat"]) == {("admin", "member-chat"): True}
 
 
+#: The chat socket's principal for each caller (``identity.principal``).
+SOCKETS = {
+    "admin": ADMIN,
+    "owner-phone": dict(owner="account:" + OWNER_ACCOUNT, kind="paired", principal_id="owner-phone",
+                        account_id=OWNER_ACCOUNT, credential_hash="owner-phone-socket"),
+    "member-phone": dict(owner="account:" + MEMBER_ACCOUNT, kind="paired", principal_id="member-phone",
+                         account_id=MEMBER_ACCOUNT, credential_hash="member-phone-socket"),
+    "direct-phone": dict(owner="paired:direct-phone", kind="paired", principal_id="direct-phone",
+                         account_id=None, credential_hash="direct-phone-socket"),
+}
+
+#: A chat a directly paired controller started on the worker that runs it.
+DIRECT_CHAT = {"direct-chat": dict(owner="paired:direct-phone", kind="paired", principal_id="direct-phone",
+                                   account_id=None, credential_hash="direct-hash")}
+
+PHONES = ("owner-phone", "member-phone", "direct-phone")
+
+
+def _direct_request():
+    return SimpleNamespace(state=SimpleNamespace(api_user=None, is_admin=False, paired_client={
+        "id": "direct-phone", "account_owner_admin": False}))
+
+
+def _rest_allowed(request, session_id):
+    """The REST transcript routes' check (``GET /sessions/{id}`` and the rest)."""
+    from app.api.sessions_helpers import check_transcript_access
+    try:
+        asyncio.run(check_transcript_access(request, database.get_session(session_id)))
+        return True
+    except HTTPException as exc:
+        assert exc.status_code == 403
+        return False
+
+
+def _socket_allowed(who, session_id):
+    """The chat socket's ``load_session``/``query`` check after the live
+    credential check (``bind_session`` -> ``store.bind``)."""
+    try:
+        mobile_tool_identity.bind(session_id, SOCKETS[who])
+        return True
+    except PermissionError:
+        return False
+
+
+def _transcript_matrix(worker, requests, chats):
+    """(who, chat) -> (images, REST transcript, chat socket) on ``worker``.
+
+    The admin login's REST reads are not account-checked (owner access across
+    workers), so its REST column is None.
+    """
+    result = {}
+    with worker.active():
+        for who, request in requests.items():
+            for sid in chats:
+                rest = None if who == "admin" else _rest_allowed(request, sid)
+                result[(who, sid)] = (_allowed(request, sid), rest, _socket_allowed(who, sid))
+    return result
+
+
+def _agree(matrix):
+    """Every caller gets one answer for a chat: images, REST and socket."""
+    for key, (images, rest, socket) in matrix.items():
+        assert socket == images and rest in (None, images), (key, matrix[key])
+    return {key: answers[0] for key, answers in matrix.items()}
+
+
+def test_transcript_follows_the_image_rule_on_the_running_worker_and_the_mirror(workers, callers):
+    """A member's phone and a direct controller: one answer for images and transcript (#1877)."""
+    viewer, owner = _network(workers)
+    _start_chats(owner, {**CHATS, **DIRECT_CHAT})
+    _publish(owner, viewer)
+    requests = {**callers, "direct-phone": _direct_request()}
+    chats = [*CHATS, *DIRECT_CHAT, "legacy-chat"]
+    expected = {
+        # Another member's phone reads only its own account's chats.
+        **{("member-phone", sid): sid == "member-chat" for sid in chats},
+        # A direct controller reads only the chats it started.
+        **{("direct-phone", sid): sid == "direct-chat" for sid in chats},
+        # The owner's phone: its account's chats and the owner's install chats.
+        **{("owner-phone", sid): sid in ("owner-phone-chat", "desktop-chat", "legacy-chat") for sid in chats},
+    }
+    for worker in (owner, viewer):
+        with worker.active():
+            if worker is viewer:
+                for sid in chats:  # A real mirror: no local record here.
+                    assert mobile_tool_identity.read(sid) is None
+        answers = _agree(_transcript_matrix(worker, {k: requests[k] for k in PHONES}, chats))
+        assert answers == expected, worker.name
+        # The admin login: the socket answers as the images do. (A direct
+        # controller's chat is the admin's REST/image vs socket asymmetry
+        # left open in #1877, so it is not compared here.)
+        admin = _agree(_transcript_matrix(worker, {"admin": callers["admin"]}, [*CHATS, "legacy-chat"]))
+        assert admin == {("admin", "member-chat"): False, ("admin", "owner-phone-chat"): True,
+                         ("admin", "desktop-chat"): True, ("admin", "legacy-chat"): True}, worker.name
+    with viewer.active():
+        # Deciding on the mirror wrote nothing there.
+        for sid in chats:
+            assert mobile_tool_identity.read(sid) is None
+
+
+def test_transcript_with_an_owner_on_an_older_build(workers, callers, monkeypatch):
+    """No label on the mirror: the owner group keeps the transcript, nobody else gets it."""
+    viewer, owner = _network(workers)
+    _start_chats(owner)
+    coll = policy.collection("sessions")
+    old = dataclasses.replace(coll, fields=tuple(f for f in coll.fields if f != "provenance_owner"))
+    with monkeypatch.context() as old_build:
+        old_build.setitem(policy.COLLECTIONS, "sessions", old)
+        with owner.active():
+            engine.scan_all()
+    converge([viewer, owner])
+    with viewer.active():
+        assert database.get_session("member-chat")["provenance_owner"] is None
+    requests = {**callers, "direct-phone": _direct_request()}
+    chats = ["member-chat", "owner-phone-chat", "desktop-chat"]
+    answers = _agree(_transcript_matrix(viewer, requests, chats))
+    assert answers == {(who, sid): who in ("admin", "owner-phone") for who in requests for sid in chats}
+
+
+def test_after_a_handoff_the_transcript_follows_the_running_workers_label(workers, callers, monkeypatch):
+    """The new owner has the label but no record; every worker answers as for images."""
+    import json
+
+    from app.network import crypto, handoff
+    from tests.core.network.test_ownership_revocation import COMMIT, REMOTE, _stub_git_checkout
+
+    viewer, owner = _network(workers)
+    _start_chats(owner, {"member-chat": CHATS["member-chat"]})
+    _publish(owner, viewer)
+    target = _third(viewer, workers, "target")
+    everyone = [viewer, owner, target]
+    converge(everyone)
+    _stub_git_checkout(monkeypatch)
+    with owner.active():
+        reserved = handoff.begin("member-chat", target.device_id, REMOTE)
+    with target.active():
+        key = engine.context().keyring[reserved["key_version"]]
+        token = json.loads(crypto.decrypt_payload(
+            key, reserved["payload"], handoff._aad("member-chat", target.device_id)))["token"]
+    with owner.active():
+        handoff.finish("member-chat", target.device_id, {"phase": "commit", "token": token, **COMMIT})
+    with target.active():
+        handoff._accept_owner("member-chat", target.device_id, COMMIT["branch"])
+    converge(everyone)
+
+    requests = {**callers, "direct-phone": _direct_request()}
+    for worker in everyone:
+        answers = _agree(_transcript_matrix(worker, requests, ["member-chat"]))
+        assert answers == {(who, "member-chat"): who == "member-phone" for who in requests}, worker.name
+    with target.active():
+        # Continuing the chat on the worker that now runs it took no record.
+        assert mobile_tool_identity.read("member-chat") is None
+        # The admin claim (#1873) still relabels it there.
+        mobile_tool_identity.bind("member-chat", ADMIN, claim=True)
+        engine.scan_all()
+    converge(everyone)
+    for worker in everyone:
+        answers = _agree(_transcript_matrix(worker, {"admin": callers["admin"]}, ["member-chat"]))
+        assert answers == {("admin", "member-chat"): True}, worker.name
+
+
 def test_a_claim_needs_the_install_admin_and_a_chat_with_no_record(workers):
     """Nobody but the install admin relabels a chat through a claim."""
     (worker,) = [workers("solo")]
@@ -366,3 +533,41 @@ def test_mirrored_record_shape(value, expected):
     assert (None if record is None else (record["kind"], record["account_id"])) == expected
     if record is not None:
         assert record["principal_id"] is None and record["credential_hash"] is None
+
+
+def test_after_a_handoff_the_owner_keeps_its_own_chats_everywhere(workers, callers, monkeypatch):
+    """The owner's phone and admin keep the owner's chats on every worker after a move (#1877)."""
+    import json
+
+    from app.network import crypto, handoff
+    from tests.core.network.test_ownership_revocation import COMMIT, REMOTE, _stub_git_checkout
+
+    viewer, owner = _network(workers)
+    mine = {sid: CHATS[sid] for sid in ("owner-phone-chat", "desktop-chat")}
+    _start_chats(owner, mine)
+    _publish(owner, viewer)
+    target = _third(viewer, workers, "target")
+    everyone = [viewer, owner, target]
+    converge(everyone)
+    _stub_git_checkout(monkeypatch)
+    for sid in mine:
+        with owner.active():
+            reserved = handoff.begin(sid, target.device_id, REMOTE)
+        with target.active():
+            key = engine.context().keyring[reserved["key_version"]]
+            token = json.loads(crypto.decrypt_payload(
+                key, reserved["payload"], handoff._aad(sid, target.device_id)))["token"]
+        with owner.active():
+            handoff.finish(sid, target.device_id, {"phase": "commit", "token": token, **COMMIT})
+        with target.active():
+            handoff._accept_owner(sid, target.device_id, COMMIT["branch"])
+    converge(everyone)
+
+    requests = {**callers, "direct-phone": _direct_request()}
+    for worker in everyone:
+        with worker.active():
+            for sid in mine:
+                assert database.get_session(sid)["owner_device_id"] == target.device_id, worker.name
+        answers = _agree(_transcript_matrix(worker, requests, list(mine)))
+        assert answers == {(who, sid): who in ("admin", "owner-phone") for who in requests for sid in mine}, \
+            worker.name

@@ -1263,7 +1263,7 @@ class TestLiveActiveTasks:
     ``activeTasks`` / ``unpark_pending`` are computed by
     ``lifecycle_state.compute`` straight from the task registry (the old
     in-memory live-store path is deleted) and attached to every local
-    response. These tests drive the REAL endpoint with only ``require_session``
+    response. These tests drive the REAL endpoint with only ``require_transcript_session``
     and the cloud-relay check stubbed — registry, lifecycle compute and the
     (empty) DB loaders all run for real.
     """
@@ -1274,7 +1274,7 @@ class TestLiveActiveTasks:
 
         fake_session = {"id": session_id, "title": "T"}
         with patch.object(
-            sessions_api, "require_session", new=AsyncMock(return_value=fake_session)
+            sessions_api, "require_transcript_session", new=AsyncMock(return_value=fake_session)
         ):
             return await sessions_api.get_live_session(
                 request=object(),
