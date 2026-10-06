@@ -167,7 +167,8 @@ def mark_stale_background_tasks_killed(
     ``server_restart`` (and ``summary`` when given) so a later read can tell a
     restart casualty from an ordinary kill. Returns the flipped rows (dicts with
     ``task_id``, ``session_id``, ``tool_use_id``, ``title``, ``kind``, ``agent``,
-    ``roster_name``, ``model``, ``started_at``) so the caller can emit a terminal
+    ``roster_name``, ``model``, ``started_at``, ``terminal_notified``) so the
+    caller can emit a terminal
     ``task.updated`` frame per row, settle the UI chip, rebuild the registry
     and tell each parent what was interrupted.
     """
@@ -186,7 +187,7 @@ def mark_stale_background_tasks_killed(
                    AND status NOT IN ({terminal_list})
                    AND remote_device_id IS NULL
              RETURNING task_id, session_id, tool_use_id, title, kind, agent,
-                       roster_name, model, started_at""",
+                       roster_name, model, started_at, terminal_notified""",
             (SERVER_RESTART_REASON, summary, instance_id),
         )
         return rows_to_list(cursor.fetchall())

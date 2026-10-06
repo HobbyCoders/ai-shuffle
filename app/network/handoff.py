@@ -42,9 +42,31 @@ def _aad(sid, target):
     return ("shuffle-session-handoff-v1:" + sid + ":" + target).encode()
 
 
+def _has_live_tasks(cursor, sid):
+    """Whether ``sid`` has background work that is still running on this worker.
+
+    A durable running row is live while something still runs it: a Task child
+    on another worker reports back to it, and local work is in this process's
+    task registry. A local row the registry does not know was stranded by a
+    missed settle (#1758); it must not pin the session to this worker.
+    """
+    from app.core.task_registry import task_registry
+
+    if task_registry.has_active_background_work(sid):
+        return True
+    cursor.execute("SELECT task_id, remote_device_id FROM background_tasks "
+                   "WHERE session_id=%s AND status IN ('running','pending')", (sid,))
+    for row in cursor.fetchall():
+        if row["remote_device_id"]:
+            return True
+        record = task_registry.get_task(sid, row["task_id"])
+        if record is not None and record.get("status") in ("running", "pending"):
+            return True
+    return False
+
+
 def _idle(cursor, sid):
-    cursor.execute("SELECT 1 FROM background_tasks WHERE session_id=%s AND status IN ('running','pending') LIMIT 1", (sid,))
-    if cursor.fetchone():
+    if _has_live_tasks(cursor, sid):
         raise ValueError("Wait for this session's background work to finish before resuming here.")
     cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND state IN ('queued','running','interrupting','draining') LIMIT 1", (sid,))
     if cursor.fetchone():
@@ -96,12 +118,10 @@ def _checkout_users(session, project, path, branch):
 
 def _quiet(cursor, sid):
     """Refuse when a held session already has live work that predates the hold."""
-    from app.core.task_registry import task_registry
     cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND state IN ('running','interrupting','draining') LIMIT 1", (sid,))
     if cursor.fetchone():
         raise ValueError(BUSY_CHECKOUT)
-    cursor.execute("SELECT 1 FROM background_tasks WHERE session_id=%s AND status IN ('running','pending') LIMIT 1", (sid,))
-    if cursor.fetchone() or task_registry.has_active_background_work(sid):
+    if _has_live_tasks(cursor, sid):
         raise ValueError(BUSY_CHECKOUT)
 
 

@@ -235,6 +235,37 @@ def test_live_source_run_blocks_snapshot(pair):
             handoff.begin("handoff-test", b.device_id, checkout_transfer.remote_identity(target))
         assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
 
+def _task_row(task_id, remote=None):
+    from app.db.background_tasks import upsert_background_tasks
+    upsert_background_tasks([{
+        "task_id": task_id, "session_id": "handoff-test", "kind": "agent",
+        "title": "Worker", "status": "running", "terminal_notified": True,
+        "started_at": "2026-10-03T17:24:00+00:00", "updated_at": "2026-10-03T17:24:00+00:00",
+        "remote_device_id": remote,
+    }])
+
+
+def test_a_stranded_task_row_does_not_pin_the_session(pair):
+    """#1758: a running row whose task this worker no longer runs refused every
+    hand-off; live local work and a child on another worker still do."""
+    from app.core.task_registry import task_registry
+    a, b, source, target = pair
+    with a.active():
+        _task_row("stranded")
+        with get_db() as conn:
+            handoff._idle(conn.cursor(), "handoff-test")
+            handoff._quiet(conn.cursor(), "handoff-test")
+        task_registry.start_task("handoff-test", "stranded", "agent", "Worker", tool_use_id="stranded")
+        try:
+            with get_db() as conn, pytest.raises(ValueError, match="background work"):
+                handoff._idle(conn.cursor(), "handoff-test")
+        finally:
+            task_registry.clear_session("handoff-test")
+        _task_row("remote-child", remote=b.device_id)
+        with get_db() as conn, pytest.raises(ValueError, match="background work"):
+            handoff._idle(conn.cursor(), "handoff-test")
+
+
 @pytest.mark.asyncio
 async def test_projectless_session_transfers_history_only(pair, monkeypatch):
     a,b,source,target=pair

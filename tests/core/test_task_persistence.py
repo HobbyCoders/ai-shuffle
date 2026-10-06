@@ -192,6 +192,53 @@ async def test_terminal_notified_persisted_via_callback_point(mock_db):
     assert row["terminal_notified"]
 
 
+async def test_a_resumed_task_clears_the_first_runs_notified_latch(mock_db):
+    """#1758: a worker resumed by a message after a failed first run persisted a
+    RUNNING row with terminal_notified=true, and its own later failure was
+    never announced because the one-shot latch was still set."""
+    sid = "tpers-resumed"
+    fired = []
+    task_registry.set_terminal_notification_callback(lambda s, t: fired.append(t["id"]))
+    try:
+        task_registry.mark_background_launch(sid, "t1")
+        task_registry.start_task(sid, "t1", "agent", "bg work", tool_use_id="t1")
+        task_registry.complete_task(sid, "t1", "killed")
+        await tp.flush()
+        assert _rows(mock_db, sid)[0]["terminal_notified"]
+
+        task_registry.resume_task(sid, "t1")
+        await tp.flush()
+        row = _rows(mock_db, sid)[0]
+        assert row["status"] == "running"
+        assert not row["terminal_notified"]
+
+        task_registry.complete_task(sid, "t1", "error")
+        await tp.flush()
+    finally:
+        task_registry.set_terminal_notification_callback(None)
+    assert fired == ["t1", "t1"]
+    assert _rows(mock_db, sid)[0]["terminal_notified"]
+
+
+async def test_a_revived_completed_task_persists_without_the_old_latch(mock_db):
+    """A completion delivered as a wake latches terminal_notified; an SDK
+    revival of that task is a new run and must not persist the old latch."""
+    from app.core import turn_scheduler
+
+    sid = "tpers-revived"
+    task_registry.start_task(sid, "t1", "agent", "bg work", tool_use_id="t1")
+    task_registry.complete_task(sid, "t1", "completed")
+    turn_scheduler._mark_terminal_notified(sid, ["t1"])
+    await tp.flush()
+    assert _rows(mock_db, sid)[0]["terminal_notified"]
+
+    task_registry.start_task(sid, "t1", "agent", "bg work", tool_use_id="t1")
+    await tp.flush()
+    row = _rows(mock_db, sid)[0]
+    assert row["status"] == "running"
+    assert not row["terminal_notified"]
+
+
 async def test_sdk_background_flag_persisted(mock_db):
     sid = "tpers-sdkbg"
     task_registry.start_task(sid, "sh1", "shell", "sleep 100")

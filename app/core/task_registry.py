@@ -239,7 +239,10 @@ def to_wire(record: Dict[str, Any]) -> Dict[str, Any]:
         }
         # What the child is doing there means nothing once its record here
         # settled: a stopped child does not read "working" (#1806).
-        if record.get("worker_state") and record.get("status") == "running":
+        # An unreachable worker's mirrored state is stale (a stopped worker's
+        # mirror still says "working"); report only that it went quiet (#1808).
+        if (record.get("worker_state") and record.get("status") == "running"
+                and not record.get("unreachable_since")):
             wire["workerState"] = record.get("worker_state")
         if record.get("unreachable_since"):
             wire["unreachableSince"] = record.get("unreachable_since")
@@ -1055,6 +1058,8 @@ class TaskRegistry:
                 # unpark/pump wake (A-3 clear-on-revival).
                 self._woken.get(session_id, set()).discard(task_id)
                 self._wake_suppressed.get(session_id, set()).discard(task_id)
+                # The delivered completion was the earlier run's (#1758).
+                self._terminal_notified.get(session_id, set()).discard(task_id)
                 # ...and the chip latches, so the revived run paints a fresh
                 # running chip (the durable start row is deduped on this latch —
                 # see turn_recorder._translate_shared) and can settle again.
@@ -1651,6 +1656,10 @@ class TaskRegistry:
         # Continuations have their own completion ID; retain earlier deliveries.
         self._wake_suppressed.get(session_id, set()).discard(task_id)
         self._chipped.get(session_id, {}).pop(task_id, None)
+        # The first run's failure notice was for that run. Left latched, the
+        # continuation's running row persisted terminal_notified=true and its
+        # own failure was never announced (#1758).
+        self._terminal_notified.get(session_id, set()).discard(task_id)
         self.start_task(session_id, task_id, "agent", row.get("subject") or "Worker continuation",
                         tool_use_id=task_id, agent=row.get("agent"), name=row.get("name"),
                         model=row.get("model"))

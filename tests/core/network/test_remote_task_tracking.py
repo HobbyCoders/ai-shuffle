@@ -260,6 +260,28 @@ def test_a_quiet_target_is_marked_unreachable_and_cleared_when_it_answers(worker
         assert "unreachableSince" not in task_registry.get_task("caller", child)
 
 
+def test_a_quiet_target_shows_no_stale_worker_state(workers, monkeypatch, kicks):
+    """The mirror of a stopped worker still says "working"; while the worker is
+    unreachable the record reports only that, not the stale state (#1808)."""
+    a, b, router = network(workers, monkeypatch)
+    child = started_child(a, b)
+    monkeypatch.setattr(remote_task, "_mirrored_states", lambda ids: {i: "working" for i in ids})
+    with b.active():
+        assert asyncio.run(remote_task.check_targets()) == 0
+        assert task_registry.get_task("caller", child)["workerState"] == "working"
+    router.down.add(UNRAID_URL)
+    with b.active():
+        assert asyncio.run(remote_task.check_targets()) == 1
+        task = task_registry.get_task("caller", child)
+        assert task["unreachableSince"]
+        assert "workerState" not in task
+    router.down.clear()
+    with b.active():
+        assert asyncio.run(remote_task.check_targets()) == 0
+        task = task_registry.get_task("caller", child)
+        assert "unreachableSince" not in task and task["workerState"] == "working"
+
+
 def test_task_status_answers_only_for_the_asking_workers_children(workers, monkeypatch, kicks):
     a, b, _ = network(workers, monkeypatch)
     child = started_child(a, b)

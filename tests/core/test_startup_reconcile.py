@@ -311,6 +311,40 @@ async def test_stale_background_emit_failure_does_not_block_others(
     assert set(attempted) == {"t-a", "t-b"}
 
 
+async def test_a_stale_row_already_notified_is_settled_but_not_announced(
+    mock_db, test_db, monkeypatch
+):
+    """#1758: a finished worker's row left "running" with terminal_notified set
+    was announced as interrupted, waking the parent on every restart."""
+    import app.core.turn_recorder as tr
+    from app.core import turn_scheduler
+    from app.db.background_tasks import get_background_task, upsert_background_task
+
+    async def _ignore(session_id, event):
+        return None
+
+    monkeypatch.setattr(tr, "record_drained_event", _ignore)
+    announced = []
+
+    async def _capture(session_id, frames):
+        announced.append((session_id, [f["task_id"] for f in frames]))
+        return "wake"
+
+    monkeypatch.setattr(turn_scheduler, "on_tasks_interrupted_by_restart", _capture)
+    sid = _make_session(test_db)
+    _seed_bg_task(sid, "t-live", "running")
+    upsert_background_task({
+        "task_id": "t-done", "session_id": sid, "kind": "agent",
+        "title": "t-done", "status": "running", "terminal_notified": True,
+    })
+
+    counts = await reconcile_from_durable_truth()
+
+    assert counts["background_task_rows_killed"] == 2
+    assert get_background_task("t-done", sid)["status"] == "killed"
+    assert announced == [(sid, ["t-live"])]
+
+
 # =============================================================================
 # V2 turns — boot reap-and-kick sweep (D3)
 # =============================================================================

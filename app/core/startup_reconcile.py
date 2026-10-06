@@ -246,6 +246,15 @@ async def _announce_interrupted_tasks(rows: list) -> int:
     )
     from app.db import sessions as sessions_db
 
+    # A row whose terminal notice the parent already had is not news: it was
+    # a finished run's row left "running" by a missed settle, and announcing
+    # it woke the parent on every restart (#1758). A resumed run clears the
+    # latch, so live work is still announced.
+    rows = [
+        row for row in rows
+        if not (row.get("terminal_notified") if isinstance(row, dict)
+                else (row[9] if len(row) > 9 else False))
+    ]
     by_session: Dict[str, list] = {}
     for row in rows:
         session_id = _row_value(row, "session_id", 1)
