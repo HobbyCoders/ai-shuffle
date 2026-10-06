@@ -7,7 +7,11 @@ import okhttp3.Call
 import java.io.ByteArrayInputStream
 import java.io.FilterInputStream
 import java.io.IOException
+import java.security.cert.CertificateException
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ConcurrentHashMap
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLPeerUnverifiedException
 
 /** No cookie/session-token URL workaround: image/audio/video requests use the same paired auth as fetch. */
 internal class WorkerAssetLoader(private val client: WorkerDownloadClient = WorkerDownloadClient()) {
@@ -15,6 +19,31 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
 
     companion object {
         const val AUTH_MESSAGE = "This worker could not authorize a file. Update the worker, refresh chat, then pair again if needed."
+        /** A timeout, refused or dropped connection: what a worker restart looks like from here. */
+        const val RESTARTING_MESSAGE = "A file could not be loaded. The worker may be restarting."
+        const val ACCESS_MESSAGE = "A file could not be loaded. Cloudflare Access asked this phone to sign in. Refresh chat; pair again if it keeps happening."
+        const val INVALID_MESSAGE = "A file could not be loaded. The worker sent a response this app cannot use."
+        const val HTTPS_MESSAGE = "A file could not be loaded. The worker's HTTPS connection could not be verified."
+        const val FAILED_MESSAGE = "A file could not be loaded. Check the worker connection."
+
+        /**
+         * What to tell the owner about one failed element load, or null to say nothing
+         * (a cancelled load). Cloudflare Access is named only when the failure was Access's
+         * sign-in redirect on a worker paired through Access; 401/403 answers have [AUTH_MESSAGE].
+         */
+        fun failureMessage(error: Throwable, cfAccess: Boolean): String? = when {
+            error is CancellationException -> null
+            error is ExternalRedirectException -> if (cfAccess) ACCESS_MESSAGE else INVALID_MESSAGE
+            error is InvalidResponse || error is IllegalArgumentException || error is IllegalStateException -> INVALID_MESSAGE
+            // A certificate the phone rejects. Other TLS errors (a reset mid-handshake) are dropped connections.
+            error is SSLPeerUnverifiedException || (error is SSLHandshakeException &&
+                generateSequence(error.cause) { it.cause }.any { it is CertificateException }) -> HTTPS_MESSAGE
+            error is IOException -> RESTARTING_MESSAGE
+            else -> FAILED_MESSAGE
+        }
+
+        /** The worker answered, but not with a usable file response. */
+        private class InvalidResponse(message: String) : IOException(message)
 
         /** A URL on the paired worker (the phone UI page's own origin), or null. */
         fun workerUrl(base: String, url: String): String? = url.takeIf { ChatDownloadPolicy.url(base, it) }
@@ -25,7 +54,8 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
     }
 
     fun load(server: Server, url: String, method: String, headers: Map<String, String>, token: String?,
-             cookie: String?, userAgent: String, allowed: () -> Boolean, status: (String) -> Unit): WebResourceResponse {
+             cookie: String?, userAgent: String, allowed: () -> Boolean, status: (String) -> Unit,
+             loaded: () -> Unit = {}): WebResourceResponse {
         if (method != "GET" && method != "HEAD") return failure(405, "Only file reads are supported.")
         val target = workerUrl(server.baseUrl, url) ?: return failure(403, "External content blocked")
         if (token.isNullOrBlank() || !allowed()) return failure(401, "Refresh chat before opening files.")
@@ -49,7 +79,7 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
                 val mime = body.contentType()
                 val range = if (response.code == 206 && headers.keys.any { it.equals("Range", true) }) {
                     val match = Regex("bytes ([0-9]+)-([0-9]+)/([0-9]+)").matchEntire(response.header("Content-Range").orEmpty())
-                        ?: throw IOException("Invalid partial file response")
+                        ?: throw InvalidResponse("Invalid partial file response")
                     match.groupValues.drop(1).map { it.toLong() }.also { (start, end, total) ->
                         require(start <= end && end < total) { "Invalid partial file bounds" }
                     }
@@ -99,15 +129,20 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
                         try { response.close() } finally { activeCall?.let(calls::remove) }
                     }
                 }
+                // The worker is answering files again: any earlier file-load notice is stale.
+                if (response.code in 200..299) loaded()
                 return WebResourceResponse(mime?.let { "${it.type}/${it.subtype}" } ?: "application/octet-stream",
                     mime?.charset()?.name(), response.code, response.message.ifBlank { "Worker response" }, responseHeaders, stream)
             } catch (error: Exception) {
                 response.close()
                 throw error
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            // Cancelled by navigation, Refresh chat or close (cancel()): not a failure to report.
+            val cancelled = activeCall?.isCanceled() == true
             activeCall?.let { it.cancel(); calls.remove(it) }
-            if (allowed()) status("This file could not be loaded. Check the worker connection and Cloudflare Access settings, then refresh chat.")
+            val message = if (cancelled) null else failureMessage(error, server.hasCfAccess)
+            if (message != null && allowed()) status(message)
             return failure(502, "The worker could not load this file.")
         }
     }

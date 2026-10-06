@@ -62,7 +62,8 @@ class WebSessionReservationSmokeTest {
         catch (error: kotlinx.coroutines.TimeoutCancellationException) { throw AssertionError(message, error) }
     }
     private fun web(activity: ChatActivity): WebView {
-        val shell = activity.findViewById<TextView>(R.id.screenStatus).parent as LinearLayout
+        // The status floats over the chat (#1946); the WebView is in the toolbar's column.
+        val shell = activity.findViewById<LinearLayout>(R.id.screenToolbar).parent as LinearLayout
         return (0 until shell.childCount).map { shell.getChildAt(it) }.filterIsInstance<WebView>().single()
     }
     /** The token the phone UI page currently holds (its runtime contract), or "" before the page has one. */

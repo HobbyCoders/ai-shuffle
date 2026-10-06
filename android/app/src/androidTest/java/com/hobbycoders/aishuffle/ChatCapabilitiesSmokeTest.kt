@@ -45,7 +45,7 @@ class ChatCapabilitiesSmokeTest {
         catch (error: kotlinx.coroutines.TimeoutCancellationException) { throw AssertionError(message, error) }
     }
     private fun web(activity: ChatActivity): WebView {
-        val shell = activity.findViewById<TextView>(R.id.screenStatus).parent as LinearLayout
+        val shell = activity.findViewById<LinearLayout>(R.id.screenToolbar).parent as LinearLayout
         return shell.getChildAt(shell.childCount - 1) as WebView
     }
     private fun fixture(

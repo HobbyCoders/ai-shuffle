@@ -9,6 +9,13 @@ import java.io.OutputStream
 import java.util.concurrent.CancellationException
 import java.util.concurrent.TimeUnit
 
+/**
+ * The worker answered a file request with a redirect off its own origin (for a Cloudflare
+ * Access worker, the Access sign-in page). Credentials were not forwarded.
+ */
+internal class ExternalRedirectException :
+    IllegalArgumentException("The file redirects outside this worker. Its credentials were not forwarded.")
+
 /** Shared streaming transport for WebView assets and SAF downloads. Credentials never leave the paired HTTPS origin. */
 internal class WorkerDownloadClient(
     client: OkHttpClient = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS)
@@ -52,9 +59,8 @@ internal class WorkerDownloadClient(
                 if (!allowed()) throw CancellationException("Download cancelled")
                 if (response.code in 300..399 && response.code != 304) {
                     val redirected = response.header("Location")?.let { response.request.url.resolve(it) }?.toString()
-                    require(redirected != null && ChatDownloadPolicy.url(server.baseUrl, redirected)) {
-                        "The file redirects outside this worker. Its credentials were not forwarded."
-                    }
+                    if (redirected == null || !ChatDownloadPolicy.url(server.baseUrl, redirected))
+                        throw ExternalRedirectException()
                     require(attempt < 5) { "The file redirected too many times. Try again." }
                     next = redirected
                 } else {

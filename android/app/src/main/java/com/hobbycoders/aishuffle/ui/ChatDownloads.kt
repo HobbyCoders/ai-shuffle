@@ -33,6 +33,9 @@ internal class ChatDownloads(
     private val sessionToken: () -> String?,
     private val status: (String) -> Unit,
 ) {
+    companion object {
+        const val SAVED_MESSAGE = "File saved."
+    }
     private class Transfer(val id: String, val page: Int, val size: Long, val url: String?, val reply: ((Boolean) -> Unit)?) {
         val output = AtomicReference<OutputStream?>()
         var uri: Uri? = null
@@ -183,7 +186,7 @@ internal class ChatDownloads(
             }
             active = null
             transfer.timeout?.cancel()
-            status("File saved.")
+            status(SAVED_MESSAGE)
             true
         } catch (error: Exception) { failed(transfer, error); false }
     }

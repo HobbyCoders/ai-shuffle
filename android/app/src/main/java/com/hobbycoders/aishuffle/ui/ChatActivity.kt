@@ -70,7 +70,10 @@ class ChatActivity : NativeScreen() {
     @Volatile private var sessionToken: String? = null
     @Volatile private var workerDocumentAllowed = false
     private val workerAssets = WorkerAssetLoader()
-    private var assetFailure: String? = null
+    /** A failed image/media/file load: clears itself (#1946). Created with the status overlay. */
+    private lateinit var fileNotice: StatusNotice
+    /** "File saved.": informational, so it does not stay over the page. */
+    private lateinit var savedNotice: StatusNotice
     /**
      * Why the phone UI page itself failed to load (old worker, HTTP error), shown
      * instead of the page. Cleared only when this activity starts a new load:
@@ -141,7 +144,9 @@ class ChatActivity : NativeScreen() {
             userAgentString = WebUserAgent.decorate(userAgentString, appVersionName())
         }
         chatLayout()
-        downloads = ChatDownloads(this, web, server, ::authorized, { sessionToken }) { status.text = it }
+        downloads = ChatDownloads(this, web, server, ::authorized, { sessionToken }) {
+            if (it == ChatDownloads.SAVED_MESSAGE) savedNotice.show(it) else { status.text = it }
+        }
         downloads.install()
         installShellBridge()
         // The page is the worker's own origin and authenticates with the Bearer token;
@@ -207,7 +212,7 @@ class ChatActivity : NativeScreen() {
                     WorkerAssetLoader.workerUrl(server.baseUrl, url.toString()) != null -> {
                         if (request.isForMainFrame) blocked("Chat opens the phone UI, not other worker pages.")
                         // The engine's automatic icon probe: not a page load, so never proxy it
-                        // (a miss would surface as "This file could not be loaded").
+                        // (a miss would surface as a file-load notice).
                         else if (url.path == "/favicon.ico") blocked("No icon")
                         // Explicitly authenticated fetch/SSE keep their existing API/CORS path.
                         // Element loads have no Authorization header and need the native stream.
@@ -219,9 +224,14 @@ class ChatActivity : NativeScreen() {
                             workerAssets.load(server, url.toString(), request.method, request.requestHeaders, token,
                                 CookieManager.getInstance().getCookie(server.baseUrl),
                                 request.requestHeaders.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value ?: "AI-Shuffle-Android",
-                                { workerDocumentAllowed && generation == document && token == sessionToken && authorized() }) { message ->
-                                view.post { if (generation == document && workerDocumentAllowed) { assetFailure = message; status.text = message } }
-                            }
+                                { workerDocumentAllowed && generation == document && token == sessionToken && authorized() },
+                                status = { message ->
+                                    view.post {
+                                        if (generation == document && workerDocumentAllowed)
+                                            fileNotice.show(message, sticky = message == WorkerAssetLoader.AUTH_MESSAGE)
+                                    }
+                                },
+                                loaded = { view.post { if (generation == document) fileNotice.clear() } })
                         }
                     }
                     else -> blocked("External content blocked")
@@ -237,7 +247,7 @@ class ChatActivity : NativeScreen() {
                 if (pageFailure != null) workerDocumentAllowed = false
             }
             override fun onPageFinished(view: WebView, url: String) {
-                if (MobileUi.isUiUrl(server.baseUrl, url)) status.text = pageFailure ?: assetFailure.orEmpty()
+                if (MobileUi.isUiUrl(server.baseUrl, url)) status.text = pageFailure ?: fileNotice.message.orEmpty()
             }
             override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, response: WebResourceResponse) {
                 // A worker from before the phone UI moved to /mobile/ answers 404 here.
@@ -300,29 +310,34 @@ class ChatActivity : NativeScreen() {
         nativeBar = toolbar
         (toolbar.parent as ViewGroup).removeView(toolbar)
         (status.parent as ViewGroup).removeView(status)
-        status.setPadding(dp(16), dp(4), dp(16), dp(8))
+        // Status messages float over the top of the chat viewport and take no layout space:
+        // nothing in the page moves when one appears or goes (#1946).
+        status.setPadding(dp(16), dp(10), dp(16), dp(10))
+        status.setTextColor(color(R.color.ink))
+        status.background = rounded(R.color.card, 12)
+        status.elevation = dp(4).toFloat()
         status.visibility = if (status.text.isNullOrBlank()) View.GONE else View.VISIBLE
         status.doAfterTextChanged { status.visibility = if (it.isNullOrBlank()) View.GONE else View.VISIBLE }
-        // Keep system bars and the keyboard outside the chat viewport. The WebView
-        // gets all remaining height, with no surrounding ScrollView or blank status row.
-        // NativeScreen applies insets to the content container, even after replacing its child.
-        val shell = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL; setBackgroundColor(color(R.color.surface))
-            addView(toolbar, LinearLayout.LayoutParams(-1, dp(56)))
-            addView(status, LinearLayout.LayoutParams(-1, -2))
-            repairButton = MaterialButton(this@ChatActivity).apply {
-                text = "Reconnect this worker"; isAllCaps = false; visibility = View.GONE
-                setTextColor(color(R.color.on_primary))
-                backgroundTintList = android.content.res.ColorStateList.valueOf(color(R.color.primary))
-                com.hobbycoders.aishuffle.tools.guardConsentTouch(this)
-                setOnClickListener {
-                    if (authorized()) startActivity(Intent(this@ChatActivity, WorkerRepairActivity::class.java).putExtra(EXTRA_SERVER_ID, server.id))
-                }
-            }
-            addView(repairButton, LinearLayout.LayoutParams(-1, -2).apply { marginStart = dp(16); marginEnd = dp(16) })
-            addView(web, LinearLayout.LayoutParams(-1, 0, 1f))
+        fileNotice = StatusNotice(status)
+        savedNotice = StatusNotice(status)
+        // Tap to dismiss. A failed page keeps its reason: the page under it is blank and
+        // Refresh chat is what fixes it.
+        status.setOnClickListener {
+            if (pageFailure == null || status.text.toString() != pageFailure) { fileNotice.clear(); savedNotice.clear(); status.text = "" }
         }
-        setContentView(shell)
+        // Keep system bars and the keyboard outside the chat viewport. The WebView
+        // gets all remaining height, with no surrounding ScrollView or status row.
+        // NativeScreen applies insets to the content container, even after replacing its child.
+        repairButton = MaterialButton(this@ChatActivity).apply {
+            text = "Reconnect this worker"; isAllCaps = false; visibility = View.GONE
+            setTextColor(color(R.color.on_primary))
+            backgroundTintList = android.content.res.ColorStateList.valueOf(color(R.color.primary))
+            com.hobbycoders.aishuffle.tools.guardConsentTouch(this)
+            setOnClickListener {
+                if (authorized()) startActivity(Intent(this@ChatActivity, WorkerRepairActivity::class.java).putExtra(EXTRA_SERVER_ID, server.id))
+            }
+        }
+        setContentView(ChatScreenLayout.build(this, toolbar, status, repairButton, web, color(R.color.surface)))
     }
     private fun openWorkers(message: String? = null) {
         startActivity(Intent(this, ServerListActivity::class.java)
@@ -452,7 +467,7 @@ class ChatActivity : NativeScreen() {
             lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
         sessionJob = lifecycleScope.launch {
             repairButton.visibility = View.GONE
-            assetFailure = null
+            fileNotice.clear()
             status.text = "Opening a secure chat…"
             if (server.hasCfAccess) ApiClient.fetchCfAuthorizationCookie(server)?.let { cookie ->
                 // HttpOnly and worker-only; SameSite=None as Cloudflare Access issues it.
@@ -525,6 +540,7 @@ class ChatActivity : NativeScreen() {
     override fun onDestroy() {
         workerDocumentAllowed = false
         workerAssets.cancel()
+        if (::fileNotice.isInitialized) { fileNotice.clear(); savedNotice.clear() }
         WebSessionBootstrap.cancel(sharedAttempt)
         cancelPagePermissions()
         switchJob?.cancel()

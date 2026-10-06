@@ -76,7 +76,7 @@ class ChatToolbarSmokeTest {
                     var ready = false
                     scenario.onActivity { activity ->
                         val status = activity.findViewById<TextView>(R.id.screenStatus)
-                        val shell = status.parent as LinearLayout
+                        val shell = activity.findViewById<LinearLayout>(R.id.screenToolbar).parent as LinearLayout
                         val web = (0 until shell.childCount).map { shell.getChildAt(it) }.filterIsInstance<WebView>().single()
                         ready = activity.hasWindowFocus() && activity.resources.configuration.orientation == orientation &&
                             status.visibility == View.GONE && MobileUi.isUiUrl(server.baseUrl, web.url) && web.height > 0
@@ -84,7 +84,7 @@ class ChatToolbarSmokeTest {
                     ready
                 }
                 fun page(run: (WebView) -> Unit) = scenario.onActivity { activity ->
-                    val shell = activity.findViewById<TextView>(R.id.screenStatus).parent as LinearLayout
+                    val shell = activity.findViewById<LinearLayout>(R.id.screenToolbar).parent as LinearLayout
                     run((0 until shell.childCount).map { shell.getChildAt(it) }.filterIsInstance<WebView>().single())
                 }
                 // The page tells the shell over `shuffleShell` whether it draws its own
@@ -159,11 +159,21 @@ class ChatToolbarSmokeTest {
                 onView(withText("Voice")).check(doesNotExist())
                 onView(withText(server.host)).check(doesNotExist())
                 onView(withText("account server")).check(doesNotExist())
-                // Errors are still announced, but clearing them releases their entire row.
+                // Errors are still announced, over the chat: showing or clearing one moves nothing (#1946).
+                var webBounds = listOf<Int>()
+                page { webBounds = listOf(it.top, it.height) }
                 scenario.onActivity { it.findViewById<TextView>(R.id.screenStatus).text = "Connection interrupted" }
+                instrumentation.waitForIdleSync()
                 scenario.onActivity { assertEquals(View.VISIBLE, it.findViewById<TextView>(R.id.screenStatus).visibility) }
-                scenario.onActivity { it.findViewById<TextView>(R.id.screenStatus).text = "" }
+                page { assertEquals(webBounds, listOf(it.top, it.height)) }
+                // Tapping dismisses it.
+                scenario.onActivity { activity ->
+                    val status = activity.findViewById<TextView>(R.id.screenStatus)
+                    status.performClick()
+                    assertEquals("", status.text.toString())
+                }
                 instrumentation.waitForIdleSync(); checkViewport()
+                page { assertEquals(webBounds, listOf(it.top, it.height)) }
                 val beforeRefresh = sessions.get()
                 announce(false)
                 onView(withContentDescription("More chat options")).perform(click())

@@ -16,6 +16,12 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.security.cert.CertificateException
+import java.util.concurrent.CancellationException
+import javax.net.ssl.SSLException
+import javax.net.ssl.SSLHandshakeException
 
 @RunWith(RobolectricTestRunner::class)
 class WorkerAssetLoaderTest {
@@ -138,10 +144,94 @@ class WorkerAssetLoaderTest {
                 .header("Content-Range", "bytes 9-4/12").body("abc".toResponseBody("video/mp4".toMediaType())).build()
         }.build()))
         val result = loader.load(server, server.baseUrl + assetPaths[1], "GET", mapOf("Range" to "bytes=2-4"),
-            "token", null, "fixture", { true }, { reported = true })
+            "token", null, "fixture", { true }, { assertEquals(WorkerAssetLoader.INVALID_MESSAGE, it); reported = true })
         assertEquals(502, result.statusCode)
         assertTrue(reported)
         result.data.close()
+    }
+
+    private fun loaderFailing(error: () -> Nothing) = WorkerAssetLoader(WorkerDownloadClient(
+        OkHttpClient.Builder().addInterceptor { error() }.build()))
+
+    // #1946: a worker restart is a timeout or a dropped connection, not a Cloudflare Access problem.
+    @Test fun timeoutOrDroppedConnectionSaysTheWorkerMayBeRestarting() {
+        for (error in listOf(SocketTimeoutException("timeout"), ConnectException("refused"), IOException("unexpected end of stream"))) {
+            val statuses = mutableListOf<String>()
+            var loaded = false
+            val result = loaderFailing { throw error }.load(server, server.baseUrl + assetPaths[0], "GET", emptyMap(),
+                "token", null, "fixture", { true }, { statuses.add(it) }, { loaded = true })
+            assertEquals(502, result.statusCode)
+            assertEquals(listOf(WorkerAssetLoader.RESTARTING_MESSAGE), statuses)
+            assertFalse(loaded)
+        }
+    }
+
+    @Test fun messageNamesTheCauseAndCloudflareAccessOnlyForAnAccessRedirect() {
+        fun message(error: Throwable, cfAccess: Boolean = false) = WorkerAssetLoader.failureMessage(error, cfAccess)
+        assertEquals(WorkerAssetLoader.RESTARTING_MESSAGE, message(SocketTimeoutException("read timed out")))
+        // A TLS reset mid-handshake is a dropped connection; a rejected certificate is not.
+        assertEquals(WorkerAssetLoader.RESTARTING_MESSAGE, message(SSLException("Connection reset by peer")))
+        assertEquals(WorkerAssetLoader.HTTPS_MESSAGE,
+            message(SSLHandshakeException("bad cert").apply { initCause(CertificateException("untrusted")) }))
+        assertEquals(WorkerAssetLoader.ACCESS_MESSAGE, message(ExternalRedirectException(), cfAccess = true))
+        assertEquals(WorkerAssetLoader.INVALID_MESSAGE, message(ExternalRedirectException(), cfAccess = false))
+        assertEquals(WorkerAssetLoader.INVALID_MESSAGE, message(IllegalArgumentException("Invalid partial file bounds")))
+        assertEquals(WorkerAssetLoader.FAILED_MESSAGE, message(RuntimeException("unexpected")))
+        assertNull(message(CancellationException("Download cancelled")))
+        for (text in listOf(WorkerAssetLoader.RESTARTING_MESSAGE, WorkerAssetLoader.INVALID_MESSAGE,
+            WorkerAssetLoader.HTTPS_MESSAGE, WorkerAssetLoader.FAILED_MESSAGE)) {
+            assertFalse(text, text.contains("Cloudflare"))
+        }
+        for (cfAccess in listOf(false, true)) {
+            assertEquals(WorkerAssetLoader.RESTARTING_MESSAGE, message(SocketTimeoutException("timeout"), cfAccess))
+        }
+    }
+
+    @Test fun accessSignInRedirectNamesCloudflareAccessOnlyOnAnAccessWorker() {
+        val loader = WorkerAssetLoader(WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(302).message("Found")
+                .header("Location", "https://team.cloudflareaccess.com/cdn-cgi/access/login/worker.example")
+                .body("".toResponseBody()).build()
+        }.build()))
+        val access = server.copy(cfAccessClientId = "client-id-fixture", cfAccessClientSecret = "client-secret-fixture")
+        for ((paired, expected) in listOf(access to WorkerAssetLoader.ACCESS_MESSAGE, server to WorkerAssetLoader.INVALID_MESSAGE)) {
+            val statuses = mutableListOf<String>()
+            loader.load(paired, paired.baseUrl + assetPaths[0], "GET", emptyMap(), "token", null, "fixture", { true },
+                { statuses.add(it) }).data.close()
+            assertEquals(listOf(expected), statuses)
+        }
+    }
+
+    @Test fun aSuccessfulLoadReportsLoadedSoAnEarlierNoticeClears() {
+        var loaded = 0
+        val loader = WorkerAssetLoader(WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body("png".toResponseBody("image/png".toMediaType())).build()
+        }.build()))
+        loader.load(server, server.baseUrl + assetPaths[0], "GET", emptyMap(), "token", null, "fixture", { true },
+            { fail(it) }, { loaded++ }).data.close()
+        assertEquals(1, loaded)
+    }
+
+    @Test fun notModifiedAndCancelledLoadsStaySilent() {
+        var loaded = false
+        val notModified = WorkerAssetLoader(WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(304).message("Not Modified")
+                .body("".toResponseBody()).build()
+        }.build()))
+        val stale = notModified.load(server, server.baseUrl + assetPaths[0], "GET", mapOf("If-None-Match" to "etag"),
+            "token", null, "fixture", { true }, { fail(it) }, { loaded = true })
+        assertEquals(502, stale.statusCode)
+        stale.data.close()
+        assertFalse(loaded)
+        // Navigation, Refresh chat and close cancel in-flight loads (cancel()): OkHttp reports "Canceled".
+        val cancelled = WorkerAssetLoader(WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain ->
+            chain.call().cancel(); throw IOException("Canceled")
+        }.build()))
+        val result = cancelled.load(server, server.baseUrl + assetPaths[0], "GET", emptyMap(),
+            "token", null, "fixture", { true }, { fail(it) }, { loaded = true })
+        assertEquals(502, result.statusCode)
+        assertFalse(loaded)
     }
 
     @Test fun rejectsMissingAuthMainOriginSpoofsAndReportsOldWorkerAuthFailures() {
