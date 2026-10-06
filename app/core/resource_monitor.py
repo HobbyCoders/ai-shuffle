@@ -35,6 +35,38 @@ _snapshot_count: int = 0
 _rss_history: list[tuple[float, float]] = []  # (monotonic_time, rss_mb)
 _RSS_HISTORY_MAX = 50  # Keep last ~4 hours of samples at 5-min interval
 
+# Process names of the CLI a delegated session runs. Only the backend's DIRECT
+# children with one of these names can be a session subprocess; everything
+# else in the tree (postgres, cloudflared, agent tool and Monitor shells, the
+# browser MCP, a session CLI's own children) is not one.
+_SESSION_CLI_NAMES = frozenset({"claude", "claude.exe"})
+# A CLI younger than this may still be connecting, before the pool records it.
+_UNTRACKED_CLI_MIN_AGE_SECONDS = 120.0
+
+
+def _untracked_session_clis(tracked_pids: set[int]) -> tuple[int, int]:
+    """(session CLIs that are direct children, those no pooled session owns).
+
+    A CLI the pool does not own and that is older than the connect window is
+    what a real subprocess leak looks like. Blocking psutil walk: call it off
+    the event loop.
+    """
+    import psutil
+
+    total = untracked = 0
+    now = time.time()
+    for child in psutil.Process(os.getpid()).children(recursive=False):
+        try:
+            if child.name().lower() not in _SESSION_CLI_NAMES:
+                continue
+            total += 1
+            if (child.pid not in tracked_pids
+                    and now - child.create_time() >= _UNTRACKED_CLI_MIN_AGE_SECONDS):
+                untracked += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return total, untracked
+
 
 async def _collect_metrics() -> dict:
     """Collect all resource metrics from across the application."""
@@ -52,16 +84,28 @@ async def _collect_metrics() -> dict:
 
     # --- Session Pool ---
     try:
-        from app.core.session_pool import get_session_pool, _session_pool, is_subprocess_alive
+        from app.core.session_pool import (
+            get_session_pool, _session_pool, is_subprocess_alive, subprocess_pid,
+        )
         from datetime import datetime as dt_cls, timezone as tz_cls
         if _session_pool is not None:
             pool = get_session_pool()
             metrics["pool_size"] = len(pool._pool)
+            # The WARM size: how many idle subprocess sessions stay pooled. Not
+            # a concurrency limit; busy sessions grow the pool past it.
             metrics["pool_max_size"] = pool._max_size
-            # The size bound counts SUBPROCESS sessions only, so the capacity
-            # and subprocess-leak heuristics below need that number rather than
-            # the whole pool's (which now includes native in-process sessions).
             metrics["pool_delegated"] = pool.delegated_size
+            # The real limit on new subprocess sessions (resource guards).
+            refusal = pool.admission_check()
+            if refusal:
+                metrics["pool_admission_refusal"] = refusal
+            tracked_pids = {p for p in map(subprocess_pid, list(pool._pool.values())) if p}
+            try:
+                (metrics["session_cli_processes"],
+                 metrics["session_cli_untracked"]) = await asyncio.to_thread(
+                    _untracked_session_clis, tracked_pids)
+            except Exception as e:  # psutil missing or unreadable: no leak signal
+                logger.debug(f"{_PREFIX} Failed to count session CLI processes: {e}")
             # Count streaming sessions in pool
             pool_streaming = sum(1 for s in pool._pool.values() if s.is_streaming)
             metrics["pool_streaming"] = pool_streaming
@@ -277,30 +321,23 @@ def _check_warnings(metrics: dict) -> list[str]:
     if task_count > 100:
         warnings.append(f"{task_count} asyncio tasks active - possible task leak")
 
-    # Too many child processes
-    children = metrics.get("child_processes", 0)
-    # Subprocesses come from DELEGATED sessions; a native in-process session
-    # spawns none, so counting it here would hide a real leak behind slack it
-    # never earned.
-    delegated = metrics.get("pool_delegated", metrics.get("pool_size", 0))
-    if children > delegated + 2:  # Allow some slack
-        warnings.append(f"{children} child processes but pool size is {delegated} - possible subprocess leak")
+    # Subprocess leak: a session CLI still running that no pooled session owns.
+    # child_processes is NOT compared with the pool: it counts every descendant
+    # (each CLI's own children, postgres, tunnels, tool and Monitor shells,
+    # the browser MCP), so it outgrows the session count with no leak at all.
+    untracked = metrics.get("session_cli_untracked", 0)
+    if untracked > 0:
+        warnings.append(
+            f"{untracked} session CLI subprocess(es) not owned by any pooled "
+            f"session - possible subprocess leak"
+        )
 
-    # Session pool at capacity — the SUBPROCESS half of it, which is what
-    # pool_max_size bounds. pool_max_size is reported by _collect_metrics
-    # straight off the live pool; the fallback reads the CONFIGURED size rather
-    # than a hardcoded constant, so it cannot go stale. If neither
-    # is available the pool is not up yet — there is nothing to warn about.
-    pool_size = metrics.get("pool_delegated", metrics.get("pool_size", 0))
-    pool_max = metrics.get("pool_max_size")
-    if pool_max is None:
-        try:
-            from app.core.config import settings
-            pool_max = getattr(settings, "sdk_session_pool_size", None)
-        except Exception:
-            pool_max = None
-    if pool_max and pool_size >= pool_max:
-        warnings.append(f"Session pool at capacity ({pool_size}/{pool_max})")
+    # New subprocess sessions refused. pool_max_size is only the WARM size
+    # (idle sessions kept); busy sessions grow past it by design, so reaching
+    # it is not a problem. The admission guards are the real limit.
+    refusal = metrics.get("pool_admission_refusal")
+    if refusal:
+        warnings.append(f"New subprocess sessions are being refused: {refusal}")
 
     # DB connection pool near/at exhaustion. Warn early (>=80%) so a slow
     # slot leak is visible before it surfaces as "connection pool exhausted".

@@ -657,15 +657,68 @@ def fluid_transcript_entries(
     """
     if not looks_like_fluid_session_id(sdk_session_id):
         return []
-    entries = [
-        _node_to_entry(node, sdk_session_id)
-        for node in load_fluid_path(sdk_session_id)
-    ]
+    nodes = load_fluid_path(sdk_session_id)
+    entries = [_node_to_entry(node, sdk_session_id) for node in nodes]
     if not include_inner_calls:
         return entries
+    entries = _splice_delivered_steers(entries, nodes)
     return _splice_compaction_cards(
         _splice_inner_calls(entries, sdk_session_id), sdk_session_id
     )
+
+
+# ─── Mid-turn steers ─────────────────────────────────────────────────────────
+#
+# fluid delivers a mid-turn steer by appending it to the next tool result the
+# model reads (``ToolResultBlock.delivered_steers``); it never becomes a user
+# node. A transcript read from the node tree alone therefore lost every steer
+# the user typed while a turn ran, although the event log (and the live chat)
+# showed it. The read-only renderers get each user steer back as its own user
+# entry, right after the tool result that carried it.
+
+#: Marks a spliced steer entry. Not a rewind checkpoint: it has no node.
+STEER_ENTRY_FLAG = "fluidSteer"
+
+
+def _splice_delivered_steers(
+    entries: List[Dict[str, Any]], nodes: Sequence[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Insert a user entry for each steer a node's tool results delivered.
+
+    ``entries`` must still be index-aligned with ``nodes``. Only the user's own
+    words come back: a peer agent's message (``sender``) and a harness notice
+    (``origin`` other than ``user``) share the delivery queue but were never
+    typed by the user, and the event log does not show them as user messages.
+    """
+    out: List[Dict[str, Any]] = []
+    for entry, node in zip(entries, nodes):
+        out.append(entry)
+        blocks = _as_dict(node.get("message")).get("content") or []
+        steers = [
+            steer
+            for block in blocks
+            if isinstance(block, dict) and block.get("kind") == "toolresultblock"
+            for steer in (block.get("delivered_steers") or [])
+            if isinstance(steer, dict)
+            and (steer.get("origin") or "user") == "user"
+            and steer.get("sender") is None
+            and isinstance(steer.get("text"), str)
+            and steer["text"].strip()
+        ]
+        for index, steer in enumerate(steers):
+            out.append({
+                "uuid": f"{entry.get('uuid')}_steer_{index}",
+                "parentUuid": entry.get("uuid"),
+                "type": "user",
+                "timestamp": entry.get("timestamp"),
+                "sessionId": entry.get("sessionId"),
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": steer["text"]}],
+                },
+                STEER_ENTRY_FLAG: True,
+            })
+    return out
 
 
 # ─── Checkpoints ─────────────────────────────────────────────────────────────
@@ -1828,7 +1881,15 @@ def fluid_live_messages(
     from app.core.jsonl_parser import _transform_entries
 
     messages, usage = _transform_entries(entries, sdk_session_id, working_dir)
-    checkpoint_ids = {cp.uuid for cp in checkpoints_from_entries(entries) if cp.role == "user"}
+    # A spliced steer has no node, so it can be neither a rewind target nor an
+    # ordinal in the checkpoint list rewind uses.
+    checkpoint_ids = {
+        cp.uuid
+        for cp in checkpoints_from_entries(
+            [e for e in entries if not e.get(STEER_ENTRY_FLAG)]
+        )
+        if cp.role == "user"
+    }
     for message in messages:
         if message.get("role") == "user":
             message["checkpoint_backed"] = message.get("uuid") in checkpoint_ids

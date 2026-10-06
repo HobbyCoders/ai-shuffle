@@ -406,6 +406,75 @@ def test_live_messages_render_through_the_shared_transform(mock_db):
     ]
 
 
+def _steered_result(steers):
+    return fluid_message("user", [{
+        "kind": "toolresultblock", "tool_use_id": "t1",
+        "content": [{"kind": "text", "text": "file body"}],
+        "is_error": False,
+        "delivered_steers": steers,
+        "delivery_metadata_version": 1,
+    }])
+
+
+def _seed_steered(session_id="ses_steered"):
+    """A turn whose tool result carried a user steer, a peer message and a
+    harness notice — the three things fluid's steer queue delivers."""
+    _insert(session_id, [
+        ("n1", None, _user("first prompt")),
+        ("n2", "n1", fluid_message("assistant", [{
+            "kind": "tooluseblock", "id": "t1", "name": "Read",
+            "input": {"file_path": "/x"},
+        }])),
+        ("n3", "n2", _steered_result([
+            {"text": "also end with STEERED", "origin": "user", "sender": None, "id": "s1"},
+            {"text": "peer says hi", "origin": "user", "sender": "worker-a", "id": "s2"},
+            {"text": "budget notice", "origin": "system", "sender": None, "id": None},
+        ])),
+        ("n4", "n3", _assistant("done STEERED")),
+        ("n5", "n4", _user("second prompt")),
+        ("n6", "n5", _assistant("second reply")),
+    ])
+    return session_id
+
+
+def test_steer_fixture_matches_real_fluid_serialization():
+    pytest.importorskip("fluid")
+    from fluid.messages.content import Message, SteerDelivery, Text, ToolResultBlock
+
+    block = ToolResultBlock(
+        tool_use_id="t1", content=[Text(text="file body")],
+        delivered_steers=[SteerDelivery(text="also end with STEERED", id="s1")],
+        delivery_metadata_version=1,
+    )
+    assert Message(role="user", content=[block]).to_dict() == _steered_result([
+        {"text": "also end with STEERED", "origin": "user", "sender": None, "id": "s1"},
+    ])
+
+
+def test_live_messages_show_a_mid_turn_steer_in_order(mock_db):
+    """A steer the user typed while the turn ran is a user message, placed
+    after the tool result that delivered it; peer messages and harness
+    notices are not the user's words and stay out."""
+    session_id = _seed_steered()
+    messages, _usage = fluid_live_messages(session_id, "/workspace")
+
+    users = [m for m in messages if m["role"] == "user"]
+    assert [m["content"] for m in users] == [
+        "first prompt", "also end with STEERED", "second prompt",
+    ]
+    assert [m["checkpoint_backed"] for m in users] == [True, False, True]
+    order = [m["content"] for m in messages if m["type"] in (None, "text")]
+    assert order.index("also end with STEERED") < order.index("done STEERED")
+
+
+def test_steers_never_shift_the_rewind_checkpoints(mock_db):
+    session_id = _seed_steered()
+    assert len(fluid_transcript_entries(session_id)) == len(load_fluid_path(session_id))
+    assert [cp.uuid for cp in get_fluid_checkpoints(session_id) if cp.role == "user"] == [
+        "n1", "n5",
+    ]
+
+
 def test_live_messages_empty_for_unknown_session(mock_db):
     assert fluid_live_messages("ses_missing") == ([], {})
 

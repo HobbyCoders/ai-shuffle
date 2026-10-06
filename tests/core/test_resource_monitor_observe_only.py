@@ -458,3 +458,51 @@ async def test_on_pool_eviction_delegates_to_cleanup(monkeypatch):
     await rm._on_pool_eviction("ses-evicted", "idle")
 
     assert calls == [(["ses-evicted"], "idle")]
+
+
+# ─── (d) The subprocess-leak warning measures session CLIs only (W4-C) ─────
+
+
+def test_descendants_of_running_sessions_are_not_a_leak():
+    """26 descendants for 7 delegated sessions is normal: each CLI owns its own
+    children, and postgres, tunnels and tool shells sit in the same tree."""
+    from app.core.resource_monitor import _check_warnings
+
+    warnings = _check_warnings({"child_processes": 26, "pool_delegated": 7,
+                                "session_cli_processes": 7, "session_cli_untracked": 0})
+    assert not any("leak" in w for w in warnings)
+
+
+def test_a_session_cli_no_pooled_session_owns_is_a_leak():
+    from app.core.resource_monitor import _check_warnings
+
+    warnings = _check_warnings({"child_processes": 3, "pool_delegated": 2,
+                                "session_cli_processes": 3, "session_cli_untracked": 1})
+    assert warnings == [
+        "1 session CLI subprocess(es) not owned by any pooled session - possible subprocess leak"
+    ]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="process name from exec path")
+def test_untracked_session_clis_counts_only_unowned_cli_children(tmp_path, monkeypatch):
+    """Real processes: a CLI-named child is counted, an owned one is not a leak,
+    and an unrelated child (a tool shell, a tunnel) is not counted at all."""
+    pytest.importorskip("psutil")
+    from app.core import resource_monitor as rm
+
+    sleep = "/bin/sleep" if os.path.exists("/bin/sleep") else "/usr/bin/sleep"
+    cli = tmp_path / "claude"
+    cli.symlink_to(sleep)
+    procs = [subprocess.Popen([str(cli), "30"]), subprocess.Popen([str(cli), "30"]),
+             subprocess.Popen([sleep, "30"])]
+    try:
+        monkeypatch.setattr(rm, "_UNTRACKED_CLI_MIN_AGE_SECONDS", 0.0)
+        assert rm._untracked_session_clis({procs[0].pid}) == (2, 1)
+        assert rm._untracked_session_clis({procs[0].pid, procs[1].pid}) == (2, 0)
+        # A CLI still inside its connect window is not reported yet.
+        monkeypatch.setattr(rm, "_UNTRACKED_CLI_MIN_AGE_SECONDS", 3600.0)
+        assert rm._untracked_session_clis(set()) == (2, 0)
+    finally:
+        for p in procs:
+            p.kill()
+            p.wait()

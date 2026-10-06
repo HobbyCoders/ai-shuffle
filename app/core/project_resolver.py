@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, Optional
+import threading
+import time
+from typing import Any, Dict, Optional, Tuple
 
 from app.core import checkout_manager
 from app.core.config import settings
@@ -29,6 +31,43 @@ from app.db import projects_v2
 from app.db.base import get_db
 
 logger = logging.getLogger(__name__)
+
+# A refused checkout stays refused until someone fixes it, and every listing
+# (git activity, git status, the message resolver) asks again for every session
+# bound to it. Warn once per checkout and cause, again only when the cause
+# changes or after the interval, and at DEBUG in between.
+_REFUSAL_REPEAT_SECONDS = 3600.0
+_REFUSAL_MEMO_MAX = 2048
+_refusals: Dict[Tuple[str, str], Tuple[str, float]] = {}
+_refusals_lock = threading.Lock()
+
+
+def _log_refusal(path: str, branch: str, reason: str) -> None:
+    """Log a refused branch checkout at WARNING once per (checkout, cause)."""
+    key = (path, branch)
+    now = time.monotonic()
+    with _refusals_lock:
+        seen = _refusals.get(key)
+        repeat = (
+            seen is not None
+            and seen[0] == reason
+            and now - seen[1] < _REFUSAL_REPEAT_SECONDS
+        )
+        if not repeat:
+            if len(_refusals) >= _REFUSAL_MEMO_MAX:
+                _refusals.clear()
+            _refusals[key] = (reason, now)
+    if repeat:
+        logger.debug("project_resolver: still refusing checkout for branch %r: %s", branch, reason)
+    else:
+        logger.warning("project_resolver: refusing checkout for branch %r: %s", branch, reason)
+
+
+def _clear_refusal(path: str, branch: str) -> None:
+    """The checkout is usable again: a later refusal is news and warns."""
+    if _refusals:
+        with _refusals_lock:
+            _refusals.pop((path, branch), None)
 
 
 def origin_for_legacy_project(project_row: Dict[str, Any]) -> str:
@@ -294,8 +333,9 @@ def resolve_existing_cwd(session_row: Dict[str, Any]) -> Optional[str]:
             try:
                 checkout_manager._require_branch_binding(path, branch)
             except checkout_manager.WorktreeError as e:
-                logger.warning("project_resolver: refusing checkout for branch %r: %s", branch, e)
+                _log_refusal(path, branch, str(e))
                 return None
+            _clear_refusal(path, branch)
         return path
     return None
 

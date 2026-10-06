@@ -785,11 +785,13 @@ async def test_native_steer_reload_has_no_checkpoint_but_normal_prompt_resolves(
     assert error is None and from_seq == users[2]["seq"]
     # A non-existent steer occurrence refuses rather than guessing a cut.
     assert _resolve_checkpoint_uuid_from_content(sdk, str(tmp_path), steer, 1)[0] is None
+    # The reload shows the steer where the event log has it, without making
+    # it a checkpoint; a backfill from this read keeps that marking.
     messages, _ = fluid_live_messages(sdk, str(tmp_path))
-    normal = [m for m in messages if m["role"] == "user"]
-    assert [m["content"] for m in normal] == [prompt, steer]
-    assert all(m["checkpoint_backed"] is True for m in normal)
-    assert all(_convert_one(SID, m)[0]["payload"]["checkpoint_backed"] is True for m in normal)
+    shown = [m for m in messages if m["role"] == "user"]
+    assert [m["content"] for m in shown] == [prompt, steer, steer]
+    assert [m["checkpoint_backed"] for m in shown] == [True, False, True]
+    assert [_convert_one(SID, m)[0]["payload"]["checkpoint_backed"] for m in shown] == [True, False, True]
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -846,7 +848,7 @@ async def test_native_steered_turn_rewind_keeps_native_and_replay_aligned(
     if not request.include_response:
         assert native == [] and load_fluid_path(sdk) == [] and replay == []
     else:
-        assert [m["content"] for m in native if m["role"] == "user"] == [prompt]
+        assert [m["content"] for m in native if m["role"] == "user"] == [prompt, steer]
         assert [r["payload"]["content"] for r in replay if r["event_type"] == "message.user"] == [prompt, steer]
         native_replies = [m["content"] for m in native if m["role"] == "assistant" and m.get("type") == "text"]
         # The native producer streams assistant.text_delta, not closed

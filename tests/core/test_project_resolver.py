@@ -387,6 +387,44 @@ def test_resolve_existing_cwd_none_when_dir_absent(mock_db):
     assert out is None
 
 
+def test_a_refused_checkout_warns_once_per_cause(mock_db, monkeypatch, tmp_path, caplog):
+    """Every listing re-resolves every session, so a checkout left on the
+    wrong branch used to warn on each read. One warning per cause; a new cause
+    or a checkout that recovered and broke again warns again."""
+    import logging
+
+    monkeypatch.setattr(project_resolver, "_refusals", {}, raising=False)
+    pv2 = projects_v2.upsert_project("git:refuse", name="R")
+    checkouts_db.upsert_checkout(pv2["id"], RUNNER, str(tmp_path), branch="feat/x")
+    session = {"id": "s19", "project_v2_id": pv2["id"], "branch": "feat/x"}
+    cause = {"text": "is on None"}
+
+    def binding(path, branch):
+        if cause["text"]:
+            raise project_resolver.checkout_manager.WorktreeError(cause["text"])
+
+    monkeypatch.setattr(project_resolver.checkout_manager, "_require_branch_binding", binding)
+
+    def warnings():
+        return [
+            r.getMessage() for r in caplog.records
+            if r.name == project_resolver.logger.name and r.levelno == logging.WARNING
+        ]
+
+    with caplog.at_level(logging.DEBUG, logger=project_resolver.logger.name):
+        for _ in range(5):
+            assert project_resolver.resolve_existing_cwd(session) is None
+        assert len(warnings()) == 1
+        cause["text"] = "is on main"
+        assert project_resolver.resolve_existing_cwd(session) is None
+        assert len(warnings()) == 2 and "is on main" in warnings()[-1]
+        cause["text"] = None
+        assert project_resolver.resolve_existing_cwd(session) == str(tmp_path)
+        cause["text"] = "is on main"
+        assert project_resolver.resolve_existing_cwd(session) is None
+        assert len(warnings()) == 3
+
+
 def test_resolve_existing_cwd_none_when_no_checkout_row(mock_db):
     pv2 = projects_v2.upsert_project("git:ex3", name="EX3")
     out = project_resolver.resolve_existing_cwd(

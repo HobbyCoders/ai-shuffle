@@ -385,36 +385,35 @@ def test_configured_defaults_target_a_low_idle_floor():
     assert settings.sdk_session_detached_grace_seconds > 0
 
 
-# ─── Monitor's pool-capacity warning (F10's stale constant) ───────────────
+# ─── Monitor's pool warnings (W4-C: warm size is not a capacity) ──────────
 
 
-def test_capacity_warning_uses_the_reported_pool_max():
+def test_busy_sessions_past_the_warm_size_do_not_warn():
+    """The warm size bounds IDLE sessions; busy ones grow the pool past it by
+    design, so 7 running sessions against a warm size of 4 is not a problem."""
     from app.core.resource_monitor import _check_warnings
 
-    warnings = _check_warnings({"pool_size": 4, "pool_max_size": 4})
-    assert any("Session pool at capacity (4/4)" in w for w in warnings)
-
-    warnings = _check_warnings({"pool_size": 2, "pool_max_size": 4})
-    assert not any("at capacity" in w for w in warnings)
+    warnings = _check_warnings({"pool_size": 7, "pool_delegated": 7, "pool_max_size": 4})
+    assert not any("capacity" in w or "refused" in w for w in warnings)
 
 
-def test_capacity_warning_falls_back_to_the_configured_size_not_a_constant():
-    """The old fallback was a literal 3 and went stale the moment the default moved."""
-    from app.core.config import settings
+def test_an_admission_refusal_warns_with_its_reason():
     from app.core.resource_monitor import _check_warnings
 
-    configured = settings.sdk_session_pool_size
-    at_capacity = _check_warnings({"pool_size": configured})
-    below = _check_warnings({"pool_size": configured - 1})
+    warnings = _check_warnings({
+        "pool_delegated": 2, "pool_max_size": 4,
+        "pool_admission_refusal": "host low on memory: 300MB available < floor 1024MB",
+    })
+    assert warnings == [
+        "New subprocess sessions are being refused: "
+        "host low on memory: 300MB available < floor 1024MB"
+    ]
 
-    assert any("at capacity" in w for w in at_capacity)
-    assert not any("at capacity" in w for w in below)
 
-
-def test_capacity_warning_is_silent_before_the_pool_exists():
+def test_pool_warnings_are_silent_before_the_pool_exists():
     from app.core.resource_monitor import _check_warnings
 
-    assert not any("at capacity" in w for w in _check_warnings({}))
+    assert _check_warnings({}) == []
 
 
 # ─── Busy guards added in round 7 ─────────────────────────────────────────
