@@ -131,3 +131,23 @@ it('replaces an earlier success with a later failure', async () => {
 	expect(screen.queryByText('Claude Code updated from 2.1.280 to 2.1.285.')).toBeNull();
 	await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(1));
 });
+it('keeps the removed confirmation after the CLI is gone until it is dismissed', async () => {
+	const removed = 'Claude Code removed. Your sign-in and settings were kept.';
+	const onDismiss = vi.fn();
+	current = { ...base, installed: true, can_remove: true }; render(ClaudeCliInstall, { manage: true, onDismiss });
+	await fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+	current = { ...base, installed: false, job: { ...job('succeeded', 'remove'), message: removed } };
+	await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove' }));
+	expect(await screen.findByText(removed)).toBeTruthy();
+	expect(screen.queryByRole('button', { name: 'Install Claude Code' })).toBeNull();
+	await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+	expect(onDismiss).toHaveBeenCalledOnce();
+	expect(screen.queryByText(removed)).toBeNull();
+	expect(await screen.findByRole('button', { name: 'Install Claude Code' })).toBeTruthy();
+});
+it('does not replay an earlier removal on a later visit', async () => {
+	current = { ...base, installed: false, job: { ...job('succeeded', 'remove'), message: 'Claude Code removed.' } };
+	render(ClaudeCliInstall, { manage: true });
+	expect(await screen.findByRole('button', { name: 'Install Claude Code' })).toBeTruthy();
+	expect(screen.queryByRole('button', { name: 'Dismiss' })).toBeNull();
+});

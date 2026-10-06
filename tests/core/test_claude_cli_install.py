@@ -149,6 +149,34 @@ def test_installer_env_is_an_allow_list(worker, monkeypatch):
     assert seen["PATH"].split(ci.os.pathsep)[0] == str(ci._launcher().parent)
 
 
+def test_installer_env_keeps_npm_settings_and_mtls_but_not_npm_tokens(worker, monkeypatch):
+    """#1890: an npm-installed CLI's update needs its env-only npm prefix,
+    registry and CA; a proxy may need Claude Code's client certificate. npm
+    auth tokens stay out."""
+    passed = {
+        "NPM_CONFIG_PREFIX": "/opt/npm-global", "npm_config_registry": "https://npm.example/",
+        "npm_config_cafile": "/etc/ssl/corp.pem", "NPM_CONFIG_STRICT_SSL": "true",
+        "CLAUDE_CODE_CLIENT_CERT": "/certs/client.pem", "CLAUDE_CODE_CLIENT_KEY": "/certs/client.key",
+        "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE": "pass",
+    }
+    withheld = {"npm_config__authToken": "npm_secret", "NPM_CONFIG__AUTH": "dXNlcjpwYXNz",
+                "npm_config_//npm.example/:_authToken": "npm_secret2"}
+    for name, value in {**passed, **withheld}.items():
+        monkeypatch.setenv(name, value)
+    seen = {}
+
+    def popen(command, **kw):
+        seen.update(kw["env"])
+        return Mock(pid=123, returncode=0)
+    monkeypatch.setattr(ci.subprocess, "Popen", popen)
+    assert ci._run_command(["bash"])[0] == 0
+    fold = str.upper if ci.sys.platform == "win32" else str
+    names = {fold(k) for k in seen}
+    assert {fold(k) for k in passed} <= names
+    assert not {fold(k) for k in withheld} & names
+    assert "npm_secret" not in seen.values()
+
+
 @pytest.mark.skipif(ci.sys.platform == "win32", reason="POSIX env(1)")
 def test_installer_child_sees_only_allowed_variables(worker, monkeypatch):
     import shutil

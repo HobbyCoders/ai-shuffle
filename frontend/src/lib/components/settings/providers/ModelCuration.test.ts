@@ -133,6 +133,34 @@ describe('Models tab', () => {
 		expect((screen.getByRole('checkbox', { name: 'a' }) as HTMLInputElement).checked).toBe(false);
 	});
 
+	it('lets a model name be typed in when the gateway has no model list (#1851)', async () => {
+		mocks.post.mockRejectedValue(new Error('Could not fetch models from the provider upstream: http_404'));
+		render(ModelCuration, { row: router([]) });
+		await fireEvent.input(await screen.findByLabelText('Model name'), { target: { value: ' my-model ' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+		await waitFor(() => expect(mocks.patch).toHaveBeenCalled());
+		expect(saved()).toEqual([{ id: 'my-model', label: 'my-model' }]);
+		expect((screen.getByRole('checkbox', { name: 'my-model' }) as HTMLInputElement).checked).toBe(true);
+	});
+
+	it('offers typing for an empty list but not for a rejected key', async () => {
+		mocks.post.mockResolvedValueOnce({ source: 'upstream', models: [] });
+		render(ModelCuration, { row: router([]) });
+		expect(await screen.findByLabelText('Model name')).toBeTruthy();
+		cleanup();
+		mocks.post.mockRejectedValueOnce(new Error('Could not fetch models from the provider upstream: http_401'));
+		render(ModelCuration, { row: router([]) });
+		await screen.findByRole('alert');
+		expect(screen.queryByLabelText('Model name')).toBeNull();
+	});
+
+	it('does not offer typing when the list has models', async () => {
+		mocks.post.mockResolvedValue({ source: 'upstream', models: [entry('a')] });
+		render(ModelCuration, { row: router([]) });
+		await screen.findByRole('checkbox', { name: 'a' });
+		expect(screen.queryByLabelText('Model name')).toBeNull();
+	});
+
 	it('explains a media model the filter finds in the hidden list', async () => {
 		mocks.post.mockResolvedValue({
 			source: 'upstream',

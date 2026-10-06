@@ -157,7 +157,7 @@ export function describeFetchFailure(detail: string, name: string): FetchFailure
 	if (status === 404 || status === 405 || /\binvalid_json\b|\bmissing_base_url\b/.test(text)) {
 		return {
 			kind: 'no-list',
-			message: `${name} does not list its models (there is no /models address). AI Shuffle reads the models from that list, and model names cannot be typed in by hand yet.`
+			message: `${name} does not list its models (there is no /models address). Type the model names it serves below.`
 		};
 	}
 	if (status === 429) {

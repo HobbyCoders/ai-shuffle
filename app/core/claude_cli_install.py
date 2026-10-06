@@ -163,15 +163,28 @@ def _now():
 
 # The installer and updater see only what they need to download and place
 # the CLI: the search path, the home and config folders, locale, temp
-# folders, proxies and CA bundles. Credentials and other worker settings in
+# folders, proxies, CA bundles, npm location/registry settings and Claude
+# Code's mTLS client certificate. Credentials and other worker settings in
 # the environment (API keys, database URLs, tokens) are never passed on.
 _PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY")
+# npm settings an npm-installed CLI's "Check for update" may only have in the
+# environment: where it lives, which registry, which CA, which proxy. Named
+# one by one, never NPM_CONFIG_* as a prefix: npm also reads registry auth
+# tokens from npm_config__auth* / "//host/:_authToken" variables, and those
+# stay out like every other credential.
+_NPM_ENV = tuple(f"NPM_CONFIG_{name}" for name in (
+    "PREFIX", "REGISTRY", "CAFILE", "CA", "STRICT_SSL", "PROXY", "HTTPS_PROXY",
+    "NOPROXY", "USERCONFIG", "GLOBALCONFIG", "CACHE",
+))
 _INSTALLER_ENV = frozenset({
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
     "TMPDIR", "TMP", "TEMP", "CLAUDE_CONFIG_DIR",
     "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
     *_PROXY_ENV, *(name.lower() for name in _PROXY_ENV),
+    *_NPM_ENV, *(name.lower() for name in _NPM_ENV),
+    # Claude Code's mTLS settings, for a proxy that requires a client certificate.
+    "CLAUDE_CODE_CLIENT_CERT", "CLAUDE_CODE_CLIENT_KEY", "CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
     # Windows: PowerShell and Anthropic's install.ps1 need these.
     "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME",
     "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",

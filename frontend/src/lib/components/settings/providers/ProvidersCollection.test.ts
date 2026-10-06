@@ -23,8 +23,8 @@ import { SETTINGS_ACCESS_CONTEXT } from '$lib/settings/access.svelte';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
 import ProvidersCollection from './ProvidersCollection.svelte';
 import { providerDrafts } from './drafts.svelte';
-import { chatgptRow, gatewayRow, grokRow, row } from './fixtures';
-import { fakeWorker } from './fake-worker';
+import { chatgptRow, claudeSummary, gatewayRow, grokRow, row } from './fixtures';
+import { cliStatus, fakeWorker } from './fake-worker';
 
 let worker: ReturnType<typeof fakeWorker>;
 
@@ -300,5 +300,50 @@ describe('coverage', () => {
 			},
 			{ settle: () => flush(8) }
 		);
+	});
+});
+
+describe('Claude Code on the Not connected page', () => {
+	function notSignedIn() {
+		const claude = claudeSummary({ api_key: { set: false, last4: null } });
+		claude.cli = { ...claude.cli, signed_in: false, email: null, plan: null };
+		return claude;
+	}
+
+	it('keeps the removed confirmation on screen until it is dismissed', async () => {
+		const removed = 'Claude Code removed. Your sign-in and settings were kept.';
+		worker = fakeWorker({ claude: notSignedIn(), cli: cliStatus({ signed_in: false }) }, {
+			'POST /settings/claude-cli/remove': () => {
+				worker.state.claude = { ...worker.state.claude, cli: { ...worker.state.claude.cli, installed: false } };
+				worker.state.cli = { ...worker.state.cli, installed: false };
+				return { installed: false, version: null, path: null, keep_installed: false, installed_by_app: false,
+					can_install: true, can_remove: false, platform: 'docker',
+					job: { kind: 'remove', state: 'succeeded', started_at: '2026-10-06T00:00:00Z',
+						finished_at: '2026-10-06T00:00:05Z', message: removed, output_tail: '' } };
+			}
+		});
+		worker.state.integrations = { ...worker.state.integrations, anthropic_api_key_set: false };
+		vi.stubGlobal('fetch', worker.fetch);
+		await providers.refreshAll();
+		settingsNav.go({ category: 'providers', item: 'provider:claude' });
+		render(ProvidersCollection);
+		await flush();
+		// The Not connected page: Set up rows, no Credentials group.
+		expect(screen.getAllByRole('button', { name: 'Set up' }).length).toBeGreaterThan(0);
+		expect(screen.queryByRole('region', { name: /^Credentials/ })).toBeNull();
+
+		await fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+		await fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Remove' }));
+		await flush(10);
+
+		expect(worker.sent('POST', '/settings/claude-cli/remove')).toHaveLength(1);
+		expect(providers.current.claude?.cli?.installed).toBe(false);
+		expect(await screen.findByText(removed)).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'Install Claude Code' })).toBeNull();
+
+		await fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+		await flush();
+		expect(screen.queryByText(removed)).toBeNull();
+		expect(screen.queryByTestId('claude-cli-install')).toBeNull();
 	});
 });

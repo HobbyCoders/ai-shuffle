@@ -246,4 +246,25 @@ describe('setup: a gateway with no model list', () => {
 		await waitFor(() => expect(mocks.del).toHaveBeenCalledWith('/model-providers/row-1'));
 		await waitFor(() => expect(onChanged).toHaveBeenCalled());
 	});
+
+	it('is completed with a typed model name (#1851)', async () => {
+		fetchAnswers(new Error(`${UPSTREAM}http_404`));
+		render(ProviderConnect, { provider: 'gateway' });
+		await fireEvent.input(screen.getByPlaceholderText('Together AI'), { target: { value: 'Box' } });
+		await fireEvent.input(screen.getByPlaceholderText('https://host/v1'), { target: { value: 'https://box/v1' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		const failure = await screen.findByTestId('curation-failure');
+		expect(failure.textContent).toContain('Type the model names it serves below.');
+		expect((screen.getByRole('button', { name: 'Use selected' }) as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.input(screen.getByLabelText('Model name'), { target: { value: 'box-model' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Add model' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Use selected (1)' }));
+		await waitFor(() =>
+			expect(mocks.patch).toHaveBeenLastCalledWith('/model-providers/row-1', {
+				models: [{ id: 'box-model', label: 'box-model' }],
+				default_model: 'box-model'
+			})
+		);
+		expect(await screen.findByTestId('setup-provider-connect-done')).toBeTruthy();
+	});
 });

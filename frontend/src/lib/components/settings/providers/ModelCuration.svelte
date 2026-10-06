@@ -18,6 +18,10 @@
 	 *    timeout or server error offers Retry, and an endpoint with no model list
 	 *    offers Remove (`onRemove`).
 	 *
+	 * An endpoint that lists no models (no /models address, or an empty list)
+	 * gets a "Model name" field instead: a typed id is added checked, so a
+	 * gateway that cannot list its models can still be completed (#1851).
+	 *
 	 * Saved entries keep `context_window`, pricing and the reasoning metadata
 	 * (see curation.ts).
 	 */
@@ -86,6 +90,9 @@
 	let filter = $state('');
 	let source = $state<'preset' | 'upstream' | ''>('');
 	let hiddenMedia = $state<HiddenMedia[]>([]);
+	/** The list is missing or empty, so model names can be typed in. */
+	let typeable = $state(false);
+	let typed = $state('');
 
 	const checked = $derived(rows.filter((r) => r.checked).length);
 	const shown = $derived(filterRows(rows, filter));
@@ -110,8 +117,11 @@
 			// The wizard needs a model: pre-check a known chat model, if any.
 			if (wizard) rows = precheckRecommended(rows, res.recommended);
 			hiddenMedia = res.hidden ?? [];
+			typeable = (res.models?.length ?? 0) === 0;
 		} catch (e) {
 			const detail = getErrorMessage(e, 'Could not fetch models');
+			// A rejected key needs a new key, not typed model names.
+			typeable = describeFetchFailure(detail, providerName).kind !== 'rejected';
 			if (wizard) {
 				failure = describeFetchFailure(detail, providerName);
 				if (failure.kind === 'rejected') onRejected?.(failure.message);
@@ -125,7 +135,25 @@
 	}
 
 	async function toggle(modelId: string) {
-		const next = rows.map((r) => (r.id === modelId ? { ...r, checked: !r.checked } : r));
+		await apply(rows.map((r) => (r.id === modelId ? { ...r, checked: !r.checked } : r)));
+	}
+
+	/** Adds a typed model id, checked; an id already listed is just checked. */
+	async function addTyped() {
+		const modelId = typed.trim();
+		if (!modelId || saving) return;
+		typed = '';
+		const known = rows.find((r) => r.id === modelId);
+		if (known?.checked) return;
+		await apply(
+			known
+				? rows.map((r) => (r.id === modelId ? { ...r, checked: true } : r))
+				: [{ id: modelId, label: modelId, checked: true }, ...rows]
+		);
+	}
+
+	/** Setup keeps the choice for "Use selected"; manage saves it on the spot. */
+	async function apply(next: CurationRow[]) {
 		if (mode === 'setup') {
 			rows = next;
 			return;
@@ -217,6 +245,21 @@
 			{/if}
 		</div>
 	{/if}
+	{#if typeable && !loading}
+		<div class="typed" data-testid="curation-typed">
+			<TextField
+				bind:value={typed}
+				onchange={addTyped}
+				placeholder="Model name, as the endpoint expects it"
+				label="Model name"
+				mono
+				maxlength={200}
+				width={260}
+				disabled={saving}
+			/>
+			<button type="button" class="st-btn" disabled={saving || !typed.trim()} onclick={addTyped}>Add model</button>
+		</div>
+	{/if}
 	{#if rows.length > 0}
 		<div class="filter">
 			<TextField bind:value={filter} type="search" placeholder="Filter models" label="Filter models" width={260} />
@@ -226,7 +269,9 @@
 		{#if loading && rows.length === 0}
 			<p class="pv-empty">Loading models</p>
 		{:else if rows.length === 0}
-			<p class="pv-empty">{failure ? 'No models yet.' : 'No models returned.'}</p>
+			<p class="pv-empty">
+				{failure ? 'No models yet.' : 'No models returned.'}{typeable ? ' Type a model name above to add one.' : ''}
+			</p>
 		{:else}
 			<div class="pv-mlist">
 				{#each shown as r (r.id)}
@@ -275,6 +320,16 @@
 	}
 	.filter :global(.st-txt) {
 		width: 100% !important;
+	}
+	.typed {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		margin: 0 0 8px;
+	}
+	.typed :global(.st-txt) {
+		flex: 1 1 200px;
+		width: auto !important;
 	}
 	.pv-fail {
 		display: flex;

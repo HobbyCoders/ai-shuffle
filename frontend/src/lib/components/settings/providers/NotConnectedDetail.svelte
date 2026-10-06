@@ -21,6 +21,10 @@
 	let { provider }: Props = $props();
 	const access = getSettingsAccess();
 	const cliInstalled = $derived(!!provider.claude && !!providers.current.claude?.cli?.installed);
+	// Stay mounted once shown, so a Remove done here can show its confirmation
+	// after the CLI is gone; the section leaves when that is dismissed.
+	let showCli = $state(false);
+	$effect(() => { if (cliInstalled) showCli = true; });
 	const kinds = $derived(kindsOf(provider.id));
 	const models = $derived(
 		provider.claude
@@ -53,7 +57,7 @@
 			</SettingRow>
 		{/each}
 	</RowGroup>
-	{#if cliInstalled}
-		<ClaudeCliInstall manage isAdmin={!access.readOnly} />
+	{#if provider.claude && (cliInstalled || showCli)}
+		<ClaudeCliInstall manage isAdmin={!access.readOnly} onDismiss={() => (showCli = false)} />
 	{/if}
 </DetailPane>

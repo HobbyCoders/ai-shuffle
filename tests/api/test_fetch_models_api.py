@@ -12,6 +12,7 @@ monkeypatch on ``app.core.http_client.get_http_client``.
 """
 
 import httpx
+import pytest
 
 from app.api import model_providers as mp_api
 from app.core import encryption, model_catalog_presets
@@ -460,6 +461,36 @@ class TestUpstreamPath:
         _install_mock_transport(monkeypatch, _handler)
         resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
         assert resp.status_code == 502, resp.text
+
+    @pytest.mark.parametrize("token", [RAW_TOKEN, None], ids=["keyed", "keyless"])
+    def test_gateway_without_a_model_list_is_completed_by_typed_models(
+        self, authenticated_client, mock_db, monkeypatch, token,
+    ):
+        # #1851: a custom gateway with no GET /models (404) is completed with
+        # model ids typed by hand: the 404 is not recorded as a rejected key,
+        # and once a typed model is saved the gateway counts as ready.
+        from app.core import credential_gate
+
+        unlock_encryption(mock_db)
+        _make_provider(
+            provider_type="custom", base_url="https://gateway.example/v1",
+            auth_token=encryption.encrypt_value(token) if token else None,
+        )
+        _install_mock_transport(monkeypatch, lambda request: httpx.Response(404, text="Not Found"))
+        resp = authenticated_client.post(f"{ROOT}/{PROVIDER_ID}/fetch-models")
+        assert resp.status_code == 502 and "http_404" in resp.json()["detail"], resp.text
+        gateway = f"gw:{PROVIDER_ID}"
+        assert db.get_model_provider(PROVIDER_ID).get("credential_status") != "rejected"
+        if token:
+            assert gateway not in credential_gate.ready_providers(claude_ok=False)
+
+        resp = authenticated_client.patch(f"{ROOT}/{PROVIDER_ID}", json={
+            "models": [{"id": "llama-3.1-70b", "label": "llama-3.1-70b"}],
+            "default_model": "llama-3.1-70b",
+        })
+        assert resp.status_code == 200, resp.text
+        assert credential_gate.ready_providers(claude_ok=False) == [gateway]
+        assert credential_gate.default_provider_model() == (PROVIDER_ID, "llama-3.1-70b")
 
     def test_list_capped_at_2000(self, authenticated_client, mock_db, monkeypatch):
         unlock_encryption(mock_db)

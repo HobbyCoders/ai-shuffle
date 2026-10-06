@@ -243,7 +243,7 @@ jobs:
             tests/db/test_fluid_delegated_batching_postgres.py tests/db/test_fluid_native_batching_postgres.py \
             tests/db/test_universal_search_pg.py tests/db/test_runs_activity_postgres.py \
             tests/core/test_pg_session_store.py tests/core/test_pg_session_store_rewind.py \
-            tests/db/test_explore_retirement_postgres.py \
+            tests/db/test_explore_retirement_postgres.py tests/db/test_builtin_refresh_postgres.py \
             -o addopts="" -p no:cacheprovider --timeout=120 -v
 
       - name: Audit public Python dependencies
