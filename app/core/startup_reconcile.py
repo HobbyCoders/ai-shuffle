@@ -984,7 +984,8 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
 
         # Processes the previous run recorded itself as starting (agent CLIs,
         # Monitor shells and what they started), verified by pid + start time
-        # + command line. Catches what the marker sweep above deliberately
+        # + command line, and any process that inherited the dead run's id
+        # (process_ledger.RUN_MARKER). Catches what the marker sweep above deliberately
         # leaves alone, e.g. a dev server orphaned when the server died.
         try:
             from app.core import process_ledger

@@ -334,3 +334,15 @@ async def test_rapid_launcher_exit_surfaces_its_stderr(monkeypatch, tmp_path):
     assert "crash-looped" in detail
     assert "[browser-egress] could not start: boom" in detail
     assert "could not start: boom" in (tmp_path / "launcher.log").read_text()
+
+
+def test_the_browser_is_launched_without_the_server_run_marker(monkeypatch):
+    # The browser serves the install, not one server run: the next boot must
+    # never stop it as the previous run's orphan (#1711).
+    from app.core import process_ledger
+
+    monkeypatch.setenv(process_ledger.RUN_MARKER, "run-1")
+    monkeypatch.setenv("SOME_SETTING", "kept")
+    env = nc._egress_env()
+    assert process_ledger.RUN_MARKER not in env
+    assert env["SOME_SETTING"] == "kept"

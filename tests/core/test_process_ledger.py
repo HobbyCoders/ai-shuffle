@@ -161,3 +161,103 @@ def test_bad_input_and_a_missing_ledger_never_raise(ledger):
     assert process_ledger.reap_previous_run() == []
     assert process_ledger.refresh() == 0
     process_ledger.forget_process(None)
+
+
+# --- #1711: processes no entry names, found by the run id they inherited ---
+
+# Parent that starts a sleeping child, prints its pid and exits at once: the
+# child outlives it before any refresh could snapshot it.
+_LAUNCH_AND_EXIT = (
+    "import subprocess, sys; "
+    f"c = subprocess.Popen([sys.executable, '-c', {_SLEEP!r}]); "
+    "print(c.pid, flush=True)"
+)
+
+
+def _record_run(server_pid, server_created) -> str:
+    run_id = os.urandom(8).hex()
+    path = process_ledger.runs_path()
+    runs = process_ledger._load_runs(path)
+    runs[run_id] = {"server_pid": server_pid, "server_create_time": server_created, "started_at": time.time()}
+    process_ledger._save_runs(path, runs)
+    return run_id
+
+
+def _orphan_of(spawn, env) -> int:
+    parent = spawn(_LAUNCH_AND_EXIT, stdout=subprocess.PIPE, text=True, env=env)
+    child_pid = int(parent.stdout.readline())
+    parent.wait(timeout=30)
+    return child_pid
+
+
+def test_mark_run_records_this_run_and_every_child_inherits_it(ledger, monkeypatch):
+    from fluid.tools.child_env import scrub_child_env
+
+    _path, spawn = ledger
+    monkeypatch.setattr(process_ledger, "_run_id", None)
+    monkeypatch.delenv(process_ledger.RUN_MARKER, raising=False)
+
+    run_id = process_ledger.mark_run()
+
+    assert run_id and process_ledger.mark_run() == run_id  # once per server run
+    assert os.environ[process_ledger.RUN_MARKER] == run_id
+    run = process_ledger._load_runs(process_ledger.runs_path())[run_id]
+    assert run["server_pid"] == os.getpid()
+    child = spawn(f"import os; print(os.environ.get({process_ledger.RUN_MARKER!r}))", stdout=subprocess.PIPE, text=True)
+    assert child.communicate(timeout=30)[0].strip() == run_id
+    # The native Bash tool's child environment keeps it; a service started
+    # with ``without_run_marker`` does not.
+    assert scrub_child_env()[process_ledger.RUN_MARKER] == run_id
+    assert process_ledger.RUN_MARKER not in process_ledger.without_run_marker(dict(os.environ))
+
+
+def test_a_child_whose_unrecorded_parent_exited_before_any_snapshot_is_stopped(ledger):
+    _path, spawn = ledger
+    run_id = _record_run(*_dead_server())
+    child_pid = _orphan_of(spawn, {**os.environ, process_ledger.RUN_MARKER: run_id})
+    assert psutil.pid_exists(child_pid)
+
+    stopped = process_ledger.reap_previous_run(timeout=5)
+
+    assert stopped == [child_pid]
+    assert _gone(child_pid)
+    assert process_ledger._load_runs(process_ledger.runs_path()) == {}
+
+
+def test_a_background_child_of_a_native_bash_call_is_stopped(ledger, monkeypatch):
+    from fluid.tools.child_env import scrub_child_env
+
+    _path, spawn = ledger
+    run_id = _record_run(*_dead_server())
+    monkeypatch.setenv(process_ledger.RUN_MARKER, run_id)  # what the dead server's children inherited
+    child_pid = _orphan_of(spawn, scrub_child_env())  # the native Bash tool's base environment
+
+    assert process_ledger.reap_previous_run(timeout=5) == [child_pid]
+    assert _gone(child_pid)
+
+
+def test_a_live_runs_marked_processes_are_left_alone(ledger):
+    _path, spawn = ledger
+    run_id = _record_run(os.getpid(), psutil.Process().create_time())
+    proc = spawn(env={**os.environ, process_ledger.RUN_MARKER: run_id})
+
+    assert process_ledger.reap_previous_run(timeout=1) == []
+    assert proc.poll() is None
+    assert run_id in process_ledger._load_runs(process_ledger.runs_path())
+
+
+@pytest.mark.parametrize("case", ["started_before_the_run", "unmarked", "another_run"])
+def test_only_a_process_carrying_a_dead_runs_id_that_started_after_it_is_taken(ledger, case):
+    _path, spawn = ledger
+    pid, created = _dead_server()
+    if case == "started_before_the_run":
+        created += 3600  # a process cannot inherit the id of a run that started after it
+    run_id = _record_run(pid, created)
+    env = dict(os.environ)
+    env.pop(process_ledger.RUN_MARKER, None)
+    if case != "unmarked":
+        env[process_ledger.RUN_MARKER] = run_id if case == "started_before_the_run" else "some-other-run"
+    proc = spawn(env=env)
+
+    assert process_ledger.reap_previous_run(timeout=1) == []
+    assert proc.poll() is None

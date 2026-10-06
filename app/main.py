@@ -180,6 +180,11 @@ async def lifespan(app: FastAPI):
     # Before any child is spawned: same-uid children must not be able to read
     # this process's /proc environ (its start-up secrets).
     harden_process_introspection()
+    # Also before any child is spawned: every child inherits this run's id, so
+    # the next boot can stop what this run leaves behind if it dies (#1711).
+    if os.environ.get("TESTING") != "1":
+        from app.core import process_ledger
+        process_ledger.mark_run()
     prewarm_code_mode_sandbox()
 
     # Startup phases

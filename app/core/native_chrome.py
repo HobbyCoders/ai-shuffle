@@ -250,10 +250,15 @@ def _egress_command(exe: str, args: List[str]) -> List[str]:
 
 
 def _egress_env() -> dict:
-    """Process env plus the app's base SSRF policy for the proxy."""
-    from app.core.browser_egress import egress_env
+    """Process env plus the app's base SSRF policy for the proxy.
 
-    return {**os.environ, **egress_env()}
+    Without the server-run marker: the browser is a service of this install,
+    not a leftover of the run that launched it (#1711).
+    """
+    from app.core.browser_egress import egress_env
+    from app.core.process_ledger import without_run_marker
+
+    return without_run_marker({**os.environ, **egress_env()})
 
 
 # Seconds between relaunches, and a run shorter than this counts as a rapid

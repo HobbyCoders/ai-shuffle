@@ -25,6 +25,17 @@ Descendants found by walking a verified root are taken only when they started
 after it. Nothing is ever matched by image name. The file is per install
 (``process-ledger-<instance id>.json`` in the data directory) and every
 function here is best-effort and never raises.
+
+The ledger only knows the roots it was told about, and a child is found
+through a root that is still alive or through the last snapshot. So
+:func:`mark_run` also gives each server run a random id, which it records
+in ``runs-process-ledger-<instance id>.json`` and puts in this process's
+environment as :data:`RUN_MARKER`. Every child inherits it: agent CLIs,
+Monitor shells, native Bash tool calls and whatever they start (#1711). At
+boot, a process is also stopped when its own environment carries the id of a
+recorded run whose server is gone, and it started after that server did.
+Long-lived services the server starts for itself (the native Chrome) are
+launched without the marker.
 """
 
 from __future__ import annotations
@@ -52,7 +63,14 @@ _MAX_DESCENDANTS = 64
 #: How many entries the file may hold; the oldest are dropped first.
 _MAX_ENTRIES = 512
 
+#: Inherited by every process this server starts; names the server run.
+RUN_MARKER = "AI_SHUFFLE_SERVER_RUN"
+
+#: How many server runs the runs file may remember; the oldest go first.
+_MAX_RUNS = 32
+
 _lock = threading.Lock()
+_run_id: Optional[str] = None
 
 
 def _psutil():
@@ -69,6 +87,12 @@ def ledger_path() -> Path:
     if settings.data_dir is None:
         raise RuntimeError("no data directory configured")
     return Path(settings.data_dir) / f"process-ledger-{settings.effective_instance_id}.json"
+
+
+def runs_path() -> Path:
+    """The server runs whose children carry :data:`RUN_MARKER`, beside the ledger."""
+    path = ledger_path()
+    return path.with_name("runs-" + path.name)
 
 
 def _same_start(current: Any, recorded: Any) -> bool:
@@ -124,6 +148,66 @@ def _save(path: Path, entries: Dict[str, Dict[str, Any]]) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps({"version": 1, "processes": entries}), encoding="utf-8")
     os.replace(tmp, path)
+
+
+def _load_runs(path: Path) -> Dict[str, Dict[str, Any]]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception:  # noqa: BLE001 — a corrupt file is an empty one
+        logger.debug("process ledger runs unreadable at %s", path, exc_info=True)
+        return {}
+    runs = data.get("runs") if isinstance(data, dict) else None
+    return {str(k): v for k, v in runs.items() if isinstance(v, dict)} if isinstance(runs, dict) else {}
+
+
+def _save_runs(path: Path, runs: Dict[str, Dict[str, Any]]) -> None:
+    if len(runs) > _MAX_RUNS:
+        ordered = sorted(runs.items(), key=lambda kv: kv[1].get("started_at") or 0)
+        runs = dict(ordered[-_MAX_RUNS:])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps({"version": 1, "runs": runs}), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def mark_run() -> Optional[str]:
+    """Record this server run and put its id in the environment children inherit.
+
+    Call once at boot, before anything is spawned. Idempotent; never raises.
+    Returns the run id, or None when it could not be recorded (then no child
+    is marked, since no later boot could match the id).
+    """
+    global _run_id
+    if _run_id is not None:
+        return _run_id
+    import time
+    import uuid
+
+    run_id = uuid.uuid4().hex
+    server_pid, server_created = _server()
+    try:
+        with _lock:
+            path = runs_path()
+            runs = _load_runs(path)
+            runs[run_id] = {
+                "server_pid": server_pid,
+                "server_create_time": server_created,
+                "started_at": time.time(),
+            }
+            _save_runs(path, runs)
+    except Exception:  # noqa: BLE001
+        logger.debug("process ledger: recording this server run failed", exc_info=True)
+        return None
+    os.environ[RUN_MARKER] = run_id
+    _run_id = run_id
+    return run_id
+
+
+def without_run_marker(env: Dict[str, str]) -> Dict[str, str]:
+    """``env`` for a service that must outlive this server run (never reaped as its orphan)."""
+    return {key: value for key, value in env.items() if key != RUN_MARKER}
 
 
 def record_process(
@@ -316,7 +400,9 @@ def reap_previous_run(*, timeout: float = 5.0) -> List[int]:
         with _lock:
             path = ledger_path()
             entries = _load(path)
-            if not entries:
+            runs_file = runs_path()
+            runs = _load_runs(runs_file)
+            if not entries and not runs:
                 return []
             protected = _protected_pids(ps)
             victims: Dict[int, Any] = {}
@@ -342,7 +428,14 @@ def reap_previous_run(*, timeout: float = 5.0) -> List[int]:
                             take(proc)
                     except Exception:  # noqa: BLE001
                         continue
-            _save(path, kept)
+            if entries:
+                _save(path, kept)
+            # Processes no entry names, found by the run id they inherited.
+            dead = {run_id: run for run_id, run in runs.items() if not _server_alive(ps, run)}
+            if dead:
+                for proc in _marked_by(ps, dead):
+                    take(proc)
+                _save_runs(runs_file, {run_id: run for run_id, run in runs.items() if run_id not in dead})
     except Exception:  # noqa: BLE001
         logger.warning("process ledger: reading the previous run failed", exc_info=True)
         return []
@@ -357,6 +450,29 @@ def reap_previous_run(*, timeout: float = 5.0) -> List[int]:
         "and left behind: pids=%s", len(pids), pids,
     )
     return pids
+
+
+def _marked_by(ps: Any, runs: Dict[str, Dict[str, Any]]) -> List[Any]:
+    """Live processes whose own environment carries one of ``runs``' ids.
+
+    A process inherits the id from that run's server, so it cannot have
+    started before the server did; one that claims to is not taken. A process
+    whose environment cannot be read is never taken.
+    """
+    starts = {run_id: float(run.get("server_create_time") or 0.0) for run_id, run in runs.items()}
+    earliest = min(starts.values()) - START_TIME_TOLERANCE_S
+    out = []
+    for proc in ps.process_iter(["create_time"]):
+        try:
+            created = proc.info.get("create_time")
+            if created is None or created < earliest:
+                continue
+            run_id = proc.environ().get(RUN_MARKER)
+        except Exception:  # noqa: BLE001 — gone, or not ours to read
+            continue
+        if run_id in starts and created + START_TIME_TOLERANCE_S >= starts[run_id]:
+            out.append(proc)
+    return out
 
 
 def _stop(ps: Any, procs: Iterable[Any], *, timeout: float) -> None:
