@@ -733,6 +733,93 @@ async def test_cancelled_pending_peer_is_withdrawn_before_its_boundary() -> None
     assert len(_user_frames(frames)) == 1
 
 
+async def test_user_steer_rides_the_next_tool_boundary_instead_of_a_stdin_frame() -> None:
+    """#1786: a mid-turn user message on a CLI with tool-boundary hooks is
+    never written to stdin (the CLI may preempt the running tool for a human
+    prompt). It rides the next main-thread PostToolUse answer in the user's
+    steering marker, exactly once, and is receipted inside the turn."""
+    from fluid.context.peer import PEER_OPEN_PREFIX
+    from fluid.context.steering import STEER_CLOSE, STEER_OPEN
+
+    async def on_prompt(loop, event):
+        await loop.submit(Steer(text="use the staging config", id="q1"))
+        # A host retry of the same id while it waits is not a second message.
+        await loop.submit(Steer(text="use the staging config", id="q1"))
+        await loop.submit(RespondPermission(request_id=event.request_id, decision="allow"))
+
+    loop, frames, events, seen = await _run_peer_boundary_turn(on_prompt)
+
+    # Only the turn's own user frame reached stdin: nothing for the CLI to
+    # treat as a human follow-up that interrupts the tool.
+    assert len(_user_frames(frames)) == 1
+    receipts = [e for e in events if isinstance(e, SteerDelivered)]
+    assert len(receipts) == 1
+    assert receipts[0].steers == [{"id": "q1", "text": "use the staging config"}]
+    complete = next(e for e in events if isinstance(e, TurnComplete))
+    assert receipts[0].seq < complete.seq
+    assert receipts[0].turn_id == complete.turn_id
+    assert seen["main"].count("use the staging config") == 1
+    assert f"{STEER_OPEN}\nuse the staging config\n{STEER_CLOSE}" in seen["main"]
+    assert PEER_OPEN_PREFIX not in seen["main"]
+    assert seen["sub"] == ""
+    assert len([e for e in events if isinstance(e, TurnStarted)]) == 1
+    # After the turn there is nothing to steer into: the host keeps it queued.
+    with pytest.raises(RuntimeError, match="no turn is running"):
+        await loop.submit(Steer(text="late", id="q2"))
+
+
+async def test_user_steer_and_peer_share_one_boundary_in_arrival_order() -> None:
+    from fluid.context.peer import PEER_OPEN_PREFIX
+    from fluid.context.steering import STEER_OPEN
+    from fluid.events.ops import AgentMessage
+
+    async def on_prompt(loop, event):
+        await loop.submit(AgentMessage(sender="reviewer", text="peer first", id="peer-1", wake=False))
+        await loop.submit(Steer(text="user second", id="q1"))
+        await loop.submit(RespondPermission(request_id=event.request_id, decision="allow"))
+
+    _loop, frames, events, seen = await _run_peer_boundary_turn(on_prompt)
+
+    assert len(_user_frames(frames)) == 1
+    main = seen["main"]
+    assert main.index(PEER_OPEN_PREFIX) < main.index("peer first") < main.index(STEER_OPEN) < main.index("user second")
+    receipts = [e for e in events if isinstance(e, SteerDelivered)]
+    assert [r.steers for r in receipts] == [[
+        {"id": "peer-1", "text": "peer first", "from": "reviewer"},
+        {"id": "q1", "text": "user second"},
+    ]]
+
+
+async def test_user_steer_still_waiting_for_its_boundary_can_be_cancelled() -> None:
+    answers: dict[str, bool] = {}
+
+    async def on_prompt(loop, event):
+        await loop.submit(Steer(text="never mind", id="q1"))
+        answers["pending"] = await loop.cancel_steer("q1")
+        answers["again"] = await loop.cancel_steer("q1")
+        await loop.submit(RespondPermission(request_id=event.request_id, decision="allow"))
+
+    _loop, frames, events, seen = await _run_peer_boundary_turn(on_prompt)
+
+    assert answers == {"pending": True, "again": False}
+    assert seen == {"sub": "", "main": ""}
+    assert not any(isinstance(e, SteerDelivered) for e in events)
+    assert len(_user_frames(frames)) == 1
+
+
+async def test_user_steer_pending_when_stop_lands_is_never_delivered() -> None:
+    async def on_prompt(loop, event):
+        await loop.submit(Steer(text="before stop", id="q1"))
+        await loop.submit(Interrupt())
+        await loop.submit(RespondPermission(request_id=event.request_id, decision="deny"))
+
+    _loop, frames, events, seen = await _run_peer_boundary_turn(on_prompt)
+
+    assert seen == {"sub": "", "main": ""}
+    assert not any(isinstance(e, SteerDelivered) for e in events)
+    assert len(_user_frames(frames)) == 1
+
+
 async def test_peer_admitted_while_cli_result_is_unread_is_dropped_without_a_cycle() -> None:
     """With hooks registered, a peer can be accepted while the CLI's result
     sits unread: no tool boundary follows, so it is dropped at the result with
@@ -784,9 +871,59 @@ async def test_peer_admitted_while_cli_result_is_unread_is_dropped_without_a_cyc
         await loop.aclose()
 
 
+async def test_user_steer_accepted_while_cli_result_is_unread_starts_no_cycle() -> None:
+    """The old stdin lane's race: a steer landing while the CLI's result sat
+    unread started a follow-up CLI cycle after the turn. On the hook lane it
+    waits for a boundary that never comes, is dropped at the result with no
+    receipt and no stdin frame, and the host's queued row runs as its own turn."""
+    held, release = asyncio.Event(), asyncio.Event()
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _make_loop("a", store=store, session_id=sid, hooks=HookBus())
+    frames = _spy_on_frames(loop)
+    results, readers = [], set()
+    write = loop._write_frame
+
+    async def install_actual_result_gate(frame):
+        reader = loop._proc.stdout
+        if reader not in readers:
+            readers.add(reader)
+            readline = reader.readline
+
+            async def gated_readline():
+                line = await readline()
+                if line and json.loads(line).get("type") == "result":
+                    results.append(json.loads(line))
+                    if len(results) == 1:
+                        held.set()
+                        await release.wait()
+                return line
+            reader.readline = gated_readline
+        await write(frame)
+
+    loop._write_frame = install_actual_result_gate
+    try:
+        await loop.submit(UserTurn(content="first admitted host turn"))
+        await asyncio.wait_for(held.wait(), 10)
+        assert loop._peer_boundary_available()
+        await loop.submit(Steer(text="unread-result steer", id="q1"))
+        release.set()
+        await loop.wait_turn()
+        await loop._discard_stale_stdout()
+        assert loop._pending_peers == []
+        assert len(_user_frames(frames)) == len(results) == 1
+        assert len([e for e in loop.bus.log(sid) if isinstance(e, TurnStarted)]) == 1
+        assert not any(isinstance(e, SteerDelivered) for e in loop.bus.log(sid))
+        assert "q1" not in loop._turn_peer_ids
+    finally:
+        release.set()
+        await loop.aclose()
+
+
 async def test_steer_mid_turn_writes_one_user_frame_and_receipts_it() -> None:
-    """A live turn is steered by writing a second ``user`` frame to the CLI's
-    stdin; the write is the delivery, so it is receipted immediately."""
+    """Without tool-boundary hooks (the fallback), a live turn is steered by
+    writing a second ``user`` frame to the CLI's stdin; the write is the
+    delivery, so it is receipted immediately."""
     store = MemoryStore()
     sid = (await store.create_session()).session_id
     loop = _make_loop("b", store=store, session_id=sid)

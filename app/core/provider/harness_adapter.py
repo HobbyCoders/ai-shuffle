@@ -1925,8 +1925,11 @@ class HarnessAdapter(ProviderAdapter):
         Both legs accept it and both receipt it with ``SteerDelivered`` (mirrored
         to :class:`SteerDeliveredEvent`), but they deliver differently: the
         native leg folds the text into the next tool result inside fluid's
-        steering marker, while the delegated leg writes a second ``user`` frame
-        to the CLI's stdin. Either way the receipt — not this call — is what
+        steering marker, and the delegated leg carries a user steer in the same
+        marker on its next tool-boundary hook answer (a second stdin ``user``
+        frame only when the CLI has no such hooks, or for a harness notice:
+        the CLI may preempt a running tool for a human stdin prompt, #1786).
+        Either way the receipt — not this call — is what
         says the model has the words.
 
         fluid raises ``RuntimeError`` when there is nothing live to steer into
@@ -1958,9 +1961,10 @@ class HarnessAdapter(ProviderAdapter):
 
         False whenever the text may already be in front of the model: an
         unknown id, a steer the native leg already folded into a tool result,
-        and every delegated-leg call (writing to the CLI's stdin IS delivery,
-        so there is nothing to recall). A disconnected or non-fluid engine
-        answers False for the same reason — never claim an un-send that did
+        and a delegated steer that took the stdin fallback (that write IS
+        delivery, so there is nothing to recall). A delegated user steer still
+        waiting for its tool-boundary hook is recalled like a native one. A
+        disconnected or non-fluid engine answers False for the same reason — never claim an un-send that did
         not happen.
         """
         engine = self._engine
@@ -4088,9 +4092,11 @@ class HarnessAdapter(ProviderAdapter):
                 # so without this the marker would read as
                 # suspected injection and be ignored.
                 #
-                # The delegated leg needs nothing: its steers are real ``user``
-                # frames on the CLI's stdin, indistinguishable from any other
-                # thing the user typed.
+                # The delegated leg does not get this block: its user steers
+                # ride a PostToolUse hook's additionalContext, which Claude
+                # Code's own prompt already tells the model to treat as coming
+                # from the user (custom-prompt delegated profiles lack that
+                # line; see #1786), or, without hooks, a real stdin frame.
                 from fluid.context.steering import PROMPT_BLOCK as STEERING_BLOCK
 
                 sections.append(
