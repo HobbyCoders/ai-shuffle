@@ -85,6 +85,47 @@ function makeInit(
 	return { ...createSessionInit(deps), getState, deps };
 }
 
+describe('session-init · deep link replaces the restored chat (#1923 follow-up)', () => {
+	beforeEach(() => {
+		sessionStorage.clear();
+		vi.mocked(feedController.start).mockClear();
+	});
+
+	it('binds the linked chat before init awaits anything, never the previous one', async () => {
+		const load = vi.fn(async () => ({ sessionId: 'chat-a', title: 'Chat A', project: 'proj-a' } as PersistedSession));
+		const { init, getState, deps } = makeInit(null, load);
+		const initializing = init({ deepLinkSessionId: 'chat-b' });
+		// Synchronously, before the first await settles.
+		expect(getState().sessionId).toBe('chat-b');
+		expect(getState().title).toBe('');
+		expect(getState().isRestoringSession).toBe(true);
+		expect(feedController.start).toHaveBeenCalledWith('chat-b');
+		expect(deps.switcher.refreshSessionMetadata).toHaveBeenCalledWith('chat-b');
+		await initializing;
+		// The tab's previous chat is not even read, let alone adopted.
+		expect(load).not.toHaveBeenCalled();
+		expect(feedController.start).not.toHaveBeenCalledWith('chat-a');
+		expect(getState().sessionId).toBe('chat-b');
+		expect(getState().title).toBe('');
+		expect(getState().isRestoringSession).toBe(true);
+	});
+
+	it('fills the profile but leaves the project for the linked chat\'s own row', async () => {
+		const { init, getState } = makeInit(null);
+		await init({ deepLinkSessionId: 'chat-b' });
+		expect(getState().profile).toBe('profile-1');
+		// A device default here would block /live's project as an in-flight pick.
+		expect(getState().project).toBe('');
+	});
+
+	it('wins over a pending skip-restore from an earlier New Chat', async () => {
+		sessionStorage.setItem('__aihub_skipSessionRestore', '1');
+		const { init, getState } = makeInit(null);
+		await init({ deepLinkSessionId: 'chat-b' });
+		expect(getState().sessionId).toBe('chat-b');
+	});
+});
+
 describe('session-init · isRestoringSession on persisted restore', () => {
 	beforeEach(() => {
 		sessionStorage.clear();

@@ -101,10 +101,33 @@ export function createSessionInit(deps: SessionInitDeps) {
 
 	// ─── init ────────────────────────────────────────────────────────
 
-	async function init() {
+	/**
+	 * @param options.deepLinkSessionId A `/?session=<id>` link this load opens.
+	 *   It is adopted as the open session before anything awaits, and the
+	 *   tab's previously open chat is not restored at all: otherwise that chat's
+	 *   title, sidebar highlight and composer showed (and took sends) until the
+	 *   link opened after the first loads.
+	 */
+	async function init(options: { deepLinkSessionId?: string | null } = {}) {
 		const initGen = bumpInitGeneration();
 
-		const skipRestore = getSkipRestore();
+		const deepLinkSessionId = options.deepLinkSessionId || null;
+		const skipRestore = getSkipRestore() || deepLinkSessionId !== null;
+
+		if (deepLinkSessionId) {
+			update(s => ({
+				...s,
+				sessionId: deepLinkSessionId,
+				// Unknown until /live answers; never the previous chat's title.
+				title: '',
+				messages: [],
+				// Same restore window as a reload: the surface shows its loading
+				// state and a send waits until the linked chat's history is in.
+				isRestoringSession: true,
+			}));
+			feedController.start(deepLinkSessionId);
+			void switcher.refreshSessionMetadata(deepLinkSessionId);
+		}
 
 		try {
 			// Boot waterfall (finding S5): these two preference reads are
@@ -127,7 +150,12 @@ export function createSessionInit(deps: SessionInitDeps) {
 			const defaultProfile = backendSelection?.selectedProfile || switcher.getPersistedProfile();
 			const defaultProject = backendSelection?.selectedProject || switcher.getPersistedProject();
 
-			if (skipRestore) {
+			if (deepLinkSessionId) {
+				// The linked chat's project comes from its own row (/live, then the
+				// open after the first loads). A device default written here would
+				// read as a pick made during that fetch and block it.
+				update(s => ({ ...s, profile: s.profile || defaultProfile }));
+			} else if (skipRestore) {
 				update(s => ({
 					...s,
 					profile: s.profile || defaultProfile,

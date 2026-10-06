@@ -12,6 +12,7 @@
 	import { activeView, settingsTargetForView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { projects, sessions } from '$lib/stores/app-data.svelte';
+	import { pendingDeepLink } from '$lib/stores/pending-deep-link';
 	import { activeSession } from '$lib/stores/active-session';
 	import {
 		git,
@@ -237,7 +238,13 @@
 			return chatHeaderTitle({
 				sessionId: activeTab?.sessionId ?? null,
 				title: activeTab?.title,
-				messageCount: activeTab?.messages.length ?? 0
+				messageCount: activeTab?.messages.length ?? 0,
+				// A deep-linked chat can finish its history before /live names it.
+				loading: !!(
+					activeTab?.isRestoringSession ||
+					activeTab?.isLoadingSession ||
+					(activeTab?.sessionId && $pendingDeepLink === activeTab.sessionId)
+				)
 			});
 		}
 		return viewTitles[$activeView.type] || '';

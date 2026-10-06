@@ -145,11 +145,15 @@ describe('Swarm session navigation through the actual active-session store', () 
 	it('lets a fresh deep link override the saved parent even when the child is not listed', async () => {
 		history.replaceState(null, '', '/?session=worker-child');
 		render(Page);
+		// The link is bound at init, before the first loads, so the saved
+		// parent never shows; its lane follows once the deep link is handled
+		// (the param is stripped then).
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
 		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: 'worker-child' });
+		await waitFor(() => expect(window.location.search).toBe(''));
+		expect(activeSession.current.sessionId).toBe('worker-child');
 		expect(appMode.current).toBe('code');
 		expect(feedController.start).toHaveBeenLastCalledWith('worker-child');
-		expect(window.location.search).toBe('');
 	});
 
 	it('selects a worker after closing the mobile drawer', async () => {

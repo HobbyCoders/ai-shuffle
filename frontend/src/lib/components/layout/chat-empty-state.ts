@@ -75,6 +75,8 @@ export interface ChatHeaderTitleInput {
 	title: string | null | undefined;
 	/** Number of messages currently in the active session store. */
 	messageCount: number;
+	/** The bound session's history is still loading (boot restore or deep link). */
+	loading?: boolean;
 }
 
 /**
@@ -85,9 +87,11 @@ export interface ChatHeaderTitleInput {
  * genuinely unbound, empty chat.
  */
 export function chatHeaderTitle(input: ChatHeaderTitleInput): string {
-	const { sessionId, title, messageCount } = input;
+	const { sessionId, title, messageCount, loading = false } = input;
 	if (sessionId || messageCount > 0) {
-		return title?.trim() || 'Untitled';
+		// A deep link binds before its title is known: say it is loading rather
+		// than call the chat Untitled for the moment before /live answers.
+		return title?.trim() || (loading ? 'Loading…' : 'Untitled');
 	}
 	return 'New Chat';
 }

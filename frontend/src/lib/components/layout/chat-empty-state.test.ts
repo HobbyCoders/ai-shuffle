@@ -133,6 +133,17 @@ describe('chatHeaderTitle', () => {
 		).toBe('Refactor the poller');
 	});
 
+	it('says "Loading…" for a bound session whose title has not arrived yet', () => {
+		// A deep link binds the chat before /live answers: its title is still
+		// blank, and "Untitled" would misstate a chat that has a name.
+		expect(
+			chatHeaderTitle({ sessionId: 'sess-1', title: '', messageCount: 0, loading: true })
+		).toBe('Loading…');
+		expect(
+			chatHeaderTitle({ sessionId: 'sess-1', title: 'Named', messageCount: 0, loading: true })
+		).toBe('Named');
+	});
+
 	it('falls back to "Untitled" for a bound session with no/blank title', () => {
 		expect(chatHeaderTitle({ sessionId: 'sess-1', title: '', messageCount: 0 })).toBe('Untitled');
 		expect(chatHeaderTitle({ sessionId: 'sess-1', title: '   ', messageCount: 0 })).toBe(

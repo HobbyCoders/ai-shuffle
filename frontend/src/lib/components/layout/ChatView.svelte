@@ -28,6 +28,8 @@
 	import PrivateAccessPrompt from '$lib/components/chat/PrivateAccessPrompt.svelte';
 	import WorkspaceSelector from './WorkspaceSelector.svelte';
 	import ChatModeHero from './ChatModeHero.svelte';
+	import ChatUnavailableNotice from './ChatUnavailableNotice.svelte';
+	import { unavailableChat, clearUnavailableChat } from '$lib/stores/unavailable-chat';
 	import VoiceCallPanel from '$lib/components/voice/VoiceCallPanel.svelte';
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { RotateCcw } from 'lucide-svelte';
@@ -69,6 +71,9 @@
 	// brand-new "Let's build your project" workspace picker.
 	const isClearedSession = $derived(chatSurface === 'cleared');
 	const primaryAssistant = $derived(assistantMode ? $assistantState : null);
+	// A chat that could not be opened, while this surface is still the unbound
+	// New Chat it fell back to. Binding any chat hides it.
+	const unavailable = $derived($activeSession.sessionId ? null : $unavailableChat);
 
 	// The assistant's background work, as plain lines beside its composer.
 	const backgroundJobs = $derived(
@@ -299,6 +304,8 @@
 						<h1 class="cleared-title">{primaryAssistant.introduction.preferred_name ? `Hello, ${primaryAssistant.introduction.preferred_name}.` : 'Where shall we begin?'}</h1>
 						<p class="cleared-hint">Just say what you need.</p>
 					</div>
+				{:else if unavailable}
+					<ChatUnavailableNotice chat={unavailable} onDismiss={clearUnavailableChat} />
 				{:else if isClearedSession}
 					<!-- Bound existing session with an empty transcript (cleared via the
 					     sessions-board broom, #558). Show its OWN title + a cleared

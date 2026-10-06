@@ -37,6 +37,7 @@ import {
 // Extracted sub-modules
 import { createSessionInit, setSkipRestore, bumpInitGeneration } from './session/session-init';
 // V2 Phase 1: SSE-fed reducer store for v2_stream sessions (single writer).
+import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
 import { feedController } from './session/v2/feed-controller';
 import { createMessageSender } from './session/message-sender';
 import { createPermissionHandler } from './session/permission-handler';
@@ -727,8 +728,11 @@ feedController.attach({
 	// #1908: a remembered or opened session the server no longer serves (404/403)
 	// leaves to the empty state instead of retrying forever; newChat also forgets
 	// it as the session to restore on the next load.
-	onSessionUnavailable: (sessionId: string) => {
-		if (_state.sessionId === sessionId) activeSession.newChat();
+	onSessionUnavailable: (sessionId: string, status: number) => {
+		if (_state.sessionId !== sessionId) return;
+		activeSession.newChat();
+		// Say why the chat did not open, instead of a silent New Chat.
+		markChatUnavailable(sessionId, status);
 	},
 });
 
@@ -857,7 +861,7 @@ export const activeSession = {
 
 	subscribe: _subscribe,
 
-	init: async () => { await sessionInitModule.init(); activeSession.applyComposerDefaults(); },
+	init: async (options?: { deepLinkSessionId?: string | null }) => { await sessionInitModule.init(options); activeSession.applyComposerDefaults(); },
 	destroy: sessionInitModule.destroy,
 	resetForAccountChange() {
 		bumpInitGeneration();
@@ -868,6 +872,7 @@ export const activeSession = {
 	// ── Session Navigation (delegated to session-switcher) ─────────
 
 	switchSession: (sessionId: string, projectId?: string | null, worktreeInfo?: import('./session/session-switcher').SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) => {
+		clearUnavailableChat();
 		setSkipRestore(false);
 		// Explicit navigation wins over an async boot restore still reading the
 		// persisted session. Its generation checks will now discard that stale load.
@@ -876,6 +881,7 @@ export const activeSession = {
 	},
 
 	newChat: () => {
+		clearUnavailableChat();
 		setSkipRestore(true);
 		bumpInitGeneration();
 		const restoredDraft = switcher.newChat();

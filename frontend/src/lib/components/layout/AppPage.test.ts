@@ -150,11 +150,49 @@ describe('AppPage initial Assistant landing', () => {
   expect(mocks.openFeaturePage).not.toHaveBeenCalled(); expect(get(activeView)?.type).toBe('session');
  });
  it('lets explicit session deep-links take priority', async () => {
+  mocks.init.mockImplementation(async (opts?: { deepLinkSessionId?: string }) => {
+   if (opts?.deepLinkSessionId) active.set({ sessionId: opts.deepLinkSessionId, draft: '', project: null });
+  });
   window.history.replaceState({}, '', '/?session=notification-task'); await boot();
+  expect(mocks.init).toHaveBeenCalledWith({ deepLinkSessionId: 'notification-task' });
   expect(mocks.openSession).toHaveBeenCalledWith('notification-task');
   // Assistant is never mounted first (its requests would race the deep link).
   expect(mocks.openFeaturePage).not.toHaveBeenCalled();
   expect(get(activeView)).toEqual({ type: 'session', sessionId: 'notification-task' });
+  expect(window.location.search).toBe('');
+ });
+ it('shows the linked chat from the first frame, never the chat the tab had open (#1923)', async () => {
+  // The tab was last on chat A; the link names chat B.
+  views.set({ type: 'session', sessionId: 'chat-a' });
+  let release!: () => void;
+  mocks.init.mockImplementation((opts?: { deepLinkSessionId?: string }) => {
+   if (opts?.deepLinkSessionId) active.set({ sessionId: opts.deepLinkSessionId, draft: '', project: null });
+   return new Promise<void>(resolve => { release = resolve; });
+  });
+  window.history.replaceState({}, '', '/?session=chat-b');
+  render(AppPage, { shell });
+  // Before init (and the first loads) settle, the view and the store are on B.
+  await waitFor(() => expect(mocks.init).toHaveBeenCalledWith({ deepLinkSessionId: 'chat-b' }));
+  expect(get(activeView)).toEqual({ type: 'session', sessionId: 'chat-b' });
+  expect(get(active).sessionId).toBe('chat-b');
+  release(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
+  expect(mocks.openSession).toHaveBeenCalledWith('chat-b');
+  expect(mocks.openSession).not.toHaveBeenCalledWith('chat-a');
+ });
+ it('does not pull the user back to the link once they left it while it loaded', async () => {
+  let release!: () => void;
+  mocks.init.mockImplementation((opts?: { deepLinkSessionId?: string }) => {
+   if (opts?.deepLinkSessionId) active.set({ sessionId: opts.deepLinkSessionId, draft: '', project: null });
+   return new Promise<void>(resolve => { release = resolve; });
+  });
+  window.history.replaceState({}, '', '/?session=gone-id');
+  render(AppPage, { shell });
+  await waitFor(() => expect(mocks.init).toHaveBeenCalled());
+  // The link answered 404 (store fell back to a new chat), or the user moved on.
+  active.set({ sessionId: null, draft: '', project: null });
+  release(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
+  expect(mocks.openSession).not.toHaveBeenCalled();
+  expect(mocks.openFeaturePage).not.toHaveBeenCalled();
   expect(window.location.search).toBe('');
  });
 });

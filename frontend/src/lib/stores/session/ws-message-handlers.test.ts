@@ -2199,6 +2199,36 @@ describe('ws-message-handlers', () => {
 
 			expect(deps.onNewChat).toHaveBeenCalled();
 		});
+
+		it('records the missing chat so the New Chat it falls back to says why', async () => {
+			const { unavailableChat, clearUnavailableChat } = await import('../unavailable-chat');
+			const { get } = await import('svelte/store');
+			clearUnavailableChat();
+			const state = mockState();
+			state.sessionId = 'missing-session';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'session_not_found', session_id: 'missing-session' });
+
+			expect(get(unavailableChat)).toEqual({ sessionId: 'missing-session', status: 404 });
+			clearUnavailableChat();
+		});
+
+		it('leaves the notice alone when another session is missing', async () => {
+			const { unavailableChat, clearUnavailableChat } = await import('../unavailable-chat');
+			const { get } = await import('svelte/store');
+			clearUnavailableChat();
+			const state = mockState();
+			state.sessionId = 'open-session';
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'session_not_found', session_id: 'other-session' });
+
+			expect(deps.onNewChat).not.toHaveBeenCalled();
+			expect(get(unavailableChat)).toBeNull();
+		});
 	});
 
 	describe('start handler', () => {

@@ -167,6 +167,9 @@
 			pendingDeepLink.set(deepLinkSessionId);
 			// Never a permanent spinner: if boot fails before the open, let go.
 			setTimeout(() => pendingDeepLink.update((id) => (id === deepLinkSessionId ? null : id)), 20_000);
+			// Show the linked chat from the first frame. The view saved by the
+			// last visit (often another chat) must not render meanwhile.
+			layout.openChat(deepLinkSessionId);
 		}
 
 		// The project catalog loads alongside init: a new chat's remembered
@@ -174,8 +177,10 @@
 		// until it has answered (#1636).
 		const catalogLoad = Promise.all([appData.loadProjects(), appData.loadClusterProjects()]);
 
-		// Initialize data
-		await activeSession.init();
+		// Initialize data. A deep link is bound here, before init awaits, in
+		// place of the chat this tab last had open: that chat never shows and a
+		// send never reaches it while the first loads run.
+		await activeSession.init({ deepLinkSessionId });
 		// The layout's explicit New Chat wins over an older backend session
 		// snapshot (see below). Settle that now, not after the loads: until then
 		// the composer was bound to the old session, so a send went there and the
@@ -270,7 +275,12 @@
 		// the session is owned by another device) relays exactly like a click in
 		// the Sessions board.
 		if (deepLinkSessionId) {
-			handleOpenSession(deepLinkSessionId);
+			// Re-open with the row now loaded (lane, worktree). Skip it when the
+			// linked chat already left: the server said it does not exist (the
+			// "chat not found" notice is up) or the user went elsewhere meanwhile.
+			if (!navigationClaimed && $activeSession.sessionId === deepLinkSessionId) {
+				handleOpenSession(deepLinkSessionId);
+			}
 			const url = new URL(window.location.href);
 			url.searchParams.delete('session');
 			history.replaceState(history.state, '', url.pathname + url.search + url.hash);

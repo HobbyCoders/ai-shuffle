@@ -26,6 +26,7 @@ import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
 import { setPrivateAccessPending } from '../chat-access';
 import { contextChoiceFromWindow } from '$lib/constants/model-context';
+import { markChatUnavailable } from '../unavailable-chat';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -952,8 +953,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				scheduleSessionsReload();
 				const currentId = getState().sessionId;
 				if (currentId === missingId) {
-					update(s => ({ ...s, error: 'This session no longer exists.' }));
 					onNewChat();
+					// The notice replaces the old one-line error, which the
+					// New Chat reset cleared before anyone could read it.
+					markChatUnavailable(missingId, 404);
 				}
 				break;
 			}
