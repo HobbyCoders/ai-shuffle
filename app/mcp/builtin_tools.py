@@ -1633,8 +1633,8 @@ def create_builtin_tools_server(
     @tool(
         "AndroidAction",
         "Run a supported native action on ONE explicitly selected Android device. "
-        "Use AndroidDevices first. Foreground tools must be locally enabled; "
-        "sensitive actions require real on-device approval (never pass confirmed=true). "
+        "Use AndroidDevices first. Tools must be enabled on the phone, and most "
+        "actions wait for the user to approve them there. "
         "System intents report launched_confirmation, NOT completion of the external action. "
         "Returns actual device result; waits at most 25 seconds. Cancellation cannot undo "
         "a side effect already performed. Calendar times must include a timezone.",

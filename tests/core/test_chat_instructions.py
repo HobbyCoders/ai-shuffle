@@ -126,3 +126,77 @@ def test_default_chat_instructions_describe_html_creation_and_sandbox_limits():
     assert "network requests" in text
     assert "HTML code block" in text
     assert "screenshot" in text
+
+
+# ---------------------------------------------------------------------------
+# Who gets the chat instructions. They describe how the chat renders a reply;
+# a Task/Swarm worker's reply goes to the agent that started it instead.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def db():
+    from app.core import provider_agent
+
+    from tests.pg_shim import new_sqlite_connection, route_db_to
+
+    conn = new_sqlite_connection()
+    provider_agent.reset_worker_sessions()
+    with route_db_to(conn):
+        yield conn
+    provider_agent.reset_worker_sessions()
+    conn.close()
+
+
+def _system_text(session_id):
+    import app.core.query_options as qo
+
+    opts, _ = qo.build_options_from_profile(
+        profile={"id": "t", "config": {"model": "opus", "tools_preset": "claude_code"}},
+        session_id=session_id,
+    )
+    prompt = opts.system_prompt
+    return prompt.get("append", "") if isinstance(prompt, dict) else str(prompt or "")
+
+
+def _go_live(session_id, source):
+    from app.db import runs as runs_db
+    from app.db import turns as turns_db
+
+    turn = turns_db.enqueue_turn(session_id, source, prompt="x")
+    run = runs_db.claim_run(session_id, "runner-b", 60)
+    turns_db.start_turn(turn["id"], run["id"], "runner-b")
+
+
+def test_a_top_level_chat_gets_the_chat_instructions(db):
+    from app.core.query_options import WORKER_REPORT_INSTRUCTIONS
+
+    _go_live("human-1", "user")
+    text = _system_text("human-1")
+    assert DEFAULT_SECURITY_INSTRUCTIONS.strip() in text
+    assert WORKER_REPORT_INSTRUCTIONS not in text
+
+
+def test_a_worker_gets_the_report_note_instead(db):
+    from app.core import provider_agent
+    from app.core.query_options import WORKER_REPORT_INSTRUCTIONS
+
+    provider_agent.register_worker_session("worker-1")
+    text = _system_text("worker-1")
+    assert "## Chat display" not in text
+    assert WORKER_REPORT_INSTRUCTIONS in text
+    assert len(WORKER_REPORT_INSTRUCTIONS) < len(DEFAULT_SECURITY_INSTRUCTIONS) // 10
+
+
+def test_a_worker_turn_claimed_by_another_runner_gets_the_report_note(db):
+    from app.core import provider_agent
+
+    _go_live("worker-x", provider_agent.WORKER_TURN_SOURCE)
+    assert provider_agent.is_worker_session("worker-x") is False
+    assert "## Chat display" not in _system_text("worker-x")
+
+
+def test_a_worker_chat_a_human_types_into_gets_the_chat_instructions(db):
+    # After a restart the in-process worker set is empty; the live turn is the
+    # owner's, so the reply is shown in the chat.
+    _go_live("worker-y", "user")
+    assert "## Chat display" in _system_text("worker-y")

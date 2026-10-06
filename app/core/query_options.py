@@ -106,6 +106,30 @@ def _ai_tools_credential_config(
 # the same interaction kind as the CLI's AskUserQuestion.
 WORKER_DISALLOWED_TOOLS = ("AskUserQuestion", "AskUser")
 
+# What a worker turn gets instead of the chat instructions ("Chat display",
+# about 1.8k tokens on how the chat renders replies). A worker's reply goes to
+# the agent that started it, which has those instructions and makes the links.
+WORKER_REPORT_INSTRUCTIONS = (
+    "## Your report\n"
+    "Your replies go to the agent that started you, not to a chat screen. "
+    "Name files by absolute path and copy media URLs verbatim from tool "
+    "results; that agent turns them into links."
+)
+
+
+def _is_worker_run(session_id: Optional[str]) -> bool:
+    """Whether this build is for a Task/Swarm worker's turn (the same guard
+    that withholds ``AskUserQuestion``). A worker chat a human later types
+    into runs a ``user`` turn and is not a worker run. Never raises."""
+    if not (settings.provider_agent_enabled and session_id):
+        return False
+    try:
+        from app.core.provider_agent import is_provider_agent_worker
+        return is_provider_agent_worker(session_id)
+    except Exception:  # noqa: BLE001 — the full instructions are the safe default
+        logger.debug("Worker check failed for %s", session_id, exc_info=True)
+        return False
+
 
 # The Claude Code CLI ships a ``claude-api`` skill (Anthropic SDK reference
 # docs). Invoking it injects ~142K tokens of documentation in one shot, and its
@@ -983,8 +1007,13 @@ def build_options_from_profile(
     # profile that never had the app env block does not start getting one.
     turn_env: Optional[Dict[str, Any]] = None
 
-    # Get the active security instructions (custom or default)
-    security_instructions = get_security_instructions()
+    # Get the active security instructions (custom or default). A worker turn's
+    # reply is read by the agent that started it, not shown in the chat, so it
+    # gets a short report note instead of the chat-display text.
+    security_instructions = (
+        WORKER_REPORT_INSTRUCTIONS if _is_worker_run(session_id)
+        else get_security_instructions()
+    )
 
     if system_prompt is None:
         # No preset - just security instructions as plain text

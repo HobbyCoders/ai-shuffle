@@ -281,6 +281,9 @@ async def test_runtime_registration_discovery(monkeypatch):
     assert {'AndroidDevices', 'AndroidAction'} <= tools.keys()
     assert 'mcp__builtins__AndroidAction' in builtin_tools.get_builtin_tool_names()
     assert len(tools['AndroidAction'].input_schema['oneOf']) == len(service.TOOLS)
+    # The description must not name an argument the schema does not have.
+    assert 'confirmed' not in tools['AndroidAction'].description
+    assert 'confirmed' not in tools['AndroidAction'].input_schema['properties']
     monkeypatch.setattr(service, 'device_authorizer', None)
     response = await tools['AndroidDevices'].handler({})
     assert 'controller_context_missing' in response['content'][0]['text']

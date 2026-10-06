@@ -1,0 +1,4 @@
+# The project requires Python 3.12 (fluid/pyproject.toml, the Docker image, CI).
+# Without this, ruff assumes 3.10 and flags 3.11+ builtins such as
+# BaseExceptionGroup as undefined names.
+target-version = "py312"

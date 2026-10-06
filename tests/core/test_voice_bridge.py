@@ -1468,6 +1468,17 @@ def test_default_agent_otherwise_takes_the_alphabetically_first_name():
     assert vb._pick_default_agent([]) is None
 
 
+def test_phone_mode_names_no_action_the_phone_does_not_support():
+    """The phone-mode appendix used to promise calls, texts, notifications,
+    contact lookup, ``end_session`` and a ``confirmed=true`` argument. None of
+    them is an Android action the server accepts (``mobile_tools.FIELDS``)."""
+    text = vb.DEFAULT_CHAT_INSTRUCTIONS
+    for stale in ("send_sms", "confirmed", "end_session", "contact", "calls",
+                  "texts", "notifications"):
+        assert stale not in text, stale
+    assert "Stay silent until the user speaks" in text
+
+
 async def test_the_default_pick_is_stable_across_row_order(
     mock_db, fake_sockets, fake_dispatch, idle_gate, monkeypatch
 ):
