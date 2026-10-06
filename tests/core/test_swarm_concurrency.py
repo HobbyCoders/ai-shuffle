@@ -178,6 +178,47 @@ async def test_explicit_host_limit_queues_then_starts_remaining_child(harness, m
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("setting", [
+    "task_worker_max_per_provider", "subagent_max_concurrent_per_session", "task_tool_max_workers",
+])
+async def test_child_dispatched_after_its_siblings_started_still_queues(harness, monkeypatch, setting):
+    """The third child reaches the dispatcher only once the first two are live.
+
+    Which of the two orders happens is up to the scheduler; on a slow runner
+    the root budget used to refuse this one outright instead of queueing it
+    (issue #1870, item 10). Pinning the late order makes that path certain.
+    """
+    barrier, start = harness
+    monkeypatch.setattr(config.settings, setting, 2)
+    make_dispatcher = task_dispatch.make_fluid_dispatcher
+    calls = []
+
+    def late_third(*args, **kwargs):
+        dispatch = make_dispatcher(*args, **kwargs)
+
+        async def dispatch_late(arguments, ctx):
+            calls.append(arguments)
+            if len(calls) == 3:
+                await barrier.wait_for_starts(2)
+            return await dispatch(arguments, ctx)
+        return dispatch_late
+
+    monkeypatch.setattr(task_dispatch, "make_fluid_dispatcher", late_third)
+    coordinator, key = await start(3)
+    await barrier.wait_for_starts(2)
+    await asyncio.sleep(0.08)
+    assert len(barrier.started) == 2 and len(calls) == 3
+    assert [t["status"] for t in coordinator.snapshot(key)["tasks"]] == ["running"] * 3
+    barrier.active[barrier.started[0]].set()
+    await barrier.wait_for_starts(3)
+    assert barrier.peak == 2
+    barrier.release()
+    await asyncio.wait_for(coordinator.jobs[key], 5)
+    assert coordinator.snapshot(key)["status"] == "completed"
+    assert len(barrier.finished) == 3
+
+
+@pytest.mark.asyncio
 async def test_stop_settles_waiting_admission_without_starting_more_workers(harness, monkeypatch):
     barrier, start = harness
     monkeypatch.setattr(config.settings, "task_worker_max_per_provider", 1)

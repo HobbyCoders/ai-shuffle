@@ -823,3 +823,11 @@ def pytest_unconfigure(config):
     from tests import _xdist_gate
 
     _xdist_gate.unconfigure(config)
+
+
+# ─── Conftest fixtures on a re-collected directory ─────────────────────────
+# A mixed command line can make pytest collect one folder twice; the second
+# node would not see that folder's conftest fixtures. See
+# tests/_directory_fixtures.py.
+
+from tests._directory_fixtures import pytest_make_collect_report  # noqa: F401

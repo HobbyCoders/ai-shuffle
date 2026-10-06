@@ -342,7 +342,15 @@ class TestRejectedStatus:
 
 class TestObservedAtOnRepeat:
     @pytest.mark.asyncio
-    async def test_repeat_persists_only_observed_at_coalesced_per_window(self, monitor, mock_db):
+    async def test_repeat_persists_only_observed_at_coalesced_per_window(
+        self, monitor, mock_db, monkeypatch,
+    ):
+        # The wall clock is controlled: ``observed_at`` is epoch milliseconds
+        # and the row only takes a strictly later one, so on a fast runner a
+        # real clock can give a repeat the same millisecond as the first
+        # reading (issue #1928).
+        clock = [time.time()]
+        monkeypatch.setattr(usage_limits.time, "time", lambda: clock[0])
         monitor._broadcast = AsyncMock()
         await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
         await monitor.apply_live_event_and_broadcast("seven_day", 0.10, "b")
@@ -350,8 +358,9 @@ class TestObservedAtOnRepeat:
         generation = first["generation"]
         assert monitor._broadcast.await_count == 2
 
-        # Same values an hour later (pretend): the shared row learns the newer
+        # Same values an hour later: the shared row learns the newer
         # observation time without a new generation or a changed reading.
+        clock[0] += 3600
         for key in monitor._observed_persisted:
             monitor._observed_persisted[key] -= 3600
         await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
@@ -371,6 +380,7 @@ class TestObservedAtOnRepeat:
         touch = MagicMock(wraps=monitor._persist_observed)
         monitor._persist_observed = touch
         for _ in range(5):
+            clock[0] += 1
             await monitor.apply_live_event_and_broadcast("five_hour", 0.42, "a")
         assert touch.call_count == 0 and monitor._broadcast.await_count == 3
         assert next(w for w in monitor._windows if w["type"] == "five_hour")["observed_at"] \
@@ -378,9 +388,12 @@ class TestObservedAtOnRepeat:
 
         # The other window has its own interval: its first repeat after a
         # minute still writes.
+        clock[0] += 60
         monitor._observed_persisted["seven_day"] -= 3600
         await monitor.apply_live_event_and_broadcast("seven_day", 0.10, "b")
         assert touch.call_count == 1 and monitor._broadcast.await_count == 4
+        assert next(w for w in _own_row()["windows"] if w["type"] == "seven_day")["observed_at"] \
+            == int(clock[0] * 1000)
 
     @pytest.mark.asyncio
     async def test_repeat_right_after_a_full_persist_does_not_write(self, monitor, mock_db):

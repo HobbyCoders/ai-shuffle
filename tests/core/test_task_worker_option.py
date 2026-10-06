@@ -111,6 +111,23 @@ def test_a_valid_remote_pick_goes_to_the_remote_dispatch_not_the_local_one(calle
     assert kwargs["prompt"] == "go" and kwargs["mode"] == "sync"
 
 
+def test_a_remote_pick_is_refused_at_once_when_the_root_tree_is_full(caller, network, monkeypatch):
+    """A remote child has no local admission queue, so a full worker budget
+    refuses it before anything is sent."""
+    from app.core import remote_task
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "task_tool_max_workers", 2)
+    monkeypatch.setattr(td, "_live_worker_count_for_root", lambda root: 2)
+
+    async def never(**kwargs):
+        raise AssertionError("a full tree must not reach the remote worker")
+    monkeypatch.setattr(remote_task, "dispatch_remote", never)
+    payload, calls = _dispatch({"worker": "Unraid"})
+    assert payload["ok"] is False and "Worker budget reached (2 live workers" in payload["error"]
+    assert calls == []
+
+
 def test_file_agents_cannot_run_on_another_worker(caller, network):
     registry = {"reviewer": {"name": "reviewer", "prompt": "Review.", "tools": ["Read"]}}
     with patch("app.core.provider_agent.dispatch_worker") as local:

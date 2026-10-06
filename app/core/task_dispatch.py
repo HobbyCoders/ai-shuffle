@@ -1815,16 +1815,6 @@ async def _dispatch_task_tool(
             "ok": False,
             "error": f"Nesting limit reached ({max_depth} levels of agent-invokes-agent).",
         }
-    max_workers = int(getattr(settings, "task_tool_max_workers", 64) or 64)
-    if _live_worker_count_for_root(root_session_id) >= max_workers:
-        return {
-            "ok": False,
-            "error": (
-                f"Worker budget reached ({max_workers} live workers for this "
-                "session). Wait for running workers or stop them."
-            ),
-        }
-
     label = (args.get("label") or "").strip() or f"Task · {target_name}"
     # fluid's Task hands over ``name``: a short slug derived from the task
     # ("fix-flaky-login") that the worker is listed and addressed by, so
@@ -1832,6 +1822,21 @@ async def _dispatch_task_tool(
     roster_name = str(args.get("name") or "").strip()[:60] or None
 
     if remote_worker is not None:
+        # A remote child skips local admission, so it has no queue for the
+        # root tree's worker budget: refuse at once when the tree is full. A
+        # local child is held to the same budget by ``_reserve_admission``,
+        # which counts reservations as well as live workers and queues like
+        # the other worker limits; refusing here first would fail it or queue
+        # it depending only on whether its siblings had registered yet.
+        max_workers = _root_worker_limit()
+        if _live_worker_count_for_root(root_session_id) >= max_workers:
+            return {
+                "ok": False,
+                "error": (
+                    f"Worker budget reached ({max_workers} live workers for this "
+                    "session). Wait for running workers or stop them."
+                ),
+            }
         # The target checks its own credentials, model, depth and checkout and
         # runs the child in its own pool: no local admission or credential gate.
         from app.core import remote_task

@@ -338,17 +338,24 @@ def test_cycle_refused(agents, monkeypatch):
 
 
 def test_worker_budget(agents, monkeypatch):
+    """A full root tree queues a local child like every other worker limit,
+    then refuses it with the limit named once the admission wait runs out."""
     from app.core.config import settings
 
     monkeypatch.setattr(settings, "task_tool_max_workers", 2)
     monkeypatch.setattr(td, "caller_chain", lambda sid: ([], "root", 0))
     monkeypatch.setattr(td, "_live_worker_count_for_root", lambda root: 2)
-    payload = asyncio.run(_dispatch(
-        {"agent": "helper", "prompt": "go"},
-        "s",
-        caller_profile_id="root-agent",
-    ))
-    assert payload["ok"] is False and "budget" in payload["error"].lower()
+    monkeypatch.setattr(td, "_ADMISSION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(td, "_ADMISSION_POLL_SECONDS", 0.005)
+    with patch("app.core.provider_agent.dispatch_worker") as dispatch:
+        payload = asyncio.run(_dispatch(
+            {"agent": "helper", "prompt": "go"},
+            "s",
+            caller_profile_id="root-agent",
+        ))
+    assert payload["ok"] is False and payload["reason"] == "capacity"
+    assert "TASK_TOOL_MAX_WORKERS limit 2" in payload["error"]
+    dispatch.assert_not_called()
 
 
 def test_provider_bound_target_admission(agents):

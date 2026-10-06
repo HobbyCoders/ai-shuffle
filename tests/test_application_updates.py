@@ -20,6 +20,19 @@ A, B, C = "a" * 40, "b" * 40, "c" * 40
 RUNTIME = "d" * 64
 
 
+@pytest.fixture(autouse=True)
+def _no_inherited_update_settings(monkeypatch):
+    """Start every test from a customer container's defaults.
+
+    A worker that follows edge exports UPDATE_CHANNEL=edge and its own
+    SHUFFLE_CONTAINER_UPDATES directory; shells and agents on it inherit
+    both, which made the supervisor follow edge instead of stable here.
+    Tests that need one of these set it themselves.
+    """
+    for name in ("UPDATE_CHANNEL", "SHUFFLE_CONTAINER_UPDATES", "SHUFFLE_UPDATE_POLICY_FILE", "GIT_SHA"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def feed(tmp_path, monkeypatch):
     key = Ed25519PrivateKey.generate()
