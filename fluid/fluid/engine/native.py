@@ -1910,6 +1910,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         history: list[Message] = []
         compaction_stats: dict[str, int] | None = None
         measured: int | None = None
+        nodes: list[SessionNode] = []
         # Resolve the session READ-ONLY: _ensure_session would create one, and
         # asking what the context looks like must not bring a session into being.
         sid = self._session.session_id if self._session is not None else None
@@ -1925,6 +1926,26 @@ class NativeLoop(BackgroundLifecycleMixin):
             if self._compactor.active:
                 compaction_stats = self._compactor.stats(nodes)
             measured = await self._measured_next_prompt(sid, nodes)
+        # The deferred-tool catalog the NEXT user turn will carry (tools not
+        # yet announced — every deferred tool before the first turn) is real
+        # prompt text that request sends; on the JSON-tool path it is ~1.7k
+        # tokens the breakdown otherwise left out until after the turn.
+        # A resumed engine seeds ``_deferred_announced`` only on its first
+        # turn, so names already announced in the stored history are read
+        # back here (without touching that state) to avoid pricing them twice.
+        specs = self._unannounced_deferred_specs()
+        if specs and nodes and not self._deferred_rehydrated:
+            announced: set[str] = set()
+            for node in nodes:
+                text = node.message.text()
+                if text:
+                    announced.update(parse_deferred_catalog(text))
+            specs = [s for s in specs if s.name not in announced]
+        if specs:
+            pending = Message(role="user", content=[Text(render_deferred_catalog(specs))])
+            history = [*history, pending]
+            if measured is not None:
+                measured += estimate_tokens_of_messages([pending])
         return self._context_usage_snapshot(
             history=history,
             compaction=compaction_stats,
@@ -2907,16 +2928,20 @@ class NativeLoop(BackgroundLifecycleMixin):
         exists to search for. Skipped under code-mode, where discovery goes
         through the in-kernel list_tools/search_tools instead.
         """
-        if self.registry is None or self._codemode is not None:
-            return None
-        specs = [
-            s for s in self.registry.deferred_tools()
-            if s.name not in self._deferred_announced and self._tool_wired(s.name)
-        ]
+        specs = self._unannounced_deferred_specs()
         if not specs:
             return None
         self._deferred_announced.update(s.name for s in specs)
         return render_deferred_catalog(specs)
+
+    def _unannounced_deferred_specs(self) -> list[Any]:
+        """Deferred tools the next user turn's catalog reminder would announce."""
+        if self.registry is None or self._codemode is not None:
+            return []
+        return [
+            s for s in self.registry.deferred_tools()
+            if s.name not in self._deferred_announced and self._tool_wired(s.name)
+        ]
 
     # ─── Compaction plumbing ─────────────────────────────────────────────
 

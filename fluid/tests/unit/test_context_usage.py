@@ -373,8 +373,20 @@ def _registry_with_deferred() -> ToolRegistry:
                  input_schema={"type": "object"}), _noop,
     )
     # Unload one so it becomes known-but-deferred (the ToolSearch tier).
-    registry._loaded.discard("Hidden")
+    assert registry.defer_schema("Hidden")
     return registry
+
+
+def test_defer_schema_moves_a_registered_tool_to_the_deferred_tier() -> None:
+    registry = _registry_with_deferred()
+    assert [s.name for s in registry.list_tools()] == ["Read"]
+    assert [s.name for s in registry.deferred_tools()] == ["Hidden"]
+    # Unknown names are reported, not registered.
+    assert registry.defer_schema("Nope") is False
+    assert registry.get("Nope") is None
+    # load_schema is the inverse: ToolSearch brings it back.
+    registry.load_schema("Hidden")
+    assert registry.deferred_tools() == []
 
 
 async def _noop(input: dict, ctx) -> str:
@@ -444,6 +456,8 @@ async def test_code_mode_still_reports_the_deferred_tier(tmp_path) -> None:
         await loop.aclose()
     assert [t["name"] for t in usage["deferredBuiltinTools"]] == ["Hidden"]
     assert _by_name(usage)[SYSTEM_TOOLS_DEFERRED]["isDeferred"] is True
+    # No catalog reminder rides the user turn under code mode, so none is priced.
+    assert MESSAGES not in _by_name(usage)
 
 
 async def test_native_messages_use_the_trimmed_history_view(tmp_path) -> None:
@@ -519,15 +533,51 @@ async def test_native_snapshot_has_no_side_effects(tmp_path) -> None:
 
 async def test_native_without_a_session_prices_an_empty_history(tmp_path) -> None:
     """No turn submitted yet: report the static context instead of creating a
-    session as a side effect of asking."""
+    session as a side effect of asking. The only Messages are the deferred-tool
+    catalog the first user turn will carry."""
     store = MemoryStore()
     loop = _loop(tmp_path, store)
     try:
         usage = await loop.get_context_usage()
     finally:
         await loop.aclose()
-    assert MESSAGES not in _by_name(usage)
+    assert _by_name(usage)[MESSAGES]["tokens"] == _catalog_tokens(loop)
     assert loop._session is None
+
+
+def _catalog_tokens(loop: NativeLoop) -> int:
+    from fluid.context.trim import estimate_tokens_of_messages
+    from fluid.tools.builtins.tool_search import render_deferred_catalog
+
+    text = render_deferred_catalog(loop.registry.deferred_tools())
+    return estimate_tokens_of_messages([Message(role="user", content=[Text(text)])])
+
+
+async def test_pending_deferred_catalog_is_priced_once(tmp_path) -> None:
+    """The first request carries the deferred-tool catalog in its user turn.
+    The breakdown before the turn prices it as Messages (it used to be missing
+    until the turn ran: ~1.7k tokens on the app's JSON-tool path); after the
+    turn it is part of the stored history and must not be added again."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _loop(tmp_path, store, session_id=sid, context_window=200_000)
+    try:
+        before = await loop.get_context_usage()
+        await loop.submit(UserTurn(content="hi"))
+        await loop.wait_turn()
+        assert loop._unannounced_deferred_specs() == []
+        nodes = await store.load_path(sid)
+        after = await loop.get_context_usage()
+        expected = await loop._measured_next_prompt(sid, nodes)
+    finally:
+        await loop.aclose()
+    assert _by_name(before)[MESSAGES]["tokens"] == _catalog_tokens(loop)
+    assert before["totalTokens"] == sum(
+        c["tokens"] for c in before["categories"]
+        if not c.get("isDeferred") and c["name"] != FREE_SPACE
+    )
+    assert after["measured"] is True
+    assert after["totalTokens"] == expected
 
 
 # ─── Delegated: control_response correlation ─────────────────────────────────
@@ -1036,7 +1086,8 @@ async def test_discovered_agent_bodies_are_not_priced(tmp_path, monkeypatch) -> 
         tools = sum(tool_schema_tokens(t) for t in loop._tools_api())
         assert CUSTOM_AGENTS not in _by_name(usage)
         assert usage["agents"] == []
-        assert usage["totalTokens"] == prompt_tokens + tools
+        # Plus the deferred-tool catalog the first user turn will carry.
+        assert usage["totalTokens"] == prompt_tokens + tools + _catalog_tokens(loop)
         assert usage["totalTokens"] < 2_000  # the bodies alone would be ~6,900
 
         # With a measured total the fixed rows keep their own estimates: no

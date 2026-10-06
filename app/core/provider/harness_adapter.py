@@ -4208,6 +4208,13 @@ class HarnessAdapter(ProviderAdapter):
                 "[HarnessAdapter] bridged in-proc sdk servers onto fluid registry: %s",
                 ", ".join(recorded),
             )
+        if native:
+            # Rarely used members of the eager tiers go deferred too (name +
+            # one-liner, schema on demand) — before the prompt compiles, so the
+            # code-mode catalog collapses them and the prefix never moves.
+            from app.core.provider.fluid_tool_bridge import defer_native_tools
+
+            defer_native_tools(registry)
 
         if _session_mode(options) == "chat":
             from dataclasses import replace
@@ -5658,12 +5665,26 @@ def _catalog_one_liner(spec: Any, leaf: str) -> str:
     """``<first line of the description> [risk: X]`` — the whole prompt budget a
     deferred tool gets. Mirrors ``Projection.one_liner``; kept local so the
     collapse works against the currently vendored fluid too."""
-    first = ""
-    for line in (getattr(spec, "description", "") or "").strip().splitlines():
-        if line.strip():
-            first = line.strip()
-            break
-    note = "" if getattr(spec, "code_mode_allowed", True) else "  [JSON-path only]"
+    description = getattr(spec, "description", "") or ""
+    try:
+        # The ToolSearch catalog's own rule: first line, cut at a word boundary
+        # near 100 chars. Many descriptions are one long paragraph, so the bare
+        # first line was the WHOLE description (ArchiveSession: ~350 tokens).
+        from fluid.tools.builtins.tool_search import _one_line
+
+        first = _one_line(description)
+    except ImportError:
+        first = ""
+        for line in description.strip().splitlines():
+            if line.strip():
+                first = line.strip()
+                break
+    # A description's own "In code mode reach it with ..." sentence is how a
+    # deferred tool is called from run_python; keep it past the cut.
+    reach = description.find("In code mode reach it")
+    if reach >= 0 and "In code mode reach it" not in first:
+        first = f"{first} {description[reach:].splitlines()[0].strip()}".strip()
+    note ="" if getattr(spec, "code_mode_allowed", True) else "  [JSON-path only]"
     return f"{first or leaf} [risk: {getattr(spec, 'risk', 'write')}]{note}"
 
 

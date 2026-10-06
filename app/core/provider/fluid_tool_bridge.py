@@ -271,6 +271,49 @@ NATIVE_SHADOWED_BUILTINS: frozenset[str] = frozenset({
     "ListAgents", "SendMessage",
 })
 
+# Individual tools of EAGER servers (and fluid builtins) that the native leg
+# moves to the deferred tier: each serves a specific owner request (pair an
+# Android device, build a plugin, schedule a cron, read the app's own logs,
+# tidy the sidebar), not the turn-by-turn work, and together their full docs
+# cost ~3.8k tokens on every first request (AndroidAction's JSON schema alone
+# is ~1.5k). Deferred, each is still announced by name + one-liner and stays
+# callable: ToolSearch loads the schema on the JSON path, ``read_tool_docs``
+# serves the docs under code mode. The set is applied once at session build,
+# so the prompt prefix stays byte-stable across turns. Registry names, so a
+# fluid builtin and an ``mcp__builtins__`` bridge copy are both expressible.
+NATIVE_DEFERRED_TOOLS: frozenset[str] = frozenset({
+    "mcp__builtins__AndroidAction",
+    "mcp__builtins__AndroidDevices",
+    "mcp__builtins__CheckPlugin",
+    "mcp__builtins__FindPlugins",
+    "mcp__builtins__InstallPlugin",
+    "mcp__builtins__CronCreate",
+    "mcp__builtins__CronDelete",
+    "mcp__builtins__CronList",
+    "mcp__builtins__RemoteTrigger",
+    "mcp__builtins__DeployStatus",
+    "mcp__builtins__GetAppErrors",
+    "mcp__builtins__GetAppLogs",
+    "mcp__builtins__HandOffSession",
+    "mcp__builtins__NotifyDevices",
+    "mcp__builtins__WorktreeReport",
+    "SettleSession",
+    "UnsettleSession",
+    "ArchiveSession",
+})
+
+
+def defer_native_tools(registry: ToolRegistry) -> List[str]:
+    """Move :data:`NATIVE_DEFERRED_TOOLS` into the registry's deferred tier.
+
+    Returns the names actually deferred (absent tools are skipped). A vendored
+    fluid without ``defer_schema`` leaves everything eager, the old behaviour.
+    """
+    defer = getattr(registry, "defer_schema", None)
+    if not callable(defer):
+        return []
+    return [name for name in sorted(NATIVE_DEFERRED_TOOLS) if defer(name)]
+
 
 def _builtins_call_timeouts(registry: ToolRegistry) -> dict[str, Optional[float]]:
     """Per-tool call bounds for the ``builtins`` server, over the registry's.

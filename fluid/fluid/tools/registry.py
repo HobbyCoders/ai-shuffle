@@ -537,6 +537,20 @@ class ToolRegistry:
         self._loaded.add(name)
         return entry.spec
 
+    def defer_schema(self, name: str) -> bool:
+        """Move a registered tool into the deferred tier (inverse of ``load_schema``).
+
+        For hosts that register a server or builtin set eagerly but want a few
+        rarely used members announced by name only, their schema loaded on
+        demand via ToolSearch (or ``read_tool_docs`` under code mode). Call it
+        at session build, before the first request, so the prompt prefix never
+        changes mid-session because of it. Returns False for an unknown name.
+        """
+        if name not in self._entries:
+            return False
+        self._loaded.discard(name)
+        return True
+
     def get(self, name: str) -> ToolSpec | None:
         entry = self._entries.get(name)
         return entry.spec if entry else None

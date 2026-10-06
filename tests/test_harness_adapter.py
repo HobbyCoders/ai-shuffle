@@ -2928,9 +2928,14 @@ async def test_tool_catalog_prices_under_tools_not_system_prompt(
 
     tool_sections = [s for s in compiled.sections if s.kind == "tools"]
     assert tool_sections, "catalog sections must ride as kind='tools'"
+    # The collapsed "## Deferred tools" index has no tool_name: it is prose
+    # about several tools, priced under System prompt (usage.py's documented rule).
+    deferred_index = [s for s in tool_sections if not s.tool_name]
+    assert all(s.text.startswith("## Deferred tools") for s in deferred_index)
     expected_tools = sum(
         estimate_tokens_of_text(s.text)
-        for s in tool_sections if not s.tool_name.startswith("mcp__")
+        for s in tool_sections
+        if s.tool_name and not s.tool_name.startswith("mcp__")
     )
     expected_mcp = sum(
         estimate_tokens_of_text(s.text)
@@ -2944,7 +2949,7 @@ async def test_tool_catalog_prices_under_tools_not_system_prompt(
         estimate_tokens_of_text(s.text)
         for s in compiled.sections
         if s.kind in ("base", "environment", "extra", "agents")
-    )
+    ) + sum(estimate_tokens_of_text(s.text) for s in deferred_index)
 
 # ─── Native-leg context window (feeds get_context_usage) ─────────────────────
 
