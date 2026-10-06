@@ -19,6 +19,8 @@ PEER_TIMEOUT = 30.0
 # offline for the launch; each dead address used to cost a full request
 # timeout. The background sync keeps its own timeouts.
 CONNECT_TIMEOUT = 3.0
+# Per-peer launch outcomes.
+SYNCED, SYNCING, UNREACHED = "synced", "syncing", "unreached"
 _task: asyncio.Task | None = None
 _last_result: dict | None = None
 
@@ -93,27 +95,38 @@ async def _sync() -> dict:
     if not links:
         return {"status": "partial" if account_incomplete else "synced", "peers": 0}
     async with httpx.AsyncClient(follow_redirects=False) as client:
-        async def catch_up(link):
+        async def catch_up(link) -> str:
+            """``SYNCED``, ``SYNCING`` (answered, still delivering at the limit) or ``UNREACHED``."""
             peer_started = time.monotonic()
             outcome = "failed"
+            batches = link.batches
             try:
                 if not link.endpoints or link.backoff_until > time.monotonic():
                     # The background sync just failed to reach it and is
                     # backing off: do not hold the launch for it again.
                     outcome = "skipped (backing off)"
-                    return False
+                    return UNREACHED
                 async with asyncio.timeout(PEER_TIMEOUT):
                     await link.sync_once(client, ctx, catch_up=True)
                     transport.note_contact(link.device_id)
                     await run_sync(store.upsert_peer, link.device_id, base_url=link.base_url, contacted=True, error=None)
                 outcome = "synced"
-                return True
-            except (TimeoutError, httpx.HTTPError, transport.PeerError) as exc:
+                return SYNCED
+            except TimeoutError:
+                if link.batches > batches:
+                    # It answered and was still moving batches when the launch
+                    # limit came: a large backlog, not an outage. The
+                    # background sync carries on from what was applied.
+                    outcome = f"still syncing in the background ({link.batches - batches} batches so far)"
+                    return SYNCING
+                outcome = "unreachable (TimeoutError)"
+                return UNREACHED
+            except (httpx.HTTPError, transport.PeerError) as exc:
                 outcome = f"unreachable ({type(exc).__name__})"
-                return False
+                return UNREACHED
             except Exception:
                 logger.exception("Startup sync with peer %s failed", link.device_id)
-                return False
+                return UNREACHED
             finally:
                 logger.info("Startup sync: peer %s %s in %.1fs", link.device_id, outcome,
                             time.monotonic() - peer_started)
@@ -124,9 +137,10 @@ async def _sync() -> dict:
             results = await asyncio.gather(*(catch_up(link) for link in links))
         finally:
             transport.connect_timeout.reset(token)
-    reached = sum(results)
-    logger.info("Startup sync: peer phase took %.1fs (%d of %d reached)",
-                time.monotonic() - peers_started, reached, len(links))
+    reached = results.count(SYNCED)
+    syncing = results.count(SYNCING)
+    logger.info("Startup sync: peer phase took %.1fs (%d of %d reached, %d still syncing)",
+                time.monotonic() - peers_started, reached, len(links), syncing)
     # Records can reference note attachments and other managed files. Do not
     # declare the first render current while their bytes are still missing.
     blobs_started = time.monotonic()
@@ -138,6 +152,14 @@ async def _sync() -> dict:
     logger.info("Startup sync: file phase took %.1fs", time.monotonic() - blobs_started)
     if reached == len(links) and not account_incomplete:
         return {"status": "synced", "peers": reached}
+    if syncing:
+        # "partial", not a new status word: installed desktop launchers refuse
+        # to open the app on a status they do not know (desktop worker.ts).
+        reason = ("Still syncing with another worker in the background. Showing saved data; "
+                  "it updates as the sync finishes.")
+        if reached + syncing < len(links):
+            reason += " Some workers could not be reached; sync will retry."
+        return {"status": "partial", "peers": reached, "syncing": syncing, "reason": reason}
     return {"status": "partial" if reached else "offline", "peers": reached,
             "reason": "Some workers could not be synced. Showing saved data; sync will retry in the background."}
 

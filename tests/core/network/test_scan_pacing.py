@@ -74,6 +74,28 @@ async def test_published_changes_restore_active_cadence(monkeypatch):
     assert clock.scans == [0, 4, 12, 28, 60, 62, 64, 68]
 
 
+async def test_a_transcript_backlog_shortens_the_rest_but_never_removes_it(monkeypatch):
+    """#1978: while transcript events remain unpublished the scanner rests as
+    long as its pass took, within [SCAN_BACKLOG_REST_SECONDS,
+    SCAN_INTERVAL_SECONDS], instead of a fixed SCAN_INTERVAL_SECONDS."""
+    from app.network import catalog
+    clock = ScanClock(monkeypatch, passes=5)
+    durations = iter([1.0, 0.1, 5.0, 0.0, 0.0])
+    backlog = iter([True, True, True, False, False])
+
+    def scan():
+        clock.now += next(durations)
+        catalog._events_backlog = next(backlog)
+        return 400
+
+    monkeypatch.setattr(catalog, "_events_backlog", False)
+    monkeypatch.setattr(engine, "scan_all", scan)
+    await clock.run()
+    # A 1 s pass rests 1 s, a 0.1 s pass the 0.5 s floor, a 5 s pass the 2 s
+    # cap; once drained, the usual 2 s cadence returns.
+    assert clock.scans == pytest.approx([0, 2.0, 2.6, 9.6, 11.6])
+
+
 async def test_writes_during_scan_are_retained_and_bursts_are_coalesced(monkeypatch):
     clock = ScanClock(monkeypatch, passes=3)
 

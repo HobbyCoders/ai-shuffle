@@ -41,6 +41,17 @@ EVENT_PASS_BATCHES = 8
 # three quarters of that with room for the AEAD overhead.
 MAX_EVENT_BYTES = (1 << 22) * 3 // 4 - 4096
 
+# Whether the last pass stopped with transcript events still unpublished. The
+# scanner reads it (``take_events_backlog``) to rest less between passes.
+_events_backlog = False
+
+
+def take_events_backlog() -> bool:
+    """Whether a backlog remained after the last pass; clears the flag."""
+    global _events_backlog
+    backlog, _events_backlog = _events_backlog, False
+    return backlog
+
 
 def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_held: bool = False,
                        unpublished_only: bool = False, session_ids: Optional[List[str]] = None) -> List[str]:
@@ -52,11 +63,11 @@ def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_hel
     ``sync_records`` for that row): the source of a shared-database cluster
     hands those over, and stops once the owner speaks.
     """
-    sql = ("SELECT id, updated_at FROM sessions "
+    sql = ("SELECT id, updated_at, is_worker FROM sessions "
            "WHERE (owner_device_id = %s OR (owner_device_id IS NULL AND instance_id = %s))")
     params: List[Any] = [device_id, _my_instance_id()]
     if include_held:
-        sql = ("SELECT s.id, s.updated_at FROM sessions s "
+        sql = ("SELECT s.id, s.updated_at, s.is_worker FROM sessions s "
                "LEFT JOIN sync_records r ON r.collection = 'sessions' AND r.record_id = s.id "
                "WHERE (s.owner_device_id = %s OR (s.owner_device_id IS NULL AND s.instance_id = %s) "
                "OR (s.owner_device_id IS NOT NULL AND s.owner_device_id <> %s AND s.instance_id IS NOT NULL "
@@ -77,13 +88,14 @@ def _owned_session_ids(cursor, device_id: str, *, recent_only: bool, include_hel
         # client/server round trips for every already-published transcript.
         # Missing/zero cursors still visit the publisher so a cleared stream
         # can retract its old tail before publishing replacement events.
-        # Recently active sessions first: live work must not wait behind an
-        # old backlog.
+        # Top-level chats first, then sub-agent transcripts (#1978); within
+        # each, recently active sessions first: the chat the owner has open
+        # must not wait behind an old or delegated backlog.
         sql = (f"SELECT owned.id FROM ({sql}) owned "
                "LEFT JOIN network_catalog_cursors c ON c.session_id = owned.id "
                "WHERE c.published_seq IS NULL OR c.published_seq = 0 OR EXISTS ("
                "SELECT 1 FROM session_events e WHERE e.session_id = owned.id AND e.seq > c.published_seq) "
-               "ORDER BY owned.updated_at DESC, owned.id")
+               "ORDER BY COALESCE(owned.is_worker, FALSE), owned.updated_at DESC, owned.id")
     cursor.execute(sql, tuple(params))
     return [r["id"] for r in cursor.fetchall()]
 
@@ -139,12 +151,15 @@ def publish_owned(*, ctx: Optional[engine.NetworkContext] = None,
     published += publish_runtime(ctx, session_ids=ids)
     published += _publish_child_rows("session_tags", ctx, session_ids=ids)
     published += _publish_child_rows("pending_interactions", ctx, session_ids=ids)
+    global _events_backlog
     deadline = time.monotonic() + EVENT_PASS_SECONDS
+    backlog = False
     for _ in range(EVENT_PASS_BATCHES):
-        count, exhausted = _publish_events(ctx=ctx, recent_only=True, limit=EVENT_BATCH)
+        count, backlog = _publish_events(ctx=ctx, recent_only=True, limit=EVENT_BATCH)
         published += count
-        if not exhausted or time.monotonic() >= deadline:
+        if not backlog or time.monotonic() >= deadline:
             break
+    _events_backlog = backlog
     if published:
         engine.kick()
     return published
@@ -253,9 +268,11 @@ def _publish_events(*, ctx: Optional[engine.NetworkContext], recent_only: bool,
                     session_ids: Optional[List[str]] = None, limit: int = EVENT_BATCH) -> Tuple[int, bool]:
     """Publish up to ``limit`` events; returns (records published, budget used up).
 
-    Sessions share the budget: each round gives every session that still has
-    events an equal slice, so one long backlog cannot take a whole pass from
-    the sessions after it.
+    The budget goes to sessions in priority order (``_owned_session_ids``):
+    each one publishes everything it has before the next gets any, so after
+    a long hold the top-level chat the owner is looking at is current first
+    and sub-agent transcripts follow (#1978). Nothing starves: a session's
+    backlog is finite, and it gets only its new events on later passes.
     """
     ctx = ctx or engine.context()
     if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY or engine.outbox_held():
@@ -271,19 +288,12 @@ def _publish_events(*, ctx: Optional[engine.NetworkContext], recent_only: bool,
                                          include_held=True, unpublished_only=True)
     count = 0
     remaining = max(0, limit)
-    active = targets
-    while remaining > 0 and active:
-        share = max(1, remaining // len(active))
-        more = []
-        for session_id in active:
-            if remaining <= 0:
-                break
-            published, used, has_more = _publish_session_events(ctx, coll, session_id, min(share, remaining))
-            count += published
-            remaining -= used
-            if has_more:
-                more.append(session_id)
-        active = more
+    for session_id in targets:
+        if remaining <= 0:
+            break
+        published, used, _ = _publish_session_events(ctx, coll, session_id, remaining)
+        count += published
+        remaining -= used
     if count:
         engine.kick()
     return count, remaining <= 0

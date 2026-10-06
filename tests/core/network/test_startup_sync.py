@@ -267,3 +267,50 @@ def test_startup_barrier_requires_owner_access(monkeypatch):
     app.include_router(network.router)
     with TestClient(app) as client:
         assert client.post("/api/v1/network/startup-sync").status_code == 403
+
+
+async def test_peer_still_delivering_at_the_launch_limit_is_reported_as_syncing(workers, monkeypatch, caplog):
+    """A large backlog that outlasts PEER_TIMEOUT is not an outage (#1978)."""
+    import logging
+    import time as time_mod
+    a, b = workers("backlog-source"), workers("backlog-target")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    for i in range(12):
+        set_owner_pref(a, f"backlog-{i}", i)
+    served = connect(monkeypatch, a, b)
+    monkeypatch.setattr(transport, "BATCH_LIMIT", 2)
+    monkeypatch.setattr(startup_sync, "PEER_TIMEOUT", 0.3)
+    real_apply = engine.apply_batch
+
+    def slow_apply(ops):
+        time_mod.sleep(0.08)  # each batch arrives, slowly
+        return real_apply(ops)
+    monkeypatch.setattr(engine, "apply_batch", slow_apply)
+    with b.active(), caplog.at_level(logging.INFO, logger="app.network.startup_sync"):
+        result = await startup_sync.synchronize()
+        assert result["status"] == "partial" and result["status"] != "offline"
+        assert result["peers"] == 0 and result["syncing"] == 1
+        assert "syncing" in result["reason"] and "background" in result["reason"]
+        assert 0 < sum(owner_pref(b, f"backlog-{i}") == i for i in range(12)) < 12
+    assert sum(path.endswith("/exchange") for _, path in served.requests) > 1
+    assert "still syncing in the background" in caplog.text
+    assert "unreachable" not in caplog.text
+
+
+async def test_peer_that_answers_nothing_before_the_limit_is_still_unreachable(workers, monkeypatch):
+    a, b = workers("silent-source"), workers("silent-target")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    set_owner_pref(a, "late", True)
+    connect(monkeypatch, a, b)
+    monkeypatch.setattr(startup_sync, "PEER_TIMEOUT", 0.05)
+
+    async def hangs(*args, **kwargs):
+        await asyncio.Event().wait()
+    monkeypatch.setattr(transport.PeerLink, "authenticate", hangs)
+    with b.active():
+        result = await startup_sync.synchronize()
+        assert result["status"] == "offline" and "syncing" not in result

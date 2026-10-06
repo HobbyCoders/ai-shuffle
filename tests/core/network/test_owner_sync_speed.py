@@ -182,10 +182,49 @@ def test_recent_sessions_publish_first_and_share_the_budget(workers):
         # One event of budget goes to the most recently active session.
         assert catalog.publish_events(limit=1) == 1
         assert _cursors("old", "mid", "live") == {"old": 0, "mid": 0, "live": 1}
-        # Six events over three sessions, two each: the old backlog cannot take
-        # them all. The one "live" had no use for goes to the next most recent.
+        # Six events: the most recent sessions take what they have first
+        # (#1978), so the old backlog cannot take them all; it gets the rest.
         assert catalog.publish_events(limit=6) == 6
         assert _cursors("old", "mid", "live") == {"old": 2, "mid": 3, "live": 2}
+
+
+def test_backlog_publishes_the_recent_top_level_chat_before_subagent_transcripts(workers, monkeypatch):
+    """After a long hold the open chat is current first, sub-agents follow (#1978)."""
+    worker = workers("priority-events")
+    monkeypatch.setattr(catalog, "EVENT_BATCH", 10)
+    monkeypatch.setattr(catalog, "EVENT_CHUNK", 4)
+    with worker.active():
+        engine.create_network("Priority events")
+        now = datetime.now(timezone.utc)
+        top_level = {"open-chat": (40, 1), "older-chat": (6, 50)}
+        # Sub-agents that ran for the open chat are its most recent activity.
+        subagents = {f"agent-{i}": (12, 0.1 * (i + 1)) for i in range(6)}
+        subagents["old-agent"] = (12, 60)
+        for sid, (events, hours_ago) in {**top_level, **subagents}.items():
+            _session(sid)
+            _append(sid, events)
+            worker.sql("UPDATE sessions SET updated_at = ?, is_worker = ? WHERE id = ?",
+                       ((now - timedelta(hours=hours_ago)).isoformat(), sid in subagents, sid))
+        sizes = {sid: events for sid, (events, _) in {**top_level, **subagents}.items()}
+        passes = 0
+        while catalog.publish_owned():
+            passes += 1
+            assert passes < 100
+        assert _cursors(*sizes) == sizes
+        # The outbox order is the publish order (origin_seq), and the order
+        # in which a returning peer pulls it.
+        ops = sorted((o for o in store.ops_since({}) if o["collection"] == "session_events"),
+                     key=lambda o: o["origin_seq"])
+        owner = [o["record_id"].split("|", 1)[0] for o in ops]
+        last = {sid: max(i for i, s in enumerate(owner) if s == sid) for sid in sizes}
+        first_subagent = min(i for i, s in enumerate(owner) if s in subagents)
+        assert last["open-chat"] < last["older-chat"] < first_subagent
+        assert max(last.values()) == last["old-agent"]
+        # Per-session order is kept: every stream went out in seq order.
+        by_session = {}
+        for op, sid in zip(ops, owner):
+            by_session.setdefault(sid, []).append(op["order_seq"])
+        assert all(seqs == list(range(1, sizes[sid] + 1)) for sid, seqs in by_session.items())
 
 
 def test_one_scanner_pass_drains_a_backlog_in_short_transactions(workers, monkeypatch):
@@ -204,6 +243,27 @@ def test_one_scanner_pass_drains_a_backlog_in_short_transactions(workers, monkey
         assert commits.call_count >= 12 // 2
         ops = [o for o in store.ops_since({}) if o["collection"] == "session_events"]
         assert sorted(o["order_seq"] for o in ops) == list(range(1, 13))
+
+
+def test_a_pass_that_leaves_a_backlog_tells_the_scanner(workers, monkeypatch):
+    """#1978: the scanner rests less while events remain unpublished; the
+    publisher reports that once per pass, and only while it is true."""
+    worker = workers("backlog-flag")
+    monkeypatch.setattr(catalog, "EVENT_BATCH", 5)
+    monkeypatch.setattr(catalog, "EVENT_PASS_BATCHES", 2)
+    with worker.active():
+        engine.create_network("Backlog")
+        _session("s1")
+        _append("s1", 23)
+        catalog.publish_owned()
+        assert _cursors("s1") == {"s1": 10}
+        assert catalog.take_events_backlog() is True
+        assert catalog.take_events_backlog() is False  # read once
+        catalog.publish_owned()
+        assert catalog.take_events_backlog() is True
+        catalog.publish_owned()  # 3 left: a partial batch ends the backlog
+        assert _cursors("s1") == {"s1": 23}
+        assert catalog.take_events_backlog() is False
 
 
 def test_hydrate_publishes_a_long_transcript_in_chunks(workers, monkeypatch):

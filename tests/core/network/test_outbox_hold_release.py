@@ -224,3 +224,47 @@ def test_inbound_view_opens_the_hold_once_other_peers_were_tried(workers, monkey
 
         assert transport.release_hold_for_peer_view(a.device_id, {}) is True
         assert engine.outbox_held() is False
+
+
+async def test_offline_restart_holds_transcripts_then_drains_the_open_chat_first(workers, monkeypatch):
+    """#1978: a restart while the only peer is unreachable keeps every
+    transcript event in the hold (the rollback guarantee is unchanged). The
+    first contact releases it, and the open chat's backlog goes out ahead of
+    the sub-agent transcripts written after it, in a bounded number of passes."""
+    from app.network import catalog
+    from tests.core.network.test_owner_sync_speed import _append, _session
+    a, b = _network(workers, "a", "b")
+    net = Network(monkeypatch, b=b)  # A reaches B; B cannot reach A
+    monkeypatch.setattr(catalog, "EVENT_BATCH", 10)
+
+    def transcript_ops():
+        ops = [o for o in store.ops_since({}) if o["collection"] == "session_events"]
+        return [o["record_id"].split("|", 1)[0] for o in sorted(ops, key=lambda o: o["origin_seq"])]
+
+    with b.active():
+        store.touch_member(a.device_id, endpoints=["http://nowhere.local:9"])
+        engine.hold_outbox(True)  # B restarted
+        _session("open-chat")
+        _append("open-chat", 30)
+        _session("agent")  # created later: the more recent activity
+        _append("agent", 30)
+        b.sql("UPDATE sessions SET is_worker = ? WHERE id = ?", (True, "agent"))
+        catalog.publish_owned()
+        assert transcript_ops() == []
+        async with httpx.AsyncClient() as client:
+            assert await transport.sync_pass(client) == {}
+        assert engine.outbox_held() is True
+        catalog.publish_owned()
+        assert transcript_ops() == []
+
+    await _dial(a, b.device_id, net.url("b"))
+
+    assert engine.outbox_held() is False
+    with b.active():
+        passes = 0
+        while catalog.publish_owned():
+            passes += 1
+            assert passes <= 2  # 60 events at 8 batches of 10 per pass
+        owner = transcript_ops()
+    assert len(owner) == 60
+    assert max(i for i, s in enumerate(owner) if s == "open-chat") < owner.index("agent")

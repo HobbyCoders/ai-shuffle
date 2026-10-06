@@ -367,9 +367,9 @@ def lock_state(cursor) -> Optional[dict]:
 
 def bump_clock(cursor, observed: int = 0) -> int:
     """Lamport tick: max(local, observed) + 1, persisted."""
-    cursor.execute("UPDATE network_state SET clock = CASE WHEN clock > %s THEN clock ELSE %s END + 1 WHERE id = 1",
-                   (observed, observed))
-    cursor.execute("SELECT clock FROM network_state WHERE id = 1")
+    # One round trip: this runs once per published op.
+    cursor.execute("UPDATE network_state SET clock = CASE WHEN clock > %s THEN clock ELSE %s END + 1 WHERE id = 1 "
+                   "RETURNING clock", (observed, observed))
     row = cursor.fetchone()
     return int(row["clock"]) if row else 0
 
@@ -541,8 +541,12 @@ def list_membership_records(_conn=None) -> List[dict]:
 # ---------------------------------------------------------------------------
 
 def next_origin_seq(cursor, device_id: str, incarnation: int) -> int:
-    cursor.execute("SELECT MAX(seq) AS s FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s",
-                   (device_id, incarnation))
+    # ORDER BY ... LIMIT 1, not MAX(seq): while a stream grows faster than
+    # autovacuum re-analyzes (a first publish of a large backlog), PostgreSQL
+    # can plan MAX as an aggregate over the whole stream, one heap fetch per
+    # op, for every op it allocates (#1978). This form always reads one entry.
+    cursor.execute("SELECT seq AS s FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s "
+                   "ORDER BY seq DESC LIMIT 1", (device_id, incarnation))
     row = cursor.fetchone()
     current = row["s"] if row and row["s"] is not None else 0
     return int(current) + 1

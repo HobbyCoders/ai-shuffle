@@ -48,6 +48,27 @@ def test_incarnation_bump_persists(data_dir):
     assert identity.load(create=False).incarnation == 2
 
 
+def test_identity_derives_its_public_key_once(data_dir, monkeypatch):
+    """#1978: every published op reads the device id; deriving the Ed25519
+    public key on each read was a measurable share of publish time."""
+    first = identity.load()
+    calls = []
+    real = crypto.signing_public_key
+    monkeypatch.setattr(crypto, "signing_public_key", lambda private: calls.append(1) or real(private))
+    fresh = identity.DeviceIdentity(signing_private=first.signing_private,
+                                    encryption_private=first.encryption_private,
+                                    incarnation=first.incarnation, created_at=first.created_at)
+    for _ in range(5):
+        assert fresh.device_id == first.device_id
+        assert fresh.signing_public == first.signing_public
+    assert len(calls) == 1
+    # Changed fields mean a new object, never a stale cached key.
+    other = identity.DeviceIdentity(signing_private=crypto.generate_signing_key(),
+                                    encryption_private=first.encryption_private,
+                                    incarnation=first.incarnation, created_at=first.created_at)
+    assert other.device_id != first.device_id
+
+
 def test_corrupt_identity_file_is_rejected(data_dir):
     identity.load()
     path = data_dir / ".credential-keys" / identity.IDENTITY_FILE

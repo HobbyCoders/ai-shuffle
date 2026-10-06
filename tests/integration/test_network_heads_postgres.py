@@ -129,3 +129,55 @@ def test_concurrent_changes_never_truncate_the_returned_frontier(pg, streams):
         assert len(heads) == streams + 1 and heads[("worker-0000", 1)] == 2
         assert heads[("zzz-new-stream", 7)] == 3
     assert store.local_watermarks()["worker-0000"]["1"] == 2
+
+
+def _rows_read(cursor, query, params):
+    """Index or heap entries the plan of ``query`` reads from sync_ops."""
+    import json as _json
+    cursor.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + query, params)
+    raw = next(iter(cursor.fetchone().values()))
+    plan = (_json.loads(raw) if isinstance(raw, str) else raw)[0]["Plan"]
+    total, stack = 0, [plan]
+    while stack:
+        node = stack.pop()
+        if node.get("Relation Name") == "sync_ops":
+            total += int(node.get("Actual Rows", 0)) * int(node.get("Actual Loops", 1))
+        stack.extend(node.get("Plans", []))
+    return total
+
+
+def test_stream_head_reads_one_entry_while_a_stream_outgrows_its_statistics(pg):
+    """#1978: a first publish of a large backlog grows the worker's own stream
+    far past what the planner last saw. Each op's sequence allocation (and the
+    advertised head) must still read the stream's last entry only, not every
+    entry of the stream once per op."""
+    store, connect = pg
+    with connect() as conn:
+        cur = conn.cursor()
+        # The log of a newly enrolled worker: never analyzed yet.
+        cur.execute("ALTER TABLE sync_ops SET (autovacuum_enabled = false)")
+        for n in range(20):
+            insert(store, cur, f"peer-{n:02d}", 1, 1, f"r{n}")
+        for seq in range(1, 3001):
+            insert(store, cur, "self", 1, seq, f"own-{seq}")
+    with connect() as conn:
+        cur = conn.cursor()
+        seen = []
+
+        class Recording:
+            def execute(self, query, params=None):
+                seen.append((query, params))
+                cur.execute(query, params)
+
+            def fetchone(self):
+                return cur.fetchone()
+
+            def fetchall(self):
+                return cur.fetchall()
+
+        assert store.next_origin_seq(Recording(), "self", 1) == 3001
+        assert store._log_heads(Recording())
+        seq_query, heads_query = seen
+        assert _rows_read(cur, *seq_query) <= 2
+        # One last entry per stream (21), plus the seeks between streams.
+        assert _rows_read(cur, *heads_query) <= 21 * 4

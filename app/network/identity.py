@@ -24,6 +24,7 @@ import stat
 import tempfile
 import threading
 from dataclasses import dataclass
+from functools import cached_property
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -50,7 +51,10 @@ class DeviceIdentity:
     incarnation: int
     created_at: str
 
-    @property
+    # Cached: every published op reads the device id more than once, and
+    # deriving the public key from the private one each time cost ~2.5 s per
+    # 20,000 ops (#1978). The fields are frozen, so the result cannot go stale.
+    @cached_property
     def signing_public(self) -> bytes:
         return crypto.signing_public_key(self.signing_private)
 
@@ -58,7 +62,7 @@ class DeviceIdentity:
     def encryption_public(self) -> bytes:
         return crypto.encryption_public_key(self.encryption_private)
 
-    @property
+    @cached_property
     def device_id(self) -> str:
         return device_id_for(self.signing_public)
 

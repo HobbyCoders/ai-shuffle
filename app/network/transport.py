@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 SYNC_IDLE_SECONDS = 10.0
 SYNC_ACTIVE_SECONDS = 1.0
 SCAN_INTERVAL_SECONDS = 2.0
+# While a transcript backlog remains, the scanner rests as long as the pass
+# took (at least this long, at most SCAN_INTERVAL_SECONDS): about half its
+# time publishing instead of a third, and never back to back (#1978).
+SCAN_BACKLOG_REST_SECONDS = 0.5
 SCAN_IDLE_MAX_SECONDS = 60.0
 # Past this many dirty sessions in one burst, a catalog wake reconciles the
 # whole catalog instead of listing ids.
@@ -126,6 +130,10 @@ class PeerLink:
         # Set once an inbound contact has cut a failure streak's backoff short;
         # cleared by the next successful sync. One early redial per streak.
         self.contact_kick_used = False
+        # Batches this link moved in either direction (pulled with ops, or
+        # pushed). The launch barrier compares it across its time limit to
+        # tell a peer that is still delivering from one that never answered.
+        self.batches = 0
         self._sync_lock = asyncio.Lock()
 
     def update_endpoints(self, endpoints: list[str]) -> None:
@@ -270,6 +278,7 @@ class PeerLink:
                 result = await asyncio.to_thread(engine.apply_batch, ops)
                 summary["received"] += result.applied
                 summary["apply"] = result.as_dict()
+                self.batches += 1
             if not catch_up:
                 # A backlog drains in one pass instead of one batch per
                 # SYNC_ACTIVE_SECONDS; the time budget keeps the push below
@@ -320,6 +329,7 @@ class PeerLink:
                 break
             pushed = await self._request(client, "POST", "/api/v1/network/peer/ops", json_body={"ops": outbound})
             summary["sent"] += len(outbound)
+            self.batches += 1
             if pushed.get("retry") or pushed.get("pending"):
                 # The peer kept some ops out of its stream for now; resend soon.
                 summary["unsettled"] = True
@@ -734,6 +744,7 @@ async def scan_loop() -> None:
         owner_wake = candidates is None or bool(candidates)
         full = full or (not dirty and not owner_wake) or time.monotonic() - last_full_scan >= SCAN_IDLE_MAX_SECONDS
         published = 0
+        started = time.monotonic()
         try:
             if full:
                 published = await asyncio.to_thread(engine.scan_all)
@@ -763,6 +774,12 @@ async def scan_loop() -> None:
         # Targeted writes must not postpone discovery of external edits/deletes.
         delay = min(delay, max(SCAN_INTERVAL_SECONDS,
                                SCAN_IDLE_MAX_SECONDS - (time.monotonic() - last_full_scan)))
+        from app.network import catalog
+        if catalog.take_events_backlog():
+            rest = min(SCAN_INTERVAL_SECONDS,
+                       max(SCAN_BACKLOG_REST_SECONDS, time.monotonic() - started))
+            await asyncio.sleep(rest)
+            continue
         # Coalesce streaming writes and requests arriving during the scan.
         # Even a slow scan or repeated failure must leave the worker some rest.
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
