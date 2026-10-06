@@ -405,6 +405,16 @@ class Session(SessionBase):
     pr_number: Optional[int] = None
     pr_url: Optional[str] = None
     pr_state: Optional[str] = None
+    # Every PR this chat and its sub-agent workers opened, newest last
+    # (``{number, url, state, title, branch, source}``). Empty on rows from
+    # before the list existed; clients then fall back to the pr_* fields.
+    pull_requests: List[Dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("pull_requests", mode="before")
+    @classmethod
+    def decode_pull_requests(cls, value):
+        from app.db.sessions import decode_pull_requests
+        return decode_pull_requests(value)
     # Automation provenance — set when an automation run created this session.
     # Automation sessions run headless (no live watch surface), so the sessions
     # list badges them to differentiate from interactive chats.

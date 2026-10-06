@@ -261,6 +261,10 @@ def create_postgres_schema(cursor) -> None:
             pr_number INTEGER,
             pr_url TEXT,
             pr_state TEXT,
+            -- Every pull request this chat (or one of its sub-agent workers)
+            -- opened: a JSON list of {number, url, state, title, branch,
+            -- source}. NULL on older rows; pr_* above stays the primary PR.
+            pull_requests JSONB,
             -- Working time for the sidepanel. work_ms is the banked sum of
             -- the session's finished turn intervals (start -> settle/park), so
             -- idle gaps never count; work_started_at is the live turn's start

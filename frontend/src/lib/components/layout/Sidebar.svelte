@@ -73,6 +73,7 @@
 		deriveStatus,
 		sessionTimestamp,
 		sessionDeviceId,
+		sessionPrState,
 		projectKey,
 		isVisibleSidebarSession,
 		isArchived,
@@ -352,7 +353,7 @@
 						parked: !!s.parked_task_kind,
 						attention: $backgroundPermissions.get(s.id) ?? null,
 						privateAccess: ($privateAccessPending.get(s.id) ?? 0) > 0,
-						prState: s.pr_state ?? null,
+						prState: sessionPrState(s),
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
 						isActive: !!s.is_active
 					}),

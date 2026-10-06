@@ -912,3 +912,87 @@ describe('SessionCard git state', () => {
 		expect(container.querySelector('.lead')?.getAttribute('aria-label')).toBe('Uncommitted changes');
 	});
 });
+
+describe('SessionCard several pull requests', () => {
+	const pr = (number: number, state: 'open' | 'merged' | 'closed', extra: Record<string, unknown> = {}) => ({
+		number,
+		url: `https://github.com/o/r/pull/${number}`,
+		state,
+		title: `Change ${number}`,
+		...extra,
+	});
+
+	it('keeps one PR exactly as before, with no list control', () => {
+		const { container } = renderCard({ pr_state: 'open', pr_number: 42, pull_requests: [pr(42, 'open')] }, { status: 'pr' });
+		expect(container.querySelector('.l2 .st.pr')?.textContent).toBe('PR #42 open');
+		expect(container.querySelector('.pr-chip.multi')).toBeNull();
+		expect(screen.queryByRole('button', { name: /Pull requests/ })).toBeNull();
+	});
+
+	it('summarises open and merged PRs in one toned chip', () => {
+		const { container } = renderCard(
+			{
+				pr_state: 'merged',
+				pr_number: 3,
+				pull_requests: [pr(1, 'open'), pr(2, 'open', { source: 'subagent' }), pr(3, 'merged')],
+			},
+			{ status: 'pr' },
+		);
+		const chip = container.querySelector('.l2 .pr-chip.multi');
+		expect(chip?.textContent).toBe('2 PRs open · 1 merged');
+		expect(chip?.querySelector('.green')?.textContent).toBe('2 PRs open');
+		expect(chip?.querySelector('.purple')?.textContent).toBe('1 merged');
+	});
+
+	it('lists every PR from the keyboard button and closes on Escape', async () => {
+		const { container, onOpen } = renderCard({
+			pr_state: 'merged',
+			pr_number: 3,
+			pull_requests: [pr(1, 'open'), pr(2, 'open', { source: 'subagent', title: 'Worker fix' }), pr(3, 'merged')],
+		});
+		const button = screen.getByRole('button', { name: 'Pull requests: 2 PRs open, 1 merged' });
+		expect(button.getAttribute('aria-expanded')).toBe('false');
+		await fireEvent.click(button);
+		expect(onOpen).not.toHaveBeenCalled();
+		expect(button.getAttribute('aria-expanded')).toBe('true');
+
+		const dialog = screen.getByRole('dialog', { name: 'Pull requests' });
+		const links = [...dialog.querySelectorAll('a')];
+		// Newest first, each a link to the PR.
+		expect(links.map((a) => a.getAttribute('href'))).toEqual([
+			'https://github.com/o/r/pull/3',
+			'https://github.com/o/r/pull/2',
+			'https://github.com/o/r/pull/1',
+		]);
+		expect(links[1].getAttribute('aria-label')).toBe('#2 Worker fix, open, by a sub-agent');
+		expect(links[0].getAttribute('target')).toBe('_blank');
+
+		await fireEvent.keyDown(dialog, { key: 'Escape' });
+		expect(screen.queryByRole('dialog')).toBeNull();
+		expect(document.activeElement).toBe(button);
+	});
+
+	it('opens the list from the chip without opening the session', async () => {
+		const { container, onOpen } = renderCard({
+			pull_requests: [pr(1, 'merged'), pr(2, 'merged')],
+			pr_state: 'merged',
+			pr_number: 2,
+		});
+		const chip = container.querySelector('.pr-chip.multi') as HTMLElement;
+		expect(chip.textContent).toBe('2 PRs merged');
+		await fireEvent.click(chip);
+		expect(onOpen).not.toHaveBeenCalled();
+		expect(screen.getByRole('dialog', { name: 'Pull requests' })).toBeTruthy();
+		await fireEvent.click(chip);
+		expect(screen.queryByRole('dialog')).toBeNull();
+	});
+
+	it('shows the same toned summary on a settled row', () => {
+		const { container } = renderCard(
+			{ is_active: false, pull_requests: [pr(1, 'merged'), pr(2, 'open')], pr_state: 'open', pr_number: 2 },
+			{ compact: true },
+		);
+		expect(container.querySelector('.l3 .pr-chip.multi')?.textContent).toBe('1 PR open · 1 merged');
+	});
+});
+

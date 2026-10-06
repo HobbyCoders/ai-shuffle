@@ -393,6 +393,7 @@ async def create_pull_request(
         pr_number=pr.number,
         pr_url=pr.url,
         pr_state="open",
+        pr_title=getattr(pr, "title", None),
     )
 
     return pr_to_response(pr)

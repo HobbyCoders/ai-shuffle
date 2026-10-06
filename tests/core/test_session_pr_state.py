@@ -305,3 +305,122 @@ async def test_reconcile_canonical_session_missing_checkout_does_not_use_base(mo
         assert not await reconcile_session_pr(sid)
         gh.get_repo_from_remote.assert_not_called()
     assert database.get_session(sid)["pr_state"] is None
+
+
+def _listed(sid):
+    return [
+        (e['number'], e['state'], e['source'])
+        for e in database.decode_pull_requests(database.get_session(sid)['pull_requests'])
+    ]
+
+
+def _quiet_sync():
+    sync = patch('app.core.sync_engine.sync_engine')
+    mock = sync.start()
+    mock.broadcast_session_updated = AsyncMock()
+    mock.broadcast_user_session_updated = AsyncMock()
+    return sync, mock
+
+
+@pytest.mark.asyncio
+async def test_subagent_pr_is_listed_on_its_parent_chat(mock_db):
+    parent = _mk(project_id='p1', worktree_branch='feat/parent')
+    database.update_session_pr_state(
+        parent, pr_number=3, pr_url='https://github.com/o/r/pull/3', pr_state='open'
+    )
+    middle = _mk(project_id='p1', parent_session_id=parent, is_worker=True, hidden=True,
+                 worktree_branch='task/m')
+    worker = _mk(project_id='p1', parent_session_id=middle, is_worker=True, hidden=True,
+                 worktree_branch='task/w')
+    sync, mock = _quiet_sync()
+    try:
+        await persist_pr_state(
+            session_id=worker, project_id='p1', branch='task/w', pr_number=21,
+            pr_url='https://github.com/o/r/pull/21', pr_state='open', pr_title='Worker fix',
+        )
+        # The parent keeps its own PR as the primary and lists both.
+        row = database.get_session(parent)
+        assert (row['pr_number'], row['pr_state']) == (3, 'open')
+        assert _listed(parent) == [(3, 'open', 'session'), (21, 'open', 'subagent')]
+        assert _listed(middle) == [(21, 'open', 'subagent')]
+        assert database.get_session(middle)['pr_number'] is None
+        parent_patch = [
+            c.kwargs for c in mock.broadcast_user_session_updated.await_args_list
+            if c.kwargs['session_id'] == parent
+        ][-1]['updates']
+        assert 'pr_number' not in parent_patch
+        assert [e['number'] for e in parent_patch['pull_requests']] == [3, 21]
+
+        # Merging the worker's PR (by number, as a merge webhook does) reaches the parent.
+        await persist_pr_state(pr_number=21, pr_url='https://github.com/o/r/pull/21',
+                               pr_state='merged')
+        assert _listed(parent) == [(3, 'open', 'session'), (21, 'merged', 'subagent')]
+        assert database.get_session(parent)['pr_state'] == 'open'
+    finally:
+        sync.stop()
+
+
+@pytest.mark.asyncio
+async def test_fork_pr_is_not_listed_on_its_source_chat(mock_db):
+    source = _mk(project_id='p1', worktree_branch='feat/a')
+    fork = _mk(project_id='p1', parent_session_id=source, worktree_branch='feat/b')
+    sync, _ = _quiet_sync()
+    try:
+        await persist_pr_state(session_id=fork, pr_number=8,
+                               pr_url='https://github.com/o/r/pull/8', pr_state='open')
+    finally:
+        sync.stop()
+    assert _listed(fork) == [(8, 'open', 'session')]
+    assert _listed(source) == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_new_branch_keeps_older_pr_and_refreshes_it(mock_db):
+    sid = _mk(project_id='p1', worktree_branch='feat/two')
+    database.update_session_pr_state(
+        sid, pr_number=4, pr_url='https://github.com/o/r/pull/4', pr_state='open',
+        pr_branch='feat/one',
+    )
+    new_pr = SimpleNamespace(number=9, url='https://github.com/o/r/pull/9', state='OPEN',
+                             head_branch='feat/two', title='Second')
+    old_now = SimpleNamespace(number=4, url='https://github.com/o/r/pull/4', state='MERGED',
+                              head_branch='feat/one', title='First')
+    sync, _ = _quiet_sync()
+    try:
+        with patch('app.api.git_helpers.get_working_dir_async',
+                   new=AsyncMock(return_value='/wd')), \
+                patch('app.core.github_service.github_service') as gh:
+            gh.get_repo_from_remote.return_value = 'o/r'
+            gh.list_pulls.return_value = [new_pr]
+            gh.get_pull.return_value = old_now
+            assert await reconcile_session_pr(sid)
+            gh.get_pull.assert_called_once_with('o/r', 4)
+    finally:
+        sync.stop()
+    row = database.get_session(sid)
+    assert (row['pr_number'], row['pr_state']) == (9, 'open')
+    entries = database.decode_pull_requests(row['pull_requests'])
+    assert [(e['number'], e['state'], e['title']) for e in entries] == [
+        (4, 'merged', 'First'), (9, 'open', 'Second'),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_skips_listed_prs_from_another_repo(mock_db):
+    sid = _mk(project_id='p1', worktree_branch='feat/x')
+    database.update_session_pr_state(
+        sid, pr_number=4, pr_url='https://github.com/o/r/pull/4', pr_state='open'
+    )
+    database.update_session_pr_state(
+        sid, pr_number=5, pr_url='https://github.com/other/repo/pull/5', pr_state='open',
+        primary=False,
+    )
+    same = SimpleNamespace(number=4, url='https://github.com/o/r/pull/4', state='OPEN',
+                           head_branch='feat/x', title='T')
+    with patch('app.api.git_helpers.get_working_dir_async',
+               new=AsyncMock(return_value='/wd')), \
+            patch('app.core.github_service.github_service') as gh:
+        gh.get_repo_from_remote.return_value = 'o/r'
+        gh.list_pulls.return_value = [same]
+        assert await reconcile_session_pr(sid)
+        gh.get_pull.assert_not_called()

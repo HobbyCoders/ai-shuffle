@@ -131,6 +131,9 @@ class SessionRow(TypedDict):
     pr_number: Optional[int]
     pr_url: Optional[str]
     pr_state: Optional[str]
+    # Every PR this chat and its sub-agent workers opened, newest last:
+    # ``{number, url, state, title, branch, source}``. NULL on older rows.
+    pull_requests: Optional[List[Dict[str, Any]]]
     # The native leg's "# Workspace facts" snapshot, rendered once and reused
     # byte-for-byte on every later connect (see
     # ``set_session_workspace_facts``). NULL until the first native connect.
@@ -1357,37 +1360,162 @@ def resync_session_branch(session_id: str, branch: str) -> Optional[SessionRow]:
         return row_to_dict(cursor.fetchone())
 
 
+# A chat that ships many PRs keeps the newest ones; the sidebar summarises.
+MAX_SESSION_PULL_REQUESTS = 50
+_PR_STATES = frozenset({"open", "merged", "closed"})
+
+
+def decode_pull_requests(raw: Any) -> List[Dict[str, Any]]:
+    """The ``pull_requests`` column as a clean list (tolerates NULL/TEXT/junk)."""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    entries: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        try:
+            number = int(item.get("number"))
+        except (TypeError, ValueError):
+            continue
+        state = str(item.get("state") or "").lower()
+        if number <= 0 or state not in _PR_STATES:
+            continue
+        entries.append({
+            "number": number,
+            "url": item.get("url") or None,
+            "state": state,
+            "title": item.get("title") or None,
+            "branch": item.get("branch") or None,
+            "source": "subagent" if item.get("source") == "subagent" else "session",
+        })
+    return entries
+
+
+def _same_pull_request(entry: Dict[str, Any], number: int, url: Optional[str]) -> bool:
+    if entry.get("number") != number:
+        return False
+    # Numbers repeat across repositories; two known URLs must agree.
+    return not (url and entry.get("url") and entry["url"] != url)
+
+
+def merge_pull_request(
+    entries: List[Dict[str, Any]], entry: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Upsert ``entry`` (by number + URL) without losing known fields.
+
+    A known title, branch or URL is never replaced by an unknown one, and the
+    first recorded source wins (a sub-agent's PR stays a sub-agent's PR when
+    a later merge reaches the parent another way).
+    """
+    out = [dict(e) for e in entries]
+    for existing in out:
+        if _same_pull_request(existing, entry["number"], entry.get("url")):
+            for key in ("url", "title", "branch"):
+                if entry.get(key):
+                    existing[key] = entry[key]
+            if entry.get("state"):
+                existing["state"] = entry["state"]
+            return out
+    out.append({
+        "number": entry["number"],
+        "url": entry.get("url") or None,
+        "state": entry["state"],
+        "title": entry.get("title") or None,
+        "branch": entry.get("branch") or None,
+        "source": "subagent" if entry.get("source") == "subagent" else "session",
+    })
+    return out[-MAX_SESSION_PULL_REQUESTS:]
+
+
 def update_session_pr_state(
     session_id: str,
     *,
     pr_number: Optional[int] = None,
     pr_url: Optional[str] = None,
     pr_state: Optional[str] = None,
+    pr_title: Optional[str] = None,
+    pr_branch: Optional[str] = None,
+    pr_source: str = "session",
+    primary: bool = True,
 ) -> Optional[SessionRow]:
     """Write persisted PR lifecycle fields on a session. Does not touch is_active.
 
-    Only columns whose argument is not None are updated, so a merge can flip
-    ``pr_state`` without re-supplying number/url. Returns the updated row, or
-    None when no such session exists.
+    ``primary`` writes the single ``pr_*`` columns (the session's own latest
+    PR), where only columns whose argument is not None are updated, so a merge
+    can flip ``pr_state`` without re-supplying number/url. Every write also
+    upserts the PR into the ``pull_requests`` list; ``primary=False`` touches
+    only that list (a sub-agent's PR on its parent, or an older PR this chat
+    moved on from). A row from before the list existed seeds it with its
+    single PR first, so no PR is forgotten. Returns the updated row, or None
+    when no such session exists.
     """
     _ph = ph()
     now = datetime.now(timezone.utc).isoformat()
-    updates = [f"updated_at = {_ph}"]
-    values: list = [now]
-    if pr_number is not None:
-        updates.append(f"pr_number = {_ph}")
-        values.append(pr_number)
-    if pr_url is not None:
-        updates.append(f"pr_url = {_ph}")
-        values.append(pr_url)
-    if pr_state is not None:
-        updates.append(f"pr_state = {_ph}")
-        values.append(pr_state)
-    if len(updates) == 1:
-        return get_session(session_id)
-    values.append(session_id)
     with get_db() as conn:
         cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT pr_number, pr_url, pr_state, pull_requests, branch, worktree_branch"
+            f" FROM sessions WHERE id = {_ph} FOR UPDATE",
+            (session_id,),
+        )
+        current = row_to_dict(cursor.fetchone())
+        if not current:
+            return None
+
+        entries = decode_pull_requests(current.get("pull_requests"))
+        legacy_state = str(current.get("pr_state") or "").lower()
+        if not entries and current.get("pr_number") and legacy_state in _PR_STATES:
+            entries = [{
+                "number": int(current["pr_number"]),
+                "url": current.get("pr_url") or None,
+                "state": legacy_state,
+                "title": None,
+                "branch": current.get("branch") or current.get("worktree_branch") or None,
+                "source": "session",
+            }]
+        number = pr_number if pr_number is not None else (
+            current.get("pr_number") if primary else None
+        )
+        listed = list(entries)
+        if number is not None:
+            known = next(
+                (e for e in entries if _same_pull_request(e, int(number), pr_url)), None
+            )
+            state = pr_state or (known or {}).get("state")
+            if state in _PR_STATES:
+                url = pr_url or (
+                    current.get("pr_url") if primary and pr_number is None else None
+                )
+                listed = merge_pull_request(entries, {
+                    "number": int(number),
+                    "url": url,
+                    "state": state,
+                    "title": pr_title,
+                    "branch": pr_branch,
+                    "source": pr_source,
+                })
+
+        updates = [f"updated_at = {_ph}"]
+        values: list = [now]
+        if primary:
+            for column, value in (
+                ("pr_number", pr_number), ("pr_url", pr_url), ("pr_state", pr_state)
+            ):
+                if value is not None:
+                    updates.append(f"{column} = {_ph}")
+                    values.append(value)
+        if listed != decode_pull_requests(current.get("pull_requests")):
+            updates.append(f"pull_requests = {_ph}")
+            values.append(json.dumps(listed))
+        if len(updates) == 1:
+            cursor.execute(f"SELECT * FROM sessions WHERE id = {_ph}", (session_id,))
+            return row_to_dict(cursor.fetchone())
+        values.append(session_id)
         cursor.execute(
             f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph} RETURNING *",
             values,
@@ -1405,6 +1533,34 @@ def list_sessions_by_pr_number(pr_number: int) -> list:
             (pr_number,),
         )
         return [row_to_dict(r) for r in cursor.fetchall()]
+
+
+def list_sessions_listing_pr(pr_number: int, pr_url: Optional[str] = None) -> list:
+    """Sessions whose ``pull_requests`` list holds this PR.
+
+    A text prefilter narrows the scan (Postgres renders jsonb as
+    ``"number": 5,``; a compact JSON write reads ``"number":5,``); the
+    decoded list decides.
+    """
+    _ph = ph()
+    number = int(pr_number)
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        patterns = [
+            f'%"number":{gap}{number}{end}%' for gap in (" ", "") for end in (",", "}")
+        ]
+        cursor.execute(
+            "SELECT * FROM sessions WHERE pull_requests IS NOT NULL AND ("
+            + " OR ".join([f"CAST(pull_requests AS TEXT) LIKE {_ph}"] * len(patterns))
+            + ")",
+            patterns,
+        )
+        rows = [row_to_dict(r) for r in cursor.fetchall()]
+    return [
+        row for row in rows
+        if any(_same_pull_request(e, number, pr_url)
+               for e in decode_pull_requests(row.get("pull_requests")))
+    ]
 
 
 def list_sessions_for_cleanup(project_id: str, project_v2_id: Optional[str] = None) -> list:

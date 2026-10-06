@@ -65,14 +65,16 @@
 		formatAge,
 		deviceLabel,
 		branchLabel,
-		prStateText,
 		sessionModeOf,
+		sessionPullRequests,
+		summarizePullRequests,
 		sessionTimestamp,
 		cardActions,
 		type CardAction,
 		type SessionCardStatus,
 		type SessionGitFacts
 	} from './session-card-data';
+	import SessionPrList from './SessionPrList.svelte';
 
 	interface Props {
 		session: Session;
@@ -240,9 +242,35 @@
 	);
 	const stageTone = $derived(GIT_STAGE_TONES[stage]);
 	const stageTip = $derived(GIT_STAGE_TIPS[stage]);
-	const prText = $derived(prStateText(prState, session.pr_number));
+	// Every PR the chat (and its sub-agents) opened. One reads exactly like
+	// the old single-PR chip; several collapse into counts by state.
+	const prs = $derived(sessionPullRequests(session));
+	const prSummary = $derived(
+		summarizePullRequests(prs) ??
+			(prState ? summarizePullRequests([{ number: 0, url: null, state: prState, title: null, branch: null, source: 'session' }]) : null)
+	);
+	const prText = $derived(prSummary?.text ?? null);
+	const prTone = $derived(prSummary?.state ?? prState);
+	const multiPr = $derived(prs.length > 1);
 	// Follow-up edits do not erase the PR history. Show both facts.
 	const showPr = $derived(Boolean(prText));
+	let prListOpen = $state(false);
+	let prChipRef = $state<HTMLElement | null>(null);
+	let prButtonRef = $state<HTMLButtonElement | null>(null);
+	let prReturnFocus = $state<HTMLElement | null>(null);
+	const prListLabel = $derived(
+		prSummary ? `Pull requests: ${prSummary.text.replace(/ · /g, ', ')}` : 'Pull requests'
+	);
+
+	function togglePrList(event: MouseEvent, from: HTMLElement | null) {
+		event.stopPropagation();
+		event.preventDefault();
+		prReturnFocus = from === prChipRef ? prButtonRef ?? frameRef : from;
+		prListOpen = !prListOpen;
+	}
+	$effect(() => {
+		if (!multiPr) prListOpen = false;
+	});
 	/** Compact rows carry one git word; a PR names its number, the rest use the
 	 *  stage's own label ("uncommitted", "pushed", …). */
 	const stageWord = $derived(
@@ -377,7 +405,7 @@
 	}
 
 	function isControlTarget(target: EventTarget | null): boolean {
-		return target instanceof Element && !!target.closest('.hover-acts, button, input, a');
+		return target instanceof Element && !!target.closest('.hover-acts, .pr-pop, .pr-chip.multi, button, input, a');
 	}
 
 	function handlePointerDown(event: PointerEvent) {
@@ -622,6 +650,19 @@
 			<!-- The working time sits at the end of the row that carries the
 			     session's state: the status line on active rows, the meta line
 			     on settled ones. The title keeps the full width. -->
+			{#snippet multiPrChip()}
+				<!-- A pointer shortcut to the list. Keyboard and screen readers
+				     reach it through the "Pull requests" row action. -->
+				<!-- svelte-ignore a11y_click_events_have_key_events -->
+				<!-- svelte-ignore a11y_no_static_element_interactions -->
+				<span
+					bind:this={prChipRef}
+					class="st pr pr-chip multi"
+					class:open={prListOpen}
+					title={`${prText} — show the list`}
+					onclick={(e) => togglePrList(e, prChipRef)}
+				>{#each prSummary?.parts ?? [] as part, i (part.state)}{#if i > 0}<span class="sep">{' · '}</span>{/if}<span class:green={part.state === 'open'} class:purple={part.state === 'merged'} class:muted={part.state === 'closed'}>{part.text}</span>{/each}</span>
+			{/snippet}
 			{#snippet timerChip()}
 				<span class="timer" class:live={turnLive} title={timerTitle}>{timer}</span>
 			{/snippet}
@@ -633,7 +674,11 @@
 						</span>{/if}</span>
 					{#if showPr}
 						<span class="dot" aria-hidden="true"></span>
-						<span class="st pr" title={prText} class:green={prState === 'open'} class:purple={prState === 'merged'}>{prText}</span>
+						{#if multiPr}
+							{@render multiPrChip()}
+						{:else}
+							<span class="st pr" title={prText} class:green={prTone === 'open'} class:purple={prTone === 'merged'}>{prText}</span>
+						{/if}
 					{/if}
 					{#if diff}
 						<span class="dot" aria-hidden="true"></span>
@@ -657,7 +702,11 @@
 				{/if}
 				{#if compact && stageWord}
 					<span class="dot" aria-hidden="true"></span>
-					<span class="st {stageTone}">{stageWord}</span>
+					{#if multiPr && (stage === 'pr' || stage === 'merged' || stage === 'closed')}
+						{@render multiPrChip()}
+					{:else}
+						<span class="st {stageTone}">{stageWord}</span>
+					{/if}
 				{/if}
 				{#if branch}
 					<span class="dot" aria-hidden="true"></span>
@@ -674,6 +723,20 @@
 		<!-- Hover actions on a pointer that hovers. On touch they stay in the
 		     DOM for assistive tech, visually hidden: the swipe is the gesture. -->
 		<span class="hover-acts" aria-label="Session actions">
+			{#if multiPr}
+				<button
+					bind:this={prButtonRef}
+					type="button"
+					class="row-action"
+					title="Pull requests"
+					aria-label={prListLabel}
+					aria-haspopup="dialog"
+					aria-expanded={prListOpen}
+					onclick={(e) => togglePrList(e, prButtonRef)}
+				>
+					<GitPullRequest size={15} strokeWidth={1.9} />
+				</button>
+			{/if}
 			{#each hoverActions as action (action)}
 				<button
 					type="button"
@@ -694,6 +757,15 @@
 				</button>
 			{/each}
 		</span>
+	{/if}
+	{#if prListOpen && prSummary && multiPr}
+		<SessionPrList
+			{prs}
+			summary={prSummary}
+			anchor={prChipRef ?? prButtonRef}
+			returnFocus={prReturnFocus}
+			onClose={() => (prListOpen = false)}
+		/>
 	{/if}
 </div>
 
@@ -903,7 +975,13 @@
 	}
 	.timer.live { color: var(--primary); }
 	/* A long PR label ellipsizes before it can push the timer off the line. */
-	.l2 .st.pr { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+	.l2 .st.pr,
+	.l3 .st.pr { flex: 0 1 auto; min-width: 0; white-space: nowrap; }
+	/* Several PRs: each count keeps its state's tone; the chip opens the list. */
+	.pr-chip.multi { cursor: pointer; position: relative; }
+	.pr-chip.multi .sep { color: var(--subtle-foreground); }
+	.pr-chip.multi:hover > span:not(.sep),
+	.pr-chip.multi.open > span:not(.sep) { text-decoration: underline dotted; text-underline-offset: 2px; }
 	/* On the meta line the project and the branch share the squeeze, so
 	   neither collapses to a stub. */
 	.seg.proj-seg { flex: 0 1 auto; min-width: 4.5em; }

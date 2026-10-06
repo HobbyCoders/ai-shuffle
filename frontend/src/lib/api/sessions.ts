@@ -17,6 +17,16 @@ export interface SessionTag {
 	color: string;
 }
 
+/** A stored entry of `Session.pull_requests`. */
+export interface SessionPullRequestRow {
+	number: number;
+	url?: string | null;
+	state: 'open' | 'merged' | 'closed';
+	title?: string | null;
+	branch?: string | null;
+	source?: 'session' | 'subagent';
+}
+
 export interface Session {
 	workspace_project_ids?: string[];
 	id: string;
@@ -60,6 +70,9 @@ export interface Session {
 	pr_number?: number | null;
 	pr_url?: string | null;
 	pr_state?: 'open' | 'merged' | 'closed' | null;
+	/** Every PR the chat opened or merged, its sub-agents' included (oldest
+	 *  first). Empty on rows written before the list existed. */
+	pull_requests?: SessionPullRequestRow[] | null;
 	/** Banked working time (ms): the sum of every finished turn's live
 	 *  interval. Idle gaps between turns never count. */
 	work_ms?: number | null;

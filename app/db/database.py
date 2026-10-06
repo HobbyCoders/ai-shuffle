@@ -2220,6 +2220,11 @@ def _run_column_migrations(cursor):
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "pr_state"):
         cursor.execute("ALTER TABLE sessions ADD COLUMN pr_state TEXT")
         migrations_applied.append("sessions.pr_state")
+    # Every PR a chat and its sub-agent workers opened (JSON list). NULL on
+    # pre-existing rows: readers fall back to the single pr_* fields above.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "pull_requests"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN pull_requests JSONB")
+        migrations_applied.append("sessions.pull_requests")
 
     # Working time for the sidepanel. ``work_ms`` banks every finished turn's
     # live interval (app/db/turns.py), ``work_started_at`` is the live turn's
@@ -3482,6 +3487,8 @@ from app.db.sessions import (  # noqa: F401
     resync_session_branch,
     update_session_pr_state,
     list_sessions_by_pr_number,
+    list_sessions_listing_pr,
+    decode_pull_requests,
     list_sessions_for_branch,
     list_sessions_for_v2_branch,
     session_has_forks,

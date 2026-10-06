@@ -328,6 +328,107 @@ export function prStateText(
 	return `${ref} closed`;
 }
 
+export type PullRequestState = 'open' | 'merged' | 'closed';
+
+/** One pull request a chat opened, or that one of its sub-agents opened. */
+export interface SessionPullRequest {
+	number: number;
+	url: string | null;
+	state: PullRequestState;
+	title: string | null;
+	branch: string | null;
+	source: 'session' | 'subagent';
+}
+
+const PR_STATES: readonly PullRequestState[] = ['open', 'merged', 'closed'];
+
+/**
+ * Every pull request the row knows about, oldest first. Rows written before
+ * the list existed (or by an older worker) carry only the single `pr_*`
+ * fields; those become a one-entry list. A primary PR missing from the list
+ * is appended so the list never contradicts the row.
+ */
+export function sessionPullRequests(
+	s: Pick<Session, 'pull_requests' | 'pr_number' | 'pr_url' | 'pr_state'>
+): SessionPullRequest[] {
+	const list: SessionPullRequest[] = [];
+	for (const raw of Array.isArray(s.pull_requests) ? s.pull_requests : []) {
+		const number = Number(raw?.number);
+		const state = String(raw?.state ?? '').toLowerCase() as PullRequestState;
+		if (!Number.isInteger(number) || number <= 0 || !PR_STATES.includes(state)) continue;
+		list.push({
+			number,
+			url: raw.url || null,
+			state,
+			title: raw.title || null,
+			branch: raw.branch || null,
+			source: raw.source === 'subagent' ? 'subagent' : 'session'
+		});
+	}
+	const primary = s.pr_number;
+	if (primary && s.pr_state && !list.some((pr) => pr.number === primary && (!pr.url || !s.pr_url || pr.url === s.pr_url))) {
+		list.push({
+			number: primary,
+			url: s.pr_url ?? null,
+			state: s.pr_state,
+			title: null,
+			branch: null,
+			source: 'session'
+		});
+	}
+	return list;
+}
+
+export interface PullRequestSummary {
+	total: number;
+	open: number;
+	merged: number;
+	closed: number;
+	/** The state the row reads as: any open PR wins, then merged, then closed. */
+	state: PullRequestState;
+	/** Short chip copy: "PR #12 open" for one, "2 PRs open · 1 merged" for many. */
+	text: string;
+	/** The chip copy split into toned parts, in display order. */
+	parts: { state: PullRequestState; text: string }[];
+}
+
+/**
+ * Collapse a chat's PRs into one chip. One PR reads exactly like the single
+ * PR chip always has. Several read as counts by state (open, merged, closed,
+ * zero counts left out) with the noun on the first part.
+ */
+export function summarizePullRequests(prs: readonly SessionPullRequest[]): PullRequestSummary | null {
+	if (prs.length === 0) return null;
+	const counts = { open: 0, merged: 0, closed: 0 };
+	for (const pr of prs) counts[pr.state] += 1;
+	const state: PullRequestState = counts.open ? 'open' : counts.merged ? 'merged' : 'closed';
+	if (prs.length === 1) {
+		const text = prStateText(prs[0].state, prs[0].number) ?? 'PR';
+		return { total: 1, ...counts, state, text, parts: [{ state: prs[0].state, text }] };
+	}
+	const parts = PR_STATES.filter((k) => counts[k] > 0).map((k, i) => ({
+		state: k,
+		text: i === 0 ? `${counts[k]} ${counts[k] === 1 ? 'PR' : 'PRs'} ${k}` : `${counts[k]} ${k}`
+	}));
+	return {
+		total: prs.length,
+		...counts,
+		state,
+		text: parts.map((p) => p.text).join(' · '),
+		parts
+	};
+}
+
+/**
+ * The PR state a row's status reads as across all its PRs: one still open
+ * keeps the chat on "PR Opened" even after a later PR merged.
+ */
+export function sessionPrState(
+	s: Pick<Session, 'pull_requests' | 'pr_number' | 'pr_url' | 'pr_state'>
+): PullRequestState | null {
+	return summarizePullRequests(sessionPullRequests(s))?.state ?? s.pr_state ?? null;
+}
+
 /** Diff counts for the second line, e.g. `{ plus: '+124', minus: '−38' }`.
  *  Null when there is nothing changed to count. Uses a real minus sign so the
  *  two columns line up in the mono face. */

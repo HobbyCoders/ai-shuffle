@@ -15,6 +15,9 @@ import {
 	isVisibleSidebarSession,
 	liveProjectKeys,
 	prStateText,
+	sessionPrState,
+	sessionPullRequests,
+	summarizePullRequests,
 	sessionDeviceId,
 	sessionModeOf,
 	sessionTimestamp,
@@ -565,5 +568,60 @@ describe('sessionNeedsYou / attentionTitle', () => {
 	it('prefixes the count only when something is waiting', () => {
 		expect(attentionTitle('AI Shuffle', 0)).toBe('AI Shuffle');
 		expect(attentionTitle('AI Shuffle', 3)).toBe('(3) AI Shuffle');
+	});
+});
+
+describe('session pull requests', () => {
+	const pr = (number: number, state: 'open' | 'merged' | 'closed', extra: Record<string, unknown> = {}) => ({
+		number,
+		url: `https://github.com/o/r/pull/${number}`,
+		state,
+		...extra
+	});
+
+	it('reads a legacy single-PR row as a one-entry list', () => {
+		expect(sessionPullRequests({ pr_number: 5, pr_url: 'u5', pr_state: 'open' })).toEqual([
+			{ number: 5, url: 'u5', state: 'open', title: null, branch: null, source: 'session' }
+		]);
+		expect(sessionPullRequests({ pr_state: null })).toEqual([]);
+	});
+
+	it('keeps the stored list, drops bad entries and adds a missing primary', () => {
+		const list = sessionPullRequests({
+			pull_requests: [pr(1, 'merged', { source: 'subagent', title: 'T' }), { number: 'x', state: 'open' } as never],
+			pr_number: 2,
+			pr_url: 'https://github.com/o/r/pull/2',
+			pr_state: 'open'
+		});
+		expect(list.map((p) => [p.number, p.state, p.source])).toEqual([
+			[1, 'merged', 'subagent'],
+			[2, 'open', 'session']
+		]);
+	});
+
+	it('reads one PR exactly like the single-PR chip', () => {
+		expect(summarizePullRequests(sessionPullRequests({ pull_requests: [pr(123, 'open')] }))?.text).toBe(
+			prStateText('open', 123)
+		);
+		expect(summarizePullRequests([])).toBeNull();
+	});
+
+	it('counts several PRs by state with the noun on the first part', () => {
+		const list = (states: ('open' | 'merged' | 'closed')[]) =>
+			summarizePullRequests(sessionPullRequests({ pull_requests: states.map((st, i) => pr(i + 1, st)) }));
+		expect(list(['open', 'open'])?.text).toBe('2 PRs open');
+		expect(list(['merged', 'open', 'merged'])?.text).toBe('1 PR open · 2 merged');
+		expect(list(['merged', 'merged', 'merged'])?.text).toBe('3 PRs merged');
+		expect(list(['closed', 'merged'])?.text).toBe('1 PR merged · 1 closed');
+		expect(list(['closed', 'merged'])?.state).toBe('merged');
+		expect(list(['merged', 'open'])?.parts.map((p) => p.state)).toEqual(['open', 'merged']);
+	});
+
+	it('keeps a chat on an open PR while any PR is still open', () => {
+		expect(
+			sessionPrState({ pull_requests: [pr(1, 'open'), pr(2, 'merged')], pr_number: 2, pr_state: 'merged' })
+		).toBe('open');
+		expect(sessionPrState({ pr_state: 'closed' })).toBe('closed');
+		expect(sessionPrState({})).toBeNull();
 	});
 });
