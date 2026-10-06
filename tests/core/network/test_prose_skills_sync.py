@@ -152,6 +152,45 @@ def test_names_limits_and_held_folders(workers):
         assert memory_records.publish() == 0
 
 
+def test_held_folder_warns_once_per_reason(workers, caplog, monkeypatch):
+    monkeypatch.setattr(prose_skills, "_held_logged", {})
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        root = _root(a)
+        for i in range(prose_skills.MAX_FILES + 1):
+            _write(root / "many" / ("SKILL.md" if i == 0 else f"f{i}.md"), "z")
+
+        def held_warnings():
+            return [r for r in caplog.records if r.levelname == "WARNING"
+                    and r.getMessage().startswith("Prose skill many not synced")]
+
+        caplog.set_level("INFO", logger=prose_skills.log.name)
+        memory_records.publish()
+        memory_records.publish()
+        assert len(held_warnings()) == 1
+        assert "too many files or bytes" in held_warnings()[0].getMessage()
+
+        # A different reason is news and logs again, once.
+        _write(root / "many" / "SKILL.md", "y" * (prose_skills.MAX_FILE_BYTES + 1))
+        memory_records.publish()
+        memory_records.publish()
+        assert len(held_warnings()) == 2
+        assert "SKILL.md is over the size limit" in held_warnings()[1].getMessage()
+
+        # Back within the limits it syncs and forgets; holding it again warns again.
+        for i in range(1, prose_skills.MAX_FILES + 1):
+            (root / "many" / f"f{i}.md").unlink()
+        _write(root / "many" / "SKILL.md", "fits")
+        memory_records.publish()
+        assert "prose-skill:many" in _ids(a)
+        assert "many" not in prose_skills._held_logged
+        assert any(r.getMessage() == "Prose skill many now synced" for r in caplog.records)
+        _write(root / "many" / "SKILL.md", "y" * (prose_skills.MAX_FILE_BYTES + 1))
+        memory_records.publish()
+        assert len(held_warnings()) == 3
+
+
 def test_hostile_records_are_rejected():
     assert prose_skills.decode(prose_skills.encode({"SKILL.md": "ok", "references/a.md": "a"})) is not None
     for files in ({"../escape.md": "x", "SKILL.md": "x"}, {"SKILL.md": "x", "a/../../b": "x"},

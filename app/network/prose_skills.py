@@ -48,6 +48,9 @@ _SKIP_NAMES = frozenset({"__pycache__"})
 # Refresh and apply both read-modify-write the manifest and the folders.
 LOCK = threading.RLock()
 
+# Held folder name -> the reason already logged, so each refresh does not warn again.
+_held_logged: Dict[str, str] = {}
+
 
 @dataclass(frozen=True)
 class Snapshot:
@@ -182,6 +185,15 @@ def save_manifest(manifest: Mapping[str, Mapping[str, Any]]) -> None:
 # Publish side
 # ---------------------------------------------------------------------------
 
+def _note_held(name: str, reason: str) -> bool:
+    """Record why ``name`` is held; True only when that reason is new for it."""
+    with LOCK:
+        if _held_logged.get(name) == reason:
+            return False
+        _held_logged[name] = reason
+        return True
+
+
 def stage_publish(cur, known: Mapping[str, Mapping[str, Any]], manifest: Dict[str, Dict[str, Any]]) -> bool:
     """Write changed folders as rows on ``cur``; update ``manifest`` in place.
 
@@ -204,14 +216,21 @@ def stage_publish(cur, known: Mapping[str, Mapping[str, Any]], manifest: Dict[st
             snap = snapshot(child)
         except Held as exc:
             held.add(child.name)
-            log.warning("Prose skill %s not synced: %s", child.name, exc)
+            if _note_held(child.name, f"held: {exc}"):
+                log.warning("Prose skill %s not synced: %s", child.name, exc)
             continue
-        except OSError:
+        except OSError as exc:
             held.add(child.name)
-            log.warning("Prose skill %s unreadable", child.name, exc_info=True)
+            if _note_held(child.name, f"unreadable: {exc}"):
+                log.warning("Prose skill %s unreadable", child.name, exc_info=True)
             continue
         if snap is not None:
             present[child.name] = snap
+    with LOCK:
+        for name in [n for n in _held_logged if n not in held]:
+            del _held_logged[name]
+            if name in present:
+                log.info("Prose skill %s now synced", name)
     changed = False
     for name, snap in present.items():
         rid = PREFIX + name

@@ -218,13 +218,37 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
     git_dir = install_path / ".git"
     gcs_sha_file = install_path / ".gcs-sha"
 
-    if not install_path.exists():
-        raise RuntimeError(f"Marketplace directory not found: {install_location}")
+    def _clone_from_source() -> None:
+        source_data = data[marketplace_id].get("source", {})
+        source_url = source_data.get("url") or source_data.get("repo", "")
+        # Handle GitHub shorthand (org/repo) vs full URL
+        if source_url and not source_url.startswith(("http://", "https://", "git@")):
+            source_url = f"https://github.com/{source_url}"
+        if not source_url:
+            if not install_path.exists():
+                raise RuntimeError(f"Marketplace directory not found: {install_location}")
+            raise RuntimeError(f"Cannot re-clone marketplace: no source URL found for {marketplace_id}")
+        shutil.rmtree(install_path, ignore_errors=True)
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "--", source_url, install_location],
+                check=True,
+                capture_output=True,
+                timeout=120
+            )
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Failed to re-clone marketplace: {_git_error(e)}")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Marketplace re-clone timed out")
 
+    if not install_path.exists():
+        # The registry entry outlived its folder -- clone it back from source.
+        logger.warning(f"Marketplace directory is missing: {install_location}. Cloning...")
+        _clone_from_source()
     # GCS-distributed marketplace (installed by Claude Code CLI, not git).
     # These have a .gcs-sha file and no .git directory. The CLI manages
     # updates, so we just verify the content is intact and skip re-clone.
-    if gcs_sha_file.exists():
+    elif gcs_sha_file.exists():
         manifest = svc._get_marketplace_manifest(install_path)
         if manifest:
             logger.info(
@@ -239,25 +263,7 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
     elif not git_dir.exists():
         # Non-git, non-GCS directory -- attempt re-clone from source
         logger.warning(f"Marketplace directory exists but is not a git repo: {install_location}. Re-cloning...")
-        source_data = data[marketplace_id].get("source", {})
-        source_url = source_data.get("url") or source_data.get("repo", "")
-        # Handle GitHub shorthand (org/repo) vs full URL
-        if source_url and not source_url.startswith(("http://", "https://", "git@")):
-            source_url = f"https://github.com/{source_url}"
-        if not source_url:
-            raise RuntimeError(f"Cannot re-clone marketplace: no source URL found for {marketplace_id}")
-        shutil.rmtree(install_path, ignore_errors=True)
-        try:
-            subprocess.run(
-                ["git", "clone", "--depth", "1", "--", source_url, install_location],
-                check=True,
-                capture_output=True,
-                timeout=120
-            )
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to re-clone marketplace: {_git_error(e)}")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("Marketplace re-clone timed out")
+        _clone_from_source()
     else:
         # Git-based marketplace -- pull latest
         try:

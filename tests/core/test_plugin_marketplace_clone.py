@@ -64,6 +64,30 @@ def test_sync_reclone_separates_the_url(svc, fake_git):
     assert _url_after_separator(fake_git[0]) == "https://example.com/org/mp.git"
 
 
+def test_sync_clones_a_marketplace_whose_folder_is_missing(svc, fake_git):
+    root = svc.MARKETPLACES_DIR / "mp"
+    data = {"mp": {"source": {"source": "git", "url": "https://example.com/org/mp.git"},
+                   "installLocation": str(root)}}
+    svc._write_json_file(svc.MARKETPLACES_FILE, data)
+    assert not root.exists()
+
+    assert plugin_marketplace.sync_marketplace(svc, "mp") is True
+
+    assert len(fake_git) == 1
+    assert _url_after_separator(fake_git[0]) == "https://example.com/org/mp.git"
+    assert fake_git[0][-1] == str(root)
+
+
+def test_sync_missing_folder_without_source_url_raises(svc, fake_git):
+    root = svc.MARKETPLACES_DIR / "mp"
+    data = {"mp": {"source": {"source": "git"}, "installLocation": str(root)}}
+    svc._write_json_file(svc.MARKETPLACES_FILE, data)
+
+    with pytest.raises(RuntimeError, match="Marketplace directory not found"):
+        plugin_marketplace.sync_marketplace(svc, "mp")
+    assert fake_git == []
+
+
 @pytest.mark.parametrize("stored", ["--upload-pack=touch /tmp/pwn", "ext::sh -c id", "file:///etc"])
 def test_sync_reclone_never_clones_an_option_or_helper_url(svc, fake_git, stored):
     """A stored URL outside the allowed transports is read as GitHub shorthand."""
