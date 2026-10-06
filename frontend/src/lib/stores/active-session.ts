@@ -142,6 +142,11 @@ export interface ActiveSessionState {
 	 *  targets that turn — a stop delivered after its turn settled then no-ops
 	 *  server-side instead of interrupting the successor turn (GitHub #585). */
 	liveTurnId: string | null;
+	/** The latest turn is parked on background work (v2 feed `turn.parked`,
+	 *  cleared by the next `turn.*`). Keeps the transcript from folding a parked
+	 *  turn in the moment between its last task finishing and the wake turn
+	 *  starting. Optional: only the v2 feed writes it; undefined reads as false. */
+	turnParked?: boolean;
 	/** Model the SDK's MAIN lane is ACTUALLY running for the live/last turn,
 	 *  surfaced by the v2 feed's `system.note`/`model_info` events (null when no
 	 *  note has arrived). Compared against the effective model selection to flag
@@ -333,6 +338,7 @@ function defaultState(): ActiveSessionState {
 		isStreaming: false,
 		optimisticStreaming: false,
 		liveTurnId: null,
+		turnParked: false,
 		liveModel: null,
 		liveRequestedModel: null,
 		liveProvider: null,
@@ -718,6 +724,12 @@ feedController.attach({
 	// avoiding a circular import). Lazy ref: activeSession is defined just below and
 	// this only runs at feed-event time.
 	resolveInteractionByRequestId: (requestId: string) => activeSession.resolveInteractionByRequestId(requestId),
+	// #1908: a remembered or opened session the server no longer serves (404/403)
+	// leaves to the empty state instead of retrying forever; newChat also forgets
+	// it as the session to restore on the next load.
+	onSessionUnavailable: (sessionId: string) => {
+		if (_state.sessionId === sessionId) activeSession.newChat();
+	},
 });
 
 // ─── Exported Store ──────────────────────────────────────────────────────────

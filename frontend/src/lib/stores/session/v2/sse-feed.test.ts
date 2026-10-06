@@ -497,3 +497,51 @@ describe('createSseFeed log epoch', () => {
 		feed.stop();
 	});
 });
+
+// ─── Terminal HTTP answers (#1908) ───────────────────────────────────────────
+
+describe('createSseFeed unreadable session', () => {
+	const tick = async (n = 30) => {
+		for (let i = 0; i < n; i++) await Promise.resolve();
+	};
+	beforeEach(() => vi.useFakeTimers());
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	it.each([404, 403])('stops for good on HTTP %i and reports it once', async (status) => {
+		const fetchMock = vi.fn(async () => ({ ok: false, status, body: null }));
+		vi.stubGlobal('fetch', fetchMock);
+		const onUnavailable = vi.fn();
+		const onError = vi.fn();
+		const feed = createSseFeed('gone-1', { onEvent: () => {}, onUnavailable, onError });
+
+		await tick();
+		// Well past the 15 s backoff cap: a retrying feed would have refetched.
+		await vi.advanceTimersByTimeAsync(60_000);
+		await tick();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(onUnavailable).toHaveBeenCalledTimes(1);
+		expect(onUnavailable).toHaveBeenCalledWith(status);
+		expect(onError).not.toHaveBeenCalled();
+		expect(feed.running).toBe(false);
+	});
+
+	it.each([500, 502])('keeps reconnecting on HTTP %i', async (status) => {
+		const fetchMock = vi.fn(async () => ({ ok: false, status, body: null }));
+		vi.stubGlobal('fetch', fetchMock);
+		const onUnavailable = vi.fn();
+		const feed = createSseFeed('flaky-1', { onEvent: () => {}, onUnavailable, onError: () => {} });
+
+		await tick();
+		await vi.advanceTimersByTimeAsync(5_000);
+		await tick();
+
+		expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+		expect(onUnavailable).not.toHaveBeenCalled();
+		expect(feed.running).toBe(true);
+		feed.stop();
+	});
+});

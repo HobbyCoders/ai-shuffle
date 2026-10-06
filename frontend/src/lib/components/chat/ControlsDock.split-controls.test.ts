@@ -13,11 +13,12 @@ import { api, getUsageLimits } from '$lib/api/client';
 import { getModels, hydrateModelRegistry } from '$lib/constants/models';
 
 vi.hoisted(() => {
-	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-		ok: false,
-		status: 404,
-		json: vi.fn().mockResolvedValue({})
-	}));
+	// Every API read 404s; the event feed of the session a test opens stays
+	// pending instead, because a 404 there means the session does not exist and
+	// the store leaves it (#1908).
+	vi.stubGlobal('fetch', vi.fn((url: unknown) => String(url).includes('/events?')
+		? new Promise(() => {})
+		: Promise.resolve({ ok: false, status: 404, json: vi.fn().mockResolvedValue({}) })));
 });
 
 vi.mock('$lib/api/client', async (importOriginal) => {

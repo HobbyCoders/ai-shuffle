@@ -12,7 +12,8 @@ vi.mock('$lib/stores/app-data.svelte', async () => {
 	return {
 		appData: { loadClusterProjects: vi.fn() },
 		projects: readable(Array.from({ length: 40 }, (_, i) => ({ id: `p${i + 1}`, name: `Project ${i + 1}` }))),
-		clusterProjects: readable([]), profiles: readable([{ id: 'agent' }])
+		clusterProjects: readable([]), profiles: readable([{ id: 'agent' }]),
+		profilesLoaded: readable(true)
 	};
 });
 

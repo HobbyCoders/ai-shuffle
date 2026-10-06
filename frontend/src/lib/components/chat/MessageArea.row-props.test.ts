@@ -49,3 +49,14 @@ describe('MessageArea per-row props', () => {
 		expect(source).toMatch(/function userPromptOccurrence\(messageIndex: number\): number \{\s*return promptOccurrence\[messageIndex\] \?\? 0;/);
 	});
 });
+
+describe('MessageArea settle hold', () => {
+	it('groups the transcript with the held lifecycle, not the raw signals', () => {
+		expect(source).toContain("import { createSettleHold } from '$lib/utils/settle-hold';");
+		expect(source).toMatch(/const latestTurnUnsettled = \$derived\.by\(\(\) => \{\s*void settleHoldTick;\s*return settleHold\.update\(\{/);
+		expect(source).toContain('unsettled: rawLatestTurnUnsettled,');
+		expect(source).toContain("parked: $activeSession.turnParked === true");
+		expect(source).toContain('const latestIsUnsettled = latestTurnUnsettled;');
+		expect(source).toContain('onDestroy(() => settleHold.dispose());');
+	});
+});

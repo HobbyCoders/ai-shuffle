@@ -1108,3 +1108,88 @@ describe('transcript model lookups', () => {
 		expect(model.items).toEqual(buildDisplayItems(messages, SETTLED_OPTS));
 	});
 });
+
+describe('context compaction inside a turn', () => {
+	function compacted(subtype = 'compact_boundary'): ChatMessage {
+		return msg({
+			role: 'system',
+			type: 'system',
+			systemSubtype: subtype,
+			content: '',
+			systemData: { compact_metadata: { trigger: 'auto', pre_tokens: 180_000 } }
+		});
+	}
+
+	it.each(['compact_boundary', 'microcompact_boundary'])(
+		'folds a mid-turn %s card into the Worked group and keeps it as an expanded row',
+		(subtype) => {
+			const card = compacted(subtype);
+			const answer = text('done');
+			const messages = [user('go'), tool(), card, tool(), answer];
+			const items = buildDisplayItems(messages, SETTLED);
+			expect(items.map((item) => item.kind)).toEqual(['message', 'work_log']);
+			const log = items[1] as Extract<DisplayItem, { kind: 'work_log' }>;
+			expect(log.folded.map((entry) => entry.message)).toContain(card);
+			expect(log.sequence.find((entry) => entry.message === card)?.hiddenWhenCollapsed).toBe(true);
+			expect(collapsedVisibleMessages(items)).toEqual([messages[0], answer]);
+			// The payload is untouched: the expanded row renders the same card.
+			expect(log.sequence.find((entry) => entry.message === card)?.message).toBe(card);
+		}
+	);
+
+	it('mentions the compaction in the fold summary', () => {
+		const rows = workEntries([tool(), compacted()]);
+		expect(summarizeWork(rows)).toBe('Ran 1 command and compacted the context');
+		expect(summarizeWorkCompact(rows)).toBe('Ran 1 · Compacted 1');
+		expect(summarizeWork(workEntries([compacted()]))).toBe('Compacted the context');
+	});
+
+	it('leaves a compaction that trails the answer on its own row', () => {
+		const card = compacted();
+		const messages = [user('go'), tool(), text('done'), card];
+		expect(collapsedVisibleMessages(buildDisplayItems(messages, SETTLED))).toContain(card);
+	});
+
+	it('leaves the replay elided-prefix marker and failed compactions visible', () => {
+		const marker = compacted('compaction_boundary');
+		const failed = compacted('compact_failed');
+		const messages = [user('go'), tool(), marker, failed, tool(), text('done')];
+		const visible = collapsedVisibleMessages(buildDisplayItems(messages, SETTLED));
+		expect(visible).toContain(marker);
+		expect(visible).toContain(failed);
+	});
+
+	it('shows the card flat while the turn is still running', () => {
+		const card = compacted();
+		const messages = [user('go'), tool(), card, tool({ toolStatus: 'running' })];
+		const items = buildDisplayItems(messages, { ...SETTLED, latestTurnUnsettled: true });
+		expect(items.every((item) => item.kind === 'message')).toBe(true);
+		expect(collapsedVisibleMessages(items)).toContain(card);
+	});
+});
+
+describe('settled work log identity', () => {
+	it('keeps its key when a late result folds an earlier row', () => {
+		const prompt = user('go');
+		const running = tool({ toolStatus: 'running' });
+		const before = [prompt, running, tool(), text('done')];
+		const after = [prompt, { ...running, toolStatus: 'complete' as const }, before[2], before[3]];
+		const keyOf = (messages: ChatMessage[]) =>
+			buildDisplayItems(messages, SETTLED).find((item) => item.kind === 'work_log')!;
+		const first = keyOf(before) as Extract<DisplayItem, { kind: 'work_log' }>;
+		const second = keyOf(after) as Extract<DisplayItem, { kind: 'work_log' }>;
+		expect(second.folded.length).toBe(first.folded.length + 1);
+		expect(second.key).toBe(first.key);
+	});
+
+	it('keys each steered segment by its own prompt', () => {
+		const messages = [
+			user('go', undefined, 't1'), tool(), text('first'),
+			user('also this', undefined, 't1'), tool(), text('second')
+		];
+		const keys = buildDisplayItems(messages, SETTLED)
+			.filter((item) => item.kind === 'work_log')
+			.map((item) => (item as Extract<DisplayItem, { kind: 'work_log' }>).key);
+		expect(keys).toEqual([`wl-turn-${messages[0].id}`, `wl-turn-${messages[3].id}`]);
+	});
+});

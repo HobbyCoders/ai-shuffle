@@ -27,7 +27,7 @@ import {
 import { createSseFeed, type SseFeed } from './sse-feed';
 import type { ActiveSessionState } from '../../active-session';
 import type { SdkContextUsage } from '$lib/api/sessions';
-import type { ChatMessage, QueuedMessage, Task } from '../../types';
+import type { QueuedMessage, Task } from '../../types';
 import { browserPanel } from '../../browser-panel.svelte';
 import { pendingQueue, reconcilePendingPeerMessages } from '../pending-queue';
 import { swarms } from '../../swarms';
@@ -54,6 +54,10 @@ export interface FeedControllerDeps {
 	 *  event says it was resolved (possibly on another device). Wired to
 	 *  activeSession.resolveInteractionByRequestId; a cheap no-op when absent. */
 	resolveInteractionByRequestId: (requestId: string) => void;
+	/** #1908: the server answered this session's feed with 404/403 — it no
+	 *  longer exists or this viewer may not read it. Called once, after the
+	 *  feed has stopped for good; the store leaves the session. */
+	onSessionUnavailable?: (sessionId: string, status: number) => void;
 }
 
 // ─── Module state ─────────────────────────────────────────────────────────────
@@ -136,25 +140,14 @@ let usageApplied = false;
 // the indicator back to false (the turn-start stutter).
 let optimisticStreaming = false;
 
-// ─── Progressive paint during a long backfill ────────────────────────────────
+// ─── No progressive paint ─────────────────────────────────────────────────────
 //
-// Hydration is atomic: nothing paints until `caught_up`. On a long log that is a
-// spinner for as long as the whole backfill takes to stream and reduce. A quick
-// load stays atomic, but once a backfill has been flowing for
-// PROGRESSIVE_PAINT_AFTER_MS the messages reduced so far are published at a
-// bounded cadence. Only `messages` is published: loading/restoring flags,
-// streaming state and tasks still wait for the real sentinel, and so does the
-// transcript cache (R1).
-export const PROGRESSIVE_PAINT_AFTER_MS = 1_500;
-export const PROGRESSIVE_PAINT_EVERY_MS = 1_000;
-export const PROGRESSIVE_PAINT_EVERY_EVENTS = 2_000;
-let backfillFirstFrameAt = 0;
-let lastInterimFoldAt = 0;
-let eventsSinceInterimFold = 0;
-// The array the last interim fold handed to activeSession. Everything in it came
-// from the reducer, so seedOptimistic only needs to look past it; rescanning it
-// would re-seed messages a replayed rewind has removed since that paint.
-let interimMessages: ChatMessage[] | null = null;
+// Hydration is atomic: nothing paints until `caught_up` (or the floor below).
+// An earlier interim paint published the messages reduced so far during a long
+// backfill; the reader then watched the chat rebuild itself turn by turn, with
+// groups folding and unfolding as history streamed past. The loading state is
+// the honest view of a load in progress, so a long log keeps it until the
+// sentinel and is then revealed in one step.
 
 // ─── Hydration floor ──────────────────────────────────────────────────────────
 //
@@ -399,19 +392,11 @@ function seedOptimistic(): void {
 	if (!deps) return;
 	const app = deps.getState();
 	if (app.sessionId !== currentSessionId) return;
-	const painted = interimMessages;
-	const from =
-		painted &&
-		painted.length > 0 &&
-		app.messages.length >= painted.length &&
-		app.messages[painted.length - 1] === painted[painted.length - 1]
-			? painted.length
-			: 0;
 	// Runs before EVERY reduced SSE event, so it must not be O(user rows x
 	// reducer rows): index the reducer's ids/command ids once per call (#1282).
 	let knownIds: Set<string> | null = null;
 	let knownCommandIds: Set<string> | null = null;
-	for (let i = from; i < app.messages.length; i++) {
+	for (let i = 0; i < app.messages.length; i++) {
 		const m = app.messages[i];
 		if (m.role !== 'user') continue;
 		if (!knownIds || !knownCommandIds) {
@@ -509,6 +494,7 @@ function transcriptPatch(
 		isStreaming: rs.isStreaming || optimistic,
 		optimisticStreaming: rs.isStreaming ? false : optimistic,
 		liveTurnId: rs.liveTurnId,
+		turnParked: rs.parked,
 		liveModel: rs.liveModel,
 		liveRequestedModel: rs.liveRequestedModel,
 		liveProvider: rs.liveProvider,
@@ -541,7 +527,6 @@ function fold(hydrationComplete = false): void {
 	// can never claim ownership on the fed session's behalf.
 	if (reducerState.usage !== null) usageApplied = true;
 	if (hydrationComplete) transcriptPublished = true;
-	interimMessages = null;
 	deps.update((s) =>
 		s.sessionId === currentSessionId
 			? {
@@ -552,37 +537,6 @@ function fold(hydrationComplete = false): void {
 				}
 			: s
 	);
-}
-
-/**
- * Publish the messages reduced so far while a long backfill is still batching
- * (see PROGRESSIVE_PAINT_AFTER_MS). Called per backfilled event; a no-op until
- * the backfill has run long enough, then at most once per interval.
- */
-function maybeInterimFold(): void {
-	// Only while the user is still looking at the loading state. A cache resume or
-	// a floor-driven publish already shows a transcript; repainting it mid-backfill
-	// would visibly rebuild it (S1).
-	if (transcriptPublished) return;
-	const now = Date.now();
-	if (backfillFirstFrameAt === 0) {
-		backfillFirstFrameAt = now;
-		return;
-	}
-	eventsSinceInterimFold++;
-	if (now - backfillFirstFrameAt < PROGRESSIVE_PAINT_AFTER_MS) return;
-	if (
-		now - lastInterimFoldAt < PROGRESSIVE_PAINT_EVERY_MS &&
-		eventsSinceInterimFold < PROGRESSIVE_PAINT_EVERY_EVENTS
-	) {
-		return;
-	}
-	if (!deps || deps.getState().sessionId !== currentSessionId) return;
-	lastInterimFoldAt = now;
-	eventsSinceInterimFold = 0;
-	const messages = releaseMessages(reducerState);
-	interimMessages = messages;
-	deps.update((s) => (s.sessionId === currentSessionId ? { ...s, messages } : s));
 }
 
 // ─── Flush scheduling ─────────────────────────────────────────────────────────
@@ -791,10 +745,6 @@ function resetFeedFlags(): void {
 	hydrationSlow = false;
 	usageApplied = false;
 	resumeFromSeq = 0;
-	backfillFirstFrameAt = 0;
-	lastInterimFoldAt = 0;
-	eventsSinceInterimFold = 0;
-	interimMessages = null;
 }
 
 /**
@@ -1010,13 +960,10 @@ export const feedController: FeedController = {
 					deps?.resolveInteractionByRequestId(ev.request_id);
 				}
 				// During backfill (!caughtUp) accumulate — the complete fold happens
-				// on `caught_up`, with interim paints only for a long backfill. After
+				// on `caught_up`, however long the backfill runs. After
 				// catch-up, fold on the live cadence: throttled for streaming deltas,
 				// next-frame for everything else.
-				if (!caughtUp) {
-					maybeInterimFold();
-					return;
-				}
+				if (!caughtUp) return;
 				if (
 					ev.type === 'tool.use' &&
 					typeof ev.name === 'string' &&
@@ -1031,6 +978,13 @@ export const feedController: FeedController = {
 				scheduleFlush(
 					THROTTLED_EVENT_TYPES.has(String(ev.type)) ? 'throttled' : 'immediate'
 				);
+			},
+			onUnavailable: (status) => {
+				if (generation !== feedGeneration || currentSessionId !== sessionId) return;
+				console.info(`[feedController] session ${sessionId} is unavailable (HTTP ${status}); leaving it`);
+				transcriptCache.delete(sessionId);
+				teardown(false);
+				deps?.onSessionUnavailable?.(sessionId, status);
 			},
 			onError: (err) => {
 				if (generation !== feedGeneration) return;

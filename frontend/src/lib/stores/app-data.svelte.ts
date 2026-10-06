@@ -21,6 +21,9 @@ import { archivedChats } from './archived-chats';
 
 interface AppDataState {
 	profiles: Profile[];
+	/** The agent roster has answered at least once. Until then an empty
+	 *  `profiles` means "not loaded yet", not "no agents". */
+	profilesLoaded: boolean;
 	projects: Project[];
 	/** Origin-keyed catalog of projects available on approved online installs. */
 	clusterProjects: ClusterProject[];
@@ -89,6 +92,7 @@ const SEARCH_PAGE_SIZE = 20;
 
 let _state = $state<AppDataState>({
 	profiles: [],
+	profilesLoaded: false,
 	projects: [],
 	clusterProjects: [],
 	sessions: [],
@@ -607,7 +611,7 @@ export const appData = {
 	async loadProfiles() {
 		try {
 			const profiles = await api.get<Profile[]>('/agents');
-			_update(s => ({ ...s, profiles }));
+			_update(s => ({ ...s, profiles, profilesLoaded: true }));
 		} catch (e) {
 			console.error('Failed to load profiles:', e);
 		}
@@ -920,6 +924,7 @@ export const appData = {
 // ─── Derived Convenience Stores (via store-utils createDerived) ─────────────
 
 export const profiles = createDerived(() => _state.profiles);
+export const profilesLoaded = createDerived(() => _state.profilesLoaded);
 export const projects = createDerived(() => _state.projects);
 export const clusterProjects = createDerived(() => _state.clusterProjects);
 export const sessions = createDerived(() => _state.sessions);

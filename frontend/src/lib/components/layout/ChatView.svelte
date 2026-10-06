@@ -32,6 +32,7 @@
 	import { voiceCallState, isCallSurfaceActive } from '$lib/services/voiceCall';
 	import { RotateCcw } from 'lucide-svelte';
 	import { classifyChatSurface } from './chat-empty-state';
+	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	// The phone shell docks prompts above its composer; the web build has none.
 	import { composerShell } from '$lib/components/chat/composer-shell';
 
@@ -57,7 +58,9 @@
 			// Pending peers belong in the transcript, even before its first message.
 			messageCount: $activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0),
 			isRestoringSession: $activeSession.isRestoringSession,
-			isLoadingSession: $activeSession.isLoadingSession
+			// A deep link boot has read but not opened yet is a load in progress,
+			// not a New Chat: no hero flash before the linked chat appears.
+			isLoadingSession: $activeSession.isLoadingSession || deepLinkLoading($pendingDeepLink, $activeSession.sessionId)
 		})
 	);
 	const isEmptyState = $derived(chatSurface === 'new' || chatSurface === 'cleared');

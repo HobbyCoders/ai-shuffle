@@ -39,6 +39,11 @@ export interface SseFeedOptions {
 	onOpen?: () => void;
 	/** Optional: called on transient errors (before a reconnect is scheduled). */
 	onError?: (err: unknown) => void;
+	/** Optional: called once when the server answers the connect with 404 or
+	 *  403 — the session is gone or this viewer may not read it. That answer
+	 *  will not change on retry, so the feed stops itself first and never
+	 *  reconnects (#1908). Network errors and 5xx still reconnect with backoff. */
+	onUnavailable?: (status: number) => void;
 	/** Seed cursor. The first request uses `from_seq`; reconnects use lastSeq (server filter is exclusive). */
 	fromSeq?: number;
 	/** Log epoch the seed cursor belongs to (from an earlier `caught_up`). Sent
@@ -353,6 +358,17 @@ export function createSseFeed(sessionId: string, options: SseFeedOptions): SseFe
 				} catch {
 					/* stale response cleanup is best-effort */
 				}
+				return;
+			}
+			if (res.status === 404 || res.status === 403) {
+				// Terminal: retrying cannot make an unreadable session readable.
+				try {
+					await res.body?.cancel();
+				} catch {
+					/* best-effort */
+				}
+				feed.stop();
+				options.onUnavailable?.(res.status);
 				return;
 			}
 			if (!res.ok || !res.body) {

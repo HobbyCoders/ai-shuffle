@@ -6,16 +6,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 
-const stores = vi.hoisted(() => ({ projects: null as never, clusterProjects: null as never, profiles: null as never }));
+const stores = vi.hoisted(() => ({ projects: null as never, clusterProjects: null as never, profiles: null as never, profilesLoaded: null as never }));
 const loadClusterProjects = vi.hoisted(() => vi.fn());
 vi.mock('$lib/stores/app-data.svelte', async () => {
 	const { writable } = await import('svelte/store');
-	Object.assign(stores, { projects: writable([]), clusterProjects: writable([]), profiles: writable([]) });
+	Object.assign(stores, { projects: writable([]), clusterProjects: writable([]), profiles: writable([]), profilesLoaded: writable(true) });
 	return {
 		appData: { loadClusterProjects },
 		projects: stores.projects,
 		clusterProjects: stores.clusterProjects,
-		profiles: stores.profiles
+		profiles: stores.profiles,
+		profilesLoaded: stores.profilesLoaded
 	};
 });
 vi.mock('$lib/stores/platform.svelte', () => ({ isMobileUi: () => false }));
@@ -35,6 +36,7 @@ beforeEach(() => {
 		{ origin: 'git@x:team/offline', name: 'Offline', project_v2_id: 'v2-off', local_project_id: null, eligible: [{ online: false }] }
 	]);
 	(stores.profiles as W).set([{ id: 'a1', name: 'Helper' }]);
+	(stores.profilesLoaded as W).set(true);
 	loadClusterProjects.mockResolvedValue(undefined);
 	onSelectProject = vi.fn();
 	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
@@ -114,5 +116,12 @@ describe('WorkspaceSelector', () => {
 		mount();
 		await fireEvent.click(screen.getByRole('button', { name: 'No agents yet — create one to start chatting' }));
 		expect(openFeaturePage).toHaveBeenCalledWith('profile');
+	});
+
+	it('says nothing about agents while the roster is still loading', () => {
+		(stores.profiles as W).set([]);
+		(stores.profilesLoaded as W).set(false);
+		mount();
+		expect(screen.queryByRole('button', { name: /No agents yet/ })).toBeNull();
 	});
 });

@@ -150,6 +150,24 @@ function isGroupableSystem(msg: ChatMessage): boolean {
 	return msg.type === 'system' && GROUPABLE_SYSTEM_SUBTYPES.has(msg.systemSubtype || '');
 }
 
+/**
+ * "Context compacted" cards. One that lands in the middle of a turn is part of
+ * that turn's work: it folds into the Worked group and stays a row in the
+ * expanded log. The replay's elided-prefix marker (`compaction_boundary`) and
+ * a failed compaction are not work and keep their own row.
+ */
+const COMPACTION_CARD_SUBTYPES = new Set(['compact_boundary', 'microcompact_boundary']);
+
+function isCompactionCard(msg: ChatMessage): boolean {
+	return (msg.type === 'system' || msg.role === 'system')
+		&& COMPACTION_CARD_SUBTYPES.has(msg.systemSubtype || '');
+}
+
+/** Work the agent did after a compaction proves the compaction was mid-turn. */
+function isTurnWork(msg: ChatMessage): boolean {
+	return msg.role === 'assistant' || msg.type === 'tool_use' || msg.type === 'subagent';
+}
+
 /** Dedicated/decision-bearing tools retain their own presentation. */
 function isSpecialTool(msg: ChatMessage): boolean {
 	return (
@@ -378,7 +396,8 @@ export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
 	const thoughtCount = entries.filter(
 		(entry) => entry.message.type === 'thinking'
 	).length;
-	if (tools.length === 0 && thoughtCount === 0) return null;
+	const compactions = entries.filter((entry) => isCompactionCard(entry.message)).length;
+	if (tools.length === 0 && thoughtCount === 0 && compactions === 0) return null;
 
 	const counts = new Map<ToolAction, number>();
 	let failed = 0;
@@ -391,6 +410,7 @@ export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
 		COMPACT_ACTION_LABELS[action](count)
 	);
 	if (thoughtCount > 0) tokens.push(`Thought ${thoughtCount}`);
+	if (compactions > 0) tokens.push(`Compacted ${compactions}`);
 	if (failed > 0) tokens.push(`${failed} failed`);
 	return tokens.length > 0 ? tokens.join(' · ') : null;
 }
@@ -412,9 +432,14 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	const tools = entries.filter(
 		(entry) => entry.message.type === 'tool_use' || entry.message.type === 'subagent'
 	);
+	const compactions = entries.filter((entry) => isCompactionCard(entry.message)).length;
+	const compactionLabel = compactions === 1 ? 'compacted the context' : `compacted the context ${compactions} times`;
 	if (tools.length === 0) {
-		if (entries.some((entry) => entry.message.type === 'thinking')) return 'Reasoning and interim work';
-		return entries.length > 0 ? 'Interim work' : null;
+		const base = entries.some((entry) => entry.message.type === 'thinking')
+			? 'Reasoning and interim work'
+			: entries.length > compactions ? 'Interim work' : null;
+		if (compactions === 0) return base;
+		return base ? `${base}, ${compactionLabel}` : compactionLabel.charAt(0).toUpperCase() + compactionLabel.slice(1);
 	}
 
 	const counts = new Map<ToolAction, number>();
@@ -436,6 +461,7 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	if (thoughtCount > 0) {
 		labels.push(`thought ${thoughtCount} ${thoughtCount === 1 ? 'time' : 'times'}`);
 	}
+	if (compactions > 0) labels.push(compactionLabel);
 	const sentence = sentenceJoin(labels);
 	if (!sentence) return null;
 	return failed > 0 ? `${sentence}, ${failed} failed` : sentence;
@@ -737,9 +763,16 @@ export function buildTranscriptModel(
 			const response = segment.slice(1);
 			const gallery = galleryMediaForTurn(response.map((entry) => entry.message), options.sessionId);
 			const terminalAssistant = response.findLast((entry) => isAssistantText(entry.message)) ?? null;
+			// A compaction card the turn worked past is mid-turn; one trailing the
+			// answer (an idle or manual /compact) keeps its own row.
+			const lastWork = response.findLastIndex((entry) => isTurnWork(entry.message));
+			const midTurnCompactions = new Set(
+				response.filter((entry, i) => i < lastWork && isCompactionCard(entry.message))
+			);
 			const shouldHide = (entry: Positioned) =>
 				isCompletedRoutineWork(entry.message, gallery.length > 1) ||
 				isGroupableSystem(entry.message) ||
+				midTurnCompactions.has(entry) ||
 				entry.message.type === 'tool_result' ||
 				(isAssistantText(entry.message) && !entry.message.streaming && entry !== terminalAssistant);
 			const folded = response
@@ -754,9 +787,14 @@ export function buildTranscriptModel(
 			// User prompts stay outside disclosures, including steers. The duration
 			// still describes the logical turn; summaries count only this segment.
 			emitWithSystemGroups(prefix, items);
+			// Keyed by the prompt that opens the segment, which never changes. Keying
+			// by the first folded row remounted the group (collapsing an open log and
+			// replaying its settle animation) whenever a late tool result or a
+			// finished delegation folded an earlier row.
+			const anchor = prefix[0] ?? folded[0] ?? response[0];
 			items.push({
 				kind: 'work_log',
-				key: `wl-turn-${(folded[0] ?? response[0]).message.id ?? (folded[0] ?? response[0]).index}`,
+				key: `wl-turn-${anchor.message.id ?? anchor.index}`,
 				gallery,
 				mode: 'settled',
 				folded,

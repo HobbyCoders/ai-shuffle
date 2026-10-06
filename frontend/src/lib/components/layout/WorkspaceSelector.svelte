@@ -8,7 +8,7 @@
 	 */
 	import { ChevronDown, FolderClosed } from 'lucide-svelte';
 	import { isMobileUi } from '$lib/stores/platform.svelte';
-	import { appData, clusterProjects, profiles, projects } from '$lib/stores/app-data.svelte';
+	import { appData, clusterProjects, profiles, profilesLoaded, projects } from '$lib/stores/app-data.svelte';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -202,8 +202,9 @@
 		{/if}
 	</div>
 
-	{#if $profiles.length === 0}
-		<!-- Nothing is seeded, so a fresh install lands here with an empty agent
+	{#if $profilesLoaded && $profiles.length === 0}
+		<!-- Only once the roster has answered: before that an empty list is a
+		     load in progress, not a missing agent. Nothing is seeded, so a fresh install lands here with an empty agent
 		     picker and a send that can only fail. Say what is missing where the
 		     user is already looking, rather than at submit time. -->
 		<button type="button" class="no-agents" onclick={() => layout.openFeaturePage('profile')}>

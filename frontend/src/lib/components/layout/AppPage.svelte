@@ -45,6 +45,7 @@
 	import TagManager from '$lib/components/TagManager.svelte';
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
+	import { pendingDeepLink, deepLinkSessionId as deepLinkSessionIdFrom } from '$lib/stores/pending-deep-link';
 
 	interface Props {
 		/** Renders the app shell (sidebar/top bar chrome) around MainPanel. */
@@ -158,6 +159,16 @@
 		// The root layout owns auth routing and delays this mount until verified.
 		if (!$isAuthenticated) return;
 
+		// Read a deep link before anything awaits: the chat surface shows its
+		// loading state until the linked session opens below, instead of the
+		// New Chat hero for the length of init and the first loads.
+		const deepLinkSessionId = deepLinkSessionIdFrom(window.location.search);
+		if (deepLinkSessionId) {
+			pendingDeepLink.set(deepLinkSessionId);
+			// Never a permanent spinner: if boot fails before the open, let go.
+			setTimeout(() => pendingDeepLink.update((id) => (id === deepLinkSessionId ? null : id)), 20_000);
+		}
+
 		// The project catalog loads alongside init: a new chat's remembered
 		// project and branch resolve against it, and the composer holds a send
 		// until it has answered (#1636).
@@ -220,7 +231,6 @@
 		// subsequent New conversation actions, drafts and restored sessions win.
 		// A deep link (see below) is an explicit destination; read it first so the
 		// landing never mounts Assistant only to be replaced a moment later.
-		const deepLinkSessionId = new URLSearchParams(window.location.search).get('session');
 		const hasDraft = hasComposerDraft($activeSession.draft);
 		const emptyOwnerLanding = $isAdmin && !navigationClaimed && !layoutNewChatWon && !restoredSessionId && !hasDraft && !deepLinkSessionId &&
 			(!$activeView || ($activeView.type === 'session' && currentViewSessionId === null));
@@ -264,6 +274,9 @@
 			const url = new URL(window.location.href);
 			url.searchParams.delete('session');
 			history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+			// The open has bound the session (or will on the next frame when the
+			// sidebar overlay closes first); its own loading state takes over.
+			requestAnimationFrame(() => pendingDeepLink.set(null));
 		}
 
 		// The in-app notification bell opens the relevant session without a reload.

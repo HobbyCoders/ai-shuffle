@@ -64,6 +64,7 @@
 		hasLinkedSubagent as hasLinkedSubagentIn,
 		type TranscriptModel
 	} from '$lib/utils/work-log';
+	import { createSettleHold } from '$lib/utils/settle-hold';
 	import {
 		TRANSCRIPT_WINDOW_SIZE,
 		TRANSCRIPT_WINDOW_CHUNK,
@@ -81,6 +82,7 @@
 		type TurnVisibility
 	} from './transcript-window';
 	import { classifyTranscriptRender } from '$lib/components/layout/chat-empty-state';
+	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	import { applyPerformanceProfile } from '$lib/utils/perf-profile';
 	import {
 		deriveUserTurnNavigationItems,
@@ -417,13 +419,28 @@
 		return promptOccurrence[messageIndex] ?? 0;
 	}
 
-	const latestTurnUnsettled = $derived(
+	const rawLatestTurnUnsettled = $derived(
 		$activeSession.isStreaming ||
 		Boolean($activeSession.liveTurnId) ||
 		($activeSession.activeTasks ?? []).some((task) => task.status === 'running') ||
 		($activeSession.pendingPermissions ?? []).length > 0 ||
 		($activeSession.pendingQuestions ?? []).some(question => !question.nonblocking)
 	);
+	// The raw signals drop for a moment between turn.completed and turn.parked,
+	// and between a parked turn's last task finishing and its wake turn starting.
+	// Folding on that blip collapsed the whole turn and popped it back open; the
+	// hold keeps the turn as shown unless it stays settled (see settle-hold.ts).
+	let settleHoldTick = $state(0);
+	const settleHold = createSettleHold(() => settleHoldTick++);
+	onDestroy(() => settleHold.dispose());
+	const latestTurnUnsettled = $derived.by(() => {
+		void settleHoldTick;
+		return settleHold.update({
+			sessionId: $activeSession.sessionId,
+			unsettled: rawLatestTurnUnsettled,
+			parked: $activeSession.turnParked === true
+		});
+	});
 
 	// Memoize the grouped display list by message and lifecycle identity.
 	// The active-session store emits a fresh state object on every SSE stream
@@ -523,7 +540,7 @@
 			// An empty recipient can still have a peer waiting for its first turn.
 			messageCount: $activeSession.messages.length + ($activeSession.pendingPeerMessages?.length ?? 0),
 			isRestoringSession: $activeSession.isRestoringSession,
-			isLoadingSession: $activeSession.isLoadingSession
+			isLoadingSession: $activeSession.isLoadingSession || deepLinkLoading($pendingDeepLink, $activeSession.sessionId)
 		})
 	);
 
