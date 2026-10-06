@@ -19,7 +19,7 @@ from app.core import runner_capabilities as rc
 def test_shape_has_all_keys_and_types():
     caps = rc.detect_capabilities()
     assert set(caps.keys()) == {"os", "has_display", "computer_use", "has_chrome", "docker",
-                                "claude_cli_signed_in", "provider_kinds", "remote_task"}
+                                "claude_cli_signed_in", "provider_kinds", "remote_task", "terminal"}
     assert caps["os"] in ("windows", "linux", "darwin")
     assert isinstance(caps["has_display"], bool)
     assert isinstance(caps["computer_use"], bool)
@@ -28,6 +28,17 @@ def test_shape_has_all_keys_and_types():
     assert isinstance(caps["claude_cli_signed_in"], bool)
     assert isinstance(caps["provider_kinds"], list)
     assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 3
+    assert caps["terminal"] in (0, 1)
+
+
+def test_terminal_capability_off_without_pty():
+    from app.core import terminals
+
+    with patch.object(terminals, "pty_supported", return_value=False):
+        assert rc.detect_capabilities()["terminal"] == 0
+    with patch.object(terminals, "pty_supported", return_value=True), \
+            patch.object(terminals, "available_shells", return_value=[{"name": "sh", "path": "/bin/sh", "default": True}]):
+        assert rc.detect_capabilities()["terminal"] == 1
 
 
 def test_os_matches_platform():

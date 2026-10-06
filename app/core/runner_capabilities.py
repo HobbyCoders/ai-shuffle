@@ -23,6 +23,7 @@ Shape::
         "claude_cli_signed_in": bool,
         "provider_kinds": ["openai", ...],
         "remote_task": int,
+        "terminal": int,
     }
 
 ``computer_use`` is whether computer use is switched on for this worker and
@@ -181,6 +182,17 @@ def _detect_provider_kinds() -> List[str]:
         return []
 
 
+def _detect_terminal() -> int:
+    """In-app terminal support (#1945): 1 = this worker runs PTY shells,
+    0 = none (Windows has no PTY without ConPTY)."""
+    try:
+        from app.core.terminals import capability_version
+
+        return capability_version()
+    except Exception:  # noqa: BLE001 — detection must never raise
+        return 0
+
+
 def detect_capabilities() -> Dict[str, Any]:
     """Best-effort snapshot of this runner's placement capabilities.
 
@@ -196,4 +208,5 @@ def detect_capabilities() -> Dict[str, Any]:
         "claude_cli_signed_in": _detect_claude_cli_signed_in(),
         "provider_kinds": _detect_provider_kinds(),
         "remote_task": REMOTE_TASK_VERSION,
+        "terminal": _detect_terminal(),
     }

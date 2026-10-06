@@ -6,6 +6,7 @@ Main FastAPI application entry point
 import asyncio
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,6 +31,7 @@ from app.api import events as events_api
 from app.api import artifacts as artifacts_api
 from app.api import network as network_api
 from app.api import plugin_oauth as plugin_oauth_api
+from app.api import terminals as terminals_api
 
 # Import middleware
 from app.middleware.csrf import CSRFProtectionMiddleware
@@ -113,10 +115,30 @@ logger = logging.getLogger(__name__)
 # Filter out noisy WebSocket connection logs from uvicorn
 # (e.g., "('127.0.0.1', 55839) - "WebSocket /api/v1/ws/chat..." [accepted]")
 class _UvicornWebSocketFilter(logging.Filter):
-    """Suppress routine WebSocket accepted/open/closed messages."""
+    """Suppress routine WebSocket accepted/open/closed messages, and redact
+    credentials from the query strings uvicorn logs.
+
+    uvicorn logs a WebSocket path WITH its query string when a socket is
+    refused before accept (``"WebSocket /path?..." 403``) or answered with an
+    HTTP response; sockets such as the terminal one carry ``?token=``.
+    """
     NOISE = ("connection open", "connection closed", "[accepted]")
+    _QUERY_SECRET = re.compile(
+        r"([?&](?:[A-Za-z0-9_.-]*(?:token|ticket|key|secret|sig|signature|password|auth|session|code))=)"
+        r"[^&#\s\"']*",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _redact(cls, value):
+        if isinstance(value, str) and "=" in value:
+            return cls._QUERY_SECRET.sub(r"\1[redacted]", value)
+        return value
 
     def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._redact(arg) for arg in record.args)
+        record.msg = self._redact(record.msg)
         msg = record.getMessage()
         return not any(phrase in msg for phrase in self.NOISE)
 
@@ -342,6 +364,13 @@ async def lifespan(app: FastAPI):
     stop_loop_watchdog()
     from app.core import browser_runtime
     await browser_runtime.shutdown()
+    # In-app terminals live in this process: kill every shell's process group
+    # so none outlives the app (the list is empty after a restart).
+    try:
+        from app.core.terminals import registry as terminal_registry
+        await terminal_registry.shutdown()
+    except Exception:
+        logger.exception("terminal shutdown failed")
     # Close any live voice sideband: the socket belongs to this process,
     # so a restart must hang up rather than leak a half-open realtime call.
     try:
@@ -589,6 +618,8 @@ app.include_router(project_memory.router)
 app.include_router(mcp.router)
 app.include_router(tools_api.router)
 app.include_router(browser_panel.router)
+app.include_router(terminals_api.router)
+app.include_router(terminals_api.ws_router)
 app.include_router(mobile.router)
 from app.api import mobile_tools
 app.include_router(mobile_tools.router)
