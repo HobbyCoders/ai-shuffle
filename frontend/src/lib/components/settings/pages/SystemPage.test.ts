@@ -12,6 +12,7 @@ vi.mock('$lib/stores/app-data.svelte', () => ({ appData: { loadProjects: vi.fn()
 import SystemPage from './SystemPage.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
+import { supportCaps, supportReportDialog } from '$lib/stores/support-report.svelte';
 
 const lease = {
 	mode: 'licensed',
@@ -72,6 +73,8 @@ beforeEach(() => {
 afterEach(() => {
 	cleanup();
 	resourceSync.clear();
+	supportCaps.reset();
+	supportReportDialog.close();
 	vi.useRealTimers();
 });
 
@@ -337,5 +340,68 @@ describe('memory health', () => {
 		const row = await screen.findByTestId('memory-health');
 		await waitFor(() => expect(row.textContent).toContain('Available after approval'));
 		expect(within(row).queryByRole('button')).toBeNull();
+	});
+});
+
+describe('help: report a problem', () => {
+	const openForm = async () => {
+		await fireEvent.click(await screen.findByRole('button', { name: /Describe it/ }));
+		return (await screen.findByLabelText('What went wrong?')) as HTMLTextAreaElement;
+	};
+
+	it('opens the support report dialog with the description as a frontend error', async () => {
+		render(SystemPage);
+		expect(screen.getByText('Report a problem')).toBeTruthy();
+		const field = await openForm();
+		await waitFor(() => expect(document.activeElement).toBe(field));
+		await fireEvent.input(field, { target: { value: '  The voice call dropped after a minute  ' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+		expect(supportReportDialog.request?.source).toEqual({
+			error: { message: 'The voice call dropped after a minute', source: 'frontend' }
+		});
+		expect(transport.get).toHaveBeenCalledWith('/support/capabilities');
+	});
+
+	it('continues on Enter and keeps Shift+Enter for a new line', async () => {
+		render(SystemPage);
+		const field = await openForm();
+		await fireEvent.input(field, { target: { value: 'Sidebar is empty' } });
+		await fireEvent.keyDown(field, { key: 'Enter', shiftKey: true });
+		expect(supportReportDialog.request).toBeNull();
+		await fireEvent.keyDown(field, { key: 'Enter' });
+		expect(supportReportDialog.request?.source).toEqual({ error: { message: 'Sidebar is empty', source: 'frontend' } });
+	});
+
+	it('requires a description before opening anything', async () => {
+		render(SystemPage);
+		const field = await openForm();
+		await fireEvent.input(field, { target: { value: '   ' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+		expect((await screen.findByRole('alert')).textContent).toContain('Describe the problem first.');
+		expect(field.getAttribute('aria-invalid')).toBe('true');
+		expect(supportReportDialog.request).toBeNull();
+		await fireEvent.input(field, { target: { value: 'x' } });
+		expect(screen.queryByText('Describe the problem first.')).toBeNull();
+	});
+
+	it('limits the description and closes on Cancel', async () => {
+		render(SystemPage);
+		const field = await openForm();
+		expect(field.maxLength).toBe(1000);
+		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+		await waitFor(() => expect(screen.queryByLabelText('What went wrong?')).toBeNull());
+		expect(supportReportDialog.request).toBeNull();
+	});
+
+	it('is hidden when this login cannot send support reports', async () => {
+		transport.get.mockImplementation(async (path: string) => {
+			if (path === '/support/capabilities') throw Object.assign(new Error('Owner access required'), { status: 403 });
+			if (path === '/license') return { ...license };
+			return {};
+		});
+		render(SystemPage);
+		await waitFor(() => expect(supportCaps.status).toBe('forbidden'));
+		await waitFor(() => expect(screen.queryByText('Report a problem')).toBeNull());
+		expect(screen.queryByRole('button', { name: /Describe it/ })).toBeNull();
 	});
 });

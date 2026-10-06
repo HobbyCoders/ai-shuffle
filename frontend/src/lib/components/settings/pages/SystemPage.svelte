@@ -1,8 +1,8 @@
 <script lang="ts">
 	/**
 	 * System: Workspace (folder, import from Claude Code and Codex), Updates
-	 * (policy, check for updates, version), Memory (read-only health) and
-	 * License.
+	 * (policy, check for updates, version), Memory (read-only health),
+	 * License and Help (report a problem to HobbyCoders support).
 	 *
 	 * The workspace path saves when "Check path" finds it valid. A path edited
 	 * here is never replaced by a change made elsewhere; a banner offers the
@@ -46,6 +46,8 @@
 	import { UpdatesState } from './updates-state.svelte';
 	import { deployRows, deploySummary, loadDeployStatus, type DeployReport } from './deploy-status';
 	import { fetchMemoryHealth, memoryRows, memorySummary, type MemoryHealth } from './memory-health';
+	import ReportProblemForm from './editors/ReportProblemForm.svelte';
+	import { canSendSupportReport, openSupportReport, supportCaps } from '$lib/stores/support-report.svelte';
 	import './editors/editors.css';
 
 	/* ---------- workspace ---------- */
@@ -286,6 +288,24 @@
 			: `${license?.seats_used ?? '?'} of ${license?.seats ?? 3}`
 	);
 
+	/* ---------- help: report a problem ---------- */
+
+	let reportOpen = $state(false);
+	let problem = $state('');
+
+	/** The description becomes the report's error message; the dialog does the rest. */
+	function reportProblem(description: string) {
+		openSupportReport({ error: { message: description, source: 'frontend' } });
+	}
+
+	function closeReport() {
+		reportOpen = false;
+		// The editor held focus; give it back to the row's toggle.
+		requestAnimationFrame(() =>
+			document.querySelector<HTMLElement>('[data-setting-anchor="system.reportProblem"] button[aria-expanded]')?.focus()
+		);
+	}
+
 	/* ---------- lifecycle ---------- */
 
 	onMount(() => {
@@ -293,6 +313,7 @@
 		void loadLicense();
 		void refreshDeploy();
 		void loadMemory();
+		void supportCaps.load();
 		updates.start();
 	});
 	onDestroy(() => {
@@ -433,7 +454,19 @@
 	</RowGroup>
 	{#if licenseNotice}<p class="st-msg" role="status">{licenseNotice}</p>{/if}
 	{#if licenseError}<p class="st-msg err" role="alert">{licenseError}</p>{/if}
+
+	{#if canSendSupportReport()}
+		<RowGroup title="Help">
+			<SettingRow id="system.reportProblem" expanded={reportOpen ? reportForm : undefined}>
+				<ExpandToggle value="Describe it" bind:open={reportOpen} />
+			</SettingRow>
+		</RowGroup>
+	{/if}
 </PreferencePage>
+
+{#snippet reportForm()}
+	<ReportProblemForm bind:description={problem} onContinue={reportProblem} onCancel={closeReport} />
+{/snippet}
 
 {#snippet importWizard()}
 	<ImportWizard bind:step={importStep} onImported={(n) => (imported = n)} onClose={() => (importOpen = false)} />

@@ -29,6 +29,7 @@
 	import OwnerAccessGate from '$lib/components/OwnerAccessGate.svelte';
 	import { ownerAccess } from '$lib/stores/owner-access.svelte';
 	import { notify } from '$lib/stores/notifications';
+	import { historyNotificationActions } from '$lib/services/error-actions';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
 	import { bindVisualViewport } from '$lib/utils/visual-viewport';
 	import { startLiveSync } from '$lib/services/live-sync';
@@ -48,6 +49,9 @@
 	const currentPath = $derived<string>($page.url.pathname);
 	let mounted = $state(false);
 	let bootstrapPreparation: Promise<unknown> | undefined;
+	// Notifications loaded after a reload get their buttons back
+	// ("Send report to support" on an error).
+	notify.setHistoryActions(historyNotificationActions);
 	let teardownErrorHandlers: (() => void) | null = null;
 	let teardownVisualViewport: (() => void) | null = null;
 	let teardownFileLinks: (() => void) | null = null;

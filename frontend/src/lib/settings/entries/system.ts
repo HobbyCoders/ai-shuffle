@@ -1,6 +1,6 @@
 /**
  * System: workspace folder, import from Claude Code and Codex, updates, memory health,
- * license. The legacy 'license' tab and AccountPanel land on `system.license`.
+ * license, and Help (report a problem to HobbyCoders support). The legacy 'license' tab and AccountPanel land on `system.license`.
  * SystemPage.svelte renders one `<SettingRow id>` per entry.
  */
 import type { SettingEntry } from '../types';
@@ -102,5 +102,14 @@ export const entries: SettingEntry[] = [
 		label: 'Deactivate on this worker',
 		hint: 'New agent runs pause here',
 		keywords: ['license deactivate', 'free seat']
+	},
+	{
+		id: 'system.reportProblem',
+		category: 'system',
+		section: 'Help',
+		label: 'Report a problem',
+		hint: 'Send to HobbyCoders support',
+		help: 'Describe what went wrong. You then see exactly what will be sent, with secrets hidden, and nothing leaves this worker until you press Send. Sending needs this worker signed in to a Shuffle account.',
+		keywords: ['support', 'bug', 'send report', 'send logs', 'feedback', 'contact', 'issue', 'help', 'hobbycoders']
 	}
 ];

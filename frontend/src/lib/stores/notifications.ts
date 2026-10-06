@@ -34,7 +34,7 @@ export interface AppNotification {
 }
 
 /** A notification row as returned by `GET /api/v1/notifications` (wire shape). */
-interface ServerNotificationRow {
+export interface ServerNotificationRow {
 	id: string;
 	severity: NotificationSeverity;
 	surface?: NotificationSurface | 'toast' | 'inline';
@@ -70,7 +70,18 @@ interface NotifyOptions {
 	session_id?: string;
 }
 
+/**
+ * Rebuilds the buttons of notifications loaded from history (closures cannot
+ * be stored). Registered by the app shell; see `historyNotificationActions`
+ * in $lib/services/error-actions. `ready` runs alongside the fetch.
+ */
+export interface HistoryActions {
+	ready?: () => Promise<unknown>;
+	build: (row: ServerNotificationRow) => { action?: NotificationAction; secondaryAction?: NotificationAction };
+}
+
 const HISTORY_CAP = 200;
+let _historyActions: HistoryActions | null = null;
 
 const _store = createStore<NotificationState>({ live: [], history: [] });
 const _timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -248,7 +259,8 @@ export const notify = Object.assign(
 					if (before.has(item.id) && !local) continue; // dismissed during fetch
 					if (local && before.get(item.id) !== local) { merged.set(item.id, local); continue; }
 					if (!item.dismissed) merged.set(item.id, { ...item, surface: 'notification',
-						action: local?.action, secondaryAction: local?.secondaryAction, session_id: item.session_id ?? local?.session_id });
+						action: local?.action ?? item.action, secondaryAction: local?.secondaryAction ?? item.secondaryAction,
+						session_id: item.session_id ?? local?.session_id });
 				}
 				for (const local of s.history) {
 					if (!local.persist || before.get(local.id) !== local) merged.set(local.id, local);
@@ -262,7 +274,8 @@ export const notify = Object.assign(
 		 * app load (see +layout.svelte). Best-effort: guards SSR + auth and never
 		 * throws so it can't break startup. Server rows carry their own
 		 * `{kind, payload}` action descriptor which can't be rendered as a live
-		 * button, so hydrated items have no `action` (they're past events).
+		 * button; the registered `HistoryActions` rebuild the buttons the live
+		 * event would have had (e.g. "Send report to support" on an error).
 		 */
 		loadHistory: async (): Promise<void> => {
 			try {
@@ -273,10 +286,15 @@ export const notify = Object.assign(
 				await Promise.allSettled([..._pendingRemote]);
 				if (request !== _historyRequest) return;
 				const baseline = _store.current.history;
-				const res = await api.get<{ notifications?: ServerNotificationRow[] }>('/notifications');
+				const actions = _historyActions;
+				const [res] = await Promise.all([
+					api.get<{ notifications?: ServerNotificationRow[] }>('/notifications'),
+					actions?.ready?.().catch(() => {})
+				]);
 				if (request !== _historyRequest || !auth.current.status?.authenticated || owner !== auth.current.status.preference_identity) return;
 				const rows = res?.notifications ?? [];
 				const items: AppNotification[] = rows.map((r) => ({
+					...actions?.build(r),
 					id: r.id,
 					severity: r.severity,
 					surface: r.surface === 'banner' ? 'banner' : 'notification',
@@ -284,7 +302,6 @@ export const notify = Object.assign(
 					source: 'server',
 					title: r.title ?? undefined,
 					message: r.message ?? '',
-					action: undefined,
 					persist: true,
 					read: !!r.read,
 					dismissed: !!r.dismissed,
@@ -295,6 +312,11 @@ export const notify = Object.assign(
 			} catch {
 				// Never break startup on a notifications fetch failure.
 			}
+		},
+
+		/** Register how history items get their buttons back (null to stop). */
+		setHistoryActions: (actions: HistoryActions | null) => {
+			_historyActions = actions;
 		},
 
 		/** Mark a single history item read (locally + remote best-effort). */

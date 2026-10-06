@@ -7,7 +7,7 @@ vi.mock('$app/navigation', () => ({ goto: mocks.goto }));
 vi.mock('$lib/stores/theme.svelte', () => ({ theme: { init: vi.fn() } }));
 vi.mock('$lib/stores/pwa.svelte', () => ({ pwa: { init: vi.fn(), current: { updateReady: false } } }));
 vi.mock('$lib/constants/models', () => ({ ensureModelRegistryHydrated: mocks.hydrate, setReadyProviders: vi.fn() }));
-vi.mock('$lib/stores/notifications', () => ({ notify: { loadHistory: mocks.history, banner: vi.fn() } }));
+vi.mock('$lib/stores/notifications', () => ({ notify: { loadHistory: mocks.history, banner: vi.fn(), setHistoryActions: vi.fn() } }));
 vi.mock('$lib/services/error-reporter', () => ({ installGlobalErrorHandlers: () => () => {} }));
 vi.mock('$lib/utils/visual-viewport', () => ({ bindVisualViewport: () => () => {} }));
 vi.mock('$lib/services/live-sync', () => ({ startLiveSync: () => () => {} }));

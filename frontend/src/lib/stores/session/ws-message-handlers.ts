@@ -17,7 +17,7 @@ import type { ActiveSessionState, StreamingSessionInfo } from '../active-session
 import { notify, type NotificationAction, type NotificationSeverity, type NotificationSurface } from '../notifications';
 import { rateLimit } from '../rate-limit';
 import { reportClientError } from '$lib/services/error-reporter';
-import { errorActions } from '$lib/services/error-actions';
+import { serverNotificationActions } from '$lib/services/error-actions';
 // The SSE-fed reducer store — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
@@ -646,18 +646,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// Mirror the legacy api_error UX: 429 is transient (5s, no action),
 				// other errors get 10s + "Send report to support" (and "Fix with
 				// AI" only when the capabilities say this is a source checkout).
+				// History loaded after a reload rebuilds the same buttons.
 				duration_ms = n.severity === 'warning' ? 5000 : 10000;
-				if (n.severity !== 'warning') {
-					const payload = n.action?.payload ?? {};
-					({ action, secondaryAction } = errorActions({
-						source: 'ws',
-						message: n.message,
-						status_code:
-							typeof payload.status_code === 'number' ? payload.status_code : undefined,
-						session_id: n.session_id ?? (payload.session_id as string | undefined),
-					}));
-				}
 			}
+			({ action, secondaryAction } = serverNotificationActions(n));
 
 			// Drop the server-side `{kind, payload}` action descriptor — it can't be
 			// rendered directly; the rebuilt closure (if any) is passed separately.
