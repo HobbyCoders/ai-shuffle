@@ -37,7 +37,7 @@
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
 	import { isCurrentHeadMerged } from '$lib/stores/derived/merged-pr';
 	import { computePrimaryAction, mergeBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
-	import { computeHeaderSummary, computePipeline, computeUnreadableCheckoutSummary } from '$lib/stores/derived/git-header-summary';
+	import { computeHeaderSummary, computePipeline, computeUncommittedChanges, computeUnreadableCheckoutSummary } from '$lib/stores/derived/git-header-summary';
 	import { shouldShowGitPanelTrigger } from '$lib/components/layout/git-header-visibility';
 	import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
 	import { computeShipItSteps } from '$lib/stores/derived/git-action-options';
@@ -229,14 +229,17 @@
 
 	// Use worktreeBranch prop as immediate fallback while store is loading
 	const currentBranch = $derived(snapshot.currentBranch ?? worktreeBranch ?? null);
-	const hasChanges = $derived(
-		(snapshot.diffStats?.additions ?? 0) > 0 ||
-		(snapshot.diffStats?.deletions ?? 0) > 0 ||
-		(snapshot.diffStats?.files_changed ?? 0) > 0
-	);
+	// Diff stats miss untracked files, so the status decides too (a tree whose
+	// only change is a new file must still offer Commit).
+	const uncommitted = $derived(computeUncommittedChanges({
+		diffStats: snapshot.diffStats,
+		status: snapshot.status,
+		changedFiles: snapshot.changedFiles
+	}));
+	const hasChanges = $derived(uncommitted.hasChanges);
 	const additions = $derived(snapshot.diffStats?.additions ?? 0);
 	const deletions = $derived(snapshot.diffStats?.deletions ?? 0);
-	const filesChanged = $derived(snapshot.changedFiles?.length ?? snapshot.diffStats?.files_changed ?? 0);
+	const filesChanged = $derived(uncommitted.filesChanged);
 	const changedFiles = $derived(snapshot.changedFiles ?? []);
 	const commitsAhead = $derived(snapshot.status?.ahead ?? 0);
 	// Whether the branch carries real content over its base branch (non-empty

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeHeaderSummary, computePipeline, computeUnreadableCheckoutSummary, type HeaderSummaryInput } from './git-header-summary';
+import { computeHeaderSummary, computePipeline, computeUncommittedChanges, computeUnreadableCheckoutSummary, type HeaderSummaryInput } from './git-header-summary';
 
 const base: HeaderSummaryInput = {
 	mergeBlocked: false,
@@ -83,6 +83,83 @@ describe('computeHeaderSummary priority ladder', () => {
 		expect(s.tone).toBe('blocked');
 		expect(s.label).toBe('PR #9');
 		expect('accessPending' in base).toBe(false);
+	});
+});
+
+describe('computeUncommittedChanges', () => {
+	const zero = { additions: 0, deletions: 0, files_changed: 0 };
+	const cleanStatus = { has_changes: false, staged: 0, modified: 0, untracked: 0, conflicts: 0 };
+
+	it('reads a clean tree as clean', () => {
+		expect(computeUncommittedChanges({ diffStats: zero, status: cleanStatus, changedFiles: [] }))
+			.toEqual({ hasChanges: false, filesChanged: 0 });
+	});
+
+	it('counts an untracked-only tree that diff stats cannot see', () => {
+		const r = computeUncommittedChanges({
+			diffStats: zero,
+			status: { ...cleanStatus, has_changes: true, untracked: 1 },
+			changedFiles: [{ file: 'new.png', status: '?', category: 'untracked' }]
+		});
+		expect(r).toEqual({ hasChanges: true, filesChanged: 1 });
+	});
+
+	it('counts untracked files from status before the changed-files list loads', () => {
+		const r = computeUncommittedChanges({
+			diffStats: zero,
+			status: { ...cleanStatus, has_changes: true, untracked: 2 },
+			changedFiles: null
+		});
+		expect(r).toEqual({ hasChanges: true, filesChanged: 2 });
+	});
+
+	it('adds untracked files to the tracked count from diff stats', () => {
+		const r = computeUncommittedChanges({
+			diffStats: { additions: 3, deletions: 1, files_changed: 2 },
+			status: { ...cleanStatus, has_changes: true, modified: 2, untracked: 1 },
+			changedFiles: []
+		});
+		expect(r).toEqual({ hasChanges: true, filesChanged: 3 });
+	});
+
+	it('prefers the changed-files list for the count', () => {
+		const r = computeUncommittedChanges({
+			diffStats: { additions: 3, deletions: 1, files_changed: 2 },
+			status: { ...cleanStatus, has_changes: true, modified: 2 },
+			changedFiles: [{}, {}]
+		});
+		expect(r.filesChanged).toBe(2);
+	});
+
+	it('does not let a stale changed-files list keep a committed tree dirty', () => {
+		// Commit applies a fresh inline status and diff stats but leaves the list.
+		const r = computeUncommittedChanges({
+			diffStats: zero,
+			status: cleanStatus,
+			changedFiles: [{ file: 'new.png', status: '?', category: 'untracked' }]
+		});
+		expect(r).toEqual({ hasChanges: false, filesChanged: 0 });
+	});
+
+	it('still works from diff stats alone when status has not loaded', () => {
+		const r = computeUncommittedChanges({
+			diffStats: { additions: 5, deletions: 2, files_changed: 1 },
+			status: null,
+			changedFiles: null
+		});
+		expect(r).toEqual({ hasChanges: true, filesChanged: 1 });
+	});
+
+	it('feeds a file-count label to the header when line counts are zero', () => {
+		const r = computeUncommittedChanges({
+			diffStats: zero,
+			status: { ...cleanStatus, has_changes: true, untracked: 1 },
+			changedFiles: null
+		});
+		const s = computeHeaderSummary({ ...base, hasChanges: r.hasChanges, filesChanged: r.filesChanged });
+		expect(s.tone).toBe('changes');
+		expect(s.label).toBe('1 file');
+		expect(s.summary).toBe('1 file changed');
 	});
 });
 

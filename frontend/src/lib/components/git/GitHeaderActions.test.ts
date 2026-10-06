@@ -374,6 +374,93 @@ describe('GitHeaderActions header label', () => {
 	});
 });
 
+// ── A tree whose only change is an untracked file ───────────────────────────
+// `git diff` never sees untracked files, so diff stats read 0/0/0 while the
+// status and the changed-files list both name the new file.
+
+describe('GitHeaderActions untracked-only changes', () => {
+	function untrackedOnly(changedFiles: unknown = [
+		{ file: 'lt1005-red-square.png', status: '?', category: 'untracked', additions: 0, deletions: 0, is_binary: true }
+	]) {
+		setSnapshot({
+			status: {
+				is_git_repo: true,
+				current_branch: 'feature/x',
+				default_branch: 'main',
+				ahead: 0,
+				unpushed: 0,
+				differs_from_base: false,
+				is_clean: false,
+				has_changes: true,
+				staged: 0,
+				modified: 0,
+				untracked: 1,
+				conflicts: 0
+			},
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+			changedFiles,
+			branches: [
+				{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 0, behind: 0 },
+				{ name: 'main', current: false, remote: false }
+			]
+		});
+	}
+
+	it('labels the header with the file count instead of "Up to date"', () => {
+		untrackedOnly();
+		renderHeader();
+		expect(trigger().textContent).not.toContain('Up to date');
+		expect(trigger().textContent).toContain('1 file');
+		expect(trigger().title).toBe('1 file changed');
+	});
+
+	it('lists the file and enables Commit in the panel', async () => {
+		untrackedOnly();
+		const { handlers } = renderHeader();
+		await openPanel();
+		expect(panel().textContent).not.toContain('Working tree is clean');
+		expect(panel().textContent).toContain('Changed files · 1');
+		expect(panel().textContent).toContain('lt1005-red-square.png');
+		const commit = row('Commit');
+		expect(commit.disabled).toBe(false);
+		expect(commit.textContent).toContain('1 file');
+		expect(commit.textContent).not.toContain('nothing new');
+		expect(row('Push').textContent).toContain('commit first');
+		await fireEvent.click(commit);
+		expect(handlers.onClickCommit).toHaveBeenCalledWith();
+	});
+
+	it('counts the file from status before the changed-files list loads', async () => {
+		untrackedOnly(null);
+		renderHeader();
+		expect(trigger().title).toBe('1 file changed');
+		await openPanel();
+		expect(row('Commit').disabled).toBe(false);
+		expect(panel().textContent).toContain('1 file changed.');
+	});
+
+	it('reads clean again once a commit clears the status, even with a stale file list', () => {
+		untrackedOnly();
+		setSnapshot({
+			status: {
+				is_git_repo: true, current_branch: 'feature/x', default_branch: 'main', ahead: 1, unpushed: 1,
+				differs_from_base: true, is_clean: true, has_changes: false, staged: 0, modified: 0, untracked: 0, conflicts: 0
+			},
+			diffStats: { additions: 0, deletions: 0, files_changed: 0 },
+			changedFiles: [
+				{ file: 'lt1005-red-square.png', status: '?', category: 'untracked', additions: 0, deletions: 0, is_binary: true }
+			],
+			branches: [
+				{ name: 'feature/x', current: true, remote: false, upstream: 'origin/feature/x', ahead: 1, behind: 0 },
+				{ name: 'main', current: false, remote: false }
+			]
+		});
+		renderHeader();
+		expect(trigger().textContent).toContain('1 to push');
+		expect(trigger().title).not.toContain('changed');
+	});
+});
+
 // ── Row visibility matrix inside the panel ──────────────────────────────────
 
 describe('GitHeaderActions panel rows', () => {

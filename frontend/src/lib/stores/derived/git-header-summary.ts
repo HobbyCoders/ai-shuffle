@@ -57,6 +57,48 @@ export interface HeaderSummary {
 	summary: string;
 }
 
+export interface UncommittedChangesInput {
+	diffStats: { additions: number; deletions: number; files_changed: number } | null | undefined;
+	status:
+		| { has_changes?: boolean; staged?: number; modified?: number; untracked?: number; conflicts?: number }
+		| null
+		| undefined;
+	changedFiles: readonly unknown[] | null | undefined;
+}
+
+export interface UncommittedChanges {
+	hasChanges: boolean;
+	filesChanged: number;
+}
+
+/**
+ * Whether the checkout has uncommitted work, and how many files it touches.
+ *
+ * Diff stats come from `git diff`, which never sees untracked files, so a tree
+ * whose only change is a new file reads 0/0/0 there. The status carries the
+ * untracked count, so it decides too. The changed-files list does not: commit
+ * and push apply a fresh inline status but leave that list as it was, and
+ * letting it decide would keep a just-committed tree reading as dirty.
+ */
+export function computeUncommittedChanges(input: UncommittedChangesInput): UncommittedChanges {
+	const { diffStats, status, changedFiles } = input;
+	const untracked = status?.untracked ?? 0;
+	const statusFiles = (status?.staged ?? 0) + (status?.modified ?? 0) + untracked + (status?.conflicts ?? 0);
+	const hasChanges =
+		(diffStats?.additions ?? 0) > 0 ||
+		(diffStats?.deletions ?? 0) > 0 ||
+		(diffStats?.files_changed ?? 0) > 0 ||
+		status?.has_changes === true ||
+		statusFiles > 0;
+	if (!hasChanges) return { hasChanges, filesChanged: 0 };
+	if (changedFiles && changedFiles.length > 0) return { hasChanges, filesChanged: changedFiles.length };
+	// Diff stats count tracked files only; add the untracked ones from status.
+	const tracked = diffStats?.files_changed ?? 0;
+	const fromDiff = tracked > 0 ? tracked + untracked : 0;
+	// A dirty tree touches at least one file, whatever the counts say.
+	return { hasChanges, filesChanged: Math.max(1, fromDiff || statusFiles) };
+}
+
 function plural(n: number, word: string): string {
 	return `${n} ${word}${n === 1 ? '' : 's'}`;
 }
