@@ -47,6 +47,7 @@ from app.api.auth import require_auth
 from app.api.sessions_helpers import require_transcript_session
 from app.api.sse_utils import is_client_disconnect
 from app.core.event_gateway import get_gateway
+from app.core.harness_reminders import strip_harness_reminders
 from app.core.history_backfill import ensure_backfilled
 from app.db.session_events import (
     EMPTY_LOG_EPOCH,
@@ -291,6 +292,11 @@ def _flush_pending(
 def _wire(row: Dict[str, Any]) -> Dict[str, Any]:
     """Merge a DB row's payload with its envelope (envelope keys win)."""
     payload = row.get("payload") or {}
+    if row.get("event_type") == "message.user" and isinstance(payload.get("content"), str):
+        # Rows backfilled from a transcript can carry harness reminders.
+        content = strip_harness_reminders(payload["content"])
+        if content is not payload["content"]:
+            payload = {**payload, "content": content}
     created_at = row.get("created_at")
     if hasattr(created_at, "isoformat"):
         created_at = created_at.isoformat()

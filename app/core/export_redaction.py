@@ -9,6 +9,7 @@ import json
 import re
 from typing import Any
 
+from app.core.harness_reminders import strip_harness_reminders_from_entry
 from app.core.scrub import REDACTED, redact_url_credentials, strip_url_userinfo
 
 # Match the preview-access wire format, including copies outside a URL.
@@ -125,6 +126,8 @@ def redact_export_jsonl(content: str) -> str:
 
     Never fall back to raw bytes. Reject nonstandard JSON constants as well;
     malformed history can still be downloaded through the private raw path.
+    Harness reminder blocks (saved memory, environment facts) are removed
+    from user messages: they are private model context, not the conversation.
     """
     def reject_constant(_value: str) -> None:
         raise ValueError("Nonstandard JSON constant")
@@ -136,5 +139,5 @@ def redact_export_jsonl(content: str) -> str:
         entry = json.loads(line, parse_constant=reject_constant)
         if not isinstance(entry, dict):
             raise ValueError("JSONL record must be an object")
-        entries.append(redact_external_export(entry))
+        entries.append(redact_external_export(strip_harness_reminders_from_entry(entry)))
     return "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries)

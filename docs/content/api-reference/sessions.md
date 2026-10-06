@@ -663,6 +663,8 @@ Export a session.
 
 **Sharing:** Choose **Export for sharing (.md)** to remove recognized secrets from a separate Markdown download. Review all content before posting: this is defense in depth, not arbitrary-secret detection, and is not a raw backup. Sharing files end in `-share-safe.md` (or `.json`/`.jsonl` for those API formats). Responses include `X-Transcript-Privacy: share-safe` or `private-raw`. Malformed raw JSONL returns `422` for sharing exports, never an unfiltered fallback.
 
+**Harness context:** The app adds private context to each prompt for the model, such as saved memory facts and environment details, inside `<system-reminder>` blocks. Session reads, the live event feed, Markdown and JSON exports, and sharing exports leave these blocks out of user messages. The private raw JSONL backup keeps them, because it is the exact history used for re-import. Only complete blocks in the app's own format, on their own lines and starting with one of the app's known headers, are left out; text you typed, including the literal words `<system-reminder>` inside a sentence, is kept.
+
 ```bash
 # Export as Markdown (default)
 curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=markdown" \

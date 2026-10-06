@@ -32,6 +32,7 @@ from typing import List, Dict, Any, Optional, Generator, Tuple
 from datetime import datetime, timezone
 
 from app.core.config import settings
+from app.core.harness_reminders import strip_harness_reminders
 from app.core.query_streaming import extract_mcp_image
 from app.core.session_title import derive_session_title
 from app.core.system_message_filter import is_hidden_system_subtype
@@ -1657,6 +1658,9 @@ def _transform_entries(
         if entry_type == "user" and role == "user":
             # User message - can be plain text, tool results, or array with text blocks
             if isinstance(content, str):
+                # Harness-injected reminders (memory snapshot, env facts) are
+                # model context, not what the person typed: never show them.
+                content = strip_harness_reminders(content)
                 # Check for slash command (e.g., /commit, /ralph-loop)
                 slash_cmd = _parse_slash_command(content)
                 if slash_cmd is not None:
@@ -1877,7 +1881,7 @@ def _transform_entries(
                                 })
                         elif block.get("type") == "text":
                             # Text block in user content array
-                            text = block.get("text", "")
+                            text = strip_harness_reminders(block.get("text", ""))
                             if text and not _is_system_content(text) and not _is_task_notification(text):
                                 has_text_content = True
                                 text_parts.append(text)
