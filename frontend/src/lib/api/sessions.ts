@@ -262,7 +262,7 @@ export async function exportSession(
 	options: { shareSafe?: boolean } = {}
 ): Promise<void> {
 	const ext = format === 'json' ? 'json' : format === 'jsonl' ? 'jsonl' : 'md';
-	const fallback = options.shareSafe ? `session-export-share-safe.${ext}` : `session-export.${ext}`;
+	const fallback = options.shareSafe ? `session-export-share-safe.${ext}` : `session-export-private.${ext}`;
 	const sharingQuery = options.shareSafe ? '&share_safe=true' : '';
 	await fetchAndDownload(`/sessions/${sessionId}/export?format=${format}${sharingQuery}`, fallback,
 		options.shareSafe ? (response) => {

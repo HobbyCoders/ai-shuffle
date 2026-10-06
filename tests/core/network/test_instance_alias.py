@@ -130,6 +130,72 @@ def test_repair_never_approves_another_install_or_takes_another_devices_id(worke
         assert runners.device_for_instance("inst-x") is None
 
 
+def _forge_presence(worker, device_id, row):
+    """Sign a presence op about ``device_id`` from ``worker``'s own stream."""
+    with worker.active():
+        with store.get_db() as conn:
+            assert engine.record(conn.cursor(), "presence", device_id, row, ctx=engine.context()) is not None
+
+
+def test_presence_applies_only_from_the_device_it_describes(workers):
+    """A member's signed presence op about another device is refused on apply.
+
+    Presence carries a device's endpoints and install id. Without this, any
+    member could replace another device's reachability on every peer, and
+    the install id in presence could not be trusted for the #1716 lookups.
+    """
+    a, b, c = workers("a"), workers("b"), workers("c")
+    with as_install(a, "inst-a"):
+        engine.create_network("Home", device_name="Unraid", legacy_instance_id="inst-a")
+    join(a, b, name="DesktopWorker", legacy_instance_id="inst-b")
+    join(a, c, name="Laptop", legacy_instance_id="inst-c")
+    with as_install(b, "inst-b"):
+        engine.publish_presence(version="b-1", endpoints=["http://10.0.0.2:8000"])
+    # Accepted: the device's own presence.
+    assert exchange(b, a).applied >= 1
+    exchange(b, c)
+    with a.active():
+        assert engine.presence_of(b.device_id)["endpoints"] == ["http://10.0.0.2:8000"]
+
+    forged = {"device_id": b.device_id, "endpoints": ["http://10.6.6.6:8000"], "capabilities": {},
+              "version": "b-1", "platform": "linux", "incarnation": 1, "instance_id": "inst-forged",
+              "updated_at": "2099-01-01T00:00:00+00:00"}
+    _forge_presence(c, b.device_id, forged)
+    # A row whose key names the sender but whose body names another device.
+    _forge_presence(c, c.device_id, dict(forged, device_id=b.device_id))
+    result = exchange(c, a)
+    assert result.rejected == 2
+    assert result.reasons.count("presence for another device") == 2
+    with a.active():
+        assert engine.presence_of(b.device_id)["endpoints"] == ["http://10.0.0.2:8000"]
+        assert engine.presence_of(c.device_id) is None or \
+            engine.presence_of(c.device_id)["device_id"] == c.device_id
+    # Nor can a member retract another device's presence.
+    with c.active():
+        with store.get_db() as conn:
+            assert engine.record(conn.cursor(), "presence", b.device_id, None, ctx=engine.context()) is not None
+    assert exchange(c, a).rejected == 1
+    with a.active():
+        assert engine.presence_of(b.device_id)["endpoints"] == ["http://10.0.0.2:8000"]
+
+
+def test_scan_never_republishes_another_devices_presence(workers):
+    """The scanner publishes and retracts only this device's own presence row."""
+    a, b = workers("a"), workers("b")
+    with as_install(a, "inst-a"):
+        engine.create_network("Home", device_name="Unraid", legacy_instance_id="inst-a")
+    join(a, b, name="DesktopWorker", legacy_instance_id="inst-b")
+    with as_install(b, "inst-b"):
+        engine.publish_presence(version="b-1", endpoints=["http://10.0.0.2:8000"])
+    exchange(b, a)
+    with as_install(a, "inst-a"):
+        # A local copy of a peer's row that drifted from the network's view.
+        a.sql("UPDATE network_presence SET version = 'drifted' WHERE device_id = ?", (b.device_id,))
+        assert engine.scan_collection("presence") == 0
+        a.sql("DELETE FROM network_presence WHERE device_id = ?", (b.device_id,))
+        assert engine.scan_collection("presence") == 0
+
+
 async def test_a_worker_awaiting_admission_stays_unapproved(workers, fake):
     a, b = workers("a"), workers("b")
     with as_install(a, "inst-a"):

@@ -471,6 +471,38 @@ class TestSubmitPersistsTheBinding:
         )
         assert db.get_session("s-fresh")["context_window"] == 1_000_000
 
+    @pytest.mark.parametrize("saved, sent, base, pushed", [
+        # The send saved a new window (a model switch remaps the choice to
+        # that model's window): the sender's pin is now stale.
+        (200_000, 1_000_000, 200_000, 1_000_000),
+        # Another client picked first: the send is dropped and the sender
+        # learns the pin its turn runs on.
+        (200_000, 1_000_000, 1_000_000, 200_000),
+        # The client already holds the saved pin: nothing to tell.
+        (200_000, 200_000, 200_000, None),
+    ])
+    async def test_send_pushes_the_pin_when_the_senders_base_is_stale(
+            self, mock_db, saved, sent, base, pushed):
+        """#1895 follow-up: after a send changes the saved pin, open clients
+        learn it, or their next send carries an outdated base and is dropped."""
+        from unittest.mock import AsyncMock
+        from app.core.sync_engine import sync_engine
+
+        make_profile("agent", {})
+        db.create_session("s-push", profile_id="agent", model="opus", context_window=saved)
+        with patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            await turn_manager.submit_async(
+                "s-push", "user", prompt="hi", profile_id="agent",
+                overrides={"model": "opus", "context_window": sent, "context_window_base": base},
+                no_kick=True,
+            )
+        if pushed is None:
+            broadcast.assert_not_awaited()
+        else:
+            broadcast.assert_awaited_once_with(
+                session_id="s-push", updates={"context_window": pushed}, source_device_id=None)
+            assert db.get_session("s-push")["context_window"] == pushed
+
     def test_zero_base_means_no_pin_seen(self, mock_db):
         make_profile("agent", {})
         db.create_session("s-none", profile_id="agent", model="opus")

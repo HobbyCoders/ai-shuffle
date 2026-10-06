@@ -209,7 +209,9 @@ async def export_session(
     if share_safe:
         title = redact_export_text(title)
     privacy_headers = {"X-Transcript-Privacy": "share-safe" if share_safe else "private-raw"}
-    suffix = "-share-safe" if share_safe else ""
+    # Name both kinds: once downloaded, the file name is all that tells a raw
+    # copy (which may hold secrets) from the filtered one.
+    suffix = "-share-safe" if share_safe else "-private"
 
     # Generate base filename
     # Sanitize title for filename

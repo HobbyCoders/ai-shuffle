@@ -26,6 +26,8 @@ on:
       - 'frontend/tests/BrowserWorkspaceParent.svelte'
       - 'frontend/tests/verify-provider-login.mjs'
       - 'frontend/tests/verify-browser-cold-start.mjs'
+      - 'frontend/tests/*crumb-strip*'
+      - 'frontend/tests/CrumbStripFixture.svelte'
       - 'frontend/src/lib/components/settings/providers/tabs/KeyUsage.svelte'
       - 'frontend/package*.json'
       - 'tests/test_browser_workspace_integration.py'
@@ -103,6 +105,13 @@ jobs:
       - name: Verify shadow-root auth editor discovery and edits
         working-directory: browser-mcp
         run: npm test -- test/editors.test.ts -t 'nested shadow auth fields'
+      # Reuse the job existing Chromium and playwright-core installation.
+      - name: Verify desktop breadcrumb strip layout
+        working-directory: frontend
+        run: |
+          npx vite dev --config tests/vite.crumb-strip.config.js --host 127.0.0.1 --port 5249 --strictPort > /tmp/crumb-strip-vite.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf -o /dev/null http://127.0.0.1:5249/tests/crumb-strip.html && break; sleep 1; done
+          node tests/verify-crumb-strip.mjs || { cat /tmp/crumb-strip-vite.log; exit 1; }
       - name: Verify shared browser and rendered desktop/mobile UI
         run: python -m pytest tests/test_browser_workspace_integration.py -o addopts="" -q -s --timeout=240
       - name: Upload browser verification screenshots

@@ -46,7 +46,7 @@ describe('sharing-safe session download boundary', () => {
 		fetchMock.mockResolvedValueOnce(fileResponse());
 		await exportSession('session-test', 'jsonl', options);
 		expect(fetchMock).toHaveBeenCalledExactlyOnceWith('/api/v1/sessions/session-test/export?format=jsonl', { method: 'GET' });
-		expect(downloaded).toEqual(['session-export.jsonl']);
+		expect(downloaded).toEqual(['session-export-private.jsonl']);
 	});
 
 	it('opts into filtering and a distinct Markdown fallback filename', async () => {

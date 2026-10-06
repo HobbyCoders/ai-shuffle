@@ -270,6 +270,7 @@ def _submit_blocking(
     command_id: Optional[str] = None,
     parent_turn_id: Optional[str] = None,
     instance_id: Optional[str] = None,
+    window_pin: Optional[Dict[str, int]] = None,
 ) -> str:
     """Every BLOCKING part of :func:`submit` — up to three DB round trips (run
     binding, wakeup supersede, enqueue) — and nothing else.
@@ -277,6 +278,10 @@ def _submit_blocking(
     Split out so :func:`submit_async` can pay ONE thread hop for the whole
     logical operation instead of one per write, while the kick (which needs a
     running event loop) stays with the caller. Never fires the kick.
+
+    ``window_pin``, when given, receives ``{"context_window": pin}`` if the
+    send carried a ``context_window_base`` that is not the pin saved after it,
+    so :func:`submit_async` can push the pin to the chat's open clients.
 
     Returns the new turn's id. The turn is durably ``queued`` before the kick
     fires, so even if the kick is a no-op (nothing registered yet) or fails, the
@@ -370,6 +375,13 @@ def _submit_blocking(
                     overrides = {k: v for k, v in overrides.items() if k != "context_window"}
                 else:
                     database.set_session_run_binding(session_id, context_window=window)
+                saved_pin = window or (row or {}).get("context_window") or None
+                if window_pin is not None and has_window_base and saved_pin and saved_pin != window_base:
+                    # The sending client's pin is now out of date (this send
+                    # saved another window, e.g. after a model change, or
+                    # another client picked first). The caller tells open
+                    # clients, or their next send would be dropped as stale.
+                    window_pin["context_window"] = saved_pin
         except Exception:  # noqa: BLE001 — never let this break an enqueue.
             logger.exception(
                 "run-binding persist failed for session %s", session_id
@@ -504,6 +516,7 @@ async def submit_async(
         from app.core import assistant_confirm
 
         await assistant_confirm.on_owner_message(session_id, prompt)
+    window_pin: Dict[str, int] = {}
     turn_id = await asyncio.to_thread(
         _submit_blocking,
         session_id,
@@ -518,10 +531,29 @@ async def submit_async(
         command_id=command_id,
         parent_turn_id=parent_turn_id,
         instance_id=instance_id,
+        window_pin=window_pin,
     )
     if not no_kick:
         _kick(session_id)
+    if window_pin:
+        await _announce_window_pin(session_id, window_pin["context_window"])
     return turn_id
+
+
+async def _announce_window_pin(session_id: str, window: int) -> None:
+    """Push the chat's saved context-window pin to its open clients.
+
+    The same ``session_updated`` push a picker change sends (#1895): a client
+    adopts it as its pin, so its next send's ``context_window_base`` matches.
+    """
+    try:
+        from app.core.sync_engine import sync_engine
+
+        await sync_engine.broadcast_session_updated(
+            session_id=session_id, updates={"context_window": window}, source_device_id=None,
+        )
+    except Exception:  # noqa: BLE001 — the turn is queued either way.
+        logger.warning("Could not announce the context window of %s", session_id, exc_info=True)
 
 
 def remove_queued(turn_id: str) -> Optional[Dict[str, Any]]:

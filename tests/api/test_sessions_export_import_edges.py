@@ -569,6 +569,8 @@ def test_separate_share_safe_export_from_real_producers(client, world, source, f
     # Fresh CLI imports need not have a store-backed Markdown/JSON view yet;
     # sharing renders the strictly parsed file without changing that raw path.
     assert raw.headers["x-transcript-privacy"] == "private-raw"
+    # The raw copy may hold secrets; its filename says so once it is on disk.
+    assert f'-private.{extension}"' in raw.headers["content-disposition"]
     if path:
         assert raw_jsonl.content == path.read_bytes()
 

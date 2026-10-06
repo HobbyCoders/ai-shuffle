@@ -808,6 +808,8 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
             continue
         record_id = coll.record_id(plaintext)
         seen.add(record_id)
+        if coll.name == "presence" and record_id != ctx.device_id:
+            continue  # only that device publishes it; peers refuse it from anyone else
         existing = known.get(record_id)
         pending_active = coll.name == "session_active" and bool(row.get("local_pending"))
         if (not pending_active and existing is not None and not bool(existing["deleted"])
@@ -824,6 +826,8 @@ def scan_collection(collection: str, *, ctx: Optional[NetworkContext] = None, ow
             if record_id in seen or record_id in retained or bool(existing["deleted"]):
                 continue
             if owner_only and existing.get("origin_device_id") != ctx.device_id:
+                continue
+            if coll.name == "presence" and record_id != ctx.device_id:
                 continue
             changed.append((record_id, None))
     for start in range(0, len(changed), SCAN_PUBLISH_BATCH):
@@ -1178,6 +1182,13 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         plaintext, _decryption_key = open_envelope(ctx, env)
     except (crypto.CryptoError, envelope_mod.EnvelopeError) as exc:
         raise ApplyError("cannot open payload") from exc
+
+    if coll.name == "presence" and not _presence_names_only(
+            env.origin_device_id, env.record_id, plaintext if env.op == OP_UPSERT else None):
+        # Each device publishes its own presence (endpoints, capabilities,
+        # install id). A member's signed op about another device would
+        # replace that device's reachability on every peer.
+        raise ApplyError("presence for another device")
 
     if (coll.name == "agents" and env.record_id == "Explore" and env.op == OP_UPSERT
             and plaintext.get("is_builtin")):
@@ -2234,6 +2245,13 @@ def _adopt_member_alias(cursor, ctx: NetworkContext, device_id: str, instance_id
         store.update_state(_conn=_CursorConn(cursor), legacy_instance_map=ctx.legacy_instance_map)
     logger.info("Recorded instance id alias for device %s", device_id)
     return True
+
+
+def _presence_names_only(device_id: str, record_id: str, presence: Optional[Mapping[str, Any]]) -> bool:
+    """True when a presence record (or its deletion) describes ``device_id`` alone."""
+    if record_id != device_id:
+        return False
+    return presence is None or presence.get("device_id") == device_id
 
 
 def _learn_presence_alias(cursor, ctx: NetworkContext, presence: Mapping[str, Any], origin_device_id: str) -> None:

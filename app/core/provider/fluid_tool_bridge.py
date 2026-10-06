@@ -128,6 +128,11 @@ BUILTINS_RISK_MAP: Mapping[str, str] = {
     "SendMessage": "write",
     "ScheduleWakeup": "safe",
     "NotifyDevices": "safe",
+    # Listing the session's authorized phones reads state only. A phone
+    # action changes the device, so it keeps the write gate (and most
+    # actions also wait for an on-phone Allow).
+    "AndroidDevices": "safe",
+    "AndroidAction": "write",
     # Monitor runs a host shell command; fluid rates its own Monitor "write".
     "Monitor": "write",
     "TaskOutput": "safe",

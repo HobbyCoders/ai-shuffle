@@ -165,6 +165,18 @@ def test_register_recorded_sdk_servers_applies_risk_maps():
     assert gateway.risk == "write"  # dynamic gateway tool → server default
 
 
+def test_android_device_listing_is_safe_and_action_stays_gated():
+    """A read-only device listing must not ask for approval in Ask mode; a
+    phone action keeps the write gate."""
+    cfg = {"type": "sdk", "name": "builtins", "instance": _Instance()}
+    record_sdk_server_tools(cfg, [_tool("AndroidDevices"), _tool("AndroidAction")])
+
+    registry = ToolRegistry()
+    register_recorded_sdk_servers(registry, {"builtins": cfg})
+    assert registry.get("mcp__builtins__AndroidDevices").risk == "safe"
+    assert registry.get("mcp__builtins__AndroidAction").risk == "write"
+
+
 def test_deferred_servers_land_in_the_deferred_tier_and_stay_loadable():
     """Native-leg tiering: app-config/ai-tools schemas stay out of the prompt
     prefix (deferred, ToolSearch-loadable) while builtins remain eager."""
