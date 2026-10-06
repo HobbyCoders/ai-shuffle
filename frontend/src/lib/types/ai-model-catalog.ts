@@ -1236,9 +1236,42 @@ export const OPENAI_STT_MODELS: STTModel[] = [
 export const ALL_TTS_MODELS: TTSModel[] = [...FAL_TTS_MODELS, ...OPENAI_TTS_MODELS];
 export const ALL_STT_MODELS: STTModel[] = [...FAL_STT_MODELS, ...OPENAI_STT_MODELS];
 
+// ============================================================================
+// Image Models — ChatGPT subscription (#1796)
+// ============================================================================
+
+/** Setting value that routes the image tools to the ChatGPT subscription.
+ * Must match SUBSCRIPTION_IMAGE_MODEL in app/core/provider/subscription_images.py. */
+export const SUBSCRIPTION_IMAGE_MODEL_ID = 'chatgpt-subscription';
+
+export const SUBSCRIPTION_IMAGE_MODELS: ImageModel[] = [
+	{
+		id: SUBSCRIPTION_IMAGE_MODEL_ID,
+		name: 'chatgpt-subscription',
+		displayName: 'ChatGPT subscription (OpenAI built-in)',
+		provider: 'chatgpt',
+		description:
+			"OpenAI's built-in image generation on the ChatGPT account signed in on this worker. Every chat can use it, whatever its text model. No fal.ai key needed.",
+		capabilities: {
+			generation: true,
+			editing: true,
+			inpainting: false,
+			referenceImages: true,
+			variations: false,
+			textRendering: 'excellent',
+			maxReferenceImages: 14
+		},
+		aspectRatios: ['1:1', '3:2', '2:3'],
+		resolutions: [],
+		maxOutputSize: '1536x1024',
+		pricePerImage: 0
+	}
+];
+
 // Convenience subsets — Image
-export const TEXT_TO_IMAGE_MODELS = FAL_IMAGE_MODELS.filter(m => m.capabilities.generation);
-export const IMAGE_EDITING_MODELS = FAL_IMAGE_MODELS.filter(m => m.capabilities.editing);
+const ALL_IMAGE_MODELS = [...SUBSCRIPTION_IMAGE_MODELS, ...FAL_IMAGE_MODELS];
+export const TEXT_TO_IMAGE_MODELS = ALL_IMAGE_MODELS.filter(m => m.capabilities.generation);
+export const IMAGE_EDITING_MODELS = ALL_IMAGE_MODELS.filter(m => m.capabilities.editing);
 
 // Convenience subsets — Video
 export const TEXT_TO_VIDEO_MODELS = FAL_VIDEO_MODELS.filter(m => m.capabilities.generation);

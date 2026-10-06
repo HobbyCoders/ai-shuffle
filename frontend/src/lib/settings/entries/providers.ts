@@ -32,7 +32,7 @@ const LOOP_WORKER_LIMIT_HELP =
 export const FAL_BALANCE_HELP =
 	'Read with the media key itself, at most once every five minutes. Usage shows the same reading.';
 export const NATIVE_IMAGE_HELP =
-	'GenerateNativeImage uses the session’s own provider and credential, separate from fal.ai, and never switches providers. Images are saved with the session. Session cost estimates leave these charges out.';
+	'GenerateNativeImage is offered only in chats running on this provider’s models. It uses the session’s own provider and credential, separate from fal.ai, and never switches providers. Images are saved with the session. Session cost estimates leave these charges out. To let chats on any model make images with a signed-in ChatGPT account, choose “ChatGPT subscription” as the image model under Models.';
 
 export const entries: SettingEntry[] = [
 	{

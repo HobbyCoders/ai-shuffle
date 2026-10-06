@@ -19,6 +19,8 @@ Connect any of these, one or several. Each uses your own account and bills you u
 - **Custom gateway:** any compatible endpoint with your own token, including a local model server.
 - **fal.ai:** a media key for images, video and audio. It does not run agents on its own.
 
+Images can also come from a ChatGPT subscription sign-in. Under **Settings > Models**, choose **ChatGPT subscription (OpenAI built-in)** for Text to Image or Image Editing, and every chat can make or edit images with it, whatever its text model. It needs no fal.ai key. If that ChatGPT account is not signed in on the worker, the image tools say so and use nothing else. Without that choice, OpenAI's built-in image tool appears only in chats that run on an OpenAI model.
+
 Voice mode uses your own OpenAI account.
 
 ## Subscription or API key

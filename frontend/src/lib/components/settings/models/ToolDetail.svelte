@@ -41,7 +41,8 @@
 	const curated = $derived(tools.curated(tool));
 	const name = $derived(tools.displayName(tool));
 	const blocked = $derived(tools.blockedByFal(tool));
-	const onFal = $derived(tools.runsOnFal(tool));
+	const RUNS_ON = { fal: 'fal.ai media key', openai: 'OpenAI API key', chatgpt: 'ChatGPT subscription' };
+	const runsOn = $derived(tools.runsOn(tool));
 	const status = $derived<StatusTone>(!modelId ? 'off' : blocked ? 'warn' : 'ok');
 	const statusText = $derived(!modelId ? 'No model chosen' : blocked ? 'fal.ai is off' : 'Ready');
 	const price = $derived(tools.price(tool) || (modelId && !curated ? 'Per fal.ai' : null));
@@ -90,7 +91,7 @@
 			type="button"
 			class="link"
 			onclick={() => settingsNav.go({ category: 'providers' })}
-		>{onFal ? 'fal.ai media key' : 'OpenAI API key'}</button>
+		>{RUNS_ON[runsOn]}</button>
 	</span>
 {/snippet}
 

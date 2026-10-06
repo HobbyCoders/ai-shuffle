@@ -256,6 +256,29 @@ def _ai_tools_available() -> bool:
         return False
 
 
+def _subscription_image_tool_names() -> set:
+    """Bare image tool names that run on the ChatGPT subscription, not fal.ai.
+
+    Those tools need no fal.ai key (#1796), so they stay on the surface of a
+    worker without one. Mirrors the env the tools read: editing and reference
+    generation use ``image_edit_model``, then ``image_model``.
+    """
+    try:
+        from app.core.provider.subscription_images import is_subscription_model
+
+        image_model = database.get_system_setting("image_model") or ""
+        edit_model = database.get_system_setting("image_edit_model") or image_model
+    except Exception:  # noqa: BLE001 — an unreadable setting selects nothing
+        logger.debug("could not read the image model settings", exc_info=True)
+        return set()
+    names = set()
+    if is_subscription_model(image_model):
+        names.add("generateImage")
+    if is_subscription_model(edit_model):
+        names.update({"editImage", "generateWithReference"})
+    return names
+
+
 # The background-work MANAGERS. Every one of them reports on, reads or stops
 # work that Task or Monitor started — none of them can start anything — so a
 # surface with neither producer leaves the model four tools that can only ever
@@ -1440,11 +1463,16 @@ def build_options_from_profile(
         ai_tools_config_from_names,
     )
 
+    # Without a fal.ai key only the image tools set to the ChatGPT
+    # subscription can run, so only those are offered.
+    _fal_available = _ai_tools_available()
+    _subscription_only = set() if _fal_available else _subscription_image_tool_names()
     ai_tool_names = [
         name
         for name in ai_tool_names_for_config(None, every=True)
-        if tool_permitted(name, access.allowed, access.disallowed)
-    ] if _ai_tools_available() else []
+        if (_fal_available or name.split("__")[-1] in _subscription_only)
+        and tool_permitted(name, access.allowed, access.disallowed)
+    ]
     if ai_tool_names:
         mcp_allowed_tools.extend(ai_tool_names)
         logger.debug(f"AI MCP tools to allow: {ai_tool_names}")

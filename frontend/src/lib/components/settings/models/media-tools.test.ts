@@ -160,6 +160,25 @@ describe('MediaTools', () => {
 		expect(tools.blockedByFal(tool('tts'))).toBe(false);
 	});
 
+	it('offers the ChatGPT subscription for images, which never needs fal.ai (#1796)', async () => {
+		settings = { ...settings, fal_enabled: false, image_model: 'chatgpt-subscription', image_edit_model: 'chatgpt-subscription' };
+		const tools = await loaded();
+		for (const item of ['t2i', 'edit']) {
+			expect(tool(item).getModels().map((m) => m.id)).toContain('chatgpt-subscription');
+			expect(tools.runsOn(tool(item))).toBe('chatgpt');
+			expect(tools.blockedByFal(tool(item))).toBe(false);
+			expect(tools.price(tool(item))).toBe('ChatGPT plan');
+		}
+		expect(tools.displayName(tool('t2i'))).toBe('ChatGPT subscription (OpenAI built-in)');
+		expect(tools.settingOptions(tool('t2i'), tool('t2i').settings[0])).toEqual(['1:1', '3:2', '2:3']);
+	});
+
+	it('treats an openai/ image id from the fal.ai catalog as fal.ai, not an OpenAI key', async () => {
+		settings = { ...settings, image_edit_model: 'openai/gpt-image-2.5/flare/edit' };
+		const tools = await loaded();
+		expect(tools.runsOn(tool('edit'))).toBe('fal');
+	});
+
 	it('saves options at once and sliders after a pause', async () => {
 		const tools = await loaded();
 		const t2i = tool('t2i');

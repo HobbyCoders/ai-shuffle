@@ -147,6 +147,12 @@ function sttCapabilities(model: AnyModel): CapabilityBadge[] {
 // The Registry — Single source of truth
 // ============================================================================
 
+/** Per-image price; the ChatGPT subscription is covered by the plan. */
+function formatImagePrice(m: AnyModel): string {
+	const image = m as ImageModel;
+	return image.provider === 'chatgpt' ? 'ChatGPT plan' : `$${image.pricePerImage.toFixed(3)}/img`;
+}
+
 export const AI_TOOL_CATEGORIES: ToolCategory[] = [
 	{
 		id: 'image',
@@ -165,7 +171,7 @@ export const AI_TOOL_CATEGORIES: ToolCategory[] = [
 				defaultModel: 'fal-ai/flux-pro/v1.1-ultra',
 				getModels: () => TEXT_TO_IMAGE_MODELS,
 				catalogToolType: 'image_generation',
-				formatPrice: (m) => `$${(m as ImageModel).pricePerImage.toFixed(3)}/img`,
+				formatPrice: formatImagePrice,
 				getCapabilities: imageCapabilities,
 				settings: [
 					{
@@ -193,7 +199,7 @@ export const AI_TOOL_CATEGORIES: ToolCategory[] = [
 				defaultModel: 'fal-ai/flux-pro/kontext',
 				getModels: () => IMAGE_EDITING_MODELS,
 				catalogToolType: 'image_editing',
-				formatPrice: (m) => `$${(m as ImageModel).pricePerImage.toFixed(3)}/img`,
+				formatPrice: formatImagePrice,
 				getCapabilities: imageCapabilities,
 				settings: [],
 			},

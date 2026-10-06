@@ -128,6 +128,40 @@ def _save_images(cwd, items):
         raise
 
 
+async def stream_images(provider, request, items, usage):
+    """Run one native image request, filling ``items`` and ``usage`` in place.
+
+    Returns a sanitized warning or ``None``. The containers are the caller's so
+    observations made before a cancellation stay with the caller, which records
+    them in its own ``finally``. Also used by the subscription image tools that
+    chats on other providers get (app.core.provider.subscription_images).
+    """
+    warning = None
+    try:
+        async with aclosing(provider.stream(request)) as chunks:
+            async for chunk in chunks:
+                if chunk.kind == "image_generation":
+                    if chunk.payload.get("status") == "completed" and chunk.payload.get("result"):
+                        items.append(chunk.payload)
+                    else:
+                        warning = _error()
+                elif chunk.kind in {"usage", "message_start", "provider_request"}:
+                    observed = chunk.payload.get("usage", {})
+                    for key, value in observed.items():
+                        if isinstance(value, int) and not isinstance(value, bool):
+                            usage[key] = max(usage.get(key, 0), value)
+                    if chunk.payload.get("provider_requests"):
+                        usage["provider_requests"] = chunk.payload["provider_requests"]
+                elif chunk.kind == "error":
+                    warning = _error(chunk.payload.get("status"), chunk.payload)
+                    break
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - request errors may contain credentials
+        warning = _error()
+    return warning
+
+
 def make_handler(engine_supplier, session_supplier, *, chat_mode=False):
     async def generate(args, ctx):
         prompt = args.get("prompt")
@@ -157,27 +191,7 @@ def make_handler(engine_supplier, session_supplier, *, chat_mode=False):
                                   tools=[tool], extra={"tool_choice": {"type": "image_generation"}})
         items, usage, warning = [], {}, None
         try:
-            async with aclosing(provider.stream(request)) as chunks:
-                async for chunk in chunks:
-                    if chunk.kind == "image_generation":
-                        if chunk.payload.get("status") == "completed" and chunk.payload.get("result"):
-                            items.append(chunk.payload)
-                        else:
-                            warning = _error()
-                    elif chunk.kind in {"usage", "message_start", "provider_request"}:
-                        observed = chunk.payload.get("usage", {})
-                        for key, value in observed.items():
-                            if isinstance(value, int) and not isinstance(value, bool):
-                                usage[key] = max(usage.get(key, 0), value)
-                        if chunk.payload.get("provider_requests"):
-                            usage["provider_requests"] = chunk.payload["provider_requests"]
-                    elif chunk.kind == "error":
-                        warning = _error(chunk.payload.get("status"), chunk.payload)
-                        break
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - request errors may contain credentials
-            warning = _error()
+            warning = await stream_images(provider, request, items, usage)
         finally:
             if items:
                 usage["generated_images"] = len(items)

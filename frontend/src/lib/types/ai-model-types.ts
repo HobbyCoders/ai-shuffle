@@ -12,7 +12,9 @@
 // Image/video/3D models are all fal.ai. Speech models (TTS/STT) can also be
 // served directly by OpenAI (GPT), so the provider union includes 'openai'.
 
-export type AIProvider = 'fal-ai' | 'openai';
+// 'chatgpt': the built-in OpenAI image generation on the ChatGPT subscription
+// signed in on the worker (no fal.ai or OpenAI API key; #1796).
+export type AIProvider = 'fal-ai' | 'openai' | 'chatgpt';
 
 // ============================================================================
 // Image Model Types

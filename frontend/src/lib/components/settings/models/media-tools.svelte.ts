@@ -228,12 +228,23 @@ export class MediaTools {
 		return voice ? `${voice.name}${voice.gender ? ` (${voice.gender})` : ''}` : voiceId;
 	}
 
-	/** True when the selected model is billed to fal.ai (not an OpenAI speech model). */
-	runsOnFal(tool: ToolDefinition): boolean {
+	/** What the selected model runs on: a fal.ai key, an OpenAI API key (speech
+	 * models), or the ChatGPT subscription signed in on the worker (images). */
+	runsOn(tool: ToolDefinition): 'fal' | 'openai' | 'chatgpt' {
 		const id = this.modelId(tool);
-		if (!id) return true;
+		if (!id) return 'fal';
 		const provider = (this.curated(tool) as { provider?: string } | undefined)?.provider;
-		return provider ? provider !== 'openai' : !id.startsWith('openai/');
+		if (provider === 'openai' || provider === 'chatgpt') return provider;
+		if (provider) return 'fal';
+		// Uncurated `openai/` ids are OpenAI speech models only; an image id
+		// such as `openai/gpt-image-2.5/flare/edit` is a fal.ai catalog model.
+		const speech = tool.catalogToolType === 'tts' || tool.catalogToolType === 'stt';
+		return speech && id.startsWith('openai/') ? 'openai' : 'fal';
+	}
+
+	/** True when the selected model is billed to fal.ai. */
+	runsOnFal(tool: ToolDefinition): boolean {
+		return this.runsOn(tool) === 'fal';
 	}
 
 	/** fal.ai is switched off and this tool needs it. */
