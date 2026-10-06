@@ -793,6 +793,27 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # admitted, so a resubmitted id is never delivered twice.
         self._pending_peers: list[AgentMessage | Steer] = []
         self._turn_peer_ids: set[str] = set()
+        # Stdin-lane steers (``_deliver_steer``) not written yet, in arrival
+        # order: any that arrived while the main conversation was compacting,
+        # and harness notices that arrived while no main-thread tool call was
+        # running. The CLI would queue such a frame until its model call ends
+        # and, if that call ends the turn, run it as a follow-up cycle after
+        # its ``result`` that no turn reads (#1987). They are written once a
+        # main-thread tool call runs (outside a compaction), or dropped
+        # unreceipted when the turn ends first.
+        self._held_stdin_steers: list[Steer] = []
+        # Ids of the main thread's tool calls that have no result yet.
+        self._main_tools_open: set[str] = set()
+        # Harness notices written to stdin and not yet receipted: the record
+        # for ``SteerDelivered`` and whether a main-thread tool result has been
+        # read since the write. The CLI folds a stdin frame into the model call
+        # after the next tool result; one that opens after such a result is the
+        # proof the model got it. Dropped unreceipted when the result comes
+        # first, so the host hands the notice to its at-rest wake.
+        self._unacked_notices: list[tuple[dict[str, Any], bool]] = []
+        # The running turn's ``result`` was read (or its terminal published):
+        # a stdin frame written now could only start a CLI cycle nobody reads.
+        self._stdin_lane_closed = False
         # A hook on a bridge-served call answered ``continue: false``: the
         # reason, reported as the turn's ErrorEvent once the CLI's result
         # lands (the native loop ends its turn the same way).
@@ -948,6 +969,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """
         if isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
             self._peer_admission_open = False
+            self._stdin_lane_closed = True
             self._drop_pending_peers()
         sequenced = await self.bus.publish(event)
         await persist_event(self.store, sequenced)
@@ -1000,6 +1022,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 del self._pending_peers[index]
                 self._turn_peer_ids.discard(steer_id)
                 return True
+        for index, held in enumerate(self._held_stdin_steers):
+            if steer_id and held.id == steer_id:
+                # A held stdin-lane steer: not written yet either.
+                del self._held_stdin_steers[index]
+                return True
         return False
 
     # ─── ExecutionEngine interface ───────────────────────────────────────
@@ -1011,6 +1038,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if self._turn_task and not self._turn_task.done():
                 raise RuntimeError("a turn is already running; Interrupt it first")
             self._interrupted.clear()
+            self._stdin_lane_closed = False
             if self._stop_carryover_until is not None:
                 # The Stop that cut this turn's switch short is this turn's.
                 if asyncio.get_running_loop().time() <= self._stop_carryover_until:
@@ -1854,6 +1882,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 failure = f"claude stdin closed before the turn was sent: {exc!r}"
             else:
                 self._peer_admission_open = not self._interrupted.is_set()
+                self._stdin_lane_closed = False  # a retried attempt reopens it
                 async with self._stdout_lock:
                     failure = await self._read_until_result(sid, turn_id, mapper, user_node)
             if failure is None:
@@ -1986,27 +2015,42 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         no batching and no per-frame acknowledgement to wait for, since the loop
         does not run with ``--replay-user-messages``.
 
-        Written-to-stdin *is* delivery here: from that byte on the CLI owns the
-        message and folds it into the turn, so ``SteerDelivered`` is receipted as
-        soon as the write drains. The event is published straight from ``submit``
-        rather than from the turn's frame reader; that is safe because ``_emit``
-        does not suspend between assigning a seq and queueing on the store's
-        event lock, and the lock admits writers in arrival order. The steer
-        receipt is a durable barrier, so it also commits any deltas the reader
-        had batched before it.
+        For the user's own words (the no-hook fallback), written-to-stdin *is*
+        delivery: from that byte on the CLI owns the message, so
+        ``SteerDelivered`` is receipted as soon as the write drains. The event
+        is published straight from ``submit`` rather than from the turn's frame
+        reader; that is safe because ``_emit`` does not suspend between
+        assigning a seq and queueing on the store's event lock, and the lock
+        admits writers in arrival order. The steer receipt is a durable
+        barrier, so it also commits any deltas the reader had batched before it.
 
-        Known narrow race: if the CLI's ``result`` for this turn was already in
-        flight when the frame landed, the CLI holds the frame and processes it as
-        a self-initiated follow-up cycle *after* the result. The text is never
-        lost and the receipt still stands, but the assistant response to it
-        arrives outside the turn — where the between-turn drain
-        (``_discard_stale_stdout``) or the next turn's reader picks it up.
+        A harness notice is receipted later, by the turn's reader, once the CLI
+        provably folded it into this turn: a main-thread tool result read after
+        the write, then a model call opening (``_ack_stdin_notices``). A frame
+        that lands while the model's last call of the turn is running is not
+        folded into it; the CLI writes its ``result`` and then runs the frame as
+        a self-initiated follow-up cycle that no turn reads (#1987). Such a
+        notice is dropped unreceipted when the result is read, and the host
+        hands it to its at-rest wake; that wake turn's between-turn drain
+        (``_discard_stale_stdout``) reads the follow-up cycle to its result
+        before writing, so the cycle is never orphaned. The model may then read
+        the notice twice, which is the price of never losing it.
+
+        So a notice is only written while a main-thread tool call is running,
+        and no stdin-lane frame at all while the main conversation is
+        compacting (``_main_compacting``): the CLI would hold it until the
+        compaction ends and, if the model's first answer after it ends the
+        turn, run it after the ``result`` (#1987). Such a steer is held
+        (``_held_stdin_steers``) and written when the next main-thread tool
+        call starts (``_stdin_lane_frame``), so the CLI attaches it to that
+        tool's result. A turn that ends first drops it unreceipted: the user's
+        queue row runs as its own turn, a notice goes to the wake.
 
         Raises ``RuntimeError`` when there is nothing live to steer into: no
         running turn (send a ``UserTurn`` instead), an interrupt already
-        requested for the running turn, no live CLI process behind it, or (on
-        the hook lane) the turn's result already read. The caller is expected
-        to fall back to queueing the message. A peer's
+        requested for the running turn, no live CLI process behind it, or the
+        turn's result already read. The caller is expected to fall back to
+        queueing the message. A peer's
         AgentMessage never takes this lane (see ``_admit_peer``): a stdin frame
         has no same-query binding, and the user's result-in-flight window above
         does not authorize a peer follow-up cycle.
@@ -2036,6 +2080,50 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if op.id is not None:
                 self._turn_peer_ids.add(op.id)
             return
+        if self._stdin_lane_closed:
+            raise RuntimeError(
+                "the running turn's result is already read; queue the message instead"
+            )
+        if (
+            self._main_compacting or self._held_stdin_steers
+            or (op.origin != "user" and not self._main_tools_open)
+        ):
+            # Behind the compaction, and behind anything already held, so
+            # steers still reach the CLI in submission order.
+            if op.id is None or all(held.id != op.id for held in self._held_stdin_steers):
+                self._held_stdin_steers.append(op)
+            return
+        await self._write_stdin_steer(op)
+
+    async def _release_held_stdin_steers(self) -> None:
+        """Write the held stdin-lane steers, in order.
+
+        Called by the turn's reader once a main-thread tool call is running
+        outside a compaction. Nothing is written once the turn is ending
+        (result read, a Stop, a hook that ended the query): the held steers
+        then stay put and are dropped unreceipted with the turn.
+        """
+        if (
+            self._stdin_lane_closed
+            or self._interrupted.is_set()
+            or self._hook_stop_reason is not None
+        ):
+            return
+        held, self._held_stdin_steers = self._held_stdin_steers, []
+        for index, op in enumerate(held):
+            try:
+                await self._write_stdin_steer(op)
+            except (OSError, RuntimeError):
+                # The CLI never got it: no receipt, so the host's fallback
+                # (the queue row, or the wake for a notice) still owns it.
+                logger.warning(
+                    "could not write %d held steer(s) after a compaction",
+                    len(held) - index, exc_info=True,
+                )
+                return
+
+    async def _write_stdin_steer(self, op: Steer) -> None:
+        """Write one steer as a stdin ``user`` frame (see ``_deliver_steer``)."""
         text = op.text
         record: dict[str, Any] = {"id": op.id, "text": op.text}
         if op.origin != "user":
@@ -2051,9 +2139,66 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         await self._write_frame({"type": "user", "message": {
             "role": "user", "content": [{"type": "text", "text": text}],
         }})
+        if op.origin != "user":
+            self._unacked_notices.append((record, False))
+            return
         await self._emit(SteerDelivered(
             session_id=self.session_id, turn_id=self._active_turn_id,
             steers=[record],
+        ))
+
+    async def _stdin_lane_frame(self, frame: dict[str, Any], mapped: Any) -> None:
+        """Follow the main thread's open tool calls for the stdin lane.
+
+        Receipts the notices this frame proves were folded in, then writes
+        any held steers once a main-thread tool call is running and no
+        compaction is: the CLI attaches input queued while a tool runs to
+        that tool's result, so the model reads it before it can end the turn.
+        """
+        if frame.get("parent_tool_use_id"):
+            return  # a subagent's frame: neither a main tool call nor proof
+        message = frame.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        blocks = [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+        if frame.get("type") == "assistant":
+            self._main_tools_open.update(
+                str(b["id"]) for b in blocks if b.get("type") == "tool_use" and b.get("id")
+            )
+        elif frame.get("type") == "user":
+            self._main_tools_open.difference_update(
+                str(b.get("tool_use_id")) for b in blocks if b.get("type") == "tool_result"
+            )
+        await self._ack_stdin_notices(frame, mapped, blocks)
+        if self._held_stdin_steers and self._main_tools_open and not self._main_compacting:
+            await self._release_held_stdin_steers()
+
+    async def _ack_stdin_notices(
+        self, frame: dict[str, Any], mapped: Any, blocks: list[dict[str, Any]],
+    ) -> None:
+        """Receipt the stdin notices this frame proves the model received.
+
+        A main-thread tool result marks every notice written before it: the
+        CLI attaches queued input right after a tool result. The next
+        main-thread model call that opens then carries them, and they are
+        receipted before that call's events.
+        """
+        if not self._unacked_notices:
+            return
+        kind = frame.get("type")
+        if kind == "user":
+            if any(block.get("type") == "tool_result" for block in blocks):
+                self._unacked_notices = [(record, True) for record, _ in self._unacked_notices]
+            return
+        if kind != "assistant" or mapped.opened_call is None:
+            return
+        acked = [record for record, boundary in self._unacked_notices if boundary]
+        if not acked:
+            return
+        self._unacked_notices = [
+            (record, boundary) for record, boundary in self._unacked_notices if not boundary
+        ]
+        await self._emit(SteerDelivered(
+            session_id=self.session_id, turn_id=self._active_turn_id, steers=acked,
         ))
 
     def _admit_peer(self, op: AgentMessage) -> None:
@@ -2116,12 +2261,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """Forget peers no boundary of this turn can deliver any more.
 
         No receipt is emitted for them: the host's durable row is the record,
-        and it runs through ordinary scheduling.
+        and it runs through ordinary scheduling. Steers held through a
+        compaction and notices the model never acknowledged go the same way
+        (a notice's host fallback is the at-rest wake).
         """
         for op in self._pending_peers:
             if op.id is not None:
                 self._turn_peer_ids.discard(op.id)
         self._pending_peers.clear()
+        if self._held_stdin_steers or self._unacked_notices:
+            logger.info(
+                "dropping %d held and %d unacknowledged stdin steer(s) at turn end; "
+                "the host's fallback delivers them",
+                len(self._held_stdin_steers), len(self._unacked_notices),
+            )
+        self._held_stdin_steers.clear()
+        self._unacked_notices.clear()
 
     def _peer_boundary(
         self,
@@ -2471,6 +2626,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         parent = user_node
         last_assistant: Message | None = None
         self._main_compacting = False
+        self._main_tools_open.clear()
         while True:
             line = await self._next_stdout_line()
             if not line:
@@ -2492,6 +2648,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 # A completed CLI result cannot admit an unrequested peer cycle,
                 # even while terminal publication or storage is still pending.
                 self._peer_admission_open = False
+                self._stdin_lane_closed = True
+                self._main_tools_open.clear()
                 self._drop_pending_peers()
             progress = self._track_main_compaction(frame)
             if progress is not None:
@@ -2505,6 +2663,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 logger.info("a subagent's compaction boundary; not reported")
                 continue
             mapped = mapper.feed(frame)
+            await self._stdin_lane_frame(frame, mapped)
             if mapped.hook_request is not None:
                 # The CLI waits on this answer before it goes on, so it is
                 # given here, in stream order.

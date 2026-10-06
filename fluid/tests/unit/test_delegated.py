@@ -2556,6 +2556,164 @@ async def test_a_system_origin_steer_reaches_the_cli_in_the_notice_marker() -> N
         await loop.aclose()
 
 
+# ─── Harness notices never start a CLI cycle after the result (#1987) ───────
+
+
+_NOTICE = "<task-notification>worker finished</task-notification>"
+
+
+async def _until(predicate, timeout: float = 10.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        assert asyncio.get_running_loop().time() < deadline, "condition never held"
+        await asyncio.sleep(0.01)
+
+
+def _notice_writes(loop: DelegatedLoop) -> list[dict]:
+    """Spy on the stdin writes of notice frames, with the loop's state then."""
+    writes: list[dict] = []
+    original = loop._write_frame
+
+    async def spy(frame: dict) -> None:
+        if frame.get("type") == "user" and "worker finished" in json.dumps(frame):
+            writes.append({
+                "compacting": loop._main_compacting,
+                "tools_open": set(getattr(loop, "_main_tools_open", ())),
+                "events": len(loop.bus.log(loop._session.session_id)),
+            })
+        await original(frame)
+
+    loop._write_frame = spy  # type: ignore[method-assign]
+    return writes
+
+
+async def test_a_notice_during_compaction_waits_for_the_next_main_tool_call(tmp_path) -> None:
+    """Written mid-compaction, the CLI held the frame until the compaction
+    ended and, if the model then ended the turn, ran it after the result.
+    Now it is written once the compaction is over and a main-thread tool
+    call runs, and receipted only when the model call after that tool's
+    result opens."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _scripted_loop(tmp_path, [[
+        {"op": "text", "text": "starting"},
+        {"op": "frame", "frame": _STATUS_ON},
+        {"op": "sleep", "s": 0.4},
+        {"op": "frame", "frame": _STATUS_OFF},
+        {"op": "frame", "frame": _boundary(150_000)},
+        {"op": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}},
+        {"op": "sleep", "s": 0.3},
+        {"op": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+        {"op": "text", "text": "saw the notice"},
+        {"op": "result"},
+    ]], store=store, session_id=sid)
+    writes = _notice_writes(loop)
+    try:
+        await loop.submit(UserTurn(content="go"))
+        await _until(lambda: loop._main_compacting)
+        await loop.submit(Steer(text=_NOTICE, id="n1", origin="system"))
+        assert writes == []  # held, not written into the compaction
+        await loop.wait_turn()
+        events = loop.bus.log(sid)
+    finally:
+        await loop.aclose()
+    assert writes == [{"compacting": False, "tools_open": {"toolu_1"}, "events": writes[0]["events"]}]
+    before_write = events[: writes[0]["events"]]
+    assert _compactions(before_write)  # after the boundary, while toolu_1 runs
+    assert not any(isinstance(e, ToolResult) for e in before_write)
+    receipts = [e for e in events if isinstance(e, SteerDelivered)]
+    assert [r.steers[0]["id"] for r in receipts] == ["n1"]
+    position = events.index(receipts[0])
+    assert any(isinstance(e, ToolResult) for e in events[:position])
+    assert isinstance(events[-1], TurnComplete) and position < len(events) - 1
+
+
+async def test_a_notice_during_compaction_is_not_written_when_the_turn_ends(tmp_path) -> None:
+    """The #1987 timeline: the model's first answer after the compaction
+    ends the turn. The notice is never written (the CLI cannot run it as a
+    follow-up cycle nobody reads) and gets no receipt, so the host hands it
+    to the at-rest wake."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _scripted_loop(tmp_path, [[
+        {"op": "text", "text": "parking"},
+        {"op": "frame", "frame": _STATUS_ON},
+        {"op": "sleep", "s": 0.4},
+        {"op": "frame", "frame": _STATUS_OFF},
+        {"op": "frame", "frame": _boundary(150_000)},
+        {"op": "text", "text": "Waiting for the worker; ending the turn."},
+        {"op": "result"},
+    ]], store=store, session_id=sid)
+    writes = _notice_writes(loop)
+    try:
+        await loop.submit(UserTurn(content="go"))
+        await _until(lambda: loop._main_compacting)
+        await loop.submit(Steer(text=_NOTICE, id="n1", origin="system"))
+        await loop.wait_turn()
+        events = loop.bus.log(sid)
+    finally:
+        await loop.aclose()
+    assert writes == []
+    assert not any(isinstance(e, SteerDelivered) for e in events)
+    assert isinstance(events[-1], TurnComplete)
+
+
+async def test_a_notice_during_the_last_model_call_is_not_written(tmp_path) -> None:
+    """The old narrow race: a notice that lands while the model's last call
+    runs (no tool call in flight) used to be written and receipted, and the
+    CLI then answered it in a cycle after the result. It is now held, then
+    dropped unreceipted when the result comes."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _scripted_loop(tmp_path, [[
+        {"op": "text", "text": "thinking"},
+        {"op": "sleep", "s": 0.4},
+        {"op": "text", "text": "done"},
+        {"op": "result"},
+    ]], store=store, session_id=sid)
+    writes = _notice_writes(loop)
+    try:
+        await loop.submit(UserTurn(content="go"))
+        await _until(lambda: any(
+            isinstance(e, TextDelta) for e in loop.bus.log(sid)
+        ))
+        await loop.submit(Steer(text=_NOTICE, id="n1", origin="system"))
+        await loop.wait_turn()
+        events = loop.bus.log(sid)
+    finally:
+        await loop.aclose()
+    assert writes == []
+    assert not any(isinstance(e, SteerDelivered) for e in events)
+
+
+async def test_a_written_notice_with_no_model_call_after_it_has_no_receipt(tmp_path) -> None:
+    """A notice written while a tool runs is receipted only once a model
+    call after the tool's result opens. If the result comes first, the model
+    never read it in this turn: no receipt, so the host's wake still owns it
+    (that wake's between-turn drain reads any cycle the CLI runs for it)."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _scripted_loop(tmp_path, [[
+        {"op": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls"}},
+        {"op": "sleep", "s": 0.4},
+        {"op": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+        {"op": "result", "subtype": "error_max_turns"},
+    ]], store=store, session_id=sid)
+    writes = _notice_writes(loop)
+    try:
+        await loop.submit(UserTurn(content="go"))
+        await _until(lambda: any(
+            isinstance(e, ToolUse) for e in loop.bus.log(sid)
+        ))
+        await loop.submit(Steer(text=_NOTICE, id="n1", origin="system"))
+        assert len(writes) == 1  # a main tool call runs: written at once
+        await loop.wait_turn()
+        events = loop.bus.log(sid)
+    finally:
+        await loop.aclose()
+    assert not any(isinstance(e, SteerDelivered) for e in events)
+
+
 # ─── Missing CLI ─────────────────────────────────────────────────────────────
 
 

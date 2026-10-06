@@ -114,12 +114,15 @@ def wait_for(msg_type: str) -> dict | None:
             return msg
 
 
-def assistant_frame(sid: str, content: list[dict], stop_reason: str, usage: dict | None = None) -> dict:
+def assistant_frame(
+    sid: str, content: list[dict], stop_reason: str, usage: dict | None = None,
+    msg_id: str = "msg_fake",
+) -> dict:
     return {
         "type": "assistant",
         "session_id": sid,
         "message": {
-            "id": "msg_fake",
+            "id": msg_id,
             "model": "claude-fake",
             "content": content,
             "usage": usage or {
@@ -212,19 +215,19 @@ def turn_tool(sid: str, *, question: bool = False) -> None:
             "type": "tool_result", "tool_use_id": tid,
             "content": [{"type": "text", "text": response["message"]}], "is_error": True,
         }]}})
-        emit(assistant_frame(sid, [{"type": "text", "text": "Independent work completed."}], "end_turn"))
+        emit(assistant_frame(sid, [{"type": "text", "text": "Independent work completed."}], "end_turn", msg_id="msg_fake_2"))
     elif behavior == "allow":
         emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
             "type": "tool_result", "tool_use_id": tid,
             "content": [{"type": "text", "text": "Paris: sunny, 21C"}], "is_error": False,
         }]}})
-        emit(assistant_frame(sid, [{"type": "text", "text": "It is sunny in Paris."}], "end_turn"))
+        emit(assistant_frame(sid, [{"type": "text", "text": "It is sunny in Paris."}], "end_turn", msg_id="msg_fake_2"))
     else:
         emit({"type": "user", "session_id": sid, "message": {"role": "user", "content": [{
             "type": "tool_result", "tool_use_id": tid,
             "content": [{"type": "text", "text": "permission denied by user"}], "is_error": True,
         }]}})
-        emit(assistant_frame(sid, [{"type": "text", "text": "Understood, skipping that."}], "end_turn"))
+        emit(assistant_frame(sid, [{"type": "text", "text": "Understood, skipping that."}], "end_turn", msg_id="msg_fake_2"))
     emit(result_frame(sid))
 
 
