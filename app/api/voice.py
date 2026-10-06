@@ -853,6 +853,16 @@ async def create_voice_session(
             "greet": session_mode is None,
         },
     }
+    if request.context_window:
+        # A window the model does not offer is ignored, never stamped as the
+        # new chat's pin (the picker's check).
+        from app.core.model_registry import offered_context_window
+
+        session_create_overrides["context_window"] = await run_sync(
+            offered_context_window,
+            {**session_create_overrides, "profile_id": profile_id},
+            request.context_window,
+        )
 
     # Current branch sessions have no legacy worktree row. Reuse the normal V2
     # path so existing branches are recovered and Auto creates a real branch;

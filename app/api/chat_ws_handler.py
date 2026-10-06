@@ -1419,6 +1419,16 @@ class ChatWebSocketHandler:
             # Create session + first user message atomically so neither is orphaned.
             # Wrapped in run_sync to avoid blocking the event loop during DB I/O.
             from app.db.base import transaction
+            from app.core.model_registry import offered_context_window
+
+            # A window the model does not offer is ignored, never stamped as
+            # the new chat's pin (the picker's check).
+            create_window = (
+                await run_sync(offered_context_window,
+                               {"model": (overrides or {}).get("model"), "profile_id": profile_id},
+                               overrides["context_window"])
+                if (overrides or {}).get("context_window") else None
+            )
 
             def _create_session_atomic():
                 with transaction() as txn:
@@ -1438,7 +1448,7 @@ class ChatWebSocketHandler:
                         model=(overrides or {}).get("model"),
                         effort=(overrides or {}).get("effort"),
                         permission_mode=(overrides or {}).get("permission_mode"),
-                        context_window=(overrides or {}).get("context_window"),
+                        context_window=create_window,
                         fast=(overrides or {}).get("fast"),
                         # The composer's sidepanel mode is likewise settled at
                         # birth — 'code' persists as NULL, the same as every
@@ -1480,7 +1490,7 @@ class ChatWebSocketHandler:
                             "title": title, "api_user_id": self.api_user_id,
                             "model": (overrides or {}).get("model"), "effort": (overrides or {}).get("effort"),
                             "permission_mode": (overrides or {}).get("permission_mode"),
-                            "context_window": (overrides or {}).get("context_window"),
+                            "context_window": create_window,
                             "fast": (overrides or {}).get("fast"), "mode": session_mode,
                             # Who started it, recorded above; the worker that
                             # runs it labels it at creation (#1877).

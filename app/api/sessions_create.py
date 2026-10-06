@@ -117,8 +117,15 @@ async def create_empty_session(
     session_id = str(uuid.uuid4())
 
     def _create() -> None:
+        from app.core.model_registry import offered_context_window
         from app.db.base import transaction
 
+        # A window the model does not offer is ignored, never stamped as the
+        # new chat's pin (the picker's check).
+        window = offered_context_window(
+            {"model": overrides.get("model"), "profile_id": profile_id},
+            overrides.get("context_window"),
+        )
         with transaction() as txn:
             database.create_session(
                 session_id=session_id,
@@ -131,7 +138,7 @@ async def create_empty_session(
                 model=overrides.get("model"),
                 effort=overrides.get("effort"),
                 permission_mode=overrides.get("permission_mode"),
-                context_window=overrides.get("context_window"),
+                context_window=window,
                 fast=overrides.get("fast"),
                 mode=mode,
                 _conn=txn,

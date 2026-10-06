@@ -1024,10 +1024,28 @@ async def stream_query(
     # This API lane bypasses turn_manager, so save an explicit context-window
     # pick here as every other human send does: it wins for this turn (the
     # override) and becomes the chat's pin, so a later wake or retry neither
-    # reverts nor widens it.
+    # reverts nor widens it. A window the turn's model does not offer is
+    # ignored (the picker's check): not saved, and dropped from this turn so it
+    # runs on the saved pin or the model default.
     if (overrides or {}).get("context_window"):
-        await run_sync(database.set_session_run_binding, session_id,
-                       context_window=overrides["context_window"])
+        from app.core.model_registry import offered_context_window
+
+        _window_row = {**(session or {}), "model": overrides.get("model") or (session or {}).get("model")}
+        if overrides.get("model"):
+            # This lane does not save the model, so apply the provider rebind
+            # the options builder makes for this turn: a native Claude pick the
+            # bound provider does not curate runs (and offers windows) natively.
+            from app.db.sessions import _provider_for_model_pick
+
+            _provider, _rebind = await run_sync(
+                _provider_for_model_pick, session_id, overrides["model"])
+            if _rebind:
+                _window_row["provider_id"] = _provider
+        _window = await run_sync(offered_context_window, _window_row, overrides["context_window"])
+        if _window is None:
+            overrides = {k: v for k, v in overrides.items() if k != "context_window"}
+        else:
+            await run_sync(database.set_session_run_binding, session_id, context_window=_window)
 
     # Store user message and broadcast to other devices. Skipped on a failover
     # retry (persist_user_message=False): the original entry already added the

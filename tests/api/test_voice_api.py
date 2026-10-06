@@ -469,16 +469,30 @@ class TestCreateVoiceSession:
         _make_provider()
         _install_mock_transport(monkeypatch, _secret_handler())
         resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={
-            "model": "gpt-5.6", "effort": "high", "permission_mode": "ask",
-            "context_window": 12345, "fast": True, "execution_mode": "local",
+            "model": "opus", "effort": "high", "permission_mode": "ask",
+            "context_window": 200_000, "fast": True, "execution_mode": "local",
         })
         assert resp.status_code == 200, resp.text
         row = db.get_session(resp.json()["session_id"])
-        assert row["model"] == "gpt-5.6"
+        assert row["model"] == "opus"
         assert row["effort"] == "high"
         assert row["permission_mode"] == "ask"
-        assert row["context_window"] == 12345
+        # A window the model offers; an unoffered one is ignored (#1894).
+        assert row["context_window"] == 200_000
         assert row["fast"] in (True, 1)
+
+    def test_creation_ignores_a_window_the_model_does_not_offer(
+        self, authenticated_client, mock_db, monkeypatch
+    ):
+        """#1894: never stamped as the pin, which would be enforced as a ceiling."""
+        _enable_voice()
+        _make_provider()
+        _install_mock_transport(monkeypatch, _secret_handler())
+        resp = authenticated_client.post(f"{VOICE_ROOT}/sessions", json={
+            "model": "opus", "context_window": 12345, "execution_mode": "local",
+        })
+        assert resp.status_code == 200, resp.text
+        assert db.get_session(resp.json()["session_id"])["context_window"] is None
 
     def test_v2_existing_branch_is_provisioned_and_voice_bound(
         self, authenticated_client, mock_db, monkeypatch, tmp_path

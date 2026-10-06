@@ -16,6 +16,7 @@ Covers:
   so an automation or a wakeup replay never re-binds a session behind the user.
 """
 
+import asyncio
 from unittest.mock import patch
 
 import pytest
@@ -575,3 +576,222 @@ class TestFastModeBinding:
                 no_kick=True,
             )
             assert db.get_session("f-flip")["fast"] == fast
+
+
+# ---------------------------------------------------------------------------
+# A window the model does not offer is ignored on every saving source (#1894)
+# ---------------------------------------------------------------------------
+#
+# Since #1866 a saved pin is a ceiling the options builder enforces even when
+# the model does not offer it, so no send or create may save a client window
+# the model does not offer. Sonnet offers 200K and 1M; Haiku offers no choice.
+# The value is ignored, as the API reference documents: the saved pin is left
+# alone and the turn runs on it (or on the model default when unpinned).
+
+
+class TestUnofferedWindowIsIgnored:
+    def _profile(self, tmp_path):
+        make_profile("agent", {"cwd": str(tmp_path)})
+        return {"id": "agent", "config": {"cwd": str(tmp_path)}}
+
+    # Every human-facing turn source shares this save: a WebSocket send
+    # (user/queue), the HTTP conversation API, a worktree chat's first message
+    # and a connector message.
+    @pytest.mark.parametrize("source", ["user", "queue", "api", "worktree", "connector"])
+    def test_send_keeps_the_saved_pin_and_runs_on_it(self, mock_db, tmp_path, source):
+        from app.db import turns
+
+        profile = self._profile(tmp_path)
+        db.create_session("s-pinned", profile_id="agent", model="sonnet",
+                          context_window=200_000)
+        turn_id = turn_manager.submit(
+            "s-pinned", source, prompt="hi", profile_id="agent",
+            overrides={"cwd": str(tmp_path), "context_window": 1000}, no_kick=True)
+        assert db.get_session("s-pinned")["context_window"] == 200_000
+        overrides = turns.get_turn(turn_id)["overrides"]
+        assert overrides["context_window"] == 200_000
+        opts = _build_options(profile, session_id="s-pinned", overrides=overrides)
+        assert opts.aih_context_window == 200_000
+
+    def test_send_on_an_unpinned_chat_runs_the_model_default(self, mock_db, tmp_path):
+        from app.db import turns
+
+        profile = self._profile(tmp_path)
+        db.create_session("s-free", profile_id="agent", model="sonnet")
+        turn_id = turn_manager.submit(
+            "s-free", "user", prompt="hi", profile_id="agent",
+            overrides={"cwd": str(tmp_path), "context_window": 150_000}, no_kick=True)
+        assert db.get_session("s-free")["context_window"] is None
+        overrides = turns.get_turn(turn_id)["overrides"]
+        assert "context_window" not in overrides
+        opts = _build_options(profile, session_id="s-free", overrides=overrides)
+        assert opts.aih_context_window is None
+        assert "CLAUDE_CODE_MAX_CONTEXT_TOKENS" not in opts.env
+
+    def test_send_is_checked_against_the_model_it_picks(self, mock_db, tmp_path):
+        self._profile(tmp_path)
+        db.create_session("s-switch", profile_id="agent", model="sonnet")
+        turn_manager.submit("s-switch", "user", prompt="hi", profile_id="agent",
+                            overrides={"model": "haiku", "context_window": 1_000_000},
+                            no_kick=True)
+        row = db.get_session("s-switch")
+        assert (row["model"], row["context_window"]) == ("haiku", None)
+        turn_manager.submit("s-switch", "user", prompt="hi", profile_id="agent",
+                            overrides={"model": "opus", "context_window": 1_000_000},
+                            no_kick=True)
+        row = db.get_session("s-switch")
+        assert (row["model"], row["context_window"]) == ("opus", 1_000_000)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("pin", [200_000, None])
+    async def test_api_stream_keeps_the_saved_pin_and_runs_on_it(self, mock_db, tmp_path, pin):
+        from app.core import credential_gate, query_engine
+
+        self._profile(tmp_path)
+        db.create_session("s-stream", profile_id="agent", model="sonnet", context_window=pin)
+        built = []
+
+        async def capture(options):
+            built.append(options)
+            return "stop before spawn"
+
+        with patch.object(qo, "get_security_instructions", return_value=""), \
+                patch.object(credential_gate, "refusal_for_options_async", capture):
+            frames = [frame async for frame in query_engine.stream_query(
+                "hello", "agent", session_id="s-stream",
+                overrides={"cwd": str(tmp_path), "context_window": 1000})]
+        assert frames[-1]["message"] == "stop before spawn"
+        assert built[0].aih_context_window == pin
+        assert db.get_session("s-stream")["context_window"] == pin
+
+    @pytest.mark.asyncio
+    async def test_api_stream_switching_a_provider_chat_to_claude_keeps_an_offered_window(
+            self, mock_db, tmp_path):
+        """The turn runs natively, so it is checked against the native model."""
+        from app.core import credential_gate, query_engine
+
+        _mk_provider()
+        self._profile(tmp_path)
+        db.create_session("s-prov", profile_id="agent", model="prov:op:openai/gpt-5.6")
+        assert db.get_session("s-prov")["provider_id"] == "op"
+        built = []
+
+        async def capture(options):
+            built.append(options)
+            return "stop before spawn"
+
+        with patch.object(qo, "get_security_instructions", return_value=""), \
+                patch.object(credential_gate, "refusal_for_options_async", capture):
+            [frame async for frame in query_engine.stream_query(
+                "hello", "agent", session_id="s-prov",
+                overrides={"cwd": str(tmp_path), "model": "opus", "context_window": 200_000})]
+        assert built[0].aih_context_window == 200_000
+        assert db.get_session("s-prov")["context_window"] == 200_000
+
+    @pytest.mark.asyncio
+    async def test_forwarded_create_and_turn_ignore_it(self, mock_db, tmp_path, monkeypatch):
+        """A chat created and driven from another worker (app.network.control)."""
+        from app.db import turns
+        from app.network import catalog, control
+
+        monkeypatch.setattr(catalog, "publish_owned", lambda: 0)
+        monkeypatch.setattr(turn_manager, "_kick", lambda sid: None)
+        self._profile(tmp_path)
+        turn = {"source": "user", "prompt": "hi", "profile_id": "agent", "owner_send": True,
+                "overrides": {"context_window": 1000}}
+        result = await control._sessions({
+            "session": {"id": "s-fwd", "profile_id": "agent", "title": "t",
+                        "model": "sonnet", "context_window": 150_000},
+            "turn": turn,
+        }, "dev-other")
+        assert db.get_session("s-fwd")["context_window"] is None
+        assert "context_window" not in turns.get_turn(result["turn"]["turn_id"])["overrides"]
+
+        await control._turns({**turn, "session_id": "s-fwd",
+                              "overrides": {"context_window": 1_000_000}}, "dev-other")
+        assert db.get_session("s-fwd")["context_window"] == 1_000_000
+
+    def test_voice_context_patch_ignores_it(self, mock_db, tmp_path):
+        from app.api.voice_context import VoiceContextPatch, _persist_patch
+
+        self._profile(tmp_path)
+        db.create_session(session_id="s-voice", profile_id="agent", mode="voice",
+                          provider_id="realtime-provider", model="sonnet",
+                          context_window=200_000)
+        assert _persist_patch("s-voice", VoiceContextPatch(context_window=150_000))[
+            "context_window"] == 200_000
+        row = _persist_patch("s-voice", VoiceContextPatch(model="haiku", context_window=1_000_000))
+        assert (row["model"], row["context_window"]) == ("haiku", 200_000)
+        _persist_patch("s-voice", VoiceContextPatch(model="sonnet"))
+        # The voice row's provider funds Realtime, not the text model.
+        assert _persist_patch("s-voice", VoiceContextPatch(context_window=1_000_000))[
+            "context_window"] == 1_000_000
+
+    def test_promptless_worktree_create_ignores_it(self, mock_db, tmp_path):
+        from app.api.sessions_worktree import persist_promptless_run_binding
+
+        self._profile(tmp_path)
+        db.create_session("s-wt", profile_id="agent")
+        persist_promptless_run_binding("s-wt", {"model": "sonnet", "context_window": 150_000})
+        row = db.get_session("s-wt")
+        assert (row["model"], row["context_window"]) == ("sonnet", None)
+        persist_promptless_run_binding("s-wt", {"context_window": 1_000_000})
+        assert db.get_session("s-wt")["context_window"] == 1_000_000
+
+    def test_branch_create_overrides_ignore_it(self, mock_db, tmp_path):
+        """The create fields a voice call starting on a branch passes."""
+        from app.api.sessions_worktree import _merge_session_create_overrides
+
+        self._profile(tmp_path)
+        base = {"session_id": "s-branch", "profile_id": "agent"}
+        merged = _merge_session_create_overrides(
+            base, {"model": "haiku", "context_window": 1_000_000})
+        assert merged["context_window"] is None
+        merged = _merge_session_create_overrides(base, {
+            "model": "sonnet", "mode": "voice", "provider_id": "realtime-provider",
+            "context_window": 1_000_000})
+        assert merged["context_window"] == 1_000_000
+
+    def test_rest_create_ignores_it(self, authenticated_client, tmp_path):
+        self._profile(tmp_path)
+        for window, saved in ((150_000, None), (1_000_000, 1_000_000)):
+            response = authenticated_client.post("/api/v1/sessions", json={
+                "profile_id": "agent",
+                "overrides": {"model": "sonnet", "context_window": window}})
+            assert response.status_code == 200, response.text
+            assert db.get_session(response.json()["session_id"])["context_window"] == saved
+
+    @pytest.mark.asyncio
+    async def test_conversation_api_create_ignores_it(self, mock_db, tmp_path):
+        from unittest.mock import AsyncMock
+
+        from app.api.query import conversation
+        from app.core.models import ConversationRequest
+
+        self._profile(tmp_path)
+        with patch("app.core.turn_manager.submit_async", new=AsyncMock(return_value="t")), \
+                patch("app.core.turn_manager.wait_session_idle", new=AsyncMock(return_value=True)), \
+                patch("app.core.turn_outcome.final_turn_outcome",
+                      return_value={"usage": {}, "error": None, "interrupted": False}), \
+                patch("app.core.turn_outcome.extract_final_assistant_text", return_value="ok"):
+            result = await conversation(ConversationRequest(
+                prompt="hi", profile="agent",
+                overrides={"model": "sonnet", "context_window": 150_000}),
+                {"id": None, "profile_ids": ["agent"]})
+        assert db.get_session(result["session_id"])["context_window"] is None
+
+    @pytest.mark.asyncio
+    async def test_background_query_ignores_it(self, mock_db, tmp_path):
+        from unittest.mock import AsyncMock
+
+        import app.core.query_background as qb
+
+        self._profile(tmp_path)
+        db.create_session("s-bg", profile_id="agent", model="sonnet", context_window=200_000)
+        with patch.object(qb, "_run_background_query", new=AsyncMock()) as run:
+            await qb.start_background_query(
+                "hi", "agent", session_id="s-bg",
+                overrides={"cwd": str(tmp_path), "context_window": 1000})
+            await asyncio.sleep(0)
+        assert db.get_session("s-bg")["context_window"] == 200_000
+        assert "context_window" not in run.call_args.kwargs["overrides"]

@@ -279,6 +279,47 @@ def context_window_choices(
     return [standard, 1_000_000] if window and window >= 1_000_000 else []
 
 
+def offered_context_window(session: Optional[Dict[str, Any]], window: Any) -> Optional[int]:
+    """``window`` when the chat's model offers it, else ``None``.
+
+    The one check every saving source of a client-supplied window goes
+    through: the picker (``PUT …/run-settings``, which refuses with 409) and
+    every send or create that stores the window as the chat's pin (which
+    ignore it, as the API reference documents). A saved pin is a ceiling the
+    options builder enforces even when it is not offered, so a value the model
+    does not offer must never become one.
+
+    ``session`` is the session row, or the same fields of a chat about to be
+    created (``model``, ``provider_id``, ``profile_id``, ``mode``). The model
+    is the row's, else its launched model, else its agent's legacy model, else
+    the registry default. A voice row's ``provider_id`` funds the Realtime
+    call, not its text model, so only a ``prov:`` model names a provider there.
+    Blocking: reads the agent and provider rows.
+    """
+    try:
+        value = int(window) if window and not isinstance(window, bool) else None
+    except (TypeError, ValueError):
+        value = None
+    if value is None or value <= 0:
+        return None
+    from app.db import database
+    from app.db.model_providers import get_model_provider
+
+    row = session or {}
+    model = row.get("model") or row.get("launched_model")
+    if not model:
+        profile = database.get_profile(row["profile_id"]) if row.get("profile_id") else None
+        model = ((profile or {}).get("config") or {}).get("model") or DEFAULT_MODEL
+    provider_id = row.get("provider_id") if row.get("mode") != "voice" else None
+    if model.startswith("prov:"):
+        _, provider_id, model = model.split(":", 2)
+    provider = get_model_provider(provider_id) if provider_id else None
+    if value in context_window_choices(model, provider):
+        return value
+    logger.debug("Ignoring context window %s: model %r does not offer it", value, model)
+    return None
+
+
 # Anthropic API model ids for the selectable presets. The registry's canonical
 # stored form is the short Agent SDK alias ("opus"); the delegated leg's claude
 # CLI resolves aliases itself, but fluid's native Anthropic leg sends the model

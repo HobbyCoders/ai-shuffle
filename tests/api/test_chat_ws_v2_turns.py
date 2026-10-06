@@ -429,6 +429,28 @@ async def test_handle_query_persists_context_window_on_new_session(mock_db):
     assert row["context_window"] == 200_000
 
 
+async def test_handle_query_ignores_an_unoffered_window_on_new_session(mock_db):
+    """#1894: a window the model does not offer (Sonnet offers 200K and 1M)
+    is never stamped as a new chat's pin, which would be enforced as a ceiling."""
+    with _Patches():
+        with patch.object(
+            cwh.turn_manager, "submit_async", AsyncMock(return_value="turn-x")
+        ):
+            handler = _make_handler()
+            await handler.handle_query({
+                "prompt": "new session with an unoffered window",
+                "session_id": None,
+                "profile": "default",
+                "project": None,
+                "overrides": {"model": "sonnet", "context_window": 150_000},
+            })
+
+    session_id = sent_frames(handler, "session_created")[0]["session_id"]
+    row = database.get_session(session_id)
+    assert row["model"] == "sonnet"
+    assert row["context_window"] is None
+
+
 # ═══ handle_queue_message — submit(queue) ════════════════════════════════════
 
 

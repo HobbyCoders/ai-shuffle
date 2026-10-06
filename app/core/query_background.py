@@ -740,10 +740,24 @@ async def start_background_query(
                 model=overrides.get("model"),
                 effort=overrides.get("effort"),
                 permission_mode=overrides.get("permission_mode"),
-                context_window=overrides.get("context_window"),
                 fast=overrides.get("fast"),
                 workspace_project_ids=overrides.get("workspace_project_ids"),
             )
+            if overrides.get("context_window"):
+                # The picker's check, against the model just saved: a window
+                # the model does not offer is ignored, neither saved as the pin
+                # nor run on this turn.
+                from app.core.model_registry import offered_context_window
+
+                row = await run_sync(database.get_session, session_id)
+                window = await run_sync(
+                    offered_context_window, row, overrides["context_window"]
+                )
+                if window is None:
+                    overrides = {k: v for k, v in overrides.items() if k != "context_window"}
+                else:
+                    await run_sync(database.set_session_run_binding, session_id,
+                                   context_window=window)
         except Exception:
             logger.exception(
                 f"[Background] run-binding persist failed for session {session_id}"

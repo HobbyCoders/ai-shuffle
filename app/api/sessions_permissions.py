@@ -68,18 +68,10 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate) -> dict:
             # next turn reads the binding and the pool reconnects if it changed.
             if len(changes) != 1:
                 raise ValueError("Change the context window separately from effort/Fast mode")
-            from app.core.model_registry import DEFAULT_MODEL, context_window_choices
+            from app.core.model_registry import offered_context_window
 
-            model = session.get("model") or session.get("launched_model")
-            if not model:
-                profile = await run_sync(database.get_profile, session.get("profile_id"))
-                model = ((profile or {}).get("config") or {}).get("model") or DEFAULT_MODEL
-            provider_id = session.get("provider_id")
-            if model and model.startswith("prov:"):
-                _, provider_id, model = model.split(":", 2)
-            provider = await run_sync(get_model_provider, provider_id) if provider_id else None
-            window = changes["context_window"]
-            if window not in context_window_choices(model, provider):
+            window = await run_sync(offered_context_window, session, changes["context_window"])
+            if window is None:
                 raise ValueError("This model does not support the selected context window")
             await run_sync(database.set_session_run_binding, session_id, context_window=window)
             return {"context_window": window}

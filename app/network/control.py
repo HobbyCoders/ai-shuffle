@@ -685,8 +685,15 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
             raise ValueError(f"Unknown profile: {profile_id}")
         api_user_id = requested_api_user if (
             requested_api_user and database.get_api_user(requested_api_user) is not None) else None
+        create_fields = dict(fields)
+        if create_fields.get("context_window"):
+            # A window the model does not offer is ignored, never stamped as
+            # the new chat's pin (the picker's check).
+            from app.core.model_registry import offered_context_window
+            create_fields["context_window"] = offered_context_window(
+                {**create_fields, "profile_id": profile_id}, create_fields["context_window"])
         row = database.create_session(session_id=session_id, profile_id=profile_id, project_id=None,
-                                      is_active=True, api_user_id=api_user_id, **fields)
+                                      is_active=True, api_user_id=api_user_id, **create_fields)
         if label:
             # Who started the chat on the member (#1877): set once, when this
             # worker creates the chat it will run. A later copy never labels

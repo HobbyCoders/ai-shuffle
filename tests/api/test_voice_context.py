@@ -82,6 +82,13 @@ def test_sparse_patch_roundtrips_all_context_and_preserves_realtime_provider(
     context_client, monkeypatch
 ):
     session_id = _session()
+    # The worker model's provider offers the 1M window the patch selects; a
+    # window the model does not offer is ignored (#1894).
+    db.create_model_provider(
+        provider_id="worker-provider", name="Worker", provider_type="openrouter",
+        base_url="https://openrouter.ai/api", auth_token=None,
+        models=[{"id": "openai/gpt-5.6", "context_window": 1_000_000}], enabled=True,
+    )
     with _voice_binding_helper(monkeypatch):
         response = context_client.patch(
             PATH.format(session_id),
@@ -89,7 +96,7 @@ def test_sparse_patch_roundtrips_all_context_and_preserves_realtime_provider(
                 "model": "prov:worker-provider:openai/gpt-5.6",
                 "effort": "high",
                 "permission_mode": "bypassPermissions",
-                "context_window": 400_000,
+                "context_window": 1_000_000,
                 "fast": True,
             },
         )
@@ -100,7 +107,7 @@ def test_sparse_patch_roundtrips_all_context_and_preserves_realtime_provider(
         "model": "prov:worker-provider:openai/gpt-5.6",
         "effort": "high",
         "permission_mode": "bypassPermissions",
-        "context_window": 400_000,
+        "context_window": 1_000_000,
         "fast": True,
     }
     row = db.get_session(session_id)

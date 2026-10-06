@@ -313,10 +313,24 @@ def _submit_blocking(
                 model=overrides.get("model"),
                 effort=overrides.get("effort"),
                 permission_mode=overrides.get("permission_mode") if explicit_permission else None,
-                context_window=overrides.get("context_window"),
                 fast=overrides.get("fast"),
                 workspace_project_ids=overrides.get("workspace_project_ids"),
             )
+            if overrides.get("context_window"):
+                # Checked against the model just saved, as the picker checks
+                # it. A window the model does not offer is ignored: never
+                # saved as the pin (which would be enforced as a ceiling)
+                # and dropped from this turn, which runs on the saved pin or
+                # the model default.
+                from app.core.model_registry import offered_context_window
+
+                window = offered_context_window(
+                    database.get_session(session_id), overrides["context_window"]
+                )
+                if window is None:
+                    overrides = {k: v for k, v in overrides.items() if k != "context_window"}
+                else:
+                    database.set_session_run_binding(session_id, context_window=window)
         except Exception:  # noqa: BLE001 — never let this break an enqueue.
             logger.exception(
                 "run-binding persist failed for session %s", session_id

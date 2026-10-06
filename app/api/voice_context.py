@@ -117,6 +117,9 @@ def _persist_patch(session_id: str, body: VoiceContextPatch) -> dict:
 
         if is_primary_session(session_id):
             kwargs.pop("effort")
+    # A window is checked once the model change is stored, as the picker checks
+    # it; one the model does not offer is ignored (null still clears the pin).
+    window = kwargs.pop("context_window") if kwargs.get("context_window") else None
     row = database.get_session(session_id) or {}
     if kwargs:
         if row.get("mode") == "voice":
@@ -127,6 +130,12 @@ def _persist_patch(session_id: str, body: VoiceContextPatch) -> dict:
             database.patch_voice_session_context(session_id, kwargs)
             if kwargs.get("model") is not None:
                 database.set_session_run_binding(session_id, model=kwargs["model"])
+    if window is not None:
+        from app.core.model_registry import offered_context_window
+
+        window = offered_context_window(database.get_session(session_id), window)
+        if window is not None:
+            database.patch_voice_session_context(session_id, {"context_window": window})
     return database.get_session(session_id) or {}
 
 

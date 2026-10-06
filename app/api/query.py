@@ -421,6 +421,15 @@ async def conversation(
             title = derive_session_title(
                 request.prompt, max_chars=50, word_boundary=False
             )
+            from app.core.model_registry import offered_context_window
+
+            # A window the model does not offer is ignored, never stamped as
+            # the new chat's pin (the picker's check).
+            create_window = await run_sync(
+                offered_context_window,
+                {"model": (overrides or {}).get("model"), "profile_id": profile_id},
+                (overrides or {}).get("context_window"),
+            )
             await run_sync(
                 database.create_session,
                 session_id=session_id,
@@ -434,7 +443,7 @@ async def conversation(
                 model=(overrides or {}).get("model"),
                 effort=(overrides or {}).get("effort"),
                 permission_mode=(overrides or {}).get("permission_mode"),
-                context_window=(overrides or {}).get("context_window"),
+                context_window=create_window,
                 fast=(overrides or {}).get("fast"),
             )
             # Best-effort: surface the new session on connected devices right

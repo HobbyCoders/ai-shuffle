@@ -83,7 +83,14 @@ def _merge_session_create_overrides(
     unknown = set(overrides or {}) - _SESSION_CREATE_OVERRIDE_KEYS
     if unknown:
         raise ValueError(f"Unsupported session create overrides: {sorted(unknown)}")
-    return {**base, **(overrides or {})}
+    merged = {**base, **(overrides or {})}
+    if merged.get("context_window"):
+        # A window the model does not offer is ignored, never stamped as the
+        # new chat's pin (the picker's check). Blocking: callers run in a thread.
+        from app.core.model_registry import offered_context_window
+
+        merged["context_window"] = offered_context_window(merged, merged["context_window"])
+    return merged
 
 
 _RUN_BINDING_KEYS = (
@@ -101,8 +108,17 @@ def persist_promptless_run_binding(session_id: str, overrides: Optional[dict]) -
     run on defaults instead of the composer's model and permission mode.
     """
     binding = {k: (overrides or {}).get(k) for k in _RUN_BINDING_KEYS}
+    window = binding.pop("context_window")
     if any(value is not None for value in binding.values()):
         database.set_session_run_binding(session_id, **binding)
+    if window:
+        # Checked against the model just saved, as the picker checks it: a
+        # window the model does not offer is ignored, never saved as the pin.
+        from app.core.model_registry import offered_context_window
+
+        window = offered_context_window(database.get_session(session_id), window)
+        if window is not None:
+            database.set_session_run_binding(session_id, context_window=window)
 
 
 def _migrate_uploads_to_dir(
