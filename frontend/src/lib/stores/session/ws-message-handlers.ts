@@ -550,6 +550,13 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		if (msgType === 'user_session_updated') {
 			const updates = (data.updates ?? {}) as Record<string, unknown>;
 			const sessionId = data.session_id as string | undefined;
+			// A rename (e.g. through the API) also retitles the chat on screen,
+			// which may not be registered on the session to get session_updated.
+			if (typeof updates.title === 'string' && updates.title && sessionId && sessionId === getState().sessionId) {
+				const title = updates.title;
+				update(s => ({ ...s, title }));
+				onPersistSession();
+			}
 			// Same policy as session_updated: patch the row, and only reload when
 			// the row is unknown here or the change reshapes the list server-side
 			// (hidden / tags / project move).

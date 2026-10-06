@@ -1450,6 +1450,25 @@ async def update_session(
         status=session_status,
     )
 
+    # Tell every open tab and device: without this an API rename left the
+    # title stale in tabs that already had the chat open or listed.
+    updates = {}
+    if title:
+        updates["title"] = title
+    if session_status:
+        updates["status"] = session_status
+    if updates and session:
+        try:
+            from app.core.sync_engine import sync_engine
+            await sync_engine.broadcast_user_session_updated(
+                user_id=existing.get("api_user_id") or "admin",
+                session_id=session_id,
+                updates=updates,
+                source_device_id=None,
+            )
+        except Exception:  # the write already committed
+            logger.warning("Could not broadcast session update for %s", session_id, exc_info=True)
+
     # The raw row (RETURNING *) carries server-only columns.
     return client_view(session)
 

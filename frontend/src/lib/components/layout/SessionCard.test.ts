@@ -284,6 +284,14 @@ describe('SessionCard actions', () => {
 		expect(screen.getByTitle('Move to Active')).toBeTruthy();
 	});
 
+	it('shows the PR chip on a settled row that has no project id', () => {
+		const { container } = renderCard(
+			{ is_active: false, project_id: null, pr_number: 1839, pr_state: 'merged', pr_url: 'https://github.com/o/r/pull/1839' },
+			{ compact: true }
+		);
+		expect(container.querySelector('.l3')?.textContent).toContain('PR #1839 merged');
+	});
+
 	it('settles an active session without opening it', async () => {
 		const { onOpen } = renderCard();
 
@@ -984,6 +992,37 @@ describe('SessionCard several pull requests', () => {
 		expect(onOpen).not.toHaveBeenCalled();
 		expect(screen.getByRole('dialog', { name: 'Pull requests' })).toBeTruthy();
 		await fireEvent.click(chip);
+		expect(screen.queryByRole('dialog')).toBeNull();
+	});
+
+	it('gives the chip a 44 px touch target without growing the row', async () => {
+		const { container, onOpen } = renderCard({
+			pull_requests: [pr(1, 'merged'), pr(2, 'merged')],
+			pr_state: 'merged',
+			pr_number: 2,
+		});
+		const chip = container.querySelector('.pr-chip.multi') as HTMLElement;
+		const card = container.querySelector('.scard') as HTMLElement;
+		const frame = container.querySelector('.scard-frame') as HTMLElement;
+		// The chip is a 16 px line: 100..180 x 40..56.
+		chip.getBoundingClientRect = () =>
+			({ left: 100, top: 40, width: 80, height: 16, right: 180, bottom: 56, x: 100, y: 40, toJSON() {} }) as DOMRect;
+		const tap = async (type: string, x: number, y: number) => {
+			await fireEvent.pointerDown(frame, { pointerId: 1, isPrimary: true, button: 0, pointerType: type, clientX: x, clientY: y });
+			await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, pointerType: type, clientX: x, clientY: y });
+			await fireEvent.click(card, { clientX: x, clientY: y });
+		};
+		// A finger 12 px below the text still means the chip.
+		await tap('touch', 140, 68);
+		expect(onOpen).not.toHaveBeenCalled();
+		expect(screen.getByRole('dialog', { name: 'Pull requests' })).toBeTruthy();
+		await fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+		// Outside the 44 px band, the tap opens the chat as before.
+		await tap('touch', 140, 80);
+		expect(onOpen).toHaveBeenCalledTimes(1);
+		// A mouse is precise: the same near-miss opens the chat.
+		await tap('mouse', 140, 68);
+		expect(onOpen).toHaveBeenCalledTimes(2);
 		expect(screen.queryByRole('dialog')).toBeNull();
 	});
 

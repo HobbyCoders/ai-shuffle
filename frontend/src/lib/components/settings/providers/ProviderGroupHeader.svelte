@@ -39,7 +39,9 @@
 		<ProviderTile {provider} ring={selected ? 'accent' : 'bg'} />
 		<span class="pname">{provider.name}</span>
 	</button>
-	{#if provider.claude}
+	{#if provider.pending}
+		<span class="cnt checking" role="status">Checking…</span>
+	{:else if provider.claude}
 		<span class="mode">
 			<Segmented
 				size="sm"
@@ -132,15 +134,40 @@
 		align-items: center;
 		min-width: 0;
 	}
+	/* A 280-340px list cannot hold the name and the mode switch on one line:
+	   the switch moves under the name, the connector runs past it. */
+	@container st-list (max-width: 359px) {
+		.pgh.claude:has(.mode) {
+			grid-template-columns: minmax(0, 1fr);
+			height: auto;
+			padding-bottom: 6px;
+		}
+		.pgh.claude .mode {
+			justify-self: start;
+			padding-left: 46px;
+		}
+	}
 	.cnt {
 		font-size: 12px;
 		color: var(--st-subtle);
 		text-align: right;
 		white-space: nowrap;
 	}
+	.checking {
+		justify-self: end;
+		animation: pgh-pulse 1.4s ease-in-out infinite;
+	}
+	@keyframes pgh-pulse {
+		50% {
+			opacity: 0.45;
+		}
+	}
 	@media (prefers-reduced-motion: reduce) {
 		.pgh::after {
 			transition: none;
+		}
+		.checking {
+			animation: none;
 		}
 	}
 </style>

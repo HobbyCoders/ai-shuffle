@@ -73,6 +73,32 @@ afterEach(() => {
 });
 
 describe('the list', () => {
+	it('shows Claude as Checking, not Not connected, until its status arrives', async () => {
+		let release!: () => void;
+		const held = new Promise<void>((r) => (release = r));
+		const real = worker.fetch;
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+			if (String(input).includes('/settings/claude-auth')) await held;
+			return real(input, init);
+		});
+		render(ProvidersCollection);
+		await flush();
+		const claude = group('Claude');
+		expect(within(claude).getByRole('status').textContent).toBe('Checking…');
+		expect(screen.queryByRole('radiogroup', { name: 'Claude runs on' })).toBeNull();
+		expect(screen.getAllByText('Claude')).toHaveLength(1);
+		release();
+		await flush();
+		expect(within(group('Claude')).queryByRole('status')).toBeNull();
+		expect(credentialNames('Claude')[0]).toBe('Claude Max subscription, Active for Claude');
+	});
+
+	it('keeps the Add provider name when the narrow list hides its label', async () => {
+		await show();
+		const add = screen.getByRole('button', { name: 'Add provider' });
+		expect(add.getAttribute('title')).toBe('Add provider');
+	});
+
 	it('groups connected credentials under their provider and lists the rest as Not connected', async () => {
 		await show();
 		expect(screen.getByText('5 connected')).toBeTruthy();

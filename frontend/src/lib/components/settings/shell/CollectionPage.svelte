@@ -111,11 +111,12 @@
 				{#if addLabel}
 					<button
 						type="button"
-						class="st-btn primary sm"
+						class="st-btn primary sm st-add"
+						title={addLabel}
 						disabled={addDisabled || access.readOnly}
 						onclick={() => onAdd?.()}
 					>
-						<Plus />{addLabel}
+						<Plus /><span class="st-add-l">{addLabel}</span>
 					</button>
 				{/if}
 			</div>
@@ -147,6 +148,9 @@
 		position: relative;
 	}
 	.st-lcol {
+		/* The list is a container so its header and rows can fit a narrow
+		   column (280px when a wide sidebar sits beside Settings). */
+		container: st-list / inline-size;
 		border-right: 1px solid var(--st-border);
 		display: flex;
 		flex-direction: column;
@@ -182,6 +186,26 @@
 	}
 	.sp {
 		flex: 1;
+	}
+	.st-add {
+		flex-shrink: 0;
+	}
+	/* Too narrow for title, count and a labelled button on one line: the
+	   button keeps its plus and its accessible name, the label is hidden. */
+	@container st-list (max-width: 359px) {
+		.st-add {
+			width: 28px;
+			padding: 0;
+			justify-content: center;
+		}
+		.st-add-l {
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip: rect(0 0 0 0);
+			white-space: nowrap;
+		}
 	}
 	.st-ltools {
 		display: flex;
@@ -238,6 +262,8 @@
 		min-height: 0;
 	}
 	.st-dpane {
+		/* Rows reflow when the pane is narrow (see settings.css). */
+		container: st-detail / inline-size;
 		overflow-y: auto;
 		min-width: 0;
 		min-height: 0;

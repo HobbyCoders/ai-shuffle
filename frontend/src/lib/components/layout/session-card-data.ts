@@ -282,10 +282,18 @@ export interface GitStageInput {
  * Without `git` facts (every settled row — we don't spend a request on those)
  * the answer comes from `prState` alone and otherwise falls to the quiet dot,
  * because "no data" must never be drawn as "no changes to push".
+ *
+ * A row with no checkout to read (no project id, or a chat/voice row) has no
+ * git lifecycle, but a PR it recorded is still a fact about the chat: the
+ * stage then comes from `prState` alone, so the settled row keeps its chip.
  */
 export function deriveGitStage(input: GitStageInput): GitStage {
-	if (input.mode === 'chat' || input.mode === 'voice') return 'none';
-	if (!input.hasProject) return 'none';
+	if (input.mode === 'chat' || input.mode === 'voice' || !input.hasProject) {
+		if (input.prState === 'open') return 'pr';
+		if (input.prState === 'merged') return 'merged';
+		if (input.prState === 'closed') return 'closed';
+		return 'none';
+	}
 	if (input.prState === 'open') return 'pr';
 	if (input.git && !input.git.isRepo) {
 		if (input.prState === 'merged') return 'merged';
@@ -693,4 +701,29 @@ export function sessionNeedsYou(
 /** The tab title with the number of sessions waiting on the user in front. */
 export function attentionTitle(base: string, count: number): string {
 	return count > 0 ? `(${count}) ${base}` : base;
+}
+
+/** Minimum touch target edge, in CSS px (WCAG 2.5.5 / platform guidance). */
+export const MIN_TAP_TARGET = 44;
+
+/**
+ * Whether a tap at (x, y) lands on `rect` once it is grown, about its centre,
+ * to at least `min` px each way. The PR chip on a session row is a 16 px line
+ * of text inside lines that clip their overflow, so its touch target is
+ * widened in hit-testing instead of in layout: the row keeps its density.
+ */
+export function withinTapTarget(
+	rect: { left: number; top: number; width: number; height: number },
+	x: number,
+	y: number,
+	min: number = MIN_TAP_TARGET
+): boolean {
+	const padX = Math.max(0, (min - rect.width) / 2);
+	const padY = Math.max(0, (min - rect.height) / 2);
+	return (
+		x >= rect.left - padX &&
+		x <= rect.left + rect.width + padX &&
+		y >= rect.top - padY &&
+		y <= rect.top + rect.height + padY
+	);
 }

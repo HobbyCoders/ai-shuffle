@@ -155,6 +155,27 @@ describe('Files worker picker', () => {
 		expect(within(list()).queryByText(/is offline/)).toBeNull();
 	});
 
+	it('offers a way back to this device when the other worker refuses the list', async () => {
+		files.setWorker('dev_pc');
+		remote = { status: 403, body: { detail: 'Not allowed' } };
+		render(FilesStudio);
+		expect(await within(list()).findByText('Not allowed')).toBeTruthy();
+		await fireEvent.click(within(list()).getByRole('button', { name: 'Back to this device' }));
+		expect(await within(list()).findByText('notes.md')).toBeTruthy();
+		expect(localStorage.getItem('files_worker')).toBeNull();
+	});
+
+	it('does not offer Back to this device for an error on this device', async () => {
+		const real = fetch;
+		vi.stubGlobal('fetch', async (input: string, init: RequestInit = {}) =>
+			new URL(input, 'http://localhost').pathname.endsWith('/workspace/files')
+				? json({ detail: 'Not allowed' }, 403)
+				: real(input, init));
+		render(FilesStudio);
+		expect(await within(list()).findByText('Not allowed')).toBeTruthy();
+		expect(within(list()).queryByRole('button', { name: 'Back to this device' })).toBeNull();
+	});
+
 	it('falls back to this device when the remembered worker is no longer paired', async () => {
 		files.setWorker('dev_departed');
 		render(FilesStudio);

@@ -412,3 +412,18 @@ describe('claudeGateNotice', () => {
 		expect(claudeGateNotice(summary)).toBe('License expired.');
 	});
 });
+
+describe('Claude before its summary answers', () => {
+	it('is pending, kept with the connected providers, not listed as Not connected', () => {
+		const { connected, notConnected } = splitProviders(
+			buildProviders(input({ rows: [row()], claude: null, claudePending: true }))
+		);
+		const claude = connected.find((p) => p.id === 'claude');
+		expect(claude?.pending).toBe(true);
+		expect(notConnected.map((p) => p.id)).not.toContain('claude');
+	});
+	it('is Not connected once the read failed (no longer pending)', () => {
+		const { notConnected } = splitProviders(buildProviders(input({ rows: [row()], claude: null })));
+		expect(notConnected.map((p) => p.id)).toContain('claude');
+	});
+});

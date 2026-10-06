@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Session } from '$lib/api/client';
 import {
 	cardActions,
+	withinTapTarget,
 	sessionNeedsYou,
 	attentionTitle,
 	deriveGitStage,
@@ -372,6 +373,13 @@ describe('deriveGitStage', () => {
 		expect(deriveGitStage({ ...repo, git: { ...clean, isRepo: false } })).toBe('none');
 	});
 
+	it('keeps a recorded PR on a row with no project to read', () => {
+		expect(deriveGitStage({ hasProject: false, prState: 'merged' })).toBe('merged');
+		expect(deriveGitStage({ hasProject: false, prState: 'open' })).toBe('pr');
+		expect(deriveGitStage({ hasProject: false, prState: 'closed' })).toBe('closed');
+		expect(deriveGitStage({ ...repo, mode: 'chat', prState: 'merged' })).toBe('merged');
+	});
+
 	it.each(['merged', 'closed'] as const)(
 		'keeps a persisted %s PR visible when this install cannot find the checkout',
 		(prState) => {
@@ -623,5 +631,22 @@ describe('session pull requests', () => {
 		).toBe('open');
 		expect(sessionPrState({ pr_state: 'closed' })).toBe('closed');
 		expect(sessionPrState({})).toBeNull();
+	});
+});
+
+describe('withinTapTarget', () => {
+	const chip = { left: 100, top: 40, width: 80, height: 16 };
+	it('grows a short target to 44 px about its centre', () => {
+		// Centre y = 48; band 26..70.
+		expect(withinTapTarget(chip, 140, 26)).toBe(true);
+		expect(withinTapTarget(chip, 140, 70)).toBe(true);
+		expect(withinTapTarget(chip, 140, 25)).toBe(false);
+		expect(withinTapTarget(chip, 140, 71)).toBe(false);
+	});
+	it('keeps a target that is already large enough as it is', () => {
+		expect(withinTapTarget(chip, 99, 48)).toBe(false);
+		expect(withinTapTarget(chip, 181, 48)).toBe(false);
+		expect(withinTapTarget({ left: 0, top: 0, width: 10, height: 10 }, 27, 5)).toBe(true);
+		expect(withinTapTarget({ left: 0, top: 0, width: 10, height: 10 }, 28, 5)).toBe(false);
 	});
 });

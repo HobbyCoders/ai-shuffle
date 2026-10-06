@@ -452,3 +452,47 @@
 .settings-shell .st-grp.danger:has(> .st-card:not(:has(*))) {
 	display: none;
 }
+
+/* ---------- narrow detail pane beside the list (desktop, ~1100-1440px) ----------
+ * A wide app sidebar leaves the detail pane 420-460px wide. Fixed-width fields
+ * then squeezed their labels to "En…", so rows reflow as on the phone: the
+ * control drops under its label when both do not fit, text fields take the
+ * full width, hints wrap, and the facts strip uses two columns.
+ */
+@container st-detail (max-width: 520px) {
+	.settings-shell:not([data-stacked]) .st-dpane .st-row:has(> .st-rt) {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px 12px;
+	}
+	.settings-shell:not([data-stacked]) .st-dpane .st-row > .st-rt {
+		flex: 1 1 128px;
+	}
+	.settings-shell:not([data-stacked]) .st-dpane .st-row > .st-rt .st-rh {
+		white-space: normal;
+	}
+	.settings-shell:not([data-stacked]) .st-dpane .st-row > .st-rc {
+		flex: 0 1 auto;
+		max-width: 100%;
+		margin-left: auto;
+		flex-wrap: wrap;
+	}
+	.settings-shell:not([data-stacked]) .st-dpane .st-row:has(> .st-rc :is(.st-txt, .st-meter)) > .st-rc {
+		flex: 1 1 100%;
+		flex-wrap: nowrap;
+	}
+	.settings-shell:not([data-stacked]) .st-dpane .st-row .st-txt {
+		flex: 1 1 160px;
+	}
+	.settings-shell:not([data-stacked]) .st-dpane .st-facts {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+	.settings-shell:not([data-stacked]) .st-dpane .st-fact:nth-child(odd) {
+		border-left: 0;
+		padding-left: 0;
+	}
+	.settings-shell:not([data-stacked]) .st-dpane .st-fact:nth-child(n + 3) {
+		border-top: 1px solid var(--st-border);
+	}
+}

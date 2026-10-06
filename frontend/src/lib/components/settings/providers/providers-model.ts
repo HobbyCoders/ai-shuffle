@@ -186,6 +186,8 @@ export interface ProviderView {
 	onCount: number;
 	/** A gateway still being set up. */
 	draft?: boolean;
+	/** Its state is not known yet (Claude before `/settings/claude-auth` answers). */
+	pending?: boolean;
 }
 
 export interface DraftCredential {
@@ -213,6 +215,11 @@ export interface ProvidersInput {
 	 * turns ran here, so Claude was in use even when its sign-in has lapsed.
 	 */
 	claudeUsed?: boolean;
+	/**
+	 * The Claude Code summary has not answered yet (no reading, no error):
+	 * Claude is neither connected nor "Not connected" until it does.
+	 */
+	claudePending?: boolean;
 }
 
 const BUILT_IN: { id: BuiltInProviderId; name: string; glyph: ProviderGlyphKind; letter: string }[] = [
@@ -496,6 +503,10 @@ export function buildProviders(input: ProvidersInput): ProviderView[] {
 	for (const d of drafts) push(d.providerId, draftCredential(d));
 
 	const views: ProviderView[] = BUILT_IN.map((b) => view(b.id, b.name, b.glyph, b.letter, byProvider.get(b.id) ?? []));
+	if (input.claudePending && !input.claude) {
+		const claude = views.find((v) => v.claude);
+		if (claude && claude.credentials.length === 0) claude.pending = true;
+	}
 	for (const row of rows) {
 		if (classifyRow(row) !== 'custom') continue;
 		const id = providerOfRow(row);
@@ -540,8 +551,10 @@ export const isConnected = (p: ProviderView): boolean => p.credentials.length > 
 /** Connected providers (with their credentials) and the "Not connected" group. */
 export function splitProviders(views: ProviderView[]): { connected: ProviderView[]; notConnected: ProviderView[] } {
 	return {
-		connected: views.filter(isConnected),
-		notConnected: views.filter((p) => !isConnected(p))
+		// A provider whose state is still loading keeps its place among the
+		// connected ones (neutral, "Checking") rather than flashing "Not connected".
+		connected: views.filter((p) => isConnected(p) || !!p.pending),
+		notConnected: views.filter((p) => !isConnected(p) && !p.pending)
 	};
 }
 

@@ -436,6 +436,9 @@
 							{#if currentPath}
 								<button class="fs-btn fs-btn--sm" onclick={() => navigate('')}>Go to Workspace</button>
 							{/if}
+							{#if workerId !== null}
+								<button class="fs-btn fs-btn--sm fs-btn--primary" onclick={() => selectWorker(null)}>Back to this device</button>
+							{/if}
 						</div>
 					</div>
 				{:else if loading && $sortedFiles.length === 0}

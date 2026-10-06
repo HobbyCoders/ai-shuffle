@@ -89,7 +89,6 @@
 		/* Electron hands any press inside a drag region to the OS title bar.
 		   The dock sits below the drag strip; this keeps it out of any. */
 		-webkit-app-region: no-drag;
-		app-region: no-drag;
 	}
 
 	/* Under the page header, centred on the chat column. */
@@ -139,7 +138,6 @@
 		max-width: 100%;
 		box-sizing: border-box;
 		-webkit-app-region: no-drag;
-		app-region: no-drag;
 		animation: dock-in 160ms ease-out;
 	}
 	.dock-entry > :global(.banner) {

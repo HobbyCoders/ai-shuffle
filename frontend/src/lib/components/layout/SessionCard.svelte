@@ -70,6 +70,7 @@
 		summarizePullRequests,
 		sessionTimestamp,
 		cardActions,
+		withinTapTarget,
 		type CardAction,
 		type SessionCardStatus,
 		type SessionGitFacts
@@ -529,9 +530,19 @@
 		}, COMMIT_AT);
 	}
 
-	function openCard() {
+	function openCard(event?: MouseEvent) {
 		if (suppressNextClick) {
 			suppressNextClick = false;
+			return;
+		}
+		// A finger that lands just off the 16 px PR chip still means the chip:
+		// touch taps within 44×44 px of it open the list, not the chat.
+		if (
+			event && !selecting && multiPr && prChipRef &&
+			pointerType !== '' && pointerType !== 'mouse' &&
+			withinTapTarget(prChipRef.getBoundingClientRect(), event.clientX, event.clientY)
+		) {
+			togglePrList(event, prChipRef);
 			return;
 		}
 		if (selecting) {

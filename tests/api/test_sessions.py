@@ -1206,6 +1206,37 @@ class TestUpdateSession:
         call_kwargs = mock_database.update_session.call_args[1]
         assert call_kwargs["status"] == "completed"
 
+    def test_rename_reaches_every_open_tab(self, client, mock_database, sample_session, monkeypatch):
+        """A rename is pushed to the owner's devices, so open tabs update."""
+        from unittest.mock import AsyncMock
+        from app.core.sync_engine import sync_engine
+
+        broadcast = AsyncMock()
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", broadcast)
+        mock_database.get_session.return_value = sample_session
+        mock_database.update_session.return_value = {**sample_session, "title": "New Title"}
+
+        response = client.patch("/api/v1/sessions/test-session-id?title=New%20Title")
+
+        assert response.status_code == 200
+        broadcast.assert_awaited_once()
+        kwargs = broadcast.await_args.kwargs
+        assert kwargs["session_id"] == "test-session-id"
+        assert kwargs["updates"] == {"title": "New Title"}
+        assert kwargs["source_device_id"] is None
+
+    def test_rename_survives_a_failed_broadcast(self, client, mock_database, sample_session, monkeypatch):
+        from unittest.mock import AsyncMock
+        from app.core.sync_engine import sync_engine
+
+        monkeypatch.setattr(sync_engine, "broadcast_user_session_updated", AsyncMock(side_effect=RuntimeError("down")))
+        mock_database.get_session.return_value = sample_session
+        mock_database.update_session.return_value = {**sample_session, "title": "New Title"}
+
+        response = client.patch("/api/v1/sessions/test-session-id?title=New%20Title")
+
+        assert response.status_code == 200
+
     def test_update_session_not_found(self, client, mock_database):
         """Should return 404 for non-existent session."""
         mock_database.get_session.return_value = None

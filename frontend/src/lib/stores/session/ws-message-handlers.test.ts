@@ -2184,6 +2184,41 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('user_session_updated handler (rename)', () => {
+		it('retitles the open chat, not only its row', () => {
+			let state = mockState();
+			state.sessionId = 'session-1';
+			state.title = 'Old title';
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-1', updates: { title: 'Renamed' } });
+
+			expect(state.title).toBe('Renamed');
+			expect(deps.onPersistSession).toHaveBeenCalled();
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { title: 'Renamed' });
+		});
+
+		it('leaves the open chat alone when another chat is renamed', () => {
+			let state = mockState();
+			state.sessionId = 'session-1';
+			state.title = 'Mine';
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+
+			handlers.handleMessage({ type: 'user_session_updated', session_id: 'session-2', updates: { title: 'Other' } });
+
+			expect(state.title).toBe('Mine');
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-2', { title: 'Other' });
+		});
+	});
+
 	describe('session_not_found handler', () => {
 		it('should trigger new chat when current session is not found', () => {
 			const state = mockState();

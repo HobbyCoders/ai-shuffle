@@ -37,6 +37,7 @@
 			fal: { keySet: s.falKeySet, masked: s.falKeyMasked, enabled: s.falEnabled },
 			usage: s.usage?.providers,
 			claudeUsed: claudeUsageRecorded(s.usage),
+			claudePending: !s.claude && !s.claudeError && !s.claudeForbidden,
 			drafts: providerDrafts.list,
 			draftGateways: providerDrafts.gateways
 		})
@@ -92,7 +93,9 @@
 		{#if target?.kind === 'draft'}
 			{#key target.draft.item}<DraftDetail draft={target.draft} provider={target.provider} />{/key}
 		{:else if target?.kind === 'provider'}
-			{#if isConnected(target.provider)}
+			{#if target.provider.pending}
+				<EmptyDetail icon={KeyRound} message="Loading providers" />
+			{:else if isConnected(target.provider)}
 				<ProviderDetail provider={target.provider} />
 			{:else}
 				<NotConnectedDetail provider={target.provider} />
