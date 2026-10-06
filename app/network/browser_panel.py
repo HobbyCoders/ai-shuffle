@@ -56,13 +56,32 @@ async def forward_http(
 ) -> Response:
     from app.core.browser_uploads import MAX_BODY
 
+    path = peer_path(session_id) + ("/" + operation if operation else "")
+    return await forward_buffered(request, device_id, path, max_body=MAX_BODY)
+
+
+async def forward_buffered(
+    request: Request,
+    device_id: str,
+    path: str,
+    *,
+    max_body: int,
+    noun: str = "browser",
+    timeout: float = 60,
+) -> Response:
+    """Relay one buffered HTTP request to ``path`` on a member worker.
+
+    The peer's status and body pass through unchanged, so its own refusals
+    (a path outside its allow-list, an oversized upload) reach the caller as
+    it phrased them. A 401 is retried once with a fresh device token; any other
+    response is returned as-is, so a mutation is never replayed.
+    """
     ctx, link = await peer_link(device_id)
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
-        if len(body) > MAX_BODY:
-            raise HTTPException(413, "Browser request too large")
-    path = peer_path(session_id) + ("/" + operation if operation else "")
+        if len(body) > max_body:
+            raise HTTPException(413, f"{noun.capitalize()} request too large")
     try:
         async with httpx.AsyncClient(follow_redirects=False) as client:
             for attempt in range(2):
@@ -76,20 +95,20 @@ async def forward_http(
                     headers=headers,
                     params=request.query_params.multi_items(),
                     content=bytes(body),
-                    timeout=60,
+                    timeout=timeout,
                 ) as response:
                     if response.status_code == 401 and attempt == 0:
                         link.token = None
                         continue  # Rejected before dispatch; mutations are not replayed otherwise.
                     if 300 <= response.status_code < 400:
                         raise HTTPException(
-                            502, "The session's worker redirected the browser request"
+                            502, f"The session's worker redirected the {noun} request"
                         )
                     result = bytearray()
                     async for chunk in response.aiter_bytes():
                         result.extend(chunk)
                         if len(result) > MAX_MESSAGE:
-                            raise HTTPException(502, "Browser response too large")
+                            raise HTTPException(502, f"{noun.capitalize()} response too large")
                     transport.note_contact(device_id)
                     return Response(
                         bytes(result),

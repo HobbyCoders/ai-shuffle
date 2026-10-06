@@ -237,6 +237,23 @@ def require_device(request: Request) -> str:
     return device_id
 
 
+def require_worker_device(request: Request) -> str:
+    """FastAPI dependency: another active *worker* of this network, or 401/403.
+
+    ``require_device`` admits any active member, and consumer devices (a phone,
+    a paired browser) can hold a device token too. Routes that act with the
+    owner's whole-worker authority admit only the account's other workers, the
+    same rule the control plane applies before starting chats or subagents here.
+    """
+    device_id = require_device(request)
+    ctx = engine.context()
+    member = ctx.member(device_id) if ctx is not None else None
+    if (ctx is None or device_id == ctx.device_id or member is None
+            or member.kind != membership.KIND_WORKER or member.status != membership.STATUS_ACTIVE):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only another worker of this account may do this")
+    return device_id
+
+
 def reset_for_tests() -> None:
     global _secret
     with _lock:

@@ -22,6 +22,7 @@ from app.core.config import settings
 from app.db.async_database import run_sync
 from app.api.auth import require_auth
 from app.api.common import require_file_access
+from app.network import tokens
 # The size cap comes from the project upload rather than being restated here:
 # the composer's attach button posts to one endpoint or the other depending on
 # the session's lane, and a file the user can attach in one lane and not the
@@ -35,7 +36,13 @@ from app.api.projects import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/workspace", tags=["Workspace Files"])
+# Authentication is router-wide so the same handlers can also be mounted on
+# ``peer_router`` below, where the caller is another of the owner's workers.
+router = APIRouter(
+    prefix="/api/v1/workspace",
+    tags=["Workspace Files"],
+    dependencies=[Depends(require_auth)],
+)
 
 
 # Request models
@@ -103,8 +110,7 @@ async def authorize_workspace_path(request: Request, full_path: Path) -> None:
 async def list_workspace_files(
     request: Request,
     path: str = "",
-    show_hidden: bool = False,
-    token: str = Depends(require_auth)
+    show_hidden: bool = False
 ):
     """List files in the workspace directory."""
     workspace = settings.effective_workspace_dir.resolve()
@@ -159,8 +165,7 @@ async def list_workspace_files(
 async def upload_file(
     request: Request,
     file: UploadFile = File(...),
-    path: str = Form(default=""),
-    token: str = Depends(require_auth)
+    path: str = Form(default="")
 ):
     """Upload a file to the workspace."""
     # Same two-stage cap as the project upload: a Content-Length pre-check so an
@@ -224,8 +229,7 @@ async def upload_file(
 @router.get("/files/download")
 async def download_file(
     request: Request,
-    path: str = Query(..., description="Path to file relative to workspace root"),
-    token: str = Depends(require_auth)
+    path: str = Query(..., description="Path to file relative to workspace root")
 ):
     """Download a file from the workspace."""
     full_path = validate_workspace_path(path)
@@ -254,8 +258,7 @@ async def download_file(
 async def create_folder(
     request: Request,
     body: CreateFolderRequest,
-    path: str = Query(default="", description="Parent directory path"),
-    token: str = Depends(require_auth)
+    path: str = Query(default="", description="Parent directory path")
 ):
     """Create a new folder within the workspace."""
     workspace = settings.effective_workspace_dir.resolve()
@@ -299,8 +302,7 @@ async def create_folder(
 async def rename_file_or_folder(
     request: Request,
     body: RenameRequest,
-    path: str = Query(..., description="Path to file or folder to rename"),
-    token: str = Depends(require_auth)
+    path: str = Query(..., description="Path to file or folder to rename")
 ):
     """Rename a file or folder within the workspace."""
     workspace = settings.effective_workspace_dir.resolve()
@@ -346,8 +348,7 @@ async def rename_file_or_folder(
 @router.delete("/files")
 async def delete_file_or_folder(
     request: Request,
-    path: str = Query(..., description="Path to file or folder to delete"),
-    token: str = Depends(require_auth)
+    path: str = Query(..., description="Path to file or folder to delete")
 ):
     """Delete a file or folder within the workspace."""
     workspace = settings.effective_workspace_dir.resolve()
@@ -398,3 +399,35 @@ async def delete_file_or_folder(
         )
 
     return {"deleted": path}
+
+
+def _peer_device(request: Request, device_id: str = Depends(tokens.require_worker_device)) -> str:
+    """Another worker of this account relaying its owner's Files page here.
+
+    Safe on its own, not only because the relay behaved: only an active
+    ``KIND_WORKER`` member other than this one is admitted (a consumer device's
+    token is refused), and one network belongs to one account, so such a worker
+    already carries the owner's authority here (it may start chats and
+    subagents on this worker through the control plane). The relaying worker
+    additionally requires its own owner (app.api.remote_workspace_files). The
+    local path checks above then apply unchanged, so a path this worker would
+    refuse its own owner is refused to the relay too.
+    """
+    request.state.api_user = None
+    return device_id
+
+
+# Peer-only mirror of the workspace file routes. Device tokens are accepted
+# here and nowhere on the public /api/v1/workspace routes.
+peer_router = APIRouter(
+    prefix="/api/v1/network/peer/workspace",
+    include_in_schema=False,
+    dependencies=[Depends(_peer_device)],
+)
+for _route in list(router.routes):
+    peer_router.add_api_route(
+        _route.path[len(router.prefix):],
+        _route.endpoint,
+        methods=list(_route.methods),
+        name="peer_" + _route.name,
+    )

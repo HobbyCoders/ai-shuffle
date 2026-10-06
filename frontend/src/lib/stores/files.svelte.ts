@@ -33,10 +33,20 @@ export interface FileItem {
 }
 
 interface FilesState {
+	/**
+	 * The worker whose files are on screen: an owner device id, or null for
+	 * the worker serving this page. Per browser, never synced to the server.
+	 */
+	workerId: string | null;
 	currentPath: string;
 	files: FileItem[];
 	loading: boolean;
+	/** A failed action (rename, delete, upload…). The listing stays usable. */
 	error: string | null;
+	/** Why the current folder could not be listed, shown in place of the rows. */
+	loadError: string | null;
+	/** HTTP status of that failure (503 = the worker is offline), or null. */
+	loadErrorStatus: number | null;
 	// Selection state
 	selectedFiles: Set<string>;
 	// Upload state
@@ -55,6 +65,8 @@ interface FilesState {
 
 const STORAGE_KEY = 'files_state';
 const SERVER_PREFERENCE_KEY = 'files_preferences';
+/** Which worker the Files page shows. Local only: device ids are never synced. */
+const WORKER_STORAGE_KEY = 'files_worker';
 
 // ============================================================================
 // Module-level mutable state (timers, flags)
@@ -62,6 +74,40 @@ const SERVER_PREFERENCE_KEY = 'files_preferences';
 
 /** Bumped per listing request; only the newest request may write the listing. */
 let _loadSeq = 0;
+
+class ListingError extends Error {
+	constructor(message: string, readonly status: number | null) {
+		super(message);
+	}
+}
+
+function loadWorker(): string | null {
+	if (!browser) return null;
+	try {
+		return localStorage.getItem(WORKER_STORAGE_KEY) || null;
+	} catch {
+		return null;
+	}
+}
+
+function saveWorker(id: string | null) {
+	if (!browser) return;
+	try {
+		if (id) localStorage.setItem(WORKER_STORAGE_KEY, id);
+		else localStorage.removeItem(WORKER_STORAGE_KEY);
+	} catch {
+		/* storage full or blocked: the choice simply does not persist */
+	}
+}
+
+/**
+ * The workspace file endpoints for a worker: this worker's own routes, or the
+ * owner-only relay to another worker (`/workspace/workers/<device id>/…`).
+ */
+export function filesBaseFor(workerId: string | null): string {
+	const root = `${apiBase()}/workspace`;
+	return workerId ? `${root}/workers/${encodeURIComponent(workerId)}` : root;
+}
 
 /** The backend's `detail`, or `fallback` when the error body is not JSON (a proxy's HTML 502). */
 async function errorDetail(response: Response, fallback: string): Promise<string> {
@@ -157,10 +203,13 @@ function saveToStorage(state: FilesState) {
 const persisted = loadFromStorage();
 
 let _state = $state<FilesState>({
+	workerId: loadWorker(),
 	currentPath: '',
 	files: [],
 	loading: false,
 	error: null,
+	loadError: null,
+	loadErrorStatus: null,
 	selectedFiles: new Set(),
 	uploading: false,
 	uploadProgress: 0,
@@ -191,6 +240,38 @@ export const files = {
 
 	subscribe,
 
+	/** Base URL of the selected worker's file endpoints. */
+	base(): string {
+		return filesBaseFor(_state.workerId);
+	},
+
+	// ========================================================================
+	// Worker
+	// ========================================================================
+
+	/**
+	 * Show another worker's files (null = this worker). The previous worker's
+	 * listing, path and selection are dropped at once, so nothing from it can
+	 * be seen or acted on while the new worker loads.
+	 */
+	setWorker(id: string | null): void {
+		const next = id || null;
+		saveWorker(next);
+		if (next === _state.workerId) return;
+		_update((s) => ({
+			...s,
+			workerId: next,
+			currentPath: '',
+			files: [],
+			selectedFiles: new Set<string>(),
+			error: null,
+			loadError: null,
+			loadErrorStatus: null,
+			loading: true,
+		}));
+		files.loadFiles();
+	},
+
 	// ========================================================================
 	// Navigation
 	// ========================================================================
@@ -211,9 +292,10 @@ export const files = {
 	async loadFiles(): Promise<void> {
 		const currentPath = _state.currentPath;
 		const showHidden = _state.showHidden;
+		const base = files.base();
 		const seq = ++_loadSeq;
 
-		_update((s) => ({ ...s, loading: true, error: null }));
+		_update((s) => ({ ...s, loading: true, error: null, loadError: null, loadErrorStatus: null }));
 
 		try {
 			const params = new URLSearchParams({
@@ -221,10 +303,11 @@ export const files = {
 				show_hidden: showHidden.toString(),
 			});
 
-			const response = await fetch(`${apiBase()}/workspace/files?${params}`, withAuth({ }));
+			const response = await fetch(`${base}/files?${params}`, withAuth({ }));
 
 			if (!response.ok) {
-				throw new Error(await errorDetail(response, 'Failed to load files'));
+				const message = await errorDetail(response, 'Failed to load files');
+				throw new ListingError(message, response.status);
 			}
 
 			const data = await response.json();
@@ -237,11 +320,16 @@ export const files = {
 			}));
 		} catch (e) {
 			if (seq !== _loadSeq) return;
-			const error = e instanceof Error ? e.message : 'Failed to load files';
+			const loadError = e instanceof Error ? e.message : 'Failed to load files';
+			// A network failure (no status) reaching this worker is as good as offline.
+			const loadErrorStatus = e instanceof ListingError ? e.status : null;
 			_update((s) => ({
 				...s,
+				files: [],
+				selectedFiles: new Set<string>(),
 				loading: false,
-				error,
+				loadError,
+				loadErrorStatus,
 			}));
 		}
 	},
@@ -252,11 +340,12 @@ export const files = {
 
 	async createFolder(name: string): Promise<boolean> {
 		const currentPath = _state.currentPath;
+		const base = files.base();
 
 		try {
 			const params = new URLSearchParams({ path: currentPath });
 
-			const response = await fetch(`${apiBase()}/workspace/files/folder?${params}`, withAuth({
+			const response = await fetch(`${base}/files/folder?${params}`, withAuth({
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/json',
@@ -278,10 +367,11 @@ export const files = {
 	},
 
 	async rename(path: string, newName: string): Promise<boolean> {
+		const base = files.base();
 		try {
 			const params = new URLSearchParams({ path });
 
-			const response = await fetch(`${apiBase()}/workspace/files/rename?${params}`, withAuth({
+			const response = await fetch(`${base}/files/rename?${params}`, withAuth({
 				method: 'PUT',
 				headers: {
 					'Content-Type': 'application/json',
@@ -303,10 +393,11 @@ export const files = {
 	},
 
 	async delete(path: string): Promise<boolean> {
+		const base = files.base();
 		try {
 			const params = new URLSearchParams({ path });
 
-			const response = await fetch(`${apiBase()}/workspace/files?${params}`, withAuth({
+			const response = await fetch(`${base}/files?${params}`, withAuth({
 				method: 'DELETE',
 			}));
 
@@ -350,6 +441,8 @@ export const files = {
 
 	async uploadFiles(fileList: FileList): Promise<boolean> {
 		const currentPath = _state.currentPath;
+		// Captured once: switching worker mid-upload must not send the rest elsewhere.
+		const base = files.base();
 		if (fileList.length === 0) return false;
 
 		_update((s) => ({ ...s, uploading: true, uploadProgress: 0, error: null }));
@@ -362,7 +455,7 @@ export const files = {
 				formData.append('file', file);
 				formData.append('path', currentPath);
 
-				const response = await fetch(`${apiBase()}/workspace/upload`, withAuth({
+				const response = await fetch(`${base}/upload`, withAuth({
 					method: 'POST',
 					body: formData,
 				}));
@@ -404,7 +497,7 @@ export const files = {
 		try {
 			const params = new URLSearchParams({ path });
 
-			const response = await fetch(`${apiBase()}/workspace/files/download?${params}`, withAuth({ }));
+			const response = await fetch(`${files.base()}/files/download?${params}`, withAuth({ }));
 
 			if (!response.ok) {
 				throw new Error(await errorDetail(response, 'Failed to download'));
@@ -495,10 +588,13 @@ export const files = {
 
 	reset(): void {
 		_state = {
+			workerId: null,
 			currentPath: '',
 			files: [],
 			loading: false,
 			error: null,
+			loadError: null,
+			loadErrorStatus: null,
 			selectedFiles: new Set(),
 			uploading: false,
 			uploadProgress: 0,

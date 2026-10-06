@@ -6,18 +6,24 @@
 	 * a columnar file list (Name / Size / Modified / download) on the right, under a
 	 * Studio page header (New folder / Upload) and a breadcrumb + hidden-files
 	 * toolbar. Reuses the `files` store for all data + operations. Theme tokens only.
+	 *
+	 * The breadcrumb starts at a worker chip: the page can show any of the
+	 * owner's workers, relayed through this one (see FilesWorkerPicker).
 	 */
 	import { onMount } from 'svelte';
-	import { apiBase, withAuth } from '$lib/api/runtime';
+	import { withAuth } from '$lib/api/runtime';
+	import { listInstalls, type Install } from '$lib/api/installs';
 	import {
 		Folder, File as FileIcon, FileCode, FileText, FileImage, FileVideo, FileAudio,
 		FileArchive, FileSpreadsheet, Database, Settings, Package,
-		FolderPlus, Upload, Download, Trash2, Edit3, Home, ChevronRight, Check, X, Loader2
+		FolderPlus, Upload, Download, Trash2, Edit3, Home, Check, X, Loader2,
+		ServerOff, FolderX, RotateCw
 	} from 'lucide-svelte';
 	import { files, sortedFiles, breadcrumbs, type FileItem } from '$lib/stores/files.svelte';
-	import Banner from '$lib/components/Banner.svelte';
 	import StudioPageHeader from '$lib/components/layout/StudioPageHeader.svelte';
 	import FilesTreeNode from './FilesTreeNode.svelte';
+	import FilesWorkerPicker from './FilesWorkerPicker.svelte';
+	import { findWorker, workerOptions, type WorkerOption } from './files-workers';
 	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import RowActionMenu from '$lib/components/ui/RowActionMenu.svelte';
 
@@ -45,31 +51,88 @@
 	const uploading = $derived($files.uploading);
 	const uploadProgress = $derived($files.uploadProgress);
 	const error = $derived($files.error);
+	const loadError = $derived($files.loadError);
+	const workerId = $derived($files.workerId);
+	// No status = the request never got an answer; 503 = the relay says offline.
+	const workerOffline = $derived(
+		workerId !== null && loadError !== null && ($files.loadErrorStatus === null || $files.loadErrorStatus === 503)
+	);
+
+	// ── Workers ──
+	let installs = $state<Install[]>([]);
+	let installsLoading = $state(true);
+	let installsFailed = $state(false);
+	const workerChoices = $derived(workerOptions(installs));
+	const selectedWorker = $derived<WorkerOption>(
+		findWorker(workerChoices, workerId) ?? {
+			// A remembered worker before the list arrives: never show this
+			// device's name over another worker's files.
+			key: workerId, name: 'Another worker', hint: null, isSelf: false,
+			online: true, disabled: false, reason: null
+		}
+	);
+	const workerName = $derived(selectedWorker.isSelf ? 'this device' : selectedWorker.name);
+
+	async function loadWorkers() {
+		installsLoading = true;
+		installsFailed = false;
+		try {
+			const res = await listInstalls();
+			installs = Array.isArray(res?.installs) ? res.installs : [];
+			// A remembered worker that left the network falls back to this one.
+			if ($files.workerId !== null && !findWorker(workerOptions(installs), $files.workerId)) {
+				files.setWorker(null);
+			}
+		} catch {
+			installsFailed = true;
+		} finally {
+			installsLoading = false;
+		}
+	}
+
+	function selectWorker(key: string | null) {
+		showNewFolder = false;
+		renameTarget = null;
+		pendingDelete = null;
+		pendingBulkDelete = false;
+		actionsOpenPath = null;
+		files.setWorker(key);
+	}
 	const showHidden = $derived($files.showHidden);
 	const selectedCount = $derived($files.selectedFiles.size);
 	const allSelected = $derived($sortedFiles.length > 0 && $sortedFiles.every((f) => $files.selectedFiles.has(f.path)));
 
+	let rootSeq = 0;
 	async function loadRootDirs() {
+		const seq = ++rootSeq;
 		try {
 			const params = new URLSearchParams({ path: '', show_hidden: String($files.showHidden) });
-			const res = await fetch(`${apiBase()}/workspace/files?${params}`, withAuth({ }));
-			if (res.ok) {
-				const data = await res.json();
-				rootDirs = (data.files as FileItem[])
-					.filter((f) => f.type === 'directory')
-					.map((f) => ({ name: f.name, path: f.path }));
-			}
-		} catch { /* tree is best-effort */ }
+			const res = await fetch(`${files.base()}/files?${params}`, withAuth({ }));
+			// Another worker (or toggle) was chosen meanwhile: its own fetch owns the tree.
+			if (seq !== rootSeq) return;
+			if (!res.ok) { rootDirs = []; return; }
+			const data = await res.json();
+			if (seq !== rootSeq) return;
+			rootDirs = (data.files as FileItem[])
+				.filter((f) => f.type === 'directory')
+				.map((f) => ({ name: f.name, path: f.path }));
+		} catch {
+			/* tree is best-effort */
+			if (seq === rootSeq) rootDirs = [];
+		}
 	}
 
 	onMount(() => {
 		files.loadFiles();
-		loadRootDirs();
+		loadWorkers();
 	});
 
-	// Keep the tree's root list in sync when the hidden-files toggle flips.
+	// Keep the tree's root list in sync with the worker and the hidden-files
+	// toggle. The previous worker's folders go at once, never shown under the new one.
 	$effect(() => {
 		$files.showHidden;
+		$files.workerId;
+		rootDirs = [];
 		loadRootDirs();
 	});
 
@@ -115,6 +178,7 @@
 	async function onDrop(e: DragEvent) {
 		e.preventDefault();
 		isDragging = false;
+		if (loadError) return;
 		if (e.dataTransfer?.files?.length) await files.uploadFiles(e.dataTransfer.files);
 	}
 
@@ -224,12 +288,16 @@
 <div class="fs">
 	<div class="fs-wrap">
 	<div class="fs-head">
-		<StudioPageHeader eyebrow="Browse, upload & manage your workspace" title="Project" accent="files">
+		<StudioPageHeader
+			eyebrow={selectedWorker.isSelf ? 'Browse, upload & manage your workspace' : `Browse, upload & manage files on ${selectedWorker.name}`}
+			title="Project"
+			accent="files"
+		>
 			{#snippet actions()}
-				<button class="fs-btn" onclick={openNewFolder}>
+				<button class="fs-btn" onclick={openNewFolder} disabled={!!loadError}>
 					<FolderPlus size={15} strokeWidth={1.8} /><span>New folder</span>
 				</button>
-				<button class="fs-btn fs-btn--primary" onclick={triggerUpload} disabled={uploading}>
+				<button class="fs-btn fs-btn--primary" onclick={triggerUpload} disabled={uploading || !!loadError}>
 					{#if uploading}<Loader2 size={15} class="fs-spin" />{:else}<Upload size={15} strokeWidth={1.8} />{/if}
 					<span>{uploading ? `Uploading ${uploadProgress}%` : 'Upload'}</span>
 				</button>
@@ -239,6 +307,15 @@
 
 	<!-- Toolbar: breadcrumbs + hidden toggle -->
 	<div class="fs-toolbar">
+		<FilesWorkerPicker
+			options={workerChoices}
+			selected={selectedWorker}
+			loading={installsLoading}
+			failed={installsFailed}
+			onSelect={selectWorker}
+			onRetry={loadWorkers}
+		/>
+		<span class="fs-crumb-sep fs-crumb-sep--worker" aria-hidden="true">/</span>
 		<nav class="fs-crumbs" aria-label="Breadcrumb">
 			{#each $breadcrumbs as crumb, i (crumb.path)}
 				{#if i > 0}<span class="fs-crumb-sep">/</span>{/if}
@@ -282,10 +359,6 @@
 		</div>
 	{/if}
 
-	{#if error}
-		<Banner severity="error" message={error} dismissible onDismiss={() => files.clearError()} />
-	{/if}
-
 	{#if selectedCount > 0}
 		<div class="fs-bulkbar">
 			<span>{selectedCount} selected</span>
@@ -299,21 +372,26 @@
 	<!-- Two-column layout -->
 	<div class="fs-layout">
 		<div class="fs-side">
-			<aside class="fs-tree">
+			<aside class="fs-tree" aria-label="Folders on {workerName}">
 				<button class="fs-tree-root" class:on={currentPath === ''} onclick={() => navigate('')}>
 					<Home size={14} strokeWidth={1.8} /><span>Workspace</span>
 				</button>
-				{#each rootDirs as dir (dir.path)}
-					<FilesTreeNode name={dir.name} path={dir.path} depth={0} {currentPath} {showHidden} onNavigate={navigate} {treeVersion} />
-				{/each}
+				<!-- Remounted per worker: expanded nodes must not refetch the old worker's paths. -->
+				{#key workerId}
+					{#each rootDirs as dir (dir.path)}
+						<FilesTreeNode name={dir.name} path={dir.path} depth={0} {currentPath} {showHidden} onNavigate={navigate} {treeVersion} />
+					{/each}
+				{/key}
 			</aside>
 		</div>
 
+		<div class="fs-mainwrap">
 		<div
 			class="fs-main"
 			class:drag={isDragging}
 			role="region"
 			aria-label="File list"
+			aria-busy={loading}
 			ondragover={onDragOver}
 			ondragleave={onDragLeave}
 			ondrop={onDrop}
@@ -334,8 +412,37 @@
 					<span></span>
 				</div>
 
-				{#if loading && $sortedFiles.length === 0}
-					<div class="fs-state"><Loader2 size={24} class="fs-spin" /><p>Loading files…</p></div>
+				{#if loadError && workerOffline}
+					<div class="fs-state fs-state--problem" role="alert">
+						<ServerOff size={30} strokeWidth={1.4} />
+						<p class="fs-state-title">{selectedWorker.name} is offline</p>
+						<p class="fs-state-detail">{loadError} Its files will show here once it reconnects.</p>
+						<div class="fs-state-actions">
+							<button class="fs-btn fs-btn--sm" onclick={() => files.loadFiles()} disabled={loading}>
+								{#if loading}<Loader2 size={14} class="fs-spin" />{:else}<RotateCw size={14} strokeWidth={1.8} />{/if}<span>Try again</span>
+							</button>
+							<button class="fs-btn fs-btn--sm fs-btn--primary" onclick={() => selectWorker(null)}>Back to this device</button>
+						</div>
+					</div>
+				{:else if loadError}
+					<div class="fs-state fs-state--problem" role="alert">
+						<FolderX size={30} strokeWidth={1.4} />
+						<p class="fs-state-title">This folder could not be opened</p>
+						<p class="fs-state-detail">{loadError}</p>
+						<div class="fs-state-actions">
+							<button class="fs-btn fs-btn--sm" onclick={() => files.loadFiles()} disabled={loading}>
+								{#if loading}<Loader2 size={14} class="fs-spin" />{:else}<RotateCw size={14} strokeWidth={1.8} />{/if}<span>Try again</span>
+							</button>
+							{#if currentPath}
+								<button class="fs-btn fs-btn--sm" onclick={() => navigate('')}>Go to Workspace</button>
+							{/if}
+						</div>
+					</div>
+				{:else if loading && $sortedFiles.length === 0}
+					<div class="fs-state" role="status">
+						<Loader2 size={24} class="fs-spin" />
+						<p>{workerId === null ? 'Loading files…' : `Loading files from ${selectedWorker.name}…`}</p>
+					</div>
 				{:else if $sortedFiles.length === 0}
 					<div class="fs-state">
 						<Folder size={30} strokeWidth={1.25} />
@@ -403,6 +510,14 @@
 			{#if isDragging}
 				<div class="fs-droplay"><Upload size={26} strokeWidth={1.6} /><span>Drop files to upload</span></div>
 			{/if}
+		</div>
+		<!-- Floats over the list instead of pushing it down: no layout shift. -->
+		{#if error}
+			<div class="fs-toast" role="alert">
+				<span class="fs-toast-msg">{error}</span>
+				<button class="fs-toast-x" aria-label="Dismiss error" onclick={() => files.clearError()}><X size={14} strokeWidth={2} /></button>
+			</div>
+		{/if}
 		</div>
 	</div>
 	</div>
@@ -560,7 +675,31 @@
 	.fs-tree-root :global(svg) { color: var(--muted-foreground); flex-shrink: 0; }
 	.fs-tree-root.on :global(svg) { color: var(--primary-foreground); }
 
-	.fs-main { position: relative; min-height: 0; overflow-y: auto; }
+	.fs-crumb-sep--worker { margin: 0 -2px 0 2px; }
+	.fs-mainwrap { position: relative; min-height: 0; display: flex; flex-direction: column; }
+	.fs-main { position: relative; flex: 1; min-height: 0; overflow-y: auto; }
+
+	/* Action errors float at the foot of the list: the rows never move. */
+	.fs-toast {
+		position: absolute; left: 50%; bottom: 14px; z-index: 5;
+		transform: translateX(-50%);
+		display: flex; align-items: flex-start; gap: 10px;
+		width: max-content; max-width: min(520px, calc(100% - 24px));
+		padding: 9px 8px 9px 14px; border-radius: calc(var(--radius, 0.75rem) - 2px);
+		background: color-mix(in oklch, var(--destructive) 14%, var(--card));
+		border: 1px solid color-mix(in oklch, var(--destructive) 45%, var(--border));
+		color: var(--foreground); font-size: 0.8125rem; line-height: 1.45;
+		box-shadow: 0 10px 28px -12px rgb(0 0 0 / 0.45);
+		animation: fs-toast-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+	}
+	@keyframes fs-toast-in { from { opacity: 0; transform: translate(-50%, 6px); } }
+	.fs-toast-msg { flex: 1; min-width: 0; padding-top: 2px; overflow-wrap: anywhere; }
+	.fs-toast-x {
+		display: grid; place-items: center; width: 26px; height: 26px; flex-shrink: 0;
+		background: transparent; border: none; border-radius: 6px; color: var(--muted-foreground); cursor: pointer;
+	}
+	.fs-toast-x:hover { background: var(--hover-overlay); color: var(--foreground); }
+	.fs-toast-x:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 	.fs-main.drag { outline: 2px dashed var(--primary); outline-offset: -4px; border-radius: var(--radius, 0.75rem); }
 
 	.fs-list {
@@ -615,6 +754,11 @@
 		padding: 44px 24px; text-align: center; color: var(--muted-foreground); font-size: 0.85rem;
 	}
 	.fs-state :global(svg) { color: var(--muted-foreground); opacity: 0.7; }
+	.fs-state--problem :global(svg) { color: var(--destructive); opacity: 0.85; }
+	.fs-state--problem .fs-state-actions :global(svg) { color: currentColor; opacity: 1; }
+	.fs-state-title { margin: 4px 0 0; color: var(--foreground); font-weight: 600; font-size: 0.9rem; }
+	.fs-state-detail { margin: 0; max-width: 44ch; overflow-wrap: anywhere; }
+	.fs-state-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
 	.fs-link { background: none; border: none; color: var(--primary); cursor: pointer; font-size: 0.8125rem; }
 	.fs-link:hover { text-decoration: underline; }
 
@@ -638,5 +782,17 @@
 		.fs-row { grid-template-columns: 28px 1fr auto auto; gap: 10px; }
 		.fs-md { display: none; }
 		.fs-bulkbar { margin: 0 16px 10px; }
+		/* The page scrolls as a whole here, so pin the toast to the viewport. */
+		.fs-toast {
+			position: fixed; left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+			transform: none; width: auto; max-width: none; z-index: 30;
+		}
+		@keyframes fs-toast-in-m { from { opacity: 0; transform: translateY(6px); } }
+		.fs-toast { animation-name: fs-toast-in-m; }
+		.fs-state-actions .fs-btn { min-height: 44px; }
+		.fs-toast-x { width: 36px; height: 36px; }
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.fs-toast { animation: none; }
 	}
 </style>
