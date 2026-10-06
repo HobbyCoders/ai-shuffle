@@ -170,7 +170,14 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   token bound to the network and its membership generation; every
   authenticated request re-checks membership, so revocation takes effect
   within one token lifetime, and any membership change invalidates every
-  outstanding token at once.
+  outstanding token at once. Any active member can hold a token, consumer
+  devices included. The sync plane (`/peer/exchange`, `/ops`, `/snapshot`,
+  `/state`, `/blob`, `/ping`) admits any active member (`require_device`).
+  Routes that act with the owner's authority on this worker admit only
+  another active worker of the account (`require_worker_device`):
+  `/peer/control/*`, `/peer/browser/*`, `/peer/workspace/*`,
+  `/api/files/peer/*` and the generated-media `/peer/*` routes. The
+  usage-budget routes check the worker kind themselves.
 - **Revocation.** Publishes a signed revocation carrying the last accepted
   incarnation and sequence of the removed device and rotates the network key
   for the rest (wrapped to each remaining member, sealed under the previous

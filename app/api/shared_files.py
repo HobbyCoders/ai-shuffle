@@ -147,7 +147,7 @@ async def get_file_by_path(
 async def peer_file(
     session_id: str, path: str, request: Request,
     project_id: str | None = None,
-    _device: str = Depends(tokens.require_device),
+    _device: str = Depends(tokens.require_worker_device),
 ):
     try:
         session = await run_sync(control._require_owned, session_id)

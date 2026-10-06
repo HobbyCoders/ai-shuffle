@@ -109,7 +109,7 @@ def build_media_module(
     async def peer_media(
         session_id: str, request: Request, path: str | None = None,
         filename: str | None = None, project_id: str | None = None,
-        _device: str = Depends(tokens.require_device),
+        _device: str = Depends(tokens.require_worker_device),
     ):
         try:
             session = await run_sync(control._require_owned, session_id)

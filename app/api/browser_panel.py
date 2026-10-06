@@ -239,7 +239,7 @@ async def get_panel_status(
 
 
 @router.get("/api/v1/network/peer/browser/{session_id}")
-async def peer_panel_status(session_id: str, device_id: str = Depends(tokens.require_device)) -> dict:
+async def peer_panel_status(session_id: str, device_id: str = Depends(tokens.require_worker_device)) -> dict:
     await remote_panel.require_owned(session_id)
     target = registry.get_target(session_id)
     return {"has_target": bool(target is not None and target.target_id),
@@ -248,7 +248,7 @@ async def peer_panel_status(session_id: str, device_id: str = Depends(tokens.req
 
 
 @router.post("/api/v1/network/peer/browser/{session_id}/start")
-async def peer_panel_start(session_id: str, device_id: str = Depends(tokens.require_device)) -> dict:
+async def peer_panel_start(session_id: str, device_id: str = Depends(tokens.require_worker_device)) -> dict:
     await remote_panel.require_owned(session_id)
     from app.core import browser_runtime
     try:
@@ -259,7 +259,7 @@ async def peer_panel_start(session_id: str, device_id: str = Depends(tokens.requ
 
 @router.post("/api/v1/network/peer/browser/{session_id}/upload")
 async def peer_panel_upload(request: Request, session_id: str, viewer_id: str, runtime_id: str,
-                            tab_id: str, field: str, device_id: str = Depends(tokens.require_device)) -> dict:
+                            tab_id: str, field: str, device_id: str = Depends(tokens.require_worker_device)) -> dict:
     await remote_panel.require_owned(session_id)
     from app.core import browser_uploads
     return await browser_uploads.upload(request, session_id, viewer_id, runtime_id, tab_id, field)

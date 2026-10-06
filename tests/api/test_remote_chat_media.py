@@ -43,7 +43,7 @@ def test_owner_serves_actual_media_and_range(media, monkeypatch, filename):
     viewer, module, prefix, path = media
     owner_app = FastAPI()
     owner_app.include_router(module.router)
-    owner_app.dependency_overrides[tokens.require_device] = lambda: "viewer"
+    owner_app.dependency_overrides[tokens.require_worker_device] = lambda: "viewer"
     monkeypatch.setattr(control, "_require_owned", lambda _: {"id": "chat"})
     seen = []
     with TestClient(owner_app) as owner:
@@ -99,7 +99,7 @@ def test_peer_rechecks_device_ownership_and_file_scope(media, monkeypatch):
     client, _, prefix, path = media
     url = f"{prefix}/peer/chat"
     assert client.get(url, params={"path": str(path)}).status_code == 401
-    client.app.dependency_overrides[tokens.require_device] = lambda: "viewer"
+    client.app.dependency_overrides[tokens.require_worker_device] = lambda: "viewer"
     monkeypatch.setattr(control, "_require_owned", Mock(side_effect=PermissionError))
     assert client.get(url, params={"path": str(path)}).status_code == 409
     monkeypatch.setattr(control, "_require_owned", lambda _: {"project_id": "allowed"})

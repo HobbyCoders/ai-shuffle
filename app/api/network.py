@@ -5,7 +5,11 @@ Three audiences share the ``/api/v1/network`` prefix:
 - users of this worker's UI (``require_auth`` / ``require_admin``):
   status, members, conflicts, recovery key, joining another worker
 - peer workers presenting a device token (``tokens.require_device``):
-  ``/peer/*`` exchange, ops, snapshot, ping
+  ``/peer/*`` exchange, ops, snapshot, state, blob parts, ping. These carry
+  only the replicated network data every active member already holds the
+  keys for. ``/peer/control/*`` acts with the owner's authority on this
+  worker (turns, sessions, answers, Git, settings), so it admits only another
+  active worker of the account (``tokens.require_worker_device``)
 - a joining worker with a pairing code (unauthenticated, rate limited):
   ``POST /join`` and ``GET /join/{id}``
 
@@ -557,7 +561,8 @@ async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = F
 
 
 @router.post("/peer/control/{action}")
-async def peer_control(action: str, request: Request, device_id: str = Depends(tokens.require_device)) -> dict:
+async def peer_control(action: str, request: Request,
+                      device_id: str = Depends(tokens.require_worker_device)) -> dict:
     """The owner side of the runner API: turns, sessions, interrupt, prompt answers, hydrate."""
     from app.network import control
     transport.note_contact(device_id)

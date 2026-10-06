@@ -60,13 +60,13 @@ def test_peer_needs_device_auth(client):
 
 @pytest.mark.parametrize("error,status", [(LookupError(), 404), (PermissionError(), 409)])
 def test_peer_requires_local_owner(client, monkeypatch, error, status):
-    client.app.dependency_overrides[tokens.require_device] = lambda: "viewer"
+    client.app.dependency_overrides[tokens.require_worker_device] = lambda: "viewer"
     monkeypatch.setattr(control, "_require_owned", Mock(side_effect=error))
     assert client.get("/api/files/peer/chat?path=/report").status_code == status
 
 
 def test_peer_checks_file_roots_and_scope(client, monkeypatch):
-    client.app.dependency_overrides[tokens.require_device] = lambda: "viewer"
+    client.app.dependency_overrides[tokens.require_worker_device] = lambda: "viewer"
     monkeypatch.setattr(control, "_require_owned", lambda _: {"project_id": "project"})
     access = Mock(side_effect=HTTPException(403))
     monkeypatch.setattr(api, "require_file_access", access)
@@ -139,7 +139,7 @@ def test_viewer_downloads_file_served_by_owner(client, monkeypatch, tmp_path):
     from app.api import common
     owner_app = FastAPI()
     owner_app.include_router(api.router)
-    owner_app.dependency_overrides[tokens.require_device] = lambda: "viewer"
+    owner_app.dependency_overrides[tokens.require_worker_device] = lambda: "viewer"
     monkeypatch.setattr(control, "_require_owned", lambda _: {"id": "chat"})
     monkeypatch.setattr(api, "settings", SimpleNamespace(effective_workspace_dir=tmp_path))
     monkeypatch.setattr(common, "_registered_serve_roots", lambda: ())

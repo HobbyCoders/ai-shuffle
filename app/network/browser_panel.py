@@ -245,7 +245,7 @@ async def serve_peer(websocket: WebSocket, session_id: str) -> None:
 
     # Peer credentials are accepted only here, never on the public browser API.
     try:
-        await run_sync(tokens.require_device, websocket)
+        await run_sync(tokens.require_worker_device, websocket)
         await require_owned(session_id)
     except HTTPException as exc:
         await websocket.send_denial_response(Response(status_code=exc.status_code))
@@ -255,7 +255,7 @@ async def serve_peer(websocket: WebSocket, session_id: str) -> None:
     async def watch_authority():
         while True:
             await asyncio.sleep(AUTH_CHECK_SECONDS)
-            await run_sync(tokens.require_device, websocket)
+            await run_sync(tokens.require_worker_device, websocket)
             await require_owned(session_id)
 
     tasks = [

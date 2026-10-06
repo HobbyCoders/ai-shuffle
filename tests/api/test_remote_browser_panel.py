@@ -106,7 +106,7 @@ def test_peer_http_requires_device_not_user_auth(client):
 
 
 def test_peer_refuses_non_owned_session(client, monkeypatch):
-    client.app.dependency_overrides[tokens.require_device] = lambda: "peer"
+    client.app.dependency_overrides[tokens.require_worker_device] = lambda: "peer"
     monkeypatch.setattr(control, "_require_owned", Mock(side_effect=PermissionError()))
     assert client.post("/api/v1/network/peer/browser/session/start").status_code == 409
 
@@ -285,7 +285,7 @@ async def test_peer_stream_stops_on_revocation_and_cleans_viewer(monkeypatch):
         finally:
             stopped.set()
 
-    monkeypatch.setattr(tokens, "require_device", authorize)
+    monkeypatch.setattr(tokens, "require_worker_device", authorize)
     monkeypatch.setattr(remote, "require_owned", AsyncMock())
     monkeypatch.setattr(api, "serve_browser_panel", serve)
     monkeypatch.setattr(remote, "AUTH_CHECK_SECONDS", 0)
