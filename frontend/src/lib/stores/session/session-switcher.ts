@@ -674,6 +674,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 				contextChoiceFromWindow(row?.context_window) ??
 				ephemeral?.contextWindowChoice ??
 				DEFAULT_CONTEXT_WINDOW_CHOICE,
+			// The pin as the row last reported it; /live and picks refresh it.
+			contextWindowPin: row ? (row.context_window ?? null) : undefined,
 			// Worktree fields: ephemeral > worktreeInfo from session list > safe defaults
 			worktreeIntent: ephemeral?.worktreeIntent ?? worktreeInfo?.worktreeIntent ?? 'local',
 			// Compose-time only: an existing session's device is already settled
@@ -735,6 +737,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const initialModel = getState().modelOverride;
 		const initialEffort = getState().effortLevelOverride;
 		const initialContextChoice = getState().contextWindowChoice;
+		const initialContextPin = getState().contextWindowPin;
 		let snap: LiveSnapshot | null;
 		try {
 			// `include_messages=false`: the SSE feed is the transcript authority, so
@@ -818,6 +821,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			const savedContextChoice = contextChoiceFromWindow(meta.context_window);
 			if (savedContextChoice && getState().contextWindowChoice === initialContextChoice) {
 				patch.contextWindowChoice = savedContextChoice;
+			}
+			// Never replace a pin a pick or an announcement set during this fetch.
+			if (meta.context_window !== undefined && getState().contextWindowPin === initialContextPin) {
+				patch.contextWindowPin = meta.context_window ?? null;
 			}
 			// An older chat may not be in the paginated session list. Hydrate its
 			// folders from /live, without overwriting an edit made during the fetch.
@@ -943,6 +950,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			fastMode: getPersistedFastMode(),
 			workspaceProjectIds: newChatEphemeral?.workspaceProjectIds ?? [],
 			contextWindowChoice: getPersistedContextWindowChoice(),
+			contextWindowPin: undefined,
 			pendingPermissions: [],
 			deferredPermissions: [],
 			pendingQuestions: [],

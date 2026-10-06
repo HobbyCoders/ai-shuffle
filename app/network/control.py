@@ -553,7 +553,7 @@ _MAX_CONTEXT_WINDOW = 10_000_000
 
 def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
     """Only the run settings the local WebSocket composer sends: model,
-    permission mode, effort and context window.
+    permission mode, effort and context window (with its acknowledged base).
 
     Anything else — ``cwd`` and ``worktree_info`` above all — is dropped so a
     member cannot run the owner's agent outside the session's checkout. The
@@ -591,6 +591,11 @@ def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
         if type(context_window) is not int or not 0 < context_window <= _MAX_CONTEXT_WINDOW:
             raise ValueError("Invalid context_window")
         overrides["context_window"] = context_window
+        # The pin the sending client last saw, so the owner can tell an
+        # outdated window from a pick (turn_manager.CONTEXT_WINDOW_BASE).
+        base = raw.get("context_window_base")
+        if type(base) is int and 0 <= base <= _MAX_CONTEXT_WINDOW:
+            overrides["context_window_base"] = base
     return overrides or None
 
 

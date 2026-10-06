@@ -19,6 +19,10 @@ def device_id(runner_id: str) -> str:
     ctx = engine.context()
     if ctx is None:
         return runner_id
+    if runner_id == settings.effective_instance_id:
+        # This install's own id names this worker even when its member row
+        # records no alias or an older one (#1716).
+        return ctx.device_id
     for member in store.list_members(include_revoked=False):
         if runner_id in (member["device_id"], member.get("legacy_instance_id")):
             if member["kind"] != membership.KIND_WORKER:

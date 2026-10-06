@@ -445,6 +445,38 @@ describe('message-sender context-window override', () => {
 		expect(frame.overrides.model).toBe('haiku');
 		expect(frame.overrides.context_window).toBeUndefined();
 	});
+
+	// #1895: the worker keeps a newer pin when this tab's view of it is outdated.
+	it.each([
+		{ label: 'the acknowledged pin', pin: 1_000_000, base: 1_000_000 },
+		{ label: '0 when no pin is saved', pin: null, base: 0 },
+		{ label: 'nothing while the pin is unknown', pin: undefined, base: undefined },
+	])('sends $label as context_window_base on an existing chat', async ({ pin, base }) => {
+		const { deps, wsConn } = makeDeps(baseState({
+			sessionId: 'ses-1',
+			worktreeIntent: 'local',
+			modelOverride: 'sonnet',
+			contextWindowChoice: 'standard',
+			contextWindowPin: pin,
+		}));
+		await createMessageSender(deps).sendMessage('follow-up');
+		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
+		expect(frame.overrides.context_window).toBe(200_000);
+		expect(frame.overrides.context_window_base).toBe(base);
+	});
+
+	it('sends no context_window_base when the send creates the chat', async () => {
+		const { deps, wsConn } = makeDeps(baseState({
+			worktreeIntent: 'local',
+			modelOverride: 'sonnet',
+			contextWindowChoice: 'standard',
+			contextWindowPin: 1_000_000,
+		}));
+		await createMessageSender(deps).sendMessage('first');
+		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
+		expect(frame.overrides.context_window).toBe(200_000);
+		expect(frame.overrides).not.toHaveProperty('context_window_base');
+	});
 });
 
 describe('message-sender new-session adoption token (hijack fix)', () => {

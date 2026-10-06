@@ -444,6 +444,50 @@ class TestSubmitPersistsTheBinding:
         assert row["effort"] == "high"
         assert row["context_window"] == 200_000
 
+    def test_outdated_window_does_not_replace_a_newer_pin(self, mock_db):
+        """#1895: the phone picked 200k; a tab that still saw 1M sends 1M."""
+        make_profile("agent", {})
+        db.create_session("s-stale", profile_id="agent", model="opus", context_window=200_000)
+        turn_id = turn_manager.submit(
+            "s-stale", "user", prompt="hi", profile_id="agent",
+            overrides={"model": "opus", "context_window": 1_000_000,
+                       "context_window_base": 1_000_000},
+            no_kick=True,
+        )
+        assert db.get_session("s-stale")["context_window"] == 200_000
+        from app.db import turns
+        saved = turns.get_turn(turn_id)["overrides"]
+        assert saved["context_window"] == 200_000
+        assert "context_window_base" not in saved
+
+    def test_window_from_a_client_with_the_current_pin_is_saved(self, mock_db):
+        make_profile("agent", {})
+        db.create_session("s-fresh", profile_id="agent", model="opus", context_window=200_000)
+        turn_manager.submit(
+            "s-fresh", "user", prompt="hi", profile_id="agent",
+            overrides={"model": "opus", "context_window": 1_000_000,
+                       "context_window_base": 200_000},
+            no_kick=True,
+        )
+        assert db.get_session("s-fresh")["context_window"] == 1_000_000
+
+    def test_zero_base_means_no_pin_seen(self, mock_db):
+        make_profile("agent", {})
+        db.create_session("s-none", profile_id="agent", model="opus")
+        turn_manager.submit(
+            "s-none", "user", prompt="hi", profile_id="agent",
+            overrides={"model": "opus", "context_window": 200_000, "context_window_base": 0},
+            no_kick=True,
+        )
+        assert db.get_session("s-none")["context_window"] == 200_000
+        # A client that saw no pin cannot replace one saved since.
+        turn_manager.submit(
+            "s-none", "user", prompt="hi", profile_id="agent",
+            overrides={"model": "opus", "context_window": 1_000_000, "context_window_base": 0},
+            no_kick=True,
+        )
+        assert db.get_session("s-none")["context_window"] == 200_000
+
     def test_wakeup_replay_does_not_rebind(self, mock_db):
         """A wakeup replays the model the SCHEDULING turn used, which may be
         older than what the user has since chosen."""

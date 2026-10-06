@@ -128,12 +128,33 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate) -> dict:
         return selected
 
 
+async def _announce_context_window(session_id: str, result: dict) -> None:
+    """Tell this worker's open clients of the chat about a saved window pick.
+
+    Without it another tab, the phone or the other worker's browser keeps its
+    older window until a reload, and its next send carries it (#1895). Every
+    socket gets it, the picker's own too: the REST call names no device, and
+    the value is the one the picker already applied.
+    """
+    window = result.get("context_window") if isinstance(result, dict) else None
+    if not window:
+        return
+    try:
+        from app.core.sync_engine import sync_engine
+        await sync_engine.broadcast_session_updated(
+            session_id=session_id, updates={"context_window": window}, source_device_id=None)
+    except Exception:  # noqa: BLE001 — the pick is saved either way
+        logger.warning("Could not announce the context window of %s", session_id, exc_info=True)
+
+
 async def handle_run_settings(body: dict, from_device: str) -> dict:
     session_id = body.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         raise ValueError("session_id is required")
-    return await apply_run_settings(session_id, RunSettingsUpdate.model_validate(
+    result = await apply_run_settings(session_id, RunSettingsUpdate.model_validate(
         {key: value for key, value in body.items() if key != "session_id"}))
+    await _announce_context_window(session_id, result)
+    return result
 
 
 @router.put("/{session_id}/run-settings")
@@ -145,15 +166,18 @@ async def update_run_settings(
     owner = await run_sync(control.owner_of, session)
     try:
         if owner is not None:
-            return await control.call(owner, "run-settings", {
+            result = await control.call(owner, "run-settings", {
                 "session_id": session_id, **body.model_dump(exclude_unset=True),
             })
-        return await apply_run_settings(session_id, body)
+        else:
+            result = await apply_run_settings(session_id, body)
     except (control.ControlRefused, ValueError) as exc:
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         logger.exception("Could not change run settings for %s", session_id)
         raise HTTPException(503, "Could not confirm the setting change. Retry when the session is connected.") from exc
+    await _announce_context_window(session_id, result)
+    return result
 
 
 class PermissionModeUpdate(BaseModel):

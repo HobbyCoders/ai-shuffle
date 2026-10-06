@@ -208,7 +208,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		// real pick and has to travel.
 		overrides.fast = _state.fastMode;
 		const contextWindow = contextWindowOverride(_state);
-		if (contextWindow != null) overrides.context_window = contextWindow;
+		if (contextWindow != null) {
+			overrides.context_window = contextWindow;
+			// The pin this tab last saw acknowledged (0: none). If another tab or
+			// device has picked since, the worker keeps that newer pin (#1895).
+			if (_state.sessionId && _state.contextWindowPin !== undefined) {
+				overrides.context_window_base = _state.contextWindowPin ?? 0;
+			}
+		}
 		return Object.keys(overrides).length > 0 ? overrides : undefined;
 	}
 

@@ -62,7 +62,9 @@ def installs_map() -> Dict[str, dict]:
 
     Keys are device ids. The legacy instance id of a member is also mapped
     so a ``runner:<instance_id>`` placement written before migration still
-    resolves to the right device.
+    resolves to the right device. This install's own instance id always maps
+    to its own row, even when its member row records no alias or an older
+    one (#1716), as ``device_for_instance`` does.
     """
     out: Dict[str, dict] = {}
     listing = directory()
@@ -71,6 +73,10 @@ def installs_map() -> Dict[str, dict]:
         legacy = row.get("legacy_instance_id")
         if legacy and legacy not in out:
             out[legacy] = dict(row, id=legacy)
+    own_instance = settings.effective_instance_id
+    own = next((row for row in listing["runners"] if row.get("is_self")), None)
+    if own is not None and own_instance and own_instance != own["id"]:
+        out[own_instance] = dict(own, id=own_instance)
     return out
 
 

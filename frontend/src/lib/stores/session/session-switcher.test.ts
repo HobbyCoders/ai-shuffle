@@ -466,6 +466,7 @@ describe('session-switcher · authoritative binding hydration', () => {
 		ephemeralStore.set('session-B', { contextWindowChoice: '1m' } as SessionEphemeral);
 		await switcher.switchSession('session-B');
 		expect(getState().contextWindowChoice).toBe('standard');
+		expect(getState().contextWindowPin).toBe(200_000);
 		switcher.destroy();
 	});
 
@@ -474,6 +475,7 @@ describe('session-switcher · authoritative binding hydration', () => {
 		const { switcher, getState } = makeSwitcher(fullState({ contextWindowChoice: '1m' }));
 		await switcher.refreshSessionMetadata('session-A');
 		expect(getState().contextWindowChoice).toBe('standard');
+		expect(getState().contextWindowPin).toBe(200_000);
 		switcher.destroy();
 	});
 
@@ -482,10 +484,11 @@ describe('session-switcher · authoritative binding hydration', () => {
 		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
 		const { switcher, getState, deps } = makeSwitcher(fullState({ contextWindowChoice: '1m' }));
 		const pending = switcher.refreshSessionMetadata('session-A');
-		deps.update(s => ({ ...s, contextWindowChoice: 'standard' }));
+		deps.update(s => ({ ...s, contextWindowChoice: 'standard', contextWindowPin: 200_000 }));
 		resolve({ session_meta: { context_window: 1_000_000 } });
 		await pending;
 		expect(getState().contextWindowChoice).toBe('standard');
+		expect(getState().contextWindowPin).toBe(200_000);
 		switcher.destroy();
 	});
 

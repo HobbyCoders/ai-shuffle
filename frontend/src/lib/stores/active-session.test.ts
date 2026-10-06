@@ -228,12 +228,15 @@ describe('live effort and Fast mode selection', () => {
 			await pending;
 			expect(activeSession.current.contextWindowChoice).toBe('standard');
 			expect(patchRow).toHaveBeenCalledWith('live-knobs', { context_window: 200_000 });
+			// The next send names this pin as its base (#1895).
+			expect(activeSession.current.contextWindowPin).toBe(200_000);
 		});
 		it('keeps the previous pin when saving fails', async () => {
-			Object.assign(activeSession.current, { modelOverride: 'fable', contextWindowChoice: '1m' });
+			Object.assign(activeSession.current, { modelOverride: 'fable', contextWindowChoice: '1m', contextWindowPin: 1_000_000 });
 			vi.spyOn(api, 'put').mockRejectedValue(new Error('unreachable'));
 			await activeSession.setContextWindowChoice('standard');
 			expect(activeSession.current.contextWindowChoice).toBe('1m');
+			expect(activeSession.current.contextWindowPin).toBe(1_000_000);
 		});
 	});
 

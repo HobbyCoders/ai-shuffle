@@ -546,6 +546,17 @@ async def test_control_turns_carry_the_context_window_to_the_owner(workers, monk
         assert database.get_session("s-window")["context_window"] == 200_000
         from app.db import turns as turns_db
         assert turns_db.get_latest_turn("s-window")["overrides"]["context_window"] == 200_000
+    with b.active():
+        # #1895: B's browser still believes the chat is at 1M. Its base names
+        # that, so the owner keeps the newer 200k pin.
+        await control.submit_turn(a.device_id, "s-window", prompt="go",
+                                  overrides={"model": "opus", "context_window": 1_000_000,
+                                             "context_window_base": 1_000_000})
+    with a.active():
+        assert database.get_session("s-window")["context_window"] == 200_000
+        latest = turns_db.get_latest_turn("s-window")["overrides"]
+        assert latest["context_window"] == 200_000
+        assert "context_window_base" not in latest
 
 
 async def test_control_turns_steers_a_message_into_the_owners_live_turn(workers, monkeypatch):

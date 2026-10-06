@@ -25,6 +25,7 @@ import { pendingQueue, reconcilePendingPeerMessages } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
 import { setPrivateAccessPending } from '../chat-access';
+import { contextChoiceFromWindow } from '$lib/constants/model-context';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -175,6 +176,8 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'has_running_tasks',
 	'work_ms',
 	'work_started_at',
+	// A context-window pick made on another tab or device (#1895).
+	'context_window',
 ]);
 
 /**
@@ -482,6 +485,16 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						update(s => ({ ...s, title: updatedTitle }));
 						onPersistSession();
 					}
+				}
+				// A context-window pick saved from another tab, device or worker:
+				// adopt it, so this composer neither shows nor sends the older one.
+				const pickedChoice = contextChoiceFromWindow(updates.context_window as number | null | undefined);
+				if (pickedChoice && updatedSessionId && updatedSessionId === getState().sessionId) {
+					update(s => ({
+						...s, contextWindowChoice: pickedChoice,
+						contextWindowPin: updates.context_window as number,
+					}));
+					onPersistSession();
 				}
 				// Row-level metadata (title backfill, is_active flip, …) is merged
 				// straight into the sidebar row — no refetch, so no chance of a

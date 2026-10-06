@@ -89,4 +89,23 @@ describe('agent-written styling and form controls (#1718)', () => {
 		expect(box.getAttributeNames().sort()).toEqual(['type']);
 		expect(render(sanitizeHtml('<p><input type="checkbox"></p>')).querySelector('input')).toBeNull();
 	});
+
+	it('keeps the markdown the chat documents: tables, details, kbd, sub, sup, code', () => {
+		const md = [
+			'| a | b |', '|---|---|', '| 1 | 2 |', '',
+			'<details><summary>More</summary>hidden body</details>', '',
+			'Press <kbd>Ctrl</kbd>, H<sub>2</sub>O, x<sup>2</sup>, ~~gone~~', '',
+			'```ts', 'const answer = 42;', '```'
+		].join('\n');
+		const fragment = render(sanitizeHtml(renderChatMarkdown(md, false)));
+		expect(fragment.querySelectorAll('table th')).toHaveLength(2);
+		expect(fragment.querySelectorAll('table td')).toHaveLength(2);
+		expect(fragment.querySelector('details > summary')?.textContent).toBe('More');
+		expect(fragment.querySelector('details')?.textContent).toContain('hidden body');
+		expect(fragment.querySelector('kbd')?.textContent).toBe('Ctrl');
+		expect(fragment.querySelector('sub')?.textContent).toBe('2');
+		expect(fragment.querySelector('sup')?.textContent).toBe('2');
+		expect(fragment.querySelector('del, s')?.textContent).toBe('gone');
+		expect(fragment.querySelector('pre code')?.textContent).toContain('const answer = 42;');
+	});
 });

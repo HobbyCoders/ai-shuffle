@@ -72,12 +72,12 @@ def test_startup_repairs_a_membership_without_an_install_id(workers):
     # Admitted directly without an install id: the record such a join left.
     join(a, b, name="DesktopWorker", legacy_instance_id=None)
     with as_install(b, "inst-b"):
-        # The gap as found on the affected worker. ``get_install`` resolves the
-        # own id through its ``is_self`` fallback (#1710); the alias-keyed
-        # lookups do not.
+        # The gap as found on the affected worker. Lookups of its own id
+        # resolve through the ``is_self`` fallbacks (#1710, #1716); the alias
+        # itself is missing, so its peers cannot map the id yet.
         assert _legacy(b, b.device_id) is None
         assert "inst-b" not in engine.context().legacy_instance_map
-        assert "inst-b" not in database.get_installs_map()
+        assert database.get_installs_map()["inst-b"]["id"] == b.device_id
         network_startup.initialize()
         assert _legacy(b, b.device_id) == "inst-b"
         assert database.is_install_approved("inst-b")
@@ -145,3 +145,35 @@ async def test_a_worker_awaiting_admission_stays_unapproved(workers, fake):
         assert database.get_install("inst-b") is None
         assert not database.is_install_approved("inst-b")
         assert store.get_member(b.device_id) is None
+
+
+def test_a_changed_install_id_still_finds_this_worker(workers):
+    """#1716 case 2: the certificate names an older install id than the one running.
+
+    The repair never replaces a recorded alias, so every lookup of this
+    install's own current id must fall back to its own row, the way
+    ``get_install`` and ``device_for_instance`` already did.
+    """
+    from app.network import git as network_git
+
+    a, b = workers("a"), workers("b")
+    with as_install(a, "inst-a"):
+        engine.create_network("Home", device_name="Unraid", legacy_instance_id="inst-a")
+    join(a, b, name="DesktopWorker", legacy_instance_id="inst-old")
+    with as_install(b, "inst-new"):
+        assert engine.heal_own_instance_alias() is False
+        assert _legacy(b, b.device_id) == "inst-old"
+        assert database.get_install("inst-new")["id"] == b.device_id
+        assert runners.device_for_instance("inst-new") == b.device_id
+        # Session enrichment, placement and usage rows keyed by the current id.
+        assert database.get_installs_map()["inst-new"]["id"] == b.device_id
+        assert runners.installs_map()["inst-new"]["device_id"] == b.device_id
+        assert network_git.device_id("inst-new") == b.device_id
+        # The older alias and the peer still resolve as before.
+        assert database.get_installs_map()["inst-old"]["id"] == b.device_id
+        assert database.get_installs_map()["inst-a"]["id"] == a.device_id
+        assert network_git.device_id("inst-a") == a.device_id
+    with as_install(a, "inst-a"):
+        # Only the worker itself knows its new id; this is the open part of #1716.
+        assert "inst-new" not in database.get_installs_map()
+        assert runners.device_for_instance("inst-new") is None

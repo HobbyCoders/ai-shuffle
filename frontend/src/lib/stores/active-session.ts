@@ -196,6 +196,10 @@ export interface ActiveSessionState {
 	workspaceProjectIds?: string[];
 	/** Semantic 1M vs model-family standard-window choice for eligible GPT/Claude models. */
 	contextWindowChoice: ContextWindowChoice;
+	/** The open chat's saved context-window pin as this client last saw it
+	 *  acknowledged (null: none saved; undefined: not known yet). Sent beside a
+	 *  send's window so the worker can tell an outdated window from a pick (#1895). */
+	contextWindowPin?: number | null;
 	pendingPermissions: PermissionRequestType[];
 	/** Slice B (SDK 0.1.81): permission requests the user deferred — visible as a
 	 *  "N deferred" pill below the chat. Re-broadcast on `requeue_deferred_permissions`. */
@@ -737,6 +741,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 	const sessionId = _state.sessionId;
 	const stateKey = field === 'effort' ? 'effortLevelOverride' : field === 'fast' ? 'fastMode' : 'contextWindowChoice';
 	let selected = value;
+	let savedWindow: number | null = null;
 	if (sessionId) {
 		// Serialize picks for the same owner/session so a slow earlier request
 		// cannot overwrite a newer pick at the running worker.
@@ -755,6 +760,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			if (!saved || sessionOwnerEpoch() !== ownerEpoch) return;
 			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window) : saved[field];
 			if (field === 'context_window' && selected) {
+				savedWindow = saved.context_window;
 				// Navigation reads the sidebar row before its /live refresh. Keep
 				// an acknowledged pick there too, including across in-flight loads.
 				appData.mergeSessionPatch(sessionId, { context_window: saved.context_window });
@@ -780,7 +786,10 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			field === 'effort' ? selected as string | null : selected ? '1' : '');
 	}
 	if (_state.sessionId !== sessionId) return;
-	_update(s => ({ ...s, [stateKey]: selected }));
+	_update(s => ({
+		...s, [stateKey]: selected,
+		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})
+	}));
 	persistSession();
 }
 

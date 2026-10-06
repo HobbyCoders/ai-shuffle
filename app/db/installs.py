@@ -253,14 +253,28 @@ def get_installs_map() -> Dict[str, InstallRow]:
     """Return {install_id: row} for batch session enrichment.
 
     In a network the map is keyed by device id AND by each member's legacy
-    instance id, so rows written before migration still resolve.
+    instance id, so rows written before migration still resolve. This
+    install's own instance id always maps to its own row, as in
+    ``get_install``: the alias can be missing, or name an older install id
+    after the data directory changed (#1716).
     """
     out = {row["id"]: row for row in get_installs()}
     for row in list(out.values()):
         legacy = row.get("legacy_instance_id")
         if legacy and legacy not in out:
             out[legacy] = row
+    own = _own_network_row(out.values())
+    if own is not None:
+        from app.core.config import settings
+
+        if settings.effective_instance_id:
+            out[settings.effective_instance_id] = own
     return out
+
+
+def _own_network_row(rows) -> Optional[InstallRow]:
+    """This worker's own directory row in a network, else None."""
+    return next((row for row in rows if row.get("is_self")), None)
 
 
 def delete_install(install_id: str) -> bool:

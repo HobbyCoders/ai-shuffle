@@ -1878,6 +1878,40 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('session_updated handler (context-window pick, #1895)', () => {
+		function announce(sessionId: string, contextWindow: number) {
+			let state = mockState();
+			state.contextWindowChoice = '1m';
+			state.contextWindowPin = 1_000_000;
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+			handlers.handleMessage({
+				event_type: 'session_updated',
+				session_id: sessionId,
+				data: { updates: { context_window: contextWindow } },
+			});
+			return state;
+		}
+
+		it('adopts a pick made on another tab or device without a reload', () => {
+			const state = announce('session-1', 200_000);
+			expect(state.contextWindowChoice).toBe('standard');
+			expect(state.contextWindowPin).toBe(200_000);
+			expect(deps.onPersistSession).toHaveBeenCalled();
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { context_window: 200_000 });
+		});
+
+		it('leaves the open chat alone when another chat was picked', () => {
+			const state = announce('session-2', 200_000);
+			expect(state.contextWindowChoice).toBe('1m');
+			expect(state.contextWindowPin).toBe(1_000_000);
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-2', { context_window: 200_000 });
+		});
+	});
+
 	describe('user_session_updated handler (working time, #1619)', () => {
 		it('patches work_ms and work_started_at into the row without a list reload', async () => {
 			vi.useFakeTimers();

@@ -270,3 +270,43 @@ async def test_context_pick_on_legacy_session_uses_its_launched_model(mock_db, m
     monkeypatch.setattr(api.control, "_require_owned", db.get_session)
     await api.apply_run_settings("legacy-window", api.RunSettingsUpdate(context_window=200_000))
     assert db.get_session("legacy-window")["context_window"] == 200_000
+
+
+@pytest.mark.asyncio
+async def test_context_pick_is_announced_to_open_clients(mock_db, monkeypatch):
+    """#1895: another tab, the phone or the other worker's browser learns a
+    window pick without a reload, on the worker that took the request and on
+    the owner that saved it. Effort/Fast changes announce nothing new."""
+    from app.core.sync_engine import sync_engine
+
+    db.create_profile("role", "Role", None, {"model": "fable"})
+    db.create_session(session_id="announce", profile_id="role", model="fable", context_window=1_000_000)
+    monkeypatch.setattr(api.control, "_require_owned", db.get_session)
+    monkeypatch.setattr("app.core.session_pool.get_session_pool",
+                        lambda: SimpleNamespace(peek=lambda _: None))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda _: None)
+    monkeypatch.setattr(api, "require_session", AsyncMock(return_value={"id": "announce"}))
+    monkeypatch.setattr(api.control, "owner_of", lambda row: None)
+    broadcast = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_session_updated", broadcast)
+
+    await api.update_run_settings(None, "announce", api.RunSettingsUpdate(context_window=200_000))
+    broadcast.assert_awaited_once_with(
+        session_id="announce", updates={"context_window": 200_000}, source_device_id=None)
+
+    broadcast.reset_mock()
+    await api.handle_run_settings({"session_id": "announce", "context_window": 1_000_000}, "peer")
+    broadcast.assert_awaited_once_with(
+        session_id="announce", updates={"context_window": 1_000_000}, source_device_id=None)
+
+    broadcast.reset_mock()
+    monkeypatch.setattr(api.control, "owner_of", lambda row: "remote")
+    monkeypatch.setattr(api.control, "call", AsyncMock(return_value={"context_window": 200_000}))
+    await api.update_run_settings(None, "announce", api.RunSettingsUpdate(context_window=200_000))
+    broadcast.assert_awaited_once_with(
+        session_id="announce", updates={"context_window": 200_000}, source_device_id=None)
+
+    broadcast.reset_mock()
+    monkeypatch.setattr(api.control, "call", AsyncMock(return_value={"effort": "low", "fast": False}))
+    await api.update_run_settings(None, "announce", api.RunSettingsUpdate(effort="low"))
+    broadcast.assert_not_awaited()

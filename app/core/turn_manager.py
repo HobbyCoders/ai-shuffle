@@ -151,6 +151,33 @@ VOICE_DELEGATION = "voice_delegation"
 # which may be older than what the user has since chosen).
 _BINDING_SOURCES = ("user", "queue", "api", "worktree", "connector")
 
+# Override key a composer sends beside ``context_window``: the chat's saved pin
+# as that client last saw it acknowledged (0 for none). A pick made on another
+# tab, device or worker is not pushed to every open client, so a client can
+# still hold an older window and send it. When the base differs from the pin
+# saved now, the send's window is outdated: it is not saved and the turn runs
+# on the saved pin (#1895). A send without the key (an older client, the API)
+# keeps the earlier behaviour. Never stored on the turn.
+CONTEXT_WINDOW_BASE = "context_window_base"
+
+
+def _split_window_base(
+    overrides: Optional[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[int], bool]:
+    """``(overrides without the base, base, whether a base was sent)``.
+
+    A base that is not a whole number is treated as not sent.
+    """
+    if not overrides or CONTEXT_WINDOW_BASE not in overrides:
+        return overrides, None, False
+    raw = overrides[CONTEXT_WINDOW_BASE]
+    rest = {k: v for k, v in overrides.items() if k != CONTEXT_WINDOW_BASE} or None
+    if raw is None:
+        return rest, None, True
+    if type(raw) is not int or raw < 0:
+        return rest, None, False
+    return rest, raw or None, True
+
 
 def _without_home_effort(
     session_id: str, overrides: Optional[Dict[str, Any]]
@@ -278,6 +305,7 @@ def _submit_blocking(
     if archive_guard.is_archived(session_id):
         archive_guard.log_dropped(session_id, source, "refused at submit")
         raise archive_guard.SessionArchived(session_id)
+    overrides, window_base, has_window_base = _split_window_base(overrides)
     overrides = _without_home_effort(session_id, overrides)
     if source == "connector":
         # Connector turns always go through their API user's approval policy.
@@ -324,9 +352,20 @@ def _submit_blocking(
                 # the model default.
                 from app.core.model_registry import offered_context_window
 
-                window = offered_context_window(
-                    database.get_session(session_id), overrides["context_window"]
-                )
+                row = database.get_session(session_id)
+                if has_window_base and window_base != ((row or {}).get("context_window") or None):
+                    # The client's view of the pin is outdated (another tab or
+                    # device picked since): its window must not replace the
+                    # newer pin, which this turn runs on instead.
+                    logger.info(
+                        "Ignoring outdated context window %s for session %s "
+                        "(client base %s, saved pin %s)",
+                        overrides["context_window"], session_id, window_base,
+                        (row or {}).get("context_window"),
+                    )
+                    window = None
+                else:
+                    window = offered_context_window(row, overrides["context_window"])
                 if window is None:
                     overrides = {k: v for k, v in overrides.items() if k != "context_window"}
                 else:
