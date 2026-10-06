@@ -261,3 +261,40 @@ def test_only_a_process_carrying_a_dead_runs_id_that_started_after_it_is_taken(l
 
     assert process_ledger.reap_previous_run(timeout=1) == []
     assert proc.poll() is None
+
+
+# --- #1711 part 3: an install awaiting approval still reaps its own processes ---
+
+_SHARED_STATE_BRANCHES = (
+    "_boot_reap_and_kick_turns",
+    "_clear_stale_parked_markers",
+    "_mark_stale_background_task_rows",
+    "_repair_orphaned_engine_pending",
+    "_reset_orphaned_session_statuses",
+    "_sweep_stray_cli_processes",
+)
+
+
+async def test_an_install_awaiting_approval_still_stops_its_previous_runs_processes(ledger, monkeypatch):
+    from app.core import startup_reconcile
+    from app.core.config import settings
+
+    path, spawn = ledger
+    recorded = spawn()  # a stale ledger entry: an agent CLI the dead run recorded
+    assert process_ledger.record_process(recorded.pid, "agent_cli")
+    _as_previous_run(path)
+    run_id = _record_run(*_dead_server())  # an orphan only the dead run's id names
+    orphan_pid = _orphan_of(spawn, {**os.environ, process_ledger.RUN_MARKER: run_id})
+    bystander = spawn(env={k: v for k, v in os.environ.items() if k != process_ledger.RUN_MARKER})
+    # The boot sweeps are switched off inside the suite; this test is the boot.
+    monkeypatch.setenv("TESTING", "0")
+    monkeypatch.setattr(settings, "reap_stray_cli_on_boot", True)
+    for name in _SHARED_STATE_BRANCHES:
+        monkeypatch.setattr(startup_reconcile, name, lambda *a, _n=name, **k: pytest.fail(f"{_n} ran while quarantined"))
+
+    counts = await startup_reconcile.reconcile_at_boot(False)
+
+    assert counts == {"orphan_processes_reaped": 2}
+    assert _gone(recorded.pid) and _gone(orphan_pid)
+    assert bystander.poll() is None
+    assert json.loads(path.read_text(encoding="utf-8"))["processes"] == {}

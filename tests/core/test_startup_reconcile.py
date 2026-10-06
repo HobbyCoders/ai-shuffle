@@ -12,8 +12,11 @@ Covers:
   idempotent column migration from a v50-shaped database).
 """
 
+import asyncio
 import json
 import uuid
+
+import pytest
 
 
 from app.core.config import settings
@@ -589,3 +592,88 @@ async def test_boot_leaves_a_clean_pending_set_alone(mock_db, test_db):
         "SELECT seq FROM fluid_session_events WHERE session_id = ?", ("ses_clean",)
     ).fetchall()
     assert len(rows) == 2
+
+
+# =============================================================================
+# #1711 part 3: an install awaiting approval still claims and runs turns, so
+# its boot still stops the processes its own previous run left behind. Every
+# branch that writes shared database state stays gated on approval.
+# =============================================================================
+
+_GATED_BRANCHES = {
+    "_boot_reap_and_kick_turns": "turns_reaped",
+    "_clear_stale_parked_markers": "parked_markers_cleared",
+    "_mark_stale_background_task_rows": "background_task_rows_killed",
+    "_repair_orphaned_engine_pending": "engine_pending_repaired",
+    "_reset_orphaned_session_statuses": "statuses_reset",
+    "_sweep_stray_cli_processes": "stray_cli_reaped",
+}
+
+
+@pytest.mark.parametrize("approved", [True, False])
+async def test_reconcile_at_boot_gates_shared_state_on_approval(monkeypatch, approved):
+    import app.core.startup_reconcile as sr
+
+    ran = []
+
+    def _branch(name):
+        async def _async_stub():
+            ran.append(name)
+            return 1
+
+        def _sync_stub():
+            ran.append(name)
+            return 1
+
+        return _async_stub if asyncio.iscoroutinefunction(getattr(sr, name)) else _sync_stub
+
+    for name in (*_GATED_BRANCHES, "_reap_previous_run_processes"):
+        monkeypatch.setattr(sr, name, _branch(name))
+    monkeypatch.setenv("TESTING", "0")  # this test is the boot; the sweeps are stubbed
+    monkeypatch.setattr(settings, "reap_stray_cli_on_boot", True)
+
+    counts = await sr.reconcile_at_boot(approved)
+
+    if approved:  # as before: every branch
+        assert sorted(ran) == sorted([*_GATED_BRANCHES, "_reap_previous_run_processes"])
+        assert all(counts[key] == 1 for key in _GATED_BRANCHES.values())
+    else:  # only this install's own processes
+        assert ran == ["_reap_previous_run_processes"]
+    assert counts["orphan_processes_reaped"] == 1
+
+
+@pytest.mark.parametrize("approved", [True, False])
+def test_boot_runs_the_own_process_reap_whether_or_not_the_install_is_approved(
+    mock_db, _api_unit_credentials, monkeypatch, approved,
+):
+    from fastapi.testclient import TestClient
+
+    from app.core import startup
+    import app.core.startup_reconcile as sr
+    from app.core import cluster
+    from app.core.automation_manager import automation_manager
+    from app.main import app
+
+    automation_manager._scheduler = None
+    automation_manager._initialized = False
+    calls = []
+
+    async def _reconcile_at_boot(runner_approved):
+        calls.append(("reconcile_at_boot", runner_approved))
+        return {}
+
+    real_start_services = startup.start_services
+
+    async def _start_services(*args, **kwargs):
+        calls.append(("start_services",))
+        return await real_start_services(*args, **kwargs)
+
+    monkeypatch.setattr(cluster, "register_self", lambda: approved)
+    monkeypatch.setattr(sr, "reconcile_at_boot", _reconcile_at_boot)
+    monkeypatch.setattr(startup, "start_services", _start_services)
+
+    with TestClient(app):
+        pass
+
+    assert ("reconcile_at_boot", approved) in calls
+    assert (("start_services",) in calls) is approved

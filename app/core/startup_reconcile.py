@@ -983,9 +983,7 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
             context={"reconcile": "session_status"},
         )
 
-    # Suppressed under TESTING (conftest sets TESTING=1): the sweep scans the
-    # whole process table, which is slow and pointless inside the test suite.
-    if settings.reap_stray_cli_on_boot and os.environ.get("TESTING") != "1":
+    if _process_sweeps_enabled():
         try:
             counts["stray_cli_reaped"] = await asyncio.to_thread(
                 _sweep_stray_cli_processes
@@ -1000,29 +998,67 @@ async def reconcile_from_durable_truth() -> Dict[str, int]:
                 context={"reconcile": "stray_cli"},
             )
 
-        # Processes the previous run recorded itself as starting (agent CLIs,
-        # Monitor shells and what they started), verified by pid + start time
-        # + command line, and any process that inherited the dead run's id
-        # (process_ledger.RUN_MARKER). Catches what the marker sweep above deliberately
-        # leaves alone, e.g. a dev server orphaned when the server died.
-        try:
-            from app.core import process_ledger
-
-            counts["orphan_processes_reaped"] = len(
-                await asyncio.to_thread(process_ledger.reap_previous_run)
-            )
-        except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
-            logger.exception("Boot reconcile: process-ledger sweep failed")
-            await run_sync(
-                record_error,
-                "backend",
-                f"Boot reconcile failed while stopping the previous run's processes: {exc}",
-                detail=traceback.format_exc(),
-                context={"reconcile": "process_ledger"},
-            )
+        # Catches what the marker sweep above deliberately leaves alone, e.g.
+        # a dev server orphaned when the server died.
+        counts["orphan_processes_reaped"] = await _reap_previous_run_processes()
 
     if any(counts.values()):
         logger.info(f"Boot reconcile from durable truth: {counts}")
     else:
         logger.debug("Boot reconcile from durable truth: nothing to reconcile")
+    return counts
+
+
+def _process_sweeps_enabled() -> bool:
+    """Whether the boot process sweeps run. Suppressed under TESTING (conftest
+    sets TESTING=1): they scan the whole process table, which is slow and
+    pointless inside the test suite."""
+    return bool(settings.reap_stray_cli_on_boot) and os.environ.get("TESTING") != "1"
+
+
+async def _reap_previous_run_processes() -> int:
+    """Stop what this install's own dead server runs left behind; never raises.
+
+    Processes the previous run recorded itself as starting (agent CLIs,
+    Monitor shells and what they started), verified by pid + start time +
+    command line, and any process that inherited a dead run's id
+    (``process_ledger.RUN_MARKER``). Both lists live in this install's data
+    directory, so nothing here can name another install's processes, the
+    managed PostgreSQL or the native Chrome (started without the run id).
+    Returns the number of processes stopped.
+    """
+    try:
+        from app.core import process_ledger
+
+        return len(await asyncio.to_thread(process_ledger.reap_previous_run))
+    except Exception as exc:  # noqa: BLE001 — reconcile must never block boot
+        logger.exception("Boot reconcile: process-ledger sweep failed")
+        await run_sync(
+            record_error,
+            "backend",
+            f"Boot reconcile failed while stopping the previous run's processes: {exc}",
+            detail=traceback.format_exc(),
+            context={"reconcile": "process_ledger"},
+        )
+        return 0
+
+
+async def reconcile_at_boot(runner_approved: bool) -> Dict[str, int]:
+    """The boot recovery for this install; never raises.
+
+    An approved install runs every branch of :func:`reconcile_from_durable_truth`.
+    An install awaiting approval still claims and runs turns, so after a crash
+    it must still stop the processes its own previous run left behind (#1711);
+    it runs only that, the process-ledger and dead-run-id reap. Everything that
+    writes shared database state (turns, sessions, background-task rows, the
+    engine's pending sets) and the instance-marker CLI sweep stay gated on
+    approval.
+    """
+    if runner_approved:
+        return await reconcile_from_durable_truth()
+    counts = {"orphan_processes_reaped": 0}
+    if _process_sweeps_enabled():
+        counts["orphan_processes_reaped"] = await _reap_previous_run_processes()
+    if counts["orphan_processes_reaped"]:
+        logger.info(f"Boot reconcile (install awaiting approval): {counts}")
     return counts

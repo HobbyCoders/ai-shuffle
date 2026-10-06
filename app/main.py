@@ -247,13 +247,14 @@ async def lifespan(app: FastAPI):
     # previous run's crash can leave sessions durably marked parked (stuck
     # spinners/badges in the UI) and leak its CLI subprocesses — nothing in
     # memory survived, so clear both now. Guarded: reconcile failure must
-    # never block boot.
-    if runner_approved:
-        try:
-            from app.core.startup_reconcile import reconcile_from_durable_truth
-            await reconcile_from_durable_truth()
-        except Exception:
-            logger.exception("Startup reconcile failed (non-fatal)")
+    # never block boot. An install awaiting approval still runs turns, so it
+    # still stops the processes its own previous run left behind; everything
+    # touching shared database state waits for approval (#1711).
+    try:
+        from app.core import startup_reconcile
+        await startup_reconcile.reconcile_at_boot(runner_approved)
+    except Exception:
+        logger.exception("Startup reconcile failed (non-fatal)")
 
     init_encryption_and_sessions()
     init_workspace()
@@ -284,7 +285,8 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning(
             "Runner services are disabled while this install awaits approval. "
-            "The admin UI and heartbeat remain available."
+            "The admin UI and heartbeat remain available; processes this "
+            "install's own previous run left behind are still stopped at boot."
         )
 
     # One-time, unbounded backfill: heal any sessions orphaned by a past
