@@ -60,7 +60,13 @@ export async function verifyOfflineSetup(page, { ownerPassword } = {}) {
   }
   assert.equal(await step.getByRole('button', { name: 'Continue', exact: true }).isDisabled(), true);
   await step.getByTestId('setup-provider-claude').click();
-  for (const [mode, label] of [['subscription', /^Subscription/], ['api_key', /^API key/]]) {
+  // Startup records a default mode (subscription on a fresh worker), and picking
+  // the way that is already stored saves nothing. Pick the other way first so
+  // each click is a real change through the mode producer.
+  const picks = [['subscription', /^Subscription/], ['api_key', /^API key/]];
+  const stored = (await workerJson(page, '/api/v1/settings/claude-auth')).mode;
+  if (picks[0][0] === stored) picks.reverse();
+  for (const [mode, label] of picks) {
     const ways = step.getByRole('radiogroup', { name: 'How to pay for Claude' });
     await ways.waitFor();
     const [response] = await Promise.all([
