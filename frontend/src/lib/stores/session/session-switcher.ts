@@ -26,6 +26,7 @@ import { archivedChats } from '../archived-chats';
 import { subagentChats } from '../subagent-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
+import { beginJourney } from '$lib/services/journey-timing';
 import { resolveNewChatProject, resolveSessionProject } from './session-project';
 import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.svelte';
 import { encodeProviderModel } from '$lib/constants/models.svelte';
@@ -516,6 +517,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	// ── Session Navigation ──────────────────────────────────────────────
 
 	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) {
+		beginJourney('chat.open', sessionId);
 		const generation = ++_switchGeneration;
 		const state = getState();
 		// The header stays mounted across sessions; its popovers must not follow.

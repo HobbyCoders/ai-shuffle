@@ -19,6 +19,7 @@
 	 * capability picker; ordinary navigation continues through handleOpenSession.
 	 */
 	import { onMount, onDestroy } from 'svelte';
+	import { beginJourney, cancelJourney, claimNavigationOrigin, finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
 	import { privateAccessPending } from '$lib/stores/chat-access';
@@ -155,9 +156,16 @@
 		_refreshBoard();
 	}
 
+	const bootstrapKey = $props.id();
+	let cancelBootstrapPaint = () => {};
+	onDestroy(() => { cancelBootstrapPaint(); cancelJourney('app.bootstrap', bootstrapKey); });
 	onMount(async () => {
 		// The root layout owns auth routing and delays this mount until verified.
 		if (!$isAuthenticated) return;
+		// Navigation origin includes auth + JS loading. This is bootstrap settled,
+		// not proof that a restored transcript or all feature panels are ready.
+		const bootstrapOrigin = claimNavigationOrigin();
+		if (bootstrapOrigin !== null) beginJourney('app.bootstrap', bootstrapKey, bootstrapOrigin);
 
 		// Read a deep link before anything awaits: the chat surface shows its
 		// loading state until the linked session opens below, instead of the
@@ -176,6 +184,14 @@
 		// project and branch resolve against it, and the composer holds a send
 		// until it has answered (#1636).
 		const catalogLoad = Promise.all([appData.loadProjects(), appData.loadClusterProjects()]);
+		// These reads do not depend on the restored selection. Start them while
+		// preferences load, but keep ALL reconciliation below init's intent guard.
+		// Short-lived build-time kill switch for the performance sprint.
+		const loadIndependentData = () => Promise.all([
+			appData.loadProfiles(), appData.loadSessions(), appData.loadApiUserSessions(), loadAllTags()
+		]);
+		const earlyData = import.meta.env.VITE_PERF_PARALLEL_BOOTSTRAP !== '0'
+			? loadIndependentData() : null;
 
 		// Initialize data. A deep link is bound here, before init awaits, in
 		// place of the chat this tab last had open: that chat never shows and a
@@ -191,13 +207,7 @@
 		// Finish the New Chat's remembered project and branch as soon as the
 		// catalog is in, even under text typed while it loaded.
 		const catalogLoaded = catalogLoad.then(() => activeSession.resolveComposerDefaultsAfterCatalog());
-		await Promise.all([
-			appData.loadProfiles(),
-			appData.loadSessions(),
-			catalogLoaded,
-			appData.loadApiUserSessions(),
-			loadAllTags()
-		]);
+		await Promise.all([earlyData ?? loadIndependentData(), catalogLoaded]);
 		// Sessions were just loaded — seed the board-refresh debounce so the first
 		// board render / focus event doesn't immediately refetch the same list.
 		_lastBoardRefresh = Date.now();
@@ -288,6 +298,8 @@
 			// sidebar overlay closes first); its own loading state takes over.
 			requestAnimationFrame(() => pendingDeepLink.set(null));
 		}
+
+		cancelBootstrapPaint = finishJourneyAfterPaint('app.bootstrap', bootstrapKey);
 
 		// The in-app notification bell opens the relevant session without a reload.
 		openSessionEventHandler = (event: Event) => {

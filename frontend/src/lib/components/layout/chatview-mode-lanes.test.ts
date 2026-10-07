@@ -111,6 +111,17 @@ describe('ChatView — stable empty layout', () => {
 	});
 });
 
+describe('ChatView — chat.open timing', () => {
+	it('finishes the sample from a primitive settled id, not on every activeSession tick', () => {
+		// A raw $activeSession read inside the effect re-runs it (cancelling and
+		// rescheduling its frames) on each streaming update.
+		const effect = codeOnly.match(/\$effect\(\(\) => \{\s*if \(settledChatId\)[^}]*\}\);/);
+		expect(effect?.[0]).toContain("finishJourneyAfterPaint('chat.open', settledChatId)");
+		expect(effect?.[0]).not.toContain('$activeSession');
+		expect(codeOnly).toMatch(/const settledChatId = \$derived\.by\(/);
+	});
+});
+
 describe('ChatModeHero — projectless by construction', () => {
 	const hero = src('ChatModeHero.svelte');
 

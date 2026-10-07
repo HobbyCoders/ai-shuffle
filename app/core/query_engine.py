@@ -1721,6 +1721,9 @@ async def _stream_to_websocket_impl(
         loop_guard_turn: The turn row itself, kept by the loop guard when it
             holds the turn for confirmation.
     """
+    from app.core.startup_timing import TurnStartupTiming
+
+    startup_timing = TurnStartupTiming(session_id, (loop_guard_turn or {}).get("id"))
     # Get profile. Log at ERROR: consumers may have no surface for this yield
     # (headless path has no 'error' dispatch handler and force-cleans the live
     # store), so the log line can be the only trace of the refusal.
@@ -1847,6 +1850,7 @@ async def _stream_to_websocket_impl(
         }
         return
     _build_opts_elapsed = time.monotonic() - _build_opts_start
+    startup_timing.mark("options_built")
     if _build_opts_elapsed > 0.5:
         logger.warning(f"[WS] build_options_from_profile took {_build_opts_elapsed:.2f}s for session {session_id}")
 
@@ -2693,6 +2697,7 @@ async def _stream_to_websocket_impl(
         state.streaming_started_at = None
         raise
 
+    startup_timing.mark("adapter_ready")
     try:
         # Resolve virtual @Notes/note-id references to actual content. A resumed
         # turn has no prompt to resolve — the head node already carries whatever
@@ -2746,6 +2751,8 @@ async def _stream_to_websocket_impl(
             else:
                 await state.adapter.send_query(prompt)
         _query_send_elapsed = time.monotonic() - _query_send_start
+        # Accepted by the adapter, NOT proof of provider or model receipt.
+        startup_timing.mark("submitted")
         if _query_send_elapsed > 1.0:
             logger.warning(f"[WS] client.query() took {_query_send_elapsed:.1f}s for session {session_id}")
 
@@ -2759,6 +2766,8 @@ async def _stream_to_websocket_impl(
 
             _event_count += 1
             if _event_count == 1:
+                # May be an init/system frame; deliberately not called first token.
+                startup_timing.mark("first_event")
                 # The delegated CLI is running by its turn's first event (the
                 # first turn spawns it). Make it, and the subagents it forks
                 # (they inherit the score), the kernel's preferred OOM-kill

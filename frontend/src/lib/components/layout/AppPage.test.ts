@@ -70,7 +70,34 @@ beforeEach(() => {
  mocks.openFeaturePage.mockImplementation(type => views.set({ type }));
  mocks.openSession.mockImplementation(id => { views.set({ type: 'session', sessionId: id }); active.set({ sessionId: id, draft: '', project: null }); });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.unstubAllEnvs(); });
+
+// Optional wall-clock correlation rig. The CI ratchet is the deterministic
+// pre-init request count below, never a shared-host timing threshold.
+it.runIf(process.env.PERF_BOOTSTRAP_LAB === '1')('bootstrap wall-clock lab', async () => {
+ const report: Record<string, number[]> = {};
+ for (const flag of ['0', '1']) {
+  vi.stubEnv('VITE_PERF_PARALLEL_BOOTSTRAP', flag);
+  const samples: number[] = [];
+  for (let i = 0; i < 21; i++) {
+   mocks.init.mockImplementation(() => new Promise(resolve => setTimeout(resolve, 25)));
+   mocks.load.mockImplementation(() => new Promise(resolve => setTimeout(resolve, 40)));
+   let done!: () => void;
+   const ready = new Promise<void>(resolve => { done = resolve; });
+   mocks.initGlobalStt.mockImplementation(() => { done(); return () => {}; });
+   const start = performance.now();
+   const view = render(AppPage, { shell });
+   await ready;
+   if (i) samples.push(performance.now() - start); // warm-up excluded
+   view.unmount();
+  }
+  report[flag === '0' ? 'serial' : 'parallel'] = samples;
+ }
+ console.log('BOOTSTRAP_LAB ' + JSON.stringify(Object.fromEntries(Object.entries(report).map(([mode, values]) => {
+  const sorted = [...values].sort((a, b) => a - b);
+  return [mode, { n: sorted.length, p75_ms: sorted[Math.ceil(sorted.length * 0.75) - 1], samples_ms: values }];
+ }))));
+});
 
 describe('AppPage initial Assistant landing', () => {
  it.each([null, emptyView])('lands an owner with no selected session on Assistant (%j)', async view => {
@@ -122,13 +149,23 @@ describe('AppPage initial Assistant landing', () => {
  });
  // #1636 review: the composer holds a send until the catalog answers, so the
  // catalog starts loading alongside init instead of after it.
- it('starts the project catalog load alongside init', async () => {
+ it('starts all independent bootstrap reads alongside init without reconciling early', async () => {
   let finishInit!: () => void; mocks.init.mockReturnValue(new Promise<void>(resolve => { finishInit = resolve; }));
   render(AppPage, { shell });
-  await waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(mocks.load).toHaveBeenCalledTimes(5));
+  expect(mocks.validateSelectedProfile).not.toHaveBeenCalled();
   expect(mocks.resolveComposerDefaultsAfterCatalog).not.toHaveBeenCalled();
   finishInit(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
   expect(mocks.resolveComposerDefaultsAfterCatalog).toHaveBeenCalledOnce();
+ });
+ it('retains the serial fallback behind the build-time kill switch', async () => {
+  vi.stubEnv('VITE_PERF_PARALLEL_BOOTSTRAP', '0');
+  let finishInit!: () => void; mocks.init.mockReturnValue(new Promise<void>(resolve => { finishInit = resolve; }));
+  render(AppPage, { shell });
+  await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+  expect(mocks.load).toHaveBeenCalledTimes(2);
+  finishInit(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
+  expect(mocks.load).toHaveBeenCalledTimes(5);
  });
  it('does not replace another feature destination', async () => {
   views.set({ type: 'profile' }); await boot();

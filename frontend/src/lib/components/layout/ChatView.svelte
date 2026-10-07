@@ -3,6 +3,7 @@
 	/** Chat surface for code, chat and voice. Lane-specific heroes share one
 	 * persistent editor. A live voice call adds compact controls alongside it. */
 	import { onDestroy, tick, untrack } from 'svelte';
+	import { finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { activeSession, activeWsConnected, streamingSessions } from '$lib/stores/active-session';
 	import { sessions } from '$lib/stores/app-data.svelte';
 	import { openSession } from '$lib/services/session-navigation';
@@ -65,6 +66,18 @@
 			isLoadingSession: $activeSession.isLoadingSession || deepLinkLoading($pendingDeepLink, $activeSession.sessionId)
 		})
 	);
+	// The chat.open sample ends after the DOM update once history has settled.
+	// A primitive $derived keeps the effect from re-running (and restarting its
+	// frames) on every activeSession tick, such as streaming text; a teardown
+	// cancels the frames, so a view that moved on never completes the old sample.
+	const settledChatId = $derived.by(() => {
+		const id = $activeSession.sessionId;
+		const loading = $activeSession.isLoadingSession || $activeSession.isRestoringSession;
+		return id && !loading && !deepLinkLoading($pendingDeepLink, id) ? id : null;
+	});
+	$effect(() => {
+		if (settledChatId) return finishJourneyAfterPaint('chat.open', settledChatId);
+	});
 	const isEmptyState = $derived(chatSurface === 'new' || chatSurface === 'cleared');
 	// A BOUND, settled, empty session — a just-cleared conversation. Presents the
 	// hero with the session's own title + a "cleared" hint instead of the
