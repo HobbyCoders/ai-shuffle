@@ -335,6 +335,48 @@ describe('SystemMessage — provider_retry', () => {
 
 		expect(container.textContent).toBe('');
 	});
+
+	it.each([
+		['provider_error', 'in-stream server_error before content after 183s'],
+		['no_content', 'no content for 91s']
+	])('shows a live retry when the provider failed before replying (%s)', (cause, reason) => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: { attempt: 1, max_attempts: 3, model: 'gpt-6.1-sol', cause, reason }
+				})
+			}
+		});
+
+		expect(screen.getByText('Retrying')).toBeTruthy();
+		expect(container.textContent).toContain(reason);
+		expect(container.textContent).toContain('attempt 1 of 3');
+		expect(container.textContent).toContain('gpt-6.1-sol');
+		expect(container.querySelector('.animate-spin')).not.toBeNull();
+		expect(container.querySelector('[data-testid="provider-retry-button"]')).toBeNull();
+	});
+
+	it('keeps a pre-content retry as a finished row once the reply arrived', () => {
+		const { container } = render(SystemMessage, {
+			props: {
+				message: makeMessage({
+					systemSubtype: 'provider_retry',
+					systemData: {
+						attempt: 1,
+						max_attempts: 3,
+						cause: 'provider_error',
+						reason: 'in-stream server_error before content after 183s',
+						settled: true
+					}
+				})
+			}
+		});
+
+		expect(screen.getByText('Retried')).toBeTruthy();
+		expect(container.textContent).toContain('after 183s');
+		expect(container.querySelector('.animate-spin')).toBeNull();
+	});
 });
 
 describe('SystemMessage — provider_retry exhausted', () => {

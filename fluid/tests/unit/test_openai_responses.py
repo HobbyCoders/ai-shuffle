@@ -1,5 +1,7 @@
 """OpenAI Responses provider: SSE normalization, request body, e2e chunk walk."""
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -1022,7 +1024,10 @@ async def test_overload_retries_stop_at_the_overload_budget(_sleeps: list[float]
 
     chunks = await _run_client(handler, retries=5)
     assert calls == 1 + OVERLOAD_MAX_RETRIES
-    assert [c.kind for c in chunks] == ["message_start", "error"]
+    # Each re-send is announced (#1992); the last attempt's error ends it.
+    assert [c.kind for c in chunks] == (
+        ["message_start"] + ["provider_retry"] * OVERLOAD_MAX_RETRIES + ["error"]
+    )
     assert chunks[-1].payload["retriable"] is True
     assert chunks[-1].payload["code"] == "server_is_overloaded"
 
@@ -1221,6 +1226,221 @@ async def test_rate_limit_without_a_hint_uses_the_default_backoff(
     assert calls == 2
     # base_delay=0 and no jitter in _run_client's policy: the default is 0.
     assert _sleeps == [0]
+
+
+# ─── a pre-content retry is visible to the engine and host (#1992) ──────────
+
+
+async def test_error_before_content_yields_a_retry_chunk_before_the_retry(
+    _sleeps: list[float], caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _sse(_CREATED + _failed("server_error", "server_error"))
+        return _sse(_CREATED + _TEXT + _COMPLETED)
+
+    with caplog.at_level(logging.WARNING, logger=responses_client_module.__name__):
+        chunks = await _run_client(handler, retries=3)
+    kinds = [c.kind for c in chunks]
+    assert calls == 2
+    # Acceptance first, then the retry note, then the retried attempt's reply.
+    assert kinds[:2] == ["message_start", "provider_retry"]
+    assert kinds.count("message_start") == 1
+    assert kinds.index("provider_retry") < kinds.index("text_delta")
+    retry = chunks[1].payload
+    assert retry["attempt"] == 1 and retry["max_attempts"] == 3
+    assert retry["cause"] == "provider_error"
+    assert retry["reason"].startswith("in-stream server_error before content after ")
+    assert retry["reason"].endswith("s")
+    assert retry["delay_seconds"] == _sleeps[0]
+    warned = [r for r in caplog.records if "in-stream error before content" in r.message]
+    assert warned and warned[0].levelno == logging.WARNING
+    assert "after the request was sent" in warned[0].message
+
+
+async def test_engine_publishes_the_client_retry_as_provider_retry() -> None:
+    from fluid.events import ProviderRetry, TextDelta, UserTurn
+
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _sse(_CREATED + _failed("server_error", "server_error"))
+        return _sse(_CREATED + _TEXT + _COMPLETED)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAIResponsesClient(
+        api_key="sk-test", http_client=http,
+        retry=RetryPolicy(max_retries=2, base_delay=0, jitter=0),
+    )
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=client, store=store, model="gpt-6-astra", session_id=sid,
+        max_continuations_per_turn=0,
+    )
+    try:
+        await loop.submit(UserTurn(content="hi"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=10)
+        events = loop.bus.log(sid)
+    finally:
+        await http.aclose()
+        await loop.aclose()
+    retries = [e for e in events if isinstance(e, ProviderRetry)]
+    assert len(retries) == 1
+    retry = retries[0]
+    assert (retry.attempt, retry.max_attempts) == (1, 2)
+    assert retry.cause == "provider_error"
+    assert "server_error before content" in retry.reason
+    assert retry.model == "gpt-6-astra"
+    first_text = next(i for i, e in enumerate(events) if isinstance(e, TextDelta))
+    assert events.index(retry) < first_text
+
+
+class _Heartbeats(httpx.AsyncByteStream):
+    """``head``, then a heartbeat every ``gap`` seconds ``count`` times, then ``tail``."""
+
+    def __init__(self, head: str, *, gap: float, count: int, tail: str = "") -> None:
+        self._head, self._gap, self._count, self._tail = head, gap, count, tail
+
+    async def __aiter__(self):
+        yield self._head.encode()
+        for _ in range(self._count):
+            await asyncio.sleep(self._gap)
+            yield b": keepalive\n\n"
+        if self._tail:
+            yield self._tail.encode()
+
+    async def aclose(self) -> None:
+        pass
+
+
+def _heartbeats(head: str, *, gap: float = 0.02, count: int = 6, tail: str = "") -> httpx.Response:
+    return httpx.Response(
+        200, stream=_Heartbeats(head, gap=gap, count=count, tail=tail),
+        headers={"content-type": "text/event-stream"},
+    )
+
+
+async def _run_budgeted(handler, *, budget: float | None, retries: int = 2,
+                        tools: list | None = None) -> list[StreamChunk]:
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OpenAIResponsesClient(
+        api_key="sk-test", http_client=http, pre_content_heartbeat_budget=budget,
+        retry=RetryPolicy(max_retries=retries, base_delay=0, jitter=0),
+    )
+    request = ProviderRequest(
+        model="gpt-6-astra", messages=[Message(role="user", content=[Text("hi")])],
+    )
+    if tools is not None:
+        request.extra["tools"] = tools
+    try:
+        return [c async for c in client.stream(request)]
+    finally:
+        await http.aclose()
+
+
+def test_the_heartbeat_only_budget_defaults_to_90_seconds() -> None:
+    from fluid.providers.openai_responses.client import (
+        DEFAULT_PRE_CONTENT_HEARTBEAT_BUDGET_S,
+    )
+
+    assert DEFAULT_PRE_CONTENT_HEARTBEAT_BUDGET_S == 90.0
+    assert OpenAIResponsesClient(api_key="k")._pre_content_heartbeat_budget == 90.0
+
+
+async def test_only_heartbeats_past_the_budget_is_cut_and_retried() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            # Accepted, then nothing but heartbeats for well past the budget.
+            return _heartbeats(_CREATED, gap=0.03, count=20, tail=_TEXT + _COMPLETED)
+        return _sse(_CREATED + _TEXT + _COMPLETED)
+
+    chunks = await _run_budgeted(handler, budget=0.05)
+    kinds = [c.kind for c in chunks]
+    assert calls == 2
+    assert kinds[0] == "message_start" and kinds.count("message_start") == 1
+    retry = next(c.payload for c in chunks if c.kind == "provider_retry")
+    assert retry["cause"] == "no_content"
+    assert retry["reason"].startswith("no content for ")
+    assert (retry["attempt"], retry["max_attempts"]) == (1, 2)
+    # The cut attempt's late text never arrives; the retry's reply does, once.
+    assert kinds.count("text_delta") == 1
+    assert "error" not in kinds and kinds[-1] == "message_stop"
+    # Fewer heartbeats than the cut attempt would have sent reached the engine.
+    assert kinds.count("provider_alive") < 20
+
+
+async def test_heartbeats_after_a_reasoning_item_are_not_cut() -> None:
+    # Encrypted-only reasoning can stream nothing but heartbeats for minutes
+    # once its item opened; that is work, not a hang.
+    calls = 0
+    reasoning = _event("response.output_item.added", {"item": {"id": "rs_1", "type": "reasoning"}})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _heartbeats(_CREATED + reasoning, gap=0.03, count=6, tail=_TEXT + _COMPLETED)
+
+    chunks = await _run_budgeted(handler, budget=0.05)
+    assert calls == 1
+    assert not any(c.kind == "provider_retry" for c in chunks)
+    assert chunks[-1].kind == "message_stop"
+
+
+async def test_the_heartbeat_only_budget_can_be_disabled() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _heartbeats(_CREATED, gap=0.03, count=6, tail=_TEXT + _COMPLETED)
+
+    for budget in (0, None):
+        calls = 0
+        chunks = await _run_budgeted(handler, budget=budget)
+        assert calls == 1
+        assert not any(c.kind == "provider_retry" for c in chunks)
+        assert chunks[-1].kind == "message_stop"
+
+
+async def test_the_heartbeat_only_budget_shares_the_retry_budget() -> None:
+    # Spent retries leave the last attempt alone: it gets the provider's own
+    # answer instead of another cut.
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _heartbeats(_CREATED, gap=0.03, count=4, tail=_TEXT + _COMPLETED)
+
+    chunks = await _run_budgeted(handler, budget=0.05, retries=1)
+    assert calls == 2
+    assert [c.kind for c in chunks].count("provider_retry") == 1
+    assert chunks[-1].kind == "message_stop"
+
+
+async def test_the_heartbeat_only_budget_never_replays_a_native_image() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return _heartbeats(_CREATED, gap=0.03, count=4, tail=_TEXT + _COMPLETED)
+
+    chunks = await _run_budgeted(handler, budget=0.05, tools=[{"type": "image_generation"}])
+    assert calls == 1
+    assert not any(c.kind == "provider_retry" for c in chunks)
 
 
 # ─── routing identity (experiment E1 arms, FLUID_RESPONSES_ROUTING_ARM) ─────
@@ -1588,3 +1808,17 @@ async def test_a_worker_loop_does_not_rebind_the_parent_learner(tmp_path: Path) 
     finally:
         await child.aclose()
         await parent.aclose()
+
+
+@pytest.mark.parametrize("configured,expected", [(None, 90.0), (30, 30.0), (0, None)])
+def test_the_heartbeat_only_budget_is_set_from_the_provider_config(
+    configured: float | None, expected: float | None,
+) -> None:
+    from fluid.config.loader import BUILTIN_DEFAULTS, _build_provider_client, deep_merge
+    from fluid.config.model import HarnessConfig
+
+    block = {} if configured is None else {"pre_content_heartbeat_budget": configured}
+    merged = deep_merge(BUILTIN_DEFAULTS, {"providers": {"openai": block}})
+    client = _build_provider_client(HarnessConfig.from_dict(merged), "openai")
+    assert isinstance(client, OpenAIResponsesClient)
+    assert client._pre_content_heartbeat_budget == expected

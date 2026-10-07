@@ -109,6 +109,16 @@ TURN_STATE_HEADER = "x-codex-turn-state"
 # credits), which Codex parses into its rate-limit snapshot, and the public
 # API's x-ratelimit-* family. Logged at debug level for experiment E1.
 _QUOTA_HEADER_PREFIXES = ("x-codex-", "x-ratelimit-")
+# Seconds an accepted response may send nothing but heartbeats (after its own
+# response.created) before it is abandoned and re-sent. The backend has been
+# seen holding such a request for ~180 s and then failing it with
+# server_error, after which the re-sent request answered at once (#1992).
+DEFAULT_PRE_CONTENT_HEARTBEAT_BUDGET_S = 90.0
+# Data events that only restate that the response exists; they are not a sign
+# the model started work, so they leave the heartbeat-only budget running.
+_PRE_CONTENT_IDLE_EVENTS = frozenset(
+    ("response.created", "response.in_progress", "response.queued")
+)
 
 log = logging.getLogger(__name__)
 
@@ -158,6 +168,7 @@ class OpenAIResponsesClient:
         stream_deadline: float | None = DEFAULT_STREAM_DEADLINE_S,
         first_byte_timeout: float | None = DEFAULT_FIRST_BYTE_TIMEOUT_S,
         event_silence_timeout: float | None = None,
+        pre_content_heartbeat_budget: float | None = DEFAULT_PRE_CONTENT_HEARTBEAT_BUDGET_S,
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
         routing_arm: str | None = None,
@@ -196,6 +207,14 @@ class OpenAIResponsesClient:
         self._event_silence_timeout = (
             timeout if event_silence_timeout is None else event_silence_timeout
         )
+        # Wall clock from the headers during which a response that has sent
+        # only its own start and heartbeats (no reasoning item, no output) is
+        # left alone. Past it the stream is closed and the request re-sent,
+        # on the same retry budget as a retriable in-stream error. Any other
+        # event (a reasoning item opening, output) ends the bound for that
+        # attempt. Never applied to a native image generation, which must not
+        # be replayed. None or 0 disables it.
+        self._pre_content_heartbeat_budget = pre_content_heartbeat_budget
         self._http = http_client
         self._retry = retry or RetryPolicy()
 
@@ -476,6 +495,7 @@ class OpenAIResponsesClient:
                             # body that ends before either was cut off.
                             terminal = False
                             retry_class: ErrorClass | None = None
+                            retry_budget = self._retry.max_retries
                             # Heartbeat-only bound: applies only until the
                             # first data event (proof of life for the first
                             # frame, not a limit on later reasoning).
@@ -483,15 +503,30 @@ class OpenAIResponsesClient:
                             headers_at = time.monotonic()
                             data_seen = False
                             heartbeats_only = False
+                            # Pre-content budget: the response exists but has
+                            # sent nothing past its own start (#1992).
+                            idle_budget = self._pre_content_heartbeat_budget
+                            started_work = False
+                            no_content_cut = False
                             async for event_name, data in events:
                                 if event_name != KEEPALIVE_EVENT:
                                     data_seen = True
+                                    if event_name not in _PRE_CONTENT_IDLE_EVENTS:
+                                        started_work = True
                                 elif (
                                     not data_seen
                                     and silence_limit and silence_limit > 0
                                     and time.monotonic() - headers_at > silence_limit
                                 ):
                                     heartbeats_only = True
+                                    break
+                                elif (
+                                    not started_work and not native_image
+                                    and idle_budget and idle_budget > 0
+                                    and attempt < retry_budget
+                                    and time.monotonic() - headers_at > idle_budget
+                                ):
+                                    no_content_cut = True
                                     break
                                 for chunk in normalizer.consume(event_name, data):
                                     if chunk.kind == "message_start":
@@ -509,6 +544,7 @@ class OpenAIResponsesClient:
                                             budget = min(budget, verdict.max_retries)
                                         if verdict.retriable and attempt < budget:
                                             retry_class = verdict
+                                            retry_budget = budget
                                             break
                                     if pending_start is not None:
                                         start_sent = True
@@ -525,24 +561,60 @@ class OpenAIResponsesClient:
                                     yield chunk
                                 if retry_class is not None:
                                     break
-                            if retry_class is not None:
+                            if retry_class is not None or no_content_cut:
                                 await events.aclose()
-                                log.info(
-                                    "Retrying openai_responses call after an "
-                                    "in-stream error before content (code=%s, "
-                                    "attempt %d)", retry_class.code, attempt + 1,
-                                )
-                                if retry_class.retry_after is not None:
-                                    # The provider said when; never longer
-                                    # than the long floor.
-                                    wait = min(
-                                        retry_class.retry_after, LONG_BACKOFF_FLOOR_S,
+                                elapsed = time.monotonic() - sent_at
+                                if retry_class is not None:
+                                    if retry_class.retry_after is not None:
+                                        # The provider said when; never
+                                        # longer than the long floor.
+                                        wait = min(
+                                            retry_class.retry_after, LONG_BACKOFF_FLOOR_S,
+                                        )
+                                    else:
+                                        wait = max(
+                                            self._retry.delay(attempt),
+                                            retry_class.backoff_floor,
+                                        )
+                                    code = retry_class.code or "error"
+                                    reason = (
+                                        f"in-stream {code} before content "
+                                        f"after {elapsed:.0f}s"
+                                    )
+                                    cause = "provider_error"
+                                    log.warning(
+                                        "Retrying openai_responses call after an "
+                                        "in-stream error before content (code=%s, "
+                                        "attempt %d of %d, %.0fs after the request "
+                                        "was sent)", code, attempt + 1,
+                                        retry_budget, elapsed,
                                     )
                                 else:
-                                    wait = max(
-                                        self._retry.delay(attempt),
-                                        retry_class.backoff_floor,
+                                    wait = self._retry.delay(attempt)
+                                    reason = f"no content for {elapsed:.0f}s"
+                                    cause = "no_content"
+                                    log.warning(
+                                        "Retrying openai_responses call: only "
+                                        "heartbeats for %.0fs before content "
+                                        "(budget %gs, attempt %d of %d)",
+                                        elapsed, idle_budget, attempt + 1,
+                                        retry_budget,
                                     )
+                                # The host learns the call is being re-sent
+                                # (the engine turns this into ProviderRetry).
+                                # A held start goes first, so acceptance still
+                                # leads; the retry's own start is then dropped.
+                                if pending_start is not None:
+                                    start_sent = True
+                                    yield pending_start
+                                yield StreamChunk("provider_retry", {
+                                    "attempt": attempt + 1,
+                                    "max_attempts": retry_budget,
+                                    "reason": reason,
+                                    "delay_seconds": wait,
+                                    "cause": cause,
+                                    "elapsed_seconds": round(elapsed, 1),
+                                })
                                 await asyncio.sleep(wait)
                                 attempt += 1
                                 continue

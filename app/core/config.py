@@ -459,6 +459,11 @@ class Settings(BaseSettings):
     # a model, so the default 0 disables it, as fluid's LocalClient does.
     # Env: PROVIDER_FIRST_BYTE_TIMEOUT_LOCAL.
     provider_first_byte_timeout_local: float = 0.0
+    # Responses lane (OpenAI/Codex): how long an accepted call may send only
+    # heartbeats before any reasoning or output; past it the request is
+    # re-sent on the client's retry budget and the chat shows a retry card
+    # (#1992). 0 disables it. Env: PROVIDER_PRE_CONTENT_HEARTBEAT_BUDGET.
+    provider_pre_content_heartbeat_budget: float = 90.0
 
     # Size limits
     max_tool_output_chars: int = 500_000  # ~500KB, well under 1MB WS buffer

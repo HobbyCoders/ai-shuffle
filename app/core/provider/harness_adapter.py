@@ -7160,6 +7160,18 @@ def _provider_timeout_kwargs(base_url: Optional[str] = None) -> Dict[str, Any]:
     }
 
 
+def _responses_timeout_kwargs() -> Dict[str, Any]:
+    """The Responses-only bound: PROVIDER_PRE_CONTENT_HEARTBEAT_BUDGET.
+
+    How long an accepted call may send only heartbeats before any reasoning
+    or output; 0 (or below) becomes ``None``, which fluid reads as disabled.
+    """
+    from app.core.config import settings
+
+    seconds = float(getattr(settings, "provider_pre_content_heartbeat_budget", 90.0) or 0)
+    return {"pre_content_heartbeat_budget": seconds if seconds > 0 else None}
+
+
 def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> httpx.AsyncClient:
     """An ``httpx.AsyncClient`` that passively captures usage/quota headers and
     records upstream rate limits.
@@ -7246,6 +7258,7 @@ async def _build_provider_client(
     timeouts = _provider_timeout_kwargs(creds.base_url if creds is not None else None)
 
     if kind == "openai_responses":
+        timeouts = {**timeouts, **_responses_timeout_kwargs()}
         if creds is not None:
             http_client = _usage_capture_http_client(
                 str(provider_id), creds.use_codex_backend

@@ -687,6 +687,9 @@ def _build_provider_client(config: HarnessConfig, provider_name: str):
         from fluid.providers.openai_responses.client import OpenAIResponsesClient
 
         kwargs = {"api_key": api_key, **deadline}
+        if pc.pre_content_heartbeat_budget is not None:
+            # 0 disables; absent keeps the client's 90 s default.
+            kwargs["pre_content_heartbeat_budget"] = pc.pre_content_heartbeat_budget or None
         if pc.base_url:
             kwargs["base_url"] = pc.base_url
         client = OpenAIResponsesClient(**kwargs)

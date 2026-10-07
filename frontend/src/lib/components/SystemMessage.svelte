@@ -2,6 +2,8 @@
 	import type { ChatMessage } from '$lib/stores/types';
 	import {
 		isLiveConnectionDropRetry,
+		isLivePreContentRetry,
+		isPreContentRetry,
 		isTransientProviderRetry,
 		supersededAttempt
 	} from '$lib/utils/provider-retry';
@@ -744,6 +746,23 @@
 						compact: true
 					};
 				}
+				if (isPreContentRetry(message) && !data.exhausted) {
+					// The provider failed before replying (an error in place of
+					// content, or only heartbeats for too long) and the request
+					// was re-sent. Kept after the reply arrives: the wait before
+					// it can be minutes, and this row is where that time went.
+					const why = typeof data.reason === 'string' && data.reason ? ` (${data.reason})` : '';
+					const live = isLivePreContentRetry(message);
+					let note = `Provider failed before replying${why}. Request re-sent (attempt ${data.attempt ?? '?'} of ${maxAttempts})`;
+					if (retryModel) note += ` · ${retryModel}`;
+					return {
+						title: live ? 'Retrying' : 'Retried',
+						content: note,
+						badge: 'retry',
+						badgeColor: 'amber',
+						compact: true
+					};
+				}
 				const superseded = supersededAttempt(message);
 				if (superseded && !data.exhausted) {
 					// The reply arrived. What the dropped attempt had streamed is
@@ -910,7 +929,9 @@
 	let retrying = $state(false);
 	const retryInFlight = $derived(retrying || retryResuming);
 	// A reconnect after a dropped provider connection is work in flight too.
-	const reconnecting = $derived(isLiveConnectionDropRetry(message));
+	const reconnecting = $derived(
+		isLiveConnectionDropRetry(message) || isLivePreContentRetry(message)
+	);
 	$effect(() => {
 		if (retryResuming) retrying = false;
 	});

@@ -4656,6 +4656,20 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ))
             if chunk.kind == "message_start":
                 self._merge_usage(usage_totals, payload.get("usage", {}))
+            elif chunk.kind == "provider_retry":
+                # The client gave up on an attempt before any content and is
+                # re-sending the request itself (an in-stream error, or only
+                # heartbeats for too long). Without this the host sees a
+                # silent stretch as long as the provider took to fail.
+                await self._emit(ProviderRetry(
+                    session_id=sid, turn_id=turn_id,
+                    attempt=int(payload.get("attempt") or 1),
+                    max_attempts=int(payload.get("max_attempts") or 1),
+                    reason=str(payload.get("reason") or "provider error before content"),
+                    delay_seconds=float(payload.get("delay_seconds") or 0.0),
+                    model=self.model,
+                    cause=payload.get("cause") or None,
+                ))
             elif chunk.kind == "block_start":
                 index = payload["index"]
                 tool_use_id = payload.get("tool_use_id")

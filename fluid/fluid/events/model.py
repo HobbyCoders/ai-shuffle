@@ -517,7 +517,10 @@ class ProviderRetry(Event):
     model: str | None = None
     # Machine-readable kind of failure being retried, for hosts that show some
     # retries and hide others. ``"connection_dropped"``: the provider closed the
-    # stream mid-response and the same request is being re-sent. None for the
+    # stream mid-response and the same request is being re-sent.
+    # ``"provider_error"``: the provider sent a retriable error before any
+    # content (the code is in ``reason``). ``"no_content"``: the provider sent
+    # only heartbeats for too long and the request was abandoned. None for the
     # other retry kinds (empty or truncated responses, runaway arguments).
     cause: str | None = None
     # Set when this retry goes out with reasoning effort lowered one step (the

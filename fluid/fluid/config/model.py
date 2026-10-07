@@ -107,6 +107,12 @@ class ProviderConfig:
     # local server may hold its headers while it loads a model); raise it for
     # a gateway that sends nothing until the upstream's first token.
     first_byte_timeout: float | None = None
+    # Seconds an accepted Responses call may send only its own start and
+    # heartbeats before it is abandoned and re-sent, on the client's retry
+    # budget. Absent → the client's default
+    # (fluid.providers.openai_responses.client.DEFAULT_PRE_CONTENT_HEARTBEAT_BUDGET_S,
+    # 90 s); 0 disables it. Honoured by the "openai_responses" kind only.
+    pre_content_heartbeat_budget: float | None = None
     # Standing server-specific request-body knobs, merged into every request
     # (llama.cpp cache_prompt/samplers, Ollama options, …). Currently honoured
     # by the "local" kind.
@@ -130,6 +136,9 @@ class ProviderConfig:
             tool_style=tool_style,
             stream_deadline=_optional_seconds(d.get("stream_deadline")),
             first_byte_timeout=_optional_seconds(d.get("first_byte_timeout")),
+            pre_content_heartbeat_budget=_optional_seconds(
+                d.get("pre_content_heartbeat_budget")
+            ),
             extra=dict(d.get("extra") or {}),
         )
 
@@ -644,6 +653,7 @@ class HarnessConfig:
                     "tool_style": pc.tool_style,
                     "stream_deadline": pc.stream_deadline,
                     "first_byte_timeout": pc.first_byte_timeout,
+                    "pre_content_heartbeat_budget": pc.pre_content_heartbeat_budget,
                     "extra": dict(pc.extra),
                 }
                 for name, pc in self.providers.items()

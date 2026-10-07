@@ -331,6 +331,40 @@ async def test_connection_drop_retry_carries_its_cause_to_the_ui():
 
 
 @pytest.mark.asyncio
+async def test_pre_content_responses_retry_reaches_the_ui_with_its_cause():
+    """#1992: the Responses client's own re-send after an in-stream error (or
+    a heartbeat-only stretch) before content arrives as a ProviderRetry whose
+    cause, reason and attempt reach the provider_retry card."""
+    events = [
+        lm.TurnStarted(session_id=SID, model="m", provider="fake"),
+        lm.ProviderRetry(
+            session_id=SID, attempt=1, max_attempts=3,
+            reason="in-stream server_error before content after 183s",
+            delay_seconds=0.5, model="gpt-6-astra", cause="provider_error",
+        ),
+        lm.ProviderRetry(
+            session_id=SID, attempt=2, max_attempts=3,
+            reason="no content for 91s",
+            delay_seconds=1.0, model="gpt-6-astra", cause="no_content",
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    got = await _collect(_adapter_with(FakeEngine(events)))
+    first, second = [e for e in got if isinstance(e, SystemMessage)
+                     and e.subtype == "provider_retry"]
+    assert first.data == {
+        "attempt": 1,
+        "max_attempts": 3,
+        "reason": "in-stream server_error before content after 183s",
+        "delay_seconds": 0.5,
+        "model": "gpt-6-astra",
+        "cause": "provider_error",
+    }
+    assert second.data["cause"] == "no_content"
+    assert second.data["reason"] == "no content for 91s"
+
+
+@pytest.mark.asyncio
 async def test_steer_submits_the_op_and_its_receipt_reaches_the_stream():
     """A queued message handed to the running turn goes out as a fluid Steer
     carrying the queue row's id, and fluid's delivery receipt mirrors into the
@@ -8286,6 +8320,43 @@ async def test_build_provider_client_first_byte_timeout_reaches_chat_and_respons
             finally:
                 if http_client is not None:
                     await http_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_build_provider_client_pre_content_budget_reaches_responses_only(monkeypatch):
+    """#1992: PROVIDER_PRE_CONTENT_HEARTBEAT_BUDGET bounds a Responses call that
+    sends only heartbeats before content; 0 disables it. Other kinds do not
+    take the option."""
+    import app.core.provider.harness_adapter as ha
+    from app.core.config import Settings, settings
+    from app.core.provider.fluid_credentials import ProviderCredentials
+
+    assert Settings.model_fields["provider_pre_content_heartbeat_budget"].default == 90.0
+
+    async def fake_resolve(_kind, _provider_id):
+        return ProviderCredentials(api_key="sk-test", base_url=None)
+
+    monkeypatch.setattr(ha, "resolve_provider_credentials", fake_resolve)
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    for configured, expected in ((90.0, 90.0), (25.0, 25.0), (0.0, None)):
+        monkeypatch.setattr(settings, "provider_pre_content_heartbeat_budget", configured)
+        for options in (
+            SessionOptions(model="m", extra={"provider_id": "prov-1"}),
+            SessionOptions(model="m"),
+        ):
+            client, http_client = await ha._build_provider_client("openai_responses", options)
+            try:
+                assert client._pre_content_heartbeat_budget == expected
+            finally:
+                if http_client is not None:
+                    await http_client.aclose()
+    client, http_client = await ha._build_provider_client(
+        "openrouter", SessionOptions(model="m")
+    )
+    assert not hasattr(client, "_pre_content_heartbeat_budget")
+    if http_client is not None:
+        await http_client.aclose()
 
 
 # ── A local server (Ollama, vLLM) gets the local first-byte bound, off by default ──

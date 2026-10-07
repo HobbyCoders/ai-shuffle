@@ -135,6 +135,7 @@ def _non_default_config_dict() -> dict:
                 "tool_style": "text",
                 "stream_deadline": 12.5,
                 "first_byte_timeout": 90.0,
+                "pre_content_heartbeat_budget": 45.0,
                 "extra": {"a": 1},
             },
         },

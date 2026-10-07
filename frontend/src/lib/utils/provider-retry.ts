@@ -18,6 +18,27 @@ export function isLiveConnectionDropRetry(message: ChatMessage): boolean {
 	return isConnectionDropRetry(message) && !data?.exhausted && !data?.settled;
 }
 
+/**
+ * The provider failed before sending any reply and the request was re-sent:
+ * an error sent in place of content (`provider_error`), or only heartbeats for
+ * too long (`no_content`). The wait before it can be minutes, so the card
+ * stays in the transcript as the record of where that time went (#1992).
+ */
+export function isPreContentRetry(message: ChatMessage): boolean {
+	const cause = message.systemData?.cause;
+	return (
+		(message.type === 'system' || message.role === 'system') &&
+		message.systemSubtype === 'provider_retry' &&
+		(cause === 'provider_error' || cause === 'no_content')
+	);
+}
+
+/** A pre-content retry whose re-sent request has not answered yet. */
+export function isLivePreContentRetry(message: ChatMessage): boolean {
+	const data = message.systemData;
+	return isPreContentRetry(message) && !data?.exhausted && !data?.settled;
+}
+
 /** What a dropped attempt had streamed before its retry superseded it. */
 export interface SupersededAttempt {
 	text: string;
@@ -37,7 +58,8 @@ export function supersededAttempt(message: ChatMessage): SupersededAttempt | nul
 /**
  * Retries stay in the event history, not the transcript: empty-response
  * retries always, and a connection-drop retry once its reply arrived, unless
- * it holds the output of the attempt it replaced.
+ * it holds the output of the attempt it replaced. A pre-content retry always
+ * stays in the transcript.
  */
 export function isTransientProviderRetry(message: ChatMessage): boolean {
 	return (
@@ -45,6 +67,7 @@ export function isTransientProviderRetry(message: ChatMessage): boolean {
 		message.systemSubtype === 'provider_retry' &&
 		!message.systemData?.exhausted &&
 		!isLiveConnectionDropRetry(message) &&
+		!isPreContentRetry(message) &&
 		!supersededAttempt(message)
 	);
 }
