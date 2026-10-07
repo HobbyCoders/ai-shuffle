@@ -677,10 +677,10 @@ export function isArchived(s: Session): boolean {
 export type CardAction = 'settle' | 'activate' | 'archive' | 'restore';
 
 /**
- * The actions a row offers, in rail order. The LAST one sits at the trailing
- * edge and is what a long swipe commits: Settle for an Active row, Archive
- * for a settled one (Settled is where the list gets tidied), Restore for an
- * archived one.
+ * The actions a row offers. On touch, a left swipe commits the state toggle
+ * (Settle for an Active row, Move to Active for a settled one, Restore for an
+ * archived one) and a right swipe commits Archive. The card sorts Archive
+ * first for its hover actions, so this order is not the on-screen order.
  */
 export function cardActions(s: Pick<Session, 'is_active' | 'status'>): CardAction[] {
 	if (isArchived(s as Session)) return ['restore'];

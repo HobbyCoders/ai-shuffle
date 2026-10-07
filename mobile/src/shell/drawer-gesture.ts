@@ -59,7 +59,7 @@ const OWN_GESTURE = [
  *
  * Not from a field, a slider, an open dialog or menu, or anything marked
  * `data-no-drawer-swipe`. Not from a session row when closing, because a left
- * swipe on a row archives it. And not from inside something that can still
+ * swipe on a row settles it. And not from inside something that can still
  * scroll sideways in the swipe's direction (a wide code block, a table), so
  * that content keeps its own scroll.
  */

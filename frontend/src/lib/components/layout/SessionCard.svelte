@@ -16,8 +16,9 @@
 	 *   L1  glyph · title · total working time (age in the hover title)
 	 *   L2  device icon · git-state word · branch
 	 *
-	 * Inbox gestures. A touch or pen swipe RIGHT settles an active row (or
-	 * moves a settled one back to Active); a swipe LEFT archives. Past 40% of
+	 * Inbox gestures. A touch or pen swipe LEFT settles an active row (moves a
+	 * settled one back to Active, restores an archived one); a swipe RIGHT
+	 * archives. Past 40% of
 	 * the row the lane goes solid and letting go commits; a fast flick commits
 	 * too. The row then slides out and folds away. A press-and-hold starts
 	 * selection, where a tap toggles the row's checkmark. A mouse never
@@ -290,8 +291,8 @@
 	const actions = $derived(cardActions(session));
 	/** Hover order: Archive first, then the state toggle (or Restore). */
 	const hoverActions = $derived([...actions].sort((a, b) => (a === 'archive' ? -1 : b === 'archive' ? 1 : 0)));
-	/** What a right swipe does; a left swipe always archives. */
-	const rightAction = $derived<CardAction>(
+	/** What a left swipe does (the state toggle); a right swipe always archives. */
+	const leftAction = $derived<CardAction>(
 		actions.includes('restore') ? 'restore' : session.is_active ? 'settle' : 'activate'
 	);
 	const canArchive = $derived(actions.includes('archive'));
@@ -448,7 +449,7 @@
 			clearLongPress();
 			pressing = false;
 			const horizontal = Math.abs(dx) > Math.abs(dy);
-			const allowed = dx > 0 || canArchive;
+			const allowed = dx < 0 || canArchive;
 			if (!horizontal || pointerType === 'mouse' || selecting || !allowed) {
 				pointerId = null;
 				return;
@@ -463,8 +464,8 @@
 		if (elapsed > 0) velocity = (event.clientX - lastX) / elapsed;
 		lastX = event.clientX;
 		lastT = t;
-		// A row that cannot archive only travels right.
-		if (!canArchive) dx = Math.max(0, dx);
+		// A row that cannot archive only travels left.
+		if (!canArchive) dx = Math.min(0, dx);
 		const lim = rowWidth * EASE_RATIO;
 		dragX = Math.abs(dx) <= lim ? dx : Math.sign(dx) * (lim + (Math.abs(dx) - lim) * 0.35);
 		lane = dx > 0 ? 'l' : dx < 0 ? 'r' : null;
@@ -496,7 +497,7 @@
 		const flick = Math.abs(velocity) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
 		if (dx !== 0 && (armed || flick)) {
 			const dir = dx < 0 ? -1 : 1;
-			slideOut(dir, dir < 0 ? 'archive' : rightAction);
+			slideOut(dir, dir < 0 ? leftAction : 'archive');
 		} else {
 			springBack();
 		}
@@ -597,17 +598,18 @@
 	onpointercancel={cancelPointer}
 >
 	{#if lane}
-		<div class="lane l" aria-hidden="true" class:on={lane === 'l'}>
-			{#if rightAction === 'settle'}
-				<Check size={20} strokeWidth={2} /><span>Settle</span>
-			{:else if rightAction === 'activate'}
-				<Undo2 size={20} strokeWidth={2} /><span>Move to Active</span>
-			{:else}
-				<ArchiveRestore size={20} strokeWidth={2} /><span>Restore</span>
-			{/if}
+		<!-- Lane `l` is uncovered by a right swipe, lane `r` by a left one. -->
+		<div class="lane l archive" aria-hidden="true" class:on={lane === 'l'}>
+			<Archive size={20} strokeWidth={2} /><span>Archive</span>
 		</div>
-		<div class="lane r" aria-hidden="true" class:on={lane === 'r'}>
-			<span>Archive</span><Archive size={20} strokeWidth={2} />
+		<div class="lane r toggle" aria-hidden="true" class:on={lane === 'r'}>
+			{#if leftAction === 'settle'}
+				<span>Settle</span><Check size={20} strokeWidth={2} />
+			{:else if leftAction === 'activate'}
+				<span>Move to Active</span><Undo2 size={20} strokeWidth={2} />
+			{:else}
+				<span>Restore</span><ArchiveRestore size={20} strokeWidth={2} />
+			{/if}
 		</div>
 	{/if}
 	<div
@@ -804,20 +806,21 @@
 		transition: background-color 150ms ease, color 150ms ease;
 	}
 	.lane.on { opacity: 1; }
-	.lane.l {
-		justify-content: flex-start;
+	/* Position follows the swipe; colour follows the action it commits. */
+	.lane.l { justify-content: flex-start; }
+	.lane.r { justify-content: flex-end; }
+	.lane.toggle {
 		background: color-mix(in oklch, var(--primary) 28%, var(--sidebar));
 		color: var(--primary);
 	}
-	.lane.r {
-		justify-content: flex-end;
+	.lane.archive {
 		background: color-mix(in oklch, var(--info) 22%, var(--sidebar));
 		color: var(--info);
 	}
 	.lane span { opacity: 0.55; transition: opacity 150ms ease; }
 	.lane :global(svg) { flex: none; transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1); }
-	.scard-frame.armed .lane.l { background: var(--primary); color: var(--primary-foreground); }
-	.scard-frame.armed .lane.r { background: var(--info); color: oklch(0.18 0.04 250); }
+	.scard-frame.armed .lane.toggle { background: var(--primary); color: var(--primary-foreground); }
+	.scard-frame.armed .lane.archive { background: var(--info); color: oklch(0.18 0.04 250); }
 	.scard-frame.armed .lane span { opacity: 1; }
 	.scard-frame.armed .lane :global(svg) { transform: scale(1.18); }
 

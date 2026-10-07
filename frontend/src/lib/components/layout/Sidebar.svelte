@@ -8,8 +8,8 @@
 	 * header buttons, search and filter, the Assistant's single persistent
 	 * conversation, and the ledger itself: Needs you, Active and Settled.
 	 *
-	 * Rows follow the inbox model. Swipe right settles an active session (or
-	 * brings a settled one back); swipe left archives. A long press starts a
+	 * Rows follow the inbox model. Swipe left settles an active session (or
+	 * brings a settled one back); swipe right archives. A long press starts a
 	 * multi-select whose bar offers the same moves in bulk. On desktop the
 	 * same moves sit in each row's hover actions.
 	 *
@@ -826,7 +826,7 @@
 			{@render sect('active', 'Active', activeRows.length)}
 			{#if !collapsedGroups.active}
 				{#if activeRows.length === 0}
-					<p class="empty">Nothing active. Swipe a settled session right to bring it back.</p>
+					<p class="empty">Nothing active. Swipe a settled session left to bring it back.</p>
 				{:else}
 					<div class="cards" data-group="active">
 						{#each activeRows as row (row.session.id)}
@@ -1148,8 +1148,10 @@
 	/* The mobile drawer is the full screen wide, and Android reserves the
 	   outer ~24dp of each edge for its back gesture. A swipe rail flush with
 	   that edge got taken for a back swipe, and taps on its outer half went
-	   to the system. Hold the rows off the edge so the whole row, and the
-	   place a thumb starts a settle swipe, sit inside the app's own touch area. */
+	   to the system. Hold the rows off the right edge so the whole row, and
+	   the place a thumb starts a left (settle) swipe, sit inside the app's own
+	   touch area. The left edge needs no guard: the icon rail already keeps
+	   the rows, and the start of a right (archive) swipe, clear of it. */
 	.list.edge-guard { padding-right: 24px; }
 	.cards { display: flex; flex-direction: column; gap: 1px; }
 

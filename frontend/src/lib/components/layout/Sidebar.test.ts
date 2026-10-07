@@ -1486,7 +1486,7 @@ describe('Sidebar unified conversation history', () => {
 		appMode.set('voice');
 		render(Sidebar, { props: sidebarProps });
 		const empties = Array.from(document.querySelectorAll('.empty')).map((n) => n.textContent?.trim());
-		expect(empties).toEqual(['Nothing active. Swipe a settled session right to bring it back.', 'No sessions yet']);
+		expect(empties).toEqual(['Nothing active. Swipe a settled session left to bring it back.', 'No sessions yet']);
 	});
 	it('retains explicit project scope when new-conversation capabilities change', async () => {
 		mocks.sessions.set(fixture());

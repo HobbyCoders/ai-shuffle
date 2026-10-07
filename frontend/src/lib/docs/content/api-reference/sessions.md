@@ -377,7 +377,7 @@ In a worker network, this is shared sidebar state, not an execution command. Any
 
 Add `"archived": true` to archive the session (it always leaves Active) or `"archived": false` to restore an archived one. Archiving changes the session's status on the worker that runs it, so unlike settling it needs that worker online: an offline owner returns `503` and a refused change `409`.
 
-In the app, archived conversations live under **Settings → Archived chats**, not in the sidebar. This page loads archived history independently of sidebar filters and provides pagination for older chats. Opening a conversation leaves it archived; **Restore** moves it to Settled. Desktop session rows expose Archive on hover or keyboard focus, and mobile rows expose it with a left swipe.
+In the app, archived conversations live under **Settings → Archived chats**, not in the sidebar. This page loads archived history independently of sidebar filters and provides pagination for older chats. Opening a conversation leaves it archived; **Restore** moves it to Settled. Desktop session rows expose Archive on hover or keyboard focus, and mobile rows expose it with a right swipe; a left swipe settles a row, or brings a settled one back to Active.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/active \

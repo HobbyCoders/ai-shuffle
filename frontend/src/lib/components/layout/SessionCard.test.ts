@@ -520,22 +520,27 @@ describe('SessionCard swipe gestures', () => {
 		vi.restoreAllMocks();
 	});
 
-	it('settles an active row on a long right swipe, then offers Undo', async () => {
+	it('settles an active row on a long left swipe, then offers Undo', async () => {
 		const clock = slowClock();
 		const { container, onOpen } = renderCard({ is_active: true });
 		const { frame, card } = parts(container);
-		await down(card, { x: 20 });
-		await move(frame, { x: 100 });
+		await down(card, { x: 300 });
+		await move(frame, { x: 220 });
 		expect(frame.classList.contains('dragging')).toBe(true);
 		expect(frame.classList.contains('armed')).toBe(false);
-		await move(frame, { x: 200 });
+		await move(frame, { x: 120 });
 		expect(frame.classList.contains('armed')).toBe(true);
-		expect(container.querySelector('.lane.l.on')?.textContent).toContain('Settle');
-		await up(frame, { x: 200 });
+		// The lane uncovered on the right is the settle lane, in its colour.
+		const lane = container.querySelector('.lane.r.on');
+		expect(lane?.textContent).toContain('Settle');
+		expect(lane?.classList.contains('toggle')).toBe(true);
+		await up(frame, { x: 120 });
 		await fireEvent.click(card);
 		clock.mockRestore();
 
 		expect(frame.classList.contains('sliding')).toBe(true);
+		// The row leaves the way the finger went.
+		expect(card.style.transform).toBe('translateX(-320px)');
 		expect(mocks.setSessionActive).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(450);
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
@@ -543,31 +548,49 @@ describe('SessionCard swipe gestures', () => {
 		expect(onOpen).not.toHaveBeenCalled();
 	});
 
-	it.each([true, false])('archives on a long left swipe (active=%s)', async (is_active) => {
+	it.each([true, false])('archives on a long right swipe, then offers Undo (active=%s)', async (is_active) => {
 		const clock = slowClock();
 		const { container } = renderCard({ is_active });
 		const { frame, card } = parts(container);
-		await down(card, { x: 300 });
-		await move(frame, { x: 100 });
-		expect(container.querySelector('.lane.r.on')?.textContent).toContain('Archive');
-		await up(frame, { x: 100 });
+		await down(card, { x: 20 });
+		await move(frame, { x: 220 });
+		const lane = container.querySelector('.lane.l.on');
+		expect(lane?.textContent).toContain('Archive');
+		expect(lane?.classList.contains('archive')).toBe(true);
+		await up(frame, { x: 220 });
 		clock.mockRestore();
+		expect(card.style.transform).toBe('translateX(320px)');
 		await vi.advanceTimersByTimeAsync(450);
 		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', true);
 		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		expect(mocks.banner.mock.calls.at(-1)?.[0]).toBe('Archived “Sidebar work”');
 	});
 
-	it('moves a settled row back to Active on a right swipe', async () => {
+	it('moves a settled row back to Active on a left swipe', async () => {
 		const clock = slowClock();
 		const { container } = renderCard({ is_active: false }, { compact: true });
 		const { frame, card } = parts(container);
-		await down(card, { x: 20 });
-		await move(frame, { x: 220 });
-		expect(container.querySelector('.lane.l.on')?.textContent).toContain('Move to Active');
-		await up(frame, { x: 220 });
+		await down(card, { x: 300 });
+		await move(frame, { x: 100 });
+		expect(container.querySelector('.lane.r.on')?.textContent).toContain('Move to Active');
+		await up(frame, { x: 100 });
 		clock.mockRestore();
 		await vi.advanceTimersByTimeAsync(450);
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', true);
+		expect(mocks.setSessionArchived).not.toHaveBeenCalled();
+	});
+
+	it('restores an archived row on a left swipe', async () => {
+		const clock = slowClock();
+		const { container } = renderCard({ is_active: false, status: 'archived' }, { compact: true });
+		const { frame, card } = parts(container);
+		await down(card, { x: 300 });
+		await move(frame, { x: 100 });
+		expect(container.querySelector('.lane.r.on')?.textContent).toContain('Restore');
+		await up(frame, { x: 100 });
+		clock.mockRestore();
+		await vi.advanceTimersByTimeAsync(450);
+		expect(mocks.setSessionArchived).toHaveBeenCalledWith('session-a', false);
 	});
 
 	it('springs a short slow drag back and keeps the next tap working', async () => {
@@ -599,11 +622,11 @@ describe('SessionCard swipe gestures', () => {
 		vi.spyOn(performance, 'now').mockImplementation(() => ticks.shift() ?? 1040);
 		const { container } = renderCard({ is_active: true });
 		const { frame, card } = parts(container);
-		await down(card, { x: 20 });
-		await move(frame, { x: 60 });
-		await move(frame, { x: 110 });
+		await down(card, { x: 300 });
+		await move(frame, { x: 260 });
+		await move(frame, { x: 210 });
 		expect(frame.classList.contains('armed')).toBe(false);
-		await up(frame, { x: 110 });
+		await up(frame, { x: 210 });
 		await vi.advanceTimersByTimeAsync(450);
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
 	});
@@ -633,11 +656,11 @@ describe('SessionCard swipe gestures', () => {
 		expect(screen.getByTitle('Settle session')).toBeTruthy();
 	});
 
-	it('does not swipe an archived row left, since it is archived already', async () => {
+	it('does not swipe an archived row right, since it is archived already', async () => {
 		const { container } = renderCard({ is_active: false, status: 'archived' });
 		const { frame, card } = parts(container);
-		await down(card, { x: 300 });
-		await move(frame, { x: 100 });
+		await down(card, { x: 20 });
+		await move(frame, { x: 220 });
 		expect(frame.classList.contains('dragging')).toBe(false);
 	});
 
