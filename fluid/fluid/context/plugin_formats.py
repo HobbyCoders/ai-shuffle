@@ -47,7 +47,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from fluid.context.instructions import Command, Skill, _read, parse_frontmatter
+from fluid.context.instructions import (
+    Command,
+    Skill,
+    _read,
+    model_invocable,
+    parse_frontmatter,
+)
 from fluid.context.plugin_import import markdown_notes, normalize_agent_fields
 
 log = logging.getLogger(__name__)
@@ -368,6 +374,7 @@ def _skills_for(plugin_name: str, root: Path, manifest: dict[str, Any]) -> list[
                 path=str(skill_md),
                 scope="plugin",
                 body_loaded=False,
+                model_invocable=model_invocable(fields),
             )
         )
     return out

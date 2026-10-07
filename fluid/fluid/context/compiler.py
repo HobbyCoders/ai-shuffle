@@ -65,6 +65,21 @@ SKILLS_HEADER = (
     "it covers."
 )
 
+# Rendered under the skills header only when the index lists a plugin skill
+# (issue #2003). Plugin skills are third-party: their descriptions are written
+# to match broadly, and a model told to load a skill "before doing a task it
+# covers" loaded a prose-editing plugin for a coding brief because one step
+# wrote a README. Plugin skills are therefore opt-in; user, project and
+# built-in skills keep the header's rule. The ``<plugin>:<name>`` namespace is
+# the marker, so no entry pays extra tokens and catalogs without plugin skills
+# are unchanged. Shared by both legs (the app reuses it for the delegated
+# leg's list).
+PLUGIN_SKILLS_NOTE = (
+    "Skills named <plugin>:<name> are opt-in: use one only when the user asks "
+    "for it or the task is mainly its job, not because one step (a README, a "
+    "commit message) touches its topic."
+)
+
 AGENTS_HEADER = (
     "# Available agent types\n"
     "These agent types can be delegated to with the Task tool. Each runs in "
@@ -163,21 +178,35 @@ def skills_index(
     """Progressive-disclosure skills listing (name + description only).
 
     Sorted by name: the index feeds the cached prompt prefix, so its order must
-    not depend on filesystem walk order.
+    not depend on filesystem walk order. A skill whose frontmatter sets
+    ``disable-model-invocation: true`` is left out (the Skill tool still loads
+    it by name), and :data:`PLUGIN_SKILLS_NOTE` follows the header whenever a
+    plugin skill is listed.
     """
-    skills = discover_skills(
-        cwd,
-        include_global=include_global,
-        include_project=include_project,
-        include_plugins=include_plugins,
-        plugins=plugins,
-    )
+    skills = [
+        s for s in discover_skills(
+            cwd,
+            include_global=include_global,
+            include_project=include_project,
+            include_plugins=include_plugins,
+            plugins=plugins,
+        )
+        if s.model_invocable
+    ]
     if not skills:
         return None
     lines = "\n".join(
         f"- {s.name}: {s.description}" for s in sorted(skills, key=lambda s: s.name)
     )
-    return f"{SKILLS_HEADER}\n{lines}"
+    return f"{skills_header(SKILLS_HEADER, skills)}\n{lines}"
+
+
+def skills_header(header: str, skills: Sequence) -> str:
+    """``header``, plus :data:`PLUGIN_SKILLS_NOTE` when ``skills`` lists a
+    plugin skill — the one place both legs decide the note."""
+    if any(getattr(s, "scope", "") == "plugin" for s in skills):
+        return f"{header}\n{PLUGIN_SKILLS_NOTE}"
+    return header
 
 
 def agents_index(

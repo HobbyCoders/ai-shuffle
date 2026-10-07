@@ -548,6 +548,27 @@ def test_delegated_full_replace_skills_name_the_file_to_read(
     assert SKILLS_HEADER in native and ha.DELEGATED_SKILLS_HEADER not in native
 
 
+def test_delegated_skills_block_marks_plugin_skills_opt_in():
+    """#2003: the delegated leg's "More skills" list carries fluid's plugin
+    opt-in note only when it lists a plugin skill, and leaves out a skill
+    whose frontmatter sets disable-model-invocation."""
+    from fluid.context.compiler import PLUGIN_SKILLS_NOTE
+    from fluid.context.instructions import Skill
+
+    own = Skill(name="deploy", description="Ship a build", path="/p/deploy/SKILL.md", scope="project")
+    plugin = Skill(name="unslop:unslop", description="Humanize prose", path="/u/SKILL.md", scope="plugin")
+    hidden = Skill(name="manual", description="On request", path="/m/SKILL.md", model_invocable=False)
+
+    plain = ha._delegated_skills_block([own, hidden])
+    assert plain == f"{ha.DELEGATED_SKILLS_HEADER}\n- deploy: Ship a build (/p/deploy/SKILL.md)"
+
+    mixed = ha._delegated_skills_block([own, plugin])
+    assert mixed.startswith(f"{ha.DELEGATED_SKILLS_HEADER}\n{PLUGIN_SKILLS_NOTE}\n- ")
+    assert "- unslop:unslop: Humanize prose (/u/SKILL.md)" in mixed
+
+    assert ha._delegated_skills_block([hidden]) is None
+
+
 # ─── Claude Code compactions become the chat's compaction card ──────────────
 
 

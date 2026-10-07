@@ -7824,6 +7824,40 @@ def test_skill_catalog_entry_says_how_it_is_reached_in_code_mode():
     assert one_liners.count("from tools.Skill import Skill") == 1
 
 
+def test_code_mode_skills_header_keeps_the_plugin_opt_in_note(tmp_path, monkeypatch):
+    """#2003: code mode rewrites only the header line; fluid's plugin opt-in
+    note stays directly under it, and the Skill tool's own description says
+    plugin skills are opt-in too."""
+    import json
+
+    import app.core.provider.harness_adapter as ha
+    from fluid.context.compiler import PLUGIN_SKILLS_NOTE, SKILLS_HEADER, skills_index
+    from fluid.tools.builtins.skill import SPEC
+
+    home = tmp_path / "home"
+    root = home / ".fluid" / "plugins" / "cache" / "community" / "unslop" / "2.3.0"
+    (root / "skills" / "unslop").mkdir(parents=True)
+    (root / "plugin.json").write_text('{"name": "unslop"}', encoding="utf-8")
+    (root / "skills" / "unslop" / "SKILL.md").write_text(
+        "---\nname: unslop\ndescription: Remove AI writing patterns from prose.\n---\nBODY",
+        encoding="utf-8",
+    )
+    (home / ".fluid" / "settings.json").write_text(
+        json.dumps({"enabledPlugins": {"unslop@community": True}}), encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    project = tmp_path / "proj"
+    (project / ".git").mkdir(parents=True)
+
+    index = skills_index(project, include_global=False, include_plugins=True)
+    assert index is not None and index.startswith(f"{SKILLS_HEADER}\n{PLUGIN_SKILLS_NOTE}\n")
+    code = ha._code_mode_skills_text(index)
+    assert code.startswith(f"{ha.CODE_MODE_SKILLS_HEADER}\n{PLUGIN_SKILLS_NOTE}\n")
+    assert "- unslop:unslop: Remove AI writing patterns from prose." in code
+    assert "opt-in" in SPEC.description
+
+
 def test_github_block_limits_prs_to_repository_changes():
     """Item 8c: local-config tasks and questions got branches and PRs."""
     import app.core.provider.harness_adapter as ha

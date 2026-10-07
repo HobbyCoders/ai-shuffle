@@ -213,3 +213,72 @@ def test_compiler_lists_enabled_plugin_skills_deferred(tmp_path, monkeypatch) ->
         cwd=proj, include_env=False, setting_sources=("project",),
     ))
     assert "plug:extra" not in (gated.text or "")
+
+
+def _plugin_skill(home: Path, name: str, extra: str = "") -> None:
+    root = home / ".fluid" / "plugins" / "cache" / "mp" / "plug" / "1.0.0"
+    _write(root / "plugin.json", '{"name": "plug"}')
+    _write(root / "skills" / name / "SKILL.md",
+           f"---\nname: {name}\ndescription: plugin skill {name}\n{extra}---\nPLUGIN BODY")
+    _write(home / ".fluid" / "settings.json", json.dumps({"enabledPlugins": {"plug@mp": True}}))
+
+
+def test_plugin_skills_are_listed_as_opt_in(tmp_path, monkeypatch) -> None:
+    """#2003: a coding brief loaded a prose-editing plugin skill because one
+    step wrote a README. The opt-in note follows the header only when a plugin
+    skill is listed, so a catalog without one is byte-identical to before and
+    user/project skills keep the header's rule."""
+    from fluid.context.compiler import PLUGIN_SKILLS_NOTE, SKILLS_HEADER
+
+    proj = _layout(tmp_path, monkeypatch)
+    plain = compile_prompt(PromptInputs(cwd=proj, include_env=False)).text or ""
+    assert SKILLS_HEADER in plain
+    assert PLUGIN_SKILLS_NOTE not in plain
+
+    _plugin_skill(tmp_path / "home", "extra")
+    text = compile_prompt(PromptInputs(cwd=proj, include_env=False)).text or ""
+    assert f"{SKILLS_HEADER}\n{PLUGIN_SKILLS_NOTE}\n- " in text
+    assert text.count(PLUGIN_SKILLS_NOTE) == 1
+    assert "- plug:extra: plugin skill extra" in text
+    assert "- gskill:" in text and "- pskill:" in text
+    for phrase in ("<plugin>:<name>", "opt-in", "user asks", "README"):
+        assert phrase in PLUGIN_SKILLS_NOTE
+
+
+async def test_disable_model_invocation_hides_a_skill_from_the_index_only(tmp_path, monkeypatch) -> None:
+    """Claude Code's ``disable-model-invocation: true`` keeps a skill out of
+    the model's index (plugin or not); the Skill tool still loads it by name,
+    so a user who asks for it gets it."""
+    from fluid.context.compiler import PLUGIN_SKILLS_NOTE
+    from fluid.tools.builtins.skill import handler
+    from fluid.tools.registry import ToolCtx
+
+    proj = _layout(tmp_path, monkeypatch)
+    _write(proj / ".fluid" / "skills" / "manual" / "SKILL.md",
+           "---\nname: manual\ndescription: only on request\n"
+           "disable-model-invocation: true\n---\nMANUAL BODY")
+    _plugin_skill(tmp_path / "home", "quiet", extra="disable-model-invocation: true\n")
+
+    text = compile_prompt(PromptInputs(cwd=proj, include_env=False)).text or ""
+    assert "manual" not in text
+    assert "plug:quiet" not in text
+    assert PLUGIN_SKILLS_NOTE not in text  # the only plugin skill is hidden
+    assert "- pskill:" in text
+
+    for name, body in (("manual", "MANUAL BODY"), ("plug:quiet", "PLUGIN BODY")):
+        outcome = await handler({"name": name}, ToolCtx(cwd=str(proj)))
+        assert not outcome.is_error, outcome.text
+        assert body in outcome.text
+
+
+def test_index_is_omitted_when_every_skill_opts_out(tmp_path, monkeypatch) -> None:
+    from fluid.context.compiler import SKILLS_HEADER, skills_index
+
+    home = tmp_path / "home"
+    _set_home(monkeypatch, home)
+    proj = tmp_path / "proj"
+    (proj / ".git").mkdir(parents=True)
+    _write(proj / ".fluid" / "skills" / "manual" / "SKILL.md",
+           "---\nname: manual\ndescription: d\ndisable-model-invocation: True\n---\nB")
+    assert skills_index(proj, include_global=False) is None
+    assert SKILLS_HEADER not in (compile_prompt(PromptInputs(cwd=proj, include_env=False)).text or "")

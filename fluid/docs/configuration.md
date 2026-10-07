@@ -148,6 +148,17 @@ name: a project entry beats a global one, the directory nearest the cwd beats
 an outer one, and within a directory `.fluid` beats `.agents`. Plugin entries
 are namespaced `<plugin>:<name>` and never shadow a native one.
 
+The `# Available skills` index lists each skill's name and description; the
+header tells the model to load a skill before a task it covers. When the index
+lists a plugin skill, one more line follows the header: plugin skills
+(`<plugin>:<name>`) are opt-in, used only when the user asks for one or the
+task is mainly that skill's job, not because one step (a README, a commit
+message) touches its topic. A catalog without plugin skills does not carry the
+line. A skill whose frontmatter sets `disable-model-invocation: true` (Claude
+Code's field) is left out of the index entirely; the `Skill` tool still loads
+it when asked for by name. AI Shuffle's code-mode and Claude CLI legs render
+the same note and honor the same field.
+
 ### settings.json and plugins
 
 fluid also reads a Claude-Code-schema `settings.json` stack from its own paths

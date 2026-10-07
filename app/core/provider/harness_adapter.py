@@ -6609,19 +6609,30 @@ def _delegated_fluid_context(options: SessionOptions) -> List[str]:
             if files:
                 blocks.append("\n\n".join([DELEGATED_INSTRUCTIONS_HEADER, *files]))
             skills = discover_skills(cwd, include_global=user_on, include_project=project_on)
-            if skills:
-                blocks.append(_delegated_skills_block(skills))
+            skills_block = _delegated_skills_block(skills) if skills else None
+            if skills_block:
+                blocks.append(skills_block)
     except Exception:  # noqa: BLE001 — a prompt block never fails a connect
         logger.warning("[HarnessAdapter] fluid instructions for the delegated leg failed", exc_info=True)
     return blocks
 
 
-def _delegated_skills_block(skills: Any) -> str:
-    """The delegated leg's skills list: each skill with its SKILL.md path."""
+def _delegated_skills_block(skills: Any) -> Optional[str]:
+    """The delegated leg's skills list: each skill with its SKILL.md path.
+
+    Same rules as fluid's ``skills_index``: a ``disable-model-invocation``
+    skill is left out, and fluid's plugin opt-in note follows the header when
+    a plugin skill is listed (#2003). None when nothing is left to list.
+    """
+    from fluid.context.compiler import skills_header
+
+    shown = [skill for skill in skills if getattr(skill, "model_invocable", True)]
+    if not shown:
+        return None
     lines = "\n".join(
-        f"- {skill.name}: {skill.description} ({skill.path})" for skill in skills
+        f"- {skill.name}: {skill.description} ({skill.path})" for skill in shown
     )
-    return f"{DELEGATED_SKILLS_HEADER}\n{lines}"
+    return f"{skills_header(DELEGATED_SKILLS_HEADER, shown)}\n{lines}"
 
 
 def _delegated_skills_index(options: SessionOptions) -> Optional[str]:

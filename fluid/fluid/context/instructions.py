@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -103,6 +104,15 @@ class Skill:
     path: str
     scope: str = "project"  # "global" | "project" | "plugin" | "builtin"
     body_loaded: bool = False  # progressive disclosure: body read on demand
+    # False when SKILL.md sets Claude Code's ``disable-model-invocation: true``:
+    # the skill stays out of the prompt's skills index (the model is not
+    # offered it), while the Skill tool still loads it when asked by name.
+    model_invocable: bool = True
+
+
+def model_invocable(fields: Mapping[str, Any]) -> bool:
+    """A skill's frontmatter does not opt it out of the model's skills index."""
+    return str(fields.get("disable-model-invocation", "")).strip().lower() != "true"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -589,6 +599,7 @@ def _skills_in(base: Path, scope: str) -> dict[str, Skill]:
                 path=str(skill_md),
                 scope=scope,
                 body_loaded=False,
+                model_invocable=model_invocable(fields),
             ),
         )
     return out
