@@ -430,6 +430,23 @@ export async function getContextUsage(
 	return api.get<ContextUsageResponse>(`/sessions/${sessionId}/context-usage`, options);
 }
 
+/** Fresh capability for stopping automatic work behind a terminal Task card. */
+export interface TaskStopState {
+	eligible: boolean;
+	turn_id?: string;
+}
+
+export async function getSessionTaskStopState(
+	sessionId: string,
+	taskId: string,
+	options?: RequestOptions
+): Promise<TaskStopState> {
+	return api.get<TaskStopState>(
+		`/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}/stop-state`,
+		options
+	);
+}
+
 /** Result of stopping one in-flight background task. */
 export interface StopTaskResult {
 	session_id: string;
@@ -444,9 +461,14 @@ export interface StopTaskResult {
  * Backs the "x" on the live background-tasks strip. A failed stop resolves
  * with `ok: false` rather than throwing (e.g. the task already finished).
  */
-export async function stopSessionTask(sessionId: string, taskId: string): Promise<StopTaskResult> {
+export async function stopSessionTask(
+	sessionId: string,
+	taskId: string,
+	expectedTurnId?: string
+): Promise<StopTaskResult> {
+	const query = expectedTurnId ? `?expected_turn_id=${encodeURIComponent(expectedTurnId)}` : '';
 	return api.post<StopTaskResult>(
-		`/sessions/${sessionId}/tasks/${encodeURIComponent(taskId)}/stop`
+		`/sessions/${encodeURIComponent(sessionId)}/tasks/${encodeURIComponent(taskId)}/stop${query}`
 	);
 }
 

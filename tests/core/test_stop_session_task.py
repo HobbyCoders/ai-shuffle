@@ -513,6 +513,232 @@ class TestStopSessionTaskDurableFallback:
         assert len(calls) == 1
 
 
+class TestTerminalTaskStop:
+    def _child(self):
+        from app.core.config import settings
+        from app.db import database, turns
+
+        database.register_install(settings.effective_instance_id, "test", None, "local", "1", {}, approve_new=True)
+        database.create_session(session_id="parent", profile_id="default")
+        database.create_session(session_id="child", profile_id="default", parent_session_id="parent", is_worker=True)
+        task_registry.start_task("parent", "child", "agent", "original task")
+        original = turns.enqueue_turn("child", "provider_agent", prompt="original")
+        assert turns.start_turn(original["id"])
+        assert turns.settle_turn(original["id"], "completed")
+        task_registry.complete_task("parent", "child", "completed", summary="Finished report", report_path="/tmp/report")
+        return turns
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["queued", "running", "parked", "interrupting", "draining"])
+    async def test_terminal_report_with_real_automatic_work_is_stoppable(self, mock_db, state):
+        from app.core.query_session_lifecycle import terminal_task_stop_state
+        from app.core import turn_manager
+        turns = self._child()
+        report = task_registry.get_task("parent", "child")
+        wake = turns.enqueue_turn("child", "unpark", prompt="a sibling finished")
+        if state != "queued":
+            assert turns.start_turn(wake["id"])
+            if state == "parked":
+                assert turns.park_turn(wake["id"], task_ids=["sibling"])
+            elif state in ("interrupting", "draining"):
+                assert turns.interrupt_turn("child", "send_now", turn_id=wake["id"])
+                if state == "draining":
+                    assert turns.escalate_to_draining(wake["id"])
+        assert await terminal_task_stop_state("parent", "child") == {"eligible": True, "turn_id": wake["id"]}
+        with patch.object(turn_manager, "_fire_interrupt_executor") as fire:
+            result = await stop_session_task("parent", "child", expected_turn_id=wake["id"])
+        assert result["ok"]
+        assert task_registry.get_task("parent", "child") == report
+        assert task_registry.is_user_stopped("child")
+        live = state in ("running", "interrupting", "draining")
+        expected_state = "draining" if state == "draining" else ("interrupting" if live else "aborted")
+        assert turns.get_turn(wake["id"])["state"] == expected_state
+        if live:
+            fire.assert_called_once_with("child", "stop", wake["id"])
+            assert turns.get_turn(wake["id"])["interrupt_mode"] == "stop"
+        else:
+            fire.assert_not_called()
+        assert turns.enqueue_turn("child", "unpark", prompt="late terminal")["id"] is None
+        # The durable guard still refuses a late producer after memory reset.
+        task_registry.reset_all()
+        assert turns.enqueue_turn("child", "retry", prompt="late retry")["id"] is None
+        resumed = turns.enqueue_turn("child", "user", prompt="try again")
+        assert resumed["id"]
+        assert not task_registry.is_user_stopped("child")
+        assert turns.enqueue_turn("child", "unpark", prompt="new work")["id"]
+
+    @pytest.mark.asyncio
+    async def test_actual_failed_wake_retry_producer_is_stoppable(self, mock_db):
+        from app.core import turn_scheduler
+        from app.core.query_session_lifecycle import terminal_task_stop_state
+        turns = self._child()
+        report = task_registry.get_task("parent", "child")
+        dead = turns.enqueue_turn("child", "unpark", prompt="read the finished report")
+        assert turns.start_turn(dead["id"])
+        assert turns.settle_turn(dead["id"], "aborted", "error", error="fixture reader failure")
+        with (
+            patch.object(turn_scheduler, "_clear_wake_pending"),
+            patch.object(turn_scheduler, "_drop_pooled_client", new=AsyncMock()),
+            patch.object(turn_scheduler, "note_wake_pending"),
+            patch.object(turn_scheduler, "kick") as kick,
+        ):
+            await turn_scheduler.on_turn_settled("child", dead["id"], "aborted")
+            (retry,) = turns.get_queued_turns("child")
+            assert retry["parent_turn_id"] == dead["id"]
+            assert retry["payload"][turn_scheduler.WAKE_RETRY_KEY]
+            assert retry["position"] < dead["position"]
+            assert await terminal_task_stop_state("parent", "child") == {"eligible": True, "turn_id": retry["id"]}
+            assert (await stop_session_task("parent", "child", expected_turn_id=retry["id"]))["ok"]
+            assert turns.get_turn(retry["id"])["state"] == "aborted"
+            assert not await turn_scheduler._maybe_recover_failed_wake("child", turns.get_turn(dead["id"]))
+            kick.assert_called_once_with("child")
+        assert turns.get_queued_turns("child") == []
+        assert task_registry.get_task("parent", "child") == report
+
+    @pytest.mark.asyncio
+    async def test_front_retry_is_stoppable_and_late_stop_spares_its_successor(self, mock_db):
+        from app.core.query_session_lifecycle import terminal_task_stop_state
+        turns = self._child()
+        retry = turns.enqueue_turn("child", "unpark", at_front=True)
+        assert await terminal_task_stop_state("parent", "child") == {"eligible": True, "turn_id": retry["id"]}
+        assert turns.start_turn(retry["id"])
+        assert turns.settle_turn(retry["id"], "completed")
+        successor = turns.enqueue_turn("child", "unpark", at_front=True)
+        assert turns.start_turn(successor["id"])
+        assert not (await stop_session_task("parent", "child", expected_turn_id=retry["id"]))["ok"]
+        assert turns.get_turn(successor["id"])["state"] == "running"
+        assert not task_registry.is_user_stopped("child")
+        assert await terminal_task_stop_state("parent", "child") == {"eligible": True, "turn_id": successor["id"]}
+
+    @pytest.mark.asyncio
+    async def test_parked_snapshot_does_not_target_an_at_front_live_successor(self, mock_db):
+        from app.core.query_session_lifecycle import terminal_task_stop_state
+        turns = self._child()
+        parked = turns.enqueue_turn("child", "unpark")
+        assert turns.start_turn(parked["id"])
+        assert turns.park_turn(parked["id"], task_ids=["sibling"])
+        snapshot = await terminal_task_stop_state("parent", "child")
+        successor = turns.enqueue_turn("child", "unpark", at_front=True)
+        assert turns.start_turn(successor["id"])
+        assert not (await stop_session_task("parent", "child", expected_turn_id=snapshot["turn_id"]))["ok"]
+        assert turns.get_turn(successor["id"])["state"] == "running"
+        assert not task_registry.is_user_stopped("child")
+        assert await terminal_task_stop_state("parent", "child") == {"eligible": True, "turn_id": successor["id"]}
+
+    @pytest.mark.asyncio
+    async def test_genuinely_done_is_idempotent_and_wrong_parent_cannot_stop(self, mock_db):
+        from app.core.query_session_lifecycle import terminal_task_stop_state
+        turns = self._child()
+        assert await terminal_task_stop_state("parent", "child") == {"eligible": False}
+        result = await stop_session_task("parent", "child")
+        assert result["ok"] and result["detail"] == "already finished"
+        assert not task_registry.is_user_stopped("child")
+        wake = turns.enqueue_turn("child", "unpark")
+        assert await terminal_task_stop_state("other", "child") == {"eligible": False}
+        assert not (await stop_session_task("other", "child", expected_turn_id=wake["id"]))["ok"]
+        assert turns.get_turn(wake["id"])["state"] == "queued"
+
+    @pytest.mark.asyncio
+    async def test_stale_capability_and_new_owner_work_are_spared(self, mock_db):
+        from app.core.query_session_lifecycle import terminal_task_stop_state
+        turns = self._child()
+        wake = turns.enqueue_turn("child", "unpark")
+        newer = turns.enqueue_turn("child", "unpark")
+        assert not (await stop_session_task("parent", "child", expected_turn_id=wake["id"]))["ok"]
+        assert not task_registry.is_user_stopped("child")
+        owner = turns.enqueue_turn("child", "user", prompt="unrelated next work")
+        assert await terminal_task_stop_state("parent", "child") == {"eligible": False}
+        assert not (await stop_session_task("parent", "child", expected_turn_id=newer["id"]))["ok"]
+        assert turns.get_turn(owner["id"])["state"] == "queued"
+        # Even a later automatic wake is not the historical task's authority.
+        turns.enqueue_turn("child", "unpark")
+        assert await terminal_task_stop_state("parent", "child") == {"eligible": False}
+
+    @pytest.mark.asyncio
+    async def test_owner_send_between_atomic_stop_and_executor_survives(self, mock_db, monkeypatch):
+        from app.core import turn_manager
+        turns = self._child()
+        wake = turns.enqueue_turn("child", "unpark")
+        assert turns.start_turn(wake["id"])
+        original_stop = turns.stop_terminal_child
+        owner = []
+
+        def stop_then_owner(*args):
+            result = original_stop(*args)
+            owner.append(turns.enqueue_turn("child", "user", prompt="new instruction"))
+            return result
+
+        monkeypatch.setattr(turns, "stop_terminal_child", stop_then_owner)
+        with patch.object(turn_manager, "_fire_interrupt_executor") as fire:
+            assert (await stop_session_task("parent", "child", expected_turn_id=wake["id"]))["ok"]
+        fire.assert_called_once_with("child", "stop", wake["id"])
+        assert turns.get_turn(owner[0]["id"])["state"] == "queued"
+        assert not task_registry.is_user_stopped("child")
+
+    @pytest.mark.asyncio
+    async def test_blocked_cwd_terminal_child_remains_stoppable(self, mock_db, tmp_path):
+        from app.core.query_session_lifecycle import terminal_task_stop_state
+        turns = self._child()
+        wake = turns.enqueue_turn("child", "unpark")
+        assert turns.start_turn(wake["id"])
+        assert turns.block_missing_cwd("child", wake["id"], str(tmp_path / "gone"), "missing")
+        turns.settle_turn(wake["id"], "aborted")
+        assert (await terminal_task_stop_state("parent", "child"))["eligible"]
+        assert (await stop_session_task("parent", "child", expected_turn_id=wake["id"]))["ok"]
+        assert task_registry.get_task("parent", "child")["summary"] == "Finished report"
+
+
+    def test_terminal_stop_http_contract_and_foreign_owner_denial(self, mock_db):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from app.api.auth import require_auth
+        from app.api.sessions import router
+        from app.db.base import get_db
+
+        turns = self._child()
+        wake = turns.enqueue_turn("child", "unpark")
+        app = FastAPI()
+        app.include_router(router)
+        app.dependency_overrides[require_auth] = lambda: "test"
+        with TestClient(app) as client, patch(
+            "app.api.sessions_helpers.get_api_user_from_request", return_value=None,
+        ):
+            url = "/api/v1/sessions/parent/tasks/child"
+            assert client.get(url + "/stop-state").json() == {"eligible": True, "turn_id": wake["id"]}
+            from app.db import database
+            database.create_api_user("foreign", "Foreign", "fixture-hash")
+            with get_db() as conn:
+                conn.cursor().execute("UPDATE sessions SET api_user_id=%s WHERE id=%s", ("foreign", "child"))
+            assert client.get(url + "/stop-state").json() == {"eligible": False}
+            assert not client.post(url + "/stop", params={"expected_turn_id": wake["id"]}).json()["ok"]
+            with get_db() as conn:
+                conn.cursor().execute("UPDATE sessions SET api_user_id=NULL WHERE id=%s", ("child",))
+            with patch("app.api.sessions_helpers.get_api_user_from_request", return_value={"id": "foreign"}):
+                assert client.get(url + "/stop-state").status_code == 403
+                assert client.post(url + "/stop", params={"expected_turn_id": wake["id"]}).status_code == 403
+            assert turns.get_turn(wake["id"])["state"] == "queued"
+            assert client.post(url + "/stop", params={"expected_turn_id": wake["id"]}).json()["ok"]
+            assert turns.get_turn(wake["id"])["state"] == "aborted"
+
+    @pytest.mark.asyncio
+    async def test_worker_inherits_parent_api_owner_and_older_cwd_marker(self, mock_db, tmp_path):
+        from app.core.query_session_lifecycle import terminal_task_stop_state
+        from app.db.base import get_db
+        turns = self._child()
+        from app.db import database
+        database.create_api_user("parent-key", "Parent", "fixture-hash")
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET api_user_id=%s WHERE id=%s", ("parent-key", "parent"))
+        failing = turns.enqueue_turn("child", "unpark")
+        assert turns.start_turn(failing["id"])
+        later = turns.enqueue_turn("child", "unpark")
+        assert turns.block_missing_cwd("child", failing["id"], str(tmp_path / "missing"), "missing")
+        turns.settle_turn(failing["id"], "aborted")
+        turns.remove_queued_turn(later["id"])
+        assert await terminal_task_stop_state("parent", "child") == {"eligible": True, "turn_id": later["id"]}
+        assert (await stop_session_task("parent", "child", expected_turn_id=later["id"]))["ok"]
+
+
 class TestStopAllBackgroundTasks:
     async def test_suppresses_every_wake_before_first_cancellation(self):
         session_id = "stop-all-race"

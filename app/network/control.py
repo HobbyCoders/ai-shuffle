@@ -805,10 +805,42 @@ async def _interrupt(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
                                              stop_background=bool(body.get("stop_background")),
                                              turn_id=body.get("turn_id") or None,
                                              **({"source": source} if source else {}))
-    if row is not None and body.get("stop_background"):
+    session_stop = str(body.get("mode") or "stop") == "stop" and not body.get("turn_id")
+    if body.get("stop_background") and (row is not None or session_stop):
         from app.core.query_session_lifecycle import stop_all_background_tasks
         await stop_all_background_tasks(session_id, user_stop=True)
-    return {"interrupted": row is not None, "turn_id": (row or {}).get("id")}
+    return {"interrupted": row is not None or (session_stop and bool(body.get("stop_background"))),
+            "turn_id": (row or {}).get("id")}
+
+
+def _require_terminal_child(body: Dict[str, Any], from_device: str):
+    from app.db import remote_tasks
+    from app.core.remote_task import _require_worker_member
+
+    _require_worker_member(from_device)
+    child_id = str(body.get("task_id") or "")
+    _require_owned(child_id)
+    child = remote_tasks.get_child(child_id)
+    if not child or child["parent_device_id"] != from_device:
+        raise PermissionError("Only the worker that started this child may stop it.")
+    return str(body.get("session_id") or ""), child_id
+
+
+async def _terminal_task_stop_state(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    from app.db import turns
+    from app.db.async_database import run_sync
+    parent_id, child_id = await run_sync(_require_terminal_child, body, from_device)
+    return await run_sync(turns.terminal_child_stop_state, parent_id, child_id)
+
+
+async def _terminal_task_stop(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
+    from app.core.query_session_lifecycle import stop_terminal_child_here
+    from app.db.async_database import run_sync
+    parent_id, child_id = await run_sync(_require_terminal_child, body, from_device)
+    expected = body.get("expected_turn_id")
+    if not isinstance(expected, str) or not expected:
+        raise ValueError("expected_turn_id is required")
+    return await stop_terminal_child_here(parent_id, child_id, expected)
 
 
 async def _permission(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
@@ -846,6 +878,8 @@ _HANDLERS = {
     "turns": _turns,
     "sessions": _sessions,
     "interrupt": _interrupt,
+    "terminal-task-stop-state": _terminal_task_stop_state,
+    "terminal-task-stop": _terminal_task_stop,
     "permission": _permission,
     "question": _question,
     "hydrate": _hydrate,

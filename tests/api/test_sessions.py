@@ -2566,6 +2566,56 @@ class TestSessionId:
 # Test GET /{session_id}/context-usage
 # =============================================================================
 
+class TestTerminalTaskStopRoutes:
+    """The public routes preserve auth and the backend's identity-fenced result."""
+
+    @pytest.mark.parametrize("method, suffix", [("get", "stop-state"), ("post", "stop")])
+    def test_unknown_parent_is_rejected(self, client, mock_database, method, suffix):
+        mock_database.get_session.return_value = None
+        with patch("app.core.query_session_lifecycle.terminal_task_stop_state", new=AsyncMock()) as read, \
+                patch("app.core.query_engine.stop_session_task", new=AsyncMock()) as stop:
+            response = getattr(client, method)(f"/api/v1/sessions/missing/tasks/child/{suffix}")
+        assert response.status_code == 404
+        read.assert_not_awaited()
+        stop.assert_not_awaited()
+
+    @pytest.mark.parametrize("method, suffix", [("get", "stop-state"), ("post", "stop")])
+    def test_foreign_parent_is_rejected(self, client, mock_database, mock_api_user, sample_session, method, suffix):
+        mock_database.get_session.return_value = {**sample_session, "api_user_id": "another-user"}
+        mock_api_user.return_value = {"id": "caller"}
+        with patch("app.core.query_session_lifecycle.terminal_task_stop_state", new=AsyncMock()) as read, \
+                patch("app.core.query_engine.stop_session_task", new=AsyncMock()) as stop:
+            response = getattr(client, method)(f"/api/v1/sessions/test-session-id/tasks/child/{suffix}")
+        assert response.status_code == 403
+        read.assert_not_awaited()
+        stop.assert_not_awaited()
+
+    def test_fresh_capability_is_passed_through(self, client, mock_database, sample_session):
+        mock_database.get_session.return_value = sample_session
+        state = {"eligible": True, "turn_id": "automatic-turn"}
+        with patch("app.core.query_session_lifecycle.terminal_task_stop_state", new=AsyncMock(return_value=state)) as read:
+            response = client.get("/api/v1/sessions/test-session-id/tasks/child/stop-state")
+        assert response.status_code == 200
+        assert response.json() == state
+        read.assert_awaited_once_with("test-session-id", "child")
+
+    def test_stale_refusal_is_not_retried_as_unscoped_stop(self, client, mock_database, sample_session):
+        mock_database.get_session.return_value = sample_session
+        result = {"ok": False, "detail": "stop target changed"}
+        with patch("app.core.query_engine.stop_session_task", new=AsyncMock(return_value=result)) as stop:
+            response = client.post("/api/v1/sessions/test-session-id/tasks/child/stop?expected_turn_id=old-turn")
+        assert response.status_code == 200
+        assert response.json() == {"session_id": "test-session-id", "task_id": "child", **result}
+        stop.assert_awaited_once_with("test-session-id", "child", expected_turn_id="old-turn")
+
+    def test_empty_identity_never_falls_back_to_legacy_stop(self, client, mock_database, sample_session):
+        mock_database.get_session.return_value = sample_session
+        with patch("app.core.query_engine.stop_session_task", new=AsyncMock()) as stop:
+            response = client.post("/api/v1/sessions/test-session-id/tasks/child/stop?expected_turn_id=")
+        assert response.status_code == 422
+        stop.assert_not_awaited()
+
+
 class TestGetSessionContextUsage:
     """Test GET /api/v1/sessions/{session_id}/context-usage endpoint."""
 

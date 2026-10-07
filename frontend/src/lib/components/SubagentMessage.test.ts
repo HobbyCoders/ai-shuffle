@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import SubagentMessage from './SubagentMessage.svelte';
 import type { ChatMessage } from '$lib/stores/types';
 import { openSubagentLink } from '$lib/services/session-navigation';
 
 vi.mock('$lib/services/session-navigation', () => ({ openSubagentLink: vi.fn((event: MouseEvent) => event.preventDefault()) }));
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+const stopApi = vi.hoisted(() => ({ get: vi.fn(), stop: vi.fn() }));
+vi.mock('$lib/api/sessions', () => ({ getSessionTaskStopState: stopApi.get, stopSessionTask: stopApi.stop }));
+afterEach(() => { cleanup(); vi.clearAllMocks(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const message: ChatMessage = {
  id: 'subagent-worker', role: 'assistant', type: 'subagent', content: 'Private worker result',
  toolId: 'worker', agentName: 'General Purpose', agentType: 'gpt-test', agentStatus: 'running',
@@ -53,6 +55,24 @@ describe('Subagent transcript card', () => {
   await fireEvent.click(container.querySelector('summary')!);
   expect(screen.getByText('Stopped by user')).toBeTruthy();
   expect(screen.queryByText('Private worker result')).toBeNull();
+ });
+ it.each(['completed', 'error'] as const)('exposes scoped pending-work Stop on a %s card without changing its result status', async agentStatus => {
+  vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
+  vi.stubGlobal('IntersectionObserver', class {
+   constructor(private callback: (entries: { isIntersecting: boolean }[]) => void) {}
+   observe() { this.callback([{ isIntersecting: true }]); }
+   disconnect() {}
+  });
+  stopApi.get.mockResolvedValue({ eligible: true, turn_id: 'automatic-wake' });
+  stopApi.stop.mockResolvedValue({ ok: true });
+  render(SubagentMessage, { message: { ...message, agentStatus }, parentSessionId: 'parent', canControl: true });
+  const label = agentStatus === 'completed' ? 'Completed' : 'Failed';
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Stop pending work' })).toBeTruthy());
+  expect(screen.getByRole('status').textContent).toBe(label);
+  await fireEvent.click(screen.getByRole('button', { name: 'Stop pending work' }));
+  expect(stopApi.stop).toHaveBeenCalledExactlyOnceWith('parent', 'worker-session', 'automatic-wake');
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Stop pending work' })).toBeNull());
+  expect(screen.getByRole('status').textContent).toBe(label);
  });
  it('does not invent session links from native SDK agent IDs', async () => {
   const { container } = render(SubagentMessage, { message: { ...message, agentSessionId: undefined, agentId: 'native-agent', agentStatus: 'completed' } });

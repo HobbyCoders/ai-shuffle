@@ -3,10 +3,13 @@
 	import { isSubagentRunning } from '$lib/utils/subagent-status';
 	import { openSubagentLink } from '$lib/services/session-navigation';
 	import { taskModel } from '$lib/utils/task-model';
+	import TerminalTaskStop from './chat/TerminalTaskStop.svelte';
 
-	let { message, runningToolIds }: {
+	let { message, runningToolIds, parentSessionId, canControl = false }: {
 		message: ChatMessage;
 		runningToolIds?: Set<string>;
+		parentSessionId?: string | null;
+		canControl?: boolean;
 	} = $props();
 
 	const statusInfo = $derived({
@@ -128,6 +131,10 @@
 		{/if}
 	</div>
 </details>
+
+{#if parentSessionId && message.agentSessionId && !statusInfo.isRunning && (message.agentStatus === 'completed' || message.agentStatus === 'error')}
+	<TerminalTaskStop {parentSessionId} taskId={message.agentSessionId} {canControl} />
+{/if}
 
 <style>
 	.subagent-card {

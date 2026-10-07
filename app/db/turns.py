@@ -335,6 +335,94 @@ CWD_FAILURE_KEY = "working_directory_failure"
 # request); it must not turn a platform message into permission to retry.
 CWD_OWNER_SOURCES = frozenset({"user", "queue", "resume", "api", "worktree"})
 
+# A scoped terminal-task Stop lives on its targeted turn. The session-row lock
+# serializes it with admission/claim, including an owner's newer message.
+TASK_STOP_KEY = "terminal_task_stop"
+
+
+def _task_stop(cursor, session_id: str, *, owner: bool = False) -> bool:
+    cursor.execute(
+        "SELECT * FROM turns WHERE session_id=%s "
+        "AND payload ->> 'terminal_task_stop' IS NOT NULL "
+        "ORDER BY position DESC, id DESC LIMIT 1", (session_id,),
+    )
+    row = _row(cursor.fetchone())
+    if not row or not row["payload"].get(TASK_STOP_KEY):
+        return False
+    if owner:
+        payload = {**row["payload"], TASK_STOP_KEY: False}
+        cursor.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row["id"]))
+        from app.core.task_registry import task_registry
+        task_registry.clear_user_stop(session_id)
+        return False
+    return True
+
+
+def _terminal_child_turn(cursor, parent_id: str, child_id: str):
+    # is_worker distinguishes a real Task from a fork with the same parent.
+    cursor.execute("SELECT * FROM sessions WHERE id=%s AND parent_session_id=%s AND is_worker=TRUE "
+                   "AND (api_user_id IS NULL OR api_user_id=(SELECT api_user_id FROM sessions WHERE id=%s))",
+                   (child_id, parent_id, parent_id))
+    if cursor.fetchone() is None or _task_stop(cursor, child_id):
+        return None
+    # A historical task must never gain authority over newer owner work, even
+    # after that owner's turn has finished and an automatic wake follows it.
+    cursor.execute("SELECT source FROM turns WHERE session_id=%s", (child_id,))
+    if any(r["source"] in CWD_OWNER_SOURCES for r in cursor.fetchall()):
+        return None
+    # Queue position is priority, not history: at-front retries can sit below
+    # the finished original. Prefer actual pending work over that terminal row.
+    cursor.execute("SELECT * FROM turns WHERE session_id=%s "
+                   "AND state IN ('queued','running','interrupting','draining','parked') "
+                   "ORDER BY CASE WHEN state IN ('running','interrupting','draining') THEN 0 "
+                   "WHEN state='queued' THEN 1 ELSE 2 END, position DESC, id DESC LIMIT 1", (child_id,))
+    row = _row(cursor.fetchone())
+    if row:
+        return row
+    _, failure = _cwd_failure(cursor, child_id)
+    if not (failure or {}).get("blocked"):
+        return None
+    cursor.execute("SELECT * FROM turns WHERE session_id=%s ORDER BY position DESC, id DESC LIMIT 1",
+                   (child_id,))
+    return _row(cursor.fetchone())
+
+
+def terminal_child_stop_state(parent_id: str, child_id: str) -> Dict[str, Any]:
+    """Fresh Stop eligibility, not a claim that a completed task is running."""
+    with get_db() as conn:
+        row = _terminal_child_turn(conn.cursor(), parent_id, child_id)
+    return {"eligible": True, "turn_id": row["id"]} if row else {"eligible": False}
+
+
+def stop_terminal_child(parent_id: str, child_id: str, expected_turn_id: str) -> Optional[Dict[str, Any]]:
+    """Stop only the observed automatic continuation; preserve its task report."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (child_id,))
+        row = _terminal_child_turn(cursor, parent_id, child_id)
+        if row is None or row["id"] != expected_turn_id:
+            return None
+        payload = {**row["payload"], TASK_STOP_KEY: True, "interrupt_source": "user_stop"}
+        cursor.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row["id"]))
+        cursor.execute(
+            "UPDATE turns SET state='aborted', stop_reason='interrupt', ended_at=NOW() "
+            "WHERE session_id=%s AND state IN ('queued','parked') RETURNING id", (child_id,),
+        )
+        row["aborted_turn_ids"] = [r["id"] for r in cursor.fetchall()]
+        cursor.execute(
+            "UPDATE turns SET state=CASE WHEN state='running' THEN 'interrupting' ELSE state END, "
+            "interrupt_mode='stop' "
+            "WHERE session_id=%s AND state IN ('running','interrupting','draining') RETURNING *", (child_id,),
+        )
+        live = _row(cursor.fetchone())
+        row["live_turn_id"] = live["id"] if live else None
+        if live:
+            cursor.execute("UPDATE turns SET payload=%s WHERE id=%s",
+                           (json.dumps({**live["payload"], "interrupt_source": "user_stop"}), live["id"]))
+        from app.core.task_registry import task_registry
+        task_registry.mark_user_stopped(child_id)
+    return row
+
 
 def _cwd_failure(cursor, session_id: str):
     cursor.execute(
@@ -463,7 +551,8 @@ def enqueue_turn(
         # Serialize admission with the pre-model filesystem breaker. Queued
         # automatic turns remain durable but cannot claim a live slot while held.
         cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
-        if _cwd_blocked(cursor, session_id, owner=source in CWD_OWNER_SOURCES):
+        if (_task_stop(cursor, session_id, owner=source in CWD_OWNER_SOURCES)
+                or _cwd_blocked(cursor, session_id, owner=source in CWD_OWNER_SOURCES)):
             return {"id": None, "session_id": session_id, "source": source}
         # All producers reach this boundary, including scheduler retries/unpark
         # and atomic AskUser answers that bypass turn_manager. Snapshot the
@@ -667,7 +756,8 @@ def start_turn(
             cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (candidate["session_id"],))
             # An old queued owner row is not a NEW explicit resume. Only enqueue
             # can lift the breaker on the owner's authority.
-            if _cwd_blocked(cursor, candidate["session_id"]):
+            if (_task_stop(cursor, candidate["session_id"])
+                    or _cwd_blocked(cursor, candidate["session_id"])):
                 return None
             cursor.execute(
                 "UPDATE turns SET state='running', run_id=%s, instance_id=%s, "

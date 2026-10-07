@@ -912,6 +912,46 @@ async def test_557_durable_latch_and_rearm_on_user_turn(mock_db):
 # (4) UNPARK — synth prompt + context inheritance
 # ---------------------------------------------------------------------------
 
+async def test_terminal_child_stop_consumes_real_scheduler_unpark_and_blocks_late_terminal(mock_db):
+    from app.core.config import settings
+    from app.core.query_session_lifecycle import stop_session_task, terminal_task_stop_state
+    from app.db import database
+
+    database.register_install(settings.effective_instance_id, "test", None, "local", "1", {}, approve_new=True)
+    database.create_session(session_id="stop-parent", profile_id="default")
+    database.create_session(session_id="stop-child", profile_id="default", parent_session_id="stop-parent", is_worker=True)
+    original = turns_db.enqueue_turn("stop-child", "provider_agent", prompt="original work")
+    assert turns_db.start_turn(original["id"])
+    assert turns_db.park_turn(original["id"], ["sibling"])
+    task_registry.start_task("stop-parent", "stop-child", "agent", "completed child", tool_use_id="stop-child")
+    task_registry.complete_task("stop-parent", "stop-child", "completed", summary="Keep this report")
+    task_registry.start_task("stop-child", "sibling", "agent", "sibling", tool_use_id="sibling")
+    task_registry.mark_background_launch("stop-child", "sibling")
+    frame = {"task_id": "sibling", "tool_use_id": "sibling", "status": "completed", "summary": "done"}
+    with patch.object(turn_scheduler, "_kick_after_batch_window"), patch(
+        "app.core.query_engine._read_task_output_file", return_value="",
+    ):
+        await turn_scheduler.on_task_terminal("stop-child", frame)
+        [wake] = turns_db.get_queued_turns("stop-child")
+        state = await terminal_task_stop_state("stop-parent", "stop-child")
+        assert state == {"eligible": True, "turn_id": wake["id"]}
+        assert (await stop_session_task("stop-parent", "stop-child", expected_turn_id=state["turn_id"]))["ok"]
+        assert task_registry.get_task("stop-parent", "stop-child")["summary"] == "Keep this report"
+        assert turns_db.get_queued_turns("stop-child") == []
+        assert turns_db.get_turn(wake["id"])["state"] == "aborted"
+        assert turns_db.get_turn(original["id"])["state"] == "aborted"
+        # After restart the real terminal-notification producer reaches DB
+        # admission, where the durable scoped Stop still refuses new work.
+        task_registry.reset_all()
+        task_registry.start_task("stop-child", "late", "agent", "late", tool_use_id="late")
+        task_registry.mark_background_launch("stop-child", "late")
+        await turn_scheduler.on_task_terminal("stop-child", {
+            "task_id": "late", "tool_use_id": "late", "status": "completed", "summary": "late",
+        })
+        assert turns_db.get_queued_turns("stop-child") == []
+    assert turns_db.enqueue_turn("stop-child", "user", prompt="resume")["id"]
+
+
 async def test_unpark_synthesizes_notification_turn(mock_db):
     parked = turns_db.enqueue_turn(
         "u1", "user", prompt="kick off bg work",

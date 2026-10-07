@@ -68,6 +68,84 @@ def assert_stopped_on_target(a, b, child):
 
 # --- every stop path ------------------------------------------------------------
 
+def test_terminal_task_stop_uses_signed_owner_state_and_preserves_report(workers, monkeypatch, kicks):
+    from app.core.query_session_lifecycle import terminal_task_stop_state
+    a, b, router = network(workers, monkeypatch)
+    child = started_child(a, b)
+    with a.active():
+        finish_child(child)
+        assert asyncio.run(remote_task.sweep()) == 1
+        report = remote_tasks.get_child(child)["report"]
+        continuation = turns.enqueue_turn(child, "unpark", prompt="sibling finished")
+    with b.active():
+        before = task_registry.get_task("caller", child)
+        assert before["status"] == "completed"
+        state = asyncio.run(terminal_task_stop_state("caller", child))
+        assert state == {"eligible": True, "turn_id": continuation["id"]}
+        result = asyncio.run(stop_session_task("caller", child, expected_turn_id=state["turn_id"]))
+        assert result["ok"]
+        assert task_registry.get_task("caller", child) == before
+    assert ("POST", "/api/v1/network/peer/control/terminal-task-stop-state") in router.requests(UNRAID_URL)
+    assert ("POST", "/api/v1/network/peer/control/terminal-task-stop") in router.requests(UNRAID_URL)
+    with a.active():
+        assert turns.get_turn(continuation["id"])["state"] == "aborted"
+        assert task_registry.is_user_stopped(child)
+        assert remote_tasks.get_child(child)["report"] == report
+        assert turns.enqueue_turn(child, "unpark")["id"] is None
+        owner = turns.enqueue_turn(child, "user", prompt="new owner work")
+        assert owner["id"] and not task_registry.is_user_stopped(child)
+    with b.active():
+        assert not asyncio.run(terminal_task_stop_state("caller", child))["eligible"]
+        assert not asyncio.run(stop_session_task("caller", child, expected_turn_id=state["turn_id"]))["ok"]
+    with a.active():
+        assert turns.get_turn(owner["id"])["state"] == "queued"
+
+
+def test_signed_terminal_stop_refuses_wrong_parent_and_foreign_worker(workers, monkeypatch, kicks):
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    with a.active():
+        finish_child(child)
+        asyncio.run(remote_task.sweep())
+        wake = turns.enqueue_turn(child, "unpark")
+    with b.active():
+        result = asyncio.run(control.call(a.device_id, "terminal-task-stop", {
+            "session_id": "other", "task_id": child, "expected_turn_id": wake["id"],
+        }))
+        assert not result["ok"]
+    c = workers("foreign")
+    join(a, c, name="Foreign")
+    with a.active():
+        store_child = remote_tasks.get_child(child)
+        assert store_child["parent_device_id"] == b.device_id
+        with pytest.raises(PermissionError, match="Only the worker"):
+            asyncio.run(control._terminal_task_stop_state({"session_id": "caller", "task_id": child}, c.device_id))
+        assert turns.get_turn(wake["id"])["state"] == "queued"
+        assert not task_registry.is_user_stopped(child)
+
+
+def test_routed_no_live_session_stop_latches_but_stale_turn_stop_does_not(workers, monkeypatch, kicks):
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    with a.active():
+        finish_child(child)
+        asyncio.run(remote_task.sweep())
+        wake = turns.enqueue_turn(child, "unpark")
+    with b.active():
+        stale = asyncio.run(control.interrupt(a.device_id, child, "stop", stop_background=True,
+                                              turn_id="old-turn"))
+        assert not stale["interrupted"]
+    with a.active():
+        assert not task_registry.is_user_stopped(child)
+        assert turns.get_turn(wake["id"])["state"] == "queued"
+    with b.active():
+        result = asyncio.run(control.interrupt(a.device_id, child, "stop", stop_background=True))
+        assert result == {"interrupted": True, "turn_id": None}
+    with a.active():
+        assert task_registry.is_user_stopped(child)
+        assert turns.get_turn(wake["id"])["state"] == "aborted"
+
+
 def test_the_single_task_stop_reaches_the_child_on_its_worker(workers, monkeypatch, kicks):
     a, b, router = network(workers, monkeypatch)
     child = started_child(a, b)
