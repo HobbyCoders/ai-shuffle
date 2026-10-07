@@ -84,6 +84,9 @@
 	// spinner on the core interaction would be a regression. See
 	// `deck/lazy/panels.ts` for the registry and the prefetch entry points.
 	import LazyPanel from '$lib/components/deck/lazy/LazyPanel.svelte';
+	import { terminals } from '$lib/stores/terminals.svelte';
+	import { terminalAccess } from '$lib/terminal/gating';
+	import type { TerminalToggle } from '$lib/components/chat/composer-shell';
 	import { preloadWhenIdle, runWhenIdle } from '$lib/components/deck/lazy/lazy-component';
 	import {
 		featurePanelKeyForView,
@@ -91,6 +94,7 @@
 		IDLE_PRELOAD_ORDER,
 		BrowserSidePanel,
 		ChangedFilesPanelLazy,
+		TerminalSidePanel,
 		InitRepoModalLazy,
 		type FeaturePanelKey
 	} from '$lib/components/deck/lazy/panels';
@@ -346,6 +350,30 @@
 	const panelScope = $derived(activeTab?.sessionId ? sessionPanelKey(activeTab.sessionId)
 		: activeProject ? `draft:${JSON.stringify([activeProject, selectedWorkerTarget, activeWorktreeId])}` : null);
 	const activeSidePanel = $derived(sidePanel.forScope(panelScope));
+
+	// The composer's Terminal toggle (#1945). The worker's probe is the only
+	// gate: a viewer it refuses never sees the button.
+	const terminalSessionId = $derived($activeView?.type === 'session' ? activeTab?.sessionId ?? null : null);
+	$effect(() => {
+		const sid = terminalSessionId;
+		untrack(() => {
+			if (sid) void terminals.ensureProbe(sid);
+			else void terminals.ensureCapability();
+		});
+	});
+	const terminalToggle = $derived.by((): TerminalToggle | undefined => {
+		const sid = terminalSessionId;
+		if (!sid) return undefined;
+		const probe = terminals.probeFor(sid);
+		const access = terminalAccess(probe.status === 'idle' || probe.status === 'loading' ? terminals.capability : probe);
+		if (access.kind === 'hidden') return undefined;
+		return {
+			open: activeSidePanel.active === 'terminal',
+			disabledReason: access.kind === 'disabled' ? access.reason : null,
+			toggle: () => terminals.toggle(sid),
+			preload: () => void TerminalSidePanel.preload(),
+		};
+	});
 	/** The chat column's width: the notification dock centres on it, not on the side panel. */
 	let chatColumnWidth = $state(0);
 	// Session-scoped Git requests are executed by the owning worker.
@@ -1007,6 +1035,7 @@
 							: undefined}
 						onBrowserPreload={() => BrowserSidePanel.preload()}
 						browserOpen={sessionBrowser.open}
+						terminal={terminalToggle}
 					/>
 					</div>
 				</div>
@@ -1070,6 +1099,8 @@
 				{#key `${panelScope}:${activeSidePanel.active}`}
 					{#if activeSidePanel.active === 'browser' && activeTab?.sessionId}
 						<LazyPanel handle={BrowserSidePanel} props={{ sessionId: activeTab.sessionId, embedded: true, panelActions }} label="the live browser" fallbackActions={panelActions} />
+					{:else if activeSidePanel.active === 'terminal' && activeTab?.sessionId}
+						<LazyPanel handle={TerminalSidePanel} props={{ sessionId: activeTab.sessionId, panelActions, mobile: panelOverlay }} label="the terminal" fallbackActions={panelActions} />
 					{:else if activeSidePanel.active === 'changes' && activeProject}
 						<LazyPanel handle={ChangedFilesPanelLazy} label="changed files" fallbackActions={panelActions}
 							props={{ projectId: activeProject, open: true, reviewMode: true, embedded: true,

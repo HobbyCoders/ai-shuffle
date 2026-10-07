@@ -36,6 +36,9 @@
 <svelte:window onkeydown={(e) => {
 	// Changes owns Escape so its confirmation dialog gets the first dismissal.
 	if (active === 'browser' && e.key === 'Escape' && !e.defaultPrevented) onClose();
+	// Inside a terminal, Esc belongs to the shell (vim, less, readline).
+	else if (active === 'terminal' && e.key === 'Escape' && !e.defaultPrevented
+		&& !(e.target instanceof Element && e.target.closest('.xterm, .tpanel input, .tpanel [role="alertdialog"]'))) onClose();
 }} />
 
 <aside bind:this={element} class="side-panel" class:expanded class:mobile class:resizing

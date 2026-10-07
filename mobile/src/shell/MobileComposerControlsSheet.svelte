@@ -33,7 +33,7 @@
 	import { page } from '$app/state';
 	import {
 		Activity, ArrowLeft, Check, ChevronDown, ChevronRight, Cpu, Download, FilePen, Globe,
-		Hand, LoaderCircle, Lock, Moon, ShieldOff, SlidersHorizontal, Sparkles, Zap
+		Hand, LoaderCircle, Lock, Moon, ShieldOff, SlidersHorizontal, Sparkles, SquareTerminal, Zap
 	} from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { notify } from '$lib/stores/notifications';
@@ -58,7 +58,7 @@
 		fastSupported = false, fastEnabled = false, onToggleFast, showCodeControls = true,
 		showSetup = true, permissionOptions, permissionValue, permissionUpdating = false, onPermissionSelect,
 		awayEnabled = false, awayAvailable = false, awayBusy = false, onToggleAway,
-		assistantMode = false, onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload
+		assistantMode = false, onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
 	}: Props = $props();
 
 	type Picker = 'effort' | 'access';
@@ -479,6 +479,11 @@
 		closePanel();
 		onBrowserToggle?.();
 	}
+
+	function toggleTerminal() {
+		closePanel();
+		terminal?.toggle();
+	}
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
@@ -793,6 +798,12 @@
 					{#if onBrowserToggle}
 						<button type="button" class="act" aria-pressed={browserOpen} onpointerenter={onBrowserPreload} onfocus={onBrowserPreload} onclick={toggleBrowser} aria-label="Live browser view">
 							<Globe size={20} aria-hidden="true" /><span class="act-label">Browser</span>
+						</button>
+					{/if}
+					{#if terminal && !assistantMode}
+						<button type="button" class="act" aria-pressed={terminal.open} onpointerenter={terminal.preload} onfocus={terminal.preload}
+							onclick={toggleTerminal} aria-label="Terminal" title={terminal.disabledReason ?? undefined}>
+							<SquareTerminal size={20} aria-hidden="true" /><span class="act-label">Terminal</span>
 						</button>
 					{/if}
 					{#if !assistantMode}

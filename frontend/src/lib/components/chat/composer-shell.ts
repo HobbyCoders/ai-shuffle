@@ -140,6 +140,20 @@ export interface ComposerSheetProps {
 	browserOpen?: boolean;
 	onBrowserToggle?: () => void;
 	onBrowserPreload?: () => void;
+	/** The in-app terminal toggle; absent when this viewer can't open terminals. */
+	terminal?: TerminalToggle;
+}
+
+/**
+ * The composer's Terminal toggle (#1945). Present only when the worker
+ * answered the terminal probe for this viewer; `disabledReason` explains a
+ * worker that can't run one here (the panel shows the same reason).
+ */
+export interface TerminalToggle {
+	open: boolean;
+	disabledReason: string | null;
+	toggle: () => void;
+	preload: () => void;
 }
 
 // ─── Prompt dock ────────────────────────────────────────────────────────────

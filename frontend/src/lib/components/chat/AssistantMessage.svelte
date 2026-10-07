@@ -3,7 +3,7 @@
 	/**
 	 * AssistantMessage - Assistant message with markdown rendering and hover-only action buttons
 	 */
-	import { onDestroy } from 'svelte';
+	import { onDestroy, untrack } from 'svelte';
 	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { rewriteMediaMarkdown, clampRevealToMediaBoundary, retryImages } from '$lib/utils/media';
@@ -17,6 +17,9 @@
 	import UsageEstimatedBadge from '$lib/components/UsageEstimatedBadge.svelte';
 	import { formatMessageTime } from '$lib/utils/message-time';
 	import { taskChecks, taskMessageKey, type TaskChecks } from '$lib/stores/task-checks';
+	import { terminals } from '$lib/stores/terminals.svelte';
+	import { lookupCommandBlock } from '$lib/terminal/commands';
+	import { blockAccess, blockTarget, cwdProblem, folderPieces, printableFolder, targetLine, type BlockTarget } from '$lib/terminal/gating';
 
 	interface Props {
 		content: string;
@@ -204,6 +207,121 @@
 		});
 	});
 
+	// Shell blocks in a settled reply get Open terminal and Open and paste
+	// (#1945). The command comes from the registry by the block's id, never
+	// from the page, and the buttons only appear for a viewer the worker
+	// lets open terminals. Nothing runs until the owner presses Enter.
+	const RUN_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2"/></svg>';
+	const PASTE_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 2H9a1 1 0 0 0-1 1v2c0 .6.4 1 1 1h6c.6 0 1-.4 1-1V3c0-.6-.4-1-1-1Z"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2M16 4h2a2 2 0 0 1 2 2v2M11 14h10"/><path d="m17 10 4 4-4 4"/></svg>';
+
+	function runButton(act: 'open' | 'paste', reason: string | null, target: string): HTMLButtonElement {
+		const button = document.createElement('button');
+		button.type = 'button';
+		button.className = 'code-run-btn';
+		button.dataset.act = act;
+		const label = act === 'open' ? 'Open terminal' : 'Open and paste';
+		button.innerHTML = (act === 'open' ? RUN_ICON : PASTE_ICON) + `<span class="cb-run-label"></span>`;
+		(button.lastElementChild as HTMLElement).textContent = label;
+		button.setAttribute('aria-label', label);
+		if (reason) {
+			button.setAttribute('aria-disabled', 'true');
+			button.title = reason;
+		} else {
+			button.title = act === 'open'
+				? `Open a terminal here${target ? ` (${target})` : ''}`
+				: `Type this command at the prompt${target ? ` (${target})` : ''}. It runs only when you press Enter.`;
+		}
+		return button;
+	}
+
+	$effect(() => {
+		void rendered; // {@html} replaced the blocks; re-decorate
+		const root = proseEl;
+		const sid = sessionId;
+		if (!root || streaming || !sid) return;
+		const blocks = Array.from(root.querySelectorAll<HTMLElement>('.codeblock[data-cb-id]'));
+		if (!blocks.length) return;
+		const probe = terminals.probeFor(sid);
+		if (probe.status === 'idle') untrack(() => void terminals.ensureProbe(sid));
+		for (const node of blocks) {
+			const head = node.querySelector('.codehead');
+			const copy = head?.querySelector('.code-copy-btn');
+			head?.querySelectorAll('.code-run-btn, .cb-target').forEach((el) => el.remove());
+			node.querySelectorAll(':scope > .cb-where').forEach((el) => el.remove());
+			const block = lookupCommandBlock(node.dataset.cbId);
+			if (!head || !copy || !block) continue;
+			const access = blockAccess(block, probe);
+			if (access.kind === 'hidden') continue;
+			const reason = access.kind === 'disabled' ? access.reason : null;
+			const target = targetLine(block, probe);
+			const where = blockTarget(block, probe);
+			const folderRefused = block.cwd ? cwdProblem(block.cwd) : null;
+			if (folderRefused) {
+				// Never echo a refused folder: its characters may display as
+				// something else. Say why the buttons are off instead.
+				head.after(whereRow(null, folderRefused));
+			} else if (where?.fromFence && !reason) {
+				head.after(whereRow(where, null));
+			} else if (where && !reason) {
+				head.insertBefore(targetStrip(where), copy);
+			}
+			head.insertBefore(runButton('open', reason, target), copy);
+			head.insertBefore(runButton('paste', reason, target), copy);
+		}
+	});
+
+	function span(className: string, text: string): HTMLSpanElement {
+		const el = document.createElement('span');
+		el.className = className;
+		el.textContent = text;
+		return el;
+	}
+
+	/** "Unraid · app · bash" in the head. The folder shrinks first, so the worker stays whole. */
+	function targetStrip(where: BlockTarget): HTMLSpanElement {
+		const strip = span('cb-target', '');
+		strip.title = [where.worker, where.path, where.shell].filter(Boolean).join(' · ');
+		strip.append(span('cb-t-worker', where.worker));
+		if (where.folder) strip.append(span('cb-t-sep', ' · '), span('cb-t-folder', where.folder));
+		if (where.shell) strip.append(span('cb-t-sep', ' · '), span('cb-t-shell', where.shell));
+		return strip;
+	}
+
+	/**
+	 * A folder the fence asked for gets its own row on every screen size: the
+	 * whole path, wrapped and never cut, the worker and shell, and a flag when
+	 * it is not this chat's folder or has characters that need a second look
+	 * (those show as code points). Or, for a refused folder, the reason.
+	 */
+	function whereRow(where: BlockTarget | null, refused: string | null): HTMLDivElement {
+		const row = document.createElement('div');
+		row.className = 'cb-where';
+		if (refused || !where) {
+			row.classList.add('refused');
+			row.setAttribute('role', 'note');
+			row.append(span('cb-where-flag', "Can't open"), span('cb-where-reason', refused ?? ''));
+			return row;
+		}
+		if (where.outside) row.classList.add('outside');
+		if (where.unusual) row.classList.add('unusual');
+		row.append(span('cb-where-label', 'Opens in'));
+		const path = span('cb-where-path', '');
+		path.title = printableFolder(where.path);
+		for (const piece of folderPieces(where.path)) {
+			if (piece.kind === 'text') {
+				path.append(piece.text);
+				continue;
+			}
+			const chip = span('cb-where-cp', piece.code);
+			chip.title = `Character ${piece.code}`;
+			path.append(chip);
+		}
+		row.append(path, span('cb-where-meta', [where.worker, where.shell].filter(Boolean).join(' · ')));
+		if (where.unusual) row.append(span('cb-where-flag', 'Unusual characters in this folder name'));
+		if (where.outside) row.append(span('cb-where-flag', "Outside this chat's folder"));
+		return row;
+	}
+
 	function handleTaskChange(e: Event) {
 		const box = e.target as HTMLInputElement | null;
 		if (!taskKey || box?.type !== 'checkbox') return;
@@ -353,6 +471,15 @@
 
 	async function handleProseClick(e: MouseEvent) {
 		const target = e.target as HTMLElement | null;
+		const run = target?.closest?.('.code-run-btn') as HTMLElement | null;
+		if (run) {
+			e.preventDefault();
+			e.stopPropagation();
+			if (run.getAttribute('aria-disabled') === 'true' || !sessionId) return;
+			const block = lookupCommandBlock(run.closest<HTMLElement>('.codeblock')?.dataset.cbId);
+			if (block) terminals.request(sessionId, run.dataset.act === 'paste' ? 'paste' : 'open', block, run);
+			return;
+		}
 		const btn = target?.closest?.('.code-copy-btn') as HTMLElement | null;
 		if (!btn) return;
 		e.preventDefault();
@@ -778,6 +905,153 @@
 	.abody :global(.code-copy-btn:hover) {
 		background: var(--accent);
 		color: var(--foreground);
+	}
+
+	/* Terminal buttons on shell blocks (#1945): text chips before Copy. */
+	.abody :global(.codehead .cb-target) {
+		display: inline-flex;
+		font-family: var(--font-mono);
+		font-size: 10.5px;
+		color: var(--subtle-foreground);
+		white-space: nowrap;
+		min-width: 0;
+		max-width: 40ch;
+		flex: 0 1 auto;
+	}
+
+	/* The worker and shell stay whole; only the folder name gives way. */
+	.abody :global(.cb-target .cb-t-worker),
+	.abody :global(.cb-target .cb-t-shell),
+	.abody :global(.cb-target .cb-t-sep) {
+		flex: none;
+		white-space: pre;
+	}
+
+	.abody :global(.cb-target .cb-t-folder) {
+		min-width: 2ch;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	/* A folder named by the fence: its own row, full path, every screen size. */
+	.abody :global(.cb-where) {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: 2px 8px;
+		padding: 5px 11px;
+		border-bottom: 1px solid var(--border);
+		background: color-mix(in oklch, var(--muted) 25%, transparent);
+		font: 11px/1.45 var(--font-mono);
+		color: var(--muted-foreground);
+	}
+
+	.abody :global(.cb-where-label) {
+		font-family: var(--font-sans);
+		color: var(--subtle-foreground);
+	}
+
+	.abody :global(.cb-where-path) {
+		color: var(--foreground);
+		overflow-wrap: anywhere;
+	}
+
+	/* A character that could hide or pass for ASCII, shown as its code point. */
+	.abody :global(.cb-where-cp) {
+		display: inline-block;
+		margin: 0 1px;
+		padding: 0 3px;
+		border: 1px solid color-mix(in oklch, var(--warning) 55%, transparent);
+		border-radius: 3px;
+		background: color-mix(in oklch, var(--warning) 14%, transparent);
+		color: var(--warning);
+		font-size: 10px;
+		line-height: 1.35;
+		vertical-align: 1px;
+	}
+
+	.abody :global(.cb-where-meta) {
+		color: var(--subtle-foreground);
+	}
+
+	.abody :global(.cb-where-flag) {
+		margin-left: auto;
+		padding: 0 6px;
+		border: 1px solid color-mix(in oklch, var(--warning) 45%, transparent);
+		border-radius: 4px;
+		background: color-mix(in oklch, var(--warning) 12%, transparent);
+		color: var(--warning);
+		font: 600 10.5px/1.6 var(--font-sans);
+		white-space: nowrap;
+	}
+
+	.abody :global(.cb-where.outside),
+	.abody :global(.cb-where.unusual) {
+		background: color-mix(in oklch, var(--warning) 7%, transparent);
+		box-shadow: inset 2px 0 0 var(--warning);
+	}
+
+	.abody :global(.cb-where.refused) {
+		font-family: var(--font-sans);
+		box-shadow: inset 2px 0 0 var(--warning);
+	}
+
+	.abody :global(.cb-where-flag + .cb-where-flag),
+	.abody :global(.cb-where.refused .cb-where-flag) {
+		margin-left: 0;
+	}
+
+	.abody :global(.cb-where-reason) {
+		color: var(--foreground);
+	}
+
+	.abody :global(.code-run-btn) {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		height: 24px;
+		padding: 0 8px;
+		flex: none;
+		border: 1px solid var(--border);
+		border-radius: 6px;
+		background: transparent;
+		color: var(--muted-foreground);
+		font: 500 11.5px var(--font-sans);
+		cursor: pointer;
+		transition: background-color 0.13s ease, color 0.13s ease, border-color 0.13s ease;
+	}
+
+	.abody :global(.code-run-btn:hover:not([aria-disabled='true'])) {
+		border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
+		background: color-mix(in oklch, var(--primary) 10%, transparent);
+		color: var(--foreground);
+	}
+
+	.abody :global(.code-run-btn:active:not([aria-disabled='true'])) {
+		transform: translateY(1px);
+	}
+
+	.abody :global(.code-run-btn:focus-visible),
+	.abody :global(.code-copy-btn:focus-visible) {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+
+	.abody :global(.code-run-btn[aria-disabled='true']) {
+		opacity: 0.45;
+		cursor: not-allowed;
+	}
+
+	.abody :global(.code-run-btn svg) {
+		color: var(--primary);
+		flex: none;
+	}
+
+	@media (max-width: 700px) {
+		.abody :global(.codehead .cb-target) { display: none; }
+		.abody :global(.code-run-btn) { height: 32px; padding: 0 9px; }
+		.abody :global(.code-run-btn[data-act='open'] .cb-run-label) { display: none; }
+		.abody :global(.code-copy-btn) { width: 32px; height: 32px; }
 	}
 
 	.abody :global(.code-copy-btn .cb-check) {

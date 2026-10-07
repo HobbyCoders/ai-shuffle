@@ -52,6 +52,10 @@ export const DocsPanel = createLazyComponent(
 export const BrowserSidePanel = createLazyComponent('browser-panel', () =>
 	import('$lib/components/browser/BrowserPanel.svelte')
 );
+/** The in-app terminal (#1945). xterm.js and its addons only load with it. */
+export const TerminalSidePanel = createLazyComponent('terminal-panel', () =>
+	import('$lib/components/terminal/TerminalPanel.svelte')
+);
 export const ChangedFilesPanelLazy = createLazyComponent('changed-files', () =>
 	import('$lib/components/git/ChangedFilesPanel.svelte')
 );

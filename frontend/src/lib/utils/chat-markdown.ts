@@ -14,6 +14,7 @@
 import { Marked, type Tokens } from 'marked';
 import { highlightToInnerHtml, resolveShikiLang } from './shiki';
 import { escapeHtml } from './escape-html';
+import { commandBlock, registerCommandBlock } from '$lib/terminal/commands';
 
 /** Parsed fence info string: ```ts title="src/a.ts" / ```ts:src/a.ts / ```ts src/a.ts */
 export interface FenceMeta {
@@ -85,6 +86,10 @@ const CHECK_ICON =
  */
 export function renderCodeBlock(code: string, info: string | undefined, highlight: boolean): string {
 	const { lang, filename } = parseFenceMeta(info);
+	// Shell blocks get terminal buttons once settled (`highlight`): the
+	// streaming tail re-renders on every delta and its fence is not final.
+	const runnable = highlight ? commandBlock(code, info, lang) : null;
+	const blockId = runnable ? registerCommandBlock(runnable, (info ?? '').trim()) : '';
 	const shikiLang = resolveShikiLang(lang);
 	const inner = highlight ? highlightToInnerHtml(code, shikiLang) : null;
 	const body = inner ?? escapeHtml(code);
@@ -101,7 +106,9 @@ export function renderCodeBlock(code: string, info: string | undefined, highligh
 		'</div>';
 
 	return (
-		`<div class="codeblock" data-language="${escapeHtml(lang || 'text')}">` +
+		`<div class="codeblock" data-language="${escapeHtml(lang || 'text')}"` +
+		(blockId ? ` data-cb-id="${blockId}"` : '') +
+		'>' +
 		head +
 		`<pre class="cb-pre"><code>${body}</code></pre>` +
 		'</div>'

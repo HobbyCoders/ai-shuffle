@@ -323,6 +323,22 @@ describe('Chat controls panel', () => {
 		await fireEvent.click(within(actions).getByRole('button', { name: 'Live browser view' }));
 		expect(onBrowserToggle).toHaveBeenCalledOnce();
 	});
+
+	it('shows a Terminal cell only when the worker offers terminals, and it closes the sheet', async () => {
+		const { unmount } = render(MobileComposerControlsSheet, { props: props({ open: true }) });
+		expect(within(panel()).queryByRole('button', { name: 'Terminal' })).toBeNull();
+		unmount();
+		const toggle = vi.fn();
+		const onOpenChange = vi.fn();
+		render(MobileComposerControlsSheet, { props: props({ open: true, onOpenChange,
+			terminal: { open: false, disabledReason: 'That chat runs on DesktopWorker.', toggle, preload: vi.fn() } }) });
+		const button = within(panel()).getByRole('button', { name: 'Terminal' });
+		expect(button.getAttribute('aria-pressed')).toBe('false');
+		expect(button.getAttribute('title')).toBe('That chat runs on DesktopWorker.');
+		await fireEvent.click(button);
+		expect(toggle).toHaveBeenCalledOnce();
+		expect(onOpenChange).toHaveBeenLastCalledWith(false);
+	});
 });
 
 describe('assistant\'s chat', () => {

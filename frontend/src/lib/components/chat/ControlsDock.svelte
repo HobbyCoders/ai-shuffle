@@ -45,7 +45,8 @@
 	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
 	import { composerShell } from './composer-shell';
-	import { Globe, Plus, SlidersHorizontal, Lock } from 'lucide-svelte';
+	import { Globe, Plus, SlidersHorizontal, Lock, SquareTerminal } from 'lucide-svelte';
+	import type { TerminalToggle } from './composer-shell';
 	import {
 		getModelLabel,
 		getDefaultModel,
@@ -76,6 +77,8 @@
 		onBrowserToggle?: () => void;
 		onBrowserPreload?: () => void;
 		browserOpen?: boolean;
+		/** The in-app terminal toggle (#1945); absent when this viewer can't open one. */
+		terminal?: TerminalToggle;
 		/** Keeps the mobile editor expanded while its integrated panel is open. */
 		onSheetOpenChange?: (open: boolean) => void;
 		/** Collapsed / expanding-tap: dock stays in the tree but cannot receive the expand click. */
@@ -89,7 +92,7 @@
 		callAction?: Snippet;
 	}
 
-	let { isUploading, onAttachClick, voiceActions, callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, assistantMode = false }: Props = $props();
+	let { isUploading, onAttachClick, voiceActions, callAction, onSheetOpenChange, inertToolbar = false, onBrowserToggle, onBrowserPreload, browserOpen = false, terminal, assistantMode = false }: Props = $props();
 
 	// ── Desktop popovers ──────────────────────────────────────────────
 	// Three anchored popovers, one open at a time: the permission menu, the
@@ -577,6 +580,23 @@
 			</button>
 		{/if}
 
+		{#if terminal && !assistantMode}
+			<button
+				type="button"
+				class="dock-ico terminal-toggle-btn"
+				class:active={terminal.open}
+				class:muted={!!terminal.disabledReason}
+				onclick={terminal.toggle}
+				onpointerenter={terminal.preload}
+				onfocus={terminal.preload}
+				aria-label="Toggle terminal"
+				title={terminal.disabledReason ?? 'Toggle terminal'}
+				aria-pressed={terminal.open}
+			>
+				<SquareTerminal size={14} strokeWidth={1.8} aria-hidden="true" />
+			</button>
+		{/if}
+
 		<!-- Attach stays in the primary action cluster on every viewport, in the
 		     code and chat lanes both. A code-lane upload lands in the project's
 		     or worktree's uploads dir; a chat-lane one lands in the workspace's
@@ -744,6 +764,7 @@
 	{browserOpen}
 	onBrowserToggle={assistantMode ? undefined : onBrowserToggle}
 	{onBrowserPreload}
+	terminal={assistantMode ? undefined : terminal}
 />
 {/if}
 
@@ -847,7 +868,12 @@
 		color: var(--foreground);
 	}
 
-	.dock-ico.browser-toggle-btn.active {
+	.dock-ico.terminal-toggle-btn.muted:not(.active) {
+		opacity: 0.55;
+	}
+
+	.dock-ico.browser-toggle-btn.active,
+	.dock-ico.terminal-toggle-btn.active {
 		background: color-mix(in oklch, var(--primary) 12%, transparent);
 		color: var(--primary);
 	}

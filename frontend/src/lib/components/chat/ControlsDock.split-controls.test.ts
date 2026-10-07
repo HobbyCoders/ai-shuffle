@@ -271,6 +271,23 @@ describe('ControlsDock split controls', () => {
 		expect(browser.classList.contains('active')).toBe(true);
 	});
 
+	it('shows the terminal toggle only with a terminal, and explains a disabled one', async () => {
+		const { unmount } = renderDock({});
+		expect(screen.queryByRole('button', { name: 'Toggle terminal' })).toBeNull();
+		unmount();
+		const toggle = vi.fn();
+		const preload = vi.fn();
+		renderDock({ terminal: { open: true, disabledReason: 'That chat runs on DesktopWorker.', toggle, preload } });
+		const button = screen.getByRole('button', { name: 'Toggle terminal' });
+		expect(button.getAttribute('aria-pressed')).toBe('true');
+		expect(button.classList.contains('active')).toBe(true);
+		expect(button.getAttribute('title')).toBe('That chat runs on DesktopWorker.');
+		await fireEvent.pointerEnter(button);
+		expect(preload).toHaveBeenCalledOnce();
+		await fireEvent.click(button);
+		expect(toggle).toHaveBeenCalledOnce();
+	});
+
 	it('splits the old summary chip into permission, model and effort controls', () => {
 		const { container } = renderDock();
 
