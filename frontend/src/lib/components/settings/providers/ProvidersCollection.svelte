@@ -65,6 +65,13 @@
 		return null;
 	});
 
+	// Back can replay a setup draft that Save removed, or a credential that
+	// was deleted. A settled missing target must show the phone list, not an
+	// empty detail with no Back control. Keep pending loads selected.
+	$effect(() => {
+		if (selected && !target && !loading) settingsNav.clearSelection('providers');
+	});
+
 	onMount(() => {
 		void providers.refreshAll();
 		// Subscription rows name their plan; the stored snapshot has the freshest one.

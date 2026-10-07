@@ -113,6 +113,17 @@
 	let deployError = $state('');
 	let deployOpen = $state(false);
 	let deployLoading = $state(false);
+	// Being behind (even with an idle update check) does not prove a publication
+	// gap. The backend appends this current-main refusal only while the edge
+	// gate's refusal has not been superseded by a successful publication.
+	const unpublishedEdgeMain = $derived.by(() => {
+		const report = deploy;
+		if (deployLoading || deployError || !report?.origin_main) return false;
+		return report.workers.some((worker) =>
+			worker.online && worker.channel === 'edge' && (worker.behind ?? 0) > 0 &&
+			worker.action?.includes(`. Edge refused ${report.origin_main}:`)
+		);
+	});
 
 	async function refreshDeploy() {
 		deployLoading = true;
@@ -477,6 +488,10 @@
 {/snippet}
 
 {#snippet deployList()}
+	<p class="st-msg">Running revisions compares workers with main. “Up to date” in Check for updates means the latest published worker update.</p>
+	{#if unpublishedEdgeMain}
+		<p class="st-msg" role="status">The newest main revision is not published as an edge worker update yet. See the publication refusal and next step below.</p>
+	{/if}
 	<UpdateCheckResults rows={deploy ? deployRows(deploy) : []} running={deployLoading} error={deployError} />
 {/snippet}
 

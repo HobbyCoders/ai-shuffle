@@ -23,7 +23,7 @@
 {#if rows.length === 0 && running}
 	<div class="st-wait" role="status"><span class="st-spin"></span>Checking for updates</div>
 {:else if rows.length > 0}
-	<div class="st-xlist" aria-busy={running}>
+	<div class="st-xlist st-update-results" aria-busy={running}>
 		{#each rows as row (row.id)}
 			<SettingRow label={row.name}>
 				<span class="st-status">
@@ -35,3 +35,21 @@
 	{#each hints as hint (hint)}<p class="st-msg">{hint}</p>{/each}
 {/if}
 {#if error}<p class="st-msg err" role="alert">{error}</p>{/if}
+
+<style>
+	/* These are explanations, not compact value chips. Keep the complete
+	 * reason readable, including workflow names and long revision IDs. */
+	.st-update-results :global(.st-row) {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 4px;
+	}
+	.st-update-results :global(.st-rc) {
+		justify-content: flex-start;
+	}
+	.st-update-results :global(.st-status) {
+		white-space: normal;
+		overflow-wrap: anywhere;
+		align-items: baseline;
+		line-height: 1.6;
+	}
+</style>

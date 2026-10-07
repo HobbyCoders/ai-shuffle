@@ -72,6 +72,36 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
+it.each([
+	['mp:p1', 'provider:openai'],
+	['mp:gw-1', null],
+	['claude:api-key', 'provider:claude']
+])('removes %s and returns safely after the detail unmounts', async (item, back) => {
+	worker = fakeWorker({ rows: [row(), gatewayRow()] }, {
+		'DELETE /model-providers/:id': (_body, path) => {
+			worker.state.rows = worker.state.rows.filter((r) => r.id !== path.split('/')[2]);
+			return { success: true };
+		},
+		'DELETE /settings/integrations/anthropic': () => {
+			worker.state.integrations.anthropic_api_key_set = false;
+			worker.state.integrations.anthropic_api_key_masked = '';
+			worker.state.claude = claudeSummary({ ...worker.state.claude, api_key: { set: false, last4: null } });
+			return { success: true };
+		}
+	});
+	vi.stubGlobal('fetch', worker.fetch);
+	await providers.refreshAll();
+	settingsNav.stacked = true;
+	settingsNav.go({ category: 'providers', item });
+	render(ProvidersCollection);
+	await flush();
+	await fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+	await fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+	await waitFor(() => expect(settingsNav.selectedItem('providers')).toBe(back));
+	if (!back) expect(settingsNav.view).toBe('page');
+	else expect(screen.queryByText('Select a provider or credential.')).toBeNull();
+});
+
 describe('the list', () => {
 	it('shows Claude as Checking, not Not connected, until its status arrives', async () => {
 		let release!: () => void;

@@ -80,6 +80,46 @@ afterEach(() => {
 
 const sw = (name: string) => screen.getByRole('switch', { name }) as HTMLButtonElement;
 
+const mainRevision = '02e97673a';
+const publicationRefusal = `2 behind; check for updates; publish edge first if none is offered. Edge refused ${mainRevision}: dispatch CI and Build worker source on main.`;
+const unpublishedExplanation = /The newest main revision is not published as an edge worker update yet/;
+
+async function openDeployReport(worker: Record<string, unknown>, originMain: string | null = mainRevision) {
+	const get = transport.get.getMockImplementation()!;
+	transport.get.mockImplementation(async (path: string) => path === '/settings/application-updates/deploy-status'
+		? { origin_main: originMain, workers: [{ label: 'Unraid', is_self: true, short: '83e64013c', ...worker }] }
+		: get(path));
+	render(SystemPage);
+	const row = document.querySelector('[data-setting-anchor="system.deployStatus"]')!;
+	await fireEvent.click(within(row as HTMLElement).getByRole('button', { name: /^Running revisions/ }));
+	await waitFor(() => expect(screen.getByText('Unraid (this worker)')).toBeTruthy());
+}
+
+it('shows unpublished main only for a current-main edge publication refusal and renders the full reason', async () => {
+	await openDeployReport({ online: true, channel: 'edge', behind: 2, action: publicationRefusal });
+	expect(screen.getByText(unpublishedExplanation)).toBeTruthy();
+	expect(document.querySelector('.st-update-results .st-status')?.textContent).toContain(publicationRefusal);
+	expect(document.querySelector('.st-update-results .st-status')?.textContent).toContain('Build worker source on main.');
+});
+
+it.each([
+	['current', { online: true, channel: 'edge', behind: 0, action: 'up to date' }],
+	['behind without publication evidence', { online: true, channel: 'edge', behind: 2, action: '2 behind; check for updates; publish edge first if none is offered' }],
+	['stable', { online: true, channel: 'stable', behind: 2, action: '2 behind; waits for a stable release (worker follows stable)' }],
+	['offline', { online: false, channel: 'edge', behind: 2, action: publicationRefusal }],
+	['unknown comparison', { online: true, channel: 'edge', behind: null, action: publicationRefusal }],
+	['refusal for an older main revision', { online: true, channel: 'edge', behind: 2, action: publicationRefusal.replace(mainRevision, 'old123456') }]
+])('does not infer unpublished main from a %s worker', async (_name, worker) => {
+	await openDeployReport(worker);
+	expect(screen.queryByText(unpublishedExplanation)).toBeNull();
+	expect(screen.getByText(/Running revisions compares workers with main/)).toBeTruthy();
+});
+
+it('does not infer unpublished main when the main revision is unknown', async () => {
+	await openDeployReport({ online: true, channel: 'edge', behind: 2, action: publicationRefusal }, null);
+	expect(screen.queryByText(unpublishedExplanation)).toBeNull();
+});
+
 describe('coverage', () => {
 	it('renders a row for every System entry with an active license', async () => {
 		await assertCategoryCoverage('system', () => render(SystemPage).container, {

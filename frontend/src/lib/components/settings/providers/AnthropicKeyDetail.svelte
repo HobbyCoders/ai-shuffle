@@ -64,10 +64,11 @@
 	}
 
 	async function remove() {
+		const back = provider.item;
 		try {
 			await providers.clearAnthropicKey();
 			await providers.loadClaude();
-			settingsNav.selectItem(provider.item, 'providers');
+			settingsNav.selectItem(back, 'providers');
 		} catch (e) {
 			error = getErrorMessage(e, 'Remove failed');
 		}

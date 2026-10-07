@@ -139,10 +139,13 @@ it('the Cloud pick in the provider list header opens the same setup and never se
 	expect(screen.getByRole('button', { name: 'Save and use for Claude' })).toHaveProperty('disabled', true);
 });
 
-it('saves a gateway only after the warning is acknowledged, then shows it without the token', async () => {
+it('saves a gateway, then phone Back recovers the removed setup draft to the list', async () => {
 	await show();
+	settingsNav.stacked = true;
 	await fireEvent.click(within(modes()).getByRole('button', { name: 'Cloud' }));
 	await flush();
+	// This is the history entry made by the actual setup producer.
+	const setupItem = settingsNav.selectedItem('providers')!;
 	await fireEvent.change(screen.getByLabelText('Cloud method'), { target: { value: 'gateway' } });
 	await flush();
 	expect(screen.getByText(GATEWAY_WARNING)).toBeTruthy();
@@ -172,6 +175,11 @@ it('saves a gateway only after the warning is acknowledged, then shows it withou
 	expect(screen.getByLabelText('Auth token').getAttribute('placeholder')).toBe('Stored. Leave blank to keep.');
 	expect(document.body.textContent).not.toContain(TOKEN);
 	expect(mocks.hydrate).toHaveBeenCalled();
+	expect(providerDrafts.get(setupItem)).toBeUndefined();
+	settingsNav.followHistory({ settingsView: 'detail', settingsDepth: 2, settingsCategory: 'providers', settingsItem: setupItem });
+	await waitFor(() => expect(settingsNav.view).toBe('page'));
+	expect(settingsNav.selectedItem('providers')).toBeNull();
+	expect(screen.getByRole('group', { name: 'Claude' })).toBeTruthy();
 });
 
 it('keeps the warning on the page while the method is on, and Remove deletes it', async () => {
