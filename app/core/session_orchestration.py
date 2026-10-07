@@ -29,9 +29,26 @@ REMOTE_ACTION = "orchestration-start"
 # A chat the owner's assistant started on another worker sends its report back
 # to the assistant's worker with this action when it comes to rest.
 REPORT_ACTION = "orchestration-report"
+# A MessageSession to a chat another worker runs is relayed to that worker with
+# this action; it applies its own peer checks before queueing (#2011).
+MESSAGE_ACTION = "orchestration-message"
+# ListSessions(state='active') asks each online worker for its eligible chats
+# with this action: only that worker knows which of them the user stopped.
+PEERS_ACTION = "orchestration-peers"
+# Caller-side accounting for a relayed message, as REMOTE_RECEIPT_PREFIX is for
+# a remote start. A separate prefix keeps report lookups on start receipts.
+REMOTE_MESSAGE_PREFIX = "orchestration-remote-message:"
+# ``_owner()`` of a chat the owner runs (no API key, the install's admin). Only
+# such chats message across workers, as only they start chats there.
+_OWNER_CHAT = (None, "install-admin")
 # The destination answers after one local transaction; a slow tunnel still fits.
 REMOTE_TIMEOUT = 20
+# ListSessions waits this long for another worker before listing without it.
+PEERS_TIMEOUT = 8
 _COMMAND_RE = re.compile(r"orchestration:start:[0-9a-f]{64}")
+_MESSAGE_COMMAND_RE = re.compile(r"orchestration:message:[0-9a-f]{64}")
+_LIST_FIELDS = ("id", "title", "status", "profile_id", "project_id", "project_v2_id",
+                "branch", "model", "updated_at", "is_active", "owner_device_id")
 REPORT_STATUSES = ("completed", "failed", "stopped")
 MAX_NEEDS_OWNER = 10
 # Turn sources that begin work in a chat. Continuations (unpark, auto-continue,
@@ -46,17 +63,36 @@ def _text(data, key, limit):
     return value.strip()
 
 
-def _local_top_level(row, *, allow_settled=False):
-    from app.core.config import settings
-    from app.network.runners import self_device_id
+def _top_level(row, *, allow_settled=False):
+    """An open, visible top-level chat row, wherever it runs."""
     from app.core.assistant_service import is_primary_session
     # Assistant homes are list-hidden, not command/delegated sessions.
     visible = row and (not row.get("hidden") or is_primary_session(row["id"]))
-    return bool(visible and row.get("instance_id") == settings.effective_instance_id
-                and row.get("owner_device_id") in (None, self_device_id())
-                and (allow_settled or row.get("is_active"))
+    return bool(visible and (allow_settled or row.get("is_active"))
                 and not row.get("is_worker") and not row.get("parent_session_id")
                 and row.get("status") != "archived" and row.get("mode") != "voice")
+
+
+def _local_top_level(row, *, allow_settled=False):
+    from app.core.config import settings
+    from app.network.runners import self_device_id
+    return bool(_top_level(row, allow_settled=allow_settled)
+                and row.get("instance_id") == settings.effective_instance_id
+                and row.get("owner_device_id") in (None, self_device_id()))
+
+
+def _mirror_owner(row):
+    """``_owner()`` of a chat another worker runs, from its synced label."""
+    from app.db.mobile_tool_identity import mirrored
+    return (row.get("api_user_id"), (mirrored(row) or {}).get("owner", "install-admin"))
+
+
+def _list_entry(row):
+    entry = {key: row.get(key) for key in _LIST_FIELDS}
+    stamp = entry.get("updated_at")
+    if hasattr(stamp, "isoformat"):
+        entry["updated_at"] = stamp.isoformat()
+    return entry
 
 
 def _principal(session_id):
@@ -84,19 +120,22 @@ def _caller(session_id, *, allow_settled=False):
     return row
 
 
-def _target(caller, session_id, *, allow_stopped=False):
+def _target(caller, session_id, *, allow_stopped=False, owner=None):
+    """``owner``: whose chat the receiver must be, when the caller is a chat on
+    another worker (its ``_owner()`` cannot be read here)."""
     from app.db import sessions
     from app.core.task_registry import task_registry
     row = sessions.get_session(session_id)
+    expected = owner if owner is not None else _owner(caller)
     if (row and session_id != caller["id"] and row.get("status") == "archived"
-            and _owner(row) == _owner(caller)):
+            and _owner(row) == expected):
         # Named, unlike the generic refusal below: the caller may have found it
         # through ListSessions(state='archived') and needs the reason (#1822).
         from app.core import archive_guard
         label = f"Session {session_id}" + (f" ({row['title']})" if row.get("title") else "")
         raise ValueError(archive_guard.refusal(label, "receive messages"))
     if (session_id == caller["id"] or not _local_top_level(row)
-            or _owner(row) != _owner(caller)):
+            or _owner(row) != expected):
         raise ValueError("Session is not an eligible peer; use ListSessions.")
     if not allow_stopped and task_registry.is_user_stopped(session_id):
         raise ValueError("The receiver was stopped by the user; it will not be restarted.")
@@ -138,15 +177,156 @@ def list_sessions(session_id, data):
             row.get("project_v2_id") or row.get("project_id")
         ) != (caller.get("project_v2_id") or caller.get("project_id")):
             continue
-        entry = {key: row.get(key) for key in (
-            "id", "title", "status", "profile_id", "project_id", "project_v2_id",
-            "branch", "model", "updated_at", "is_active", "owner_device_id")}
-        stamp = entry.get("updated_at")
-        if hasattr(stamp, "isoformat"):
-            entry["updated_at"] = stamp.isoformat()
-        result.append(entry)
+        result.append(_list_entry(row))
     return {"sessions": result, "next_offset": offset + len(rows) if len(rows) == 100 else None,
             "note": "Active means open in the sidebar, not necessarily generating. No transcripts or credentials included."}
+
+
+# ---------------------------------------------------------------------------
+# Peers on other workers (#2011): listed and messaged through the owning
+# worker's control channel, which applies its own peer checks.
+# ---------------------------------------------------------------------------
+
+def _same_project(row, caller):
+    return ((row.get("project_v2_id") or row.get("project_id"))
+            == (caller.get("project_v2_id") or caller.get("project_id")))
+
+
+def _calling_worker(from_device, what):
+    """The member record of the worker asking, or PermissionError."""
+    from app.network import engine, membership
+    ctx = engine.context()
+    member = ctx.member(from_device) if ctx else None
+    if (ctx is None or from_device == ctx.device_id or member is None
+            or member.kind != membership.KIND_WORKER or member.status != membership.STATUS_ACTIVE):
+        raise PermissionError(f"Only active workers of this account may {what}.")
+    return member
+
+
+def _remote_peer(caller, session_id):
+    """The worker that runs ``session_id`` when another worker does, else None.
+
+    Checked against this worker's mirror with the same rules as a local peer;
+    the owning worker checks its own row again before it queues anything.
+    """
+    from app.db import sessions
+    from app.network import control, engine, runners
+    if engine.context() is None:
+        return None
+    row = sessions.get_session(session_id)
+    if not row or session_id == caller["id"]:
+        return None
+    device = control.owner_of(row)
+    if device is None:
+        return None
+    if row.get("status") == "archived" and _mirror_owner(row) == _owner(caller):
+        from app.core import archive_guard
+        label = f"Session {session_id}" + (f" ({row['title']})" if row.get("title") else "")
+        raise ValueError(archive_guard.refusal(label, "receive messages"))
+    if not _top_level(row) or _mirror_owner(row) != _owner(caller):
+        raise ValueError("Session is not an eligible peer; use ListSessions.")
+    if _owner(caller) != _OWNER_CHAT:
+        # A tool identity is a credential of THIS install and cannot travel.
+        raise PermissionError("Only the owner's chats can message chats on another worker.")
+    worker = next((w for w in runners.other_workers() if w["device_id"] == device), None)
+    if worker is None:
+        raise ValueError(f"Session {session_id} runs on {_device_name(device)}, which is no longer "
+                         "an active worker of this account.")
+    name = worker["device_name"]
+    if not worker["online"]:
+        raise ValueError(f"Session {session_id} runs on {name}, which is offline; it cannot receive "
+                         f"messages until {name} is back online.")
+    return {"device_id": device, "device_name": name}
+
+
+def _peer_workers(session_id):
+    """The other workers ListSessions asks, or [] (not networked, not an owner chat)."""
+    from app.network import engine, runners
+    caller = _caller(session_id, allow_settled=True)
+    if engine.context() is None or _owner(caller) != _OWNER_CHAT:
+        return []
+    return runners.other_workers()
+
+
+async def _ask_for_peers(worker):
+    """``(entries, None)`` from one online worker, or ``(None, why not)``."""
+    from app.network import control
+    name = worker["device_name"]
+    try:
+        answer = await control.call(worker["device_id"], PEERS_ACTION, {}, timeout=PEERS_TIMEOUT)
+    except control.ControlRefused as exc:
+        if "Unknown control action" in str(exc):
+            return None, f"{name} (runs an older release)"
+        return None, f"{name} (refused: {exc})"
+    except control.RunnerUnreachable:
+        return None, f"{name} (could not be reached)"
+    entries = answer.get("sessions") if isinstance(answer, dict) else None
+    if not isinstance(entries, list):
+        return None, f"{name} (gave an invalid answer)"
+    return entries, None
+
+
+def _mirrored_peers(session_id, data, answers):
+    """The entries other workers vouched for that are also eligible peers in
+    this worker's mirror, so MessageSession can reach every one listed."""
+    from app.db import sessions
+    from app.network import control
+    caller = _caller(session_id, allow_settled=True)
+    scope = data.get("scope", "project")
+    out = []
+    for worker, entries in answers:
+        for entry in entries[:100]:
+            peer_id = entry.get("id") if isinstance(entry, dict) else None
+            if not isinstance(peer_id, str) or peer_id == session_id:
+                continue
+            row = sessions.get_session(peer_id)
+            if (not row or control.owner_of(row) != worker["device_id"] or not _top_level(row)
+                    or _mirror_owner(row) != _OWNER_CHAT):
+                continue
+            if scope == "project" and not _same_project(row, caller):
+                continue
+            out.append({**_list_entry(row), "owner_device_id": worker["device_id"],
+                        "worker": worker["device_name"]})
+    return out
+
+
+async def list_everywhere(session_id, data):
+    """ListSessions: this worker's rows, plus for state='active' (first page)
+    the owner's active chats on other online workers, each vouched for by the
+    worker that runs it."""
+    result = await asyncio.to_thread(list_sessions, session_id, data)
+    if data.get("state", "active") != "active" or data.get("offset", 0):
+        return result
+    workers = await asyncio.to_thread(_peer_workers, session_id)
+    if not workers:
+        return result
+    online = [w for w in workers if w["online"]]
+    answers = await asyncio.gather(*(_ask_for_peers(w) for w in online))
+    missed = [f"{w['device_name']} (offline)" for w in workers if not w["online"]]
+    missed += [problem for _, problem in answers if problem]
+    vouched = [(w, entries) for w, (entries, _) in zip(online, answers) if entries is not None]
+    result["sessions"].extend(await asyncio.to_thread(_mirrored_peers, session_id, data, vouched))
+    result["note"] += (" Chats with a worker field run on that worker; MessageSession relays to them.")
+    if missed:
+        result["note"] += " Not listed: chats on " + ", ".join(missed) + "."
+    return result
+
+
+def accept_peer_listing(body, from_device):
+    """``orchestration-peers``: this worker's chats another worker's owner chat
+    may message, after every local rule (stopped included)."""
+    from app.db import sessions
+    from app.core.task_registry import task_registry
+    _calling_worker(from_device, "list chats here")
+    rows = sessions.get_sessions(api_user_id="", active_only=True, limit=100)
+    return {"sessions": [_list_entry(row) for row in rows
+                         if _local_top_level(row) and not task_registry.is_user_stopped(row["id"])
+                         and _owner(row) == _OWNER_CHAT]}
+
+
+async def handle_peer_listing(body, from_device):
+    from app.db.async_database import run_sync
+    return await run_sync(accept_peer_listing, body, from_device)
 
 
 def _context(session_id, *, allow_empty=False):
@@ -634,6 +814,232 @@ async def handle_remote_start(body, from_device):
     return result
 
 
+def _recheck(cursor, snapshots, principals):
+    """Recheck eligibility using THIS connection. Nested pool checkouts while
+    holding the origin lock can deadlock under concurrent fanout. No model
+    input can turn an archived/foreign/worker chat into a peer."""
+    for snapshot in snapshots:
+        cursor.execute("SELECT * FROM sessions WHERE id=%s", (snapshot["id"],))
+        current = cursor.fetchone()
+        if not _local_top_level(current) or any(
+            current.get(key) != snapshot.get(key) for key in (
+                "api_user_id", "instance_id", "owner_device_id", "profile_id",
+                "provider_id", "model", "permission_mode", "project_id", "project_v2_id",
+            )
+        ):
+            raise ValueError("Session scope or permissions changed; rediscover the peer.")
+        cursor.execute("SELECT * FROM mobile_tool_identity WHERE session_id=%s", (snapshot["id"],))
+        identity = cursor.fetchone()
+        if (dict(identity) if identity else None) != principals[snapshot["id"]]:
+            raise ValueError("Session owner changed; rediscover the peer.")
+
+
+def _peer_prompt(sender_id, text):
+    prompt = format_peer_message(sender_id, text).strip()
+    return prompt.replace("another agent in this session", "another top-level session", 1)
+
+
+_POLICY_WORDS = ("cyber_policy", "content_policy", "policy rejection", "policy violation", "safety policy")
+_QUEUED_NOTE = ("Queued is not delivered. Retry the same request_id to read queued/begun/consumed/stopped "
+                "status. No automatic reply or completion notification; peers must use MessageSession.")
+
+
+def _reserve_remote_message(sender, context, peer, *, session_id, text, root_id, depth,
+                            command_id, fingerprint):
+    """Reserve a MessageSession to a chat ``peer`` runs: a settled receipt in
+    the caller's chain (dedupe and budget stay here, as for a remote start)
+    and the body for the owning worker, which builds and queues the peer row."""
+    from app.core.task_registry import task_registry
+    from app.db import turns
+    from app.db.base import transaction
+    principals = {sender["id"]: _principal(sender["id"])}
+    body = {"session_id": session_id, "command_id": command_id, "fingerprint": fingerprint,
+            "message": defang_harness_markers(text), "sender_session_id": sender["id"],
+            "sender_label": str(sender.get("title") or sender["id"])[:400], "depth": depth + 1}
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM turns WHERE id=%s FOR UPDATE", (root_id,))
+        if not cursor.fetchone():
+            raise ValueError("Orchestration origin no longer exists.")
+        cursor.execute("SELECT * FROM turns WHERE parent_turn_id=%s AND command_id=%s",
+                       (root_id, command_id))
+        previous = turns._row(cursor.fetchone())
+        _recheck(cursor, (sender,), principals)
+        if previous:
+            if previous["payload"].get("orchestration_fingerprint") != fingerprint:
+                raise ValueError("request_id was already used with different arguments.")
+            if previous["session_id"] != REMOTE_MESSAGE_PREFIX + session_id:
+                # Queued here before the chat moved to another worker.
+                return {"session_id": previous["session_id"], "turn_id": previous["id"],
+                        "status": "already_queued", "delivery_status": _delivery_status(previous),
+                        "created": False, "note": "Existing request receipt. " + _QUEUED_NOTE}
+            # Re-ask the owning worker: it answers with the message it queued.
+            return {"remote_message": peer, "receipt_id": previous["id"], "reserved": False, "body": body}
+        cursor.execute("SELECT command_id FROM turns WHERE parent_turn_id=%s AND command_id LIKE 'orchestration:%%'",
+                       (root_id,))
+        if len(cursor.fetchall()) >= MAX_ACTIONS:
+            raise ValueError("Orchestration budget reached (32 actions / 4 new sessions per chain); "
+                             "ask the user to continue.")
+        if context.get("state") == "aborted":
+            raise ValueError("A participating session was aborted; the user must continue it first.")
+        if task_registry.is_user_stopped(sender["id"]):
+            raise ValueError("The user stopped a participating session.")
+        receipt = turns.enqueue_turn(
+            REMOTE_MESSAGE_PREFIX + session_id, "agent_message", profile_id=sender["profile_id"],
+            command_id=command_id, parent_turn_id=root_id,
+            payload={"orchestration_fingerprint": fingerprint, "remote_device_id": peer["device_id"],
+                     "remote_session_id": session_id}, _conn=conn)
+        # Settled at birth: a receipt is accounting, never runnable work.
+        cursor.execute("UPDATE turns SET state='completed', started_at=NOW(), ended_at=NOW(), "
+                       "stop_reason='remote_message' WHERE id=%s", (receipt["id"],))
+    return {"remote_message": peer, "receipt_id": receipt["id"], "reserved": True, "body": body}
+
+
+async def _message_remote(plan, sender_id, sender_generation):
+    """Relay a reserved MessageSession to the worker that runs the chat."""
+    from app.core.task_registry import task_registry
+    from app.network import control
+    peer = plan["remote_message"]
+    name = peer["device_name"]
+    session_id = plan["body"]["session_id"]
+
+    async def release():
+        # Only a reservation this call made, and only when nothing was queued.
+        if plan["reserved"]:
+            await asyncio.to_thread(_delete_receipt, plan["receipt_id"], REMOTE_MESSAGE_PREFIX)
+
+    if task_registry.stop_invalidated(sender_id, sender_generation):
+        await release()
+        raise ValueError("The user stopped this session; nothing was sent.")
+    try:
+        answer = await control.call(peer["device_id"], MESSAGE_ACTION, plan["body"], timeout=REMOTE_TIMEOUT)
+    except control.ControlRefused as exc:
+        await release()
+        reason = str(exc)
+        if "Unknown control action" in reason:
+            reason = "it runs an older release; update it first"
+        raise ValueError(f"{name} refused the message: {reason}") from exc
+    except control.RunnerUnreachable as exc:
+        # It may have been queued: keep the receipt so a retry with the same
+        # request_id reads it back instead of queueing it twice.
+        raise ValueError(f"{name} could not be reached: {exc} Retry with the same request_id; "
+                         "it never queues the message twice.") from exc
+    if not isinstance(answer, dict) or answer.get("session_id") != session_id:
+        raise ValueError(f"{name} gave an invalid answer; retry with the same request_id.")
+    return {"session_id": session_id, "turn_id": answer.get("turn_id"),
+            "status": answer.get("status") or "queued",
+            "delivery_status": answer.get("delivery_status") or "queued", "created": False,
+            "url": "/?session=" + session_id, "worker": {"device_id": peer["device_id"], "name": name},
+            "note": f"Relayed to {name}, which runs this chat. " + _QUEUED_NOTE}
+
+
+def accept_remote_message(body, from_device):
+    """Receiving side of a MessageSession relayed from another worker (#2011).
+
+    The sender's worker checked its own chat, the dedupe and the chain budget.
+    This worker applies its own peer checks to the receiver (an owner chat,
+    not archived, stopped, hidden or delegated) and queues the same attributed
+    peer row a local MessageSession queues. Never authoritative user input.
+    """
+    from app.core import turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.db import turns
+    from app.db.base import transaction
+    member = _calling_worker(from_device, "message chats here")
+    session_id = _remote_text(body, "session_id", 200)
+    command_id = _remote_text(body, "command_id", 120)
+    if not _MESSAGE_COMMAND_RE.fullmatch(command_id):
+        raise ValueError("Invalid MessageSession request identity")
+    fingerprint = _remote_text(body, "fingerprint", 64)
+    content = defang_harness_markers(_remote_text(body, "message", 8000).strip())
+    sender_session = _remote_text(body, "sender_session_id", 200)
+    sender_label = _remote_text(body, "sender_label", 400)
+    depth = body.get("depth")
+    if type(depth) is not int or not 1 <= depth <= MAX_HOPS:
+        raise ValueError("Invalid peer-chain depth")
+    # A retry may read its receipt after Stop; fresh work is refused below.
+    target = _target({"id": sender_session}, session_id, allow_stopped=True, owner=_OWNER_CHAT)
+
+    def receipt(turn, created):
+        return {"session_id": session_id, "turn_id": turn["id"], "created": created,
+                "status": "queued" if created else "already_queued",
+                "delivery_status": _delivery_status(turn)}
+
+    target_context = _context(session_id, allow_empty=True)
+    terminal = turn_scheduler._turn_terminal_payload(session_id, target_context["id"])
+    payload = turn_scheduler._context_payload(target_context)
+    # The sender's chain budget stays on its worker: this turn roots its own
+    # (hops still count), and like a remotely started chat it cannot fan out.
+    payload.pop("orchestration_root", None)
+    payload.update(orchestration_depth=depth, orchestration_sender=sender_session,
+                   orchestration_fingerprint=fingerprint, orchestration_remote_origin=from_device,
+                   peer_message_content=content,
+                   peer_sender_label=f"{sender_label} (on {member.name or from_device})",
+                   forwarded_by_device=from_device)
+    principals = {session_id: _principal(session_id)}
+    with transaction() as conn:
+        cursor = conn.cursor()
+        # Serializes a retry racing the first relay of the same request.
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s AND command_id=%s", (session_id, command_id))
+        previous = turns._row(cursor.fetchone())
+        if previous:
+            if (previous.get("payload") or {}).get("orchestration_fingerprint") != fingerprint:
+                raise ValueError("request_id was already used with different arguments.")
+            return receipt(previous, False)
+        _recheck(cursor, (target,), principals)
+        if task_registry.is_user_stopped(session_id):
+            raise ValueError("The receiver was stopped by the user; it will not be restarted.")
+        if target_context.get("state") == "aborted":
+            raise ValueError("A participating session was aborted; the user must continue it first.")
+        if any(word in str(terminal.get("errors") or "").casefold() for word in _POLICY_WORDS):
+            raise ValueError("The target has a policy rejection; ask the user rather than replaying it.")
+        turn = turns.enqueue_turn(
+            session_id, "agent_message", prompt=_peer_prompt(sender_session, content),
+            profile_id=target["profile_id"], project_id=target.get("project_id"),
+            worktree_id=target_context.get("worktree_id") or target.get("worktree_id"),
+            overrides=target_context.get("overrides") or {}, payload=payload,
+            command_id=command_id, _conn=conn)
+    log.info("MessageSession from worker %s queued for chat %s", from_device, session_id)
+    return receipt(turn, True)
+
+
+async def handle_remote_message(body, from_device):
+    """``orchestration-message`` control action: queue the peer row, then wake
+    the receiver exactly as a local MessageSession does."""
+    from app.core import turn_scheduler
+    from app.core.task_registry import task_registry
+    from app.db import turns
+    from app.db.async_database import run_sync
+    target_id = _remote_text(body, "session_id", 200)
+    generation = task_registry.stop_generation(target_id)
+    async with turn_scheduler.message_resume_lock(target_id):
+        result = await run_sync(accept_remote_message, body, from_device)
+        if result["created"]:
+            if task_registry.stop_invalidated(target_id, generation):
+                await run_sync(turns.remove_queued_turn, result["turn_id"])
+                raise ValueError("The receiver was stopped by the user; queued work was cancelled.")
+            await _wake_peer(target_id)
+    return result
+
+
+async def _wake_peer(session_id):
+    """A peer row was queued: steer it in at the next boundary or wake the chat."""
+    from app.core import turn_scheduler
+    from app.core.session_runtime import try_steer_pending
+    await try_steer_pending(session_id)
+    turn_scheduler.note_wake_pending(session_id)
+    turn_scheduler.kick(session_id)
+    try:
+        from app.api.chat_ws_handler import _v2_queue_view, _v2_peer_queue_view
+        from app.core.sync_engine import sync_engine
+        queue = await asyncio.to_thread(_v2_queue_view, session_id)
+        peers = await asyncio.to_thread(_v2_peer_queue_view, session_id)
+        await sync_engine.broadcast_queue_updated(session_id, queue, pending_peer_messages=peers)
+    except Exception:
+        log.exception("Peer message queued, but queue broadcast failed")
+
+
 def _queue(sender_id, data, action, placement=None, model_plan=None):
     """``placement`` is :func:`_project_placement`'s answer for a StartSession
     that named a project (the owner's assistant only). ``model_plan`` is
@@ -695,6 +1101,12 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
     command_id = "orchestration:" + action + ":" + hashlib.sha256(
         (sender_id + ":" + request_id).encode()).hexdigest()
     fingerprint = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+    if action != "start":
+        peer = _remote_peer(sender, _text(data, "session_id", 200))
+        if peer is not None:
+            return _reserve_remote_message(
+                sender, context, peer, session_id=_text(data, "session_id", 200), text=text,
+                root_id=root_id, depth=depth, command_id=command_id, fingerprint=fingerprint)
     target = sender if action == "start" else _target(sender, _text(data, "session_id", 200), allow_stopped=True)
     target_context = context if action == "start" else _context(target["id"], allow_empty=True)
     principals = {sid: _principal(sid) for sid in {sender_id, target["id"]}}
@@ -725,23 +1137,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
         cursor.execute("SELECT * FROM turns WHERE parent_turn_id=%s AND command_id=%s",
                        (root_id, command_id))
         previous = turns._row(cursor.fetchone())
-        # Recheck eligibility using THIS connection. Nested pool checkouts
-        # while holding the origin lock can deadlock under concurrent fanout.
-        # No model input can turn an archived/foreign/worker chat into a peer.
-        for snapshot in (sender, target):
-            cursor.execute("SELECT * FROM sessions WHERE id=%s", (snapshot["id"],))
-            current = cursor.fetchone()
-            if not _local_top_level(current) or any(
-                current.get(key) != snapshot.get(key) for key in (
-                    "api_user_id", "instance_id", "owner_device_id", "profile_id",
-                    "provider_id", "model", "permission_mode", "project_id", "project_v2_id",
-                )
-            ):
-                raise ValueError("Session scope or permissions changed; rediscover the peer.")
-            cursor.execute("SELECT * FROM mobile_tool_identity WHERE session_id=%s", (snapshot["id"],))
-            identity = cursor.fetchone()
-            if (dict(identity) if identity else None) != principals[snapshot["id"]]:
-                raise ValueError("Session owner changed; rediscover the peer.")
+        _recheck(cursor, (sender, target), principals)
         if previous:
             if previous["payload"].get("orchestration_fingerprint") != fingerprint:
                 raise ValueError("request_id was already used with different arguments.")
@@ -768,7 +1164,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
         # A receipt may be read after Stop, but fresh work must still fail closed.
         if context.get("state") == "aborted" or target_context.get("state") == "aborted":
             raise ValueError("A participating session was aborted; the user must continue it first.")
-        if any(word in errors for word in ("cyber_policy", "content_policy", "policy rejection", "policy violation", "safety policy")):
+        if any(word in errors for word in _POLICY_WORDS):
             raise ValueError("The target has a policy rejection; ask the user rather than replaying it.")
         if task_registry.is_user_stopped(sender_id) or task_registry.is_user_stopped(target["id"]):
             raise ValueError("The user stopped a participating session.")
@@ -936,7 +1332,7 @@ async def _start_remote(plan, sender_id, sender_generation):
               "url": "/?session=" + answer["session_id"],
               "note": (f"Runs on {name}, in this project's checkout there (not your worktree), with no "
                        "private-access grants. Queued is not delivered; retry the same request_id to read "
-                       "its status. It cannot start chats or MessageSession you back; the user sees it "
+                       "its status. It cannot start further chats; the user sees it "
                        "in the sidebar once the worker publishes it.")}
     # What the destination actually made it on; an older release does not
     # say, so the request's own model stands in.
@@ -967,11 +1363,11 @@ def _link_remote_chat(sender_id, session_id, device_id, title):
         log.warning("Could not link remote chat %s to the assistant's limits", session_id, exc_info=True)
 
 
-def _delete_receipt(receipt_id):
+def _delete_receipt(receipt_id, prefix=REMOTE_RECEIPT_PREFIX):
     from app.db.base import get_db
     with get_db() as conn:
         conn.cursor().execute("DELETE FROM turns WHERE id=%s AND session_id LIKE %s",
-                              (receipt_id, REMOTE_RECEIPT_PREFIX + "%"))
+                              (receipt_id, prefix + "%"))
 
 
 # ---------------------------------------------------------------------------
@@ -1161,7 +1557,7 @@ def make_handler(supplier):
         try:
             sender_id = supplier()
             if action == "list":
-                result = await asyncio.to_thread(list_sessions, sender_id, data)
+                result = await list_everywhere(sender_id, data)
             elif action in ("settle", "unsettle", "archive"):
                 from app.core.session_management import manage
                 result = await manage(sender_id, data, action)
@@ -1182,24 +1578,19 @@ def make_handler(supplier):
                         # nothing here is local work to wake or broadcast.
                         result = await _start_remote(result, sender_id, sender_generation)
                         return ToolOutcome(text=json.dumps(result), ui=result)
-                    if result.get("delivery_status") == "queued" and (
+                    relay = "remote_message" in result
+                    if not relay and result.get("delivery_status") == "queued" and (
                             task_registry.stop_invalidated(sender_id, sender_generation)
                             or task_registry.stop_invalidated(target_id, target_generation)):
                         await asyncio.to_thread(turns.remove_queued_turn, result["turn_id"])
                         raise ValueError("The user stopped a participating session; queued work was cancelled.")
-                    if result.get("delivery_status") == "queued":
-                        from app.core.session_runtime import try_steer_pending
-                        await try_steer_pending(result["session_id"])
-                        turn_scheduler.note_wake_pending(result["session_id"])
-                        turn_scheduler.kick(result["session_id"])
-                        try:
-                            from app.api.chat_ws_handler import _v2_queue_view, _v2_peer_queue_view
-                            from app.core.sync_engine import sync_engine
-                            queue = await asyncio.to_thread(_v2_queue_view, result["session_id"])
-                            peers = await asyncio.to_thread(_v2_peer_queue_view, result["session_id"])
-                            await sync_engine.broadcast_queue_updated(result["session_id"], queue, pending_peer_messages=peers)
-                        except Exception:
-                            log.exception("Peer message queued, but queue broadcast failed")
+                    if not relay and result.get("delivery_status") == "queued":
+                        await _wake_peer(result["session_id"])
+                if relay:
+                    # Outside the lock: the owning worker takes its own, then
+                    # queues, wakes and publishes the message.
+                    result = await _message_remote(result, sender_id, sender_generation)
+                    return ToolOutcome(text=json.dumps(result), ui=result)
                 if result.get("created"):
                     try:
                         from app.core.sync_engine import sync_engine

@@ -257,12 +257,19 @@ counted when it answers again.
 Agents can coordinate relevant work without a parent/subagent relationship:
 
 - **ListSessions** discovers active (open, including idle) top-level chats owned
-  by the same user on this worker. It returns titles, projects, models and status,
+  by the same user. It returns titles, projects, models and status,
   not conversation contents. The default scope is the current project; `all`
-  permits cross-project discovery. Follow `next_offset` to paginate.
+  permits cross-project discovery. Follow `next_offset` to paginate. For the
+  owner's chats it also asks the owner's other online workers for their active
+  chats; those entries carry a `worker` name and `owner_device_id`, and the note
+  names any worker that is offline or could not answer.
 - **MessageSession** queues an attributed peer message using an exact discovered
   session ID. A peer can reply with the same tool. Delivery is asynchronous:
-  `queued` is not a delivery or completion acknowledgement.
+  `queued` is not a delivery or completion acknowledgement. A message to a chat on
+  another worker is relayed to that worker, which checks the chat again (owner,
+  stopped, archived) before it queues the same attributed peer message; its label
+  names the sender's worker. Only the owner's chats can message across workers, and
+  a chat whose worker is offline is refused with that worker's name.
 - **StartSession** creates a visible, independent chat with a self-contained peer
   brief. It inherits the caller's agent, model/provider, permissions, project and
   workspace, but not its transcript, private access grants or subagent lifecycle.
@@ -277,8 +284,8 @@ acknowledgements or message loops. They remain subject to the agent's tool polic
 and normal write permission gates. Peer text is not a user instruction and never
 permits bypassing a denial or delegating prohibited work.
 
-Stopped, archived, hidden, voice, subagent, other-owner and other-worker sessions
-are not eligible. Starting independent sessions is available only from eligible
+Stopped, archived, hidden, voice, subagent and other-owner sessions are not
+eligible, on any worker. Starting independent sessions is available only from eligible
 top-level chats. Outside the personal assistant's conversation no automatic
 parent completion notification is registered: ask a peer to report back with
 MessageSession when needed.

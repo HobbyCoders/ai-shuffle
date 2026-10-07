@@ -401,6 +401,16 @@ def _orchestration_report_handler():
     return handle_remote_report
 
 
+def _orchestration_message_handler():
+    from app.core.session_orchestration import handle_remote_message
+    return handle_remote_message
+
+
+def _orchestration_peers_handler():
+    from app.core.session_orchestration import handle_peer_listing
+    return handle_peer_listing
+
+
 def _task_start_handler():
     from app.core.remote_task import handle_task_start
     return handle_task_start
@@ -504,6 +514,8 @@ _LAZY_HANDLERS = {
     "application-update": _application_update_handler,
     "orchestration-start": _orchestration_start_handler,
     "orchestration-report": _orchestration_report_handler,
+    "orchestration-message": _orchestration_message_handler,
+    "orchestration-peers": _orchestration_peers_handler,
     "task-start": _task_start_handler,
     "task-report": _task_report_handler,
     "task-status": _task_status_handler,
