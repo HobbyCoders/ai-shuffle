@@ -1801,7 +1801,9 @@ async def _ask_status(target_device_id: str, ids: List[str]) -> Optional[Dict[st
     """``{id: state}`` from the target, or None when it could not be reached.
 
     A refusal is an answer: the target is reachable (an older release refuses
-    the action by name), so its children keep their last known state.
+    the action by name), but cannot confirm these children. Return CHILD_UNKNOWN
+    so an uncertain start gets the existing grace; confirmed children still wait
+    for their reports.
     """
     from app.network import control
 
@@ -1810,7 +1812,7 @@ async def _ask_status(target_device_id: str, ids: List[str]) -> Optional[Dict[st
                                     {"version": WIRE_VERSION, "worker_session_ids": ids},
                                     timeout=STATUS_TIMEOUT)
     except control.ControlRefused:
-        return {worker_id: None for worker_id in ids}
+        return {worker_id: CHILD_UNKNOWN for worker_id in ids}
     except Exception as exc:  # noqa: BLE001 — unreachable, off-network: quiet
         logger.info("remote_task: %s did not answer task-status: %s", target_device_id, exc)
         return None

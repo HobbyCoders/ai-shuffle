@@ -314,13 +314,25 @@ def test_an_older_target_that_refuses_task_status_counts_as_reachable(workers, m
     a, b, _ = network(workers, monkeypatch)
     child = started_child(a, b)
     monkeypatch.setattr(control, "known_action", lambda action: action != remote_task.TASK_STATUS_ACTION)
-    original = control._LAZY_HANDLERS.pop(remote_task.TASK_STATUS_ACTION)
-    try:
-        with b.active():
-            assert asyncio.run(remote_task.check_targets()) == 0
-            assert remote_tasks.get_dispatch(child)["unreachable_since"] is None
-    finally:
-        control._LAZY_HANDLERS[remote_task.TASK_STATUS_ACTION] = original
+    monkeypatch.delitem(control._LAZY_HANDLERS, remote_task.TASK_STATUS_ACTION)
+    monkeypatch.setattr(remote_task, "_tracking_started", None)
+    now = datetime.now().astimezone()
+    with b.active():
+        assert asyncio.run(remote_task.check_targets(now=now)) == 0
+        assert asyncio.run(remote_task.check_targets(
+            now=now + timedelta(seconds=remote_task.OFFLINE_NOTICE_SECONDS + 1))) == 0
+        dispatch = remote_tasks.get_dispatch(child)
+        assert dispatch["unreachable_since"] is None
+        assert dispatch["unconfirmed_start_at"] is None
+        assert dispatch["offline_notice_at"] is None
+        assert task_registry.get_task("caller", child)["status"] == "running"
+        assert wakes() == []
+    deliver(a, child)
+    with b.active():
+        assert task_registry.get_task("caller", child)["status"] == "completed"
+        assert asyncio.run(remote_task.check_targets(
+            now=now + timedelta(seconds=remote_task.OFFLINE_NOTICE_SECONDS + 2))) == 0
+        assert len(wakes()) == 1
 
 
 # --- a local-only session is unaffected ---------------------------------------------------
@@ -567,7 +579,10 @@ def test_remote_swarm_start_races_keep_report_and_routing_ownership(workers, mon
 
 @pytest.mark.parametrize("answer_kind", ["invalid", "timeout"])
 @pytest.mark.parametrize("ending", ["expires", "late_report"])
-def test_uncertain_swarm_start_unknown_grace_is_bounded(workers, monkeypatch, kicks, answer_kind, ending):
+@pytest.mark.parametrize("status_supported", [True, False], ids=["status-supported", "older-target"])
+def test_uncertain_swarm_start_unknown_grace_is_bounded(
+    workers, monkeypatch, kicks, answer_kind, ending, status_supported,
+):
     a, b, router = swarm_network(workers, monkeypatch)
     real_call = control.call
     starts = []
@@ -583,6 +598,10 @@ def test_uncertain_swarm_start_unknown_grace_is_bounded(workers, monkeypatch, ki
         raise control.RunnerUnreachable(remote_task.MAY_HAVE_APPLIED)
 
     monkeypatch.setattr(control, "call", call)
+    if not status_supported:
+        # The signed endpoint of an older reachable peer refuses task-status.
+        monkeypatch.setattr(control, "known_action", lambda action: action != remote_task.TASK_STATUS_ACTION)
+        monkeypatch.delitem(control._LAZY_HANDLERS, remote_task.TASK_STATUS_ACTION)
 
     async def scenario():
         with b.active():
@@ -600,7 +619,6 @@ def test_uncertain_swarm_start_unknown_grace_is_bounded(workers, monkeypatch, ki
             assert await remote_task.check_targets(now=started) == 0
             assert await remote_task.check_targets(now=deadline - timedelta(seconds=1)) == 0
             dispatch = remote_tasks.get_dispatch(child)
-            assert dispatch["target_state"] == remote_task.CHILD_UNKNOWN
             assert dispatch["last_contact_at"] and dispatch["unreachable_since"] is None
             assert dispatch["unconfirmed_start_at"] == started.isoformat()
             assert dispatch["offline_notice_at"] is None
@@ -610,12 +628,16 @@ def test_uncertain_swarm_start_unknown_grace_is_bounded(workers, monkeypatch, ki
             assert ("POST", "/api/v1/network/peer/control/task-status") in router.requests(UNRAID_URL)
 
             if ending == "late_report":
+                assert dispatch["target_state"] == remote_task.CHILD_UNKNOWN
                 # A delayed start/report within grace still completes normally.
                 assert (await real_call(a.device_id, remote_task.TASK_START_ACTION, starts[0]))["worker_session_id"] == child
                 assert await remote_task.check_targets(now=deadline - timedelta(seconds=1)) == 0
-                assert remote_tasks.get_dispatch(child)["unconfirmed_start_at"] is None
-                # A stale unknown-status pass cannot fail a now-confirmed child.
-                assert not await remote_task.notice_offline(dispatch, started.isoformat(), unknown_start=True)
+                if status_supported:
+                    assert remote_tasks.get_dispatch(child)["unconfirmed_start_at"] is None
+                    # A stale unknown-status pass cannot fail a now-confirmed child.
+                    assert not await remote_task.notice_offline(dispatch, started.isoformat(), unknown_start=True)
+                else:
+                    assert remote_tasks.get_dispatch(child)["unconfirmed_start_at"] == started.isoformat()
                 body = await report_from_target(a, child, text="Delayed disk report within grace.")
                 assert body["report"] == "Delayed disk report within grace."
                 snapshot = await admitted(published, 1)
@@ -629,6 +651,8 @@ def test_uncertain_swarm_start_unknown_grace_is_bounded(workers, monkeypatch, ki
             else:
                 # Repeated unknown answers after grace end the item once.
                 assert await remote_task.check_targets(now=deadline + timedelta(seconds=1)) == 0
+                assert coordinator.snapshot(key)["tasks"][0]["status"] == "failed"
+                assert remote_tasks.get_dispatch(child)["target_state"] == remote_task.CHILD_UNKNOWN
                 snapshot = await admitted(published, 2)
                 assert snapshot["tasks"][0]["status"] == "failed"
                 assert "reachable but still knows no subagent" in snapshot["tasks"][0]["error"]
