@@ -167,3 +167,65 @@ async def test_a_member_reader_without_any_account_lookup_fails_closed(store, mo
     monkeypatch.setattr(identity.account_hub, "check_paired_client", broken)
     rows = await store.recent_sessions(limit=25, exclude_session_id="ses_owner_phone")
     assert {r.session_id for r in rows} == set()
+
+
+# ─── Sessions another worker runs (mirrored events, no store rows) ───────────
+
+import json  # noqa: E402
+
+from app.core.provider import fluid_pg_store  # noqa: E402
+
+
+def _mirror(mock_db, app_id, api_user_id=None):
+    mock_db.execute(
+        "INSERT INTO sessions (id, sdk_session_id, title, status, updated_at, owner_device_id, "
+        "api_user_id) VALUES (?, NULL, ?, 'active', '2026-10-03 10:00:00', 'dev_remote', ?)",
+        (app_id, app_id, api_user_id),
+    )
+    mock_db.execute(
+        "INSERT INTO session_events (id, session_id, seq, event_type, payload, created_at) "
+        "VALUES (?, ?, 1, 'message.user', ?, '2026-10-03 10:00:00')",
+        (f"{app_id}-1", app_id, json.dumps({"content": f"zebrafish notes of {app_id}"})),
+    )
+    mock_db.commit()
+
+
+@pytest.fixture
+async def mirrored(store, mock_db, monkeypatch):
+    monkeypatch.setattr(fluid_pg_store, "_my_device_id", lambda: "dev_local")
+    monkeypatch.setattr(fluid_pg_store, "_worker_name", lambda device_id: "DesktopWorker")
+    monkeypatch.setattr(artifact_access, "_network_mirror",
+                        lambda s: (s or {}).get("owner_device_id") == "dev_remote")
+    database.create_api_user("key-1", "Key", "hash-key-1")
+    _mirror(mock_db, "remote-chat")
+    _mirror(mock_db, "remote-key", api_user_id="key-1")
+    database.create_session(session_id="key-chat", profile_id="default", title="key")
+    mock_db.execute("UPDATE sessions SET sdk_session_id = 'ses_key', api_user_id = 'key-1' "
+                    "WHERE id = 'key-chat'")
+    mock_db.commit()
+    return store
+
+
+#: What each viewer may read of the mirrored chats (an owner-run mirror, and
+#: one an API key's chat started on the other worker).
+MIRROR_READABLE = {
+    "ses_owner": {"remote-chat", "remote-key"},
+    "ses_owner_phone": {"remote-chat"},
+    "ses_member": set(),
+    "ses_direct": set(),
+    "ses_key": {"remote-key"},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("viewer", sorted(MIRROR_READABLE))
+async def test_mirrored_chats_follow_the_same_rules(mirrored, viewer):
+    found = {h.session_id for h in await mirrored.search(
+        ["zebrafish"], limit=25, exclude_session_id=viewer)}
+    assert found & {"remote-chat", "remote-key"} == MIRROR_READABLE[viewer]
+    listed = {r.session_id for r in await mirrored.recent_sessions(
+        limit=25, exclude_session_id=viewer)}
+    assert listed & {"remote-chat", "remote-key"} == MIRROR_READABLE[viewer]
+    for target in ("remote-chat", "remote-key"):
+        window = await mirrored.session_slice(target, viewer_session_id=viewer)
+        assert (window is not None) == (target in MIRROR_READABLE[viewer]), target

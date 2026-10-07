@@ -240,6 +240,13 @@ class SessionSearchHit:
     # Recorded project root; None = unknown (legacy session, or a backend that
     # does not track projects). SessionSearch scopes and ranks on it.
     project_root: str | None = None
+    # Most query terms found together in one matched text. Ranks ahead of
+    # ``score``, so the text that holds the whole phrase beats a session that
+    # merely repeats one common term. 0 = the backend does not report it.
+    best: int = 0
+    # The worker that runs the session, when it is not the one answering
+    # (a host with several workers); None = this one.
+    worker: str | None = None
 
 
 @dataclass
@@ -252,6 +259,7 @@ class SessionSummary:
     preview: str = ""  # the session's last assistant text, however the backend trims it
     message_count: int = 0  # 0 = unknown
     project_root: str | None = None  # as on SessionSearchHit; None = unknown
+    worker: str | None = None  # as on SessionSearchHit; None = this worker
 
 
 @dataclass
@@ -279,6 +287,7 @@ class SessionSlice:
     messages: list[RecallMessage] = field(default_factory=list)
     title: str | None = None
     last_ts: float = 0.0
+    worker: str | None = None  # as on SessionSearchHit; None = this worker
 
 
 _TOOL_LINE_CAP = 200

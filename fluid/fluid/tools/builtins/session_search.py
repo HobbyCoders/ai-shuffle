@@ -68,9 +68,11 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "we did last time\", \"the script from yesterday\") — search before "
         "asking the user to repeat themselves.\n"
         "\n"
-        "Matches are scored by how many query terms a message contains. "
-        "Results name the session id, its title, and a snippet around the "
-        "match; they are recall, not live state — verify anything you act "
+        "Matches are ranked by how many query terms one message holds "
+        "together, then by total hits. Results name the session id, its "
+        "title, and a snippet around the match; they span all of the "
+        "owner's workers, and a session another worker runs is marked "
+        "[on <worker>]. They are recall, not live state — verify anything you act "
         "on against the current files. The header states how many sessions "
         "matched and how many of them are shown — a large total is the "
         "backend's raw hit count, not a reason to re-query with different "
@@ -126,8 +128,9 @@ def _stamp(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else "unknown date"
 
 
-def _label(session_id: str, title: str | None) -> str:
-    return f"session {session_id} {title!r}" if title else f"session {session_id}"
+def _label(session_id: str, title: str | None, worker: str | None = None) -> str:
+    label = f"session {session_id} {title!r}" if title else f"session {session_id}"
+    return f"{label} [on {worker}]" if worker else label
 
 
 def _snippet(text: str, term: str) -> str:
@@ -259,7 +262,8 @@ async def _list_recent(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     ]
     for row in rows[:limit]:
         count = f", {row.message_count} messages" if row.message_count else ""
-        lines.append(f"{_label(row.session_id, row.title)} ({_stamp(row.last_ts)}{count})")
+        label = _label(row.session_id, row.title, getattr(row, "worker", None))
+        lines.append(f"{label} ({_stamp(row.last_ts)}{count})")
         if row.preview:
             lines.append(f"  last: {row.preview}")
     text = "\n".join(lines)
@@ -290,7 +294,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # The backend is asked to rank; re-sorting here keeps the contract cheap
     # for hosts that only filter. Project scope is applied on top and is a
     # stable sort, so score order survives inside each bucket.
-    hits = sorted(hits, key=lambda h: (-h.score, -h.last_ts))
+    hits = sorted(
+        hits, key=lambda h: (-getattr(h, "best", 0), -h.score, -h.last_ts)
+    )
     hits, hidden = _scoped(hits, project_root_for(ctx.cwd), scope)
     if not hits:
         # A one-line "nothing matched" is already shorter than any pointer at
@@ -316,7 +322,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     lines: list[str] = [header + _elsewhere_note(hidden)]
     for hit in shown:
         lines.append(
-            f"{_label(hit.session_id, hit.title)} "
+            f"{_label(hit.session_id, hit.title, getattr(hit, 'worker', None))} "
             f"({_stamp(hit.last_ts)}, score {hit.score}):"
         )
         lines.extend(_snippet_lines(hit.texts, terms))

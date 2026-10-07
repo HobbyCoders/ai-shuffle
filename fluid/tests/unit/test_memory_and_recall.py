@@ -356,6 +356,101 @@ async def test_session_view_formats_host_injected_slice() -> None:
     assert "Read(f.py)" in outcome.text
 
 
+async def test_session_search_names_the_worker_and_ranks_the_phrase_first() -> None:
+    """A text holding every term outranks a pile of one-term hits; a session
+    another worker runs is labelled with that worker."""
+    def fake_search(terms, *, limit=5, exclude_session_id=None):
+        return [
+            SessionSearchHit(session_id="ses_noisy", score=40, best=1, last_ts=2.0,
+                             texts=[("user", "reset again")]),
+            SessionSearchHit(session_id="app-remote", score=3, best=3, last_ts=1.0,
+                             texts=[("user", "reset the guy called tibo")],
+                             worker="DesktopWorker"),
+        ]
+
+    def fake_recent(*, limit=10, exclude_session_id=None):
+        return [SessionSummary(session_id="app-remote", title="Tibo", last_ts=1.0,
+                               preview="done", message_count=4, worker="DesktopWorker")]
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(extra={"session_search": fake_search, "session_recent": fake_recent})
+    outcome = await registry.dispatch("SessionSearch", {"query": "tibo reset guy"}, ctx)
+    first, second = outcome.text.splitlines()[1], outcome.text.splitlines()[3]
+    assert first.startswith("session app-remote [on DesktopWorker] (")
+    assert second.startswith("session ses_noisy (")
+    listed = await registry.dispatch("SessionSearch", {"scope": "all"}, ctx)
+    assert "session app-remote 'Tibo' [on DesktopWorker] (" in listed.text
+
+
+async def test_jsonl_store_search_ranks_the_fullest_text_first(tmp_path) -> None:
+    _write_session(tmp_path, "sess_many", [f"reset number {i}" for i in range(5)])
+    _write_session(tmp_path, "sess_phrase", ["reset the guy called tibo"])
+    hits = await JsonlStore(tmp_path).search(["tibo", "reset", "guy"])
+    assert [h.session_id for h in hits] == ["sess_phrase", "sess_many"]
+    assert hits[0].best == 3 and hits[1].best == 1
+
+
+def _long_slice(total: int, text_len: int = 600):
+    def fake_slice(session_id, *, start=-10, count=10):
+        messages = [
+            RecallMessage(role="user" if i % 2 else "assistant",
+                          text=f"m{i} " + "x" * text_len,
+                          tools=[f"Bash(step {i})"] if i % 2 == 0 else [])
+            for i in range(total)
+        ]
+        first = max(0, total + start) if start < 0 else min(start, total)
+        return SessionSlice(session_id=session_id, total=total, start=first,
+                            messages=messages[first:first + count], title="Long",
+                            last_ts=1_700_000_000.0, worker="DesktopWorker")
+    return fake_slice
+
+
+async def test_session_view_large_tail_window_keeps_the_newest_within_budget() -> None:
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(extra={"session_view": _long_slice(150)})
+    outcome = await registry.dispatch(
+        "SessionView", {"session_id": "app-remote", "count": 150}, ctx
+    )
+    assert not outcome.is_error
+    assert "[on DesktopWorker]" in outcome.text.splitlines()[0]
+    assert "[149 assistant]" not in outcome.text  # 149 is odd: a user message
+    assert "[149 user] m149" in outcome.text  # the newest message is kept
+    assert "[0 assistant]" not in outcome.text  # the oldest falls to the budget
+    assert "output budget reached" in outcome.text and "offset=0" in outcome.text
+    assert len(outcome.text) <= 16_000
+
+
+async def test_session_view_forward_page_keeps_the_earliest_and_says_where_to_resume() -> None:
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(extra={"session_view": _long_slice(150)})
+    outcome = await registry.dispatch(
+        "SessionView", {"session_id": "s", "offset": 0, "count": 200}, ctx
+    )
+    assert "[0 assistant] m0" in outcome.text
+    assert "[149 user]" not in outcome.text
+    resume = outcome.text.rsplit("continue with offset=", 1)[1].rstrip("]")
+    assert f"[{resume} " not in outcome.text  # the next page starts where this ended
+    assert f"[{int(resume) - 1} " in outcome.text
+
+
+async def test_session_view_show_modes() -> None:
+    registry = ToolRegistry()
+    register_builtins(registry)
+    ctx = ToolCtx(extra={"session_view": _long_slice(4, text_len=10)})
+    talk = await registry.dispatch(
+        "SessionView", {"session_id": "s", "show": "conversation"}, ctx
+    )
+    assert "(conversation only)" in talk.text
+    assert "[1 user] m1" in talk.text and "Bash(" not in talk.text
+    tools = await registry.dispatch("SessionView", {"session_id": "s", "show": "tools"}, ctx)
+    assert "(tools only)" in tools.text
+    assert "Bash(step 0)" in tools.text and "Bash(step 2)" in tools.text
+    assert "m0" not in tools.text and "[1 user]" not in tools.text
+
+
 async def test_jsonl_recent_sessions_orders_and_summarizes(tmp_path) -> None:
     store = JsonlStore(tmp_path)
     older = await _seed_session(store, [

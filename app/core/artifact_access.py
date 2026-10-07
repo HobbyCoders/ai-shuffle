@@ -151,7 +151,8 @@ def readable_store_ids(store_ids, reader):
     """The transcript-store ids whose app chat ``reader`` may read.
 
     A store id with no app session row is nobody's account's, so a paired
-    reader never sees it. Blocking.
+    reader never sees it. An app session id is accepted too (a session another
+    worker runs is recalled by it). Blocking.
     """
     ids = sorted({sid for sid in store_ids if sid})
     if not ids:
@@ -160,7 +161,8 @@ def readable_store_ids(store_ids, reader):
         return set(ids)
     readable = set()
     for sid in ids:
-        if chat_reader_may_read(reader, sessions.get_session_by_sdk_id(sid)):
+        row = sessions.get_session_by_sdk_id(sid) or sessions.get_session(sid)
+        if chat_reader_may_read(reader, row):
             readable.add(sid)
     return readable
 

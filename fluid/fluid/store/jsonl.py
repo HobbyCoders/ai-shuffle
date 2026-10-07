@@ -617,7 +617,7 @@ class JsonlStore:
             hit = self._scan_log(log_path, session_id, terms)
             if hit.score:
                 hits.append(hit)
-        hits.sort(key=lambda h: (-h.score, -h.last_ts))
+        hits.sort(key=lambda h: (-h.best, -h.score, -h.last_ts))
         for hit in hits[: max(limit, _TITLE_FILL)]:
             hit.title = self._session_title(hit.session_id)
         return hits
@@ -753,8 +753,13 @@ class JsonlStore:
                         if not n_hit:
                             continue
                         hit.score += n_hit
+                        role = message.get("role", "?")
                         if len(hit.texts) < _MAX_MATCHES_PER_SESSION:
-                            hit.texts.append((message.get("role", "?"), text))
+                            hit.texts.append((role, text))
+                        elif n_hit > hit.best:
+                            # Keep the text that holds the most terms visible.
+                            hit.texts[-1] = (role, text)
+                        hit.best = max(hit.best, n_hit)
         except OSError:
             return SessionSearchHit(session_id=session_id, score=0)
         return hit

@@ -93,7 +93,8 @@ def visible_store_ids(store_ids: Iterable[str], api_user_id: str) -> Set[str]:
     """The subset of transcript-store ids whose app session ``api_user_id`` owns.
 
     A store id with no app session row is nobody's key's, so it is never
-    visible to one.
+    visible to one. An app session id is accepted too: recall names a session
+    another worker runs by it, since that session has no store id here.
     """
     from app.db import database
     from app.db.base import get_db
@@ -105,18 +106,22 @@ def visible_store_ids(store_ids: Iterable[str], api_user_id: str) -> Set[str]:
     with get_db() as conn:
         cur = conn.cursor()
         cur.execute(
-            "SELECT sdk_session_id, api_user_id, is_worker, parent_session_id "
-            f"FROM sessions WHERE sdk_session_id IN ({placeholders})",
-            ids,
+            "SELECT id, sdk_session_id, api_user_id, is_worker, parent_session_id "
+            f"FROM sessions WHERE sdk_session_id IN ({placeholders}) "
+            f"OR id IN ({placeholders})",
+            ids + ids,
         )
         rows = [dict(r) for r in cur.fetchall()]
+    wanted = set(ids)
     visible: Set[str] = set()
     for row in rows:
         owner = row.get("api_user_id")
         if not owner and row.get("is_worker") and row.get("parent_session_id"):
             owner = session_api_user_id(database.get_session(row["parent_session_id"]))
         if owner == api_user_id:
-            visible.add(row["sdk_session_id"])
+            visible.update(
+                key for key in (row.get("sdk_session_id"), row.get("id")) if key in wanted
+            )
     return visible
 
 

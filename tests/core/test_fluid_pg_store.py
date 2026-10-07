@@ -911,3 +911,143 @@ async def test_session_slice_sdk_arm_skips_meta_and_renders_tools(mock_db):
 @pytest.mark.asyncio
 async def test_session_slice_unknown_session_is_none(mock_db):
     assert await PgFluidStore().session_slice("ses_nope") is None
+
+
+# ─── Cross-worker recall (sessions another worker owns) ──────────────────────
+#
+# A chat another worker of the owner's network runs is mirrored here as a
+# ``sessions`` row (``sdk_session_id`` is local-only, so NULL) plus its
+# ``session_events``; no transcript-store row exists on this worker. Recall
+# reads those events, names the owning worker, and accepts either id.
+
+from app.core.provider import fluid_pg_store  # noqa: E402
+
+_REMOTE = "6c0ffee0-0000-4000-8000-00000000c0de"
+
+
+@pytest.fixture
+def remote_worker(monkeypatch):
+    monkeypatch.setattr(fluid_pg_store, "_my_device_id", lambda: "dev_local")
+    monkeypatch.setattr(
+        fluid_pg_store, "_worker_name",
+        lambda device_id: {"dev_remote": "DesktopWorker"}.get(device_id, device_id or ""),
+    )
+
+
+def _event(mock_db, session_id, seq, event_type, payload, turn_id="turn-1",
+           created_at="2026-10-03 10:00:00"):
+    mock_db.execute(
+        "INSERT INTO session_events (id, session_id, seq, turn_id, event_type, payload, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (f"{session_id}-{seq}", session_id, seq, turn_id, event_type, json.dumps(payload),
+         created_at),
+    )
+    mock_db.commit()
+
+
+def _seed_remote(mock_db, app_id=_REMOTE, owner="dev_remote", title="Tibo reset help"):
+    mock_db.execute(
+        "INSERT INTO sessions (id, sdk_session_id, title, status, updated_at, owner_device_id) "
+        "VALUES (?, NULL, ?, 'active', '2026-10-03 10:05:00', ?)",
+        (app_id, title, owner),
+    )
+    mock_db.commit()
+    _event(mock_db, app_id, 1, "message.user",
+           {"content": "how do I reset the guy called tibo?", "kind": "text"})
+    _event(mock_db, app_id, 2, "assistant.text_delta", {"text": "Use the admin "})
+    _event(mock_db, app_id, 3, "assistant.text_delta", {"text": "panel to reset tibo."})
+    _event(mock_db, app_id, 4, "tool.use",
+           {"tool_use_id": "t1", "name": "Bash", "input": {"command": "isle reset tibo"}})
+    _event(mock_db, app_id, 5, "tool.result",
+           {"tool_use_id": "t1", "is_error": False, "content_preview": "player reset"})
+    _event(mock_db, app_id, 6, "assistant.text_delta", {"text": "Done, he is reset."})
+    _event(mock_db, app_id, 7, "turn.completed", {"status": "completed"})
+
+
+@pytest.mark.asyncio
+async def test_search_finds_a_session_only_another_worker_holds(mock_db, remote_worker):
+    _seed_remote(mock_db)
+    hits = await PgFluidStore().search(["tibo", "reset"])
+    hit = next((h for h in hits if h.session_id == _REMOTE), None)
+    assert hit is not None, [h.session_id for h in hits]
+    assert hit.title == "Tibo reset help"
+    assert hit.worker == "DesktopWorker"
+    assert any("tibo" in text.lower() for _role, text in hit.texts)
+    # The assistant's streamed reply is read as one text, not per delta.
+    assert any("admin panel to reset tibo" in text for _role, text in hit.texts)
+
+
+@pytest.mark.asyncio
+async def test_a_local_or_unowned_session_events_are_not_a_second_arm(mock_db, remote_worker):
+    """Events of chats this worker runs stay unread: their store rows answer."""
+    _seed_remote(mock_db, app_id="local-app", owner="dev_local", title="mine")
+    _seed_remote(mock_db, app_id="legacy-app", owner=None, title="legacy")
+    hits = await PgFluidStore().search(["tibo"])
+    assert {h.session_id for h in hits} == set()
+
+
+@pytest.mark.asyncio
+async def test_listing_shows_a_session_only_another_worker_holds(mock_db, remote_worker):
+    _seed_remote(mock_db)
+    rows = await PgFluidStore().recent_sessions(limit=10)
+    row = next((r for r in rows if r.session_id == _REMOTE), None)
+    assert row is not None
+    assert row.title == "Tibo reset help"
+    assert row.worker == "DesktopWorker"
+    assert row.preview == "Done, he is reset."
+    assert row.message_count == 4
+
+
+@pytest.mark.asyncio
+async def test_view_opens_a_session_only_another_worker_holds(mock_db, remote_worker):
+    _seed_remote(mock_db)
+    window = await PgFluidStore().session_slice(_REMOTE, start=0, count=10)
+    assert window is not None
+    assert window.title == "Tibo reset help" and window.worker == "DesktopWorker"
+    roles = [m.role for m in window.messages]
+    assert roles == ["user", "assistant", "user", "assistant"]
+    assert window.messages[0].text == "how do I reset the guy called tibo?"
+    assert window.messages[1].text == "Use the admin panel to reset tibo."
+    assert any(line.startswith("Bash(") for line in window.messages[1].tools)
+    assert window.messages[2].tools == ["-> player reset"]
+    assert window.messages[3].text == "Done, he is reset."
+    assert window.last_ts > 0
+
+
+@pytest.mark.asyncio
+async def test_view_accepts_the_app_session_id(mock_db):
+    store = PgFluidStore()
+    await store.create_session("ses_byapp")
+    await store.append("ses_byapp", _node("n1", None, "opened by its app id"))
+    _session_row(mock_db, "app-byapp", "ses_byapp", "By app id")
+
+    window = await store.session_slice("app-byapp")
+    assert window is not None
+    assert window.title == "By app id"
+    assert window.messages[0].text == "opened by its app id"
+
+
+@pytest.mark.asyncio
+async def test_an_old_session_is_found_behind_many_newer_matching_rows(mock_db):
+    store = PgFluidStore()
+    await store.create_session("ses_old")
+    mock_db.execute(
+        "INSERT INTO fluid_session_nodes (session_id, node_id, parent_id, ts, message) "
+        "VALUES ('ses_old', 'o1', NULL, 1.0, ?)",
+        (json.dumps({"role": "user", "content": [
+            {"kind": "text", "text": "tibo needs a reset"}]}),),
+    )
+    await store.create_session("ses_noisy")
+    mock_db.executemany(
+        "INSERT INTO fluid_session_nodes (session_id, node_id, parent_id, ts, message) "
+        "VALUES ('ses_noisy', ?, NULL, ?, ?)",
+        [(f"x{i}", 1000.0 + i, json.dumps({"role": "user", "content": [
+            {"kind": "text", "text": f"reset number {i}"}]})) for i in range(2100)],
+    )
+    mock_db.commit()
+
+    hits = await store.search(["tibo", "reset"])
+    ids = [h.session_id for h in hits]
+    assert "ses_old" in ids
+    # The text that holds both terms outranks a pile of one-term rows.
+    assert ids[0] == "ses_old"

@@ -220,7 +220,10 @@ def _append_events_sync(session_id: str, events: List[Event]) -> None:
 # real match, which also makes ``%``/``_`` inside a user's term harmless: an
 # over-wide LIKE just hands us rows that then fail the Python check.
 
-_SEARCH_ROW_CAP = 2000        # rows pulled per arm before Python scoring
+# The prefilter is bounded by SESSIONS, not rows: a common term in thousands
+# of newer rows must not push an older session's match out of the window.
+_SEARCH_PREFILTER_SESSIONS = 200  # candidate sessions per arm, best match first
+_SEARCH_ROWS_PER_SESSION = 20     # matching rows scored per candidate session
 _SEARCH_TEXTS_PER_SESSION = 3  # matched texts kept per session (tool trims too)
 _SEARCH_SESSION_CAP = 25       # sessions returned (``limit`` is a hint, not a promise)
 
@@ -268,40 +271,54 @@ def _accumulate(
     terms: List[str],
 ) -> None:
     """Score one row's texts into the per-session accumulator (fluid's contract:
-    score = total term hits, last_ts = newest matched row)."""
+    score = total term hits, best = most terms in one text, last_ts = newest
+    matched row). The texts kept are the ones holding the most terms."""
     for text in texts:
         lowered = text.lower()
         n_hit = sum(1 for t in terms if t in lowered)
         if not n_hit:
             continue
-        slot = acc.setdefault(session_id, {"score": 0, "last_ts": 0.0, "texts": []})
+        slot = acc.setdefault(
+            session_id, {"score": 0, "best": 0, "last_ts": 0.0, "texts": []}
+        )
         slot["score"] += n_hit
+        slot["best"] = max(slot["best"], n_hit)
         slot["last_ts"] = max(slot["last_ts"], ts)
-        if len(slot["texts"]) < _SEARCH_TEXTS_PER_SESSION:
-            slot["texts"].append((role, text))
+        kept = slot["texts"]
+        if len(kept) < _SEARCH_TEXTS_PER_SESSION:
+            kept.append((n_hit, role, text))
+        else:
+            weakest = min(range(len(kept)), key=lambda i: kept[i][0])
+            if n_hit > kept[weakest][0]:
+                kept[weakest] = (n_hit, role, text)
 
 
 def _titles_for(cur, session_ids: List[str]) -> Dict[str, str]:
-    """Session titles from the app's ``sessions`` table, keyed by store id.
+    """Session titles from the app's ``sessions`` table, keyed by recall id.
 
     ``sessions.sdk_session_id`` holds the store-side id for BOTH legs: the
-    fluid ``ses_…`` id on native sessions and the Claude uuid on delegated ones,
-    so one lookup serves every recall arm.
+    fluid ``ses_…`` id on native sessions and the Claude uuid on delegated ones.
+    A session another worker runs has no store id here, so it is recalled by
+    its app id — one lookup matches either.
     """
     ids = [sid for sid in session_ids if sid]
     if not ids:
         return {}
     placeholders = ", ".join(["%s"] * len(ids))
     cur.execute(
-        f"SELECT sdk_session_id, title FROM sessions "
-        f"WHERE sdk_session_id IN ({placeholders})",
-        ids,
+        f"SELECT id, sdk_session_id, title FROM sessions "
+        f"WHERE sdk_session_id IN ({placeholders}) OR id IN ({placeholders})",
+        ids + ids,
     )
-    return {
-        row["sdk_session_id"]: str(row["title"])
-        for row in cur.fetchall()
-        if row.get("title")
-    }
+    wanted = set(ids)
+    titles: Dict[str, str] = {}
+    for row in cur.fetchall():
+        if not row.get("title"):
+            continue
+        for key in (row.get("sdk_session_id"), row.get("id")):
+            if key in wanted:
+                titles[key] = str(row["title"])
+    return titles
 
 
 def _roots_for(cur, session_ids: List[str]) -> Dict[str, str]:
@@ -326,6 +343,202 @@ def _roots_for(cur, session_ids: List[str]) -> Dict[str, str]:
     }
 
 
+# ─── Sessions another worker runs ────────────────────────────────────────────
+#
+# A chat another worker of the owner's network runs is mirrored here as a
+# ``sessions`` row plus its ``session_events``. ``sdk_session_id`` is local-only
+# (never mirrored), so the mirror has none and no transcript-store row exists
+# on this worker: its recall reads the events, under its app id. Chats this
+# worker runs are never read this way — their store rows answer.
+
+_EVENT_TEXT_TYPES = ("message.user", "message.assistant", "assistant.text_delta")
+_EVENT_VIEW_TYPES = _EVENT_TEXT_TYPES + ("tool.use", "tool.result")
+_WORKER_ID_CHARS = 12
+
+
+def _my_device_id() -> Optional[str]:
+    """This worker's network device id; None when it is not enrolled."""
+    try:
+        from app.network import ownership
+
+        return ownership.my_device_id()
+    except Exception:  # noqa: BLE001 - no network context means no mirrors
+        logger.debug("fluid_pg_store: device id unavailable", exc_info=True)
+        return None
+
+
+def _worker_name(device_id: Optional[str]) -> str:
+    """The owning worker's name, else a short form of its device id."""
+    from app.core.remote_task import worker_display_name
+
+    name = worker_display_name(device_id)
+    return name[:_WORKER_ID_CHARS] if name == device_id else name
+
+
+def _remote_sql(alias: str = "") -> str:
+    """WHERE fragment for a sessions row another worker runs (one ``%s``: me)."""
+    return (
+        f"{alias}sdk_session_id IS NULL AND {alias}owner_device_id IS NOT NULL "
+        f"AND {alias}owner_device_id <> %s"
+    )
+
+
+def _in(values: List[str]) -> str:
+    return ", ".join(["%s"] * len(values))
+
+
+def _event_ts(payload: Dict[str, Any], created_at: Any) -> float:
+    stamp = payload.get("timestamp")
+    return _entry_ts(stamp) if stamp else _entry_ts(created_at)
+
+
+def _fold_events(rows: List[Dict[str, Any]]) -> List[RecallMessage]:
+    """A session's ``session_events`` (oldest first) as RecallMessages.
+
+    The same shape the store arms give: a user message; an assistant message
+    whose text is its streamed deltas (or final text) joined, with one line
+    per tool call; then a "user" message holding the tool results, as fluid
+    records them. Thinking and everything that is not a message is skipped.
+    """
+    from app.core.harness_reminders import strip_harness_reminders
+    from app.db.session_events import _parse_payload
+
+    out: List[RecallMessage] = []
+    open_msg: Optional[RecallMessage] = None
+    last_delta = False
+    for row in rows:
+        etype = row["event_type"]
+        payload = _parse_payload(row.get("payload"))
+        ts = _event_ts(payload, row.get("created_at"))
+        if etype == "message.user":
+            text = strip_harness_reminders(str(payload.get("content") or ""))
+            out.append(RecallMessage(role="user", text=text, ts=ts))
+            open_msg, last_delta = None, False
+        elif etype in ("assistant.text_delta", "message.assistant"):
+            delta = etype == "assistant.text_delta"
+            if not delta and payload.get("kind", "text") != "text":
+                continue
+            piece = str(payload.get("text" if delta else "content") or "")
+            if not piece:
+                continue
+            if open_msg is None or open_msg.role != "assistant":
+                open_msg = RecallMessage(role="assistant", ts=ts)
+                out.append(open_msg)
+                last_delta = False
+            if delta and last_delta:
+                open_msg.text += piece
+            else:
+                open_msg.text = f"{open_msg.text}\n{piece}" if open_msg.text else piece
+            last_delta = delta
+        elif etype == "tool.use":
+            if open_msg is None or open_msg.role != "assistant":
+                open_msg = RecallMessage(role="assistant", ts=ts)
+                out.append(open_msg)
+            try:
+                arg = json.dumps(payload.get("input") or {}, ensure_ascii=False)
+            except (TypeError, ValueError):
+                arg = "…"
+            open_msg.tools.append(
+                _clip(f"{payload.get('name') or '?'}({arg})", _TOOL_LINE_CAP)
+            )
+            last_delta = False
+        elif etype == "tool.result":
+            if open_msg is None or open_msg.role != "user":
+                open_msg = RecallMessage(role="user", ts=ts)
+                out.append(open_msg)
+            marker = "ERROR" if payload.get("is_error") else "->"
+            preview = str(payload.get("content_preview") or "") or "(no text)"
+            open_msg.tools.append(_clip(f"{marker} {preview}", _TOOL_LINE_CAP))
+            last_delta = False
+    return out
+
+
+def _event_recall_rows(cur, app_id: str, types=_EVENT_VIEW_TYPES) -> List[RecallMessage]:
+    cur.execute(
+        "SELECT event_type, payload, created_at FROM session_events "
+        f"WHERE session_id = %s AND event_type IN ({_in(list(types))}) ORDER BY seq",
+        [app_id, *types],
+    )
+    return _fold_events([dict(r) for r in cur.fetchall()])
+
+
+def _event_preview_sync(cur, app_id: str) -> tuple:
+    """(last assistant text, message count) for a session another worker runs.
+
+    Tool payloads are left out: the fold's message boundaries do not depend
+    on them, and they are most of a session's bytes.
+    """
+    cur.execute(
+        "SELECT event_type, created_at, CASE WHEN event_type IN "
+        f"({_in(list(_EVENT_TEXT_TYPES))}) THEN payload ELSE NULL END AS payload "
+        "FROM session_events "
+        f"WHERE session_id = %s AND event_type IN ({_in(list(_EVENT_VIEW_TYPES))}) "
+        "ORDER BY seq",
+        [*_EVENT_TEXT_TYPES, app_id, *_EVENT_VIEW_TYPES],
+    )
+    messages = _fold_events([dict(r) for r in cur.fetchall()])
+    for message in reversed(messages):
+        if message.role == "assistant" and message.text.strip():
+            return _clip(message.text, _PREVIEW_CHARS), len(messages)
+    return "", len(messages)
+
+
+def _exclusion_ids(cur, session_id: Optional[str]) -> List[str]:
+    """The calling session under every id recall may know it by."""
+    if not session_id:
+        return []
+    cur.execute(
+        "SELECT id, sdk_session_id FROM sessions WHERE id = %s OR sdk_session_id = %s",
+        (session_id, session_id),
+    )
+    ids = {session_id}
+    for row in cur.fetchall():
+        ids.update(v for v in (row.get("id"), row.get("sdk_session_id")) if v)
+    return sorted(ids)
+
+
+def _hits_sql(column: str, n: int) -> str:
+    """How many query terms one row's ``column`` contains (prefilter count)."""
+    return " + ".join([f"(CASE WHEN {column} ILIKE %s THEN 1 ELSE 0 END)"] * n)
+
+
+def _candidate_sessions(
+    cur, source: str, source_params: List[Any], column: str, ts: str,
+    where: str, where_params: List[Any], patterns: List[str], owner: str = "NULL",
+) -> List[Dict[str, Any]]:
+    """The arm's best ``_SEARCH_PREFILTER_SESSIONS`` sessions over ``source``:
+    most terms in one row first, then the newest match."""
+    any_term = " OR ".join([f"{column} ILIKE %s"] * len(patterns))
+    cur.execute(
+        "SELECT session_id, MAX(h) AS best, MAX(t) AS last, MAX(owner) AS owner FROM ("
+        f"SELECT session_id, {ts} AS t, {_hits_sql(column, len(patterns))} AS h, "
+        f"{owner} AS owner FROM {source} WHERE {where} AND ({any_term})"
+        ") m GROUP BY session_id ORDER BY best DESC, last DESC "
+        f"LIMIT {_SEARCH_PREFILTER_SESSIONS}",
+        list(patterns) + list(source_params) + list(where_params) + list(patterns),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def _top_rows(cur, table: str, column: str, ts: str, where: str, where_params: List[Any],
+              select: str, patterns: List[str]) -> List[Dict[str, Any]]:
+    """The strongest ``_SEARCH_ROWS_PER_SESSION`` rows of each of the arm's
+    best ``_SEARCH_PREFILTER_SESSIONS`` sessions, in one scan of ``table``
+    (the matching rows are read once; the large JSON is not re-scanned)."""
+    any_term = " OR ".join([f"{column} ILIKE %s"] * len(patterns))
+    cur.execute(
+        f"WITH m AS (SELECT {select}, {ts} AS t, {_hits_sql(column, len(patterns))} AS h "
+        f"FROM {table} WHERE {where} AND ({any_term})), "
+        "s AS (SELECT session_id, MAX(h) AS best, MAX(t) AS last FROM m "
+        f"GROUP BY session_id ORDER BY best DESC, last DESC LIMIT {_SEARCH_PREFILTER_SESSIONS}), "
+        "r AS (SELECT m.*, ROW_NUMBER() OVER (PARTITION BY m.session_id "
+        "ORDER BY m.h DESC, m.t DESC) AS rn FROM m JOIN s ON s.session_id = m.session_id) "
+        f"SELECT {select} FROM r WHERE rn <= {_SEARCH_ROWS_PER_SESSION}",
+        list(patterns) + list(where_params) + list(patterns),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
 def _first_readable(items: List[Any], reader: Dict[str, Any], cap: int, *, key) -> List[Any]:
     """The first ``cap`` of ``items`` (in order) whose chat ``reader`` may read."""
     kept: List[Any] = []
@@ -342,54 +555,68 @@ def _search_sync(
 ) -> List[SessionSearchHit]:
     patterns = [f"%{t}%" for t in terms]
     acc: Dict[str, Dict[str, Any]] = {}
+    workers: Dict[str, str] = {}
+    me = _my_device_id()
 
     with get_db() as conn:
         cur = conn.cursor()
+        excluded = _exclusion_ids(cur, exclude_session_id)
+        not_excluded = f"session_id NOT IN ({_in(excluded)})" if excluded else "TRUE"
 
         # Arm A — this store's own native session node tree.
-        where = " OR ".join(["message::text ILIKE %s"] * len(patterns))
-        params: List[Any] = list(patterns)
-        sql = (
-            f"SELECT session_id, ts, message FROM fluid_session_nodes "
-            f"WHERE ({where})"
-        )
-        if exclude_session_id:
-            sql += " AND session_id != %s"
-            params.append(exclude_session_id)
-        cur.execute(sql + f" ORDER BY ts DESC LIMIT {_SEARCH_ROW_CAP}", params)
-        for row in cur.fetchall():
+        for row in _top_rows(
+            cur, "fluid_session_nodes", "message::text", "ts", not_excluded, excluded,
+            "session_id, ts, message", patterns,
+        ):
             message = _as_dict(row["message"])
             _accumulate(
-                acc,
-                row["session_id"],
-                str(message.get("role") or "?"),
-                message_texts(message),
-                float(row["ts"] or 0.0),
-                terms,
+                acc, row["session_id"], str(message.get("role") or "?"),
+                message_texts(message), float(row["ts"] or 0.0), terms,
             )
 
         # Arm B — the Claude-format transcript (subpath IS NULL = the main
         # transcript; sidechain files live under a subpath and are not recall).
-        where = " OR ".join(["entry::text ILIKE %s"] * len(patterns))
-        params = list(patterns)
-        sql = (
-            f"SELECT session_id, created_at, entry FROM session_store_entries "
-            f"WHERE subpath IS NULL AND ({where})"
-        )
-        if exclude_session_id:
-            sql += " AND session_id != %s"
-            params.append(exclude_session_id)
-        cur.execute(sql + f" ORDER BY id DESC LIMIT {_SEARCH_ROW_CAP}", params)
-        for row in cur.fetchall():
+        for row in _top_rows(
+            cur, "session_store_entries", "entry::text", "created_at",
+            f"subpath IS NULL AND {not_excluded}", excluded,
+            "session_id, created_at, entry", patterns,
+        ):
             entry = _as_dict(row["entry"])
             _accumulate(
-                acc,
-                row["session_id"],
-                str(entry.get("type") or "?"),
-                _sse_entry_texts(entry),
-                _entry_ts(row["created_at"]),
-                terms,
+                acc, row["session_id"], str(entry.get("type") or "?"),
+                _sse_entry_texts(entry), _entry_ts(row["created_at"]), terms,
             )
+
+        # Arm C — sessions another worker runs, from their mirrored events.
+        # A match inside one streamed delta selects the session; the whole
+        # folded conversation is then scored, so a phrase split across
+        # deltas still counts as one text.
+        if me:
+            types = list(_EVENT_TEXT_TYPES)
+            source = (
+                "(SELECT e.session_id, e.created_at, e.payload, s.owner_device_id AS owner "
+                "FROM session_events e JOIN sessions s ON s.id = e.session_id "
+                f"WHERE {_remote_sql('s.')} AND e.event_type IN ({_in(types)})) ev"
+            )
+            found = _candidate_sessions(
+                cur, source, [me, *types], "payload::text", "created_at",
+                not_excluded, excluded, patterns, owner="owner",
+            )
+            if found:
+                ids = [r["session_id"] for r in found]
+                workers = {r["session_id"]: r["owner"] for r in found}
+                cur.execute(
+                    "SELECT session_id, event_type, payload, created_at FROM session_events "
+                    f"WHERE session_id IN ({_in(ids)}) AND event_type IN ({_in(types)}) "
+                    "ORDER BY session_id, seq",
+                    ids + types,
+                )
+                by_session: Dict[str, List[Dict[str, Any]]] = {}
+                for row in cur.fetchall():
+                    by_session.setdefault(row["session_id"], []).append(dict(row))
+                for sid, rows in by_session.items():
+                    for message in _fold_events(rows):
+                        _accumulate(acc, sid, message.role, [message.text], message.ts, terms)
 
     # An API key's session recalls only its own sessions; the owner, all.
     api_user_id = api_user_scope.viewer_api_user_id(exclude_session_id)
@@ -401,12 +628,14 @@ def _search_sync(
             session_id=sid,
             score=slot["score"],
             last_ts=slot["last_ts"],
-            texts=slot["texts"],
+            texts=[(role, text) for _n, role, text in
+                   sorted(slot["texts"], key=lambda t: -t[0])],
+            best=slot["best"],
         )
         for sid, slot in acc.items()
         if slot["score"] > 0
     ]
-    hits.sort(key=lambda h: (-h.score, -h.last_ts))
+    hits.sort(key=lambda h: (-h.best, -h.score, -h.last_ts))
     # A chat a member's device started recalls only what that device may
     # read over REST (#1897). Checked best-first, so only the hits that make
     # the cut cost a lookup.
@@ -423,6 +652,8 @@ def _search_sync(
         for hit in hits:
             hit.title = titles.get(hit.session_id)
             hit.project_root = roots.get(hit.session_id)
+            if workers.get(hit.session_id):
+                hit.worker = _worker_name(workers[hit.session_id])
     return hits
 
 
@@ -606,14 +837,20 @@ def _recent_sync(
     # A chat a member's device started lists only what that device may read
     # over REST (#1897); the rule needs the whole row.
     reader = artifact_access.chat_reader(exclude_session_id)
+    me = _my_device_id()
+    columns = "*" if reader is not None else "id, sdk_session_id, owner_device_id, title, updated_at"
+    params: List[Any] = []
+    listed = "sdk_session_id IS NOT NULL"
+    if me:
+        # ...and the sessions another of the owner's workers runs.
+        listed = f"({listed} OR ({_remote_sql()}))"
+        params.append(me)
     sql = (
-        f"SELECT {'*' if reader is not None else 'sdk_session_id, title, updated_at'} "
-        "FROM sessions "
-        "WHERE sdk_session_id IS NOT NULL "
+        f"SELECT {columns} FROM sessions "
+        f"WHERE {listed} "
         "AND COALESCE(hidden, FALSE) = FALSE "
         "AND status NOT IN ('archived', 'failed')"
     )
-    params: List[Any] = []
     if project_id is not None:
         sql += " AND project_id = %s"
         params.append(project_id)
@@ -621,9 +858,14 @@ def _recent_sync(
         # (Workers are hidden, so the column alone is the key's listing.)
         sql += " AND api_user_id = %s"
         params.append(api_user_id)
-    if exclude_session_id:
-        sql += " AND sdk_session_id != %s"
-        params.append(exclude_session_id)
+    with get_db() as conn:
+        excluded = _exclusion_ids(conn.cursor(), exclude_session_id)
+    if excluded:
+        sql += (
+            f" AND id NOT IN ({_in(excluded)})"
+            f" AND COALESCE(sdk_session_id, '') NOT IN ({_in(excluded)})"
+        )
+        params += excluded + excluded
     sql += " ORDER BY updated_at DESC LIMIT %s OFFSET %s"
     rows: List[Dict[str, Any]] = []
     page = limit if reader is None else _READER_PAGE
@@ -642,11 +884,15 @@ def _recent_sync(
     rows = rows[:limit]
     with get_db() as conn:
         cur = conn.cursor()
-        roots = _roots_for(cur, [r["sdk_session_id"] for r in rows])
+        roots = _roots_for(cur, [r["sdk_session_id"] for r in rows if r["sdk_session_id"]])
         out: List[SessionSummary] = []
         for row in rows:
-            store_id = row["sdk_session_id"]
-            preview, count = _preview_sync(cur, store_id)
+            remote = not row["sdk_session_id"]
+            store_id = row["id"] if remote else row["sdk_session_id"]
+            preview, count = (
+                _event_preview_sync(cur, store_id) if remote
+                else _preview_sync(cur, store_id)
+            )
             out.append(SessionSummary(
                 session_id=store_id,
                 title=str(row["title"]) if row.get("title") else None,
@@ -654,8 +900,39 @@ def _recent_sync(
                 preview=preview,
                 message_count=count,
                 project_root=roots.get(store_id),
+                worker=_worker_name(row.get("owner_device_id")) if remote else None,
             ))
     return out
+
+
+def _resolve_recall_sync(cur, session_id: str):
+    """(recall id, messages, sessions row, remote?) for either id, or None.
+
+    The store id answers first (fluid node path, else Claude transcript); an
+    app id resolves to its store id, or — for a session another worker runs —
+    to its mirrored events.
+    """
+    for arm in (_fluid_recall_rows, _sse_recall_rows):
+        messages = arm(cur, session_id)
+        if messages is not None:
+            return session_id, messages, None, False
+    cur.execute("SELECT id, sdk_session_id, owner_device_id, title FROM sessions WHERE id = %s",
+                (session_id,))
+    row = cur.fetchone()
+    if row is None:
+        return None
+    row = dict(row)
+    if row.get("sdk_session_id"):
+        for arm in (_fluid_recall_rows, _sse_recall_rows):
+            messages = arm(cur, row["sdk_session_id"])
+            if messages is not None:
+                return row["sdk_session_id"], messages, row, False
+        return None
+    me = _my_device_id()
+    owner = row.get("owner_device_id")
+    if not me or not owner or owner == me:
+        return None
+    return row["id"], _event_recall_rows(cur, row["id"]), row, True
 
 
 def _slice_sync(
@@ -672,22 +949,22 @@ def _slice_sync(
         return None
     with get_db() as conn:
         cur = conn.cursor()
-        messages = _fluid_recall_rows(cur, session_id)
-        if messages is None:
-            messages = _sse_recall_rows(cur, session_id)
-        if messages is None:
+        resolved = _resolve_recall_sync(cur, session_id)
+        if resolved is None:
             return None
-        title = _titles_for(cur, [session_id]).get(session_id)
+        recall_id, messages, row, remote = resolved
+        title = (row or {}).get("title") or _titles_for(cur, [recall_id]).get(recall_id)
     total = len(messages)
     count = max(1, int(count))
     first = max(0, total + start) if start < 0 else min(int(start), total)
     return SessionSlice(
-        session_id=session_id,
+        session_id=recall_id,
         total=total,
         start=first,
         messages=messages[first:first + count],
-        title=title,
+        title=str(title) if title else None,
         last_ts=max((m.ts for m in messages), default=0.0),
+        worker=_worker_name(row.get("owner_device_id")) if remote else None,
     )
 
 
