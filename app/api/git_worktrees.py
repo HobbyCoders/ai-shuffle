@@ -133,6 +133,7 @@ def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
         git_status=git_status_info,
         status_checked_at=wt.get("status_checked_at"),
         status_error=wt.get("status_error"),
+        binding_warning=wt.get("binding_warning"),
         # Legacy field
         session=legacy_session_info
     )
@@ -148,12 +149,14 @@ def _convert_worktree_to_summary(wt: dict) -> WorktreeSummary:
         base_branch=wt.get("base_branch"),
         exists=wt.get("exists"),
         git_status=WorktreeStatusSummary(
+            current_branch=gs.get("current_branch"),
             is_clean=gs.get("is_clean", True),
             modified_count=len(gs.get("modified", [])),
             staged_count=len(gs.get("staged", [])),
             untracked_count=len(gs.get("untracked", [])),
         ) if gs else None,
         status_error=wt.get("status_error"),
+        binding_warning=wt.get("binding_warning"),
     )
 
 
@@ -258,11 +261,17 @@ def _worktree_status_one(wt: dict) -> Tuple[Optional[dict], Optional[str]]:
     except (ValueError, TypeError) as e:
         return None, f"invalid worktree path: {e}"
     try:
-        from app.core.checkout_manager import _require_branch_binding
+        from app.core.checkout_manager import _require_checkout_root
 
-        if wt.get("branch_name"):
-            _require_branch_binding(worktree_full_path, wt["branch_name"])
-        status_data = git_service.get_status(worktree_full_path)
+        _require_checkout_root(worktree_full_path)
+        status_data = dict(git_service.get_status(worktree_full_path))
+        status_data.pop("binding_warning", None)
+        actual = status_data.get("current_branch")
+        if wt.get("branch_name") and actual != wt["branch_name"]:
+            status_data["binding_warning"] = (
+                f"Checkout is on {actual!r}, not the bound branch {wt['branch_name']!r}; "
+                "counts describe the actual checkout. Session use and cleanup remain blocked."
+            )
     except Exception as e:  # noqa: BLE001 — one worktree must not fail the batch
         return None, str(e) or type(e).__name__
     # The pygit2 reader swallows a failed read and returns a partial "clean"
@@ -450,6 +459,7 @@ async def _load_worktree_statuses(
             wt["git_status"] = entry.status if entry else None
             wt["status_checked_at"] = entry.checked_at if entry else None
             wt["status_error"] = entry.error if entry else None
+            wt["binding_warning"] = (entry.status or {}).get("binding_warning") if entry else None
 
 
 def _invalidate_worktree_status_cache(project_id: str, worktree_id: Optional[str] = None) -> None:
@@ -541,7 +551,7 @@ async def list_worktrees(
         include_status: If True (default), includes git status (dirty state) for each worktree
         focus_worktree_id: The worktree the client has open; its status is kept
             as fresh as a busy worktree's
-        compact: Return only worktrees that exist on disk, as WorktreeSummary
+        compact: Return non-retired worktrees (including stale rows), as WorktreeSummary
             rows (no session history, paths or file lists), and skip mapping
             sessions that cannot affect status freshness. The branch picker
             uses this; the full shape stays the default.
@@ -569,7 +579,9 @@ async def list_worktrees(
         worktrees = await run_sync(
             worktree_manager.get_worktrees_for_project, project_id, session_filter=session_filter
         )
-        worktrees = [wt for wt in worktrees if wt.get("exists") is not False]
+        # Keep stale active rows visible for diagnosis, but not records already
+        # explicitly retired by lifecycle cleanup.
+        worktrees = [wt for wt in worktrees if wt.get("status") not in {"completed", "deleted", "archived"}]
     else:
         worktrees = await run_sync(worktree_manager.get_worktrees_for_project, project_id)
 
@@ -630,12 +642,16 @@ async def delete_worktree(
 
     worktree = _require_worktree_for_project(worktree_id, project_id)
 
-    success = await worktree_manager.cleanup_worktree(worktree_id, keep_branch=keep_branch)
+    try:
+        success = await worktree_manager.cleanup_worktree(worktree_id, keep_branch=keep_branch)
+    except WorktreeError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
     if not success:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to remove worktree"
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cleanup refused by Git; directory and registry record preserved. "
+                   "Check for locks or invalid worktree metadata before retrying."
         )
 
     # The removed worktree's cached status and back-off go with it.

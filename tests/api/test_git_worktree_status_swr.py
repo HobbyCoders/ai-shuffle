@@ -53,6 +53,8 @@ def git(monkeypatch):
         return _status()
 
     service.get_status.side_effect = get_status
+    from app.core import checkout_manager
+    monkeypatch.setattr(checkout_manager, "_require_checkout_root", lambda path: None)
     monkeypatch.setattr(gw, "git_service", service)
     monkeypatch.setattr(gw, "get_worktree_working_dir", lambda wt: wt["worktree_path"])
     monkeypatch.setattr(gw, "_streaming_session_ids", lambda: set())

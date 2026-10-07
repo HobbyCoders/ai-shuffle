@@ -121,8 +121,12 @@ def test_list_worktrees_foreign_path_returns_empty_without_running_git(caplog):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def manager(monkeypatch):
-    """A WorktreeManager with a fully mocked git_service + patched DB module."""
+def manager(monkeypatch, tmp_path):
+    """Mock import/DB boundaries, but keep the physical project-root guard real."""
+    from tests.git_repo_helpers import hermetic_git_env, init_repo
+
+    hermetic_git_env(monkeypatch, tmp_path)
+    init_repo(tmp_path)
     mgr = WorktreeManager()
     mgr.git_service = MagicMock(name="git_service")
 

@@ -1384,7 +1384,7 @@ class TestListWorktrees:
         Branch/root validation uses real Git and is covered, without this patch,
         by test_git_worktrees_real_repo_api.py. Do not bypass the production guard.
         """
-        with patch("app.core.checkout_manager._require_branch_binding"):
+        with patch("app.core.checkout_manager._require_checkout_root"):
             yield
 
     def test_list_worktrees_success(
@@ -1560,7 +1560,7 @@ class TestListWorktrees:
         self, app, mock_database, mock_git_service,
         mock_worktree_manager, mock_settings, sample_project, sample_worktree
     ):
-        """?compact=true is the branch picker's payload: existing rows only,
+        """?compact=true keeps stale active rows visible for the branch picker,
         dirty counts without file lists, no session history or paths. Pins the
         per-row byte budget so the list cannot silently grow back."""
         import time as _t
@@ -1582,11 +1582,15 @@ class TestListWorktrees:
         mock_database.get_project.return_value = sample_project
         mock_git_service.is_git_repo.return_value = True
         mock_git_service.get_status.return_value = {
-            "is_clean": False, "current_branch": "main",
+            "is_clean": False, "current_branch": sample_worktree["branch_name"],
             "modified": ["a.py", "b.py"], "staged": [{"file": "c.py", "status": "M"}],
             "untracked": ["d.txt"],
         }
         mock_worktree_manager.get_worktrees_for_project.return_value = worktrees
+        # This size contract measures healthy rows; mismatch warnings have
+        # their own real-Git test and legitimately carry explanatory text.
+        for wt in worktrees[:40]:
+            wt["branch_name"] = sample_worktree["branch_name"]
         _gw._worktree_status_cache.clear()
 
         with (patch("app.api.git.git_service", mock_git_service),
@@ -1603,14 +1607,20 @@ class TestListWorktrees:
 
         assert response.status_code == 200
         data = response.json()
-        assert data["total"] == 40
-        assert [wt["id"] for wt in data["worktrees"]] == [f"wt-{i}" for i in range(40)]
+        assert data["total"] == 50
+        assert [wt["id"] for wt in data["worktrees"]] == ([f"wt-{i}" for i in range(40)]
+                                                        + [f"wt-gone-{i}" for i in range(10)])
         for wt in data["worktrees"]:
             assert set(wt) == {"id", "resource_kind", "branch_name", "base_branch",
-                               "exists", "git_status", "status_error"}
-            assert wt["git_status"] == {"is_clean": False, "modified_count": 2,
+                               "exists", "git_status", "status_error", "binding_warning"}
+        for wt in data["worktrees"][:40]:
+            assert wt["git_status"] == {"current_branch": sample_worktree["branch_name"],
+                                        "is_clean": False, "modified_count": 2,
                                         "staged_count": 1, "untracked_count": 1}
-        assert len(response.content) / 40 <= 260, len(response.content)
+            assert wt["binding_warning"] is None
+        for wt in data["worktrees"][40:]:
+            assert wt["git_status"] is None and "needs cleanup" in wt["status_error"]
+        assert len(response.content) / 50 <= 360, len(response.content)
 
         # Only sessions that can make a worktree hot are mapped to checkouts.
         _, kwargs = mock_worktree_manager.get_worktrees_for_project.call_args
@@ -2039,7 +2049,7 @@ class TestDeleteWorktree:
         self, app, mock_database, mock_worktree_manager, mock_settings,
         sample_project, sample_repository, sample_worktree
     ):
-        """Should return 500 on deletion failure."""
+        """A cleanup refusal is a safe, explanatory conflict, not a server error."""
         mock_database.get_project.return_value = sample_project
         mock_database.get_worktree.return_value = sample_worktree
         mock_database.get_git_repository_by_project.return_value = sample_repository
@@ -2055,7 +2065,8 @@ class TestDeleteWorktree:
                         "/api/v1/projects/test-project-id/git/worktrees/wt-abc123"
                     )
 
-        assert response.status_code == 500
+        assert response.status_code == 409
+        assert "preserved" in response.json()["detail"]
 
 
 # =============================================================================

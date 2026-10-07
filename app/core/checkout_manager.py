@@ -172,8 +172,12 @@ def _dir_is_worktree(path: str) -> bool:
     return p.is_dir() and (p / ".git").exists()
 
 
-def _require_branch_binding(path: str, branch: str) -> None:
-    """Refuse stale/adopted branch paths without switching HEAD or rewriting rows."""
+def _require_checkout_root(path: str) -> None:
+    """Validate the physical root independently of its logical branch binding.
+
+    Metadata/status reads may inspect a deliberately switched checkout, but must
+    never discover an enclosing repository through a broken or missing marker.
+    """
     root = git_service._run_git(path, ["rev-parse", "--show-toplevel"], timeout=10)
     if (
         not _dir_is_worktree(path)
@@ -183,6 +187,11 @@ def _require_branch_binding(path: str, branch: str) -> None:
         != os.path.normcase(os.path.realpath(path))
     ):
         raise WorktreeError(f"Checkout {path!r} is not its own Git working tree")
+
+
+def _require_branch_binding(path: str, branch: str) -> None:
+    """Refuse stale/adopted branch paths without switching HEAD or rewriting rows."""
+    _require_checkout_root(path)
     actual = git_service.get_current_branch(path)
     if actual != branch:
         raise WorktreeError(

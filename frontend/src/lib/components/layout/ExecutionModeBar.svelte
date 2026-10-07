@@ -10,13 +10,13 @@
 	 * mode the branch chip reads "Auto from {base}" and the base-branch picker
 	 * lives in that same dropdown.
 	 *
-	 * Uses the git store for worktree/branch data and syncWorktrees()
-	 * to clean up stale DB records on project change. Worktree creation is
+	 * Uses read-only git-store worktree/branch data. Stale bindings stay visible
+	 * for diagnosis; opening the picker never deletes registry rows or branches. Worktree creation is
 	 * deferred to send time (POST /sessions/with-worktree via message-sender);
 	 * picking a branch here only stages it.
 	 */
 	import { activeSession } from '$lib/stores/active-session';
-	import { syncWorktrees, type Worktree, type Branch } from '$lib/api/git';
+	import { type Worktree, type Branch } from '$lib/api/git';
 	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
 	import {
 		peerRunners,
@@ -67,7 +67,6 @@
 	let showModeDropdown = $state(false);
 	let modeDropdownRef = $state<HTMLDivElement | null>(null);
 	let loading = $state(false);
-	let lastSyncedProject = $state<string | null>(null);
 
 	// --- New branch modal state ---
 	let showCreateModal = $state(false);
@@ -96,11 +95,12 @@
 	});
 
 	// --- Derived data ---
-	// Filter out worktrees that no longer exist on disk
-	const filteredWorktrees = $derived($worktreeStore.filter(w => w.exists !== false));
+	// Usable bindings are selectable; stale rows remain visible for diagnosis.
+	const filteredWorktrees = $derived($worktreeStore.filter(w => w.exists !== false && !w.binding_warning && !w.status_error));
+	const staleWorktrees = $derived($worktreeStore.filter(w => w.exists === false || w.binding_warning || w.status_error));
 
 	// Branches that don't already have a worktree
-	const worktreeBranchNames = $derived(new Set(filteredWorktrees.map(w => w.branch_name)));
+	const worktreeBranchNames = $derived(new Set($worktreeStore.map(w => w.branch_name)));
 
 	// The git repo's currently checked-out branch name (can't create a worktree on it)
 	const checkedOutBranchName = $derived($gitCurrentBranch?.name || null);
@@ -161,17 +161,6 @@
 	const worktreeError = $derived($activeSession.worktreeError);
 
 	// --- Effects ---
-
-	// Sync worktrees when project changes (cleans up stale DB records)
-	$effect(() => {
-		const project = $activeSession.projectV2Id ? null : $activeSession.project;
-		if (project && project !== untrack(() => lastSyncedProject)) {
-			lastSyncedProject = project;
-			syncWorktrees(project).catch(e => {
-				console.warn('[ExecutionModeBar] Failed to sync:', e);
-			});
-		}
-	});
 
 	// Worktree/branch data is loaded by MainPanel's git store effect.
 	// We only refresh on-demand when the dropdown is opened (see toggleDropdown).
@@ -535,6 +524,24 @@
 							{/each}
 						{/if}
 
+						{#if staleWorktrees.length > 0}
+							<div class="branch-divider"></div>
+							<div class="branch-section-label">Needs cleanup / binding review</div>
+							{#each staleWorktrees as wt (wt.id)}
+								<div class="stale-worktree">
+									<button type="button" class="branch-item" disabled>
+										<GitBranch size={13} strokeWidth={1.5} />
+										<span class="branch-item-name">{wt.branch_name}</span>
+										<span class="broken-badge">{wt.binding_warning ? 'Branch changed' : wt.exists === false ? 'Missing / invalid' : 'Status unavailable'}</span>
+									</button>
+									{#if wt.binding_warning && wt.git_status}
+										<p class="stale-detail">On {wt.git_status.current_branch ?? 'detached HEAD'} · {wt.git_status.modified_count + wt.git_status.staged_count + wt.git_status.untracked_count} changed</p>
+									{/if}
+									<p class="stale-detail">{wt.binding_warning || wt.status_error || 'Directory missing; needs cleanup. Existing files are preserved.'}</p>
+								</div>
+							{/each}
+						{/if}
+
 						<!-- Available Branches -->
 						{#if filteredBranches.length > 0}
 							{#if filteredWorktrees.length > 0}
@@ -557,7 +564,7 @@
 						{/if}
 
 						<!-- Empty state -->
-						{#if filteredWorktrees.length === 0 && filteredBranches.length === 0}
+						{#if filteredWorktrees.length === 0 && staleWorktrees.length === 0 && filteredBranches.length === 0}
 							<p class="branch-empty">No branches available</p>
 						{/if}
 
@@ -850,9 +857,28 @@
 		transition: background-color 120ms ease;
 	}
 
-	.branch-item:hover {
+	.branch-item:hover:not(:disabled) {
 		background: var(--hover-overlay);
 	}
+
+	.branch-item:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: -2px;
+	}
+
+	.branch-item:active:not(:disabled) { background: var(--selection-bg); }
+	.branch-item:disabled { cursor: not-allowed; opacity: 0.8; }
+	.stale-worktree { border-left: 2px solid var(--warning); margin: 6px 4px; }
+	.stale-detail {
+		margin: 0;
+		padding: 0 10px 8px;
+		font-size: 0.6875rem;
+		line-height: 1.5;
+		color: var(--muted-foreground);
+		overflow-wrap: anywhere;
+	}
+	@media (max-width: 480px) { .branch-item { min-height: 44px; } }
+	@media (prefers-reduced-motion: reduce) { .branch-dropdown { animation: none; } }
 
 	.branch-item.active {
 		background: var(--selection-bg);

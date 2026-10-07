@@ -490,14 +490,15 @@ class WorktreeManager:
         """
         Sync database worktree records with actual state on disk.
 
-        This should be called when a chat card loads for a git project to ensure
-        the database reflects reality (worktrees may have been deleted outside the app).
+        Discover external worktrees without reclaiming stale records or branch
+        history. Missing rows remain visible until explicit guarded cleanup.
 
         Args:
             project_id: The project to sync worktrees for
 
         Returns:
-            Dict with sync results: cleaned_up (list of deleted worktree ids), active (count)
+            Dict with sync results: cleaned_up (empty, retained for compatibility),
+            active (present directory count), imported (new external row count).
         """
         project = database.get_project(project_id)
         if not project:
@@ -516,59 +517,20 @@ class WorktreeManager:
         still_active = 0
 
         main_dir = get_project_working_dir(project)
+        from app.core.checkout_manager import _require_checkout_root
+        try:
+            _require_checkout_root(main_dir)
+        except WorktreeError:
+            # A stale nested project path must not discover the parent repo's
+            # worktrees and import them as this project's registry rows.
+            return {"cleaned_up": [], "active": 0, "imported": 0, "is_git_repo": False}
 
-        # Collect branches that need cleanup (path doesn't exist on disk)
-        branches_to_cleanup = set()
+        # Absence of a directory says nothing about running sessions or the
+        # value of its unpushed branch history. Sync is discovery, not consent
+        # to force-delete a branch or hide a stale row from management.
         for wt in active_worktrees:
-            worktree_full_path = get_worktree_working_dir_as_path(wt)
-
-            if not worktree_full_path.exists():
-                # Stale record - worktree was deleted outside the app
-                branch_name = wt["branch_name"]
-                logger.debug(f"Cleaning up stale worktree record: {branch_name} (path: {worktree_full_path})")
-                database.update_worktree(wt["id"], status=WorktreeStatus.DELETED)
-
-                if branch_name:
-                    branches_to_cleanup.add(branch_name)
-
-                cleaned_up.append({
-                    "id": wt["id"],
-                    "branch_name": branch_name,
-                    "reason": "path_not_found",
-                    "branch_deleted": False
-                })
-            else:
+            if get_worktree_working_dir_as_path(wt).exists():
                 still_active += 1
-
-        # Prune stale git worktree entries BEFORE attempting branch deletion.
-        # Git refuses to delete branches that are still referenced by worktree
-        # tracking entries, even when the worktree directory no longer exists.
-        if branches_to_cleanup:
-            self.git_service.prune_worktrees(main_dir)
-
-            default_branch = repo.get("default_branch", "main")
-            # Deduplicate: only attempt each branch deletion once
-            for branch_name in branches_to_cleanup:
-                if branch_name == default_branch:
-                    continue
-                try:
-                    branches = self.git_service.list_branches(main_dir, include_remote=False)
-                    local_branch_names = [b["name"] for b in branches if not b["is_remote"]]
-                    if branch_name in local_branch_names:
-                        success = self.git_service.delete_branch(main_dir, branch_name, force=True)
-                        if success:
-                            logger.debug(f"Deleted orphaned branch: {branch_name}")
-                            # Mark branch_deleted on all records for this branch
-                            for entry in cleaned_up:
-                                if entry["branch_name"] == branch_name:
-                                    entry["branch_deleted"] = True
-                        else:
-                            logger.warning(f"Failed to delete orphaned branch: {branch_name}")
-                except Exception as e:
-                    logger.warning(f"Error cleaning up orphaned branch {branch_name}: {e}")
-
-        if cleaned_up:
-            logger.debug(f"Cleaned up {len(cleaned_up)} stale worktree records for project {project_id}")
 
         # Import external worktrees (created outside the app, e.g. via git CLI)
         imported = 0
@@ -829,7 +791,25 @@ class WorktreeManager:
             worktree["exists"] = False
 
         if worktree["exists"] and worktree_abs_path:
-            worktree["git_status"] = self.git_service.get_status(worktree_abs_path)
+            from app.core.checkout_manager import _require_checkout_root
+            from app.core import git_native
+
+            try:
+                _require_checkout_root(worktree_abs_path)
+                gs = self.git_service.get_status(worktree_abs_path)
+                error = git_native.get_status_error(worktree_abs_path)
+                worktree["git_status"] = None if error else gs
+                worktree["status_error"] = error
+                if not error and gs.get("current_branch") != worktree["branch_name"]:
+                    worktree["binding_warning"] = (
+                        f"Checkout is on {gs.get('current_branch')!r}, not the bound branch "
+                        f"{worktree['branch_name']!r}; counts describe the actual checkout. "
+                        "Session use and cleanup remain blocked."
+                    )
+            except WorktreeError as exc:
+                worktree["git_status"], worktree["status_error"] = None, str(exc)
+        else:
+            worktree["status_error"] = "directory missing or not its own Git working tree; needs cleanup"
 
         # Get all sessions for this worktree (new model)
         sessions = database.get_sessions_for_worktree(worktree_id)
@@ -970,12 +950,10 @@ class WorktreeManager:
         ]:
             """Resolve worktree → repository → project in ONE thread hop.
 
-            These three reads are contiguous, and each failure branch DELETES
-            the worktree row — a read-decide-write that has to stay atomic
-            inside one block rather than being split across thread hops. The
-            fourth element is the early-return value (``False``/``True``) when
-            one of those branches fired, ``None`` when the caller should carry
-            on with the resolved rows.
+            Missing ownership metadata refuses cleanup without deleting the
+            registry row or touching files. The fourth element is ``False``
+            when the worktree is absent, otherwise ``None`` to continue with
+            the resolved rows.
             """
             worktree = database.get_worktree(worktree_id)
             if not worktree:
@@ -986,16 +964,13 @@ class WorktreeManager:
             repo = database.get_git_repository(worktree["repository_id"])
             if not repo:
                 logger.warning(f"Repository not found for worktree: {worktree_id}")
-                # Still try to clean up the database record
-                database.delete_worktree(worktree_id)
-                return worktree, None, None, True
+                raise WorktreeError("Cleanup refused: repository metadata missing; directory and registry record preserved.")
 
             # Get project to find main directory
             project = database.get_project(repo["project_id"])
             if not project:
                 logger.warning(f"Project not found for repository: {repo['id']}")
-                database.delete_worktree(worktree_id)
-                return worktree, repo, None, True
+                raise WorktreeError("Cleanup refused: project metadata missing; directory and registry record preserved.")
 
             return worktree, repo, project, None
 
@@ -1003,7 +978,86 @@ class WorktreeManager:
         if early is not None:
             return early
 
-        # Terminate pooled sessions BEFORE removing the worktree folder.
+        try:
+            main_dir = get_project_working_dir(project)
+            worktree_abs_path = get_worktree_working_dir(worktree)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise WorktreeError(
+                "Cleanup refused: checkout path could not be resolved; "
+                "directory and registry record preserved."
+            ) from exc
+
+        def _validate_cleanup() -> None:
+            from app.core import streaming_status
+            from app.core.checkout_manager import _require_branch_binding, _require_checkout_root
+            from app.core.worktree_report import _git, _path_key, _sessions_by_path, parse_worktree_list
+
+            # Refuse before terminating sessions or severing runtime links. A
+            # registry row alone is never authority to recursively remove files.
+            try:
+                _require_checkout_root(main_dir)
+                target = Path(worktree_abs_path)
+                if target.is_symlink():
+                    raise WorktreeError("checkout directory is a symlink; automatic cleanup is unsafe")
+                if target.exists():
+                    _require_branch_binding(worktree_abs_path, worktree["branch_name"])
+                    if not (target / ".git").is_file() or (target / ".git").is_symlink():
+                        raise WorktreeError("registered directory is not a linked worktree")
+                    main_common = _git(main_dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+                    target_common = _git(worktree_abs_path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+                    if (
+                        not main_common or not target_common
+                        or _path_key(main_common.strip()) != _path_key(target_common.strip())
+                    ):
+                        raise WorktreeError("checkout belongs to another or unverifiable Git repository")
+                    admin = _git(worktree_abs_path, "rev-parse", "--absolute-git-dir")
+                    try:
+                        if not admin:
+                            raise ValueError("Git administrative directory is unavailable")
+                        admin_path = Path(admin.strip())
+                        backlink = Path((admin_path / "gitdir").read_text().strip())
+                        if not backlink.is_absolute():
+                            backlink = admin_path / backlink
+                        if _path_key(str(backlink)) != _path_key(str(target / ".git")):
+                            raise ValueError("Git administrative entry points to another checkout")
+                    except (OSError, ValueError) as exc:
+                        raise WorktreeError("Git worktree back-reference could not be verified") from exc
+                listing = _git(main_dir, "worktree", "list", "--porcelain")
+                if listing is None:
+                    raise WorktreeError("Git worktree registration could not be verified")
+                item = next((i for i in parse_worktree_list(listing)
+                             if _path_key(i["path"]) == _path_key(worktree_abs_path)), None)
+                if _path_key(worktree_abs_path) == _path_key(main_dir):
+                    raise WorktreeError("cannot remove the project checkout")
+                if target.exists() and item is None:
+                    raise WorktreeError("directory is registry-only, not registered with Git")
+                if item and item.get("locked"):
+                    raise WorktreeError("worktree is locked")
+                sessions = database.get_sessions_for_worktree(worktree_id) or []
+                sessions += _sessions_by_path().get(_path_key(worktree_abs_path), [])
+                if worktree.get("session_id"):
+                    sessions.append({"id": worktree["session_id"]})
+                try:
+                    # Cleanup is destructive: use fresh durable truth and fail
+                    # closed, unlike the fail-open, TTL-cached status display.
+                    busy = any(streaming_status._has_active_run_db(s["id"]) for s in sessions)
+                except Exception as exc:
+                    raise WorktreeError("active session status could not be verified") from exc
+                if busy:
+                    raise WorktreeError("a session is working in this checkout; stop it before cleanup")
+                # A missing directory is metadata cleanup, not permission to
+                # force-delete unmerged/unpushed branch history.
+                if not target.exists() and not keep_branch and worktree["branch_name"] != repo.get("default_branch", "main"):
+                    merged = _git(main_dir, "branch", "--format=%(refname:short)", "--merged",
+                                  repo.get("default_branch") or "main")
+                    if merged is None or worktree["branch_name"] not in merged.splitlines():
+                        raise WorktreeError("missing directory still has unmerged branch history; retry with keep_branch=true")
+            except WorktreeError as exc:
+                raise WorktreeError(f"Cleanup refused: {exc}; directory and registry record preserved.") from exc
+
+        await run_sync(_validate_cleanup)
+
+        # Terminate idle pooled sessions BEFORE removing the worktree folder.
         # Their subprocess CWD is inside the worktree — if we don't kill
         # them first, `git worktree remove` fails (Windows CWD lock) or
         # leaves a zombie subprocess (Linux).
@@ -1013,9 +1067,6 @@ class WorktreeManager:
                 f"Terminated {len(terminated)} session(s) before removing "
                 f"worktree {worktree_id}"
             )
-
-        main_dir = get_project_working_dir(project)
-        worktree_abs_path = get_worktree_working_dir(worktree)
 
         # Remove git worktree
         if Path(worktree_abs_path).exists():

@@ -94,8 +94,8 @@ def _sessions_by_path() -> Dict[str, List[Dict[str, Any]]]:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, title, project_id, project_v2_id, branch, worktree_branch, "
-                       "worktree_path, instance_id, owner_device_id, pr_state, pr_number "
-                       "FROM sessions WHERE project_v2_id IS NOT NULL "
+                       "worktree_path, worktree_id, instance_id, owner_device_id, pr_state, pr_number "
+                       "FROM sessions WHERE project_v2_id IS NOT NULL OR worktree_id IS NOT NULL "
                        "OR (worktree_path IS NOT NULL AND worktree_path <> '')")
         rows = cursor.fetchall()
     out: Dict[str, List[Dict[str, Any]]] = {}
@@ -115,6 +115,10 @@ def _sessions_by_path() -> Dict[str, List[Dict[str, Any]]]:
         checkout = (_local_checkout(row["project_v2_id"], settings.effective_instance_id,
                                     branch=branch) if row.get("project_v2_id") else None)
         path = checkout.get("path") if checkout else row.get("worktree_path")
+        if not path and row.get("worktree_id"):
+            from app.db import database
+            worktree = database.get_worktree(row["worktree_id"])
+            path = worktree.get("worktree_path") if worktree else None
         if not path:
             continue
         row["running"] = streaming_status.has_active_run(row["id"])
@@ -176,8 +180,6 @@ def _project_repos() -> List[Dict[str, Any]]:
 
 def report(project: Optional[str] = None) -> Dict[str, Any]:
     """Blocking. Include registry-only paths; never inspect an enclosing repo as a worktree."""
-    from app.core.checkout_manager import WorktreeError, _require_branch_binding
-
     sessions = _sessions_by_path()
     projects = []
     for source in _project_repos():
@@ -201,41 +203,55 @@ def report(project: Optional[str] = None) -> Dict[str, Any]:
         rows = []
         for key, item in items.items():
             path = item["path"]
-            state, error = "valid", None
-            if not Path(path).is_dir():
+            state, error, binding_warning = "valid", None, None
+            root_valid = _is_checkout_root(path)
+            if not Path(path).exists():
                 state, error = "missing", "directory missing; needs cleanup"
+            elif not root_valid:
+                state, error = "invalid", "not its own Git working tree; directory preserved; needs cleanup"
             else:
-                try:
-                    if item.get("branch"):
-                        for branch in {item["branch"], *item.get("bound_branches", [])}:
-                            _require_branch_binding(path, branch)
-                    elif not _is_checkout_root(path):
-                        raise WorktreeError("not its own Git working tree")
-                except WorktreeError as exc:
-                    state, error = "invalid", f"{exc}; needs cleanup"
-            status = _git(path, "status", "--porcelain") if state == "valid" else None
+                actual = (_git(path, "symbolic-ref", "--short", "HEAD") or "").strip() or None
+                bound = {b for b in [item.get("branch"), *item.get("bound_branches", [])] if b}
+                mismatches = sorted(b for b in bound if b != actual)
+                if mismatches:
+                    state = "branch_mismatch"
+                    binding_warning = (
+                        f"Checkout is on {actual!r}, not the bound branch {', '.join(mismatches)!r}; "
+                        "counts describe the actual checkout. Session use and cleanup remain blocked."
+                    )
+                    error = binding_warning
+                item["branch"] = actual
+            status = _git(path, "status", "--porcelain") if root_valid else None
             # Missing folders have no files to lose. Invalid folders may still
             # hold uncommitted work: never call those safe based on the parent repo.
             dirty = (len([line for line in status.splitlines() if line.strip()])
                      if status is not None else 0 if state == "missing" else None)
-            head = item.get("head")
-            if not head and item.get("branch") and repo_valid:
+            # Read HEAD/comparison refs at the verified physical root, not the
+            # bound branch or the parent project's checkout after a switch.
+            head = ((_git(path, "rev-parse", "HEAD") or "").strip() if root_valid
+                    else item.get("head") if state == "missing" else None)
+            if not head and state == "missing" and item.get("branch") and repo_valid:
                 head = (_git(repo["path"], "rev-parse", "--verify", f"refs/heads/{item['branch']}") or "").strip()
-            ahead_out = (_git(repo["path"], "rev-list", "--count", f"{default}..{head}")
-                         if head and repo_valid else None)
+            comparison_repo = path if root_valid else repo["path"]
+            can_compare = root_valid or (repo_valid and state == "missing")
+            ahead_out = (_git(comparison_repo, "rev-list", "--count", f"{default}..{head}")
+                         if head and can_compare else None)
             ahead = int(ahead_out.strip()) if ahead_out and ahead_out.strip().isdigit() else None
             merged = None
-            if head and repo_valid:
+            if head and can_compare:
                 try:
-                    probe = subprocess.run(["git", "-C", repo["path"], "merge-base", "--is-ancestor", head, default],
+                    probe = subprocess.run(["git", "-C", comparison_repo, "merge-base", "--is-ancestor", head, default],
                                            capture_output=True, timeout=15)
                     merged = probe.returncode == 0 if probe.returncode in (0, 1) else None
                 except (OSError, subprocess.SubprocessError):
                     pass
             row = assess(item, sessions.get(key, []), dirty, ahead, merged)
-            row.update(state=state, registry_ids=item.get("registry_ids", []))
+            row.update(state=state, registry_ids=item.get("registry_ids", []), binding_warning=binding_warning,
+                       directory_preserved=state in {"invalid", "branch_mismatch"})
+            if state in {"invalid", "branch_mismatch"}:
+                row["reclaimable"] = False
             if error:
-                row["reason"] = error + "; " + row["reason"]
+                row["reason"] = error if row["reason"] == "safe to remove" else error + "; " + row["reason"]
             rows.append(row)
         projects.append({**repo, "worktrees": rows,
                          **({"error": "git worktree list failed"} if listing is None else {}),

@@ -109,6 +109,8 @@ def test_report_unions_real_git_and_legacy_registry(mock_db, tmp_path, monkeypat
         assert "needs cleanup" in row["reason"]
     if state == "invalid":
         assert row["dirty_files"] is None and "status unknown" in row["reason"]
+        assert row["unpushed_commits"] is None and row["merged_into_default"] is None
+        assert row["directory_preserved"] is True
     assert database.get_worktree("wt-report") is not None  # report never cleans rows
     assert git(repo, "branch", "--show-current") == "main"
 
@@ -196,6 +198,8 @@ def test_invalid_project_root_never_discovers_parent_worktrees(mock_db, tmp_path
     assert row["state"] == "missing" and row["registry_ids"] == ["wt-invalid-root"]
     assert row["merged_into_default"] is None and row["unpushed_commits"] is None
     assert row["reclaimable"] is False
+    assert worktree_manager.sync_worktrees_for_project("p-invalid-root")["is_git_repo"] is False
+    assert len(database.get_active_worktrees_for_repository(repository["id"])) == 1
 
 
 def test_report_unions_canonical_and_legacy_metadata_and_keeps_branch_mismatch_unsafe(mock_db, tmp_path, monkeypatch):
@@ -224,10 +228,11 @@ def test_report_unions_canonical_and_legacy_metadata_and_keeps_branch_mismatch_u
     result = wr.report("p-union")
     assert result["total"] == 1 and len(result["projects"]) == 1
     row = result["projects"][0]["worktrees"][0]
-    assert row["state"] == "invalid" and row["reclaimable"] is False
-    assert row["branch"] == "fix/reassigned" and row["dirty_files"] is None
+    assert row["state"] == "branch_mismatch" and row["reclaimable"] is False
+    assert row["branch"] == "fix/reassigned" and row["dirty_files"] == 0
     assert set(row["registry_ids"]) == {"wt-union", checkout["id"]}
-    assert "bound branch" in row["reason"] and "status unknown" in row["reason"]
+    assert "bound branch" in row["binding_warning"]
+    assert "bound branch" in row["reason"] and "status unknown" not in row["reason"]
     assert git(path, "branch", "--show-current") == "fix/reassigned"  # never switch it back
 
 

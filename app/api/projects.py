@@ -1199,8 +1199,8 @@ async def sync_project_worktrees(
     """
     Sync worktree database records with actual state on disk.
 
-    Should be called when loading a chat card for a project to ensure
-    the database reflects reality (worktrees deleted outside the app).
+    Discovers external worktrees. Missing registry rows remain visible for
+    explicit guarded cleanup; syncing never force-deletes branch history.
 
     Returns:
         is_git_repo: Whether this project is a git repository

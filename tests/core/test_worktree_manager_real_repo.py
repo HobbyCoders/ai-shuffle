@@ -305,12 +305,13 @@ async def test_cleanup_unknown_worktree(project):
 # =============================================================================
 
 
-def test_sync_cleans_stale_rows_and_imports_external_worktrees(project, tmp_path):
+def test_sync_preserves_stale_rows_and_imports_external_worktrees(project, tmp_path):
     repo, record = project
     # Stale: row ACTIVE, directory deleted outside the app.
     stale = tmp_path / "stale"
     git(repo, "worktree", "add", "-q", "-b", "stale-branch", str(stale))
     _worktree_row(record, "stale-branch", stale, status=WorktreeStatus.ACTIVE, wt_id="wt-stale")
+    commit_file(stale, "valuable.txt", "unpushed history\n", "valuable history")
     shutil.rmtree(stale)
     # External worktrees created with the git CLI.
     external = tmp_path / "external"
@@ -324,16 +325,14 @@ def test_sync_cleans_stale_rows_and_imports_external_worktrees(project, tmp_path
     result = worktree_manager.sync_worktrees_for_project("p1")
 
     assert result["is_git_repo"] is True
-    assert result["cleaned_up"] == [{
-        "id": "wt-stale", "branch_name": "stale-branch",
-        "reason": "path_not_found", "branch_deleted": True,
-    }]
-    assert database.get_worktree("wt-stale")["status"] == WorktreeStatus.DELETED
-    assert git(repo, "branch", "--list", "stale-branch") == ""
+    assert result["cleaned_up"] == []
+    assert database.get_worktree("wt-stale")["status"] == WorktreeStatus.ACTIVE
+    assert git(repo, "branch", "--list", "stale-branch", "--format=%(refname:short)") == "stale-branch"
+    assert git(repo, "show", "stale-branch:valuable.txt") == "unpushed history"
     assert result["imported"] == 2 and result["active"] == 2
     rows = database.get_active_worktrees_for_repository(record["id"])
     head = git(detached, "rev-parse", "HEAD")
-    assert {r["branch_name"] for r in rows} == {"ext", f"detached-{head[:12]}"}
+    assert {r["branch_name"] for r in rows} == {"stale-branch", "ext", f"detached-{head[:12]}"}
 
     # Idempotent: nothing new on a second pass.
     again = worktree_manager.sync_worktrees_for_project("p1")

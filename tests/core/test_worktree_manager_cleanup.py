@@ -9,12 +9,13 @@ from app.core.worktree_manager import worktree_manager
 
 
 @pytest.fixture
-def cleanup_targets(tmp_path, monkeypatch):
+def cleanup_targets(mock_db, tmp_path, monkeypatch):
+    from tests.git_repo_helpers import git, hermetic_git_env, init_repo
+
+    hermetic_git_env(monkeypatch, tmp_path)
+    main = init_repo(tmp_path / "main")
     wt_dir = tmp_path / "wt"
-    wt_dir.mkdir()
-    (wt_dir / ".git").write_text("gitdir: /repo/.git/worktrees/wt\n", encoding="utf-8")
-    main = tmp_path / "main"
-    main.mkdir()
+    git(main, "worktree", "add", "-q", "-b", "feat-x", str(wt_dir))
 
     wt = {
         "id": "wt-1",

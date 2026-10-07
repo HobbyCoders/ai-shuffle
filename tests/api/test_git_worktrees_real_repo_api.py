@@ -102,16 +102,62 @@ def test_missing_marker_is_reported_as_needing_cleanup(wt_api):
     assert row["exists"] is False
     assert row["git_status"] is None
     assert "needs cleanup" in row["status_error"]
+    compact = client.get(BASE, params={"compact": "true"}).json()["worktrees"]
+    assert compact[0]["id"] == "wt-1" and compact[0]["exists"] is False
 
 
-def test_wrong_branch_is_never_reported_as_bound_worktree_status(wt_api):
+def test_wrong_branch_reports_actual_counts_with_binding_warning(wt_api):
     client, repo, path, _ = wt_api
     git(path, "switch", "-q", "-c", "feature/reassigned")
     row = client.get(BASE).json()["worktrees"][0]
-    assert row["git_status"] is None
-    assert "not the bound branch" in row["status_error"]
+    assert row["git_status"]["current_branch"] == "feature/reassigned"
+    assert row["git_status"]["untracked_count"] == 1
+    assert row["status_error"] is None
+    assert "not the bound branch" in row["binding_warning"]
+    compact = client.get(BASE, params={"compact": "true"}).json()["worktrees"][0]
+    assert compact["git_status"]["current_branch"] == "feature/reassigned"
+    assert compact["git_status"]["untracked_count"] == 1
+    assert compact["binding_warning"] == row["binding_warning"]
+    details = client.get(f"{BASE}/wt-1").json()
+    assert details["git_status"]["current_branch"] == "feature/reassigned"
+    assert details["binding_warning"] == row["binding_warning"]
     assert git(path, "branch", "--show-current") == "feature/reassigned"
     assert git(repo, "branch", "--show-current") == "main"
+
+
+@pytest.mark.parametrize("state", ["missing", "invalid", "branch_mismatch"])
+def test_canonical_checkout_list_preserves_stale_bindings_with_actual_root_status(wt_api, state):
+    from app.core.config import settings
+    from app.core.checkout_manager import ensure_checkout
+    from app.db import projects_v2, checkouts
+
+    client, repo, path, _ = wt_api
+    canonical = projects_v2.upsert_project("local:canonical-api", name="Canonical API")
+    checkouts.upsert_checkout(canonical["id"], settings.effective_instance_id, str(repo))
+    checkout = checkouts.upsert_checkout(canonical["id"], settings.effective_instance_id,
+                                         str(path), branch="feature/api")
+    assert ensure_checkout(canonical, branch="feature/api", provision_runtime=False) == str(path)
+    if state == "missing":
+        shutil.rmtree(path)
+    elif state == "invalid":
+        (path / ".git").unlink()
+    else:
+        git(path, "switch", "-q", "-c", "feature/canonical-actual")
+    url = f"/api/v1/projects/{canonical['id']}/git/worktrees"
+    response = client.get(url, params={"compact": "true"})
+    assert response.status_code == 200
+    row = response.json()["worktrees"][0]
+    assert row["id"] == checkout["id"] and row["resource_kind"] == "checkout"
+    if state == "branch_mismatch":
+        assert row["git_status"]["current_branch"] == "feature/canonical-actual"
+        assert row["git_status"]["untracked_count"] == 1 and row["binding_warning"]
+    else:
+        assert row["exists"] is False and row["git_status"] is None
+        assert "needs cleanup" in row["status_error"]
+    # Canonical checkouts never gain the legacy destructive lifecycle endpoint.
+    assert client.delete(f"{url}/{checkout['id']}").status_code == 404
+    if state != "missing":
+        assert (path / "wip.txt").read_text() == "wip\n"
 
 
 def test_cleanup_refuses_registry_only_directory_without_deleting_files_or_branch(wt_api):
@@ -119,12 +165,143 @@ def test_cleanup_refuses_registry_only_directory_without_deleting_files_or_branc
     (path / ".git").unlink()
     git(repo, "worktree", "prune")  # registry-only after fixture's marker is lost
     response = client.delete(f"{BASE}/wt-1", params={"keep_branch": "false"})
-    # Pin refusal and preservation, not the pre-existing HTTP 500: a later
-    # cleanup fix may return a more appropriate error without losing this guard.
-    assert response.status_code >= 400
+    assert response.status_code == 409
+    assert "preserved" in response.json()["detail"]
     assert (path / "wip.txt").read_text() == "wip\n"
     assert git(repo, "branch", "--list", "feature/api").strip() == "feature/api"
     assert database.get_worktree("wt-1")["status"] == WorktreeStatus.ACTIVE
+
+
+def test_cleanup_switched_branch_refuses_before_detaching_links_or_terminating(wt_api, monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.core import checkout_manager
+
+    client, repo, path, tmp_path = wt_api
+    dependency = tmp_path / "owned-dependency"
+    dependency.mkdir()
+    (dependency / "keep.txt").write_text("keep me")
+    (path / "node_modules").symlink_to(dependency, target_is_directory=True)
+    git(path, "switch", "-q", "-c", "feature/deliberate")
+    terminate = AsyncMock()
+    monkeypatch.setattr(worktree_manager, "terminate_worktree_sessions", terminate)
+    sever = []
+    monkeypatch.setattr(checkout_manager, "sever_runtime_links", lambda p: sever.append(p))
+    response = client.delete(f"{BASE}/wt-1", params={"keep_branch": "false"})
+    assert response.status_code == 409 and "bound branch" in response.json()["detail"]
+    assert (path / "node_modules").is_symlink() and (dependency / "keep.txt").read_text() == "keep me"
+    assert sever == [] and not terminate.called
+    assert git(path, "branch", "--show-current") == "feature/deliberate"
+    assert git(repo, "branch", "--list", "feature/api").strip() == "feature/api"
+    assert database.get_worktree("wt-1")["status"] == WorktreeStatus.ACTIVE
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_cleanup_running_checkout_refuses_without_stopping_session(wt_api, monkeypatch, missing):
+    from unittest.mock import AsyncMock
+    from app.core import streaming_status
+
+    client, _, path, _ = wt_api
+    database.create_session("s-cleanup", None, project_id="p1", worktree_id="wt-1",
+                            worktree_path=str(path), worktree_branch="feature/api",
+                            derive_provider_from_profile=False)
+    if missing:
+        shutil.rmtree(path)
+    from app.db import runs
+    claim = runs.claim_run("s-cleanup", "fixture-runner", 300)
+    assert claim is not None and streaming_status._has_active_run_db("s-cleanup")
+    terminate = AsyncMock()
+    monkeypatch.setattr(worktree_manager, "terminate_worktree_sessions", terminate)
+    response = client.delete(f"{BASE}/wt-1")
+    assert response.status_code == 409 and "session is working" in response.json()["detail"]
+    assert not terminate.called
+    assert database.get_worktree("wt-1")["status"] == WorktreeStatus.ACTIVE
+
+
+def test_missing_registry_cleanup_keeps_unpushed_history(wt_api):
+    from tests.git_repo_helpers import commit_file
+
+    client, repo, path, _ = wt_api
+    commit_file(path, "valuable.txt", "keep history\n", "unmerged")
+    shutil.rmtree(path)
+    response = client.delete(f"{BASE}/wt-1", params={"keep_branch": "false"})
+    assert response.status_code == 409 and "keep_branch=true" in response.json()["detail"]
+    assert database.get_worktree("wt-1")["status"] == WorktreeStatus.ACTIVE
+    assert client.delete(f"{BASE}/wt-1").status_code == 200
+    assert git(repo, "show", "feature/api:valuable.txt") == "keep history"
+    assert database.get_worktree("wt-1")["status"] == WorktreeStatus.COMPLETED
+
+
+def test_cleanup_symlink_checkout_preserves_target(wt_api):
+    client, _, path, tmp_path = wt_api
+    preserved = tmp_path / "preserved-target"
+    shutil.move(path, preserved)
+    path.symlink_to(preserved, target_is_directory=True)
+    response = client.delete(f"{BASE}/wt-1")
+    assert response.status_code == 409 and "symlink" in response.json()["detail"]
+    assert path.is_symlink() and (preserved / "wip.txt").read_text() == "wip\n"
+    assert database.get_worktree("wt-1")["status"] == WorktreeStatus.ACTIVE
+
+
+@pytest.mark.parametrize("foreign_repository", [True, False])
+def test_cleanup_replaced_git_binding_preserves_directory(wt_api, monkeypatch, foreign_repository):
+    from unittest.mock import AsyncMock
+
+    client, repo, path, tmp_path = wt_api
+    foreign_path = tmp_path / "other-worktree"
+    if foreign_repository:
+        foreign = init_repo(tmp_path / "foreign")
+        git(foreign, "worktree", "add", "-q", "-b", "feature/api", str(foreign_path))
+    else:
+        git(repo, "worktree", "add", "--force", "-q", str(foreign_path), "feature/api")
+    # The app registry and original Git administrative entry still name path,
+    # but its marker belongs to another checkout (possibly another repository).
+    (path / ".git").write_text((foreign_path / ".git").read_text())
+    terminate = AsyncMock()
+    monkeypatch.setattr(worktree_manager, "terminate_worktree_sessions", terminate)
+    response = client.delete(f"{BASE}/wt-1", params={"keep_branch": "false"})
+    assert response.status_code == 409 and "preserved" in response.json()["detail"]
+    assert not terminate.called
+    assert (path / "wip.txt").read_text() == "wip\n"
+    assert git(repo, "branch", "--list", "feature/api", "--format=%(refname:short)") == "feature/api"
+    assert database.get_worktree("wt-1")["status"] == WorktreeStatus.ACTIVE
+
+
+def test_cleanup_corrupt_path_refuses_before_touching_files_or_sessions(wt_api, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    client, repo, path, _ = wt_api
+    database.update_worktree("wt-1", worktree_path="")
+    terminate = AsyncMock()
+    monkeypatch.setattr(worktree_manager, "terminate_worktree_sessions", terminate)
+    response = client.delete(f"{BASE}/wt-1", params={"keep_branch": "false"})
+    assert response.status_code == 409 and "preserved" in response.json()["detail"]
+    assert not terminate.called
+    assert (path / "wip.txt").read_text() == "wip\n"
+    assert git(repo, "branch", "--list", "feature/api", "--format=%(refname:short)") == "feature/api"
+    assert database.get_worktree("wt-1")["status"] == WorktreeStatus.ACTIVE
+
+
+def test_cleanup_busy_status_error_fails_closed(wt_api, monkeypatch):
+    from app.core import streaming_status
+
+    client, _, path, _ = wt_api
+    database.create_session("s-unknown", None, project_id="p1", worktree_id="wt-1",
+                            derive_provider_from_profile=False)
+    def fail_status(sid):
+        raise RuntimeError("fixture unavailable")
+    monkeypatch.setattr(streaming_status, "_has_active_run_db", fail_status)
+    response = client.delete(f"{BASE}/wt-1")
+    assert response.status_code == 409 and "could not be verified" in response.json()["detail"]
+    assert (path / "wip.txt").read_text() == "wip\n"
+    assert database.get_worktree("wt-1")["status"] == WorktreeStatus.ACTIVE
+
+
+def test_cleanup_locked_worktree_preserves_dirty_files(wt_api):
+    client, repo, path, _ = wt_api
+    git(repo, "worktree", "lock", str(path))
+    response = client.delete(f"{BASE}/wt-1")
+    assert response.status_code == 409 and "locked" in response.json()["detail"]
+    assert (path / "wip.txt").read_text() == "wip\n"
 
 
 def test_get_worktree_and_foreign_ids_are_404(wt_api, mock_db):

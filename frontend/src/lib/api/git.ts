@@ -391,6 +391,8 @@ export interface Worktree {
     status_checked_at?: string | null;
     // Why the last status read failed (e.g. a corrupt index); retried on a back-off
     status_error?: string | null;
+    // Counts belong to the actual branch; the stored binding is unsafe to use.
+    binding_warning?: string | null;
 }
 
 // ============================================================================

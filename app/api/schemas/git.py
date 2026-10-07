@@ -398,6 +398,8 @@ class WorktreeInfo(BaseModel):
     # Set when the last status read failed (e.g. a corrupt index); the server
     # retries it on a back-off rather than every poll.
     status_error: Optional[str] = None
+    # Counts can be read at a real root whose HEAD no longer matches the binding.
+    binding_warning: Optional[str] = None
     # Legacy - deprecated
     session: Optional[SessionInfo] = None
 
@@ -409,7 +411,8 @@ class WorktreeListResponse(BaseModel):
 
 
 class WorktreeStatusSummary(BaseModel):
-    """Dirty state only: the counts, never the file lists."""
+    """Physical checkout branch and counts, never the file lists."""
+    current_branch: Optional[str] = None
     is_clean: bool = True
     modified_count: int = 0
     staged_count: int = 0
@@ -425,6 +428,7 @@ class WorktreeSummary(BaseModel):
     exists: Optional[bool] = None
     git_status: Optional[WorktreeStatusSummary] = None
     status_error: Optional[str] = None
+    binding_warning: Optional[str] = None
 
 
 class WorktreeCompactListResponse(BaseModel):

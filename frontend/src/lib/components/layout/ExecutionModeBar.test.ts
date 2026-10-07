@@ -91,6 +91,31 @@ beforeEach(() => {
 });
 
 
+describe('stale worktree visibility', () => {
+	it('keeps missing and switched bindings visible but unavailable for selection', async () => {
+		mocks.worktrees.set([
+			{ id: 'wt-missing', branch_name: 'fix/missing', exists: false, status_error: 'directory missing; needs cleanup' },
+			{ id: 'wt-switched', branch_name: 'fix/bound', exists: true,
+				binding_warning: 'Checkout is on fix/actual, not the bound branch fix/bound',
+				git_status: { current_branch: 'fix/actual', is_clean: false, modified_count: 1, staged_count: 0, untracked_count: 2 } }
+		]);
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
+		expect((screen.getByRole('button', { name: /fix\/missing.*missing/i }) as HTMLButtonElement).disabled).toBe(true);
+		const switched = screen.getByRole('button', { name: /fix\/bound.*branch changed/i });
+		expect((switched as HTMLButtonElement).disabled).toBe(true);
+		expect(screen.getByText('On fix/actual · 3 changed')).toBeTruthy();
+		expect(screen.getByText('directory missing; needs cleanup')).toBeTruthy();
+	});
+
+	it('does not reclaim registry rows or branches just by rendering the picker', async () => {
+		mocks.syncWorktrees.mockClear();
+		render(ExecutionModeBar);
+		await tick();
+		expect(mocks.syncWorktrees).not.toHaveBeenCalled();
+	});
+});
+
 describe('automatic non-git fallback', () => {
 	it('refreshes a canonical-only branch picker without GitHub credentials', async () => {
 		Object.assign(activeSession.current, { project: null, projectV2Id: 'pv2-shared' });
@@ -275,8 +300,11 @@ describe('ExecutionModeBar merged worktree branch chip', () => {
 		expect(screen.queryByRole('button', { name: /^from main$/i })).toBeNull();
 	});
 
-	it('opens one dropdown with Auto, New branch, and the base-branch picker', async () => {
+	it('opens one dropdown with Auto, New branch, and the base-branch picker without destructive sync', async () => {
+		mocks.syncWorktrees.mockClear();
 		render(ExecutionModeBar);
+		await tick();
+		expect(mocks.syncWorktrees).not.toHaveBeenCalled();
 
 		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
 
@@ -284,6 +312,9 @@ describe('ExecutionModeBar merged worktree branch chip', () => {
 		expect(screen.getByText('New branch...')).toBeTruthy();
 		expect(screen.getByText('Base branch')).toBeTruthy();
 		expect(screen.getAllByText('develop').length).toBeGreaterThan(0);
+		activeSession.setProject('another-project', null);
+		await tick();
+		expect(mocks.syncWorktrees).not.toHaveBeenCalled();
 	});
 
 	it('shows only the selected branch when Auto is not the current choice', async () => {
