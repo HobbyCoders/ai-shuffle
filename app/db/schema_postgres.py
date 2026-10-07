@@ -23,6 +23,28 @@ logger = logging.getLogger("app.db.schema_postgres")
 SCHEMA_VERSION = 92
 
 
+def create_session_events_recall_index(cursor) -> None:
+    """Index the mirrored-event arm of agent SessionSearch, if pg_trgm is usable.
+
+    Called by both bootstrap and the fingerprint-gated upgrade pass. Keep the
+    raw JSON expression and text-event predicate aligned with PgFluidStore's
+    prefilter; token FTS would drop short/punctuation/substring matches.
+    """
+    cursor.execute("SAVEPOINT recall_trgm_events")
+    try:
+        cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_session_events_recall_trgm "
+            "ON session_events USING gin ((payload::text) gin_trgm_ops) "
+            "WHERE event_type IN ('message.user', 'message.assistant', 'assistant.text_delta')"
+        )
+    except Exception:  # noqa: BLE001 — unavailable extension must not prevent boot
+        cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm_events")
+        logger.warning("Mirrored SessionSearch trigram index unavailable; recall remains unindexed")
+    finally:
+        cursor.execute("RELEASE SAVEPOINT recall_trgm_events")
+
+
 def create_postgres_schema(cursor) -> None:
     """Create all PostgreSQL tables, indexes, triggers, and seed data.
 
@@ -1770,6 +1792,7 @@ def create_postgres_schema(cursor) -> None:
         )
     """)
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_events_session_seq ON session_events(session_id, seq)")
+    create_session_events_recall_index(cursor)
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS session_event_counters (

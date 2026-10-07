@@ -1507,6 +1507,15 @@ def _run_column_migrations(cursor):
                 "pg_trgm unavailable — SessionSearch's prefilter stays unindexed"
             )
 
+    # #1999 added mirrored session_events to agent recall, but only the two
+    # local transcript stores had trigram indexes. No schema-version bump:
+    # this migration's source fingerprint runs the idempotent index build on
+    # existing installs too, not just databases created by bootstrap.
+    if table_exists(cursor, "session_events"):
+        from app.db.schema_postgres import create_session_events_recall_index
+
+        create_session_events_recall_index(cursor)
+
     # background_tasks (v55). Durable per-task lifecycle snapshots — WRITE-ONLY
     # in Phase 1 (no reader flips): task_registry mirrors its transitions here
     # via app.core.task_persistence so a restart/crash leaves a durable trail,

@@ -25,6 +25,27 @@ from app.db import database
 from tests.db.migration_helpers import column_names, schema_version
 
 
+@pytest.mark.parametrize("failure", ["CREATE EXTENSION", "CREATE INDEX"])
+def test_mirror_recall_index_failure_does_not_abort_boot(failure, caplog):
+    from app.db.schema_postgres import create_session_events_recall_index
+
+    statements = []
+
+    class Cursor:
+        def execute(self, sql):
+            statements.append(sql)
+            if sql.startswith(failure):
+                raise RuntimeError("synthetic unavailable extension or index privilege")
+
+    create_session_events_recall_index(Cursor())
+    assert statements[0] == "SAVEPOINT recall_trgm_events"
+    assert statements[-2:] == [
+        "ROLLBACK TO SAVEPOINT recall_trgm_events",
+        "RELEASE SAVEPOINT recall_trgm_events",
+    ]
+    assert "Mirrored SessionSearch trigram index unavailable" in caplog.text
+
+
 def _index_exists(conn, name):
     row = conn.execute(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)
