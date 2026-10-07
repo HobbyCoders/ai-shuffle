@@ -312,6 +312,7 @@ class SessionMessage(BaseModel):
     role: str  # user, assistant, system, tool
     content: str
     type: Optional[str] = None  # text, tool_use, tool_result, subagent, system - critical for rendering
+    thinkingSubtype: Optional[str] = None  # reasoning vs. provider summary in event transcripts
     subtype: Optional[str] = None  # For system messages (e.g., local_command, compact_boundary)
     # The frontend's system-message keys. Without them on the model the detail
     # response stripped a compaction card's sizes and trigger (#1886).

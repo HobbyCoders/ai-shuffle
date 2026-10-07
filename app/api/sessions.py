@@ -56,6 +56,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     fetch_and_enrich_search_results,
     build_detail_messages,
     build_live_messages,
+    load_event_messages,
     finalize_transcript,
     paginate_messages,
     DEFAULT_MESSAGE_PAGE_LIMIT,
@@ -991,18 +992,17 @@ async def get_session(
             # session would render as the user-rows-only legacy view.
             store_parse_failed = True
 
-    # The store stays the single source of truth. But an EMPTY result — after
-    # the lazy JSONL backfill inside parse_session_history_via_store had its
-    # chance — means the transcript predates the cutover and lives ONLY in the
-    # legacy session_messages table (shared across installs; e.g. the JSONL
-    # sits on another machine). Serve that instead of rendering an existing
-    # chat as empty. Post-cutover sessions always have store rows, so this can
-    # never shadow the store with the user-rows-only legacy view (the
-    # "vanishing replies" trap) — EXCEPT when the store parse RAISED: then "no
-    # messages" proves nothing about the store, so serve empty (a transient
-    # blank beats a wrong transcript) rather than fall through to the legacy
-    # view.
-    if not messages and not store_parse_failed:
+    # A remote-owned chat has no local store: its transcript is the event
+    # mirror. Only an EMPTY event history permits the legacy rescue; a raised
+    # read (or events which render no bubbles) must not resurrect user-only rows.
+    has_events = False
+    if not messages:
+        try:
+            messages, has_events = await run_sync(load_event_messages, session["id"])
+        except Exception:
+            logger.exception("Failed to read event transcript for %s", session["id"])
+            has_events = True  # Unknown is not empty: prohibit legacy fallback.
+    if not messages and not has_events and not store_parse_failed:
         if sdk_session_id:
             logger.warning(
                 "[Session API] no entries in session_store for "
@@ -1305,16 +1305,15 @@ async def get_live_session(
             # A RAISED store parse is not an EMPTY store — see GET /{id}.
             store_parse_failed = True
 
-    # Legacy rescue: the store yielded nothing even after the
-    # lazy JSONL backfill inside parse_session_history_via_store had its
-    # chance — a pre-cutover session whose transcript lives ONLY in the legacy
-    # session_messages table (shared across installs). Serve that instead of
-    # an empty chat. Fires ONLY on an empty store result — NOT on a raised
-    # parse (a transient DB error proves nothing about the store; serving the
-    # legacy view then would resurface the user-rows-only "vanishing replies"
-    # trap). Post-cutover sessions always have store rows, so the legacy view
-    # can never shadow the store. Mirrors GET /{id}.
-    if include_messages and not messages and not store_parse_failed:
+    # The mirrored event log precedes legacy user rows (see GET /{id}).
+    has_events = False
+    if include_messages and not messages:
+        try:
+            messages, has_events = await run_sync(load_event_messages, session_id)
+        except Exception:
+            logger.exception("Failed to read event transcript for live %s", session_id)
+            has_events = True
+    if include_messages and not messages and not has_events and not store_parse_failed:
         from app.core.db_message_loader import load_messages_from_db
         try:
             db_messages, has_db = await run_sync(load_messages_from_db, session_id)
