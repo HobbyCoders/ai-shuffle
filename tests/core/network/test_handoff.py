@@ -297,6 +297,55 @@ async def test_an_open_prompt_refuses_the_move(pair, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prompt", ["a" * 2000, "漢字" * 1000], ids=["ascii", "cjk"])
+async def test_failed_held_delivery_records_bounded_note_on_receiving_worker(pair, monkeypatch, prompt):
+    """#1964: submit -> durable holds -> move -> failed delivery -> receiver event."""
+    from unittest.mock import AsyncMock
+    from app.core import session_handoff as sh, turn_manager
+    from app.db import session_events, session_moves
+
+    a, b, _, _ = pair
+    sid = "handoff-test"
+    monkeypatch.setattr(sh, "_pending", {})
+    monkeypatch.setattr(sh, "_workers", lambda: {"runners": [
+        {"device_id": b.device_id, "device_name": "B", "online": True, "is_self": False},
+    ]})
+    monkeypatch.setattr(turn_manager, "_kick", lambda session_id: None)
+    notify = AsyncMock()
+    monkeypatch.setattr(sh, "_notify", notify)
+
+    async def call(device, action, body, **kwargs):
+        worker, sender = (a, b) if device == a.device_id else (b, a)
+        assert device == worker.device_id
+        with worker.active():
+            return await control.handle(action, body, from_device=sender.device_id)
+
+    monkeypatch.setattr(control, "call", call)
+    with a.active():
+        sh.request(sid, b.device_id)
+        pending = sh.pending_for(sid)
+        for _ in range(50):
+            assert turn_manager._submit_blocking(sid, "user", prompt=prompt,
+                                                  profile_id="default").startswith(sh.HELD_PREFIX)
+        assert len(session_moves.get(sid)["held"]) == 50
+    with b.active():
+        await handoff.receive(database.get_session(sid))
+        assert database.get_session(sid)["owner_device_id"] == b.device_id
+    with a.active(), patch.object(control, "submit_turn", AsyncMock(side_effect=control.ControlRefused("refused"))):
+        await sh._moved(sid, pending, b.device_id)
+        assert session_moves.get(sid) is None
+        # No local fallback: the row must be where the chat actually runs.
+        assert session_events.get_events(sid, 0) == []
+    with b.active():
+        notes = [row["payload"]["data"] for row in session_events.get_events(sid, 0)
+                 if row["event_type"] == "system.note" and row["payload"].get("subtype") == sh.SUBTYPE]
+        assert [note["status"] for note in notes] == ["moved", "held_failed"]
+        assert len(notes[-1]["content"]) == 8000 and notes[-1]["content"].endswith("…")
+        assert notes[-1]["count"] == 50 and notes[-1]["messages"] == [prompt] * 50
+    notify.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_pending_wakes_move_with_the_chat(pair, monkeypatch):
     """#1819 rule 3: a ScheduleWakeup and a limit resume run on the new worker, not here."""
     import time

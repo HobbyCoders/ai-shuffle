@@ -916,6 +916,36 @@ async def test_a_peers_note_is_kept_to_a_bounded_size():
                                      "data": {"status": "moved", "worker": "w" * 200_000}}, "dev-unraid")
 
 
+async def test_large_non_ascii_undelivered_note_is_recorded_on_the_new_worker():
+    """#1964: drive failed delivery, its peer note, and the receiving recorder."""
+    from types import SimpleNamespace
+    from app.network import control, engine
+    _chat()
+    prompts = ["漢字" * 1000] * 50
+    _held_row(*prompts)
+    context = SimpleNamespace(member=lambda device: SimpleNamespace(kind="worker", status="active"))
+    notes = []
+
+    async def receive_note(device, action, body, **kwargs):
+        assert device == "dev-gaming" and action == "session-move"
+        notes.append(body)
+        return await sh.handle_control(body, "dev-unraid")
+
+    with patch.object(control, "submit_turn", AsyncMock(side_effect=control.ControlRefused("refused"))), \
+            patch.object(control, "call", receive_note), \
+            patch.object(control, "_require_owned", return_value={"id": "s1"}), \
+            patch.object(engine, "require_context", return_value=context), \
+            patch.object(sh, "_record", AsyncMock()) as record, \
+            patch.object(sh, "_notify", AsyncMock()) as notify:
+        await sh.deliver_held("s1", "dev-gaming", "DesktopWorker")
+    assert len(notes) == 1 and len(notes[0]["content"]) > 8000
+    record.assert_awaited_once()
+    sid, content, data = record.await_args.args
+    assert sid == "s1" and len(content) == 8000 and content.endswith("…")
+    assert data["count"] == 50 and data["messages"] == prompts
+    notify.assert_not_awaited()
+
+
 async def test_held_messages_of_a_chat_archived_meanwhile_are_named_not_dropped():
     """F10: the chat was archived while the move waited."""
     from app.db.base import get_db

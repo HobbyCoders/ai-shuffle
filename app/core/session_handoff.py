@@ -1024,7 +1024,7 @@ async def handle_control(body: Dict[str, Any], from_device: str) -> Dict[str, An
 async def _note(session_id: str, content: Any, data: Any) -> Dict[str, Any]:
     """Record the old owner's hand-off row (the outcome, unsent messages) here,
     on the worker that now runs the chat, so its open chats show it."""
-    if not isinstance(content, str) or not content.strip() or len(content) > 8000 or not isinstance(data, dict):
+    if not isinstance(content, str) or not content.strip() or not isinstance(data, dict):
         raise ValueError("Invalid hand-off note")
     if data.get("status") not in NOTE_STATUSES:
         raise ValueError("Unknown hand-off note")
@@ -1032,8 +1032,9 @@ async def _note(session_id: str, content: Any, data: Any) -> Dict[str, Any]:
     if "messages" in kept:
         messages = kept["messages"] if isinstance(kept["messages"], list) else []
         kept["messages"] = [str(text)[:NOTE_MESSAGE_CHARS] for text in messages[:NOTE_MESSAGES]]
-    if len(json.dumps(kept, default=str)) > NOTE_DATA_CHARS:
+    if len(json.dumps(kept, default=str, ensure_ascii=False)) > NOTE_DATA_CHARS:
         raise ValueError("Hand-off note too large")
+    content = content if len(content) <= 8000 else content[:7999] + "…"
     await _record(session_id, content, kept)
     return {"recorded": True}
 
