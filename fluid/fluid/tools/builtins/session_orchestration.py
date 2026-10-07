@@ -79,9 +79,13 @@ MODEL_OVERRIDE_RULE = (
     "Only for when the user named a model for this work; leaving it out is the normal case. "
     "The host checks that the user asked: a model other than the one this would run on anyway "
     "is used only when the user named it in this chat, otherwise the owner is asked to approve "
-    "the switch, and a refusal starts nothing. Any model on an enabled provider's list is "
-    "accepted, written as a Claude name (opus) or prov:<providerId>:<modelId>, and it may be on "
-    "another provider. It applies to this start only."
+    "the switch, and a refusal starts nothing. Pass the model exactly as the user named it; "
+    "the host matches model IDs and display names against enabled providers' lists, ignoring "
+    "case, spaces and dashes. Trying the user's wording is safe: unknown or unavailable names "
+    "are refused with a bounded list of real choices and start nothing; ambiguous names require "
+    "an exact model id. Claude names (opus) and prov:<providerId>:<modelId> still work; an explicit "
+    "provider stays scoped. It may run on another provider, for this start only. Remote starts "
+    "are also validated against the receiving worker's own eligibility, not just the local list."
 )
 
 

@@ -377,16 +377,16 @@ def test_provider_bound_target_admission(agents, monkeypatch):
     assert "subagent default" in payload["error"]
 
 
-def test_native_model_override_refuses_a_non_claude_model(agents):
-    """A bare non-Claude id is not a native model (#1830: a provider's model is
-    named prov:<providerId>:<modelId>; see test_model_override.py)."""
+def test_model_override_refuses_a_model_absent_from_enabled_registries(agents):
+    """A bare id is safe to try, but must match an enabled model registry."""
     _mk_session(agents, "s-model-override", "root-agent")
     payload = asyncio.run(_dispatch(
         {"agent": "helper", "prompt": "go", "model": "gpt-5.6-sol"},
         "s-model-override",
     ))
     assert payload["ok"] is False
-    assert "is not a Claude model" in payload["error"]
+    assert "No matching model id or display name" in payload["error"]
+    assert "Choose one of:" in payload["error"] and "Nothing was dispatched" in payload["error"]
 
 
 def test_dispatch_stays_on_caller_provider_and_uses_target_assignment(

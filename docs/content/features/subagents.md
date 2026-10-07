@@ -37,8 +37,18 @@ on, as the model pickers name it.
 `model` is for when you name a model yourself, for example "spin up a general
 agent on GPT-6 Astra" when that agent is pinned to Opus. Any model the app can
 run is accepted: a Claude model (`opus`) or a model on an enabled provider's
-list (`prov:<providerId>:<modelId>`). A model on another provider moves that one
-subagent or chat to that provider.
+list (`prov:<providerId>:<modelId>`). Pass the model as you named it: the host
+matches full IDs and display names ignoring case, spaces and dashes, so
+"gpt 6 astra" can select a configured `gpt-6-astra`. A model need not appear in
+the Task roster to be requested; roster agent IDs are still required. Unknown
+or unavailable names refuse the start with a bounded list of real choices,
+never a fallback. Ambiguous names require an exact model ID; a `prov:` ID stays
+on its explicit provider. A model on another provider moves that one subagent
+or chat to that provider. Remote starts also check the receiving worker's own
+models and credentials; the local list does not prove remote support. Spoken
+lookup uses the sending worker's registry. `StartSession` also accepts an exact
+provider-qualified ID configured only remotely; `Task` retains its caller-side
+provider validation before the receiver checks again.
 
 The app, not the agent, decides whether a different model is used:
 

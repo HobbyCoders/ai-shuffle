@@ -760,7 +760,11 @@ def _check_model(start: _Start) -> None:
         validation = provider_agent.validate_provider_model(
             start.provider_id, start.model, require_servable=False)
         if not validation.ok:
-            raise ValueError(f"{validation.reason} (on this worker) Nothing was started.")
+            choices = [f"prov:{start.provider_id}:{model}" for model in validation.curated_ids]
+            choices = [model for model in choices if len(model) <= 300][:20]
+            hint = (" Choose one of: " + ", ".join(choices) + " (at most 20 shown)."
+                    if choices else " No eligible models are configured in this scope.")
+            raise ValueError(f"{validation.reason} (on this worker){hint} Nothing was started.")
         return
     if start.model and _native_task_model(start.model) is None:
         raise ValueError(f"Model {start.model!r} is not a Claude model on this worker; nothing was started.")

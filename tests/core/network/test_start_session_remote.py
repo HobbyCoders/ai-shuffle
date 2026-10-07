@@ -400,14 +400,19 @@ def _grok(worker):
                                        models=[{"id": "grok-4.5", "label": "Grok 4.5"}])
 
 
-async def test_a_named_model_starts_on_the_chosen_worker_with_its_provider(workers, monkeypatch, kicks):
+@pytest.mark.parametrize("wording", ["prov:grok:grok-4.5", "GROK 4.5", "prov:grok:GROK 4.5"])
+async def test_a_named_model_starts_on_the_chosen_worker_with_its_provider(workers, monkeypatch, kicks, wording):
     from app.core import task_dispatch
     monkeypatch.setattr(task_dispatch, "_credential_gap", lambda provider: None)
     a, b, _ = network(workers, monkeypatch)
-    _grok(a)  # only the destination has the provider
-    _user_says(b, "Run the test on Unraid with grok 4.5")
+    _grok(a)
+    # A remote-only exact composite remains supported. Spoken forms need a
+    # registry to identify the provider, then the receiver validates its own.
+    if wording != "prov:grok:grok-4.5":
+        _grok(b)
+    _user_says(b, f"Run the test on Unraid with {wording}")
     with b.active():
-        outcome = await start({**ARGS, "model": "prov:grok:grok-4.5"})
+        outcome = await start({**ARGS, "model": wording})
     assert not outcome.is_error, outcome.text
     result = json.loads(outcome.text)
     assert result["model"] == "prov:grok:grok-4.5"
@@ -421,14 +426,43 @@ async def test_a_named_model_starts_on_the_chosen_worker_with_its_provider(worke
         assert turn["payload"]["model_override"]["source"] == "named_by_user"
 
 
-async def test_the_destination_refuses_a_model_it_cannot_run(workers, monkeypatch, kicks):
+@pytest.mark.parametrize("wording", ["prov:grok:grok-4.5", "GROK 4.5"])
+async def test_the_destination_never_reinterprets_a_resolved_model_id(workers, monkeypatch, kicks, wording):
     from app.core import task_dispatch
     monkeypatch.setattr(task_dispatch, "_credential_gap", lambda provider: None)
     a, b, _ = network(workers, monkeypatch)
-    _user_says(b, "Run the test on Unraid with grok 4.5")
+    _grok(b)
+    with a.active():
+        database.create_model_provider("grok", "Grok", "xai", "https://example.invalid/v1",
+                                       models=[{"id": "different-id", "label": "Grok 4.5"}])
+        before = len(database.get_sessions(limit=100))
+    _user_says(b, f"Run the test on Unraid with {wording}")
     with b.active():
-        outcome = await start({**ARGS, "model": "prov:grok:grok-4.5"})
+        outcome = await start({**ARGS, "model": wording})
+        assert outcome.is_error, outcome.text
+        assert "Unraid refused the new chat" in outcome.text and "exact model id" in outcome.text
+        assert "prov:grok:different-id" in outcome.text
+        assert receipts() == []
+    with a.active():
+        assert len(database.get_sessions(limit=100)) == before
+    assert kicks == []
+
+
+@pytest.mark.parametrize("wording", ["prov:grok:grok-4.5", "GROK 4.5"])
+async def test_the_destination_refuses_a_model_it_cannot_run(workers, monkeypatch, kicks, wording):
+    from app.core import task_dispatch
+    monkeypatch.setattr(task_dispatch, "_credential_gap", lambda provider: None)
+    a, b, _ = network(workers, monkeypatch)
+    _grok(b)  # A local match is NOT evidence that the receiver can run it.
+    with a.active():
+        before = len(database.get_sessions(limit=100))
+    _user_says(b, f"Run the test on Unraid with {wording}")
+    with b.active():
+        outcome = await start({**ARGS, "model": wording})
         assert outcome.is_error
         assert "Unraid refused the new chat" in outcome.text and "cannot run on this worker" in outcome.text
         # Nothing was made there, so the receipt is given back.
         assert receipts() == []
+    with a.active():
+        assert len(database.get_sessions(limit=100)) == before
+    assert kicks == []

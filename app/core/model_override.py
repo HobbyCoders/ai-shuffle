@@ -4,7 +4,10 @@ An agent may pass ``model`` to run one new chat or subagent on a model other
 than the one it would get anyway (the agent's pin, else the owner's subagent
 default; for a new chat, the caller's own model). Any model this install can
 run is eligible: a Claude registry alias or a model on an enabled provider's
-curated list, in the app's id format (``sonnet``, ``prov:<providerId>:<modelId>``).
+curated list. Pass the owner's wording: full ids and display names match with
+case and separators ignored, without fuzzy or distinctive-word guesses.
+Exact app ids (``sonnet``, ``prov:<providerId>:<modelId>``) still work;
+ambiguous names require an exact id and never choose catalog order.
 
 The model the agent "feels like" is never used on its word. A different model
 runs only when the user asked for it, checked here by the host:
@@ -143,32 +146,77 @@ def resolve(value: Any, leg: Optional[str] = None, *, runs_here: bool = True) ->
     """
     if not isinstance(value, str) or not value.strip() or len(value) > 300:
         raise ValueError("model must be a non-empty model id of at most 300 characters.")
-    from app.core.query_options import decode_provider_model
+    from app.core.query_options import decode_provider_model, is_native_claude_model
+    from app.core import subagent_default
+    from app.core.task_dispatch import _credential_gap
 
-    wanted = canonical(value, leg)
-    if runs_here:
-        from app.core import subagent_default
+    text = value.strip()
+    explicit = decode_provider_model(text)
+    catalog = _catalog()
+    gaps: Dict[str, Optional[str]] = {}
 
-        normalized, error = subagent_default.normalize_model(wanted)
-        if error or not normalized:
-            raise ValueError(f"Model '{value.strip()}' cannot run on this worker: {error}")
-        wanted = normalized
-    elif not wanted.startswith("prov:"):
-        from app.core.query_options import is_native_claude_model
+    def checked(model: str) -> Tuple[Optional[str], Optional[str]]:
+        if not runs_here and decode_provider_model(model):
+            return model, None  # The receiver MUST check its own eligibility.
+        normalized, error = subagent_default.normalize_model(model)
+        decoded = decode_provider_model(model)
+        if not error and decoded:
+            pid = decoded[0]
+            if pid not in gaps:
+                gaps[pid] = _credential_gap(pid)
+            error = gaps[pid]
+        return (None, error) if error else (normalized, None)
 
-        if not is_native_claude_model(wanted):
-            raise ValueError(
-                f"'{value.strip()}' is not a Claude model. A provider's model is written "
-                "prov:<providerId>:<modelId>.")
-    decoded = decode_provider_model(wanted)
-    provider_id, model_id = (decoded[0], decoded[1]) if decoded else (None, wanted)
-    if runs_here and provider_id:
-        from app.core.task_dispatch import _credential_gap
-
-        gap = _credential_gap(provider_id)
-        if gap:
-            raise ValueError(gap.replace("the worker would", "it would"))
-    return Choice(model=wanted, provider_id=provider_id, model_id=model_id)
+    # Preserve exact composites and the legacy Claude aliases. A provider id
+    # is opaque: never normalize it or escape its scope to find another match.
+    wanted = canonical(text, leg)
+    exact = explicit is not None or is_native_claude_model(text)
+    normalized, reason = checked(wanted) if exact else (None, None)
+    if not runs_here and explicit and wanted not in catalog:
+        # Known spoken composites can be normalized locally, but a canonical
+        # id configured only on the destination still goes there for validation.
+        normalized = None
+    if not normalized:
+        fingerprint = "".join(_tokens(explicit[1] if explicit else text))
+        matches = []
+        for model, names in catalog.items():
+            decoded = decode_provider_model(model)
+            if explicit and (not decoded or decoded[0] != explicit[0]):
+                continue
+            if fingerprint and any(fingerprint == "".join(_tokens(name)) for name in names):
+                candidate, error = checked(model)
+                if candidate:
+                    matches.append(candidate)
+                elif reason is None:
+                    reason = error
+        matches = sorted(set(matches))
+        if len(matches) == 1:
+            normalized = matches[0]
+        elif not matches and not runs_here and explicit:
+            normalized = wanted
+        elif len(matches) > 1:
+            choices = ", ".join([model for model in matches if len(model) <= 300][:20])
+            suffix = " (additional matches omitted)" if len(matches) > 20 else ""
+            raise ValueError(f"Model '{text}' is ambiguous. Specify an exact model id: {choices}{suffix}.")
+    if not normalized:
+        available = []
+        for model in sorted(catalog):
+            decoded = decode_provider_model(model)
+            if explicit and (not decoded or decoded[0] != explicit[0]):
+                continue
+            candidate, _ = checked(model)
+            if candidate and len(candidate) <= 300:
+                available.append(candidate)
+            if len(available) == 20:
+                break
+        hint = ("Choose one of: " + ", ".join(available) + " (at most 20 shown)."
+                if available else "No eligible models are configured in this scope.")
+        location = "on this worker" if runs_here else "from this worker's enabled registry"
+        raise ValueError(f"Model '{text}' cannot run {location}: "
+                         f"{(reason or 'No matching model id or display name.')[:500]} {hint}")
+    decoded = decode_provider_model(normalized)
+    provider_id, model_id = (decoded[0], decoded[1]) if decoded else (None, normalized)
+    return Choice(model=normalized, provider_id=provider_id, model_id=model_id)
 
 
 # ---------------------------------------------------------------------------

@@ -120,6 +120,108 @@ async def _task(args, **kwargs):
         caller_provider_id=None, **kwargs)
 
 
+@pytest.mark.parametrize("wording", ["gpt 6 astra", "GPT-6-ASTRA", "gPt6AsTrA"])
+async def test_spoken_model_task_dispatch(world, wording):
+    _, seen, prompts, _ = world
+    _turn("parent", "user", f"use {wording} for the worker")
+    result = await _task({"agent": "pinned", "model": wording})
+    assert result["ok"], result
+    assert result["model"] == "astra" and result["provider"]["id"] == "lane"
+    assert result["model_override"]["source"] == mo.NAMED
+    assert len(seen) == 1 and seen[0]["model_id"] == "astra" and prompts == []
+
+
+def test_spoken_model_id_resolves_to_registry_spelling(world):
+    world[0].create_model_provider("chatgpt", "ChatGPT", "openai", "https://example.invalid/v1",
+                                   models=[{"id": "gpt-6.1-sol", "display_name": "Bright Sol"}])
+    for wording in ("GPT 6.1 SOL", "gpt6.1sol", "BRIGHT-SOL"):
+        assert mo.resolve(wording, "lane") == mo.Choice("prov:chatgpt:gpt-6.1-sol", "chatgpt", "gpt-6.1-sol")
+
+
+@pytest.mark.parametrize("wording, expected", [("opus", "opus"), ("OPUS", "opus"),
+                                              ("Claude Opus", "opus"), ("claude-opus-4-6", "opus"),
+                                              ("prov:lane:astra", "prov:lane:astra")])
+@pytest.mark.parametrize("remote", [False, True])
+def test_spoken_resolution_preserves_claude_and_exact_composites(world, wording, expected, remote):
+    assert mo.resolve(wording, "lane", runs_here=not remote).model == expected
+
+
+def test_spoken_resolution_never_uses_a_partial_or_fuzzy_name(world):
+    for wording in ("gpt 6 astr", "use gpt 6 astra", "some Astra model"):
+        with pytest.raises(ValueError, match="No matching model id or display name"):
+            mo.resolve(wording)
+
+
+def test_spoken_unavailable_choices_are_bounded_and_exclude_disabled_and_missing_credentials(world, monkeypatch):
+    db = world[0]
+    db.update_model_provider("lane", enabled=False)
+    monkeypatch.setattr(td, "_credential_gap", lambda pid: "No credential" if pid == "grok" else None)
+    db.create_model_provider("many", "Many", "openai", "https://example.invalid/v1",
+                             models=[{"id": f"available-{n}"} for n in range(30)])
+    with pytest.raises(ValueError) as failure:
+        mo.resolve("invented model")
+    text = str(failure.value)
+    choices = text.split("Choose one of: ")[1].split(" (at most 20 shown)")[0].split(", ")
+    assert len(choices) == 20
+    assert all(not model.startswith(("prov:lane:", "prov:grok:")) for model in choices)
+    assert set(choices) <= set(mo._catalog())  # Real, untruncated IDs, not guessed suggestions.
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_spoken_model_ambiguity_refuses_before_dispatch(world, explicit):
+    db, seen, prompts, _ = world
+    if explicit:
+        db.update_model_provider("lane", models_json=[{"id": "a", "label": "Shared Model"},
+                                                {"id": "b", "name": "Shared-Model"}])
+        wording = "prov:lane:SHARED MODEL"
+    else:
+        db.create_model_provider("other", "Other", "openai", "https://example.invalid/v1",
+                                 models=[{"id": "astra", "label": "GPT 6 Astra"}])
+        wording = "gpt 6 astra"
+    _turn("parent", "user", f"use {wording}")
+    result = await _task({"agent": "pinned", "model": wording})
+    assert not result["ok"] and "ambiguous" in result["error"].lower(), result
+    assert "prov:lane:" in result["error"] and "Nothing was dispatched" in result["error"]
+    assert prompts == [] and seen == []
+
+
+def test_spoken_composite_stays_on_explicit_provider(world):
+    world[0].create_model_provider("other", "Other", "openai", "https://example.invalid/v1",
+                                   models=[{"id": "astra", "label": "GPT 6 Astra"}])
+    assert mo.resolve("prov:lane:GPT 6 ASTRA").model == "prov:lane:astra"
+    assert mo.resolve("prov:other:astra").model == "prov:other:astra"
+    with pytest.raises(ValueError, match="cannot run on this worker"):
+        mo.resolve("prov:missing:GPT 6 ASTRA")
+
+
+@pytest.mark.parametrize("unavailable", ["unknown", "disabled", "credentials"])
+async def test_spoken_model_unavailable_lists_real_choices_without_child(world, monkeypatch, unavailable):
+    db, seen, prompts, _ = world
+    wording = "invented model" if unavailable == "unknown" else "GPT 6 ASTRA"
+    if unavailable == "disabled":
+        db.update_model_provider("lane", enabled=False)
+    elif unavailable == "credentials":
+        monkeypatch.setattr(td, "_credential_gap", lambda pid: "No credential for Lane" if pid == "lane" else None)
+    _turn("parent", "user", f"use {wording}")
+    result = await _task({"agent": "pinned", "model": wording})
+    assert not result["ok"] and "Choose one of:" in result["error"], result
+    assert "prov:grok:grok-4.5" in result["error"]
+    assert "Nothing was dispatched" in result["error"] and not seen and not prompts
+
+
+@pytest.mark.parametrize("allow", [False, True])
+async def test_spoken_model_still_requires_owner_naming_or_approval(world, allow):
+    _, seen, prompts, answer = world
+    _turn("parent", "user", "review the branch")
+    _turn("parent", "agent_message", "use GPT 6 ASTRA")
+    if allow:
+        answer["result"] = PermissionResultAllow(updated_input={})
+    result = await _task({"agent": "pinned", "model": "GPT 6 ASTRA"})
+    assert result["ok"] is allow, result
+    assert len(prompts) == 1 and prompts[0]["tool_name"] == mo.PROMPT_TOOL
+    assert prompts[0]["skip_saved_rules"] is True and len(seen) == int(allow)
+
+
 # ---------------------------------------------------------------------------
 # What counts as the user's own words
 # ---------------------------------------------------------------------------
@@ -658,7 +760,8 @@ async def test_parallel_calls_needing_the_same_switch_share_one_prompt(unpinned,
     assert len(seen) == (5 if allow else 0)
 
 
-async def test_away_mode_never_switches(world, monkeypatch):
+@pytest.mark.parametrize("wording", ["prov:lane:astra", "gpt 6 astra"])
+async def test_away_mode_never_switches(world, monkeypatch, wording):
     """The real permission path: Away defers the prompt, so nothing switches."""
     from app.core.permission_handler import PermissionHandler, permission_handler
 
@@ -668,7 +771,7 @@ async def test_away_mode_never_switches(world, monkeypatch):
     _turn("parent", "user", "review the branch")
     with get_db() as conn:
         conn.cursor().execute("UPDATE sessions SET away_mode=TRUE WHERE id='parent'")
-    result = await _task({"agent": "pinned", "model": "prov:lane:astra"})
+    result = await _task({"agent": "pinned", "model": wording})
     assert not result["ok"] and "the owner is away" in result["error"]
     assert not seen
 
@@ -767,6 +870,47 @@ async def test_the_swarm_and_native_task_dispatcher_apply_the_same_rule(world):
     assert seen[0]["provider_id"] == "lane"
 
 
+@pytest.mark.parametrize("wording, expected", [("gpt 6 astra", "completed"),
+                                               ("not in library", "failed")])
+async def test_spoken_model_through_real_swarm(world, monkeypatch, wording, expected):
+    from unittest.mock import AsyncMock
+    from app.core import swarm, provider_agent, turn_scheduler
+    from app.core.task_registry import task_registry
+
+    _, seen, prompts, _ = world
+    for name in ("coordinators", "workers", "worker_jobs", "_locks"):
+        monkeypatch.setattr(swarm, name, {})
+    monkeypatch.setattr(swarm, "persist", AsyncMock())
+    monkeypatch.setattr(turn_scheduler, "on_task_terminal", AsyncMock())
+    monkeypatch.setattr(td, "_await_worker_registration", AsyncMock(return_value=True))
+
+    async def worker(**kwargs):
+        seen.append(kwargs)
+        wid = kwargs["worker_session_id"]
+        await provider_agent._notify_caller_terminal("parent", wid, wid, "completed", "done")
+        return WorkerOutcome(ok=True, session_id=wid, report="done")
+
+    monkeypatch.setattr(provider_agent, "dispatch_worker", worker)
+    _turn("parent", "user", f"use {wording} for the swarm")
+    ctx = ToolCtx(extra={"task_dispatch": td.make_fluid_dispatcher("parent", "caller", None)})
+    try:
+        outcome = await swarm.make_handler(lambda: "parent")({"action": "start", "tasks": [
+            {"id": "review", "agent": "pinned", "prompt": "go", "model": wording}]}, ctx)
+        assert not outcome.is_error, outcome.text
+        coordinator = swarm.coordinators["parent"]
+        key = outcome.background_task.task_id
+        await coordinator.jobs[key]
+        snapshot = coordinator.snapshot(key)
+        assert snapshot["status"] == expected, snapshot
+        assert len(seen) == int(expected == "completed") and not prompts
+        if seen:
+            assert (seen[0]["provider_id"], seen[0]["model_id"]) == ("lane", "astra")
+        else:
+            assert "Nothing was dispatched" in snapshot["tasks"][0]["error"]
+    finally:
+        task_registry.clear_session("parent")
+
+
 # ---------------------------------------------------------------------------
 # StartSession
 # ---------------------------------------------------------------------------
@@ -795,6 +939,33 @@ async def _start(args, sender="caller"):
 
 
 ARGS = {"title": "Review", "prompt": "Review the change", "request_id": "r1"}
+
+
+@pytest.mark.parametrize("wording", ["gpt 6 astra", "prov:lane:GPT-6-ASTRA"])
+async def test_spoken_model_startsession_queues_canonical_binding(chats, wording):
+    _turn("caller", "user", f"start it on {wording}", profile="agent")
+    outcome = await _start({**ARGS, "model": wording})
+    assert not outcome.is_error, outcome.text
+    result = json.loads(outcome.text)
+    child = sessions.get_session(result["session_id"])
+    assert (child["provider_id"], child["model"]) == ("lane", "prov:lane:astra")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM turns WHERE session_id=%s", (child["id"],))
+        queued = turns._row(cursor.fetchone())
+    assert queued["overrides"]["model"] == "prov:lane:astra"
+    assert queued["payload"]["model_override"]["source"] == mo.NAMED
+    assert chats[2] == []
+
+
+async def test_spoken_model_startsession_ambiguity_creates_no_chat(chats):
+    chats[0].create_model_provider("other", "Other", "openai", "https://example.invalid/v1",
+                                   models=[{"id": "different", "label": "GPT 6 Astra"}])
+    _turn("caller", "user", "start it on gpt 6 astra", profile="agent")
+    before = len(sessions.get_sessions(limit=100))
+    outcome = await _start({**ARGS, "model": "gpt 6 astra"})
+    assert outcome.is_error and "ambiguous" in outcome.text and "Nothing was started" in outcome.text
+    assert len(sessions.get_sessions(limit=100)) == before and not chats[2]
 
 
 async def test_real_started_chat_inherits_saved_naming_after_history_retention(chats):
@@ -1008,7 +1179,7 @@ async def test_approval_starts_it_and_records_the_owner(chats):
 
 @pytest.mark.parametrize("model, text", [
     ("prov:lane:unlisted", "cannot run on this worker"),
-    ("gpt-6-astra", "is not a Claude model"),
+    ("gpt-99-imaginary", "No matching model id or display name"),
 ])
 async def test_a_model_this_worker_cannot_run_is_refused(chats, model, text):
     _turn("caller", "user", f"use {model}", profile="agent")
@@ -1037,6 +1208,17 @@ def test_startsession_spec_takes_a_string_and_states_the_rule(chats):
     prop = spec.input_schema["properties"]["model"]
     assert prop["type"] == "string" and "enum" not in prop
     assert "Only for when the user named a model" in prop["description"]
+    from app.core.agent_provider_models import build_task_contract
+    from fluid.tools.builtins.swarm import input_schema
+    descriptions = [prop["description"],
+                    build_task_contract("caller", None).input_schema["properties"]["model"]["description"],
+                    input_schema()["properties"]["tasks"]["items"]["properties"]["model"]["description"]]
+    for description in descriptions:
+        assert "Pass the model exactly as the user named it" in description
+        assert "model IDs and display names" in description
+        assert "case, spaces and dashes" in description
+        assert "start nothing" in description and "ambiguous" in description
+        assert "receiving worker's own eligibility" in description
     assert "Examples: sonnet." in prop["description"]
     assert "pass model only when the user named a model" in spec.description
 

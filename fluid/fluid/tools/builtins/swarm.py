@@ -3,6 +3,7 @@ import asyncio
 from fluid.tools.registry import ToolOutcome, ToolSpec
 
 from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
+from fluid.tools.builtins.session_orchestration import MODEL_OVERRIDE_RULE
 
 
 def describe(tools: frozenset[str] | None = None) -> str:
@@ -46,10 +47,9 @@ def input_schema(worker: dict | None = None) -> dict:
         "id": {"type": "string"}, "title": {"type": "string"},
         "agent": {"type": "string"}, "prompt": {"type": "string"},
         "model": {"type": "string", "description": (
-            "Optional model for this task only, under the same rule as Task's model: "
-            "only when the user named a model for this work; omit it to use the agent's "
-            "own model or the subagent default. The host checks that the user asked and "
-            "otherwise asks the owner to approve the switch.")},
+            "Optional model for this task only, under the same rule as Task's model; "
+            "omit it to use the agent's own model "
+            "or the subagent default. " + MODEL_OVERRIDE_RULE)},
         "depends_on": {"type": "array", "items": {"type": "string"}}}
     if worker is not None:
         item["worker"] = dict(worker)

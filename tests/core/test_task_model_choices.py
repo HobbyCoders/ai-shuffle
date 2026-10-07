@@ -107,22 +107,21 @@ async def test_removed_choice_is_revalidated_after_schema_creation(lane):
     assert not seen
 
 
-async def test_pinned_provider_not_callers_list_controls_override(lane):
+async def test_owner_named_override_may_move_away_from_pinned_provider(lane):
     db, seen = lane
     db.create_model_provider("other", "Other", "openai", "https://example.invalid/v1",
                              models=[{"id": "other-default"}, {"id": "other-choice"}])
     db.create_profile("pinned", "Pinned", None,
                       {"provider_models": {"lane": "prov:other:other-default"}})
-    # A bare id is read on the target's own provider: "sol" is not on Other.
-    for model, ok in [("sol", False), ("other-choice", True)]:
+    # A full, unambiguous owner-named model can move away from Other's pin.
+    for model, ok in [("sol", True), ("other-choice", True)]:
         result = await td.dispatch_task_tool(
             {"agent": "pinned", "prompt": "go", "model": model},
             caller_session_id="parent", caller_provider_id="lane",
         )
         assert result["ok"] is ok, result
-    assert len(seen) == 1
-    assert seen[0]["provider_id"] == "other"
-    assert seen[0]["model_id"] == "other-choice"
+    assert [(s["provider_id"], s["model_id"]) for s in seen] == [
+        ("lane", "sol"), ("other", "other-choice")]
 
 
 async def test_disabled_provider_and_invoke_allowlist_still_refuse(lane):

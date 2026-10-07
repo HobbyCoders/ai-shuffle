@@ -178,6 +178,48 @@ def dispatch(args):
 
 # --- end to end: the parent dispatches, the target starts the child ---------
 
+@pytest.mark.parametrize("receiver_has_model", [True, False])
+def test_spoken_model_task_is_checked_again_on_receiver(world, monkeypatch, receiver_has_model):
+    from app.db import turns, remote_tasks
+
+    database.create_model_provider("lane", "Lane", "openai", "https://example.invalid/v1",
+                                   models=[{"id": "gpt-6-astra", "label": "GPT-6 Astra"}])
+    monkeypatch.setattr(td, "_credential_gap", lambda provider: None)
+    turn = turns.enqueue_turn("parent", "user", prompt="use gpt 6 astra for this worker", profile_id="root-agent")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE turns SET state='completed' WHERE id=%s", (turn["id"],))
+    get_provider = database.get_model_provider
+
+    def receiver_provider(provider_id, **kwargs):
+        row = get_provider(provider_id, **kwargs)
+        if world.net.device_id == TARGET and provider_id == "lane" and not receiver_has_model:
+            # A matching display label must not replace the approved canonical id.
+            return {**row, "models_json": [{"id": "other-model", "label": "GPT-6 Astra"}]}
+        return row
+
+    monkeypatch.setattr(database, "get_model_provider", receiver_provider)
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    before = len(database.get_sessions(limit=100))
+    result = dispatch({"mode": "background", "model": "gpt 6 astra"})
+    assert result["ok"] is receiver_has_model, result
+    [(_, action, body)] = calls
+    assert action == remote_task.TASK_START_ACTION
+    assert (body["provider_id"], body["model"]) == ("lane", "gpt-6-astra")
+    if receiver_has_model:
+        child = database.get_session(result["worker_session_id"])
+        assert (child["provider_id"], child["model"]) == ("lane", "gpt-6-astra")
+        assert child_turns(child["id"])[0]["overrides"]["model"] == "gpt-6-astra"
+        assert world.kicks == [child["id"]]
+    else:
+        assert "curated model list" in result["error"]
+        assert "Choose one of: prov:lane:other-model" in result["error"]
+        assert len(database.get_sessions(limit=100)) == before and not world.kicks
+        assert database.get_session(body["worker_session_id"]) is None
+        assert remote_tasks.get_dispatch(body["worker_session_id"]) is None
+        assert remote_tasks.get_child(body["worker_session_id"]) is None
+
+
 def test_child_starts_on_the_target_in_its_own_checkout_and_owes_its_report(world, monkeypatch):
     calls = []
     route_to_target(world, monkeypatch, calls)

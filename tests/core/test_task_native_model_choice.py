@@ -2,8 +2,8 @@
 
 Native targets (no provider) run on Claude: the Claude Code CLI on a
 subscription, or the Anthropic API with a key. A Task ``model`` may be any
-Claude alias, or another provider's model written as its ``prov:`` id, which
-moves that one worker to that provider (#1830). The user's message in the
+Claude alias, or an unambiguous ID/display name from an enabled provider, which
+moves that one worker to that provider (#1830, #2030). The user's message in the
 parent names the models, so no owner prompt is involved here.
 """
 import pytest
@@ -72,7 +72,7 @@ async def test_native_dispatch_without_a_model_keeps_the_stored_assignment(nativ
     assert seen[0]["provider_id"] is None
 
 
-@pytest.mark.parametrize("model", ["gpt-5.6-sol", "claude-3-opus", "prov:chatgpt:unlisted"])
+@pytest.mark.parametrize("model", ["gpt-99-imaginary", "claude-3-opus", "prov:chatgpt:unlisted"])
 async def test_native_dispatch_refuses_a_model_this_install_cannot_run(native, model):
     _, seen = native
     result = await td.dispatch_task_tool(
@@ -84,9 +84,8 @@ async def test_native_dispatch_refuses_a_model_this_install_cannot_run(native, m
     assert not seen
 
 
-async def test_mixed_roster_reads_bare_ids_on_each_targets_own_leg(native):
-    """A bare id is read on the target's own leg; a Claude alias or a prov: id
-    names its own provider and may move a worker the user asked to move."""
+async def test_mixed_roster_resolves_owner_named_models_across_enabled_providers(native):
+    """An unambiguous bare name can move a worker off its pin, like a prov: id."""
     db, seen = native
     db.create_profile(
         "gpt-helper", "GPT Helper", None,
@@ -97,7 +96,7 @@ async def test_mixed_roster_reads_bare_ids_on_each_targets_own_leg(native):
 
     for agent, model, ok in [
         ("gpt-helper", "haiku", True),        # a Claude alias moves it to Claude
-        ("helper", "gpt-5.6-sol", False),     # a bare non-Claude id on the native leg
+        ("helper", "gpt-5.6-sol", True),      # an unambiguous id moves it to ChatGPT
         ("gpt-helper", "gpt-5.6-sol", True),
         ("helper", "haiku", True),
         ("helper", "prov:chatgpt:gpt-5.6-sol", True),  # moved to ChatGPT
@@ -111,21 +110,22 @@ async def test_mixed_roster_reads_bare_ids_on_each_targets_own_leg(native):
     assert [(s["provider_id"], s["model_id"]) for s in seen] == [
         (None, "haiku"),
         ("chatgpt", "gpt-5.6-sol"),
+        ("chatgpt", "gpt-5.6-sol"),
         (None, "haiku"),
         ("chatgpt", "gpt-5.6-sol"),
     ]
 
 
-async def test_refusal_says_how_to_write_a_providers_model(native):
-    """A bare Sol id on a Claude target says how to name a provider's model."""
+@pytest.mark.parametrize("wording", ["gpt-5.6-sol", "GPT 5.6 SOL"])
+async def test_owner_wording_resolves_a_providers_model_without_fabricating_an_id(native, wording):
     _, seen = native
     result = await td.dispatch_task_tool(
-        {"agent": "helper", "prompt": "go", "model": "gpt-5.6-sol", "mode": "sync"},
+        {"agent": "helper", "prompt": "go", "model": wording, "mode": "sync"},
         caller_session_id="parent", caller_provider_id=None,
     )
-    assert not result["ok"]
-    assert "prov:<providerId>:<modelId>" in result["error"]
-    assert not seen
+    assert result["ok"], result
+    assert result["model_override"]["source"] == "named_by_user"
+    assert [(s["provider_id"], s["model_id"]) for s in seen] == [("chatgpt", "gpt-5.6-sol")]
 
 
 def test_contract_lists_each_targets_leg_and_its_choices(native):

@@ -753,6 +753,11 @@ def accept_remote_start(body, from_device):
             picked = model_override.resolve(choice.get("model"), runs_here=True)
         except ValueError as exc:
             raise ValueError(f"{exc} Nothing was started.") from None
+        if picked.model != choice.get("model"):
+            # The sender already resolved and authorized this canonical id.
+            # A receiver's similar id/display name cannot authorize a substitute.
+            raise ValueError(f"The exact model id {choice.get('model')!r} cannot run on this worker. "
+                             f"Choose one of: {picked.model}. Nothing was started.")
         provider_id, model = picked.provider_id, picked.model
         mapped = model_override.settings_for_model(model, provider_id, effort=effort,
                                                    context_window=context_window, fast=fast)

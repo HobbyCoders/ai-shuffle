@@ -158,7 +158,9 @@ def test_task_contract_is_roster_bound_and_offers_claude_models_natively(mock_db
     guidance = parent_subagent_guidance()
     assert "# Subagent delegation" in guidance
     assert "current provider" in guidance
-    assert "Never invent a subagent ID, model, or provider" in guidance
+    assert "Never invent a subagent ID or provider" in guidance
+    assert "do not fabricate an id" in guidance
+    assert "pass the name the user used" in guidance
     from fluid.tools.fragments import (
         SUBAGENT_WORKTREE_GUIDANCE, SUBAGENT_WORKTREE_SUMMARY, SWARM_ROUTING,
     )
