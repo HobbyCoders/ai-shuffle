@@ -614,14 +614,10 @@
 
 	</div>
 
-	<!-- Mobile: usage ring on the right. Settings lives in dock-left. -->
-	<div class="mobile-controls">
-		{#if !assistantMode}<ContextUsageBar onOpenChange={onUsageOpenChange} />{/if}
-	</div>
-
-	<!-- Right group (desktop): model · effort · ring -->
-	<div class="dock-group dock-right desktop-controls">
-		<div class="dock-pop-wrap" bind:this={modelWrapRef}>
+	<!-- One right group at every width. Only model/effort hide in the phone shell;
+	     the context producer stays mounted, preserving its fetch and open popover. -->
+	<div class="dock-group dock-right">
+		<div class="dock-pop-wrap desktop-controls" bind:this={modelWrapRef}>
 			<button
 				type="button"
 				class="dock-txt model-btn"
@@ -660,7 +656,7 @@
 		</div>
 
 		{#if !assistantMode}
-		<div class="dock-pop-wrap" bind:this={effortWrapRef}>
+		<div class="dock-pop-wrap desktop-controls" bind:this={effortWrapRef}>
 			<button
 				type="button"
 				class="dock-tag effort-btn"
@@ -695,8 +691,13 @@
 			{/if}
 		</div>
 
-		<!-- Context-usage ring (16px SVG arc + its popover) -->
-		<ContextUsageBar onOpenChange={onUsageOpenChange} />
+		<!-- One producer across responsive web widths. The registered phone shell
+		     owns its quick-bar ring; its CSS-hidden dock must not start another. -->
+		{#if !ControlsSheet}
+		<div class="mobile-controls">
+			<ContextUsageBar onOpenChange={onUsageOpenChange} />
+		</div>
+		{/if}
 		{/if}
 	</div>
 </div>
@@ -1035,12 +1036,12 @@
 	}
 
 	/* ===== MOBILE ===== */
-	.mobile-controls,
 	.composer-mobile-only {
 		display: none;
 	}
 
 	.mobile-controls {
+		display: flex;
 		align-items: center;
 		gap: 3px;
 		min-width: 0;

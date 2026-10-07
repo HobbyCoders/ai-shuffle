@@ -1,4 +1,7 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
+import { activeSession } from '$lib/stores/active-session';
+import { get } from 'svelte/store';
+import { getContextUsage } from '$lib/api/sessions';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import ControlsDock from '$lib/components/chat/ControlsDock.svelte';
 import { tick } from 'svelte';
@@ -9,11 +12,9 @@ import { installMobileShell } from './register';
 installMobileShell();
 
 vi.hoisted(() => {
-	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-		ok: false,
-		status: 404,
-		json: vi.fn().mockResolvedValue({})
-	}));
+	vi.stubGlobal('fetch', vi.fn((url: unknown) => String(url).includes('/events?')
+		? new Promise(() => {})
+		: Promise.resolve({ ok: false, status: 404, json: vi.fn().mockResolvedValue({}) })));
 });
 
 vi.mock('$lib/api/client', async (importOriginal) => {
@@ -30,6 +31,26 @@ vi.mock('$lib/api/client', async (importOriginal) => {
 
 afterEach(() => { cleanup(); document.querySelectorAll('.mcp-portal').forEach((n) => n.remove()); });
 afterAll(() => vi.unstubAllGlobals());
+
+vi.mock('$lib/api/sessions', async (original) => ({
+	...await original<Record<string, unknown>>(),
+	getContextUsage: vi.fn().mockResolvedValue({ available: false, reason: 'not_connected' })
+}));
+
+it.each(['code', 'chat', 'voice'] as const)('the phone quick bar is the sole context producer in %s mode', async mode => {
+	activeSession.newChat();
+	await activeSession.switchSession('phone-context-fixture');
+	activeSession.reconcileSessionMode([{ id: 'phone-context-fixture', mode }]);
+	expect(get(activeSession).mode).toBe(mode);
+	expect(get(activeSession).sessionId).toBe('phone-context-fixture');
+	vi.mocked(getContextUsage).mockClear();
+	const { container } = render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
+	await waitFor(() => expect(getContextUsage).toHaveBeenCalledTimes(1));
+	expect(container.querySelector('.controls-dock .usage-context-wrapper')).toBeNull();
+	expect(container.querySelectorAll('.usage-context-wrapper')).toHaveLength(1);
+	cleanup();
+	activeSession.newChat();
+});
 
 describe('ControlsDock mobile control order', () => {
 	// #1816: the dock's open state drives the Chat controls panel, a dialog
@@ -82,7 +103,10 @@ describe('ControlsDock mobile control order', () => {
 		const mobile = container.querySelector('.mobile-controls');
 		const settings = left?.querySelector('.mobile-settings-trigger');
 		const attach = left?.querySelector('.attach-btn');
-		const contextUsage = mobile?.querySelector('.usage-context-wrapper');
+		const contextUsage = container.querySelector('.qcell.usage .usage-context-wrapper');
+		// The phone quick bar owns the sole ring; the CSS-hidden dock owns none.
+		expect(mobile?.querySelector('.usage-context-wrapper')).toBeFalsy();
+		expect(container.querySelectorAll('.usage-context-wrapper')).toHaveLength(1);
 
 		const browser = screen.getByRole('button', { name: 'Toggle live browser view' });
 		expect(browser.nextElementSibling).toBe(attach);

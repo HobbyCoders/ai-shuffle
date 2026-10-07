@@ -12,6 +12,7 @@
 import { render, cleanup, fireEvent, waitFor, screen } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ContextUsageBar from './ContextUsageBar.svelte';
+import { tick } from 'svelte';
 import { rateLimit } from '$lib/stores/rate-limit';
 import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
@@ -938,9 +939,46 @@ describe('ContextUsageBar — context breakdown', () => {
 		expect(container.querySelectorAll('.ctx-seg').length).toBe(1);
 	});
 
+	it('retries a failed session read on popover open without refetching a loaded breakdown', async () => {
+		mocks.getContextUsage.mockRejectedValueOnce(new Error('offline'));
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
+		const { container } = render(ContextUsageBar);
+		await waitFor(() => expect(mocks.getContextUsage).toHaveBeenCalledTimes(1));
+		await tick();
+		mocks.getContextUsage.mockResolvedValue({
+			available: true, source: 'persisted', usage: {
+				categories: [{ name: 'Retry messages', tokens: 10_000, color: '#333' }],
+				totalTokens: 10_000, maxTokens: 200_000, rawMaxTokens: 200_000,
+				percentage: 5, model: 'claude-x', isAutoCompactEnabled: true,
+			},
+		});
+		await openPopover(container);
+		await waitFor(() => expect(container.textContent).toContain('Retry messages'));
+		expect(mocks.getContextUsage).toHaveBeenCalledTimes(2);
+		await fireEvent.keyDown(document, { key: 'Escape' });
+		await openPopover(container);
+		expect(mocks.getContextUsage).toHaveBeenCalledTimes(2);
+	});
+
+	it('aborts the in-flight context read on unmount', async () => {
+		let signal: AbortSignal | undefined;
+		mocks.getContextUsage.mockImplementation((_sid: string, options: { signal: AbortSignal }) => {
+			signal = options.signal;
+			return new Promise(() => {});
+		});
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1' });
+		const { unmount } = render(ContextUsageBar);
+		await waitFor(() => expect(signal).toBeDefined());
+		expect(signal!.aborted).toBe(false);
+		await unmount();
+		expect(signal!.aborted).toBe(true);
+	});
+
 	it('never leaves a stale breakdown on screen when the session switches mid-fetch (abort race)', async () => {
 		const deferred: { resolve: ((v: unknown) => void) | null } = { resolve: null };
-		mocks.getContextUsage.mockImplementation((sid: string) => {
+		const signals = new Map<string, AbortSignal>();
+		mocks.getContextUsage.mockImplementation((sid: string, options: { signal: AbortSignal }) => {
+			signals.set(sid, options.signal);
 			if (sid === 's1') {
 				return new Promise<unknown>((resolve) => {
 					deferred.resolve = resolve;
@@ -972,6 +1010,8 @@ describe('ContextUsageBar — context breakdown', () => {
 		// in-flight controller and kicks off a fetch for s2.
 		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's2' });
 		await waitFor(() => expect(container.textContent).toContain('Messages'));
+		expect(signals.get('s1')!.aborted).toBe(true);
+		expect(signals.get('s2')!.aborted).toBe(false);
 
 		// Now let the stale s1 promise resolve — its continuation must be a no-op
 		// (aborted-signal guard) and must NOT overwrite s2's breakdown.
