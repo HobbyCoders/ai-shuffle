@@ -70,6 +70,63 @@ def test_list_worktrees_with_git_status(wt_api):
     assert no_status["worktrees"][0]["git_status"] is None
 
 
+
+
+def test_stale_marker_is_reported_not_parent_status_and_recovery_is_detected(wt_api, monkeypatch):
+    monkeypatch.setattr(git_worktrees, "_WORKTREE_STATUS_BACKOFF_BASE_SECONDS", 0)
+    monkeypatch.setattr(git_worktrees, "_WORKTREE_STATUS_FRESH_SECONDS", 0)
+    client, repo, path, _ = wt_api
+    marker = (path / ".git").read_text()
+    # Keep .git present but point it at a main checkout that no longer exists.
+    (path / ".git").write_text("gitdir: /missing-fixture/gitdir\n")
+    response = client.get(BASE)
+    assert response.status_code == 200
+    row = response.json()["worktrees"][0]
+    assert row["git_status"] is None
+    assert "not its own Git working tree" in row["status_error"]
+    (path / ".git").write_text(marker)
+    client.get(BASE)  # retry on the normal refresh path after back-off
+    pending = git_worktrees._worktree_status_cache["p1"].inflight
+    if pending is not None:
+        pending.result(timeout=5)
+    row = client.get(BASE).json()["worktrees"][0]
+    assert row["status_error"] is None
+    assert row["git_status"]["current_branch"] == "feature/api"
+    assert git(repo, "branch", "--show-current") == "main"
+
+
+def test_missing_marker_is_reported_as_needing_cleanup(wt_api):
+    client, _, path, _ = wt_api
+    (path / ".git").unlink()
+    row = client.get(BASE).json()["worktrees"][0]
+    assert row["exists"] is False
+    assert row["git_status"] is None
+    assert "needs cleanup" in row["status_error"]
+
+
+def test_wrong_branch_is_never_reported_as_bound_worktree_status(wt_api):
+    client, repo, path, _ = wt_api
+    git(path, "switch", "-q", "-c", "feature/reassigned")
+    row = client.get(BASE).json()["worktrees"][0]
+    assert row["git_status"] is None
+    assert "not the bound branch" in row["status_error"]
+    assert git(path, "branch", "--show-current") == "feature/reassigned"
+    assert git(repo, "branch", "--show-current") == "main"
+
+
+def test_cleanup_refuses_registry_only_directory_without_deleting_files_or_branch(wt_api):
+    client, repo, path, _ = wt_api
+    (path / ".git").unlink()
+    git(repo, "worktree", "prune")  # registry-only after fixture's marker is lost
+    response = client.delete(f"{BASE}/wt-1", params={"keep_branch": "false"})
+    # Pin refusal and preservation, not the pre-existing HTTP 500: a later
+    # cleanup fix may return a more appropriate error without losing this guard.
+    assert response.status_code >= 400
+    assert (path / "wip.txt").read_text() == "wip\n"
+    assert git(repo, "branch", "--list", "feature/api").strip() == "feature/api"
+    assert database.get_worktree("wt-1")["status"] == WorktreeStatus.ACTIVE
+
+
 def test_get_worktree_and_foreign_ids_are_404(wt_api, mock_db):
     client, _, _, tmp_path = wt_api
     assert client.get(f"{BASE}/wt-1").json()["git_status"]["current_branch"] == "feature/api"

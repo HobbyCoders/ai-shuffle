@@ -258,6 +258,10 @@ def _worktree_status_one(wt: dict) -> Tuple[Optional[dict], Optional[str]]:
     except (ValueError, TypeError) as e:
         return None, f"invalid worktree path: {e}"
     try:
+        from app.core.checkout_manager import _require_branch_binding
+
+        if wt.get("branch_name"):
+            _require_branch_binding(worktree_full_path, wt["branch_name"])
         status_data = git_service.get_status(worktree_full_path)
     except Exception as e:  # noqa: BLE001 — one worktree must not fail the batch
         return None, str(e) or type(e).__name__
@@ -406,6 +410,10 @@ async def _load_worktree_statuses(
     cold project waits for that refresh, and for at most
     _WORKTREE_STATUS_COLD_WAIT_SECONDS.
     """
+    for wt in worktrees:
+        if wt.get("exists") is False:
+            wt["git_status"] = None
+            wt["status_error"] = "directory missing or not its own Git working tree; needs cleanup"
     existing = [wt for wt in worktrees if wt.get("exists", True) and wt.get("id")]
     now = time.monotonic()
     with _status_lock:

@@ -186,7 +186,8 @@ def test_deleted_worktree_drops_out(git):
 def test_missing_on_disk_worktree_gets_no_status(git):
     rows = _load([_wt(0), _wt(1, exists=False)])
     assert git.reads == ["/wt/0"]
-    assert rows[1]["git_status"] is None and "status_error" not in rows[1]
+    assert rows[1]["git_status"] is None
+    assert "needs cleanup" in rows[1]["status_error"]
 
 
 def test_broken_worktree_backs_off_then_recovers(git, caplog):

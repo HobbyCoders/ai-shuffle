@@ -1376,6 +1376,17 @@ class TestFetch:
 class TestListWorktrees:
     """Test GET /api/v1/projects/{project_id}/git/worktrees endpoint."""
 
+    @pytest.fixture(autouse=True)
+    def valid_mock_checkout_bindings(self):
+        """Keep synthetic Git paths within this endpoint unit-test boundary.
+
+        These tests mock status reads and use nonexistent /test/workspace paths.
+        Branch/root validation uses real Git and is covered, without this patch,
+        by test_git_worktrees_real_repo_api.py. Do not bypass the production guard.
+        """
+        with patch("app.core.checkout_manager._require_branch_binding"):
+            yield
+
     def test_list_worktrees_success(
         self, app, mock_database, mock_git_service,
         mock_worktree_manager, mock_settings, sample_project, sample_worktree

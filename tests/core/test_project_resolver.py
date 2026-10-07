@@ -376,6 +376,60 @@ def test_resolve_existing_cwd_returns_path_when_row_and_dir_exist(mock_db, monke
     assert out == str(tmp_path)
 
 
+
+
+def test_real_stale_worktree_refused_once_and_restoration_detected(mock_db, monkeypatch, tmp_path, caplog):
+    import logging
+    import time
+
+    from tests.git_repo_helpers import git, hermetic_git_env, init_repo
+
+    hermetic_git_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(project_resolver, "_refusals", {})
+    repo = init_repo(tmp_path / "repo")
+    path = repo / ".fluid" / "worktrees" / "stale"
+    git(repo, "worktree", "add", "-q", "-b", "fix/stale", str(path))
+    project = projects_v2.upsert_project("local:stale", name="Stale")
+    checkouts_db.upsert_checkout(project["id"], RUNNER, str(path), branch="fix/stale")
+    session = {"id": "stale-session", "project_v2_id": project["id"], "branch": "fix/stale"}
+    marker = (path / ".git").read_text()
+    (path / ".git").unlink()  # only our disposable fixture
+    with caplog.at_level(logging.WARNING, logger=project_resolver.logger.name):
+        assert project_resolver.resolve_existing_cwd(session) is None
+        tomorrow = time.monotonic() + 86400
+        monkeypatch.setattr(time, "monotonic", lambda: tomorrow)
+        for _ in range(3):
+            assert project_resolver.resolve_existing_cwd(session) is None
+        assert len(caplog.records) == 1
+        (path / ".git").write_text(marker)
+        assert project_resolver.resolve_existing_cwd(session) == str(path)
+        (path / ".git").unlink()
+        assert project_resolver.resolve_existing_cwd(session) is None
+        assert len(caplog.records) == 1  # one warning for the whole process lifetime
+    assert git(repo, "branch", "--show-current") == "main"
+    assert checkouts_db.get_checkout(project["id"], RUNNER, branch="fix/stale")["path"] == str(path)
+
+
+def test_refusal_memo_at_capacity_never_evicts_or_rewarns(monkeypatch, caplog, tmp_path):
+    import logging
+
+    monkeypatch.setattr(project_resolver, "_refusals", {})
+    assert project_resolver._REFUSAL_MEMO_MAX == 2048
+    monkeypatch.setattr(project_resolver, "_REFUSAL_MEMO_MAX", 2)
+    with caplog.at_level(logging.DEBUG, logger=project_resolver.logger.name):
+        for i in range(10):
+            project_resolver._log_refusal(str(tmp_path / str(i)), "fix/x", "stale")
+        for i in range(10):
+            project_resolver._log_refusal(str(tmp_path / str(i)), "fix/x", "new cause")
+        assert len(project_resolver._refusals) == 2
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 2
+        assert len([r for r in caplog.records if r.levelno == logging.DEBUG]) == 18
+        project_resolver._log_refusal(str(tmp_path / "0"), "fix/x", "stale again")
+        assert caplog.records[-1].levelno == logging.DEBUG
+        assert len(project_resolver._refusals) == 2
+
+
 def test_resolve_existing_cwd_none_when_dir_absent(mock_db):
     # Row exists but its path is not on disk → None (honest not-materialized),
     # never materializes.
@@ -387,10 +441,8 @@ def test_resolve_existing_cwd_none_when_dir_absent(mock_db):
     assert out is None
 
 
-def test_a_refused_checkout_warns_once_per_cause(mock_db, monkeypatch, tmp_path, caplog):
-    """Every listing re-resolves every session, so a checkout left on the
-    wrong branch used to warn on each read. One warning per cause; a new cause
-    or a checkout that recovered and broke again warns again."""
+def test_a_refused_checkout_warns_once_per_process_even_after_recovery(mock_db, monkeypatch, tmp_path, caplog):
+    """Changed errors and a successful binding never reset the warning memo."""
     import logging
 
     monkeypatch.setattr(project_resolver, "_refusals", {}, raising=False)
@@ -417,12 +469,14 @@ def test_a_refused_checkout_warns_once_per_cause(mock_db, monkeypatch, tmp_path,
         assert len(warnings()) == 1
         cause["text"] = "is on main"
         assert project_resolver.resolve_existing_cwd(session) is None
-        assert len(warnings()) == 2 and "is on main" in warnings()[-1]
+        assert len(warnings()) == 1
         cause["text"] = None
         assert project_resolver.resolve_existing_cwd(session) == str(tmp_path)
         cause["text"] = "is on main"
         assert project_resolver.resolve_existing_cwd(session) is None
-        assert len(warnings()) == 3
+        assert len(warnings()) == 1
+        assert "is on main" in caplog.records[-1].getMessage()
+        assert caplog.records[-1].levelno == logging.DEBUG
 
 
 def test_resolve_existing_cwd_none_when_no_checkout_row(mock_db):
