@@ -1072,6 +1072,21 @@ async def test_steered_user_message_lands_at_the_stream_position(mock_db):
     await rec.close()
 
 
+async def test_steered_user_message_never_borrows_the_live_turns_command_id(mock_db):
+    """#2016: a steer queued without a handle of its own records none. Taking
+    the live turn's handle (an agent message's or a question answer's) made the
+    frontend reconcile the steer onto the turn's opening message, drawing the
+    steer twice."""
+    _mk_session()
+    rec = await _recorder(command_id="orchestration:message:abc")
+    await rec.start("[agent message from='peer'] hello")
+    assert await rec.record_steered_user_message("also check staging") is True
+
+    users = [r for r in _rows() if r["event_type"] == "message.user"]
+    assert [u["command_id"] for u in users] == ["orchestration:message:abc", None]
+    await rec.close()
+
+
 async def test_steered_user_message_flushes_buffered_deltas_first(mock_db):
     """It is a non-delta event like any other: buffered text may not jump over
     the user's words."""

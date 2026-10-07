@@ -499,14 +499,21 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// landed since the send began: the server has described the queue for
 			// this window, so a local row added on top of it is a second copy that
 			// no later frame is guaranteed to replace.
-			const optimisticQueuedId = sendWhileStreaming && !options?.skipMessageAppend
+			const queuedEcho = sendWhileStreaming && !options?.skipMessageAppend;
+			const optimisticQueuedId = queuedEcho
 				&& !pendingQueue.authoritySpokeSince(_state.sessionId, dispatchedAt)
 				? newLocalPendingId()
 				: null;
 
 			// Single atomic update — avoids intermediate render where streaming
 			// is cleared but the new user message hasn't been appended yet.
-			if (options?.skipMessageAppend) {
+			if (queuedEcho && !optimisticQueuedId) {
+				// The server already described the queue: no echo anywhere. Falling
+				// through to the transcript append below put a send into a live turn
+				// on the transcript, where the steer's own `message.user` was a
+				// second copy of it (#2016).
+				update(s => ({ ...s, error: null }));
+			} else if (options?.skipMessageAppend) {
 				update(s => ({
 					...s,
 					// S6: the feed reducer owns isStreaming; this is the declared

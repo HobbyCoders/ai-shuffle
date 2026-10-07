@@ -577,6 +577,50 @@ describe('message.user reconcile', () => {
 	});
 });
 
+// #2016: a steer recorded with the live turn's command_id (the turn opener's
+// handle) must not reconcile onto that already-confirmed opener. Live, the
+// owner's optimistic row made the state reconcilable, step 1 matched the
+// opener by command_id and overwrote it with the steer, and the optimistic
+// copy stayed — two identical steer bubbles.
+describe('steer sharing the live turn command_id (#2016)', () => {
+	const CMD = 'orchestration:message:782c';
+	const TURN = 'turn-live';
+	const opener = "[agent message from='peer'] hello";
+	const steer = 'Also the handoff mechanism is awesome';
+	const history = (): WireEvent[] => [
+		ev('turn.started', { id: 'ts', turn_id: TURN, command_id: CMD }),
+		ev('message.user', { id: 'srv-opener', turn_id: TURN, command_id: CMD, content: opener }),
+		ev('tool.use', { id: 'tu-evt', turn_id: TURN, command_id: CMD, tool_use_id: 'tu1', name: 'Bash', input: {} }),
+	];
+	const steerEvent = (): WireEvent =>
+		ev('message.user', {
+			id: 'srv-steer', turn_id: TURN, command_id: CMD, content: steer, uuid: null, checkpoint_backed: false,
+		});
+	const userRows = (messages: ChatMessage[]) =>
+		messages.filter((m) => m.role === 'user').map((m) => m.content);
+
+	it('live: the optimistic steer reconciles once and the opener survives', () => {
+		let s = fold(history());
+		// The composer's transcript echo (no commandId: an existing-session send),
+		// seeded into the reducer by the feed controller before the next event.
+		s = {
+			...s,
+			messages: [...s.messages, {
+				id: 'user-local', role: 'user', content: steer, timestamp: '2026-07-12T00:00:10.000Z',
+			}],
+		};
+		s = reduce(s, steerEvent());
+		expect(userRows(s.messages)).toEqual([opener, steer]);
+		expect(s.messages.find((m) => m.content === steer)?.id).toBe('user-local');
+		expect(s.messages.length).toBe(s.messageOriginSeq.size);
+	});
+
+	it('replay: the same log renders the steer once', () => {
+		const s = fold([...history(), steerEvent()]);
+		expect(userRows(s.messages)).toEqual([opener, steer]);
+	});
+});
+
 // ─── Per-message agent attribution on the live path ──────────────────────────
 
 describe('live turn profile attribution', () => {

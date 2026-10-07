@@ -1008,6 +1008,9 @@ describe('message-sender pending-bubble edges', () => {
 
 		expect(result).toBe(true);
 		expect(getState().queuedMessages).toHaveLength(0);
+		// Nor on the transcript (#2016): the turn is live, so the steer's own
+		// `message.user` is the only copy that may land there.
+		expect(getState().messages.map((m) => m.id)).toEqual(['u0']);
 		// The send itself still goes out.
 		expect(wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query')).toHaveLength(1);
 	});

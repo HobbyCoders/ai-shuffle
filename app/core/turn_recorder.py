@@ -785,9 +785,11 @@ class TurnRecorder:
         appended here, mid-stream, rather than by the ``start`` of a turn the
         row will now never have.
 
-        ``command_id`` overrides the recorder's own (the queued row's handle,
-        not the live turn's) so the frontend collapses its pending bubble onto
-        this message instead of rendering a second copy. Buffered deltas drain
+        ``command_id`` is the queued row's own handle, never the live turn's: a
+        row queued without one (any send into an existing session) records
+        none. Borrowing the turn's handle made the steer claim the turn's
+        opening message, so the frontend reconciled it onto that row and drew
+        the steer twice (#2016). Buffered deltas drain
         first, exactly as any non-delta pump event would, so log order still
         mirrors stream order. These messages have no standalone transcript
         checkpoint, so explicitly disable their independent rewind capability.
@@ -801,7 +803,7 @@ class TurnRecorder:
                 events.append(_build_event(
                     contract.MessageUser, self.session_id,
                     turn_id=self.turn_id,
-                    command_id=command_id or self.command_id,
+                    command_id=command_id,
                     content=content or "",
                     profile_id=profile_id,
                     queued_turn_id=queued_turn_id,

@@ -1430,10 +1430,21 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			const reconcilable =
 				state.messages.length !== state.messageOriginSeq.size ||
 				state.messageOriginSeq.has(event.id);
+			// A row is only a reconcile target while the server has not confirmed it
+			// (an optimistic send has no origin seq) or when this very event is
+			// being delivered again. A confirmed row is a real earlier message and
+			// must never absorb a different event: a command id is NOT unique per
+			// message — a mid-turn steer could carry its turn's id, the same one
+			// the turn's opening message has — and absorbing it overwrote that
+			// opening message with the steer while the optimistic copy stayed, so
+			// the steer rendered twice (#2016).
+			const unconfirmed = (m: ChatMessage) => m.id === event.id || !state.messageOriginSeq.has(m.id);
 			// 1. Reconcile against an optimistic message with a matching command_id.
 			let idx = -1;
 			if (commandId && reconcilable) {
-				idx = state.messages.findIndex((m) => m.role === 'user' && m.commandId === commandId);
+				idx = state.messages.findIndex(
+					(m) => m.role === 'user' && m.commandId === commandId && unconfirmed(m)
+				);
 			}
 			// 2. Fallback: the same text on a row the server has not confirmed yet
 			//    (an optimistic send has no origin seq), or a repeat delivery of
@@ -1445,10 +1456,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			//    earlier message and must never absorb a second identical send.
 			if (idx === -1 && reconcilable) {
 				idx = state.messages.findIndex(
-					(m) =>
-						m.role === 'user' &&
-						m.content === content &&
-						(m.id === event.id || !state.messageOriginSeq.has(m.id))
+					(m) => m.role === 'user' && m.content === content && unconfirmed(m)
 				);
 			}
 			// 3. Server-vs-server repair: logs written before the backfill fix
