@@ -238,8 +238,8 @@ async def test_new_session_with_online_target_pins_and_dispatches(
         "where": f"runner:{PEER}"
     }
     assert p.submit.call_args.kwargs["no_kick"] is True
-    # the install-local no-profile sentinel never rides a remote turn
-    assert p.submit.call_args.kwargs["profile_id"] is None
+    # This id names a real agent (created above), not a no-profile sentinel.
+    assert p.submit.call_args.kwargs["profile_id"] == "claude-code"
     p.notify.assert_called_once()
     assert sent_frames(handler, "query_queued")
 
@@ -545,7 +545,6 @@ async def test_target_instance_id_ignored_for_existing_session(mock_db, monkeypa
         await handler.handle_query({
             "prompt": "hello",
             "session_id": "sess-1",
-            "profile": "claude-code",
             "project": None,
             "target_instance_id": PEER,
         })
@@ -570,7 +569,6 @@ async def test_send_auto_adopts_implicitly_pinned_idle_session(mock_db, monkeypa
         await handler.handle_query({
             "prompt": "continue here",
             "session_id": "sess-1",
-            "profile": "claude-code",
             "project": None,
         })
 
@@ -592,7 +590,6 @@ async def test_explicitly_pinned_session_is_never_auto_adopted(mock_db, monkeypa
         await handler.handle_query({
             "prompt": "continue here",
             "session_id": "sess-1",
-            "profile": "claude-code",
             "project": None,
         })
 
@@ -616,7 +613,6 @@ async def test_live_run_blocks_auto_adopt(mock_db, monkeypatch):
         await handler.handle_query({
             "prompt": "continue here",
             "session_id": "sess-1",
-            "profile": "claude-code",
             "project": None,
         })
 
@@ -638,7 +634,6 @@ async def test_upload_paths_are_lifted_only_for_a_remote_turn(mock_db, monkeypat
         await handler.handle_query({
             "prompt": "look at this",
             "session_id": "sess-1",
-            "profile": "claude-code",
             "project": None,
             "upload_paths": ["/tmp/a.txt"],
         })
@@ -665,7 +660,6 @@ async def test_remote_turn_attaches_lifted_blob_ids_to_the_turn(
         await handler.handle_query({
             "prompt": "look at this",
             "session_id": "sess-1",
-            "profile": "claude-code",
             "project": "proj-1",
             "upload_paths": ["/tmp/a.txt", "/tmp/b.txt"],
         })
@@ -694,7 +688,6 @@ async def test_a_failed_lift_refuses_the_send(mock_db, monkeypatch, tmp_path):
         await handler.handle_query({
             "prompt": "look at this",
             "session_id": "sess-1",
-            "profile": "claude-code",
             "project": "proj-1",
             "upload_paths": ["/etc/passwd"],
         })
@@ -716,7 +709,6 @@ async def test_remote_turn_without_local_project_carries_staged_attachments(
         await handler.handle_query({
             "prompt": "look at this",
             "session_id": "sess-1",
-            "profile": "claude-code",
             "project": None,
             "upload_paths": ["/tmp/a.txt"],
         })
@@ -746,7 +738,6 @@ async def test_auto_adopt_clears_cli_sdk_without_jsonl(mock_db, monkeypatch):
         await handler.handle_query({
             "prompt": "continue here",
             "session_id": "sess-1",
-            "profile": "claude-code",
             "project": None,
         })
 
@@ -771,7 +762,6 @@ async def test_auto_adopt_keeps_fluid_sdk(mock_db, monkeypatch):
         await handler.handle_query({
             "prompt": "continue here",
             "session_id": "sess-1",
-            "profile": "claude-code",
             "project": None,
         })
 
@@ -802,7 +792,6 @@ async def test_missing_local_checkout_blocks_auto_adopt(mock_db, monkeypatch):
         await handler.handle_query({
             "prompt": "continue here",
             "session_id": "sess-1",
-            "profile": "claude-code",
             "project": "proj-1",
         })
 

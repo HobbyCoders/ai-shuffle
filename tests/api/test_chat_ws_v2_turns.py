@@ -194,7 +194,7 @@ async def test_handle_query_idle_submits_user_turn_no_queued_ack(mock_db):
         await handler.handle_query({
             "prompt": "hello world",
             "session_id": "sess-1",
-            "profile": "claude-code",
+            "profile": "default",
             "project": None,
         })
 
@@ -224,7 +224,7 @@ async def test_handle_query_busy_queues_behind_live_turn_and_acks(mock_db):
         await handler.handle_query({
             "prompt": "second while busy",
             "session_id": "sess-1",
-            "profile": "claude-code",
+            "profile": "default",
             "project": None,
         })
 
@@ -260,7 +260,7 @@ async def test_handle_query_busy_defers_the_transcript_record(mock_db):
         await handler.handle_query({
             "prompt": "second while busy",
             "session_id": "sess-1",
-            "profile": "claude-code",
+            "profile": "default",
             "project": None,
         })
 
@@ -283,7 +283,7 @@ async def test_handle_query_idle_still_records_immediately(mock_db):
         await handler.handle_query({
             "prompt": "nobody is busy",
             "session_id": "sess-1",
-            "profile": "claude-code",
+            "profile": "default",
             "project": None,
         })
 
@@ -314,7 +314,7 @@ async def test_handle_query_busy_tries_to_steer_the_running_turn(mock_db):
             await handler.handle_query({
                 "prompt": "second while busy",
                 "session_id": "sess-1",
-                "profile": "claude-code",
+                "profile": "default",
                 "project": None,
             })
 
@@ -332,7 +332,7 @@ async def test_handle_query_idle_never_steers(mock_db):
             await handler.handle_query({
                 "prompt": "nobody is busy",
                 "session_id": "sess-1",
-                "profile": "claude-code",
+                "profile": "default",
                 "project": None,
             })
 
@@ -348,7 +348,7 @@ async def test_handle_query_command_persisted_as_command_role(mock_db):
         await handler.handle_query({
             "prompt": "/compact now",
             "session_id": "sess-1",
-            "profile": "claude-code",
+            "profile": "default",
             "project": None,
         })
 

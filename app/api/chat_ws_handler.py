@@ -1262,10 +1262,37 @@ class ChatWebSocketHandler:
         if session_id and not await self._authorize_mobile_session(
                 session_id, claim=data.get("claim_mobile_authority") is True):
             return
-        # An existing session's own agent was checked by the gate above.
+        # Resolve an omitted follow-up agent from the session, including a
+        # remote-owned mirror. Do this AFTER the session access gates, and pass
+        # the resolved id through the same profile restriction as an explicit
+        # selection. An explicit invalid id must never fall back to this agent.
+        existing_session = (
+            await run_sync(database.get_session, session_id) if session_id else None
+        )
+        requested_profile = data.get("profile")
+        if session_id and requested_profile is None:
+            requested_profile = (existing_session or {}).get("profile_id")
+            if not requested_profile:
+                await self.send_json({
+                    "type": "error", "session_id": session_id,
+                    "message": f"Profile not found: {requested_profile}",
+                })
+                return
         allowed, profile_id = await self._restrict_profile(
-            data.get("profile"), data.get("profile", "claude-code"))
+            requested_profile,
+            requested_profile if session_id else data.get("profile", "claude-code"),
+        )
         if not allowed:
+            return
+        # Refuse on the originating socket before submitting a durable turn:
+        # runtime errors can otherwise reach only watchers on the owning worker.
+        if session_id and (
+            not requested_profile or not await run_sync(database.get_profile, profile_id)
+        ):
+            await self.send_json({
+                "type": "error", "session_id": session_id,
+                "message": f"Profile not found: {requested_profile}",
+            })
             return
         project_id = data.get("project") or None
         if isinstance(project_id, str):
@@ -1337,7 +1364,7 @@ class ChatWebSocketHandler:
         # local turn. No HTTP dispatch.
         placed_remote = False
         if session_id:
-            cloud_sess = await run_sync(database.get_session, session_id)
+            cloud_sess = existing_session
             # V2 placement: resolve via sessions.placement. A session placed on
             # ANOTHER runner still takes the LOCAL enqueue path below — the
             # durable queued turn IS the whole hand-off (PR-B collapsed the
@@ -1702,12 +1729,9 @@ class ChatWebSocketHandler:
         if getattr(self, "user_id", None):
             payload["user_id"] = self.user_id
 
-        # The 'claude-code' no-profile sentinel is install-local — it must
-        # never ride a turn row another install will execute (the cluster
-        # profile-sentinel rule). Local turns keep it (today's behavior).
+        # Both new and existing sends now have a validated concrete agent.
+        # Preserve it across a remote hand-off, even if its id is 'claude-code'.
         submit_profile_id = profile_id
-        if placed_remote and submit_profile_id == "claude-code":
-            submit_profile_id = None
 
         # Uploads travel as durable blobs — but ONLY when the turn is
         # actually leaving this install. A local turn's files are already on the

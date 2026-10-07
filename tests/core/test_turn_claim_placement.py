@@ -556,7 +556,7 @@ async def test_flag_on_remote_placed_query_enqueues_durably_no_kick(
     mock_db, monkeypatch, kicks
 ):
     """The placed submit seam: no HTTP relay, no local kick — a durable queued
-    turn (sentinel stripped), a NOTIFY wake, and the query_queued ack."""
+    turn with the session's agent, a NOTIFY wake, and the query_queued ack."""
     _stub_installs(monkeypatch, [OTHER])
     _seed_session("s-place", placement_val={"where": f"runner:{OTHER}"})
 
@@ -569,13 +569,12 @@ async def test_flag_on_remote_placed_query_enqueues_durably_no_kick(
         await handler.handle_query({
             "prompt": "run remotely",
             "session_id": "s-place",
-            "profile": "claude-code",
             "project": None,
         })
 
     queued = turns_db.get_queued_turns("s-place")
     assert [(t["source"], t["prompt"]) for t in queued] == [("user", "run remotely")]
-    assert queued[0]["profile_id"] is None  # sentinel never crosses installs
+    assert queued[0]["profile_id"] == "default"  # remote owner receives the session's agent
     assert queued[0]["instance_id"] is None  # stamped only by start_turn (Q3-E1)
     assert kicks == []  # no_kick: the owner's claim loop starts it
     assert notifies == ["s-place"]
@@ -589,7 +588,7 @@ async def test_flag_on_own_instance_null_placement_query_runs_local(
 ):
     """(1c) A11 sanity: a NULL-placement session OWNED BY ME resolves
     ("runner", me) — NOT placed_remote. The submit seam takes the plain local
-    path: sentinel kept, kick fired, no NOTIFY wake, no placed-remote ack."""
+    path: session agent kept, kick fired, no NOTIFY wake, no placed-remote ack."""
     from app.core import turn_manager
 
     _stub_installs(monkeypatch, [OTHER])
@@ -606,13 +605,12 @@ async def test_flag_on_own_instance_null_placement_query_runs_local(
         await handler.handle_query({
             "prompt": "run here",
             "session_id": "s-own",
-            "profile": "claude-code",
             "project": None,
         })
 
     queued = turns_db.get_queued_turns("s-own")
     assert [(t["source"], t["prompt"]) for t in queued] == [("user", "run here")]
-    assert queued[0]["profile_id"] == "claude-code"  # local turns keep the sentinel
+    assert queued[0]["profile_id"] == "default"  # local turns inherit the session's agent
     assert kicks == ["s-own"]  # no_kick=False — the local path kicks
     assert notifies == []  # no placed-remote NOTIFY wake
     assert sent_frames(handler, "query_queued") == []  # idle local session: no placed ack
@@ -631,7 +629,6 @@ async def test_flag_on_query_errors_honestly_when_no_capable_runner(
         await handler.handle_query({
             "prompt": "hello",
             "session_id": "s-off",
-            "profile": "claude-code",
             "project": None,
         })
 

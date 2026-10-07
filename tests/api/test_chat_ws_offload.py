@@ -56,7 +56,7 @@ async def test_handle_query_submits_off_the_event_loop(mock_db, loop_thread):
                 await handler.handle_query({
                     "prompt": "hello world",
                     "session_id": "sess-1",
-                    "profile": "claude-code",
+                    "profile": "default",
                     "project": None,
                 })
     finally:

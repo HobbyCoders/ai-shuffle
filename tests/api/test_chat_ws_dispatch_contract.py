@@ -1025,7 +1025,7 @@ async def test_query_into_a_busy_session_replies_query_queued_and_the_queue(ws_e
     async with _connect(ws_env) as conn:
         replies = await conn.roundtrip({
             "type": "query", "session_id": sid, "prompt": "and the tests",
-            "profile": "claude-code",
+            "profile": "default",
         })
     queued = turns_db.get_queued_turns(sid)
     assert [t["prompt"] for t in queued] == ["and the tests"]
@@ -1035,6 +1035,149 @@ async def test_query_into_a_busy_session_replies_query_queued_and_the_queue(ws_e
     ]
     assert turns_db.get_live_turn(sid)["id"] == live["id"]
     steer.assert_awaited_once_with(sid)
+
+
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("profile_id", ["default", "claude-code"])
+@pytest.mark.parametrize("selection", [{}, {"profile": None}, {"profile": "override-agent"}])
+async def test_followup_reaches_runtime_with_explicit_or_session_agent(
+    ws_env, monkeypatch, remote, profile_id, selection,
+):
+    """Drive the socket producer, durable turn and runtime consumer. For a
+    remote mirror only the transport/ownership boundary is simulated; the
+    forwarding serializer and owner enqueue path remain real."""
+    from app.core import placement as placement_mod, query_engine
+    from app.network import control
+    from tests.core.test_session_runtime import _runtime_env
+
+    if profile_id != "default":
+        database.create_profile(profile_id=profile_id, name="Agent", description=None, config={})
+    sid = _make_session("followup", profile_id=profile_id)
+    expected_profile = selection.get("profile") or profile_id
+    if expected_profile != profile_id:
+        database.create_profile(
+            profile_id=expected_profile, name="Override", description=None, config={})
+    if remote:
+        from app.db.base import get_db
+
+        with get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE sessions SET instance_id = %s WHERE id = %s", ("peer", sid))
+        monkeypatch.setattr(
+            placement_mod, "resolve_placement",
+            lambda row: SimpleNamespace(kind="runner", runner_id="peer"),
+        )
+        monkeypatch.setattr(cwh.ChatWebSocketHandler, "_try_auto_adopt", AsyncMock(return_value=False))
+        monkeypatch.setattr(cwh.ChatWebSocketHandler, "_network_owner", AsyncMock(return_value="peer"))
+        monkeypatch.setattr(control, "_require_owned", lambda session_id: database.get_session(session_id))
+
+        async def deliver(device_id, operation, body):
+            assert (device_id, operation) == ("peer", "turns")
+            assert body["profile_id"] == expected_profile
+            return await control._submit_forwarded_turn(body, "sender", None)
+
+        monkeypatch.setattr(control, "call", deliver)
+
+    async with _connect(ws_env) as conn:
+        replies = await conn.roundtrip({
+            "type": "query", "session_id": sid, "prompt": "continue", **selection,
+        })
+        assert not [f for f in replies if f.get("type") == "error"]
+        if remote:
+            assert replies == [{"type": "query_queued", "session_id": sid}]
+        [turn] = turns_db.get_queued_turns(sid)
+        assert turn["profile_id"] == expected_profile
+        seen = []
+
+        async def pump(**kwargs):
+            seen.append(kwargs["profile_id"])
+            # The engine's profile consumer can resolve the id the producer
+            # wrote, rather than a fixture seeding a pre-resolved turn row.
+            assert query_engine.get_profile(kwargs["profile_id"])["id"] == expected_profile
+            yield {"type": "done"}
+
+        # This process stands in for the executing worker; no real worker or
+        # provider is contacted and the recorder is isolated by the helper.
+        monkeypatch.setattr(
+            placement_mod, "resolve_placement",
+            lambda row: SimpleNamespace(
+                kind="runner", runner_id=settings.effective_instance_id, reason="test owner"),
+        )
+        monkeypatch.setattr("app.network.engine.context", lambda: None)
+        with _runtime_env(pump=pump):
+            result = await session_runtime.SessionRuntime(turn, user_id="admin").execute()
+        assert result == "completed"
+        assert seen == [expected_profile]
+
+
+@pytest.mark.parametrize("remote", [False, True])
+@pytest.mark.parametrize("profile", ["missing-agent", "claude-code", ""])
+async def test_invalid_explicit_followup_profile_errors_on_origin_socket(
+    ws_env, monkeypatch, profile, remote,
+):
+    sid = _make_session("refused-followup")
+    if remote:
+        from app.db.base import get_db
+
+        with get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE sessions SET instance_id = %s WHERE id = %s", ("peer", sid))
+    owner = AsyncMock()
+    monkeypatch.setattr(cwh.ChatWebSocketHandler, "_network_owner", owner)
+    async with _connect(ws_env) as conn:
+        assert conn.handler.current_session_id != sid
+        replies = await conn.roundtrip({
+            "type": "query", "session_id": sid, "prompt": "continue", "profile": profile,
+        })
+        assert replies == [{
+            "type": "error", "session_id": sid, "message": f"Profile not found: {profile}",
+        }]
+        # No session subscription was required to receive the refusal.
+        assert conn.handler.current_session_id != sid
+    assert turns_db.get_queued_turns(sid) == []
+    assert database.get_session_messages(sid) == []
+    owner.assert_not_awaited()
+
+
+@pytest.mark.parametrize("selection", [{}, {"profile": None}])
+async def test_followup_with_deleted_session_agent_errors_without_placeholder(ws_env, selection):
+    database.create_profile(
+        profile_id="removed-agent", name="Removed", description=None, config={})
+    sid = _make_session("deleted-agent-followup", profile_id="removed-agent")
+    assert database.delete_profile("removed-agent")
+    assert database.get_session(sid)["profile_id"] is None
+    # A real agent named like the old sentinel must not be picked implicitly.
+    database.create_profile(
+        profile_id="claude-code", name="Not a fallback", description=None, config={})
+    async with _connect(ws_env) as conn:
+        replies = await conn.roundtrip({
+            "type": "query", "session_id": sid, "prompt": "continue", **selection,
+        })
+    assert replies == [{
+        "type": "error", "session_id": sid, "message": "Profile not found: None",
+    }]
+    assert turns_db.get_queued_turns(sid) == []
+    assert database.get_session_messages(sid) == []
+
+
+async def test_omitted_followup_profile_still_obeys_api_key_agent_scope(ws_env, monkeypatch):
+    _api_env(monkeypatch, ["default"])
+    database.create_profile(profile_id="other-agent", name="Other", description=None, config={})
+    sid = _own_session("refused-agent", profile_id="other-agent")
+    async with _connect(ws_env, api_user=API_USER) as conn:
+        replies = await conn.roundtrip({"type": "query", "session_id": sid, "prompt": "continue"})
+    assert len(replies) == 1 and replies[0]["type"] == "error"
+    assert "other-agent" in replies[0]["message"]
+    assert turns_db.get_queued_turns(sid) == []
+
+
+async def test_api_key_with_several_agents_inherits_existing_session_agent(ws_env, monkeypatch):
+    _api_env(monkeypatch, ["default", "second"])
+    sid = _own_session("several-agents")
+    async with _connect(ws_env, api_user=API_USER) as conn:
+        replies = await conn.roundtrip({"type": "query", "session_id": sid, "prompt": "continue"})
+    assert not [f for f in replies if f.get("type") == "error"]
+    assert [t["profile_id"] for t in turns_db.get_queued_turns(sid)] == ["default"]
 
 
 async def test_empty_query_is_an_error(ws_env):
@@ -1315,16 +1458,15 @@ async def test_api_key_query_with_an_agent_outside_its_set_is_refused(ws_env, mo
     assert turns_db.get_queued_turns(sid) == []
 
 
-async def test_api_key_with_several_agents_must_name_one(ws_env, monkeypatch):
+async def test_api_key_with_several_agents_must_name_one_for_new_session(ws_env, monkeypatch):
     _api_env(monkeypatch, ["default", "second"])
-    sid = _own_session("sess-k2")
     async with _connect(ws_env, api_user=API_USER) as conn:
-        replies = await conn.roundtrip({"type": "query", "session_id": sid, "prompt": "hi"})
+        replies = await conn.roundtrip({"type": "query", "prompt": "hi"})
     assert replies == [{
         "type": "error",
         "message": "Specify 'profile': this API key may use agents default, second.",
     }]
-    assert turns_db.get_queued_turns(sid) == []
+    assert turns_db.get_queued_turns("sess-k2") == []
 
 
 async def test_api_key_queue_message_into_a_foreign_agent_session_is_refused(ws_env, monkeypatch):

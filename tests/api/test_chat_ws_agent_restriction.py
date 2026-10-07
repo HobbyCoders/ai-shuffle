@@ -66,22 +66,29 @@ async def test_omitted_agent_defaults_to_the_only_allowed_one(mock_db):
     assert _queued_profiles("sess-1") == ["default"]
 
 
-async def test_omitted_agent_with_several_allowed_is_refused(mock_db):
+async def test_omitted_followup_agent_uses_session_with_several_allowed(mock_db):
     _make_session("sess-1")
     handler, user = _api_handler(["default", "second"])
     with _Patches(), user:
         await handler.handle_query({"prompt": "hi", "session_id": "sess-1"})
+    assert not sent_frames(handler, "error")
+    assert _queued_profiles("sess-1") == ["default"]
+
+
+async def test_new_session_without_agent_with_several_allowed_is_refused(mock_db):
+    handler, user = _api_handler(["default", "second"])
+    with _Patches(), user:
+        await handler.handle_query({"prompt": "hi"})
     errors = sent_frames(handler, "error")
     assert errors and "default" in errors[0]["message"] and "second" in errors[0]["message"]
-    assert _queued_profiles("sess-1") == []
 
 
-async def test_unrestricted_api_user_keeps_the_sentinel_default(mock_db):
+async def test_unrestricted_api_user_inherits_the_session_agent(mock_db):
     _make_session("sess-1")
     handler, user = _api_handler(None)
     with _Patches(), user:
         await handler.handle_query({"prompt": "hi", "session_id": "sess-1"})
-    assert _queued_profiles("sess-1") == ["claude-code"]
+    assert _queued_profiles("sess-1") == ["default"]
 
 
 async def test_owner_is_unrestricted(mock_db):
@@ -89,9 +96,9 @@ async def test_owner_is_unrestricted(mock_db):
     handler = _make_handler()
     with _Patches(), patch.object(cwh.database, "get_api_user") as lookup:
         await handler.handle_query(
-            {"prompt": "hi", "session_id": "sess-1", "profile": "claude-code"})
+            {"prompt": "hi", "session_id": "sess-1", "profile": "default"})
     lookup.assert_not_called()
-    assert _queued_profiles("sess-1") == ["claude-code"]
+    assert _queued_profiles("sess-1") == ["default"]
 
 
 async def test_queue_message_with_disallowed_agent_is_refused(mock_db):
