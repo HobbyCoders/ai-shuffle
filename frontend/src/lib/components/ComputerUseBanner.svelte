@@ -36,7 +36,7 @@
 	const detail = $derived(computerUse.connectionLost ? 'Connection lost — status may be out of date'
 		: !computerUse.busy && (computerUse.secondsSince ?? 0) > 2 ? 'Thinking · computer control is still active'
 		: actions[computerUse.action ?? ''] ?? 'Using computer');
-	const hint = $derived(`Shared mouse & keyboard · ${computerUse.escapeAvailable ? 'Esc on host to stop' : 'Use Stop computer use to take control'}${!computerUse.overlayAvailable ? ' · Screen overlay unavailable' : ''}`);
+	const hint = $derived(`${computerUse.apps.length ? `Apps: ${computerUse.apps.join(', ')} · ` : ''}Shared mouse & keyboard · ${computerUse.escapeAvailable ? 'Esc on host to stop' : 'Use Stop computer use to take control'}${!computerUse.overlayAvailable ? ' · Screen overlay unavailable' : ''}`);
 </script>
 
 {#if computerUse.active}

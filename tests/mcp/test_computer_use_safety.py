@@ -123,7 +123,7 @@ def test_overlay_uses_action_geometry_on_negative_origin_monitor():
     abort.request_stop("unrelated")
     manager._update()
     manager._position.assert_called_once_with(-2560, -300, 2560, 1600)
-    assert manager._draw.call_args.args[:3] == (2560, 1600, 2)
+    assert manager._draw.call_args.args[:2] == ((-2560, -300, 2560, 1600), "Display 2")
     abort.request_stop("s")
     manager._update()
     manager._root.withdraw.assert_called_once()
@@ -143,6 +143,59 @@ def test_agent_cursor_drawn_at_physical_point_relative_to_active_display():
     manager._canvas = MagicMock()
     geo = {"left": -1920, "top": -200, "width": 1920, "height": 1080}
     activity.record(2, session_id="s", action="left_click", geometry=geo, cursor=(-1820, -150))
-    manager._draw(1920, 1080, 2, activity.snapshot())
+    manager._draw((-1920, -200, 1920, 1080), "Display 2", activity.snapshot())
     assert manager._canvas.create_polygon.call_args.args[:2] == (100, 50)
     manager._canvas.create_oval.assert_called_once()
+
+
+_FMODEL = {"id": 7, "title": "FModel - Archive", "app": "FModel", "display": 2,
+           "left": -1500, "top": 100, "width": 800, "height": 600}
+_DISPLAY_2 = {"left": -1920, "top": -200, "width": 1920, "height": 1080}
+
+
+def test_activity_record_carries_the_pinned_window():
+    activity.record(2, session_id="s", action="focus_window", geometry=_DISPLAY_2,
+                    window=_FMODEL)
+    assert activity.snapshot()["window"] == _FMODEL
+    # A display-wide action records no window: the overlay frames the display.
+    activity.record(2, session_id="s", action="screenshot", geometry=_DISPLAY_2)
+    assert activity.snapshot()["window"] is None
+    abort.request_stop("s")
+    assert activity.snapshot()["window"] is None
+
+
+@pytest.mark.parametrize("window,expected", [
+    (None, ((-1920, -200, 1920, 1080), "Display 2")),
+    (_FMODEL, ((-1500, 100, 800, 600), "FModel")),
+    # Clipped to the display it is framed on.
+    ({**_FMODEL, "left": -2000, "top": 700, "width": 500, "height": 400},
+     ((-1920, 700, 420, 180), "FModel")),
+    # No app name: the title.
+    ({**_FMODEL, "app": ""}, ((-1500, 100, 800, 600), "FModel - Archive")),
+    # Entirely off the display, or malformed: the display frame.
+    ({**_FMODEL, "left": 500}, ((-1920, -200, 1920, 1080), "Display 2")),
+    ({"app": "FModel"}, ((-1920, -200, 1920, 1080), "Display 2")),
+])
+def test_frame_for_picks_the_window_or_the_display(window, expected):
+    snap = {"display": 2, "geometry": _DISPLAY_2, "window": window}
+    assert overlay.frame_for(snap) == expected
+
+
+def test_frame_for_without_geometry_frames_nothing():
+    assert overlay.frame_for({"display": None, "geometry": None, "window": _FMODEL}) == (None, "")
+
+
+def test_overlay_frames_the_pinned_window_and_names_its_app():
+    manager = overlay._OverlayManager()
+    manager._root = MagicMock()
+    manager._canvas = MagicMock()
+    manager._apply_clickthrough = MagicMock()
+    manager._position = MagicMock()
+    activity.record(2, session_id="s", action="left_click", geometry=_DISPLAY_2,
+                    cursor=(-1400, 150), window=_FMODEL)
+    manager._update()
+    manager._position.assert_called_once_with(-1500, 100, 800, 600)
+    labels = [c.kwargs.get("text", "") for c in manager._canvas.create_text.call_args_list]
+    assert any("AI Shuffle · FModel · Clicking ·" in t for t in labels)
+    # The agent cursor is drawn relative to the window frame.
+    assert manager._canvas.create_polygon.call_args.args[:2] == (100, 50)

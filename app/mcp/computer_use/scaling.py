@@ -333,6 +333,22 @@ def foreground_display(displays: list["DisplayInfo"]) -> "DisplayInfo | None":
         return None
 
 
+def window_crop(display: "DisplayInfo",
+                bounds: "Optional[tuple[int, int, int, int]]") -> "Optional[tuple[int, int, int, int]]":
+    """The part of a window's visible frame on ``display``, as physical
+    ``(left, top, width, height)``. ``bounds`` is the window's ``(x, y, width,
+    height)`` (list_windows). None when minimized or not on that display."""
+    if not bounds:
+        return None
+    x, y, w, h = (int(v) for v in bounds)
+    x0, y0 = max(x, display.left), max(y, display.top)
+    x1 = min(x + w, display.left + display.width)
+    y1 = min(y + h, display.top + display.height)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return x0, y0, x1 - x0, y1 - y0
+
+
 @dataclass
 class DisplayInfo:
     """Geometry of one physical monitor, in virtual-desktop physical pixels."""
@@ -418,18 +434,30 @@ class DisplayManager:
 
     # ----- capture -----------------------------------------------------------
 
-    def capture(self) -> tuple[bytes, dict]:
+    def capture(self, crop: "Optional[tuple[int, int, int, int]]" = None) -> tuple[bytes, dict]:
         """Capture the selected display, downscaled to the virtual size.
 
         Returns ``(png_bytes, info)`` where info has the virtual + physical size
         and the selected display index. Records the scale map so subsequent
         actions on this display map correctly.
+
+        ``crop`` is a physical ``(left, top, width, height)`` on the selected
+        display (a window's visible frame, see ``window_crop``). Then only that
+        area is captured and the screenshot's mapping starts at the crop's
+        origin, so coordinates in the image still map to the right pixels.
         """
         import mss as _mss
         from PIL import Image
 
         geo = self._selected_geometry()
-        region = {"left": geo.left, "top": geo.top, "width": geo.width, "height": geo.height}
+        if crop is not None:
+            cl, ct, cw, ch = crop
+            if not (cw > 0 and ch > 0 and geo.left <= cl and geo.top <= ct
+                    and cl + cw <= geo.left + geo.width and ct + ch <= geo.top + geo.height):
+                raise ValueError("the crop is not inside the selected display")
+            region = {"left": int(cl), "top": int(ct), "width": int(cw), "height": int(ch)}
+        else:
+            region = {"left": geo.left, "top": geo.top, "width": geo.width, "height": geo.height}
         with _mss.mss() as sct:
             raw = sct.grab(region)
         pw, ph = raw.width, raw.height
@@ -450,9 +478,12 @@ class DisplayManager:
         png = buf.getvalue()
 
         shot_id = f"shot-{next(_OBSERVATION_SEQ)}"
+        # left/top/pw/ph describe the captured area (the whole display, or the
+        # crop); display_rect is the monitor, for the layout-change check.
         self._map[self.selected_index] = {
             "scale": scale, "pw": pw, "ph": ph,
-            "left": geo.left, "top": geo.top, "vw": vw, "vh": vh,
+            "left": region["left"], "top": region["top"], "vw": vw, "vh": vh,
+            "display_rect": (geo.left, geo.top, geo.width, geo.height),
             "id": shot_id, "at": time.time(),
         }
         info = {
@@ -462,6 +493,8 @@ class DisplayManager:
             "physical_width": pw, "physical_height": ph,
             "geometry": geo.to_dict(),
         }
+        if crop is not None:
+            info["region"] = [region["left"], region["top"], pw, ph]
         return png, info
 
     def current_observation(self) -> Optional[str]:
@@ -483,8 +516,8 @@ class DisplayManager:
                         f"Display {self.selected_index}. Use the current screenshot's coordinates "
                         "or take a new screenshot.")
         geo = next((d for d in self.list_displays() if d.index == self.selected_index), None)
-        if geo is None or (geo.left, geo.top, geo.width, geo.height) != (
-                m["left"], m["top"], m["pw"], m["ph"]):
+        expected = tuple(m.get("display_rect") or (m["left"], m["top"], m["pw"], m["ph"]))
+        if geo is None or (geo.left, geo.top, geo.width, geo.height) != expected:
             self._map.pop(self.selected_index, None)
             raise stale("The display layout changed since the screenshot (layout changed). "
                         "Take a fresh screenshot before acting.")

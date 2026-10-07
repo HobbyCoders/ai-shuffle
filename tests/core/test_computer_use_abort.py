@@ -115,6 +115,20 @@ class TestEndpoints:
         assert api.post("/api/v1/computer-use/resume").status_code in (404, 405)
         abort.resume("active")
 
+    def test_status_names_the_controlling_chats_granted_apps(self, api, monkeypatch):
+        from app.api import computer_use as cu_api
+        from app.mcp.computer_use import activity, access
+
+        monkeypatch.setattr(activity, "_sessions", {})
+        monkeypatch.setattr(cu_api, "computer_use_available", lambda: (True, "ok"))
+        assert api.get("/api/v1/computer-use/status").json()["apps"] == []
+        access.grant("active", ["Notepad", "FModel"])
+        try:
+            activity.record(1, session_id="active")
+            assert api.get("/api/v1/computer-use/status").json()["apps"] == ["FModel", "Notepad"]
+        finally:
+            access.revoke("active")
+
     def test_disable_immediately_stops_active_control(self, api):
         from app.mcp.computer_use import activity
         activity.record(1, session_id="active")

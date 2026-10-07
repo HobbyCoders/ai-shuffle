@@ -31,6 +31,8 @@ export interface ComputerUseStatus {
 	busy?: boolean;
 	cursor?: [number, number] | null;
 	geometry?: { left: number; top: number; width: number; height: number } | null;
+	/** Apps the controlling chat was granted (when active). */
+	apps?: string[];
 	seconds_since?: number | null;
 	stop_reason?: string | null;
 	escape_available?: boolean;

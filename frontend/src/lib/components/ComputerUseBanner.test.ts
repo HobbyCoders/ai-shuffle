@@ -12,7 +12,7 @@ beforeEach(() => {
 	vi.spyOn(computerUse, 'stop').mockImplementation(() => {});
 	Object.assign(computerUse, { active: true, displayLabel: 'Display 2 · 2560×1600',
 		action: 'type', secondsSince: 0, busy: true, escapeAvailable: true,
-		overlayAvailable: true, stopping: false, connectionLost: false, stopReason: null });
+		overlayAvailable: true, stopping: false, connectionLost: false, stopReason: null, apps: [] });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
@@ -25,6 +25,11 @@ describe('ComputerUseBanner', () => {
 		expect(screen.getByText(/Esc on host/)).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Stop computer use' }));
 		expect(halt).toHaveBeenCalledTimes(1);
+	});
+	it('names the granted apps when the grant lists them', () => {
+		computerUse.apps = ['FModel', 'Blender'];
+		render(ComputerUseBanner);
+		expect(screen.getByText(/Apps: FModel, Blender · Shared mouse/)).toBeTruthy();
 	});
 	it('hides details without stopping control and keeps Stop available', async () => {
 		const halt = vi.spyOn(computerUse, 'halt').mockResolvedValue();

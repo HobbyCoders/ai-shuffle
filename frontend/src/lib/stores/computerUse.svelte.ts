@@ -93,6 +93,7 @@ class ComputerUseStore {
 	busy = $state(false);
 	cursor = $state<ComputerUseStatus['cursor']>(null);
 	geometry = $state<ComputerUseStatus['geometry']>(null);
+	apps = $state<string[]>([]);
 	secondsSince = $state<number | null>(null);
 	stopReason = $state<string | null>(null);
 	escapeAvailable = $state(false);
@@ -140,6 +141,7 @@ class ComputerUseStore {
 			this.busy = s.busy ?? false;
 			this.cursor = s.cursor ?? null;
 			this.geometry = s.geometry ?? null;
+			this.apps = s.apps ?? [];
 			this.secondsSince = s.seconds_since ?? null;
 			this.stopReason = s.stop_reason ?? null;
 			this.escapeAvailable = s.escape_available ?? false;
@@ -173,6 +175,7 @@ class ComputerUseStore {
 			this.stopReason = 'user';
 			this.cursor = null;
 			this.geometry = null;
+			this.apps = [];
 			this.display = null;
 			this.displayLabel = null;
 		} catch {

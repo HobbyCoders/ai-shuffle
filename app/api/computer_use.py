@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from app.api.auth import require_admin, require_auth
 from app.db.async_database import run_sync
 from app.db.settings import get_system_setting, set_system_setting
-from app.mcp.computer_use import activity, abort, safety, overlay
+from app.mcp.computer_use import access, activity, abort, safety, overlay
 from app.mcp.computer_use.scaling import computer_use_available, last_availability
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,7 @@ class StatusResponse(BaseModel):
     busy: bool = False
     cursor: Optional[list[int]] = None
     geometry: Optional[dict] = None
+    apps: list[str] = []  # apps the controlling chat was granted (when active)
     seconds_since: Optional[float] = None
     stop_reason: Optional[str] = None
     escape_available: bool = False
@@ -120,6 +121,7 @@ async def get_status(token: str = Depends(require_auth)) -> StatusResponse:
     found = None if available else last_availability(reason)
     snap = activity.snapshot()
     label = None
+    apps = list(access.info(snap["session_id"])["apps"]) if snap["active"] else []
     if snap["active"] and snap["display"] is not None:
         geo = snap.get("geometry")
         label = (f"Display {snap['display']} · {geo['width']}×{geo['height']}"
@@ -134,7 +136,7 @@ async def get_status(token: str = Depends(require_auth)) -> StatusResponse:
         display=snap["display"],
         display_label=label,
         action=snap["action"], busy=snap["busy"], cursor=snap["cursor"], geometry=snap["geometry"],
-        seconds_since=snap["seconds_since"], stop_reason=snap["stop_reason"],
+        apps=apps, seconds_since=snap["seconds_since"], stop_reason=snap["stop_reason"],
         escape_available=safety.escape_available(), overlay_available=overlay.status()["available"],
         input_mode=await run_sync(get_computer_use_input_mode),
     )

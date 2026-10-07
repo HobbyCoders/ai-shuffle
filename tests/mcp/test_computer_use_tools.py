@@ -558,6 +558,98 @@ async def test_zoom_window_captures_physical_rect_with_mapping(desktop):
     assert (await t["zoom"]({"window_id": 101, "region": [0, 0, 5, 5]}))["isError"]
 
 
+async def test_screenshot_window_is_the_window_and_its_pixels_are_clickable(desktop):
+    t = desktop.tools
+    await t["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    result = await t["screenshot"]({"window_id": 101})
+    info = payload(result)
+    # Only Notepad's frame (10, 10, 100, 50) on Display 1 is captured, at 1:1.
+    assert desktop.captures[-1] == {"left": 10, "top": 10, "width": 100, "height": 50}
+    assert info["region"] == [10, 10, 100, 50] and info["window_id"] == 101
+    assert info["display"] == 1
+    image = Image.open(io.BytesIO(base64.b64decode(result["content"][1]["data"])))
+    assert image.size == (100, 50)
+    # Image pixels map through the crop offset.
+    await t["left_click"]({"coordinate": [30, 20], "screenshot_id": info["screenshot_id"]})
+    assert desktop.mouse.position == (40, 30)
+    assert (await t["left_click"]({"coordinate": [140, 20]}))["isError"]
+    # The overlay frames Notepad, also for the click on it.
+    window = activity.snapshot()["window"]
+    assert (window["id"], window["app"], window["left"], window["top"],
+            window["width"], window["height"]) == (101, "Notepad", 10, 10, 100, 50)
+    # A plain screenshot is still the whole display and frames it again.
+    result = await t["screenshot"]({})
+    assert desktop.captures[-1] == {"left": 0, "top": 0, "width": 200, "height": 100}
+    assert "region" not in payload(result) and "window_id" not in payload(result)
+    image = Image.open(io.BytesIO(base64.b64decode(result["content"][1]["data"])))
+    assert image.size == (150, 75)
+    assert activity.snapshot()["window"] is None
+    await t["left_click"]({"coordinate": [30, 20]})
+    assert desktop.mouse.position == (40, 27)
+
+
+async def test_screenshot_window_switches_to_the_windows_display(desktop):
+    t = desktop.tools
+    await t["request_access"]({"apps": ["Edge"], "reason": "test"})
+    info = payload(await t["screenshot"]({"window_id": 202}))
+    assert desktop.captures[-1] == {"left": -290, "top": -90, "width": 200, "height": 150}
+    assert info["display"] == 2 and info["current_display"] == "Display 2"
+    await t["mouse_move"]({"coordinate": [0, 0]})
+    assert desktop.mouse.position == (-290, -90)
+    assert activity.snapshot()["window"]["display"] == 2
+
+
+async def test_screenshot_window_refuses_windows_outside_an_app_grant(desktop):
+    t = desktop.tools
+    await t["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    shots = len(desktop.captures)
+    result = await t["screenshot"]({"window_id": 202})
+    assert result["isError"]
+    err = payload(result)
+    assert err["code"] == "PERMISSION_REQUIRED"
+    assert "'Microsoft Edge' is not one of this session's granted apps (Notepad)" in err["error"]
+    assert "request_access" in err["error"]
+    assert (await t["screenshot"]({"window_id": 999}))["isError"]
+    assert len(desktop.captures) == shots
+
+
+async def test_screenshot_window_without_named_apps_is_not_pinned(desktop):
+    # The fixture's grant names no apps: a window shot shows no more than a
+    # full screenshot does, but the overlay only frames granted apps.
+    info = payload(await desktop.tools["screenshot"]({"window_id": 101}))
+    assert info["region"] == [10, 10, 100, 50]
+    assert activity.snapshot()["window"] is None
+    result = await desktop.tools["screenshot"]({"window_id": 303})
+    assert "minimized" in payload(result)["error"]
+
+
+async def test_window_scoped_actions_pin_the_overlay_to_the_granted_window(desktop):
+    t = desktop.tools
+    await t["request_access"]({"apps": ["Edge", "Notepad"], "reason": "test"})
+    await t["focus_window"]({"window_id": 202})
+    snap = activity.snapshot()
+    assert snap["window"]["id"] == 202 and snap["display"] == 2
+    assert snap["geometry"]["left"] == -300
+    await t["switch_display"]({"display": "auto"})
+    assert activity.snapshot()["window"] is None
+    await t["screenshot"]({})
+    await t["ui_tree"]({"window_id": 101})
+    assert activity.snapshot()["window"]["id"] == 101
+    await t["screenshot"]({})
+    assert activity.snapshot()["window"] is None
+    await t["zoom"]({"window_id": 101})
+    assert activity.snapshot()["window"]["id"] == 101
+    await t["release_control"]({})
+    assert activity.snapshot()["window"] is None
+
+
+async def test_zoom_of_an_ungranted_window_is_not_pinned(desktop):
+    await desktop.tools["request_access"]({"apps": ["Notepad"], "reason": "test"})
+    await desktop.tools["screenshot"]({})
+    assert not (await desktop.tools["zoom"]({"window_id": 202})).get("isError")
+    assert activity.snapshot()["window"] is None
+
+
 async def test_batch_supports_window_actions_and_zoom(desktop):
     await desktop.tools["request_access"]({"apps": ["Notepad"], "reason": "test"})
     result = await desktop.tools["computer_batch"]({"actions": [

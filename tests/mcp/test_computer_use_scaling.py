@@ -8,7 +8,7 @@ secondary monitor at a different DPI/scale.
 
 import pytest
 
-from app.mcp.computer_use.scaling import DisplayInfo, DisplayManager
+from app.mcp.computer_use.scaling import DisplayInfo, DisplayManager, window_crop
 
 
 def _mgr_with_map(selected, entry):
@@ -94,6 +94,66 @@ class TestToPhysical:
                                "left": 0, "top": 0, "vw": 100, "vh": 100})
         with pytest.raises(ValueError, match="finite"):
             mgr.to_physical(value, 10)
+
+
+class TestWindowCrop:
+    """screenshot(window_id): the image is a window's visible frame, and its
+    pixels stay clickable through the crop offset."""
+
+    display = DisplayInfo(2, -1920, 0, 1920, 1080, False)
+
+    def test_inside_is_the_window(self):
+        assert window_crop(self.display, (-1500, 100, 800, 600)) == (-1500, 100, 800, 600)
+
+    def test_clipped_to_the_display(self):
+        # Hangs off the left and bottom edges.
+        assert window_crop(self.display, (-2000, 900, 500, 400)) == (-1920, 900, 420, 180)
+
+    @pytest.mark.parametrize("bounds", [None, (0, 0, 800, 600), (-1500, 100, 0, 600)])
+    def test_none_when_minimized_or_elsewhere(self, bounds):
+        assert window_crop(self.display, bounds) is None
+
+    def test_crop_offset_maps_image_pixels_to_physical(self):
+        # A 800x600 window crop on a negative-origin display, shown at 1:1.
+        mgr = _mgr_with_map(2, {"scale": 1.0, "pw": 800, "ph": 600, "left": -1500, "top": 100,
+                                "vw": 800, "vh": 600, "display_rect": (-1920, 0, 1920, 1080)})
+        mgr.list_displays = lambda: [self.display]
+        assert mgr.to_physical(0, 0) == (-1500, 100)
+        assert mgr.to_physical(400, 300) == (-1100, 400)
+        # Pixels past the crop are not on the image.
+        with pytest.raises(ValueError, match="outside the screenshot"):
+            mgr.to_physical(1500, 300)
+
+    def test_downscaled_crop(self):
+        mgr = _mgr_with_map(1, {"scale": 0.5, "pw": 2000, "ph": 1000, "left": 300, "top": 200,
+                                "vw": 1000, "vh": 500, "display_rect": (0, 0, 2560, 1440)})
+        mgr.list_displays = lambda: [DisplayInfo(1, 0, 0, 2560, 1440, True)]
+        assert mgr.to_physical(500, 250) == (1300, 700)
+
+    def test_layout_check_uses_the_display_not_the_crop(self):
+        entry = {"scale": 1.0, "pw": 800, "ph": 600, "left": -1500, "top": 100,
+                 "vw": 800, "vh": 600, "display_rect": (-1920, 0, 1920, 1080)}
+        mgr = _mgr_with_map(2, dict(entry))
+        mgr.list_displays = lambda: [self.display]
+        mgr.to_physical(10, 10)  # unchanged layout: no refusal
+        mgr.list_displays = lambda: [DisplayInfo(2, -2560, 0, 2560, 1440, False)]
+        with pytest.raises(ValueError, match="layout changed"):
+            mgr.to_physical(10, 10)
+
+    def test_capture_rejects_a_crop_off_the_selected_display(self, monkeypatch):
+        import sys
+        from types import SimpleNamespace
+
+        from app.mcp.computer_use import scaling
+
+        pytest.importorskip("PIL.Image")
+        monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=None))
+        monkeypatch.setattr(scaling, "_ensure_dpi_awareness", lambda: None)
+        mgr = _mgr_with_map(2, {"scale": 1.0, "pw": 1920, "ph": 1080, "left": -1920, "top": 0,
+                                "vw": 1920, "vh": 1080})
+        mgr.list_displays = lambda: [self.display]
+        with pytest.raises(ValueError, match="not inside the selected display"):
+            mgr.capture((0, 0, 100, 100))
 
 
 class TestDefaultIndex:

@@ -3,7 +3,8 @@
 AI Shuffle is usually minimized while the agent drives the desktop, so the
 "controlling your screen" indicator must live on the actual screen, not in the
 web app. This draws a thin, always-on-top, **click-through** frame around the
-active display plus a small badge, shown only while the agent is acting and
+active display (or the granted app window the agent works in, see
+``frame_for``) plus a small badge, shown only while the agent is acting and
 hidden when control stops or is paused.
 
 Implementation notes:
@@ -40,6 +41,34 @@ _BADGE_H = 30
 def status() -> dict:
     return {"available": bool(_manager and getattr(_manager, "ready", False)),
             "error": getattr(_manager, "error", None) if _manager else None}
+
+
+def frame_for(snap: dict) -> "tuple[tuple[int, int, int, int] | None, str]":
+    """What the overlay frames for an activity snapshot, and its badge name.
+
+    Returns ``((left, top, width, height), label)`` in physical pixels: the
+    session's granted app window clipped to its display (labelled with the app
+    name) when the snapshot carries one, otherwise the whole display
+    ("Display N"). The geometry is None when there is nothing to frame.
+    """
+    geo = snap.get("geometry")
+    if not geo:
+        return None, ""
+    display = (int(geo["left"]), int(geo["top"]), int(geo["width"]), int(geo["height"]))
+    window = snap.get("window")
+    if window:
+        try:
+            x, y = int(window["left"]), int(window["top"])
+            x1, y1 = x + int(window["width"]), y + int(window["height"])
+        except (KeyError, TypeError, ValueError):
+            x1 = y1 = None
+        if x1 is not None:
+            x0, y0 = max(x, display[0]), max(y, display[1])
+            x1, y1 = min(x1, display[0] + display[2]), min(y1, display[1] + display[3])
+            if x1 > x0 and y1 > y0:
+                name = str(window.get("app") or window.get("title") or "").strip()
+                return (x0, y0, x1 - x0, y1 - y0), name or f"Display {snap.get('display')}"
+    return display, f"Display {snap.get('display')}"
 
 
 def ensure_started() -> None:
@@ -141,9 +170,7 @@ class _OverlayManager:
                 self._visible = False
             return
 
-        display = snap["display"]
-        geo = snap["geometry"]
-        geometry = (geo["left"], geo["top"], geo["width"], geo["height"])
+        geometry, name = frame_for(snap)
         if not self._visible:
             self._root.deiconify()
             self._apply_clickthrough()
@@ -152,7 +179,7 @@ class _OverlayManager:
         if geometry != self._geometry:
             self._position(*geometry)
             self._geometry = geometry
-        self._draw(geo["width"], geo["height"], display, snap)
+        self._draw(geometry, name, snap)
 
     def _position(self, left, top, width, height):
         # Tk negative offsets mean "from the right/bottom edge", not virtual
@@ -166,7 +193,8 @@ class _OverlayManager:
         if not position(self._hwnd, -1, left, top, width, height, 0x0010 | 0x0040):
             raise RuntimeError("Could not position the computer-use overlay")
 
-    def _draw(self, w: int, h: int, display: int, snap: dict) -> None:
+    def _draw(self, geometry: tuple, name: str, snap: dict) -> None:
+        left, top, w, h = geometry
         self._frame = (self._frame + 1) % 1000
         # Pulse the accent between dim and bright.
         t = (math.sin(self._frame / (1000 / self.POLL_MS / 1.2)) + 1) / 2
@@ -194,18 +222,18 @@ class _OverlayManager:
             detail = "Thinking · control active"
         from app.mcp.computer_use.safety import escape_available
         stop_hint = "Esc to stop" if escape_available() else "Stop in AI Shuffle"
-        label = f"  ●  AI Shuffle · Display {display} · {detail} · {stop_hint}  "
+        label = f"  ●  AI Shuffle · {name} · {detail} · {stop_hint}  "
         font = ("Segoe UI", 11, "bold")
-        approx_w = max(280, int(len(label) * 7.2))
+        # A small window frame can be narrower than the badge: keep it inside.
+        approx_w = min(w, max(280, int(len(label) * 7.2)))
         bx0 = (w - approx_w) // 2
         bx1 = bx0 + approx_w
         c.create_rectangle(bx0, 0, bx1, _BADGE_H, fill=_BADGE_BG, outline=glow, width=2)
         c.create_text((bx0 + bx1) // 2, _BADGE_H // 2, text=label, fill=_TEXT, font=font)
 
         cursor = snap.get("cursor")
-        geo = snap["geometry"]
         if cursor:
-            x, y = cursor[0] - geo["left"], cursor[1] - geo["top"]
+            x, y = cursor[0] - left, cursor[1] - top
             if 0 <= x < w and 0 <= y < h:
                 age = time.monotonic() - snap["at"]
                 if ("click" in action or action == "left_mouse_down") and age < 0.8:

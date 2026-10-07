@@ -255,3 +255,17 @@ async def test_guidance_and_descriptions_are_short_and_plain(desktop, monkeypatc
     text = guidance + "".join(t.description for t in captured)
     assert "—" not in text and "–" not in text  # no em or en dashes
     assert max(len(t.description) for t in captured) < 400
+
+
+async def test_window_tools_point_to_the_window_screenshot(desktop, monkeypatch):
+    # After arranging or focusing a granted window, the model should look at
+    # just that app instead of the whole display (#1991).
+    monkeypatch.setattr(sdk, "_windows_tools_supported", lambda: True)
+    captured = []
+    monkeypatch.setattr("app.mcp.sdk_compat.patch_sdk_server", lambda cfg, tools: captured.extend(tools))
+    sdk.create_computer_use_server(enabled=True, session_id="test", virtual_size=(150, 100))
+    by_name = {t.name: t for t in captured}
+    assert "pass window_id so you see just that app" in by_name["screenshot"].description
+    assert "window_id" in by_name["screenshot"].input_schema["properties"]
+    for name in ("window_control", "focus_window"):
+        assert "screenshot(window_id=...)" in by_name[name].description

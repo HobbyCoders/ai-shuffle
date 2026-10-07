@@ -32,7 +32,8 @@ from typing import Any, List, Optional
 from app.mcp.computer_use import access, activity, abort, safety, uia, windows
 from app.mcp.computer_use.abort import is_stopped, Aborted as _Aborted
 from app.mcp.computer_use.errors import ActionError, stale
-from app.mcp.computer_use.scaling import DisplayManager, computer_use_available, foreground_display
+from app.mcp.computer_use.scaling import (DisplayManager, computer_use_available,
+                                          foreground_display, window_crop)
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +285,9 @@ _ZOOM_NOTE = ("Reading aid only. Clicks still use the last full screenshot: "
               "x = screenshot_region[0] + image_x / zoom_factor (same for y).")
 _ZOOM_OFF_SCREENSHOT = ("Reading aid only. This area is not in the last screenshot; "
                         "switch_display and take a screenshot before clicking here.")
+_WINDOW_SHOT_NOTE = ("Only this window's visible part (region, physical pixels). It is the "
+                     "current screenshot: click and zoom with pixels of this image. Take a "
+                     "screenshot without window_id to see the whole display.")
 _WINDOWS_NOTE = ("Front to back. bounds are [x, y, width, height] in physical desktop pixels "
                  "(list_displays geometry); screenshot_bounds are [x0, y0, x1, y1] in the last "
                  "screenshot. focus_window / window_control need granted=true.")
@@ -372,6 +376,12 @@ def create_computer_use_server(
 
     # ----- the synchronous action executor (shared by tools + batch) --------
 
+    # The granted app window the session works in, framed by the on-screen
+    # overlay instead of the whole display. Set by window-scoped actions,
+    # cleared by display-wide ones (full screenshot, switch_display,
+    # open_application) and on release.
+    pinned: dict = {"window": None}
+
     def _record(action: str, cursor=None, geo=None):
         if cursor is not None:
             geo = next((d for d in mgr.list_displays() if
@@ -380,9 +390,32 @@ def create_computer_use_server(
         elif action in ("key", "hold_key", "type", "open_application"):
             geo = foreground_display(mgr.list_displays())
         geo = geo or mgr._selected_geometry()
+        window = pinned["window"]
+        if window is not None and window.get("display") != geo.index:
+            window = None
         with abort.input_guard(session_id, inputs.token):
             activity.record(geo.index, session_id=session_id, action=action,
-                            geometry=geo.to_dict(), cursor=cursor)
+                            geometry=geo.to_dict(), cursor=cursor, window=window)
+
+    def _pin(win: "Optional[windows.WindowInfo]", action: str) -> None:
+        """Frame ``win`` in the overlay when it is a granted app's visible
+        window; otherwise frame the display."""
+        frame = windows.frame(win) if win is not None else None
+        if frame is not None and not windows.is_granted(win, access.info(session_id)["apps"]):
+            frame = None
+        pinned["window"] = frame
+        geo = None
+        if frame is not None:
+            geo = next((d for d in mgr.list_displays() if d.index == frame["display"]), None)
+        _record(action, geo=geo)
+
+    def _pin_fresh(window_id: int, action: str) -> None:
+        # After focus/move/resize the window's frame changed; read it again.
+        try:
+            win = windows.find_window(window_id, mgr.list_displays())
+        except ValueError:
+            win = None
+        _pin(win, action)
 
     def _move(point, action):
         inputs.move(point)
@@ -577,10 +610,25 @@ def create_computer_use_server(
             return [_text_item({"success": True, "action": action})]
 
         if action == "screenshot":
-            png, info = mgr.capture()
-            _record(action)
+            if p.get("window_id") is None:
+                png, info = mgr.capture()
+                pinned["window"] = None
+                _record(action)
+                inputs.check()
+                return [_text_item({"success": True, **info, **_display_note(),
+                                    "cursor": _cursor_payload()}), _img_item(png)]
+            win = _capturable_window(p["window_id"])
+            if win.display != mgr.selected_index:
+                mgr.select_display(win.display)
+            geo = mgr._selected_geometry()
+            crop = window_crop(geo, win.bounds)
+            if crop is None:
+                raise ActionError("INVALID_ARGUMENT", "that window is not on any display")
+            png, info = mgr.capture(crop)
+            _pin(win, action)
             inputs.check()
-            return [_text_item({"success": True, **info, **_display_note(),
+            return [_text_item({"success": True, **info, "window_id": win.id,
+                                "note": _WINDOW_SHOT_NOTE, **_display_note(),
                                 "cursor": _cursor_payload()}), _img_item(png)]
         if action == "zoom":
             has_region, has_window = p.get("region") is not None, p.get("window_id") is not None
@@ -595,6 +643,7 @@ def create_computer_use_server(
                                       "that window is minimized; focus_window it first")
                 png, info = mgr.capture_rect(*win.bounds)
                 info["window_id"] = win.id
+                _pin(win, action)
             inputs.check()
             info["note"] = _ZOOM_NOTE if info.get("zoom_factor") else _ZOOM_OFF_SCREENSHOT
             return [_text_item({"success": True, **info}), _img_item(png)]
@@ -609,6 +658,7 @@ def create_computer_use_server(
                 raise ActionError("FOCUS_BLOCKED", "Windows kept another window in front. Take a "
                                   "screenshot, then click the window's title bar or taskbar "
                                   "button instead.", outcome="unknown")
+            _pin_fresh(win.id, action)
             return [_text_item({"success": True, "action": action, **_after_change(win.id)})]
         if action == "window_control":
             win = _granted_window(p.get("window_id"))
@@ -620,6 +670,7 @@ def create_computer_use_server(
             else:
                 raise ActionError("INVALID_ARGUMENT",
                                   "operation must be maximize, minimize, restore or move_resize")
+            _pin_fresh(win.id, action)
             return [_text_item({"success": True, "action": action, "operation": op,
                                 **_after_change(win.id)})]
         if action == "cursor_position":
@@ -715,6 +766,7 @@ def create_computer_use_server(
             inputs.sleep(max(0.0, min(_MAX_WAIT, float(p.get("duration", 0) or 0))))
             return [_text_item({"success": True, "action": action})]
         if action == "open_application":
+            pinned["window"] = None
             result = _open_app(str(p.get("app") or ""))
             return [_text_item({"success": True, "action": action, "app": p.get("app"), **result})]
         raise ActionError("INVALID_ARGUMENT", f"unknown action: {action}")
@@ -737,10 +789,26 @@ def create_computer_use_server(
         win = windows.find_window(window_id, mgr.list_displays())
         apps = access.info(session_id)["apps"]
         if not windows.is_granted(win, apps):
-            raise ActionError(
-                "PERMISSION_REQUIRED",
-                f"{win.app!r} is not one of this session's granted apps "
-                f"({', '.join(apps) or 'none'}). Call request_access with apps=[{win.app!r}] first.")
+            raise _not_granted(win, apps)
+        return win
+
+    def _not_granted(win: "windows.WindowInfo", apps: list) -> ActionError:
+        return ActionError(
+            "PERMISSION_REQUIRED",
+            f"{win.app!r} is not one of this session's granted apps "
+            f"({', '.join(apps) or 'none'}). Call request_access with apps=[{win.app!r}] first.")
+
+    def _capturable_window(window_id: Any) -> "windows.WindowInfo":
+        # screenshot(window_id): a grant that names apps limits it to their
+        # windows; without named apps the full screenshot shows it anyway.
+        win = windows.find_window(window_id, mgr.list_displays())
+        apps = access.info(session_id)["apps"]
+        if not windows.capture_allowed(win, apps):
+            raise _not_granted(win, apps)
+        if not win.bounds:
+            raise ActionError("INVALID_ARGUMENT", "that window is minimized; focus_window it first")
+        if win.display is None:
+            raise ActionError("INVALID_ARGUMENT", "that window is not on any display")
         return win
 
     def _after_change(window_id: int) -> dict:
@@ -780,6 +848,7 @@ def create_computer_use_server(
         if not win.bounds:
             raise ActionError("INVALID_ARGUMENT", "that window is minimized; focus_window it first")
         _refuse_elevated(win)
+        _pin(win, "ui_tree")
         backend = _uia_backend()
         listed, truncated = uia.read_tree(backend, win.id, inputs.check,
                                           interactive_only=bool(p.get("interactive_only")))
@@ -848,6 +917,7 @@ def create_computer_use_server(
 
     def _element_action(action: str, p: dict) -> dict:
         el, win = _element(p.get("element_id"))
+        _pin(win, action)
         value: Optional[str] = None
         if action == "set_value":
             if p.get("value") is None or isinstance(p.get("value"), (dict, list)):
@@ -900,7 +970,8 @@ def create_computer_use_server(
                               "away or hidden), so nothing was clicked. Scroll it into view, take "
                               "a screenshot and call ui_tree again.")
         m = mgr.mapped_geometry(elements["shot"])
-        if not (m["left"] <= point[0] < m["left"] + m["pw"] and m["top"] <= point[1] < m["top"] + m["ph"]):
+        dl, dt, dw, dh = m.get("display_rect") or (m["left"], m["top"], m["pw"], m["ph"])
+        if not (dl <= point[0] < dl + dw and dt <= point[1] < dt + dh):
             raise ActionError("ACTION_FAILED", "The element is not on the selected display, so "
                               "nothing was clicked. switch_display to it and take a screenshot.")
         hit = uia.window_at(backend, point[0], point[1], inputs.check)
@@ -937,6 +1008,7 @@ def create_computer_use_server(
         # launching another instance.
         existing = _running_window(name)
         if existing is not None and windows.focus(existing.id, inputs.sleep, _alt_nudge):
+            _pin_fresh(existing.id, "open_application")
             return {"method": "focused_existing_window", **_after_change(existing.id)}
         # Launch via the Start menu: tap Win, type, Enter. Robust across
         # installed apps without resolving executables.
@@ -961,7 +1033,8 @@ def create_computer_use_server(
                "display": actual.index if actual else None,
                "selected_display": mgr.selected_index, "on_selected_display": on_selected}
         m = mgr._map.get(mgr.selected_index)
-        if m and on_selected:
+        if m and on_selected and m["left"] <= gx < m["left"] + m["pw"] \
+                and m["top"] <= gy < m["top"] + m["ph"]:
             out["x"] = int(round((gx - m["left"]) * m["scale"]))
             out["y"] = int(round((gy - m["top"]) * m["scale"]))
         return out
@@ -989,6 +1062,7 @@ def create_computer_use_server(
         try:
             if inputs.token != token:
                 mgr._map.clear()
+                pinned["window"] = None
             inputs.token = token
             inputs.check()
             others = set(activity.active_sessions()) - {session_id or "_global"}
@@ -1178,8 +1252,13 @@ def create_computer_use_server(
     @tool("screenshot",
           "Capture the selected display. Returns the image and a screenshot_id. Coordinate "
           "actions use this image's pixels until the next screenshot. Call before acting "
-          "and after any action that may change the screen.",
-          {"type": "object", "properties": {}},
+          "and after any action that may change the screen. When your grant names apps and "
+          "you know the target window, pass window_id so you see just that app; omit it for "
+          "the whole display.",
+          {"type": "object",
+           "properties": {"window_id": {"type": "integer", "description": (
+               "A list_windows id: capture only that window's visible part. Its pixels are "
+               "clickable like a full screenshot.")}}},
           annotations=big)
     async def screenshot(args: dict) -> dict:
         return await _run("screenshot", args)
@@ -1239,6 +1318,7 @@ def create_computer_use_server(
                                       f"unrecognized display {s!r}; use a name like 'Display 2' or 'auto'")
                 idx = int(mnum.group())
             info = mgr.select_display(idx)
+            pinned["window"] = None
             _record("switch_display", geo=info)
             return _ok({"selected": mgr.selected_index,
                         "display": {**info.to_dict(), "name": f"Display {info.index}"},
@@ -1355,7 +1435,8 @@ def create_computer_use_server(
 
     @tool("focus_window",
           "Bring a list_windows window to the front, restoring it if minimized. Its app "
-          "must be granted. Take a screenshot of its display before clicking.",
+          "must be granted. Take a screenshot of its display before clicking; "
+          "screenshot(window_id=...) shows just that app.",
           {"type": "object", "properties": WINDOW_ID, "required": ["window_id"]})
     async def focus_window(args: dict) -> dict:
         return await _run("focus_window", args)
@@ -1364,7 +1445,8 @@ def create_computer_use_server(
     @tool("window_control",
           "Maximize, minimize, restore or move_resize a list_windows window (app must be "
           "granted). move_resize bounds are [x, y, width, height] in physical desktop "
-          "pixels (list_windows bounds), not screenshot pixels.",
+          "pixels (list_windows bounds), not screenshot pixels. After move_resize or "
+          "focus_window on a granted window, take screenshot(window_id=...) to see just that app.",
           {"type": "object",
            "properties": {**WINDOW_ID,
                           "operation": {"type": "string",
@@ -1444,6 +1526,7 @@ def create_computer_use_server(
                 inputs.release_all()
                 activity.finish(session_id)
                 mgr._map.clear()
+                pinned["window"] = None
                 elements.update(shot=None, next=0, items={})
             finally:
                 safety.DESKTOP_LOCK.release()

@@ -122,6 +122,26 @@ def is_granted(win: WindowInfo, apps: Iterable[str]) -> bool:
     return any(name_matches(a, win.names) for a in apps)
 
 
+def capture_allowed(win: WindowInfo, apps: Iterable[str]) -> bool:
+    """Whether ``screenshot(window_id)`` may capture this window alone.
+
+    A grant that names apps limits window captures to their windows. A grant
+    with no apps limits nothing here: the full screenshot already shows it.
+    """
+    apps = [a for a in apps if a]
+    return not apps or is_granted(win, apps)
+
+
+def frame(win: WindowInfo) -> Optional[dict]:
+    """The window's visible frame for the on-screen overlay, or None when it
+    is minimized or off every display."""
+    if not win.bounds or win.display is None:
+        return None
+    left, top, width, height = win.bounds
+    return {"id": win.id, "title": win.title, "app": win.app, "display": win.display,
+            "left": left, "top": top, "width": width, "height": height}
+
+
 def app_granted(name: str, apps: Iterable[str]) -> bool:
     """Whether ``open_application(name)`` launches an app the session was granted.
 
