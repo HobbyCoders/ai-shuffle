@@ -146,7 +146,7 @@ def _status() -> dict:
     ident = identity_mod.load()
     base = {"device": ident.public_summary(), "enrolled": ctx is not None,
             "platform": identity_mod.platform_name(), "version": settings.version,
-            "instance_id": settings.effective_instance_id}
+            "revision": engine.running_revision(), "instance_id": settings.effective_instance_id}
     if ctx is None:
         base["enrollment"] = enrollment.enrollment_status()
         return base
@@ -198,6 +198,7 @@ def _member_view(row: dict, ctx) -> dict:
         "last_seen": row.get("last_seen"), "endpoints": endpoints_mod.peer_endpoints(row, presence),
         "capabilities": presence.get("capabilities") or row.get("capabilities") or {},
         "version": presence.get("version") or row.get("version"),
+        "revision": engine.running_revision() if is_self else presence.get("source_revision"),
         "online": is_self or row["device_id"] in online,
         "legacy_instance_id": row.get("legacy_instance_id"),
     }

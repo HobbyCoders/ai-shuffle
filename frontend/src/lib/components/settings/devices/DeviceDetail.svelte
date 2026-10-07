@@ -84,8 +84,8 @@
 		category="devices"
 		item={key}
 		facts={[
-			{ label: 'Platform', value: member.platform },
 			{ label: 'Version', value: member.version, mono: true },
+			{ label: 'Revision', value: member.revision ?? 'Unknown', mono: true },
 			{ label: 'Seen', value: member.online ? 'Online' : model.seen(member.last_seen).replace(/^Seen /, '') },
 			{ label: 'Network', value: model.status?.network?.name || 'Your network' }
 		]}
@@ -102,6 +102,7 @@
 	>
 		<RowGroup title="Device">
 			{@render nameRow(member.name, 100)}
+			<SettingRow label="Platform"><ValueText value={member.platform ?? 'Unknown'} tone="fg" /></SettingRow>
 		</RowGroup>
 	</DetailPane>
 {:else if joining}

@@ -2155,6 +2155,15 @@ def revoke_device(device_id: str, *, reason: str = "") -> dict:
 # Presence
 # ---------------------------------------------------------------------------
 
+def running_revision() -> Optional[str]:
+    """Short running build SHA, never the mutable checkout's HEAD."""
+    import re
+    from app.core.file_logging import source_revision
+
+    value = source_revision().strip()
+    return value[:9].lower() if re.fullmatch(r"[0-9a-fA-F]{7,64}", value) else None
+
+
 def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[str] = None,
                      endpoints: Optional[List[str]] = None) -> bool:
     ctx = context()
@@ -2165,6 +2174,7 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
         "endpoints": endpoints if endpoints is not None else _own_endpoints(),
         "capabilities": capabilities or {},
         "version": version,
+        "source_revision": running_revision(),
         "platform": identity_mod.platform_name(),
         "incarnation": ctx.identity.incarnation,
         # This install's own instance id, signed by this device's stream:
@@ -2176,15 +2186,16 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """INSERT INTO network_presence (device_id, endpoints, capabilities, version, platform, incarnation,
+            """INSERT INTO network_presence (device_id, endpoints, capabilities, version, source_revision, platform, incarnation,
                                              instance_id, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                ON CONFLICT (device_id) DO UPDATE SET endpoints = EXCLUDED.endpoints,
-                   capabilities = EXCLUDED.capabilities, version = EXCLUDED.version, platform = EXCLUDED.platform,
+                   capabilities = EXCLUDED.capabilities, version = EXCLUDED.version,
+                   source_revision = EXCLUDED.source_revision, platform = EXCLUDED.platform,
                    incarnation = EXCLUDED.incarnation, instance_id = EXCLUDED.instance_id,
                    updated_at = EXCLUDED.updated_at""",
             (row["device_id"], json.dumps(row["endpoints"]), json.dumps(row["capabilities"]), row["version"],
-             row["platform"], row["incarnation"], row["instance_id"], row["updated_at"]))
+             row["source_revision"], row["platform"], row["incarnation"], row["instance_id"], row["updated_at"]))
         changed = record(cursor, "presence", ctx.device_id, row, ctx=ctx) is not None
         # Upgrade old local-only renames without asking the user to rename again.
         # Only seed our own name: a peer's cached hostname is not authoritative.

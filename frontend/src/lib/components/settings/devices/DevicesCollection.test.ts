@@ -165,6 +165,31 @@ function show(item?: string, tab?: string) {
 }
 
 describe('Devices list', () => {
+	it('shows a desktop revision beside its bare version in the list and detail', async () => {
+		status.members![1] = member('laptop', { platform: 'windows', version: '0.9.1', revision: '04d9a0cfb' });
+		await model.loadStatus();
+		show('member:laptop');
+		expect(screen.getByRole('button', { name: /Laptop.*04d9a0cfb/ }).querySelector('.tx > .sm')?.textContent).toBe('04d9a0cfb, 0.9.1, windows, online');
+		const revision = screen.getByText('Revision');
+		expect(revision.nextElementSibling?.textContent).toBe('04d9a0cfb');
+		expect(screen.getByText('0.9.1')).toBeTruthy();
+	});
+
+	it('shows the local revision even before joining a network', async () => {
+		status = { device: { device_id: 'self', fingerprint }, enrolled: false, platform: 'linux',
+			version: '0.9.1', revision: '123456789', instance_id: 'self' };
+		await model.loadStatus();
+		show('self');
+		expect(screen.getByRole('button', { name: /123456789/ })).toBeTruthy();
+		expect(screen.getAllByText('123456789').length).toBe(2);
+	});
+
+	it('labels an older peer revision Unknown rather than inventing one', () => {
+		show('member:laptop');
+		const revision = screen.getByText('Revision');
+		expect(revision.nextElementSibling?.textContent).toBe('Unknown');
+	});
+
 	it('groups the account, requests, this worker, workers and phones', () => {
 		show();
 		for (const label of ['Account', 'Requests', 'This worker', 'Workers', 'Phones and browsers']) {
@@ -172,7 +197,7 @@ describe('Devices list', () => {
 		}
 		expect(screen.getByRole('button', { name: /Shuffle account/ }).textContent).toContain('@owner, remote access on');
 		expect(screen.getByRole('button', { name: /Pixel 9 Pro/ }).textContent).toContain('Wants to be approved');
-		expect(screen.getByRole('button', { name: /Desk/ }).textContent).toContain('linux, 1.0, ready');
+		expect(screen.getByRole('button', { name: /Desk/ }).textContent).toContain('1.0, linux, ready');
 		expect(screen.queryByText(/admin/i)).toBeNull();
 	});
 

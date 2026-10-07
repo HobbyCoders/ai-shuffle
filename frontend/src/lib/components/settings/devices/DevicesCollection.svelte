@@ -127,8 +127,9 @@
 								id: 'self',
 								name: model.workerName,
 								summary: [
-									model.status.platform,
+									model.status.revision,
 									model.status.version,
+									model.status.platform,
 									NETWORK_STATE_LABELS[model.uiState].toLowerCase()
 								]
 									.filter(Boolean)
@@ -145,7 +146,7 @@
 					...model.members.map((m) => ({
 						id: `member:${m.device_id}`,
 						name: m.name,
-						summary: [m.platform, m.online ? 'online' : model.seen(m.last_seen).toLowerCase()]
+						summary: [m.revision, m.version, m.platform, m.online ? 'online' : model.seen(m.last_seen).toLowerCase()]
 							.filter(Boolean)
 							.join(', '),
 						status: (m.online ? 'ok' : 'off') as StatusTone,

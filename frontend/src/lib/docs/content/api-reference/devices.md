@@ -25,7 +25,7 @@ curl http://localhost:8000/api/v1/network/status \
   -H "Authorization: Bearer aih_your_key"
 ```
 
-**Response:** always `device` (`device_id`, `fingerprint`), `enrolled`, `platform`, `version`, `instance_id`. Outside a network it adds `enrollment` (an in-flight join, or `null`). In a network it adds `network` (`network_id`, `name`, `member_count`, `key_version`, ...), `members`, `pending_joins`, `sync` (`records`, `ops`, `holes`, `peers`, `conflicts`), `recovery` and `hub`.
+**Response:** always `device` (`device_id`, `fingerprint`), `enrolled`, `platform`, `version`, `revision` (short running build SHA, or `null` when unknown), `instance_id`. Outside a network it adds `enrollment` (an in-flight join, or `null`). In a network it adds `network` (`network_id`, `name`, `member_count`, `key_version`, ...), `members`, `pending_joins`, `sync` (`records`, `ops`, `holes`, `peers`, `conflicts`), `recovery` and `hub`.
 
 ### GET /api/v1/network/policy
 
@@ -70,7 +70,7 @@ curl http://localhost:8000/api/v1/network/members \
   -H "Authorization: Bearer aih_your_key"
 ```
 
-**Response:** `{"members": [...]}`. Each member has `device_id`, `name`, `kind`, `platform`, `status` (`active` or `revoked`), `is_self`, `online`, `fingerprint`, `last_seen`, `endpoints`, `version`.
+**Response:** `{"members": [...]}`. Each member has `device_id`, `name`, `kind`, `platform`, `status` (`active` or `revoked`), `is_self`, `online`, `fingerprint`, `last_seen`, `endpoints`, `version`, `revision` (short running build SHA, or `null` when unknown).
 
 ### PATCH /api/v1/network/members/{device_id}
 

@@ -248,6 +248,7 @@ def create_schema(cursor) -> None:
             endpoints JSONB NOT NULL DEFAULT '[]',
             capabilities JSONB NOT NULL DEFAULT '{}',
             version TEXT,
+            source_revision TEXT,
             platform TEXT,
             incarnation INTEGER NOT NULL DEFAULT 1,
             instance_id TEXT,
@@ -274,7 +275,8 @@ def _ensure_columns(cursor) -> None:
     the catalog first.
     """
     additive = (("network_members", "last_incarnation_accepted", "INTEGER"),
-                ("network_presence", "instance_id", "TEXT"))
+                ("network_presence", "instance_id", "TEXT"),
+                ("network_presence", "source_revision", "TEXT"))
     if type(cursor).__module__.startswith("psycopg2"):
         for table, column, kind in additive:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind}")

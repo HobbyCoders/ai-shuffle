@@ -67,6 +67,8 @@ export interface NetworkMember {
 	endpoints: string[];
 	capabilities: Record<string, unknown>;
 	version: string | null;
+	/** Running build SHA; absent on workers predating revision presence. */
+	revision?: string | null;
 	online: boolean;
 	legacy_instance_id: string | null;
 }
@@ -152,6 +154,8 @@ export interface NetworkStatus {
 	enrolled: boolean;
 	platform: string | null;
 	version: string | null;
+	/** Running build SHA, independent of the release version. */
+	revision?: string | null;
 	instance_id: string;
 	/** Present (possibly null) only while NOT enrolled. */
 	enrollment?: NetworkEnrollment | null;

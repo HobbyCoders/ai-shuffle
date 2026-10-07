@@ -62,7 +62,7 @@
 	category="devices"
 	item="self"
 	facts={[
-		{ label: 'Platform', value: status.platform },
+		{ label: 'Revision', value: status.revision ?? 'Unknown', mono: true },
 		{ label: 'Version', value: status.version, mono: true },
 		{ label: 'Network', value: model.enrolled ? network?.name || 'Your network' : 'None' },
 		{ label: 'Workers', value: model.enrolled && network ? network.member_count : null }
@@ -84,6 +84,7 @@
 				{/key}
 				<SettingRow label="Platform"><ValueText value={status.platform ?? 'Unknown'} tone="fg" /></SettingRow>
 				<SettingRow label="Version"><ValueText value={status.version ?? 'Unknown'} mono tone="fg" /></SettingRow>
+				<SettingRow label="Revision"><ValueText value={status.revision ?? 'Unknown'} mono tone="fg" /></SettingRow>
 			</RowGroup>
 		{:else}
 			{@render networkTab()}
