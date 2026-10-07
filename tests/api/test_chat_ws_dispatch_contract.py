@@ -1130,7 +1130,8 @@ async def test_invalid_explicit_followup_profile_errors_on_origin_socket(
             "type": "query", "session_id": sid, "prompt": "continue", "profile": profile,
         })
         assert replies == [{
-            "type": "error", "session_id": sid, "message": f"Profile not found: {profile}",
+            "type": "error", "session_id": sid,
+            "message": "That agent no longer exists — pick another one.",
         }]
         # No session subscription was required to receive the refusal.
         assert conn.handler.current_session_id != sid
@@ -1139,13 +1140,20 @@ async def test_invalid_explicit_followup_profile_errors_on_origin_socket(
     owner.assert_not_awaited()
 
 
+@pytest.mark.parametrize("remote", [False, True])
 @pytest.mark.parametrize("selection", [{}, {"profile": None}])
-async def test_followup_with_deleted_session_agent_errors_without_placeholder(ws_env, selection):
+async def test_followup_with_deleted_session_agent_errors_without_placeholder(ws_env, selection, remote):
     database.create_profile(
         profile_id="removed-agent", name="Removed", description=None, config={})
     sid = _make_session("deleted-agent-followup", profile_id="removed-agent")
     assert database.delete_profile("removed-agent")
     assert database.get_session(sid)["profile_id"] is None
+    if remote:
+        from app.db.base import get_db
+
+        with get_db() as conn:
+            conn.cursor().execute(
+                "UPDATE sessions SET instance_id = %s WHERE id = %s", ("peer", sid))
     # A real agent named like the old sentinel must not be picked implicitly.
     database.create_profile(
         profile_id="claude-code", name="Not a fallback", description=None, config={})
@@ -1154,7 +1162,8 @@ async def test_followup_with_deleted_session_agent_errors_without_placeholder(ws
             "type": "query", "session_id": sid, "prompt": "continue", **selection,
         })
     assert replies == [{
-        "type": "error", "session_id": sid, "message": "Profile not found: None",
+        "type": "error", "session_id": sid,
+        "message": "That agent no longer exists — pick another one.",
     }]
     assert turns_db.get_queued_turns(sid) == []
     assert database.get_session_messages(sid) == []

@@ -1275,7 +1275,7 @@ class ChatWebSocketHandler:
             if not requested_profile:
                 await self.send_json({
                     "type": "error", "session_id": session_id,
-                    "message": f"Profile not found: {requested_profile}",
+                    "message": "That agent no longer exists — pick another one.",
                 })
                 return
         allowed, profile_id = await self._restrict_profile(
@@ -1291,7 +1291,7 @@ class ChatWebSocketHandler:
         ):
             await self.send_json({
                 "type": "error", "session_id": session_id,
-                "message": f"Profile not found: {requested_profile}",
+                "message": "That agent no longer exists — pick another one.",
             })
             return
         project_id = data.get("project") or None
