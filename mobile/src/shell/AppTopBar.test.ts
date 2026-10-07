@@ -141,6 +141,7 @@ describe('AppTopBar title', () => {
 		renderBar();
 		const crumbs = screen.getByRole('navigation', { name: 'Breadcrumbs' });
 		expect(crumbs.getAttribute('data-session-id')).toBe('s-1');
+		expect(crumbs.getAttribute('data-mobile')).toBe('true');
 		expect(crumbs.textContent).toContain('Website');
 		expect(crumbs.textContent).toContain('Fix login');
 	});

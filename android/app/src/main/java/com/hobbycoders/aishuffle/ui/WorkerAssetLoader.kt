@@ -46,7 +46,7 @@ internal class WorkerAssetLoader(private val client: WorkerDownloadClient = Work
         private class InvalidResponse(message: String) : IOException(message)
 
         /** A URL on the paired worker (the phone UI page's own origin), or null. */
-        fun workerUrl(base: String, url: String): String? = url.takeIf { ChatDownloadPolicy.url(base, it) }
+        fun workerUrl(base: String, url: String): String? = ChatDownloadPolicy.workerUrl(base, url)
 
         private fun failure(code: Int, message: String) = WebResourceResponse(
             "text/plain", "utf-8", code, "Blocked", mapOf("Cache-Control" to "no-store"),

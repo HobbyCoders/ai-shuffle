@@ -6,6 +6,19 @@ import { archivedChats } from '$lib/stores/archived-chats';
 import { subagentChats } from '$lib/stores/subagent-chats';
 import type { Session } from '$lib/api/client';
 
+/** A same-origin deep link whose fallback stays in the current desktop or phone UI. */
+export function sessionHref(sessionId: string, pathname: string = typeof window === 'undefined' ? '/' : window.location.pathname): string {
+	// Accept pathnames only, not origins, protocol-relative URLs, queries or fragments.
+	const path = pathname.startsWith('/') && !pathname.startsWith('//') && !/[\\?#\x00-\x20\x7f]/.test(pathname)
+		? pathname : '/';
+	return `${path}?session=${encodeURIComponent(sessionId)}`;
+}
+
+function ordinarySessionClick(event: MouseEvent): boolean {
+	return !event.defaultPrevented && event.button === 0 && !event.ctrlKey && !event.metaKey
+		&& !event.shiftKey && !event.altKey;
+}
+
 /** Shared session selection for the sidebar, deep links and in-app links. */
 export function openSession(sessionId: string, openedSession?: Session): void {
 	// Persistent assistant homes are intentionally absent from ordinary lists.
@@ -36,14 +49,14 @@ export function openSession(sessionId: string, openedSession?: Session): void {
 
 /** Open a Task or Swarm child's transcript, known to be a subagent's chat before /live answers. */
 export function openSubagentLink(event: MouseEvent, sessionId: string): void {
+	if (!ordinarySessionClick(event)) return;
 	subagentChats.mark(sessionId, true);
 	openSessionLink(event, sessionId);
 }
 
 /** Consume ordinary link clicks in the current app; retain native new-tab gestures. */
 export function openSessionLink(event: MouseEvent, sessionId: string): void {
-	if (event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey
-		|| event.shiftKey || event.altKey) return;
+	if (!ordinarySessionClick(event)) return;
 	event.preventDefault();
 	openSession(sessionId);
 }

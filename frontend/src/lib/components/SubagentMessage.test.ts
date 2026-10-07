@@ -1,13 +1,20 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { get } from 'svelte/store';
 import SubagentMessage from './SubagentMessage.svelte';
 import type { ChatMessage } from '$lib/stores/types';
 import { openSubagentLink } from '$lib/services/session-navigation';
+import { activeSession } from '$lib/stores/active-session';
+import { layout } from '$lib/stores/layout.svelte';
+import { subagentChats } from '$lib/stores/subagent-chats';
 
-vi.mock('$lib/services/session-navigation', () => ({ openSubagentLink: vi.fn((event: MouseEvent) => event.preventDefault()) }));
+vi.mock('$lib/services/session-navigation', async (importOriginal) => {
+ const original = await importOriginal<typeof import('$lib/services/session-navigation')>();
+ return { ...original, openSubagentLink: vi.fn(original.openSubagentLink) };
+});
 const stopApi = vi.hoisted(() => ({ get: vi.fn(), stop: vi.fn() }));
 vi.mock('$lib/api/sessions', () => ({ getSessionTaskStopState: stopApi.get, stopSessionTask: stopApi.stop }));
-afterEach(() => { cleanup(); vi.clearAllMocks(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); history.replaceState(null, '', '/'); vi.clearAllMocks(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const message: ChatMessage = {
  id: 'subagent-worker', role: 'assistant', type: 'subagent', content: 'Private worker result',
  toolId: 'worker', agentName: 'General Purpose', agentType: 'gpt-test', agentStatus: 'running',
@@ -18,6 +25,8 @@ const message: ChatMessage = {
 
 describe('Subagent transcript card', () => {
  it('keeps progress and output out of the parent and opens the worker transcript', async () => {
+  vi.spyOn(activeSession, 'switchSession').mockImplementation(() => {});
+  layout.setSidebarOverlay(false);
   const { container } = render(SubagentMessage, { message });
   expect(container.querySelector('details')?.open).toBe(false);
   expect(screen.getByRole('status').textContent).toBe('Running');
@@ -29,6 +38,25 @@ describe('Subagent transcript card', () => {
   expect(link.getAttribute('href')).toBe('/?session=worker-session');
   await fireEvent.click(link);
   expect(openSubagentLink).toHaveBeenCalledWith(expect.any(MouseEvent), 'worker-session');
+ });
+ it.each(['/mobile/', '/assets/mobile-ui/'])('keeps the Task fallback inside %s and opens the child with the real navigation handler', async pathname => {
+  history.replaceState(null, '', pathname);
+  layout.setSidebarOverlay(false);
+  const switchSession = vi.spyOn(activeSession, 'switchSession').mockImplementation(() => {});
+  const childId = 'worker / chat &+=?#雪';
+  subagentChats.mark(childId, false);
+  const { container } = render(SubagentMessage, { message: { ...message, agentSessionId: childId } });
+  await fireEvent.click(container.querySelector('summary')!);
+  const link = screen.getByRole('link', { name: 'Open transcript' });
+  const target = new URL(link.getAttribute('href')!, window.location.origin);
+  expect(target.origin).toBe(window.location.origin);
+  expect(target.pathname).toBe(pathname);
+  expect(target.searchParams.get('session')).toBe(childId);
+  const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+  await fireEvent(link, event);
+  expect(event.defaultPrevented).toBe(true);
+  expect(switchSession).toHaveBeenCalledExactlyOnceWith(childId, undefined, null, null, null);
+  expect(get(subagentChats).has(childId)).toBe(true);
  });
  it('shows the model the worker runs on, as the model pickers name it (#1827)', async () => {
   const { rerender } = render(SubagentMessage, { message });

@@ -35,6 +35,15 @@ class WorkerAssetLoaderTest {
         "/api/v1/workspace/files/download?path=report.pdf",
     )
 
+    @Test fun rootDeepLinksReachTheNavigationClassifierWithoutBecomingDownloadable() {
+        val target = server.baseUrl + "/?session=parent"
+        val admitted = WorkerAssetLoader.workerUrl(server.baseUrl, target)
+        assertEquals(target, admitted)
+        assertFalse(ChatDownloadPolicy.url(server.baseUrl, target))
+        assertEquals(ChatDownloadPolicy.Navigation.Session(server.baseUrl + "/mobile/?session=parent"),
+            ChatDownloadPolicy.navigation(server.baseUrl, admitted!!, true, true))
+    }
+
     @Test fun everyAssetConsumerResolvesOnlyToPairedWorker() {
         for (path in assetPaths) {
             assertEquals(server.baseUrl + path, WorkerAssetLoader.workerUrl(server.baseUrl, server.baseUrl + path))

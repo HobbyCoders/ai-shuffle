@@ -192,7 +192,11 @@ class ChatActivity : NativeScreen() {
                 // navigate the privileged document or open an unauthenticated browser tab.
                 val asset = WorkerAssetLoader.workerUrl(server.baseUrl, request.url.toString())
                 if (asset != null) {
-                    if (request.isForMainFrame && request.hasGesture()) downloads.fromUrl(asset, null, null, null, -1)
+                    when (val navigation = ChatDownloadPolicy.navigation(server.baseUrl, asset, request.isForMainFrame, request.hasGesture())) {
+                        is ChatDownloadPolicy.Navigation.Session -> if (validDocument()) view.loadUrl(navigation.url)
+                        ChatDownloadPolicy.Navigation.Download -> downloads.fromUrl(asset, null, null, null, -1)
+                        ChatDownloadPolicy.Navigation.Ignore -> Unit
+                    }
                     return true
                 }
                 if (request.isForMainFrame && request.hasGesture() && request.url.scheme == "https") {

@@ -2,7 +2,7 @@
  import { ChevronDown, LoaderCircle, Check, X, CirclePause } from 'lucide-svelte';
  import { swarms } from '$lib/stores/swarms';
  import { isSwarmActive, parseSwarm, resolveSwarm, swarmStages } from '$lib/utils/swarm';
- import { openSubagentLink } from '$lib/services/session-navigation';
+ import { openSubagentLink, sessionHref } from '$lib/services/session-navigation';
  let { sessionId, input, result, status, expanded = $bindable(false) }: {
   sessionId?: string | null; input?: Record<string, unknown>; result?: string;
   status: 'running' | 'complete' | 'error'; expanded?: boolean;
@@ -76,7 +76,7 @@
           {:else if task.status === 'interrupted'}<p>This task stopped before it finished.</p>{/if}
           {#if task.error}<p class="error" role="status">{task.error}</p>{/if}
           {#if task.worker_session_id}
-           <a class="transcript-link" href={`/?session=${encodeURIComponent(task.worker_session_id)}`} onclick={(event) => openSubagentLink(event, task.worker_session_id!)} data-sveltekit-reload>Open transcript <span aria-hidden="true">↗</span></a>
+           <a class="transcript-link" href={sessionHref(task.worker_session_id)} onclick={(event) => openSubagentLink(event, task.worker_session_id!)} data-sveltekit-reload>Open transcript <span aria-hidden="true">↗</span></a>
           {:else}<p class="muted">{task.status === 'queued' || task.status === 'running' ? 'The transcript is not available yet.' : 'No separate transcript is available for this agent.'}</p>{/if}
          </div>
         </details>

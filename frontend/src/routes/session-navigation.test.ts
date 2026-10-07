@@ -36,7 +36,7 @@ import { appMode } from '$lib/stores/sessionMode.svelte';
 import { TAB_ACTIVE_SESSION_KEY } from '$lib/stores/device-id';
 import { feedController } from '$lib/stores/session/v2/feed-controller';
 import { api, type Session } from '$lib/api/client';
-import { openSession, openSessionLink } from '$lib/services/session-navigation';
+import { openSession, openSessionLink, openSubagentLink, sessionHref } from '$lib/services/session-navigation';
 import { resourceSync } from '$lib/services/resource-sync';
 import { subagentChats } from '$lib/stores/subagent-chats';
 import { get } from 'svelte/store';
@@ -50,6 +50,8 @@ beforeEach(() => {
 	layout.setSidebarOverlay(false);
 	layout.openChat('parent');
 	appMode.set('chat', false);
+	subagentChats.mark('worker-child', false);
+	subagentChats.mark('already-consumed', false);
 	vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ tags: [], swarms: [] }), { status: 200 })));
 	vi.spyOn(api, 'get').mockResolvedValue(null);
 	for (const method of ['loadProfiles', 'loadSessions', 'loadProjects', 'loadClusterProjects', 'loadApiUserSessions'] as const) {
@@ -59,6 +61,33 @@ beforeEach(() => {
 });
 
 afterEach(() => { cleanup(); activeSession.destroy(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+describe('session link hrefs', () => {
+	it.each(['/', '/mobile/', '/mobile', '/assets/mobile-ui/'])(
+		'keeps session fallback navigation on the current UI path %s', (pathname) => {
+			history.replaceState(null, '', `${pathname}?old=1#old`);
+			const href = sessionHref('parent / chat &+=?#雪');
+			const target = new URL(href, window.location.origin);
+			expect(target.origin).toBe(window.location.origin);
+			expect(target.pathname).toBe(pathname);
+			expect(target.searchParams.get('session')).toBe('parent / chat &+=?#雪');
+			expect([...target.searchParams.keys()]).toEqual(['session']);
+			expect(target.hash).toBe('');
+		},
+	);
+
+	it('accepts an explicit UI pathname for server-side rendering', () => {
+		vi.stubGlobal('window', undefined);
+		expect(sessionHref('parent')).toBe('/?session=parent');
+		expect(sessionHref('parent', '/mobile/')).toBe('/mobile/?session=parent');
+	});
+
+	it.each(['//outside.example/', 'https://outside.example/', '/\\outside.example/', '/?connect=other', '/#fragment', '/bad\npath', ''])(
+		'never turns an unsafe pathname into an external or malformed href: %j', (pathname) => {
+			expect(sessionHref('parent', pathname)).toBe('/?session=parent');
+		},
+	);
+});
 
 describe('page session refresh scheduling', () => {
 	it('joins focus/visibility and root reconnect invalidations in one subscriber refresh', async () => {
@@ -169,13 +198,25 @@ describe('Swarm session navigation through the actual active-session store', () 
 		expect(feedController.start).toHaveBeenLastCalledWith('worker-summary');
 	});
 
-	it.each([{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { button: 1 }])(
+	it.each([{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { altKey: true }, { button: 1 }])(
 		'preserves native new-tab/window navigation for %o', async (gesture) => {
 			await activeSession.init();
 			const event = new MouseEvent('click', { cancelable: true, button: 0, ...gesture });
 			openSessionLink(event, 'worker-child');
 			expect(event.defaultPrevented).toBe(false);
 			expect(activeSession.current.sessionId).toBe('parent');
+			openSubagentLink(event, 'worker-child');
+			expect(event.defaultPrevented).toBe(false);
+			expect(get(subagentChats).has('worker-child')).toBe(false);
 		},
 	);
+
+	it('does not select or mark a child when another handler consumed the click', async () => {
+		await activeSession.init();
+		const event = new MouseEvent('click', { cancelable: true, button: 0 });
+		event.preventDefault();
+		openSubagentLink(event, 'already-consumed');
+		expect(activeSession.current.sessionId).toBe('parent');
+		expect(get(subagentChats).has('already-consumed')).toBe(false);
+	});
 });

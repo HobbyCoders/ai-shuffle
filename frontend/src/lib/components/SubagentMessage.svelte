@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { ChatMessage } from '$lib/stores/types';
 	import { isSubagentRunning } from '$lib/utils/subagent-status';
-	import { openSubagentLink } from '$lib/services/session-navigation';
+	import { openSubagentLink, sessionHref } from '$lib/services/session-navigation';
 	import { taskModel } from '$lib/utils/task-model';
 	import TerminalTaskStop from './chat/TerminalTaskStop.svelte';
 
@@ -122,7 +122,7 @@
 			<p class="stop-note">{stopNote}</p>
 		{/if}
 		{#if message.agentSessionId}
-			<a class="transcript-link" href={`/?session=${encodeURIComponent(message.agentSessionId)}`}
+			<a class="transcript-link" href={sessionHref(message.agentSessionId)}
 				onclick={(event) => openSubagentLink(event, message.agentSessionId!)} data-sveltekit-reload>
 				Open transcript <span aria-hidden="true">↗</span>
 			</a>

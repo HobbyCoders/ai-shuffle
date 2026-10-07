@@ -4,6 +4,10 @@ import { swarms } from '$lib/stores/swarms';
 import type { SwarmSnapshot } from '$lib/utils/swarm';
 import ToolUseMessage from './ToolUseMessage.svelte';
 import SwarmHistory from './SwarmHistory.svelte';
+import { activeSession } from '$lib/stores/active-session';
+import { layout } from '$lib/stores/layout.svelte';
+import { subagentChats } from '$lib/stores/subagent-chats';
+import { get } from 'svelte/store';
 const snapshot: SwarmSnapshot = {
  id: 'sw-1', session_id: 'session-swarm', title: 'Review the release', status: 'running',
  created_at: '2026-09-07T10:00:00Z', updated_at: '2026-09-07T10:01:00Z',
@@ -15,7 +19,7 @@ const snapshot: SwarmSnapshot = {
 };
 
 beforeEach(() => vi.stubGlobal('fetch', vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ swarms: [] }), { status: 200 })))));
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); history.replaceState(null, '', '/'); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 describe('Swarm card integration', () => {
  it('keeps the receipt compact and exposes stages/navigation through the swarm history', async () => {
   render(ToolUseMessage, { name: 'mcp__fluid__Swarm', status: 'complete', result: JSON.stringify({ swarm: snapshot }) });
@@ -33,6 +37,26 @@ describe('Swarm card integration', () => {
   await fireEvent.click(header);
   expect(header.getAttribute('aria-expanded')).toBe('false');
   expect(screen.queryByText('Stage 1')).toBeNull();
+ });
+ it.each(['/mobile/', '/assets/mobile-ui/'])('keeps a Swarm transcript fallback inside %s and selects the child on click', async pathname => {
+  history.replaceState(null, '', pathname);
+  layout.setSidebarOverlay(false);
+  const switchSession = vi.spyOn(activeSession, 'switchSession').mockImplementation(() => {});
+  subagentChats.mark('worker-1', false);
+  render(ToolUseMessage, { name: 'Swarm', status: 'complete', result: JSON.stringify({ swarm: snapshot }) });
+  render(SwarmHistory, { sessionId: snapshot.session_id });
+  await fireEvent.click(screen.getByRole('button', { name: /Swarm Review the release/ }));
+  await fireEvent.click(screen.getByText('Review code'));
+  const link = screen.getByRole('link', { name: 'Open transcript' });
+  const target = new URL(link.getAttribute('href')!, window.location.origin);
+  expect(target.origin).toBe(window.location.origin);
+  expect(target.pathname).toBe(pathname);
+  expect(target.searchParams.get('session')).toBe('worker-1');
+  const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+  await fireEvent(link, event);
+  expect(event.defaultPrevented).toBe(true);
+  expect(switchSession).toHaveBeenCalledExactlyOnceWith('worker-1', undefined, null, null, null);
+  expect(get(subagentChats).has('worker-1')).toBe(true);
  });
  it('shows updates before the tool result and requires cancellation confirmation', async () => {
   const early = { ...snapshot, id: 'early', session_id: 'early-session' };

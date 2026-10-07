@@ -3,18 +3,29 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import { writable } from 'svelte/store';
 import type { Session } from '$lib/api/sessions';
 
-vi.mock('$lib/stores/app-data.svelte', () => ({ appData: {}, sessions: writable<Session[]>([]) }));
-vi.mock('$lib/stores/active-session', () => ({ activeSession: writable({}) }));
+vi.mock('$lib/stores/app-data.svelte', () => ({ appData: { current: { sessions: [] } }, sessions: writable<Session[]>([]) }));
+vi.mock('$lib/stores/active-session', () => ({ activeSession: Object.assign(writable({}), { switchSession: vi.fn() }) }));
 vi.mock('$lib/api/client', () => ({ api: { get: vi.fn(), patch: vi.fn(), delete: vi.fn() }, forkSession: vi.fn() }));
 import { sessions } from '$lib/stores/app-data.svelte';
 import { api } from '$lib/api/client';
 import SessionBreadcrumbs from './SessionBreadcrumbs.svelte';
+import { activeSession } from '$lib/stores/active-session';
+import { layout } from '$lib/stores/layout.svelte';
 import { openSessionLink } from '$lib/services/session-navigation';
-vi.mock('$lib/services/session-navigation', () => ({ openSessionLink: vi.fn((event: MouseEvent) => event.preventDefault()) }));
+vi.mock('$lib/services/session-navigation', async (importOriginal) => {
+	const original = await importOriginal<typeof import('$lib/services/session-navigation')>();
+	return { ...original, openSessionLink: vi.fn(original.openSessionLink) };
+});
 
 const row = (id: string, fields: Partial<Session> = {}) => ({ id, title: id, ...fields } as Session);
-beforeEach(() => { vi.resetAllMocks(); (sessions as unknown as ReturnType<typeof writable<Session[]>>).set([]); });
-afterEach(cleanup);
+beforeEach(() => {
+	vi.clearAllMocks();
+	vi.mocked(api.get).mockReset();
+	history.replaceState(null, '', '/');
+	layout.setSidebarOverlay(false);
+	(sessions as unknown as ReturnType<typeof writable<Session[]>>).set([]);
+});
+afterEach(() => { cleanup(); history.replaceState(null, '', '/'); });
 
 it('shows project, parent and current transcript in order using persisted identity', async () => {
 	vi.mocked(api.get).mockResolvedValueOnce(row('child', { hidden: true, parent_session_id: 'parent / chat' }))
@@ -28,6 +39,25 @@ it('shows project, parent and current transcript in order using persisted identi
 	expect(document.querySelector('[aria-current="page"]')?.textContent).toContain('Review Android');
 	expect(api.get).toHaveBeenNthCalledWith(1, '/sessions/child?message_limit=1');
 	expect(api.get).toHaveBeenNthCalledWith(2, '/sessions/parent%20%2F%20chat?message_limit=1');
+});
+
+it.each(['/', '/mobile/', '/assets/mobile-ui/'])('keeps a mobile parent fallback in the phone UI when hosted at %s and selects the parent on click', async pathname => {
+	history.replaceState(null, '', pathname);
+	const parentId = 'parent / chat &+=?#雪';
+	(sessions as unknown as ReturnType<typeof writable<Session[]>>).set([
+		row('child', { hidden: true, parent_session_id: parentId }), row(parentId, { title: 'Parent chat' })
+	]);
+	render(SessionBreadcrumbs, { title: 'Worker', sessionId: 'child', mobile: true });
+	const link = screen.getByRole('link', { name: 'Open parent chat: Parent chat' });
+	const target = new URL(link.getAttribute('href')!, window.location.origin);
+	expect(target.origin).toBe(window.location.origin);
+	expect(target.pathname).toBe('/mobile/');
+	expect(target.searchParams.get('session')).toBe(parentId);
+	const event = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+	await fireEvent(link, event);
+	expect(event.defaultPrevented).toBe(true);
+	expect(activeSession.switchSession).toHaveBeenCalledExactlyOnceWith(parentId, undefined, null, null, null);
+	expect(layout.current.activeView).toEqual({ type: 'session', sessionId: parentId });
 });
 
 it('uses sidebar metadata without fetching either session and follows renamed titles', async () => {

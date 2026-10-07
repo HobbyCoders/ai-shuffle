@@ -2,7 +2,7 @@
 	import { ChevronRight } from 'lucide-svelte';
 	import { api } from '$lib/api/client';
 	import type { Session } from '$lib/api/sessions';
-	import { openSessionLink } from '$lib/services/session-navigation';
+	import { openSessionLink, sessionHref } from '$lib/services/session-navigation';
 	import { sessions } from '$lib/stores/app-data.svelte';
 	import SessionTitleMenu from './SessionTitleMenu.svelte';
 
@@ -54,7 +54,7 @@
 	{/if}
 	{#if parentId}
 		{#if parent}
-			<a class="crumb parent" href={`/?session=${encodeURIComponent(parentId)}`} onclick={(event) => openSessionLink(event, parentId!)} data-sveltekit-reload title={parent.title || 'Parent chat'} aria-label={`Open parent chat: ${parent.title || 'Untitled chat'}`}>{parent.title || 'Parent chat'}</a>
+			<a class="crumb parent" href={mobile ? sessionHref(parentId, '/mobile/') : sessionHref(parentId)} onclick={(event) => openSessionLink(event, parentId!)} data-sveltekit-reload title={parent.title || 'Parent chat'} aria-label={`Open parent chat: ${parent.title || 'Untitled chat'}`}>{parent.title || 'Parent chat'}</a>
 		{:else}
 			<span class="crumb parent" title="Parent chat unavailable">Parent chat</span>
 		{/if}
