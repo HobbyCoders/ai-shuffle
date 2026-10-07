@@ -96,6 +96,36 @@ OnInputRequired = Callable[
 OnStop = Callable[[str], None]
 
 
+_RESULT_FIELD_TYPES: dict[str, tuple[type, ...]] = {
+    "output": (str,), "exit_code": (int,), "task_id": (str,), "failed": (bool,),
+}
+
+
+def _result_fields(outcome: Any) -> dict[str, Any] | None:
+    """The structured pieces a cell gets as attributes on a shell-like result.
+
+    A tool's explicit ``result_fields`` win; otherwise a raw ``shell_result``
+    supplies ``output`` and ``exit_code``. Only the known keys with JSON-safe
+    values cross the kernel pipe.
+    """
+    fields = outcome.result_fields
+    if fields is None and outcome.shell_result is not None:
+        output, code = outcome.shell_result
+        fields = {"output": output, "exit_code": code}
+    if not isinstance(fields, dict):
+        return None
+    clean = {
+        key: value for key, value in fields.items()
+        if key in _RESULT_FIELD_TYPES and (
+            value is None or (
+                isinstance(value, _RESULT_FIELD_TYPES[key])
+                and (key == "failed" or not isinstance(value, bool))
+            )
+        )
+    }
+    return clean or None
+
+
 def _soft_external_error(spec: Any, outcome: Any) -> bool:
     """Whether an MCP/inproc error result should come back as the call's
     result text instead of aborting the cell.
@@ -348,4 +378,5 @@ class HostBridge:
             content_id=outcome.content_id,
             window_of=outcome.window_of,
             shell_exit_code=outcome.shell_result[1] if outcome.shell_result is not None else None,
+            fields=_result_fields(outcome),
         )

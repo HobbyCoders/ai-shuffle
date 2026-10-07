@@ -448,3 +448,13 @@ def test_refinement_carries_the_budget_into_the_registered_description():
     register_builtins(plain)
     refine_builtin_descriptions(plain)
     assert "1200" not in plain.get("Monitor").description
+
+
+@pytest.mark.asyncio
+async def test_background_receipt_hands_code_mode_its_task_id():
+    # #2004: a code-mode cell reads r.task_id instead of scraping the receipt.
+    async def spawn(input, ctx):
+        return BackgroundTaskReceipt(task_id="mon-fields")
+
+    out = await handler({"command": "make ci"}, ToolCtx(extra={"monitor_spawn": spawn}))
+    assert out.result_fields == {"task_id": "mon-fields"}

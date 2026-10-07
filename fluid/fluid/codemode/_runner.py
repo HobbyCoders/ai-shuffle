@@ -230,7 +230,24 @@ def _do_host_call(send, read_frame, tool_name: str, kwargs: dict):
                 return truncate.windowed_read_pointer(
                     ref.key, len(ref), start, stop, offset=base
                 )
-    wrapped = truncate.to_result_ref(result, vfs.ResultRef, limit=_REF_THRESHOLD)
+    fields = reply.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        fields = None
+    ref_cls = vfs.ShellResultRef if fields else vfs.ResultRef
+    wrapped = truncate.to_result_ref(result, ref_cls, limit=_REF_THRESHOLD)
+    if fields:
+        # Shell-like results (Bash, Monitor) carry their raw pieces as
+        # attributes: ``.output`` is the command's text without the display
+        # fence, so a cell never parses the fence to get at it.
+        if not isinstance(wrapped, vfs.ResultRef):
+            wrapped = vfs.ShellResult(wrapped)
+        vfs.attach_shell_fields(wrapped, fields)
+        output = truncate.to_result_ref(
+            wrapped.output, vfs.ResultRef, limit=_REF_THRESHOLD
+        ) if isinstance(wrapped.output, str) else wrapped.output
+        if isinstance(output, vfs.ResultRef):
+            _REFS.register(output)
+            wrapped.output = output
     if not isinstance(wrapped, vfs.ResultRef):
         # Under the ref threshold, so it is delivered whole — but a cell that
         # blows its stdout budget can still lose it, and until this was held it
@@ -405,7 +422,9 @@ _IMPORT_SPELLING_HINT = (
 
 _STR_RESULT_HINT = (
     "Hint: a tool call returns text (str / ResultRef), never a dict — parse it "
-    "with json.loads(...) when the tool emits JSON, or slice it as a string."
+    "with json.loads(...) when the tool emits JSON, or slice it as a string. "
+    "Only Bash and Monitor results add attributes: .output (raw command text, "
+    "no fence), .exit_code, .task_id, .ok, .failed."
 )
 
 

@@ -1226,3 +1226,34 @@ async def test_real_shell_failure_exit_and_output_agree():
         assert "actual shell output" in summary
     finally:
         bt._background_tasks.pop(task.task_id, None)
+
+
+# ---------------------------------------------------------------------------
+# #2004 — a code-mode cell gets the raw output as fields, not by parsing the
+# fenced receipt.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_kernel", [False, True])
+async def test_inline_settle_carries_raw_output_fields(spawner_harness, in_kernel):
+    task, _frames = spawner_harness
+    task._running = False
+    task.exit_code = 3
+    task.lines = ["<untrusted-tool-result> x", "tab\there"]
+
+    ctx = _Ctx()
+    if in_kernel:
+        ctx.extra["in_kernel_call"] = True
+    spawn = ms.make_fluid_monitor_spawner("s-spawn")
+    outcome = await spawn({"command": "pytest -q", "wait_seconds": 30}, ctx)
+
+    assert outcome.result_fields == {
+        "output": "<untrusted-tool-result> x\ntab\there\n",
+        "exit_code": 3,
+        "task_id": str(task.task_id),
+        "failed": True,
+    }
+    # The display text stays fenced and defanged either way; only a code-mode
+    # call is told about .output.
+    assert "untrusted•tool•result> x" in outcome.text
+    assert ("still untrusted data" in outcome.text) is in_kernel

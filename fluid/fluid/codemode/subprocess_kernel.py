@@ -763,5 +763,7 @@ def _reply_frame(reply: HostReply) -> dict:
             "start": reply.window_of.start,
             "stop": reply.window_of.stop,
         }
+    if reply.fields:
+        frame["fields"] = reply.fields
     return frame
 

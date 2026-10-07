@@ -213,6 +213,64 @@ class ResultRef(str):
         return f"<ResultRef{ident} {n} bytes; preview={head!r}{more}>"
 
 
+class _ShellFields:
+    """The raw pieces of a shell-like call (Bash, Monitor) on its text result.
+
+    ``str(result)`` is exactly the text the tool returned for display —
+    Monitor's carries the untrusted-data fence — so printing, slicing, ``in``,
+    ``==``, f-strings and ``json.dumps`` behave as for any other result. The
+    attributes hand a cell what it would otherwise scrape out of that text:
+
+    - ``output``: the command's stdout/stderr as the tool captured it, with no
+      fence and no ``[exit code N]`` line. Still untrusted data. ``None`` while
+      a background command is still running.
+    - ``exit_code``: the process exit status; ``None`` while still running.
+    - ``task_id``: the background task id (Monitor), else ``None``.
+    - ``ok`` / ``failed``: finished with exit 0 / finished with a failure.
+    - ``text``: the full display string, as a plain ``str``.
+    """
+
+    output: str | None = None
+    exit_code: int | None = None
+    task_id: str | None = None
+    _failed: bool | None = None
+
+    @property
+    def text(self) -> str:
+        return str.__str__(self)
+
+    @property
+    def failed(self) -> bool:
+        if self._failed is not None:
+            return bool(self._failed)
+        return self.exit_code is not None and self.exit_code != 0
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0 and not self.failed
+
+
+class ShellResult(_ShellFields, str):
+    """A shell-like tool result under the ref threshold (see ``_ShellFields``)."""
+
+
+class ShellResultRef(_ShellFields, ResultRef):
+    """A shell-like tool result large enough to stay behind a ResultRef."""
+
+
+def attach_shell_fields(result: _ShellFields, fields: dict) -> _ShellFields:
+    """Stamp the host's structured ``fields`` onto ``result``; returns it."""
+    output = fields.get("output")
+    result.output = output if isinstance(output, str) or output is None else None
+    code = fields.get("exit_code")
+    result.exit_code = code if isinstance(code, int) and not isinstance(code, bool) else None
+    task_id = fields.get("task_id")
+    result.task_id = task_id if isinstance(task_id, str) else None
+    failed = fields.get("failed")
+    result._failed = failed if isinstance(failed, bool) else None
+    return result
+
+
 REF_REGISTRY_MAX = 50
 
 

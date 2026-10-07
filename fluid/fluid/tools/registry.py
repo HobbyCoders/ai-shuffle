@@ -267,6 +267,11 @@ class ToolOutcome:
     error_code: str | None = None
     # Raw shell stdout/stderr and the actual process exit status.
     shell_result: tuple[str, int] | None = None
+    # Structured pieces code mode exposes as attributes on the returned text
+    # (``.output``, ``.exit_code``, ``.task_id``, ``.failed``), so a cell never
+    # has to parse them out of a fenced display string. ``None`` = derive them
+    # from ``shell_result`` when set, else a plain string result.
+    result_fields: dict[str, Any] | None = None
     input_required: InputRequired | None = None
     images: tuple[ToolImage, ...] = ()
     background_task: BackgroundTaskReceipt | None = None

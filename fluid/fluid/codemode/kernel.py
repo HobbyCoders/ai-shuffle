@@ -46,6 +46,10 @@ class HostReply:
     match: ``result`` is a slice of a bigger payload, so if the kernel is
     holding that bigger payload the window can be sliced out of it instead of
     fetched again.
+
+    ``fields`` (success only) are the structured pieces of a shell-like result
+    — ``output``, ``exit_code``, ``task_id``, ``failed`` — which the kernel
+    exposes as attributes on the returned text (``vfs.ShellResult``).
     """
 
     result: str | None = None
@@ -57,6 +61,7 @@ class HostReply:
     window_of: ContentWindow | None = None
     error_code: str | None = None
     shell_exit_code: int | None = None
+    fields: dict | None = None
 
 
 @dataclass(frozen=True)

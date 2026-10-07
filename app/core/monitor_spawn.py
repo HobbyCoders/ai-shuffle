@@ -224,6 +224,7 @@ def monitor_inline_receipt_text(
     output: str,
     *,
     failed: bool = False,
+    code_mode: bool = False,
 ) -> str:
     """The receipt for a command that SETTLED inside its inline wait.
 
@@ -235,6 +236,10 @@ def monitor_inline_receipt_text(
     that into a raised exception: a red TDD baseline — the expected result of
     the operation the model asked for — would abort the whole cell and every
     call queued behind it.
+
+    ``code_mode``: the call came from a code-mode cell, which also receives
+    the raw output as ``.output`` (see :func:`monitor_result_fields`), so the
+    fence note points there instead of leaving the block to be parsed.
     """
     code = "unknown" if exit_code is None else str(exit_code)
     verdict = "finished with a failure" if failed else "finished"
@@ -246,12 +251,40 @@ def monitor_inline_receipt_text(
     )
     from fluid.tools.hardening import fence_shell_output
 
-    output = fence_shell_output(output or "(no output)", "Monitor", exit_code=exit_code)
+    output = fence_shell_output(
+        output or "(no output)", "Monitor", exit_code=exit_code, raw_hint=code_mode,
+    )
     return (
         f"The command {verdict} while you waited (task {task_id}, exit code "
         f"{code}). Nothing is running and nothing will wake you — this is the "
         f"whole result.{note}\n\n" + (output or "(no output)")
     )
+
+
+# Past this the raw buffer is not worth shipping into a code-mode kernel; the
+# bounded receipt text (with its TaskOutput pointer) stands in for it.
+_RAW_OUTPUT_MAX_CHARS = 1_000_000
+
+
+def monitor_result_fields(
+    task: Any, exit_code: Optional[int], summary: str, *, failed: bool,
+) -> Dict[str, Any]:
+    """The structured pieces code mode exposes on an inline-settled Monitor.
+
+    ``output`` is the command's buffered stdout/stderr — not the bounded,
+    verdict-rescued summary the receipt shows — so a cell can save it as is.
+    A buffer past :data:`_RAW_OUTPUT_MAX_CHARS` falls back to that summary.
+    """
+    lines = list(getattr(task, "lines", None) or [])
+    output = "\n".join(lines) + "\n" if lines else ""
+    if len(output) > _RAW_OUTPUT_MAX_CHARS:
+        output = summary
+    return {
+        "output": output,
+        "exit_code": exit_code,
+        "task_id": str(task.task_id),
+        "failed": bool(failed),
+    }
 
 
 def monitor_still_running_note(wait_seconds: int) -> str:
@@ -1020,11 +1053,16 @@ def make_fluid_monitor_spawner(
                 # runner's raise signal, and raising on a red test suite would
                 # tear down the whole cell with every call queued behind it.
                 # Spawn/infra failures still raise.
+                code_mode = bool((getattr(ctx, "extra", None) or {}).get("in_kernel_call"))
                 return ToolOutcome(
                     text=monitor_inline_receipt_text(
-                        task.task_id, exit_code, output, failed=failed
+                        task.task_id, exit_code, output, failed=failed,
+                        code_mode=code_mode,
                     ),
                     is_error=False,
+                    result_fields=monitor_result_fields(
+                        task, exit_code, output, failed=failed,
+                    ),
                     ui={
                         "task_id": task.task_id, "exit_code": exit_code,
                         "status": status, "failed": failed, "output": output,

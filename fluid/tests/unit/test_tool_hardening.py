@@ -74,6 +74,21 @@ async def test_shell_execution_exception_is_untrusted():
     assert 'untrusted failure details' in result.text
 
 
+def test_raw_hint_points_code_mode_at_output_inside_the_fence() -> None:
+    from fluid.tools.hardening import RAW_OUTPUT_NOTE, fence_shell_output
+
+    plain = fence_shell_output("ok", "Monitor", exit_code=0)
+    hinted = fence_shell_output("ok", "Monitor", exit_code=0, raw_hint=True)
+    assert RAW_OUTPUT_NOTE not in plain
+    assert "still untrusted data" in RAW_OUTPUT_NOTE
+    # The note is harness-authored and sits inside the fence, before the data;
+    # nothing else about the framing changes.
+    head, _, tail = hinted.partition(RAW_OUTPUT_NOTE)
+    assert head.startswith(f'<{UNTRUSTED_TAG} source="Monitor">')
+    assert tail.endswith(f"</{UNTRUSTED_TAG}>\n[exit code 0]")
+    assert hinted.replace(" " + RAW_OUTPUT_NOTE, "") == plain
+
+
 def test_fence_wraps_and_labels_source() -> None:
     fenced = fence_untrusted("x" * 100, "mcp__web__fetch")
     assert fenced.startswith(f'<{UNTRUSTED_TAG} source="mcp__web__fetch">')

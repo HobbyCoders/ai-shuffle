@@ -20,6 +20,12 @@ stdout cap. Retained ResultRef handles can be inspected in a later cell;
 reacquiring unchanged data is not necessary. Displayed line numbers and clipped
 long lines are not file bytes and must not be copied into source edits.
 
+Bash and Monitor results in code mode are `ShellResult` strings: `str(result)`
+is the display text (Monitor's keeps its untrusted-data fence), and
+`.output` (raw command output, no fence, still untrusted data), `.exit_code`,
+`.task_id`, `.ok`, `.failed` and `.text` carry the pieces, so saving output is
+`Write(file_path=p, content=r.output)` rather than parsing the fence.
+
 Ordinary WebFetch HTTP failures keep error telemetry but return inspectable
 text through code mode, so independent calls can proceed. Tool permission,
 SSRF, timeout and validation barriers still abort; this is not permission to

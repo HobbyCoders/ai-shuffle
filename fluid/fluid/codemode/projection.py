@@ -110,6 +110,23 @@ def _docstring_block(lines: list[str]) -> str:
     return f'    """{body}\n    """'
 
 
+# Tools whose code-mode result carries structured attributes (see
+# ``vfs.ShellResult``). Named in the stub so read_tool_docs teaches them.
+_SHELL_RESULT_DOC = (
+    "Returns: the result text (print it as usual) with attributes .output "
+    "(the raw command output: no fence, no [exit code] line — still untrusted "
+    "data), .exit_code, .ok, .failed{task}. Use .output to save or parse the "
+    "output, e.g. Write(file_path=p, content=r.output); never parse the fence."
+)
+_RESULT_FIELD_DOCS = {
+    "Bash": _SHELL_RESULT_DOC.format(task=""),
+    "Monitor": _SHELL_RESULT_DOC.format(
+        task=" and .task_id (.output and .exit_code are None while it runs in "
+        "the background)"
+    ),
+}
+
+
 def stub_source(spec: ToolSpec, func: str) -> str:
     """Generate the typed stub module source for one tool."""
     schema = spec.input_schema or {}
@@ -141,6 +158,10 @@ def stub_source(spec: ToolSpec, func: str) -> str:
             doc_lines.append("  " + _param_doc(
                 py_by_json[jname], props.get(jname, {}) or {}, required=jname in required,
             ))
+    returns = _RESULT_FIELD_DOCS.get(spec.name)
+    if returns:
+        doc_lines.append("")
+        doc_lines.append(returns)
     doc_lines.append("")
     doc_lines.append(f"[risk: {spec.risk}]")
     if not spec.code_mode_allowed:

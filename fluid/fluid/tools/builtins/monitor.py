@@ -515,6 +515,12 @@ async def _spawn_detached(spawn: Any, input: dict[str, Any], ctx: ToolCtx) -> To
     receipt = outcome.background_task
     if receipt is None or outcome.is_error:
         return outcome
+    if outcome.result_fields is None:
+        # Code mode reads the id off the result (``r.task_id``) instead of
+        # parsing the receipt text; output and exit code are not known yet.
+        outcome = dataclasses.replace(
+            outcome, result_fields={"task_id": receipt.task_id}
+        )
     started = (ctx.extra or {}).get("background_task_started")
     if started is not None:
         notified = started(receipt)
