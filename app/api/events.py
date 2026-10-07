@@ -24,12 +24,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import (
     Any,
     AsyncGenerator,
     AsyncIterator,
     Dict,
+    Iterable,
     Iterator,
     List,
     NamedTuple,
@@ -49,6 +51,7 @@ from app.api.sse_utils import is_client_disconnect
 from app.core.event_gateway import get_gateway
 from app.core.harness_reminders import strip_harness_reminders
 from app.core.history_backfill import ensure_backfilled
+from app.core.turn_recorder import slim_turn_usage_payload
 from app.db.session_events import (
     EMPTY_LOG_EPOCH,
     get_events,
@@ -101,6 +104,23 @@ _TOOL_INPUT_DELTA = "tool.input_delta"
 # one per frame: every chunk crosses each BaseHTTPMiddleware layer, and that
 # per-frame cost dominated long replays.
 _BACKFILL_CHUNK_BYTES = 64 * 1024
+
+# Subagent text streams the same way: one subagent.progress row per text delta
+# of the subagent, which the client only appends to the card's trailing text
+# child. A run of consecutive chunk-kind rows for one task replays as one frame.
+# Only CONSECUTIVE rows merge: a frame's seq is the client's resume cursor, so
+# every row at or below it must already be in that frame or an earlier one.
+_SUBAGENT_PROGRESS = "subagent.progress"
+_PROGRESS_STEP_KINDS = ("tool_use", "tool_result")
+
+# Server-side kill switches for the replay slimming above. On unless set to 0;
+# read per call so a worker can be switched without a code change.
+_SLIM_USAGE_ENV = "AI_SHUFFLE_PERF_SLIM_USAGE_REPLAY"
+_COALESCE_PROGRESS_ENV = "AI_SHUFFLE_PERF_COALESCE_SUBAGENT_PROGRESS"
+
+
+def _perf_switch_on(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() not in ("0", "false", "off")
 
 
 def _sdk_session_id(session_id: str) -> Optional[str]:
@@ -289,9 +309,100 @@ def _flush_pending(
         yield _merged_row(run)
 
 
+def _progress_text(row: Dict[str, Any]) -> Optional[str]:
+    """The text a chunk-kind subagent.progress row adds, or None for any other row.
+
+    Mirrors the client reducer: ``note``, else ``payload.text``, else
+    ``payload.content``, counted only when it is a string.
+    """
+    if row.get("event_type") != _SUBAGENT_PROGRESS:
+        return None
+    payload = row.get("payload") or {}
+    if payload.get("kind") in _PROGRESS_STEP_KINDS:
+        return None
+    value = payload.get("note")
+    if value is None:
+        inner = payload.get("payload")
+        inner = inner if isinstance(inner, dict) else {}
+        value = inner.get("text")
+        if value is None:
+            value = inner.get("content")
+    return value if isinstance(value, str) else ""
+
+
+def _merged_progress_row(run: Dict[str, Any]) -> Dict[str, Any]:
+    """One frame for a run of chunk rows: first texted envelope, joined text, LAST seq."""
+    first = run["first"]
+    if run["count"] == 1:
+        return first
+    row = dict(first)
+    payload = dict(first.get("payload") or {})
+    inner = payload.get("payload")
+    inner = {k: v for k, v in inner.items() if k != "text"} if isinstance(inner, dict) else {}
+    inner["content"] = "".join(run["texts"])
+    payload["payload"] = inner
+    payload["note"] = None
+    row["payload"] = payload
+    row["seq"] = run["last_seq"]
+    return row
+
+
+def _coalesce_progress(
+    rows: Iterable[Dict[str, Any]],
+    pending: List[Optional[Dict[str, Any]]],
+) -> Iterator[Dict[str, Any]]:
+    """Merge consecutive chunk-kind subagent.progress rows for the same task.
+
+    ``pending`` is a one-slot list holding the run still open from an earlier
+    page, drained with :func:`_flush_pending_progress` once paging ends. The
+    merged row keeps the envelope of the run's first row that adds text (the
+    client names a new text child after it) and the last row's seq.
+    """
+    for row in rows:
+        run = pending[0]
+        text = _progress_text(row)
+        if text is None:
+            if run is not None:
+                pending[0] = None
+                yield _merged_progress_row(run)
+            yield row
+            continue
+        task_id = (row.get("payload") or {}).get("task_id")
+        if run is not None and run["task_id"] == task_id:
+            if text and not run["texted"]:
+                run["first"], run["texted"] = row, True
+            run["texts"].append(text)
+            run["count"] += 1
+            run["last_seq"] = row["seq"]
+            continue
+        if run is not None:
+            yield _merged_progress_row(run)
+        pending[0] = {
+            "task_id": task_id,
+            "first": row,
+            "texted": bool(text),
+            "texts": [text],
+            "count": 1,
+            "last_seq": row["seq"],
+        }
+
+
+def _flush_pending_progress(
+    pending: List[Optional[Dict[str, Any]]],
+) -> Iterator[Dict[str, Any]]:
+    run = pending[0]
+    if run is not None:
+        pending[0] = None
+        yield _merged_progress_row(run)
+
+
 def _wire(row: Dict[str, Any]) -> Dict[str, Any]:
     """Merge a DB row's payload with its envelope (envelope keys win)."""
     payload = row.get("payload") or {}
+    if row.get("event_type") == "turn.usage" and _perf_switch_on(_SLIM_USAGE_ENV):
+        # Old rows (and rows mirrored from older workers) carry the full
+        # context snapshot twice; send one compact copy.
+        payload = slim_turn_usage_payload(payload)
     if row.get("event_type") == "message.user" and isinstance(payload.get("content"), str):
         # Rows backfilled from a transcript can carry harness reminders.
         content = strip_harness_reminders(payload["content"])
@@ -554,6 +665,12 @@ async def _replay_from(
 ) -> AsyncIterator[Tuple[int, str]]:
     """Yield ``(seq, frame)`` for the backfill, coalescing streaming deltas."""
     pending: List[Optional[Dict[str, Any]]] = [None]
+    coalesce_progress = _perf_switch_on(_COALESCE_PROGRESS_ENV)
+    progress_pending: List[Optional[Dict[str, Any]]] = [None]
+
+    def _rows(rows: Iterable[Dict[str, Any]]) -> Iterable[Dict[str, Any]]:
+        return _coalesce_progress(rows, progress_pending) if coalesce_progress else rows
+
     # Looked up once, at the first tool.input_delta, from just before it: a
     # log without tool-argument deltas never pays for the lookup.
     tool_uses: Optional[Dict[Tuple[Any, str], int]] = None
@@ -575,13 +692,15 @@ async def _replay_from(
                         "tool.use lookup failed for %s", session_id, exc_info=True
                     )
                     tool_uses = {}
-        for row in _coalesce_deltas(page, pending, tool_uses):
+        for row in _rows(_coalesce_deltas(page, pending, tool_uses)):
             yield row["seq"], _frame(row)
         if page:
             page_from = page[-1]["seq"]
         if len(page) < _PAGE:
             break
-    for row in _flush_pending(pending):
+    for row in _rows(_flush_pending(pending)):
+        yield row["seq"], _frame(row)
+    for row in _flush_pending_progress(progress_pending):
         yield row["seq"], _frame(row)
 
 

@@ -100,6 +100,52 @@ def _as_dict(value: Any) -> Dict[str, Any]:
     return {"content": value}
 
 
+# A context-usage snapshot is 20-45 KB, mostly breakdown detail (gridRows,
+# mcpTools, skills, memoryFiles, ...) that only the context panel's on-demand
+# fetch (GET /sessions/{id}/context-usage) shows. The bar a turn.usage feeds
+# reads the totals and the category rows, so a turn.usage carries just those.
+_COMPACT_CONTEXT_KEYS = (
+    "categories", "totalTokens", "maxTokens", "rawMaxTokens", "percentage",
+    "model", "measured", "isAutoCompactEnabled",
+)
+_COMPACT_CATEGORY_KEYS = ("name", "tokens", "color", "isDeferred")
+
+
+def compact_context_usage(snapshot: Any) -> Any:
+    """The part of a context-usage snapshot the usage bar reads.
+
+    Anything that is not a dict is returned unchanged.
+    """
+    if not isinstance(snapshot, dict):
+        return snapshot
+    compact = {k: snapshot[k] for k in _COMPACT_CONTEXT_KEYS if k in snapshot}
+    categories = compact.get("categories")
+    if isinstance(categories, list):
+        compact["categories"] = [
+            {k: c[k] for k in _COMPACT_CATEGORY_KEYS if k in c}
+            if isinstance(c, dict) else c
+            for c in categories
+        ]
+    return compact
+
+
+def slim_turn_usage_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """A turn.usage payload with one compact snapshot.
+
+    Rows written before the snapshot was compacted carry it twice: in full at
+    the top level and again inside ``usage``. The nested copy is dropped (no
+    reader uses it) and the top-level one compacted. Returns a new dict; the
+    argument is not changed.
+    """
+    usage = payload.get("usage")
+    slim = dict(payload)
+    if isinstance(usage, dict) and "context_usage" in usage:
+        slim["usage"] = {k: v for k, v in usage.items() if k != "context_usage"}
+    if isinstance(payload.get("context_usage"), dict):
+        slim["context_usage"] = compact_context_usage(payload["context_usage"])
+    return slim
+
+
 # Pump event types whose ``screenshot`` data URI is content-addressed into the
 # artifact store. ``tool_result`` renders on the main-lane tool card;
 # ``subagent_tool_result`` on the subagent child card.
@@ -1202,11 +1248,16 @@ class TurnRecorder:
         Coalescing discards whole usage records, so the snapshot is tracked
         apart from the record it arrived on and re-attached here: a breakdown
         is never lost just because a later usage record won the window.
+
+        The snapshot is carried once, compacted to what the usage bar reads
+        (:func:`compact_context_usage`); the copy inside ``usage`` is dropped.
         """
+        if "context_usage" in usage:
+            usage = {k: v for k, v in usage.items() if k != "context_usage"}
         return self._event(
             contract.TurnUsage,
             usage=usage,
-            context_usage=self._pending_context_usage,
+            context_usage=compact_context_usage(self._pending_context_usage),
             exclude_none=True,
         )
 
