@@ -62,6 +62,7 @@ ws.send(JSON.stringify({
 | `session_closed` | Reply to `close_session` | `session_id` (null when no session was selected) |
 | `permission_response_ack` | Reply to `permission_response`. `result` is `{"resolved": true, "auto_resolved_count", "auto_resolved_ids"}` on success (plus `"deferred": true` for a deferral), or `{"error": "Request not found"}` when the request is unknown or already answered. Deferring a request marked `deferrable: false` returns an `error` and leaves it waiting | `session_id`, `request_id`, `result` |
 | `user_question_response_ack` | Reply to `user_question_response` | `session_id`, `request_id`, `success`, `reason` (`not_pending` when the question was already answered) |
+| `queued_message_removal` | Reply to `remove_queued_message`. `outcome` is `cancelled` (the message will never reach the agent), `already_delivered` (the running turn read it before the removal arrived, so it stays part of the conversation), or `not_found` | `session_id`, `message_id`, `outcome` |
 | `pending_permissions` | Reply to `get_pending_permissions` | `session_id`, `pending`, `deferred` |
 | `pending_questions` | Reply to `get_pending_questions` | `session_id`, `questions` |
 | `tabs_sync` | Another of your devices sent `tabs_update` | `tabs`, `activeTabId`, `source_device_id` |
@@ -80,7 +81,7 @@ Other devices watching the same session receive the same control frames. Content
 |------|-------------|------------|
 | `query` | Start a new query (creates a session if `session_id` is omitted) | `prompt`, `session_id`, `profile`, `project` |
 | `queue_message` | Queue a message to send after the current stream completes | `content`, `session_id`, `profile`, `project` |
-| `remove_queued_message` | Remove one queued message | `message_id`, `session_id` |
+| `remove_queued_message` | Remove one queued message; answered with `queued_message_removal` | `message_id`, `session_id` |
 | `clear_queued_messages` | Remove every queued message for the session | `session_id` |
 | `load_session` | Load/switch to a session and receive its history | `session_id` |
 | `watch_session` | Follow a session without loading its history. The server sends its queue, if any, as a `sync` frame | `session_id` |
@@ -160,7 +161,7 @@ A `query` sent while a turn is running is queued and answered with `query_queued
 }
 ```
 
-Remove an entry with `{"type": "remove_queued_message", "message_id": "turn_789", "session_id": "sess_abc123"}`, or all of them with `clear_queued_messages`. A queued message the running turn has already read cannot be removed; the next `queue_updated` shows what is left.
+Remove an entry with `{"type": "remove_queued_message", "message_id": "turn_789", "session_id": "sess_abc123"}`, or all of them with `clear_queued_messages`. A queued message the running turn has already read cannot be removed: the reply is a `queued_message_removal` frame with `outcome: "already_delivered"`, and the next `queue_updated` shows what is left. A message removed before the running turn reads it is never delivered (`outcome: "cancelled"`).
 
 A `query` queued behind a running turn is also offered to that turn, which can read it at its next step instead of waiting for the turn to end. It stays in the queue until the turn reads it, and removing it before then takes it back. A message the running turn cannot take (one for a different agent, model, effort, permission mode or set of `workspace_project_ids`, or any message on an agent backend that cannot accept messages mid-turn) runs as its own turn after the current one. For a session that runs on another device, the message is forwarded without `workspace_project_ids` and always keeps the session's own workspace folders, so the device you type on cannot add or remove folders.
 

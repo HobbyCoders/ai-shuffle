@@ -228,8 +228,12 @@ async def try_steer_task_notification(
         return False
 
 
-async def try_cancel_steer(session_id: str, turn_id: str) -> str:
+async def try_cancel_steer(session_id: str, turn_id: str, *, withdraw: bool = False) -> str:
     """Adjudicate an attempt to un-send queued turn ``turn_id``.
+
+    Pass ``withdraw=True`` when the caller is about to remove the row: it is
+    then never steered into the running turn again, even by a pass that runs
+    while the removal is still being written (``SessionRuntime.cancel_steer``).
 
     Returns one of:
 
@@ -249,7 +253,7 @@ async def try_cancel_steer(session_id: str, turn_id: str) -> str:
     if runtime is None:
         return "not_submitted"
     try:
-        return await runtime.cancel_steer(turn_id)
+        return await runtime.cancel_steer(turn_id, withdraw=withdraw)
     except Exception:  # noqa: BLE001
         logger.warning(
             "SessionRuntime: steer cancel adjudication failed for %s turn %s",
@@ -733,6 +737,13 @@ class SessionRuntime:
         # ``_finalize`` so an undelivered steer is free to be tried again by
         # whatever turn comes next.
         self._steer_attempted: set = set()
+        # Queued turn ids the user took back (× / edit) during THIS turn. The
+        # recall and the row's removal are two steps with a DB write between
+        # them, and any concurrent ``steer_pending`` pass (another send, a peer
+        # message, an answered question) would otherwise see a still-queued,
+        # no-longer-attempted row and hand it to the engine again — delivering
+        # the very message the user cancelled. Never steered again this turn.
+        self._steer_withdrawn: set = set()
         # Queued rows already logged as not steerable into this turn, so a
         # refusal is logged once per row rather than on every send and sweep.
         self._steer_refusals_logged: set = set()
@@ -1712,7 +1723,7 @@ class SessionRuntime:
                     )
                 break
             row_id = row["id"]
-            if row_id in self._steer_attempted:
+            if row_id in self._steer_attempted or row_id in self._steer_withdrawn:
                 continue
             prompt = row.get("prompt") or ""
             if not prompt:
@@ -1894,28 +1905,45 @@ class SessionRuntime:
                 folded, self.session_id, self.turn_id,
             )
 
-    async def cancel_steer(self, turn_id: str) -> str:
+    async def cancel_steer(self, turn_id: str, *, withdraw: bool = False) -> str:
         """Try to recall the steer submitted for queued turn ``turn_id``.
 
         Returns ``"not_submitted"``, ``"cancelled"`` or ``"delivered"`` — see
         the module-level :func:`try_cancel_steer` for what each means to a
         caller. A turn this runtime never steered is ``"not_submitted"``
         without touching the engine.
+
+        ``withdraw`` is for a caller about to remove the row (× / edit): unless
+        the answer is ``"delivered"``, the row is barred from every later
+        ``steer_pending`` pass of this turn. Decided here, on the event loop
+        and before the caller's first await, so no pass can slip the message
+        back into the engine while the row's removal is still being written.
         """
         if turn_id not in self._steer_attempted:
+            if withdraw:
+                self._steer_withdrawn.add(turn_id)
             return "not_submitted"
         adapter = self._live_adapter()
         if adapter is None:
             # Submitted, but the engine behind it is already gone — so is the
             # receipt path that would have absorbed the row. Nothing can
             # deliver it now; let the removal go through.
+            if withdraw:
+                self._steer_withdrawn.add(turn_id)
             return "not_submitted"
+        if withdraw:
+            # Barred BEFORE the engine is asked: ``adapter.cancel_steer`` may
+            # suspend, and a pass running meanwhile must not re-submit it.
+            self._steer_withdrawn.add(turn_id)
         if await adapter.cancel_steer(turn_id):
             # Never delivered and never will be, so the row is free again — and
             # it must leave the attempted set, or a later steer_pending() pass
-            # would skip a row that is genuinely still queued.
+            # would skip a row that is genuinely still queued (a recall that
+            # does not remove the row; a withdrawn one stays barred above).
             self._steer_attempted.discard(turn_id)
             return "cancelled"
+        # Delivered: the receipt owns the row now, nothing to bar.
+        self._steer_withdrawn.discard(turn_id)
         return "delivered"
 
     async def _turn_is_dying(self) -> bool:

@@ -257,6 +257,15 @@ def _queue_frame(session_id, rows):
     }
 
 
+def _removal_frame(session_id, message_id, outcome):
+    return {
+        "type": "queued_message_removal",
+        "session_id": session_id,
+        "message_id": message_id,
+        "outcome": outcome,
+    }
+
+
 def _live_turn(session_id, prompt="live turn"):
     from app.db import runs
 
@@ -1073,7 +1082,10 @@ async def test_remove_queued_message_removes_the_chip(ws_env):
         replies = await conn.roundtrip(
             {"type": "remove_queued_message", "session_id": sid, "message_id": drop["id"]}
         )
-    assert replies == [_queue_frame(sid, [_queue_row(keep, sid, 0)])]
+    assert replies == [
+        _queue_frame(sid, [_queue_row(keep, sid, 0)]),
+        _removal_frame(sid, drop["id"], "cancelled"),
+    ]
     assert turns_db.get_turn(drop["id"])["state"] == "aborted"
     ws_env.sync.broadcast_queue_updated.assert_awaited_with(sid, [_queue_row(keep, sid, 0)], pending_peer_messages=[])
 
@@ -1095,8 +1107,15 @@ async def test_remove_queued_message_already_delivered_stays(ws_env, monkeypatch
             {"type": "remove_queued_message", "session_id": sid, "message_id": steered["id"]}
         )
     assert turns_db.get_turn(steered["id"])["state"] == "queued"
-    assert replies == [_queue_frame(sid, [_queue_row(steered, sid, 0)])]
+    # The client is told its x did not take the message back, so it can show
+    # it as sent instead of silently dropping the chip.
+    assert replies == [
+        _queue_frame(sid, [_queue_row(steered, sid, 0)]),
+        _removal_frame(sid, steered["id"], "already_delivered"),
+    ]
     adapter.cancel_steer.assert_awaited_once_with(steered["id"])
+    # Delivered rows are the receipt's to absorb, never barred.
+    assert steered["id"] not in runtime._steer_withdrawn
 
 
 async def test_remove_queued_message_whose_steer_was_recalled(ws_env, monkeypatch):
@@ -1113,8 +1132,32 @@ async def test_remove_queued_message_whose_steer_was_recalled(ws_env, monkeypatc
             {"type": "remove_queued_message", "session_id": sid, "message_id": steered["id"]}
         )
     assert turns_db.get_turn(steered["id"])["state"] == "aborted"
-    assert replies == [_queue_frame(sid, [])]
+    assert replies == [
+        _queue_frame(sid, []),
+        _removal_frame(sid, steered["id"], "cancelled"),
+    ]
     assert steered["id"] not in runtime._steer_attempted
+    assert steered["id"] in runtime._steer_withdrawn
+
+
+async def test_remove_queued_message_that_already_ran_reports_already_delivered(ws_env):
+    """The row left the queue before the x landed (absorbed by a steer receipt
+    or started as its own turn): the model has it, and the reply says so."""
+    sid = _make_session("sess-ran")
+    ran = turns_db.enqueue_turn(sid, "user", prompt="too late")
+    turns_db.absorb_queued_turn(ran["id"])
+    async with _connect(ws_env) as conn:
+        replies = await conn.roundtrip(
+            {"type": "remove_queued_message", "session_id": sid, "message_id": ran["id"]}
+        )
+        unknown = await conn.roundtrip(
+            {"type": "remove_queued_message", "session_id": sid, "message_id": "nope"}
+        )
+    assert replies == [
+        _queue_frame(sid, []),
+        _removal_frame(sid, ran["id"], "already_delivered"),
+    ]
+    assert unknown == [_queue_frame(sid, []), _removal_frame(sid, "nope", "not_found")]
 
 
 async def test_remove_queued_message_without_an_id_is_ignored(ws_env):
@@ -1459,7 +1502,7 @@ async def test_api_key_acts_on_its_own_session(ws_env, monkeypatch):
     assert ack[0]["type"] == "permission_response_ack"
     assert ack[0]["result"]["resolved"] is True
     assert _interaction(row["id"])["state"] == "answered"
-    assert removed == [_queue_frame(sid, [])]
+    assert removed == [_queue_frame(sid, []), _removal_frame(sid, chip["id"], "cancelled")]
 
 
 async def test_api_key_remember_profile_is_kept_to_the_session(ws_env, monkeypatch):

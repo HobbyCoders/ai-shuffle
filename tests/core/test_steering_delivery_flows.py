@@ -616,6 +616,83 @@ async def test_native_leg_holds_the_steer_until_a_tool_boundary(mock_db):
         assert await session_runtime.try_cancel_steer(sid, kept["id"]) == "delivered"
 
 
+def _removal_outcomes(frames):
+    return [
+        (f["message_id"], f["outcome"])
+        for f in frames
+        if f.get("type") == "queued_message_removal"
+    ]
+
+
+async def test_a_steer_cancelled_before_its_tool_boundary_is_never_delivered(mock_db):
+    """Regression (owner, 2026-10-07). × on a steer still waiting for its tool
+    boundary recalls it from the engine, then aborts its row — two steps with a
+    DB write between them. A steering pass that ran in that gap (another send,
+    an answered question, a peer message) saw a still-queued row that was no
+    longer "attempted" and handed it straight back to the engine, so the
+    message the user cancelled reached the model at the next tool result."""
+    import app.api.chat_ws_handler as cwh
+    from app.core import turn_manager
+
+    sid = _seed_session("cancel-race")
+    live = _start_live(sid)
+    runtime = _live_runtime(sid, live)
+    row = turns_db.enqueue_turn(sid, "user", prompt="ignore that, rewriting")
+    loop = _native_loop()
+    frames = []
+    handler = _ws_handler(frames)
+    real_run_sync = cwh.run_sync
+    passes = []
+
+    async def _racing_run_sync(fn, *args, **kwargs):
+        if fn is turn_manager.remove_queued:
+            # A concurrent send lands while the removal is being written.
+            passes.append(await session_runtime.try_steer_pending(sid))
+        return await real_run_sync(fn, *args, **kwargs)
+
+    with _pooled(_harness(loop)), _ws_sync(), \
+            patch.object(cwh, "run_sync", new=_racing_run_sync):
+        assert await session_runtime.try_steer_pending(sid) == 1
+        assert [s.id for s in loop._pending_steers] == [row["id"]]
+        await handler.handle_remove_queued_message(
+            {"session_id": sid, "message_id": row["id"]}
+        )
+        # Later passes in the same turn leave it alone too.
+        assert await session_runtime.try_steer_pending(sid) == 0
+
+    assert passes == [0]
+    # Nothing left for the tool boundary to fold into the next tool result.
+    assert loop._pending_steers == []
+    assert turns_db.get_turn(row["id"])["state"] == "aborted"
+    assert _removal_outcomes(frames) == [(row["id"], "cancelled")]
+    assert row["id"] in runtime._steer_withdrawn
+
+
+async def test_a_cancel_after_the_tool_boundary_reports_already_delivered(mock_db):
+    """The boundary already folded the steer into a tool result: the × cannot
+    take it back, the row is left for the delivery receipt, and the reply
+    tells the client so it can show the message as sent."""
+    sid = _seed_session("cancel-late")
+    live = _start_live(sid)
+    runtime = _live_runtime(sid, live)
+    row = turns_db.enqueue_turn(sid, "user", prompt="too late to take back")
+    loop = _native_loop()
+    frames = []
+    handler = _ws_handler(frames)
+
+    with _pooled(_harness(loop)), _ws_sync():
+        assert await session_runtime.try_steer_pending(sid) == 1
+        loop._pending_steers.clear()  # the tool boundary drained it
+        await handler.handle_remove_queued_message(
+            {"session_id": sid, "message_id": row["id"]}
+        )
+
+    assert turns_db.get_turn(row["id"])["state"] == "queued"
+    assert _queue_frames(frames) == [["too late to take back"]]
+    assert _removal_outcomes(frames) == [(row["id"], "already_delivered")]
+    assert row["id"] not in runtime._steer_withdrawn
+
+
 async def test_native_leg_refuses_when_no_turn_is_running(mock_db):
     """The engine's turn already ended: fluid refuses, the row stays queued
     and un-attempted, and × is a plain removal."""

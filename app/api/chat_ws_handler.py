@@ -2634,6 +2634,7 @@ class ChatWebSocketHandler:
 
             await run_sync(session_handoff.drop_held, session_id, message_id)
             await self._v2_broadcast_queue(session_id)
+            await self._send_removal_outcome(session_id, message_id, "cancelled")
             return
 
         # A pending message sent into a busy session is handed to the running
@@ -2641,30 +2642,60 @@ class ChatWebSocketHandler:
         # before it can remove the row — otherwise the model still reads the
         # text at the next tool boundary and answers a message the user took
         # back. Adjudicate first; the engine decides, atomically against its own
-        # delivery boundary.
+        # delivery boundary. ``withdraw`` keeps any concurrent steering pass
+        # from handing the row back to the engine before it is aborted below.
         verdict = "not_submitted"
         if session_id:
             from app.core.session_runtime import try_cancel_steer
 
-            verdict = await try_cancel_steer(session_id, message_id)
+            verdict = await try_cancel_steer(session_id, message_id, withdraw=True)
         if verdict == "delivered":
             # Too late: the model has the words, so this row is no longer a
             # queue chip to remove — the delivery receipt records it as a user
             # message and absorbs it (or is about to). Removing it here would
             # abort a turn that is already part of the conversation. Just
             # re-broadcast so the client converges on whatever the queue really
-            # holds now.
+            # holds now, and tell the client its × did not take the message back.
             await self._v2_broadcast_queue(session_id)
+            await self._send_removal_outcome(session_id, message_id, "already_delivered")
             return
 
         # v2 turns cutover: ``message_id`` is a turn id (the queue_updated frame
         # emits turn ids as ``id``). Settle it to aborted (kept as history) via
         # the guarded queued->aborted transition; NO scheduler kick fires
         # (removing a chip never starts anything). Re-broadcast from turns.
-        await run_sync(turn_manager.remove_queued, message_id)
+        removed = await run_sync(turn_manager.remove_queued, message_id)
+        outcome = "cancelled"
+        if removed is None:
+            # The row had already left the queue: absorbed by a steer receipt
+            # or started as its own turn (the model has it either way), or it
+            # was removed before (a repeated ×).
+            row = await run_sync(turns_db.get_turn, message_id)
+            if row is None:
+                outcome = "not_found"
+            elif row.get("state") != "aborted":
+                outcome = "already_delivered"
         if session_id:
             await self._v2_broadcast_queue(session_id)
+        await self._send_removal_outcome(session_id, message_id, outcome)
         return
+
+    async def _send_removal_outcome(
+        self, session_id: Optional[str], message_id: str, outcome: str,
+    ) -> None:
+        """Answer a ``remove_queued_message`` with what actually happened.
+
+        ``cancelled``: the message will never reach the model. ``already_delivered``:
+        the running turn read it (or it ran as its own turn) before the × landed,
+        so it is part of the conversation and the client must show it as sent.
+        ``not_found``: this worker knows no such queued message.
+        """
+        await self.send_json({
+            "type": "queued_message_removal",
+            "session_id": session_id,
+            "message_id": message_id,
+            "outcome": outcome,
+        })
 
     # ------------------------------------------------------------------
     # handle_clear_queued_messages

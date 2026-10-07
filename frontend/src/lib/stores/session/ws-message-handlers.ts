@@ -960,6 +960,22 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				break;
 			}
 
+			case 'queued_message_removal': {
+				// The backend's answer to × on a pending message. `cancelled` is what
+				// the optimistic removal already shows. `already_delivered` means the
+				// running turn read the message before the × landed: it is part of
+				// the conversation (the transcript shows it once its delivery is
+				// recorded), so the user must not be left believing it was taken back.
+				if (data.outcome !== 'already_delivered') break;
+				const removalSessionId = data.session_id as string | undefined;
+				if (removalSessionId && removalSessionId !== getState().sessionId) break;
+				notify.warning(
+					'Already sent: the agent read this message before it could be cancelled. Send a follow-up to correct it.',
+					{ category: 'queued-message-already-delivered', session_id: removalSessionId, persist: false }
+				);
+				break;
+			}
+
 			case 'query_queued':
 				// Ack that a send landed in the queue instead of starting a turn —
 				// the ordinary outcome of sending while a turn is live. The live turn

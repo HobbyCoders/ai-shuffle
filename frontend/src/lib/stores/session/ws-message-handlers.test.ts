@@ -33,7 +33,7 @@ vi.mock('$lib/stores/support-report.svelte', () => ({
 // The unified notification funnel: assert the handler feeds server events into
 // the store via `notify.ingest`, rather than rendering them itself. `notify.error`
 // is used by the failed-answer-relay path to toast the user.
-vi.mock('../notifications', () => ({ notify: { ingest: vi.fn(), error: vi.fn() } }));
+vi.mock('../notifications', () => ({ notify: { ingest: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 // The SSE-fed reducer singleton. Session adoption (session_created/start) starts
 // the feed; mock it so we can assert adoption without a real EventSource, and so
 // isFeeding() reports "not yet feeding" (the branch that triggers start()).
@@ -732,6 +732,62 @@ describe('ws-message-handlers', () => {
 			});
 
 			expect(deps.update).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('queued_message_removal handler (outcome of x on a pending message)', () => {
+		beforeEach(() => {
+			(notify.warning as ReturnType<typeof vi.fn>).mockClear();
+		});
+
+		function activeOn(sessionId: string) {
+			const state = mockState();
+			state.sessionId = sessionId;
+			deps = createMockDeps({ getState: vi.fn(() => state) });
+			handlers = createMessageHandlers(deps);
+		}
+
+		it('tells the user a message the agent already read was not taken back', () => {
+			activeOn('session-1');
+
+			handlers.handleMessage({
+				type: 'queued_message_removal',
+				session_id: 'session-1',
+				message_id: 'turn-1',
+				outcome: 'already_delivered',
+			});
+
+			expect(notify.warning).toHaveBeenCalledTimes(1);
+			const [message, opts] = (notify.warning as ReturnType<typeof vi.fn>).mock.calls[0];
+			expect(message).toMatch(/already sent/i);
+			expect(opts).toMatchObject({ session_id: 'session-1' });
+			expect(deps.update).not.toHaveBeenCalled();
+		});
+
+		it('stays quiet when the cancel took effect', () => {
+			activeOn('session-1');
+
+			handlers.handleMessage({
+				type: 'queued_message_removal',
+				session_id: 'session-1',
+				message_id: 'turn-1',
+				outcome: 'cancelled',
+			});
+
+			expect(notify.warning).not.toHaveBeenCalled();
+		});
+
+		it('ignores an outcome for a session that is not in view', () => {
+			activeOn('session-1');
+
+			handlers.handleMessage({
+				type: 'queued_message_removal',
+				session_id: 'session-2',
+				message_id: 'turn-1',
+				outcome: 'already_delivered',
+			});
+
+			expect(notify.warning).not.toHaveBeenCalled();
 		});
 	});
 
