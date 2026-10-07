@@ -2129,16 +2129,20 @@ class SessionRuntime:
                 continue
             content = row.get("prompt") or steer.get("text") or ""
             profile_id = row.get("profile_id") or self.turn.get("profile_id")
-            recorded = await recorder.record_steered_user_message(
-                content,
-                profile_id=profile_id,
-                command_id=row.get("command_id"),
-                **({"queued_turn_id": row_id, "checkpoint_backed": False}
-                   if row.get("source") == "agent_message" else {}),
-            )
-            if not recorded:
-                return
-            await self._persist_user_message(content, profile_id=profile_id)
+            # A row whose words are already in the transcript (a voice handoff,
+            # whose caption was stored before submit, or a re-queued steer) adds
+            # nothing to either store, exactly as its own run would not.
+            if not (row.get("payload") or {}).get("user_message_already_recorded"):
+                recorded = await recorder.record_steered_user_message(
+                    content,
+                    profile_id=profile_id,
+                    command_id=row.get("command_id"),
+                    **({"queued_turn_id": row_id, "checkpoint_backed": False}
+                       if row.get("source") == "agent_message" else {}),
+                )
+                if not recorded:
+                    return
+                await self._persist_user_message(content, profile_id=profile_id)
             if await self._absorb_delivered_row(row_id):
                 absorbed = True
                 # Remember WHEN this turn swallowed the row, and the row

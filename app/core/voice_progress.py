@@ -31,6 +31,15 @@ MAX_NOTE_BYTES = 400
 # finished job or an approval for the rest of the call).
 PAUSE_POLL = 0.25
 PAUSE_MAX_WAIT = 30.0
+# A delegated request sent while a chat turn runs can be steered into that
+# turn (#1990). Its queue row then settles ``completed`` with this stop reason
+# (``turns.absorb_queued_turn``) and never starts or ends as a turn of its own,
+# so its outcome is read from the row. At most one check per interval while a
+# submitted row has not started.
+STEERED = "steered"
+STEERED_NOTE = ("The request reached the chat task that is already running; the chat agent sees it "
+                "at its next step and its result comes with that task. Do not report it as finished.")
+ROW_CHECK_INTERVAL = 5.0
 
 
 def excerpt(value: str, limit: int = 260) -> str:
@@ -58,6 +67,9 @@ class VoiceProgress:
         self.active_turns = set()
         self.tasks = OrderedDict()
         self.delegations = {}
+        # Submitted rows not seen starting yet: a steered one never will.
+        self.unstarted = set()
+        self.last_row_check = -ROW_CHECK_INTERVAL
         self.pending = OrderedDict()
         self.last_sent = -UPDATE_INTERVAL
         self.last_note = ""
@@ -129,6 +141,7 @@ class VoiceProgress:
     async def submitted(self, turn_id, delegation_id):
         self.delegations[turn_id] = delegation_id
         self.active_turns.add(turn_id)
+        self.unstarted.add(turn_id)
         self.note("chat", "The chat agent has received the request and is working on it.")
         await self.flush(force=True)
 
@@ -178,6 +191,7 @@ class VoiceProgress:
             return
         if kind == "turn.started":
             self.active_turns.add(tid)
+            self.unstarted.discard(tid)
         elif kind == "assistant.text_delta":
             if tid:
                 self.text[tid] = (self.text.get(tid, "") + (p.get("text") or ""))[:4000]
@@ -192,6 +206,7 @@ class VoiceProgress:
             self.text.pop(tid, None)
         elif kind in {"turn.completed", "turn.aborted"}:
             self.active_turns.discard(tid)
+            self.unstarted.discard(tid)
             text = excerpt(self.text.pop(tid, ""))
             did = self.delegations.pop(tid, None)
             # A turn that ended with nothing to say is not news for the caller.
@@ -242,6 +257,28 @@ class VoiceProgress:
                 if settled:
                     self.note("approval-settled:" + request_id, settled)
                 self._promote()
+
+    async def check_unstarted(self, now=None):
+        """Settle submitted rows that left the queue without running.
+
+        A row steered into the running turn is retired by its delivery receipt
+        and publishes no turn events, so without this it stayed "active" for
+        the rest of the call and its handoff never heard back.
+        """
+        now = time.monotonic() if now is None else now
+        if not self.unstarted or now - self.last_row_check < ROW_CHECK_INTERVAL:
+            return
+        self.last_row_check = now
+        for turn_id in list(self.unstarted):
+            row = await run_sync(turns.get_turn, turn_id)
+            if row is None or row.get("state") == "queued":
+                continue
+            # Started (its events follow) or settled; either way it is no
+            # longer waiting to start.
+            self.unstarted.discard(turn_id)
+            if row.get("stop_reason") == STEERED:
+                self.active_turns.discard(turn_id)
+                self.note("steer:" + turn_id, STEERED_NOTE, self.delegations.pop(turn_id, None))
 
     def held_for_pause(self, now=None):
         """Spoken notes are waiting and this is not a natural pause yet."""
@@ -321,6 +358,7 @@ class VoiceProgress:
                         self.consume(event)
                     if len(batch) < 500:
                         break
+                await self.check_unstarted()
                 await self.flush()
         finally:
             self.close()

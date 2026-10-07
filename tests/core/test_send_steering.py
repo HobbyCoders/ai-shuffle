@@ -479,6 +479,31 @@ async def test_receipt_records_the_message_and_absorbs_the_row(mock_db):
     ]
 
 
+async def test_a_steered_voice_handoff_is_absorbed_without_a_second_user_bubble(mock_db):
+    """#1990: a voice handoff stores the caller's caption before it is queued
+    and carries ``user_message_already_recorded``. Steered into the live turn,
+    the receipt retires the row but records its context prompt nowhere, just
+    as running it as its own turn would not."""
+    _seed_session("s5v")
+    live = turns_db.enqueue_turn("s5v", "user", prompt="the live one")
+    queued = turns_db.enqueue_turn(
+        "s5v", "user", prompt="Live conversation context:\nuser: also check the logs\n",
+        payload={"user_message_already_recorded": True, "voice_delegation": True},
+    )
+    events = [
+        {"type": "steer_delivered", "steers": [{"id": queued["id"], "text": "x"}]},
+        {"type": "done", "metadata": {}},
+    ]
+
+    with _pump_env(_pump(events)) as env:
+        assert await session_runtime.SessionRuntime(live).execute() == "completed"
+
+    env["recorder"].record_steered_user_message.assert_not_awaited()
+    assert _messages(mock_db, "s5v") == []
+    assert turns_db.get_queued_turns("s5v") == []
+    assert turns_db.get_turn(queued["id"])["stop_reason"] == "steered"
+
+
 async def test_a_slash_command_steer_records_as_a_command_row(mock_db):
     _seed_session("s6")
     live = turns_db.enqueue_turn("s6", "user", prompt="the live one")

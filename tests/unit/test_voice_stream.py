@@ -114,6 +114,66 @@ async def test_handoff_never_reports_success_before_completion(monkeypatch, stat
     assert "No final result" in reply or "stopped or failed" in reply
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live", [True, False])
+async def test_handoff_mid_turn_is_steered_into_the_running_turn(monkeypatch, caplog, live):
+    """#1990: a spoken follow-up while a chat turn runs used to be submitted
+    with only a scheduler kick, so it waited out (or was discarded with) that
+    turn. It is now handed to the live turn, as a typed message is; with no
+    live turn the kick-only path is unchanged."""
+    from app.core import session_runtime, turn_manager
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda _: {"model": "haiku", "profile_id": "p"})
+    calls = []
+    async def submit(*args, **kwargs):
+        calls.append("submit")
+        return "turn-2"
+    async def notify(turn_id):
+        calls.append(("submitted", turn_id))
+    monkeypatch.setattr(turn_manager, "submit_async", submit)
+    runtime = SimpleNamespace(steer_pending=AsyncMock(return_value=1))
+    monkeypatch.setattr(session_runtime, "_live_runtimes", {"s1": runtime} if live else {})
+    real = session_runtime.try_steer_pending
+    async def steer(session_id):
+        calls.append("steer")
+        return await real(session_id)
+    spy = AsyncMock(side_effect=steer)
+    monkeypatch.setattr(session_runtime, "try_steer_pending", spy)
+    with caplog.at_level(logging.INFO, logger="app.core.voice_stream"):
+        assert await voice_stream.delegate_to_selected_model("s1", "secret words", on_submitted=notify) == ""
+    spy.assert_awaited_once_with("s1")
+    # The steer is tried after the row exists and before anyone waits on it.
+    assert calls == ["submit", "steer", ("submitted", "turn-2")]
+    assert runtime.steer_pending.await_count == (1 if live else 0)
+    steered = [r.getMessage() for r in caplog.records if "steered" in r.getMessage()]
+    assert len(steered) == (1 if live else 0)
+    assert all("turn-2" in m and "s1" in m and "secret words" not in m for m in steered)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_steer_still_leaves_the_queued_handoff(monkeypatch):
+    from app.core import session_runtime, turn_manager
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda _: {"model": "haiku", "profile_id": "p"})
+    monkeypatch.setattr(turn_manager, "submit_async", AsyncMock(return_value="turn"))
+    monkeypatch.setattr(session_runtime, "try_steer_pending", AsyncMock(side_effect=RuntimeError("boom")))
+    notify = AsyncMock()
+    assert await voice_stream.delegate_to_selected_model("s1", "test", on_submitted=notify) == ""
+    notify.assert_awaited_once_with("turn")
+
+
+@pytest.mark.asyncio
+async def test_a_steered_handoff_never_reports_a_result_of_its_own(monkeypatch):
+    """A steered row settles completed/steered without running, so it has no
+    reply; the caller must not hear "finished" for work still running."""
+    from app.core import session_runtime, turn_manager
+    monkeypatch.setattr(voice_stream.database, "get_session", lambda _: {"model": "haiku", "profile_id": "p"})
+    monkeypatch.setattr(turn_manager, "submit_async", AsyncMock(return_value="turn"))
+    monkeypatch.setattr(session_runtime, "try_steer_pending", AsyncMock(return_value=1))
+    monkeypatch.setattr(turn_manager, "wait_settled",
+                        AsyncMock(return_value={"state": "completed", "stop_reason": "steered"}))
+    monkeypatch.setattr(voice_stream, "_turn_reply", lambda *a: "")
+    assert await voice_stream.delegate_to_selected_model("s1", "test") == voice_stream.STEERED_NOTE
+
+
 def test_commentary_chunks_preserve_complete_unicode_results():
     text = "A verified result. " + "世界🌎" * 200
     chunks = list(voice_stream.commentary_chunks(text))

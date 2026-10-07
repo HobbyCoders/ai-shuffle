@@ -22,6 +22,7 @@ from app.db.async_database import run_sync
 from app.core.voice_models import LIVE_MODEL
 from app.core.voice_options import effective_options, validate_options
 from app.core.voice_prompts import LIVE_INSTRUCTIONS, DELEGATION_INSTRUCTIONS, PERSONAPLEX_INSTRUCTIONS
+from app.core.voice_progress import STEERED, STEERED_NOTE
 
 logger = logging.getLogger(__name__)
 MAX_FRAME_BYTES = 48_000
@@ -259,6 +260,19 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
         overrides=overrides,
         payload=payload,
     )
+    # submit_async only kicks the scheduler, which never runs a row while a
+    # turn is live. Hand the row to that running turn at its next tool
+    # boundary, as a typed message is (#1990). The queue stays the
+    # correctness path: an undelivered steer runs as its own turn.
+    try:
+        from app.core.session_runtime import try_steer_pending
+        steered = await try_steer_pending(session_id)
+    except Exception:  # noqa: BLE001 — the queue is the correctness path
+        logger.debug("Voice: steer attempt failed for %s", session_id, exc_info=True)
+    else:
+        if steered:
+            logger.info("Voice: steered delegated turn %s into the running turn of %s (%d message(s))",
+                        turn_id, session_id, steered)
     if on_submitted is not None:
         # The call-wide event subscriber follows progress, parking and later
         # wakes. Do not hold the handoff open or lose results after ten minutes.
@@ -267,6 +281,10 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     settled = await turn_manager.wait_settled(turn_id, timeout=600)
     if settled is None or settled["state"] == "parked":
         return "Work is continuing in chat. No final result is available yet."
+    if settled.get("stop_reason") == STEERED:
+        # Delivered into the turn already running: this row never runs, so it
+        # has no reply of its own. The answer comes with that turn.
+        return STEERED_NOTE
     if settled["state"] != "completed":
         return "The chat task was stopped or failed. Do not claim it succeeded. Check chat for details."
     return await run_sync(_turn_reply, session_id, turn_id) or "The chat task finished without a spoken result."

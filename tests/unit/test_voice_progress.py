@@ -164,6 +164,39 @@ async def test_live_submit_returns_without_waiting_for_background_work(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_a_steered_handoff_is_settled_quietly_not_left_running(monkeypatch):
+    """#1990: a handoff steered into the running turn is retired by its delivery
+    receipt and never starts as a turn, so no turn event ever ends it. It must
+    not stay "active" for the rest of the call, and its handoff hears back."""
+    rows = {"steered": {"state": "completed", "stop_reason": "steered"},
+            "waiting": {"state": "queued"}, "started": {"state": "live"}}
+    reads = []
+    def get_turn(turn_id):
+        reads.append(turn_id)
+        return rows[turn_id]
+    monkeypatch.setattr(voice_progress.turns, "get_turn", get_turn)
+    send = AsyncMock()
+    p = voice_progress.VoiceProgress("s", send)
+    for turn_id, did in (("steered", "d2"), ("waiting", "d3"), ("started", "d4"), ("ran", "d5")):
+        await p.submitted(turn_id, did)
+    p.consume(event("turn.started", turn="ran"))
+    send.reset_mock()
+    await p.check_unstarted(now=100.0)
+    assert sorted(reads) == ["started", "steered", "waiting"]
+    assert p.unstarted == {"waiting"}
+    assert p.active_turns == {"waiting", "started", "ran"}
+    assert "steered" not in p.delegations
+    p.pending.pop("chat", None)
+    await p.flush(force=True)
+    sent = send.call_args.args[0]
+    assert sent["type"] == "session.thinking.append" and sent["delegation_id"] == "d2"
+    assert "already running" in sent["content"]
+    # Bounded: no second read inside the interval.
+    await p.check_unstarted(now=101.0)
+    assert len(reads) == 3
+
+
+@pytest.mark.asyncio
 async def test_peer_receipt_reaches_voice_without_a_user_queue_or_interrupt():
     from types import SimpleNamespace
     from app.core.session_runtime import SessionRuntime
