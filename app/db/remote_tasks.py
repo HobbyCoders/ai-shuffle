@@ -53,13 +53,14 @@ _PARENT_DDL = """CREATE TABLE IF NOT EXISTS remote_tasks (
     stop_reason TEXT,
     stop_state TEXT,
     stop_error TEXT,
-    offline_notice_at TEXT)"""
+    offline_notice_at TEXT,
+    unconfirmed_start_at TEXT)"""
 
 #: Columns added after the table first shipped: tracking (S7), stop (S8),
 #: the notice after a long silence (S12).
 _PARENT_ADDED = ("target_name", "last_contact_at", "unreachable_since", "target_state",
                  "stop_requested_at", "stop_reason", "stop_state", "stop_error",
-                 "offline_notice_at")
+                 "offline_notice_at", "unconfirmed_start_at")
 
 _TARGET_DDL = """CREATE TABLE IF NOT EXISTS remote_task_children (
     worker_session_id TEXT PRIMARY KEY,
@@ -137,6 +138,16 @@ def forget_dispatch(worker_session_id: str) -> None:
             (worker_session_id,))
 
 
+def mark_start_unconfirmed(worker_session_id: str) -> None:
+    """A Swarm kept this uncertain admission pending; bound its unknown grace."""
+    with get_db() as conn:
+        init_schema(conn)
+        conn.cursor().execute(
+            "UPDATE remote_tasks SET unconfirmed_start_at=COALESCE(unconfirmed_start_at, %s) "
+            "WHERE worker_session_id=%s AND completion_id IS NULL",
+            (utc_now_iso(), worker_session_id))
+
+
 def get_dispatch(worker_session_id: str) -> Optional[Dict[str, Any]]:
     with get_db() as conn:
         init_schema(conn)
@@ -172,7 +183,8 @@ def note_contact(target_states: Dict[str, Optional[str]]) -> None:
 
     ``target_states`` maps a worker session id to the child's state as the
     target reported it (None keeps the last one, for a target that answered
-    without one).
+    without one). A known child also confirms a previously uncertain start;
+    unknown/missing states must not keep extending that start's grace.
     """
     now = utc_now_iso()
     with get_db() as conn:
@@ -181,9 +193,10 @@ def note_contact(target_states: Dict[str, Optional[str]]) -> None:
         for worker_session_id, state in target_states.items():
             cursor.execute(
                 "UPDATE remote_tasks SET last_contact_at=%s, unreachable_since=NULL, "
-                "target_state=COALESCE(%s, target_state) "
+                "target_state=COALESCE(%s, target_state), "
+                "unconfirmed_start_at=CASE WHEN %s THEN NULL ELSE unconfirmed_start_at END "
                 "WHERE worker_session_id=%s AND completion_id IS NULL",
-                (now, state, worker_session_id))
+                (now, state, state in (RUNNING, OWED, DELIVERED, REFUSED), worker_session_id))
 
 
 def note_unreachable(worker_session_ids: List[str]) -> Dict[str, str]:
@@ -210,7 +223,7 @@ def note_unreachable(worker_session_ids: List[str]) -> Dict[str, str]:
     return since
 
 
-def claim_offline_notice(worker_session_id: str) -> Optional[Dict[str, Any]]:
+def claim_offline_notice(worker_session_id: str, *, unknown_start: bool = False) -> Optional[Dict[str, Any]]:
     """Claim the one notice that the target has been quiet too long.
 
     Only for a child still owed its report, not stopped here and not noticed
@@ -220,10 +233,11 @@ def claim_offline_notice(worker_session_id: str) -> Optional[Dict[str, Any]]:
     with get_db() as conn:
         init_schema(conn)
         cursor = conn.cursor()
+        guard = "AND unconfirmed_start_at IS NOT NULL AND target_state='unknown' " if unknown_start else ""
         cursor.execute(
             "UPDATE remote_tasks SET offline_notice_at=%s WHERE worker_session_id=%s "
             "AND completion_id IS NULL AND offline_notice_at IS NULL AND stop_requested_at IS NULL "
-            "RETURNING *", (utc_now_iso(), worker_session_id))
+            + guard + "RETURNING *", (utc_now_iso(), worker_session_id))
         return _row(cursor.fetchone())
 
 
@@ -562,7 +576,8 @@ def reopen_dispatch(worker_session_id: str, completion_id: str) -> bool:
         cursor = conn.cursor()
         cursor.execute(
             "UPDATE remote_tasks SET completion_id=NULL, status=NULL, report_path=NULL, "
-            "delivered_at=NULL, unreachable_since=NULL, target_state=NULL, offline_notice_at=NULL "
+            "delivered_at=NULL, unreachable_since=NULL, target_state=NULL, offline_notice_at=NULL, "
+            "unconfirmed_start_at=NULL "
             "WHERE worker_session_id=%s AND completion_id=%s RETURNING worker_session_id",
             (worker_session_id, completion_id))
         if cursor.fetchone() is None:

@@ -2282,7 +2282,7 @@ def make_fluid_dispatcher(
             agent_registry=agent_registry,
         )
         receipt = None
-        if payload.get("ok") and payload.get("mode") == "background":
+        if payload.get("ok") and payload.get("mode") in {"background", "remote"}:
             task_id = payload.get("task_id") or payload.get("worker_session_id")
             if task_id:
                 receipt = BackgroundTaskReceipt(

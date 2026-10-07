@@ -40,7 +40,7 @@ async def snapshots(session_id: str) -> list[dict]:
             cursor = page[-1]["seq"]
         return list(latest.values())
 
-async def bind_worker(worker_id, owner_session_id):
+async def bind_worker(worker_id, owner_session_id, *, worker=None):
     """Called by the real dispatch producer before each admitted attempt."""
     launch = current_launch.get()
     if launch is None or launch.coordinator.session_id != owner_session_id:
@@ -48,7 +48,21 @@ async def bind_worker(worker_id, owner_session_id):
     workers[worker_id] = launch
     row = next(t for t in launch.coordinator.swarms[launch.swarm_id]["tasks"] if t["id"] == launch.task_id)
     row["worker_session_id"] = worker_id
+    if worker is not None:
+        row["worker"] = dict(worker)
     await launch.coordinator.emit(launch.swarm_id)
+
+
+def unbind_worker(worker_id):
+    """Forget a remote launch only when the target provably started nothing."""
+    launch = workers.pop(worker_id, None)
+    if launch is None:
+        return
+    row = next(t for t in launch.coordinator.swarms[launch.swarm_id]["tasks"] if t["id"] == launch.task_id)
+    if row["worker_session_id"] == worker_id:
+        row["worker_session_id"] = None
+        row.pop("worker", None)
+
 
 def register_job(worker_id, task, owner_session_id):
     launch = current_launch.get()
@@ -310,6 +324,9 @@ def peer_rows(session_id):
                 target = task["worker_session_id"]
                 if not target or target == session_id:
                     continue
-                rows.append(dict(name=task["id"], ref=target, worker_session_id=target,
-                    task_id=task["task_id"], status=task["status"], kind="subagent", description=task["title"]))
+                row = dict(name=task["id"], ref=target, worker_session_id=target,
+                    task_id=task["task_id"], status=task["status"], kind="subagent", description=task["title"])
+                if task.get("worker"):
+                    row["worker"] = task["worker"]["name"]
+                rows.append(row)
     return rows

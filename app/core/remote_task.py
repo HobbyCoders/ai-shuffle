@@ -438,10 +438,17 @@ async def dispatch_remote(
     await asyncio.to_thread(_link_job, caller_session_id, worker_id, worker["device_id"], label)
 
     async def never_started() -> None:
+        from app.core.swarm import unbind_worker
+
+        unbind_worker(worker_id)
         await release()
         await asyncio.to_thread(remote_tasks.forget_dispatch, worker_id)
         await asyncio.to_thread(_forget_job, worker_id)
 
+    # Bind before sending: a fast child's report may beat the start answer.
+    # This also lets the aggregate suppress that child's individual wake.
+    await _bind_swarm_item(worker_id, caller_session_id, worker=worker)
+    answer, warning = None, None
     try:
         answer = await control.call(worker["device_id"], TASK_START_ACTION, body, timeout=START_TIMEOUT)
     except control.ControlRefused as exc:
@@ -452,36 +459,51 @@ async def dispatch_remote(
         return {"ok": False, "error": f"{name} refused the subagent: {reason}; {NOT_DISPATCHED}."}
     except control.RunnerUnreachable as exc:
         if MAY_HAVE_APPLIED in str(exc):
-            # The request was sent: the child may be running there, and if it
-            # is, its report is still accepted and wakes this session.
-            await release()
-            return {"ok": False, "error": (
+            warning = (
                 f"{name} did not confirm the subagent: {exc} Check that worker before "
-                "dispatching it again; if it did start, its report still comes back here.")}
-        await never_started()
-        return {"ok": False, "error": f"{name} could not be reached: {str(exc).rstrip('.')}; {NOT_DISPATCHED}."}
-    if not isinstance(answer, dict) or answer.get("worker_session_id") != worker_id:
-        await release()
-        return {"ok": False, "error": (
+                "dispatching it again; if it did start, its report still comes back here.")
+        else:
+            await never_started()
+            return {"ok": False, "error": f"{name} could not be reached: {str(exc).rstrip('.')}; {NOT_DISPATCHED}."}
+    if warning is None and (not isinstance(answer, dict) or answer.get("worker_session_id") != worker_id):
+        warning = (
             f"{name} gave an invalid answer; the subagent may have started there. Check that "
-            "worker before dispatching it again.")}
+            "worker before dispatching it again.")
+    if warning:
+        from app.core.swarm import owns_terminal
+
+        if not owns_terminal(caller_session_id):
+            await release()
+            return {"ok": False, "error": warning}
+        # An uncertain start still owns a Swarm slot and a possible child.
+        # Keep its branch and wait for the report/offline notice (or cancel),
+        # rather than failing the item and swallowing its later terminal wake.
+        # A reachable target that still knows no child gets the same bounded
+        # grace as an offline target, rather than holding the slot forever.
+        await asyncio.to_thread(remote_tasks.mark_start_unconfirmed, worker_id)
+        answer = {}
     await track_dispatch(
         worker_id=worker_id, target_device_id=worker["device_id"], worker_name=name,
         root_session_id=root_session_id, owner_session_id=caller_session_id, label=label,
         agent_name=agent_name, roster_name=roster_name, provider_id=provider_id,
         model_id=model_id, prompt=prompt, launch_tool_use_id=launch_tool_use_id)
-    await _bind_swarm_item(worker_id, caller_session_id)
-    return remote_receipt(answer, worker=worker, worker_id=worker_id, result_agent=result_agent,
-                          model_id=model_id, label=label, mode=mode)
+    receipt = remote_receipt(answer, worker=worker, worker_id=worker_id, result_agent=result_agent,
+                             model_id=model_id, label=label, mode=mode)
+    if warning:
+        receipt["note"] = warning + " Swarm is still waiting for its terminal outcome."
+    return receipt
 
 
-async def _bind_swarm_item(worker_id: str, caller_session_id: str) -> None:
+async def _bind_swarm_item(worker_id: str, caller_session_id: str, *, worker: Mapping[str, Any]) -> None:
     """Tie the child to the Swarm item that launched it, if any, so Swarm
     cancel can stop it and settle that item. Never raises."""
     try:
         from app.core.swarm import bind_worker
 
-        await bind_worker(worker_id, caller_session_id)
+        await bind_worker(worker_id, caller_session_id, worker={
+            "device_id": worker["device_id"],
+            "name": str(worker.get("device_name") or worker["device_id"]),
+        })
     except Exception:  # noqa: BLE001 — the child runs either way
         logger.debug("remote_task: Swarm binding failed for %s", worker_id, exc_info=True)
 
@@ -1450,8 +1472,10 @@ async def handle_task_report(body: Dict[str, Any], from_device: str) -> Dict[str
                     and not stopped_here):
                 summary = _wake_summary(report, path) + git_text
                 if noticed:
-                    summary = (f"{report.worker_name} answered again after the notice that it was "
-                               "unreachable, and this is the subagent's report.\n\n" + summary)
+                    explanation = ("its start could not be confirmed" if current.get("unconfirmed_start_at")
+                                   else "it was unreachable")
+                    summary = (f"{report.worker_name} answered again after the notice that "
+                               f"{explanation}, and this is the subagent's report.\n\n" + summary)
                 frame = {
                     "task_id": key,
                     "status": _WAKE_STATUS[report.status],
@@ -1531,6 +1555,8 @@ CHILD_UNKNOWN = "unknown"
 OFFLINE_NOTICE_SECONDS = 30 * 60
 #: ``reason`` on a record the offline notice settled.
 OFFLINE_REASON = "worker_unreachable"
+#: An uncertain Swarm start still unknown to its reachable target after grace.
+UNCONFIRMED_START_REASON = "worker_start_unconfirmed"
 
 #: When this process first checked its targets. Silence before it (this
 #: worker was down, not the target) never counts towards the notice.
@@ -1831,7 +1857,9 @@ async def check_targets(now: Optional[Any] = None) -> int:
     time it went quiet. The registry records show the worker's state and that
     time; their status stays ``running`` until the report arrives, or until
     the target has been quiet for :data:`OFFLINE_NOTICE_SECONDS`
-    (:func:`notice_offline`). ``now`` (an aware datetime) is for tests.
+    (:func:`notice_offline`). An uncertain Swarm start also fails after that
+    grace if the reachable target still reports :data:`CHILD_UNKNOWN`.
+    ``now`` (an aware datetime) is for tests.
     Returns how many children are unreachable.
     """
     from datetime import datetime, timezone
@@ -1866,10 +1894,13 @@ async def check_targets(now: Optional[Any] = None) -> int:
                     task_registry.update_remote_status(
                         session_id, worker_id, worker_state=mirrored.get(worker_id),
                         unreachable_since=since.get(worker_id))
-                if (worker_id in since and not row.get("offline_notice_at")
-                        and _quiet_seconds(since[worker_id], now) >= OFFLINE_NOTICE_SECONDS):
+                unknown_start = bool(states is not None and states.get(worker_id) == CHILD_UNKNOWN
+                                     and row.get("unconfirmed_start_at"))
+                waiting_since = row["unconfirmed_start_at"] if unknown_start else since.get(worker_id)
+                if (waiting_since and not row.get("offline_notice_at")
+                        and _quiet_seconds(waiting_since, now) >= OFFLINE_NOTICE_SECONDS):
                     try:
-                        await notice_offline(row, since[worker_id])
+                        await notice_offline(row, waiting_since, unknown_start=unknown_start)
                     except Exception:  # noqa: BLE001 — one child never blocks the others
                         logger.warning("remote_task: offline notice for %s failed", worker_id,
                                        exc_info=True)
@@ -1894,7 +1925,7 @@ def _offline_text(worker_name: str, since: str) -> str:
         "if you need it now.")
 
 
-async def notice_offline(dispatch: Mapping[str, Any], since: str) -> bool:
+async def notice_offline(dispatch: Mapping[str, Any], since: str, *, unknown_start: bool = False) -> bool:
     """Tell the caller once that a child's worker has been quiet too long.
 
     The caller stops waiting: the record settles as an error (reason
@@ -1905,6 +1936,8 @@ async def notice_offline(dispatch: Mapping[str, Any], since: str) -> bool:
     wakes the caller again (``handle_task_report``), a message to it is
     refused with a plain reason while the worker stays away, and its spend is
     still collected when it is back (``assistant_limits.refresh_remote``).
+    ``unknown_start`` instead ends a held uncertain Swarm admission whose
+    reachable target still knows no child, with :data:`UNCONFIRMED_START_REASON`.
     True when this call sent the notice.
     """
     from app.core import remote_task_approvals, turn_scheduler
@@ -1912,17 +1945,23 @@ async def notice_offline(dispatch: Mapping[str, Any], since: str) -> bool:
 
     worker_id = dispatch["worker_session_id"]
     async with _tracking_lock(worker_id):
-        claimed = await asyncio.to_thread(remote_tasks.claim_offline_notice, worker_id)
+        claimed = await asyncio.to_thread(remote_tasks.claim_offline_notice, worker_id, unknown_start=unknown_start)
         if claimed is None:
             return False
         root, owner = claimed["root_session_id"], claimed["owner_session_id"]
         name = worker_display_name(claimed["target_device_id"])
-        text = _offline_text(name, since)
-        logger.warning("remote_task: %s quiet since %s; told %s to stop waiting for %s",
-                       name, since, owner, worker_id)
+        text = (
+            f"{name} is reachable but still knows no subagent for this uncertain start after "
+            f"{OFFLINE_NOTICE_SECONDS // 60} minutes, so this stopped waiting for it. "
+            "The Swarm item failed; its dependent work will not run. "
+            "A report that still arrives later is accepted without rerunning the Swarm."
+        ) if unknown_start else _offline_text(name, since)
+        logger.warning("remote_task: %s %s since %s; told %s to stop waiting for %s",
+                       name, "start unconfirmed" if unknown_start else "quiet", since, owner, worker_id)
         await asyncio.to_thread(remote_task_approvals.drop_proxies, root, worker_id)
         notice = _Report(worker_id, "", "failed", text, False, [], dict(claimed), name)
-        settled = await _settle_tracked(claimed, notice, None, reason=OFFLINE_REASON)
+        settled = await _settle_tracked(claimed, notice, None,
+                                        reason=UNCONFIRMED_START_REASON if unknown_start else OFFLINE_REASON)
         _finish_swarm_item(worker_id, "failed", text)
         if not settled or await asyncio.to_thread(database.get_session, owner) is None:
             return True

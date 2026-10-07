@@ -4,11 +4,15 @@ Two in-process workers over the real signed control endpoint: Unraid runs the
 child, Windows runs the parent chat. No provider, no second machine.
 """
 import asyncio
+import copy
+from datetime import datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
+from fluid.tools.registry import ToolCtx
 
 from app.core import agent_messaging, provider_agent_supervisor, remote_task, startup_reconcile
-from app.core import task_persistence, turn_scheduler
+from app.core import swarm, task_dispatch, task_persistence, turn_scheduler
 from app.core.provider_agent_feed import get_feed_group, reset_feed_groups
 from app.core.task_registry import task_registry
 from app.db import background_tasks, database, remote_tasks, session_events
@@ -16,7 +20,7 @@ from app.db.base import get_db
 from app.network import catalog, control
 from tests.core.network.harness import converge
 from tests.core.network.test_remote_task_control import (
-    UNRAID_URL, finish_child, network, started_child, wakes,
+    UNRAID_URL, all_turns, finish_child, network, started_child, wakes,
 )
 
 
@@ -33,6 +37,10 @@ def _clean_tracking():
     yield
     provider_agent_supervisor.reset()
     reset_feed_groups()
+    swarm.coordinators.clear()
+    swarm.workers.clear()
+    swarm.worker_jobs.clear()
+    swarm._locks.clear()
 
 
 def caller_events(event_type=None):
@@ -334,3 +342,345 @@ def test_a_local_task_keeps_its_shape_and_nothing_is_checked(workers, monkeypatc
         restart_parent()
         assert asyncio.run(task_registry.ensure_hydrated("caller")) == 0
         assert task_registry.get_task("caller", "local-1") is None
+
+
+# --- remote Swarm: real dispatcher, signed control and report producer -----------
+
+def swarm_network(workers, monkeypatch):
+    a, b, router = network(workers, monkeypatch)
+    for worker in (a, b):
+        with worker.active():
+            from app.db import mobile_tool_identity
+            mobile_tool_identity.init_schema()
+            database.create_profile("helper", "Helper", None, {"model": "sonnet"})
+            from app.network import engine
+            engine.publish_presence(capabilities={"remote_task": 1})
+    converge([a, b])
+    return a, b, router
+
+
+async def start_swarm(monkeypatch, *, dependent=True, extra_tasks=()):
+    published = asyncio.Queue()
+    persist = swarm.persist
+
+    async def publish(snapshot):
+        await persist(snapshot)
+        published.put_nowait(copy.deepcopy(snapshot))
+
+    monkeypatch.setattr(swarm, "persist", publish)
+    ctx = ToolCtx(extra={"task_dispatch": task_dispatch.make_fluid_dispatcher("caller")})
+    outcome = await swarm.make_handler(lambda: "caller")({"action": "start", "max_parallel": 1,
+        "tasks": [
+            {"id": "first", "agent": "helper", "worker": "Unraid", "prompt": "Check the disk."},
+            {"id": "second", "agent": "helper", "worker": "Unraid", "prompt": "Review findings.",
+             "depends_on": ["first"] if dependent else []},
+        ] + list(extra_tasks)}, ctx)
+    assert not outcome.is_error, outcome.text
+    key = outcome.background_task.task_id
+    return swarm.coordinators["caller"], key, published
+
+
+async def admitted(published, index):
+    async def next_receipt():
+        while True:
+            snapshot = await published.get()
+            row = snapshot["tasks"][index]
+            if row["task_id"] or snapshot["status"] in swarm.TERMINAL_STATUSES:
+                assert row["task_id"], str(snapshot)
+                return snapshot
+    return await asyncio.wait_for(next_receipt(), 5)
+
+
+async def report_from_target(a, child, **kwargs):
+    with a.active():
+        finish_child(child, **kwargs)
+        assert remote_task.owe_if_finished(child)
+        body = remote_tasks.get_child(child)["report"]
+        assert await remote_task.deliver_due() == 1
+        return body
+
+
+@pytest.mark.parametrize("dependent", [False, True])
+def test_remote_swarm_holds_slot_routes_messages_and_uses_actual_report(workers, monkeypatch, kicks, dependent):
+    a, b, router = swarm_network(workers, monkeypatch)
+    local_resume = AsyncMock(side_effect=AssertionError("remote child must never resume locally"))
+    monkeypatch.setattr(agent_messaging, "resume_unavailable", local_resume)
+
+    async def scenario():
+        with b.active():
+            coordinator, key, published = await start_swarm(monkeypatch, dependent=dependent)
+            first_snapshot = await admitted(published, 0)
+            first, second = first_snapshot["tasks"]
+            child = first["worker_session_id"]
+            assert first["status"] == "running" and second["status"] == "queued"
+            assert second["worker_session_id"] is None
+            assert not coordinator.jobs[key].done() and wakes() == []
+            assert sum(path.endswith("/task-start") for _, path in router.requests(UNRAID_URL)) == 1
+            peers = await agent_messaging.make_roster(lambda: "caller")({"running_only": True}, None)
+            [peer] = [row for row in peers if row["worker_session_id"] == child]
+            assert peer["name"] == "first" and peer["worker"] == "Unraid" and peer["status"] == "running"
+            for address in ("first", child):
+                message = await agent_messaging.make_message(lambda: "caller")(
+                    {"to": address, "message": "Also check the logs."}, None)
+                assert not message.is_error, message.text
+            assert ("POST", "/api/v1/network/peer/control/task-message") in router.requests(UNRAID_URL)
+            with a.active():
+                assert any("Also check the logs." in t["prompt"] for t in all_turns(child)
+                           if t["source"] == "agent_message")
+                # Model messages consumed by the mocked child's live turn, not
+                # separate blank runs that could become its latest report turn.
+                from app.db import turns
+                for turn in all_turns(child):
+                    if turn["source"] == "agent_message":
+                        assert turns.absorb_queued_turn(turn["id"])
+                assert all(t["stop_reason"] == "steered" for t in all_turns(child)
+                           if t["source"] == "agent_message")
+            body = await report_from_target(a, child, text="Actual disk findings, not a launch receipt.")
+            assert body["report"] == "Actual disk findings, not a launch receipt."
+            assert wakes() == []  # child's report belongs to the aggregate
+            snapshot = await admitted(published, 1)
+            assert snapshot["tasks"][0]["result"] == body["report"]
+            second_child = snapshot["tasks"][1]["worker_session_id"]
+            assert snapshot["tasks"][1]["status"] == "running"
+            with a.active():
+                prompt = remote_task.report_owed(second_child)
+                assert prompt["owner_session_id"] == "caller"
+                [turn] = [t for t in all_turns(second_child) if t["source"] == "provider_agent"]
+                assert (body["report"] in turn["prompt"]) is dependent
+            assert (await remote_task.handle_task_report(body, a.device_id))["duplicate"]
+            assert wakes() == []
+            second_body = await report_from_target(a, second_child, text="Actual review report.")
+            assert second_body["report"] == "Actual review report."
+            await asyncio.wait_for(coordinator.jobs[key], 5)
+            snapshot = coordinator.snapshot(key)
+            assert snapshot["status"] == "completed"
+            assert [t["result"] for t in snapshot["tasks"]] == [body["report"], second_body["report"]]
+            [wake] = wakes()
+            assert key in wake["payload"]["task_ids"]
+            assert "Actual disk findings" in wake["prompt"] and "Actual review report" in wake["prompt"]
+            assert (await remote_task.handle_task_report(second_body, a.device_id))["duplicate"]
+            assert len(wakes()) == 1
+            local_resume.assert_not_awaited()
+            await task_persistence.flush()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("ending", ["failed", "cancelled"])
+def test_remote_swarm_failure_and_cancel_block_successor_and_wake_once(workers, monkeypatch, kicks, ending):
+    a, b, router = swarm_network(workers, monkeypatch)
+    local_kill = AsyncMock(side_effect=AssertionError("remote child must never be killed locally"))
+    monkeypatch.setattr(provider_agent_supervisor, "_kill_worker_session", local_kill)
+
+    async def scenario():
+        with b.active():
+            coordinator, key, published = await start_swarm(monkeypatch)
+            snapshot = await admitted(published, 0)
+            child = snapshot["tasks"][0]["worker_session_id"]
+            if ending == "failed":
+                body = await report_from_target(a, child, text="Provider refused the request.", outcome="aborted")
+            else:
+                await coordinator.cancel(key)
+                assert ("POST", "/api/v1/network/peer/control/task-stop") in router.requests(UNRAID_URL)
+                with a.active():
+                    assert remote_tasks.get_child(child)["stop_requested_at"]
+                    assert remote_task.owe_if_finished(child)
+                    body = remote_tasks.get_child(child)["report"]
+                    assert body["status"] == "stopped"
+                    assert await remote_task.deliver_due() == 1
+            await asyncio.wait_for(coordinator.jobs[key], 5)
+            snapshot = coordinator.snapshot(key)
+            assert snapshot["status"] == ending
+            assert snapshot["tasks"][0]["status"] == ending
+            assert snapshot["tasks"][1]["status"] == ("blocked" if ending == "failed" else "cancelled")
+            assert snapshot["tasks"][1]["worker_session_id"] is None
+            assert sum(path.endswith("/task-start") for _, path in router.requests(UNRAID_URL)) == 1
+            assert (await remote_task.handle_task_report(body, a.device_id))["duplicate"]
+            assert len(wakes()) == 1
+            local_kill.assert_not_awaited()
+            await task_persistence.flush()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("answer_kind", ["fast_report", "invalid", "timeout", "refused", "unreachable"])
+def test_remote_swarm_start_races_keep_report_and_routing_ownership(workers, monkeypatch, kicks, answer_kind):
+    a, b, _ = swarm_network(workers, monkeypatch)
+    real_call = control.call
+    starts, early_reports = [], []
+
+    async def call(device_id, action, body, **kwargs):
+        if action != remote_task.TASK_START_ACTION or starts:
+            return await real_call(device_id, action, body, **kwargs)
+        starts.append(body)
+        if answer_kind == "refused":
+            raise control.ControlRefused("Nothing was started")
+        if answer_kind == "unreachable":
+            raise control.RunnerUnreachable("Could not connect")
+        answer = await real_call(device_id, action, body, **kwargs)
+        if answer_kind == "fast_report":
+            early_reports.append(await report_from_target(a, body["worker_session_id"], text="Finished before receipt."))
+        elif answer_kind == "invalid":
+            return {}
+        elif answer_kind == "timeout":
+            raise control.RunnerUnreachable(remote_task.MAY_HAVE_APPLIED)
+        return answer
+
+    monkeypatch.setattr(control, "call", call)
+
+    async def scenario():
+        with b.active():
+            coordinator, key, published = await start_swarm(monkeypatch)
+            if answer_kind in {"refused", "unreachable"}:
+                await asyncio.wait_for(coordinator.jobs[key], 5)
+                snapshot = coordinator.snapshot(key)
+                assert snapshot["status"] == "failed"
+                assert [t["status"] for t in snapshot["tasks"]] == ["failed", "blocked"]
+                assert snapshot["tasks"][0]["worker_session_id"] is None
+                assert not swarm.workers
+                assert remote_tasks.get_dispatch(starts[0]["worker_session_id"]) is None
+            else:
+                if answer_kind != "fast_report":
+                    snapshot = await admitted(published, 0)
+                    assert snapshot["tasks"][0]["status"] == "running"
+                    assert snapshot["tasks"][1]["status"] == "queued"
+                    child = snapshot["tasks"][0]["worker_session_id"]
+                    assert swarm.peer_rows("caller")[0]["worker"] == "Unraid"
+                    assert task_registry.get_task("caller", child)["status"] == "running"
+                    early_reports.append(await report_from_target(a, child, text="Report after uncertain start."))
+                snapshot = await admitted(published, 1)
+                assert snapshot["tasks"][0]["result"] == early_reports[0]["report"]
+                assert wakes() == []
+                child = snapshot["tasks"][1]["worker_session_id"]
+                with a.active():
+                    [turn] = [t for t in all_turns(child) if t["source"] == "provider_agent"]
+                    assert early_reports[0]["report"] in turn["prompt"]
+                await report_from_target(a, child, text="Successor finished.")
+                await asyncio.wait_for(coordinator.jobs[key], 5)
+                assert coordinator.snapshot(key)["status"] == "completed"
+                assert (await remote_task.handle_task_report(early_reports[0], a.device_id))["duplicate"]
+            assert len(wakes()) == 1
+            await task_persistence.flush()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("answer_kind", ["invalid", "timeout"])
+@pytest.mark.parametrize("ending", ["expires", "late_report"])
+def test_uncertain_swarm_start_unknown_grace_is_bounded(workers, monkeypatch, kicks, answer_kind, ending):
+    a, b, router = swarm_network(workers, monkeypatch)
+    real_call = control.call
+    starts = []
+    monkeypatch.setattr(remote_task, "_tracking_started", None)
+
+    async def call(device_id, action, body, **kwargs):
+        if action != remote_task.TASK_START_ACTION or starts:
+            return await real_call(device_id, action, body, **kwargs)
+        starts.append(body)
+        # The request may have been sent, but no child exists on the target.
+        if answer_kind == "invalid":
+            return {}
+        raise control.RunnerUnreachable(remote_task.MAY_HAVE_APPLIED)
+
+    monkeypatch.setattr(control, "call", call)
+
+    async def scenario():
+        with b.active():
+            independent = [{"id": "independent", "agent": "helper", "worker": "Unraid",
+                            "prompt": "Unrelated work."}]
+            coordinator, key, published = await start_swarm(monkeypatch, extra_tasks=independent)
+            snapshot = await admitted(published, 0)
+            child = snapshot["tasks"][0]["worker_session_id"]
+            dispatch = remote_tasks.get_dispatch(child)
+            started = datetime.fromisoformat(dispatch["unconfirmed_start_at"])
+            deadline = started + timedelta(seconds=remote_task.OFFLINE_NOTICE_SECONDS)
+            with a.active():
+                assert remote_tasks.get_child(child) is None
+            # Real signed task-status returns CHILD_UNKNOWN while reachable.
+            assert await remote_task.check_targets(now=started) == 0
+            assert await remote_task.check_targets(now=deadline - timedelta(seconds=1)) == 0
+            dispatch = remote_tasks.get_dispatch(child)
+            assert dispatch["target_state"] == remote_task.CHILD_UNKNOWN
+            assert dispatch["last_contact_at"] and dispatch["unreachable_since"] is None
+            assert dispatch["unconfirmed_start_at"] == started.isoformat()
+            assert dispatch["offline_notice_at"] is None
+            assert task_registry.get_task("caller", child)["status"] == "running"
+            assert coordinator.snapshot(key)["tasks"][1]["status"] == "queued"
+            assert wakes() == []
+            assert ("POST", "/api/v1/network/peer/control/task-status") in router.requests(UNRAID_URL)
+
+            if ending == "late_report":
+                # A delayed start/report within grace still completes normally.
+                assert (await real_call(a.device_id, remote_task.TASK_START_ACTION, starts[0]))["worker_session_id"] == child
+                assert await remote_task.check_targets(now=deadline - timedelta(seconds=1)) == 0
+                assert remote_tasks.get_dispatch(child)["unconfirmed_start_at"] is None
+                # A stale unknown-status pass cannot fail a now-confirmed child.
+                assert not await remote_task.notice_offline(dispatch, started.isoformat(), unknown_start=True)
+                body = await report_from_target(a, child, text="Delayed disk report within grace.")
+                assert body["report"] == "Delayed disk report within grace."
+                snapshot = await admitted(published, 1)
+                assert snapshot["tasks"][0]["result"] == body["report"]
+                second_child = snapshot["tasks"][1]["worker_session_id"]
+                with a.active():
+                    [turn] = [t for t in all_turns(second_child) if t["source"] == "provider_agent"]
+                    assert body["report"] in turn["prompt"]
+                await report_from_target(a, second_child, text="Dependent report.")
+                expected_status = "completed"
+            else:
+                # Repeated unknown answers after grace end the item once.
+                assert await remote_task.check_targets(now=deadline + timedelta(seconds=1)) == 0
+                snapshot = await admitted(published, 2)
+                assert snapshot["tasks"][0]["status"] == "failed"
+                assert "reachable but still knows no subagent" in snapshot["tasks"][0]["error"]
+                assert snapshot["tasks"][1]["status"] == "blocked"
+                assert snapshot["tasks"][1]["worker_session_id"] is None
+                assert task_registry.get_task("caller", child)["status"] == "error"
+                assert task_registry.get_task("caller", child)["reason"] == remote_task.UNCONFIRMED_START_REASON
+                assert remote_tasks.get_dispatch(child)["offline_notice_at"]
+                assert provider_agent_supervisor.get_worker("caller", child) is None
+                assert await remote_task.check_targets(now=deadline + timedelta(seconds=60)) == 0
+                expected_status = "failed"
+
+            # In both cases the held max_parallel=1 slot is freed for unrelated work.
+            if ending == "late_report":
+                snapshot = await admitted(published, 2)
+            assert snapshot["tasks"][2]["status"] == "running"
+            assert wakes() == []
+            await report_from_target(a, snapshot["tasks"][2]["worker_session_id"], text="Independent report.")
+            await asyncio.wait_for(coordinator.jobs[key], 5)
+            assert coordinator.snapshot(key)["status"] == expected_status
+            [wake] = wakes()
+            assert key in wake["payload"]["task_ids"]
+            if ending == "expires":
+                assert "reachable but still knows no subagent" in wake["prompt"]
+            assert await remote_task.check_targets(now=deadline + timedelta(seconds=120)) == 0
+            assert len(wakes()) == 1
+            await task_persistence.flush()
+
+    asyncio.run(scenario())
+
+
+
+def test_existing_remote_task_table_adds_uncertain_start_marker(workers):
+    worker = workers("schema-upgrade")
+    with worker.active():
+        from app.db.base import column_exists
+
+        old_schema = remote_tasks._PARENT_DDL.replace(",\n    unconfirmed_start_at TEXT", "")
+        assert old_schema != remote_tasks._PARENT_DDL
+        with get_db() as conn:
+            conn.cursor().execute(old_schema)
+            assert not column_exists(conn.cursor(), "remote_tasks", "unconfirmed_start_at")
+        remote_tasks.record_dispatch(worker_session_id="uncertain", target_device_id="remote",
+            owner_session_id="caller", root_session_id="caller", tool_use_id=None,
+            mode="background", label="Check disk", agent="helper")
+        assert remote_tasks.get_dispatch("uncertain")["unconfirmed_start_at"] is None
+        remote_tasks.mark_start_unconfirmed("uncertain")
+        stamp = remote_tasks.get_dispatch("uncertain")["unconfirmed_start_at"]
+        assert stamp
+        remote_tasks.note_contact({"uncertain": remote_task.CHILD_UNKNOWN})
+        assert remote_tasks.get_dispatch("uncertain")["unconfirmed_start_at"] == stamp
+        remote_tasks.note_contact({"uncertain": None})
+        assert remote_tasks.get_dispatch("uncertain")["unconfirmed_start_at"] == stamp
+        remote_tasks.note_contact({"uncertain": remote_tasks.RUNNING})
+        assert remote_tasks.get_dispatch("uncertain")["unconfirmed_start_at"] is None

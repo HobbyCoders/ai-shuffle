@@ -300,6 +300,8 @@ def test_an_unreachable_or_refusing_target_releases_the_pushed_branch(world, mon
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) AS n FROM remote_tasks")
         assert cursor.fetchone()["n"] == (0 if started_nothing else 1)
+        cursor.execute("SELECT unconfirmed_start_at FROM remote_tasks")
+        assert all(row["unconfirmed_start_at"] is None for row in cursor.fetchall())
     [branch] = pushed
     assert remote_tip(world.parent, branch) is None
     assert world.kicks == []
@@ -336,6 +338,11 @@ def test_an_invalid_answer_does_not_claim_nothing_started(world, monkeypatch):
     result = dispatch({})
     assert result["ok"] is False and "may have started there" in result["error"]
     assert remote_task.NOT_DISPATCHED not in result["error"]
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT unconfirmed_start_at FROM remote_tasks")
+        [row] = cursor.fetchall()
+        assert row["unconfirmed_start_at"] is None
 
 
 def test_an_oversized_prompt_is_refused_before_any_push(world, monkeypatch):
