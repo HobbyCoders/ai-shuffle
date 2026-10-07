@@ -552,6 +552,134 @@ def test_exchange_batch_bounds_queries_frontier_and_detects_pruned_gaps(workers,
         assert store.exchange_batch({}, exclude_origin=a.device_id)[2] is False
 
 
+@pytest.mark.parametrize("key", [
+    "cluster_secret", "workspace_path:peer", "claude_auth_mode:peer",
+    "claude_auth_mode:local", "claude_cloud_config", "claude_cloud_secrets",
+])
+@pytest.mark.parametrize("out_of_order", [False, True])
+def test_local_settings_from_old_peers_are_consumed_not_stored(workers, monkeypatch, key, out_of_order):
+    from dataclasses import replace
+    from app.network import policy
+
+    old, updated = workers("old"), workers("updated")
+    with old.active():
+        engine.create_network("Mixed settings policies")
+    join(old, updated)
+    converge([old, updated])
+    coll = policy.collection("system_settings")
+    # Drive the real producer with the old peer's more permissive policy.
+    with old.active(), monkeypatch.context() as patch:
+        patch.setitem(policy.COLLECTIONS, coll.name, replace(
+            coll, shared_row=lambda row: row.get("key") == key or coll.shared_row(row)))
+        before = store.local_watermarks()
+        database.set_system_setting(key, "peer-value")
+        engine.scan_collection(coll.name)
+        [blocked] = store.ops_since(before)
+        database.set_system_setting("tts_model", "shared-value")
+        engine.scan_collection(coll.name)
+        [later] = store.ops_since({old.device_id: {"1": blocked["origin_seq"]}})
+    with updated.active():
+        if out_of_order:
+            assert engine.apply_batch([later]).pending == 1
+            result = engine.apply_batch([blocked])
+        else:
+            result = engine.apply_batch([blocked, later])
+        assert result.rejected == 1 and result.applied == 1, result.reasons
+        assert result.reasons == ["local-only row"]
+        assert database.get_system_setting(key) is None
+        assert database.get_system_setting("tts_model") == "shared-value"
+        assert engine.apply_batch([blocked, later]).duplicate == 2
+        with database.get_db() as conn:
+            assert store.get_watermark(conn.cursor(), old.device_id, 1) == later["origin_seq"]
+        assert engine.scan_collection(coll.name) == 0
+    for table in ("sync_records", "sync_ops", "sync_conflicts"):
+        assert not updated.sql(f"SELECT * FROM {table} WHERE collection = ? AND record_id = ?", (coll.name, key))
+    assert not updated.sql("SELECT * FROM sync_pending")
+
+    # A peer's tombstone must not erase a setting already owned locally.
+    with updated.active():
+        database.set_system_setting(key, "owner-value")
+    with old.active(), monkeypatch.context() as patch:
+        patch.setitem(policy.COLLECTIONS, coll.name, replace(
+            coll, shared_row=lambda row: row.get("key") == key or coll.shared_row(row)))
+        before = store.local_watermarks()
+        database.delete_system_setting(key)
+        database.delete_system_setting("tts_model")
+        engine.scan_collection(coll.name)
+        deletes = store.ops_since(before)
+    assert {op["record_id"] for op in deletes} == {key, "tts_model"}
+    with updated.active():
+        result = engine.apply_batch(deletes)
+        assert result.rejected == 1 and result.applied == 1, result.reasons
+        assert database.get_system_setting(key) == "owner-value"
+        assert database.get_system_setting("tts_model") is None
+        assert engine.scan_collection(coll.name) == 0
+    for table in ("sync_records", "sync_ops", "sync_conflicts"):
+        assert not updated.sql(f"SELECT * FROM {table} WHERE collection = ? AND record_id = ?", (coll.name, key))
+
+
+def test_local_settings_snapshot_preserves_previously_synced_copies(workers, monkeypatch):
+    from dataclasses import replace
+    from app.network import policy
+
+    old, updated = workers("old"), workers("updated")
+    key = "claude_auth_mode:local"
+    coll = policy.collection("system_settings")
+    with old.active():
+        engine.create_network("Mixed settings policies")
+    # Both workers once allowed this key: produce and receive a genuine copy.
+    with monkeypatch.context() as patch:
+        patch.setitem(policy.COLLECTIONS, coll.name, replace(
+            coll, shared_row=lambda row: row.get("key") == key or coll.shared_row(row)))
+        with old.active():
+            database.set_system_setting(key, "original-method")
+            engine.scan_collection(coll.name)
+        join(old, updated)
+        with updated.active():
+            assert database.get_system_setting(key) == "original-method"
+        with old.active():
+            database.set_system_setting(key, "cloud")
+            database.set_system_setting("tts_model", "new-shared-value")
+            engine.scan_collection(coll.name)
+            chunk = engine.snapshot_chunk(coll.name)
+    legacy_records = updated.sql("SELECT * FROM sync_records WHERE collection = ? AND record_id = ?", (coll.name, key))
+    with updated.active():
+        assert engine.apply_snapshot_chunk(chunk) == 1
+        assert database.get_system_setting(key) == "original-method"
+        assert database.get_system_setting("tts_model") == "new-shared-value"
+        assert engine.scan_collection(coll.name) == 0
+        # Rejected local-only writes must not create a conflict or log row.
+        before = store.count_ops()
+        result = exchange(old, updated)
+        assert result.rejected == 1, result.reasons
+        assert store.count_ops() == before + 1  # only the shared tts_model op
+    assert updated.sql("SELECT * FROM sync_records WHERE collection = ? AND record_id = ?", (coll.name, key)) == legacy_records
+    assert not updated.sql("SELECT * FROM sync_conflicts WHERE collection = ? AND record_id = ?", (coll.name, key))
+
+    with old.active(), monkeypatch.context() as patch:
+        patch.setitem(policy.COLLECTIONS, coll.name, replace(
+            coll, shared_row=lambda row: row.get("key") == key or coll.shared_row(row)))
+        database.delete_system_setting(key)
+        database.delete_system_setting("tts_model")
+        engine.scan_collection(coll.name)
+        deleted_chunk = engine.snapshot_chunk(coll.name)
+    with updated.active():
+        assert engine.apply_snapshot_chunk(deleted_chunk) == 1
+        assert database.get_system_setting(key) == "original-method"
+        assert database.get_system_setting("tts_model") is None
+    assert updated.sql("SELECT * FROM sync_records WHERE collection = ? AND record_id = ?", (coll.name, key)) == legacy_records
+
+
+def test_incoming_setting_policy_checks_payload_and_authoritative_record_id():
+    from app.network import policy
+
+    coll = policy.collection("system_settings")
+    assert not engine._incoming_row_is_shared(coll, "claude_auth_mode:local", {"key": "tts_model"})
+    assert not engine._incoming_row_is_shared(coll, "tts_model", {"key": "claude_cloud_secrets"})
+    assert not engine._incoming_row_is_shared(coll, "claude_auth_mode:local", None)
+    assert engine._incoming_row_is_shared(coll, "tts_model", None)
+
+
 def test_network_of_one_records_and_scans(workers):
     a = workers("a")
     with a.active():

@@ -12,6 +12,24 @@ and membership information rather than receiving every normal sync operation.
 Clerk is used for account sign-in, not peer messages; GitHub is used for code and
 distribution, not as a runtime sync service.
 
+## Worker-local settings
+
+The sharing policy in `app/network/policy.py` applies to incoming operations
+and state transfers as well as outgoing rows. Local-only settings, including
+`claude_auth_mode:<instance id>`, `claude_cloud_config` and
+`claude_cloud_secrets`, cannot be inserted, overwritten or deleted by a peer.
+A refused operation advances its origin stream without retaining its row in
+records, conflicts or the forwarding log; later shared operations still apply.
+
+Upgrading does not delete settings or historical sync data already stored by
+older builds. Previously synced copies stay on disk; review the Claude sign-in
+method on each worker and change it locally if needed. Existing encrypted
+operation history may still be served; this change does not purge it. Updated
+receivers refuse these rows, including their tombstones, and updated senders
+do not publish new tombstones to retract now-local copies. Upgrade all paired
+workers to enforce the policy everywhere. No owner data is purged by this
+change.
+
 ## Initial copies and long absences
 
 Account admission contains device-wrapped keys and peer addresses. The joining

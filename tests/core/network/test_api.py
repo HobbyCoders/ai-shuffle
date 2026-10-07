@@ -118,6 +118,57 @@ def test_peer_plane_requires_membership_and_valid_signatures(workers, make_clien
         assert tokens.verify_token("dvt_garbage") is None
 
 
+def test_peer_api_consumes_local_settings_and_offers_state_copy_for_forwarding_gap(
+        workers, make_client, monkeypatch):
+    from dataclasses import replace
+    from app.network import policy
+    from tests.core.network.harness import converge, join
+
+    old, updated, third = workers("old"), workers("updated"), workers("third")
+    with old.active():
+        engine.create_network("Mixed settings policies")
+    join(old, updated)
+    join(old, third)
+    converge([old, updated, third])
+    with third.active():
+        third_marks = store.local_watermarks()
+    key = "claude_auth_mode:local"
+    coll = policy.collection("system_settings")
+    with old.active(), monkeypatch.context() as patch:
+        patch.setitem(policy.COLLECTIONS, coll.name, replace(
+            coll, shared_row=lambda row: row.get("key") == key or coll.shared_row(row)))
+        before = store.local_watermarks()
+        database.set_system_setting(key, "cloud")
+        database.set_system_setting("tts_model", "shared-value")
+        engine.scan_collection(coll.name)
+        ops = store.ops_since(before)
+    with updated.active():
+        client = make_client()
+        token = _peer_token(client, old.context, updated.device_id)
+        assert token.status_code == 200, token.text
+        response = client.post("/api/v1/network/peer/ops", json={"ops": ops}, headers={
+            "Authorization": "Bearer " + token.json()["token"]})
+        assert response.status_code == 200, response.text
+        assert response.json()["rejected"] == response.json()["applied"] == 1
+        assert database.get_system_setting(key) is None
+        assert database.get_system_setting("tts_model") == "shared-value"
+        token = _peer_token(client, third.context, updated.device_id)
+        assert token.status_code == 200, token.text
+        headers = {"Authorization": "Bearer " + token.json()["token"]}
+        response = client.post("/api/v1/network/peer/exchange", json={"watermarks": third_marks}, headers=headers)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["snapshot_required"] is True
+        assert not any(op["collection"] == coll.name and op["record_id"] == key for op in body["ops"])
+        chunk = client.get("/api/v1/network/peer/snapshot", params={"collection": coll.name}, headers=headers)
+        assert chunk.status_code == 200, chunk.text
+    with third.active():
+        assert engine.apply_snapshot_chunk(chunk.json()) == 1
+        engine.adopt_watermarks(body["watermarks"])
+        assert database.get_system_setting(key) is None
+        assert database.get_system_setting("tts_model") == "shared-value"
+
+
 def test_join_flow_end_to_end(workers, make_client, monkeypatch):
     a, b = workers("a"), workers("b")
     with a.active():

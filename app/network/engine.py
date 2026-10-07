@@ -450,6 +450,19 @@ def _local_keys(coll: policy.Collection, record_id: str) -> Tuple[Any, ...]:
     return tuple(values[k] for k in coll.keys)
 
 
+def _incoming_row_is_shared(coll: policy.Collection, record_id: str,
+                            record: Optional[Mapping[str, Any]]) -> bool:
+    if coll.shared_row is None:
+        return True
+    if record is not None and not coll.shared_row(record):
+        return False
+    # Materialization takes key columns from the signed record id, not the
+    # payload. Check that identity too, including for payload-free deletes.
+    row = dict(record or {})
+    row.update(zip(coll.keys, coll.key_values(record_id)))
+    return coll.shared_row(row)
+
+
 def materialize(cursor, coll: policy.Collection, record_id: str, record: Optional[Mapping[str, Any]],
                 *, origin_device_id: Optional[str] = None) -> Optional[dict]:
     """Write (or delete) the domain row. Returns the row as re-read, or None.
@@ -624,6 +637,8 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
         if not safe(ctx, crypto.sha256_hex(ctx.network_key)):
             return None
     coll = policy.collection(collection)
+    if row is None and not _incoming_row_is_shared(coll, record_id, None):
+        return None  # do not retract an already-synced copy of a now-local row
     plaintext = serialize_row(coll, row) if row is not None else None
     if row is not None and plaintext is None:
         return None  # not a shared row
@@ -1182,6 +1197,11 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         plaintext, _decryption_key = open_envelope(ctx, env)
     except (crypto.CryptoError, envelope_mod.EnvelopeError) as exc:
         raise ApplyError("cannot open payload") from exc
+
+    if not _incoming_row_is_shared(coll, env.record_id, plaintext):
+        # A permanent refusal consumes this sequence without storing the
+        # payload in domain rows, sync records, conflicts or the forwarding log.
+        raise ApplyError("local-only row")
 
     if coll.name == "presence" and not _presence_names_only(
             env.origin_device_id, env.record_id, plaintext if env.op == OP_UPSERT else None):
@@ -1790,6 +1810,9 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         cursor = conn.cursor()
         for item in body["items"]:
+            if not _incoming_row_is_shared(coll, item["record_id"],
+                                           None if item["deleted"] else item["record"]):
+                continue
             if (coll.name == "agents" and item["record_id"] == "Explore" and not item["deleted"]
                     and (item["record"] or {}).get("is_builtin")):
                 continue

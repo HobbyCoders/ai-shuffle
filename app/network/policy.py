@@ -79,6 +79,7 @@ _LOCAL_SETTING_PATTERNS = [
         r"^chat_connection:",
         r"^plugin_oauth:",
         r"^claude_cli_relogin_notice(:|$)",
+        r"^claude_auth_mode(:|$)",
         r"^claude_cli_(keep_installed|installed_by_app)(:|$)",
         # The Claude "Cloud provider or gateway" method and its secrets belong
         # to this worker, like the Claude auth mode (claude_auth_mode:<instance>).
