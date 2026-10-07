@@ -137,6 +137,8 @@ The `system_prompt` field holds the agent's instructions (the editor's **Prompt*
 }
 ```
 
+When the GitHub CLI is signed in, the app adds a short GitHub section after the agent's prompt. It limits every instruction to open a pull request, including one in the agent's own prompt, to changes inside the git repository the task is for. In a folder that is not a git repository, the agent delivers the files and says nothing about pull requests.
+
 ### Session Behavior
 
 | Field                     | Type | Default | Description                                    |

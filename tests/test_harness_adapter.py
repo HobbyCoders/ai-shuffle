@@ -6722,6 +6722,44 @@ async def test_native_prompt_carries_the_github_section(monkeypatch, agent_works
     assert captured["system_sections"].text == system
 
 
+@pytest.mark.asyncio
+async def test_github_section_scopes_a_profile_pr_rule_to_git_repositories(
+    monkeypatch, agent_workspace
+):
+    """A profile saying "Open a non-draft PR for coding changes" sent a run in
+    an empty, non-git folder to probe `gh repo view` and close with an unasked
+    "No PR was opened" line. The app's GitHub section, rendered AFTER the
+    profile, scopes that rule to a git repository and tells the model what to
+    do outside one."""
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "NativeLoop", _CapturingLoop)
+    monkeypatch.setattr(ha, "_build_provider_client", _fake_provider_client)
+    options = _agents_options(agent_workspace)
+    options.system_prompt = (
+        "When finished with work:\n"
+        "- Open a non-draft PR for coding changes."
+    )
+    options.extra["github_connected"] = True
+    await ha.HarnessAdapter().connect(options)
+    system = _CapturingLoop.captured["system"]
+
+    github = next(
+        s.text for s in _CapturingLoop.captured["system_sections"].sections
+        if s.text.startswith("# GitHub")
+    )
+    scope = github.split("\n\n", 1)[0]
+    assert "inside the git repository the task is for" in scope
+    assert "scopes every PR instruction above, including the agent's own" in scope
+    assert '"Git repository: no"' in scope
+    assert "do not probe for a repository with git or gh" in scope
+    assert "say nothing about PRs" in scope
+    # The rule it scopes comes first, and the environment line it names is the
+    # one this (non-git) workspace actually renders.
+    assert system.index("Open a non-draft PR") < system.index("# GitHub")
+    assert "Git repository: no" in system
+
+
 def test_github_section_carries_the_git_hazard_rules():
     """Three failures the round-3 audit caught in live sessions, each answered
     by one line of this block."""

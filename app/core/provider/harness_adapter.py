@@ -6086,9 +6086,13 @@ per-session working state and never persist beyond this session — anything \
 worth keeping past it goes through Remember."""
 
 GITHUB_BLOCK = """# GitHub
-Open a PR only when repository files changed for the user's request; answer \
-questions and do local-config tasks (installing a skill, editing settings \
-under the home directory) directly, without a branch or a PR.
+Open a PR only when repository files changed for the user's request, inside \
+the git repository the task is for. This scopes every PR instruction above, \
+including the agent's own. In a folder that is not a git repository (the \
+environment says "Git repository: no"), deliver the files, do not probe for a \
+repository with git or gh, and say nothing about PRs. Answer questions and do \
+local-config tasks (installing a skill, editing settings under the home \
+directory) directly, without a branch or a PR.
 
 The gh CLI is installed and authenticated on this machine. Reach GitHub \
 through it in Bash — pull requests (gh pr create/view/checks), issues (gh \
