@@ -1,5 +1,6 @@
 """REST reads of a real network mirror retain the recorder's assistant reply."""
 import asyncio
+import json
 
 import pytest
 from fastapi import FastAPI, Request
@@ -7,7 +8,8 @@ from fastapi.testclient import TestClient
 
 from app.api.auth import require_auth
 from app.api.sessions import router
-from app.core.turn_recorder import TurnRecorder
+from app.contract.events import TranscriptRewound
+from app.core.turn_recorder import TurnRecorder, _build_event
 from app.db import database, session_events
 from app.network import engine
 from tests.core.network.harness import converge, join
@@ -51,6 +53,12 @@ def mirrored_chat(workers, request):
             await rec.close()
 
         asyncio.run(record())
+        if getattr(request, "param", "text") == "rewound":
+            # Same typed event write as the successful rewind command; keep
+            # the retracted recorder rows in the append-only owner log.
+            session_events.append_events("remote-chat", [
+                _build_event(TranscriptRewound, "remote-chat", from_seq=1),
+            ])
         engine.scan_all()
     converge([viewer, owner])
     with viewer.active():
@@ -121,25 +129,47 @@ def test_metadata_only_live_does_not_read_events(mirrored_chat, monkeypatch):
 
 
 @pytest.mark.parametrize("suffix", ["", "/live"])
-@pytest.mark.parametrize("history", ["absent", "event_only", "retracted", "unavailable"])
-def test_legacy_rescue_requires_no_event_history(mirrored_chat, monkeypatch, suffix, history):
+@pytest.mark.parametrize("store", ["absent", "empty", "raised"])
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("history", [
+    "absent", "event_only", "retracted", "unavailable", "counter_unavailable",
+    "event_only_unavailable", "retracted_unavailable",
+])
+def test_legacy_rescue_requires_no_event_history(
+    mirrored_chat, monkeypatch, suffix, store, legacy, history,
+):
     database.create_session(session_id="legacy-chat", profile_id="default")
-    database.add_session_message("legacy-chat", "user", "Legacy row")
-    if history == "event_only":
+    if legacy:
+        database.add_session_message("legacy-chat", "user", "Legacy row")
+    if store != "absent":
+        database.update_session("legacy-chat", sdk_session_id="legacy-sdk")
+        monkeypatch.setattr("app.core.message_resolver.resolve_working_dir", lambda session: "/missing")
+        monkeypatch.setattr("app.core.provider.fluid_transcript.is_fluid_session", lambda sid: False)
+
+        def parse(*args):
+            if store == "raised":
+                raise RuntimeError("local store unavailable")
+            return [], {}
+
+        monkeypatch.setattr("app.api.sessions.parse_session_history_via_store", parse)
+    if history.startswith("event_only"):
         session_events.append_events("legacy-chat", [{"type": "turn.started", "payload": {}}])
-    elif history == "retracted":
+    elif history.startswith("retracted"):
         session_events.append_events("legacy-chat", [
             {"type": "message.user", "payload": {"content": "Removed prompt"}},
             {"type": "assistant.text_delta", "payload": {"text": "Removed reply"}},
             {"type": "transcript.rewound", "payload": {"from_seq": 1}},
         ])
-    elif history == "unavailable":
+    if "unavailable" in history:
         def unavailable(*args, **kwargs):
             raise RuntimeError("event mirror unavailable")
         monkeypatch.setattr(session_events, "get_events", unavailable)
+        if history == "counter_unavailable":
+            monkeypatch.setattr(session_events, "get_max_seq", unavailable)
     response = mirrored_chat.get("/api/v1/sessions/legacy-chat" + suffix)
     assert response.status_code == 200, response.text
-    expected = ["Legacy row"] if history == "absent" else []
+    rescue = legacy and store != "raised" and history in ("absent", "unavailable")
+    expected = ["Legacy row"] if rescue else []
     assert [m["content"] for m in response.json()["messages"]] == expected
 
 
@@ -159,6 +189,87 @@ def test_event_mirror_rescues_missing_or_failed_local_store(mirrored_chat, monke
     response = mirrored_chat.get("/api/v1/sessions/remote-chat" + suffix)
     assert response.status_code == 200, response.text
     assert [m["content"] for m in response.json()["messages"]] == ["Say OK", "OK"]
+
+@pytest.mark.parametrize("suffix", ["", "/live"])
+@pytest.mark.parametrize("mirrored_chat", ["text", "rewound"], indirect=True)
+@pytest.mark.parametrize("fail_after_page", [False, True])
+def test_failed_mirror_read_does_not_resurrect_legacy(
+    mirrored_chat, monkeypatch, suffix, fail_after_page,
+):
+    # This counter was written by the actual peer-mirror ingestion, not seeded
+    # on the viewer. It remains nonzero after an owner rewind to an empty chat.
+    assert session_events.get_max_seq("remote-chat") > 0
+    read = session_events.get_events
+    calls = []
+
+    def unavailable(sid, from_seq=0, limit=500):
+        calls.append(from_seq)
+        if not fail_after_page or from_seq:
+            raise RuntimeError("event mirror unavailable")
+        return read(sid, from_seq, limit)
+
+    monkeypatch.setattr(session_events, "get_events", unavailable)
+    response = mirrored_chat.get("/api/v1/sessions/remote-chat" + suffix)
+    assert response.status_code == 200, response.text
+    assert response.json()["messages"] == []
+    assert len(calls) == (2 if fail_after_page else 1)
+
+
+@pytest.mark.parametrize("suffix", ["", "/live"])
+def test_populated_store_precedes_mirror_and_legacy(mirrored_chat, monkeypatch, suffix):
+    from app.core import pg_session_store as pss
+    from tests import pg_shim
+    from tests.pg_shim import ShimCursor
+
+    # Adapt SQLite's JSONB and summary timestamp expression at the driver
+    # boundary; run the real writer (including its fold), parser and transforms.
+    translate_sql = pg_shim.translate_sql
+
+    def store_sql(sql):
+        return translate_sql(sql.replace(
+            "(EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT",
+            "CAST(strftime('%s', 'now') AS INTEGER) * 1000",
+        ))
+
+    monkeypatch.setattr(pg_shim, "translate_sql", store_sql)
+    as_dict = ShimCursor._as_dict
+
+    def store_jsonb(row):
+        result = as_dict(row)
+        if result and ("entry" in result or "folded_through_id" in result):
+            for field in ("entry", "data"):
+                if isinstance(result.get(field), str):
+                    result[field] = json.loads(result[field])
+        return result
+
+    fetchall = ShimCursor.fetchall
+
+    def store_fetchall(cursor):
+        return [store_jsonb(row) for row in fetchall(cursor)]
+
+    monkeypatch.setattr(ShimCursor, "_as_dict", staticmethod(store_jsonb))
+    monkeypatch.setattr(ShimCursor, "fetchall", store_fetchall)
+    sdk_id = "populated-store-sdk-" + ("live" if suffix else "detail")
+    database.update_session("remote-chat", sdk_session_id=sdk_id)
+    monkeypatch.setattr("app.core.message_resolver.resolve_working_dir", lambda session: "/missing")
+    monkeypatch.setattr("app.core.provider.fluid_transcript.is_fluid_session", lambda sid: False)
+    asyncio.run(pss.PgSessionStore().append(
+        {"project_key": "-missing", "session_id": sdk_id},
+        [{"type": "assistant", "uuid": "store-reply", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": "Store reply"}],
+        }}],
+    ))
+    def unexpected(*args, **kwargs):
+        pytest.fail("populated store consulted the mirror/legacy rescue")
+
+    monkeypatch.setattr(session_events, "get_events", unexpected)
+    monkeypatch.setattr(session_events, "get_max_seq", unexpected)
+    monkeypatch.setattr("app.api.sessions._legacy_db_messages", unexpected)
+    monkeypatch.setattr("app.core.db_message_loader.load_messages_from_db", unexpected)
+    response = mirrored_chat.get("/api/v1/sessions/remote-chat" + suffix)
+    assert response.status_code == 200, response.text
+    assert [m["content"] for m in response.json()["messages"]] == ["Store reply"]
+
 
 @pytest.mark.parametrize("suffix", ["", "/live"])
 @pytest.mark.parametrize("mirrored_chat", ["thinking"], indirect=True)

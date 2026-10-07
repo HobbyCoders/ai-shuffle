@@ -993,15 +993,15 @@ async def get_session(
             store_parse_failed = True
 
     # A remote-owned chat has no local store: its transcript is the event
-    # mirror. Only an EMPTY event history permits the legacy rescue; a raised
-    # read (or events which render no bubbles) must not resurrect user-only rows.
+    # mirror. Only a confirmed EMPTY event history permits the legacy rescue;
+    # unreadable or bubble-less event history must not resurrect user-only rows.
     has_events = False
     if not messages:
         try:
             messages, has_events = await run_sync(load_event_messages, session["id"])
         except Exception:
             logger.exception("Failed to read event transcript for %s", session["id"])
-            has_events = True  # Unknown is not empty: prohibit legacy fallback.
+            has_events = await run_sync(_event_history_blocks_legacy_rescue, session["id"])
     if not messages and not has_events and not store_parse_failed:
         if sdk_session_id:
             logger.warning(
@@ -1051,6 +1051,22 @@ async def get_session(
 
     logger.debug(f"Returning session {session_id} with {len(messages)} messages")
     return session
+
+
+def _event_history_blocks_legacy_rescue(session_id: str) -> bool:
+    """On a failed event read, independently confirm a pre-event legacy chat.
+
+    Local appends, backfills and peer mirrors maintain the durable seq counter.
+    Rewinds are append-only: even an empty projected transcript has a nonzero
+    counter. Only zero permits rescue; an unreadable counter stays fail-closed.
+    """
+    from app.db.session_events import get_max_seq
+
+    try:
+        return get_max_seq(session_id) != 0
+    except Exception:
+        logger.exception("Failed to check event history for %s", session_id)
+        return True
 
 
 async def _legacy_db_messages(session_id: str) -> list:
@@ -1312,7 +1328,7 @@ async def get_live_session(
             messages, has_events = await run_sync(load_event_messages, session_id)
         except Exception:
             logger.exception("Failed to read event transcript for live %s", session_id)
-            has_events = True
+            has_events = await run_sync(_event_history_blocks_legacy_rescue, session_id)
     if include_messages and not messages and not has_events and not store_parse_failed:
         from app.core.db_message_loader import load_messages_from_db
         try:
