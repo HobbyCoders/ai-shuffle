@@ -39,8 +39,10 @@ HARNESS_REMINDER_OPENERS = (
     "# Memory\n",
     # app.core.environment.TURN_ENV_HEADER
     "Environment facts that change while a session runs",
-    # app.core.away_mode CONTEXT_NOTE, ASSISTANT_WORK_NOTE, REPORTED_AWAY_NOTE
+    # app.core.away_mode CONTEXT_NOTE, OWNER_BACK_NOTE, ASSISTANT_WORK_NOTE,
+    # REPORTED_AWAY_NOTE
     "The owner is away. Do not ask questions",
+    "The owner is back. Away mode is OFF.",
     "The owner's assistant started this chat.",
     "Your final reply goes back to the owner's assistant automatically",
     # app.core.assistant_confirm note lines

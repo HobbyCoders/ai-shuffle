@@ -56,7 +56,7 @@ def test_turn_environment_note_is_removed():
     assert strip_harness_reminders(_note(note, MEMORY)) == PROMPT
 
 
-@pytest.mark.parametrize("name", ["CONTEXT_NOTE", "ASSISTANT_WORK_NOTE", "REPORTED_AWAY_NOTE"])
+@pytest.mark.parametrize("name", ["CONTEXT_NOTE", "OWNER_BACK_NOTE", "ASSISTANT_WORK_NOTE", "REPORTED_AWAY_NOTE"])
 def test_away_notes_are_removed(name):
     from app.core import away_mode
 

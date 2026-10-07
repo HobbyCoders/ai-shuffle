@@ -99,3 +99,57 @@ async def test_release_pending_questions_answers_waiting_requests():
         released = await away_mode.release_pending_questions("s1")
     assert released == 1
     assert respond.await_args.args[2] == {"Which track?": "Internal testing (Recommended)", "Tag version?": "v1.2.4"}
+
+
+@pytest.fixture
+def mode_chat(mock_db):
+    from app.db import database
+
+    database.create_profile("away-agent", "Agent", None, {"model": "sonnet"})
+    database.create_session("away-chat", "away-agent")
+    return "away-chat"
+
+
+def test_never_delivered_away_does_not_get_a_cancellation(mode_chat):
+    from app.db import database
+
+    assert away_mode.turn_note(mode_chat) is None
+    database.set_session_run_binding(mode_chat, away_mode=True)
+    assert away_mode.turn_note(mode_chat) == away_mode.CONTEXT_NOTE
+    # A diagnostic preview is not delivery. Neither is toggling twice while idle.
+    database.set_session_run_binding(mode_chat, away_mode=False)
+    assert away_mode.turn_note(mode_chat) is None
+
+
+def test_receipts_are_idempotent_across_replay_and_repeated_transitions(mode_chat):
+    from app.db import database, session_events
+
+    for n in range(2):
+        database.set_session_run_binding(mode_chat, away_mode=True)
+        away_mode.record_context_delivery(mode_chat, away_mode.turn_note(mode_chat), f"on-{n}")
+        database.set_session_run_binding(mode_chat, away_mode=False)
+        note = away_mode.turn_note(mode_chat)
+        assert away_mode.OWNER_BACK_NOTE in note
+        away_mode.record_context_delivery(mode_chat, note, f"off-{n}")
+        # Late duplicate output from an old turn must not resurrect its mode.
+        away_mode.record_context_delivery(mode_chat, away_mode.CONTEXT_NOTE, f"on-{n}")
+        away_mode.record_context_delivery(mode_chat, note, f"off-{n}")
+        assert away_mode.turn_note(mode_chat) is None
+    assert len([e for e in session_events.get_events(mode_chat)
+                if e["event_type"] == away_mode._CONTEXT_EVENT]) == 4
+
+
+def test_worker_inherited_away_has_its_own_cancellation_receipt(mode_chat):
+    from app.db import database
+
+    database.create_session("away-worker", "away-agent", parent_session_id=mode_chat, is_worker=True)
+    database.set_session_run_binding(mode_chat, away_mode=True)
+    note = away_mode.turn_note("away-worker")
+    assert note == away_mode.CONTEXT_NOTE
+    away_mode.record_context_delivery("away-worker", note, "worker-on")
+    database.set_session_run_binding(mode_chat, away_mode=False)
+    note = away_mode.turn_note("away-worker")
+    assert note == away_mode.OWNER_BACK_NOTE
+    assert away_mode.turn_note(mode_chat) is None, "parent never received the Away instruction"
+    away_mode.record_context_delivery("away-worker", note, "worker-off")
+    assert away_mode.turn_note("away-worker") is None

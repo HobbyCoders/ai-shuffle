@@ -337,6 +337,10 @@ class HarnessAdapter(ProviderAdapter):
         # Fluid turn source for the next send_query/send_resume; see
         # set_turn_source. Reset to "user" after each submit.
         self._next_turn_source: str = "user"
+        # Only observed model output acknowledges an Away transition. Merely
+        # rendering a note, accepting a submit or compacting must not consume it.
+        self._pending_away_note: str | None = None
+        self._pending_away_turn: str | None = None
         # Who sent the running turn's ``/compact`` ("user" or "app"), or None
         # when the turn is not one. Labels the delegated leg's compaction card.
         self._compact_requested_by: Optional[str] = None
@@ -1609,6 +1613,10 @@ class HarnessAdapter(ProviderAdapter):
         await self._engine.submit(UserTurn(
             content=cast(Any, content), source=source,
         ))
+        # Set after acceptance: a concurrent/rejected submit must not replace
+        # the running turn's snapshot. The engines reject overlapping turns.
+        self._pending_away_note = note
+        self._pending_away_turn = None
 
     def set_turn_source(self, app_source: Optional[str]) -> None:
         """Name what starts the next turn, as an app ``turns.source``.
@@ -1889,6 +1897,16 @@ class HarnessAdapter(ProviderAdapter):
             await asyncio.to_thread(assert_proactive_allowed,
                                     self._options.extra["assistant_proactive"],
                                     self._options.extra.get("app_session_id"))
+        # Resume normally replays the exact saved request, without a fresh
+        # user node. After Away ends that would replay the old Away instruction
+        # too. Append the cancellation only in this case, leaving the unfinished
+        # request in history and ordinary retries byte-identical as before.
+        from app.core.away_mode import OWNER_BACK_NOTE
+
+        note = await asyncio.to_thread(self._away_note)
+        if note and OWNER_BACK_NOTE in note:
+            await self.send_query("Resume the unfinished request above, using the current Away mode.")
+            return
         self._mark_turn_floor()
         await self._engine.submit(Resume(source=self._take_turn_source()))
 
@@ -2006,6 +2024,29 @@ class HarnessAdapter(ProviderAdapter):
             ):
                 # The card's meter-basis "after" needs the overhead (#1907).
                 await self._load_persisted_context_overhead()
+
+            if type(event).__name__ == "TurnStarted":
+                self._pending_away_turn = event.turn_id
+            if (
+                self._pending_away_note
+                and self._pending_away_turn == getattr(event, "turn_id", None)
+                and (type(event).__name__ == "BlockStart" or (
+                    type(event).__name__ == "TurnComplete"
+                    and getattr(event, "num_model_calls", 0) > 0
+                ))
+            ):
+                try:
+                    from app.core.away_mode import record_context_delivery
+
+                    app_id = self._resolve_app_session_id()
+                    if app_id:
+                        await asyncio.to_thread(
+                            record_context_delivery, app_id,
+                            self._pending_away_note, event.turn_id,
+                        )
+                    self._pending_away_note = None
+                except Exception:  # Retry the receipt on later output.
+                    logger.warning("[HarnessAdapter] Away delivery receipt failed", exc_info=True)
 
             for translated in self._translate(event):
                 if isinstance(translated, PermissionRequestEvent) and self._can_use_tool:

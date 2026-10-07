@@ -11,6 +11,9 @@ as the permission mode. While it is on:
   confirmation) is NOT granted. It is deferred with a clear result instead of
   waiting on a card nobody is watching. Away mode never widens permissions.
 * Each turn carries a short reminder telling the model the owner is away.
+  After an Away instruction was delivered, the first model turn with Away off
+  explicitly cancels it, even if compaction or a restart hid the old reminder.
+  Read-only previews and slash commands do not acknowledge that cancellation.
 
 Chats the owner's assistant starts with StartSession get Away-style handling
 without the flag (:func:`assistant_work`): their questions are answered the
@@ -23,8 +26,10 @@ is deferred exactly as Away mode defers it. Nothing more is ever granted.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+import uuid
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -41,6 +46,21 @@ CONTEXT_NOTE = (
     "reverse).\n"
     "</system-reminder>"
 )
+
+OWNER_BACK_NOTE = (
+    "<system-reminder>\n"
+    "The owner is back. Away mode is OFF. This supersedes every earlier Away "
+    "reminder, including Away rules copied into a compaction summary or saved "
+    "session notes. Questions are allowed again in ordinary chats: ask when "
+    "clarification or approval is needed instead of taking an Away default. "
+    "Do not add a 'Decisions made for you' table unless the owner explicitly "
+    "asks for one. This cancels only Away mode, not separate assistant-started "
+    "work instructions or permission requirements.\n"
+    "</system-reminder>"
+)
+
+# Durable delivery receipts live outside the model's compactable transcript.
+_CONTEXT_EVENT = "away.context_delivered"
 
 DEFERRED_MESSAGE = (
     "Owner away; deferred. This action needs the owner's approval and Away mode "
@@ -165,7 +185,71 @@ def _mode_note(session_id: Optional[str]) -> Optional[str]:
         if ((start or {}).get("payload") or {}).get("orchestration_report_device"):
             return CONTEXT_NOTE + "\n\n" + REPORTED_AWAY_NOTE
         return CONTEXT_NOTE
-    return ASSISTANT_WORK_NOTE if assistant_work(session_id) else None
+    notes = []
+    if session_id:
+        try:
+            if _last_delivered_away(session_id):
+                notes.append(OWNER_BACK_NOTE)
+        except Exception:
+            logger.warning("Away context read failed for %s", session_id, exc_info=True)
+    if assistant_work(session_id):
+        notes.append(ASSISTANT_WORK_NOTE)
+    return "\n\n".join(notes) if notes else None
+
+
+def _last_delivered_away(session_id: str) -> bool:
+    """Read-only, so previews and compact hooks cannot consume a transition.
+
+    Before receipts existed, the original user nodes still contain the Away
+    reminder even when their rendered history has been folded into a summary.
+    This session-scoped fallback covers those sessions without treating a chat
+    which merely had its flag toggled as having received an Away instruction.
+    """
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT payload FROM session_events WHERE session_id=%s "
+            "AND event_type=%s ORDER BY seq DESC LIMIT 1",
+            (session_id, _CONTEXT_EVENT),
+        )
+        row = cursor.fetchone()
+        if row:
+            payload = row["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            return payload.get("away") is True
+        cursor.execute(
+            "SELECT 1 FROM fluid_session_nodes n JOIN sessions s "
+            "ON n.session_id=s.sdk_session_id WHERE s.id=%s "
+            "AND n.message->>'role'='user' AND n.message::text LIKE %s LIMIT 1",
+            (session_id, "%The owner is away. Do not ask questions%"),
+        )
+        return cursor.fetchone() is not None
+
+
+def record_context_delivery(session_id: str, note: str, turn_id: str) -> None:
+    """Acknowledge the exact note sent, only once model output is observed.
+
+    No output (spawn failure, blocked hook, rejected submit) leaves the note
+    pending. A crash before this receipt may repeat the cancellation, never
+    silently lose it. Stable event IDs make output/event replay idempotent.
+    """
+    away = CONTEXT_NOTE in note
+    if not away and OWNER_BACK_NOTE not in note:
+        return
+    # Record every delivered Away turn, even when its mode matches the latest
+    # receipt (or legacy transcript). Skipping that turn's stable ID lets a
+    # late replay append its old mode after the owner-back cancellation.
+    from app.db import session_events
+
+    session_events.append_events(session_id, [{
+        "id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"away-context:{session_id}:{turn_id}")),
+        "type": _CONTEXT_EVENT,
+        "turn_id": turn_id,
+        "payload": {"away": away},
+    }])
 
 
 def _labels(question: Dict[str, Any]) -> List[str]:

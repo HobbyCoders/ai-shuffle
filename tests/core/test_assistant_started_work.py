@@ -297,3 +297,17 @@ async def test_started_chat_in_away_mode_defers_instead_of_routing(home):
     database.set_session_run_binding(new_id, away_mode=True)
     assert approvals.assistant_route(new_id) is None
     assert away_mode.turn_note(new_id) == away_mode.CONTEXT_NOTE
+
+
+async def test_away_off_cancels_only_away_not_assistant_started_autonomy(home):
+    home_id, _ = home
+    new_id = json.loads((await call(home_id, "start", start_args())).text)["session_id"]
+    database.set_session_run_binding(new_id, away_mode=True)
+    away_mode.record_context_delivery(new_id, away_mode.turn_note(new_id), "started-on")
+    database.set_session_run_binding(new_id, away_mode=False)
+    note = away_mode.turn_note(new_id)
+    assert away_mode.OWNER_BACK_NOTE in note and away_mode.ASSISTANT_WORK_NOTE in note
+    assert away_mode.answers_questions(new_id)
+    assert approvals.assistant_route(new_id) is not None
+    away_mode.record_context_delivery(new_id, note, "started-off")
+    assert away_mode.turn_note(new_id) == away_mode.ASSISTANT_WORK_NOTE
