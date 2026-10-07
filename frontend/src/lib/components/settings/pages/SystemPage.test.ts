@@ -82,6 +82,7 @@ const sw = (name: string) => screen.getByRole('switch', { name }) as HTMLButtonE
 
 const mainRevision = '02e97673a';
 const publicationRefusal = `2 behind; check for updates; publish edge first if none is offered. Edge refused ${mainRevision}: dispatch CI and Build worker source on main.`;
+const refusalEvidence = { revision: mainRevision, reason: 'dispatch CI and Build worker source on main.' };
 const unpublishedExplanation = /The newest main revision is not published as an edge worker update yet/;
 
 async function openDeployReport(worker: Record<string, unknown>, originMain: string | null = mainRevision) {
@@ -96,19 +97,27 @@ async function openDeployReport(worker: Record<string, unknown>, originMain: str
 }
 
 it('shows unpublished main only for a current-main edge publication refusal and renders the full reason', async () => {
-	await openDeployReport({ online: true, channel: 'edge', behind: 2, action: publicationRefusal });
+	await openDeployReport({ online: true, channel: 'edge', behind: 2, action: publicationRefusal, edge_publication_refusal: refusalEvidence });
 	expect(screen.getByText(unpublishedExplanation)).toBeTruthy();
 	expect(document.querySelector('.st-update-results .st-status')?.textContent).toContain(publicationRefusal);
 	expect(document.querySelector('.st-update-results .st-status')?.textContent).toContain('Build worker source on main.');
 });
 
+it('uses structured evidence independently of readable action wording', async () => {
+	await openDeployReport({ online: true, channel: 'edge', behind: 2, action: 'Readable next step without the old marker.', edge_publication_refusal: refusalEvidence });
+	expect(screen.getByText(unpublishedExplanation)).toBeTruthy();
+	expect(document.querySelector('.st-update-results .st-status')?.textContent).toContain('Readable next step without the old marker.');
+});
+
 it.each([
-	['current', { online: true, channel: 'edge', behind: 0, action: 'up to date' }],
+	['current', { online: true, channel: 'edge', behind: 0, action: 'up to date', edge_publication_refusal: refusalEvidence }],
 	['behind without publication evidence', { online: true, channel: 'edge', behind: 2, action: '2 behind; check for updates; publish edge first if none is offered' }],
-	['stable', { online: true, channel: 'stable', behind: 2, action: '2 behind; waits for a stable release (worker follows stable)' }],
-	['offline', { online: false, channel: 'edge', behind: 2, action: publicationRefusal }],
-	['unknown comparison', { online: true, channel: 'edge', behind: null, action: publicationRefusal }],
-	['refusal for an older main revision', { online: true, channel: 'edge', behind: 2, action: publicationRefusal.replace(mainRevision, 'old123456') }]
+	['stable', { online: true, channel: 'stable', behind: 2, action: publicationRefusal, edge_publication_refusal: refusalEvidence }],
+	['older backend with prose only', { online: true, channel: 'edge', behind: 2, action: publicationRefusal }],
+	['offline', { online: false, channel: 'edge', behind: 2, action: publicationRefusal, edge_publication_refusal: { revision: mainRevision, reason: 'refused' } }],
+	['unknown comparison', { online: true, channel: 'edge', behind: null, action: publicationRefusal, edge_publication_refusal: refusalEvidence }],
+	['no refusal', { online: true, channel: 'edge', behind: 2, action: publicationRefusal, edge_publication_refusal: null }],
+	['refusal for an older main revision', { online: true, channel: 'edge', behind: 2, action: publicationRefusal, edge_publication_refusal: { ...refusalEvidence, revision: 'old123456' } }]
 ])('does not infer unpublished main from a %s worker', async (_name, worker) => {
 	await openDeployReport(worker);
 	expect(screen.queryByText(unpublishedExplanation)).toBeNull();
@@ -116,7 +125,7 @@ it.each([
 });
 
 it('does not infer unpublished main when the main revision is unknown', async () => {
-	await openDeployReport({ online: true, channel: 'edge', behind: 2, action: publicationRefusal }, null);
+	await openDeployReport({ online: true, channel: 'edge', behind: 2, action: publicationRefusal, edge_publication_refusal: refusalEvidence }, null);
 	expect(screen.queryByText(unpublishedExplanation)).toBeNull();
 });
 

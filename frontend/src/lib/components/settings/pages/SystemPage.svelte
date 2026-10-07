@@ -114,14 +114,14 @@
 	let deployOpen = $state(false);
 	let deployLoading = $state(false);
 	// Being behind (even with an idle update check) does not prove a publication
-	// gap. The backend appends this current-main refusal only while the edge
-	// gate's refusal has not been superseded by a successful publication.
+	// gap. Only structured current-main gate evidence proves a refusal; older
+	// backends safely omit it. Successful publication supersedes that evidence.
 	const unpublishedEdgeMain = $derived.by(() => {
 		const report = deploy;
 		if (deployLoading || deployError || !report?.origin_main) return false;
 		return report.workers.some((worker) =>
 			worker.online && worker.channel === 'edge' && (worker.behind ?? 0) > 0 &&
-			worker.action?.includes(`. Edge refused ${report.origin_main}:`)
+			worker.edge_publication_refusal?.revision === report.origin_main
 		);
 	});
 

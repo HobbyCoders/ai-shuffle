@@ -7,6 +7,13 @@
 import { api, getErrorMessage } from '$lib/api/client';
 import type { UpdateResultRow } from './updates-state.svelte';
 
+/** Explicit current-main gate evidence; absent on older workers/backends. */
+export interface EdgePublicationRefusal {
+	/** Same short revision format as DeployReport.origin_main. */
+	revision: string;
+	reason: string;
+}
+
 export interface DeployWorker {
 	label: string;
 	is_self?: boolean;
@@ -17,6 +24,7 @@ export interface DeployWorker {
 	behind?: number | null;
 	action?: string;
 	reason?: string | null;
+	edge_publication_refusal?: EdgePublicationRefusal | null;
 }
 
 export interface DeployReport {

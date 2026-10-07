@@ -57,6 +57,7 @@ def test_drift_without_a_change(repo):
     unraid, gaming = report["workers"]
     assert unraid["behind"] == 2 and unraid["short"] == shas["a"][:9]
     assert "2 behind" in unraid["action"]
+    assert unraid["edge_publication_refusal"] is None  # GitHub is unavailable.
     assert gaming["behind"] == 0 and gaming["action"] == "up to date"
     assert report["android"] is None and report["change"] is None
     assert report["summary"] == "Live on: Unraid ✗ · DesktopWorker ✓"
@@ -227,10 +228,16 @@ def test_publish_edge_first_names_the_refused_gate_and_dispatch_commands(repo, m
             f"{shas['c'][:9]}: Combined main tree was not tested by PR CI; edge publication needs "
             "owner-dispatched CI on main. CI missing, pending, or unsuccessful: .github/workflows/ci-backend.yml; "
             "Dispatch on main: gh workflow run ci-backend.yml --ref main")
+        assert unraid["edge_publication_refusal"] == {
+            "revision": report["origin_main"],
+            "reason": message.strip().replace(":\n", ": ").replace("\n", "; "),
+        }
         assert gaming["action"] == "up to date"
+        assert gaming["edge_publication_refusal"] is None
         # Drift without a change carries the same next step; the lookup is cached.
         drift = ds.assess([_row("Unraid", shas["a"])], repo=root, refresh=False)
         assert drift["workers"][0]["action"].endswith("gh workflow run ci-backend.yml --ref main")
+        assert drift["workers"][0]["edge_publication_refusal"] == unraid["edge_publication_refusal"]
     assert len(calls) == 3
 
 
@@ -246,6 +253,49 @@ def test_publish_edge_first_without_a_refusal_stays_plain(repo, monkeypatch, pub
         report = ds.assess([_row("Unraid", shas["a"], offered=shas["b"][:12])], commit=shas["c"],
                            repo=root, refresh=False)
     assert report["workers"][0]["action"] == "publish edge first (merged after the latest published build)"
+    assert report["workers"][0]["edge_publication_refusal"] is None
+
+
+@pytest.mark.parametrize("scenario", ["refused", "published", "no refusal", "stable", "current", "offline", "unknown"])
+def test_api_serializes_real_current_main_refusal(repo, monkeypatch, scenario):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from app.api.auth import require_admin
+    from app.api.settings_updates import updates_router
+
+    root, shas = repo
+    monkeypatch.setattr(ds, "_edge_refusals", {})
+    monkeypatch.setattr(ds, "find_repo", lambda: root)
+    monkeypatch.setattr(ds, "_refresh", lambda repo: None)
+    row = _row("Unraid", shas["a"], is_self=True)
+    if scenario == "stable":
+        row["channel"] = "stable"
+    elif scenario == "current":
+        row["revision"] = shas["c"]
+    elif scenario == "offline":
+        row["online"] = False
+    elif scenario == "unknown":
+        row["revision"] = None
+    monkeypatch.setattr(ds, "collect_workers", AsyncMock(return_value=[row]))
+    notes = [] if scenario == "no refusal" else [{"title": ds.EDGE_REFUSAL_TITLE, "message": "Dispatch CI on main."}]
+    run_gh, calls = _gate_api(shas["c"], notes, published=scenario == "published")
+    app = FastAPI()
+    app.include_router(updates_router, prefix="/settings")
+    app.dependency_overrides[require_admin] = lambda: "fixture owner"
+    with patch("app.core.github_service.github_service._run_gh", side_effect=run_gh):
+        response = TestClient(app).get("/settings/application-updates/deploy-status")
+    assert response.status_code == 200
+    report = response.json()
+    worker = report["workers"][0]
+    assert report["origin_main"] == shas["c"][:9]
+    if scenario == "refused":
+        assert worker["edge_publication_refusal"] == {"revision": report["origin_main"], "reason": "Dispatch CI on main."}
+        assert worker["action"].endswith(f". Edge refused {shas['c'][:9]}: Dispatch CI on main.")
+        assert calls[0][1].startswith(f"repos/HobbyCoders/ai-shuffle/commits/{shas['c']}/")
+    else:
+        assert worker["edge_publication_refusal"] is None
+    if scenario in ("stable", "current", "offline", "unknown"):
+        assert calls == []
 
 
 def test_edge_refusal_title_matches_the_gate():

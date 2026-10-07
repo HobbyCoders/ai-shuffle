@@ -20,7 +20,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,13 @@ MAIN = "origin/main"
 FETCH_TTL = 120
 _fetched: Dict[str, float] = {}
 _OFFER_PHASES = ("available", "downloading", "ready")
+
+
+class EdgePublicationRefusal(TypedDict):
+    """Explicit gate evidence for the same short revision as ``origin_main``."""
+
+    revision: str
+    reason: str
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +367,7 @@ def assess(rows: List[Dict[str, Any]], *, pr: Optional[int] = None, commit: Opti
                 "online": row["online"], "revision": full or row["revision"],
                 "short": (full or row["revision"] or "")[:9] or None, "app_version": row["app_version"],
                 "channel": row["channel"], "behind": None, "contains": None, "action": "unknown",
-                "reason": row["reason"]}
+                "reason": row["reason"], "edge_publication_refusal": None}
         if full:
             item["behind"] = _behind(repo, full)
         elif row["revision"] and not item["reason"]:
@@ -389,6 +396,8 @@ def assess(rows: List[Dict[str, Any]], *, pr: Optional[int] = None, commit: Opti
         if refusal:
             for item in workers:
                 if "publish edge first" in item["action"]:
+                    evidence: EdgePublicationRefusal = {"revision": main[:9], "reason": refusal}
+                    item["edge_publication_refusal"] = evidence
                     item["action"] += f". Edge refused {main[:9]}: {refusal}"
 
     android = None
