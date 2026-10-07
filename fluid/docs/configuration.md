@@ -410,6 +410,17 @@ What the child CLI is given, and what it is not:
   every `[mcp.<name>]` entry (rewritten into the CLI's `.mcp.json` shape).
   The CLI is started with `--strict-mcp-config`, so servers named in its own
   settings files are not connected.
+- The bundled bridge is `alwaysLoad`, but a host can keep individual tools
+  behind the CLI's ToolSearch with `bridge_deferred` (a predicate over
+  registry names): those tools are listed with `_meta`
+  `anthropic/alwaysLoad: false`, which Claude Code 2.1.285 and newer honours
+  per tool. The CLI then shows them by name only and loads a schema when the
+  model searches for it; names and calls are unchanged. An older CLI ignores
+  the key and loads every tool. AI Shuffle loads only
+  `DELEGATED_LOADED_TOOLS` (`app/core/provider/fluid_tool_bridge.py`), which
+  took the CLI's "MCP tools" row from 30k to 12k tokens;
+  `AI_SHUFFLE_PERF_BRIDGE_DEFER=0` on the worker loads everything again for
+  sessions started afterwards.
 - The `--resume` handle is kept per session. A handle the CLI rejects (its
   own store was pruned, or the id came from another machine) is dropped, the
   CLI restarted without it, and the turn replayed once into a fresh CLI

@@ -591,6 +591,7 @@ class HarnessAdapter(ProviderAdapter):
             claude_cmd = await asyncio.to_thread(_resolve_claude_cmd)
             delegated_blocked = _delegated_disallowed(options)
             from app.core.usage_limits import claude_mod_usage_sink
+            from app.core.provider.fluid_tool_bridge import delegated_bridge_deferred
 
             self._engine = DelegatedLoop(
                 store=store,
@@ -685,6 +686,10 @@ class HarnessAdapter(ProviderAdapter):
                 # back after a CLI compaction: mid-turn, the CLI folds the
                 # user message that carried it into its summary.
                 compact_context=self._compact_context_note,
+                # Bridged tools outside DELEGATED_LOADED_TOOLS reach the CLI
+                # deferred behind its ToolSearch; AI_SHUFFLE_PERF_BRIDGE_DEFER=0
+                # defers none.
+                bridge_deferred=delegated_bridge_deferred(),
             )
         else:
             provider_client, provider_http = await _build_provider_client(kind, options)
@@ -4394,9 +4399,12 @@ class HarnessAdapter(ProviderAdapter):
         # one that can load the CLI's deferred schemas, while the app's copy
         # only returns catalog names the CLI cannot call.
         #
-        # Deferral is native-only too: fluid's ToolSearch is what makes a
-        # deferred schema reachable, and the delegated leg's bundled socket
-        # server must keep serving every spec to the CLI.
+        # Registry deferral is native-only too: fluid's ToolSearch is what
+        # makes a deferred schema reachable, and the delegated leg's bundled
+        # socket server must keep serving every spec to the CLI. The delegated
+        # leg defers on the CLI's side instead: the bridge marks each tool
+        # outside DELEGATED_LOADED_TOOLS (fluid_tool_bridge) for the CLI's own
+        # ToolSearch, wired where the DelegatedLoop is built.
         skipped_builtins = set(
             NATIVE_SHADOWED_BUILTINS if native else DELEGATED_SHADOWED_BUILTINS
         )

@@ -95,6 +95,11 @@ _UNAUTHORIZED = {"error": "unauthorized: bridge token missing or wrong"}
 # STREAM_LINE_LIMIT, so the JSON line with its text still fits; an image that
 # would pass it is dropped and the result text says so.
 IMAGE_BUDGET_CHARS = 8 * 1024 * 1024
+# A listed tool's ``_meta`` key that overrides its server's ``alwaysLoad``.
+# Claude Code (2.1.285+) keeps a tool that sets it to false deferred behind
+# ToolSearch even though its ``--mcp-config`` server is ``alwaysLoad``; older
+# CLIs ignore the key and load the tool, the behaviour before tiering.
+ALWAYS_LOAD_META_KEY = "anthropic/alwaysLoad"
 # Where Claude Code puts the calling tool_use id in a tools/call request's
 # ``_meta`` (seen in 2.1.285). The child forwards it so the parent's hooks and
 # host tools can key on the same id the CLI's transcript uses.
@@ -153,6 +158,7 @@ async def serve_registry_socket(
     on_stop: OnStop | None = None,
     http_token: str | None = None,
     http_routes: dict[str, HttpRoute] | None = None,
+    deferred: Callable[[str], bool] | None = None,
 ) -> asyncio.AbstractServer:
     """Serve ``list``/``call`` requests against ``registry`` over a socket.
 
@@ -166,6 +172,10 @@ async def serve_registry_socket(
     ``tool_filter``, ``permissions`` and ``hooks`` gate the registry the way
     the native loop's dispatch path does (see ``_answer``); ``on_stop`` is
     told when a hook ends the turn.
+
+    ``deferred`` names the tools the CLI should keep behind its ToolSearch:
+    each is still listed and callable, with ``_meta`` ``anthropic/alwaysLoad``
+    false so only its name reaches the prompt until the model loads it.
 
     ``http_routes`` (with ``http_token``, required for them) maps a path to
     the handler of a JSON ``POST`` there; see ``_serve_http``.
@@ -204,7 +214,7 @@ async def serve_registry_socket(
                 resp = await _answer(
                     registry, ctx, req,
                     tool_filter=tool_filter, permissions=permissions, hooks=hooks,
-                    on_stop=on_stop,
+                    on_stop=on_stop, deferred=deferred,
                 )
                 writer.write((json.dumps(resp) + "\n").encode())
                 await writer.drain()
@@ -488,6 +498,7 @@ async def _answer(
     permissions: PermissionEngine | None = None,
     hooks: HookBus | None = None,
     on_stop: OnStop | None = None,
+    deferred: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     op = req.get("op")
     if op == "list":
@@ -502,10 +513,15 @@ async def _answer(
             # not merely refused when called.
             and _permitted(tool_filter, s.name)
         ]
-        return {"tools": [
-            {"name": s.name, "description": s.description, "input_schema": s.input_schema}
-            for s in specs
-        ]}
+        tools: list[dict[str, Any]] = []
+        for s in specs:
+            entry: dict[str, Any] = {
+                "name": s.name, "description": s.description, "input_schema": s.input_schema,
+            }
+            if deferred is not None and deferred(s.name):
+                entry["meta"] = {ALWAYS_LOAD_META_KEY: False}
+            tools.append(entry)
+        return {"tools": tools}
     if op == "call":
         name = req.get("name", "")
         if not _permitted(tool_filter, name):
@@ -586,6 +602,10 @@ def bundled_server_config(socket_path: str, token: str | None = None) -> dict[st
     claude CLI that has ToolSearch defers every MCP tool behind it (the
     default since 2.1.x, not threshold based), so the model would have to
     search before calling the tools its prompt names. Older CLIs drop the key.
+    It stays on even when the host defers some tools: those carry their own
+    ``_meta`` ``anthropic/alwaysLoad`` false in the tool list (see
+    ``serve_registry_socket``), which 2.1.285+ honours per tool, so a CLI too
+    old for the per-tool key still loads everything rather than nothing.
     """
     config: dict[str, Any] = {
         "type": "stdio",
@@ -695,13 +715,25 @@ def _field_name(model: Any, *candidates: str) -> str:
 
 
 def _tool_from_spec(types_mod: Any, spec: dict[str, Any]) -> Any:
-    """A ``mcp.types.Tool`` for one ``{"op":"list"}`` entry from the parent."""
+    """A ``mcp.types.Tool`` for one ``{"op":"list"}`` entry from the parent.
+
+    The entry's ``meta`` (the deferral marker) becomes the tool's ``_meta``.
+    An SDK whose Tool model takes no ``_meta`` gets the tool without it,
+    which the CLI then loads like any other.
+    """
     key = _field_name(types_mod.Tool, "inputSchema", "input_schema")
-    return types_mod.Tool(
-        name=spec["name"],
-        description=spec.get("description", ""),
-        **{key: spec.get("input_schema") or {"type": "object"}},
-    )
+    fields: dict[str, Any] = {
+        "name": spec["name"],
+        "description": spec.get("description", ""),
+        key: spec.get("input_schema") or {"type": "object"},
+    }
+    meta = spec.get("meta")
+    if isinstance(meta, dict) and meta:
+        try:
+            return types_mod.Tool(**fields, _meta=meta)
+        except Exception:  # noqa: BLE001 — a model without _meta: list it loaded
+            logger.debug("mcp Tool takes no _meta; %s is listed loaded", spec["name"])
+    return types_mod.Tool(**fields)
 
 
 def _reply_result(types_mod: Any, data: dict[str, Any]) -> Any:

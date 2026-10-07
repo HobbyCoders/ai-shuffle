@@ -3,7 +3,7 @@
 Driven against ``fake_claude.py``: a permission request the CLI withdraws
 (``control_cancel_request``), PreToolUse answers that fail closed, the hook
 events the loop raises itself (Notification, SessionEnd), the CLI version
-log line, and the bundled bridge's ``alwaysLoad``.
+log line, and the bundled bridge's ``alwaysLoad`` with its per-tool deferral.
 """
 
 from __future__ import annotations
@@ -36,8 +36,14 @@ from fluid.hooks.bus import (
     HookDecision,
 )
 from fluid.store.base import MemoryStore
-from fluid.tools.mcp.bundled_server import bundled_server_config
-from fluid.tools.registry import ToolCtx
+from fluid.tools.mcp.bundled_server import (
+    ALWAYS_LOAD_META_KEY,
+    _answer,
+    build_child_server,
+    bundled_server_config,
+    serve_registry_socket,
+)
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
 FAKE = str(Path(__file__).parent.parent / "fixtures" / "fake_claude.py")
 
@@ -347,4 +353,75 @@ async def test_the_cli_version_is_logged_once_per_spawn(tmp_path, caplog) -> Non
 
 @pytest.mark.parametrize("token", [None, "secret"])
 def test_the_bundled_bridge_is_always_loaded(token) -> None:
+    # Server-wide on, so a CLI without the per-tool key loads every tool
+    # rather than deferring them all; the host defers per tool (below).
     assert bundled_server_config("/tmp/b.sock", token)["alwaysLoad"] is True
+
+
+def _two_tool_registry() -> ToolRegistry:
+    reg = ToolRegistry()
+
+    async def handler(args: dict, ctx: ToolCtx) -> ToolOutcome:
+        return ToolOutcome(text="ran")
+
+    for name in ("Core", "Rare"):
+        reg.register_builtin(
+            ToolSpec(name=name, description=name, input_schema={"type": "object", "properties": {}}),
+            handler,
+        )
+    return reg
+
+
+async def test_deferred_tools_are_listed_with_always_load_false() -> None:
+    reg = _two_tool_registry()
+    listed = await _answer(reg, ToolCtx(), {"op": "list"}, deferred=lambda n: n == "Rare")
+    by_name = {t["name"]: t for t in listed["tools"]}
+    assert by_name["Rare"]["meta"] == {ALWAYS_LOAD_META_KEY: False}
+    assert "meta" not in by_name["Core"]
+    # No predicate: listed as before tiering.
+    plain = await _answer(reg, ToolCtx(), {"op": "list"})
+    assert not any("meta" in t for t in plain["tools"])
+    # Deferred only changes how the CLI shows it: still callable.
+    called = await _answer(reg, ToolCtx(), {"op": "call", "name": "Rare", "arguments": {}})
+    assert "ran" in str(called)
+
+
+async def _child_lists_and_calls(child: Any) -> tuple[list[Any], Any]:
+    """The child's tools/list and a tools/call of Rare, on either mcp generation."""
+    import inspect
+
+    import mcp.types as mt
+    from mcp.server import Server
+
+    if "on_list_tools" in inspect.signature(Server.__init__).parameters:
+        # mcp 2.x: the handlers registered on the constructor, driven directly.
+        listed = await child.get_request_handler("tools/list").handler(None, None)
+        params = mt.CallToolRequestParams.model_validate({"name": "Rare", "arguments": {}})
+        called = await child.get_request_handler("tools/call").handler(None, params)
+        return list(listed.tools), called
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    async with create_connected_server_and_client_session(child) as client:
+        listed = await client.list_tools()
+        return list(listed.tools), await client.call_tool("Rare", {})
+
+
+async def test_the_child_server_hands_the_marker_to_the_cli() -> None:
+    server = await serve_registry_socket(
+        _two_tool_registry(), "tcp:127.0.0.1:0", ToolCtx(), token="tok",
+        deferred=lambda n: n == "Rare",
+    )
+    try:
+        port = server.sockets[0].getsockname()[1]
+        child = build_child_server(f"tcp:127.0.0.1:{port}", "tok")
+        listed, called = await _child_lists_and_calls(child)
+    finally:
+        server.close()
+        await server.wait_closed()
+    tools = {
+        t.name: t.model_dump(by_alias=True, exclude_none=True, mode="json") for t in listed
+    }
+    # What the CLI reads off the wire: ``_meta`` on the deferred tool only.
+    assert tools["Rare"]["_meta"] == {ALWAYS_LOAD_META_KEY: False}
+    assert "_meta" not in tools["Core"]
+    assert "ran" in str(called.content)

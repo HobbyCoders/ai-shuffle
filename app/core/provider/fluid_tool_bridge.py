@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from types import SimpleNamespace
 from typing import Any, Callable, Iterable, List, Mapping, Optional
 
@@ -306,6 +307,77 @@ NATIVE_DEFERRED_TOOLS: frozenset[str] = frozenset({
     "UnsettleSession",
     "ArchiveSession",
 })
+
+
+# The delegated (Claude Code CLI) leg's always-loaded tier. Fluid's bundled
+# bridge serves every app tool to the CLI as ``mcp__fluid_bundled__<registry
+# name>``; with all ~90 schemas loaded they cost ~30.5k tokens of the CLI's
+# context on every request (its /context "MCP tools" row, Oct 2026). Only the
+# tools below stay loaded: the turn-by-turn operating surface the delegated
+# prompt names (Task and the background-task tools, the agent roster, memory
+# and session recall, ScheduleWakeup, the stand-ins for banned CLI tools,
+# peer-session coordination, hand-off and usage), the private-access pair the
+# access guidance tells the model to call first, and the chat lane's
+# attachment reader. Every other bridged tool (app-config, ai-tools, the rest
+# of chat-access, Android, cron, plugins, sidebar organisation, the app's
+# logs, and the Glob/Grep fallback, which
+# duplicates the CLI's own search tools wherever the CLI ships them) is
+# listed with ``_meta
+# anthropic/alwaysLoad: false``: the CLI shows it by name in its deferred-tools
+# list and its own ToolSearch loads the schema on demand. Names never change,
+# so permission rules, hooks and prompt references keep matching. An allowlist:
+# a tool added to the bridge later starts deferred. The tier is priced in
+# tests/core/test_delegated_bridge_tiers.py.
+DELEGATED_LOADED_TOOLS: frozenset[str] = frozenset({
+    "mcp__builtins__Task",
+    "mcp__builtins__Monitor",
+    "mcp__builtins__TaskGet",
+    "mcp__builtins__TaskOutput",
+    "mcp__builtins__TaskList",
+    "mcp__builtins__TaskStop",
+    "mcp__builtins__ScheduleWakeup",
+    "mcp__builtins__ListAgents",
+    "mcp__builtins__SendMessage",
+    # Stand-ins the prompt names for the CLI's banned RemoteTrigger and
+    # PushNotification (harness_adapter._DELEGATED_STAND_INS).
+    "mcp__builtins__RemoteTrigger",
+    "mcp__builtins__NotifyDevices",
+    "mcp__builtins__Remember",
+    "mcp__builtins__Recall",
+    "mcp__builtins__Forget",
+    "mcp__builtins__SessionSearch",
+    "mcp__builtins__SessionView",
+    # Peer-session coordination and worker hand-off: the host prompt tells
+    # the model to call these directly ("Use ListSessions", "Call
+    # HandOffSession once, then finish the turn").
+    "mcp__builtins__ListSessions",
+    "mcp__builtins__MessageSession",
+    "mcp__builtins__StartSession",
+    "mcp__builtins__HandOffSession",
+    # Read at every wake under the owner's usage rule.
+    "mcp__builtins__GetUsage",
+    "mcp__chat-access__RequestChatAccess",
+    "mcp__chat-access__ChatResources",
+    # app.core.attachment_read.DELEGATED_READ: the chat lane's only reader.
+    "mcp__attachments__Read",
+})
+
+# Kill switch: AI_SHUFFLE_PERF_BRIDGE_DEFER=0 (or false/off/no) puts every
+# bridged tool back on the always-loaded tier for sessions started afterwards.
+BRIDGE_DEFER_ENV = "AI_SHUFFLE_PERF_BRIDGE_DEFER"
+
+
+def delegated_bridge_deferred() -> Callable[[str], bool] | None:
+    """The delegated bridge's deferral predicate, or None when switched off.
+
+    The predicate takes a registry name and is True for every tool outside
+    :data:`DELEGATED_LOADED_TOOLS`. Read once per session build, so a session's
+    tool list stays stable across its turns.
+    """
+    flag = os.environ.get(BRIDGE_DEFER_ENV, "").strip().lower()
+    if flag in ("0", "false", "off", "no"):
+        return None
+    return lambda name: name not in DELEGATED_LOADED_TOOLS
 
 
 def defer_native_tools(registry: ToolRegistry) -> List[str]:

@@ -681,6 +681,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         claude_mod: bool | None = None,
         plan_usage_sink: Callable[[PlanUsageReport], Awaitable[None]] | None = None,
         compact_context: Callable[[], Awaitable[str | None]] | None = None,
+        bridge_deferred: Callable[[str], bool] | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -731,6 +732,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # callable returning the text, or None. The CLI folds the user
         # message that carried it into its summary when it compacts mid-turn.
         self.compact_context = compact_context
+        # Registry names of bridge tools the CLI keeps behind its ToolSearch
+        # (listed with ``_meta`` ``anthropic/alwaysLoad`` false): announced by
+        # name, schema loaded on demand, every one still callable. None loads
+        # them all, as before tiering.
+        self.bridge_deferred = bridge_deferred
         # The main conversation is compacting: set by the CLI's
         # ``system/status`` frame (``compacting``, then null), which it sends
         # before the SessionStart(compact) callback for the main thread only.
@@ -1336,6 +1342,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 on_stop=self._hook_stop,
                 http_token=self._mod_token if usage_route else None,
                 http_routes={USAGE_PATH: self._take_plan_usage} if usage_route else None,
+                deferred=self.bridge_deferred,
             )
             self._usage_route = usage_route
             if not use_unix:
