@@ -934,6 +934,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                 self._session = await self.store.create_session(
                     self._session_id, cwd=self.cwd
                 )
+            if self.ctx.session_id is None:
+                self.ctx.session_id = self._session.session_id
         return self._session
 
     @property
@@ -3505,6 +3507,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         the note; a subagent's fires the same callback and is left without."""
         source = str(data.get("source") or "startup")
         parts: list[str] = []
+        # The standalone CLI owns this guidance, not embedded bare loops.
+        # Deliver it as hook context (including after compaction), never as
+        # user text: slash commands and journal entries must remain verbatim.
+        if (
+            "cli_host" in self.ctx.extra
+            and "harness_state_root" not in self.ctx.extra
+            and not data.get("agent_id")
+        ):
+            from fluid.state import scratch_prompt
+
+            parts.append(scratch_prompt(self.ctx))
         if source == "compact":
             ledger = self._ledger_context()
             if ledger:

@@ -391,6 +391,31 @@ async def test_session_start_forwards_with_its_source(tmp_path) -> None:
     })]
 
 
+@pytest.mark.parametrize("source", ["startup", "resume", "compact"])
+async def test_cli_scratch_guidance_rides_session_hook_not_user_prompt(tmp_path, source):
+    from fluid.cli.host import CliHost
+    from fluid.config.model import HarnessConfig
+    from fluid.state import scratch_prompt
+
+    loop, written = await _loop(tmp_path)
+    host = CliHost(HarnessConfig(cwd=str(tmp_path)), loop.store).attach(loop)
+    try:
+        output = await _fire(loop, written, "SessionStart", {"source": source})
+        assert output == {"hookSpecificOutput": {
+            "hookEventName": "SessionStart", "additionalContext": scratch_prompt(loop.ctx),
+        }}
+        # Built-in CLI child agents must not inherit the parent's scratch path.
+        assert await _fire(loop, written, "SessionStart", {
+            "source": source, "agent_id": "child",
+        }) == {}
+        # App/embedding hosts provide their own guidance instead.
+        loop.ctx.extra["harness_state_root"] = tmp_path / "host-state"
+        assert await _fire(loop, written, "SessionStart", {"source": source}) == {}
+    finally:
+        await host.aclose()
+        await loop.aclose()
+
+
 async def test_session_start_after_compact_reinjects_the_ledger(tmp_path) -> None:
     """A compaction can drop the ledger from the CLI's summary; the
     compact-sourced SessionStart puts it back, rendered the way the native

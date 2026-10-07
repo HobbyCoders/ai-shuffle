@@ -8,8 +8,8 @@ user constrained" is not possible, so the model maintains it through this
 tool.
 
 Persistence is a per-session file (Note's pattern) under
-``<cwd>/.fluid/ledger/``. The engine appends the current ledger to every new
-user turn as a system-reminder block, so the newest copy always rides the
+the global per-project harness root (``ledger/``). The engine appends the
+current ledger to every new user turn as a system-reminder block, so the newest copy always rides the
 recent window — which compaction never digests — while older copies are
 stripped when their turns digest. Never-lossy without ever pinning anything in
 the cached prompt prefix.
@@ -98,13 +98,10 @@ SPEC = ToolSpec(
 _HEADER = "# Session ledger"
 
 
-def _ledger_path(cwd: str | None, session_id: str | None) -> Path:
-    return (
-        Path(cwd or ".")
-        / ".fluid"
-        / "ledger"
-        / f"{session_id or 'default'}.md"
-    )
+def _ledger_path(ctx: ToolCtx, session_id: str | None = None) -> Path:
+    from fluid.state import state_path
+
+    return state_path(ctx, "ledger", session_id)
 
 
 def _parse(text: str) -> dict[str, list[str]]:
@@ -134,12 +131,9 @@ def _render(sections: dict[str, list[str]]) -> str:
 def read_ledger(ctx: ToolCtx, session_id: str | None = None) -> str:
     """The current ledger text, or "" when empty/absent. ``session_id``
     overrides the ctx's (the engine knows the session before ctx does)."""
-    path = _ledger_path(ctx.cwd, session_id or ctx.session_id)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    return _render(_parse(text))
+    from fluid.state import read_state
+
+    return _render(_parse(read_state(ctx, "ledger", session_id)))
 
 
 # ``remove`` matches a whole entry, never a substring: one imprecise call must
@@ -232,12 +226,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # "rotate" is what models call the replace idiom; accept their word for it.
     if action == "rotate":
         action = "replace"
-    path = _ledger_path(ctx.cwd, ctx.session_id)
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError:
-        raw = ""
-    sections = _parse(raw)
+    path = _ledger_path(ctx)
+    from fluid.state import read_state
+
+    sections = _parse(read_state(ctx, "ledger"))
     if action in ("add", "remove", "replace"):
         section = str(input.get("section", "")).strip().lower()
         if section not in SECTIONS:
@@ -285,10 +277,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             )
         rendered = _render(sections)
         try:
-            if rendered:
-                _replace_text(path, rendered + "\n")
-            else:
-                path.unlink(missing_ok=True)
+            # Empty canonical state is a tombstone, not permission to restore
+            # an older cwd ledger on the next reminder or resume.
+            _replace_text(path, rendered + ("\n" if rendered else ""))
         except OSError as exc:
             return ToolOutcome(text=f"failed to write ledger: {exc}", is_error=True)
         # A delta, not the ledger: the engine already recites the ledger onto

@@ -1389,6 +1389,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._session = await self.store.create_session(
                     self._session_id, cwd=self.ctx.cwd
                 )
+            if self.ctx.session_id is None:
+                self.ctx.session_id = self._session.session_id
             # The HistoryExpand/HistorySearch builtins reach the store through
             # the ctx (same seam as tool_registry) — recall re-reads originals
             # that compaction evicted from the rendered view.
@@ -2451,6 +2453,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         reminder = self._deferred_catalog_reminder()
         if reminder is not None:
             content.append(Text(reminder))
+        # Standalone CLI context only: embedded bare loops own their prompt.
+        if "cli_host" in self.ctx.extra and "harness_state_root" not in self.ctx.extra:
+            from fluid.state import scratch_prompt
+
+            content.append(Text(scratch_prompt(self.ctx)))
         ledger = self._ledger_reminder()
         if ledger is not None:
             content.append(Text(ledger))

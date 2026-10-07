@@ -67,19 +67,20 @@ def agents(mock_db):
 
 @pytest.fixture(autouse=True)
 def report_dir(tmp_path, monkeypatch):
-    """Point sync Task report files at tmp_path instead of the real data dir.
-
-    Patches the cwd resolution the real ``task_report_dir`` reads, so the path
-    logic under test is the shipped one.
-    """
+    """Exercise shipped report routing with an isolated global projects root."""
     from app.core import project_resolver
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "fluid_projects_dir", str(tmp_path / "global"))
 
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     monkeypatch.setattr(
         project_resolver, "resolve_existing_cwd", lambda row: str(checkout)
     )
-    return checkout / ".fluid" / "task-reports"
+    from app.core.harness_state import project_state_root
+
+    return project_state_root(cwd=str(checkout)) / "task-reports"
 
 
 def _mk_session(database, session_id, profile_id, parent=None):
@@ -233,9 +234,8 @@ def test_sync_report_keeps_truncated_and_error_semantics(agents):
     assert "report_head" not in payload and "report_path" not in payload
 
 
-def test_sync_report_dir_prefers_the_callers_checkout(monkeypatch, tmp_path):
-    """The file must land where the parent's own Read already reaches — its
-    materialized checkout — not in an unrelated data dir."""
+def test_sync_report_dir_is_outside_the_callers_checkout(monkeypatch, tmp_path):
+    """The parent's cwd is project identity, never report storage."""
     from app.core import project_resolver
 
     checkout = tmp_path / "repo"
@@ -246,7 +246,11 @@ def test_sync_report_dir_prefers_the_callers_checkout(monkeypatch, tmp_path):
 
     directory = td.task_report_dir({"id": "s-1"})
 
-    assert directory == checkout / ".fluid" / "task-reports"
+    from app.core.harness_state import project_state_root
+
+    assert directory == project_state_root(cwd=str(checkout)) / "task-reports"
+    assert not directory.is_relative_to(checkout)
+    assert not (checkout / ".fluid").exists()
 
 
 def test_legacy_enabled_agents_restricts_dispatch(agents):

@@ -86,9 +86,11 @@ def test_fluid_native_reminder_blocks_are_removed():
     from fluid.tools.builtins.ledger import render_ledger_reminder
     from fluid.tools.builtins.note import render_notes_reminder
     from fluid.tools.builtins.tool_search import render_deferred_catalog
-    from fluid.tools.registry import ToolSpec
+    from fluid.tools.registry import ToolCtx, ToolSpec
+    from fluid.state import scratch_prompt
 
     blocks = [
+        scratch_prompt(ToolCtx(cwd="/", session_id="scratch-test")),
         render_deferred_catalog([ToolSpec(name="Lookup", description="d", input_schema={})]),
         render_ledger_reminder("- pinned"),
         render_notes_reminder("- step"),

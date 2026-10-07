@@ -27,7 +27,7 @@ This module adds:
 * modes: ``sync`` returns ``report_path``, ``report_chars`` and a bounded
   ``report_head``; ``background`` returns a ``BackgroundTaskReceipt`` with the
   worker session id and announces completion. Both write the report under the
-  parent's ``.fluid/task-reports/`` (:func:`write_task_report`). read-only
+  canonical global project root's ``task-reports/`` (:func:`write_task_report`). read-only
   targets (no file-writing tools) always go background, even when a call names
   a ``mode`` (:func:`_effective_task_mode`), and ``build_task_contract`` omits
   ``mode`` when every target is read-only. Others default to ``sync``.
@@ -86,11 +86,6 @@ _BACKGROUND_TASKS: set = set()
 #: report always lands in the report file; this head is the "did it work and
 #: roughly what happened" glance that decides whether to read further.
 SYNC_REPORT_HEAD_CHARS = 2_000
-
-#: Report files live under ``<parent cwd>/.fluid/task-reports/`` — the same
-#: ``.fluid`` infrastructure dir a checkout already carries for worktrees, and
-#: inside the tree the parent's own file tools already reach.
-_REPORT_DIR_PARTS = (".fluid", "task-reports")
 
 # ``None`` is a real provider binding (native Claude), so callers that know the
 # effective turn provider must be able to pass it distinctly from callers that
@@ -2115,25 +2110,18 @@ async def _dispatch_task_tool(
 
 
 def task_report_dir(caller_row: Optional[Mapping[str, Any]]) -> Path:
-    """Where this parent's Task reports land — sync and background alike.
+    """Global per-project report directory, shared by sync/background producers."""
+    from app.core.harness_state import project_state_root
 
-    The parent's already-materialized checkout when it has one — a report is
-    only useful if the parent's Read reaches it, and its cwd is the one tree
-    that is always reachable. Sessions with no checkout on this runner (bare
-    sessions, tests) fall back to the app data dir.
-    """
-    from app.core.config import settings
-
+    cwd = None
     if caller_row:
-        try:
-            from app.core import project_resolver
+        from app.core import project_resolver
 
+        try:
             cwd = project_resolver.resolve_existing_cwd(dict(caller_row))
-            if cwd:
-                return Path(cwd).joinpath(*_REPORT_DIR_PARTS)
-        except Exception:  # noqa: BLE001 — best-effort; the data dir still works
+        except Exception:  # noqa: BLE001 — a missing checkout still has global state
             logger.debug("task_dispatch: report cwd resolution failed", exc_info=True)
-    return settings.effective_data_dir.joinpath("fluid", *_REPORT_DIR_PARTS[1:])
+    return project_state_root(caller_row, cwd) / "task-reports"
 
 
 def write_task_report(
@@ -2156,7 +2144,9 @@ def write_task_report(
     try:
         directory = task_report_dir(caller_row)
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{worker_session_id or uuid.uuid4()}.md"
+        from fluid.state import safe_key
+
+        path = directory / f"{safe_key(worker_session_id or str(uuid.uuid4()))}.md"
         path.write_text(report, encoding="utf-8")
         return str(path.resolve())
     except Exception:  # noqa: BLE001 — never fail a completed dispatch on I/O

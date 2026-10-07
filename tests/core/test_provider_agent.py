@@ -433,9 +433,8 @@ def dispatch_env(monkeypatch, tmp_path):
     ``turn_scheduler.on_task_terminal`` (the caller wake) and the parent's
     resolved ``cwd``.
 
-    The cwd is a REAL tmp directory: a background dispatch now writes its
-    report under it, and a hard-coded "/repo/feat-x" would have the suite
-    creating directories at the filesystem root.
+    Both the checkout and global state root are disposable directories; reports
+    must never be written under the checkout.
     """
     from app.core import turn_manager as tm_mod
     from app.core import turn_scheduler as ts_mod
@@ -452,6 +451,8 @@ def dispatch_env(monkeypatch, tmp_path):
     fake_tm = _FakeTurnManager()
     checkout = tmp_path / "repo" / "feat-x"
     checkout.mkdir(parents=True)
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "fluid_projects_dir", str(tmp_path / "global"))
 
     def _update_session(session_id, **kwargs):
         updates.append({"session_id": session_id, **kwargs})
@@ -516,7 +517,8 @@ def dispatch_env(monkeypatch, tmp_path):
         branch_writes = branch_updates
         wakes = terminal_frames
         cwd = str(checkout)
-        report_dir = checkout / ".fluid" / "task-reports"
+        from app.core.harness_state import project_state_root
+        report_dir = project_state_root(cwd=str(checkout)) / "task-reports"
 
     return _Env()
 
@@ -1648,9 +1650,8 @@ class TestWorkerWakesItsCaller:
 
     def test_background_completion_writes_the_report_file(self, dispatch_env):
         """The retrieval seam. A background worker finishes long after the call
-        that launched it returned, so the file under the parent's own cwd is
-        the only place its report can still be read from — an audited parent
-        guessed exactly this path, found nothing, and redid the work."""
+        that launched it returned. The registry carries the absolute global
+        report path so the parent need not guess a checkout-local path."""
         from app.core.task_registry import task_registry
 
         outcome = _dispatch_bg()

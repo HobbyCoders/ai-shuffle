@@ -156,9 +156,13 @@ async def test_a_tool_call_surfaces_with_its_name_input_and_result(tmp_path) -> 
 
         path = await run.store.load_path(run.sid)
         assert [n.message.role for n in path] == ["user", "assistant", "user", "assistant"]
-        # The CLI got exactly the user's words as its turn.
+        # Embedded loops preserve the exact prompt on disk and on the wire;
+        # standalone scratch guidance belongs in SessionStart hook context.
+        assert path[0].message.text() == "list the files"
         [user] = run.stdin_frames("user")
-        assert user["message"]["content"] == [{"type": "text", "text": "list the files"}]
+        assert user["message"]["content"] == [
+            {"type": "text", "text": "list the files"},
+        ]
     finally:
         await run.aclose()
 

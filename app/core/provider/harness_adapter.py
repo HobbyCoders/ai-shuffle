@@ -1796,7 +1796,9 @@ class HarnessAdapter(ProviderAdapter):
         ctx.extra["auto_answer_questions"] = make_question_auto_answer(
             self._resolve_app_session_id
         )
-        return ctx
+        from app.core.harness_state import bind_state_context
+
+        return bind_state_context(ctx, self._resolve_app_session_id)
 
     def _turn_context_note(self) -> Optional[str]:
         """The turn's volatile context: environment facts, memory, Away mode.
@@ -1804,7 +1806,7 @@ class HarnessAdapter(ProviderAdapter):
         Blocking (a JSON read for the memory store), so callers hand it to a
         thread. Never raises: a turn is never worth losing over a reminder.
         """
-        blocks = [self._env_note(), self._memory_snapshot(), self._away_note()]
+        blocks = [self._env_note(), self._memory_snapshot(), self._away_note(), self._scratch_note()]
         present = [block for block in blocks if block]
         return "\n\n".join(present) if present else None
 
@@ -1833,9 +1835,26 @@ class HarnessAdapter(ProviderAdapter):
                 env = generate_turn_environment_note(branch=checkout_branch(cwd))
             except Exception:  # noqa: BLE001 — a reminder never fails a turn
                 logger.warning("[HarnessAdapter] compaction env note failed", exc_info=True)
-        blocks = [env, self._memory_snapshot(), self._away_note()]
+        blocks = [env, self._memory_snapshot(), self._away_note(), self._scratch_note()]
         present = [block for block in blocks if block]
         return "\n\n".join(present) if present else None
+
+    def _scratch_note(self) -> str:
+        from fluid.state import scratch_prompt
+        from fluid.tools.registry import ToolCtx
+
+        from app.core.harness_state import bind_state_context
+
+        try:
+            ctx = ToolCtx(
+                cwd=getattr(self._options, "cwd", None) or ".",
+                session_id=self._resolve_app_session_id(),
+            )
+            bind_state_context(ctx, self._resolve_app_session_id)
+            return scratch_prompt(ctx)
+        except Exception:  # a reminder never fails a turn
+            logger.warning("[HarnessAdapter] scratch context failed", exc_info=True)
+            return ""
 
     def _env_note(self) -> Optional[str]:
         """The volatile half of the app's <env> block for this turn.

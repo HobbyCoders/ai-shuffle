@@ -65,6 +65,28 @@ async def test_engine_journals_the_user_prompt_without_reminders(tmp_path, promp
     assert [e["text"] for e in users] == ["done"]
 
 
+@pytest.mark.asyncio
+async def test_cli_host_scratch_reminder_reaches_model_but_not_journal(tmp_path):
+    from fluid.cli.host import CliHost
+    from fluid.config.model import HarnessConfig
+    from fluid.state import scratch_dir
+
+    loop = _loop(tmp_path)
+    host = CliHost(HarnessConfig(cwd=str(tmp_path)), loop.store).attach(loop)
+    try:
+        await loop.submit(UserTurn(content="owner prompt"))
+        await loop.wait_turn()
+        nodes = await loop.store.load_path(loop.session_id)
+        text = nodes[0].message.text()
+        assert "# Harness scratch" in text
+        assert str(scratch_dir(loop.ctx)) in text
+        users = [e for e in SkillStore(tmp_path).journal_entries() if e["kind"] == "user"]
+        assert [e["text"] for e in users] == ["owner prompt"]
+    finally:
+        await host.aclose()
+        await loop.aclose()
+
+
 @pytest.mark.parametrize("prompt", [TERMINATED, UNTERMINATED], ids=["terminated", "unterminated"])
 def test_code_mode_journals_the_user_prompt_without_reminders(tmp_path, prompt) -> None:
     store = SkillStore(tmp_path)

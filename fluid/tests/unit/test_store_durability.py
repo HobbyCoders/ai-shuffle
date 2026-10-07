@@ -449,6 +449,7 @@ async def test_ledger_write_leaves_no_temp_file(tmp_path) -> None:
     ctx = ToolCtx(cwd=str(tmp_path), session_id="ses_l")
     out = await handler({"action": "add", "section": "state", "text": "step one"}, ctx)
     assert not out.is_error
-    ledger_dir = tmp_path / ".fluid" / "ledger"
+    from fluid.state import project_state_root
+    ledger_dir = project_state_root(ctx) / "ledger"
     assert [p.name for p in ledger_dir.iterdir()] == ["ses_l.md"]
     assert "step one" in (ledger_dir / "ses_l.md").read_text(encoding="utf-8")

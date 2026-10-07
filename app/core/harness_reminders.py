@@ -51,6 +51,7 @@ HARNESS_REMINDER_OPENERS = (
     "Waiting for the owner's decision.",
     # fluid native lane: ledger, notes, runtime facts, environment, catalog
     "Session ledger (",
+    "# Harness scratch\n",
     "Session notes (",
     "Runtime facts as of this message (",
     "Environment as of this message (",

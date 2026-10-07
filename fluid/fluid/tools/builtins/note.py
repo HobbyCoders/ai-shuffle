@@ -1,8 +1,8 @@
 """Note — external plan/notes file with recitation (Manus-style).
 
 Notes live OUTSIDE the model context in a per-session file under
-``<cwd>/.fluid/notes/``; every mutation returns the complete current notes so
-the plan is recited back into recent context (the part attention actually
+the global per-project harness root (``notes/``); every mutation returns the
+complete current notes so the plan is recited back into recent context (the part attention actually
 reads) instead of fading out mid-window. The engine also recites non-empty
 notes onto each new user turn (see :func:`read_notes` and the native loop's
 reminder plumbing), so a plan written once stays visible all session. Nothing
@@ -63,9 +63,10 @@ SPEC = ToolSpec(
 )
 
 
-def _notes_path(ctx: ToolCtx) -> Path:
-    session = ctx.session_id or "default"
-    return Path(ctx.cwd or ".") / ".fluid" / "notes" / f"{session}.md"
+def _notes_path(ctx: ToolCtx, session_id: str | None = None) -> Path:
+    from fluid.state import state_path
+
+    return state_path(ctx, "notes", session_id)
 
 
 def _read_notes(path: Path) -> str:
@@ -119,20 +120,18 @@ def _render(lines: list[str]) -> str:
 
 
 def _write_lines(path: Path, lines: list[str]) -> None:
-    if lines:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_render(lines) + "\n", encoding="utf-8")
-    else:
-        path.unlink(missing_ok=True)
+    # Keep an empty canonical tombstone so legacy notes cannot reappear.
+    from fluid.tools.builtins.ledger import _replace_text
+
+    _replace_text(path, _render(lines) + ("\n" if lines else ""))
 
 
 def read_notes(ctx: ToolCtx, session_id: str | None = None) -> str:
     """The current notes text, or "" when empty/absent. ``session_id``
     overrides the ctx's (the engine knows the session before ctx does)."""
-    path = _notes_path(
-        ToolCtx(cwd=ctx.cwd, session_id=session_id or ctx.session_id)
-    )
-    return _read_notes(path).strip()
+    from fluid.state import read_state
+
+    return read_state(ctx, "notes", session_id).strip()
 
 
 def render_notes_reminder(text: str) -> str:
@@ -144,8 +143,8 @@ def render_notes_reminder(text: str) -> str:
     )
 
 
-def _outcome(path: Path, prefix: str = "") -> ToolOutcome:
-    notes = _read_notes(path).strip()
+def _outcome(ctx: ToolCtx, prefix: str = "") -> ToolOutcome:
+    notes = read_notes(ctx)
     body = f"# Notes\n{notes}" if notes else "# Notes\n(empty)"
     return ToolOutcome(text=f"{prefix}\n{body}" if prefix else body)
 
@@ -216,7 +215,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             return ToolOutcome(
                 text="action=add requires text or texts", is_error=True
             )
-        existing = _parse_lines(_read_notes(path))
+        existing = _parse_lines(read_notes(ctx))
         try:
             _write_lines(path, existing + incoming)
         except OSError as exc:
@@ -228,7 +227,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             return ToolOutcome(
                 text="action=remove requires text or texts", is_error=True
             )
-        existing = _parse_lines(_read_notes(path))
+        existing = _parse_lines(read_notes(ctx))
         targets = {needle.lower() for needle in needles}
         removed = [line for line in existing if line.strip().lower() in targets]
         kept = [line for line in existing if line.strip().lower() not in targets]
@@ -253,9 +252,9 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             prefix += f"; no note read exactly {_quoted(missed)}"
     elif action == "clear":
         try:
-            path.unlink(missing_ok=True)
+            _write_lines(path, [])
         except OSError as exc:
             return ToolOutcome(text=f"failed to clear notes: {exc}", is_error=True)
     elif action != "list":
         return ToolOutcome(text=f"unknown action: {action}", is_error=True)
-    return _outcome(path, prefix)
+    return _outcome(ctx, prefix)

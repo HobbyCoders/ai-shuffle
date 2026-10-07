@@ -60,7 +60,8 @@ async def test_write_goes_through_temp_file_and_rename(tmp_path, monkeypatch) ->
     await ledger_handler(
         {"action": "add", "section": "decisions", "text": "keep this"}, ctx)
     before = read_ledger(ctx)
-    ledger_dir = tmp_path / ".fluid" / "ledger"
+    from fluid.state import project_state_root
+    ledger_dir = project_state_root(ctx) / "ledger"
     files_before = sorted(p.name for p in ledger_dir.iterdir())
 
     renames: list[tuple[str, str]] = []
@@ -69,12 +70,13 @@ async def test_write_goes_through_temp_file_and_rename(tmp_path, monkeypatch) ->
         renames.append((str(src), str(dst)))
         raise OSError("disk full")
 
+    real_replace = os.replace
     monkeypatch.setattr(os, "replace", failing_replace)
     out = await ledger_handler(
         {"action": "add", "section": "decisions", "text": "lost"}, ctx)
     assert out.is_error and "failed to write ledger" in out.text
     assert len(renames) == 1 and renames[0][0].endswith(".tmp")
-    monkeypatch.undo()
+    monkeypatch.setattr(os, "replace", real_replace)
     assert read_ledger(ctx) == before
     assert "lost" not in read_ledger(ctx)
     assert sorted(p.name for p in ledger_dir.iterdir()) == files_before

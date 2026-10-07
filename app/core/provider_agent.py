@@ -1911,8 +1911,9 @@ def _persist_worker_report(
 
     Shares ONE writer with the sync path
     (:func:`app.core.task_dispatch.write_task_report`) so both modes land in
-    ``<parent cwd>/.fluid/task-reports/<task_id>.md`` — the path a parent can
-    actually reach.
+    the canonical global project root's ``task-reports/<task_id>.md``.
+    The absolute receipt is readable through the parent's normal Read tool;
+    no arbitrary filesystem permission grant is added.
 
     Strictly best-effort: a failure returns ``(None, len(report))`` and the
     completion proceeds untouched. Import is lazy because ``task_dispatch``
