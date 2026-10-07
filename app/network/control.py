@@ -669,6 +669,12 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
     session_id = str(body.get("session_id") or "")
     row = _require_owned(session_id)
     payload = dict(body.get("payload") or {})
+    from app.core import session_handoff
+    if session_handoff.drop_resume(session_id, payload):
+        # An agent hand-off's resume (#2012) never restarts a chat the owner
+        # stopped here; their next message is the newer instruction.
+        logger.info("Dropped the hand-off resume of %s: the chat is stopped", session_id)
+        return {"turn_id": None, "session_id": session_id, "dropped": "stopped"}
     blob_ids = payload.get("upload_blob_ids") or []
     uploads = body.get("uploads") or []
     if blob_ids or uploads:

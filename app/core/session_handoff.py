@@ -31,6 +31,11 @@ as the Stop button does, then moves. The rules (#1819):
 * Pending wake-ups move with the chat (``app.network.handoff``).
 * The outcome and any message the new worker did not take are recorded in the
   chat on the worker that owns it after the move (the ``note`` operation).
+* A move the AGENT queued (HandOffSession) resumes the chat on the new worker
+  (#2012): after the held messages, one system-authored turn carrying the
+  hand-off note (``_resume_turn``). The owner's own move does not, nor does a
+  move the owner stopped. A new worker on an older version (``move_wakes``
+  below 2) gets no resume turn, and the outcome says so.
 * A queued move is a ``session_moves`` row (``app.db.session_moves``), so a
   restart of this worker resumes it (``resume_queued``) with its held
   messages instead of dropping it.
@@ -64,8 +69,13 @@ FORWARD_WINDOW_S = 300
 FORWARD_RETRY_S = 2.0
 FORWARD_RETRY_MAX_S = 30.0
 # What the new worker's "note" operation accepts in a hand-off row's data.
-NOTE_STATUSES = ("moved", "held_failed")
-NOTE_KEYS = ("status", "worker", "count", "unconfirmed", "messages", "reason")
+NOTE_STATUSES = ("moved", "held_failed", "resume_failed")
+NOTE_KEYS = ("status", "worker", "count", "unconfirmed", "messages", "reason", "resume")
+# An agent's hand-off resumes the chat on the new worker (#2012): one turn
+# after the held messages, marked with this payload key and sent with a
+# command id built from the move's request time, so a resend is dropped there.
+RESUME_PAYLOAD = "handoff_resume"
+RESUME_COMMAND_PREFIX = "handoff-resume-"
 # A peer's note is kept to this: the first NOTE_MESSAGES texts, each cut to
 # NOTE_MESSAGE_CHARS, and at most NOTE_DATA_CHARS of JSON in all.
 NOTE_MESSAGES = 50
@@ -420,7 +430,81 @@ async def _tell(session_id: str, owner: str, content: str, data: Dict[str, Any])
     return False
 
 
-async def deliver_held(session_id: str, target_id: str, label: str) -> None:
+def _self_label() -> str:
+    from app.network import engine
+
+    try:
+        ctx = engine.context()
+    except Exception:  # noqa: BLE001 — a label only
+        ctx = None
+    fallback = "the previous worker"
+    return _label(ctx.device_id, fallback) if ctx is not None else fallback
+
+
+def resume_plan(session_id: str, pending: PendingHandoff, owner: str) -> Optional[str]:
+    """Whether the move of ``session_id`` to ``owner`` resumes the chat there (#2012).
+
+    ``None``: no resume is due (the owner's own move, a cancelled one, or a
+    chat the owner stopped). ``"send"``: one resume turn follows the held
+    messages. ``"unsupported"`` / ``"unknown"``: due, but ``owner`` runs an
+    older version (or has not reported its capabilities), so the chat stays
+    idle there as before and the outcome says so. Sync (capability lookup).
+    """
+    if pending.by != "agent" or pending.cancelled:
+        return None
+    from app.core.task_registry import task_registry
+
+    if task_registry.is_user_stopped(session_id):
+        return None
+    from app.network.handoff import resume_carry
+
+    try:
+        carry = resume_carry(owner)
+    except Exception:  # noqa: BLE001 — unknown: never risk a second turn
+        logger.warning("Could not read the capabilities of %s", owner, exc_info=True)
+        carry = None
+    if carry is None:
+        return "unknown"
+    return "send" if carry else "unsupported"
+
+
+def _resume_turn(session_id: str, pending: PendingHandoff, label: str) -> Dict[str, Any]:
+    """The turn that resumes an agent's hand-off on ``label`` (``control.submit_turn`` kwargs).
+
+    A server-originated ``wakeup`` turn: it neither lifts a Stop nor counts as
+    the owner's message. It runs under the chat's own agent and binding.
+    Sync (DB).
+    """
+    from app.db import database
+
+    session = database.get_session(session_id) or {}
+    source = _self_label()
+    prompt = f"[hand-off] Moved from {source} to {label} at the owner's request."
+    if pending.note:
+        prompt += f" Your hand-off note: {pending.note}"
+    prompt += (" Continue the work from where you left off. If it was already complete, "
+               "stop after a brief acknowledgement; do not invent new work.")
+    return {"prompt": prompt, "source": "wakeup", "profile_id": session.get("profile_id"),
+            "project_id": session.get("project_id"),
+            "payload": {RESUME_PAYLOAD: {"from": source, "note": pending.note}},
+            "command_id": f"{RESUME_COMMAND_PREFIX}{pending.requested_at:.6f}"}
+
+
+def is_resume_turn(payload: Any) -> bool:
+    return isinstance(payload, dict) and bool(payload.get(RESUME_PAYLOAD))
+
+
+def drop_resume(session_id: str, payload: Any) -> bool:
+    """New owner: whether a forwarded resume turn is dropped (the chat is stopped here)."""
+    if not is_resume_turn(payload):
+        return False
+    from app.core.task_registry import task_registry
+
+    return task_registry.is_user_stopped(session_id)
+
+
+async def deliver_held(session_id: str, target_id: str, label: str,
+                       resume: Optional[Dict[str, Any]] = None) -> None:
     """Send the held messages of ``session_id``, oldest first, to ``target_id``.
 
     ``target_id`` owns the chat now. Each message stays in the
@@ -431,19 +515,57 @@ async def deliver_held(session_id: str, target_id: str, label: str) -> None:
     gets each message once; one whose reply was lost is named in the chat as
     unconfirmed instead of being sent twice. A refusal, or no answer within
     FORWARD_WINDOW_S, ends the delivery and the chat names what was not sent.
+
+    ``resume`` (``_resume_turn``) is sent last, once every held message is
+    there, with the same retries; the row is kept until then, so a restart
+    resends it and the new worker drops the repeat.
     """
     if session_id in _delivering:
         return
     _delivering.add(session_id)
     try:
-        await _deliver(session_id, target_id, label)
+        await _deliver(session_id, target_id, label, resume)
     except Exception:  # noqa: BLE001 — the rest stay stored; the next boot resends them
         logger.warning("Could not send the held messages of %s to %s", session_id, target_id, exc_info=True)
     finally:
         _delivering.discard(session_id)
 
 
-async def _deliver(session_id: str, target_id: str, label: str) -> None:
+def _waited(deadline: float, delay: float) -> Optional[str]:
+    """The reason to give up when retrying after ``delay`` would pass ``deadline``."""
+    if time.time() + delay <= deadline:
+        return None
+    minutes = max(1, round(FORWARD_WINDOW_S / 60))
+    return f" (it did not answer for {minutes} minute{'' if minutes == 1 else 's'})"
+
+
+async def _send_resume(session_id: str, target_id: str, resume: Dict[str, Any], deadline: float) -> str:
+    """Send the resume turn to ``target_id``. Returns why it was not sent ("" when it was).
+
+    Only a worker that drops a repeated ``command_id`` gets one
+    (``resume_plan``), so a send whose reply was lost is retried.
+    """
+    from app.network import control
+
+    delay = FORWARD_RETRY_S
+    while True:
+        try:
+            await control.submit_turn(target_id, session_id, **resume)
+            return ""
+        except control.ControlRefused as exc:
+            return f" ({exc})" if str(exc) else ""
+        except Exception:  # noqa: BLE001 — MaybeApplied or unreachable: retried
+            logger.warning("Could not send the hand-off resume of %s to %s", session_id, target_id,
+                           exc_info=True)
+        reason = _waited(deadline, delay)
+        if reason is not None:
+            return reason
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, FORWARD_RETRY_MAX_S)
+
+
+async def _deliver(session_id: str, target_id: str, label: str,
+                   resume: Optional[Dict[str, Any]] = None) -> None:
     from app.network import control
 
     resend_safe = await asyncio.to_thread(_resend_safe, target_id)
@@ -478,13 +600,22 @@ async def _deliver(session_id: str, target_id: str, label: str) -> None:
             await asyncio.to_thread(_delivered, session_id, entry)
             delay = FORWARD_RETRY_S
             continue
-        if time.time() + delay > deadline:
-            minutes = max(1, round(FORWARD_WINDOW_S / 60))
-            reason = f" (it did not answer for {minutes} minute{'' if minutes == 1 else 's'})"
+        waited = _waited(deadline, delay)
+        if waited is not None:
+            reason = waited
             break
         await asyncio.sleep(delay)
         delay = min(delay * 2, FORWARD_RETRY_MAX_S)
+    resume_reason: Optional[str] = None
+    if resume is not None and await asyncio.to_thread(_first_held, session_id) is None:
+        # Every held message is there: the resume runs after them. The row
+        # stays until it is sent, so a restart resends it (dropped there).
+        resume_reason = await _send_resume(session_id, target_id, resume, deadline)
     unsent = await asyncio.to_thread(_take_rest, session_id)
+    if resume_reason:
+        await _tell(session_id, target_id,
+                    f"Could not continue this chat on {label}{resume_reason}. Send a message there to continue.",
+                    {"status": "resume_failed", "worker": label, "reason": resume_reason.strip(" ()")})
     parts = []
     if unsent:
         parts.append(f"Could not send {_messages(len(unsent))} to {label}{reason}: {_quoted(unsent)}. "
@@ -494,6 +625,8 @@ async def _deliver(session_id: str, target_id: str, label: str) -> None:
                      "Check there before sending them again.")
     if not parts:
         return
+    if resume is not None and resume_reason is None:
+        parts.append("This chat was not resumed there.")
     content = " ".join(parts)
     told = await _tell(session_id, target_id, content, {
         "status": "held_failed", "worker": label, "count": len(unsent), "unconfirmed": len(unconfirmed),
@@ -672,11 +805,27 @@ def _owner_now(session_id: str) -> Optional[str]:
 async def _moved(session_id: str, pending: PendingHandoff, owner: str) -> str:
     """The chat now runs on ``owner``: say so there, then send it the held messages."""
     label = pending.label if owner == pending.target_id else _label(owner)
+    plan = await asyncio.to_thread(resume_plan, session_id, pending, owner)
     outcome = f"Handed off to {label}. Open this chat there to continue on the same branch."
-    await _tell(session_id, owner, outcome, {"status": "moved", "worker": label})
+    if plan == "send":
+        outcome = f"Handed off to {label}. This chat continues there on the same branch."
+    elif plan == "unsupported":
+        outcome += f" {label} runs an older version that cannot resume it by itself: send a message there."
+    elif plan == "unknown":
+        outcome += f" {label} has not reported that it can resume it by itself: send a message there."
+    data: Dict[str, Any] = {"status": "moved", "worker": label}
+    if plan:
+        data["resume"] = plan
+    await _tell(session_id, owner, outcome, data)
     with _hold_lock:
         pending.holding = False
-    await deliver_held(session_id, owner, label)
+    resume = None
+    if plan == "send":
+        try:
+            resume = await asyncio.to_thread(_resume_turn, session_id, pending, label)
+        except Exception:  # noqa: BLE001 — the held messages still go
+            logger.warning("Could not prepare the hand-off resume of %s", session_id, exc_info=True)
+    await deliver_held(session_id, owner, label, resume)
     return outcome
 
 
@@ -945,10 +1094,15 @@ async def resume_queued() -> int:
                                      float(row["requested_at"]), by=str(row.get("requested_by") or "agent"),
                                      expires_at=float(row["expires_at"]))
             if owner is not None:
-                # The move finished before the restart: its held messages go there.
+                # The move finished before the restart: its held messages go
+                # there, then an agent hand-off's resume (dropped there if it
+                # already took it).
                 pending.holding = False
                 label = pending.label if owner == pending.target_id else _label(owner)
-                _spawn(deliver_held(session_id, owner, label))
+                resume = None
+                if await asyncio.to_thread(resume_plan, session_id, pending, owner) == "send":
+                    resume = await asyncio.to_thread(_resume_turn, session_id, pending, label)
+                _spawn(deliver_held(session_id, owner, label, resume))
                 continue
             if time.time() >= pending.expires_at:
                 await _expire(session_id, pending)

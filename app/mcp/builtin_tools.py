@@ -2819,9 +2819,11 @@ def create_builtin_tools_server(
         "can continue there (e.g. 'wrap up and hand off to DesktopWorker'). When "
         "this turn and its background work end, the app commits and pushes the "
         "branch, syncs the target's checkout and context, and moves the session; "
-        "the outcome is posted in the chat. Call it once, then finish the turn "
-        "with a short summary of where the work stands. Pass the worker's name "
-        "as shown in the app (or its device id) and an optional one-line note.",
+        "the outcome is posted in the chat, and the chat then resumes on the new "
+        "worker by itself with your note as its prompt. Call it once, then finish "
+        "the turn with a short summary of where the work stands. Pass the "
+        "worker's name as shown in the app (or its device id) and an optional "
+        "one-line note saying what to continue there.",
         {
             "type": "object",
             "properties": {

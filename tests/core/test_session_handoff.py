@@ -786,10 +786,12 @@ async def test_the_outcome_is_recorded_on_the_worker_that_now_runs_the_chat():
             patch("app.db.database.get_session", return_value={"id": "s1"}), \
             patch("app.network.control.call", call):
         await sh.run_pending("s1")
+    # DesktopWorker has not reported its capabilities: no resume, and the row says so (#2012).
     call.assert_awaited_once_with("dev-gaming", "session-move", {
         "session_id": "s1", "op": "note",
-        "content": "Handed off to DesktopWorker. Open this chat there to continue on the same branch.",
-        "data": {"status": "moved", "worker": "DesktopWorker"}})
+        "content": ("Handed off to DesktopWorker. Open this chat there to continue on the same branch. DesktopWorker has "
+                    "not reported that it can resume it by itself: send a message there."),
+        "data": {"status": "moved", "worker": "DesktopWorker", "resume": "unknown"}})
     assert [c.args[2]["status"] for c in record.await_args_list] == ["started"]
 
 
@@ -803,6 +805,12 @@ async def test_the_note_operation_records_the_old_owners_row_here():
         await sh.handle_control({"session_id": "s1", "op": "note", "content": "Handed off to DesktopWorker.",
                                  "data": {"status": "moved", "worker": "DesktopWorker", "other": "x"}}, "dev-unraid")
         record.assert_awaited_once_with("s1", "Handed off to DesktopWorker.", {"status": "moved", "worker": "DesktopWorker"})
+        # #2012: the resume plan and a refused resume reach the new owner's chat.
+        await sh.handle_control({"session_id": "s1", "op": "note", "content": "Could not continue.",
+                                 "data": {"status": "resume_failed", "worker": "DesktopWorker", "reason": "x",
+                                          "resume": "send"}}, "dev-unraid")
+        assert record.await_args.args[2] == {"status": "resume_failed", "worker": "DesktopWorker", "reason": "x",
+                                             "resume": "send"}
         with pytest.raises(ValueError, match="Unknown hand-off note"):
             await sh.handle_control({"session_id": "s1", "op": "note", "content": "x",
                                      "data": {"status": "queued"}}, "dev-unraid")
@@ -955,3 +963,234 @@ async def test_rule6_a_restart_keeps_the_original_ten_minute_limit():
         assert await _settle(lambda: record.await_count and record.await_args.args[2]["status"] == "timeout",
                              rounds=300)
     assert _queued_prompts() == ["one"]
+
+
+# ---------------------------------------------------------------------------
+# #2012: an agent's hand-off resumes the chat on the new worker.
+# ---------------------------------------------------------------------------
+
+GAMING_RESUME = {"device_id": "dev-gaming", "device_name": "DesktopWorker", "capabilities": {"move_wakes": 2}}
+UNRAID_ROW = {"device_id": "dev-unraid", "device_name": "Unraid", "capabilities": {"move_wakes": 2}}
+
+
+def _runners(gaming):
+    return lambda device: {"dev-gaming": gaming, "dev-unraid": UNRAID_ROW}.get(device)
+
+
+def _gaming():
+    """``control.call`` as DesktopWorker answers it; this test's database plays it."""
+    from app.network import control
+    turns_sent, notes = [], []
+
+    async def call(device, action, body, **kwargs):
+        if action == "session-move" and body.get("op") == "note":
+            notes.append(body)
+            return {"recorded": True}
+        if action == "turns":
+            turns_sent.append(body)
+            return await control._turns(body, "dev-unraid")
+        raise control.ControlRefused("Unknown move operation")
+    return call, turns_sent, notes
+
+
+def _queued(session_id="s1"):
+    from app.db import turns
+    return [(turn["source"], turn["prompt"]) for turn in turns.get_queued_turns(session_id)]
+
+
+def _moving(gaming, call, move=None):
+    """Patches for a move to DesktopWorker that lands, seen from Unraid."""
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+    stack = ExitStack()
+    stack.enter_context(patch.object(sh, "_busy", return_value=False))
+    stack.enter_context(patch.object(sh, "_open_prompt", return_value=False))
+    stack.enter_context(patch.object(sh, "FORWARD_RETRY_S", 0))
+    stack.enter_context(patch("app.api.sessions.move_session_to", move or AsyncMock()))
+    stack.enter_context(patch("app.network.runners.find", side_effect=_runners(gaming)))
+    context = SimpleNamespace(device_id="dev-unraid", member=lambda device: SimpleNamespace(kind="worker", status="active"))
+    stack.enter_context(patch("app.network.engine.context", return_value=context))
+    stack.enter_context(patch("app.network.control.call", call))
+    return stack
+
+
+RESUME_PROMPT = ("[hand-off] Moved from Unraid to DesktopWorker at the owner's request. Your hand-off note: "
+                 "tests pass; next: wire the UI Continue the work from where you left off. If it was already "
+                 "complete, stop after a brief acknowledgement; do not invent new work.")
+
+
+async def test_2012_an_agent_hand_off_resumes_the_chat_there_with_its_note():
+    """(a) No held messages: exactly one resume turn, carrying the note."""
+    from app.db import session_moves
+    _chat()
+    call, turns_sent, notes = _gaming()
+    sh.request("s1", "DesktopWorker", "tests pass; next: wire the UI")
+    with _moving(GAMING_RESUME, call), patch.object(sh, "_record", AsyncMock()) as record:
+        outcome = await sh.run_pending("s1")
+    assert outcome == "Handed off to DesktopWorker. This chat continues there on the same branch."
+    assert [body["data"] for body in notes] == [{"status": "moved", "worker": "DesktopWorker", "resume": "send"}]
+    assert [c.args[2]["status"] for c in record.await_args_list] == ["started"]
+    assert len(turns_sent) == 1
+    body = turns_sent[0]
+    assert body["source"] == "wakeup" and body["prompt"] == RESUME_PROMPT
+    assert body["profile_id"] == "default" and "owner_send" not in body
+    assert body["command_id"].startswith(sh.RESUME_COMMAND_PREFIX)
+    assert body["payload"] == {sh.RESUME_PAYLOAD: {"from": "Unraid", "note": "tests pass; next: wire the UI"}}
+    assert _queued() == [("wakeup", RESUME_PROMPT)]
+    assert session_moves.get("s1") is None
+
+
+async def test_2012_held_messages_go_first_then_the_resume():
+    """(b) The owner's held messages run before the resume, in order."""
+    _chat()
+    call, turns_sent, _notes = _gaming()
+    sh.request("s1", "DesktopWorker", "tests pass; next: wire the UI")
+    sh.hold("s1", "user", {"prompt": "one", "profile_id": "default"})
+    sh.hold("s1", "queue", {"prompt": "two", "profile_id": "default"})
+    with _moving(GAMING_RESUME, call), patch.object(sh, "_record", AsyncMock()):
+        await sh.run_pending("s1")
+    assert [body["prompt"] for body in turns_sent] == ["one", "two", RESUME_PROMPT]
+    assert _queued() == [("user", "one"), ("queue", "two"), ("wakeup", RESUME_PROMPT)]
+
+
+async def test_2012_the_owners_own_move_of_an_idle_chat_gets_no_resume():
+    """(c) A move from the worker selector stays as it was: no turn there."""
+    _chat()
+    call, turns_sent, notes = _gaming()
+    move = AsyncMock()
+    idle = _Busy()
+    idle.idle = True
+    with _moving(GAMING_RESUME, call, move), patch.object(sh, "busy_state", idle), \
+            patch.object(sh, "_record", AsyncMock()):
+        await sh.queue_move("s1", "DesktopWorker")
+        assert await _settle(lambda: move.await_count and notes)
+        assert await _settle(lambda: "s1" not in sh._running)
+    assert turns_sent == [] and _queued() == []
+    assert notes[0]["content"] == "Handed off to DesktopWorker. Open this chat there to continue on the same branch."
+    assert notes[0]["data"] == {"status": "moved", "worker": "DesktopWorker"}
+
+
+async def test_2012_a_cancelled_or_failed_hand_off_gets_no_resume():
+    """(d) Neither a cancelled nor a failed hand-off resumes anything."""
+    _chat()
+    call, turns_sent, _notes = _gaming()
+    submit = AsyncMock()
+    sh.request("s1", "DesktopWorker", "halfway")
+    assert sh.cancel("s1")
+    with _moving(GAMING_RESUME, call), patch("app.network.control.submit_turn", submit), \
+            patch.object(sh, "_record", AsyncMock()):
+        assert await sh.run_pending("s1") is None
+    sh.request("s1", "DesktopWorker", "halfway")
+    with _moving(GAMING_RESUME, call, AsyncMock(side_effect=HTTPException(409, "DesktopWorker went offline"))), \
+            patch("app.network.control.submit_turn", submit), patch.object(sh, "_record", AsyncMock()) as record:
+        outcome = await sh.run_pending("s1")
+    assert outcome == "Hand-off to DesktopWorker failed: DesktopWorker went offline"
+    assert record.await_args.args[2] == {"status": "failed", "worker": "DesktopWorker"}
+    submit.assert_not_awaited()
+    assert turns_sent == [] and _queued() == []
+    # A pending hand-off cancelled after it was read never resumes either.
+    pending = sh.PendingHandoff("dev-gaming", "DesktopWorker", "", time.time(), by="agent")
+    pending.cancelled = True
+    with patch("app.network.runners.find", side_effect=_runners(GAMING_RESUME)):
+        assert sh.resume_plan("s1", pending, "dev-gaming") is None
+
+
+async def test_2012_a_chat_the_owner_stopped_is_not_resumed():
+    """A Stop here before the move ends, or there before the resume lands, wins."""
+    from app.core.task_registry import task_registry
+    _chat()
+    call, turns_sent, notes = _gaming()
+    sh.request("s1", "DesktopWorker", "halfway")
+    task_registry.mark_user_stopped("s1")
+    try:
+        with _moving(GAMING_RESUME, call), patch.object(sh, "_record", AsyncMock()):
+            await sh.run_pending("s1")
+        assert turns_sent == []
+        assert notes[0]["data"] == {"status": "moved", "worker": "DesktopWorker"}
+        # The new worker drops a resume that reaches a chat stopped there.
+        from app.network import control
+        resume = {"session_id": "s1", "source": "wakeup", "prompt": "resume", "profile_id": "default",
+                  "payload": {sh.RESUME_PAYLOAD: {"from": "Unraid", "note": ""}}, "command_id": "handoff-resume-1"}
+        reply = await control._turns(resume, "dev-unraid")
+        assert reply["dropped"] == "stopped" and reply["turn_id"] is None
+        assert _queued() == []
+        # Any other forwarded turn is unaffected by this rule.
+        assert not sh.drop_resume("s1", {"forwarded_by_device": "dev-unraid"})
+    finally:
+        task_registry.clear_user_stop("s1")
+
+
+async def test_2012_an_older_or_silent_new_worker_degrades_and_the_outcome_says_so():
+    """(e) No resume capability there: the move still lands, as before, with a note why."""
+    expected = {
+        "unsupported": (GAMING_NEW, ("Handed off to DesktopWorker. Open this chat there to continue on the same "
+                                     "branch. DesktopWorker runs an older version that cannot resume it by itself: "
+                                     "send a message there.")),
+        "unknown": ({"device_id": "dev-gaming", "device_name": "DesktopWorker"},
+                    ("Handed off to DesktopWorker. Open this chat there to continue on the same branch. DesktopWorker has "
+                     "not reported that it can resume it by itself: send a message there.")),
+    }
+    for plan, (gaming, text) in expected.items():
+        sh._pending.clear()
+        _chat(f"s-{plan}")
+        call, turns_sent, notes = _gaming()
+        sh.request(f"s-{plan}", "DesktopWorker", "halfway")
+        with _moving(gaming, call), patch.object(sh, "_record", AsyncMock()):
+            outcome = await sh.run_pending(f"s-{plan}")
+        assert outcome == text
+        assert notes[0]["data"] == {"status": "moved", "worker": "DesktopWorker", "resume": plan}
+        assert turns_sent == [] and _queued(f"s-{plan}") == []
+
+
+async def test_2012_a_resume_whose_reply_was_lost_or_resent_after_a_restart_runs_once():
+    """The resume reuses one command_id, so the new worker drops every repeat."""
+    from app.db import session_moves
+    from app.network import control
+    _chat()
+    sends = []
+
+    async def call(device, action, body, **kwargs):
+        if action == "session-move":
+            return {"recorded": True}
+        sends.append(body)
+        with patch("app.network.control.owner_of", return_value=None):  # DesktopWorker owns it there
+            reply = await control._turns(body, "dev-unraid")
+        if len(sends) == 1:
+            raise control.MaybeApplied("DesktopWorker did not answer in time. It may still have been applied.")
+        return reply
+    sh.request("s1", "DesktopWorker", "halfway")
+    with _moving(GAMING_RESUME, call), patch.object(sh, "_record", AsyncMock()):
+        await sh.run_pending("s1")
+    assert len(sends) == 2 and sends[0]["command_id"] == sends[1]["command_id"]
+    assert [source for source, _prompt in _queued()] == ["wakeup"]
+    # The process died after the resume landed but before the row was cleared:
+    # the next boot resends it and the new worker drops the repeat.
+    session_moves.save("s1", target_id="dev-gaming", label="DesktopWorker", note="halfway", requested_by="agent",
+                       requested_at=float(sends[0]["command_id"][len(sh.RESUME_COMMAND_PREFIX):]),
+                       expires_at=time.time() + 600)
+    with _moving(GAMING_RESUME, call), patch("app.network.control.owner_of", return_value="dev-gaming"), \
+            patch.object(sh, "_record", AsyncMock()) as record:
+        assert await sh.resume_queued() == 0
+        assert await _settle(lambda: not sh._tasks)
+    assert len(sends) == 3 and sends[2]["command_id"] == sends[0]["command_id"]
+    assert [source for source, _prompt in _queued()] == ["wakeup"]
+    assert session_moves.get("s1") is None
+    record.assert_not_awaited()
+
+
+async def test_2012_a_resume_the_new_worker_refuses_is_reported_there():
+    from app.network import control
+    _chat()
+    notes = []
+
+    async def call(device, action, body, **kwargs):
+        if action == "session-move":
+            notes.append(body)
+            return {"recorded": True}
+        raise control.ControlRefused("This chat is archived")
+    sh.request("s1", "DesktopWorker", "halfway")
+    with _moving(GAMING_RESUME, call), patch.object(sh, "_record", AsyncMock()):
+        await sh.run_pending("s1")
+    assert notes[-1]["content"] == ("Could not continue this chat on DesktopWorker (This chat is archived). "
+                                    "Send a message there to continue.")
+    assert notes[-1]["data"] == {"status": "resume_failed", "worker": "DesktopWorker", "reason": "This chat is archived"}

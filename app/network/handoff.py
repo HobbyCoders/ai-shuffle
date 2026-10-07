@@ -101,6 +101,8 @@ def _idle(cursor, sid):
 # told which ones will not run (``uncarried_wakes``). ``move_wakes`` version 1
 # also means the receiver drops a repeated ``command_id`` on a forwarded turn
 # and accepts the ``note`` operation of ``session-move`` (session_handoff).
+# Version 2 also takes the turn that resumes a chat the agent handed off
+# (``resume_carry``, #2012) and drops it while the chat is stopped there.
 WAKE_COLUMNS = ("id", "prompt", "fire_at", "profile_id", "project_id", "reason", "model", "source")
 
 
@@ -123,6 +125,21 @@ def wake_carry(target):
 
 def carries_wakes(target):
     return wake_carry(target) is True
+
+
+def resume_carry(target):
+    """Whether ``target`` takes an agent hand-off's resume turn (``move_wakes`` 2+, #2012).
+
+    True when it does, False when it runs an older version, None when its
+    capabilities are not known yet. A version 2 receiver drops a resume turn
+    while the chat is stopped there; only then may the old owner send one.
+    """
+    from app.network import runners
+
+    capabilities = (runners.find(target) or {}).get("capabilities") or {}
+    if not capabilities:
+        return None
+    return int(capabilities.get("move_wakes") or 0) >= 2
 
 
 def wake_label(row):
