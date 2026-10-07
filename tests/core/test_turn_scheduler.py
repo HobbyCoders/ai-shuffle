@@ -2430,6 +2430,233 @@ async def test_a_wake_that_died_on_a_usage_limit_is_not_re_run(mock_db):
     execute.assert_not_awaited()
 
 
+
+
+@pytest.mark.parametrize("queued_before_failure", [False, True])
+async def test_connector_intake_cannot_release_missing_cwd_breaker(mock_db, tmp_path, queued_before_failure):
+    """Connector messages are unattended intake, not an explicit owner resume."""
+    from app.db import database
+    database.create_session("connector-blocked", "default")
+    failed = turns_db.enqueue_turn("connector-blocked", "unpark", profile_id="default")
+    turns_db.start_turn(failed["id"])
+    with patch.object(turn_scheduler, "kick"):
+        if queued_before_failure:
+            await turn_manager.submit_async("connector-blocked", "connector", prompt="incoming platform message")
+        assert turns_db.block_missing_cwd("connector-blocked", failed["id"], str(tmp_path / "gone"), "missing")
+        turns_db.settle_turn(failed["id"], "aborted", "error", "missing")
+        if not queued_before_failure:
+            assert await turn_manager.submit_async(
+                "connector-blocked", "connector", prompt="incoming platform message") is None
+    assert turns_db.get_cwd_failure("connector-blocked")
+    assert database.get_session("connector-blocked")["status"] == "failed"
+
+
+async def test_blocked_worker_keeps_distinct_completed_resume_report(mock_db, tmp_path):
+    from app.core.agent_messaging import finish_message_resume
+    from app.db import database
+
+    database.create_session("report-worker", "default")
+    database.create_session("report-owner", "default")
+    _settled_turn("report-owner", profile_id="default")
+    task_registry.start_task("report-owner", "report-worker", "agent", "Worker", tool_use_id="report-worker")
+    task_registry.mark_background_launch("report-owner", "report-worker")
+    done = _settled_turn("report-worker", profile_id="default", payload={"agent_message_reply_to": "report-owner"})
+    se_db.append_events("report-worker", [{"type": "assistant.text_delta", "turn_id": done["id"],
+                                           "payload": {"text": "legitimate previous report"}}])
+    failed = turns_db.enqueue_turn("report-worker", "unpark", profile_id="default")
+    turns_db.start_turn(failed["id"])
+    turns_db.block_missing_cwd("report-worker", failed["id"], str(tmp_path / "missing"), "missing")
+    turns_db.settle_turn(failed["id"], "aborted", "error", "missing")
+    with patch.object(turn_scheduler, "kick"), patch.object(turn_scheduler, "_kick_after_batch_window"):
+        await finish_message_resume("report-worker", turns_db.get_turn(done["id"]), "completed")
+        await finish_message_resume("report-worker", turns_db.get_turn(done["id"]), "completed")
+    (report,) = turns_db.get_queued_turns("report-owner")
+    assert report["prompt"].count("legitimate previous report") == 1
+    assert report["payload"]["pending_frames"][0]["agent_message_turn_id"] == done["id"]
+
+
+@pytest.mark.parametrize("report_to_parent", [False, True])
+async def test_missing_cwd_runtime_cycle_records_one_failure_and_finishes_resume(mock_db, tmp_path, report_to_parent):
+    """Two real runtimes/recorders, with only the successful model stream faked."""
+    from app.core import query_engine as qe, query_options
+    from app.db import database, notifications
+    from tests.core.helpers import make_pump, query_profile
+    from tests.core.query_engine_flow_harness import engine_patches
+
+    missing = tmp_path / "retired-checkout"
+    missing.mkdir()
+    broken, sibling = "runtime-broken", "runtime-sibling"
+    database.create_session("runtime-owner", "default")
+    _settled_turn("runtime-owner", profile_id="default")
+    for sid in (broken, sibling):
+        database.create_session(sid, "default", parent_session_id="runtime-owner")
+    recipient = "runtime-owner" if report_to_parent else sibling
+    if report_to_parent:
+        task_registry.start_task(recipient, broken, "agent", "Worker", tool_use_id=broken)
+        task_registry.mark_background_launch(recipient, broken)
+    task_registry.start_task(broken, sibling, "agent", "Sibling", tool_use_id=sibling)
+    task_registry.mark_background_launch(broken, sibling)
+    task_registry.start_task(sibling, broken, "agent", "Worker", tool_use_id=broken)
+    task_registry.mark_background_launch(sibling, broken)
+    task_registry.complete_task(sibling, broken, "completed", summary="original run")
+    parked = turns_db.enqueue_turn(
+        broken, "agent_message", prompt="wait for sibling", profile_id="default",
+        overrides={"cwd": str(missing)}, payload={"agent_message_reply_to": recipient},
+    )
+    other = turns_db.enqueue_turn(
+        sibling, "agent_message", prompt="report back", profile_id="default",
+        payload={"agent_message_reply_to": broken},
+    )
+    session_runtime.register_scheduler(turn_scheduler.on_turn_settled)
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(turn_scheduler, "kick"))
+        stack.enter_context(patch.object(turn_scheduler, "_kick_after_batch_window"))
+        stack.enter_context(patch.object(session_runtime, "start_idle_reader"))
+        stack.enter_context(patch.object(session_runtime, "stop_idle_reader", new=AsyncMock()))
+        stack.enter_context(patch("app.core.turn_finalize.persist_turn_end_state", new=AsyncMock()))
+        stack.enter_context(patch("app.core.worker_checkout.reclaim_untouched_worker_checkout", return_value=False))
+        stack.enter_context(patch("app.core.composer_suggestions.schedule_suggestion"))
+        stack.enter_context(patch("app.services.push_notification.fire_and_forget_notify"))
+        with patch.object(qe, "_stream_to_websocket_impl", new=make_pump([
+            {"type": "done", "metadata": {}},
+        ])):
+            assert await session_runtime.execute(parked) == "parked"
+            missing.rmdir()
+            assert await session_runtime.execute(other) == "completed"
+        (wake,) = turns_db.get_queued_turns(broken)
+        # It really is a resumed task, not a handcrafted error consumer.
+        task_registry.resume_task(recipient, broken)
+        stale = turns_db.enqueue_turn(broken, "agent_message", prompt="old peer message")
+        bounds = engine_patches(stack, cwd=str(tmp_path),
+                                session_row=database.get_session(broken), profile=query_profile())
+        def build(**kwargs):
+            with patch.object(query_options, "get_security_instructions", return_value=""):
+                return query_options.build_options_from_profile(**kwargs)
+        stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", side_effect=build))
+        assert await session_runtime.execute(wake) == "aborted"
+        bounds.make_adapter.assert_not_called()
+        before = se_db.get_events(broken, 0, 100)
+        assert sum(e["event_type"] == "turn.started" for e in before) == 2
+        assert sum(e["event_type"] == "turn.aborted" for e in before) == 1
+        for _ in range(3):
+            await turn_scheduler.on_task_terminal(broken, {
+                "task_id": sibling, "status": "completed", "summary": "duplicate",
+            })
+            await turn_scheduler.on_task_terminal(sibling, {
+                "task_id": broken, "status": "error", "summary": "missing checkout",
+                "agent_message_turn_id": wake["id"],
+            })
+            await turn_scheduler._kick_impl(broken)
+        assert se_db.get_events(broken, 0, 100) == before
+        assert turns_db.get_queued_turns(sibling) == []
+        assert turns_db.get_queued_turns(broken) == [turns_db.get_turn(stale["id"])]
+        assert database.get_session(broken)["status"] == "failed"
+        assert len(notifications.list_notifications("admin")) == 1
+        # Quiescing automatic work must still settle the resumed task's verdict.
+        assert task_registry.get_task(recipient, broken)["status"] == "error"
+        if report_to_parent:
+            (report,) = turns_db.get_queued_turns(recipient)
+            assert str(missing) in report["prompt"]
+            assert report["payload"]["pending_frames"][0]["agent_message_turn_id"] == wake["id"]
+            await turn_scheduler.on_task_terminal(recipient, report["payload"]["pending_frames"][0])
+            assert len(turns_db.get_queued_turns(recipient)) == 1
+
+
+@pytest.mark.parametrize("recovery", ["owner", "restored"])
+async def test_missing_override_cwd_breaks_sibling_wake_cycle(mock_db, tmp_path, recovery):
+    """Real options failure -> streamed error -> scheduler -> durable queue/bell."""
+    from app.core import query_engine as qe, query_options
+    from app.db import database, notifications
+    from tests.core.engine_harness import collect
+    from tests.core.helpers import query_profile
+    from tests.core.query_engine_flow_harness import engine_patches
+
+    missing = tmp_path / "reclaimed-worker"
+    missing.mkdir()
+    database.create_session("broken-cwd", "default")
+    database.create_session("sibling-cwd", "default")
+    task_registry.start_task("broken-cwd", "sibling-cwd", "agent", "Sibling", tool_use_id="sibling-cwd")
+    task_registry.start_task("sibling-cwd", "broken-cwd", "agent", "Worker", tool_use_id="broken-cwd")
+    task_registry.mark_background_launch("broken-cwd", "sibling-cwd")
+    task_registry.mark_background_launch("sibling-cwd", "broken-cwd")
+    parked = turns_db.enqueue_turn("broken-cwd", "user", profile_id="default", overrides={"cwd": str(missing)})
+    turns_db.start_turn(parked["id"])
+    turns_db.park_turn(parked["id"], ["sibling-cwd"])
+    missing.rmdir()  # remove only the empty fixture directory this test owns
+    _settled_turn("sibling-cwd", profile_id="default")
+    frame = {"task_id": "sibling-cwd", "status": "completed", "summary": "finished"}
+    with patch.object(turn_scheduler, "_kick_after_batch_window"), patch.object(turn_scheduler, "kick"):
+        await turn_scheduler.on_task_terminal("broken-cwd", frame)
+        (wake,) = turns_db.get_queued_turns("broken-cwd")
+        assert turns_db.start_turn(wake["id"]) is not None
+        stale = turns_db.enqueue_turn("broken-cwd", "agent_message", prompt="already queued")
+        with ExitStack() as stack:
+            bounds = engine_patches(stack, cwd=str(tmp_path),
+                                    session_row=database.get_session("broken-cwd"),
+                                    profile=query_profile())
+            def build(**kwargs):
+                with patch.object(query_options, "get_security_instructions", return_value=""):
+                    return query_options.build_options_from_profile(**kwargs)
+            stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", side_effect=build))
+            stack.enter_context(patch("app.services.push_notification.fire_and_forget_notify"))
+            events = await collect(qe._stream_to_websocket_impl(
+                wake["prompt"], "broken-cwd", "default", overrides=wake["overrides"],
+                loop_guard_turn=wake, turn_source="unpark"))
+        error = next(e for e in events if e["type"] == "error")
+        assert error["code"] == "working_directory_missing"
+        assert error["path"] == str(missing)
+        bounds.make_adapter.assert_not_called()
+        turns_db.settle_turn(wake["id"], "aborted", "error", error["message"])
+        await turn_scheduler.on_turn_settled("broken-cwd", wake["id"], "aborted")
+        await asyncio.gather(*[
+            turn_scheduler.on_task_terminal("sibling-cwd", {
+                "task_id": "broken-cwd", "status": "error", "summary": error["message"]})
+            for _ in range(3)
+        ])
+        for _ in range(3):
+            await turn_scheduler.on_task_terminal("broken-cwd", frame)
+            assert await turn_scheduler.on_agent_message("broken-cwd", "sibling-cwd", "duplicate") is None
+        assert turn_scheduler._turn_model_call_count("broken-cwd", wake["id"]) == 0
+        assert [t["id"] for t in turns_db.get_queued_turns("broken-cwd")] == [stale["id"]]
+        assert turns_db.start_turn(stale["id"]) is None
+        with patch("app.core.session_runtime.execute", new=AsyncMock()) as execute:
+            await turn_scheduler._kick_impl("broken-cwd")
+            execute.assert_not_awaited()
+        # Restart loses process-local registry state, not the durable breaker.
+        task_registry.clear_session("broken-cwd")
+        assert turns_db.start_turn(stale["id"]) is None
+        assert turns_db.enqueue_turn("broken-cwd", "unpark", prompt="late race")["id"] is None
+        from app.core.session_pr_state import schedule_session_pr_reconcile
+        with (
+            patch("app.api.git_helpers.get_working_dir_async", new=AsyncMock()) as resolve,
+            patch("app.core.github_service.github_service") as gh,
+        ):
+            await schedule_session_pr_reconcile("broken-cwd", force=True)
+            resolve.assert_not_awaited()
+            gh.get_repo_from_remote.assert_not_called()
+        assert turns_db.get_queued_turns("sibling-cwd") == []
+    assert database.get_session("broken-cwd")["status"] == "failed"
+    notices = notifications.list_notifications("admin")
+    assert len(notices) == 1 and notices[0]["category"] == "wake_failed"
+    assert str(missing) in notices[0]["message"]
+    assert turns_db.get_turn(wake["id"])["state"] == "aborted"
+    task_registry.mark_user_stopped("broken-cwd")
+    if recovery == "owner":
+        with patch.object(turn_scheduler, "kick"):
+            resumed = await turn_manager.submit_async("broken-cwd", "resume", profile_id="default")
+        assert resumed and not task_registry.is_user_stopped("broken-cwd")
+        assert not missing.exists()  # no silent rebind, recreation or fallback
+    else:
+        missing.mkdir()
+        assert turns_db.get_cwd_failure("broken-cwd") is None
+        assert task_registry.is_user_stopped("broken-cwd")  # repair never undoes Stop
+        task_registry.clear_user_stop("broken-cwd")
+        assert turns_db.start_turn(stale["id"]) is not None
+    assert turns_db.get_cwd_failure("broken-cwd") is None
+    assert database.get_session("broken-cwd")["status"] == "active"
+    assert notifications.list_notifications("admin") == []  # incident resolved
+
+
 async def test_failed_wake_with_no_model_calls_is_re_enqueued_once(mock_db):
     dead = _dead_wake_turn("wr1")
 

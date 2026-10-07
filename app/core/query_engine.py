@@ -74,6 +74,7 @@ from app.core.query_options import (  # noqa: F401 — re-exports
     resolve_note_references,
     DEFAULT_SECURITY_INSTRUCTIONS,
     build_options_from_profile,
+    MissingWorkingDirectoryError,
     WorktreeUnavailableError,
 )
 from app.core.query_persistence import (  # noqa: F401 — re-exports
@@ -1844,9 +1845,15 @@ async def _stream_to_websocket_impl(
         # install): refuse to run in the main checkout / with an invalid cwd.
         # Surface a clear error to the user instead.
         logger.error(f"[WS] Cannot build session options for {session_id}: {e}")
+        if (isinstance(e, MissingWorkingDirectoryError)
+                or isinstance(e, WorktreeUnavailableError) and e.path and not Path(e.path).is_dir()):
+            from app.core.turn_scheduler import on_missing_working_directory
+            await on_missing_working_directory(session_id, (loop_guard_turn or {}).get("id"), e.path, str(e))
         yield {
             "type": "error", "message": str(e),
-            **({"code": "checkout_unavailable"} if isinstance(e, WorktreeUnavailableError) else {}),
+            **({"code": "working_directory_missing", "path": e.path}
+               if isinstance(e, MissingWorkingDirectoryError) else
+               {"code": "checkout_unavailable"} if isinstance(e, WorktreeUnavailableError) else {}),
         }
         return
     _build_opts_elapsed = time.monotonic() - _build_opts_start
@@ -2510,7 +2517,10 @@ async def _stream_to_websocket_impl(
         # Verify CWD exists before spawning subprocess
         if options.cwd and not Path(options.cwd).is_dir():
             logger.error(f"[WS] CWD does not exist: {options.cwd}")
-            yield {"type": "error", "message": f"Working directory does not exist: {options.cwd}"}
+            reason = f"Working directory does not exist: {options.cwd}"
+            from app.core.turn_scheduler import on_missing_working_directory
+            await on_missing_working_directory(session_id, (loop_guard_turn or {}).get("id"), str(options.cwd), reason)
+            yield {"type": "error", "message": reason, "code": "working_directory_missing", "path": str(options.cwd)}
             return
 
         # Attribute this session to tasks created inside adapter.connect() (see

@@ -47,6 +47,22 @@ def test_schema_default_is_notification(mock_db):
     assert surface == "notification"
 
 
+def test_stalled_notices_coalesce_per_owner_session_until_dismissed(mock_db):
+    from app.db import database
+    database.create_session("stalled", "default")
+    first = notifications.create_notification("admin", message="first", session_id="stalled", category="wake_failed")
+    second = notifications.create_notification("admin", message="new reason", session_id="stalled", category="wake_failed")
+    assert second["id"] == first["id"]
+    assert second["message"] == "new reason"
+    assert second["occurrence_count"] == 2
+    other_owner = notifications.create_notification("other", message="other", session_id="stalled", category="wake_failed")
+    assert other_owner["id"] != first["id"]
+    notifications.dismiss("admin", first["id"])
+    recovered = notifications.create_notification("admin", message="new stall", session_id="stalled", category="wake_failed")
+    assert recovered["id"] != first["id"]
+    assert recovered["occurrence_count"] == 1
+
+
 def test_create_defaults_to_notification_and_preserves_action_session_and_scope(mock_db):
     created = notifications.create_notification(
         "user-1",

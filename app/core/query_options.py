@@ -334,6 +334,14 @@ def _app_config_permitted(config: Optional[Dict[str, Any]]) -> bool:
     )
 
 
+class MissingWorkingDirectoryError(ValueError):
+    """A filesystem-validated cwd failure, never provider/model error text."""
+
+    def __init__(self, path: str, message: str):
+        self.path = str(path)
+        super().__init__(message)
+
+
 class WorktreeUnavailableError(Exception):
     """Raised when a worktree-flagged session's working directory no longer exists
     on disk and we refuse to silently fall back to the main checkout.
@@ -1012,7 +1020,8 @@ def build_options_from_profile(
                 if working_dir_source == "project" and project and project.get("name")
                 else working_dir_source
             )
-            raise ValueError(
+            raise MissingWorkingDirectoryError(
+                str(working_dir),
                 f"Working directory does not exist: {working_dir} (from {detail}). "
                 f"The path may belong to a different install or have been moved — "
                 f"update or remove the project/profile path, or pick another project."

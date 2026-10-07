@@ -544,6 +544,24 @@ async def test_handle_stop_interrupts_live_turn_and_stops_background(mock_db):
     stop_bg.assert_awaited_once_with("sess-1", user_stop=True)
 
 
+async def test_handle_stop_without_live_turn_quiesces_queued_work(mock_db):
+    from app.core.task_registry import task_registry
+    _make_session("sess-1")
+    queued = turns_db.enqueue_turn("sess-1", "unpark", prompt="pending")
+    with _Patches():
+        handler = _make_handler()
+        await handler.handle_stop({"session_id": "sess-1"})
+    assert turns_db.get_turn(queued["id"])["state"] == "aborted"
+    assert task_registry.is_user_stopped("sess-1")
+    from app.core import turn_scheduler
+    task_registry.start_task("sess-1", "stopped-child", "agent", "Child", tool_use_id="launch")
+    task_registry.mark_background_launch("sess-1", "launch")
+    await turn_scheduler.on_task_terminal("sess-1", {
+        "task_id": "stopped-child", "status": "completed", "summary": "late report"})
+    assert await turn_scheduler.on_agent_message("sess-1", "peer", "wake") is None
+    assert turns_db.get_queued_turns("sess-1") == []
+
+
 async def test_handle_stop_with_current_turn_id_interrupts(mock_db):
     """A stop carrying the CURRENT running turn's id interrupts it (turn-scoped
     stop, #585)."""

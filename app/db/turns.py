@@ -328,6 +328,91 @@ def _bank_ended(row: Optional[Dict[str, Any]]) -> None:
 # Enqueue
 # ---------------------------------------------------------------------------
 
+# The breaker is stored on the failing turn, not in a process-local latch. It
+# survives restarts without a new session-state schema or trusting error text.
+CWD_FAILURE_KEY = "working_directory_failure"
+# Connector intake is unattended (unlike a fresh authenticated conversation
+# request); it must not turn a platform message into permission to retry.
+CWD_OWNER_SOURCES = frozenset({"user", "queue", "resume", "api", "worktree"})
+
+
+def _cwd_failure(cursor, session_id: str):
+    cursor.execute(
+        "SELECT * FROM turns WHERE session_id=%s "
+        "AND payload ->> 'working_directory_failure' IS NOT NULL "
+        "ORDER BY ended_at DESC NULLS FIRST, position DESC, id DESC LIMIT 1", (session_id,),
+    )
+    row = _row(cursor.fetchone())
+    failure = (row or {}).get("payload", {}).get(CWD_FAILURE_KEY) or {}
+    if failure.get("instance_id") != settings.effective_instance_id:
+        return None, None  # another worker's filesystem is not ours to judge
+    return row, failure
+
+
+def _clear_cwd_failure(cursor, row, failure):
+    payload = dict(row["payload"])
+    payload[CWD_FAILURE_KEY] = {**failure, "blocked": False}
+    cursor.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), row["id"]))
+    cursor.execute("UPDATE sessions SET status='active' WHERE id=%s AND status='failed'",
+                   (row["session_id"],))
+    # Recovery closes this incident, so a later unrelated stall gets a new row.
+    cursor.execute("UPDATE notifications SET dismissed=TRUE WHERE session_id=%s "
+                   "AND category='wake_failed' AND source='server' AND dismissed=FALSE "
+                   "AND user_id = (SELECT COALESCE(api_user_id, 'admin') FROM sessions WHERE id=%s)",
+                   (row["session_id"], row["session_id"]))
+
+
+def _cwd_blocked(cursor, session_id: str, *, owner: bool = False):
+    from pathlib import Path
+
+    row, failure = _cwd_failure(cursor, session_id)
+    if not failure or not failure.get("blocked"):
+        return None
+    if owner or Path(failure["path"]).is_dir():
+        _clear_cwd_failure(cursor, row, failure)
+        return None
+    return failure
+
+
+def get_cwd_failure(session_id: str) -> Optional[Dict[str, Any]]:
+    """Only the exact restored path or an owner turn releases automatic wakes."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        return _cwd_blocked(cursor, session_id)
+
+
+def block_missing_cwd(session_id: str, turn_id: str, path: str, reason: str) -> bool:
+    """Arm before emitting the terminal error; stale runtimes cannot arm it."""
+    from pathlib import Path
+
+    if not path:
+        return False
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        cursor.execute("SELECT * FROM turns WHERE id=%s AND session_id=%s "
+                       "AND state IN ('running','interrupting','draining')", (turn_id, session_id))
+        row = _row(cursor.fetchone())
+        if row is None:
+            return False
+        # A new explicit owner send may already be queued behind this failing
+        # turn. That send is authority to retry; an old queued peer is not.
+        cursor.execute(
+            "SELECT source FROM turns WHERE session_id=%s AND state='queued' AND position>%s",
+            (session_id, row["position"]),
+        )
+        resumed = any(r["source"] in CWD_OWNER_SOURCES for r in cursor.fetchall())
+        blocked = not resumed and not Path(path).is_dir()
+        payload = dict(row["payload"])
+        payload[CWD_FAILURE_KEY] = {"path": str(path), "reason": reason, "blocked": blocked,
+                                    "turn_id": turn_id, "instance_id": settings.effective_instance_id}
+        cursor.execute("UPDATE turns SET payload=%s WHERE id=%s", (json.dumps(payload), turn_id))
+        if blocked:
+            cursor.execute("UPDATE sessions SET status='failed' WHERE id=%s AND status='active'", (session_id,))
+        return blocked
+
+
 def enqueue_turn(
     session_id: str,
     source: str,
@@ -375,6 +460,11 @@ def enqueue_turn(
     turn_id = f"turn-{uuid.uuid4().hex}"
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
+        # Serialize admission with the pre-model filesystem breaker. Queued
+        # automatic turns remain durable but cannot claim a live slot while held.
+        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        if _cwd_blocked(cursor, session_id, owner=source in CWD_OWNER_SOURCES):
+            return {"id": None, "session_id": session_id, "source": source}
         # All producers reach this boundary, including scheduler retries/unpark
         # and atomic AskUser answers that bypass turn_manager. Snapshot the
         # acknowledged pin and the stored folders, not an older turn's copy.
@@ -570,6 +660,15 @@ def start_turn(
     with get_db() as conn:
         cursor = conn.cursor()
         try:
+            cursor.execute("SELECT session_id, source FROM turns WHERE id=%s", (turn_id,))
+            candidate = cursor.fetchone()
+            if candidate is None:
+                return None
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (candidate["session_id"],))
+            # An old queued owner row is not a NEW explicit resume. Only enqueue
+            # can lift the breaker on the owner's authority.
+            if _cwd_blocked(cursor, candidate["session_id"]):
+                return None
             cursor.execute(
                 "UPDATE turns SET state='running', run_id=%s, instance_id=%s, "
                 "started_at=NOW() "

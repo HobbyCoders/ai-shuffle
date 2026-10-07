@@ -1884,10 +1884,12 @@ class ChatWebSocketHandler:
                 # unnamed source too); computer use reports it as theirs.
                 source="user_stop",
             )
-            if flipped is not None:
+            if flipped is not None or target_turn_id is None:
+                # A session-scoped Stop also quiesces queued/blocked work with
+                # no live turn. A stale TURN-scoped Stop still spares successors.
                 # Mark canceled-task wakes suppressed and stop all owned tasks.
-                # The stale-turn guard is load-bearing: a delayed Stop packet that
-                # matched no live turn must not cancel a successor's work.
+                # A delayed turn-specific Stop that matched no live turn must
+                # not cancel a successor's work.
                 from app.core.query_session_lifecycle import stop_all_background_tasks
 
                 await stop_all_background_tasks(session_id, user_stop=True)

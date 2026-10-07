@@ -165,7 +165,8 @@ async def emit_notification(
         logger.debug("emit_notification: broadcast failed", exc_info=True)
 
     # 3. Optional mobile push for high-severity, throttled per category.
-    if _should_push(user_id, category, severity, push):
+    if (record.get("occurrence_count", 1) <= 1
+            and _should_push(user_id, category, severity, push)):
         try:
             from app.services.push_notification import fire_and_forget_notify
 

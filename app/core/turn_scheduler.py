@@ -391,6 +391,8 @@ async def _kick_impl(session_id: str) -> None:
         row = await asyncio.to_thread(turns_db.pop_ready, session_id)
         if row is None or task_registry.stop_invalidated(session_id, generation):
             return
+        if await asyncio.to_thread(turns_db.get_cwd_failure, session_id):
+            return  # don't claim a run lease for a durable blocked queue
         held_until = await asyncio.to_thread(_held_by_usage_limit, session_id, row)
         if held_until is not None:
             _kick_at_reset(session_id, held_until)
@@ -438,6 +440,17 @@ async def _on_turn_settled_impl(session_id: str, turn_id: str, outcome: str) -> 
     settled = await asyncio.to_thread(turns_db.get_turn, turn_id)
     if settled is None:
         return
+    if await asyncio.to_thread(turns_db.get_cwd_failure, session_id):
+        # Admission is blocked, not settlement. Finish the task/report lifecycle
+        # even with inert queued peers; the terminal wake gate breaks the cycle.
+        from app.core.agent_messaging import finish_message_resume
+        await finish_message_resume(session_id, settled, outcome)
+        if outcome in ("completed", "aborted"):
+            from app.core.session_orchestration import report_settled_start
+            from app.core.remote_task import on_child_settled
+            await report_settled_start(session_id, settled, outcome)
+            await on_child_settled(session_id)
+        return  # no retry or queue drain while the directory is missing
     # ONE terminal-payload read feeds both the failover (api_error_status) and
     # auto-continue (stop_reason) derivations. Both are naturally inert on a
     # non-completed settlement — a parked/aborted turn has no terminal
@@ -618,6 +631,10 @@ async def _maybe_recover_failed_wake(
     if (settled.get("stop_reason") or "") != "error":
         return False
 
+    if (settled.get("payload") or {}).get(turns_db.CWD_FAILURE_KEY):
+        return False  # a filesystem failure never needs a fresh provider client
+    if await asyncio.to_thread(turns_db.get_cwd_failure, session_id):
+        return False
     from fluid.providers._retry import is_usage_limit_text
     if is_usage_limit_text(settled.get("error")):
         # A usage limit is never retried, wake or not.
@@ -663,6 +680,8 @@ async def _maybe_recover_failed_wake(
         # ahead of anything queued behind the wake, not after it.
         at_front=True,
     )
+    if not retry.get("id"):
+        return False  # another pre-model failure armed the durable breaker
     if task_registry.stop_invalidated(session_id, generation):
         # Stop can race the database enqueue itself; retire only our stale row.
         await asyncio.to_thread(turns_db.remove_queued_turn, retry["id"])
@@ -675,6 +694,27 @@ async def _maybe_recover_failed_wake(
     )
     kick(session_id)
     return True
+
+
+async def on_missing_working_directory(session_id: str, turn_id: str, path: str, reason: str) -> None:
+    """Arm a durable, worker-local pre-model breaker before terminal fanout."""
+    armed = await asyncio.to_thread(turns_db.block_missing_cwd, session_id, turn_id, path, reason)
+    if not armed:
+        return
+    from app.db import sessions
+    from app.core.sync_engine import sync_engine
+
+    row = await asyncio.to_thread(sessions.get_session, session_id) or {}
+    await _notify_dead_wake(session_id, {"error": reason, "payload": {
+        "api_user_id": row.get("api_user_id"),
+    }})
+    try:
+        await sync_engine.broadcast_user_session_updated(
+            user_id=row.get("api_user_id") or "admin", session_id=session_id,
+            updates={"status": row.get("status") or "failed"},
+        )
+    except Exception:
+        logger.debug("Missing-cwd state broadcast failed for %s", session_id, exc_info=True)
 
 
 async def _notify_dead_wake(session_id: str, settled: Dict[str, Any]) -> None:
@@ -690,6 +730,7 @@ async def _notify_dead_wake(session_id: str, settled: Dict[str, Any]) -> None:
             message=(
                 "A background task finished, but the session could not be woken "
                 "to read its report. Send a message to pick it back up."
+                + (f" Reason: {settled['error']}" if settled.get("error") else "")
             ),
             category="wake_failed",
             surface="notification",
@@ -1305,6 +1346,8 @@ async def on_agent_message(
     from app.core import archive_guard
     from app.core.task_registry import task_registry
 
+    if await asyncio.to_thread(turns_db.get_cwd_failure, session_id):
+        return None
     if await archive_guard.is_archived_async(session_id):
         archive_guard.log_dropped(session_id, "agent_message", f"from {sender}")
         return None
@@ -1454,6 +1497,8 @@ async def _enqueue_context_wake(
     if await archive_guard.is_archived_async(session_id):
         archive_guard.log_dropped(session_id, source, f"tasks={task_ids}")
         return {"id": None, "session_id": session_id, "source": source}
+    if await asyncio.to_thread(turns_db.get_cwd_failure, session_id):
+        return {"id": None, "session_id": session_id, "source": source}
     context = await asyncio.to_thread(_latest_context_turn, session_id) or {}
     payload = _context_payload(context)
     if context.get("stop_reason") == "profile_removed":
@@ -1534,6 +1579,10 @@ async def _enqueue_context_wake(
                 session_id, payload.get("held_peer_messages") or "",
             )
         raise
+    if not turn.get("id"):
+        if source == "unpark":
+            _restore_held_peer_messages(session_id, payload.get("held_peer_messages") or "")
+        return turn  # a cwd breaker armed while the enqueue was in flight
     # Stop may have already drained the queue while the DB work was pending.
     # A newer user message can clear the latch, but not this generation fence.
     if task_registry.stop_invalidated(session_id, generation):
@@ -1911,6 +1960,20 @@ async def _on_task_terminal_locked(
     empty notification is never enqueued."""
     try:
         task_id = frame.get("task_id")
+        if await asyncio.to_thread(turns_db.get_cwd_failure, session_id):
+            return
+        # Suppress the failed wake's fanout, not distinct successful reports
+        # or an older continuation whose terminal delivery raced this failure.
+        if task_id and frame.get("status") == "error":
+            failure = await asyncio.to_thread(turns_db.get_cwd_failure, task_id)
+            completion_id = frame.get("agent_message_turn_id")
+            if failure and (not completion_id or completion_id == failure.get("turn_id")):
+                from app.db import sessions
+                child = await asyncio.to_thread(sessions.get_session, task_id) or {}
+                if child.get("parent_session_id") != session_id:
+                    return  # siblings do not need an auto-wake to report this
+                # The actual parent still owns a failure report. Its existing
+                # per-task/continuation latch delivers that report only once.
         from app.core.swarm import workers as swarm_workers
         launch = swarm_workers.get(task_id)
         if (launch is not None and launch.coordinator.session_id == session_id
@@ -2088,6 +2151,8 @@ async def _on_task_terminal_locked(
             turn = await _enqueue_context_wake(
                 session_id, "unpark", [frame], wake_task_ids, prompt
             )
+            if not turn.get("id"):
+                return  # no delivery identity is spent on a refused enqueue
             task_registry.mark_woken(session_id, task_id, completion_id=frame.get("agent_message_turn_id"))
             logger.info(
                 "turn_scheduler: unpark for %s — task %s terminal (%s), wake turn %s",

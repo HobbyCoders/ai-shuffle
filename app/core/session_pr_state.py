@@ -363,6 +363,9 @@ async def reconcile_session_pr(session_id: str) -> bool:
         if not session:
             return True
 
+        from app.db import turns
+        if await asyncio.to_thread(turns.get_cwd_failure, session_id):
+            return True  # known permanent failure: no gh calls or bounded retries
         project_id = session.get("project_id")
         # Canonical sessions (including those synced from another worker) may
         # have no legacy project alias. The working-dir helper resolves their

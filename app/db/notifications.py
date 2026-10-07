@@ -82,7 +82,19 @@ def _serialize(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
                 payload = None
         action = {"kind": row["action_kind"], "payload": payload}
 
+    count_payload = {}
+    if row.get("category") == "wake_failed":
+        raw = row.get("action_payload") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                raw = {}
+        if isinstance(raw, dict):
+            count_payload = raw
     return {
+        **({"occurrence_count": count_payload.get("_occurrence_count", 1)}
+           if row.get("category") == "wake_failed" else {}),
         "id": row["id"],
         "user_id": row.get("user_id"),
         "severity": row.get("severity") or "info",
@@ -130,6 +142,30 @@ def create_notification(
 
     with get_db() as conn:
         cursor = conn.cursor()
+        if category == "wake_failed" and source == "server" and session_id:
+            # Serialize all stalled emitters for a durable session, including
+            # competing runtimes; owner scope is part of the open-incident key.
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+            cursor.execute(
+                "SELECT * FROM notifications WHERE session_id=%s "
+                "AND user_id IS NOT DISTINCT FROM %s AND category='wake_failed' "
+                "AND source='server' AND dismissed=FALSE ORDER BY created_at DESC LIMIT 1",
+                (session_id, user_id),
+            )
+            existing = row_to_dict(cursor.fetchone())
+            if existing:
+                stored = existing.get("action_payload") or {}
+                if isinstance(stored, str):
+                    stored = json.loads(stored)
+                count = int(stored.get("_occurrence_count", 1)) + 1
+                updated_payload = {**(action_payload or stored), "_occurrence_count": count}
+                cursor.execute(
+                    "UPDATE notifications SET message=%s, title=%s, severity=%s, "
+                    "action_payload=%s WHERE id=%s RETURNING *",
+                    (message, title, severity, json.dumps(updated_payload), existing["id"]),
+                )
+                return _serialize(row_to_dict(cursor.fetchone()))
+            payload_json = json.dumps({**(action_payload or {}), "_occurrence_count": 1})
         cursor.execute(
             """INSERT INTO notifications
                   (id, user_id, severity, surface, category, source, title,

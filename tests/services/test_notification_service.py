@@ -41,6 +41,48 @@ async def _emit_with_mocks(**kwargs):
 
 
 @pytest.mark.asyncio
+async def test_stalled_incident_concurrent_updates_preserve_read_state_and_do_not_repush(mock_db):
+    import asyncio
+    import threading
+    from contextlib import contextmanager
+    from app.db import database, notifications
+
+    # pg_shim strips FOR UPDATE and shares ONE SQLite connection across threads.
+    # Supply the transaction exclusion that PostgreSQL's session-row lock owns;
+    # keep the actual notification reads/writes and all count assertions real.
+    get_db = notifications.get_db
+    lock = threading.RLock()
+    @contextmanager
+    def locked_db():
+        with lock, get_db() as conn:
+            yield conn
+
+    database.create_session("notice-race", "default")
+    with patch.object(notifications, "get_db", new=locked_db), \
+         patch("app.core.sync_engine.sync_engine.broadcast_notification", new=AsyncMock()) as broadcast, \
+         patch("app.services.push_notification.fire_and_forget_notify") as push:
+        first = await notification_service.emit_notification(
+            "admin", severity="error", category="wake_failed", session_id="notice-race", message="missing cwd",
+        )
+        assert notifications.mark_read("admin", first["id"])
+        # Defeat the ordinary 60s push throttle: incident coalescing must itself
+        # prevent another push even long after the first error.
+        notification_service._last_push.clear()
+        updates = await asyncio.gather(*[
+            notification_service.emit_notification(
+                "admin", severity="error", category="wake_failed", session_id="notice-race", message=f"retry {i}",
+            ) for i in range(8)
+        ])
+    assert {row["id"] for row in updates} == {first["id"]}
+    assert all(row["read"] for row in updates)
+    assert notifications.get_notification("admin", first["id"])["occurrence_count"] == 9
+    assert notifications.unread_count("admin") == 0
+    assert len(notifications.list_notifications("admin")) == 1
+    assert broadcast.await_count == 9
+    push.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_notification_persists_all_severities_by_default():
     result, created, broadcast, push = await _emit_with_mocks(
         severity="success", message="Finished"

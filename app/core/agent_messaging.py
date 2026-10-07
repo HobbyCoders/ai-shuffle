@@ -218,6 +218,10 @@ def make_message(supplier):
                 text=archive_guard.refusal(row["name"], "receive messages or be resumed"),
                 is_error=True,
             )
+        from app.db import turns
+        failure = await asyncio.to_thread(turns.get_cwd_failure, target)
+        if failure:
+            return ToolOutcome(text=f"Could not resume {row['name']}: working directory missing: {failure['path']}; ask the owner to resume or restore it", is_error=True)
         resuming = row["status"] != "running"
         if resuming:
             error = await resume_unavailable(target, row)
@@ -264,7 +268,10 @@ async def deliver_message(target: str, sender: str, text: str, *,
     """
     from app.core import session_runtime, turn_scheduler
     from app.core.session_pool import get_session_pool
+    from app.db import turns
 
+    if await asyncio.to_thread(turns.get_cwd_failure, target):
+        return STOPPED, None
     state = get_session_pool().get(target)
     adapter = getattr(state, "adapter", None)
     engine = getattr(adapter, "engine", None)
@@ -393,6 +400,10 @@ async def finish_message_resume(session_id, settled, outcome):
         # Admission holds this lock until both queue and ownership are written.
         parked = await asyncio.to_thread(turn_scheduler._session_has_parked_turn, session_id)
         busy = await asyncio.to_thread(turns_db.session_has_unsettled_turns, session_id)
+        if await asyncio.to_thread(turns_db.get_cwd_failure, session_id):
+            # Held peers cannot run and must not keep the failed continuation's
+            # task marked running forever. Never ignore a genuinely live turn.
+            busy = bool(await asyncio.to_thread(turns_db.get_live_turn, session_id))
         latest = await asyncio.to_thread(turn_scheduler._latest_context_turn, session_id)
         if (record and record.torn_down) or task_registry.is_user_stopped(session_id):
             return
