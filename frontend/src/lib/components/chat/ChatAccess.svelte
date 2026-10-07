@@ -20,6 +20,7 @@
 	import { resourceSync } from '$lib/services/resource-sync';
 	import { chatAccessSummary, setPrivateAccessPending, type PendingAccessItem } from '$lib/stores/chat-access';
 	import { subagentChats } from '$lib/stores/subagent-chats';
+	import { getSessionOwnerMeta } from '$lib/stores/away-mode.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import { buildShell } from '$lib/utils/platform';
 	import { focusableWithin } from '$lib/components/ui/focus-trap';
@@ -280,7 +281,7 @@
 			// Keep the persisted mode check; retries must not expose private controls
 			// for an unverified session or bypass endpoint authorization.
 			if (!verified) {
-				const session = await api.get<{mode: string; is_remote?: boolean; device_name?: string | null; is_worker?: boolean}>(`/sessions/${encodeURIComponent(sessionId)}`);
+				const session = await getSessionOwnerMeta(sessionId, 'is_remote');
 				if (!alive) return;
 				// A subagent's chat shows no private access: its items show in its
 				// main chat. A deep link can mount this before /live says so.

@@ -383,6 +383,27 @@ class TestLiveEndpointPayload:
         assert "mode" not in SESSION_ROW
         assert response.json()["session_meta"]["mode"] is None
 
+    @pytest.mark.parametrize("away", [None, True, False])
+    def test_metadata_only_snapshot_carries_away_mode(self, api_client, away):
+        # Away mode reads this instead of the whole GET /sessions/{id} transcript.
+        meta = self._live(api_client, "?include_messages=false", {"away_mode": away}).json()["session_meta"]
+        assert meta["away_mode"] is away
+
+    def test_owner_fields_are_opt_in(self, api_client):
+        def annotate(rows):
+            for row in rows:
+                row["is_remote"] = True
+                row["device_name"] = "DesktopWorker"
+        with patch("app.api.sessions._annotate_cluster_fields", side_effect=annotate) as annotated:
+            plain = self._live(api_client, "?include_messages=false").json()["session_meta"]
+            assert annotated.call_count == 0
+            assert "is_remote" not in plain and "device_name" not in plain
+            meta = self._live(api_client, "?include_messages=false&owner_fields=true").json()["session_meta"]
+        assert annotated.call_count == 1
+        assert meta["is_remote"] is True
+        assert meta["device_name"] == "DesktopWorker"
+        assert meta["is_worker"] is False
+
     def test_metadata_only_snapshot_still_reports_a_window(self, api_client):
         body = self._live(api_client, "?include_messages=false").json()
         assert body["messages"] == []

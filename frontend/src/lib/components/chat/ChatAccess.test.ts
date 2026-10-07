@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, fireEvent, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
-const m = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), delete: vi.fn() }));
+const m = vi.hoisted(() => {
+ const api = { get: vi.fn(), post: vi.fn(), delete: vi.fn(),
+  // The session check reads /live metadata; it answers with the row the test set up.
+  getShared: vi.fn(async (url: string) => ({ session_meta: { is_remote: false, device_name: null, ...(await api.get(url)) } })) };
+ return api;
+});
 vi.mock('$lib/api/client', () => ({ api: m, getErrorMessage: (e: {detail?: string}) => e.detail ?? 'Unavailable' }));
 const accessAuth = vi.hoisted(() => {
  type Status = Record<string, unknown>;
@@ -298,6 +303,20 @@ describe('private-access recovery and live invalidations', () => {
   // The owner's change notice arrives as a scoped invalidation on this worker.
   resourceSync.invalidate(['chat-access:remote']); await vi.advanceTimersByTimeAsync(100);
   expect(accessCalls()).toHaveLength(2);
+ });
+ it('checks the session through its /live metadata, never the whole transcript', async () => {
+  render(ChatAccess, {sessionId: 's-slim'}); await flush();
+  expect(m.getShared).toHaveBeenCalledWith('/sessions/s-slim/live?include_messages=false&owner_fields=true');
+  expect(m.get.mock.calls.map(([url]) => url)).not.toContain('/sessions/s-slim');
+  expect(accessCalls()).toHaveLength(1);
+ });
+ it('reads the whole session with VITE_PERF_SLIM_SESSION_READ=0', async () => {
+  vi.stubEnv('VITE_PERF_SLIM_SESSION_READ', '0');
+  try {
+   render(ChatAccess, {sessionId: 's-full'}); await flush();
+   expect(m.getShared).not.toHaveBeenCalled();
+   expect(m.get.mock.calls.map(([url]) => url)).toContain('/sessions/s-full');
+  } finally { vi.unstubAllEnvs(); }
  });
  it('rechecks where access lives when a session moves between devices', async () => {
   let remote = true;

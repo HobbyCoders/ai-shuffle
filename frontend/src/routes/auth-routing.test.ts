@@ -21,7 +21,7 @@ vi.mock('$lib/stores/active-session', () => ({ activeSession: {
 	validateSelectedProfile: vi.fn(), reconcileSessionMode: vi.fn()
 } }));
 vi.mock('$lib/stores/app-data.svelte', () => ({
-	appData: { current: { profiles: [], sessions: [] }, loadProfiles: vi.fn(), loadSessions: vi.fn(),
+	appData: { current: { profiles: [], sessions: [] }, loadProfiles: vi.fn(), loadSessions: vi.fn(), prefetchSessions: vi.fn(),
 		loadProjects: vi.fn(), loadClusterProjects: vi.fn(), loadApiUserSessions: vi.fn() },
 	profiles: writable([]), projects: writable([]), sessions: writable([]), sessionsTagFilter: writable(null)
 }));
@@ -201,6 +201,33 @@ it('does not repeat bootstrap metadata requests when their 401 confirms valid wo
 	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
 	expect(mocks.history).toHaveBeenCalledOnce(); expect(mocks.hydrate).toHaveBeenCalledOnce();
 	expect(statusRequests).toHaveBeenCalledTimes(2); expect(mocks.goto).not.toHaveBeenCalled();
+});
+
+it.each([['on', true], ['off (VITE_PERF_PARALLEL_AUTH_PROBES=0)', false]])(
+	'sends the owner and auth status probes together, applying auth only after owner status (%s)', async (_label, parallel) => {
+	if (!parallel) vi.stubEnv('VITE_PERF_PARALLEL_AUTH_PROBES', '0');
+	const owner = deferred();
+	const order: string[] = [];
+	statusRequests.mockResolvedValue(Response.json(signedIn));
+	vi.stubGlobal('fetch', vi.fn((url: string) => {
+		if (url === '/api/v1/auth/status' || url === '/api/v1/owner/status') order.push(url);
+		return url === '/api/v1/auth/status' ? statusRequests()
+			: url === '/api/v1/owner/status' ? owner.promise
+			: Promise.resolve(Response.json([]));
+	}));
+	try {
+		render(Harness);
+		await waitFor(() => expect(order).toContain('/api/v1/owner/status'));
+		await new Promise(resolve => setTimeout(resolve, 0));
+		if (parallel) expect(order).toEqual(['/api/v1/owner/status', '/api/v1/auth/status']);
+		else expect(order).toEqual(['/api/v1/owner/status']);
+		// The early auth answer never moves the app ahead of the owner status.
+		expect(auth.current.status).toBeNull();
+		expect(mocks.init).not.toHaveBeenCalled();
+		owner.resolve(Response.json(ownerStatus));
+		await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
+		expect(statusRequests).toHaveBeenCalledOnce();
+	} finally { vi.unstubAllEnvs(); }
 });
 
 it('shows the owner-password sign-in to a LAN browser and enters the app after it', async () => {

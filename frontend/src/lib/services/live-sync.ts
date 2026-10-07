@@ -18,13 +18,24 @@ import { getOrCreateDeviceId } from '$lib/stores/device-id';
 import { bindSessionOwner } from '$lib/stores/session-owner';
 import { promptStash } from '$lib/stores/session/prompt-stash';
 import { preferenceSync } from './preferences';
-import { resourceSync } from './resource-sync';
+import { RESOURCE_NAMES, resourceSync } from './resource-sync';
 import { resetUserEventDedupe } from './user-event-dedupe';
 import { handleGlobalUserEvent, activeSession } from '$lib/stores/active-session';
 import { appData } from '$lib/stores/app-data.svelte';
 import { hydrateModelRegistry } from '$lib/constants/models';
 import { notify } from '$lib/stores/notifications';
 import { feedController } from '$lib/stores/session/v2/feed-controller';
+import { lastGetFailed, lastGetStartedAt, startupDedupeEnabled } from '$lib/api/client';
+
+/** The read that answers each resource-sync name, for the first sync_ready. */
+const FIRST_SYNC_READS: Record<string, string> = {
+ sessions: '/sessions/cursor',
+ tags: '/tags',
+ projects: '/projects',
+ agents: '/agents',
+ settings: '/models',
+ notifications: '/notifications'
+};
 
 /** Root-layout lifetime, not chat lifetime. Cookie authentication also supports
  * HttpOnly sessions; no token is copied to storage or put into diagnostics. */
@@ -38,6 +49,9 @@ export function startLiveSync() {
  // follows a gap in which broadcasts (a clear, a delete) may have been missed;
  // the first one after start or an owner change has nothing to catch up on.
  let syncedBefore = false;
+ // When the current owner was bound: reads sent since then were made for it.
+ const startedAt = performance.now();
+ let boundAt = startedAt;
  // Keep lifecycle/permission delivery live; defer presentation-only catalogue
  // reads until resume invalidates the full set once. In-flight dirty work stays
  // coalesced by loadSessions/resourceSync, not queued per background event.
@@ -98,9 +112,25 @@ export function startLiveSync() {
    try { data = JSON.parse(event.data); } catch { return; }
    if (data.type === 'sync_ready') {
     attempts = 0;
-    void preferenceSync.reconnect();
+    const first = !syncedBefore;
     if (syncedBefore) resyncFeedAfterGap();
     syncedBefore = true;
+    if (first && startupDedupeEnabled()) {
+     // Nothing to catch up on yet (sync_reconcile repairs a missed change):
+     // join the bind's preference snapshot, and refresh only a resource whose
+     // read failed or was made for a previous owner. One read for this owner
+     // already went out, and one not yet sent goes out after the subscription.
+     void preferenceSync.hydrate();
+     const stale = RESOURCE_NAMES.filter(name => {
+      const read = FIRST_SYNC_READS[name];
+      if (!read || lastGetFailed(read)) return true;
+      const at = lastGetStartedAt(read);
+      return at !== undefined && at < boundAt;
+     });
+     if (stale.length) invalidate(stale);
+     return;
+    }
+    void preferenceSync.reconnect();
     invalidate();
    } else if (data.type === 'sync_reconcile') {
     void preferenceSync.reconnect();
@@ -141,6 +171,8 @@ export function startLiveSync() {
   // Retire old editors and restores before resetting adapters can notify them.
   if (bindSessionOwner(owner, next, cachedOwner)) activeSession.resetForAccountChange();
   const previous = owner; disconnect(!!previous); owner = next;
+  // Reads sent since the page started already belong to the first owner.
+  boundAt = previous === undefined ? startedAt : performance.now();
   // Stashed prompts belong to the account that stashed them.
   promptStash.setOwner(owner);
   syncedBefore = false;

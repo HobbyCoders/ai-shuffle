@@ -1,25 +1,48 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const get = vi.fn();
+const getShared = vi.fn();
 const put = vi.fn();
-vi.mock('$lib/api/client', () => ({ api: { get: (...a: unknown[]) => get(...a), put: (...a: unknown[]) => put(...a) } }));
+vi.mock('$lib/api/client', () => ({ api: {
+	get: (...a: unknown[]) => get(...a), getShared: (...a: unknown[]) => getShared(...a), put: (...a: unknown[]) => put(...a)
+} }));
 
 import { AWAY_CONFIRM_GRACE_MS, awayMode } from './away-mode.svelte';
 
 describe('away mode store', () => {
 	beforeEach(() => {
 		get.mockReset();
+		getShared.mockReset();
 		put.mockReset();
+		vi.unstubAllEnvs();
 	});
 
-	it('loads the persisted flag once per session', async () => {
-		get.mockResolvedValue({ away_mode: true });
+	it('loads the persisted flag once per session from the metadata read, not the transcript', async () => {
+		getShared.mockResolvedValue({ session_meta: { away_mode: true, is_worker: false } });
 		await awayMode.load('s-load');
 		await awayMode.load('s-load');
-		expect(get).toHaveBeenCalledTimes(1);
-		expect(get).toHaveBeenCalledWith('/sessions/s-load');
+		expect(getShared).toHaveBeenCalledTimes(1);
+		expect(getShared).toHaveBeenCalledWith('/sessions/s-load/live?include_messages=false&owner_fields=true');
+		expect(get).not.toHaveBeenCalled();
 		expect(awayMode.isAway('s-load')).toBe(true);
 		expect(awayMode.isAway(null)).toBe(false);
+	});
+
+	it('falls back to the session row when the worker does not report the flag', async () => {
+		getShared.mockResolvedValue({ session_meta: { mode: 'code' } });
+		get.mockResolvedValue({ away_mode: true });
+		await awayMode.load('s-old-worker');
+		expect(get).toHaveBeenCalledWith('/sessions/s-old-worker');
+		expect(awayMode.isAway('s-old-worker')).toBe(true);
+	});
+
+	it('reads the whole session row with VITE_PERF_SLIM_SESSION_READ=0', async () => {
+		vi.stubEnv('VITE_PERF_SLIM_SESSION_READ', '0');
+		get.mockResolvedValue({ away_mode: true });
+		await awayMode.load('s-flag-off');
+		expect(getShared).not.toHaveBeenCalled();
+		expect(get).toHaveBeenCalledWith('/sessions/s-flag-off');
+		expect(awayMode.isAway('s-flag-off')).toBe(true);
 	});
 
 	it('flips the flag through the owning worker and reports released questions', async () => {

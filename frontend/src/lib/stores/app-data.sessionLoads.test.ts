@@ -10,7 +10,7 @@
  *    every committed page, so a load that was already in flight when the user
  *    acted cannot commit pre-mutation rows over them.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
 	get: vi.fn(),
@@ -323,5 +323,44 @@ describe('"Load older sessions" paging', () => {
 
 		expect(appData.current.sessionsHasMore).toBe(false);
 		await appData.loadSessions(null);
+	});
+});
+
+describe('early sidebar list (VITE_PERF_EARLY_SESSION_LIST)', () => {
+	const listCalls = () => mocks.get.mock.calls.filter(([url]) => String(url).startsWith('/sessions/cursor')).length;
+	afterEach(() => vi.unstubAllEnvs());
+
+	it('lets the boot load join the list started when auth answered', async () => {
+		listDelayMs = 20;
+		appData.prefetchSessions();
+		await appData.loadSessions();
+		// One capped page plus the Active set, not twice.
+		expect(listCalls()).toBe(2);
+		expect(appData.current.sessions.length).toBeGreaterThan(0);
+	});
+
+	it('accepts a prefetched list that already committed, once', async () => {
+		appData.prefetchSessions();
+		await vi.waitFor(() => expect(appData.current.sessionsLoading).toBe(false));
+		await new Promise(r => setTimeout(r, 0));
+		await appData.loadSessions();
+		expect(listCalls()).toBe(2);
+		// Only the first loadSessions takes it; a later refresh reloads.
+		await appData.loadSessions();
+		expect(listCalls()).toBe(4);
+	});
+
+	it('loads again when the boot load asks for a different filter', async () => {
+		appData.prefetchSessions();
+		await appData.loadSessions('other-tag');
+		expect(mocks.get.mock.calls.some(([url]) => String(url).includes('tag_id=other-tag'))).toBe(true);
+		await appData.loadSessions(null);
+	});
+
+	it('starts nothing early with VITE_PERF_EARLY_SESSION_LIST=0', async () => {
+		vi.stubEnv('VITE_PERF_EARLY_SESSION_LIST', '0');
+		appData.prefetchSessions();
+		await new Promise(r => setTimeout(r, 0));
+		expect(listCalls()).toBe(0);
 	});
 });

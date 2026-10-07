@@ -10,6 +10,39 @@
  */
 import { api } from '$lib/api/client';
 
+/**
+ * Performance kill switch VITE_PERF_SLIM_SESSION_READ (default on; see
+ * "Performance flags" in docs/internal/DEVELOPMENT.md). `0` restores reading
+ * the whole `GET /sessions/{id}` (transcript included) for one field.
+ */
+export function slimSessionReadEnabled(): boolean {
+	return import.meta.env.VITE_PERF_SLIM_SESSION_READ !== '0';
+}
+
+/** The session row fields away mode and the private-access panel read. */
+export interface SessionOwnerMeta {
+	mode?: string | null;
+	away_mode?: boolean | null;
+	is_worker?: boolean;
+	is_remote?: boolean;
+	device_name?: string | null;
+}
+
+/**
+ * The row fields without the transcript: `/live` metadata (about 20 ms) in
+ * place of `GET /sessions/{id}` (megabytes on a long chat). Concurrent callers
+ * share one request. A worker too old to report a field gets the full read.
+ */
+export async function getSessionOwnerMeta(sessionId: string, field: keyof SessionOwnerMeta): Promise<SessionOwnerMeta> {
+	const full = () => api.get<SessionOwnerMeta>(`/sessions/${encodeURIComponent(sessionId)}`);
+	if (!slimSessionReadEnabled()) return full();
+	const live = await api.getShared<{ session_meta?: SessionOwnerMeta }>(
+		`/sessions/${encodeURIComponent(sessionId)}/live?include_messages=false&owner_fields=true`
+	);
+	const meta = live?.session_meta;
+	return meta && field in meta ? meta : full();
+}
+
 /** How long a just-confirmed change outranks a session row that disagrees.
  *  A session owned by another worker answers the PUT before its mirror here
  *  has caught up, so a list reload in that gap still carries the old value. */
@@ -36,7 +69,7 @@ class AwayModeStore {
 		if (!sessionId || this.#loaded.has(sessionId)) return;
 		this.#loaded.add(sessionId);
 		try {
-			const session = await api.get<{ away_mode?: boolean | null }>(`/sessions/${sessionId}`);
+			const session = await getSessionOwnerMeta(sessionId, 'away_mode');
 			if (this.values[sessionId] === undefined) this.values[sessionId] = !!session?.away_mode;
 		} catch {
 			this.#loaded.delete(sessionId);

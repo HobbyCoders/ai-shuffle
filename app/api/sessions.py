@@ -1151,6 +1151,14 @@ async def get_live_session(
             "next_before_seq` from the previous response to page backwards."
         ),
     ),
+    owner_fields: bool = Query(
+        False,
+        description=(
+            "Also put the owning-device fields (`is_remote`, `device_name`) in "
+            "`session_meta`, so a client can read them without the full "
+            "`GET /sessions/{id}` transcript."
+        ),
+    ),
     token: str = Depends(require_auth)
 ):
     """
@@ -1217,7 +1225,15 @@ async def get_live_session(
         "status": session.get("status"),
         # A subagent's chat shows no Git or private-access controls.
         "is_worker": bool(session.get("is_worker")),
+        # Away mode (app/core/away_mode.py); null is a flag never set (off).
+        "away_mode": session.get("away_mode"),
     }
+    if owner_fields:
+        # Which device runs this chat (private access is managed there).
+        annotated = dict(session)
+        await run_sync(_annotate_cluster_fields, [annotated])
+        session_meta["is_remote"] = bool(annotated.get("is_remote"))
+        session_meta["device_name"] = annotated.get("device_name")
 
     # Always include the title so the frontend header stays in sync
     session_title = session.get("title")

@@ -17,6 +17,21 @@ function fixture(initial: Record<string, unknown> = { theme: 'server' }) {
  return { sync, transport, server, apply, value: () => value, edit: (next: unknown) => { value=next; sync.save('theme', next); } };
 }
 describe('authoritative preference coordination', () => {
+ it('hydrate joins the snapshot in flight and reads nothing once ready; reconnect asks again', async () => {
+  const f=fixture();
+  const first=f.sync.reconnect();
+  await f.sync.hydrate(); await first;
+  expect(f.transport.all).toHaveBeenCalledTimes(1);
+  await f.sync.hydrate();
+  expect(f.transport.all).toHaveBeenCalledTimes(1);
+  await f.sync.reconnect();
+  expect(f.transport.all).toHaveBeenCalledTimes(2);
+ });
+ it('hydrate reads the snapshot when none has been taken', async () => {
+  const f=fixture();
+  await f.sync.hydrate();
+  expect(f.transport.all).toHaveBeenCalledTimes(1); expect(f.value()).toBe('server');
+ });
  it('serializes a versioned migration before the user edit made during its response', async () => {
   const f=fixture({});
   f.transport.allWithVersions=async()=>({preferences:{},versions:{}});

@@ -1,5 +1,6 @@
 /** Account-scoped defaults. Session transcripts and existing run bindings stay local to their session. */
 import { preferenceSync } from '$lib/services/preferences';
+import { startupDedupeEnabled } from '$lib/api/client';
 import type { ClusterProject } from '$lib/api/installs';
 import { sessionOwnerEpoch } from './session-owner';
 
@@ -134,7 +135,9 @@ export const composerPreferences = {
   return false;
  },
  onRemote(listener: () => void) { listeners.add(listener); return () => listeners.delete(listener); },
- async hydrate() { await preferenceSync.reconnect(); },
+ async hydrate() {
+  await (startupDedupeEnabled() ? preferenceSync.hydrate() : preferenceSync.reconnect());
+ },
 };
 
 /** Resolve by shared project UUID against this worker's authorized catalog, never by path/name. */

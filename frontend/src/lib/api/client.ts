@@ -149,6 +149,69 @@ export interface RequestOptions {
 	keepalive?: boolean;
 }
 
+/**
+ * Performance kill switch VITE_PERF_STARTUP_DEDUPE (default on; see
+ * "Performance flags" in docs/internal/DEVELOPMENT.md). `0` restores one
+ * request per caller for shared reads and the full first-sync refresh.
+ */
+export function startupDedupeEnabled(): boolean {
+	return import.meta.env.VITE_PERF_STARTUP_DEDUPE !== '0';
+}
+
+/** When a GET for each path (without its query) last went out, unless it failed. */
+const getStartedAt = new Map<string, number>();
+/** Paths whose latest GET failed. */
+const getFailed = new Set<string>();
+
+/**
+ * performance.now() at which the latest GET of `pathname` (query ignored) went
+ * out, while that request is in flight or after it succeeded. Undefined when
+ * none was sent or the latest one failed.
+ */
+export function lastGetStartedAt(pathname: string): number | undefined {
+	return getStartedAt.get(pathname);
+}
+
+/** Whether the latest GET of `pathname` (query ignored) failed. */
+export function lastGetFailed(pathname: string): boolean {
+	return getFailed.has(pathname);
+}
+
+// Every write through this client bumps the epoch: a shared read that went out
+// before a write never answers a caller that asks after it.
+let writeEpoch = 0;
+
+/** Bumped by every non-GET request through this client. */
+export function apiWriteEpoch(): number {
+	return writeEpoch;
+}
+type SharedRead = { epoch: number; promise: Promise<unknown>; settledAt?: number };
+const sharedReads = new Map<string, SharedRead>();
+
+export interface SharedGetOptions {
+	signal?: AbortSignal;
+	/** Also reuse a successful answer this recent (ms). Default: in-flight only. */
+	maxAgeMs?: number;
+}
+
+function abortError(): Error {
+	try { return new DOMException('The operation was aborted.', 'AbortError'); }
+	catch { const e = new Error('The operation was aborted.'); e.name = 'AbortError'; return e; }
+}
+
+function withSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return promise;
+	if (signal.aborted) return Promise.reject(abortError());
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(abortError());
+		signal.addEventListener('abort', onAbort, { once: true });
+		promise.then(
+			value => { signal.removeEventListener('abort', onAbort); resolve(value); },
+			error => { signal.removeEventListener('abort', onAbort); reject(error); }
+		);
+	});
+}
+
 export class ApiClient {
 	private async request<T>(
 		method: string,
@@ -156,18 +219,43 @@ export class ApiClient {
 		body?: unknown,
 		options?: RequestOptions
 	): Promise<T> {
-		const response = await fetch(`${apiBase()}${path}`, withAuth({
-			method,
-			headers: {
-				'Content-Type': 'application/json'
-			},
-			body: body ? JSON.stringify(body) : undefined,
-			signal: options?.signal,
-			keepalive: options?.keepalive,
-			cache: options?.cache
-		}));
+		// Bookkeeping stays inside this one async function: an extra await
+		// layer would delay every answer by a few microtasks and reorder
+		// callers that race a read against a write.
+		const pathname = path.split('?')[0];
+		let startedAt: number | undefined;
+		if (method === 'GET') {
+			startedAt = performance.now();
+			getStartedAt.set(pathname, startedAt);
+			getFailed.delete(pathname);
+		} else {
+			writeEpoch++;
+		}
+		const markFailed = () => {
+			if (startedAt !== undefined && getStartedAt.get(pathname) === startedAt) {
+				getStartedAt.delete(pathname);
+				getFailed.add(pathname);
+			}
+		};
+		let response: Response;
+		try {
+			response = await fetch(`${apiBase()}${path}`, withAuth({
+				method,
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: body ? JSON.stringify(body) : undefined,
+				signal: options?.signal,
+				keepalive: options?.keepalive,
+				cache: options?.cache
+			}));
+		} catch (error) {
+			markFailed();
+			throw error;
+		}
 
 		if (!response.ok) {
+			markFailed();
 			const detail = await extractErrorDetail(response);
 			// Confirm worker authentication separately from provider-specific or stale
 			// failures. Auth endpoints render their own expected authentication errors.
@@ -190,6 +278,41 @@ export class ApiClient {
 
 	async get<T>(path: string, options?: RequestOptions): Promise<T> {
 		return this.request<T>('GET', path, undefined, options);
+	}
+
+	/**
+	 * A read many startup consumers ask for at once: a caller that asks while
+	 * the same path is in flight awaits that request instead of sending its own
+	 * (and, with `maxAgeMs`, reuses an answer that recent). Each caller gets its
+	 * own copy of the response. A write through this client in between, or a
+	 * failure, makes the next caller fetch again; aborting only drops that
+	 * caller's wait.
+	 */
+	getShared<T>(path: string, options: SharedGetOptions = {}): Promise<T> {
+		if (!startupDedupeEnabled()) return this.get<T>(path, { signal: options.signal });
+		const maxAge = options.maxAgeMs ?? 0;
+		let entry = sharedReads.get(path);
+		const reusable = entry && entry.epoch === writeEpoch
+			&& (entry.settledAt === undefined || performance.now() - entry.settledAt <= maxAge);
+		if (!entry || !reusable) {
+			const created: SharedRead = { epoch: writeEpoch, promise: Promise.resolve() };
+			created.promise = this.request<unknown>('GET', path).then(
+				value => {
+					created.settledAt = performance.now();
+					// Keep a settled answer only as long as a caller may reuse it.
+					if (maxAge <= 0) { if (sharedReads.get(path) === created) sharedReads.delete(path); }
+					else setTimeout(() => { if (sharedReads.get(path) === created) sharedReads.delete(path); }, maxAge);
+					return value;
+				},
+				error => {
+					if (sharedReads.get(path) === created) sharedReads.delete(path);
+					throw error;
+				}
+			);
+			sharedReads.set(path, created);
+			entry = created;
+		}
+		return withSignal(entry.promise.then(value => (value === undefined ? value : structuredClone(value)) as T), options.signal);
 	}
 
 	async post<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
@@ -563,9 +686,14 @@ export type UsageLimitsSnapshot = UsageSnapshot;
  * `refresh=true` to force a live fetch (and provider-usage poll) on the server.
  */
 export async function getUsageLimits(refresh = false): Promise<UsageLimitsSnapshot> {
-	const path = refresh ? '/usage/limits?refresh=true' : '/usage/limits';
-	return api.get<UsageLimitsSnapshot>(path);
+	if (refresh) return api.get<UsageLimitsSnapshot>('/usage/limits?refresh=true');
+	// The composer asks again whenever its model resolves; the reading changes
+	// through usage_snapshot events and forced refreshes, not within seconds.
+	return api.getShared<UsageLimitsSnapshot>('/usage/limits', { maxAgeMs: USAGE_LIMITS_REUSE_MS });
 }
+
+/** How long a plain `/usage/limits` answer is reused by the next caller. */
+export const USAGE_LIMITS_REUSE_MS = 5_000;
 
 /**
  * Parse and validate agent export file

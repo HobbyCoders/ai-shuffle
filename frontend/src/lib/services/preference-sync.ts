@@ -63,6 +63,13 @@ export class PreferenceSync {
   e.pending = { value: clone(value), revision: ++e.revision, version: e.version };
   void this.flush(key, e);
  }
+ /** Settle once a snapshot has applied: join the one in flight, or take one if
+  * none has succeeded yet. Unlike reconnect(), never asks for a second read. */
+ hydrate(): Promise<void> {
+  if (this.bootstrap) return this.bootstrap;
+  if (this.ready) return Promise.resolve();
+  return this.reconnect();
+ }
  reconnect(): Promise<void> {
   if (this.bootstrap) { this.bootstrapAgain = true; return this.bootstrap; }
   const epoch = this.epoch;

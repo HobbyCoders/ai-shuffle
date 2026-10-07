@@ -332,8 +332,35 @@ async function fetchActiveSessions(tagId?: string | null): Promise<Session[]> {
 // in the same turn share the first request; later invalidations retain one trailing
 // refresh. A changed filter fences the old response before it can publish.
 let sessionLoad: Promise<void> | null = null;
-let pendingSessionLoad: { tagId: string | null; pages: number | undefined } | null = null;
+type SessionLoadRequest = { tagId: string | null; pages: number | undefined };
+let pendingSessionLoad: SessionLoadRequest | null = null;
 let runningSessionTag: string | null = null;
+
+/**
+ * Performance kill switch VITE_PERF_EARLY_SESSION_LIST (default on; see
+ * "Performance flags" in docs/internal/DEVELOPMENT.md). `0` restores starting
+ * the sidebar list only when the app page mounts.
+ */
+export function earlySessionListEnabled(): boolean {
+	return import.meta.env.VITE_PERF_EARLY_SESSION_LIST !== '0';
+}
+
+// The sidebar list started as soon as auth answered (prefetchSessions). The
+// next loadSessions() (the app page's boot load) takes it once instead of
+// loading again: it joins it in flight, or accepts its committed result while
+// that is recent and nothing loaded the list since.
+const SESSION_PREFETCH_REUSE_MS = 15_000;
+interface SessionPrefetch {
+	promise: Promise<void>;
+	tagId: string | null;
+	request: SessionLoadRequest | null;
+	commitsBefore: number;
+	settledAt?: number;
+}
+let sessionPrefetch: SessionPrefetch | null = null;
+// Successful list commits, so a settled prefetch can tell it produced the list.
+let sessionListCommits = 0;
+let sessionListCommitRequest = 0;
 
 /**
  * Cursor pages the committed list currently holds: the capped initial load
@@ -430,6 +457,8 @@ async function fetchSessionList(tagId?: string | null, requestedPages?: number) 
 		retireSupersededEdits(requestId);
 
 		_loadedSessionPages = Math.max(INITIAL_SESSION_PAGES, pagesFetched);
+		sessionListCommits++;
+		sessionListCommitRequest = requestId;
 		commitSessions(rows, {
 			total: rows.length + (hasMore ? 1 : 0),
 			offset: rows.length,
@@ -786,7 +815,38 @@ export const appData = {
 	// ── Session Operations ──────────────────────────────────────────────
 
 	async loadSessions(tagId: string | null = _state.sessionsTagFilter) {
+		const early = sessionPrefetch;
+		sessionPrefetch = null;
+		if (early && early.tagId === (tagId ?? null)) {
+			// In flight, and nothing asked for a newer load since: wait for it.
+			if (early.settledAt === undefined && sessionLoad === early.promise
+				&& (pendingSessionLoad === null || pendingSessionLoad === early.request)) {
+				await early.promise;
+				return;
+			}
+			// Settled: its list is the committed one and still recent.
+			if (early.settledAt !== undefined && sessionLoad === null
+				&& sessionListCommits === early.commitsBefore + 1
+				&& sessionListCommitRequest === _loadSessionsRequestId
+				&& _state.sessionsTagFilter === early.tagId
+				&& performance.now() - early.settledAt <= SESSION_PREFETCH_REUSE_MS) return;
+		}
 		await loadSessionsInternal(tagId);
+	},
+
+	/**
+	 * Start the sidebar's first session-list load as soon as auth allows,
+	 * ahead of the rest of the bootstrap. The next loadSessions() for the same
+	 * filter (the app page's boot load) awaits it rather than loading again.
+	 */
+	prefetchSessions(): void {
+		if (!earlySessionListEnabled() || sessionLoad || sessionPrefetch) return;
+		const tagId = _state.sessionsTagFilter ?? null;
+		const commitsBefore = sessionListCommits;
+		const promise = loadSessionsInternal(tagId);
+		const entry: SessionPrefetch = { promise, tagId, request: pendingSessionLoad, commitsBefore };
+		sessionPrefetch = entry;
+		void promise.catch(() => {}).finally(() => { entry.settledAt = performance.now(); });
 	},
 
 	async loadMoreSessions() {

@@ -28,11 +28,13 @@
 	import SupportReportHost from '$lib/components/support/SupportReportHost.svelte';
 	import OwnerAccessGate from '$lib/components/OwnerAccessGate.svelte';
 	import { ownerAccess } from '$lib/stores/owner-access.svelte';
+	import { parallelAuthProbesEnabled, prefetchAuthStatus } from '$lib/api/auth';
 	import { notify } from '$lib/stores/notifications';
 	import { historyNotificationActions } from '$lib/services/error-actions';
 	import { installGlobalErrorHandlers } from '$lib/services/error-reporter';
 	import { bindVisualViewport } from '$lib/utils/visual-viewport';
 	import { startLiveSync } from '$lib/services/live-sync';
+	import { appData } from '$lib/stores/app-data.svelte';
 	import { initDesktop } from '$lib/services/desktop';
 	import { installFileLinkGuard } from '$lib/utils/file-link-guard';
 	let teardownLiveSync: (() => void) | undefined;
@@ -114,6 +116,10 @@
 		let current = true;
 		// Metadata failures can start another auth check through the 401 handler.
 		// Reuse this work so that confirmation cannot restart failing requests.
+		// The sidebar's session list does not wait for the model registry: the
+		// app page's boot load joins this request (see prefetchSessions).
+		if (status.authenticated && !mobileApp && currentPath === '/' && !status.setup_required
+			&& status.onboarding_complete !== false && !ownerPasswordBlocking) appData.prefetchSessions();
 		const preparation = status.authenticated
 			? (bootstrapPreparation ??= Promise.allSettled([ensureModelRegistryHydrated(), notify.loadHistory()]))
 			: Promise.resolve();
@@ -124,7 +130,10 @@
 
 	async function refreshAuth() {
 		// Owner password state first, so a blocking step never flashes the app.
-		await ownerAccess.refresh();
+		// The auth probe goes out alongside it; its answer is applied after.
+		const ownerStatus = ownerAccess.refresh();
+		if (parallelAuthProbesEnabled()) prefetchAuthStatus();
+		await ownerStatus;
 		try { await auth.checkAuth(); }
 		catch { /* The store retains prior auth and exposes a connection error. */ }
 	}

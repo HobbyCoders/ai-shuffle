@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const m = vi.hoisted(() => ({ bindings:new Set<string>(),listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadProjectCatalog:vi.fn(),loadSessions:vi.fn(),
+const m = vi.hoisted(() => ({ bindings:new Set<string>(),listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),hydrate:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadProjectCatalog:vi.fn(),loadSessions:vi.fn(),
  feed:{invalidate:vi.fn(),invalidateUnverified:vi.fn(),isFeeding:vi.fn(()=>false),hasLogEpoch:vi.fn(()=>false),restart:vi.fn(),revive:vi.fn()} }));
 vi.mock('$lib/stores/auth.svelte',()=>({auth:{current:{status:{preview_access:false}},subscribe:(fn:(s:any)=>void)=>{m.listener=fn;return m.unsubscribe;},checkAuth:m.check}}));
-vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,refresh:m.refresh,register:(key:string)=>m.bindings.add(key)}}));
+vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,hydrate:m.hydrate,refresh:m.refresh,register:(key:string)=>m.bindings.add(key)}}));
 vi.mock('./resource-sync', async (importOriginal) => {
  const actual = await importOriginal<typeof import('./resource-sync')>();
  const sync = new actual.ResourceSync();
@@ -30,7 +30,12 @@ vi.mock('$lib/stores/browser-panel.svelte',()=>({}));
 const access = vi.hoisted(() => ({get: vi.fn()}));
 vi.mock('$lib/api/client', async (importOriginal) => {
  const actual = await importOriginal<typeof import('$lib/api/client')>();
- return {...actual, api: {...actual.api, get: access.get}};
+ // ChatAccess reads the session row through /live metadata (getSessionOwnerMeta).
+ const getShared = async (url: string) => {
+  const row = await access.get(url);
+  return url.includes('/live?') ? {session_meta: {is_remote: false, device_name: null, ...row}} : row;
+ };
+ return {...actual, api: {...actual.api, get: access.get, getShared}};
 });
 import { render, screen, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
@@ -53,7 +58,7 @@ class Socket {
 let stop:()=>void;
 function account(username:string|null) {m.listener?.({loading:false,status:{authenticated:!!username,username,preference_identity:username ? {user_type:'admin',user_id:username} : null}});}
 beforeEach(()=>{Object.defineProperty(document,'hidden',{configurable:true,value:false});vi.useFakeTimers();vi.clearAllMocks();(activeSession.current as {sessionId:string|null}).sessionId=null;m.feed.isFeeding.mockReturnValue(false);m.feed.hasLogEpoch.mockReturnValue(false);Socket.all=[];localStorage.clear();sessionStorage.clear();vi.stubGlobal('WebSocket',Socket);});
-afterEach(()=>{stop?.();vi.useRealTimers();vi.unstubAllGlobals();});
+afterEach(()=>{stop?.();vi.useRealTimers();vi.unstubAllGlobals();vi.unstubAllEnvs();});
 describe('root authenticated live-sync lifecycle',()=>{
  it('delivers a scoped socket access change through the real resource subscriber to the approval card', async () => {
   Object.defineProperty(document, 'hidden', {configurable:true, value:false});
@@ -117,7 +122,8 @@ describe('root authenticated live-sync lifecycle',()=>{
   stop=startLiveSync();account('alice');const socket=Socket.all[0];
   expect(socket.url).toContain('/api/v1/ws/global?device_id=');expect(socket.url).not.toContain('token=');
   socket.emit({type:'sync_ready'});socket.emit({type:'sync_ready'});
-  expect(m.reconnect).toHaveBeenCalledTimes(3);expect(m.invalidate).toHaveBeenCalledTimes(2);
+  // The first sync_ready joins the bind's preference snapshot; a later one re-reads.
+  expect(m.hydrate).toHaveBeenCalledTimes(1);expect(m.reconnect).toHaveBeenCalledTimes(2);expect(m.invalidate).toHaveBeenCalledTimes(2);
   socket.emit({type:'preferences_changed',keys:['theme','theme',17]});expect(m.refresh).toHaveBeenCalledTimes(1);
   socket.emit({type:'resources_changed',resources:['notes',null]});expect(m.invalidate).toHaveBeenLastCalledWith(['notes']);
  });
@@ -186,6 +192,8 @@ describe('root authenticated live-sync lifecycle',()=>{
   expect(m.loadProjectCatalog).toHaveBeenCalledOnce();expect(m.loadSessions).toHaveBeenCalledOnce();
  });
  it('lets the first catalog refresh join a boot load that started after sync_ready',async()=>{
+  // The full first refresh (VITE_PERF_STARTUP_DEDUPE=0 or a reconnect).
+  vi.stubEnv('VITE_PERF_STARTUP_DEDUPE','0');
   stop=startLiveSync();account('alice');
   const before=performance.now();
   Socket.all[0].emit({type:'sync_ready'});
@@ -220,5 +228,47 @@ describe('root authenticated live-sync lifecycle',()=>{
   stop=startLiveSync();account('alice');Socket.all[0].close();await vi.advanceTimersByTimeAsync(1000);
   expect(Socket.all).toHaveLength(2);Socket.all[1].close();stop();await vi.advanceTimersByTimeAsync(30000);
   expect(Socket.all).toHaveLength(2);expect(m.unsubscribe).toHaveBeenCalled();
+ });
+ describe('first sync_ready after a bind (VITE_PERF_STARTUP_DEDUPE)',()=>{
+  const ok=()=>vi.fn(async()=>new Response('{}',{status:200,headers:{'content-type':'application/json'}}));
+  const invalidated=()=>m.invalidate.mock.calls.flatMap(([names])=>names ?? ['<all>']);
+  it('skips the refresh of reads sent or still to come for this owner and joins the preference snapshot',async()=>{
+   const {api:real}=await vi.importActual<typeof import('$lib/api/client')>('$lib/api/client');
+   vi.stubGlobal('fetch',ok());
+   stop=startLiveSync();account('alice');m.reconnect.mockClear();m.invalidate.mockClear();
+   await real.get('/models');await real.get('/sessions/cursor?limit=50');
+   Socket.all[0].emit({type:'sync_ready'});
+   expect(m.hydrate).toHaveBeenCalledOnce();expect(m.reconnect).not.toHaveBeenCalled();
+   expect(invalidated()).not.toContain('settings');expect(invalidated()).not.toContain('sessions');
+   // Not read yet: the boot load that reads it starts after the subscription.
+   expect(invalidated()).not.toContain('tags');
+   // No read stands for this name: it is refreshed as before.
+   expect(invalidated()).toContain('chat-access');
+   // A reconnect afterwards catches up on everything.
+   Socket.all[0].emit({type:'sync_ready'});
+   expect(m.reconnect).toHaveBeenCalledOnce();expect(m.invalidate).toHaveBeenLastCalledWith(undefined);
+  });
+  it('still refreshes a read that failed or was made for the previous owner',async()=>{
+   const {api:real}=await vi.importActual<typeof import('$lib/api/client')>('$lib/api/client');
+   vi.stubGlobal('fetch',ok());
+   stop=startLiveSync();account('alice');m.reconnect.mockClear();m.invalidate.mockClear();
+   await real.get('/models');
+   vi.stubGlobal('fetch',vi.fn(async()=>new Response('{}',{status:500})));
+   await expect(real.get('/tags')).rejects.toBeTruthy();
+   await vi.advanceTimersByTimeAsync(10);
+   account('bob');
+   Socket.all[1].emit({type:'sync_ready'});
+   expect(invalidated()).toContain('settings');expect(invalidated()).toContain('tags');
+  });
+  it('refreshes everything and re-reads preferences with VITE_PERF_STARTUP_DEDUPE=0',async()=>{
+   vi.stubEnv('VITE_PERF_STARTUP_DEDUPE','0');
+   const {api:real}=await vi.importActual<typeof import('$lib/api/client')>('$lib/api/client');
+   vi.stubGlobal('fetch',ok());
+   stop=startLiveSync();account('alice');m.reconnect.mockClear();m.invalidate.mockClear();
+   await real.get('/models');
+   Socket.all[0].emit({type:'sync_ready'});
+   expect(m.hydrate).not.toHaveBeenCalled();expect(m.reconnect).toHaveBeenCalledOnce();
+   expect(m.invalidate).toHaveBeenCalledWith(undefined);
+  });
  });
 });

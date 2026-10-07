@@ -2,12 +2,42 @@
  * Authentication API functions
  */
 
-import { api, type AuthStatus } from './client';
+import { api, apiWriteEpoch, type AuthStatus } from './client';
 
-export async function getAuthStatus(): Promise<AuthStatus> {
+/**
+ * Performance kill switch VITE_PERF_PARALLEL_AUTH_PROBES (default on; see
+ * "Performance flags" in docs/internal/DEVELOPMENT.md). `0` restores sending
+ * `/auth/status` only after `/owner/status` has answered.
+ */
+export function parallelAuthProbesEnabled(): boolean {
+	return import.meta.env.VITE_PERF_PARALLEL_AUTH_PROBES !== '0';
+}
+
+async function fetchAuthStatus(): Promise<AuthStatus> {
 	const status = await api.get<AuthStatus>('/auth/status', { cache: 'no-store' });
 	if (typeof status?.authenticated !== 'boolean') throw new Error('Invalid authentication status response');
 	return status;
+}
+
+// An auth probe sent ahead of its consumer (alongside the owner status probe).
+// The next getAuthStatus() claims it once, unless a write went out since.
+const EARLY_STATUS_TTL_MS = 30_000;
+let earlyStatus: { promise: Promise<AuthStatus>; epoch: number; at: number } | null = null;
+
+/** Send the auth status probe now; the next getAuthStatus() call receives it. */
+export function prefetchAuthStatus(): void {
+	const promise = fetchAuthStatus();
+	promise.catch(() => { /* The claiming caller sees the failure. */ });
+	earlyStatus = { promise, epoch: apiWriteEpoch(), at: performance.now() };
+}
+
+export async function getAuthStatus(): Promise<AuthStatus> {
+	const early = earlyStatus;
+	earlyStatus = null;
+	if (early && early.epoch === apiWriteEpoch() && performance.now() - early.at <= EARLY_STATUS_TTL_MS) {
+		return early.promise;
+	}
+	return fetchAuthStatus();
 }
 
 export async function setupInstallation(): Promise<void> {

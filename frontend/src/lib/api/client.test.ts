@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ApiClient, recheckAuthOn401 } from './client';
+import { ApiClient, lastGetFailed, lastGetStartedAt, recheckAuthOn401 } from './client';
 import { auth } from '$lib/stores/auth.svelte';
 
 describe('ApiClient', () => {
@@ -467,6 +467,81 @@ describe('ApiClient', () => {
 			await expect(client.get('/sessions')).rejects.toMatchObject({ status: 403 });
 			await flush();
 			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+	});
+	describe('getShared (VITE_PERF_STARTUP_DEDUPE)', () => {
+		const json = (body: unknown, status = 200) =>
+			new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+		afterEach(() => vi.unstubAllEnvs());
+
+		it('lets concurrent callers await one request and gives each its own copy', async () => {
+			let release!: (r: Response) => void;
+			fetchMock.mockImplementationOnce(() => new Promise<Response>(r => { release = r; }));
+			const a = client.getShared<{ items: string[] }>('/shared/a');
+			const b = client.getShared<{ items: string[] }>('/shared/a');
+			release(json({ items: ['x'] }));
+			const [ra, rb] = await Promise.all([a, b]);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			ra.items.push('mutated');
+			expect(rb.items).toEqual(['x']);
+		});
+
+		it('fetches again once the shared read settled, unless maxAgeMs still covers it', async () => {
+			fetchMock.mockImplementation(async () => json({ n: 1 }));
+			await client.getShared('/shared/b');
+			await client.getShared('/shared/b');
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+			fetchMock.mockClear();
+			await client.getShared('/shared/c', { maxAgeMs: 60_000 });
+			await client.getShared('/shared/c', { maxAgeMs: 60_000 });
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('never answers a caller that asks after a write with a read sent before it', async () => {
+			fetchMock.mockImplementation(async () => json({ ok: true }));
+			await client.getShared('/shared/d', { maxAgeMs: 60_000 });
+			await client.post('/elsewhere', {});
+			await client.getShared('/shared/d', { maxAgeMs: 60_000 });
+			expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith('/shared/d'))).toHaveLength(2);
+		});
+
+		it('does not share a failure with the next caller', async () => {
+			fetchMock.mockResolvedValueOnce(json({ detail: 'boom' }, 500)).mockResolvedValueOnce(json({ ok: true }));
+			await expect(client.getShared('/shared/e', { maxAgeMs: 60_000 })).rejects.toBeTruthy();
+			await expect(client.getShared('/shared/e', { maxAgeMs: 60_000 })).resolves.toEqual({ ok: true });
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+		});
+
+		it('aborting drops only that caller\'s wait', async () => {
+			let release!: (r: Response) => void;
+			fetchMock.mockImplementationOnce(() => new Promise<Response>(r => { release = r; }));
+			const controller = new AbortController();
+			const aborted = client.getShared('/shared/f', { signal: controller.signal });
+			const kept = client.getShared('/shared/f');
+			controller.abort();
+			await expect(aborted).rejects.toMatchObject({ name: 'AbortError' });
+			release(json({ v: 2 }));
+			await expect(kept).resolves.toEqual({ v: 2 });
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		});
+
+		it('sends one request per caller with VITE_PERF_STARTUP_DEDUPE=0', async () => {
+			vi.stubEnv('VITE_PERF_STARTUP_DEDUPE', '0');
+			fetchMock.mockImplementation(async () => json({}));
+			await Promise.all([client.getShared('/shared/g', { maxAgeMs: 60_000 }), client.getShared('/shared/g', { maxAgeMs: 60_000 })]);
+			expect(fetchMock).toHaveBeenCalledTimes(2);
+		});
+
+		it('records when a path was last read, and forgets a read that failed', async () => {
+			fetchMock.mockResolvedValueOnce(json({})).mockResolvedValueOnce(json({}, 500));
+			const before = performance.now();
+			await client.get('/read-log?x=1');
+			const at = lastGetStartedAt('/read-log');
+			expect(at).toBeGreaterThanOrEqual(before);
+			expect(lastGetFailed('/read-log')).toBe(false);
+			await expect(client.get('/read-log')).rejects.toBeTruthy();
+			expect(lastGetStartedAt('/read-log')).toBeUndefined();
+			expect(lastGetFailed('/read-log')).toBe(true);
 		});
 	});
 });
