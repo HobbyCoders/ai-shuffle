@@ -76,6 +76,7 @@ import logging
 import math
 import os
 import re
+import ssl
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -7172,6 +7173,48 @@ def _responses_timeout_kwargs() -> Dict[str, Any]:
     return {"pre_content_heartbeat_budget": seconds if seconds > 0 else None}
 
 
+# Kill switch for provider HTTP reuse ("0" restores one client per model call,
+# each loading the CA bundle). Documented under "Performance flags" in
+# docs/internal/DEVELOPMENT.md.
+PROVIDER_HTTP_REUSE_ENV = "AI_SHUFFLE_PERF_PROVIDER_HTTP_REUSE"
+_provider_ssl_context: Optional[ssl.SSLContext] = None
+
+
+def _provider_http_reuse_enabled() -> bool:
+    value = os.environ.get(PROVIDER_HTTP_REUSE_ENV, "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _provider_tls_verify() -> Any:
+    """``verify=`` for the provider clients the adapter builds.
+
+    httpx loads the CA bundle afresh for every client it constructs (about
+    13 ms on the event loop on this worker), so one TLS context is built per
+    process and shared. It honours SSL_CERT_FILE / SSL_CERT_DIR as they are at
+    first use, like a per-client context would at its construction.
+    """
+    global _provider_ssl_context
+    if not _provider_http_reuse_enabled():
+        return True
+    if _provider_ssl_context is None:
+        _provider_ssl_context = httpx.create_ssl_context()
+    return _provider_ssl_context
+
+
+def _session_provider_http(timeout: float) -> Optional[httpx.AsyncClient]:
+    """The HTTP client one native session's provider client keeps for its life.
+
+    Without an injected client fluid's Anthropic and chat/completions clients
+    build and close an ``httpx.AsyncClient`` per model call: a CA bundle load
+    on the event loop and a fresh TCP and TLS handshake every turn and every
+    tool-loop step. Returned to the adapter, which closes it on disconnect.
+    None when the kill switch is off, which restores the per-call clients.
+    """
+    if not _provider_http_reuse_enabled():
+        return None
+    return httpx.AsyncClient(timeout=timeout, verify=_provider_tls_verify())
+
+
 def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> httpx.AsyncClient:
     """An ``httpx.AsyncClient`` that passively captures usage/quota headers and
     records upstream rate limits.
@@ -7221,7 +7264,9 @@ def _usage_capture_http_client(provider_id: str, use_codex_backend: bool) -> htt
                 pass
 
     return httpx.AsyncClient(
-        timeout=_provider_read_timeout(), event_hooks={"response": [_on_response]}
+        timeout=_provider_read_timeout(),
+        event_hooks={"response": [_on_response]},
+        verify=_provider_tls_verify(),
     )
 
 
@@ -7293,6 +7338,7 @@ async def _build_provider_client(
         # so an opted-in retry can never double-stream a partial message.
         pricing = _openrouter_pricing(options)
         if creds is not None:
+            session_http = _session_provider_http(timeouts["timeout"])
             if creds.base_url:
                 return (
                     OpenRouterClient(
@@ -7300,16 +7346,18 @@ async def _build_provider_client(
                         base_url=_chat_completions_url(creds.base_url),
                         pricing=pricing,
                         retry=RetryPolicy(),
+                        http_client=session_http,
                         **timeouts,
                     ),
-                    None,
+                    session_http,
                 )
             return (
                 OpenRouterClient(
                     api_key=creds.api_key, pricing=pricing, retry=RetryPolicy(),
+                    http_client=session_http,
                     **timeouts,
                 ),
-                None,
+                session_http,
             )
         _require_env_credential("OPENROUTER_API_KEY", kind)
         return OpenRouterClient(pricing=pricing, retry=RetryPolicy(), **timeouts), None
@@ -7329,6 +7377,7 @@ async def _build_provider_client(
             bearer_http = httpx.AsyncClient(
                 timeout=timeouts["timeout"],
                 headers={"Authorization": f"Bearer {creds.api_key}"},
+                verify=_provider_tls_verify(),
             )
             return (
                 AnthropicClient(
@@ -7339,7 +7388,11 @@ async def _build_provider_client(
                 ),
                 bearer_http,
             )
-        return AnthropicClient(api_key=creds.api_key, **timeouts), None
+        session_http = _session_provider_http(timeouts["timeout"])
+        return (
+            AnthropicClient(api_key=creds.api_key, http_client=session_http, **timeouts),
+            session_http,
+        )
     _require_env_credential("ANTHROPIC_API_KEY", kind)
     return AnthropicClient(**timeouts), None
 

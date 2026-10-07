@@ -8241,6 +8241,108 @@ async def test_build_provider_client_bound_row_carries_configured_timeouts(
             await http_client.aclose()
 
 
+_OK_SSE = (
+    'data: {"id":"c","object":"chat.completion.chunk","model":"m","choices":'
+    '[{"index":0,"delta":{"role":"assistant","content":"OK"},"finish_reason":null}]}\n\n'
+    'data: {"id":"c","object":"chat.completion.chunk","model":"m","choices":'
+    '[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+    "data: [DONE]\n\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_bound_openrouter_session_builds_no_http_client_per_model_call(monkeypatch):
+    """Journey 3 guard: fluid's chat/completions client built (and closed) an
+    httpx client per model call, loading the CA bundle on the event loop
+    (~13 ms) and opening a new TCP/TLS connection every turn. The adapter now
+    injects one client per session: zero client constructions per model call
+    after connect, and the CA bundle is loaded at most once per process."""
+    import httpx
+    from fluid.messages import Message, Text
+    from fluid.providers.base import ProviderRequest
+
+    import app.core.provider.harness_adapter as ha
+    from app.core.provider.fluid_credentials import ProviderCredentials
+
+    monkeypatch.delenv(ha.PROVIDER_HTTP_REUSE_ENV, raising=False)
+    monkeypatch.setattr(ha, "_provider_ssl_context", None)
+
+    async def fake_resolve(_kind, _provider_id):
+        return ProviderCredentials(api_key="sk-test", base_url="https://chat.example/v1")
+
+    monkeypatch.setattr(ha, "resolve_provider_credentials", fake_resolve)
+    ca_loads = []
+    real_create = httpx.create_ssl_context
+    monkeypatch.setattr(
+        ha.httpx, "create_ssl_context",
+        lambda *a, **k: ca_loads.append(1) or real_create(*a, **k),
+    )
+    options = SessionOptions(model="m", extra={"provider_id": "prov-1"})
+    client, http_client = await ha._build_provider_client("openrouter", options)
+    _other_client, other_http = await ha._build_provider_client("openrouter", options)
+    try:
+        assert http_client is not None and client._http is http_client
+        assert len(ca_loads) == 1  # two sessions, one CA bundle load
+
+        posts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            posts.append(str(request.url))
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"}, text=_OK_SSE
+            )
+
+        http_client._transport = httpx.MockTransport(handler)
+        constructed = []
+        real_init = httpx.AsyncClient.__init__
+
+        def counting_init(self, *a, **k):
+            constructed.append(1)
+            real_init(self, *a, **k)
+
+        monkeypatch.setattr(httpx.AsyncClient, "__init__", counting_init)
+        request = ProviderRequest(model="m", system="", messages=[
+            Message(role="user", content=[Text("Reply with exactly OK")])
+        ])
+        for _turn in range(3):
+            kinds = [chunk.kind async for chunk in client.stream(request)]
+            assert "message_stop" in kinds
+        assert len(posts) == 3
+        assert posts[0] == "https://chat.example/v1/chat/completions"
+        assert constructed == []
+        assert not http_client.is_closed  # the adapter closes it on disconnect
+    finally:
+        await http_client.aclose()
+        await other_http.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["anthropic", "openrouter"])
+async def test_bound_row_injects_session_http_client_unless_switched_off(monkeypatch, kind):
+    import app.core.provider.harness_adapter as ha
+    from app.core.provider.fluid_credentials import ProviderCredentials
+
+    async def fake_resolve(_kind, _provider_id):
+        return ProviderCredentials(api_key="sk-test", base_url=None)
+
+    monkeypatch.setattr(ha, "resolve_provider_credentials", fake_resolve)
+    options = SessionOptions(model="m", extra={"provider_id": "prov-1"})
+
+    monkeypatch.delenv(ha.PROVIDER_HTTP_REUSE_ENV, raising=False)
+    client, http_client = await ha._build_provider_client(kind, options)
+    try:
+        assert http_client is not None
+        assert client._http is http_client
+    finally:
+        await http_client.aclose()
+
+    # Kill switch: the fluid client goes back to one httpx client per call.
+    monkeypatch.setenv(ha.PROVIDER_HTTP_REUSE_ENV, "0")
+    client, http_client = await ha._build_provider_client(kind, options)
+    assert http_client is None
+    assert client._http is None
+
+
 @pytest.mark.asyncio
 async def test_build_provider_client_zero_disables_deadline_and_first_byte(monkeypatch):
     """0 disables the whole-call deadline and the first-byte bound (fluid's
