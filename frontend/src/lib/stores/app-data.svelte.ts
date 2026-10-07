@@ -582,6 +582,20 @@ const _catalogAnswered = { projects: false, cluster: false };
 const _catalogFailures = { projects: false, cluster: false };
 let _catalogWaiters: (() => void)[] = [];
 
+// The latest request of each catalog half, so a refresh can join one that
+// already reflects the server state it is asked for (see loadProjectCatalog).
+type CatalogRequest = { startedAt: number; done: Promise<boolean> };
+const _catalogLatest: { projects: CatalogRequest | null; cluster: CatalogRequest | null } = {
+	projects: null,
+	cluster: null
+};
+
+function trackCatalogRequest(half: 'projects' | 'cluster', load: () => Promise<boolean>): Promise<boolean> {
+	const request: CatalogRequest = { startedAt: performance.now(), done: load() };
+	_catalogLatest[half] = request;
+	return request.done;
+}
+
 function settleCatalogHalf(half: 'projects' | 'cluster', ok: boolean) {
 	_catalogAnswered[half] = true;
 	_catalogFailures[half] = !ok;
@@ -650,25 +664,49 @@ export const appData = {
 	// ── Project Operations ──────────────────────────────────────────────
 
 	async loadProjects() {
-		try {
-			const projects = await api.get<Project[]>('/projects');
-			_update(s => ({ ...s, projects }));
-			settleCatalogHalf('projects', true);
-		} catch (e) {
-			console.error('Failed to load projects:', e);
-			settleCatalogHalf('projects', false);
-		}
+		await trackCatalogRequest('projects', async () => {
+			try {
+				const projects = await api.get<Project[]>('/projects');
+				_update(s => ({ ...s, projects }));
+				settleCatalogHalf('projects', true);
+				return true;
+			} catch (e) {
+				console.error('Failed to load projects:', e);
+				settleCatalogHalf('projects', false);
+				return false;
+			}
+		});
 	},
 
 	async loadClusterProjects() {
-		try {
-			const result = await listClusterProjects();
-			_update(s => ({ ...s, clusterProjects: result.projects }));
-			settleCatalogHalf('cluster', true);
-		} catch (e) {
-			console.error('Failed to load cluster projects:', e);
-			settleCatalogHalf('cluster', false);
-		}
+		await trackCatalogRequest('cluster', async () => {
+			try {
+				const result = await listClusterProjects();
+				_update(s => ({ ...s, clusterProjects: result.projects }));
+				settleCatalogHalf('cluster', true);
+				return true;
+			} catch (e) {
+				console.error('Failed to load cluster projects:', e);
+				settleCatalogHalf('cluster', false);
+				return false;
+			}
+		});
+	},
+
+	/**
+	 * Refresh both catalog halves for an invalidation seen at `freshSince`
+	 * (a performance.now() time). A half whose latest request started at or
+	 * after that moment already reflects the change, so it is joined rather
+	 * than repeated, unless it failed. At startup this folds the first
+	 * sync_ready refresh into the boot load instead of fetching twice.
+	 */
+	async loadProjectCatalog(freshSince: number) {
+		const reuse = async (half: 'projects' | 'cluster', load: () => Promise<void>) => {
+			const latest = _catalogLatest[half];
+			if (latest && latest.startedAt >= freshSince && (await latest.done)) return;
+			await load();
+		};
+		await Promise.all([reuse('projects', appData.loadProjects), reuse('cluster', appData.loadClusterProjects)]);
 	},
 
 	async createProject(data: { id: string; name: string; description?: string; path?: string }) {

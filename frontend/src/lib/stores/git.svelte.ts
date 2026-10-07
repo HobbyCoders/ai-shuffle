@@ -423,6 +423,51 @@ function _checkWorktreeGone(e: unknown): boolean {
 }
 
 /**
+ * Performance kill switch (VITE_PERF_DEFER_GIT_ON_OPEN, default on; see
+ * docs/internal/DEVELOPMENT.md "Performance flags"). Set it to `0` at build
+ * time to restore the full fan-out on every load.
+ */
+export function deferGitOnOpen(): boolean {
+	return import.meta.env.VITE_PERF_DEFER_GIT_ON_OPEN !== '0';
+}
+
+export interface GitLoadOptions {
+	/** Settles once the chat's transcript is on screen (or a cap elapsed). The
+	 *  PR lookup, and the remote fetch that follows the load, wait for it. */
+	afterCriticalPath?: Promise<unknown>;
+}
+
+type TranscriptSource = {
+	subscribe(run: (state: { sessionId: string | null; isLoadingSession: boolean }) => void): () => void;
+};
+
+/**
+ * Resolve once `sessionId`'s transcript has loaded, the user has moved to
+ * another chat, or `maxWaitMs` has passed, whichever is first. Background Git
+ * work for a chat being opened waits on this so it does not compete with the
+ * transcript for connections and server time.
+ */
+export function whenTranscriptSettled(source: TranscriptSource, sessionId: string, maxWaitMs: number): Promise<void> {
+	return new Promise((resolve) => {
+		let done = false;
+		let unsubscribe: (() => void) | undefined;
+		const finish = () => {
+			if (done) return;
+			done = true;
+			clearTimeout(cap);
+			// subscribe() runs the callback synchronously, before it returns.
+			if (unsubscribe) unsubscribe();
+			resolve();
+		};
+		const cap = setTimeout(finish, maxWaitMs);
+		unsubscribe = source.subscribe((state) => {
+			if (state.sessionId !== sessionId || !state.isLoadingSession) finish();
+		});
+		if (done) unsubscribe();
+	});
+}
+
+/**
  * Core load logic shared by loadRepository and loadForWorktree.
  *
  * Lands as ONE atomic, coherent write: status, branches, commits, worktrees,
@@ -435,7 +480,8 @@ async function _loadCore(
 	projectId: string,
 	worktreeId: string | undefined,
 	mode: GitMode,
-	sessionId?: string | undefined
+	sessionId?: string | undefined,
+	options?: GitLoadOptions
 ) {
 	_worktreeGone = false; // Reset on context switch
 	_clearServerBackoff(); // Reset backoff on context switch
@@ -470,10 +516,17 @@ async function _loadCore(
 		_loadedKey = key;
 
 		if (status.is_git_repo) {
+			// Opening a chat: only what the header renders goes out now. Nothing
+			// renders the commit graph, the worktree list belongs to the new-chat
+			// branch picker (which refreshes it when opened), and the PR lookup
+			// (a `gh` call) waits until the transcript is on screen.
+			const deferOpen = deferGitOnOpen();
+			const remote = _remoteSessions.has(sessionId ?? "") || (typeof requestScope === 'object' && requestScope.workerId !== 'local');
+			const gate = deferOpen ? options?.afterCriticalPath : undefined;
 			const [branches, graphResponse, worktrees, diffStats, changedFilesResp, prState] = await Promise.all([
 				gitApi.getBranches(projectId, true, worktreeId, undefined, requestScope),
-				gitApi.getCommitGraph(projectId, 50, undefined, requestScope),
-				(_remoteSessions.has(sessionId ?? "") || (typeof requestScope === 'object' && requestScope.workerId !== 'local')) ? Promise.resolve([]) : gitApi.getWorktrees(projectId, worktreeId).catch((e) => {
+				deferOpen ? Promise.resolve(null) : gitApi.getCommitGraph(projectId, 50, undefined, requestScope),
+				remote ? Promise.resolve([]) : deferOpen && sessionId ? Promise.resolve(cached?.worktrees ?? []) : gitApi.getWorktrees(projectId, worktreeId).catch((e) => {
 					// This legacy project-level list is optional. A resumed v2
 					// session can have a healthy checkout without a legacy project.
 					console.warn('Failed to load worktree list:', e);
@@ -481,7 +534,13 @@ async function _loadCore(
 				}),
 				gitApi.getDiffStats(projectId, true, worktreeId, undefined, requestScope).catch(() => null),
 				gitApi.getChangedFiles(projectId, worktreeId, requestScope).catch(() => null),
-				gitApi.getPrState(projectId, worktreeId ?? undefined, requestScope).catch(() => null)
+				(async () => {
+					if (gate) {
+						await gate.catch(() => undefined);
+						if (_loadInFlight !== scope) return null;
+					}
+					return gitApi.getPrState(projectId, worktreeId ?? undefined, requestScope).catch(() => null);
+				})()
 			]);
 			if (_loadInFlight !== scope) return;
 			if (prState) _lastPrStateFetch.set(key, Date.now());
@@ -497,7 +556,7 @@ async function _loadCore(
 			const newState: CachedState = {
 				status,
 				branches,
-				commits: graphResponse.commits,
+				commits: graphResponse?.commits ?? cached?.commits ?? [],
 				worktrees,
 				diffStats: diffStats ?? null,
 				prState: resolvedPr,
@@ -778,18 +837,18 @@ export const git = {
 		else _remoteSessions.delete(sessionId);
 	},
 
-	async loadRepository(projectId: string, _forceReload = false, sessionId?: string) {
+	async loadRepository(projectId: string, _forceReload = false, sessionId?: string, options?: GitLoadOptions) {
 		const scope = _scopeKey(projectId, undefined, sessionId);
 		if (_loadInFlight === scope) return;
 		_loadInFlight = scope;
-		await _loadCore(scope, projectId, undefined, 'project', sessionId);
+		await _loadCore(scope, projectId, undefined, 'project', sessionId, options);
 	},
 
-	async loadForWorktree(projectId: string, worktreeId: string, _forceReload = false, sessionId?: string) {
+	async loadForWorktree(projectId: string, worktreeId: string, _forceReload = false, sessionId?: string, options?: GitLoadOptions) {
 		const scope = _scopeKey(projectId, worktreeId, sessionId);
 		if (_loadInFlight === scope) return;
 		_loadInFlight = scope;
-		await _loadCore(scope, projectId, worktreeId, 'worktree', sessionId);
+		await _loadCore(scope, projectId, worktreeId, 'worktree', sessionId, options);
 	},
 
 	/**
@@ -1201,6 +1260,11 @@ export const git = {
 
 	async deleteWorktree(worktreeId: string, keepBranch: boolean = true) {
 		if (!_state.projectId) return;
+		// An existing chat no longer loads the worktree list on open, so learn
+		// the row's kind before deciding whether this delete is allowed.
+		if (!_state.workerTarget && !_state.worktrees.some(w => w.id === worktreeId)) {
+			await git.loadWorktrees();
+		}
 		if (_state.workerTarget || _state.worktrees.some(w => w.id === worktreeId && w.resource_kind === 'checkout')) {
 			throw new Error('Use the session lifecycle for this checkout');
 		}

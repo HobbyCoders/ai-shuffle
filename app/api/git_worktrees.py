@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 from fastapi import APIRouter, HTTPException, Depends, Request, status
 
@@ -36,6 +36,9 @@ from app.api.schemas.git import (
     WorktreeGitStatus,
     WorktreeInfo,
     WorktreeListResponse,
+    WorktreeCompactListResponse,
+    WorktreeStatusSummary,
+    WorktreeSummary,
     WorktreeFileInfo,
     WorktreeFilesResponse,
     OperationResponse,
@@ -133,6 +136,37 @@ def _convert_worktree_to_info(wt: dict) -> WorktreeInfo:
         # Legacy field
         session=legacy_session_info
     )
+
+
+def _convert_worktree_to_summary(wt: dict) -> WorktreeSummary:
+    """Compact row: identity, branch and dirty counts (see WorktreeSummary)."""
+    gs = wt.get("git_status")
+    return WorktreeSummary(
+        id=wt["id"],
+        resource_kind=wt.get("resource_kind", "worktree"),
+        branch_name=wt["branch_name"],
+        base_branch=wt.get("base_branch"),
+        exists=wt.get("exists"),
+        git_status=WorktreeStatusSummary(
+            is_clean=gs.get("is_clean", True),
+            modified_count=len(gs.get("modified", [])),
+            staged_count=len(gs.get("staged", [])),
+            untracked_count=len(gs.get("untracked", [])),
+        ) if gs else None,
+        status_error=wt.get("status_error"),
+    )
+
+
+def _session_may_be_hot(streaming: set, active_since: float):
+    """Session filter for the compact list: keep only sessions that can make
+    their worktree hot (see _is_hot). Mapping every historical session to its
+    checkout costs a DB lookup and a HEAD read each, and only hotness uses it."""
+    def keep(session: dict) -> bool:
+        if session.get("id") in streaming:
+            return True
+        updated = _to_epoch(session.get("updated_at"))
+        return updated is not None and updated >= active_since
+    return keep
 
 
 # Dedicated, bounded thread pool for the per-worktree status fan-out.
@@ -481,12 +515,13 @@ async def worktree_report(project_id: str, _=Depends(require_admin)):
     return await run_sync(report, project_id)
 
 
-@router.get("/worktrees", response_model=WorktreeListResponse)
+@router.get("/worktrees", response_model=Union[WorktreeListResponse, WorktreeCompactListResponse])
 async def list_worktrees(
     request: Request,
     project_id: str,
     include_status: bool = True,
     focus_worktree_id: Optional[str] = None,
+    compact: bool = False,
     token: str = Depends(require_auth)
 ):
     """
@@ -498,6 +533,10 @@ async def list_worktrees(
         include_status: If True (default), includes git status (dirty state) for each worktree
         focus_worktree_id: The worktree the client has open; its status is kept
             as fresh as a busy worktree's
+        compact: Return only worktrees that exist on disk, as WorktreeSummary
+            rows (no session history, paths or file lists), and skip mapping
+            sessions that cannot affect status freshness. The branch picker
+            uses this; the full shape stays the default.
     """
     from app.api.common import require_origin_access
     from app.db.projects_v2 import get_project_v2
@@ -515,13 +554,26 @@ async def list_worktrees(
                 detail="Project is not a git repository"
             )
 
-    worktrees = await run_sync(worktree_manager.get_worktrees_for_project, project_id)
+    if compact:
+        session_filter = _session_may_be_hot(
+            _streaming_session_ids(), time.time() - _WORKTREE_HOT_ACTIVITY_SECONDS
+        )
+        worktrees = await run_sync(
+            worktree_manager.get_worktrees_for_project, project_id, session_filter=session_filter
+        )
+        worktrees = [wt for wt in worktrees if wt.get("exists") is not False]
+    else:
+        worktrees = await run_sync(worktree_manager.get_worktrees_for_project, project_id)
 
     # Optionally attach git status for each existing worktree. This serves the
     # last known statuses and refreshes hot worktrees in the background, off the
     # main GitPool (see _load_worktree_statuses).
     if include_status:
         await _load_worktree_statuses(project_id, worktrees, focus_worktree_id)
+
+    if compact:
+        summaries = [_convert_worktree_to_summary(wt) for wt in worktrees]
+        return WorktreeCompactListResponse(worktrees=summaries, total=len(summaries))
 
     worktree_infos = [_convert_worktree_to_info(wt) for wt in worktrees]
 

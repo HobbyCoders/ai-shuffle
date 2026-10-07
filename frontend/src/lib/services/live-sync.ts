@@ -44,10 +44,17 @@ export function startLiveSync() {
  const visible = (refresh: () => void | Promise<unknown>) => () => {
   if (!document.hidden) return refresh();
  };
+ // When the project catalog was last invalidated: a catalog request that
+ // started after it (the boot load, at startup) already answers it.
+ let projectsInvalidatedAt = 0;
+ const invalidate = (names?: string[]) => {
+  if (!names || names.includes('projects')) projectsInvalidatedAt = performance.now();
+  resourceSync.invalidate(names);
+ };
  const unsubscribeResources = [
   resourceSync.subscribe(['sessions', 'tags'], visible(() => appData.loadSessions())),
   resourceSync.subscribe(['projects'], visible(async () => {
-   await Promise.all([appData.loadProjects(), appData.loadClusterProjects(), appData.loadSessions()]);
+   await Promise.all([appData.loadProjectCatalog(projectsInvalidatedAt), appData.loadSessions()]);
    activeSession.applyComposerDefaults();
   })),
   resourceSync.subscribe(['agents'], visible(async () => {
@@ -94,16 +101,16 @@ export function startLiveSync() {
     void preferenceSync.reconnect();
     if (syncedBefore) resyncFeedAfterGap();
     syncedBefore = true;
-    resourceSync.invalidate();
+    invalidate();
    } else if (data.type === 'sync_reconcile') {
     void preferenceSync.reconnect();
-    resourceSync.invalidate();
+    invalidate();
    } else if (data.type === 'chat_access_changed' && typeof data.session_id === 'string') {
     resourceSync.invalidate([`chat-access:${data.session_id}`]);
    } else if (data.type === 'preferences_changed' && Array.isArray(data.keys)) {
     for (const key of new Set(data.keys)) if (typeof key === 'string') void preferenceSync.refresh(key);
    } else if (data.type === 'resources_changed' && Array.isArray(data.resources)) {
-    resourceSync.invalidate(data.resources.filter((v): v is string => typeof v === 'string'));
+    invalidate(data.resources.filter((v): v is string => typeof v === 'string'));
    } else handleGlobalUserEvent(data);
   };
   ws.onopen = () => {
@@ -150,7 +157,7 @@ export function startLiveSync() {
   if (!owner || document.visibilityState !== 'visible') return;
   reconnect();
   void preferenceSync.reconnect();
-  resourceSync.invalidate();
+  invalidate();
  };
  window.addEventListener('online', resume);
  document.addEventListener('visibilitychange', resume);

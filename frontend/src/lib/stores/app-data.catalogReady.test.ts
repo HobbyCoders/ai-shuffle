@@ -44,3 +44,34 @@ it('counts a failed half as answered, and says it failed, so a held send never w
 	await appData.loadClusterProjects();
 	expect(appData.projectCatalogFailed).toBe(false);
 });
+
+// Chat-open perf: at startup the first sync_ready refresh used to fetch both
+// halves again while the boot load of the same catalog was still in flight.
+it('joins a catalog request that started after the invalidation instead of repeating it', async () => {
+	const invalidatedAt = performance.now();
+	const local = deferred<unknown>(), cluster = deferred<unknown>();
+	mocks.get.mockReturnValue(local.promise); mocks.listClusterProjects.mockReturnValue(cluster.promise);
+	const boot = Promise.all([appData.loadProjects(), appData.loadClusterProjects()]);
+	const refresh = appData.loadProjectCatalog(invalidatedAt);
+	local.resolve([{ id: 'p' }]); cluster.resolve({ projects: [] });
+	await Promise.all([boot, refresh]);
+	expect(mocks.get).toHaveBeenCalledTimes(1); expect(mocks.listClusterProjects).toHaveBeenCalledTimes(1);
+	expect(appData.current.projects.map(p => p.id)).toEqual(['p']);
+});
+
+it('refetches a half whose latest request predates the invalidation or failed', async () => {
+	vi.spyOn(console, 'error').mockImplementation(() => {});
+	mocks.get.mockResolvedValue([{ id: 'old' }]); mocks.listClusterProjects.mockRejectedValue(new Error('down'));
+	await Promise.all([appData.loadProjects(), appData.loadClusterProjects()]);
+	const invalidatedAt = performance.now() + 1;
+	mocks.get.mockResolvedValue([{ id: 'new' }]); mocks.listClusterProjects.mockResolvedValue({ projects: [] });
+	await appData.loadProjectCatalog(invalidatedAt);
+	expect(mocks.get).toHaveBeenCalledTimes(2); expect(appData.current.projects.map(p => p.id)).toEqual(['new']);
+	// The cluster half failed, so even a fresh-enough failure is retried.
+	mocks.listClusterProjects.mockRejectedValueOnce(new Error('down'));
+	const since = performance.now();
+	await appData.loadClusterProjects();
+	await appData.loadProjectCatalog(since);
+	expect(mocks.listClusterProjects).toHaveBeenCalledTimes(4);
+	expect(appData.projectCatalogFailed).toBe(false);
+});

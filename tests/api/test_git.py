@@ -1545,6 +1545,100 @@ class TestListWorktrees:
             worktrees.append(wt)
         return worktrees
 
+    def test_list_worktrees_compact_shape_and_size(
+        self, app, mock_database, mock_git_service,
+        mock_worktree_manager, mock_settings, sample_project, sample_worktree
+    ):
+        """?compact=true is the branch picker's payload: existing rows only,
+        dirty counts without file lists, no session history or paths. Pins the
+        per-row byte budget so the list cannot silently grow back."""
+        import time as _t
+        from datetime import datetime, timezone
+        from app.api import git_worktrees as _gw
+
+        session = {"id": "ses-x", "title": "A session title " * 4, "status": "active",
+                   "updated_at": "2024-01-15T10:30:00Z"}
+        worktrees = self._make_worktrees(sample_worktree, 40)
+        for wt in worktrees:
+            wt["sessions"] = [session] * 3
+            wt["session_count"] = 3
+            wt["active_session"] = session
+        for i in range(10):
+            gone = sample_worktree.copy()
+            gone.update(id=f"wt-gone-{i}", branch_name=f"gone/{i}", exists=False)
+            worktrees.append(gone)
+
+        mock_database.get_project.return_value = sample_project
+        mock_git_service.is_git_repo.return_value = True
+        mock_git_service.get_status.return_value = {
+            "is_clean": False, "current_branch": "main",
+            "modified": ["a.py", "b.py"], "staged": [{"file": "c.py", "status": "M"}],
+            "untracked": ["d.txt"],
+        }
+        mock_worktree_manager.get_worktrees_for_project.return_value = worktrees
+        _gw._worktree_status_cache.clear()
+
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
+                    with patch("app.api.git.get_api_user_from_request", return_value=None):
+                        client = TestClient(app)
+                        response = client.get(
+                            "/api/v1/projects/test-project-id/git/worktrees?compact=true")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 40
+        assert [wt["id"] for wt in data["worktrees"]] == [f"wt-{i}" for i in range(40)]
+        for wt in data["worktrees"]:
+            assert set(wt) == {"id", "resource_kind", "branch_name", "base_branch",
+                               "exists", "git_status", "status_error"}
+            assert wt["git_status"] == {"is_clean": False, "modified_count": 2,
+                                        "staged_count": 1, "untracked_count": 1}
+        assert len(response.content) / 40 <= 260, len(response.content)
+
+        # Only sessions that can make a worktree hot are mapped to checkouts.
+        _, kwargs = mock_worktree_manager.get_worktrees_for_project.call_args
+        keep = kwargs["session_filter"]
+        now = datetime.now(timezone.utc)
+        assert keep({"id": "recent", "updated_at": now.isoformat()}) is True
+        old = datetime.fromtimestamp(_t.time() - _gw._WORKTREE_HOT_ACTIVITY_SECONDS - 60, timezone.utc)
+        assert keep({"id": "old", "updated_at": old.isoformat()}) is False
+        assert keep({"id": "no-timestamp"}) is False
+
+    def test_list_worktrees_compact_keeps_streaming_sessions_hot(
+        self, app, mock_database, mock_git_service,
+        mock_worktree_manager, mock_settings, sample_project
+    ):
+        """A streaming session with an old timestamp still counts as hot."""
+        from app.api import git_worktrees as _gw
+
+        mock_database.get_project.return_value = sample_project
+        mock_git_service.is_git_repo.return_value = True
+        mock_worktree_manager.get_worktrees_for_project.return_value = []
+
+        with (patch("app.api.git.git_service", mock_git_service),
+             patch("app.api.git_worktrees.git_service", mock_git_service),
+             patch("app.api.git_ai.git_service", mock_git_service)):
+            with (patch("app.api.git_worktrees.worktree_manager", mock_worktree_manager)):
+                with (patch("app.api.git.database", mock_database),
+                 patch("app.api.git_helpers.database", mock_database),
+                 patch("app.api.git_worktrees.database", mock_database)):
+                    with (patch("app.api.git.get_api_user_from_request", return_value=None),
+                          patch.object(_gw, "_streaming_session_ids", return_value={"live"})):
+                        response = TestClient(app).get(
+                            "/api/v1/projects/test-project-id/git/worktrees?compact=true")
+
+        assert response.status_code == 200
+        _, kwargs = mock_worktree_manager.get_worktrees_for_project.call_args
+        keep = kwargs["session_filter"]
+        assert keep({"id": "live", "updated_at": "2020-01-01T00:00:00Z"}) is True
+        assert keep({"id": "idle", "updated_at": "2020-01-01T00:00:00Z"}) is False
+
     def test_list_worktrees_status_runs_concurrently_bounded(
         self, app, mock_database, mock_git_service,
         mock_worktree_manager, mock_settings, sample_project, sample_worktree
@@ -2316,6 +2410,40 @@ def test_canonical_list_uses_materialized_checkouts_and_local_scope(app, canonic
         denied = TestClient(app).delete(f"/api/v1/projects/{project['id']}/git/worktrees/{local['id']}")
         assert denied.status_code == 404
         cleanup.assert_not_called()
+
+
+def test_canonical_compact_list_skips_cold_session_mapping(app, canonical_checkout):
+    """The compact list resolves a cwd only for sessions that can be hot."""
+    from app.db import database
+    from app.api.git_worktrees import _worktree_status_cache
+    from app.core import project_resolver
+    project, path = canonical_checkout
+    database.create_session("list-recent", "default", project_v2_id=project["id"],
+                            worktree_branch="feature/list", target_instance_id="list-local")
+    _worktree_status_cache.clear()
+    resolved = []
+    real = project_resolver.resolve_existing_cwd
+
+    def counting(session):
+        resolved.append(session["id"])
+        return real(session)
+
+    with patch.object(project_resolver, "resolve_existing_cwd", counting), \
+            patch("app.api.git_worktrees._session_may_be_hot",
+                  lambda streaming, since: lambda s: s["id"] != "list-recent"):
+        compact = TestClient(app).get(
+            f"/api/v1/projects/{project['id']}/git/worktrees?compact=true")
+    assert compact.status_code == 200, compact.text
+    assert "list-recent" not in resolved
+    row = compact.json()["worktrees"][0]
+    assert row["resource_kind"] == "checkout" and row["branch_name"] == "feature/list"
+    assert row["git_status"]["untracked_count"] == 1 and row["git_status"]["is_clean"] is False
+    assert "sessions" not in row and "worktree_path" not in row
+
+    with patch.object(project_resolver, "resolve_existing_cwd", counting):
+        full = TestClient(app).get(f"/api/v1/projects/{project['id']}/git/worktrees")
+    assert "list-recent" in resolved
+    assert [s["id"] for s in full.json()["worktrees"][0]["sessions"]] == ["list-recent"]
 
 
 def test_canonical_list_origin_access_and_remote_only(app, canonical_checkout, monkeypatch):

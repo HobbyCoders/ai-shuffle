@@ -408,6 +408,32 @@ class WorktreeListResponse(BaseModel):
     total: int
 
 
+class WorktreeStatusSummary(BaseModel):
+    """Dirty state only: the counts, never the file lists."""
+    is_clean: bool = True
+    modified_count: int = 0
+    staged_count: int = 0
+    untracked_count: int = 0
+
+
+class WorktreeSummary(BaseModel):
+    """One row of the compact worktree list: what the branch picker renders."""
+    id: str
+    resource_kind: Literal["worktree", "checkout"] = "worktree"
+    branch_name: str
+    base_branch: Optional[str] = None
+    exists: Optional[bool] = None
+    git_status: Optional[WorktreeStatusSummary] = None
+    status_error: Optional[str] = None
+
+
+class WorktreeCompactListResponse(BaseModel):
+    """Response for ``GET .../git/worktrees?compact=true``: existing rows only,
+    without session history, paths or file lists."""
+    worktrees: List[WorktreeSummary]
+    total: int
+
+
 # =============================================================================
 # Branch Name Generation Models
 # =============================================================================

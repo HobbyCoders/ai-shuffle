@@ -21,7 +21,7 @@ import logging
 import os
 import uuid
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Callable, Optional, Tuple, Dict, Any, List
 
 from app.core.config import settings
 from app.core.git_cache import _git_cache
@@ -713,7 +713,9 @@ class WorktreeManager:
         """Get worktree associated with a session"""
         return database.get_worktree_by_session(session_id)
 
-    def get_worktrees_for_project(self, project_id: str) -> List[Dict]:
+    def get_worktrees_for_project(
+        self, project_id: str, session_filter: Optional[Callable[[Dict], bool]] = None
+    ) -> List[Dict]:
         """Get all worktrees for a project with session info.
 
         Uses the new sessions.worktree_id relationship model.
@@ -723,11 +725,15 @@ class WorktreeManager:
         - sessions: list of all sessions for this worktree
         - session_count: total number of sessions
         - active_session: currently active session (if any)
+
+        ``session_filter`` limits which sessions a canonical project maps to
+        its checkouts (each mapping resolves the session's cwd); the session
+        fields then cover only the sessions it kept.
         """
         from app.db.projects_v2 import get_project_v2
 
         if get_project_v2(project_id):
-            return self._get_checkout_worktrees(project_id)
+            return self._get_checkout_worktrees(project_id, session_filter)
 
         repo = database.get_git_repository_by_project(project_id)
         if not repo:
@@ -762,7 +768,9 @@ class WorktreeManager:
 
         return worktrees
 
-    def _get_checkout_worktrees(self, project_id: str) -> List[Dict]:
+    def _get_checkout_worktrees(
+        self, project_id: str, session_filter: Optional[Callable[[Dict], bool]] = None
+    ) -> List[Dict]:
         """List physical branch checkouts on this runner, not replicated paths.
 
         Checkout IDs are not legacy worktree IDs. Advertise that distinction so
@@ -778,6 +786,8 @@ class WorktreeManager:
         sessions_by_path = {}
         for session in list_sessions_for_cleanup(project_id, project_id):
             if owner_of(session) is not None:
+                continue
+            if session_filter is not None and not session_filter(session):
                 continue
             cwd = resolve_existing_cwd(session)
             if cwd:

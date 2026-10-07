@@ -352,31 +352,36 @@ export interface CommitGraphResponse {
 
 export interface WorktreeGitStatus {
     is_clean: boolean;
-    current_branch: string | null;
+    current_branch?: string | null;
     // File counts for quick display (e.g., "3 modified")
     modified_count: number;
     staged_count: number;
     untracked_count: number;
-    // Full file lists (may be empty for list endpoint)
-    modified: string[];
-    staged: StagedFileEntry[];
-    untracked: string[];
+    // Full file lists; the compact list (getWorktrees) leaves them out
+    modified?: string[];
+    staged?: StagedFileEntry[];
+    untracked?: string[];
 }
 
+/**
+ * A worktree row. getWorktrees asks for the compact list, which carries only
+ * what the branch picker shows (id, kind, branch, base, exists, status counts
+ * and status error); the optional fields below come from other endpoints.
+ */
 export interface Worktree {
     id: string;
-    repository_id: string | null;
+    repository_id?: string | null;
     checkout_id?: string | null;
     resource_kind?: 'worktree' | 'checkout';
     legacy_lifecycle_supported?: boolean;
     project_id?: string | null;
     runner_id?: string | null;
-    session_id: string | null;
+    session_id?: string | null;
     branch_name: string;
-    worktree_path: string;
-    base_branch: string | null;
-    status: string;
-    created_at: string;
+    worktree_path?: string;
+    base_branch?: string | null;
+    status?: string;
+    created_at?: string;
     // New fields from worktree-session decoupling
     exists?: boolean;  // Whether worktree folder exists on disk
     session_count?: number;  // Number of sessions that have used this worktree
@@ -515,12 +520,15 @@ export interface WorktreeListResponse {
 }
 
 /**
- * Get all worktrees for a project. `focusWorktreeId` names the worktree the
- * user has open so the server keeps its status fresh (other idle worktrees
- * serve their last known status).
+ * Get the worktrees of a project for the branch picker. `focusWorktreeId`
+ * names the worktree the user has open so the server keeps its status fresh
+ * (other idle worktrees serve their last known status). The compact list
+ * leaves out archived rows, session data, paths and file lists.
  */
 export async function getWorktrees(projectId: string, focusWorktreeId?: string | null): Promise<Worktree[]> {
-    const qs = focusWorktreeId ? `?focus_worktree_id=${encodeURIComponent(focusWorktreeId)}` : '';
+    const params = new URLSearchParams({ compact: 'true' });
+    if (focusWorktreeId) params.set('focus_worktree_id', focusWorktreeId);
+    const qs = `?${params}`;
     const response = await api.get<WorktreeListResponse>(`${BASE}/${projectId}/git/worktrees${qs}`);
     return response.worktrees;
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const m = vi.hoisted(() => ({ bindings:new Set<string>(),listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadSessions:vi.fn(),
+const m = vi.hoisted(() => ({ bindings:new Set<string>(),listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadProjectCatalog:vi.fn(),loadSessions:vi.fn(),
  feed:{invalidate:vi.fn(),invalidateUnverified:vi.fn(),isFeeding:vi.fn(()=>false),hasLogEpoch:vi.fn(()=>false),restart:vi.fn(),revive:vi.fn()} }));
 vi.mock('$lib/stores/auth.svelte',()=>({auth:{current:{status:{preview_access:false}},subscribe:(fn:(s:any)=>void)=>{m.listener=fn;return m.unsubscribe;},checkAuth:m.check}}));
 vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,refresh:m.refresh,register:(key:string)=>m.bindings.add(key)}}));
@@ -11,7 +11,7 @@ vi.mock('./resource-sync', async (importOriginal) => {
  return { ...actual, resourceSync: { subscribe: vi.fn(sync.subscribe.bind(sync)), invalidate: m.invalidate, clear: m.clear } };
 });
 vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null},applyComposerDefaults:vi.fn(),resetForAccountChange:vi.fn()}}));
-vi.mock('$lib/stores/app-data.svelte',()=>({appData:{loadProfiles:vi.fn().mockResolvedValue(undefined),loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadSessions:m.loadSessions}}));
+vi.mock('$lib/stores/app-data.svelte',()=>({appData:{loadProfiles:vi.fn().mockResolvedValue(undefined),loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadProjectCatalog:m.loadProjectCatalog,loadSessions:m.loadSessions}}));
 vi.mock('$lib/stores/notifications',()=>({notify:{resetLocal:vi.fn()}}));
 vi.mock('$lib/constants/models',()=>({hydrateModelRegistry:vi.fn().mockResolvedValue(true)}));
 vi.mock('$lib/stores/session/v2/feed-controller',()=>({feedController:m.feed}));
@@ -170,12 +170,12 @@ describe('root authenticated live-sync lifecycle',()=>{
    await vi.advanceTimersByTimeAsync(100);
   }
   expect(m.loadSessions).not.toHaveBeenCalled();
-  expect(m.loadProjects).not.toHaveBeenCalled();
+  expect(m.loadProjectCatalog).not.toHaveBeenCalled();
   Object.defineProperty(document,'hidden',{configurable:true,value:false});
   Object.defineProperty(document,'visibilityState',{configurable:true,value:'visible'});
   document.dispatchEvent(new Event('visibilitychange'));
   await vi.advanceTimersByTimeAsync(100);
-  expect(m.loadProjects).toHaveBeenCalledOnce();
+  expect(m.loadProjectCatalog).toHaveBeenCalledOnce();
   // Both subscriptions enter the central coalescing loadSessions operation.
   expect(m.loadSessions).toHaveBeenCalledTimes(2);
  });
@@ -183,7 +183,22 @@ describe('root authenticated live-sync lifecycle',()=>{
   stop=startLiveSync();account('alice');
   const subscription=vi.mocked(resourceSync.subscribe).mock.calls.filter(([names])=>names.includes('projects')).at(-1);
   await subscription?.[1]();
-  expect(m.loadProjects).toHaveBeenCalledOnce();expect(m.loadSessions).toHaveBeenCalledOnce();
+  expect(m.loadProjectCatalog).toHaveBeenCalledOnce();expect(m.loadSessions).toHaveBeenCalledOnce();
+ });
+ it('lets the first catalog refresh join a boot load that started after sync_ready',async()=>{
+  stop=startLiveSync();account('alice');
+  const before=performance.now();
+  Socket.all[0].emit({type:'sync_ready'});
+  await vi.advanceTimersByTimeAsync(100);
+  expect(m.loadProjectCatalog).toHaveBeenCalledOnce();
+  // The refresh names the moment of the invalidation, not of the refresh.
+  const [freshSince]=m.loadProjectCatalog.mock.calls[0];
+  expect(freshSince).toBeGreaterThanOrEqual(before);
+  expect(freshSince).toBeLessThanOrEqual(performance.now());
+  m.loadProjectCatalog.mockClear();
+  Socket.all[0].emit({type:'resources_changed',resources:['sessions']});
+  await vi.advanceTimersByTimeAsync(100);
+  expect(m.loadProjectCatalog).not.toHaveBeenCalled();
  });
  it('uses stable server identities for renamed devices and separates roles with equal IDs',()=>{
   stop=startLiveSync();account('alice');m.start.mockClear();

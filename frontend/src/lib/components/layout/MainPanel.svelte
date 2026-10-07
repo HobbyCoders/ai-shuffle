@@ -19,7 +19,10 @@
 		gitStatus,
 		gitPrState,
 		githubFeaturesAvailable,
-		branches as branchStore
+		branches as branchStore,
+		deferGitOnOpen,
+		whenTranscriptSettled,
+		type GitLoadOptions
 	} from '$lib/stores/git.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
@@ -363,6 +366,9 @@
 		git.setGithubAuth($githubAuthenticated);
 	});
 
+	// Longest the PR lookup waits for the transcript of the chat being opened.
+	const GIT_OPEN_GATE_MAX_MS = 2000;
+
 	// Debounce rapid project changes (e.g., clicking through chats quickly)
 	// to prevent cascading git loads that break commit/branch buttons.
 	let _projectDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -402,10 +408,16 @@
 			// DEBOUNCED: network fetch for fresh data
 			_projectDebounceTimer = setTimeout(() => {
 				_projectDebounceTimer = null;
+				// An existing chat's transcript comes first: the PR lookup (and the
+				// remote fetch after it) waits until the transcript has loaded, or
+				// the user has moved on, or GIT_OPEN_GATE_MAX_MS has passed.
+				const options: GitLoadOptions | undefined = sessionId && deferGitOnOpen()
+					? { afterCriticalPath: whenTranscriptSettled(activeSession, sessionId, GIT_OPEN_GATE_MAX_MS) }
+					: undefined;
 				if (worktreeId) {
-					git.loadForWorktree(project, worktreeId, false, sessionId);
+					git.loadForWorktree(project, worktreeId, false, sessionId, options);
 				} else {
-					git.loadRepository(project, false, sessionId);
+					git.loadRepository(project, false, sessionId, options);
 				}
 			}, 150);
 		} else {
