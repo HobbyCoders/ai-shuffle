@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock('$lib/services/preferences', () => ({ preferenceSync: {
  register: (key: string, adapter: { apply(value: unknown): void }) => mocks.adapters.set(key, adapter),
- save: vi.fn(), reconnect: vi.fn(async () => {}),
+ save: vi.fn(), registerPrefix: vi.fn(), reconnect: vi.fn(async () => {}),
 } }));
 vi.mock('./app-data.svelte', () => ({ appData: { get current() { return mocks.catalog; }, get projectCatalogLoaded() { return mocks.catalogLoaded; } } }));
 vi.mock('./session/ws-connection', () => ({ createWsConnection: () => ({
@@ -27,7 +27,7 @@ async function receiveDefaults(projectId = 'foreign-clone') {
  mocks.adapters.get('composer.checkout')!.apply({ kind: 'branch', projectId, projectV2Id: 'repo',
   branch: 'topic/remote', baseBranch: 'develop', createNew: true });
  mocks.adapters.get('composer.model')!.apply('sonnet');
- mocks.adapters.get('composer.effort')!.apply('max');
+ mocks.adapters.get('composer.modelEfforts')!.apply({sonnet:'max'});
  await Promise.resolve();
 }
 it.each(['local-first', 'cluster-first'])('defers a branch until both catalog halves resolve the local project (%s)', async order => {

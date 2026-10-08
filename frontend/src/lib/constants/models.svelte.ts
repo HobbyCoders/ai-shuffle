@@ -49,6 +49,25 @@ export interface ModelOption {
  * profiles can still hold e.g. `"opus[1m]"`, which `normalizeModel` strips.
  */
 const LEGACY_1M_SUFFIX = '[1m]';
+// Concrete IDs for true shorthand aliases, not the version-folding profile migration map.
+const STATIC_EFFORT_MODEL_ALIASES: Record<string, string> = {
+ haiku: 'claude-haiku-4-5', sonnet: 'claude-sonnet-5', opus: 'claude-opus-5', fable: 'claude-fable-5'
+};
+function effortBareModel(value: string): string {
+ const bare = (decodeProviderModel(value)?.modelId ?? value).replace(/\[1m\]$/, '');
+ return bare.startsWith('anthropic/claude-') ? bare.slice('anthropic/'.length) : bare;
+}
+export function canonicalEffortModel(value: string): string {
+ const bare = effortBareModel(value);
+ const concrete = _registry.effortModelAliases[bare] ?? bare;
+ return concrete.startsWith('claude-') ? concrete.replace(/-\d{8}$/, '') : concrete;
+}
+export function isLegacyEffortAlias(value: string): boolean {
+ return Object.prototype.hasOwnProperty.call(_registry.effortModelAliases, effortBareModel(value));
+}
+export function legacyEffortFamily(value: string): string | null {
+ return /^claude-(haiku|sonnet|opus|fable)-\d/.exec(canonicalEffortModel(value))?.[1] ?? null;
+}
 
 // ---------------------------------------------------------------------------
 // Static fallback — mirrors `app/core/model_registry.py` at build time.
@@ -78,7 +97,9 @@ const STATIC_LEGACY_MAP: Readonly<Record<string, string>> = {
 	'claude-opus-4-7': 'opus',
 	'claude-opus-4-7[1m]': 'opus',
 	'claude-opus-4-8': 'opus',
-	'claude-opus-4-8[1m]': 'opus'
+	'claude-opus-4-8[1m]': 'opus',
+	'claude-opus-5': 'opus',
+	'claude-opus-5[1m]': 'opus'
 };
 
 /** Sentinel value meaning "inherit from parent" (used by subagents). */
@@ -254,6 +275,7 @@ interface RegistryState {
 	models: ModelOption[];
 	default: string;
 	legacyMap: Record<string, string>;
+	effortModelAliases: Record<string, string>;
 	providers: ProviderEntry[];
 	claude: ClaudeAuthInfo;
 	hydrated: boolean;
@@ -272,6 +294,7 @@ const _registry = $state<RegistryState>({
 	default: STATIC_DEFAULT,
 	serverDefaultSet: false,
 	legacyMap: { ...STATIC_LEGACY_MAP },
+	effortModelAliases: { ...STATIC_EFFORT_MODEL_ALIASES },
 	providers: [],
 	claude: { auth_kind: null, plan_type: null },
 	hydrated: false,
@@ -532,7 +555,7 @@ export function formatProviderDisplay(display: ProviderDisplay): string {
  */
 export function normalizeModel(value: string | null | undefined): string {
 	if (!value) return INHERIT_VALUE;
-	const mapped = _registry.legacyMap[value];
+	const mapped = _registry.legacyMap[value] ?? STATIC_LEGACY_MAP[value];
 	if (mapped !== undefined) return mapped;
 	return value.endsWith(LEGACY_1M_SUFFIX)
 		? value.slice(0, -LEGACY_1M_SUFFIX.length)
@@ -753,6 +776,7 @@ interface RegistryPayload {
 	default: string;
 	inherit_value?: string;
 	legacy_map: Record<string, string>;
+	effort_model_aliases?: Record<string, string>;
 	providers?: RegistryProviderPayload[];
 	claude?: RegistryClaudePayload;
 }
@@ -941,6 +965,7 @@ async function hydrateRegistry(refreshCapabilities: boolean): Promise<boolean> {
 		_registry.default = payload.default || STATIC_DEFAULT;
 		_registry.serverDefaultSet = !!payload.default;
 		_registry.legacyMap = payload.legacy_map ?? { ...STATIC_LEGACY_MAP };
+		_registry.effortModelAliases = payload.effort_model_aliases ?? { ...STATIC_EFFORT_MODEL_ALIASES };
 		_registry.providers = Array.isArray(payload.providers)
 			? payload.providers.map(mapPayloadProvider)
 			: [];

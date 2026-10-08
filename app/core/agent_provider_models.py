@@ -849,8 +849,9 @@ def build_task_contract(
             ),
         },
     }
-    from fluid.tools.builtins.session_orchestration import MODEL_OVERRIDE_RULE
+    from fluid.tools.builtins.session_orchestration import MODEL_OVERRIDE_RULE, EFFORT_PROPERTY
 
+    properties["effort"] = dict(EFFORT_PROPERTY)
     properties["model"] = {
         "type": "string",
         "minLength": 1,

@@ -81,14 +81,14 @@ def test_worker_options_use_model_default_when_no_spawn_or_caller_effort(mock_db
     assert options.effort == expected
 
 
-@pytest.mark.parametrize("explicit,expected", [(None, "xhigh"), ("low", "low"), ("none", "none")])
+@pytest.mark.parametrize("explicit,expected", [(None, "xhigh"), ("low", "low"), ("none", "low")])
 def test_child_spawn_effort_overrides_inheritance(dispatch_env, monkeypatch, explicit, expected):
     from app.db import turns
 
     monkeypatch.setattr(turns, "get_latest_turn", lambda _: {"overrides": {"effort": "xhigh"}})
     result = asyncio.run(pa.dispatch_worker(
         parent_session_id="root", context_session_id="caller", profile_id="child",
-        prompt="offline", effort=explicit,
+        prompt="offline", model_id="sonnet", effort=explicit,
     ))
     assert result.ok
     assert dispatch_env.create_kwargs["effort"] == expected
@@ -108,6 +108,8 @@ def test_captured_absence_cannot_read_a_later_parent_setting(dispatch_env, monke
 @pytest.mark.parametrize("route,model,expected", [
     ("openai_responses", "test-model", "xhigh"),
     ("delegated", "sonnet", "xhigh"),
+    ("delegated", "fable", "xhigh"),
+    ("delegated", "opus", "xhigh"),
     ("delegated", "haiku", None),
 ])
 def test_worker_effort_reaches_native_wire_and_cli_argv(
@@ -121,11 +123,16 @@ def test_worker_effort_reaches_native_wire_and_cli_argv(
     from fluid.providers.openai_responses.serialize import build_request_body
     from app.db import turns
 
-    monkeypatch.setattr(turns, "get_latest_turn", lambda _: {"overrides": {"effort": "xhigh"}})
+    from app.core import preference_identity
+    from app.db import database, model_providers
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    database.set_user_preference("account", "owner", "composer.modelEfforts", {model: "xhigh"})
+    monkeypatch.setattr(turns, "get_latest_turn", lambda _: {"overrides": {"effort": "low"}})
     provider = "p" if route == "openai_responses" else None
     row = {"provider_type": "openai", "models_json": [{"id": model,
         "reasoning_capabilities": {"version": 1, "effort_levels": ["low", "xhigh"]}}]}
     monkeypatch.setattr(ha, "_lookup_provider_row", lambda _: row)
+    monkeypatch.setattr(model_providers, "get_model_provider", lambda _: row)
     result = asyncio.run(pa.dispatch_worker(
         parent_session_id="root", context_session_id="caller", profile_id="child",
         prompt="offline", provider_id=provider, model_id=model,
@@ -133,9 +140,10 @@ def test_worker_effort_reaches_native_wire_and_cli_argv(
     assert result.ok
     # An unrelated legacy profile default must not silently replace the caller.
     options = _build_thinking_config({"effort": "low"}, model,
-        dispatch_env.tm.submitted[0]["overrides"], dispatch_env.create_kwargs["effort"])
+        dispatch_env.tm.submitted[0]["overrides"], dispatch_env.create_kwargs["effort"],
+        allow_profile_effort=False)
     requested = options.get("effort")
-    assert requested == "xhigh"
+    assert requested == expected
     effective = ha._effective_effort(SessionOptions(model=model, extra={"provider_id": provider}), requested, route)
     assert effective == expected
     if route == "openai_responses":

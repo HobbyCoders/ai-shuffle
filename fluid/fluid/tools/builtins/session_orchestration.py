@@ -89,6 +89,12 @@ MODEL_OVERRIDE_RULE = (
 )
 
 
+EFFORT_PROPERTY = {
+    "type": "string", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+    "description": "Optional explicit effort for this child only. Otherwise use the owner's last effort for its model, then the parent's, then the model default. Fitted to supported levels.",
+}
+
+
 def start_session_spec(model_examples=()) -> ToolSpec:
     """StartSession's spec. ``model_examples`` (app-format ids such as the
     owner's subagent default) are named in the ``model`` description; any
@@ -100,6 +106,7 @@ def start_session_spec(model_examples=()) -> ToolSpec:
         "request_id": {"type": "string", "maxLength": 120},
         "worker": {"type": "string", "minLength": 1, "maxLength": 200},
         "project": {"type": "string", "minLength": 1, "maxLength": 500},
+        "effort": dict(EFFORT_PROPERTY),
         "model": {"type": "string", "minLength": 1, "maxLength": 300, "description": (
             "Optional: the model the new chat runs on, and so its provider; omitted, it inherits "
             "yours. " + MODEL_OVERRIDE_RULE + " Effort, context window and fast mode the new "

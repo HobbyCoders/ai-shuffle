@@ -71,7 +71,7 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock('$lib/services/preferences', () => ({ preferenceSync: {
- register: (key: string, adapter: PreferenceAdapter) => mocks.adapters.set(key, adapter), save: mocks.save
+ register: (key: string, adapter: PreferenceAdapter) => mocks.adapters.set(key, adapter), registerPrefix: vi.fn(), save: mocks.save
 } }));
 
 vi.mock('$lib/stores/active-session', async (importOriginal) => {

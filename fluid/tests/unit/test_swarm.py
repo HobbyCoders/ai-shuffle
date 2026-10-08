@@ -10,7 +10,8 @@ def spec(key, deps=()):
     return dict(id=key, agent="helper", prompt="do " + key, depends_on=list(deps))
 
 @pytest.mark.parametrize("model", [None, "other-model"])
-async def test_task_model_choice_reaches_dispatch(model):
+@pytest.mark.parametrize("effort", [None, "low", "ultra"])
+async def test_task_model_choice_reaches_dispatch(model, effort):
     calls = []
 
     async def dispatch(data, ctx):
@@ -21,10 +22,14 @@ async def test_task_model_choice_reaches_dispatch(model):
     task = spec("a")
     if model is not None:
         task["model"] = model
+    if effort is not None:
+        task["effort"] = effort
     _, receipt = await c.start({"tasks": [task]}, ToolCtx())
     await asyncio.wait_for(c.jobs[receipt.task_id], 5)
     assert calls[0].get("model") == model
     assert ("model" in calls[0]) is (model is not None)
+    assert calls[0].get("effort") == effort
+    assert ("effort" in calls[0]) is (effort is not None)
     snapshot = c.snapshot(receipt.task_id)
     assert snapshot["status"] == "completed"
 
@@ -33,6 +38,12 @@ async def test_task_model_choice_reaches_dispatch(model):
 def test_invalid_model_choice_rejected(model):
     with pytest.raises(ValueError, match="model must be"):
         validate({"tasks": [{**spec("a"), "model": model}]})
+
+
+@pytest.mark.parametrize("effort", [False, 3, [], {}, "", "future"])
+def test_invalid_effort_choice_rejected(effort):
+    with pytest.raises(ValueError, match="unknown reasoning effort"):
+        validate({"tasks": [{**spec("a"), "effort": effort}]})
 
 
 @pytest.mark.parametrize("worker", [None, "Unraid"])

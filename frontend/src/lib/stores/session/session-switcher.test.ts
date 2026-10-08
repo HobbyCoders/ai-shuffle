@@ -11,6 +11,7 @@ import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
 import { appMode } from '../sessionMode.svelte';
+import { composerPreferences } from '../composer-preferences';
 import { api } from '$lib/api/client';
 import { get } from 'svelte/store';
 import { openDropdown, openHeaderDropdown } from '../header-dropdowns';
@@ -902,7 +903,7 @@ describe('session run binding on switch', () => {
 
 	it('restores the complete last-used binding for a new chat', () => {
 		localStorage.setItem('aihub_lastModel', 'prov:openai:gpt-5.6-sol');
-		localStorage.setItem('aihub_lastEffort', 'xhigh');
+		composerPreferences.set('modelEfforts', {'gpt-5.6-sol':'xhigh'});
 		localStorage.setItem('aihub_lastPermissionMode', 'plan');
 		localStorage.setItem('aihub_lastContextWindowChoice', 'standard');
 		const { switcher, getState } = makeSwitcher(fullState());

@@ -1589,6 +1589,10 @@ async def _dispatch_task_tool(
             "ok": False,
             "error": f"Unknown mode '{requested_mode}' (sync|background).",
         }
+    from app.core.model_effort import EFFORT_LEVELS
+    explicit_effort = args.get("effort")
+    if explicit_effort is not None and explicit_effort not in EFFORT_LEVELS:
+        return {"ok": False, "error": "Task effort must be a supported effort level."}
     requested_model = args.get("model")
     if requested_model is not None and not isinstance(requested_model, str):
         return {"ok": False, "error": "Task model must be a model ID string."}
@@ -1673,10 +1677,6 @@ async def _dispatch_task_tool(
             except PermissionError as exc:
                 return {"ok": False, "error": str(exc), "reason": "model_not_requested"}
             model_override_record = {"source": source, "instead_of": baseline}
-            if choice.provider_id != leg:
-                # The inherited effort may not exist on the new provider.
-                selected_effort = model_override.settings_for_model(
-                    choice.model, choice.provider_id, effort=selected_effort)["effort"]
             effective_provider_id = choice.provider_id
         requested_model = choice.model_id
     if requested_model and not effective_provider_id:
@@ -1792,6 +1792,11 @@ async def _dispatch_task_tool(
             }
         result_agent = target.id
 
+    from app.core.model_effort import resolve_child_effort
+    selected_effort = await asyncio.to_thread(
+        resolve_child_effort, model_id, effective_provider_id,
+        explicit=explicit_effort, parent=selected_effort, caller=caller_row)
+
     # An API key's session may only start workers on the key's own agents;
     # dispatch_worker re-checks, this answers before any card is drawn.
     from app.core import api_user_scope
@@ -1875,6 +1880,7 @@ async def _dispatch_task_tool(
             provider_id=effective_provider_id,
             model_id=model_id,
             effort=selected_effort,
+            effort_explicit=explicit_effort is not None,
             prompt=prompt,
             label=label,
             roster_name=roster_name,

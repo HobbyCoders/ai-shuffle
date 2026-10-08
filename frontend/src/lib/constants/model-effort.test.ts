@@ -41,9 +41,9 @@ describe('authoritative effort capabilities', () => {
   expect(reconcileModelEffort('xhigh', capability('missing'))).toBe('xhigh');
   expect(reconcileModelEffort('xhigh', capability('unsupported'))).toBeNull();
  });
- it('reconciles model switches to declared defaults without confusing literal none with omission', () => {
-  expect(reconcileModelEffort('xhigh', capability('z-ai/glm-5.3-flash'))).toBe('max');
-  expect(reconcileModelEffort('minimal', capability('openai/gpt-5.6-sol'))).toBe('medium');
+ it('clamps to nearest supported levels without confusing literal none with omission', () => {
+  expect(reconcileModelEffort('xhigh', capability('z-ai/glm-5.3-flash'))).toBe('high');
+  expect(reconcileModelEffort('minimal', capability('openai/gpt-5.6-sol'))).toBe('none');
   expect(reconcileModelEffort('none', capability('openai/gpt-5.6-sol'))).toBe('none');
   expect(reconcileModelEffort(null, capability('openai/gpt-5.6-sol'))).toBeNull();
   expect(reconcileModelEffort('low', capability('single'))).toBe('high');
@@ -51,7 +51,7 @@ describe('authoritative effort capabilities', () => {
  it('accepts seven options and backend mandatory filtering without synthesizing none', () => {
   expect(levels('seven')).toEqual(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
   expect(levels('mandatory')).toEqual(['low', 'high']);
-  expect(reconcileModelEffort('none', capability('mandatory'))).toBe('high');
+  expect(reconcileModelEffort('none', capability('mandatory'))).toBe('low');
  });
  it('preserves unknown settings pins but does not advertise OpenAI-only levels for native models', () => {
   expect(modelEffortOptions('prov:or:unknown', 'minimal').map(o => o.value)).toEqual(['minimal']);

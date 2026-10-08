@@ -658,6 +658,10 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         body["model_choice"] = _override_record(model_plan)
     if assistant:
         body["report_back"] = True
+    from app.core.model_effort import resolve_child_effort
+    body["effort_explicit"] = data.get("effort") is not None
+    body["effort"] = resolve_child_effort(body["model"], body["provider_id"], explicit=data.get("effort"),
+                                          parent=overrides.get("effort", sender.get("effort")), caller=sender)
     return body
 
 
@@ -764,6 +768,12 @@ def accept_remote_start(body, from_device):
         effort, context_window, fast = mapped["effort"], mapped["context_window"], mapped["fast"]
     elif provider_id and model_providers.get_model_provider(provider_id) is None:
         provider_id = None
+    from app.core.model_effort import resolve_child_effort
+    effort_explicit = body.get("effort_explicit", False)
+    if not isinstance(effort_explicit, bool):
+        raise ValueError("Invalid effort_explicit")
+    effort = resolve_child_effort(model, provider_id,
+                                  explicit=effort if effort_explicit else None, parent=effort)
     payload = {
         "orchestration_depth": depth, "orchestration_sender": sender_session,
         "orchestration_fingerprint": fingerprint, "orchestration_remote_origin": from_device,
@@ -1205,6 +1215,7 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                    "model": overrides.get("model") or sender.get("model"),
                    "effort": overrides.get("effort", sender.get("effort")),
                    "context_window": sender.get("context_window"), "fast": sender.get("fast")}
+            parent_effort = run["effort"]
             if plan:
                 # A model the user asked for (#1830): its provider, and only
                 # the inherited settings that still apply to it.
@@ -1215,6 +1226,10 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                 run.update(provider_id=plan["provider_id"], model=plan["model"], **mapped)
                 overrides = _start_overrides(overrides, plan, mapped)
                 payload["model_override"] = _override_record(plan)
+            from app.core.model_effort import resolve_child_effort
+            run["effort"] = resolve_child_effort(run["model"], run["provider_id"],
+                                                explicit=data.get("effort"), parent=parent_effort, caller=sender)
+            overrides = {**overrides, "effort": run["effort"]}
             target = sessions.create_session(
                 session_id=new_id, title=title, profile_id=sender["profile_id"],
                 api_user_id=sender.get("api_user_id"), is_active=True,

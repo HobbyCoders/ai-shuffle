@@ -599,6 +599,24 @@ def test_permission_ceiling_table(monkeypatch, requested, agent_mode, policy, ex
     assert remote_task.remote_permission_mode(requested, config) == expected
 
 
+@pytest.mark.parametrize("explicit,expected", [(False, "max"), (True, "low")])
+def test_receiver_model_preference_beats_sender_fallback_but_not_explicit(world, monkeypatch, explicit, expected):
+    from app.core import preference_identity
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    database.set_user_preference("account", "owner", "composer.modelEffort.opus", "max")
+    answer = start_on_target(world, body_for(world, model_id="opus", effort="low", effort_explicit=explicit))
+    row = database.get_session(answer["worker_session_id"])
+    [turn] = child_turns(answer["worker_session_id"])
+    assert row["effort"] == turn["overrides"]["effort"] == expected
+
+
+def test_remote_child_clamps_effort_against_receiving_worker(world):
+    answer = start_on_target(world, body_for(world, effort="ultra"))
+    row = database.get_session(answer["worker_session_id"])
+    [turn] = child_turns(answer["worker_session_id"])
+    assert row["effort"] == turn["overrides"]["effort"] == "max"
+
+
 def test_the_child_runs_at_the_ceiling(world, monkeypatch):
     database.update_profile("coder", config={"model": "sonnet", "allowed_tools": ["Read", "Edit", "Bash"],
                                              "permission_mode": "acceptEdits"})

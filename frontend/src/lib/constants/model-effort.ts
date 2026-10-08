@@ -69,5 +69,10 @@ export function modelEffortOptions(model: string | null, pinned: string | null) 
 /** Preserve unknown pins and omitted defaults; reconcile only declared capabilities. */
 export function reconcileModelEffort(value: string | null, capability: ReturnType<typeof resolveModelEffort>) {
 	if (!capability.ready || !capability.known || value === null || capability.options.some(option => option.value === value)) return value;
-	return capability.defaultValue;
+	const rank = EFFORT_OPTIONS.findIndex(option => option.value === value);
+	if (rank < 0 || !capability.options.length) return capability.defaultValue;
+	return capability.options.reduce((best, option) =>
+		Math.abs(EFFORT_OPTIONS.findIndex(level => level.value === option.value) - rank)
+		< Math.abs(EFFORT_OPTIONS.findIndex(level => level.value === best.value) - rank) ? option : best
+	).value;
 }

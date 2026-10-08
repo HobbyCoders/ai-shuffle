@@ -4,6 +4,8 @@
 export interface PreferenceAdapter {
  read(): unknown;
  apply(value: unknown): void; // undefined means reset to defaults
+ /** Retired keys: snapshot-only reads, no recreation or alias-addressed GETs. */
+ readOnly?: boolean;
 }
 export interface PreferenceTransport {
  all(): Promise<Record<string, unknown>>;
@@ -16,6 +18,21 @@ type Entry = { adapter: PreferenceAdapter; revision: number; request: number;
 const clone = (value: unknown) => JSON.parse(JSON.stringify(value));
 export class PreferenceSync {
  private entries = new Map<string, Entry>();
+ private prefixes = new Map<string, (key: string) => PreferenceAdapter | null>();
+ registerPrefix(prefix: string, adapter: (key: string) => PreferenceAdapter | null) {
+  this.prefixes.set(prefix, adapter);
+ }
+ private entry(key: string): Entry | undefined {
+  if (!this.entries.has(key)) {
+   for (const [prefix, create] of this.prefixes) {
+    if (!key.startsWith(prefix)) continue;
+    const adapter = create(key);
+    if (adapter) this.register(key, adapter);
+    break;
+   }
+  }
+  return this.entries.get(key);
+ }
  private epoch = 0;
  private active = false;
  private ready = false;
@@ -26,7 +43,10 @@ export class PreferenceSync {
  private initializedKeys = new Set<string>();
  constructor(private transport: PreferenceTransport) {}
  register(key: string, adapter: PreferenceAdapter) {
-  this.entries.set(key, { adapter, revision: 0, request: 0, running: false, initialized: false });
+  this.entries.set(key, { adapter, revision: 0, request: 0, running: false,
+   initialized: this.initializedKeys.has(key) });
+  // Legacy adapters can discover keys while a snapshot is being applied.
+  if (this.active && this.bootstrap) this.bootstrapAgain = true;
  }
  start(reset = false, owner: string | null = null) {
   this.stop(reset);
@@ -59,7 +79,7 @@ export class PreferenceSync {
  }
  save(key: string, value: unknown) {
   const e = this.entries.get(key);
-  if (!e || !this.active) return;
+  if (!e || !this.active || e.adapter.readOnly) return;
   e.pending = { value: clone(value), revision: ++e.revision, version: e.version };
   void this.flush(key, e);
  }
@@ -94,13 +114,16 @@ export class PreferenceSync {
   } catch { return; }
   if (epoch !== this.epoch || !this.active) return;
   this.ready = true;
+  for (const key of Object.keys(values)) this.entry(key);
   await Promise.all([...this.entries].map(async ([key, e]) => {
-   const [revision, request] = versions.get(key)!;
+   const [revision, request] = versions.get(key) ?? [e.revision, e.request];
    if (serverVersions && e.request === request) e.version = serverVersions[key] ?? null;
    if (e.pending) { await this.flush(key, e); return; }
    if (e.revision !== revision || e.request !== request) return;
    if (Object.prototype.hasOwnProperty.call(values, key)) {
     this.initialized(key, e); e.adapter.apply(values[key]);
+   } else if (e.adapter.readOnly) {
+    this.initialized(key, e); e.adapter.apply(undefined);
    } else if (!e.initialized) {
     e.initialized = true;
     e.running = true;
@@ -124,9 +147,14 @@ export class PreferenceSync {
   await Promise.all(invalidated.map(key => this.refresh(key)));
  }
  async refresh(key: string) {
-  const e = this.entries.get(key);
+  const e = this.entry(key);
   if (!e || !this.active) return;
   if (!this.ready) { this.earlyInvalidations.add(key); return; }
+  if (e.adapter.readOnly) {
+   // An invalidation drained by snapshot must not await its own bootstrap.
+   if (this.bootstrap) this.bootstrapAgain = true; else await this.reconnect();
+   return;
+  }
   if (e.pending || e.running) return;
   const epoch = this.epoch, revision = e.revision, request = ++e.request;
   try {

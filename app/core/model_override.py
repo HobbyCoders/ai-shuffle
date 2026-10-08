@@ -802,13 +802,13 @@ def settings_for_model(model: str, provider_id: Optional[str], *, effort: Any = 
                        context_window: Any = None, fast: Any = None) -> Dict[str, Any]:
     """The inherited run settings that still apply to ``model``.
 
-    An effort, context window or fast mode the new model does not support is
-    dropped (None), so it starts on that model's own default instead of a
-    setting its provider would reject. The context window is the user's
+    Effort is fitted to the nearest supported level. Unsupported context
+    windows and fast mode are dropped instead of sending a setting the
+    provider would reject. The context window is the user's
     standard-or-1M choice, so it is first fitted to the new model the way a
     Task worker's is (a GPT 272K "standard" becomes Claude's 200K).
     """
-    from app.core.model_effort import normalize_effort
+    from app.core.model_effort import clamp_effort
     from app.core.model_registry import context_window_choices
     from app.core.provider_agent import worker_context_window
     from app.core.provider.harness_adapter import _decide_provider_kind
@@ -823,7 +823,7 @@ def settings_for_model(model: str, provider_id: Optional[str], *, effort: Any = 
         model=bare, extra={"provider_id": provider_id} if provider_id else {}))
     window = worker_context_window(context_window, provider_id, bare)
     return {
-        "effort": normalize_effort(effort, bare, provider, route=route) if effort else None,
+        "effort": clamp_effort(effort, bare, provider, route=route),
         "context_window": (window if window
                            and window in context_window_choices(bare, provider) else None),
         "fast": fast if not fast or route in ("delegated", "openai_responses") else None,

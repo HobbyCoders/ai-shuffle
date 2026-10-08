@@ -830,6 +830,29 @@ def test_secret_added_on_a_is_usable_on_c_joined_from_b(workers):
         assert engine.context().member(a.device_id).status == "active"
 
 
+def test_simultaneous_model_effort_edits_and_clears_survive_two_worker_sync(workers):
+    from app.core.model_effort import effort_preference_key
+    a, b = workers("gaming"), workers("unraid")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    converge([a, b])
+    opus, sol = effort_preference_key("opus"), effort_preference_key("gpt-6.1-sol")
+    # Neither worker has received the other's edit when it makes its own.
+    set_owner_pref(a, opus, "low")
+    set_owner_pref(b, sol, "xhigh")
+    converge([a, b])
+    for worker in (a, b):
+        assert owner_pref(worker, opus) == "low"
+        assert owner_pref(worker, sol) == "xhigh"
+    set_owner_pref(a, opus, None)
+    set_owner_pref(b, sol, "max")
+    converge([a, b])
+    for worker in (a, b):
+        assert owner_pref(worker, opus) is None
+        assert owner_pref(worker, sol) == "max"
+
+
 def test_same_operation_over_two_routes_applies_once(workers):
     a, b, c = workers("a"), workers("b"), workers("c")
     with a.active():

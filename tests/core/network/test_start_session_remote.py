@@ -84,6 +84,25 @@ ARGS = {"title": "Folder sandbox test", "prompt": "Run the private-folder test h
         "request_id": "unraid-test", "worker": "Unraid"}
 
 
+@pytest.mark.parametrize("effort,expected", [(None, "max"), ("low", "low")])
+async def test_remote_start_receiver_preference_beats_sender_fallback_not_explicit(workers, monkeypatch, kicks, effort, expected):
+    from app.core import preference_identity
+    from app.core.model_effort import effort_preference_key
+    a, b, served = network(workers, monkeypatch)
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    with a.active():
+        database.set_user_preference("account", "owner", effort_preference_key("opus"), "max")
+    with b.active():
+        database.set_session_run_binding("caller", model="opus", effort="low")
+        result = await start({**ARGS, **({"effort": effort} if effort is not None else {})})
+        assert not result.is_error, result.text
+        child = json.loads(result.text)["session_id"]
+    with a.active():
+        row = database.get_session(child)
+        [turn] = agent_turns(child)
+        assert row["effort"] == turn["overrides"]["effort"] == expected
+
+
 async def test_starts_on_the_chosen_worker_once(workers, monkeypatch, kicks):
     a, b, served = network(workers, monkeypatch)
     with b.active():

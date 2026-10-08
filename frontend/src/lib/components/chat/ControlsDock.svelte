@@ -454,7 +454,7 @@
 		// The assistant's home has no effort pick to keep in range.
 		if (assistantMode) return;
 		const reconciled = reconcileModelEffort(effortValue, effortCapability);
-		if (reconciled !== effortValue) activeSession.setEffortLevelOverride(reconciled);
+		if (reconciled !== effortValue) activeSession.setEffortLevelOverride(reconciled, false);
 	});
 
 	// Effort shows its pinned level when one is set, else "Auto" (the model's

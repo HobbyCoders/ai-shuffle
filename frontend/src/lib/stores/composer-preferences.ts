@@ -3,6 +3,13 @@ import { preferenceSync } from '$lib/services/preferences';
 import { startupDedupeEnabled } from '$lib/api/client';
 import type { ClusterProject } from '$lib/api/installs';
 import { sessionOwnerEpoch } from './session-owner';
+import { getDefaultModel, canonicalEffortModel, isLegacyEffortAlias, legacyEffortFamily } from '$lib/constants/models';
+import { EFFORT_OPTIONS, reconcileModelEffort, resolveModelEffort } from '$lib/constants/model-effort';
+
+export function effortModelKey(model: string | null): string {
+ const selected = model || getDefaultModel();
+ return canonicalEffortModel(selected);
+}
 
 type ProjectPick = { projectId: string; projectV2Id: string | null };
 // A `branch` pick (New branch..., or a branch/checkout picked from the list) is
@@ -12,7 +19,7 @@ type CheckoutPick = ProjectPick & ({kind:'existing'; worktreeId:string; branch:s
  | {kind:'branch'; branch:string; baseBranch:string; createNew:boolean});
 interface Picks {
  profile: string; project: ProjectPick; checkout: CheckoutPick | null;
- model: string | null; effort: string | null; permissionMode: string | null;
+ model: string | null; effort: string | null; modelEfforts: Record<string, string | null>; permissionMode: string | null;
  contextWindowChoice: string | null; fastMode: string | null; worktreeIntent: 'local' | 'worktree';
 }
 const legacy: Partial<Record<keyof Picks, string>> = {
@@ -21,7 +28,7 @@ const legacy: Partial<Record<keyof Picks, string>> = {
  fastMode:'aihub_lastFastMode', worktreeIntent:'aihub_executionMode'
 };
 const defaults: Picks = {profile:'', project:{projectId:'',projectV2Id:null}, checkout:null,
- model:null, effort:null, permissionMode:null, contextWindowChoice:null, fastMode:null, worktreeIntent:'local'};
+ model:null, effort:null, modelEfforts:{}, permissionMode:null, contextWindowChoice:null, fastMode:null, worktreeIntent:'local'};
 const values = {...defaults};
 let checkoutRevision = 0;
 export interface BranchClaim { consume(): void; release(): void }
@@ -62,6 +69,13 @@ function normalize<K extends keyof Picks>(key: K, value: unknown): Picks[K] {
   if ('worktreeId' in pick && typeof pick.worktreeId === 'string') return {...pick,kind:'existing'} as Picks[K];
   return null as Picks[K];
  }
+ if (key === 'modelEfforts') return Object.fromEntries(
+  value && typeof value === 'object' && !Array.isArray(value) ? Object.entries(value)
+   .filter(([model, effort]) => model.length > 0 && (effort === null || typeof effort === 'string'
+    && EFFORT_OPTIONS.some(option => option.value === effort)))
+   // Old family keys remain fallbacks; never manufacture a concrete choice from them.
+   .map(([model, effort]) => [(isLegacyEffortAlias(model) && legacyEffortFamily(model)) || effortModelKey(model), effort]) : []
+ ) as Picks[K];
  if (key === 'worktreeIntent') return (value === 'worktree' ? 'worktree' : 'local') as Picks[K];
  // Preserve explicit access choices for future sessions, including Bypass.
  // Existing sessions restore their own binding, never this default.
@@ -82,21 +96,94 @@ function store<K extends keyof Picks>(key: K, value: unknown) {
   }
  } catch { /* memory still works if storage is unavailable */ }
 }
+export const MODEL_EFFORT_PREFIX = 'composer.modelEffort.';
+export const effortPreferenceKey = (model: string | null) => MODEL_EFFORT_PREFIX + encodeURIComponent(effortModelKey(model));
+const registeredEfforts = new Set<string>();
+const appliedEfforts = new Set<string>();
+function applyEffort(model: string, value: unknown) {
+ const next = {...values.modelEfforts};
+ if (value === undefined) delete next[model];
+ else next[model] = typeof value === 'string' && EFFORT_OPTIONS.some(option => option.value === value) ? value : null;
+ store('modelEfforts', next);
+}
+function effortAdapter(model: string) {
+ registeredEfforts.add(model);
+ return {
+  readOnly: isLegacyEffortAlias(model),
+  read: () => values.modelEfforts[model] ?? null,
+  apply(value: unknown) {
+   if (value === undefined) appliedEfforts.delete(model); else appliedEfforts.add(model);
+   applyEffort(model, value); notifyRemote();
+  }
+ };
+}
+function registerEffort(model: string) {
+ // Family records are discovered read-only from account snapshots, never created.
+ if (!isLegacyEffortAlias(model) && !registeredEfforts.has(model))
+  preferenceSync.register(effortPreferenceKey(model), effortAdapter(model));
+}
 for (const key of Object.keys(defaults) as (keyof Picks)[]) {
  try {
   const cached = localStorage.getItem(`ai-shuffle-composer:${key}`);
   const old = legacy[key] ? localStorage.getItem(legacy[key]!) : key === 'project'
    ? {projectId:localStorage.getItem('aihub_selectedProject') || '', projectV2Id:null} : undefined;
-  store(key, cached !== null ? JSON.parse(cached) : old);
+  // Migrate only the last model/effort pair; never seed unrelated models.
+  const initial = key === 'modelEfforts' && cached === null && values.model && values.effort
+   ? {[values.model]: values.effort} : old;
+  store(key, cached !== null ? JSON.parse(cached) : initial);
  } catch { /* SSR or unavailable storage */ }
- preferenceSync.register(`composer.${key}`, {
+ if (key === 'modelEfforts') {
+  // Read/migrate the old map, but never write new choices into that conflict unit.
+  preferenceSync.register('composer.modelEfforts', {
+   read: () => null,
+   apply(value) {
+    if (value === undefined) { appliedEfforts.clear(); store('modelEfforts', {}); }
+    else for (const [model, effort] of Object.entries(normalize('modelEfforts', value))) {
+     if (!appliedEfforts.has(model)) applyEffort(model, effort);
+     registerEffort(model);
+    }
+    notifyRemote();
+   }
+  });
+ } else preferenceSync.register(`composer.${key}`, {
   read: () => values[key],
   apply(value) { store(key, value); notifyRemote(); }
  });
 }
+preferenceSync.registerPrefix(MODEL_EFFORT_PREFIX, key => {
+ try {
+  const model = decodeURIComponent(key.slice(MODEL_EFFORT_PREFIX.length));
+  const family = isLegacyEffortAlias(model) && legacyEffortFamily(model) === model;
+  return model && (family || effortPreferenceKey(model) === key) ? effortAdapter(model) : null;
+ } catch { return null; }
+});
+for (const model of Object.keys(values.modelEfforts)) registerEffort(model);
 export const composerPreferences = {
  get current(): Readonly<Picks> { return values; },
+ effortForModel(model: string | null): string | null {
+  const key = effortModelKey(model), family = legacyEffortFamily(model || getDefaultModel());
+  const saved = Object.prototype.hasOwnProperty.call(values.modelEfforts, key)
+   ? values.modelEfforts[key] : family ? values.modelEfforts[family] : null;
+  return reconcileModelEffort(saved ?? null, resolveModelEffort(model));
+ },
+ rememberEffort(model: string | null, effort: string | null) {
+  const key = effortModelKey(model);
+  registerEffort(key);
+  applyEffort(key, effort);
+  appliedEfforts.add(key);
+  // Null is a replicated tombstone: legacy maps cannot resurrect a clear.
+  preferenceSync.save(effortPreferenceKey(key), effort);
+ },
  set<K extends keyof Picks>(key: K, value: Picks[K]) {
+  if (key === 'modelEfforts') {
+   const next = Object.fromEntries(Object.entries(normalize('modelEfforts', value))
+    .map(([model, effort]) => [effortModelKey(model), effort]));
+   for (const model of Object.keys(values.modelEfforts))
+    if (isLegacyEffortAlias(model)) applyEffort(model, undefined);
+   for (const model of new Set([...Object.keys(values.modelEfforts), ...Object.keys(next)]))
+    composerPreferences.rememberEffort(model, next[model] ?? null);
+   return;
+  }
   // A deliberate re-pick is a new intent even when its fields are identical.
   if (key === 'checkout') checkoutRevision++;
   store(key, value); preferenceSync.save(`composer.${key}`, values[key]);

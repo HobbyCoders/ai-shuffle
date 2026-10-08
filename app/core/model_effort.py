@@ -144,6 +144,111 @@ def effort_capabilities(model: str | None, provider: Mapping[str, Any] | None = 
             "effort_metadata_version": version}
 
 
+def clamp_effort(value: Any, model: str | None, provider: Mapping[str, Any] | None = None,
+                 *, route: str | None = None) -> str | None:
+    """Fit a remembered/inherited pick to declared levels, preserving unknown pins."""
+    route = route or effort_route(provider)
+    cap = effort_capabilities(model, provider, route=route)
+    levels = cap["effort_levels"]
+    if value not in EFFORT_LEVELS:
+        return cap["default_effort"]
+    if levels is None:
+        return normalize_effort(value, model, provider, route=route)
+    if not levels:
+        return None
+    rank = EFFORT_LEVELS.index(value)
+    return min(levels, key=lambda level: (abs(EFFORT_LEVELS.index(level) - rank),
+                                        EFFORT_LEVELS.index(level)))
+
+
+MODEL_EFFORT_PREFIX = "composer.modelEffort."
+
+
+def _effort_bare_model(model: str | None) -> str:
+    from app.core.query_options import decode_provider_model
+    decoded = decode_provider_model(model) if model else None
+    bare = ((decoded[1] if decoded else model) or "").removesuffix("[1m]")
+    return bare.removeprefix("anthropic/") if bare.startswith("anthropic/claude-") else bare
+
+
+def canonical_effort_model(model: str | None) -> str:
+    """Preserve concrete versions; unwrap only true aliases of that version."""
+    import re
+    from app.core.model_registry import API_MODEL_IDS
+    bare = _effort_bare_model(model)
+    bare = API_MODEL_IDS.get(bare, bare)
+    return re.sub(r"-\d{8}$", "", bare) if bare.startswith("claude-") else bare
+
+
+def legacy_effort_family(model: str | None) -> str | None:
+    """Read-only compatibility with preferences previously collapsed by family."""
+    import re
+    match = re.match(r"^claude-(haiku|sonnet|opus|fable)-\d", canonical_effort_model(model))
+    return match[1] if match else None
+
+
+def effort_preference_key(model: str | None) -> str:
+    from urllib.parse import quote
+    return MODEL_EFFORT_PREFIX + quote(canonical_effort_model(model), safe="-_.!~*'()")
+
+
+def resolve_child_effort(model: str | None, provider_id: str | None, *,
+                         explicit: Any = None, parent: Any = None,
+                         caller: Mapping[str, Any] | None = None) -> str | None:
+    """Explicit child choice > authenticated owner's model pick > parent > default."""
+    import logging
+    from app.core import preference_identity
+    from app.db import mobile_tool_identity
+    from app.core.query_options import decode_provider_model
+    from app.core.provider.harness_adapter import _decide_provider_kind
+    from app.core.provider.types import SessionOptions
+    from app.db import database
+    from app.db.model_providers import get_model_provider
+
+    decoded = decode_provider_model(model) if model else None
+    bare = decoded[1] if decoded else model
+    provider_id = decoded[0] if decoded else provider_id
+    provider = get_model_provider(provider_id) if provider_id else None
+    route = _decide_provider_kind(SessionOptions(
+        model=bare, extra={"provider_id": provider_id} if provider_id else {}))
+    saved = None
+    if explicit not in EFFORT_LEVELS and bare:
+        try:
+            row = caller or {}
+            principal = mobile_tool_identity.read(row["id"]) if row.get("id") else None
+            if row.get("api_user_id"):
+                principal = {"kind": "api_user", "principal_id": row["api_user_id"]}
+            identity = preference_identity.principal_preference_identity(principal or {"kind": "admin"})
+            pref = database.get_user_preference(*identity, effort_preference_key(bare))
+            if pref is not None:
+                # A null per-model record is a clear, not permission to resurrect
+                # an older whole-map or single-composer preference.
+                saved = pref.get("value")
+            else:
+                from app.core.model_registry import API_MODEL_IDS
+                legacy = database.get_user_preference(*identity, "composer.modelEfforts")
+                values = legacy.get("value") if legacy else None
+                values = values if isinstance(values, dict) else {}
+                # A concrete choice in the old map still outranks any family fallback.
+                concrete = next((key for key in values if _effort_bare_model(key) not in API_MODEL_IDS
+                                 and canonical_effort_model(key) == canonical_effort_model(bare)), None)
+                if concrete is not None:
+                    saved = values[concrete]
+                else:
+                    family = legacy_effort_family(bare)
+                    family_pref = database.get_user_preference(*identity, MODEL_EFFORT_PREFIX + family,
+                                                               canonical=False) if family else None
+                    if family_pref is not None:
+                        saved = family_pref.get("value")
+                    else:
+                        saved = next((value for key, value in values.items()
+                                      if _effort_bare_model(key) == family), None)
+        except Exception:
+            logging.getLogger(__name__).warning("Could not read model effort preference; inheriting caller effort", exc_info=True)
+    selected = next((v for v in (explicit, saved, parent) if isinstance(v, str) and v in EFFORT_LEVELS), None)
+    return clamp_effort(selected, bare, provider, route=route)
+
+
 def normalize_effort(value: Any, model: str | None, provider: Mapping[str, Any] | None = None,
                      *, route: str | None = None) -> str | None:
     route = route or effort_route(provider)

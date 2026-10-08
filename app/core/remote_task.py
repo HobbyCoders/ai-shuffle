@@ -106,7 +106,7 @@ _BODY_KEYS = frozenset({
     "version", "worker_session_id", "agent", "agent_name", "prompt", "label",
     "name", "provider_id", "model", "effort", "permission_mode",
     "tool_allowlist", "mode", "origin", "depth", "checkout", "parent",
-    "context_window", "fast",
+    "context_window", "fast", "effort_explicit",
 })
 #: The ``remote_task`` capability that accepts ``context_window`` in the body.
 #: An older target refuses unknown fields, so the parent sends it only to
@@ -115,6 +115,7 @@ CONTEXT_WINDOW_VERSION = 2
 #: The ``remote_task`` capability that accepts ``fast`` (the caller's fast
 #: mode) in the body; sent only to targets at this version or later.
 FAST_VERSION = 3
+EFFORT_VERSION = 4
 #: Upper bound for a requested window; real choices are at most 1M.
 MAX_CONTEXT_WINDOW = 10_000_000
 _PARENT_KEYS = frozenset({
@@ -231,6 +232,7 @@ def start_body(
     tool_use_id: Optional[str],
     context_window: Optional[int] = None,
     fast: Optional[bool] = None,
+    effort_explicit: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """The ``task-start`` body. Identifiers only; never a path or credential.
 
@@ -267,6 +269,8 @@ def start_body(
         body["context_window"] = int(context_window)
     if fast is not None:
         body["fast"] = bool(fast)
+    if effort_explicit is not None:
+        body["effort_explicit"] = effort_explicit
     return body
 
 
@@ -345,6 +349,7 @@ async def dispatch_remote(
     launch_tool_use_id: Optional[str] = None,
     tool_allowlist: Optional[List[str]] = None,
     stop_generation: Optional[int] = None,
+    effort_explicit: bool = False,
 ) -> Dict[str, Any]:
     """Start a Task child on ``worker`` (a directory row) and return the receipt.
 
@@ -419,6 +424,7 @@ async def dispatch_remote(
         parent_device_id=ctx.device_id, parent_session_id=root_session_id,
         owner_session_id=caller_session_id, tool_use_id=launch_tool_use_id,
         context_window=context_window, fast=fast,
+        effort_explicit=effort_explicit if _remote_task_version(worker) >= EFFORT_VERSION else None,
     )
     if stop_generation is not None and task_registry.stop_invalidated(root_session_id, stop_generation):
         await release()
@@ -570,6 +576,7 @@ class _Start:
     fingerprint: str
     context_window: Optional[int] = None
     fast: Optional[bool] = None
+    effort_explicit: bool = False
 
 
 def _text(body: Mapping[str, Any], key: str, limit: int) -> str:
@@ -619,6 +626,9 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
     if len(prompt) > MAX_PROMPT_CHARS:
         raise ValueError(f"The prompt is longer than {MAX_PROMPT_CHARS} characters; nothing was started.")
     effort = _optional_text(body, "effort", 40)
+    effort_explicit = body.get("effort_explicit", False)
+    if type(effort_explicit) is not bool:
+        raise ValueError("effort_explicit must be true or false")
     if effort is not None and effort not in EFFORT_LEVELS:
         raise ValueError(f"Unknown effort {effort!r}; nothing was started.")
     mode = body.get("mode")
@@ -660,6 +670,7 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
         provider_id=_optional_text(body, "provider_id", 200),
         model=_optional_text(body, "model", 200),
         effort=effort,
+        effort_explicit=effort_explicit,
         permission_mode=control._valid_permission_mode(body.get("permission_mode")),
         tool_allowlist=[t.strip() for t in tools] if tools else None,
         mode=mode,
@@ -839,17 +850,21 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
         start.context_window, start.provider_id, start.model)
     # Fitted to the child's model on THIS worker, as the window is.
     fast = provider_agent.worker_fast(start.fast, start.provider_id, start.model, start.agent)
+    from app.core.model_effort import resolve_child_effort
+    effort = resolve_child_effort(start.model, start.provider_id,
+                                  explicit=start.effort if start.effort_explicit else None,
+                                  parent=start.effort)
     fields = provider_agent.worker_session_fields(
         worker_session_id=start.worker_session_id, profile_id=start.agent, title=start.label,
         parent_session_id=start.parent_session_id, provider_id=start.provider_id,
-        model_id=start.model, effort=start.effort, project_v2_id=project_v2_id,
+        model_id=start.model, effort=effort, project_v2_id=project_v2_id,
         worktree_branch=checkout.branch if checkout else None,
         worktree_path=checkout.path if checkout else None,
         permission_mode=permission_mode, context_window=context_window,
         permission_ceiling=permission_mode, fast=fast,
     )
     overrides = provider_agent.worker_turn_overrides(
-        provider_id=start.provider_id, model_id=start.model, effort=start.effort,
+        provider_id=start.provider_id, model_id=start.model, effort=effort,
         cwd=received.cwd, permission_mode=permission_mode, checkout=checkout,
         tool_allowlist=tools, context_window=context_window, fast=fast,
     )

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const m = vi.hoisted(() => ({ bindings:new Set<string>(),listener: undefined as undefined | ((s: any)=>void), start:vi.fn(),stop:vi.fn(),reconnect:vi.fn(),hydrate:vi.fn(),refresh:vi.fn(),invalidate:vi.fn(),clear:vi.fn(),handle:vi.fn(),unsubscribe:vi.fn(),check:vi.fn().mockResolvedValue(undefined),loadProjects:vi.fn(),loadClusterProjects:vi.fn(),loadProjectCatalog:vi.fn(),loadSessions:vi.fn(),
  feed:{invalidate:vi.fn(),invalidateUnverified:vi.fn(),isFeeding:vi.fn(()=>false),hasLogEpoch:vi.fn(()=>false),restart:vi.fn(),revive:vi.fn()} }));
 vi.mock('$lib/stores/auth.svelte',()=>({auth:{current:{status:{preview_access:false}},subscribe:(fn:(s:any)=>void)=>{m.listener=fn;return m.unsubscribe;},checkAuth:m.check}}));
-vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,hydrate:m.hydrate,refresh:m.refresh,register:(key:string)=>m.bindings.add(key)}}));
+vi.mock('./preferences',()=>({preferenceSync:{start:m.start,stop:m.stop,reconnect:m.reconnect,hydrate:m.hydrate,refresh:m.refresh,register:(key:string)=>m.bindings.add(key),registerPrefix:vi.fn()}}));
 vi.mock('./resource-sync', async (importOriginal) => {
  const actual = await importOriginal<typeof import('./resource-sync')>();
  const sync = new actual.ResourceSync();

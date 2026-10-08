@@ -758,10 +758,11 @@ let permissionSelectionGeneration = 0;
 const runSettingGenerations = { effort: 0, fast: 0, context_window: 0 };
 const runSettingQueues = new Map<string, Promise<unknown>>();
 
-async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', value: string | null | boolean | number) {
+async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', value: string | null | boolean | number, remember = true) {
 	const generation = ++runSettingGenerations[field];
 	const ownerEpoch = sessionOwnerEpoch();
 	const sessionId = _state.sessionId;
+	const selectedModel = _state.modelOverride || getDefaultModel();
 	const stateKey = field === 'effort' ? 'effortLevelOverride' : field === 'fast' ? 'fastMode' : 'contextWindowChoice';
 	let selected = value;
 	let savedWindow: number | null = null;
@@ -805,10 +806,11 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		selected = sessionId ? selected : contextChoiceFromWindow(value as number);
 		setPersistedRunBinding('contextWindowChoice', selected as ContextWindowChoice);
 	} else {
+		if (field === 'effort' && remember) composerPreferences.rememberEffort(selectedModel, selected as string | null);
 		setPersistedRunBinding(field === 'effort' ? 'effort' : 'fastMode',
 			field === 'effort' ? selected as string | null : selected ? '1' : '');
 	}
-	if (_state.sessionId !== sessionId) return;
+	if (_state.sessionId !== sessionId || (field === 'effort' && (_state.modelOverride || getDefaultModel()) !== selectedModel)) return;
 	_update(s => ({
 		...s, [stateKey]: selected,
 		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})
@@ -1060,7 +1062,7 @@ export const activeSession = {
 	// also update the running engine without interrupting its turn. Picks outlive
 	// this tab and become defaults for the NEXT new chat, including Bypass.
 
-	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model })); setPersistedRunBinding('model', model); persistSession(); },
+	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model, effortLevelOverride: composerPreferences.effortForModel(model) ?? s.effortLevelOverride })); setPersistedRunBinding('model', model); persistSession(); },
 	async setPermissionModeOverride(mode: string | null) {
 		mode = normalizePermissionMode(mode);
 		const generation = ++permissionSelectionGeneration;
@@ -1083,7 +1085,7 @@ export const activeSession = {
 		_update(s => ({ ...s, permissionModeOverride: mode }));
 		persistSession();
 	},
-	setEffortLevelOverride(level: string | null) { return setLiveRunSetting('effort', level); },
+	setEffortLevelOverride(level: string | null, remember = true) { return setLiveRunSetting('effort', level, remember); },
 	setFastMode(on: boolean) { return setLiveRunSetting('fast', on); },
 	async setWorkspaceProjectIds(ids: string[]) {
 		const owner = { sessionId: _state.sessionId, project: _state.project, projectV2Id: _state.projectV2Id };
@@ -1187,7 +1189,7 @@ export const activeSession = {
 		const picks = composerPreferences.current;
 		const code = _state.mode !== 'chat';
 		_update(s => ({...s,
-			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:picks.effort,
+			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:composerPreferences.effortForModel(picks.model) ?? s.effortLevelOverride,
 			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : null, fastMode:picks.fastMode === '1',
 			contextWindowChoice:getPersistedContextWindowChoice(),
 			...composerCheckoutDefaults(code),

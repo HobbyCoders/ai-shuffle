@@ -63,6 +63,31 @@ def jsonb_client(mock_db, monkeypatch):
         yield client
 
 
+def test_per_model_effort_preferences_roundtrip(jsonb_client):
+    root = "/api/v1/preferences/"
+    opus = "composer.modelEffort.claude-opus-5"
+    sol = "composer.modelEffort.gpt-6.1-sol"
+    older = "composer.modelEffort.claude-opus-4-6"
+    saved_older = jsonb_client.put(root + older, json={"key": older, "value": "low", "expected_version": None})
+    assert saved_older.status_code == 200
+    # The API canonicalizes writes as well as reads, not just the composer cache.
+    saved = jsonb_client.put(root + "composer.modelEffort.prov:api:claude-opus-5[1m]",
+                            json={"key": opus, "value": "low", "expected_version": None})
+    other = jsonb_client.put(root + sol, json={"key": sol, "value": "xhigh", "expected_version": None})
+    assert saved.status_code == other.status_code == 200
+    assert saved.json()["key"] == opus
+    assert jsonb_client.get(root + opus).json()["value"] == "low"
+    assert jsonb_client.put(root + opus, json={"key": opus, "value": "max",
+                           "expected_version": saved.json()["version"]}).status_code == 200
+    assert jsonb_client.put(root + sol, json={"key": sol, "value": "high",
+                           "expected_version": other.json()["version"]}).status_code == 200
+    assert jsonb_client.get(root + "composer.modelEffort.prov:api:claude-opus-4-6-20260205[1m]").json()["value"] == "low"
+    assert jsonb_client.delete(root + opus).status_code == 200
+    values = jsonb_client.get(root + "all").json()["preferences"]
+    assert values[opus] is None and values[sol] == "high" and values[older] == "low"
+    assert jsonb_client.get(root + "composer.modelEffort.opus[1m]").json()["value"] is None
+
+
 @pytest.mark.parametrize(
     "value",
     [

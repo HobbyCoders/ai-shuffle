@@ -2324,11 +2324,17 @@ async def dispatch_worker(
         api_user_id = api_user_scope.session_api_user_id(parent_row)
         # Task snapshots this before admission, including a deliberate None.
         # Direct callers retain the same inheritance without consulting globals.
-        selected_effort = (
-            effort if isinstance(effort, str) and effort in EFFORT_LEVELS
-            else _caller_effort(parent_row) if inherited_effort is _EFFORT_UNSET
-            else inherited_effort
-        )
+        from app.core.model_effort import resolve_child_effort
+        # Task has already resolved and snapshotted its child's model preference.
+        # Other dispatch producers (voice, jobs, direct calls) resolve it here.
+        if inherited_effort is _EFFORT_UNSET:
+            selected_effort = resolve_child_effort(
+                model_id, provider_id, explicit=effort, parent=_caller_effort(parent_row),
+                caller=parent_row)
+        elif isinstance(effort, str) and effort in EFFORT_LEVELS:
+            selected_effort = resolve_child_effort(model_id, provider_id, explicit=effort)
+        else:
+            selected_effort = inherited_effort
         worker_window = worker_context_window(
             _caller_context_window(parent_row), provider_id, model_id,
         )

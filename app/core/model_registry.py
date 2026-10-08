@@ -98,6 +98,8 @@ LEGACY_MODEL_MAP: Dict[str, str] = {
     "claude-opus-4-7[1m]": "opus",
     "claude-opus-4-8": "opus",
     "claude-opus-4-8[1m]": "opus",
+    "claude-opus-5": "opus",
+    "claude-opus-5[1m]": "opus",
 }
 
 # RETIRED MECHANISM — legacy-data normalizer only. The 1M context window used to
@@ -561,6 +563,7 @@ def registry_payload() -> Dict[str, object]:
         "default": _default_selection(),
         "inherit_value": INHERIT_VALUE,
         "legacy_map": dict(LEGACY_MODEL_MAP),
+        "effort_model_aliases": dict(API_MODEL_IDS),
         "providers": _providers_payload(),
         "claude": _claude_payload(),
     }

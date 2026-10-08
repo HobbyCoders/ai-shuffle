@@ -3,7 +3,7 @@ import asyncio
 from fluid.tools.registry import ToolOutcome, ToolSpec
 
 from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
-from fluid.tools.builtins.session_orchestration import MODEL_OVERRIDE_RULE
+from fluid.tools.builtins.session_orchestration import MODEL_OVERRIDE_RULE, EFFORT_PROPERTY
 
 
 def describe(tools: frozenset[str] | None = None) -> str:
@@ -46,6 +46,7 @@ def input_schema(worker: dict | None = None) -> dict:
     item = {
         "id": {"type": "string"}, "title": {"type": "string"},
         "agent": {"type": "string"}, "prompt": {"type": "string"},
+        "effort": dict(EFFORT_PROPERTY),
         "model": {"type": "string", "description": (
             "Optional model for this task only, under the same rule as Task's model; "
             "omit it to use the agent's own model "

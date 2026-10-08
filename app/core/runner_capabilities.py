@@ -161,9 +161,9 @@ def _detect_claude_cli_signed_in() -> bool:
 
 # The remote subagent wire this release understands. Version 2 adds the
 # optional ``context_window`` start field, version 3 the optional ``fast``
-# field; a parent sends each only to a target at that version or later (an
-# older target refuses unknown fields).
-REMOTE_TASK_VERSION = 3
+# field, version 4 explicit-effort provenance. A parent sends each only to
+# a target at that version or later (an older target refuses unknown fields).
+REMOTE_TASK_VERSION = 4
 
 # A moved chat's pending wake-ups move with it (#1819): version 1 receivers
 # re-create the ``wakes`` a move sends. Older ones ignore them, so the owner

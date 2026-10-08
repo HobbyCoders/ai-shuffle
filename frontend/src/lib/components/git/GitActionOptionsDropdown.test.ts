@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 
 const save = vi.hoisted(() => vi.fn());
-vi.mock('$lib/services/preferences', () => ({ preferenceSync: { save, refresh: vi.fn(), register: vi.fn() } }));
+vi.mock('$lib/services/preferences', () => ({ preferenceSync: { save, refresh: vi.fn(), register: vi.fn(), registerPrefix: vi.fn() } }));
 import { gitActionPreferences } from '$lib/stores/gitActionPreferences.svelte';
 import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
 vi.mock('$lib/constants/model-picker', () => ({ buildModelPickerCatalog: () => ({

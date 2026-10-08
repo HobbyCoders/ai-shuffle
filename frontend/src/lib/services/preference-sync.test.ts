@@ -17,6 +17,58 @@ function fixture(initial: Record<string, unknown> = { theme: 'server' }) {
  return { sync, transport, server, apply, value: () => value, edit: (next: unknown) => { value=next; sync.save('theme', next); } };
 }
 describe('authoritative preference coordination', () => {
+ it('reads retired family records only from snapshots and never recreates them or follows alias GETs', async () => {
+  const family='composer.modelEffort.opus', concrete='composer.modelEffort.claude-opus-5';
+  const server:Record<string,unknown>={[family]:'low',[concrete]:'max'};
+  const values:Record<string,unknown>={};
+  const transport:PreferenceTransport={all:vi.fn(async()=>({...server})),
+   get:vi.fn(async()=>({value:'max'})),put:vi.fn(async(_key,value)=>({value}))};
+  const sync=new PreferenceSync(transport);
+  sync.registerPrefix('composer.modelEffort.',key=>({readOnly:key===family,read:()=>values[key],apply:v=>values[key]=v}));
+  sync.start();
+  // Early invalidations must not make snapshot await its own bootstrap.
+  await sync.refresh(family); await sync.hydrate();
+  expect(values[family]).toBe('low'); expect(values[concrete]).toBe('max');
+  server[family]='medium'; await sync.refresh(family);
+  expect(values[family]).toBe('medium'); expect(transport.get).not.toHaveBeenCalled();
+  sync.save(family,'high'); await settle(); expect(transport.put).not.toHaveBeenCalled();
+  delete server[family]; await sync.refresh(family);
+  expect(values[family]).toBeUndefined(); expect(transport.put).not.toHaveBeenCalled();
+  const missing=new PreferenceSync(transport), reset=vi.fn();
+  missing.register(family,{readOnly:true,read:()=> 'cached legacy choice',apply:reset});
+  missing.start(); await missing.hydrate();
+  expect(reset).toHaveBeenCalledWith(undefined); expect(transport.put).not.toHaveBeenCalled();
+ });
+ it('keeps simultaneous per-model edits and clears from two clients and discovers new remote entries', async () => {
+  const server:Record<string,unknown> = {'composer.modelEffort.opus':'medium','composer.modelEffort.sol':'high'};
+  const versions:Record<string,string> = Object.fromEntries(Object.keys(server).map(k=>[k,'v1']));
+  let revision=1;
+  const transport:PreferenceTransport = {
+   all:async()=>({...server}),
+   allWithVersions:async()=>({preferences:{...server},versions:{...versions}}),
+   get:async key=>key in server?{value:server[key],version:versions[key]}:null,
+   put:vi.fn(async(key,value,missing,expected)=>{
+    if (missing && key in server) return {value:server[key],version:versions[key]};
+    if (expected !== undefined && expected !== (versions[key]??null)) throw {status:409};
+    server[key]=value; versions[key]=`v${++revision}`; return {value,version:versions[key]};
+   })
+  };
+  const client=()=>{
+   const values:Record<string,unknown>={}; const sync=new PreferenceSync(transport);
+   sync.registerPrefix('composer.modelEffort.',key=>({read:()=>values[key]??null,apply:v=>values[key]=v}));
+   sync.start(); return {sync,values};
+  };
+  const a=client(),b=client(); await Promise.all([a.sync.hydrate(),b.sync.hydrate()]);
+  a.sync.save('composer.modelEffort.opus','low'); b.sync.save('composer.modelEffort.sol','xhigh');
+  await settle(); await Promise.all([a.sync.reconnect(),b.sync.reconnect()]);
+  for (const c of [a,b]) expect(c.values).toMatchObject({'composer.modelEffort.opus':'low','composer.modelEffort.sol':'xhigh'});
+  a.sync.save('composer.modelEffort.opus',null); b.sync.save('composer.modelEffort.sol','max');
+  await settle(); await Promise.all([a.sync.reconnect(),b.sync.reconnect()]);
+  for (const c of [a,b]) expect(c.values).toMatchObject({'composer.modelEffort.opus':null,'composer.modelEffort.sol':'max'});
+  server['composer.modelEffort.terra']='ultra'; versions['composer.modelEffort.terra']='v99';
+  await b.sync.refresh('composer.modelEffort.terra');
+  expect(b.values['composer.modelEffort.terra']).toBe('ultra');
+ });
  it('hydrate joins the snapshot in flight and reads nothing once ready; reconnect asks again', async () => {
   const f=fixture();
   const first=f.sync.reconnect();

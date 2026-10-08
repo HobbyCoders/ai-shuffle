@@ -38,8 +38,18 @@ _PREFERENCE_COLUMNS = (
 )
 
 
-def get_user_preference(user_type: str, user_id: str, key: str) -> Optional[UserPreferenceRow]:
-    """Get a user preference by key"""
+def _canonical_preference_key(key: str) -> str:
+    if key.startswith("composer.modelEffort."):
+        from urllib.parse import unquote
+        from app.core.model_effort import MODEL_EFFORT_PREFIX, effort_preference_key
+        return effort_preference_key(unquote(key[len(MODEL_EFFORT_PREFIX):]))
+    return key
+
+
+def get_user_preference(user_type: str, user_id: str, key: str, *, canonical: bool = True) -> Optional[UserPreferenceRow]:
+    """Get a preference; raw reads are reserved for retired family-key fallbacks."""
+    if canonical:
+        key = _canonical_preference_key(key)
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -78,6 +88,7 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any, only
     Omitted version supports legacy clients; explicit null requires a missing
     row. A supplied UUID must match the row owned by this exact user and key.
     """
+    key = _canonical_preference_key(key)
     with get_db() as conn:
         cursor = conn.cursor()
         now = datetime.now(timezone.utc).isoformat()
@@ -138,7 +149,11 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any, only
 
 
 def delete_user_preference(user_type: str, user_id: str, key: str) -> bool:
-    """Delete a user preference"""
+    """Delete a preference; retain model-effort clears as replicated nulls."""
+    key = _canonical_preference_key(key)
+    if key.startswith("composer.modelEffort."):
+        set_user_preference(user_type, user_id, key, None)
+        return True
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(

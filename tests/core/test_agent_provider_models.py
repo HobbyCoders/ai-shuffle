@@ -148,6 +148,11 @@ def test_task_contract_is_roster_bound_and_offers_claude_models_natively(mock_db
     # Task's model takes any model the user asked for (#1830): a checked
     # string, never an enum of every provider's models.
     assert "enum" not in contract.input_schema["properties"]["model"]
+    from fluid.tools.builtins.session_orchestration import EFFORT_PROPERTY, start_session_spec
+    from fluid.tools.builtins.swarm import input_schema
+    assert contract.input_schema["properties"]["effort"] == EFFORT_PROPERTY
+    assert start_session_spec().input_schema["properties"]["effort"] == EFFORT_PROPERTY
+    assert input_schema()["properties"]["tasks"]["items"]["properties"]["effort"] == EFFORT_PROPERTY
     from app.core import subagent_default
     subagent_default.write("sonnet")
     contract = build_task_contract("caller", None)

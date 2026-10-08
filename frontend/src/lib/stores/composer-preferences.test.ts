@@ -1,10 +1,70 @@
 import {beforeEach, expect, it, vi} from 'vitest';
-const mocks = vi.hoisted(() => ({adapters:new Map<string,{read:()=>unknown; apply:(v:unknown)=>void}>(), save:vi.fn(), epoch:0}));
+const mocks = vi.hoisted(() => ({adapters:new Map<string,{read:()=>unknown; apply:(v:unknown)=>void}>(), prefixes:new Map<string,any>(), save:vi.fn(), epoch:0}));
 vi.mock('./session-owner', () => ({sessionOwnerEpoch:()=>mocks.epoch}));
 vi.mock('$lib/services/preferences', () => ({preferenceSync:{
- register:(key:string, adapter:any)=>mocks.adapters.set(key,adapter), save:mocks.save, reconnect:vi.fn(async()=>{})
+ register:(key:string, adapter:any)=>mocks.adapters.set(key,adapter), registerPrefix:(prefix:string,factory:any)=>mocks.prefixes.set(prefix,factory), save:mocks.save, reconnect:vi.fn(async()=>{})
 }}));
-beforeEach(() => {vi.resetModules(); localStorage.clear(); mocks.adapters.clear(); mocks.save.mockClear(); mocks.epoch=0;});
+beforeEach(() => {vi.resetModules(); localStorage.clear(); mocks.adapters.clear(); mocks.prefixes.clear(); mocks.save.mockClear(); mocks.epoch=0;});
+
+it('migrates the legacy effort only for the last selected model', async () => {
+ localStorage.setItem('aihub_lastModel','prov:old:sol'); localStorage.setItem('aihub_lastEffort','xhigh');
+ const {composerPreferences:p} = await import('./composer-preferences');
+ expect(p.effortForModel('prov:new:sol')).toBe('xhigh');
+ expect(p.effortForModel('unrelated')).toBeNull();
+});
+
+it('round-trips model efforts through the account adapter and restores independently of provider', async () => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ p.rememberEffort('prov:first:sol', 'xhigh');
+ p.rememberEffort('opus', 'low');
+ expect(mocks.save).toHaveBeenLastCalledWith('composer.modelEffort.claude-opus-5', 'low');
+ expect(mocks.save).not.toHaveBeenCalledWith('composer.modelEfforts', expect.anything());
+ vi.resetModules();
+ const {composerPreferences:reloaded} = await import('./composer-preferences');
+ expect(reloaded.effortForModel('prov:second:sol')).toBe('xhigh');
+ expect(reloaded.effortForModel('opus')).toBe('low');
+ expect(reloaded.effortForModel('never-used')).toBeNull();
+ mocks.adapters.get('composer.modelEffort.sol')!.apply('high');
+ mocks.adapters.get('composer.modelEffort.claude-opus-5')!.apply('medium');
+ expect(reloaded.effortForModel('prov:first:sol')).toBe('high');
+ expect(reloaded.current.modelEfforts).toEqual({sol:'high','claude-opus-5':'medium'});
+ reloaded.rememberEffort('opus', null);
+ expect(reloaded.effortForModel('opus')).toBeNull();
+ mocks.adapters.get('composer.modelEfforts')!.apply(undefined);
+ expect(reloaded.effortForModel('prov:first:sol')).toBeNull();
+});
+
+it.each(['opus', 'prov:api:claude-opus-5', 'opus[1m]', 'prov:api:claude-opus-5[1m]'])('shares canonical model effort for %s and preserves clears over legacy maps', async model => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ p.rememberEffort(model, 'low');
+ expect(mocks.save).toHaveBeenLastCalledWith('composer.modelEffort.claude-opus-5', 'low');
+ for (const alias of ['opus', 'prov:api:claude-opus-5', 'opus[1m]']) expect(p.effortForModel(alias)).toBe('low');
+ mocks.adapters.get('composer.modelEffort.claude-opus-5')!.apply(null);
+ mocks.adapters.get('composer.modelEfforts')!.apply({opus:'max'});
+ expect(p.effortForModel(model)).toBeNull();
+ p.rememberEffort(model, null);
+ expect(mocks.save).toHaveBeenLastCalledWith('composer.modelEffort.claude-opus-5', null);
+});
+
+it.each(['claude-opus-4-6', 'claude-opus-4-7', 'claude-opus-4-8'])('keeps %s independent from Opus 5, aliases, legacy fallbacks and clears', async older => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ const legacy = mocks.prefixes.get('composer.modelEffort.')('composer.modelEffort.opus');
+ expect(legacy.readOnly).toBe(true); legacy.apply('high');
+ expect(p.effortForModel(older)).toBe('high');
+ p.rememberEffort(older, 'low'); p.rememberEffort('opus', 'max');
+ expect(mocks.save).toHaveBeenLastCalledWith('composer.modelEffort.claude-opus-5', 'max');
+ mocks.adapters.get('composer.modelEfforts')!.apply({[older]:'max', opus:'max'});
+ for (const alias of [older, older+'-20260205', 'prov:api:'+older+'[1m]', 'anthropic/'+older])
+  expect(p.effortForModel(alias)).toBe('low');
+ expect(p.effortForModel('claude-opus-5')).toBe('max');
+ p.rememberEffort(older, null);
+ expect(p.effortForModel(older)).toBeNull();
+ vi.resetModules(); const {composerPreferences:reload} = await import('./composer-preferences');
+ expect(reload.effortForModel(older)).toBeNull();
+ expect(reload.effortForModel('claude-opus-5')).toBe('max');
+ expect(reload.effortForModel('claude-opus-4-9')).toBe('high');
+ expect(mocks.save.mock.calls.some(([key])=>key==='composer.modelEffort.opus')).toBe(false);
+});
 
 it('applies account snapshots and explicit clears without echoing saves', async () => {
  localStorage.setItem('aihub_lastEffort','high');

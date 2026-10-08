@@ -850,12 +850,27 @@ async def test_a_message_a_voice_model_handed_to_the_chat_does_not_count(unpinne
     assert not result["ok"] and len(prompts) == 1 and not seen
 
 
-async def test_inherited_effort_is_dropped_when_the_new_provider_lacks_it(world):
+@pytest.mark.parametrize("effort,expected", [(None, "max"), ("low", "low"), ("ultra", "ultra")])
+async def test_task_reads_child_model_preference_after_spoken_model_resolution(world, monkeypatch, effort, expected):
+    from app.core import preference_identity
+    db, seen, _, _ = world
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    db.set_user_preference("account", "owner", "composer.modelEffort.astra", "max")
+    _turn("parent", "user", "use gpt 6 astra")
+    args = {"agent": "pinned", "model": "gpt 6 astra"}
+    if effort is not None:
+        args["effort"] = effort
+    result = await _task(args, caller_effort="low")
+    assert result["ok"], result
+    assert seen[0]["inherited_effort"] == expected
+
+
+async def test_inherited_effort_is_clamped_when_the_new_provider_lacks_it(world):
     _, seen, _, _ = world
     _turn("parent", "user", "use grok 4.5")
     result = await _task({"agent": "pinned", "model": "prov:grok:grok-4.5"}, caller_effort="xhigh")
     assert result["ok"], result
-    assert seen[0]["provider_id"] == "grok" and seen[0]["inherited_effort"] is None
+    assert seen[0]["provider_id"] == "grok" and seen[0]["inherited_effort"] == "high"
 
 
 async def test_the_swarm_and_native_task_dispatcher_apply_the_same_rule(world):
@@ -872,12 +887,16 @@ async def test_the_swarm_and_native_task_dispatcher_apply_the_same_rule(world):
 
 @pytest.mark.parametrize("wording, expected", [("gpt 6 astra", "completed"),
                                                ("not in library", "failed")])
-async def test_spoken_model_through_real_swarm(world, monkeypatch, wording, expected):
+@pytest.mark.parametrize("effort,chosen", [(None, "max"), ("low", "low"), ("ultra", "ultra")])
+async def test_spoken_model_through_real_swarm(world, monkeypatch, wording, expected, effort, chosen):
     from unittest.mock import AsyncMock
     from app.core import swarm, provider_agent, turn_scheduler
     from app.core.task_registry import task_registry
 
-    _, seen, prompts, _ = world
+    from app.core import preference_identity
+    db, seen, prompts, _ = world
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    db.set_user_preference("account", "owner", "composer.modelEffort.astra", "max")
     for name in ("coordinators", "workers", "worker_jobs", "_locks"):
         monkeypatch.setattr(swarm, name, {})
     monkeypatch.setattr(swarm, "persist", AsyncMock())
@@ -895,7 +914,8 @@ async def test_spoken_model_through_real_swarm(world, monkeypatch, wording, expe
     ctx = ToolCtx(extra={"task_dispatch": td.make_fluid_dispatcher("parent", "caller", None)})
     try:
         outcome = await swarm.make_handler(lambda: "parent")({"action": "start", "tasks": [
-            {"id": "review", "agent": "pinned", "prompt": "go", "model": wording}]}, ctx)
+            {"id": "review", "agent": "pinned", "prompt": "go", "model": wording,
+             **({"effort": effort} if effort is not None else {})}]}, ctx)
         assert not outcome.is_error, outcome.text
         coordinator = swarm.coordinators["parent"]
         key = outcome.background_task.task_id
@@ -905,6 +925,7 @@ async def test_spoken_model_through_real_swarm(world, monkeypatch, wording, expe
         assert len(seen) == int(expected == "completed") and not prompts
         if seen:
             assert (seen[0]["provider_id"], seen[0]["model_id"]) == ("lane", "astra")
+            assert seen[0]["inherited_effort"] == chosen
         else:
             assert "Nothing was dispatched" in snapshot["tasks"][0]["error"]
     finally:
@@ -956,6 +977,26 @@ async def test_spoken_model_startsession_queues_canonical_binding(chats, wording
     assert queued["overrides"]["model"] == "prov:lane:astra"
     assert queued["payload"]["model_override"]["source"] == mo.NAMED
     assert chats[2] == []
+
+
+@pytest.mark.parametrize("model,words,key", [(None, "start a chat", "sonnet"),
+                                             ("gpt 6 astra", "start it on gpt 6 astra", "astra")])
+@pytest.mark.parametrize("effort,chosen", [(None, "low"), ("medium", "medium"), ("ultra", "max")])
+async def test_startsession_reads_model_preference_for_inherited_and_spoken_models(chats, monkeypatch, model, words, key, effort, chosen):
+    from app.core import preference_identity
+    db = chats[0]
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    db.set_user_preference("account", "owner", "composer.modelEffort." + key, "low")
+    _turn("caller", "user", words, profile="agent")
+    outcome = await _start({**ARGS, **({"model": model} if model else {}),
+                           **({"effort": effort} if effort is not None else {})})
+    assert not outcome.is_error, outcome.text
+    # Astra advertises Ultra; native Sonnet fits it to Max.
+    if effort == "ultra" and key == "astra":
+        chosen = "ultra"
+    row = sessions.get_session(json.loads(outcome.text)["session_id"])
+    assert row["effort"] == chosen
+    assert orch._start_turn(row["id"])["overrides"]["effort"] == chosen
 
 
 async def test_spoken_model_startsession_ambiguity_creates_no_chat(chats):
@@ -1115,11 +1156,11 @@ async def test_a_named_model_on_another_provider_starts_there_with_valid_setting
     result = json.loads(outcome.text)
     row = sessions.get_session(result["session_id"])
     assert (row["provider_id"], row["model"]) == ("grok", "prov:grok:grok-4.5")
-    # Opus-era settings Grok 4.5 cannot take fall back to its defaults.
-    assert row["effort"] is None and row["context_window"] is None
+    # Fit the parent's effort to Grok's supported scale; drop the invalid window.
+    assert row["effort"] == "high" and row["context_window"] is None
     turn = orch._start_turn(row["id"])
     assert turn["overrides"]["model"] == "prov:grok:grok-4.5"
-    assert "effort" not in turn["overrides"] and "provider" not in turn["overrides"]
+    assert turn["overrides"]["effort"] == "high" and "provider" not in turn["overrides"]
     assert turn["payload"]["model_override"]["source"] == mo.NAMED
     assert result["model"] == "prov:grok:grok-4.5"
     assert result["provider"] == {"id": "grok", "name": "Grok"}

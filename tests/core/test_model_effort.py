@@ -93,6 +93,106 @@ def test_native_registry_matches_default_delegated_route(monkeypatch):
     assert effort_capabilities("claude-mythos-5-1", route="anthropic")["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
 
 
+@pytest.mark.parametrize("explicit,saved,parent,expected", [
+    ("low", "max", "high", "low"),
+    (None, "max", "high", "max"),
+    (None, None, "medium", "medium"),
+    (None, None, None, "high"),
+    (None, "invalid", "medium", "medium"),
+    ("ultra", "low", "medium", "max"),
+])
+def test_child_effort_priority_and_preference_roundtrip(mock_db, monkeypatch, explicit, saved, parent, expected):
+    from app.core import preference_identity
+    from app.core.model_effort import resolve_child_effort
+    from app.db import database
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    from app.core.model_effort import effort_preference_key
+    key = effort_preference_key("opus" if saved else "another-model")
+    database.set_user_preference("account", "owner", key, saved or "low")
+    assert database.get_user_preference("account", "owner", key)["value"] == (saved or "low")
+    assert resolve_child_effort("opus", None, explicit=explicit, parent=parent) == expected
+
+
+@pytest.mark.parametrize("model", ["opus", "prov:api:claude-opus-5", "opus[1m]", "prov:api:claude-opus-5[1m]"])
+def test_effort_aliases_share_reads_writes_and_clears(mock_db, monkeypatch, model):
+    from app.core import preference_identity
+    from app.core.model_effort import effort_preference_key, resolve_child_effort
+    from app.db import database
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    database.set_user_preference("account", "owner", "composer.modelEfforts", {"opus": "max"})
+    database.set_user_preference("account", "owner", "composer.modelEffort." + model, "low")
+    assert effort_preference_key(model) == "composer.modelEffort.claude-opus-5"
+    assert database.get_user_preference("account", "owner", effort_preference_key("opus"))["value"] == "low"
+    assert resolve_child_effort(model, None, parent="high") == "low"
+    assert database.delete_user_preference("account", "owner", "composer.modelEffort." + model)
+    assert database.get_user_preference("account", "owner", effort_preference_key("opus"))["value"] is None
+    assert resolve_child_effort(model, None, parent="medium") == "medium"
+
+
+@pytest.mark.parametrize("older", ["claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8"])
+def test_concrete_versions_keep_independent_effort_and_clears(mock_db, monkeypatch, older):
+    from app.core import preference_identity
+    from app.core.model_effort import effort_preference_key, resolve_child_effort
+    from app.db import database, settings
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    # An existing record written by the previous family-keyed implementation.
+    with monkeypatch.context() as migration:
+        migration.setattr(settings, "_canonical_preference_key", lambda key: key)
+        database.set_user_preference("account", "owner", "composer.modelEffort.opus", "high")
+    database.set_user_preference("account", "owner", effort_preference_key(older), "low")
+    database.set_user_preference("account", "owner", effort_preference_key("opus"), "max")
+    assert resolve_child_effort(older, None, parent="medium") == "low"
+    assert resolve_child_effort("claude-opus-5", None, parent="medium") == "max"
+    for alias in (older + "-20260205", "prov:api:" + older + "[1m]", "anthropic/" + older):
+        assert effort_preference_key(alias) == effort_preference_key(older)
+        assert resolve_child_effort(alias, None, parent="medium") == "low"
+    database.delete_user_preference("account", "owner", effort_preference_key(older))
+    assert resolve_child_effort(older, None, parent="medium") == "medium"
+    assert resolve_child_effort("opus", None, parent="low") == "max"
+    assert resolve_child_effort("claude-opus-4-9", None, parent="low") == "high"
+    assert database.get_user_preference("account", "owner", "composer.modelEffort.opus", canonical=False)["value"] == "high"
+
+
+def test_legacy_map_concrete_entry_beats_family_fallback(mock_db, monkeypatch):
+    from app.core import preference_identity
+    from app.core.model_effort import resolve_child_effort
+    from app.db import database
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    database.set_user_preference("account", "owner", "composer.modelEfforts",
+                                 {"opus": "max", "claude-opus-4-6": "low"})
+    assert resolve_child_effort("claude-opus-4-6", None, parent="high") == "low"
+    assert resolve_child_effort("claude-opus-5", None, parent="high") == "max"
+
+
+@pytest.mark.parametrize("model,parent,expected", [
+    ("haiku", "max", None),
+    ("never-seen-model", "xhigh", "xhigh"),
+    ("never-seen-model", None, None),
+])
+def test_child_effort_unknown_and_unsupported(mock_db, monkeypatch, model, parent, expected):
+    from app.core import preference_identity
+    from app.core.model_effort import resolve_child_effort
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    assert resolve_child_effort(model, None, parent=parent) == expected
+
+
+def test_child_effort_uses_bare_model_across_providers_and_keeps_api_users_separate(mock_db, monkeypatch):
+    from app.core import preference_identity
+    from app.core.model_effort import resolve_child_effort
+    from app.db import database, model_providers
+    monkeypatch.setattr(preference_identity, "principal_preference_identity",
+                        lambda p: ("api_user", p["principal_id"]) if p["kind"] == "api_user" else ("account", "owner"))
+    provider = {"provider_type": "openai", "models_json": [{"id": "shared-model",
+                "reasoning_capabilities": {"version": 1, "effort_levels": ["low", "medium", "high"], "default_effort": "low"}}]}
+    monkeypatch.setattr(model_providers, "get_model_provider", lambda _: provider)
+    from app.core.provider import harness_adapter
+    monkeypatch.setattr(harness_adapter, "_lookup_provider_row", lambda _: provider)
+    database.set_user_preference("account", "owner", "composer.modelEfforts", {"shared-model": "xhigh"})
+    for pid in ("first", "second"):
+        assert resolve_child_effort(f"prov:{pid}:shared-model", pid, parent="low") == "high"
+    assert resolve_child_effort("shared-model", "first", caller={"api_user_id": "key-user"}) == "low"
+
+
 def test_metadata_beats_official_and_legacy_upgrade():
     old = {"id": "gpt-5.6-sol", "supported_reasoning_levels": ["none", "max"], "default_reasoning_level": "none"}
     from app.db.model_providers import _normalize_model_capabilities

@@ -213,6 +213,41 @@ describe('live permission selection', () => {
 });
 
 
+describe('per-model effort selection', () => {
+ it('remembers explicit composer picks and restores them on model switches', async () => {
+  Object.assign(activeSession.current, {sessionId:null, modelOverride:'opus', effortLevelOverride:null});
+  composerPreferences.set('modelEfforts', {});
+  await activeSession.setEffortLevelOverride('max');
+  activeSession.setModelOverride('sonnet');
+  expect(activeSession.current.effortLevelOverride).toBe('max');
+  await activeSession.setEffortLevelOverride('low');
+  activeSession.setModelOverride('opus');
+  expect(activeSession.current.effortLevelOverride).toBe('max');
+  activeSession.setModelOverride('sonnet');
+  expect(activeSession.current.effortLevelOverride).toBe('low');
+  activeSession.setModelOverride('never-used');
+  expect(activeSession.current.effortLevelOverride).toBe('low');
+ });
+ it('remembers the acknowledged model without replacing a newly selected model effort', async () => {
+  Object.assign(activeSession.current, {sessionId:'late-effort', modelOverride:'opus'});
+  composerPreferences.set('modelEfforts', {sonnet:'low'});
+  let acknowledge!: (value: {effort:string}) => void;
+  const put = vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => {acknowledge=resolve;}));
+  const pending = activeSession.setEffortLevelOverride('max');
+  activeSession.setModelOverride('sonnet');
+  acknowledge({effort:'max'}); await pending;
+  expect(activeSession.current.effortLevelOverride).toBe('low');
+  expect(composerPreferences.current.modelEfforts['claude-opus-5']).toBe('max');
+  put.mockRestore(); activeSession.current.sessionId=null;
+ });
+ it('does not save capability reconciliation as an owner pick', async () => {
+  Object.assign(activeSession.current, {sessionId:null, modelOverride:'opus'});
+  composerPreferences.set('modelEfforts', {opus:'ultra'});
+  await activeSession.setEffortLevelOverride('max', false);
+  expect(composerPreferences.current.modelEfforts['claude-opus-5']).toBe('ultra');
+ });
+});
+
 describe('live effort and Fast mode selection', () => {
 	describe('context window selection', () => {
 		it('saves the pin without sending a message and waits for acknowledgement', async () => {

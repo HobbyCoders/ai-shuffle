@@ -53,6 +53,7 @@ const mocks = vi.hoisted(() => {
 vi.mock('$lib/services/preferences', () => ({
 	preferenceSync: {
 		register: (key: string, adapter: PreferenceAdapter) => mocks.adapters.set(key, adapter),
+		registerPrefix: vi.fn(),
 		save: vi.fn(),
 	},
 }));

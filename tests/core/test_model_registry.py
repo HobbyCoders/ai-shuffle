@@ -174,6 +174,10 @@ def test_registry_payload_shape():
     # Flipped legacy map is serialized for the frontend — [1m] ids land on base.
     assert payload["legacy_map"]["claude-opus-4-8"] == "opus"
     assert payload["legacy_map"]["claude-opus-4-8[1m]"] == "opus"
+    # Effort uses true current aliases, not the profile version-migration map.
+    assert payload["effort_model_aliases"] == m.API_MODEL_IDS
+    assert payload["effort_model_aliases"]["opus"] == "claude-opus-5"
+    assert "claude-opus-4-8" not in payload["effort_model_aliases"]
 
 
 class TestResolveProviderContextWindow:

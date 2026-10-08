@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { composerPreferences } from '$lib/stores/composer-preferences';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
@@ -19,6 +20,7 @@ vi.mock('$lib/api/client', async (importOriginal) => {
  return { ...actual, api: { ...actual.api, get: mocks.get },
   getUsageLimits: vi.fn().mockResolvedValue({ available: false, buckets: {}, provider_buckets: {} }) };
 });
+beforeEach(() => composerPreferences.set('modelEfforts', {}));
 afterEach(() => cleanup());
 import { effortRegistryFixture as payload } from '$lib/test-stubs/effort-registry';
 const renderDock = () => render(ControlsDock, { props: { isUploading: false, onAttachClick: vi.fn() } });
@@ -86,6 +88,9 @@ describe('ControlsDock dynamic effort', () => {
    await tick();
    expect(get(activeSession).effortLevelOverride).toBe('ultra');
   }
+  activeSession.setModelOverride('prov:codex:gpt-5.6-sol');
+  await tick();
+  expect(get(activeSession).effortLevelOverride).toBe('ultra');
   activeSession.setModelOverride('prov:or:z-ai/glm-5.3-flash');
   await tick();
   expect(get(activeSession).effortLevelOverride).toBe('max');
@@ -95,6 +100,63 @@ describe('ControlsDock dynamic effort', () => {
   } else {
    expect(Array.from(panelEfforts(), el => el.textContent?.trim())).toEqual(['Low', 'High', 'Max']);
   }
+ });
+ it.each(['desktop', 'mobile'])('restores independent model efforts through the rendered %s controls', async surface => {
+  mocks.get.mockResolvedValue(payload);
+  await hydrateModelRegistry();
+  activeSession.newChat();
+  activeSession.setModelOverride('opus');
+  renderDock();
+  if (surface === 'desktop') {
+   await fireEvent.click(screen.getByRole('button', { name: /^Effort:/ }));
+   await fireEvent.input(screen.getByRole('slider'), { target: { value: '0' } });
+  } else {
+   await openPanel(); await fireEvent.click(panelEfforts()[0]);
+  }
+  expect(get(activeSession).effortLevelOverride).toBe('low');
+  activeSession.setModelOverride('prov:codex:gpt-5.6-sol'); await tick();
+  expect(get(activeSession).effortLevelOverride).toBe('low');
+  if (surface === 'desktop') await fireEvent.input(screen.getByRole('slider'), { target: { value: '3' } });
+  else await fireEvent.click(panelEfforts()[3]);
+  activeSession.setModelOverride('opus'); await tick();
+  expect(get(activeSession).effortLevelOverride).toBe('low');
+  if (surface === 'desktop') expect(screen.getByRole('slider').getAttribute('aria-valuetext')).toBe('Low');
+  else expect(document.querySelector('.mcp .effort-tile .tile-value')?.textContent).toBe('Low');
+  activeSession.setModelOverride('prov:codex:gpt-5.6-sol'); await tick();
+  expect(get(activeSession).effortLevelOverride).toBe('xhigh');
+  if (surface === 'desktop') expect(screen.getByRole('slider').getAttribute('aria-valuetext')).toBe('XHigh');
+  else expect(document.querySelector('.mcp .effort-tile .tile-value')?.textContent).toBe('XHigh');
+  activeSession.setModelOverride('prov:or:seven'); await tick();
+  expect(get(activeSession).effortLevelOverride).toBe('xhigh');
+  activeSession.setModelOverride('prov:or:z-ai/glm-5.3-flash'); await tick();
+  expect(get(activeSession).effortLevelOverride).toBe('high');
+ });
+ it.each(['desktop', 'mobile'])('keeps concrete Opus versions independent through the %s controls', async surface => {
+  const row=payload.providers.find(p=>p.id==='or')!;
+  const template=row.models.find(m=>m.id==='seven')!;
+  const versions=['claude-opus-4-6','claude-opus-4-7','claude-opus-4-8','claude-opus-5'];
+  mocks.get.mockResolvedValue({...payload,providers:payload.providers.map(p=>p.id==='or'
+   ? {...p,models:[...p.models,...versions.map(id=>({...template,id,label:id}))]} : p)});
+  await hydrateModelRegistry(); activeSession.newChat();
+  activeSession.setModelOverride('prov:or:claude-opus-4-6'); renderDock();
+  if (surface==='desktop') await fireEvent.click(screen.getByRole('button',{name:/^Effort:/}));
+  else await openPanel();
+  const pick=async(index:number)=> surface==='desktop'
+   ? fireEvent.input(screen.getByRole('slider'),{target:{value:String(index)}})
+   : fireEvent.click(panelEfforts()[index]);
+  for (const [index,id] of versions.entries()) {
+   activeSession.setModelOverride('prov:or:'+id); await tick();
+   await pick([2,3,4,6][index]);
+  }
+  for (const [index,id] of versions.entries()) {
+   activeSession.setModelOverride('prov:or:'+id); await tick();
+   const label=['Low','Medium','High','Max'][index];
+   expect(get(activeSession).effortLevelOverride).toBe(label.toLowerCase());
+   if(surface==='desktop') expect(screen.getByRole('slider').getAttribute('aria-valuetext')).toBe(label);
+   else expect(document.querySelector('.mcp .effort-tile .tile-value')?.textContent).toBe(label);
+  }
+  expect(composerPreferences.effortForModel('prov:api:claude-opus-4-6-20260205[1m]')).toBe('low');
+  expect(composerPreferences.effortForModel('opus')).toBe('max');
  });
  it('preserves XHigh on Astra after metadata hydration', async () => {
   activeSession.newChat();
@@ -110,7 +172,7 @@ describe('ControlsDock dynamic effort', () => {
   await fireEvent.click(screen.getByRole('button', { name: 'Effort: XHigh' }));
   expect(screen.getByRole('slider').getAttribute('max')).toBe('4');
  });
- it('reconciles to the GLM default and renders six Sol and seven full options on mobile', async () => {
+ it('clamps a GLM pick to the nearest level and renders six Sol and seven full options on mobile', async () => {
   mocks.get.mockResolvedValue(payload);
   await hydrateModelRegistry();
   activeSession.newChat();
@@ -120,7 +182,8 @@ describe('ControlsDock dynamic effort', () => {
   await fireEvent.click(screen.getByRole('button', { name: 'Effort: XHigh' }));
   activeSession.setModelOverride('prov:or:z-ai/glm-5.3-flash');
   await tick();
-  expect(get(activeSession).effortLevelOverride).toBe('max');
+  // High and Max are equally close; the shared policy prefers the lower level.
+  expect(get(activeSession).effortLevelOverride).toBe('high');
   expect(screen.getByRole('slider').getAttribute('max')).toBe('2');
   await openPanel();
   expect(panelEfforts()).toHaveLength(3);
@@ -136,6 +199,7 @@ describe('ControlsDock dynamic effort', () => {
   await fireEvent.click(panelEfforts()[1]);
   expect(get(activeSession).effortLevelOverride).toBe('minimal');
   activeSession.setModelOverride('prov:or:single');
+  activeSession.setEffortLevelOverride('minimal');
   await tick();
   expect(panelEfforts()).toHaveLength(1);
   expect(get(activeSession).effortLevelOverride).toBe('high');

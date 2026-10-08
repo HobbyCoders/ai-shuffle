@@ -243,8 +243,7 @@ function sessionModelBinding(row: { model?: string | null; provider_id?: string 
 }
 
 export function getPersistedEffort(): string | null {
-	if (typeof window === 'undefined') return null;
-	return localStorage.getItem('aihub_lastEffort') || null;
+	return composerPreferences.effortForModel(getPersistedModel()) ?? composerPreferences.current.effort;
 }
 
 export function normalizePermissionMode(mode: string | null | undefined): string | null {
