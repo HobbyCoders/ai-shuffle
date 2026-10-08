@@ -56,6 +56,34 @@ describe('when to warn', () => {
 });
 
 describe('the words', () => {
+	it.each(['send', 'compact'] as const)('compares totals and recommends %s', (recommendation) => {
+		const text = coldSendText(state({ cost_comparison: {
+			model: 'claude-sonnet-5', cold_resume_usd: 1.69, compaction_usd: 1.73,
+			continued_usd: 0.37, compact_continue_usd: 2.1,
+			compacted_context_tokens: 82_400, reply_tokens: 4_000, summary_tokens: 8_000,
+			recommendation
+		} }))!;
+		expect(text).toContain('Cold resume total: ~$1.69');
+		expect(text).toContain('Compact and continue total: ~$2.10 ($1.73 compaction + $0.37 continuation)');
+		expect(text).toContain('claude-sonnet-5, assuming ~82k tokens retained and an assumed 8k-token summary');
+		expect(text).toContain('1-hour cache writes; no cache hits assumed');
+		expect(text).toContain(recommendation === 'send'
+			? 'Recommendation: Send anyway for this one call'
+			: 'Recommendation: Compact first for the lower estimated total');
+	});
+
+	it('does not invent a model call or a cache-write charge for native compaction', () => {
+		const text = coldSendText(state({ leg: 'openrouter', cost_comparison: {
+			model: 'fixture', cold_resume_usd: 0.84, compaction_usd: 0,
+			continued_usd: 0.2, compact_continue_usd: 0.2,
+			compacted_context_tokens: 80_000, reply_tokens: 4_000, summary_tokens: 0,
+			recommendation: 'compact'
+		} }))!;
+		expect(text).toContain('$0.00 compaction + $0.20 continuation');
+		expect(text).not.toContain('summary');
+		expect(text).not.toContain('cache writes');
+	});
+
 	it('says the size and the idle time plainly', () => {
 		expect(tokensInWords(412_000)).toBe('412k tokens');
 		expect(tokensInWords(1_200_000)).toBe('1.2M tokens');
@@ -63,7 +91,7 @@ describe('the words', () => {
 		expect(idleInWords(600)).toBe('10 min');
 		expect(coldSendText(state())).toBe(
 			'This chat holds about 412k tokens and its cache has expired after 1.5 h idle. ' +
-				'Sending now re-reads all of it at full price. Compacting first makes it much smaller.'
+				'Sending now re-reads all of it. Cost comparison unavailable: model pricing is missing. Compact first to reduce context, or Send anyway.'
 		);
 		expect(coldSendText(state({ warn: false }))).toBeNull();
 	});

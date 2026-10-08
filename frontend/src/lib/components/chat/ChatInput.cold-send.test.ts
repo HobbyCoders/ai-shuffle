@@ -65,9 +65,17 @@ async function submit() {
 
 describe('cold send warning', () => {
 	it('asks before a large cold send, and Send anyway sends and is remembered', async () => {
-		cache = COLD;
+		cache = { ...COLD, cost_comparison: {
+			model: 'claude-sonnet-5', cold_resume_usd: 1.69, compaction_usd: 1.73,
+			continued_usd: 0.37, compact_continue_usd: 2.1,
+			compacted_context_tokens: 82_400, reply_tokens: 4_000, summary_tokens: 8_000,
+			recommendation: 'send'
+		} };
 		const { editor } = await submit();
 		await waitFor(() => expect(screen.getByText(/holds about 412k tokens/)).toBeTruthy());
+		expect(screen.getByText(/Cold resume total: ~\$1.69/)).toBeTruthy();
+		expect(screen.getByText(/Compact and continue total: ~\$2.10/)).toBeTruthy();
+		expect(screen.getByText(/Recommendation: Send anyway for this one call/)).toBeTruthy();
 		expect(sends).not.toHaveBeenCalled();
 		expect(editor.textContent).toBe(TEXT);
 		await fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }));

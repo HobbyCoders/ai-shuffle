@@ -41,6 +41,19 @@ export function compactSession(sessionId: string): Promise<{ turn_id: string; se
 	return api.post(`/sessions/${encodeURIComponent(sessionId)}/compact`);
 }
 
+/** API-price estimates for compaction plus one resumed call, not the whole turn. */
+export interface SendCostComparison {
+	model: string;
+	cold_resume_usd: number;
+	compaction_usd: number;
+	continued_usd: number;
+	compact_continue_usd: number;
+	compacted_context_tokens: number;
+	reply_tokens: number;
+	summary_tokens: number;
+	recommendation: 'compact' | 'send';
+}
+
 export interface CacheState {
 	leg: string | null;
 	context_tokens: number | null;
@@ -51,6 +64,7 @@ export interface CacheState {
 	cold: boolean;
 	large: boolean;
 	warn: boolean;
+	cost_comparison?: SendCostComparison | null;
 }
 
 export function getCacheState(sessionId: string): Promise<CacheState> {

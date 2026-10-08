@@ -36,10 +36,22 @@ export function idleInWords(seconds: number): string {
 export function coldSendText(state: CacheState): string | null {
 	if (!state.warn || !state.context_tokens) return null;
 	const idle = state.idle_seconds ? ` after ${idleInWords(state.idle_seconds)} idle` : '';
-	return (
-		`This chat holds about ${tokensInWords(state.context_tokens)} and its cache has expired${idle}. ` +
-		'Sending now re-reads all of it at full price. Compacting first makes it much smaller.'
-	);
+	const intro = `This chat holds about ${tokensInWords(state.context_tokens)} and its cache has expired${idle}. `;
+	const cost = state.cost_comparison;
+	if (!cost) return intro + 'Sending now re-reads all of it. Cost comparison unavailable: model pricing is missing. Compact first to reduce context, or Send anyway.';
+	const usd = (value: number) => `$${value.toFixed(2)}`;
+	const summary = cost.summary_tokens
+		? ` and an assumed ${tokensInWords(cost.summary_tokens).replace(' tokens', '-token')} summary` : '';
+	const cacheWrite = state.leg === 'delegated' ? ' Includes 1-hour cache writes; no cache hits assumed.' : ' No cache hits assumed.';
+	const recommendation = cost.recommendation === 'compact'
+		? 'Recommendation: Compact first for the lower estimated total.'
+		: 'Recommendation: Send anyway for this one call; compacting may save on later calls.';
+	return intro +
+		`Cold resume total: ~${usd(cost.cold_resume_usd)}. ` +
+		`Compact and continue total: ~${usd(cost.compact_continue_usd)} ` +
+		`(${usd(cost.compaction_usd)} compaction + ${usd(cost.continued_usd)} continuation). ` +
+		`API-price estimates for ${cost.model}, assuming ~${tokensInWords(cost.compacted_context_tokens)} retained${summary} ` +
+		`and a ${tokensInWords(cost.reply_tokens).replace(' tokens', '-token')} reply. Later calls are extra.` + cacheWrite + ' ' + recommendation;
 }
 
 export function materiallyChanged(acknowledged: number, current: number): boolean {

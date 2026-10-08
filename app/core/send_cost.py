@@ -22,6 +22,7 @@ would be a large cold read (``warn``).
 
 from __future__ import annotations
 
+import math
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -100,6 +101,90 @@ def assess(
     }
 
 
+# Planning assumptions are estimates, not promises about a future CLI summary or reply.
+COMPACT_RETAINED_RATIO = 0.2
+SUMMARY_OUTPUT_TOKENS = 8_000
+DEFAULT_REPLY_TOKENS = 4_000
+
+
+def compare_costs(
+    *, model: str, leg: Optional[str], context_tokens: int,
+    compacted_context_tokens: int, reply_tokens: int, summary_tokens: int,
+    resolver: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Price one resumed call, with and without compaction, from the same budget.
+
+    Neither path assumes a cache hit: a rewritten prompt cannot reuse the old
+    cached history. Delegated calls also pay the CLI's observed 1-hour cache
+    write rate. Native compaction is mechanical and makes no model call.
+    Unknown input/output rates must stay unknown, not become a free option.
+    """
+    from fluid.providers.pricing import estimate_cost, resolve_price
+
+    price = resolve_price(model, resolver=resolver)
+    if price is not None and (price.input is None or price.output is None):
+        return None
+
+    def cost(prompt: int, output: int) -> Optional[float]:
+        usage: Dict[str, Any] = {"output_tokens": output}
+        if leg == "delegated":
+            usage.update(cache_creation_input_tokens=prompt,
+                         cache_creation={"ephemeral_1h_input_tokens": prompt})
+        else:
+            usage["input_tokens"] = prompt
+        total = estimate_cost(model, usage, resolver=resolver)
+        return total if total is not None and math.isfinite(total) and total >= 0 else None
+
+    cold = cost(context_tokens, reply_tokens)
+    compaction = cost(context_tokens, summary_tokens) if leg == "delegated" else 0.0
+    continued = cost(compacted_context_tokens, reply_tokens)
+    if cold is None or compaction is None or continued is None:
+        return None
+    compact = compaction + continued
+    return {
+        "model": model,
+        "cold_resume_usd": cold,
+        "compaction_usd": compaction,
+        "continued_usd": continued,
+        "compact_continue_usd": compact,
+        "compacted_context_tokens": compacted_context_tokens,
+        "reply_tokens": reply_tokens,
+        "summary_tokens": summary_tokens if leg == "delegated" else 0,
+        "recommendation": "compact" if compact < cold else "send",
+    }
+
+
+def _comparison(
+    session: Dict[str, Any], leg: Optional[str], tokens: int,
+    snapshot: Dict[str, Any], last: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    from app.core.model_registry import API_MODEL_IDS, DEFAULT_MODEL
+    from app.core.provider.harness_adapter import (
+        _catalog_pricing_resolver, _context_overhead_tokens,
+    )
+    from app.core.provider.types import SessionOptions
+    from app.core.query_options import decode_provider_model
+
+    raw = session.get("model") or session.get("launched_model") or snapshot.get("model")
+    raw = raw or DEFAULT_MODEL
+    decoded = decode_provider_model(raw)
+    provider_id = decoded[0] if decoded else session.get("provider_id")
+    model = decoded[1] if decoded else raw
+    model = API_MODEL_IDS.get(model, model) if leg == "delegated" else model
+    resolver = _catalog_pricing_resolver(SessionOptions(model=model, extra={"provider_id": provider_id}))
+    # Preserve measured fixed overhead; compaction cannot remove system/tools.
+    overhead = _context_overhead_tokens(snapshot) or 0
+    retained = min(tokens, max(math.ceil(tokens * COMPACT_RETAINED_RATIO),
+                               overhead + SUMMARY_OUTPUT_TOKENS))
+    reply = (last or {}).get("usage", {}).get("output_tokens")
+    reply = int(reply) if isinstance(reply, (int, float)) and not isinstance(reply, bool) \
+        and math.isfinite(reply) and reply > 0 else DEFAULT_REPLY_TOKENS
+    return compare_costs(
+        model=model, leg=leg, context_tokens=tokens, compacted_context_tokens=retained,
+        reply_tokens=reply, summary_tokens=SUMMARY_OUTPUT_TOKENS, resolver=resolver,
+    )
+
+
 def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict[str, Any]:
     """Whether a send into ``session`` now re-reads a large context cold. Sync."""
     from app.core.limit_resume import session_leg
@@ -109,17 +194,26 @@ def cache_state(session: Dict[str, Any], *, now: Optional[float] = None) -> Dict
     leg = session_leg(session)
     last = _last_call(session_id)
     context_tokens: Optional[int] = None
+    data: Dict[str, Any] = {}
     try:
         snapshot = database.get_session_context_usage_snapshot(session_id) or {}
-        total = (snapshot.get("data") or {}).get("totalTokens")
+        data = snapshot.get("data") or {}
+        total = data.get("totalTokens")
         if isinstance(total, (int, float)) and not isinstance(total, bool) and total > 0:
             context_tokens = int(total)
     except Exception:  # noqa: BLE001 — fall back to the last call's prompt
         context_tokens = None
     if context_tokens is None and last is not None:
         context_tokens = _prompt_tokens(last["usage"]) or None
-    return assess(
+    state = assess(
         leg=leg, context_tokens=context_tokens,
         last_call_at=last["at"] if last else None,
         now=time.time() if now is None else now,
     )
+    state["cost_comparison"] = None
+    if state["warn"] and context_tokens is not None:
+        try:
+            state["cost_comparison"] = _comparison(session, leg, context_tokens, data, last)
+        except Exception:  # noqa: BLE001 — missing pricing must not hold a send
+            pass
+    return state
