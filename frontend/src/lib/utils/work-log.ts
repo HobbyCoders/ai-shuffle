@@ -217,6 +217,7 @@ function isAssistantPhantom(msg: ChatMessage): boolean {
 
 /** Only work known to be closed may disappear in a settled disclosure. */
 function isCompletedRoutineWork(msg: ChatMessage, gallery = false): boolean {
+	if (agentDelivery(msg)) return true;
 	if (msg.type === 'thinking') return !msg.streaming;
 	if (msg.type === 'subagent') return isSettledSubagent(msg);
 	// A finished retry note is routine work: it folds with the run instead of
@@ -397,7 +398,8 @@ export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
 		(entry) => entry.message.type === 'thinking'
 	).length;
 	const compactions = entries.filter((entry) => isCompactionCard(entry.message)).length;
-	if (tools.length === 0 && thoughtCount === 0 && compactions === 0) return null;
+	const deliveries = entries.filter((entry) => agentDelivery(entry.message)).length;
+	if (tools.length === 0 && thoughtCount === 0 && compactions === 0 && deliveries === 0) return null;
 
 	const counts = new Map<ToolAction, number>();
 	let failed = 0;
@@ -411,6 +413,7 @@ export function summarizeWorkCompact(rows: WorkLogEntry[]): string | null {
 	);
 	if (thoughtCount > 0) tokens.push(`Thought ${thoughtCount}`);
 	if (compactions > 0) tokens.push(`Compacted ${compactions}`);
+	if (deliveries > 0) tokens.push(`Msgs ${deliveries}`);
 	if (failed > 0) tokens.push(`${failed} failed`);
 	return tokens.length > 0 ? tokens.join(' · ') : null;
 }
@@ -434,7 +437,8 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 	);
 	const compactions = entries.filter((entry) => isCompactionCard(entry.message)).length;
 	const compactionLabel = compactions === 1 ? 'compacted the context' : `compacted the context ${compactions} times`;
-	if (tools.length === 0) {
+	const deliveries = entries.filter((entry) => agentDelivery(entry.message)).length;
+	if (tools.length === 0 && deliveries === 0) {
 		const base = entries.some((entry) => entry.message.type === 'thinking')
 			? 'Reasoning and interim work'
 			: entries.length > compactions ? 'Interim work' : null;
@@ -462,6 +466,7 @@ export function summarizeWork(rows: WorkLogEntry[]): string | null {
 		labels.push(`thought ${thoughtCount} ${thoughtCount === 1 ? 'time' : 'times'}`);
 	}
 	if (compactions > 0) labels.push(compactionLabel);
+	if (deliveries > 0) labels.push(`Got ${deliveries} agent ${deliveries === 1 ? 'message' : 'messages'}`);
 	const sentence = sentenceJoin(labels);
 	if (!sentence) return null;
 	return failed > 0 ? `${sentence}, ${failed} failed` : sentence;
@@ -488,9 +493,12 @@ function splitTurns(messages: Positioned[]): Positioned[][] {
 	let current: Positioned[] = [];
 	let currentTurnId: string | undefined;
 	for (const entry of messages) {
-		if (entry.message.role === 'user' && !agentDelivery(entry.message)) {
+		// Only an authoritative idle wake opens a peer-only turn. Different wake
+		// ids while parked/live still belong to the ongoing logical user turn.
+		const idleAgentWake = !!agentDelivery(entry.message) && entry.message.metadata?.agent_wake === true;
+		if (idleAgentWake || (entry.message.role === 'user' && !agentDelivery(entry.message))) {
 			const turnId = entry.message.turnId;
-			const steeredIntoCurrentTurn = !!turnId && turnId === currentTurnId && current.length > 0;
+			const steeredIntoCurrentTurn = !idleAgentWake && !!turnId && turnId === currentTurnId && current.length > 0;
 			if (!steeredIntoCurrentTurn) {
 				if (current.length > 0) {
 					turns.push(current);
@@ -697,9 +705,9 @@ export function buildTranscriptModel(
 	messages.forEach((message, index) => {
 		const realTurnId = message.turnId && message.turnId !== 'backfill' ? message.turnId : null;
 		rewindEligible[index] = canRewindUserMessage(message, !!realTurnId && promptTurnIds.has(realTurnId));
-		if (message.role === 'user' && message.type !== 'command') {
+		if (message.role === 'user' && message.type !== 'command' && !agentDelivery(message)) {
 			if (realTurnId) promptTurnIds.add(realTurnId);
-			if (message.id && !agentDelivery(message)) latestUserTurnId = message.id;
+			if (message.id) latestUserTurnId = message.id;
 		}
 		if (rewindEligible[index]) {
 			const key = (message.content ?? '').trim();
@@ -741,10 +749,10 @@ export function buildTranscriptModel(
 			return;
 		}
 
-		// Never infer a fold for preamble/history records that are not associated
-		// with a user turn. Real and reloaded v2 transcripts both have user boundaries.
+		// Ordinary preamble/history stays flat. A peer wake can start work without
+		// a human prompt; its delivery belongs inside that turn's disclosure.
 		const userIndex = turn.findIndex((entry) => entry.message.role === 'user' && !agentDelivery(entry.message));
-		if (userIndex < 0) {
+		if (userIndex < 0 && !turn.some((entry) => agentDelivery(entry.message))) {
 			emitWithSystemGroups(turn, items);
 			return;
 		}
@@ -753,14 +761,14 @@ export function buildTranscriptModel(
 		// once that turn settles. Keep its work and media on the side they arrived.
 		const turnMessages = turn.map((entry) => entry.message);
 		const durationLabel = turnFoldLabel(turnMessages, turnWasInterrupted(turnMessages));
-		const segments: Positioned[][] = [];
+		const segments: Positioned[][] = [[]];
 		for (const entry of turn) {
-			if (entry.message.role === 'user' && !agentDelivery(entry.message)) segments.push([]);
+			if (entry.message.role === 'user' && !agentDelivery(entry.message) && segments.at(-1)!.length > 0) segments.push([]);
 			segments.at(-1)!.push(entry);
 		}
 		for (const segment of segments) {
-			const prefix = segment.slice(0, 1);
-			const response = segment.slice(1);
+			const prefix = userIndex < 0 ? [] : segment.slice(0, 1);
+			const response = segment.slice(prefix.length);
 			const gallery = galleryMediaForTurn(response.map((entry) => entry.message), options.sessionId);
 			const terminalAssistant = response.findLast((entry) => isAssistantText(entry.message)) ?? null;
 			// A compaction card the turn worked past is mid-turn; one trailing the

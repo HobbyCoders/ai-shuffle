@@ -85,6 +85,8 @@ export interface V2SessionState {
 	 *  settled then no-ops server-side instead of interrupting the successor
 	 *  (GitHub #585). */
 	liveTurnId: string | null;
+	/** First prompt of a peer turn that started from idle, not a parked continuation. */
+	pendingAgentWake: boolean;
 	/** Profile (agent) id the live turn is running as, from `turn.started`.
 	 *  Messages created on the live SSE path (streaming deltas, and a
 	 *  `message.user` whose event carries no profile) are stamped with it at
@@ -213,6 +215,7 @@ export function initialState(): V2SessionState {
 		openTextId: null,
 		openThinkingId: null,
 		liveTurnId: null,
+		pendingAgentWake: false,
 		liveTurnProfileId: null,
 		pendingPumpAck: null,
 		pumpAckBuffer: '',
@@ -886,7 +889,8 @@ function appendAgentDeliveries(
 	eventId: string,
 	stamp: string,
 	seq: number,
-	sole: boolean
+	sole: boolean,
+	startsTurn = false
 ): V2SessionState {
 	let next = state;
 	deliveries.forEach((delivery, i) => {
@@ -897,6 +901,7 @@ function appendAgentDeliveries(
 			content: delivery.content,
 			systemSubtype: 'agent_message',
 			systemData: { sender: delivery.sender, content: delivery.content, delivery: 'held' },
+			...(startsTurn && i === 0 ? { metadata: { agent_wake: true } } : {}),
 			timestamp: stamp || undefined,
 		}, seq);
 	});
@@ -1082,6 +1087,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				messages,
 				mayHaveLiveRetry,
 				attemptStartSeq: seq,
+				pendingAgentWake: (event.source === 'agent_message' || event.source === 'promotion') &&
+					!state.isStreaming && !state.parked,
 				isStreaming: true,
 				parked: false,
 				liveTurnId: typeof event.turn_id === 'string' ? event.turn_id : state.liveTurnId,
@@ -1361,6 +1368,8 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 
 		// ── User message (+ optimistic reconcile) ───────────────────────
 		case 'message.user': {
+			const startsAgentTurn = state.pendingAgentWake;
+			if (startsAgentTurn) state = { ...state, pendingAgentWake: false };
 			state = markAttemptBoundary(state, seq);
 			const content = str(event.content);
 
@@ -1409,7 +1418,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 			// and never the reminder itself (#1618).
 			if (content.includes('<system-reminder>')) {
 				const held = heldAgentDeliveries(content);
-				if (held) return appendAgentDeliveries(state, held, event.id, stampTs(event, createdAt), seq, true);
+				if (held) return appendAgentDeliveries(state, held, event.id, stampTs(event, createdAt), seq, true, startsAgentTurn);
 			}
 
 			// A real typed message (wake-turn notifications returned above): the
@@ -1496,6 +1505,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content,
 				timestamp: stamp || undefined,
 				...(turnId ? { turnId } : {}),
+				...(startsAgentTurn ? { metadata: { agent_wake: true } } : {}),
 				...(typeof event.queued_turn_id === 'string' ? { queuedTurnId: event.queued_turn_id } : {}),
 				...(str(event.uuid) ? { jsonlUuid: str(event.uuid) } : {}),
 				...(typeof event.checkpoint_backed === 'boolean' ? { checkpointBacked: event.checkpoint_backed } : {}),

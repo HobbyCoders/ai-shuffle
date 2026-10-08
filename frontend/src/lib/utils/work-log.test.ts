@@ -4,6 +4,8 @@
 import { describe, it, expect } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
 import type { SwarmSnapshot } from './swarm';
+import producer from './__fixtures__/agent-delivery-producer.json';
+import { deriveUserTurnNavigationItems } from './transcript-navigation';
 import { initialState, reduce, type WireEvent } from '$lib/stores/session/v2/reducer';
 import {
 	buildDisplayItems,
@@ -146,6 +148,132 @@ function collapsedVisibleMessages(items: DisplayItem[]): ChatMessage[] {
 
 const SETTLED = { isStreaming: false, groupingEnabled: true };
 const LIVE = { isStreaming: true, groupingEnabled: true };
+
+describe('agent deliveries in settled work', () => {
+	const peer = (sender = 'reviewer') => user(`[agent\x20message from='${sender}' — a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\nReview complete.\n[/agent\x20message]`);
+	const receipt = () => msg({ role: 'system', type: 'system', systemSubtype: 'agent_message',
+		systemData: { sender: 'tester', content: 'Tests pass.', delivery: 'delivered' } });
+	const held = () => reduce(initialState(), {
+		type: 'message.user', id: 'held', seq: 1, session_id: 'delivery-test',
+		created_at: '2026-10-08T10:00:00Z', content: producer.prompts.promotion
+	} as WireEvent).messages;
+
+	it('folds both forms and reducer-produced held messages in their original order', () => {
+		const prompt = user('Review the change');
+		const deliveries = [receipt(), peer(), ...held()];
+		const answer = text('All done');
+		const messages = [prompt, tool({ toolName: 'Read' }), deliveries[0], tool(), ...deliveries.slice(1), answer];
+		const items = buildDisplayItems(messages, SETTLED);
+		expect(items.map(item => item.kind)).toEqual(['message', 'work_log']);
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, answer]);
+		const group = items[1];
+		if (group.kind !== 'work_log') throw new Error('expected work log');
+		expect(group.sequence.map(entry => entry.message)).toEqual(messages.slice(1));
+		expect(group.folded.map(entry => entry.message)).toEqual(messages.slice(1, -1));
+		expect(group.summary).toBe('Read 1 file, ran 1 command, and got 4 agent messages');
+		expect(group.compactSummary).toBe('Read 1 · Ran 1 · Msgs 4');
+	});
+
+	it.each([LIVE, { ...SETTLED, latestTurnUnsettled: true }, { ...SETTLED, groupingEnabled: false }])(
+		'keeps deliveries visible while live/parked or grouping is disabled (%j)', options => {
+			const messages = [user('Review'), receipt(), peer(), ...held(), text('Done')];
+			expect(collapsedVisibleMessages(buildDisplayItems(messages, options))).toEqual(messages);
+		}
+	);
+
+	it.each([receipt, peer, held])('folds an agent-initiated wake with no human prompt (%#)', make => {
+		const deliveries = [make()].flat();
+		const answer = text('Follow-up complete');
+		const messages = [...deliveries, tool(), answer];
+		const model = buildTranscriptModel(messages, SETTLED);
+		expect(model.items).toHaveLength(1);
+		expect(model.items[0].kind).toBe('work_log');
+		expect(collapsedVisibleMessages(model.items)).toEqual([answer]);
+		const group = model.items[0];
+		if (group.kind !== 'work_log') throw new Error('expected work log');
+		expect(group.sequence.map(entry => entry.message)).toEqual(messages);
+		expect(group.key).toBe(`wl-turn-${deliveries[0].id}`);
+		expect(model.latestUserTurnId).toBeNull();
+		expect([...model.itemIndexByTurnId]).toEqual([]);
+		expect(model.rewindEligible.every(eligible => !eligible)).toBe(true);
+		expect(collapsedVisibleMessages(buildDisplayItems(messages, LIVE))).toEqual(messages);
+	});
+
+	it('does not consume human checkpoint ordinals or turn navigation', () => {
+		const delivery = { ...peer(), turnId: 'next', checkpointBacked: true, jsonlUuid: 'not-a-human-checkpoint' };
+		const prompt = user('again', undefined, 'first');
+		const next = user('again', undefined, 'next');
+		const messages = [prompt, delivery, receipt(), ...held(), text('Done'), next, tool(), text('Done again')];
+		const model = buildTranscriptModel(messages, SETTLED);
+		expect(model.rewindEligible[1]).toBe(false);
+		expect(model.rewindEligible[6]).toBe(true);
+		expect(model.promptOccurrence[6]).toBe(1);
+		expect(model.latestUserTurnId).toBe(next.id);
+		expect([...model.itemIndexByTurnId.keys()]).toEqual([prompt.id, next.id]);
+		expect(deriveUserTurnNavigationItems(messages).map(item => item.id)).toEqual([prompt.id, next.id]);
+	});
+
+	it.each(['idle_single', 'promotion', 'urgent_with_held'] as const)(
+		'keeps a previous final answer outside the new idle wake fold (%s)', form => {
+			let state = initialState();
+			let seq = 0;
+			const apply = (type: string, fields: Record<string, unknown> = {}) => {
+				state = reduce(state, { type, id: `wake-${++seq}`, seq, session_id: 'wake-test',
+					created_at: '2026-10-08T10:00:00Z', ...fields } as WireEvent);
+			};
+			apply('turn.started', { turn_id: 'human-turn', source: 'user' });
+			apply('message.user', { turn_id: 'human-turn', content: 'Review' });
+			apply('message.assistant', { content: 'Original final answer' });
+			apply('turn.completed');
+			apply('turn.started', { turn_id: 'idle-wake', source: form === 'promotion' ? 'promotion' : 'agent_message' });
+			apply('message.user', { turn_id: 'idle-wake', content: producer.prompts[form] });
+			const live = buildTranscriptModel(state.messages, LIVE);
+			expect(collapsedVisibleMessages(live.items).some(m => m.content === 'Original final answer')).toBe(true);
+			apply('message.assistant', { content: 'Wake final answer' });
+			apply('turn.completed');
+			const model = buildTranscriptModel(state.messages, SETTLED);
+			expect(collapsedVisibleMessages(model.items).map(m => m.content)).toEqual([
+				'Review', 'Original final answer', 'Wake final answer'
+			]);
+			const group = model.items.at(-1)!;
+			if (group.kind !== 'work_log') throw new Error('expected wake work log');
+			expect(group.folded).toHaveLength(form === 'idle_single' ? 1 : form === 'promotion' ? 2 : 3);
+			expect(group.sequence.at(-1)?.message.content).toBe('Wake final answer');
+			expect(model.latestUserTurnId).toBe(state.messages[0].id);
+		});
+
+	it.each([
+		['live', 'idle_single'], ['parked', 'idle_single'],
+		['live', 'promotion'], ['parked', 'promotion']
+	] as const)('keeps a %s peer wake (%s) in the ongoing logical turn', (lifecycle, form) => {
+		let state = initialState();
+		let seq = 0;
+		const apply = (type: string, fields: Record<string, unknown> = {}) => {
+			state = reduce(state, { type, id: `ongoing-${++seq}`, seq, session_id: 'wake-test',
+				created_at: '2026-10-08T10:00:00Z', ...fields } as WireEvent);
+		};
+		apply('turn.started', { turn_id: 'human-turn', source: 'user' });
+		apply('message.user', { turn_id: 'human-turn', content: 'Review' });
+		apply('message.assistant', { content: 'Waiting for agents' });
+		if (lifecycle === 'parked') {
+			apply('turn.completed');
+			apply('turn.parked');
+		}
+		apply('turn.started', { turn_id: 'peer-wake', source: form === 'promotion' ? 'promotion' : 'agent_message' });
+		apply('message.user', { turn_id: 'peer-wake', content: producer.prompts[form] });
+		apply('message.assistant', { content: 'Final answer' });
+		apply('turn.completed');
+		const model = buildTranscriptModel(state.messages, SETTLED);
+		expect(model.items.filter(item => item.kind === 'work_log')).toHaveLength(1);
+		expect(collapsedVisibleMessages(model.items).map(m => m.content)).toEqual(['Review', 'Final answer']);
+	});
+
+	it('counts delivery-only work with singular and plural labels', () => {
+		expect(summarizeWork(workEntries([receipt()]))).toBe('Got 1 agent message');
+		expect(summarizeWorkCompact(workEntries([peer()]))).toBe('Msgs 1');
+		expect(summarizeWork(workEntries(held()))).toBe('Got 2 agent messages');
+	});
+});
 
 describe('Swarm workflow visibility', () => {
  it.each(['Swarm', 'mcp__fluid__Swarm'])('keeps %s outside settled work folds', (toolName) => {

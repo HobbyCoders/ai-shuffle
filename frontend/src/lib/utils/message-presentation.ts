@@ -1,8 +1,9 @@
 import type { ChatMessage } from '$lib/stores/types';
+import { agentDelivery } from './agent-delivery';
 
 /** A steer has no independent checkpoint. Legacy normal prompts retain content resolution. */
 export function canRewindUserMessage(message: ChatMessage, earlierPromptInTurn = false): boolean {
-	if (message.role !== 'user' || message.type === 'command') return false;
+	if (message.role !== 'user' || message.type === 'command' || agentDelivery(message)) return false;
 	if (message.checkpointBacked === false) return false;
 	if (message.checkpointBacked === true || message.jsonlUuid) return true;
 	return !earlierPromptInTurn;

@@ -78,6 +78,28 @@ const baseProps = {
 afterEach(cleanup);
 
 describe('WorkLogGroup', () => {
+	it('hides settled agent messages, then expands them in transcript order', async () => {
+		const messages: ChatMessage[] = [
+			{ id: 'peer-1', role: 'system', type: 'system', systemSubtype: 'agent_message', content: 'First delivery' },
+			{ ...message, id: 'read', content: 'Read the source' },
+			{ id: 'peer-2', role: 'system', type: 'system', systemSubtype: 'agent_message', content: 'Second delivery' },
+			{ id: 'answer', role: 'assistant', type: 'text', content: 'Final answer' }
+		];
+		const group = buildTranscriptModel(messages, { isStreaming: false, groupingEnabled: true }).items[0];
+		if (group.kind !== 'work_log') throw new Error('expected work log');
+		render(WorkLogGroup, { ...group, row });
+		expect(screen.queryByText('First delivery')).toBeNull();
+		expect(screen.queryByText('Second delivery')).toBeNull();
+		expect(screen.getByText('Final answer')).toBeTruthy();
+		expect(screen.getByText('Read 1 file and got 2 agent messages')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { expanded: false }));
+		expect(screen.getAllByTestId('work-row').map(el => el.textContent)).toEqual([
+			'First delivery', 'Read the source', 'Second delivery', 'Final answer'
+		]);
+		await fireEvent.click(screen.getByRole('button', { expanded: true }));
+		expect(screen.getAllByTestId('work-row').map(el => el.textContent)).toEqual(['Final answer']);
+	});
+
 	it('keeps legacy embedded turn anchors when settled work is collapsed or expanded', async () => {
 		const messages = [
 			{ id: 'prompt', role: 'user', content: 'Start', turnId: 'turn-1' },
