@@ -339,6 +339,8 @@ def mutation_allowed(path: str, method: str) -> bool:
     """Whether a preview grant may make this request at all."""
     if method.upper() in _SAFE_METHODS:
         return True
+    if path.startswith("/api/v1/projects/") and "/git/worktrees/" in path and path.rstrip("/").endswith("/forget"):
+        return False
     return not path.startswith(MUTATION_DENY_PREFIXES)
 
 

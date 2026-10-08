@@ -56,6 +56,22 @@ def test_background_work_without_model_lease_is_busy(target, monkeypatch):
     monkeypatch.setattr(activity.task_registry, 'has_active_background_work', lambda _: True)
     assert activity.busy_git_target_sessions('legacy', target[0]) == ['busy']
 
+def test_monitor_background_work_without_model_lease_is_busy(target, monkeypatch, mock_db):
+    from app.core.task_registry import TaskRegistry
+    from app.db import database
+
+    database.create_session('busy', 'default')
+    registry = TaskRegistry()
+    monkeypatch.setattr(activity, 'task_registry', registry)
+    monkeypatch.setattr(activity, '_live_session_ids', lambda: set())
+    registry.start_task('busy', 'monitor-only', 'shell', 'Working')
+    registry.mark_monitor_shell_task('busy', 'monitor-only')
+    assert not registry.has_active_background_work('busy')  # Monitor is not SDK work.
+    assert activity.busy_git_target_sessions('legacy', target[0]) == ['busy']
+    registry.complete_task('busy', 'monitor-only', 'completed', notify=False)
+    assert activity.busy_git_target_sessions('legacy', target[0]) == []
+
+
 def test_explicit_destination_branch_is_protected(target, monkeypatch):
     monkeypatch.setattr(activity.git_service, 'get_current_branch', lambda _: 'unrelated')
     assert activity.busy_git_target_sessions('legacy', target[0], ['feature']) == ['busy']

@@ -1258,6 +1258,15 @@ export const git = {
 		}
 	},
 
+	async forgetWorktree(worktreeId: string) {
+		const projectId = _state.projectId;
+		if (!projectId) throw new Error('No project selected');
+		if (_state.workerTarget) throw new Error('Forget is only available on the local worker');
+		await gitApi.forgetWorktree(projectId, worktreeId);
+		// A response from the old project must not refresh the new selection.
+		if (_state.projectId === projectId) await git.loadWorktrees();
+	},
+
 	async deleteWorktree(worktreeId: string, keepBranch: boolean = true) {
 		if (!_state.projectId) return;
 		// An existing chat no longer loads the worktree list on open, so learn

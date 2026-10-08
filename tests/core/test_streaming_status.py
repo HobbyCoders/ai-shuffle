@@ -337,6 +337,13 @@ async def test_sweep_keeps_live_sessions(mock_db, monkeypatch):
 # V2 turns — live-turn busy union + reap-and-kick sweep (D3)
 # =============================================================================
 
+def test_unavailable_live_turn_read_is_busy(monkeypatch):
+    def unavailable():
+        raise RuntimeError("turn read unavailable")
+    monkeypatch.setattr(streaming_status, "get_db", unavailable)
+    assert streaming_status._has_live_turn_db("draining-session") is True
+
+
 def test_draining_turn_reads_busy_without_active_run(mock_db):
     """A draining turn (escalated interrupt keeping the healthy client) keeps
     the session busy even with no lease-valid active run."""

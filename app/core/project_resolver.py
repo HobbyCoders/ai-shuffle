@@ -41,7 +41,8 @@ _refusals_lock = threading.Lock()
 
 
 def _refusal_key(path: str, branch: str) -> tuple[str, str]:
-    return os.path.normcase(os.path.realpath(path)), branch
+    # A junction being removed/repointed must not mint a fresh warning key.
+    return os.path.normcase(os.path.abspath(path)), branch
 
 
 def _log_refusal(path: str, branch: str, reason: str) -> None:

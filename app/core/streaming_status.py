@@ -94,8 +94,8 @@ _loop: Optional[asyncio.AbstractEventLoop] = None
 
 def _has_live_turn_db(session_id: str) -> bool:
     """True iff a v2 live turn (running|interrupting|draining) exists for the
-    session. Fully guarded: returns False on ANY error (missing table, etc.) —
-    so this union can NEVER lose the authoritative runs-busy signal it augments.
+    session. Fail closed on read errors: an unverified draining turn must not
+    authorize Git mutations after its run lease has been released.
 
     A ``draining`` turn is the reason this matters: an escalated interrupt keeps
     the healthy client while its reader drains, and the run lease may already be
@@ -113,10 +113,10 @@ def _has_live_turn_db(session_id: str) -> bool:
             return cursor.fetchone() is not None
     except Exception:
         logger.debug(
-            "[streaming_status] live-turn read failed for %s", session_id,
+            "[streaming_status] live-turn read failed for %s; treating as busy", session_id,
             exc_info=True,
         )
-        return False
+        return True
 
 
 def _has_active_run_db(session_id: str) -> bool:

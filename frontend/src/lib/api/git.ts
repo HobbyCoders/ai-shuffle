@@ -543,6 +543,11 @@ export async function deleteWorktree(projectId: string, worktreeId: string, keep
     await api.delete(`${BASE}/${projectId}/git/worktrees/${worktreeId}${params}`);
 }
 
+/** Forget stale registrations without removing checkout files or branches. */
+export async function forgetWorktree(projectId: string, worktreeId: string): Promise<void> {
+    await api.post(`${BASE}/${projectId}/git/worktrees/${worktreeId}/forget`);
+}
+
 /**
  * Reopen a completed worktree — recreates the git worktree on disk
  * and sets the DB record back to active so the session can resume.

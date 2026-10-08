@@ -30,10 +30,15 @@ def _project_candidates(project_id, working_dir=None):
     if not canonical:
         project = resolve_project_v2({'project_id': project_id})
         canonical = project['id'] if project else None
-    sessions = list_sessions_for_cleanup(project_id, canonical)
+    return active_git_sessions(list_sessions_for_cleanup(project_id, canonical))
+
+
+def active_git_sessions(sessions):
+    """Shared uncached activity truth for Git mutations and stale-registration cleanup."""
     live = _live_session_ids()
     return [s for s in sessions if s.get('id') and
-            (s['id'] in live or task_registry.has_active_background_work(s['id']))]
+            (s['id'] in live or task_registry.has_active_background_work(s['id'])
+             or task_registry.has_running_monitor_shell(s['id']))]
 
 def project_has_active_git_sessions(project_id, working_dir=None):
     try:

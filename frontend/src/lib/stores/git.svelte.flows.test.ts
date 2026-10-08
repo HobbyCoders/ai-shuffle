@@ -19,7 +19,8 @@ const mocks = vi.hoisted(() => ({
 	getChangedFiles: vi.fn(),
 	fetchRemote: vi.fn(),
 	checkout: vi.fn(),
-	deleteWorktree: vi.fn()
+	deleteWorktree: vi.fn(),
+	forgetWorktree: vi.fn()
 }));
 
 // Records every property the git store reads off the GitHub store, so the
@@ -236,6 +237,16 @@ describe('git store — branch checkout', () => {
 });
 
 describe('git store — worktree selection', () => {
+	it('forgets canonical and legacy stale rows through the metadata-only API', async () => {
+		await git.loadRepository('p', false, 's1');
+		mocks.forgetWorktree.mockResolvedValue(undefined);
+		mocks.getWorktrees.mockResolvedValue([]);
+		await git.forgetWorktree('ck-stale');
+		expect(mocks.forgetWorktree).toHaveBeenCalledWith('p', 'ck-stale');
+		expect(mocks.deleteWorktree).not.toHaveBeenCalled();
+		expect(git.current.worktrees).toEqual([]);
+	});
+
 	it('scopes every load call to the selected worktree and refuses to delete a session checkout', async () => {
 		mocks.getWorktrees.mockResolvedValue([
 			{ id: 'wt-1', branch_name: 'feat/x', resource_kind: 'worktree' },

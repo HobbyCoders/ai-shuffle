@@ -67,6 +67,23 @@
 	let showModeDropdown = $state(false);
 	let modeDropdownRef = $state<HTMLDivElement | null>(null);
 	let loading = $state(false);
+	let forgetConfirm = $state<string | null>(null);
+	let forgetting = $state<string | null>(null);
+	let forgetError = $state<string | null>(null);
+
+	async function forgetWorktree(wt: Worktree) {
+		forgetting = wt.id;
+		forgetError = null;
+		try {
+			await git.forgetWorktree(wt.id);
+			forgetConfirm = null;
+		} catch (error) {
+			const e = error as { detail?: string; message?: string };
+			forgetError = e.detail || e.message || 'Could not forget this worktree';
+		} finally {
+			forgetting = null;
+		}
+	}
 
 	// --- New branch modal state ---
 	let showCreateModal = $state(false);
@@ -538,6 +555,16 @@
 										<p class="stale-detail">On {wt.git_status.current_branch ?? 'detached HEAD'} · {wt.git_status.modified_count + wt.git_status.staged_count + wt.git_status.untracked_count} changed</p>
 									{/if}
 									<p class="stale-detail">{wt.binding_warning || wt.status_error || 'Directory missing; needs cleanup. Existing files are preserved.'}</p>
+									{#if !$git.workerTarget && !wt.binding_warning && (wt.exists === false || wt.status_error?.includes('not its own Git working tree'))}
+										{#if forgetConfirm === wt.id}
+											<p class="stale-detail">Forget this registration? Files, branches and chat history will be kept.</p>
+											<button type="button" class="branch-item" disabled={forgetting !== null} onclick={() => forgetWorktree(wt)}>{forgetting === wt.id ? 'Forgetting…' : 'Confirm forget'}</button>
+											<button type="button" class="branch-item" disabled={forgetting !== null} onclick={(event) => { event.stopPropagation(); forgetConfirm = null; forgetError = null; }}>Cancel</button>
+											{#if forgetError}<p class="stale-detail" role="alert">{forgetError}</p>{/if}
+										{:else}
+											<button type="button" class="branch-item" disabled={forgetting !== null} onclick={(event) => { event.stopPropagation(); forgetConfirm = wt.id; forgetError = null; }} aria-label={`Forget ${wt.branch_name}`}>Forget</button>
+										{/if}
+									{/if}
 								</div>
 							{/each}
 						{/if}

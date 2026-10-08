@@ -190,6 +190,9 @@ def test_grant_requires_cookie_local_listener_and_private_peer():
     ("/api/settings/import", "POST", False),
     ("/api/v1/network/peers", "DELETE", False),
     ("/api/v1/plugins/install", "POST", False),
+    ("/api/v1/projects/p/git/worktrees/w/forget", "POST", False),
+    ("/api/v1/projects/p/git/worktrees/w/forget/", "POST", False),
+    ("/api/v1/projects/p/git/worktrees", "GET", True),
 ])
 def test_mutation_policy(path, method, allowed):
     assert preview_access.mutation_allowed(path, method) is allowed

@@ -479,6 +479,19 @@ def test_a_refused_checkout_warns_once_per_process_even_after_recovery(mock_db, 
         assert caplog.records[-1].levelno == logging.DEBUG
 
 
+def test_refusal_key_is_stable_when_a_junction_target_changes(monkeypatch, tmp_path, caplog):
+    import logging
+    import os
+
+    monkeypatch.setattr(project_resolver, "_refusals", {})
+    path = str(tmp_path / "stale-junction")
+    with caplog.at_level(logging.WARNING, logger=project_resolver.logger.name):
+        project_resolver._log_refusal(path, "fix/stale", "missing marker")
+        monkeypatch.setattr(os.path, "realpath", lambda p: str(tmp_path / "new-target"))
+        project_resolver._log_refusal(path, "fix/stale", "still missing marker")
+    assert len(caplog.records) == 1
+
+
 def test_resolve_existing_cwd_none_when_no_checkout_row(mock_db):
     pv2 = projects_v2.upsert_project("git:ex3", name="EX3")
     out = project_resolver.resolve_existing_cwd(

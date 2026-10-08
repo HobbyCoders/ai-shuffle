@@ -13,6 +13,153 @@ from app.core.git_cache import _native_reader
 logger = logging.getLogger(__name__)
 
 
+def forget_stale_worktree_metadata(main_dir: str, worktree_path: str) -> None:
+    """Forget ONE stale Git registration, touching only its administrative files.
+
+    Git's prune is repository-wide; worktree remove may recurse through Windows
+    junctions. Neither is suitable here. Verify the common-dir/back-reference,
+    preflight every admin entry without following links, then unlink only those
+    files. The checkout, dependency links and branch refs are never touched.
+    """
+    import stat
+    import subprocess
+    from pathlib import Path
+
+    from app.core.worktree_report import _git, _is_checkout_root, parse_worktree_list
+
+    def key(path):
+        return os.path.normcase(os.path.abspath(path))
+
+    metadata_root = None
+    metadata_device = None
+
+    def no_links(path):
+        mounts = set()
+        if metadata_root is not None and os.sys.platform == "linux":
+            # st_dev catches filesystem crossings but not same-device bind
+            # mounts. Refresh Linux's mount table on every delete preflight.
+            for line in Path("/proc/self/mountinfo").read_text(encoding="utf-8").splitlines():
+                field = line.split()[4]
+                for escaped, plain in ((r"\040", " "), (r"\011", "\t"), (r"\012", "\n"), (r"\134", "\\")):
+                    field = field.replace(escaped, plain)
+                mounts.add(Path(field))
+        for part in (path, *path.parents):
+            try:
+                info = part.lstat()
+            except FileNotFoundError:
+                continue  # Only genuine absence is safe; inspection errors propagate.
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise ValueError("path contains a symlink or Windows junction")
+            if metadata_device is not None and (part == metadata_root or metadata_root in part.parents):
+                if info.st_dev != metadata_device or part in mounts:
+                    raise ValueError("Git administrative path crosses a foreign filesystem or mount")
+
+    target = Path(os.path.abspath(worktree_path))
+    main = Path(os.path.abspath(main_dir))
+    # Only the app's own placement roots; never forget a base or imported clone.
+    roots = [main / name / "worktrees" for name in (".fluid", ".claude")]
+    if not any(key(root) != key(target) and root in target.parents for root in roots):
+        raise ValueError("not an app-managed worktree path")
+    no_links(target)
+    if not _is_checkout_root(str(main)):
+        raise ValueError("project checkout is unavailable or invalid")
+
+    def require_stale():
+        # A real but switched/foreign/borrowed Git root is not a stale directory.
+        if _is_checkout_root(str(target)) or (
+            (target / ".git").exists()
+            and _git(str(target), "rev-parse", "--absolute-git-dir") is not None
+        ):
+            raise ValueError("directory still has usable Git metadata; keep its registration")
+
+    require_stale()
+    common = _git(str(main), "rev-parse", "--path-format=absolute", "--git-common-dir")
+    listing = _git(str(main), "worktree", "list", "--porcelain")
+    if not common or listing is None:
+        raise ValueError("Git registration could not be verified")
+    item = next((i for i in parse_worktree_list(listing) if key(i["path"]) == key(target)), None)
+    if item and item.get("locked"):
+        raise ValueError("worktree is locked")
+    metadata_root = Path(common.strip())
+    no_links(metadata_root)
+    metadata_device = metadata_root.lstat().st_dev
+    admin_root = metadata_root / "worktrees"
+    no_links(admin_root)
+    matches = []
+    if admin_root.is_dir():
+        for admin in admin_root.iterdir():
+            no_links(admin)
+            backlink = admin / "gitdir"
+            if not admin.is_dir() or not backlink.is_file():
+                continue
+            no_links(backlink)
+            link = Path(backlink.read_text(encoding="utf-8").strip())
+            if not link.is_absolute():
+                link = admin / link
+            if key(link) == key(target / ".git"):
+                matches.append(admin)
+    if not matches and not item:
+        return  # Registry-only: no Git metadata to prune.
+    if len(matches) != 1:
+        raise ValueError("Git administrative back-reference is missing or ambiguous")
+    admin = matches[0]
+    if (admin / "locked").exists():
+        raise ValueError("worktree is locked")
+    files, directories, fsmonitor_sockets = [], [], []
+    pending = [admin]
+    while pending:
+        directory = pending.pop()
+        no_links(directory)
+        directories.append(directory)
+        for entry in directory.iterdir():
+            no_links(entry)
+            info = entry.lstat()
+            if entry.name.endswith(".lock"):
+                raise ValueError("Git administrative files are busy")
+            if stat.S_ISDIR(info.st_mode):
+                pending.append(entry)
+            elif stat.S_ISREG(info.st_mode):
+                files.append(entry)
+            elif entry.parent == admin and entry.name == "fsmonitor--daemon.ipc" and stat.S_ISSOCK(info.st_mode):
+                fsmonitor_sockets.append(entry)
+            else:
+                raise ValueError(f"unexpected Git administrative file type: {entry.name} ({stat.filemode(info.st_mode)})")
+    # Fail closed if the checkout was restored while gathering the manifest.
+    require_stale()
+    for endpoint in fsmonitor_sockets:
+        # Newer Linux Git leaves a Unix IPC socket in each worktree admin dir.
+        # Stop only that daemon, after validating the whole manifest, so it
+        # cannot keep writing into metadata we are about to forget. Explicit
+        # --git-dir scopes IPC to this admin dir, never the main daemon's socket.
+        no_links(endpoint)
+        try:
+            stopped = subprocess.run(
+                ["git", "-C", str(main), f"--git-dir={admin}", f"--work-tree={main}", "fsmonitor--daemon", "stop"],
+                capture_output=True, text=True, timeout=30,
+                env={**os.environ, "LC_ALL": "C"},
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError("Git fsmonitor daemon could not be stopped") from exc
+        # A vanished checkout can leave its socket after the daemon has exited.
+        # Only Git's explicit no-daemon result is safe to treat as stopped.
+        if stopped.returncode and not (
+            stopped.returncode == 128 and stopped.stderr.strip() == "fatal: fsmonitor--daemon is not running"
+        ):
+            raise ValueError("Git fsmonitor daemon could not be stopped")
+        if endpoint.exists():
+            no_links(endpoint)
+            if not stat.S_ISSOCK(endpoint.lstat().st_mode):
+                raise ValueError("Git fsmonitor endpoint changed type")
+            endpoint.unlink()
+    require_stale()
+    for entry in files:
+        no_links(entry)
+        entry.unlink()
+    for directory in reversed(directories):
+        no_links(directory)
+        directory.rmdir()
+
+
 class GitWorktreeMixin:
     """Mixin providing worktree operations for GitService."""
 

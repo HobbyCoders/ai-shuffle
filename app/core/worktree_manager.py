@@ -929,6 +929,89 @@ class WorktreeManager:
 
         return terminated
 
+    async def forget_worktree(self, project_id: str, worktree_id: str) -> None:
+        """Forget stale local registrations only; preserve files, branches and chats."""
+        def forget():
+            from app.core.git_activity import active_git_sessions
+            from app.core.checkout_manager import _resolve_checkout_path
+            from app.core.git_worktree_ops import forget_stale_worktree_metadata
+            from app.core.worktree_report import _path_key, _project_repos, _sessions_by_path
+            from app.db.base import get_db
+            from app.db.projects_v2 import get_project_v2
+
+            if get_project_v2(project_id):
+                rows = checkouts_db.list_checkouts(project_id)
+                row = next((r for r in rows if r["id"] == worktree_id), None)
+                if not row or row["runner_id"] != settings.effective_instance_id or not row.get("branch"):
+                    raise WorktreeError("Forget refused: not a local branch checkout of this project.")
+                base = next((r for r in rows if r["runner_id"] == row["runner_id"] and not r.get("branch")), None)
+                if not base or not base.get("path"):
+                    raise WorktreeError("Forget refused: project checkout metadata missing.")
+                main_dir = _resolve_checkout_path(base["path"])
+                path = _resolve_checkout_path(row["path"]) if row.get("path") else None
+            else:
+                row = database.get_worktree(worktree_id)
+                repo = database.get_git_repository(row["repository_id"]) if row else None
+                project = database.get_project(project_id)
+                if not repo or repo["project_id"] != project_id or not project:
+                    raise WorktreeError("Forget refused: not a worktree of this project.")
+                if project.get("instance_id") not in (None, "", settings.effective_instance_id):
+                    raise WorktreeError("Forget refused: project belongs to another worker.")
+                main_dir = get_project_working_dir(project)
+                path = get_worktree_working_dir(row) if row.get("worktree_path") else None
+            if not path:
+                raise WorktreeError("Forget refused: checkout path metadata missing.")
+
+            # Remove both canonical and legacy aliases, or fallback/sync can
+            # resurrect the stale entry. Scope to this repository and runner.
+            ids = {worktree_id}
+            aliases = {project_id}
+            branches = {row.get("branch") or row.get("branch_name")}
+            for source in _project_repos():
+                if _path_key(source["path"]) == _path_key(main_dir):
+                    aliases.update(source["aliases"])
+                    for registered in source["registered"]:
+                        if _path_key(registered["path"]) == _path_key(path):
+                            branches.add(registered.get("branch"))
+                            for registry_id in registered["registry_ids"]:
+                                legacy = database.get_worktree(registry_id)
+                                if legacy:
+                                    owner_repo = database.get_git_repository(legacy["repository_id"])
+                                    owner_project = database.get_project(owner_repo["project_id"]) if owner_repo else None
+                                    if not owner_project or owner_project.get("instance_id") not in (None, "", settings.effective_instance_id):
+                                        continue
+                                ids.add(registry_id)
+            sessions = _sessions_by_path().get(_path_key(path), [])
+            for registry_id in ids:
+                sessions.extend(database.get_sessions_for_worktree(registry_id) or [])
+                legacy = database.get_worktree(registry_id)
+                if legacy and legacy.get("session_id"):
+                    sessions.append({"id": legacy["session_id"]})
+            for alias in aliases:
+                for branch in branches - {None, ""}:
+                    sessions.extend(database.list_sessions_for_branch(alias, branch))
+                    sessions.extend(database.list_sessions_for_v2_branch(alias, branch))
+            try:
+                busy = bool(active_git_sessions(sessions))
+            except Exception as exc:
+                raise WorktreeError("Forget refused: active session status could not be verified.") from exc
+            if busy:
+                raise WorktreeError("Forget refused: a session is working in this checkout or on its branch.")
+            try:
+                forget_stale_worktree_metadata(main_dir, path)
+            except (OSError, ValueError) as exc:
+                raise WorktreeError(f"Forget refused: {exc}; registry and checkout files preserved.") from exc
+
+            # One transaction; session history and logical branches are retained.
+            with get_db() as conn:
+                cursor = conn.cursor()
+                for registry_id in ids:
+                    cursor.execute("DELETE FROM checkouts WHERE id = %s AND runner_id = %s AND branch IS NOT NULL",
+                                   (registry_id, settings.effective_instance_id))
+                    cursor.execute("DELETE FROM worktrees WHERE id = %s", (registry_id,))
+
+        await run_sync(forget)
+
     async def cleanup_worktree(self, worktree_id: str, keep_branch: bool = True) -> bool:
         """
         Remove a worktree and optionally delete its branch.

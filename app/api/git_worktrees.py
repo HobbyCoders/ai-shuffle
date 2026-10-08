@@ -667,6 +667,33 @@ async def delete_worktree(
     )
 
 
+@router.post("/worktrees/{worktree_id}/forget", response_model=OperationResponse)
+async def forget_worktree(
+    request: Request,
+    project_id: str,
+    worktree_id: str,
+    token: str = Depends(require_admin),
+):
+    """Forget a stale local registration, never its files or branch history."""
+    from app.api.common import require_origin_access
+    from app.db import projects_v2, checkouts
+
+    if await run_sync(projects_v2.get_project_v2, project_id):
+        await run_sync(require_origin_access, request=request, project_v2_id=project_id)
+        if not any(r["id"] == worktree_id for r in await run_sync(checkouts.list_checkouts, project_id)):
+            raise HTTPException(status_code=404, detail="Checkout not found in this project")
+    else:
+        check_project_access(request, project_id)
+        _require_worktree_for_project(worktree_id, project_id)
+    try:
+        await worktree_manager.forget_worktree(project_id, worktree_id)
+    except WorktreeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _invalidate_worktree_status_cache(project_id)
+    invalidate_working_dir_cache(project_id=project_id)
+    return OperationResponse(success=True, message="Forgot stale registration; files, branches and session history kept")
+
+
 @router.post("/worktrees/{worktree_id}/reopen", response_model=WorktreeInfo)
 async def reopen_worktree(
     request: Request,

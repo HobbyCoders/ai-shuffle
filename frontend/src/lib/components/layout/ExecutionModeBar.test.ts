@@ -30,7 +30,8 @@ const mocks = vi.hoisted(() => {
 		loadWorktrees: vi.fn().mockResolvedValue(undefined),
 		loadBranches: vi.fn().mockResolvedValue(undefined),
 		createBranch: vi.fn().mockResolvedValue(undefined),
-		syncWorktrees: vi.fn().mockResolvedValue({})
+		syncWorktrees: vi.fn().mockResolvedValue({}),
+		forgetWorktree: vi.fn().mockResolvedValue(undefined)
 	};
 });
 
@@ -61,7 +62,8 @@ vi.mock('$lib/stores/git.svelte', () => ({
 		...mocks.git,
 		loadWorktrees: mocks.loadWorktrees,
 		loadBranches: mocks.loadBranches,
-		createBranch: mocks.createBranch
+		createBranch: mocks.createBranch,
+		forgetWorktree: mocks.forgetWorktree
 	}
 }));
 
@@ -92,6 +94,25 @@ beforeEach(() => {
 
 
 describe('stale worktree visibility', () => {
+	it('requires confirmation to forget stale rows and keeps refusal visible', async () => {
+		mocks.forgetWorktree.mockReset().mockRejectedValueOnce({ detail: 'Forget refused: worktree is locked' });
+		mocks.worktrees.set([{ id: 'wt-stale', branch_name: 'fix/stale', exists: false }]);
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: /worktree branch:/i }));
+		expect(mocks.forgetWorktree).not.toHaveBeenCalled();
+		await fireEvent.click(screen.getByRole('button', { name: 'Forget fix/stale' }));
+		expect(screen.getByText(/Files, branches and chat history will be kept/)).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+		expect(mocks.forgetWorktree).not.toHaveBeenCalled();
+		await fireEvent.click(screen.getByRole('button', { name: 'Forget fix/stale' }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Confirm forget' }));
+		expect(mocks.forgetWorktree).toHaveBeenCalledWith('wt-stale');
+		expect(screen.getByRole('alert').textContent).toContain('worktree is locked');
+		mocks.forgetWorktree.mockImplementationOnce(async () => { mocks.worktrees.set([]); });
+		await fireEvent.click(screen.getByRole('button', { name: 'Confirm forget' }));
+		expect(screen.queryByRole('button', { name: 'Forget fix/stale' })).toBeNull();
+	});
+
 	it('keeps missing and switched bindings visible but unavailable for selection', async () => {
 		mocks.worktrees.set([
 			{ id: 'wt-missing', branch_name: 'fix/missing', exists: false, status_error: 'directory missing; needs cleanup' },

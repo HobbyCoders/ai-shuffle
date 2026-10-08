@@ -153,12 +153,15 @@ def _project_repos() -> List[Dict[str, Any]]:
         path = _absolute(project["path"])
         repo = database.get_git_repository_by_project(project["id"])
         registered = database.get_worktrees_for_repository(repo["id"]) if repo else []
-        repos[_path_key(path)] = {
+        entry = repos.setdefault(_path_key(path), {
             "project": project.get("name") or project["id"], "project_id": project["id"],
-            "path": path, "aliases": [project["id"]],
-            "registered": [{"path": _absolute(w["worktree_path"]), "branch": w["branch_name"],
-                            "registry_ids": [w["id"]]} for w in registered if w.get("worktree_path")],
-        }
+            "path": path, "aliases": [], "registered": [],
+        })
+        entry["aliases"].append(project["id"])
+        entry["registered"].extend(
+            {"path": _absolute(w["worktree_path"]), "branch": w["branch_name"], "registry_ids": [w["id"]]}
+            for w in registered if w.get("worktree_path")
+        )
     for project in projects_v2.list_projects_v2():
         local = [c for c in checkouts.list_checkouts(project["id"])
                  if c["runner_id"] == settings.effective_instance_id and c.get("path")]
