@@ -112,6 +112,57 @@ def test_a_missing_stamp_dir_is_ignored(monkeypatch, tmp_path):
     assert file_logging.source_revision(tmp_path / "gone" / "server") == "unknown"
 
 
+def test_linux_macos_packaged_revision_reaches_the_banner(no_revision_env, caplog):
+    (no_revision_env.parent / "build-source.json").write_text(json.dumps({
+        "version": "0.9.1", "sourceCommit": CFCA, "buildUrl": "https://example.com/build",
+    }), encoding="utf-8")
+
+    assert f"revision={CFCA}" in _banner(caplog)
+
+
+@pytest.mark.parametrize("preferred", ["SHUFFLE_SOURCE_REVISION", "GIT_SHA", "desktop-build", "sha-file"])
+def test_build_source_is_the_last_fallback(no_revision_env, monkeypatch, preferred):
+    (no_revision_env.parent / "build-source.json").write_text(json.dumps({"sourceCommit": CFCA}))
+    revision = "a" * 40
+    if preferred in ("SHUFFLE_SOURCE_REVISION", "GIT_SHA"):
+        monkeypatch.setenv(preferred, revision)
+    elif preferred == "desktop-build":
+        _stamp_desktop_build(no_revision_env, json.dumps({"revision": revision}))
+        (no_revision_env / "GIT_SHA").write_text("b" * 40)
+    else:
+        (no_revision_env / "GIT_SHA").write_text(revision)
+
+    assert file_logging.source_revision() == revision
+
+
+@pytest.mark.parametrize("content", [
+    b"{not json", b"[]", b"null", b'{}', b'{"revision": "cfca3e6"}',
+    b'{"sourceCommit": "not-a-sha"}', b'{"sourceCommit": "abcdef"}',
+    json.dumps({"sourceCommit": "a" * 65}).encode(), b"", b"\xff",
+])
+def test_a_malformed_build_source_is_ignored(no_revision_env, content):
+    (no_revision_env.parent / "build-source.json").write_bytes(content)
+
+    assert file_logging.source_revision() == "unknown"
+
+
+@pytest.mark.parametrize("content", ["{not json", json.dumps({"revision": "bad"})])
+def test_malformed_earlier_stamps_allow_build_source_fallback(no_revision_env, content):
+    _stamp_desktop_build(no_revision_env, content)
+    (no_revision_env / "GIT_SHA").write_text("not-a-sha")
+    (no_revision_env.parent / "build-source.json").write_text(json.dumps({"sourceCommit": CFCA}))
+
+    assert file_logging.source_revision() == CFCA
+
+
+def test_build_source_is_read_only_from_the_worker_root(no_revision_env):
+    content = json.dumps({"sourceCommit": CFCA})
+    (no_revision_env / "build-source.json").write_text(content)
+    (no_revision_env.parent.parent / "build-source.json").write_text(content)
+
+    assert file_logging.source_revision() == "unknown"
+
+
 def test_the_default_root_is_the_dir_that_holds_the_app_package():
     # server/app/core/file_logging.py maps to server/, so a packaged install
     # reads resources/worker/desktop-build.json.

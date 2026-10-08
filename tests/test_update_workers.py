@@ -142,6 +142,40 @@ def test_peer_boundary_rechecks_membership_expiry_and_target_policy(setup, monke
         asyncio.run(fleet.peer_action({"operation": "status"}, "hub"))
 
 
+def test_installer_worker_revision_reaches_deploy_status_with_no_shell_revision(setup, monkeypatch, tmp_path):
+    from app.core import deploy_status, file_logging
+
+    _, remote = setup
+    monkeypatch.delenv("SHUFFLE_SOURCE_REVISION", raising=False)
+    monkeypatch.delenv("GIT_SHA", raising=False)
+    server = tmp_path / "resources" / "worker" / "server"
+    server.mkdir(parents=True)
+    monkeypatch.setattr(file_logging, "_APP_ROOT", server)
+    revision = "04d9a0cfb83b43031dd3565930455afa3049b7a5"
+    (server.parent / "build-source.json").write_text(json.dumps({
+        "version": "0.9.1", "sourceCommit": revision, "buildUrl": "https://example.com/build",
+    }))
+    # useInstallers has no source manager, so the desktop shell reports null.
+    updates.desktop_exchange({"phase": "idle", "running_version": None})
+    member = SimpleNamespace(kind="worker", status="active")
+    monkeypatch.setattr(fleet.engine, "context", lambda: SimpleNamespace(member=lambda _: member))
+
+    async def sent(device_id, kind, body, **kwargs):
+        assert device_id == "peer" and kind == "application-update"
+        response = await fleet.peer_action(body, "self")
+        assert response["running_version"] is None
+        assert response["revision"] == revision
+        return response
+
+    remote.side_effect = sent
+    row = asyncio.run(deploy_status._peer_row({"device_id": "peer", "online": True}))
+
+    assert row["revision"] == revision
+    assert row["app_version"] == fleet._build()["app_version"]
+    assert row["reason"] is None
+    remote.assert_awaited_once()
+
+
 def test_peer_cannot_replace_target_identity_in_receipts(setup):
     values, remote = setup
     values[updates.ALL_KEY] = "true"

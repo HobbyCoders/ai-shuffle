@@ -10,7 +10,7 @@ from tests.core.network.harness import exchange, join
 from tests.core.network.test_api import make_client
 
 
-@pytest.mark.parametrize("metadata", ["selected-source", "bundled-desktop", "container"])
+@pytest.mark.parametrize("metadata", ["selected-source", "image-env", "bundled-desktop", "container", "installer-desktop"])
 def test_bare_version_revision_reaches_peer_api(workers, make_client, monkeypatch, tmp_path, metadata):
     a, b = workers("unraid"), workers("desktop")
     with a.active():
@@ -22,12 +22,19 @@ def test_bare_version_revision_reaches_peer_api(workers, make_client, monkeypatc
     server.mkdir(parents=True)
     monkeypatch.setattr(file_logging, "_APP_ROOT", server)
     revision = "04d9a0cfb83b43031dd3565930455afa3049b7a5"
+    (server.parent / "build-source.json").write_text(json.dumps({
+        "version": "0.9.1", "sourceCommit": revision if metadata == "installer-desktop" else "a" * 40,
+        "buildUrl": "https://example.com/build",
+    }))
     if metadata == "selected-source":
         monkeypatch.setenv("SHUFFLE_SOURCE_REVISION", revision)
         monkeypatch.setenv("GIT_SHA", "a" * 40)  # selected source wins
+    elif metadata == "image-env":
+        monkeypatch.setenv("GIT_SHA", revision)
     elif metadata == "bundled-desktop":
         (server.parent / "desktop-build.json").write_text(json.dumps({"revision": revision}))
-    else:
+        (server / "GIT_SHA").write_text("a" * 40)
+    elif metadata == "container":
         (server / "GIT_SHA").write_text(revision)
     with b.active():
         engine.publish_presence(version="0.9.1")
@@ -76,6 +83,26 @@ def test_unavailable_revision_is_null_not_checkout_head(workers, make_client, mo
         engine.create_network("Home")
         engine.publish_presence(version="0.9.1")
         assert engine.presence_of(a.device_id)["source_revision"] is None
+        assert client.get("/api/v1/network/members").json()["members"][0]["revision"] is None
+
+
+@pytest.mark.parametrize("content", [
+    "{not json", "[]", "null", "{}", '{"sourceCommit": "not-a-sha"}',
+])
+def test_malformed_installer_stamp_publishes_no_revision(workers, make_client, monkeypatch, tmp_path, content):
+    monkeypatch.delenv("SHUFFLE_SOURCE_REVISION", raising=False)
+    monkeypatch.delenv("GIT_SHA", raising=False)
+    server = tmp_path / "worker" / "server"
+    server.mkdir(parents=True)
+    monkeypatch.setattr(file_logging, "_APP_ROOT", server)
+    (server.parent / "build-source.json").write_text(content)
+    a = workers("linux")
+    with a.active():
+        engine.create_network("Home")
+        engine.publish_presence(version="0.9.1")
+        assert engine.presence_of(a.device_id)["source_revision"] is None
+        client = make_client()
+        assert client.get("/api/v1/network/status").json()["revision"] is None
         assert client.get("/api/v1/network/members").json()["members"][0]["revision"] is None
 
 

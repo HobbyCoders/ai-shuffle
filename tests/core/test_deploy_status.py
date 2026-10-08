@@ -173,7 +173,7 @@ def test_collect_workers_reads_self_and_peers(monkeypatch):
     assert me["label"] == "Unraid" and me["revision"] == "a" * 40 and me["offered"] == "b" * 12
     assert pc["revision"] == "c" * 40 and pc["channel"] == "stable" and pc["app_version"] == "1.1"
     assert off["reason"] == "offline"
-    assert old["revision"] is None and "predates" in old["reason"]
+    assert old["revision"] is None and old["reason"] == "worker did not report its revision"
 
 
 def test_deploy_status_never_raises(monkeypatch):

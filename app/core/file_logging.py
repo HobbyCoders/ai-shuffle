@@ -344,11 +344,10 @@ _REVISION_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 def _file_revision(app_root: Path) -> str:
     """The revision stamped next to the code, or ``""`` when there is none.
 
-    The packaged desktop worker ships ``desktop-build.json`` one level above
-    ``server/`` and starts the bundled build without any revision variable, so
-    this file is the only record of what it runs. The container image also
-    writes ``/app/GIT_SHA``. A missing, unreadable or malformed file is
-    ignored.
+    Packaged desktop workers stamp metadata one level above ``server/``:
+    ``desktop-build.json`` on Windows and ``build-source.json`` on Linux/macOS.
+    Prefer the Windows stamp, then the container image's ``GIT_SHA``, then the
+    Linux/macOS stamp. A missing, unreadable or malformed file is ignored.
     """
     try:
         data = json.loads((app_root.parent / "desktop-build.json").read_text(encoding="utf-8"))
@@ -359,6 +358,13 @@ def _file_revision(app_root: Path) -> str:
         pass
     try:
         value = (app_root / "GIT_SHA").read_text(encoding="utf-8").strip()
+        if _REVISION_RE.match(value):
+            return value
+    except (OSError, ValueError):
+        pass
+    try:
+        data = json.loads((app_root.parent / "build-source.json").read_text(encoding="utf-8"))
+        value = str(data.get("sourceCommit") or "").strip() if isinstance(data, dict) else ""
         if _REVISION_RE.match(value):
             return value
     except (OSError, ValueError):

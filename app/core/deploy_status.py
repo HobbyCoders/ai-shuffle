@@ -296,7 +296,7 @@ async def _peer_row(peer: Dict[str, Any]) -> Dict[str, Any]:
     row["offered"] = _offered(state, row["revision"])
     if not row["revision"]:
         row["reason"] = ("status unavailable" if state.get("phase") == "unknown"
-                         else "worker does not report its revision (it predates revision reporting; update it)")
+                         else "worker did not report its revision")
     return row
 
 
