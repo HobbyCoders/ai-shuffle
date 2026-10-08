@@ -12,17 +12,19 @@ Usage:
     python -m app.core.jq_shim --arg name value '$name'
 """
 
-import sys
-import json
 import argparse
 import io
+import json
 import os
 import shutil
 import subprocess
-from typing import List, Optional, Any
+import sys
+from typing import Any, List, Optional
 
-from .parser import parse_jq_expression, ParseError
-from .evaluator import evaluate, validate, is_stream, EvaluationError, EMPTY
+from fluid.tools.child_env import scrub_child_env
+
+from .evaluator import EMPTY, EvaluationError, evaluate, is_stream, validate
+from .parser import ParseError, parse_jq_expression
 
 # Marker present near the top of every copy of this shim (bin/jq, bin/jq.bat),
 # used to skip them when looking for a real jq to delegate to.
@@ -69,7 +71,7 @@ def _delegate_or_fail(argv: List[str], message: str, status: int) -> int:
     if real_jq is not None:
         sys.stdout.flush()
         # If that "real" jq is a wrapper that re-enters the shim, stop there
-        env = dict(os.environ, JQ_SHIM_NO_FALLBACK="1")
+        env = {**scrub_child_env(), "JQ_SHIM_NO_FALLBACK": "1"}
         return subprocess.call([real_jq] + argv, env=env)
     print(f"jq: error: {message}", file=sys.stderr)
     return status

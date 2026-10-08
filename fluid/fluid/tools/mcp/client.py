@@ -153,10 +153,13 @@ class McpClient:
         transport = self.config.get("transport", "stdio")
         if transport == "stdio":
             from mcp.client.stdio import StdioServerParameters, stdio_client
+
+            from fluid.tools.child_env import child_env_with_overlay
+
             params = StdioServerParameters(
                 command=self.config["command"],
                 args=list(self.config.get("args", [])),
-                env=self.config.get("env"),
+                env=child_env_with_overlay(self.config.get("env")),
                 cwd=self.config.get("cwd"),
             )
             return stdio_client(params), None

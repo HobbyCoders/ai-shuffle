@@ -27,6 +27,8 @@ import threading
 import time
 from typing import Optional
 
+from fluid.tools.child_env import scrub_child_env
+
 from app.core import claude_cli_status
 from app.core.cli_bridge import PtyProcess, is_pty_available
 
@@ -65,7 +67,7 @@ def terminal_supported() -> bool:
 
 
 def _login_env() -> dict:
-    env = {k: v for k, v in os.environ.items()
+    env = {k: v for k, v in scrub_child_env().items()
            if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")}
     env["TERM"] = "dumb"
     env["NO_COLOR"] = "1"

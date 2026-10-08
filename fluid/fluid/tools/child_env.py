@@ -43,6 +43,38 @@ _DENY_SUFFIX_RE = re.compile(
     r"_COOKIE|_SIGNING_KEY|_ENCRYPTION_KEY|_JWT_KEY)$",
     re.IGNORECASE,
 )
+# Claude Code cloud/gateway authentication belongs ONLY to the delegated CLI.
+# Do not allow these through generic inheritance, explicit tool overlays, or
+# FLUID_CHILD_ENV_PASSTHROUGH. Non-secret account/endpoint selectors are included:
+# inheriting them without the key can silently route another child elsewhere.
+CLAUDE_AUTH_NAMES = frozenset({
+    "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
+    "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT", "GCLOUD_PROJECT",
+    "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES", "CLOUDSDK_CONFIG",
+    "IDENTITY_ENDPOINT", "IDENTITY_HEADER", "IDENTITY_SERVER_THUMBPRINT", "IMDS_ENDPOINT",
+    "MSI_ENDPOINT", "MSI_SECRET",
+})
+CLAUDE_AUTH_PREFIXES = (
+    "AWS_", "AZURE_", "CLOUD_ML_", "VERTEX_REGION_", "ANTHROPIC_VERTEX_",
+    "ANTHROPIC_FOUNDRY_", "ANTHROPIC_BEDROCK_", "CLAUDE_CODE_USE_",
+    "CLAUDE_CODE_SKIP_",
+)
+
+
+def is_claude_auth(name: str) -> bool:
+    upper = name.upper()
+    return upper in CLAUDE_AUTH_NAMES or upper.startswith(CLAUDE_AUTH_PREFIXES)
+
+
+def scrub_claude_auth_env(environ: Mapping[str, str]) -> dict[str, str]:
+    """Remove CLI-only cloud credentials AND routing settings, without mutation."""
+    cloud_configured = bool(environ.get("ANTHROPIC_BASE_URL") or environ.get("ANTHROPIC_AUTH_TOKEN") or any(
+        environ.get("CLAUDE_CODE_USE_" + name) in ("1", "true") for name in ("BEDROCK", "VERTEX", "FOUNDRY")
+    ))
+    return {k: v for k, v in environ.items() if not is_claude_auth(k)
+            and not (cloud_configured and k.upper() == "ANTHROPIC_API_KEY")}
+
+
 # What tools legitimately use from the inherited environment even though the
 # name looks like a credential: model-provider and fal.ai keys an operator set
 # on the container, and the GitHub CLI token. Plain variables (PATH, HOME,
@@ -65,7 +97,7 @@ def is_host_secret(name: str, extra_allowed: frozenset[str] = frozenset()) -> bo
     upper = name.upper()
     # A passthrough may allow a build/deploy token, never the app database or
     # authentication secrets. These remain private even with a broad override.
-    if is_app_secret(upper):
+    if is_app_secret(upper) or is_claude_auth(upper):
         return True
     if upper in ALLOWED_CREDENTIAL_NAMES or upper in extra_allowed:
         return False
@@ -84,7 +116,7 @@ def scrub_child_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """A copy of ``environ`` (default ``os.environ``) without host secrets."""
     source = os.environ if environ is None else environ
     keep = _passthrough(source)
-    return {k: v for k, v in source.items()
+    return {k: v for k, v in scrub_claude_auth_env(source).items()
             if k.upper() not in {PASSTHROUGH_ENV, UNSET_ENV} and not is_host_secret(k, keep)}
 
 
@@ -100,5 +132,33 @@ def child_env_with_overlay(overlay: Mapping[str, str] | None,
     extra = dict(overlay or {})
     for name in _names(extra.pop(UNSET_ENV, None)):
         env.pop(name, None)
-    env.update(extra)
+    env.update(scrub_claude_auth_env(extra))
     return env
+
+
+def claude_cli_env_with_overlay(overlay: Mapping[str, str] | None,
+                                environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The delegated ``claude`` subprocess only: restore its explicit allowlist.
+
+    Host cloud credentials are still scrubbed. The app supplies the owner's
+    selected method as an overlay; no other child may call this exception.
+    """
+    env = child_env_with_overlay(overlay, environ)
+    env.update({k: v for k, v in (overlay or {}).items() if is_claude_auth(k)})
+    if any(is_claude_auth(k) for k in (overlay or {})) and (overlay or {}).get("ANTHROPIC_API_KEY"):
+        env["ANTHROPIC_API_KEY"] = overlay["ANTHROPIC_API_KEY"]
+    return env
+
+
+if __name__ == "__main__":
+    # MCP launch trampoline. Its config masks CLI auth values before Python
+    # starts; remove even those empty names before executing the actual server.
+    import sys
+
+    command = sys.argv[1:]
+    if not command:
+        raise SystemExit("missing child command")
+    env = scrub_claude_auth_env(os.environ)
+    if env.get("ANTHROPIC_API_KEY") == "":
+        env.pop("ANTHROPIC_API_KEY")
+    os.execvpe(command[0], command, env)

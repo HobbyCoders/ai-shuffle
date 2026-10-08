@@ -45,8 +45,10 @@ class IMessageRpcClient:
 
     async def start(self) -> None:
         """Spawn the imsg rpc subprocess."""
+        from app.core.process_tree import child_env
+
         self._process = await asyncio.create_subprocess_exec(
-            self._cli_path, "rpc",
+            self._cli_path, "rpc", env=child_env(),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

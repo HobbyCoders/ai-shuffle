@@ -16,6 +16,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from fluid.tools.child_env import scrub_child_env
+
 logger = logging.getLogger(__name__)
 
 _DONE_PR_STATES = {"merged", "closed"}
@@ -24,7 +26,7 @@ _DONE_PR_STATES = {"merged", "closed"}
 def _git(repo: str, *args: str, timeout: int = 15) -> Optional[str]:
     try:
         result = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True,
-                                encoding="utf-8", errors="replace", timeout=timeout)
+                                encoding="utf-8", errors="replace", timeout=timeout, env=scrub_child_env())
     except (OSError, subprocess.SubprocessError):
         return None
     return result.stdout if result.returncode == 0 else None
@@ -244,7 +246,7 @@ def report(project: Optional[str] = None) -> Dict[str, Any]:
             if head and can_compare:
                 try:
                     probe = subprocess.run(["git", "-C", comparison_repo, "merge-base", "--is-ancestor", head, default],
-                                           capture_output=True, timeout=15)
+                                           capture_output=True, timeout=15, env=scrub_child_env())
                     merged = probe.returncode == 0 if probe.returncode in (0, 1) else None
                 except (OSError, subprocess.SubprocessError):
                     pass

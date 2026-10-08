@@ -227,7 +227,8 @@ class TestTimeoutKillsTheWholeHook:
     """
 
     @pytest.mark.asyncio
-    async def test_timeout_returns_promptly_and_kills_the_child(self, tmp_path):
+    @pytest.mark.parametrize("procfs_exit_race", [False, True])
+    async def test_timeout_returns_promptly_and_kills_the_child(self, tmp_path, monkeypatch, procfs_exit_race):
         import time
 
         pid_file = tmp_path / "child.pid"
@@ -244,11 +245,32 @@ class TestTimeoutKillsTheWholeHook:
 
         # Linux: the orphaned child must be dead (gone or a zombie awaiting reap).
         stat = Path(f"/proc/{int(pid_file.read_text().strip())}/stat")
+        vanished_reads = []
+        if procfs_exit_race:
+            read_text = Path.read_text
+
+            def read_with_exit_race(path, *args, **kwargs):
+                if path != stat:
+                    return read_text(path, *args, **kwargs)
+                try:
+                    text = read_text(path, *args, **kwargs)
+                except FileNotFoundError:
+                    text = None
+                # Inject ESRCH only after the real child is gone/dead. A live
+                # child still reaches the unchanged deadline assertion below.
+                if text is None or text.rsplit(")", 1)[-1].split()[0] in ("Z", "X"):
+                    vanished_reads.append(True)
+                    raise ProcessLookupError(3, "No such process")
+                return text
+
+            monkeypatch.setattr(Path, "read_text", read_with_exit_race)
 
         def _alive() -> bool:
             try:
                 return stat.read_text().rsplit(")", 1)[-1].split()[0] not in ("Z", "X")
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
+                # procfs can lose the process after open but before read,
+                # reporting ESRCH instead of ENOENT. Both mean it exited.
                 return False
 
         if Path("/proc/self/stat").exists():
@@ -256,3 +278,5 @@ class TestTimeoutKillsTheWholeHook:
             while _alive():
                 assert time.monotonic() < deadline, "backgrounded child survived the timeout"
                 await asyncio.sleep(0.02)
+            if procfs_exit_race:
+                assert vanished_reads, "procfs exit-race regression was not exercised"

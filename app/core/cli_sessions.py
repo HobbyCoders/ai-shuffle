@@ -11,12 +11,14 @@ import os
 import re
 import shutil
 import subprocess
-import uuid
 import unicodedata
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypedDict, NotRequired
+from typing import Any, NotRequired, TypedDict
+
+from fluid.tools.child_env import scrub_child_env
 
 
 class SessionKey(TypedDict):
@@ -215,7 +217,7 @@ def list_sessions(directory: str | None = None, limit: int | None = None,
     if directory and include_worktrees:
         try:
             result = subprocess.run(["git", "-C", directory, "worktree", "list", "--porcelain"],
-                                    capture_output=True, text=True, timeout=5, check=True)
+                                    capture_output=True, text=True, timeout=5, check=True, env=scrub_child_env())
             directories.update(line[len("worktree "):] for line in result.stdout.splitlines()
                                if line.startswith("worktree "))
         except (OSError, subprocess.SubprocessError):

@@ -322,4 +322,6 @@ def layered_env(extra: dict[str, str] | None, base: dict[str, str] | None = None
     env = dict(os.environ if base is None else base)
     if extra:
         env.update({str(k): str(v) for k, v in extra.items()})
-    return env
+    from fluid.tools.child_env import scrub_claude_auth_env
+
+    return scrub_claude_auth_env(env)

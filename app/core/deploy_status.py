@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict
 
+from fluid.tools.child_env import scrub_child_env
+
 logger = logging.getLogger(__name__)
 
 _APP_ROOT = Path(__file__).resolve().parents[2]
@@ -48,7 +50,7 @@ class EdgePublicationRefusal(TypedDict):
 def _git(repo: Path, *args: str, timeout: int = 15) -> Optional[subprocess.CompletedProcess]:
     try:
         return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=timeout)
+                              encoding="utf-8", errors="replace", timeout=timeout, env=scrub_child_env())
     except (OSError, subprocess.SubprocessError):
         return None
 

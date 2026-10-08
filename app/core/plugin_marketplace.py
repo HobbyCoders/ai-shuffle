@@ -8,11 +8,12 @@ import logging
 import re
 import shutil
 import subprocess
-from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Optional, Dict
+from pathlib import Path
+from typing import Dict, List, Optional
 
 from app.core.plugin_models import MarketplaceInfo
+from app.core.process_tree import child_env
 from app.core.scrub import redact_url_credentials
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,7 @@ def add_marketplace(svc, url: str, name: Optional[str] = None) -> MarketplaceInf
                 ["git", "clone", "--depth", "1", "--", url, install_location],
                 check=True,
                 capture_output=True,
-                timeout=120
+                timeout=120, env=child_env(),
             )
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to clone marketplace: {_git_error(e)}")
@@ -234,7 +235,7 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
                 ["git", "clone", "--depth", "1", "--", source_url, install_location],
                 check=True,
                 capture_output=True,
-                timeout=120
+                timeout=120, env=child_env(),
             )
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to re-clone marketplace: {_git_error(e)}")
@@ -271,7 +272,7 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
                 ["git", "-C", install_location, "pull", "--ff-only"],
                 check=True,
                 capture_output=True,
-                timeout=120
+                timeout=120, env=child_env(),
             )
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to sync marketplace: {_git_error(e)}")
@@ -321,6 +322,7 @@ def skipped_entries(mp_path: Path) -> List[Dict[str, str]]:
     import json as _json
 
     from fluid.context.plugin_formats import read_marketplace
+
     from app.core.plugin_install import _safe_path_component
 
     try:

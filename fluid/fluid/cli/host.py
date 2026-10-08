@@ -77,6 +77,7 @@ from fluid.events.ops import (
 )
 from fluid.store.base import new_id
 from fluid.tools.builtins._util import strip_ansi
+from fluid.tools.child_env import scrub_child_env
 from fluid.tools.priority import lower_process_group_priority, priority_creationflags
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome
 from fluid.tools.shell import resolve_shell
@@ -279,6 +280,7 @@ class CliHost:
 
     async def _recover_swarms(self, pending):
         import json
+
         from fluid.events.model import SwarmUpdated
         from fluid.swarm import recover
         session_id = self.engine.ctx.session_id
@@ -305,8 +307,9 @@ class CliHost:
 
     async def swarm(self, input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         import json
-        from fluid.swarm import SwarmCoordinator, recover, validate
+
         from fluid.events.model import SwarmUpdated
+        from fluid.swarm import SwarmCoordinator, recover, validate
 
         async with self._swarm_lock:
             if self._swarm is None:
@@ -1044,6 +1047,7 @@ async def _kill_tree(process: asyncio.subprocess.Process) -> None:
             subprocess.run,
             ["taskkill", "/T", "/F", "/PID", str(process.pid)],
             capture_output=True, check=False,
+            env=scrub_child_env(),
         )
     else:
         try:

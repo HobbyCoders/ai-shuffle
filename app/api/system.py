@@ -10,20 +10,21 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from fluid.tools.child_env import scrub_child_env
 from pydantic import BaseModel
 
-from app.core.models import HealthResponse, VersionResponse, StatsResponse
-from app.core.auth import auth_service
+from app.api.auth import require_admin, require_auth
+from app.api.common import reset_served_roots_cache
 from app.core import config as config_module
+from app.core.auth import auth_service
 from app.core.config import settings
+from app.core.models import HealthResponse, StatsResponse, VersionResponse
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.auth import require_auth, require_admin
-from app.api.common import reset_served_roots_cache
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +172,8 @@ async def get_version():
             ['claude', '--version'],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
+            env=scrub_child_env(),
         )
         return result.stdout.strip() if result.returncode == 0 else None
 
@@ -299,7 +301,7 @@ async def get_diagnostics(request: Request, token: str = Depends(require_auth), 
     Returns the same metrics collected by the periodic ResourceMonitor,
     plus warnings. Use this to check system health without digging through logs.
     """
-    from app.core.resource_monitor import _collect_metrics, _check_warnings
+    from app.core.resource_monitor import _check_warnings, _collect_metrics
 
     if whole_stack and not getattr(request.state, "is_admin", False):
         raise HTTPException(status_code=403, detail="Whole-stack diagnostics require owner access")
@@ -577,9 +579,10 @@ async def browse_filesystem(
     Returns directories at the given path for the tree browser UI.
     If no path is given, returns starting points.
     """
-    from app.core.platform import is_local_mode
-    from app.core.config import settings as app_settings
     import sys
+
+    from app.core.config import settings as app_settings
+    from app.core.platform import is_local_mode
 
     local_mode = is_local_mode()
     # The effective dir: ``workspace_dir`` is None unless WORKSPACE_DIR is set.

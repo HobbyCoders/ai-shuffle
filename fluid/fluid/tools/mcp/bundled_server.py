@@ -627,6 +627,7 @@ def write_bundled_config(
     user_servers: dict[str, Any] | None = None,
     token: str | None = None,
     tool_filter: Callable[[str], bool] | None = None,
+    cli_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Write an ``.mcp.json``-style config and return it.
 
@@ -643,9 +644,34 @@ def write_bundled_config(
         servers[server_name] = bundled_server_config(socket_path, token)
     for name, server in (user_servers or {}).items():
         servers[name] = cli_server_entry(server)
+    if cli_env is not None:
+        servers = {name: isolated_cli_server_entry(server, cli_env)
+                   for name, server in servers.items()}
     config = {"mcpServers": servers}
     Path(path).write_text(json.dumps(config, indent=2))
     return config
+
+
+def isolated_cli_server_entry(server: dict[str, Any], cli_env: dict[str, str]) -> dict[str, Any]:
+    """Keep Claude-only credentials out of even CLI-spawned stdio MCPs.
+
+    The CLI overlays MCP env rather than replacing its inherited environment.
+    Mask the auth values before the trampoline starts, then remove the empty
+    names in the trampoline. No secret is written into the MCP config.
+    """
+    from fluid.tools.child_env import is_claude_auth, scrub_claude_auth_env
+
+    entry = dict(server)
+    overlay = dict(entry.get("env") or {})
+    names = {n for n in cli_env.keys() | overlay.keys() if is_claude_auth(n)}
+    if names and cli_env.get("ANTHROPIC_API_KEY"):
+        names.add("ANTHROPIC_API_KEY")
+    if entry.get("type", "stdio") != "stdio" or not names:
+        return entry
+    entry["env"] = {**scrub_claude_auth_env(overlay), **dict.fromkeys(names, "")}
+    entry["args"] = ["-m", "fluid.tools.child_env", entry["command"], *entry.get("args", [])]
+    entry["command"] = sys.executable
+    return entry
 
 
 def cli_server_entry(server: dict[str, Any]) -> dict[str, Any]:

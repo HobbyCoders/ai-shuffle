@@ -6,18 +6,19 @@ its own origin credentials and only fast-forwards clean local checkouts.
 from __future__ import annotations
 
 import hashlib
-import os
-from pathlib import Path
 import re
 import subprocess
+from pathlib import Path
 from urllib.parse import urlsplit
+
+from fluid.tools.child_env import scrub_child_env
 
 
 def _run(cwd, *args, timeout=120):
     try:
         return subprocess.run(
             ["git", *args], cwd=cwd, capture_output=True, timeout=timeout,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            env={**scrub_child_env(), "GIT_TERMINAL_PROMPT": "0"},
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git timed out during resume. Check the remote and retry; ownership has not moved.") from exc

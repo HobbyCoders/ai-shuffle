@@ -2,17 +2,18 @@
 Authentication service for AI Hub
 """
 
-import os
-import sys
-import shutil
-import logging
-import subprocess
-import time
 import asyncio
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import bcrypt
+from fluid.tools.child_env import scrub_child_env
 
 from app.db import database
 
@@ -141,7 +142,7 @@ class AuthService:
             if not claude_cmd:
                 return {"success": False, "message": "Logout failed",
                         "error": status.error or "Claude CLI not found"}
-            env = {k: v for k, v in os.environ.items()
+            env = {k: v for k, v in scrub_child_env().items()
                    if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")}
             result = subprocess.run(
                 [claude_cmd, 'auth', 'logout'],
@@ -250,7 +251,7 @@ class AuthService:
         return None
 
     def _github_env(self) -> Dict[str, str]:
-        return {**os.environ, 'GH_CONFIG_DIR': str(self.gh_config_dir),
+        return {**scrub_child_env(), 'GH_CONFIG_DIR': str(self.gh_config_dir),
                 'HOME': os.environ.get('HOME', str(Path.home()))}
 
     def _setup_github_git(self, gh_cmd: str) -> None:
@@ -270,6 +271,7 @@ class AuthService:
         preserving other accounts/hosts and atomically writing owner-only data.
         """
         import tempfile
+
         import yaml
 
         hosts_file = self.gh_config_dir / 'hosts.yml'

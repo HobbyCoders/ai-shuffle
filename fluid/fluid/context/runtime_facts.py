@@ -16,6 +16,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from fluid.tools.child_env import scrub_child_env
+
 _log = logging.getLogger(__name__)
 
 _RECEIPT = "fluid-runtime-provisioning.json"
@@ -27,6 +29,7 @@ def _receipt_path(root: Path) -> Path | None:
         result = subprocess.run(
             ["git", "rev-parse", "--git-path", _RECEIPT], cwd=root,
             capture_output=True, text=True, timeout=1,
+            env=scrub_child_env(),
         )
         if result.returncode:
             return None

@@ -19,16 +19,15 @@ logger = logging.getLogger(__name__)
 # Env vars injected into the spawned ``browser`` MCP server subprocess, sourced
 # from the session's full_env (built by query_options). Keyed on server name so
 # no other STDIO server is affected. The ANTHROPIC_* subset feeds the
-# ``browser_find`` cheap-model sub-call: it inherits the session's provider
-# routing (ANTHROPIC_BASE_URL/AUTH_TOKEN) or a direct API key, plus the
-# small-fast model id. CHROME_CDP_PORT tells the server which supervised
+# ``browser_find`` cheap-model sub-call: a direct API key plus the small-fast
+# model id. Claude cloud/gateway auth is never handed to this server.
+# CHROME_CDP_PORT tells the server which supervised
 # Chromium CDP port to attach to (default 9221); BROWSER_MCP_ENTRY is passed
 # through for dev overrides. BROWSER_UPLOAD_DIR gates browser_upload — the
 # server rejects all uploads unless it is set to an allowlisted directory.
 # Values that are unset/empty are omitted.
 _BROWSER_ENV_KEYS = (
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_AUTH_TOKEN",
+    # Claude gateway credentials/routing are CLI-only, never browser-find auth.
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_SMALL_FAST_MODEL",
     "CHROME_CDP_PORT",
@@ -211,7 +210,9 @@ def _build_browser_server_env(
     ``AIS_PANEL_REGISTER_URL`` (loopback register endpoint, overridable via the
     ``BROWSER_PANEL_REGISTER_URL`` process env).
     """
-    src = tool_env or {}
+    from fluid.tools.child_env import scrub_claude_auth_env
+
+    src = scrub_claude_auth_env(tool_env or {})
     env: Dict[str, str] = {}
     for key in _BROWSER_ENV_KEYS:
         value = src.get(key)

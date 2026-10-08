@@ -77,15 +77,15 @@ Claude runs in exactly one mode at a time, the one you chose: **Subscription**, 
 
 ## Claude through a cloud provider or gateway
 
-The Claude Code CLI can also run Claude through Amazon Bedrock, Google Vertex AI, Microsoft Foundry, or an LLM gateway that you run. In AI Shuffle this is a third Claude method, **Cloud provider or gateway**. It is off by default, and nothing turns it on except you.
+The Claude Code CLI can also run Claude through Amazon Bedrock, Google Vertex AI, Microsoft Foundry, or an LLM gateway that you run. In AI Shuffle this is a third Claude method, **Cloud provider or gateway**. Configure it in Settings, or use the stock CLI's worker-environment configuration, including its built-in cloud credential chains.
 
-- **Off unless you choose it.** AI Shuffle never picks up cloud credentials or a gateway address on its own, whether from the worker's environment, a profile, a project or a plugin. With the Subscription or API key mode, these variables are removed before the CLI starts, as before.
+- **Explicit configuration.** A saved-and-selected Settings cloud method is authoritative. Otherwise, a cloud selector (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` or `CLAUDE_CODE_USE_FOUNDRY`) or gateway configuration (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`) in the worker environment selects Cloud. A stray cloud key without a selector does not. **Off** still prevents Claude from running. Profile environment values are not used as cloud credentials.
 - **Owner only.** Only the owner of the worker can view, set or remove it.
-- **One method at a time.** You choose one, enter its values in **Settings → Providers → Claude → Add → Cloud provider or gateway**, and AI Shuffle passes the CLI only that method's variables. Your Claude subscription sign-in and Anthropic API key are not passed in this mode, and AI Shuffle never falls back to them.
-- **Secrets stay on the worker.** Keys, tokens and the service account file are stored encrypted, the same way as the Anthropic API key. The app never shows them again; a stored secret shows as "Stored", and you can replace it but not read it. The region, project, resource name and base URL are shown.
+- **One method at a time.** Enter values in **Settings → Providers → Claude → Add → Cloud provider or gateway**, or configure one method in the worker environment. AI Shuffle passes only the method's allowlisted variables to the delegated `claude` subprocess. Multiple cloud selectors are refused. A selected Settings configuration never falls back to the worker's credentials when its secrets are unavailable. A gateway may use `ANTHROPIC_API_KEY` instead of an auth token; other cloud methods do not receive an Anthropic key or subscription token.
+- **Secrets stay on the worker.** Values entered in Settings are stored encrypted, the same way as the Anthropic API key. The app never shows secrets again; a stored secret shows as "Stored", and you can replace it but not read it. Worker-environment credentials remain under your existing worker configuration; AI Shuffle does not copy them into its credential store or inspect cloud credential files.
 - **This worker only.** Like the Claude mode itself, the method and its secrets apply to the worker you set them on. They are not copied to your other paired workers; set each worker up on its own.
 - **Turning it on.** **Save and use for Claude** turns it on. **Save** only stores the values. Choosing **Cloud** under **Runs on** opens this page; it does not switch on its own.
-- **Turning it off.** Pick **Subscription** or **API key** under **Runs on** to go back to exactly what you had before. **Remove this credential** deletes the stored values and secrets. If Cloud is still the mode, Claude then waits until you set it up again or choose another mode.
+- **Turning it off.** For Settings credentials, pick **Subscription** or **API key** under **Runs on**, or remove the credential. For worker-environment configuration, remove its selector/gateway variables and restart the worker to return to the saved mode. Choose **Off** to disable Claude regardless of environment configuration.
 
 Before you can save, you must confirm that you have read this warning. It stays on the page while the method is set up:
 
@@ -93,19 +93,18 @@ Before you can save, you must confirm that you have read this warning. It stays 
 
 For a gateway, also:
 
-> All Claude traffic from this worker goes to the address you enter. The browser tool also receives this address and token.
+> All Claude traffic from this worker goes to the address you enter. AI Shuffle passes this address and token only to Claude Code, not to the browser tool or other app-launched tools. Claude Code's own commands can still read them.
 
 The warning is accurate:
 
-- The Claude Code CLI passes its environment to the commands its agents run, to hooks and to MCP servers, so an agent's Bash tool can read these values.
+- **App-owned child isolation is not a sandbox.** AI Shuffle does not pass cloud credentials, account selectors or gateway routing to other agents' Fluid Bash/Monitor shells, NativeLoop sessions, terminals, browser tools, status probes, or app-launched MCP/plugin processes. App-configured stdio MCP entries launched by the CLI are masked and scrubbed too. The stock CLI's own Bash tool and user-configured Claude plugin/hook commands still inherit its environment, just as when you run Claude Code directly. Same-UID processes can also read each other's accessible files or process state; see [the same-user security boundary discussion](https://github.com/HobbyCoders/ai-shuffle/issues/1957).
 - For Vertex AI, the service account key is written to a file in the worker's data folder that only the app's user can read. Agents' Bash and Read tools and the in-app terminals run as that same user, so they can read it too. Only a key of type `service_account` is accepted.
 - The CLI still reads `.claude/settings.json` in a project and in your home folder. An `env` block there can point Claude at another address.
-- With a gateway, the browser tool receives the gateway address and token, the same way it receives Claude credentials in the other modes.
 - The worker's own proxy and certificate settings (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`) still apply, since a company network may need them. `NODE_TLS_REJECT_UNAUTHORIZED` is always removed in this mode, so certificate checks stay on.
 
 Give the account only the permissions it needs to call Claude.
 
-In this mode every variable starting with `AWS_`, `GOOGLE_`, `AZURE_`, `ANTHROPIC_`, `CLOUD_ML_`, `CLAUDE_CODE_USE_` or `CLAUDE_CODE_SKIP_`, plus `CLAUDE_CODE_OAUTH_TOKEN`, is removed from what the CLI inherits from the worker and the profile, then only the chosen method's stored values are set. That includes model overrides such as `ANTHROPIC_MODEL` set on the worker or in a profile. If the stored values cannot be prepared (for example the key file cannot be written), the run stops with an error; it never continues on the worker's own credentials.
+Cloud account and endpoint variables are removed from generic child environments, including profile/settings overlays; `FLUID_CHILD_ENV_PASSTHROUGH` cannot override this. Only the Claude spawn restores the selected method's allowlist. If Settings values cannot be prepared (for example the Vertex key file cannot be written), the run stops with an error rather than continuing on another account. Switching the selected account or mode forces a fresh pooled Claude process without placing the credentials in the shared tool environment.
 
 | Method | Values you enter | What the CLI gets | Setup guide |
 |---|---|---|---|
@@ -118,7 +117,16 @@ A base URL must start with `https://`. Plain `http://` is accepted only for an a
 
 Usage on this method is billed by your cloud provider or gateway, not by a Claude plan, so the loop guard does not apply. The status in Settings checks only that the values are present; it does not call your cloud account. A wrong key shows up as an error on the first run.
 
-Limits: other ways the CLI can sign in to these clouds (AWS profiles and SSO, Google's default login, Microsoft Entra ID) are not offered here. This method has not been tested against a real Amazon Bedrock, Google Vertex AI or Microsoft Foundry account.
+### Stock CLI worker-environment setup
+
+Set variables on the worker process using your existing deployment or service configuration, then restart the worker. They are never forwarded to other workers or to app-owned tool processes. Settings reports the active method as **Cloud provider or gateway**, with **(worker environment)** in its method label; it checks configuration presence, not a live cloud sign-in.
+
+- **Bedrock:** `CLAUDE_CODE_USE_BEDROCK=1` with `AWS_REGION` or `AWS_DEFAULT_REGION`. Use access keys/session token, `AWS_BEARER_TOKEN_BEDROCK`, or the CLI's default AWS credential chain (`AWS_PROFILE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, role/web-identity or container-credential variables). AWS profiles and SSO are handled by the CLI, not AI Shuffle.
+- **Vertex:** `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, and `ANTHROPIC_VERTEX_PROJECT_ID`. Use `GOOGLE_APPLICATION_CREDENTIALS` or the CLI's default Google login/ADC; `CLOUDSDK_CONFIG`, Google project aliases and `VERTEX_REGION_CLAUDE_*` overrides are passed only to Claude. This path does not require pasting a service-account key into Settings.
+- **Foundry:** `CLAUDE_CODE_USE_FOUNDRY=1` and `ANTHROPIC_FOUNDRY_RESOURCE` or `ANTHROPIC_FOUNDRY_BASE_URL`. Use the API key/auth-token variables or the CLI's Microsoft Entra/default Azure credential chain, including `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`, certificate or federated-token configuration.
+- **Gateway:** `ANTHROPIC_BASE_URL`, with `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` or `ANTHROPIC_CUSTOM_HEADERS` as required by the gateway. An auth token by itself is also passed to the CLI. Follow the official setup guides above for the CLI's endpoint and skip-auth switches.
+
+No real Bedrock, Vertex, Foundry or gateway account was used to verify this support. Automated tests use fake values and exercise the CLI spawn environment and app-owned child isolation; a configuration-presence check is not proof that your account can authenticate.
 
 ## The loop guard
 

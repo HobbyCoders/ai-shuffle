@@ -257,8 +257,9 @@ def _egress_env() -> dict:
     """
     from app.core.browser_egress import egress_env
     from app.core.process_ledger import without_run_marker
+    from app.core.process_tree import child_env
 
-    return without_run_marker({**os.environ, **egress_env()})
+    return without_run_marker(child_env(egress_env()))
 
 
 # Seconds between relaunches, and a run shorter than this counts as a rapid

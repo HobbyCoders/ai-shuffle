@@ -478,6 +478,29 @@ def test_clipboard_without_tools_names_them():
         linux.clipboard_command(False, lambda name: None)
 
 
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_sdk_clipboard_children_scrub_cloud_credentials(monkeypatch, platform):
+    from app.mcp import computer_use_sdk as sdk
+
+    cloud_env = {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_SECRET_ACCESS_KEY": "fake-aws-secret",
+                 "ANTHROPIC_AUTH_TOKEN": "fake-gateway-token", "ANTHROPIC_BASE_URL": "https://fake.invalid"}
+    for name, value in cloud_env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setattr(linux, "clipboard_command", lambda write: ["fake-clipboard"])
+    calls = []
+    def run(args, **kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(stdout="fake-clipboard-text")
+    monkeypatch.setattr(sdk.subprocess, "run", run)
+    assert sdk._clipboard_read() == "fake-clipboard-text"
+    sdk._clipboard_write("fake-clipboard-text")
+    assert len(calls) == 2
+    for kwargs in calls:
+        assert not set(kwargs["env"]) & cloud_env.keys()
+
+
 def test_sdk_clipboard_uses_linux_command_without_waiting_on_pipes(monkeypatch):
     from app.mcp import computer_use_sdk as sdk
 

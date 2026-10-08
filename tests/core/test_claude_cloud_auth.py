@@ -9,15 +9,19 @@ import json
 import logging
 import os
 import stat
-
 from unittest.mock import patch
 
 import pytest
+from fluid.tools.child_env import (
+    UNSET_ENV,
+    child_env_with_overlay,
+    claude_cli_env_with_overlay,
+)
 
-from app.core import claude_auth_mode, claude_cloud_auth as cloud, credential_gate
+from app.core import claude_auth_mode, credential_gate
+from app.core import claude_cloud_auth as cloud
 from app.core.environment import inject_claude_code_auth
 from app.db import database
-from fluid.tools.child_env import UNSET_ENV, child_env_with_overlay
 
 FAKE = {
     "aws_id": "AKIAFAKEFAKEFAKE0000",
@@ -60,7 +64,7 @@ def _cli_env(profile=None, host=HOST):
     # VERTEX_REGION_* names it must also remove.
     with patch.dict(os.environ, host):
         overlay = inject_claude_code_auth(dict(profile or {}))
-    return child_env_with_overlay(overlay, host)
+    return claude_cli_env_with_overlay(overlay, host)
 
 
 def _unset(env):
@@ -157,9 +161,13 @@ def test_vertex_writes_an_owner_only_credential_file(store):
     assert cloud.status()["ready"] is True
 
 
-def test_cloud_mode_with_nothing_saved_passes_no_cloud_or_claude_credential(store):
+def test_cloud_mode_without_settings_or_worker_configuration_passes_no_credential(store):
     claude_auth_mode.set_mode("cloud")
-    env = _cli_env(profile={"AWS_REGION": "profile-region"})
+    # Orphan cloud keys without a selector/endpoint are not a configuration.
+    host = {name: value for name, value in HOST.items() if not (
+        name.startswith("CLAUDE_CODE_USE_") or name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN")
+    )}
+    env = _cli_env(profile={"AWS_REGION": "profile-region"}, host=host)
     assert not (set(env) & (ALL_CLOUD_NAMES | {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}))
     assert {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} <= _unset(inject_claude_code_auth({}))
 
@@ -170,6 +178,293 @@ def test_switching_back_restores_todays_behaviour(store):
     assert inject_claude_code_auth({})["ANTHROPIC_AUTH_TOKEN"] == FAKE["gateway_token"]
     claude_auth_mode.set_mode("subscription")
     assert inject_claude_code_auth({}) == {UNSET_ENV: "ANTHROPIC_API_KEY,ANTHROPIC_AUTH_TOKEN"}
+
+
+@pytest.mark.parametrize("case", sorted(METHOD_CASES) + ["vertex"])
+async def test_saved_method_is_private_to_the_delegated_spawn(store, monkeypatch, tmp_path, case):
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.store.base import MemoryStore
+    from fluid.tools.registry import ToolRegistry
+
+    from app.core import environment
+    from app.core.provider import harness_adapter as ha
+    from app.core.provider.types import SessionOptions
+
+    if case == "vertex":
+        method, values = "vertex", {"region": "global", "project_id": "fake-project",
+                                    "credentials_json": FAKE["vertex_json"]}
+    else:
+        method, values, _ = METHOD_CASES[case]
+    cloud.save(method, values)
+    claude_auth_mode.set_mode("cloud")
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: ["claude"])
+    shared = environment._build_env_with_ai_tools(HOST, None)
+    assert not set(shared) & ALL_CLOUD_NAMES
+    options = SessionOptions(model="opus", cwd=str(tmp_path), env=shared,
+                             extra={"fluid_store": MemoryStore(), "fluid_registry": ToolRegistry()})
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(options)
+    try:
+        assert isinstance(adapter._engine, DelegatedLoop)
+        from unittest.mock import AsyncMock
+
+        captured = {}
+        async def spawn(*argv, **kwargs):
+            captured.update(kwargs["env"])
+            raise RuntimeError("captured-claude-spawn")
+        monkeypatch.setattr(adapter._engine, "_version_guard", AsyncMock())
+        monkeypatch.setattr(adapter._engine, "_build_argv", lambda: ["claude", "--fake-in-test"])
+        monkeypatch.setattr("fluid.engine.delegated.asyncio.create_subprocess_exec", spawn)
+        with pytest.raises(RuntimeError, match="captured-claude-spawn"):
+            await adapter._engine._ensure_process()
+        expected = cloud.env_for_cli()
+        assert {name: captured[name] for name in expected} == expected
+        assert not set(options.env) & ALL_CLOUD_NAMES
+        assert not set(child_env_with_overlay(adapter._engine.env, HOST)) & ALL_CLOUD_NAMES
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.parametrize("method,env", [
+    ("bedrock", {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_REGION": "us-east-1", "AWS_PROFILE": "fake-sso"}),
+    ("bedrock", {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_ACCESS_KEY_ID": FAKE["aws_id"],
+                 "AWS_SECRET_ACCESS_KEY": FAKE["aws_secret"], "AWS_SESSION_TOKEN": FAKE["aws_session"]}),
+    ("vertex", {"CLAUDE_CODE_USE_VERTEX": "1", "CLOUD_ML_REGION": "global",
+                "ANTHROPIC_VERTEX_PROJECT_ID": "fake-project", "CLOUDSDK_CONFIG": "/fake/adc"}),
+    ("vertex", {"CLAUDE_CODE_USE_VERTEX": "1", "GOOGLE_APPLICATION_CREDENTIALS": "/fake/key.json",
+                "VERTEX_REGION_CLAUDE_SONNET_4_6": "global"}),
+    ("foundry", {"CLAUDE_CODE_USE_FOUNDRY": "1", "ANTHROPIC_FOUNDRY_RESOURCE": "fake-resource",
+                 "AZURE_CLIENT_ID": "fake-client", "AZURE_TENANT_ID": "fake-tenant",
+                 "AZURE_CLIENT_SECRET": "fake-entra-secret"}),
+    ("foundry", {"CLAUDE_CODE_USE_FOUNDRY": "1", "ANTHROPIC_FOUNDRY_RESOURCE": "fake-resource",
+                 "ANTHROPIC_FOUNDRY_API_KEY": FAKE["foundry_key"]}),
+    ("gateway", {"ANTHROPIC_BASE_URL": "https://fake-gateway.invalid",
+                 "ANTHROPIC_AUTH_TOKEN": FAKE["gateway_token"]}),
+    ("gateway", {"ANTHROPIC_BASE_URL": "https://fake-gateway.invalid",
+                 "ANTHROPIC_API_KEY": "fake-gateway-api-key", "ANTHROPIC_CUSTOM_HEADERS": "fake: header"}),
+])
+@pytest.mark.real_agent_gate
+def test_worker_environment_methods_are_cli_only_and_report_cloud(store, method, env):
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.tools.child_env import scrub_child_env
+
+    from app.core import environment, generation_options
+    from app.core.terminals import shell_environment
+
+    claude_auth_mode.set_mode("subscription")
+    # Only obvious fakes. This test never reads an ADC/AWS/Entra file or account.
+    with patch.dict(os.environ, {"PATH": "/usr/bin", **env, "PRIVATE_SERVICE_TOKEN": "fake-unrelated"}, clear=True):
+        assert claude_auth_mode.current_mode() == "cloud"
+        assert cloud.status()["method"] == method and cloud.status()["ready"]
+        assert "worker environment" in cloud.status()["method_label"]
+        assert credential_gate.claude_credential_ready({"installed": True, "signed_in": False}) == (True, None)
+        assert claude_auth_mode.summary({"installed": True, "signed_in": False})["mode"] == "cloud"
+        loop = DelegatedLoop.__new__(DelegatedLoop)
+        loop.env = inject_claude_code_auth({})
+        actual = loop._child_env()
+        assert {name: actual[name] for name in env} == env
+        assert "PRIVATE_SERVICE_TOKEN" not in actual
+        for child in (scrub_child_env(), child_env_with_overlay(env),
+                      environment._build_env_with_ai_tools(env, None),
+                      generation_options._resolve_env({"env": env}),
+                      shell_environment("bash", "/bin/bash")):
+            assert not set(child) & set(env)
+        claude_auth_mode.set_mode("off")
+        assert claude_auth_mode.current_mode() == "off"
+        assert not set(inject_claude_code_auth({})) & set(env)
+
+
+async def test_native_loop_never_prepares_or_receives_cloud_auth(store, monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+
+    from fluid.engine.native import NativeLoop
+    from fluid.providers.base import ProviderCaps
+    from fluid.store.base import MemoryStore
+    from fluid.tools.registry import ToolRegistry
+
+    from app.core.provider import harness_adapter as ha
+    from app.core.provider.types import SessionOptions
+
+    class FakeProvider:
+        name = "fake"
+        caps = ProviderCaps()
+
+    cloud.save("gateway", {"base_url": "https://gw.example", "auth_token": FAKE["gateway_token"]})
+    claude_auth_mode.set_mode("cloud")
+    monkeypatch.setattr(ha, "_build_provider_client", AsyncMock(return_value=(FakeProvider(), None)))
+    monkeypatch.setattr(cloud, "env_for_cli", lambda: pytest.fail("NativeLoop requested CLI auth"))
+    options = SessionOptions(model="fake-model", cwd=str(tmp_path), env=dict(HOST),
+                             extra={"fluid_provider": "openrouter", "fluid_store": MemoryStore(),
+                                    "fluid_registry": ToolRegistry()})
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(options)
+    try:
+        assert isinstance(adapter._engine, NativeLoop)
+        assert not set(adapter._engine.ctx.extra.get("settings_env", {})) & ALL_CLOUD_NAMES
+    finally:
+        await adapter.disconnect()
+
+
+async def test_real_monitor_shell_has_no_cloud_auth(store, monkeypatch, tmp_path):
+    import asyncio
+    import sys
+
+    from app.core import process_ledger
+    from app.mcp import builtin_tools
+
+    for name, value in HOST.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(process_ledger, "record_process", lambda *args, **kwargs: None)
+    script = tmp_path / "monitor_env_probe.py"
+    script.write_text("import os\nassert not set(" + repr(tuple(ALL_CLOUD_NAMES)) + ") & os.environ.keys()\nprint('clean')\n")
+    task = await builtin_tools._spawn_background(f'"{sys.executable}" "{script}"', str(tmp_path), None)
+    try:
+        await asyncio.wait_for(task._reader_task, 10)
+        assert task.exit_code == 0
+        assert "clean" in task.lines
+    finally:
+        builtin_tools._background_tasks.pop(task.task_id, None)
+
+
+async def test_node_plugin_process_drops_cloud_overlay_and_keeps_its_own_key(store, monkeypatch):
+    from app.mcp.node_worker import NodeWorker
+
+    captured = {}
+    async def spawn(*args, **kwargs):
+        captured.update(kwargs["env"])
+        raise RuntimeError("captured-before-start")
+    monkeypatch.setattr("app.mcp.node_worker.asyncio.create_subprocess_exec", spawn)
+    with patch.dict(os.environ, HOST):
+        worker = NodeWorker("fake-worker.mjs", env={**HOST, "FAL_KEY": "fake-fal-key"})
+        with pytest.raises(RuntimeError, match="captured-before-start"):
+            await worker._start()
+    assert not set(captured) & ALL_CLOUD_NAMES
+    assert captured["FAL_KEY"] == "fake-fal-key"
+
+
+async def test_imessage_child_does_not_inherit_cloud_credentials(store, monkeypatch):
+    from app.core.connectors.imessage import IMessageRpcClient
+
+    captured = {}
+    async def spawn(*args, **kwargs):
+        captured.update(kwargs["env"])
+        raise RuntimeError("captured-before-start")
+    monkeypatch.setattr("app.core.connectors.imessage.asyncio.create_subprocess_exec", spawn)
+    with patch.dict(os.environ, HOST), pytest.raises(RuntimeError, match="captured-before-start"):
+        await IMessageRpcClient("fake-imsg").start()
+    assert not set(captured) & ALL_CLOUD_NAMES
+
+
+def test_selected_settings_method_wins_over_worker_environment_without_fallback(store):
+    cloud.save("gateway", {"base_url": "https://saved.invalid", "auth_token": FAKE["gateway_token"]})
+    claude_auth_mode.set_mode("cloud")
+    with patch.dict(os.environ, {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_PROFILE": "fake-sso"}):
+        assert cloud.env_for_cli() == {"ANTHROPIC_BASE_URL": "https://saved.invalid",
+                                      "ANTHROPIC_AUTH_TOKEN": FAKE["gateway_token"]}
+        database.delete_system_setting(cloud.SECRETS_SETTING)
+        assert cloud.env_for_cli() == {}  # never fall back to the AWS account
+
+
+def test_app_owned_subprocess_launches_never_default_to_inheritance():
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    missing = []
+    checked = 0
+    for area in ("app", "fluid/fluid"):
+        for path in (root / area).rglob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = ast.unparse(node.func)
+                wrapped = bool(node.args) and isinstance(node.args[0], ast.Attribute) and ast.unparse(node.args[0]) == "subprocess.run"
+                subprocess_call = name.startswith("subprocess.") and name.split(".")[-1] in {
+                    "run", "Popen", "call", "check_output", "check_call",
+                }
+                if wrapped or subprocess_call or name.endswith((".create_subprocess_exec", ".create_subprocess_shell")):
+                    checked += 1
+                    if not any(keyword.arg == "env" for keyword in node.keywords):
+                        missing.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert checked > 0
+    assert missing == [], "App-owned launches must supply a scrubbed environment: " + ", ".join(missing)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_git_service_children_scrub_inheritance_and_explicit_maps(store, monkeypatch, explicit):
+    from unittest.mock import Mock
+
+    from app.core.git_service import GitService
+
+    run = Mock(return_value=Mock(returncode=0))
+    monkeypatch.setattr("app.core.git_service.subprocess.run", run)
+    with patch.dict(os.environ, HOST):
+        GitService()._run_git("fake-repo", ["status"], env={**HOST, "GIT_ASKPASS": "fake-askpass"} if explicit else None)
+    assert not set(run.call_args.kwargs["env"]) & ALL_CLOUD_NAMES
+    assert run.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    if explicit:
+        assert run.call_args.kwargs["env"]["GIT_ASKPASS"] == "fake-askpass"
+
+
+def test_damaged_selected_settings_never_fall_back_to_worker_env(store):
+    claude_auth_mode.set_mode("cloud")
+    database.set_system_setting(cloud.CONFIG_SETTING, "damaged-not-json")
+    with patch.dict(os.environ, {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_PROFILE": "fake-sso"}):
+        assert not cloud.status()["ready"]
+        assert cloud.env_for_cli() == {}
+
+
+def test_app_mcp_browser_plugin_and_connector_envs_do_not_inherit_cloud_auth(store, monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    from fluid.tools.mcp.client import McpClient
+
+    from app.core import mcp_config, native_chrome, plugin_install
+    from app.core.connectors.package_proxy import worker_environment
+
+    with patch.dict(os.environ, HOST):
+        fake_stdio = Mock(return_value=object())
+        monkeypatch.setattr("mcp.client.stdio.stdio_client", fake_stdio)
+        client = McpClient("fake-mcp", {"command": "fake", "env": {**HOST, "MCP_SERVICE_TOKEN": "fake-mcp-token"}})
+        client._open_transport()
+        env = fake_stdio.call_args.args[0].env
+        assert not set(env) & ALL_CLOUD_NAMES
+        assert env["MCP_SERVICE_TOKEN"] == "fake-mcp-token"
+        assert not set(native_chrome._egress_env()) & ALL_CLOUD_NAMES
+        assert not set(worker_environment()) & ALL_CLOUD_NAMES
+        browser = mcp_config._build_browser_server_env(HOST)
+        assert not set(browser) & ALL_CLOUD_NAMES
+        run = Mock(return_value=Mock(returncode=0))
+        monkeypatch.setattr(plugin_install.subprocess, "run", run)
+        plugin_install._clone_plugin_source(None, {"source": "url", "url": "https://github.com/fake/plugin.git"}, tmp_path)
+        assert not set(run.call_args.kwargs["env"]) & ALL_CLOUD_NAMES
+
+
+@pytest.mark.parametrize("method", tuple(cloud.CLI_ENV_ALLOWLISTS))
+def test_every_worker_method_allowlist_name_reaches_only_cli(store, method):
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.tools.child_env import scrub_child_env
+
+    env = {name: "fake-allowlisted-value" for name in cloud.CLI_ENV_ALLOWLISTS[method]}
+    env.update(dict(cloud.METHODS[method].selector))
+    with patch.dict(os.environ, env, clear=True):
+        overlay = inject_claude_code_auth({})
+        loop = DelegatedLoop.__new__(DelegatedLoop)
+        loop.env = overlay
+        actual = loop._child_env()
+        assert {name: actual[name] for name in env} == env
+        assert not set(scrub_child_env()) & set(env)
+        assert not set(child_env_with_overlay(env)) & set(env)
+
+
+def test_conflicting_environment_selectors_fail_closed(store):
+    with patch.dict(os.environ, {"CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_USE_VERTEX": "1"}):
+        assert not cloud.status()["ready"]
+        with pytest.raises(cloud.CloudConfigError):
+            cloud.environment_env_for_cli()
+        from app.core.environment import ClaudeCloudSetupError
+        with pytest.raises(ClaudeCloudSetupError):
+            inject_claude_code_auth({})
 
 
 # ─── storage ──────────────────────────────────────────────────────────────
@@ -367,26 +662,16 @@ def test_a_failed_cloud_setup_fails_the_run_and_never_falls_back_to_host_credent
     assert FAKE["gateway_token"] not in caplog.text
 
 
-def test_generation_fails_closed_in_cloud_mode_only(store, monkeypatch):
-    """Finding 1 for titles and commit messages: generation's best-effort auth
-    step re-raises in cloud mode instead of running on the host's sign-in."""
-    from app.core import environment, generation_options
-    from app.core.environment import ClaudeCloudSetupError
+def test_generation_defers_auth_to_the_cli_boundary(store, monkeypatch):
+    """Generation options may feed NativeLoop; they must not prepare CLI auth."""
+    from app.core import generation_options
 
     cloud.save("gateway", {"base_url": "https://gw.example", "auth_token": FAKE["gateway_token"]})
     claude_auth_mode.set_mode("cloud")
-    monkeypatch.setattr(cloud, "env_for_cli", lambda: (_ for _ in ()).throw(OSError("db read failed")))
-    with patch.dict(os.environ, HOST), pytest.raises(ClaudeCloudSetupError):
-        generation_options._resolve_env(None)
-
-    def other_failure(env, provider_id=None):
-        raise RuntimeError("unexpected")
-
-    monkeypatch.setattr(environment, "inject_claude_code_auth", other_failure)
-    with pytest.raises(ClaudeCloudSetupError):
-        generation_options._resolve_env(None)
-    claude_auth_mode.set_mode("subscription")
-    assert generation_options._resolve_env(None)["CLAUDECODE"] == ""  # best-effort as before
+    monkeypatch.setattr(cloud, "env_for_cli", lambda: pytest.fail("auth prepared before runtime selection"))
+    env = generation_options._resolve_env({"env": HOST})
+    assert not set(env) & ALL_CLOUD_NAMES
+    assert env["CLAUDECODE"] == ""
 
 
 def test_cloud_mode_removes_every_cloud_and_anthropic_prefix_but_keeps_proxy_and_ca(store):

@@ -20,18 +20,18 @@ build_options_from_profile makes one unavoidable DB call (get_security_instructi
 we patch that single boundary and let the rest run against on-disk config.
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 import app.core.query_options as qo
 from app.core.builtin_mcp_servers import (
-    get_builtin_servers,
-    get_browser_server_config,
     BROWSER_SERVER_NAME,
     DEFAULT_BROWSER_MCP_ENTRY,
+    get_browser_server_config,
+    get_builtin_servers,
 )
-from app.core.mcp_config import _build_mcp_servers_dict, _build_browser_server_env
+from app.core.mcp_config import _build_browser_server_env, _build_mcp_servers_dict
 from app.core.mcp_service import (
     McpServerConfig,
     McpServerType,
@@ -125,8 +125,8 @@ class TestMcpServersInclusion:
 
         # Curated env: whitelisted keys injected, others excluded.
         env = result["browser"]["env"]
-        assert env["ANTHROPIC_BASE_URL"] == "http://gw.local"
-        assert env["ANTHROPIC_AUTH_TOKEN"] == "tok"
+        assert "ANTHROPIC_BASE_URL" not in env
+        assert "ANTHROPIC_AUTH_TOKEN" not in env
         assert env["ANTHROPIC_SMALL_FAST_MODEL"] == "haiku"
         assert env["CHROME_CDP_PORT"] == "9221"
         assert "UNRELATED_SECRET" not in env

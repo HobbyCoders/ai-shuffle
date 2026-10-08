@@ -499,6 +499,9 @@ class HarnessAdapter(ProviderAdapter):
 
     async def connect(self, options: SessionOptions) -> None:
         """Build the fluid engine from SessionOptions and prime its session."""
+        from fluid.tools.child_env import scrub_claude_auth_env
+
+        options.env = scrub_claude_auth_env(options.env or {})
         self._options = options
         from app.core.provider.sdk_hook_bridge import sdk_hooks_bus
 
@@ -597,6 +600,14 @@ class HarnessAdapter(ProviderAdapter):
             from app.core.usage_limits import claude_mod_usage_sink
             from app.core.provider.fluid_tool_bridge import delegated_bridge_deferred
 
+            # Never put Claude cloud credentials in SessionOptions.env, which
+            # also feeds tools and MCPs. This private copy is for claude only.
+            from app.core.environment import inject_claude_code_auth
+
+            cli_env = await asyncio.to_thread(
+                inject_claude_code_auth, dict(options.env or {}),
+                options.extra.get("provider_id"),
+            )
             self._engine = DelegatedLoop(
                 store=store,
                 model=options.model,
@@ -627,7 +638,7 @@ class HarnessAdapter(ProviderAdapter):
                     else _external_mcp_servers(options.mcp_servers)
                 ),
                 cwd=options.cwd,
-                env=options.env,
+                env=cli_env,
                 add_dirs=list(options.add_dirs) if options.add_dirs else None,
                 # Reasoning depth (profile config or chat override) → CLI
                 # --effort. Validated app-side to the CLI's vocabulary.

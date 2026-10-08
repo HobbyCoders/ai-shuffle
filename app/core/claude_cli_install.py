@@ -13,6 +13,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from fluid.tools.child_env import scrub_child_env
+
 from app.core import claude_auth_mode, claude_cli_status
 from app.core.config import settings
 from app.core.platform import is_docker_mode
@@ -220,7 +222,7 @@ def _run_command(command):
             timed_out = True
             if sys.platform == "win32":
                 subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                               capture_output=True, timeout=15)
+                               capture_output=True, timeout=15, env=scrub_child_env())
             else:
                 os.killpg(proc.pid, signal.SIGKILL)
             proc.wait(timeout=15)

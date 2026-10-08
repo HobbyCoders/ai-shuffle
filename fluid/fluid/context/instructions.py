@@ -41,6 +41,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from fluid.tools.child_env import scrub_child_env
+
 # Ordered per-directory candidates. Order fixes the order blocks appear within
 # a scope. ``AGENTS.local.md`` follows ``AGENTS.md`` so personal rules layer
 # over shared ones.
@@ -763,6 +765,7 @@ def _run_inline_bash(command: str, cwd: str, timeout: float) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=timeout,
+            env=scrub_child_env(),
         )
         return proc.stdout.decode(errors="replace").strip()
     except subprocess.TimeoutExpired:

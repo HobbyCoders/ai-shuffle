@@ -7,12 +7,14 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-
-
-
 from fluid.engine.delegated import DelegatedLoop
 from fluid.tools.builtins.bash import handler as bash_handler
-from fluid.tools.child_env import PASSTHROUGH_ENV, UNSET_ENV, child_env_with_overlay, scrub_child_env
+from fluid.tools.child_env import (
+    PASSTHROUGH_ENV,
+    UNSET_ENV,
+    child_env_with_overlay,
+    scrub_child_env,
+)
 from fluid.tools.registry import ToolCtx
 
 HOST = {
@@ -115,6 +117,134 @@ def test_delegated_child_drops_inherited_names_the_caller_unsets(monkeypatch) ->
     assert "ANTHROPIC_API_KEY" not in env and "ANTHROPIC_AUTH_TOKEN" not in env
     assert UNSET_ENV not in env
     assert env["FOO"] == "bar"
+
+
+CLOUD_ENV = {
+    "AWS_ACCESS_KEY_ID": "fake-aws-id", "AWS_SECRET_ACCESS_KEY": "fake-aws-secret",
+    "AWS_SESSION_TOKEN": "fake-aws-session", "AWS_BEARER_TOKEN_BEDROCK": "fake-bedrock-token",
+    "AWS_PROFILE": "fake-profile", "AWS_REGION": "us-east-1",
+    "GOOGLE_APPLICATION_CREDENTIALS": "/fake/google.json", "CLOUD_ML_REGION": "global",
+    "ANTHROPIC_VERTEX_PROJECT_ID": "fake-project", "CLAUDE_CODE_USE_VERTEX": "1",
+    "AZURE_CLIENT_SECRET": "fake-entra-secret", "ANTHROPIC_FOUNDRY_API_KEY": "fake-foundry-key",
+    "ANTHROPIC_FOUNDRY_RESOURCE": "fake-resource", "CLAUDE_CODE_USE_FOUNDRY": "1",
+    "ANTHROPIC_BASE_URL": "https://fake-gateway.invalid", "ANTHROPIC_AUTH_TOKEN": "fake-gateway-token",
+    "ANTHROPIC_API_KEY": "fake-gateway-api-key", "ANTHROPIC_CUSTOM_HEADERS": "fake: header",
+}
+
+
+def test_cloud_auth_cannot_use_passthrough_or_tool_overlays():
+    source = {**CLOUD_ENV, PASSTHROUGH_ENV: ",".join(CLOUD_ENV), "FAL_KEY": "fake-fal"}
+    assert not set(scrub_child_env(source)) & CLOUD_ENV.keys()
+    assert not set(child_env_with_overlay(CLOUD_ENV, source)) & CLOUD_ENV.keys()
+    assert child_env_with_overlay(CLOUD_ENV, source)["FAL_KEY"] == "fake-fal"
+
+
+async def test_real_bash_drops_cloud_auth_even_from_settings_overlay(monkeypatch, tmp_path):
+    for name, value in CLOUD_ENV.items():
+        monkeypatch.setenv(name, value)
+    script = tmp_path / "cloud_env_probe.py"
+    script.write_text("import os\nassert not set(" + repr(tuple(CLOUD_ENV)) + ") & os.environ.keys()\nprint('clean')\n")
+    ctx = ToolCtx(cwd=str(tmp_path), extra={"settings_env": dict(CLOUD_ENV)})
+    out = await bash_handler({"command": f'"{sys.executable}" "{script}"'}, ctx)
+    assert not out.is_error and out.text.strip() == "clean"
+
+
+async def test_real_cli_mcp_trampoline_masks_before_launch_and_unsets_for_server(tmp_path):
+    import asyncio
+
+    from fluid.tools.mcp.bundled_server import isolated_cli_server_entry
+
+    script = tmp_path / "mcp_env_probe.py"
+    script.write_text("import os\nassert not set(" + repr(tuple(CLOUD_ENV)) + ") & os.environ.keys()\n"
+                      "assert os.environ['MCP_SERVICE_TOKEN'] == 'fake-mcp-token'\nprint('clean')\n")
+    original = {"type": "stdio", "command": sys.executable, "args": [str(script)],
+                "env": {**CLOUD_ENV, "MCP_SERVICE_TOKEN": "fake-mcp-token"}}
+    config = isolated_cli_server_entry(original, CLOUD_ENV)
+    inherited = {**os.environ, **CLOUD_ENV, **config["env"]}
+    # The trampoline itself never sees a cloud credential value.
+    assert all(inherited[name] == "" for name in CLOUD_ENV)
+    assert original["env"]["ANTHROPIC_AUTH_TOKEN"] == "fake-gateway-token"
+    proc = await asyncio.create_subprocess_exec(config["command"], *config["args"],
+                                                env=inherited, stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.PIPE)
+    stdout, stderr = await proc.communicate()
+    assert proc.returncode == 0, stderr.decode()
+    assert stdout.strip() == b"clean"
+
+
+@pytest.mark.parametrize("surface", ["prompt_git", "runtime_git", "inline_command"])
+def test_context_children_run_without_cloud_credentials(monkeypatch, tmp_path, surface):
+    import subprocess
+
+    from fluid.context import environment, instructions, runtime_facts
+
+    for name, value in CLOUD_ENV.items():
+        monkeypatch.setenv(name, value)
+    script = tmp_path / "context_probe.py"
+    script.write_text("import os\nassert not set(" + repr(tuple(CLOUD_ENV)) + ") & os.environ.keys()\nprint('clean')\n")
+    original = subprocess.run
+    def launch(command, *args, **kwargs):
+        kwargs.pop("shell", None)
+        return original([sys.executable, str(script)], *args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", launch)
+    if surface == "prompt_git":
+        assert environment._run_git(str(tmp_path), "status") == "clean"
+    elif surface == "runtime_git":
+        assert runtime_facts._receipt_path(tmp_path) == tmp_path / "clean"
+    else:
+        assert instructions._run_inline_bash("fake-command", str(tmp_path), 5) == "clean"
+
+
+async def test_native_grep_child_runs_without_cloud_credentials(monkeypatch, tmp_path):
+    import asyncio
+
+    from fluid.tools.builtins.grep import _ripgrep
+
+    for name, value in CLOUD_ENV.items():
+        monkeypatch.setenv(name, value)
+    script = tmp_path / "grep_probe.py"
+    script.write_text("import os\nassert not set(" + repr(tuple(CLOUD_ENV)) + ") & os.environ.keys()\nprint('clean.txt:1:clean')\n")
+    original = asyncio.create_subprocess_exec
+    async def launch(*args, **kwargs):
+        return await original(sys.executable, str(script), **kwargs)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    result = await _ripgrep("fake-rg", "clean", tmp_path, None, False, 5)
+    assert not result.is_error
+    assert "clean.txt:1:clean" in result.text
+
+
+@pytest.mark.parametrize("surface", ["listing", "links"])
+def test_file_discovery_children_scrub_cloud_credentials(monkeypatch, tmp_path, surface):
+    from unittest.mock import Mock
+
+    from fluid.tools.builtins import _util
+
+    for name, value in CLOUD_ENV.items():
+        monkeypatch.setenv(name, value)
+    popen = Mock(return_value=Mock())
+    monkeypatch.setattr(_util.subprocess, "Popen", popen)
+    monkeypatch.setattr(_util.shutil, "which", lambda name: "fake-git")
+    if surface == "listing":
+        _util._rg_listing("fake-rg", tmp_path, _util.WalkState())
+    else:
+        _util._LinkProbe(tmp_path)
+    assert popen.call_count
+    for call in popen.call_args_list:
+        assert not set(call.kwargs["env"]) & CLOUD_ENV.keys()
+
+
+async def test_fluid_hook_child_runs_without_cloud_credentials(monkeypatch, tmp_path):
+    from fluid.hooks.bus import PRE_TOOL_USE
+    from fluid.hooks.command import CommandHook
+
+    for name, value in CLOUD_ENV.items():
+        monkeypatch.setenv(name, value)
+    script = tmp_path / "hook_probe.py"
+    script.write_text("import os\nassert not set(" + repr(tuple(CLOUD_ENV)) + ") & os.environ.keys()\nprint('clean')\n")
+    hook = CommandHook(event=PRE_TOOL_USE, command=f'"{sys.executable}" "{script}"', cwd=str(tmp_path), timeout=5)
+    code, stdout, stderr = await hook._run(b"{}")
+    assert code == 0, stderr
+    assert stdout.strip() == "clean"
 
 
 def test_unset_never_removes_what_the_caller_hands_over() -> None:

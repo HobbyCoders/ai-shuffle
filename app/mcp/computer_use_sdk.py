@@ -29,11 +29,18 @@ import subprocess
 import sys
 from typing import Any, List, Optional
 
-from app.mcp.computer_use import access, activity, abort, safety, uia, windows
-from app.mcp.computer_use.abort import is_stopped, Aborted as _Aborted
+from fluid.tools.child_env import scrub_child_env
+
+from app.mcp.computer_use import abort, access, activity, safety, uia, windows
+from app.mcp.computer_use.abort import Aborted as _Aborted
+from app.mcp.computer_use.abort import is_stopped
 from app.mcp.computer_use.errors import ActionError, stale
-from app.mcp.computer_use.scaling import (DisplayManager, computer_use_available,
-                                          foreground_display, window_crop)
+from app.mcp.computer_use.scaling import (
+    DisplayManager,
+    computer_use_available,
+    foreground_display,
+    window_crop,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -323,20 +330,27 @@ def create_computer_use_server(
         logger.info("computer-use disabled (%s) — server not created", reason)
         return None
     try:
-        from app.mcp.inproc import tool, create_tool_server
         from mcp.types import ToolAnnotations
+
+        from app.mcp.inproc import create_tool_server, tool
     except ImportError:
         return None
     try:
-        from pynput.mouse import Controller as MouseController, Button
-        from pynput.keyboard import Controller as KeyboardController, Key
+        from pynput.keyboard import Controller as KeyboardController
+        from pynput.keyboard import Key
+        from pynput.mouse import Button
+        from pynput.mouse import Controller as MouseController
     except Exception:
         logger.info("pynput unavailable — computer-use disabled")
         return None
 
-    from app.mcp.sdk_compat import patch_sdk_server
-    from app.mcp.computer_use.keymap import is_system_chord, parse_chord, parse_modifiers
     from app.mcp.computer_use import overlay
+    from app.mcp.computer_use.keymap import (
+        is_system_chord,
+        parse_chord,
+        parse_modifiers,
+    )
+    from app.mcp.sdk_compat import patch_sdk_server
 
     mgr = DisplayManager(virtual_size=virtual_size, target_display=target_display)
     overlay.ensure_started()
@@ -1634,12 +1648,13 @@ def _clipboard_read() -> str:
              "[Console]::Write((Get-Clipboard -Raw))"],
             capture_output=True, text=True, encoding="utf-8", timeout=5, check=True,
             creationflags=subprocess.CREATE_NO_WINDOW,
+            env=scrub_child_env(),
         )
         return out.stdout
     if sys.platform.startswith("linux"):
         from app.mcp.computer_use import linux
         out = subprocess.run(linux.clipboard_command(write=False), capture_output=True, text=True,
-                             encoding="utf-8", timeout=5, check=True)
+                             encoding="utf-8", timeout=5, check=True, env=scrub_child_env())
         return out.stdout
     raise RuntimeError("clipboard read not supported on this platform")
 
@@ -1652,6 +1667,7 @@ def _clipboard_write(text: str) -> None:
              "Set-Clipboard -Value ([Console]::In.ReadToEnd())"],
             input=text, text=True, encoding="utf-8", capture_output=True, timeout=5, check=True,
             creationflags=subprocess.CREATE_NO_WINDOW,
+            env=scrub_child_env(),
         )
         return
     if sys.platform.startswith("linux"):
@@ -1659,6 +1675,6 @@ def _clipboard_write(text: str) -> None:
         # xclip/xsel fork a process that keeps serving the selection: never
         # wait on its output pipes.
         subprocess.run(linux.clipboard_command(write=True), input=text.encode("utf-8"),
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=True)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=True, env=scrub_child_env())
         return
     raise RuntimeError("clipboard write not supported on this platform")

@@ -20,11 +20,12 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import subprocess
 from pathlib import Path
 from typing import List, Optional
+
+from fluid.tools.child_env import scrub_child_env
 
 from app.db import sessions as sessions_db
 
@@ -68,7 +69,7 @@ def _run(
     credential prompt. Never ``shell=True``; returns the CompletedProcess (the
     caller inspects ``returncode``). Raises only on timeout / spawn failure,
     which the public functions catch."""
-    env = dict(os.environ)
+    env = scrub_child_env()
     env["GIT_TERMINAL_PROMPT"] = "0"
     return subprocess.run(
         ["git"] + args,

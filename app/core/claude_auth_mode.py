@@ -11,9 +11,9 @@ and the user picks it:
   the CLI as ``ANTHROPIC_API_KEY``, and nothing else credential-like is.
 - ``cloud``: "Cloud provider or gateway". The CLI runs on the one method the
   owner set up in Settings (Amazon Bedrock, Google Vertex AI, Microsoft Foundry
-  or an LLM gateway), with only that method's stored values
-  (:mod:`app.core.claude_cloud_auth`). Off by default; the startup default
-  never picks it and nothing is detected from the environment.
+  or an LLM gateway), with only that method's allowlisted values
+  (:mod:`app.core.claude_cloud_auth`). An explicit cloud selector or gateway
+  in the worker environment also selects this mode, unless Claude is off.
 - ``off``: Claude is turned off on this worker. Claude models leave the model
   pickers, every Claude turn is refused with a setup message, and no Anthropic
   credential reaches a CLI child. Only the user turns this on; the startup
@@ -21,7 +21,9 @@ and the user picks it:
 
 The mode is an explicit per-worker setting (``claude_auth_mode:<instance id>``).
 When both a CLI sign-in and a stored key exist, the setting decides; the app
-never switches modes on its own. An install that predates the setting gets a
+does not infer a cloud credential from a stray key. An explicit worker cloud
+configuration takes precedence unless a saved Settings cloud method is selected
+(or Claude is off). An install that predates the setting gets a
 one-time default at startup (:func:`ensure_mode_recorded`): ``api_key`` when a
 key is stored and the CLI reports no sign-in, otherwise ``subscription``. That
 default is written down, so a later change in credentials cannot flip it.
@@ -33,6 +35,8 @@ module never reads the CLI's own credential files; CLI sign-in state comes from
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Optional
 
@@ -126,12 +130,36 @@ def current_mode() -> str:
     except Exception:  # noqa: BLE001 — a DB hiccup must not pick a mode silently
         logger.warning("Could not read the Claude Code auth mode; assuming subscription", exc_info=True)
         return MODE_SUBSCRIPTION
+    if mode == MODE_OFF:
+        return mode
+    from app.core import claude_cloud_auth
+
+    if claude_cloud_auth.has_environment_auth():
+        return MODE_CLOUD
     if mode:
         return mode
     try:
         return default_mode(has_stored_api_key(), _cli_signed_in_peek())
     except Exception:  # noqa: BLE001
         return MODE_SUBSCRIPTION
+
+
+def spawn_fingerprint() -> str:
+    """Non-secret pooled-session identity, without materializing CLI credentials."""
+    from app.core import claude_cloud_auth
+
+    mode = current_mode()
+    identity = [mode]
+    if mode == MODE_CLOUD:
+        if claude_cloud_auth._use_environment():
+            identity.append(json.dumps(claude_cloud_auth.environment_env_for_cli(), sort_keys=True))
+        else:
+            identity.extend(database.get_system_setting(key) or "" for key in (
+                claude_cloud_auth.CONFIG_SETTING, claude_cloud_auth.SECRETS_SETTING,
+            ))
+    elif mode == MODE_API_KEY:
+        identity.append(database.get_system_setting(API_KEY_SETTING) or "")
+    return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
 def is_off() -> bool:

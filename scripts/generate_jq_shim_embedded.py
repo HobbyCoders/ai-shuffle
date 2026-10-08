@@ -1,5 +1,6 @@
 """Regenerate the Python embedded in app/core/jq_shim/bin/jq and bin/jq.bat from the package modules."""
-import ast, sys
+import ast
+import sys
 from pathlib import Path
 
 ROOT = Path(sys.argv[1])
@@ -13,8 +14,9 @@ This module provides a command-line interface compatible with jq,
 allowing shell scripts to use jq syntax while the processing is
 handled by Python. All code is embedded - no external imports needed.
 
-GENERATED from app/core/jq_shim/{parser,evaluator,__main__}.py - edit those
-files and regenerate; tests/core/test_jq_shim checks the copies match.
+GENERATED from app/core/jq_shim/{parser,evaluator,__main__}.py and
+fluid/fluid/tools/child_env.py - edit those files and regenerate;
+tests/core/test_jq_shim checks the copies match.
 """
 
 import sys
@@ -27,6 +29,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 from enum import Enum
@@ -62,7 +65,7 @@ def body(path: Path) -> str:
     return text
 
 
-parts = [HEADER.rstrip("\n")]
+parts = [HEADER.rstrip("\n"), "\n\n# Shared subprocess environment policy\n\n" + body(ROOT / "fluid/fluid/tools/child_env.py")]
 for name in ("parser.py", "evaluator.py", "__main__.py"):
     parts.append("\n\n# " + "=" * 77 + f"\n# {name}\n# " + "=" * 77 + "\n\n" + body(PKG / name))
 parts.append('\n\nif __name__ == "__main__":\n    _configure_console_encoding()\n    sys.exit(main())\n')

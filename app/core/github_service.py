@@ -5,12 +5,14 @@ This service wraps the GitHub CLI (gh) to provide pull request and
 workflow management capabilities.
 """
 
-import subprocess
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+import subprocess
 from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+from fluid.tools.child_env import scrub_child_env
 
 from app.core.ttl_cache import CACHE_MISS, TTLCache  # noqa: F401  (re-exported)
 
@@ -213,6 +215,7 @@ class GitHubService:
                 errors="replace",
                 timeout=timeout,
                 input=stdin_data,
+                env=scrub_child_env(),
             )
 
             if result.returncode != 0:
@@ -295,7 +298,8 @@ class GitHubService:
                 capture_output=True,
                 text=True,
                 cwd=working_dir,
-                timeout=10
+                timeout=10,
+                env=scrub_child_env(),
             )
 
             if result.returncode != 0:

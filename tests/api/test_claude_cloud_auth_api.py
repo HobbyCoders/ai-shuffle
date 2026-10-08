@@ -41,6 +41,22 @@ def test_save_returns_no_secret_and_logs_none(authenticated_client, caplog):
     assert TOKEN not in caplog.text
 
 
+def test_ui_payload_reports_worker_cloud_not_a_missing_subscription(authenticated_client, monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("AWS_PROFILE", "fake-sso-profile")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    unsigned = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=False)
+    with patch.object(claude_cli_status, "get_status_async", AsyncMock(return_value=unsigned)):
+        response = authenticated_client.get(MODE)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "cloud"
+    assert body["cloud"]["ready"] and body["cloud"]["method"] == "bedrock"
+    assert "worker environment" in body["cloud"]["method_label"]
+    assert body["gate"]["claude_credential_ready"] is True
+    assert "fake-sso-profile" not in response.text
+
+
 def test_saving_needs_the_warning_acknowledged(authenticated_client):
     r = authenticated_client.put(CLOUD, json={**GATEWAY, "acknowledge_warning": False})
     assert r.status_code == 400 and "warning" in r.text

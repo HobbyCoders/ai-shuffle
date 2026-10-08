@@ -5,9 +5,12 @@
 2. A subscription-mode run goes through the stock ``claude`` CLI found on PATH,
    and the worker process never opens or stats the CLI's own credential file
    (``$CLAUDE_CONFIG_DIR/.credentials.json``); no Anthropic API key or token
-   reaches the CLI, even when one is stored in Settings or set on the host.
+   reaches the CLI, even when a key is stored in Settings or set on the host.
 3. An API-key (BYOK) run hands the CLI exactly the user's stored key and no
    other Anthropic credential.
+4. An explicit worker gateway token selects the CLI's built-in gateway auth
+   even when subscription/API-key mode was previously saved (#1862); these
+   credentials never reach app-owned child environments.
 
 Tests 2 and 3 run a real turn through the real pump
 (``query_engine._stream_to_websocket_impl``), the fluid harness adapter and the
@@ -175,10 +178,12 @@ def _install_fake_cli(tmp_path, monkeypatch) -> dict:
     assert ha._resolve_claude_cmd()[-1] in (str(script), str(recorder))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     monkeypatch.setenv("FAKE_CLAUDE_SCENARIO", "a")
-    # Start from a host environment with no credential-shaped variables, so
-    # what the CLI child sees is exactly what the app handed it.
+    # Start without ambient credentials or CLI routing selectors, so the fake
+    # turn cannot inherit a real worker's cloud configuration.
+    from fluid.tools.child_env import is_claude_auth
+
     for name in list(os.environ):
-        if CREDENTIAL_NAME.search(name):
+        if CREDENTIAL_NAME.search(name) or is_claude_auth(name):
             monkeypatch.delenv(name, raising=False)
 
     def calls() -> list[dict]:
@@ -265,7 +270,7 @@ async def test_subscription_run_touches_no_token_file_and_hands_over_no_key(
     # subscription choice must win and none of them may reach the CLI.
     database.set_system_setting("anthropic_api_key", USER_KEY)
     monkeypatch.setenv("ANTHROPIC_API_KEY", HOST_KEY)
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", HOST_TOKEN)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     _seed(tmp_path, "c14-sub")
 
     frames = await _run_turn("c14-sub", audit=file_audit)
@@ -292,8 +297,9 @@ async def test_byok_run_uses_only_the_users_key(mock_db, tmp_path, fake_cli, fil
     monkeypatch.setattr(claude_cli_status, "get_status", lambda force=False, resolver=None: _cli_status(True))
     claude_auth_mode.set_mode("api_key")
     database.set_system_setting("anthropic_api_key", USER_KEY)
-    # Other Anthropic credentials on the host must not ride along.
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", HOST_TOKEN)
+    # OAuth cannot ride along. An explicit worker auth token instead selects
+    # gateway mode (#1862), covered separately below.
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", HOST_OAUTH)
     _seed(tmp_path, "c14-byok")
 
@@ -309,3 +315,33 @@ async def test_byok_run_uses_only_the_users_key(mock_db, tmp_path, fake_cli, fil
     assert credential_like == ["ANTHROPIC_API_KEY"]
     assert not {HOST_TOKEN, HOST_OAUTH} & set(child.values())
     assert file_audit.touched(fake_cli["credentials"]) == []
+
+
+@pytest.mark.parametrize("saved_mode", ["subscription", "api_key"])
+async def test_explicit_worker_gateway_reaches_only_the_cli(
+    mock_db, tmp_path, fake_cli, file_audit, monkeypatch, saved_mode,
+):
+    monkeypatch.setattr(claude_cli_status, "get_status", lambda force=False, resolver=None: _cli_status(False))
+    claude_auth_mode.set_mode(saved_mode)
+    database.set_system_setting("anthropic_api_key", USER_KEY)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://fake-gateway.invalid")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", HOST_TOKEN)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", HOST_OAUTH)
+    _seed(tmp_path, "c14-gateway")
+
+    frames = await _run_turn("c14-gateway", audit=file_audit)
+
+    assert not [f for f in frames if f.get("type") == "error"]
+    assert any(f.get("type") == "done" for f in frames), frames
+    runs = _turn_calls(fake_cli["calls"]())
+    assert len(runs) == 1
+    child = runs[0]["env"]
+    assert child["ANTHROPIC_BASE_URL"] == "https://fake-gateway.invalid"
+    assert child["ANTHROPIC_AUTH_TOKEN"] == HOST_TOKEN
+    assert "ANTHROPIC_API_KEY" not in child
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in child
+    assert USER_KEY not in child.values()
+    assert file_audit.touched(fake_cli["credentials"]) == []
+    from app.core.process_tree import child_env
+    assert "ANTHROPIC_AUTH_TOKEN" not in child_env()
+    assert "ANTHROPIC_BASE_URL" not in child_env()

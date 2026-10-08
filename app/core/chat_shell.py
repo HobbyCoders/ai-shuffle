@@ -43,6 +43,8 @@ import threading
 import time
 from contextlib import contextmanager
 
+from fluid.tools.child_env import scrub_child_env
+
 from app.core.chat_files import LIMIT, AccessDenied
 
 logger = logging.getLogger(__name__)
@@ -210,7 +212,7 @@ def _preconditions() -> tuple[str | None, str]:
     if not bwrap:
         return None, "bubblewrap (bwrap) is not installed"
     try:
-        help_text = subprocess.run([bwrap, "--help"], capture_output=True, text=True, timeout=5)
+        help_text = subprocess.run([bwrap, "--help"], capture_output=True, text=True, timeout=5, env=scrub_child_env())
     except (OSError, subprocess.SubprocessError) as exc:
         return None, f"bwrap --help failed: {type(exc).__name__}"
     text = help_text.stdout + help_text.stderr

@@ -7,15 +7,16 @@ Provides standalone functions that operate on a PluginService instance.
 import logging
 import re
 import subprocess
-from pathlib import Path
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from app.core.plugin_models import (
+    AutoUpdateSettings,
     PluginInfo,
     PluginUpdateInfo,
-    AutoUpdateSettings,
 )
+from app.core.process_tree import child_env
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +113,7 @@ def _get_marketplace_head_version(svc, marketplace_id: str) -> Optional[str]:
             ["git", "-C", install_location, "rev-parse", "--short", "HEAD"],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10, env=child_env(),
         )
         if result.returncode == 0:
             return result.stdout.strip()

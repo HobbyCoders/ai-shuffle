@@ -1956,6 +1956,11 @@ def build_options_from_profile(
     # the OpenAI Responses lane into ``service_tier: priority``. None/False both
     # mean standard; stamped unconditionally so presence is not a signal.
     options.aih_fast = fast
+    # CLI credentials are no longer part of the shared tool environment.
+    # Keep account/mode rotation visible to the warm pool using only a digest.
+    from app.core import claude_auth_mode
+
+    options.aih_claude_auth_fingerprint = claude_auth_mode.spawn_fingerprint() if not provider_id else None
     # ``ai-tools`` owns a persistent Node worker whose FAL_KEY is fixed at
     # spawn. Force a fresh pooled session when the configured credential moves
     # absent → set, rotates, or is removed; the fingerprint contains no secret.

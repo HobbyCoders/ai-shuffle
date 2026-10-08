@@ -11,10 +11,10 @@ import sys
 from typing import Any
 
 from fluid.context.settings_stack import layered_env
-from fluid.tools.child_env import scrub_child_env
 from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi, truncate
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
+from fluid.tools.child_env import scrub_child_env
 from fluid.tools.fragments import CWD_PARAM, FRESH_PROCESS
 from fluid.tools.priority import lower_process_group_priority, priority_creationflags
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
@@ -206,6 +206,7 @@ async def kill_tree(proc: asyncio.subprocess.Process) -> None:
                 subprocess.run,
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 capture_output=True,
+                env=scrub_child_env(),
             )
         except OSError:
             pass

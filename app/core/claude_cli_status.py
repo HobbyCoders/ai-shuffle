@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import subprocess
 import threading
@@ -92,7 +91,9 @@ class ClaudeCliStatus:
 
 
 def _probe_env() -> dict:
-    env = {k: v for k, v in os.environ.items() if k not in _STRIPPED_ENV}
+    from fluid.tools.child_env import scrub_child_env
+
+    env = {k: v for k, v in scrub_child_env().items() if k not in _STRIPPED_ENV}
     env.setdefault("NO_COLOR", "1")
     return env
 

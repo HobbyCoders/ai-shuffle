@@ -35,6 +35,7 @@ from fluid.tools.builtins._util import (
     truncate,
     walk_files,
 )
+from fluid.tools.child_env import scrub_child_env
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
 
 MAX_MATCHES = 200
@@ -316,6 +317,7 @@ async def _ripgrep(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=str(run_dir),
+        env=scrub_child_env(),
     )
     # stderr drains alongside stdout so a chatty rg cannot fill its pipe and
     # stall before stdout reaches EOF.

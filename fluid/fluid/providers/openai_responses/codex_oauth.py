@@ -44,6 +44,7 @@ from urllib.parse import urlencode
 import httpx
 
 from fluid._filelock import file_lock
+from fluid.tools.child_env import scrub_child_env
 
 logger = logging.getLogger(__name__)
 
@@ -456,6 +457,7 @@ def _restrict_to_owner_windows(path: Path) -> None:
         subprocess.run(
             ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:F"],
             check=False, capture_output=True, timeout=10,
+            env=scrub_child_env(),
         )
     except (OSError, subprocess.SubprocessError):
         logger.debug("codex_oauth: could not restrict %s", path, exc_info=True)

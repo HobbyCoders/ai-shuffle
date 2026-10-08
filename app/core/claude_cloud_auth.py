@@ -3,17 +3,16 @@
 The stock Claude Code CLI can also run on Amazon Bedrock, Google Vertex AI,
 Microsoft Foundry, or an LLM gateway (a base URL plus a bearer token). AI
 Shuffle offers these as a third Claude auth mode, ``cloud``
-(``app.core.claude_auth_mode.MODE_CLOUD``), which is off by default and only
-the owner turns on.
+(``app.core.claude_auth_mode.MODE_CLOUD``). The owner configures them in
+Settings or in the worker environment, exactly as for the stock CLI.
 
 Rules this module keeps:
 
-- Nothing is detected. The values come only from what the owner saved in
-  Settings: the non-secret ones (region, project, resource, base URL) in the
-  ``claude_cloud_config`` system setting, the secret ones encrypted with the
-  app's credential storage (``app.core.encryption``, the same as the Anthropic
-  API key) in ``claude_cloud_secrets``. Host, profile, project and plugin
-  environment values are never used.
+- Settings values use ``claude_cloud_config`` and encrypted
+  ``claude_cloud_secrets``. Alternatively an explicit worker-environment
+  selector or gateway configuration opts into a built-in CLI method and its
+  default credential chain. Neither source is passed to app-owned tools,
+  shells, native providers or MCPs. Profile values are not cloud credentials.
 - One named method at a time. :func:`env_for_cli` returns exactly the chosen
   method's allowlisted variables. Everything else that could pick an account
   or an endpoint is removed from what the CLI would otherwise inherit: every
@@ -65,8 +64,9 @@ WARNING_TEXT = (
     "with the smallest permissions that work, and only on a worker you trust."
 )
 GATEWAY_WARNING_TEXT = (
-    "All Claude traffic from this worker goes to the address you enter. The browser tool "
-    "also receives this address and token."
+    "All Claude traffic from this worker goes to the address you enter. "
+    "AI Shuffle passes this address and token only to Claude Code, not to the browser tool "
+    "or other app-launched tools. Claude Code's own commands can still read them."
 )
 
 
@@ -158,6 +158,73 @@ GATEWAY = Method(
 
 METHODS: Dict[str, Method] = {m.id: m for m in (BEDROCK, VERTEX, FOUNDRY, GATEWAY)}
 
+# Worker-environment configuration is also an owner configuration of the stock
+# CLI, not a credential for Fluid/tools. Keep a finite allowlist per method,
+# including the CLI's default credential chains (AWS profiles/SSO, Google ADC,
+# Microsoft Entra). Never inspect credential files or resolve those chains here.
+CLI_ENV_ALLOWLISTS = {
+    "bedrock": BEDROCK.allowlist + (
+        "AWS_DEFAULT_REGION", "AWS_PROFILE", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_SDK_LOAD_CONFIG", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME", "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+        "AWS_EC2_METADATA_DISABLED", "AWS_CA_BUNDLE", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+        "ANTHROPIC_BEDROCK_BASE_URL", "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    ),
+    "vertex": VERTEX.allowlist + (
+        "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT", "GCLOUD_PROJECT", "CLOUDSDK_CONFIG",
+        "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
+        "ANTHROPIC_VERTEX_BASE_URL", "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+    ),
+    "foundry": FOUNDRY.allowlist + (
+        "ANTHROPIC_FOUNDRY_AUTH_TOKEN", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+        "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_SECRET", "AZURE_CLIENT_CERTIFICATE_PATH",
+        "AZURE_CLIENT_CERTIFICATE_PASSWORD", "AZURE_CLIENT_SEND_CERTIFICATE_CHAIN",
+        "AZURE_USERNAME", "AZURE_PASSWORD", "AZURE_FEDERATED_TOKEN_FILE", "AZURE_AUTHORITY_HOST",
+        "AZURE_CONFIG_DIR", "AZURE_TOKEN_CREDENTIALS", "AZURE_ADDITIONALLY_ALLOWED_TENANTS",
+        "IDENTITY_ENDPOINT", "IDENTITY_HEADER", "IDENTITY_SERVER_THUMBPRINT", "IMDS_ENDPOINT",
+        "MSI_ENDPOINT", "MSI_SECRET",
+    ),
+    "gateway": GATEWAY.allowlist + ("ANTHROPIC_API_KEY", "ANTHROPIC_CUSTOM_HEADERS"),
+}
+
+
+def has_environment_auth(environ: Mapping[str, str] | None = None) -> bool:
+    source = os.environ if environ is None else environ
+    return bool(source.get("ANTHROPIC_BASE_URL") or source.get("ANTHROPIC_AUTH_TOKEN") or any(
+        source.get("CLAUDE_CODE_USE_" + name) in ("1", "true") for name in ("BEDROCK", "VERTEX", "FOUNDRY")
+    ))
+
+
+def environment_env_for_cli(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """One explicit built-in method's allowlist, for the Claude subprocess ONLY."""
+    source = os.environ if environ is None else environ
+    selected = [name for name in ("bedrock", "vertex", "foundry")
+                if source.get("CLAUDE_CODE_USE_" + name.upper()) in ("1", "true")]
+    if len(selected) > 1:
+        raise CloudConfigError("Select only one Claude cloud provider in the worker environment.")
+    method = selected[0] if selected else "gateway" if has_environment_auth(source) else None
+    if method is None:
+        return {}
+    env = {name: source[name] for name in CLI_ENV_ALLOWLISTS[method] if source.get(name)}
+    # The CLI documents per-Claude-model Vertex region variables. This is the
+    # one deliberately dynamic configuration namespace, not a secret prefix.
+    if method == "vertex":
+        env.update({name: value for name, value in source.items()
+                    if name.startswith("VERTEX_REGION_CLAUDE_") and value})
+    return env
+
+
+def _use_environment() -> bool:
+    from app.core import claude_auth_mode
+
+    # A saved-and-selected Settings method is authoritative; no mixed accounts
+    # and no fallback if its encrypted secrets cannot be prepared.
+    return has_environment_auth() and not (
+        claude_auth_mode.stored_mode(cached=True) == claude_auth_mode.MODE_CLOUD
+        and database.get_system_setting(CONFIG_SETTING) is not None
+    )
+
 # Every variable any method may set, the other Claude credentials, and the
 # variables that would let a host or profile value pick a cloud account or an
 # endpoint on its own. In cloud mode all of them, and every name with one of
@@ -200,8 +267,10 @@ CLOUD_MODE_UNSET_PREFIXES: Tuple[str, ...] = (
 
 def is_cloud_unset_name(name: str) -> bool:
     """True for a variable cloud mode removes from what the CLI inherits."""
+    from fluid.tools.child_env import is_claude_auth
+
     upper = name.upper()
-    return upper in CLOUD_MODE_UNSET or upper.startswith(CLOUD_MODE_UNSET_PREFIXES)
+    return is_claude_auth(upper) or upper in CLOUD_MODE_UNSET or upper.startswith(CLOUD_MODE_UNSET_PREFIXES)
 
 # Variables whose change means a pooled CLI talks to another account.
 CLOUD_IDENTITY_ENV_KEYS: Tuple[str, ...] = tuple(dict.fromkeys(
@@ -389,6 +458,17 @@ def missing(cfg: Optional[dict]) -> List[str]:
 
 def status() -> dict:
     """Presence check for Settings and the credential gate. No values, no network."""
+    if _use_environment():
+        try:
+            env = environment_env_for_cli()
+        except CloudConfigError:
+            return {"method": None, "method_label": "Worker environment", "configured": True,
+                    "ready": False, "missing": ["one cloud provider selector"], "storage_locked": False}
+        method = next((m for m in (BEDROCK, VERTEX, FOUNDRY) if all(
+            env.get(name) in ("1", "true") for name, _ in m.selector
+        )), GATEWAY)
+        return {"method": method.id, "method_label": method.label + " (worker environment)",
+                "configured": True, "ready": True, "missing": [], "storage_locked": False}
     cfg = stored()
     method = METHODS.get(cfg["method"]) if cfg else None
     need = missing(cfg)
@@ -577,11 +657,14 @@ def _materialize_vertex(credentials_json: str) -> str:
 
 
 def env_for_cli() -> Dict[str, str]:
-    """Exactly the chosen method's variables from stored values ({} when not ready).
+    """The chosen method's allowlisted Settings/worker-env variables, CLI only.
 
     Also the point every run passes: a Vertex key file left from an earlier
     config (cleared, changed to another method, or not complete) is removed.
     """
+    if _use_environment():
+        remove_materialized_files()
+        return environment_env_for_cli()
     cfg = stored()
     if cfg is None or cfg["method"] != VERTEX.id or missing(cfg):
         remove_materialized_files()

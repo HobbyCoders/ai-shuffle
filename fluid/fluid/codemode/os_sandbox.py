@@ -85,6 +85,8 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from fluid.tools.child_env import scrub_child_env
+
 _log = logging.getLogger(__name__)
 
 MODES = ("auto", "required", "off")
@@ -323,6 +325,7 @@ def _supports_disable_userns(bwrap: str) -> bool:
     try:
         out = subprocess.run(
             [bwrap, "--help"], capture_output=True, text=True, timeout=5,
+            env=scrub_child_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return False

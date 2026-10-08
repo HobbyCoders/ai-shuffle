@@ -16,8 +16,9 @@ narrower 3-key tuple (would miss provider config edits).
 from unittest.mock import MagicMock, patch
 
 import pytest
-from app.core.agent_types import AgentOptions
 
+from app.core.agent_types import AgentOptions
+from app.core.provider.types import SessionOptions
 from app.core.session_pool import (
     PROVIDER_IDENTITY_ENV_KEYS,
     PROVIDER_OVERLAY_ENV_KEYS,
@@ -25,7 +26,6 @@ from app.core.session_pool import (
     provider_env_requires_reconnect,
     requires_reconnect,
 )
-from app.core.provider.types import SessionOptions
 
 
 def _make_state(env) -> SessionState:
@@ -50,6 +50,28 @@ def test_reconnect_reports_all_changed_names_without_values():
     options = _new_options({"ANTHROPIC_AUTH_TOKEN": "new-secret"})
     options.cwd = "/private/workspace"
     assert reconnect_option_names(state, options) == ["system_prompt", "cwd", "provider_env"]
+
+
+def test_cli_auth_digest_reconnects_without_shared_credentials(mock_db):
+    from app.core import claude_auth_mode, claude_cloud_auth, encryption
+    from app.core.session_pool import reconnect_option_names
+    from app.db import database
+
+    encryption.set_encryption_key("fake-password", database)
+    claude_auth_mode.set_mode("cloud")
+    values = {"base_url": "https://fake-gateway.invalid", "auth_token": "fake-token-one"}
+    claude_cloud_auth.save("gateway", values)
+    state = _make_state({})
+    state.connect_options.aih_claude_auth_fingerprint = claude_auth_mode.spawn_fingerprint()
+    new = _new_options({})
+    new.aih_claude_auth_fingerprint = claude_auth_mode.spawn_fingerprint()
+    assert requires_reconnect(state, new) is False
+    claude_cloud_auth.save("gateway", {**values, "auth_token": "fake-token-two"})
+    new.aih_claude_auth_fingerprint = claude_auth_mode.spawn_fingerprint()
+    assert reconnect_option_names(state, new) == ["claude_auth"]
+    assert len(new.aih_claude_auth_fingerprint) == 64
+    assert "fake-token" not in new.aih_claude_auth_fingerprint
+    assert state.connect_options.env == new.env == {}
 
 
 def test_identical_env_no_reconnect():

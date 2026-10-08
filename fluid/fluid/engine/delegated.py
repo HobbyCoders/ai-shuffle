@@ -1222,9 +1222,9 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # A caller may also name inherited variables this child must not see
         # (``FLUID_CHILD_ENV_UNSET``), e.g. a host Anthropic key while the
         # user chose to run the CLI on their subscription.
-        from fluid.tools.child_env import child_env_with_overlay
+        from fluid.tools.child_env import claude_cli_env_with_overlay
 
-        env = child_env_with_overlay(self.env, os.environ)
+        env = claude_cli_env_with_overlay(self.env, os.environ)
         # ``FORCED_CHILD_ENV`` goes on last, so neither the host environment
         # nor the caller's overlay can change it:
         #
@@ -1356,6 +1356,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             self.registry, self._mcp_config_path,
             socket_path=self._socket_path, user_servers=self.mcp_servers,
             token=self._bridge_token, tool_filter=self._bridge_tool_permitted,
+            cli_env=self._child_env(),
         )
 
     def _build_argv(self) -> list[str]:

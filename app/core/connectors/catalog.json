@@ -61,7 +61,7 @@
       "module": "imessage",
       "class": "IMessageConnector",
       "files": {
-        "imessage.py": "93c008d90267d9b7b311fe2e47cb301c5e36262dc33e8153259ec392ef43d0c1",
+        "imessage.py": "84fc5ceea6f69dbad72f8b8543e21094aef57a1ae30de9f86b4ef4aabfaf694a",
         "imessage_actions.py": "c0352b5b38d0cd7ece65c29889ddfd62d6dc997abc2f632b1e7490b8f56157f4"
       }
     },
@@ -140,5 +140,5 @@
     ]
   },
   "sdk": 1,
-  "release": "07ce98d28e294991"
+  "release": "0d3d3e5002b8e129"
 }

@@ -119,22 +119,22 @@ def test_provider_session_is_left_alone():
     assert env == {"ANTHROPIC_AUTH_TOKEN": "gw"}
 
 
-class TestMainSubprocessEnvAlwaysOnInjection:
-    """``_build_env_with_ai_tools`` applies the mode even with NO ai tools."""
+class TestSharedToolEnv:
+    """Claude auth is added at DelegatedLoop, never to the shared tools env."""
 
-    def test_injected_when_ai_tools_config_is_none(self):
+    def test_not_injected_when_ai_tools_config_is_none(self):
         with _mode("api_key"), patch.object(env_mod, "_get_decrypted_api_key", return_value="sk-ant-main"):
             env = _build_env_with_ai_tools(base_env=None, ai_tools_config=None)
-        assert env["ANTHROPIC_API_KEY"] == "sk-ant-main"
+        assert "ANTHROPIC_API_KEY" not in env
         assert env["CLAUDECODE"] == ""
 
-    def test_injected_when_ai_tools_all_disabled(self):
+    def test_not_injected_when_ai_tools_all_disabled(self):
         with _mode("api_key"), patch.object(env_mod, "_get_decrypted_api_key", return_value="sk-ant-main"):
             env = _build_env_with_ai_tools(
                 base_env=None,
                 ai_tools_config={"image_generation": False, "tts": False},
             )
-        assert env["ANTHROPIC_API_KEY"] == "sk-ant-main"
+        assert "ANTHROPIC_API_KEY" not in env
 
     def test_not_injected_in_subscription_mode(self):
         with _mode("subscription"), patch.object(env_mod, "_get_decrypted_api_key", return_value="sk-ant-main"):

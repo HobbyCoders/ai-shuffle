@@ -13,14 +13,16 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
+from fluid.tools.child_env import scrub_child_env
+
+from app.core import encryption
+from app.core.config import ENV_FILE_PATH, ENV_FILE_REF_VAR, settings
+from app.core.model_registry import resolve_provider_context_window
+from app.core.platform import DeploymentMode
 from app.db import database
 from app.db.model_providers import ModelProviderRow
-from app.core.config import ENV_FILE_PATH, ENV_FILE_REF_VAR, settings
-from app.core.platform import DeploymentMode
-from app.core import encryption
-from app.core.model_registry import resolve_provider_context_window
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +96,8 @@ def _is_git_repo(working_dir: str) -> bool:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
+            env=scrub_child_env(),
         )
         return result.returncode == 0
     except Exception:
@@ -364,8 +367,8 @@ def inject_claude_code_auth(
 ) -> Dict[str, str]:
     """Wire the Claude Code credential of the ACTIVE auth mode into a spawn env.
 
-    The user chooses the mode (``app.core.claude_auth_mode``); the app never
-    switches it on its own, whatever credentials happen to exist:
+    The owner chooses the mode (``app.core.claude_auth_mode``) in Settings or
+    through an explicit built-in cloud/gateway worker-environment configuration:
 
     - ``api_key``: the Anthropic API key stored in Settings goes in as
       ``ANTHROPIC_API_KEY``. Other Anthropic credential variables from the host
@@ -380,8 +383,8 @@ def inject_claude_code_auth(
       ``AZURE_``, ``ANTHROPIC_`` and provider-switch variable, plus
       ``CLAUDE_CODE_OAUTH_TOKEN`` and ``NODE_TLS_REJECT_UNAUTHORIZED``, is
       removed from the host and profile env, then only the chosen method's
-      stored values are set. With nothing complete stored, nothing is set and
-      the credential gate refuses. When the stored values cannot be prepared,
+      allowlisted values are set, from selected Settings or the worker env.
+      With neither configuration, the credential gate refuses. When the values cannot be prepared,
       :class:`ClaudeCloudSetupError` is raised (the host names are already
       marked for removal), so the run fails instead of falling back.
     - ``off``: Claude is turned off. Nothing is injected and every Anthropic
@@ -401,8 +404,9 @@ def inject_claude_code_auth(
     """
     if provider_id:
         return env
-    from app.core import claude_auth_mode
     from fluid.tools.child_env import UNSET_ENV
+
+    from app.core import claude_auth_mode
 
     mode = claude_auth_mode.current_mode()
     if mode == claude_auth_mode.MODE_API_KEY:
@@ -422,7 +426,7 @@ def inject_claude_code_auth(
 
         # Every method's variables and every other Claude credential go,
         # whether they came from the host or the profile; then only the
-        # chosen method's STORED values are put back.
+        # chosen method's allowlisted owner configuration is put back.
         # The removal marker is set first, so even a caller that swallows the
         # error below cannot hand the CLI the host's own credentials.
         unset = tuple(claude_cloud_auth.host_names_to_unset())
@@ -801,12 +805,11 @@ def _build_env_with_ai_tools(
     if ENV_FILE_PATH:
         env.setdefault(ENV_FILE_REF_VAR, ENV_FILE_PATH)
 
-    # ALWAYS-ON: apply the Claude Code auth mode the user chose (API key
-    # injected in api_key mode, every Anthropic key kept away in subscription
-    # mode) for EVERY session, regardless of whether AI tools are enabled. Must
-    # happen BEFORE the ai_tools early-returns below. For provider sessions
-    # (provider_id set) nothing is touched; apply_provider_env owns auth.
-    inject_claude_code_auth(env, provider_id)
+    # This environment is shared by tools, MCP servers and native sessions.
+    # Claude credentials are added later, ONLY at the DelegatedLoop boundary.
+    from fluid.tools.child_env import scrub_claude_auth_env
+
+    env = scrub_claude_auth_env(env)
 
     # Browser automation is the ``browser`` STDIO MCP server
     # (app.core.builtin_mcp_servers); mcp_config threads its env
@@ -1210,6 +1213,7 @@ def checkout_branch(working_dir: Optional[str]) -> Optional[str]:
         result = subprocess.run(
             ["git", "symbolic-ref", "--short", "-q", "HEAD"],
             cwd=working_dir, capture_output=True, text=True, timeout=5,
+            env=scrub_child_env(),
         )
     except Exception:
         return None
@@ -1322,6 +1326,7 @@ def _interpreter_has_pytest(executable: str) -> bool:
         result = subprocess.run(
             [executable, "-c", "import pytest"],
             capture_output=True, timeout=10, check=False,
+            env=scrub_child_env(),
         )
         return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
@@ -1374,6 +1379,7 @@ def _python_facts(cwd: Path, is_shuffle: bool) -> list:
                 result = subprocess.run(
                     [pytest_exe, "--version"], capture_output=True, timeout=10,
                     check=False,
+                    env=scrub_child_env(),
                 )
                 if result.returncode == 0:
                     return [f"Python: pytest was not verified in worker interpreter "

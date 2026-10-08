@@ -16,6 +16,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from fluid.tools.child_env import scrub_child_env
 from fluid.tools.shell import describe as describe_shell
 
 _GIT_TIMEOUT = 3.0  # seconds; env gathering must never stall a session start
@@ -29,6 +30,7 @@ def _run_git(cwd: str, *args: str) -> str | None:
             capture_output=True,
             text=True,
             timeout=_GIT_TIMEOUT,
+            env=scrub_child_env(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

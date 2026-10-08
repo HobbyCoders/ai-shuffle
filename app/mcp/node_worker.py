@@ -12,7 +12,6 @@ are multiplexed via unique request IDs.
 import asyncio
 import json
 import logging
-import os
 import uuid
 from typing import Dict, Optional
 
@@ -40,8 +39,9 @@ class NodeWorker:
 
     async def _start(self) -> None:
         """Start the worker subprocess and wait for ready signal."""
-        node_env = os.environ.copy()
-        node_env.update(self._env)
+        from fluid.tools.child_env import child_env_with_overlay
+
+        node_env = child_env_with_overlay(self._env)
 
         self._process = await asyncio.create_subprocess_exec(
             'node', self._worker_script,

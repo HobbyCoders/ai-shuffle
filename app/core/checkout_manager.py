@@ -44,6 +44,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from fluid.tools.child_env import scrub_child_env
+
 from app.core.config import settings
 from app.core.git_service import git_service
 from app.core.project_links import auto_link_group_id
@@ -889,6 +891,7 @@ def _run_npm_install(package_dir: Path) -> Tuple[bool, str]:
             errors="replace",
             timeout=_NPM_INSTALL_TIMEOUT_SECONDS,
             shell=(os.name == "nt"),
+            env=scrub_child_env(),
         )
     except (OSError, subprocess.SubprocessError) as e:
         return False, f"{printable} could not run: {e}"
@@ -914,6 +917,7 @@ def _run_svelte_kit_sync(package_dir: Path) -> bool:
             errors="replace",
             timeout=_SVELTE_SYNC_TIMEOUT_SECONDS,
             shell=(os.name == "nt"),
+            env=scrub_child_env(),
         )
     except (OSError, subprocess.SubprocessError) as e:
         logger.debug(

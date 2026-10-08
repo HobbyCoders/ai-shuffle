@@ -44,6 +44,7 @@ from fluid.hooks.bus import (
     TURN_START,
     HookDecision,
 )
+from fluid.tools.child_env import scrub_child_env
 
 log = logging.getLogger(__name__)
 
@@ -210,6 +211,7 @@ class CommandHook:
             stderr=asyncio.subprocess.PIPE,
             cwd=self.cwd or None,
             **spawn_kwargs,
+            env=scrub_child_env(),
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(stdin), self.timeout)
@@ -324,6 +326,7 @@ async def _kill_tree(proc: asyncio.subprocess.Process) -> None:
                 subprocess.run,
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 capture_output=True,
+                env=scrub_child_env(),
             )
         else:
             os.killpg(proc.pid, signal.SIGKILL)

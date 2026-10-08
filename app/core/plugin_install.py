@@ -10,15 +10,16 @@ import re
 import shutil
 import stat
 import subprocess
-from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 from app.core.plugin_models import (
     PluginInfo,
     PluginScope,
     _force_rmtree,
 )
+from app.core.process_tree import child_env
 from app.core.scrub import redact_url_credentials
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,7 @@ def _clone_plugin_source(svc, source: Dict[str, Any], dest: Path) -> None:
         cmd,
         capture_output=True,
         text=True,
-        timeout=120
+        timeout=120, env=child_env(),
     )
     if result.returncode != 0:
         raise RuntimeError(f"Failed to clone plugin: {_git_error_text(result.stderr)}")
@@ -168,7 +169,7 @@ def _checkout_pinned_sha(repo_dir: Path, sha: Any) -> None:
     def _head() -> str:
         r = subprocess.run(
             ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, env=child_env(),
         )
         return r.stdout.strip().lower() if r.returncode == 0 else ""
 
@@ -178,7 +179,7 @@ def _checkout_pinned_sha(repo_dir: Path, sha: Any) -> None:
         ["git", "-C", str(repo_dir), "fetch", "--depth", "1", "origin", sha],
         ["git", "-C", str(repo_dir), "checkout", "--detach", "FETCH_HEAD"],
     ):
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=child_env())
         if r.returncode != 0:
             break
     if not _head().startswith(sha):
@@ -221,7 +222,7 @@ def _clone_git_subdir_source(svc, source: Dict[str, Any], dest: Path) -> None:
         cmd.extend(["--", url, str(tmp_dir)])
 
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120
+            cmd, capture_output=True, text=True, timeout=120, env=child_env(),
         )
         if result.returncode != 0:
             raise RuntimeError(

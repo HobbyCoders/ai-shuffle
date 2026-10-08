@@ -2,26 +2,26 @@
 Authentication API routes
 """
 
-import os
 import hashlib
-import time
-import subprocess
 import logging
+import os
+import subprocess
+import time
 import uuid as _uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Response, Request, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import RedirectResponse
+from fluid.tools.child_env import scrub_child_env
 
-from app.core import owner_auth, preview_access
+from app.core import audit_service, owner_auth, preview_access
 from app.core.auth import (
     auth_service,
     is_github_authenticated_cached,
     reset_github_auth_cache,
     set_github_auth_cached,
 )
-from app.core import audit_service
 from app.db import database as db
 from app.db.async_database import run_sync
 
@@ -546,9 +546,7 @@ def claude_cli_login_hint() -> dict:
 
 async def claude_cli_summary(force: bool = False) -> dict:
     """The CLI probe plus the login hint, as the status endpoints return it."""
-    from app.core import claude_cli_status
-
-    from app.core import claude_relogin_notice
+    from app.core import claude_cli_status, claude_relogin_notice
 
     status = await claude_cli_status.get_status_async(force)
     notice = await run_sync(claude_relogin_notice.payload)
@@ -759,7 +757,8 @@ async def auth_diagnostics(token: str = Depends(require_admin)):
             ['which', 'claude'],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
+            env=scrub_child_env(),
         )
         return result.stdout.strip() if result.returncode == 0 else "NOT FOUND"
 

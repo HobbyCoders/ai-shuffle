@@ -32,6 +32,8 @@ import subprocess
 import sys
 from typing import Any, Dict, Iterable, List, Optional
 
+from fluid.tools.child_env import scrub_child_env
+
 logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -84,8 +86,11 @@ def spawn_kwargs() -> Dict[str, Any]:
 
 def child_nice() -> int:
     """The ``child_process_nice`` setting as a nice increment; 0 means off."""
-    from app.core.config import settings  # noqa: PLC0415 — keep this module import-light
     from fluid.tools.priority import parse_child_nice  # noqa: PLC0415
+
+    from app.core.config import (
+        settings,  # noqa: PLC0415 — keep this module import-light
+    )
 
     return parse_child_nice(getattr(settings, "child_process_nice", None))
 
@@ -180,6 +185,7 @@ def pid_alive(pid: int) -> bool:
             out = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
                 capture_output=True, text=True, timeout=10,
+                env=scrub_child_env(),
             ).stdout
         except Exception:  # noqa: BLE001
             return False
@@ -229,6 +235,7 @@ def _force_kill_pid(pid: int) -> None:
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True, timeout=10,
+                env=scrub_child_env(),
             )
         else:
             os.kill(pid, signal.SIGKILL)
@@ -252,6 +259,7 @@ def _signal_group(pid: int, *, force: bool, own_group: bool) -> bool:
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True, timeout=15,
+                env=scrub_child_env(),
             )
             return True
         # Graceful: uvicorn and friends handle SIGBREAK and shut down cleanly.

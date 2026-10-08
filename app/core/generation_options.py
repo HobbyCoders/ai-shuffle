@@ -197,10 +197,9 @@ def _resolve_env(
     AI Shuffle is started from within a Claude Code session. Other env vars
     from the profile pass through.
 
-    Also injects the Claude Code auth credential (`ANTHROPIC_API_KEY`) when a
-    stored anthropic_api_key is set, mirroring the main chat subprocess. AI
-    generation authenticates exactly like every other Claude Code session: key
-    set → API-key auth wins; key absent → connected OAuth account is used.
+    Claude Code authentication is added only when the adapter chooses the
+    delegated CLI leg, mirroring chat. These options never carry stored Claude
+    cloud credentials into a native generation call.
 
     When ``provider_id`` is set the profile targets a non-Anthropic model
     provider: the Anthropic key is NOT injected, and the gateway env is overlaid
@@ -216,27 +215,11 @@ def _resolve_env(
             env.update({str(k): str(v) for k, v in profile_env.items()})
     env["CLAUDECODE"] = ""
 
-    # Inject the stored anthropic_api_key as the Claude Code auth credential
-    # (same precedence as chat sessions). For provider sessions this early-returns
-    # without injecting. Imported lazily to keep this module free of the heavier
-    # environment wiring at import time.
-    #
-    # Best-effort in the subscription and API-key modes, as before. In cloud
-    # mode a failure ends the call (ClaudeCloudSetupError, a
-    # ProviderConfigError): continuing would run the CLI on the host's own
-    # credentials instead of the owner's chosen cloud provider or gateway.
-    from app.core.environment import ClaudeCloudSetupError, inject_claude_code_auth
-    try:
-        inject_claude_code_auth(env, provider_id)
-    except ClaudeCloudSetupError:
-        raise
-    except Exception as e:  # noqa: BLE001 - auth injection is best-effort outside cloud mode
-        from app.core import claude_auth_mode
-        if not provider_id and claude_auth_mode.current_mode() == claude_auth_mode.MODE_CLOUD:
-            logger.warning("Claude cloud provider settings could not be applied for generation (%s)",
-                           type(e).__name__)
-            raise ClaudeCloudSetupError() from None
-        logger.debug(f"Could not inject Claude Code auth for generation: {e}")
+    # The adapter chooses the runtime later. CLI authentication is injected
+    # there, only for DelegatedLoop; a NativeLoop must not receive cloud auth.
+    from fluid.tools.child_env import scrub_claude_auth_env
+
+    env = scrub_claude_auth_env(env)
 
     # Overlay the model-provider env when a provider is set. NOT wrapped
     # in a best-effort try/except: a misconfigured provider must surface,

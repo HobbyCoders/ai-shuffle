@@ -1791,6 +1791,10 @@ def reconnect_option_names(state: SessionState, new_options: AgentOptions) -> li
     # switch stays a hot-swap (see provider_env_requires_reconnect).
     if provider_env_requires_reconnect(old.env, new_options.env):
         changed.append("provider_env")
+    if getattr(old, "aih_claude_auth_fingerprint", None) != getattr(
+        new_options, "aih_claude_auth_fingerprint", None
+    ):
+        changed.append("claude_auth")
 
     # Resolved provider BINDING. The env comparison above only sees the
     # gateway overlay vars, which are identical (absent) on two different

@@ -53,6 +53,14 @@ def test_embedded_copy_matches_modules(loader):
             )
 
 
+@pytest.mark.parametrize("loader", [_embedded_from_sh, _embedded_from_bat], ids=["jq", "jq.bat"])
+def test_embedded_environment_policy_matches_shared_helper(loader):
+    embedded = _definitions(loader())
+    helper = SHIM_DIR.parents[2] / "fluid" / "fluid" / "tools" / "child_env.py"
+    for name, dump in _definitions(helper.read_text()).items():
+        assert embedded[name] == dump, f"{name} differs from the shared environment policy"
+
+
 def test_embedded_copies_are_identical():
     assert _embedded_from_sh() == _embedded_from_bat().rstrip("\n")
 
@@ -108,8 +116,36 @@ def _run_bat_copy(*args, input_data):
     env["JQ_SHIM_NO_FALLBACK"] = "1"
     return subprocess.run(
         [sys.executable, "-x", str(SHIM_DIR / "bin" / "jq.bat"), *args],
-        input=input_data, capture_output=True, text=True, env=env, timeout=60,
+        input=input_data, capture_output=True, text=True, env=env, timeout=60, check=False,
     )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="fake executable uses a POSIX shebang")
+@pytest.mark.parametrize("name", ["jq", "jq.bat"])
+def test_standalone_fallback_scrubs_cloud_credentials(tmp_path, name):
+    cloud = {
+        "CLAUDE_CODE_USE_BEDROCK": "1", "AWS_SECRET_ACCESS_KEY": "fake-aws-secret",
+        "GOOGLE_APPLICATION_CREDENTIALS": "/fake/service-account.json",
+        "AZURE_CLIENT_SECRET": "fake-azure-secret", "ANTHROPIC_AUTH_TOKEN": "fake-gateway-token",
+        "ANTHROPIC_BASE_URL": "https://fake.invalid", "ANTHROPIC_API_KEY": "fake-gateway-key",
+    }
+    real_jq = tmp_path / "jq"
+    real_jq.write_text(
+        f"#!{sys.executable}\nimport os\n"
+        + "assert not set(" + repr(tuple(cloud)) + ") & os.environ.keys()\n"
+        + "assert os.environ['JQ_SHIM_NO_FALLBACK'] == '1'\nprint('fallback-clean')\n"
+    )
+    real_jq.chmod(0o755)
+    env = {**os.environ, **cloud, "PYTHONPATH": "", "JQ_SHIM_PYTHON": sys.executable,
+           "FLUID_CHILD_ENV_PASSTHROUGH": ",".join(cloud),
+           "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", "")}
+    env.pop("JQ_SHIM_NO_FALLBACK", None)
+    command = (["bash", str(SHIM_DIR / "bin" / name)] if name == "jq" else
+               [sys.executable, "-x", str(SHIM_DIR / "bin" / name)])
+    result = subprocess.run(command + ["--fake-unrecognized-option"], cwd=tmp_path, env=env,
+                            input="{}", capture_output=True, text=True, timeout=10, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "fallback-clean"
 
 
 def test_bat_copy_runs_under_python_x():
@@ -131,7 +167,7 @@ def test_bash_copy_regressions():
     for program, data, expected in cases:
         result = subprocess.run(
             ["bash", str(SHIM_DIR / "bin" / "jq"), "-c", program],
-            input=data, capture_output=True, text=True, env=env, timeout=60,
+            input=data, capture_output=True, text=True, env=env, timeout=60, check=False,
         )
         assert result.returncode == 0, (program, result.stderr)
         assert result.stdout.strip() == expected, program

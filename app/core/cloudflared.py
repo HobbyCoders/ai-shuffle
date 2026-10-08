@@ -2,7 +2,6 @@
 import hashlib
 import json
 import os
-from pathlib import Path
 import platform
 import shutil
 import subprocess
@@ -10,6 +9,9 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
+from pathlib import Path
+
+from fluid.tools.child_env import scrub_child_env
 
 # Keep the native client aligned with Dockerfile. Digests are from Cloudflare's
 # official GitHub release assets, pinned so setup never executes an unchecked download.
@@ -107,6 +109,7 @@ def bundle(*, reuse_verified=False):
     result = subprocess.run(
         [executable, '--version'], check=True, capture_output=True, text=True,
         timeout=15, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+        env=scrub_child_env(),
     )
     if not result.stdout.strip().startswith(f'cloudflared version {VERSION} '):
         raise RuntimeError('Bundled cloudflared did not report the pinned version')

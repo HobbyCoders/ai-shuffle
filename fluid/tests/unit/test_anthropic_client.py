@@ -30,6 +30,15 @@ TAIL = (
 )
 
 
+def test_native_client_does_not_borrow_the_claude_gateway_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-gateway-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://fake-gateway.invalid")
+    assert AnthropicClient()._api_key == ""
+    assert AnthropicClient(api_key="fake-native-key")._api_key == "fake-native-key"
+    monkeypatch.delenv("ANTHROPIC_BASE_URL")
+    assert AnthropicClient()._api_key == "fake-gateway-key"  # ordinary API env remains supported
+
+
 def _error_event(error_type: str) -> str:
     return (
         "event: error\n"

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
 
+from fluid.tools.child_env import scrub_child_env
 from fluid.tools.registry import ToolCtx
 
 _TRUNCATE_LIMIT = 30_000  # ~30KB; keep head + tail, drop the middle
@@ -205,6 +206,7 @@ def _rg_listing(rg: str, root: Path, state: WalkState) -> Iterator[str] | None:
         proc = subprocess.Popen(
             args, cwd=str(root), stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=scrub_child_env(),
         )
     except OSError:
         return None
@@ -302,6 +304,7 @@ class _LinkProbe:
                     [git, "-c", "core.fsmonitor=false", *cmd],
                     cwd=str(root), stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    env=scrub_child_env(),
                 ))
         except OSError:
             self.close()

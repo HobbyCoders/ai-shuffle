@@ -76,7 +76,9 @@ class AnthropicClient:
         http_client: httpx.AsyncClient | None = None,
         retry: RetryPolicy | None = None,
     ) -> None:
-        self._api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        from fluid.tools.child_env import scrub_claude_auth_env
+
+        self._api_key = api_key or scrub_claude_auth_env(os.environ).get("ANTHROPIC_API_KEY", "")
         self._base_url = base_url
         self._timeout = timeout
         # Wall clock for one whole model call, above the per-read ``timeout``.

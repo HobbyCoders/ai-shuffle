@@ -19,23 +19,28 @@ import logging
 import os
 import re
 import subprocess
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from app.core.scrub import redact_url_credentials, strip_url_userinfo
+from fluid.tools.child_env import child_env_with_overlay, scrub_child_env
+
+# Mixins composing GitService
+from app.core.git_branch_ops import GitBranchMixin
+from app.core.git_cache import (
+    AHEAD_BEHIND_CACHE_TTL as _AHEAD_BEHIND_CACHE_TTL,
+)
+from app.core.git_cache import (
+    STATUS_CACHE_TTL as _STATUS_CACHE_TTL,
+)
 
 # Cache primitives used below
 from app.core.git_cache import (
     _git_cache,
     _native_reader,
-    STATUS_CACHE_TTL as _STATUS_CACHE_TTL,
-    AHEAD_BEHIND_CACHE_TTL as _AHEAD_BEHIND_CACHE_TTL,
 )
-
-# Mixins composing GitService
-from app.core.git_branch_ops import GitBranchMixin
-from app.core.git_worktree_ops import GitWorktreeMixin
-from app.core.git_diff_ops import GitDiffMixin
 from app.core.git_commit_ops import GitCommitMixin
+from app.core.git_diff_ops import GitDiffMixin
+from app.core.git_worktree_ops import GitWorktreeMixin
+from app.core.scrub import redact_url_credentials, strip_url_userinfo
 
 logger = logging.getLogger(__name__)
 
@@ -138,9 +143,9 @@ class GitService(
             args: Git command arguments (without 'git' prefix)
             timeout: Command timeout in seconds
             check: If True, raise CalledProcessError on non-zero exit
-            env: Optional environment mapping for the subprocess. ``None`` (the
-                default) inherits the parent process environment exactly as before,
-                so existing callers are unaffected.
+            env: Optional explicit subprocess environment. CLI-only cloud
+                authentication is scrubbed from both inherited and explicit maps.
+                ``None`` inherits the scrubbed parent environment.
 
         Returns:
             CompletedProcess with returncode, stdout, stderr
@@ -149,7 +154,7 @@ class GitService(
         # prompt: the server has no TTY, so a fetch/clone that needs
         # credentials would otherwise sit until the timeout. The caller's env
         # wins when it sets the variable explicitly.
-        run_env = dict(env if env is not None else os.environ)
+        run_env = child_env_with_overlay(env, {}) if env is not None else scrub_child_env()
         run_env.setdefault("GIT_TERMINAL_PROMPT", "0")
         try:
             return subprocess.run(
