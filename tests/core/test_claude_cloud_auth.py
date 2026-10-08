@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import stat
+import sys
+from contextlib import contextmanager, nullcontext
 from unittest.mock import patch
 
 import pytest
@@ -414,30 +416,105 @@ def test_damaged_selected_settings_never_fall_back_to_worker_env(store):
         assert cloud.env_for_cli() == {}
 
 
-def test_app_mcp_browser_plugin_and_connector_envs_do_not_inherit_cloud_auth(store, monkeypatch, tmp_path):
-    from unittest.mock import Mock
+def _mcp_module_cache():
+    return {name: module for name, module in sys.modules.copy().items()
+            if name == "mcp" or name.startswith("mcp.")}
 
-    from fluid.tools.mcp.client import McpClient
 
-    from app.core import mcp_config, native_chrome, plugin_install
-    from app.core.connectors.package_proxy import worker_environment
+@contextmanager
+def _preserve_mcp_modules():
+    original = _mcp_module_cache()
+    try:
+        yield
+    finally:
+        for name in _mcp_module_cache().keys() - original.keys():
+            sys.modules.pop(name, None)
+        sys.modules.update(original)
 
-    with patch.dict(os.environ, HOST):
-        fake_stdio = Mock(return_value=object())
-        monkeypatch.setattr("mcp.client.stdio.stdio_client", fake_stdio)
-        client = McpClient("fake-mcp", {"command": "fake", "env": {**HOST, "MCP_SERVICE_TOKEN": "fake-mcp-token"}})
-        client._open_transport()
-        env = fake_stdio.call_args.args[0].env
-        assert not set(env) & ALL_CLOUD_NAMES
-        assert env["MCP_SERVICE_TOKEN"] == "fake-mcp-token"
-        assert not set(native_chrome._egress_env()) & ALL_CLOUD_NAMES
-        assert not set(worker_environment()) & ALL_CLOUD_NAMES
-        browser = mcp_config._build_browser_server_env(HOST)
-        assert not set(browser) & ALL_CLOUD_NAMES
-        run = Mock(return_value=Mock(returncode=0))
-        monkeypatch.setattr(plugin_install.subprocess, "run", run)
-        plugin_install._clone_plugin_source(None, {"source": "url", "url": "https://github.com/fake/plugin.git"}, tmp_path)
-        assert not set(run.call_args.kwargs["env"]) & ALL_CLOUD_NAMES
+
+@pytest.mark.parametrize("cache_state", ["cold", "parent_present", "parent_absent"])
+@pytest.mark.parametrize("fail_inside", [False, True])
+def test_mcp_module_cache_restored_after_reimport(cache_state, fail_inside):
+    # Preserve even the regression's setup imports, not just its inner reimport.
+    incoming = _mcp_module_cache()
+    with _preserve_mcp_modules():
+        import importlib
+        from types import ModuleType
+
+        stdio = parent = None
+        if cache_state == "cold":
+            for name in _mcp_module_cache():
+                sys.modules.pop(name)
+        else:
+            stdio = importlib.import_module("mcp.client.stdio")
+            parent = importlib.import_module("mcp")
+            if cache_state == "parent_absent":
+                sys.modules.pop("mcp")
+                assert "mcp" not in sys.modules
+                assert importlib.import_module("mcp.client.stdio") is stdio
+
+        original = _mcp_module_cache()
+        expected = pytest.raises(RuntimeError, match="injected failure") if fail_inside else nullcontext()
+        with expected, _preserve_mcp_modules():
+            sys.modules.pop("mcp", None)
+            recreated = importlib.import_module("mcp")
+            assert recreated is not parent
+            loaded_stdio = importlib.import_module("mcp.client.stdio")
+            if stdio is not None:
+                assert loaded_stdio is stdio
+            # Cover both a removed original child and an introduced descendant.
+            sys.modules.pop("mcp.client.stdio")
+            sys.modules["mcp._regression_only"] = ModuleType("mcp._regression_only")
+            if fail_inside:
+                raise RuntimeError("injected failure")
+
+        restored = _mcp_module_cache()
+        assert restored.keys() == original.keys()
+        assert all(restored[name] is module for name, module in original.items())
+
+    restored = _mcp_module_cache()
+    assert restored.keys() == incoming.keys()
+    assert all(restored[name] is module for name, module in incoming.items())
+
+
+@pytest.mark.parametrize("reimport_parent", [False, True])
+def test_app_mcp_browser_plugin_and_connector_envs_do_not_inherit_cloud_auth(store, monkeypatch, tmp_path, reimport_parent):
+    with _preserve_mcp_modules():
+        import importlib
+        from unittest.mock import Mock
+
+        from fluid.tools.mcp.client import McpClient
+
+        from app.core import mcp_config, native_chrome, plugin_install
+        from app.core.connectors.package_proxy import worker_environment
+
+        # A retried parent import can leave cached children without corresponding
+        # parent attributes. Patch the module the transport imports, not traversal
+        # through mcp.client attributes (which pytest's string resolver requires).
+        stdio = importlib.import_module("mcp.client.stdio")
+        if reimport_parent:
+            # The cached SDK children may already outlive an absent parent in CI.
+            sys.modules.pop("mcp", None)
+            assert "mcp" not in sys.modules
+            parent = importlib.import_module("mcp")
+            assert not hasattr(parent, "client")
+            assert importlib.import_module("mcp.client.stdio") is stdio
+        with patch.dict(os.environ, HOST):
+            fake_stdio = Mock(return_value=object())
+            monkeypatch.setattr(stdio, "stdio_client", fake_stdio)
+            client = McpClient("fake-mcp", {"command": "fake", "env": {**HOST, "MCP_SERVICE_TOKEN": "fake-mcp-token"}})
+            client._open_transport()
+            env = fake_stdio.call_args.args[0].env
+            assert not set(env) & ALL_CLOUD_NAMES
+            assert env["MCP_SERVICE_TOKEN"] == "fake-mcp-token"
+            assert not set(native_chrome._egress_env()) & ALL_CLOUD_NAMES
+            assert not set(worker_environment()) & ALL_CLOUD_NAMES
+            browser = mcp_config._build_browser_server_env(HOST)
+            assert not set(browser) & ALL_CLOUD_NAMES
+            run = Mock(return_value=Mock(returncode=0))
+            monkeypatch.setattr(plugin_install.subprocess, "run", run)
+            plugin_install._clone_plugin_source(None, {"source": "url", "url": "https://github.com/fake/plugin.git"}, tmp_path)
+            assert not set(run.call_args.kwargs["env"]) & ALL_CLOUD_NAMES
 
 
 @pytest.mark.parametrize("method", tuple(cloud.CLI_ENV_ALLOWLISTS))

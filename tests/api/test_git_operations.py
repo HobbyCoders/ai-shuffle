@@ -286,10 +286,9 @@ class TestExecuteFinish:
             stopped.append(sid)
             busy.discard(sid)
 
-        mock_reg = MagicMock()
-        mock_reg.has_active_background_work.side_effect = (
-            lambda sid: activity == "background" and sid in busy
-        )
+        def background_work(sid):
+            return activity == "background" and sid in busy
+
         with patch.multiple(
             gitops,
             git_service=mock_git_service,
@@ -298,7 +297,10 @@ class TestExecuteFinish:
         ), patch(
             "app.core.streaming_status.has_active_run",
             side_effect=lambda sid: activity == "turn" and sid in busy,
-        ), patch("app.core.task_registry.task_registry", mock_reg), patch(
+        ), patch(
+            "app.core.task_registry.task_registry.has_active_background_work",
+            side_effect=background_work,
+        ), patch(
             "app.db.database.get_sessions_for_worktree",
             return_value=[{"id": "me"}, {"id": "other"}, {"id": "idle"}],
         ), patch.object(gitops, "_stop_session_for_cleanup", side_effect=stop):
@@ -442,8 +444,6 @@ class TestExecuteFinish:
         mock_git_service.get_status.return_value = {"is_clean": True, "ahead": 0}
         op = _finish_op(project_id="p1", session_id="me")
 
-        mock_reg = MagicMock()
-        mock_reg.has_active_background_work.return_value = False
         mock_db = MagicMock()
         mock_db.get_sessions.return_value = [{"id": "me"}, {"id": "other"}]
 
@@ -455,7 +455,7 @@ class TestExecuteFinish:
         ), patch(
             "app.core.streaming_status.has_active_run",
             side_effect=lambda sid: sid == "other",
-        ), patch("app.core.task_registry.task_registry", mock_reg), \
+        ), patch("app.core.task_registry.task_registry.has_active_background_work", return_value=False), \
              patch("app.db.database.get_sessions", mock_db.get_sessions), \
              patch.object(gitops, "_stop_session_for_cleanup", new_callable=AsyncMock) as stop:
             await _execute_finish(

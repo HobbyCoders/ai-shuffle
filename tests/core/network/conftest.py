@@ -10,6 +10,11 @@ from tests.core.network.harness import Worker
 @pytest.fixture
 def workers(tmp_path):
     """Factory for in-process ``Worker``s; closes them and resets network state."""
+    # A prior app lifespan registers materialization callbacks. Do not inherit
+    # them: these workers explicitly drive apply side effects themselves.
+    engine.reset_for_tests()
+    tokens.reset_for_tests()
+    transport.reset_for_tests()
     made = []
 
     def make(name):
