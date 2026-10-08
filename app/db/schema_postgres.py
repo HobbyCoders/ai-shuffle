@@ -30,6 +30,8 @@ def create_session_events_recall_index(cursor) -> None:
     raw JSON expression and text-event predicate aligned with PgFluidStore's
     prefilter; token FTS would drop short/punctuation/substring matches.
     """
+    if session_recall_cache_ready(cursor):
+        return
     cursor.execute("SAVEPOINT recall_trgm_events")
     try:
         cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
@@ -43,6 +45,52 @@ def create_session_events_recall_index(cursor) -> None:
         logger.warning("Mirrored SessionSearch trigram index unavailable; recall remains unindexed")
     finally:
         cursor.execute("RELEASE SAVEPOINT recall_trgm_events")
+
+
+def session_recall_cache_ready(cursor) -> bool:
+    """Use the optional cache only after all three indexes are valid."""
+    cursor.execute(
+        "SELECT c.relname FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = current_schema() AND i.indisvalid AND i.indisready "
+        "AND c.relname IN ('idx_fluid_recall_text_trgm', 'idx_sse_recall_text_trgm', 'idx_events_recall_text_trgm')"
+    )
+    return {r["relname"] for r in cursor.fetchall()} == {
+        "idx_fluid_recall_text_trgm", "idx_sse_recall_text_trgm", "idx_events_recall_text_trgm",
+    }
+
+
+def create_session_recall_text(cursor) -> None:
+    """Explicit maintenance only: atomically backfill the optional recall cache.
+
+    Never call this from bootstrap or startup migrations: stored columns rewrite
+    the tables. The maintenance entry point checks capacity and sets lock and
+    statement timeouts before calling. Failures roll the whole transaction back.
+    """
+    cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+    shapes = (
+        ("fluid_session_nodes", "message::text", "TRUE", "idx_fluid_recall_text_trgm"),
+        ("session_store_entries", "entry::text", "subpath IS NULL", "idx_sse_recall_text_trgm"),
+        ("session_events", "payload::text",
+         "event_type IN ('message.user', 'message.assistant', 'assistant.text_delta')",
+         "idx_events_recall_text_trgm"),
+    )
+    for table, expression, predicate, index in shapes:
+        if not column_exists(cursor, table, "recall_text"):
+            cursor.execute(
+                f"ALTER TABLE {table} ADD COLUMN recall_text TEXT GENERATED ALWAYS AS "
+                f"(CASE WHEN {predicate} THEN {expression} END) STORED"
+            )
+        cursor.execute(
+            f"CREATE INDEX IF NOT EXISTS {index} ON {table} "
+            f"USING gin (recall_text gin_trgm_ops) WHERE {predicate}"
+        )
+    if not session_recall_cache_ready(cursor):
+        raise RuntimeError("Recall cache indexes are not valid; retain legacy indexes and retry maintenance")
+    # The native expression index still serves the separate session-list API.
+    # The other two expressions are only read by SessionSearch and are now redundant.
+    cursor.execute("DROP INDEX IF EXISTS idx_sse_entry_trgm")
+    cursor.execute("DROP INDEX IF EXISTS idx_session_events_recall_trgm")
 
 
 def create_postgres_schema(cursor) -> None:
@@ -1665,11 +1713,12 @@ def create_postgres_schema(cursor) -> None:
     cursor.execute("SAVEPOINT recall_trgm_sse")
     try:
         cursor.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_sse_entry_trgm "
-            "ON session_store_entries USING gin ((entry::text) gin_trgm_ops) "
-            "WHERE subpath IS NULL"
-        )
+        if not session_recall_cache_ready(cursor):
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sse_entry_trgm "
+                "ON session_store_entries USING gin ((entry::text) gin_trgm_ops) "
+                "WHERE subpath IS NULL"
+            )
         cursor.execute("RELEASE SAVEPOINT recall_trgm_sse")
     except Exception:  # noqa: BLE001 — degraded recall beats a dead bootstrap
         cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm_sse")

@@ -523,17 +523,24 @@ def _candidate_sessions(
 def _top_rows(cur, table: str, column: str, ts: str, where: str, where_params: List[Any],
               select: str, patterns: List[str]) -> List[Dict[str, Any]]:
     """The strongest ``_SEARCH_ROWS_PER_SESSION`` rows of each of the arm's
-    best ``_SEARCH_PREFILTER_SESSIONS`` sessions, in one scan of ``table``
-    (the matching rows are read once; the large JSON is not re-scanned)."""
+    best ``_SEARCH_PREFILTER_SESSIONS`` sessions. Score the stored search text
+    first, then fetch JSON only for the capped rows."""
     any_term = " OR ".join([f"{column} ILIKE %s"] * len(patterns))
+    # Rank narrow row keys, not full transcripts. Otherwise a broad query's
+    # materialized CTE copies every JSONB message to work_mem/temp files even
+    # though only the capped rows ever reach Python.
+    key = "node_id" if table == "fluid_session_nodes" else "id"
+    selected = ", ".join(f"d.{name.strip()}" for name in select.split(","))
     cur.execute(
-        f"WITH m AS (SELECT {select}, {ts} AS t, {_hits_sql(column, len(patterns))} AS h "
+        f"WITH m AS (SELECT session_id, {key}, {ts} AS t, {_hits_sql(column, len(patterns))} AS h "
         f"FROM {table} WHERE {where} AND ({any_term})), "
         "s AS (SELECT session_id, MAX(h) AS best, MAX(t) AS last FROM m "
         f"GROUP BY session_id ORDER BY best DESC, last DESC LIMIT {_SEARCH_PREFILTER_SESSIONS}), "
         "r AS (SELECT m.*, ROW_NUMBER() OVER (PARTITION BY m.session_id "
         "ORDER BY m.h DESC, m.t DESC) AS rn FROM m JOIN s ON s.session_id = m.session_id) "
-        f"SELECT {select} FROM r WHERE rn <= {_SEARCH_ROWS_PER_SESSION}",
+        f"SELECT {selected} FROM r JOIN {table} d ON d.session_id = r.session_id "
+        f"AND d.{key} = r.{key} WHERE rn <= {_SEARCH_ROWS_PER_SESSION} "
+        "ORDER BY r.session_id, r.h DESC, r.t DESC",
         list(patterns) + list(where_params) + list(patterns),
     )
     return [dict(r) for r in cur.fetchall()]
@@ -560,12 +567,17 @@ def _search_sync(
 
     with get_db() as conn:
         cur = conn.cursor()
+        # Maintenance is opt-in. Old databases (and an incomplete/invalid
+        # cache) retain the indexed raw-JSON query with identical semantics.
+        from app.db.schema_postgres import session_recall_cache_ready
+
+        cached = session_recall_cache_ready(cur)
         excluded = _exclusion_ids(cur, exclude_session_id)
         not_excluded = f"session_id NOT IN ({_in(excluded)})" if excluded else "TRUE"
 
         # Arm A — this store's own native session node tree.
         for row in _top_rows(
-            cur, "fluid_session_nodes", "message::text", "ts", not_excluded, excluded,
+            cur, "fluid_session_nodes", "recall_text" if cached else "message::text", "ts", not_excluded, excluded,
             "session_id, ts, message", patterns,
         ):
             message = _as_dict(row["message"])
@@ -577,7 +589,7 @@ def _search_sync(
         # Arm B — the Claude-format transcript (subpath IS NULL = the main
         # transcript; sidechain files live under a subpath and are not recall).
         for row in _top_rows(
-            cur, "session_store_entries", "entry::text", "created_at",
+            cur, "session_store_entries", "recall_text" if cached else "entry::text", "created_at",
             f"subpath IS NULL AND {not_excluded}", excluded,
             "session_id, created_at, entry", patterns,
         ):
@@ -593,13 +605,14 @@ def _search_sync(
         # deltas still counts as one text.
         if me:
             types = list(_EVENT_TEXT_TYPES)
+            event_column = "recall_text" if cached else "payload"
             source = (
-                "(SELECT e.session_id, e.created_at, e.payload, s.owner_device_id AS owner "
+                f"(SELECT e.session_id, e.created_at, e.{event_column}, s.owner_device_id AS owner "
                 "FROM session_events e JOIN sessions s ON s.id = e.session_id "
                 f"WHERE {_remote_sql('s.')} AND e.event_type IN ({_in(types)})) ev"
             )
             found = _candidate_sessions(
-                cur, source, [me, *types], "payload::text", "created_at",
+                cur, source, [me, *types], "recall_text" if cached else "payload::text", "created_at",
                 not_excluded, excluded, patterns, owner="owner",
             )
             if found:

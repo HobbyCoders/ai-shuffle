@@ -37,13 +37,120 @@ def test_mirror_recall_index_failure_does_not_abort_boot(failure, caplog):
             if sql.startswith(failure):
                 raise RuntimeError("synthetic unavailable extension or index privilege")
 
+        def fetchall(self):
+            return []
+
     create_session_events_recall_index(Cursor())
-    assert statements[0] == "SAVEPOINT recall_trgm_events"
+    assert "SAVEPOINT recall_trgm_events" in statements
     assert statements[-2:] == [
         "ROLLBACK TO SAVEPOINT recall_trgm_events",
         "RELEASE SAVEPOINT recall_trgm_events",
     ]
     assert "Mirrored SessionSearch trigram index unavailable" in caplog.text
+
+
+@pytest.mark.parametrize("failure", ["CREATE EXTENSION", "CREATE INDEX"])
+def test_explicit_recall_cache_failure_propagates_for_transaction_rollback(monkeypatch, failure):
+    from app.db import schema_postgres
+
+    statements = []
+
+    class Cursor:
+        def execute(self, sql):
+            statements.append(sql)
+            if sql.startswith(failure):
+                raise RuntimeError("synthetic unavailable extension or index privilege")
+
+    monkeypatch.setattr(schema_postgres, "column_exists", lambda *_: False)
+    with pytest.raises(RuntimeError):
+        schema_postgres.create_session_recall_text(Cursor())
+    assert not any(sql.startswith("DROP INDEX") for sql in statements)
+
+
+def test_startup_never_backfills_optional_recall_cache(mock_db, monkeypatch):
+    from app.db import base, schema_postgres
+
+    monkeypatch.setattr(schema_postgres, "create_session_recall_text",
+                        lambda _: pytest.fail("Optional cache must not run at startup"))
+    with base.get_db() as conn:
+        database._set_marker(conn.cursor(), database.MIGRATIONS_FINGERPRINT_KEY, "force-upgrade-test")
+    database.init_database()
+    for table in ("fluid_session_nodes", "session_store_entries", "session_events"):
+        assert "recall_text" not in column_names(mock_db, table)
+
+
+@pytest.mark.parametrize("free_bytes,allowed", [(0, False), (100 * 1024 ** 3, True)])
+def test_maintenance_requires_capacity_and_bounds_ddl(monkeypatch, free_bytes, allowed):
+    from app.db import schema_postgres
+    from scripts.session_recall_cache import apply_cache
+
+    statements = []
+
+    class Cursor:
+        def execute(self, sql):
+            statements.append(sql)
+
+        def fetchone(self):
+            return {"bytes": 1000}
+
+    monkeypatch.setattr(schema_postgres, "session_recall_cache_ready", lambda _: False)
+    monkeypatch.setattr(schema_postgres, "create_session_recall_text", lambda _: statements.append("MIGRATE"))
+    if allowed:
+        apply_cache(Cursor(), free_bytes)
+        assert statements[-1] == "MIGRATE"
+    else:
+        with pytest.raises(RuntimeError, match="Insufficient free space"):
+            apply_cache(Cursor(), free_bytes)
+        assert "MIGRATE" not in statements
+    assert statements[:2] == ["SET LOCAL lock_timeout = '2000ms'", "SET LOCAL statement_timeout = '300000ms'"]
+
+
+def test_maintenance_without_apply_never_opens_database(monkeypatch, capsys):
+    from app.db import base
+    from scripts.session_recall_cache import main
+
+    monkeypatch.setattr(base, "init_pool", lambda **_: pytest.fail("No explicit approval"))
+    assert main([]) == 0
+    assert "--apply" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("lock_ms,statement_ms", [(0, 300000), (2000, -1)])
+def test_maintenance_rejects_unbounded_timeouts(lock_ms, statement_ms):
+    from scripts.session_recall_cache import apply_cache
+
+    with pytest.raises(ValueError, match="positive"):
+        apply_cache(None, 100 * 1024 ** 3, lock_timeout_ms=lock_ms, statement_timeout_ms=statement_ms)
+
+
+def test_maintenance_failure_does_not_print_connection_details(monkeypatch, capsys):
+    from app.db import base
+    from scripts.session_recall_cache import main
+
+    def fail(**_):
+        raise RuntimeError("private connection detail")
+
+    closed = []
+    monkeypatch.setattr(base, "init_pool", fail)
+    monkeypatch.setattr(base, "close_pool", lambda: closed.append(True))
+    assert main(["--apply"]) == 1
+    assert "private connection detail" not in capsys.readouterr().out
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("indexes,ready", [([], False), (["idx_fluid_recall_text_trgm"], False), (
+    ["idx_fluid_recall_text_trgm", "idx_sse_recall_text_trgm", "idx_events_recall_text_trgm"], True,
+)])
+def test_cache_requires_all_valid_ready_indexes(indexes, ready):
+    from app.db.schema_postgres import session_recall_cache_ready
+
+    class Cursor:
+        def execute(self, sql):
+            assert "i.indisvalid AND i.indisready" in sql
+
+        def fetchall(self):
+            return [{"relname": name} for name in indexes]
+
+    assert session_recall_cache_ready(Cursor()) is ready
 
 
 def _index_exists(conn, name):

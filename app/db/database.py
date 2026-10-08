@@ -1495,11 +1495,14 @@ def _run_column_migrations(cursor):
                 "CREATE INDEX IF NOT EXISTS idx_fluid_nodes_trgm "
                 "ON fluid_session_nodes USING gin ((message::text) gin_trgm_ops)"
             )
-            cursor.execute(
-                "CREATE INDEX IF NOT EXISTS idx_sse_entry_trgm "
-                "ON session_store_entries USING gin ((entry::text) gin_trgm_ops) "
-                "WHERE subpath IS NULL"
-            )
+            from app.db.schema_postgres import session_recall_cache_ready
+
+            if not session_recall_cache_ready(cursor):
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sse_entry_trgm "
+                    "ON session_store_entries USING gin ((entry::text) gin_trgm_ops) "
+                    "WHERE subpath IS NULL"
+                )
             cursor.execute("RELEASE SAVEPOINT recall_trgm")
         except Exception:  # noqa: BLE001 — degraded recall beats a dead boot
             cursor.execute("ROLLBACK TO SAVEPOINT recall_trgm")

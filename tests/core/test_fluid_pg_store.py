@@ -662,6 +662,59 @@ async def _seed_searchable(mock_db):
     return store
 
 
+@pytest.mark.parametrize("table,key,ts,payload", [
+    ("fluid_session_nodes", "node_id", "ts", "message"),
+    ("session_store_entries", "id", "created_at", "entry"),
+])
+def test_search_ranks_row_keys_before_fetching_json(table, key, ts, payload):
+    from app.core.provider import fluid_pg_store as recall
+
+    class Cursor:
+        def execute(self, sql, params):
+            self.sql, self.params = sql, params
+
+        def fetchall(self):
+            return []
+
+    cur = Cursor()
+    patterns = ["%quokka%", "%東京%", "%50%_complete%"]
+    recall._top_rows(cur, table, "recall_text", ts, "session_id <> %s", ["caller"],
+                     f"session_id, {ts}, {payload}", patterns)
+    matching = cur.sql.split("), s AS", 1)[0]
+    assert f"SELECT session_id, {key}," in matching
+    assert payload not in matching and "::text" not in matching
+    assert f"d.{payload}" in cur.sql
+    assert f"d.{key} = r.{key}" in cur.sql
+    assert f"WHERE rn <= {recall._SEARCH_ROWS_PER_SESSION}" in cur.sql
+    assert cur.params == [*patterns, "caller", *patterns]
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_search_uses_ready_cache_or_legacy_columns(mock_db, monkeypatch, cached):
+    from app.core.provider import fluid_pg_store as recall
+    from app.db import schema_postgres
+
+    monkeypatch.setattr(schema_postgres, "session_recall_cache_ready", lambda _: cached)
+    columns = []
+
+    def top_rows(cur, table, column, *args):
+        columns.append((table, column))
+        return []
+
+    def candidates(cur, source, source_params, column, *args, **kwargs):
+        assert ("e.recall_text" if cached else "e.payload") in source
+        columns.append(("session_events", column))
+        return []
+
+    monkeypatch.setattr(recall, "_my_device_id", lambda: "test-local")
+    monkeypatch.setattr(recall, "_top_rows", top_rows)
+    monkeypatch.setattr(recall, "_candidate_sessions", candidates)
+    assert recall._search_sync(["quokka", "東京", "50%_complete"], 5, None) == []
+    assert columns == [("fluid_session_nodes", "recall_text" if cached else "message::text"),
+                       ("session_store_entries", "recall_text" if cached else "entry::text"),
+                       ("session_events", "recall_text" if cached else "payload::text")]
+
+
 @pytest.mark.asyncio
 async def test_search_spans_both_arms_and_ranks_by_score(mock_db):
     store = await _seed_searchable(mock_db)

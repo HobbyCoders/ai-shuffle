@@ -299,6 +299,11 @@ def translate_sql(sql: str) -> str:
         s,
     )
     s = _CAST_RE.sub("", s)                    # x::date -> x
+    # SQLite cannot ADD a STORED generated column to a populated table. A
+    # virtual column exercises the same automatic insert/update derivation;
+    # stored backfill/index behavior is covered on disposable PostgreSQL.
+    if "GENERATED ALWAYS AS" in s.upper():
+        s = re.sub(r"\bSTORED\b", "VIRTUAL", s, flags=re.I)
     s = re.sub(r"\bILIKE\b", "LIKE", s, flags=re.I)
     s = re.sub(r"\bjsonb_agg\b", "json_group_array", s, flags=re.I)
     s = re.sub(r"\bjson_agg\b", "json_group_array", s, flags=re.I)
@@ -308,8 +313,13 @@ def translate_sql(sql: str) -> str:
     # The app checks table/column existence and nullability via
     # information_schema (no equivalent in SQLite). Rewrite the three fixed
     # query shapes emitted by app.db.base / app.db.compat to SQLite's
-    # sqlite_master / pragma_table_info. Placeholders are already qmark and
+    # sqlite_master / pragma_table_xinfo. Placeholders are already qmark and
     # bind order (table[, column]) is preserved.
+    if "FROM pg_index i JOIN pg_class c" in s:
+        return (
+            "SELECT name AS relname FROM sqlite_master WHERE type='index' "
+            "AND name IN ('idx_fluid_recall_text_trgm', 'idx_sse_recall_text_trgm', 'idx_events_recall_text_trgm')"
+        )
     if "information_schema.tables" in s:
         return (
             "SELECT name AS table_name FROM sqlite_master "
@@ -319,10 +329,10 @@ def translate_sql(sql: str) -> str:
         if "is_nullable" in s:
             return (
                 "SELECT CASE \"notnull\" WHEN 1 THEN 'NO' ELSE 'YES' END "
-                "AS is_nullable FROM pragma_table_info(?) WHERE name = ?"
+                "AS is_nullable FROM pragma_table_xinfo(?) WHERE name = ?"
             )
         return (
-            "SELECT name AS column_name FROM pragma_table_info(?) "
+            "SELECT name AS column_name FROM pragma_table_xinfo(?) "
             "WHERE name = ?"
         )
 
