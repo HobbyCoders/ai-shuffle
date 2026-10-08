@@ -379,8 +379,8 @@
 				     new session creation (sessionId: undefined → new ID). -->
 				<MirrorSyncGate
 					sessionId={$activeSession.sessionId}
-					remote={$sessions.find(s => s.id === $activeSession.sessionId)?.is_remote}
-					deviceName={$sessions.find(s => s.id === $activeSession.sessionId)?.device_name}
+					remote={$sessions.find(s => s.id === $activeSession.sessionId)?.is_remote ?? $activeSession.isRemote}
+					deviceName={$sessions.find(s => s.id === $activeSession.sessionId)?.device_name ?? $activeSession.ownerDeviceName}
 					onCaughtUp={() => activeSession.reloadSession()}
 				>
 					<MessageArea {assistantMode} />

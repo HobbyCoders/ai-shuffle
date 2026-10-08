@@ -108,6 +108,9 @@ export const backgroundPermissions = {
 /** Full reactive state for the single active session. */
 export interface ActiveSessionState {
 	sessionId: string | null;
+	/** Ownership from /live, including sessions absent from the sidebar. */
+	isRemote?: boolean;
+	ownerDeviceName?: string | null;
 	/** Which sidepanel lane this surface belongs to — the single thing every
 	 *  component reads to decide what to render, because it covers both cases
 	 *  uniformly: for an OPEN session it is the session row's own mode, and for

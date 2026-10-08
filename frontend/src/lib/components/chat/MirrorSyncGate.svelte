@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Snippet } from 'svelte';
+	import { untrack, type Snippet } from 'svelte';
 	import { apiBase, withAuth } from '$lib/api/runtime';
 	import { LoaderCircle } from 'lucide-svelte';
 
@@ -13,11 +13,15 @@
 	let syncState = $state<'checking' | 'syncing' | 'current' | 'offline'>('checking');
 	let pending = $state(0);
 	let checkedSession = $state<string | null>(null);
+	// Props may be getters over whole stores (ChatView's $activeSession/$sessions).
+	// Equal primitive values must not restart polling when those stores reload.
+	const pollingSessionId = $derived(sessionId);
+	const pollingRemote = $derived(remote);
 	const waiting = $derived(!!sessionId && remote && (checkedSession !== sessionId || syncState === 'checking' || syncState === 'syncing'));
 
 	$effect(() => {
-		const id = sessionId;
-		if (!id || !remote) return;
+		const id = pollingSessionId;
+		if (!id || !pollingRemote) return;
 		const controller = new AbortController();
 		let timer: ReturnType<typeof setTimeout>;
 		let wasBehind = false;
@@ -31,11 +35,12 @@
 				const status = await response.json();
 				if (controller.signal.aborted) return;
 				if (!['checking', 'syncing', 'current', 'offline'].includes(status.state)) throw new Error('Invalid sync status');
-				if (status.state === 'current' && (wasBehind || checkedSession !== id)) onCaughtUp();
+				const caughtUp = status.state === 'current' && (wasBehind || checkedSession !== id);
 				wasBehind = status.state !== 'current';
 				syncState = status.state;
 				pending = status.pending_updates ?? 0;
 				checkedSession = id;
+				if (caughtUp) untrack(onCaughtUp);
 			} catch {
 				// Keep a known backlog visible on a failed poll; never call it current.
 			} finally {

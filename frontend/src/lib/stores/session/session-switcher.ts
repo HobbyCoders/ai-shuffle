@@ -89,6 +89,8 @@ interface LiveSnapshot {
 		status?: string | null;
 		/** A subagent's chat: no Git or private access UI. */
 		is_worker?: boolean;
+		is_remote?: boolean;
+		device_name?: string | null;
 	};
 	/** Durable background-task view (task registry `get_visible`), already in
 	 *  the `Task` wire shape. Used to SEED the chip strip on switch-in. */
@@ -586,6 +588,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		update(s => ({
 			...s,
 			sessionId,
+			isRemote: row?.is_remote,
+			ownerDeviceName: row?.device_name,
 			title: resolvedTitle,
 			project: targetProject,
 			projectV2Id: targetV2,
@@ -751,7 +755,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// long session) is discarded on arrival. Asking for metadata only keeps
 			// the switch-in off the transcript read path entirely.
 			snap = await api.get<LiveSnapshot>(
-				`/sessions/${encodeURIComponent(sessionId)}/live?since_update_id=0&include_messages=false`
+				`/sessions/${encodeURIComponent(sessionId)}/live?since_update_id=0&include_messages=false&owner_fields=true`
 			);
 		} catch (e) {
 			console.warn('[ActiveSession] metadata snapshot failed:', e);
@@ -791,6 +795,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		const meta = snap.session_meta;
 		if (meta) {
+			if (meta.is_remote !== undefined) patch.isRemote = meta.is_remote;
+			if (meta.device_name !== undefined) patch.ownerDeviceName = meta.device_name;
 			// Reloads and deep links have no row to tell an archived chat apart.
 			if (meta.status !== undefined) archivedChats.mark(sessionId, meta.status === 'archived');
 			if (meta.is_worker !== undefined) subagentChats.mark(sessionId, meta.is_worker);
@@ -907,6 +913,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		update(s => ({
 			...s,
 			sessionId: null,
+			isRemote: undefined,
+			ownerDeviceName: undefined,
 			mode,
 			// A fresh chat has no session to restore — cancel any pending boot
 			// restore (and any in-flight openChat load) so neither window can

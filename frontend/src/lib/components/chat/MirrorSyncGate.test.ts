@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
+import { fromStore, writable } from 'svelte/store';
 import MirrorSyncGate from './MirrorSyncGate.svelte';
 
 const children = createRawSnippet(() => ({ render: () => '<div>2 running tasks, 2 agents</div>' }));
@@ -11,7 +12,7 @@ describe('mirrored session freshness', () => {
 	it('holds stale task/agent state, keeps the notice on poll errors, and refreshes on drain', async () => {
 		vi.useFakeTimers();
 		const fetch = vi.fn().mockResolvedValueOnce(status('syncing', 40))
-			.mockRejectedValueOnce(new Error('connection lost')).mockResolvedValue(status('current'));
+			.mockRejectedValueOnce(new Error('connection lost')).mockImplementation(() => Promise.resolve(status('current')));
 		vi.stubGlobal('fetch', fetch);
 		const onCaughtUp = vi.fn();
 		render(MirrorSyncGate, { sessionId: 'remote-chat', remote: true, deviceName: 'Unraid', onCaughtUp, children });
@@ -47,6 +48,62 @@ describe('mirrored session freshness', () => {
 		view.unmount();
 		await vi.advanceTimersByTimeAsync(4000);
 		expect(fetch).toHaveBeenCalledTimes(2);
+	});
+
+	it('does not restart when catch-up reloads the session store without changing its id', async () => {
+		vi.useFakeTimers();
+		const session = writable({ sessionId: 'remote-chat', revision: 0 });
+		const reactiveSession = fromStore(session);
+		const fetch = vi.fn().mockImplementation(() => Promise.resolve(status('current')));
+		vi.stubGlobal('fetch', fetch);
+		const onCaughtUp = vi.fn(() => session.update(s => ({ ...s, revision: s.revision + 1 })));
+		render(MirrorSyncGate, {
+			get sessionId() { return reactiveSession.current.sessionId; },
+			remote: true, onCaughtUp, children,
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+		expect(screen.queryByRole('status')).toBeNull();
+		await vi.advanceTimersByTimeAsync(6000);
+		expect(onCaughtUp).toHaveBeenCalledOnce();
+		expect(fetch).toHaveBeenCalledTimes(4);
+		expect(screen.getByText('2 running tasks, 2 agents')).toBeTruthy();
+		// A later, real backlog may reload once more, but never for the reload itself.
+		fetch.mockResolvedValueOnce(status('syncing', 3));
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(screen.getByText('3 updates remaining')).toBeTruthy();
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(onCaughtUp).toHaveBeenCalledTimes(2);
+		expect(screen.queryByRole('status')).toBeNull();
+		await vi.advanceTimersByTimeAsync(4000);
+		expect(onCaughtUp).toHaveBeenCalledTimes(2);
+		expect(fetch).toHaveBeenCalledTimes(8);
+	});
+
+	it('renders an unlisted local session once its loaded ownership arrives', async () => {
+		vi.useFakeTimers();
+		const session = writable<{ sessionId: string; isRemote?: boolean }>({ sessionId: 'local-child' });
+		const reactiveSession = fromStore(session);
+		const sidebar = fromStore(writable<{ id: string; is_remote: boolean }[]>([]));
+		const fetch = vi.fn().mockResolvedValue(status('syncing', 7));
+		vi.stubGlobal('fetch', fetch);
+		const onCaughtUp = vi.fn();
+		render(MirrorSyncGate, {
+			get sessionId() { return reactiveSession.current.sessionId; },
+			get remote() {
+				return sidebar.current.find(s => s.id === reactiveSession.current.sessionId)?.is_remote
+					?? reactiveSession.current.isRemote;
+			},
+			onCaughtUp, children,
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(screen.getByText('7 updates remaining')).toBeTruthy();
+		session.set({ sessionId: 'local-child', isRemote: false });
+		await vi.advanceTimersByTimeAsync(6000);
+		expect(screen.queryByRole('status')).toBeNull();
+		expect(screen.getByText('2 running tasks, 2 agents')).toBeTruthy();
+		expect(fetch).toHaveBeenCalledOnce();
+		expect(onCaughtUp).not.toHaveBeenCalled();
 	});
 
 	it('checks a session before its sidebar ownership row has arrived', async () => {

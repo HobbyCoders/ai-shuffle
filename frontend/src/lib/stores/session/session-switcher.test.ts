@@ -350,6 +350,20 @@ describe('session-switcher · authoritative lane hydration', () => {
 		switcher.destroy();
 	});
 
+	it.each([false, true])('loads ownership for an unlisted child (remote=%s) and clears it on navigation', async (is_remote) => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { is_remote, device_name: 'Owner' } });
+		const { switcher, getState } = makeSwitcher(fullState());
+		await switcher.switchSession('unlisted-child');
+		await vi.waitFor(() => expect(getState().isRemote).toBe(is_remote));
+		expect(getState().ownerDeviceName).toBe('Owner');
+		expect(_mockSessions.current).toEqual([]);
+		expect(api.get).toHaveBeenCalledWith('/sessions/unlisted-child/live?since_update_id=0&include_messages=false&owner_fields=true');
+		await switcher.switchSession('unknown-owner');
+		expect(getState().isRemote).toBeUndefined();
+		expect(getState().ownerDeviceName).toBeUndefined();
+		switcher.destroy();
+	});
+
 	it('corrects a stale lane on reload without changing the saved default', async () => {
 		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { mode: 'chat' } });
 		const { switcher, getState } = makeSwitcher(fullState({ mode: 'voice' }));
