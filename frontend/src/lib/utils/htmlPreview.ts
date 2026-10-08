@@ -13,6 +13,13 @@ export const MAX_HTML_PREVIEW_BYTES = 2 * 1024 * 1024;
 export const HTML_PREVIEW_SANDBOX = 'allow-scripts';
 
 const FILE_ROUTE = '/api/files/by-path';
+// Survives transcript re-renders/remounts, scoped to worker URL and session.
+const missingPreviews = new Set<string>();
+
+export function retryHtmlPreview(href: string, sessionId?: string | null): void {
+	missingPreviews.delete(chatFileUrl(href, sessionId));
+}
+
 const markdown = new Marked();
 
 function htmlPreviewLink(href: string): HtmlPreviewLink | null {
@@ -59,12 +66,18 @@ export async function loadHtmlPreview(href: string, signal: AbortSignal, session
 	const link = htmlPreviewLink(href);
 	if (!link) throw new Error('Only local HTML file links can be previewed.');
 	signal.throwIfAborted();
-	const response = await fetch(chatFileUrl(link.href, sessionId), withAuth({
+	const url = chatFileUrl(link.href, sessionId);
+	if (missingPreviews.has(url)) throw new Error('Could not load this HTML file (HTTP 404).');
+	const response = await fetch(url, withAuth({
 		signal,
 		redirect: 'error',
 		cache: 'no-store'
 	}));
 	if (!response.ok) {
+		if (response.status === 404 && !signal.aborted) {
+			if (missingPreviews.size >= 200) missingPreviews.delete(missingPreviews.values().next().value!);
+			missingPreviews.add(url);
+		}
 		await response.body?.cancel();
 		throw new Error(`Could not load this HTML file (HTTP ${response.status}).`);
 	}

@@ -30,7 +30,7 @@ from app.api.pairing import _ExchangeRateLimiter
 from app.core.config import settings
 from app.db import network as store
 from app.db.async_database import run_sync
-from app.network import engine, enrollment, identity as identity_mod, policy, recovery, runners, tokens, transport
+from app.network import catalog, engine, enrollment, identity as identity_mod, policy, recovery, runners, tokens, transport
 from app.network import endpoints as endpoints_mod
 from app.api.network_usage import router as usage_budget_router
 
@@ -116,6 +116,7 @@ class TokenRequest(BaseModel):
 
 class ExchangeRequest(BaseModel):
     flush: bool = False
+    catalog_backlog: bool = False
     watermarks: Dict[str, Dict[str, int]] = Field(default_factory=dict)
     limit: int = Field(default=500, ge=1, le=2000)
     lane: Optional[str] = None
@@ -508,6 +509,7 @@ async def peer_ping(device_id: str = Depends(tokens.require_device)) -> dict:
 async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.require_device)) -> dict:
     ctx = engine.require_context()
     transport.note_contact(device_id)
+    transport.note_watermarks(device_id, body.watermarks, catalog_backlog=body.catalog_backlog)
 
     def _work():
         if engine.outbox_held():
@@ -524,7 +526,8 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
                 "key_version": ctx.key_version, "incarnation": ctx.identity.incarnation,
                 "endpoints": engine._own_endpoints(), "capabilities": transport._capabilities(),
                 "version": settings.version, "snapshot_required": snapshot,
-                "peer_state": 1, "flushed": body.flush}
+                "peer_state": 1, "flushed": body.flush,
+                "catalog_backlog": catalog.has_events_backlog(ctx=ctx)}
 
     return await run_sync(_work)
 

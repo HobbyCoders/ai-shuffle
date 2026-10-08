@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import { buildHtmlPreviewDocument, loadHtmlPreview, HTML_PREVIEW_SANDBOX } from '$lib/utils/htmlPreview';
+	import { buildHtmlPreviewDocument, loadHtmlPreview, retryHtmlPreview, HTML_PREVIEW_SANDBOX } from '$lib/utils/htmlPreview';
 	import { chatFileUrl } from '$lib/utils/chat-files';
 	import { FileCode2, Monitor, Smartphone, RotateCw, Download, Maximize2, X, ShieldCheck, LoaderCircle, CircleAlert, ArrowUpRight } from 'lucide-svelte';
 
@@ -75,7 +75,7 @@
 			</button>
 		</div>
 		<div class="actions">
-			<button class="icon-button" onclick={() => revision++} disabled={loading} aria-label="Refresh HTML preview" title="Reload the file">
+			<button class="icon-button" onclick={() => { retryHtmlPreview(href, sessionId); revision++; }} disabled={loading} aria-label="Refresh HTML preview" title="Reload the file">
 				<RotateCw size={13} strokeWidth={1.8} aria-hidden="true" />
 			</button>
 			<a class="icon-button" href={downloadUrl || chatFileUrl(href, sessionId)} download={filename} aria-label="Download HTML file" title="Download HTML file">
@@ -105,7 +105,7 @@
 			<div class="notice" role="alert">
 				<CircleAlert size={20} strokeWidth={1.5} aria-hidden="true" />
 				<p>{error}</p>
-				<button class="retry" onclick={() => revision++}><RotateCw size={12} aria-hidden="true" />Try again</button>
+				<button class="retry" onclick={() => { retryHtmlPreview(href, sessionId); revision++; }}><RotateCw size={12} aria-hidden="true" />Try again</button>
 			</div>
 		{:else if showSource}
 			<pre aria-label="HTML source"><code>{source}</code></pre>

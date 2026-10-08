@@ -1746,6 +1746,31 @@ class TestGetSyncChanges:
         assert response.status_code == 403
 
 
+class TestGetSessionSyncStatus:
+    def test_returns_owner_freshness(self, client, mock_database, sample_session):
+        sample_session["owner_device_id"] = "peer-owner"
+        mock_database.get_session.return_value = sample_session
+        with patch("app.network.transport.owner_sync_status", return_value={
+            "state": "syncing", "pending_updates": 12,
+        }) as freshness:
+            response = client.get("/api/v1/sessions/test-session-id/sync-status")
+        assert response.status_code == 200
+        assert response.json() == {"state": "syncing", "pending_updates": 12}
+        freshness.assert_called_once_with("peer-owner")
+
+    def test_missing_session(self, client, mock_database):
+        mock_database.get_session.return_value = None
+        response = client.get("/api/v1/sessions/missing/sync-status")
+        assert response.status_code == 404
+
+    def test_denies_unreadable_session(self, client, mock_database, mock_api_user, sample_session):
+        mock_api_user.return_value = {"id": "api-user-1", "project_id": "other-project"}
+        sample_session["project_id"] = "test-project"
+        mock_database.get_session.return_value = sample_session
+        response = client.get("/api/v1/sessions/test-session-id/sync-status")
+        assert response.status_code == 403
+
+
 class TestGetSessionState:
     """Test GET /api/v1/sessions/{session_id}/state endpoint."""
 

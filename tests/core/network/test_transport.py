@@ -226,6 +226,77 @@ async def test_rollback_proof_survives_peer_pruning(workers):
     assert owner_pref(a, "after-restore") is True
 
 
+async def test_mirror_freshness_tracks_real_backlog_until_committed(workers, monkeypatch):
+    from tests.core.network.harness import join
+    a, b = workers("owner"), workers("mirror")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    for index in range(4):
+        set_owner_pref(a, f"backlog-{index}", index)
+    served = ServedBy(a, "https://owner.example.com")
+    monkeypatch.setattr(transport, "BATCH_LIMIT", 1)
+    monkeypatch.setattr(transport, "SYNC_PULL_SECONDS", 0)
+    observed = []
+    apply = engine.apply_batch
+
+    def applying(ops):
+        # The transport has observed the owner's real frontier before applying.
+        observed.append(transport.owner_sync_status(a.device_id))
+        return apply(ops)
+
+    monkeypatch.setattr(engine, "apply_batch", applying)
+    async with httpx.AsyncClient(transport=served.transport()) as client:
+        with b.active():
+            link = transport.PeerLink(a.device_id, [served.base_url])
+            await link.sync_once(client, engine.context())
+            behind = transport.owner_sync_status(a.device_id)
+            assert behind["state"] == "syncing"
+            assert behind["pending_updates"] > 0
+            # Unreachable/expired contacts must not clear known missing updates.
+            transport._last_contact.clear()
+            assert transport.owner_sync_status(a.device_id) == behind
+            assert transport.owner_sync_status(b.device_id)["state"] == "current"
+            await link.sync_once(client, engine.context(), catch_up=True)
+            assert transport.owner_sync_status(a.device_id) == {"state": "current", "pending_updates": 0}
+    assert observed[0]["state"] == "syncing"
+    assert owner_pref(b, "backlog-3") == 3
+
+
+async def test_mirror_waits_for_unpublished_transcript_not_just_op_watermarks(workers):
+    from app.db import session_events
+    from app.network import catalog
+    from tests.core.network.harness import join
+    a, b = workers("event-owner"), workers("event-mirror")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    with a.active():
+        database.create_session("backlogged-chat", "default", title="Backlogged")
+        session_events.append_events("backlogged-chat", [
+            {"type": "message.user", "payload": {"content": f"turn-{i}"}} for i in range(3)
+        ])
+        # Commit just the row and first event, as a budget-limited scanner does.
+        engine.scan_collection("sessions", owner_only=True)
+        catalog.publish_events(session_ids=["backlogged-chat"], limit=1)
+        assert catalog.has_events_backlog()
+    served = ServedBy(a, "https://event-owner.example.com")
+    async with httpx.AsyncClient(transport=served.transport()) as client:
+        with b.active():
+            link = transport.PeerLink(a.device_id, [served.base_url])
+            await link.sync_once(client, engine.context())
+            # All published ops arrived, but the source has unpublished events.
+            assert transport.owner_sync_status(a.device_id) == {"state": "syncing", "pending_updates": 0}
+            assert len(session_events.get_events("backlogged-chat")) == 1
+        with a.active():
+            catalog.publish_events(session_ids=["backlogged-chat"])
+            assert not catalog.has_events_backlog()
+        with b.active():
+            await link.sync_once(client, engine.context())
+            assert transport.owner_sync_status(a.device_id) == {"state": "current", "pending_updates": 0}
+            assert len(session_events.get_events("backlogged-chat")) == 3
+
+
 @pytest.mark.parametrize("replace_all", [False, True])
 async def test_rollback_proof_after_cross_origin_head_pruning(workers, replace_all):
     from tests.core.network.harness import exchange, join

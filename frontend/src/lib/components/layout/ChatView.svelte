@@ -21,6 +21,7 @@
 	import { DOCK_ORDER } from '$lib/stores/notification-dock.svelte';
 	import { forkOfferedSessionHere } from '$lib/components/chat/fork-here';
 	import MessageArea from '$lib/components/chat/MessageArea.svelte';
+	import MirrorSyncGate from '$lib/components/chat/MirrorSyncGate.svelte';
 	import ChatInput from '$lib/components/chat/ChatInput.svelte';
 	import ArchivedChatBar from '$lib/components/chat/ArchivedChatBar.svelte';
 	import { archivedChats } from '$lib/stores/archived-chats';
@@ -376,7 +377,14 @@
 				     component destruction prevents a Svelte 5 reactivity edge case
 				     where the recreated component loses reactive updates during
 				     new session creation (sessionId: undefined → new ID). -->
-				<MessageArea {assistantMode} />
+				<MirrorSyncGate
+					sessionId={$activeSession.sessionId}
+					remote={$sessions.find(s => s.id === $activeSession.sessionId)?.is_remote}
+					deviceName={$sessions.find(s => s.id === $activeSession.sessionId)?.device_name}
+					onCaughtUp={() => activeSession.reloadSession()}
+				>
+					<MessageArea {assistantMode} />
+				</MirrorSyncGate>
 			</div>
 		</div>
 	{/if}

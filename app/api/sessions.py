@@ -2164,6 +2164,18 @@ async def get_sync_changes(
     }
 
 
+@router.get("/{session_id}/sync-status")
+async def get_session_sync_status(
+    request: Request,
+    session_id: str,
+    token: str = Depends(require_auth),
+):
+    """Freshness of a mirrored owner's committed sync stream."""
+    session = await require_session(request, session_id)
+    from app.network.transport import owner_sync_status
+    return await run_sync(owner_sync_status, session.get("owner_device_id"))
+
+
 @router.get("/{session_id}/state")
 async def get_session_state(
     request: Request,

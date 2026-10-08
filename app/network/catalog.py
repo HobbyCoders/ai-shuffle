@@ -46,6 +46,26 @@ MAX_EVENT_BYTES = (1 << 22) * 3 // 4 - 4096
 _events_backlog = False
 
 
+def has_events_backlog(*, ctx: Optional[engine.NetworkContext] = None) -> bool:
+    """Events not yet in the outbox; op watermarks alone cannot describe these."""
+    ctx = ctx or engine.context()
+    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+        return False
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=HISTORY_DAYS)).isoformat()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 1 FROM sessions s
+            LEFT JOIN network_catalog_cursors c ON c.session_id = s.id
+            WHERE (s.owner_device_id = %s OR (s.owner_device_id IS NULL AND s.instance_id = %s))
+                AND (s.updated_at >= %s OR s.updated_at IS NULL)
+                AND EXISTS (SELECT 1 FROM session_events e WHERE e.session_id = s.id
+                    AND e.seq > COALESCE(c.published_seq, 0))
+            LIMIT 1
+        """, (ctx.device_id, _my_instance_id(), cutoff))
+        return cursor.fetchone() is not None
+
+
 def take_events_backlog() -> bool:
     """Whether a backlog remained after the last pass; clears the flag."""
     global _events_backlog

@@ -4,6 +4,7 @@ import {
 	extractHtmlPreviews,
 	HTML_PREVIEW_SANDBOX,
 	loadHtmlPreview,
+	retryHtmlPreview,
 	MAX_HTML_PREVIEW_BYTES
 } from './htmlPreview';
 
@@ -12,6 +13,7 @@ const link = `[Open demo](${href})`;
 const fetchMock = vi.fn();
 
 afterEach(() => {
+	retryHtmlPreview(href);
 	vi.unstubAllGlobals();
 	vi.clearAllMocks();
 	delete window.__SHUFFLE_MOBILE__;
@@ -125,6 +127,20 @@ describe('HTML preview source loading', () => {
 	it.each([401, 403, 404, 500])('reports HTTP %s without showing server response HTML', async (status) => {
 		respond(new Response('<script>serverError()</script>', { status }));
 		await expect(loadHtmlPreview(href, new AbortController().signal)).rejects.toThrow(`HTTP ${status}`);
+	});
+
+	it('does not retry a missing embed on remount, but allows explicit refresh', async () => {
+		const missing = '/api/files/by-path?path=%2Fwork%2Fmissing.html';
+		respond(new Response('missing', { status: 404 }));
+		await expect(loadHtmlPreview(missing, new AbortController().signal, 'chat')).rejects.toThrow('HTTP 404');
+		await expect(loadHtmlPreview(missing, new AbortController().signal, 'chat')).rejects.toThrow('HTTP 404');
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		respond(new Response('new owner file'));
+		await expect(loadHtmlPreview(missing, new AbortController().signal, 'other-chat')).resolves.toBe('new owner file');
+		retryHtmlPreview(missing, 'chat');
+		respond(new Response('restored'));
+		await expect(loadHtmlPreview(missing, new AbortController().signal, 'chat')).resolves.toBe('restored');
+		expect(fetchMock).toHaveBeenCalledTimes(3);
 	});
 
 	it('rejects a non-HTML response type', async () => {

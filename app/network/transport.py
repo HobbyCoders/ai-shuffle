@@ -31,7 +31,7 @@ import httpx
 
 from app.core.config import settings
 from app.db import network as store
-from app.network import engine, identity as identity_mod, membership, policy, tokens
+from app.network import catalog, engine, identity as identity_mod, membership, policy, tokens
 from app.network.endpoints import dial_endpoints, peer_endpoints, validate_endpoints
 from app.network.envelope import Envelope
 
@@ -76,6 +76,40 @@ _owner_collections: set[str] = set()
 _tasks: List[asyncio.Task] = []
 _links: Dict[str, "PeerLink"] = {}
 _last_contact: Dict[str, float] = {}
+# Authenticated peer frontiers, retained across failed/retried pulls. A failed
+# request does not make a known backlog disappear. Only committed watermarks do.
+_peer_watermarks: Dict[str, dict] = {}
+_snapshot_peers: set[str] = set()
+_peer_catalog_backlog: Dict[str, bool] = {}
+
+
+def note_watermarks(device_id: str, watermarks: dict, *, catalog_backlog: bool = False) -> None:
+    _peer_watermarks[device_id] = {origin: dict(streams) for origin, streams in watermarks.items()}
+    _peer_catalog_backlog[device_id] = catalog_backlog
+
+
+def owner_sync_status(owner_device_id: str | None) -> dict:
+    """Conservative owner-wide freshness, not a claim about individual events."""
+    ctx = engine.context()
+    if not ctx or not owner_device_id or owner_device_id == ctx.device_id:
+        return {"state": "current", "pending_updates": 0}
+    heads: dict[str, int] = {}
+    for watermarks in list(_peer_watermarks.values()):
+        for incarnation, seq in watermarks.get(owner_device_id, {}).items():
+            heads[str(incarnation)] = max(heads.get(str(incarnation), 0), int(seq))
+    local = store.local_watermarks().get(owner_device_id, {})
+    pending = sum(max(0, seq - int(local.get(inc, 0))) for inc, seq in heads.items())
+    snapshot = owner_device_id in _snapshot_peers or any(
+        peer in _snapshot_peers and owner_device_id in marks
+        for peer, marks in list(_peer_watermarks.items()))
+    if pending or snapshot or _peer_catalog_backlog.get(owner_device_id):
+        state = "syncing"
+    elif heads:
+        state = "current"
+    else:
+        state = "checking" if owner_device_id in online_devices() else "offline"
+    return {"state": state, "pending_updates": pending}
+
 # Peers our own sync pass has tried (reached or not) since the startup outbox
 # hold began. A peer's inbound view opens the hold only once every other peer
 # we can dial is in here (``release_hold_for_peer_view``).
@@ -261,9 +295,13 @@ class PeerLink:
             exchange = await self._request(client, "POST", "/api/v1/network/peer/exchange", json_body={
                 "watermarks": marks, "limit": BATCH_LIMIT, "incarnation": ctx.identity.incarnation,
                 "flush": catch_up and target is None,
+                "catalog_backlog": await asyncio.to_thread(catalog.has_events_backlog, ctx=ctx),
                 **(await asyncio.to_thread(_description)), "version": settings.version,
             })
             theirs = exchange.get("watermarks") or {}
+            note_watermarks(self.device_id, theirs, catalog_backlog=bool(exchange.get("catalog_backlog")))
+            if not exchange.get("snapshot_required"):
+                _snapshot_peers.discard(self.device_id)
             if catch_up and target is None and not exchange.get("flushed"):
                 raise PeerError("Update this worker to support startup sync")
             if target is None:
@@ -351,6 +389,7 @@ class PeerLink:
 
     async def receive_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext) -> int:
         from app.network import peer_snapshot
+        _snapshot_peers.add(self.device_id)
         await self.authenticate(client, ctx)
         manifest = await self._request(client, "POST", "/api/v1/network/peer/state", json_body={})
         await asyncio.to_thread(peer_snapshot.verify_manifest, manifest, self.device_id)
@@ -370,7 +409,11 @@ class PeerLink:
                 if len(raw) != expected["bytes"]:
                     raise PeerError("Peer state page was truncated")
                 await asyncio.to_thread((directory / f"{index}.json").write_bytes, raw)
-            return await asyncio.to_thread(peer_snapshot.apply, manifest, directory, self.device_id)
+            applied = await asyncio.to_thread(peer_snapshot.apply, manifest, directory, self.device_id)
+            note_watermarks(self.device_id, manifest["watermarks"],
+                            catalog_backlog=_peer_catalog_backlog.get(self.device_id, False))
+            _snapshot_peers.discard(self.device_id)
+            return applied
 
     async def _check_rollback(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
                               theirs: Dict[str, Dict[str, int]]) -> bool:
@@ -928,6 +971,9 @@ def forget_peers() -> None:
     """Drop every peer link and contact record (the worker left its network)."""
     _links.clear()
     _last_contact.clear()
+    _peer_watermarks.clear()
+    _snapshot_peers.clear()
+    _peer_catalog_backlog.clear()
     _tried_since_hold.clear()
 
 
