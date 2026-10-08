@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 
 import pytest
 
@@ -696,6 +697,35 @@ def test_search_uses_ready_cache_or_legacy_columns(mock_db, monkeypatch, cached)
 
     monkeypatch.setattr(schema_postgres, "session_recall_cache_ready", lambda _: cached)
     columns = []
+    planner_queries = []
+    original = recall.get_db
+
+    class Cursor:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def execute(self, sql, params=None):
+            if sql.startswith("SELECT set_config"):
+                planner_queries.append(sql)
+                return
+            return self.cursor.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self.cursor, name)
+
+    class Connection:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def cursor(self):
+            return Cursor(self.conn.cursor())
+
+    @contextmanager
+    def capture():
+        with original() as conn:
+            yield Connection(conn)
+
+    monkeypatch.setattr(recall, "get_db", capture)
 
     def top_rows(cur, table, column, *args):
         columns.append((table, column))
@@ -713,6 +743,11 @@ def test_search_uses_ready_cache_or_legacy_columns(mock_db, monkeypatch, cached)
     assert columns == [("fluid_session_nodes", "recall_text" if cached else "message::text"),
                        ("session_store_entries", "recall_text" if cached else "entry::text"),
                        ("session_events", "recall_text" if cached else "payload::text")]
+    assert len(planner_queries) == int(cached)
+    if cached:
+        assert "GREATEST(current_setting('cpu_tuple_cost')::numeric, 0.05)" in planner_queries[0]
+        assert planner_queries[0].endswith("::text, true)")  # Transaction-local only.
+        assert "enable_seqscan" not in planner_queries[0]
 
 
 @pytest.mark.asyncio

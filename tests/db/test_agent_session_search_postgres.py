@@ -394,6 +394,135 @@ def test_actual_agent_queries_choose_all_three_trigram_indexes(recall, monkeypat
             assert index in plan, plan
 
 
+def test_toasted_cache_selective_plan_and_transaction_local_cost(recall, monkeypatch):
+    from fluid.messages import Message, Text
+
+    original = recall.get_db
+    queries = []
+    costs = []
+
+    class Cursor:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def execute(self, sql, params=None):
+            result = self.cursor.execute(sql, params)
+            if sql.startswith("SELECT set_config"):
+                costs.append(float(self.cursor.fetchone()["set_config"]))
+            if sql.startswith("WITH m AS"):
+                queries.append((sql, params))
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self.cursor, name)
+
+    class Connection:
+        def __init__(self, conn):
+            self.conn = conn
+
+        def cursor(self):
+            return Cursor(self.conn.cursor())
+
+    with original() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT current_setting('cpu_tuple_cost') AS cost, pg_backend_pid() AS pid")
+        before = cur.fetchone()
+        # Shadow just the native arm on this connection. The ordinary corpus
+        # has inline rows, so it cannot catch the underestimated TOAST scan.
+        cur.execute("CREATE TEMP TABLE fluid_session_nodes "
+                    "(LIKE public.fluid_session_nodes INCLUDING ALL) ON COMMIT DROP")
+        # Reproduce maintenance's heap rewrite and bulk index build, rather
+        # than inserting into a cache/index that already exists.
+        cur.execute("ALTER TABLE pg_temp.fluid_session_nodes DROP COLUMN recall_text")
+        text = "log code sample " + " ".join(md5(str(k).encode()).hexdigest() for k in range(118))
+        rows = []
+        # 7,200 rows retain the transition; 3,584 still scan at the floor.
+        for i in range(225):
+            for j in range(32):
+                body = "zebrafish quokka capybara " + text if i < 3 and j == 0 else text
+                rows.append((f"toasted-{i}", str(j), i * 100 + j,
+                             Json(Message("user", [Text(body)]).to_dict())))
+        execute_values(cur, "INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES %s", rows)
+        cur.execute("ALTER TABLE pg_temp.fluid_session_nodes ADD COLUMN recall_text TEXT "
+                    "GENERATED ALWAYS AS (CASE WHEN TRUE THEN message::text END) STORED")
+        cur.execute("CREATE INDEX toasted_recall_gin ON pg_temp.fluid_session_nodes "
+                    "USING gin (recall_text gin_trgm_ops)")
+        cur.execute("ANALYZE pg_temp.fluid_session_nodes")
+
+        @contextmanager
+        def capture():
+            yield Connection(conn)
+
+        with monkeypatch.context() as mp:
+            mp.setattr(recall, "get_db", capture)
+            for configured, expected in (("0.01", 0.05), ("0.2", 0.2)):
+                cur.execute("SELECT set_config('cpu_tuple_cost', %s, true)", (configured,))
+                hits = recall._search_sync(["zebrafish", "quokka", "capybara"], 5, None)
+                assert len([h for h in hits if h.session_id.startswith("toasted-")]) == 3
+                assert costs[-1] == expected
+                sql, params = queries[-2]  # Native, followed by delegated.
+                assert "FROM fluid_session_nodes" in sql
+                cur.execute("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, params)
+                plan = cur.fetchone()["QUERY PLAN"][0]["Plan"]
+
+                def nodes(node):
+                    yield node
+                    for child in node.get("Plans", []):
+                        yield from nodes(child)
+
+                if configured == "0.01":
+                    cur.execute("SELECT set_config('cpu_tuple_cost', '0.01', true)")
+                    cur.execute("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, params)
+                    baseline = cur.fetchone()["QUERY PLAN"][0]["Plan"]
+                    assert any(n["Node Type"] == "Seq Scan" and
+                               n.get("Relation Name") == "fluid_session_nodes"
+                               for n in nodes(baseline)), baseline
+                    cur.execute("SELECT set_config('cpu_tuple_cost', '0.05', true)")
+
+                scans = list(nodes(plan))
+                assert any(n["Node Type"] == "Bitmap Index Scan" and
+                           n.get("Index Name") == "toasted_recall_gin" for n in scans), plan
+                assert not any(n["Node Type"] == "Seq Scan" and
+                               n.get("Relation Name") == "fluid_session_nodes" for n in scans), plan
+    # A second transaction on the pooled connection must not inherit the
+    # search's cost floor (nor the deliberately higher operator setting).
+    with original() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT current_setting('cpu_tuple_cost') AS cost, pg_backend_pid() AS pid")
+        assert cur.fetchone() == before
+
+
+def test_cache_cost_does_not_leak_after_rollback_on_same_backend(recall, monkeypatch):
+    from psycopg2.errors import DivisionByZero
+
+    original = recall.get_db
+    with original() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT current_setting('cpu_tuple_cost') AS cost, pg_backend_pid() AS pid")
+        before = cur.fetchone()
+
+    with pytest.raises(DivisionByZero), original() as conn:
+        @contextmanager
+        def shared_transaction():
+            yield conn
+
+        with monkeypatch.context() as mp:
+            mp.setattr(recall, "get_db", shared_transaction)
+            assert recall._search_sync(["recallneedle", "quokkaneedle"], 5, None)
+        cur = conn.cursor()
+        cur.execute("SELECT current_setting('cpu_tuple_cost') AS cost, pg_backend_pid() AS pid")
+        during = cur.fetchone()
+        assert during["pid"] == before["pid"]
+        assert float(during["cost"]) == max(float(before["cost"]), 0.05)
+        cur.execute("SELECT 1 / 0")
+
+    # This is a real pool release/recheckout after get_db() rolls back.
+    with original() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT current_setting('cpu_tuple_cost') AS cost, pg_backend_pid() AS pid")
+        assert cur.fetchone() == before
+
+
 def _legacy_top_rows(cur, table, column, ts, where, where_params, select, patterns):
     """Freeze the pre-#2000 query for exact result/cap parity, not just index parity."""
     from app.core.provider import fluid_pg_store as recall

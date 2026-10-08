@@ -572,6 +572,16 @@ def _search_sync(
         from app.db.schema_postgres import session_recall_cache_ready
 
         cached = session_recall_cache_ready(cur)
+        if cached:
+            # The heap can contain little but TOAST pointers. PG's default
+            # per-tuple cost misses fetching/scanning the stored transcript,
+            # making a selective GIN lookup look dearer than a full scan.
+            # Price that work only in this recall transaction, without
+            # disabling scans or lowering an operator's higher cost setting.
+            cur.execute(
+                "SELECT set_config('cpu_tuple_cost', "
+                "GREATEST(current_setting('cpu_tuple_cost')::numeric, 0.05)::text, true)"
+            )
         excluded = _exclusion_ids(cur, exclude_session_id)
         not_excluded = f"session_id NOT IN ({_in(excluded)})" if excluded else "TRUE"
 
