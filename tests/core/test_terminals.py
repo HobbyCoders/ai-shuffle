@@ -19,7 +19,7 @@ import pytest
 from app.core import terminals as T
 
 pytestmark = [
-    pytest.mark.skipif(not T.pty_supported(), reason="needs a Unix PTY"),
+    pytest.mark.skipif(os.name == "nt" or not T.pty_supported(), reason="needs a Unix PTY"),
     pytest.mark.timeout(60),
 ]
 

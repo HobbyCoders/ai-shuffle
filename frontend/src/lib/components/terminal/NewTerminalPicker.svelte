@@ -1,7 +1,7 @@
 <script lang="ts">
 	/** Folder and shell for a new terminal. Used as the "+" popover and as the empty state. */
 	import { Folder, TerminalSquare } from 'lucide-svelte';
-	import type { ProbeState } from '$lib/terminal/gating';
+	import { cwdProblem, type ProbeState } from '$lib/terminal/gating';
 
 	let {
 		probe,
@@ -33,7 +33,7 @@
 	// svelte-ignore state_referenced_locally
 	let shell = $state(probe.defaultShell ?? probe.shells[0] ?? '');
 	let input = $state<HTMLInputElement>();
-	const folderError = $derived(folder.trim() && !folder.trim().startsWith('/') ? 'Use a full path, for example /workspace/my-project.' : '');
+	const folderError = $derived(folder.trim() ? cwdProblem(folder.trim()) ?? '' : '');
 
 	$effect(() => { if (!inline) input?.focus(); });
 

@@ -1,12 +1,12 @@
 """In-app terminals: owner-only shells on this worker's own pseudo-terminal.
 
-Phase 1 of #1945. Each :class:`Terminal` is one interactive shell (bash or sh)
-running on a Unix PTY in its own session (``setsid``), so closing a terminal
-can kill everything the shell started, background jobs included. Output goes
+Each terminal is an interactive shell on a Unix PTY (bash or sh) or Windows
+ConPTY (PowerShell). A Unix session or Windows Job Object contains everything
+the shell starts, background jobs included. Output goes
 into a bounded scrollback (about 5,000 lines or 2 MB, whichever is smaller)
 and to every attached viewer; a browser reload reattaches by id and replays
 the scrollback. Terminals live in this process only: when the app stops every
-shell's process group is killed and the list starts empty.
+shell and its descendants are killed and the list starts empty.
 
 The wire contract (routes, WebSocket messages, errors) is
 ``docs/internal/terminals.md``. Authorization lives in ``app/api/terminals.py``;
@@ -16,8 +16,8 @@ The shell environment is the worker's own environment minus every secret
 (:func:`shell_environment`). It is stricter than the Bash-tool scrubber: the
 provider keys that tool deliberately lets through are dropped here too.
 
-Unix only. On Windows (no PTY without ConPTY) :func:`supported` is False and
-creating a terminal fails with ``not_supported``.
+On Windows, ConPTY runs PowerShell in a kill-on-close Job Object. The
+HTTP/WebSocket contract and bounded output buffers are shared with Unix.
 """
 
 from __future__ import annotations
@@ -40,7 +40,11 @@ from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 _PTY_OK = False
-if sys.platform != "win32":
+if sys.platform == "win32":
+    from app.core import windows_conpty
+
+    _PTY_OK = windows_conpty.supported()
+else:
     try:
         import fcntl
         import select
@@ -122,14 +126,23 @@ def _now_iso() -> str:
 # ---------------------------------------------------------------------------
 
 def pty_supported() -> bool:
-    """Whether this worker can run a terminal at all (a Unix PTY)."""
-    return _PTY_OK and sys.platform != "win32"
+    """Whether this worker has Unix PTYs or Windows ConPTY."""
+    return _PTY_OK
 
 
 def available_shells() -> List[Dict[str, Any]]:
     """The shells present on this worker; the first is the default."""
     found: List[Dict[str, Any]] = []
-    for name, candidates in _SHELLS:
+    shells = _SHELLS
+    if sys.platform == "win32":
+        # Desktop launches need not have PowerShell 7 on PATH.
+        shells = (
+            ("pwsh", (os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
+                                    "PowerShell", "7", "pwsh.exe"),)),
+            ("powershell", (os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                                          "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),)),
+        )
+    for name, candidates in shells:
         path = next((p for p in candidates if os.path.isfile(p) and os.access(p, os.X_OK)), None)
         if path is None:
             which = shutil.which(name)
@@ -145,7 +158,7 @@ def supported() -> bool:
 
 def capability_version() -> int:
     """The ``terminal`` capability a worker advertises: 1 = phase-1 PTY
-    terminals, 0 = none (Windows, or no shell)."""
+    terminals, 0 = none (no PTY support or no shell)."""
     try:
         return 1 if supported() else 0
     except Exception:  # noqa: BLE001 — capability detection never raises
@@ -496,7 +509,10 @@ class Terminal:
         finally:
             os.close(slave)
         os.set_blocking(master, False)
-        self._proc, self._fd = proc, master
+        self._start_reader(proc, master, self._read_loop)
+
+    def _start_reader(self, proc, fd, target) -> None:
+        self._proc, self._fd = proc, fd
         self.state = STATE_STARTING
         self.exit_code = None
         self.exited_at = None
@@ -506,7 +522,7 @@ class Terminal:
         self._last_output = 0.0
         self._started_at = time.monotonic()
         self._exited = asyncio.Event()
-        self._thread = threading.Thread(target=self._read_loop, args=(proc, master),
+        self._thread = threading.Thread(target=target, args=(proc, fd),
                                         name=f"terminal-{self.id}", daemon=True)
         self._thread.start()
 
@@ -751,6 +767,101 @@ class Terminal:
             await asyncio.sleep(0.03)
 
 
+class WindowsTerminal(Terminal):
+    """ConPTY transport; registry, viewers, scrollback and wire state stay shared."""
+
+    def spawn(self) -> None:
+        self._loop = asyncio.get_running_loop()
+        proc = windows_conpty.ConPTYProcess(
+            self.shell_path, self.cwd, shell_environment(self.shell, self.shell_path),
+            self.cols, self.rows,
+        )
+        self._start_reader(proc, None, self._read_windows)
+
+    def _read_windows(self, proc, _fd) -> None:
+        closer = None
+        try:
+            while True:
+                data = proc.read(_READ_SIZE)
+                if data == b"":
+                    break
+                if data:
+                    self._post(self._on_output, data)
+                else:
+                    time.sleep(0.01)
+                if proc.poll() is not None and closer is None:
+                    # ClosePseudoConsole may wait for us to drain its output.
+                    closer = threading.Thread(target=proc.close, daemon=True)
+                    closer.start()
+        except OSError:
+            logger.debug("terminal %s: ConPTY reader stopped", self.id, exc_info=True)
+        finally:
+            if closer is None:
+                closer = threading.Thread(target=proc.close, daemon=True)
+                closer.start()
+            closer.join()
+            proc.closed.wait()
+            code = proc.poll()
+            proc.release()
+            self._post(self._on_exit, _exit_code(code))
+
+    async def kill(self) -> None:
+        self._closing = True
+        if self._proc is not None and self.state != STATE_EXITED:
+            await asyncio.to_thread(self._proc.close)
+            await self.wait_exited(3.0)
+        if self._thread is not None:
+            await asyncio.to_thread(self._thread.join, 3.0)
+
+    def kill_now(self) -> None:
+        if self._proc is not None:
+            self._proc.close()
+            if self._thread is not None:
+                self._thread.join(timeout=3.0)
+
+    def refresh_busy(self) -> bool:
+        busy = False
+        proc = self._proc
+        if self.state != STATE_EXITED and proc is not None:
+            try:
+                busy = proc.busy()
+            except OSError:
+                pass
+        changed = busy != self.busy
+        self.busy = busy
+        if self.state == STATE_STARTING and proc is not None and proc.poll() is None \
+                and time.monotonic() - self._started_at > 2.0:
+            self.state = STATE_LIVE
+            changed = True
+        return changed
+
+    def resize(self, cols: int, rows: int) -> None:
+        self.cols, self.rows = cols, rows
+        if self._proc is not None and self.state != STATE_EXITED:
+            try:
+                self._proc.resize(cols, rows)
+            except OSError:
+                pass
+
+    async def write(self, data: bytes) -> None:
+        async with self._write_lock:
+            if self._proc is None or self.state == STATE_EXITED:
+                raise TerminalError("terminal_exited", "This terminal has exited. Restart it to type again.", 409)
+            try:
+                await asyncio.wait_for(asyncio.to_thread(self._proc.write, data), WRITE_TIMEOUT_SECONDS)
+            except asyncio.TimeoutError as exc:
+                # A stuck pipe writer must not accumulate executor threads.
+                await self.kill()
+                raise TerminalError("terminal_unresponsive",
+                                    "The terminal isn't reading input right now. Try again in a moment.", 409) from exc
+            except OSError as exc:
+                raise TerminalError("terminal_exited", "This terminal has exited. Restart it to type again.", 409) from exc
+
+    def holds_bracketed_paste(self) -> bool:
+        # PSReadLine doesn't offer the bash/readline guarantee used by paste.
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Paste
 # ---------------------------------------------------------------------------
@@ -941,7 +1052,8 @@ class TerminalRegistry:
         # Re-checked after the await: two creates may have raced.
         if self.count >= self.limit:
             raise TerminalError("limit_reached", self.limit_message(worker["name"]), 409)
-        terminal = Terminal(
+        terminal_class = WindowsTerminal if sys.platform == "win32" else Terminal
+        terminal = terminal_class(
             shell=chosen, cwd=path, folder_source=source, session_id=session_id,
             created_by=created_by, worker_id=worker["id"],
             cols=_clamp(cols, COLS_RANGE, DEFAULT_COLS), rows=_clamp(rows, ROWS_RANGE, DEFAULT_ROWS),

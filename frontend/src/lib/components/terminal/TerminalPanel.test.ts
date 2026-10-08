@@ -128,6 +128,22 @@ function clipboardPaste(index: number, text: string) {
 
 const sentText = () => fx.socketInput.map((entry) => entry.data).join('');
 
+describe('Windows picker', () => {
+	it('opens the seeded Windows folder using the discovered PowerShell shell', async () => {
+		api.targets.mockResolvedValue({ ...targets,
+			worker: { id: 'w', name: 'DesktopWorker', platform: 'windows' },
+			shells: [{ name: 'powershell', default: true }], default_shell: 'powershell',
+			default_folder: { path: String.raw`C:\Projects\app`, source: 'project' },
+		});
+		const view = await mount();
+		expect((view.getByRole('textbox', { name: /^Folder/ }) as HTMLInputElement).value).toBe(String.raw`C:\Projects\app`);
+		const button = view.getByRole('button', { name: 'Open terminal' }) as HTMLButtonElement;
+		expect(button.disabled).toBe(false);
+		await fireEvent.click(button);
+		await waitFor(() => expect(api.create).toHaveBeenCalledWith({ session_id: 's1', cwd: null, shell: 'powershell' }));
+	});
+});
+
 describe('pasting', () => {
 	it('asks before a multi-line paste and sends nothing until Paste', async () => {
 		const view = await mount();

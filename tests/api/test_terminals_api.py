@@ -23,7 +23,7 @@ from app.core import terminals as service
 from app.core.config import settings
 
 pytestmark = [
-    pytest.mark.skipif(not service.pty_supported(), reason="needs a Unix PTY"),
+    pytest.mark.skipif(os.name == "nt" or not service.pty_supported(), reason="needs a Unix PTY"),
     pytest.mark.timeout(90),
 ]
 

@@ -109,6 +109,17 @@ describe('blockAccess', () => {
 	});
 });
 
+describe('Windows folders', () => {
+	it('allows drive and UNC paths but rejects relative and traversal paths', () => {
+		for (const path of [String.raw`C:\Projects\app`, 'D:/Projects/app', String.raw`\\server\share\app`]) {
+			expect(cwdProblem(path)).toBeNull();
+		}
+		for (const path of [String.raw`C:Projects`, String.raw`C:\Projects\..\other`, String.raw`\\server\share\.\app`]) {
+			expect(cwdProblem(path)).not.toBeNull();
+		}
+	});
+});
+
 describe('labels', () => {
 	it('names the folder', () => {
 		expect(folderName('/workspace/app/')).toBe('app');

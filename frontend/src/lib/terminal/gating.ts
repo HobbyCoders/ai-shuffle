@@ -81,8 +81,9 @@ const HIDDEN = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
  */
 export function cwdProblem(cwd: string): string | null {
 	if (HIDDEN.test(cwd)) return "The folder has hidden or control characters, so it can't open from here.";
-	if (!cwd.startsWith('/')) return 'The folder must be a full path, for example /workspace/my-project.';
-	if (cwd.split('/').some((part) => part === '.' || part === '..')) return 'The folder has . or .. in it. Use a plain full path.';
+	const windows = /^[a-z]:[\\/]/i.test(cwd) || /^\\\\[^\\/]+[\\/][^\\/]+/.test(cwd);
+	if (!cwd.startsWith('/') && !windows) return 'The folder must be a full path, for example /workspace/my-project or C:\\Projects.';
+	if (cwd.split(windows ? /[\\/]/ : /\//).some((part) => part === '.' || part === '..')) return 'The folder has . or .. in it. Use a plain full path.';
 	return null;
 }
 
