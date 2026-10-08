@@ -17,7 +17,7 @@ function mount(overrides: Record<string, unknown> = {}) {
 	const onComplete = vi.fn();
 	const props = {
 		sessionId: 's 1',
-		request: { id: 'r/1', kind: 'machine', purpose: 'Check disk usage on 10.0.0.5', expires_at: inAnHour() },
+		request: { id: 'r/1', kind: 'machine', purpose: 'Check disk usage on 10.0.0.5', expires_at: inAnHour(), suggested_host: '10.0.0.5', suggested_port: 22, suggested_username: 'ops' },
 		savedConnections: saved,
 		vaultAvailable: true,
 		onComplete,
@@ -38,7 +38,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('PrivateAccessRequest', () => {
-	it('offers the saved server named in the request and grants it without sending credentials', async () => {
+	it('offers the saved server matching the structured hints and grants it without sending credentials', async () => {
 		const { onComplete } = mount();
 		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('build');
 		expect(screen.getByText('ops@10.0.0.5:22')).toBeTruthy();
@@ -47,6 +47,51 @@ describe('PrivateAccessRequest', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
 		await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
 		expect(m.post).toHaveBeenCalledWith(endpoint, { connection: null, saved_id: 'build', minutes: 240, save_connection: false });
+	});
+
+	it.each([
+		{ suggested_host: '10.0.0.146', suggested_port: 22, suggested_username: 'x' },
+		{ suggested_host: '10.0.0.5', suggested_port: 2222, suggested_username: 'ops' },
+		{ suggested_host: '10.0.0.5', suggested_port: 22, suggested_username: 'root' },
+		{ suggested_host: '10.0.0.50' },
+		{ suggested_port: 22, suggested_username: 'ops' },
+		{}
+	])('defaults to new rather than an unrelated saved connection for %j', hints => {
+		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Check 10.0.0.5 and 10.0.0.9', expires_at: inAnHour(), ...hints } });
+		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('');
+		expect(field('Server IP address').value).toBe(hints.suggested_host ?? '');
+		expect(field('Port').value).toBe(String(hints.suggested_port ?? 22));
+		expect(field('Username').value).toBe(hints.suggested_username ?? '');
+		expect(field('Password').value).toBe('');
+	});
+
+	it.each(['10.0.0.5', 'BUILD.Example.', '2001:db8::5'])('matches only the host when port and user are omitted: %s', host => {
+		mount({
+			request: { id: 'r/1', kind: 'machine', purpose: 'Inspect server', expires_at: inAnHour(), suggested_host: host },
+			savedConnections: [{ ...saved[1], target: `ops@${host.toLowerCase().replace(/\.$/, '')}:2222` }]
+		});
+		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('build');
+	});
+
+	it('matches canonical IPv6 saved targets against expanded literals', () => {
+		mount({
+			request: { id: 'r/1', kind: 'machine', purpose: 'Inspect server', expires_at: inAnHour(), suggested_host: '2001:0db8:0:0:0:0:0:5', suggested_port: 2222, suggested_username: 'ops' },
+			savedConnections: [{ ...saved[1], target: 'ops@2001:db8::5:2222' }]
+		});
+		expect((screen.getByLabelText('Connection') as HTMLSelectElement).value).toBe('build');
+	});
+
+	it('prefills editable new-machine fields and submits the reviewed values', async () => {
+		mount({ request: { id: 'r/1', kind: 'machine', purpose: 'Inspect VM', expires_at: inAnHour(), suggested_host: '10.0.0.146', suggested_port: 2222, suggested_username: 'x' } });
+		expect(field('Server IP address').value).toBe('10.0.0.146');
+		expect(field('Port').value).toBe('2222');
+		expect(field('Username').value).toBe('x');
+		await fireEvent.input(field('Server IP address'), { target: { value: '10.0.0.147' } });
+		await fireEvent.input(field('Port'), { target: { value: '22' } });
+		await fireEvent.input(field('Username'), { target: { value: 'deploy' } });
+		await fireEvent.input(field('Password'), { target: { value: 'card-only' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect' }));
+		expect(m.post).toHaveBeenCalledWith(endpoint, expect.objectContaining({ saved_id: '', connection: expect.objectContaining({ host: '10.0.0.147', port: 22, username: 'deploy' }) }));
 	});
 
 	it('keeps the full saved host key in an initially collapsed disclosure', async () => {

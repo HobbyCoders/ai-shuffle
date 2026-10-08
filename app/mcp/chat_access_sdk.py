@@ -22,6 +22,14 @@ user to post addresses, passwords, private keys, API keys, tokens or other
 connection details as chat text. The card sends those inputs directly to the
 worker; you receive only a temporary handle, resource kind, permissions and
 expiry. Never try to reveal private inputs.
+For machine access, pass suggested_host with the known unicast IPv4 or IPv6
+literal, never a hostname, URL or credentials. Hostname approval is not supported.
+Pass suggested_port and suggested_username when known. These editable
+hints prefill the card for review; omit unknown values and never guess. Never
+put passwords, private keys or credentials in hints or conversation text. A saved
+connection is preselected only when its host (and any supplied port/user) matches;
+otherwise the card starts with a new connection. Hints grant no access. Approved
+machine connection details remain private to the card, not tool results.
 For folder access, include suggested_path with the absolute folder path you want
 on the worker that runs this chat. The user can edit it before approving. Use a
 known path, not a guessed one; in Docker/Unraid this is the container path, not
@@ -80,6 +88,9 @@ def create_chat_access_server(session_id: str):
             if operation == "request":
                 result = await broker.request(session_id, args.get("kind", ""), args.get("purpose", ""),
                                               suggested_path=args.get("suggested_path", ""),
+                                              suggested_host=args.get("suggested_host", ""),
+                                              suggested_port=args.get("suggested_port"),
+                                              suggested_username=args.get("suggested_username", ""),
                                               service_provider=args.get("service_provider", ""),
                                               suggested_url=args.get("suggested_url", ""),
                                               plugin=args.get("plugin", ""), service=args.get("service", ""))
@@ -97,11 +108,14 @@ def create_chat_access_server(session_id: str):
             message = "Operation failed or timed out. Inspect the target before retrying; a remote change may already have occurred."
         return {"isError": True, "content": [{"type": "text", "text": message}]}
 
-    @tool("RequestChatAccess", "Show a private access card for an SSH machine, Linux or macOS folder, or HTTPS API service. Explain why access is needed. Machine/folder requests wait up to four minutes and return an opaque handle. Service requests return awaiting_user immediately, not access; preparation lasts 24 hours and identical retries resume it. The user explicitly submits private inputs when ready. After the user confirms readiness, call ChatResources for the approved handle; do not poll or assume consent. For folders, suggested_path is a known absolute path on the owning worker. For services, service_provider chooses cloudflare or custom; suggested_url is a known PUBLIC HTTPS API base without credentials/query/fragment. Cloudflare prefills its official endpoint. For a service an installed plugin declares a sign-in for, pass plugin and service instead of the hints; the user signs in from the card. Hints grant no access. Never put secrets or private connection details in tool arguments, and do not promise generic OAuth.", {
+    @tool("RequestChatAccess", "Show a private access card for an SSH machine, Linux or macOS folder, or HTTPS API service. Explain why access is needed. Machine/folder requests wait up to four minutes and return an opaque handle. Service requests return awaiting_user immediately, not access; preparation lasts 24 hours and identical retries resume it. The user explicitly submits private inputs when ready. After the user confirms readiness, call ChatResources for the approved handle; do not poll or assume consent. For machines, suggested_host is a known unicast IPv4 or IPv6 literal, never a hostname (hostname approval is not supported); suggested_port (1-65535) and suggested_username (POSIX username) are optional known hints. All are editable in the card. A matching saved connection is preselected; otherwise it starts with a new connection. Passwords and private keys belong only in the card. For folders, suggested_path is a known absolute path on the owning worker. For services, service_provider chooses cloudflare or custom; suggested_url is a known PUBLIC HTTPS API base without credentials/query/fragment. Cloudflare prefills its official endpoint. For a service an installed plugin declares a sign-in for, pass plugin and service instead of the hints; the user signs in from the card. Hints grant no access. Never put secrets in tool arguments; only known machine host/port/username may be passed as machine hints. Do not promise generic OAuth.", {
         "type": "object",
         "properties": {
             "kind": {"type": "string", "enum": ["machine", "folder", "service"]},
             "purpose": {"type": "string"},
+            "suggested_host": {"type": "string", "maxLength": 64, "description": "Machine only: known unicast IPv4 or IPv6 literal, editable for review. Hostnames are not supported; pass the machine IP. No URLs, credentials or interface scope; omit when unknown."},
+            "suggested_port": {"type": "integer", "minimum": 1, "maximum": 65535, "description": "Machine only: known SSH port, editable for review. Omit when unknown."},
+            "suggested_username": {"type": "string", "maxLength": 128, "description": "Machine only: known POSIX username, editable for review. Never passwords, keys or credentials; omit when unknown."},
             "suggested_path": {"type": "string", "description": "Folder only: known absolute path on the owning worker, prefilled for user review. Omit when unknown."},
             "service_provider": {"type": "string", "enum": ["cloudflare", "custom"], "description": "Service only: known provider preset, or custom. Omit for other kinds."},
             "suggested_url": {"type": "string", "description": "Service only: known public HTTPS API base, without credentials, query or fragment. Never private connection details; omit when unknown."},

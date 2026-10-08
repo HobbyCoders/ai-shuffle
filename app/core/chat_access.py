@@ -155,6 +155,9 @@ class AccessRequest:
     result: asyncio.Future
     claiming: bool = False
     suggested_path: str = ""
+    suggested_host: str = ""
+    suggested_port: int | None = None
+    suggested_username: str = ""
     service_provider: str = ""
     suggested_url: str = ""
     plugin_id: str = ""
@@ -169,6 +172,10 @@ class AccessRequest:
         result = {key: getattr(self, key) for key in ("id", "kind", "purpose", "expires_at")}
         if self.suggested_path:
             result["suggested_path"] = self.suggested_path
+        if self.kind == "machine":
+            for key in ("suggested_host", "suggested_port", "suggested_username"):
+                if getattr(self, key) not in ("", None):
+                    result[key] = getattr(self, key)
         if self.kind == "service":
             result.update(status="awaiting_user", service_provider=self.service_provider,
                           suggested_url=self.suggested_url)
@@ -437,7 +444,8 @@ class Broker:
 
     async def request(self, session_id: str, kind: str, purpose: str, suggested_path: str = "",
                       service_provider: str = "", suggested_url: str = "", plugin: str = "",
-                      service: str = ""):
+                      service: str = "", suggested_host: str = "",
+                      suggested_port: int | None = None, suggested_username: str = ""):
         owner = await session_owner(session_id)
         if not isinstance(plugin, str) or not isinstance(service, str):
             raise AccessDenied("Name an installed plugin and one service it declares.")
@@ -452,6 +460,21 @@ class Broker:
             suggested_url = chat_services.parse_origin(config.service_url).url
         if kind not in {"machine", "folder", "service"} or not isinstance(purpose, str) or not purpose.strip() or len(purpose) > 2000:
             raise AccessDenied("Specify machine, folder or service and a short explanation of the requested access.")
+        if not isinstance(suggested_host, str) or not isinstance(suggested_username, str):
+            raise AccessDenied("Machine hints must be an IPv4 or IPv6 literal and a POSIX username. Pass the machine IP, not a hostname.")
+        if (suggested_host or suggested_port is not None or suggested_username) and kind != "machine":
+            raise AccessDenied("Machine setup hints are only available for machine requests.")
+        if suggested_host:
+            try:
+                address = ipaddress.ip_address(suggested_host)
+            except ValueError:
+                raise AccessDenied("Pass the machine IP as an IPv4 or IPv6 literal, not a hostname, URL or credentials.") from None
+            if "%" in suggested_host or address.is_unspecified or address.is_multicast or address.is_link_local:
+                raise AccessDenied("Suggest a unicast machine IP literal without an interface scope.")
+        if suggested_port is not None and (type(suggested_port) is not int or not 1 <= suggested_port <= 65535):
+            raise AccessDenied("A suggested machine port must be an integer from 1 to 65535.")
+        if suggested_username and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}", suggested_username):
+            raise AccessDenied("Suggest a POSIX username, never credentials or connection strings.")
         if not isinstance(suggested_path, str) or (suggested_path and (
             kind != "folder" or not suggested_path.startswith("/") or len(suggested_path) > 4096
             or any(c in suggested_path for c in "\0\r\n")
@@ -496,7 +519,9 @@ class Broker:
         request = AccessRequest(uuid.uuid4().hex, session_id, owner, kind, purpose.strip(),
                                 time.time() + duration, asyncio.get_running_loop().create_future(),
                                 suggested_path=suggested_path, service_provider=service_provider,
-                                suggested_url=suggested_url, plugin_id=plugin, plugin_service=service)
+                                suggested_url=suggested_url, plugin_id=plugin, plugin_service=service,
+                                suggested_host=suggested_host, suggested_port=suggested_port,
+                                suggested_username=suggested_username)
         self.requests[request.id] = request
         self._notify(session_id, owner)
         keep_pending = False

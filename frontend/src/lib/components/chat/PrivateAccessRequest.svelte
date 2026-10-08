@@ -6,7 +6,7 @@
 	import ServiceAccessRequest from './ServiceAccessRequest.svelte';
 	import PluginServiceAccess from './PluginServiceAccess.svelte';
 	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
-	let { sessionId, request, savedConnections, vaultAvailable, owner = null, clearSecretsKey = 0, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string }; savedConnections: Saved[]; vaultAvailable: boolean; owner?: string | null; clearSecretsKey?: number; onComplete: () => void } = $props();
+	let { sessionId, request, savedConnections, vaultAvailable, owner = null, clearSecretsKey = 0, onComplete }: { sessionId: string; request: { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string; suggested_host?: string; suggested_port?: number; suggested_username?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string }; savedConnections: Saved[]; vaultAvailable: boolean; owner?: string | null; clearSecretsKey?: number; onComplete: () => void } = $props();
 	// A mirrored conversation's access lives on the device that runs it; this worker only relays.
 	const where = $derived(owner ?? 'this worker');
 	const sentTo = $derived(owner ? `Sent only to ${owner} through this worker` : 'Sent only to this worker');
@@ -23,22 +23,33 @@
 		const tick = setInterval(() => { now = Date.now(); }, 1000);
 		return () => clearInterval(tick);
 	});
-	// Offer the saved server the model asked for (by host in its request), else
-	// the first saved one; "New connection" stays one choice away.
+	// Only structured hints can select a saved machine. Never infer a target
+	// from free-text purpose or fall back to an unrelated saved connection.
 	let savedId = $state(untrack(() => {
-		const options = savable ? savedConnections.filter(s => (s.kind ?? 'machine') === request.kind) : [];
-		if (!options.length) return '';
-		const host = (target: string) => target.split('@').pop()?.split(':')[0] ?? '';
-		return (options.find(s => host(s.target) && request.purpose.includes(host(s.target))) ?? options[0]).id;
+		if (!machine || !request.suggested_host) return '';
+		const normalizeHost = (value: string) => {
+			const host = value.toLowerCase().replace(/\.$/, '');
+			if (!host.includes(':')) return host;
+			try { return new URL(`http://[${host}]`).hostname; }
+			catch { return host; }
+		};
+		const options = savedConnections.filter(s => (s.kind ?? 'machine') === 'machine');
+		return options.find(s => {
+			// The catalogue formats targets as username@host:port, including IPv6.
+			const target = /^([^@]+)@(.+):([0-9]+)$/.exec(s.target);
+			return target && normalizeHost(target[2]) === normalizeHost(request.suggested_host!)
+				&& (request.suggested_port === undefined || Number(target[3]) === request.suggested_port)
+				&& (!request.suggested_username || target[1] === request.suggested_username);
+		})?.id ?? '';
 	}));
 	let saveConnection = $state(false);
 	let label = $state(machine ? 'SSH server' : 'Folder');
 	let minutes = $state(60);
 	let path = $state(untrack(() => request.kind === 'folder' ? request.suggested_path ?? '' : ''));
 	let writable = $state(false);
-	let host = $state('');
-	let port = $state(22);
-	let username = $state('');
+	let host = $state(untrack(() => machine ? request.suggested_host ?? '' : ''));
+	let port = $state(untrack(() => machine ? request.suggested_port ?? 22 : 22));
+	let username = $state(untrack(() => machine ? request.suggested_username ?? '' : ''));
 	let fingerprint = $state('');
 	let password = $state('');
 	let privateKey = $state('');

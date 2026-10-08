@@ -653,6 +653,146 @@ async def test_sdk_handler_obeys_session_mode_after_private_grant(broker, ssh_ta
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("hints", [
+    {"suggested_host": "ssh://10.0.0.146"},
+    {"suggested_host": "user:password@host"},
+    {"suggested_host": "user@host"},
+    {"suggested_host": "host/path"},
+    {"suggested_host": "host?password=secret"},
+    {"suggested_host": "host#secret"},
+    {"suggested_host": " host"},
+    {"suggested_host": "host name"},
+    {"suggested_host": "host\n"},
+    {"suggested_host": "host\x00"},
+    {"suggested_host": "host\x7f"},
+    {"suggested_host": "999.999.1.1"},
+    {"suggested_host": "0.0.0.0"},
+    {"suggested_host": "::"},
+    {"suggested_host": "224.0.0.1"},
+    {"suggested_host": "ff02::1"},
+    {"suggested_host": "169.254.1.1"},
+    {"suggested_host": "fe80::1"},
+    {"suggested_host": "-host"},
+    {"suggested_host": "host..example"},
+    {"suggested_host": "[2001:db8::1]"},
+    {"suggested_host": "fe80::1%eth0"},
+    {"suggested_host": "a" * 65},
+    {"suggested_host": ".".join(["a" * 63] * 4)},
+    {"suggested_host": 123},
+    {"suggested_host": None},
+    {"suggested_port": 0},
+    {"suggested_port": 65536},
+    {"suggested_port": True},
+    {"suggested_port": 22.0},
+    {"suggested_port": "22"},
+    {"suggested_username": "user:password"},
+    {"suggested_username": "user@host"},
+    {"suggested_username": " user"},
+    {"suggested_username": "user name"},
+    {"suggested_username": "user\n"},
+    {"suggested_username": "user\x00"},
+    {"suggested_username": "-user"},
+    {"suggested_username": "a" * 129},
+    {"suggested_username": 123},
+    {"suggested_username": None},
+])
+async def test_machine_hints_reject_invalid_inputs_before_card(broker, hints):
+    with pytest.raises(AccessDenied):
+        await broker.request("chat", "machine", "Inspect VM", **hints)
+    assert not broker.requests and not broker.grants
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["folder", "service"])
+@pytest.mark.parametrize("hints", [
+    {"suggested_host": "10.0.0.146"}, {"suggested_port": 22}, {"suggested_username": "x"},
+])
+async def test_machine_hints_are_machine_only(broker, kind, hints):
+    with pytest.raises(AccessDenied, match="only available for machine"):
+        await broker.request("chat", kind, "Inspect resource", **hints)
+    assert not broker.requests
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host,port,username", [
+    ("10.0.0.146", 22, "x"), ("192.0.2.1", 1, "_build-user"),
+    ("2001:db8::1", 65535, "Build.user"), ("2001:db8::2", None, ""),
+])
+async def test_machine_sdk_hints_reach_only_the_owner_card(broker, monkeypatch, host, port, username):
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+    monkeypatch.setattr(sdk, "broker", broker)
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    args = {"kind": "machine", "purpose": "Inspect VM", "suggested_host": host,
+            "suggested_username": username}
+    if port is not None:
+        args["suggested_port"] = port
+    requested = asyncio.create_task(tools["RequestChatAccess"].handler(args))
+    await asyncio.sleep(0)
+    try:
+        card = (await broker.snapshot("chat"))["requests"][0]
+        assert card["suggested_host"] == host
+        assert card.get("suggested_port") == port
+        assert card.get("suggested_username", "") == username
+        assert not broker.grants  # Prefilling never grants consent.
+        resources = await broker.resources("chat")
+        assert not resources["grants"]
+        assert not resources.get("pending_requests")  # Only services have resumable preparation.
+        await broker.decline("chat", card["id"])
+        response = await requested
+        assert response["isError"]
+    finally:
+        requested.cancel()
+        await asyncio.gather(requested, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hostname", ["build", "build.example", "BUILD.example.", "a" * 63 + "." + "b" * 63])
+async def test_machine_hostname_hint_requires_ip_before_showing_card(broker, hostname):
+    with pytest.raises(AccessDenied, match="Pass the machine IP.*not a hostname"):
+        await broker.request("chat", "machine", "Inspect server", suggested_host=hostname)
+    assert not broker.requests and not broker.grants
+
+
+@pytest.mark.asyncio
+async def test_machine_card_hints_can_be_approved_unchanged(broker, ssh_target, monkeypatch):
+    from app.core.chat_access import GrantSubmission
+    from app.core.provider.sdk_tool_records import recorded_sdk_server_tools
+    from app.mcp import chat_access_sdk as sdk
+    monkeypatch.setattr(sdk, "broker", broker)
+    tools = {t.name: t for t in recorded_sdk_server_tools(sdk.create_chat_access_server("chat"))}
+    spec, commands, _ = ssh_target
+    args = {"kind": "machine", "purpose": "Inspect server", "suggested_host": spec.host,
+            "suggested_port": spec.port, "suggested_username": spec.username}
+    requested = asyncio.create_task(tools["RequestChatAccess"].handler(args))
+    await asyncio.sleep(0)
+    try:
+        card = (await broker.snapshot("chat"))["requests"][0]
+        # Submit the card's actual hints unchanged; only secrets/key verification
+        # come from the private owner input, not agent arguments.
+        connection = GrantInput(kind="machine", label="Reviewed server",
+            host=card["suggested_host"], port=card["suggested_port"],
+            username=card["suggested_username"], password=spec.password,
+            fingerprint=spec.fingerprint)
+        await broker.fulfill("chat", card["id"], GrantSubmission(connection=connection))
+        response = await requested
+        assert not response.get("isError")
+        grant = next(iter(broker.grants.values()))
+        assert (grant.host, grant.port, grant.username) == (spec.host, spec.port, spec.username)
+        running = asyncio.create_task(broker.run("chat", grant.id, "command", {"command": "inspect"}))
+        action = await pending(broker)
+        await broker.decide("chat", action.id, True)
+        output = await running
+        assert output["stdout"] == "remote:inspect" and commands == ["inspect"]
+        resources = await broker.resources("chat")
+        assert set(resources["grants"][0]) == {"id", "kind", "expires_at", "writable"}
+        broker.revoke("chat", grant.id)
+    finally:
+        requested.cancel()
+        await asyncio.gather(requested, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_private_request_decline_cancel_and_cross_session(broker, ssh_target):
     from app.core.chat_access import GrantSubmission
     task = asyncio.create_task(broker.request("chat", "machine", "Need server access"))
@@ -687,9 +827,15 @@ async def test_saved_connection_requires_new_request_and_approval(broker, ssh_ta
         return "c" * 32
     monkeypatch.setattr(chat_vault, "save", save)
     monkeypatch.setattr(chat_vault, "load", lambda owner, saved_id: saved[saved_id])
-    first = asyncio.create_task(broker.request("chat", "machine", "Initial access"))
+    first = asyncio.create_task(broker.request("chat", "machine", "Initial access",
+                                              suggested_host=spec.host, suggested_port=spec.port,
+                                              suggested_username=spec.username))
     await asyncio.sleep(0)
     request = next(iter(broker.requests.values()))
+    card = (await broker.snapshot("chat"))["requests"][0]
+    assert card["suggested_host"] == spec.host
+    assert card["suggested_port"] == spec.port
+    assert card["suggested_username"] == spec.username
     blank = spec.model_copy(update={"fingerprint": ""})
     await broker.fulfill("chat", request.id, GrantSubmission(connection=blank, save_connection=True))
     handle = await first

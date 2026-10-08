@@ -64,6 +64,18 @@ def test_real_chat_access_tools_have_serializable_provider_schemas():
         "properties": {
             "kind": {"type": "string", "enum": ["machine", "folder", "service"]},
             "purpose": {"type": "string"},
+            "suggested_host": {
+                "type": "string", "maxLength": 64,
+                "description": "Machine only: known unicast IPv4 or IPv6 literal, editable for review. Hostnames are not supported; pass the machine IP. No URLs, credentials or interface scope; omit when unknown.",
+            },
+            "suggested_port": {
+                "type": "integer", "minimum": 1, "maximum": 65535,
+                "description": "Machine only: known SSH port, editable for review. Omit when unknown.",
+            },
+            "suggested_username": {
+                "type": "string", "maxLength": 128,
+                "description": "Machine only: known POSIX username, editable for review. Never passwords, keys or credentials; omit when unknown.",
+            },
             "suggested_path": {
                 "type": "string",
                 "description": "Folder only: known absolute path on the owning worker, prefilled for user review. Omit when unknown.",
@@ -94,7 +106,8 @@ def test_real_chat_access_tools_have_serializable_provider_schemas():
     ))
     encoded = json.dumps(wire)
     assert "RequestChatAccess" in encoded and "ChatWriteFile" in encoded
-    assert "suggested_path" in encoded
+    for hint in ("suggested_path", "suggested_host", "suggested_port", "suggested_username"):
+        assert hint in encoded
     # The broker's one-shot card is the approval; the generic gate would ask twice.
     for name in ("ChatRunCommand", "ChatWriteFile"):
         assert registry.get(f"mcp__chat-access__{name}").risk == "safe"
