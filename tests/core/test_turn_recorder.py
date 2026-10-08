@@ -12,6 +12,7 @@ in-memory SQLite shim.
 """
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -1430,6 +1431,94 @@ async def test_record_voice_exchange_writes_one_contiguous_batch(mock_db):
     assert rows[2]["payload"]["model"] == "gpt-realtime-2.1"
     assert rows[3]["payload"]["stop_reason"] == "end_turn"
     assert rows[3]["payload"]["usage"] == {"voice_realtime": {"total_tokens": 12}}
+
+
+async def test_recorded_agents_status_is_context_not_a_second_voice_write(mock_db):
+    """#1798: replay stored public text from the reported call, not live audio.
+
+    Session 1fdae9db-3826-420b-b387-7c161fac317e has chat progress at seq 45,
+    a distinct final at seq 52, and their spoken paraphrase at seq 87. The raw
+    provider fragment boundaries were not retained; these are stored payloads.
+    """
+    from app.core import voice_progress, voice_stream
+
+    progress_text = (
+        "I've found the current Agents page in AI Shuffle and I'm starting a full inventory "
+        "of everything on it, so the three mockups are built from the real fields instead "
+        "of invented ones."
+    )
+    final_text = (
+        "I've started on the Agents page redesign. First step is a full inventory of every "
+        "tool, permission and setting on the current page, so nothing gets dropped.\n\n"
+        "Once that's back I'll have three designers build competing mockups that differ in "
+        "layout, not just styling, all using AI Shuffle's real look. I'll send you the three "
+        "to pick from."
+    )
+    spoken_text = (
+        "I've found the current Agents page in AI Shuffle and I'm cataloging everything "
+        "on it so the mockups match it properly. I've started on the Agents page redesign. "
+        "I'm doing a full inventory of every tool, permission, and setting on the page so "
+        "nothing gets missed. I'll keep details in chat and I'll come back with the three "
+        "solid layout options for you to choose from."
+    )
+    _mk_session()
+    rec = await _recorder()
+    await rec.start("Redesign the Agents page.")
+    call = voice_stream.VoiceStream(
+        AsyncMock(), {"id": SID}, {"model": "gpt-live-1", "voice": "marin"}, "", 5,
+    )
+    call.upstream = AsyncMock()
+    progress = voice_progress.VoiceProgress(SID, call.send)
+    call.progress = progress
+    cursor = 0
+
+    async def consume_new_rows():
+        nonlocal cursor
+        for row in se.get_events(SID, from_seq=cursor):
+            cursor = row["seq"]
+            progress.consume(row)
+        await progress.flush(force=True)
+
+    await consume_new_rows()
+    # Drive the real chat recorder, including the tool boundary between public
+    # progress and the final reply. Do not seed the consumer's text buffer.
+    for frame in [
+        {"type": "chunk", "content": progress_text},
+        {"type": "tool_use", "id": "inventory", "name": "Task", "input": {}},
+    ]:
+        await rec.on_event(frame)
+    await consume_new_rows()
+    await rec.on_event({"type": "tool_result", "tool_use_id": "inventory", "output": "Started"})
+    await rec.on_event({"type": "chunk", "content": final_text})
+    await rec.on_event({"type": "done", "metadata": {"stop_reason": "end_turn"}})
+    await rec.close()
+    await consume_new_rows()
+
+    sent = [json.loads(c.args[0]) for c in call.upstream.send.await_args_list]
+    assert [note["type"] for note in sent] == [
+        "session.thinking.append", "session.commentary.append",
+    ]
+    assert progress_text[:60] in sent[0]["content"]
+    assert final_text[:60] in sent[1]["content"]
+    assert progress_text[:60] not in sent[1]["content"]
+    assert sessions_db.get_session_messages(SID) == []  # Notes never write voice messages.
+
+    # Only the provider's spoken transcript enters durable voice storage. A
+    # repeated checkpoint must not re-append it, and its events must not feed
+    # another update back into the voice model.
+    await call.caption("assistant", spoken_text)
+    await call.flush()
+    await call.flush()
+    await consume_new_rows()
+    voice_rows = [r for r in _rows() if (r.get("turn_id") or "").startswith("voice-")]
+    assert [r["event_type"] for r in voice_rows] == [
+        "turn.started", "message.assistant", "turn.completed",
+    ]
+    assert voice_rows[1]["payload"]["content"] == spoken_text
+    assert [(m["role"], m["content"]) for m in sessions_db.get_session_messages(SID)] == [
+        ("assistant", spoken_text),
+    ]
+    assert call.upstream.send.await_count == 2
 
 
 async def test_record_voice_exchange_tolerates_missing_user_text(mock_db):
