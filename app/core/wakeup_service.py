@@ -657,8 +657,15 @@ def _arm(row: Dict[str, Any], delay_seconds: float) -> None:
 
 
 def arm_persisted(row: Dict[str, Any]) -> None:
-    """Arm the timer for a row a sync caller already persisted, at its
-    ``fire_at``. Without a running loop the row waits for boot rehydrate."""
+    """Arm an immutable persisted row once, at its ``fire_at``.
+
+    A repeated handoff receipt must not cancel its timer after that timer has
+    claimed (deleted) the row but before it submits the turn. Producers that
+    replace a row disarm its old id first. Without a loop, boot rehydrates it.
+    """
+    previous = _timers.get(row.get("id"))
+    if previous is not None and not previous.done():
+        return
     try:
         asyncio.get_running_loop()
     except RuntimeError:

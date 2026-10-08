@@ -6,6 +6,8 @@
 	 */
 	import { LogIn, Server } from 'lucide-svelte';
 	import { NETWORK_STATE_LABELS } from '$lib/api/network-status';
+	import { abandonHandoffTransfer, type HandoffTransferRecovery } from '$lib/api/network';
+	import { getErrorMessage } from '$lib/api/client';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import type { StatusTone } from '$lib/settings/types';
 	import DetailPane from '../shell/DetailPane.svelte';
@@ -45,6 +47,18 @@
 	const network = $derived(status.network);
 	const accountWorkerNames = $derived(model.accountWorkers.map((d) => d.name || 'a worker').join(', '));
 	let rev = $state(0);
+	let releaseWakes = $state<Record<string, boolean>>({});
+	let recoveryError = $state('');
+
+	async function abandon(transfer: HandoffTransferRecovery) {
+		recoveryError = '';
+		try {
+			await abandonHandoffTransfer(transfer.token, releaseWakes[transfer.token] ?? false);
+			await model.loadStatus();
+		} catch (e) {
+			recoveryError = getErrorMessage(e, 'Could not abandon the transfer');
+		}
+	}
 
 	async function rename(name: string) {
 		if (await model.rename('self', name)) flashSaved();
@@ -151,6 +165,31 @@
 				/>
 			</SettingRow>
 		</RowGroup>
+		{#if status.handoff_transfers?.pending.length}
+			<RowGroup title="Unfinished chat transfers">
+				<InlineBanner tone="warn">Messages held on the source worker may be missing. Wake-ups stay paused until delivery finishes or you abandon the transfer.</InlineBanner>
+				{#each status.handoff_transfers.pending as transfer (transfer.token)}
+					<SettingRow label={transfer.title || 'Chat'} hint={`Waiting for ${transfer.source}`}>
+						{#if transfer.can_abandon}
+							<label><input type="checkbox" bind:checked={releaseWakes[transfer.token]} /> Resume remaining wake-ups</label>
+							<InlineConfirm label="Abandon transfer"
+								question={releaseWakes[transfer.token] ? 'Earlier messages may be missing. Resume remaining wake-ups anyway?' : 'Keep this chat here and discard its paused wake-ups?'}
+								onConfirm={() => abandon(transfer)} />
+						{:else}
+							<ValueText value={transfer.reason === 'delivering' ? 'Delivering messages' : 'Recovery available after five minutes offline'} />
+						{/if}
+					</SettingRow>
+				{/each}
+				{#if recoveryError}<InlineBanner tone="warn"><span role="alert">{recoveryError}</span></InlineBanner>{/if}
+			</RowGroup>
+		{/if}
+		{#if status.handoff_transfers?.history.length}
+			<RowGroup title="Recovered chat transfers">
+				{#each status.handoff_transfers.history as transfer}
+					<SettingRow label={transfer.title || 'Chat'} hint={transfer.reason === 'source_revoked' ? 'Source worker revoked; paused wake-ups discarded' : transfer.reason === 'owner_resumed_wakes' ? 'Transfer abandoned; remaining wake-ups resumed' : 'Transfer abandoned; paused wake-ups discarded'} />
+				{/each}
+			</RowGroup>
+		{/if}
 		{@render joinFields()}
 	{/if}
 {/snippet}

@@ -2407,6 +2407,35 @@ def _run_column_migrations(cursor):
             )
         """)
         migrations_applied.append("session_moves")
+    for column, definition in (("wake_token", "TEXT"),
+                               ("wakes_superseded", "BOOLEAN NOT NULL DEFAULT FALSE")):
+        if not column_exists(cursor, "session_moves", column):
+            cursor.execute(f"ALTER TABLE session_moves ADD COLUMN {column} {definition}")
+            migrations_applied.append(f"session_moves.{column}")
+            if column == "wakes_superseded":
+                cursor.execute("UPDATE session_moves SET wakes_superseded=TRUE WHERE held <> '[]'")
+    if not table_exists(cursor, "handoff_wakes"):
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS handoff_wakes (
+            token TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            branch TEXT,
+            wakes JSONB NOT NULL,
+            superseded BOOLEAN NOT NULL DEFAULT FALSE,
+            keep_peer BOOLEAN NOT NULL DEFAULT TRUE,
+            finalized BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+            offline_since DOUBLE PRECISION,
+            recovery_reason TEXT
+        )
+        """)
+        migrations_applied.append("handoff_wakes")
+    for column, definition in (("created_at", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+                               ("offline_since", "DOUBLE PRECISION"), ("recovery_reason", "TEXT")):
+        if not column_exists(cursor, "handoff_wakes", column):
+            cursor.execute(f"ALTER TABLE handoff_wakes ADD COLUMN {column} {definition}")
+            migrations_applied.append(f"handoff_wakes.{column}")
 
     # Tool access (v82). Stamp ``tool_selection_mode`` into
     # every agent config so the runtime rule has no legacy branch, and fold the

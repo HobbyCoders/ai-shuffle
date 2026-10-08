@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 import uuid
 
@@ -84,7 +85,22 @@ def open_prompt(cursor, sid):
     return broker.pending_count(sid) > 0
 
 
+def _check_unfinished_wakes(cursor, sid):
+    ctx = engine.context()
+    cursor.execute("SELECT 1 FROM handoff_wakes WHERE session_id=%s AND finalized=FALSE "
+                   "AND source_id<>%s LIMIT 1", (sid, ctx.device_id if ctx else ""))
+    if cursor.fetchone():
+        raise ValueError("Wait for this chat's previous move to finish delivering messages before moving it again. "
+                         "If the source is unavailable, open Settings, Devices, This worker, Network to abandon it.")
+
+
+def check_unfinished_wakes(sid):
+    with get_db() as conn:
+        _check_unfinished_wakes(conn.cursor(), sid)
+
+
 def _idle(cursor, sid):
+    _check_unfinished_wakes(cursor, sid)
     if _has_live_tasks(cursor, sid):
         raise ValueError("Wait for this session's background work to finish before resuming here.")
     cursor.execute("SELECT 1 FROM turns WHERE session_id=%s AND state IN ('queued','running','interrupting','draining') LIMIT 1", (sid,))
@@ -192,6 +208,201 @@ def install_wakes(sid, wakes):
                 instance_id=settings.effective_instance_id))
         except Exception:  # noqa: BLE001 — already here (a shared database); keep the rest
             logger.warning("Could not install moved wake %s for %s", wake.get("id"), sid, exc_info=True)
+    return rows
+
+
+def _stage_wakes(sid, owner, data, branch):
+    """Persist dormant wakes before commit; boot rehydration cannot see them."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO handoff_wakes (token,session_id,source_id,branch,wakes,created_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (token) DO NOTHING",
+                    (data["token"], sid, owner, branch, json.dumps(data.get("wakes") or []), time.time()))
+
+
+def note_source_contact(device_id):
+    """A successful contact resets recovery even while Devices is closed."""
+    if engine.context() is None:
+        return
+    now = time.time()
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE handoff_wakes SET offline_since=CASE "
+                              "WHEN offline_since IS NULL OR offline_since<%s THEN %s ELSE offline_since END "
+                              "WHERE source_id=%s AND finalized=FALSE", (now, now, device_id))
+
+
+# No timeout runs a possibly superseded wake. After this observed offline
+# interval the owner may explicitly discard or resume the remaining wakes.
+ABANDON_AFTER_S = 300
+
+
+def transfer_recovery_status():
+    from app.network import membership, transport
+
+    ctx = engine.context()
+    if ctx is None:
+        return {"pending": [], "history": []}
+    online = transport.online_devices()
+    now = time.time()
+    pending, history = [], []
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT h.*,s.title,s.owner_device_id FROM handoff_wakes h "
+                    "JOIN sessions s ON s.id=h.session_id WHERE h.source_id<>%s "
+                    "AND (h.finalized=FALSE OR h.recovery_reason IS NOT NULL) ORDER BY h.created_at,h.token",
+                    (ctx.device_id,))
+        for raw in cur.fetchall():
+            row = dict(raw)
+            if row["finalized"]:
+                history.append({"session_id": row["session_id"], "title": row["title"],
+                                "reason": row["recovery_reason"]})
+                continue
+            if row["owner_device_id"] not in (ctx.device_id, row["source_id"]):
+                continue
+            member = ctx.member(row["source_id"])
+            revoked = member is not None and member.status == membership.STATUS_REVOKED
+            source_online = row["source_id"] in online
+            # Decide against the current locked row, not the SELECT snapshot:
+            # neither a stale poll nor an older contact may rewind the clock.
+            cur.execute("UPDATE handoff_wakes SET offline_since=CASE "
+                        "WHEN offline_since IS NULL OR (%s AND offline_since<%s) "
+                        "THEN %s ELSE offline_since END WHERE token=%s AND finalized=FALSE "
+                        "RETURNING offline_since", (source_online, now, now, row["token"]))
+            current = cur.fetchone()
+            if current is None:
+                continue  # Finalized after the status snapshot.
+            since = current["offline_since"]
+            can_abandon = revoked or (not source_online and now - since >= ABANDON_AFTER_S)
+            pending.append({"token": row["token"], "session_id": row["session_id"], "title": row["title"],
+                            "source": member.name if member else "Unavailable worker",
+                            "can_abandon": can_abandon,
+                            "reason": "source_revoked" if revoked else "delivering" if source_online else "source_offline"})
+    return {"pending": pending, "history": history[-20:]}
+
+
+def abandon_transfer(token, *, release_wakes=False):
+    status = transfer_recovery_status()
+    row = next((row for row in status["pending"] if row["token"] == token), None)
+    if row is None:
+        raise ValueError("This transfer is no longer waiting for recovery.")
+    if not row["can_abandon"]:
+        raise ValueError("Wait until the source has been offline for five minutes before abandoning this transfer.")
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT source_id FROM handoff_wakes WHERE token=%s", (token,))
+        source = cur.fetchone()["source_id"]
+    reason = "owner_resumed_wakes" if release_wakes else "owner_discarded_wakes"
+    rows = _finalize_wakes(row["session_id"], source, {"token": token, "release": True},
+                           recovery_reason=reason, discard_all=not release_wakes)
+    return row["session_id"], rows
+
+
+def recover_revoked_transfers():
+    """Revocation is explicit owner authority, but never authority to run old wakes."""
+    from app.network import membership
+
+    ctx = engine.context()
+    if ctx is None:
+        return
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM handoff_wakes WHERE finalized=FALSE AND source_id<>%s", (ctx.device_id,))
+        rows = [dict(row) for row in cur.fetchall()]
+    for row in rows:
+        source = ctx.member(row["source_id"])
+        if source is None or source.status != membership.STATUS_REVOKED:
+            continue
+        session = database.get_session(row["session_id"])
+        if session and session.get("owner_device_id") in (ctx.device_id, row["source_id"]):
+            _finalize_wakes(row["session_id"], row["source_id"], {"token": row["token"], "release": True},
+                            recovery_reason="source_revoked", discard_all=True)
+        else:
+            # A historical reservation must never undo a later ownership change.
+            with get_db() as conn:
+                conn.cursor().execute("UPDATE handoff_wakes SET finalized=TRUE,recovery_reason='source_revoked' "
+                                      "WHERE token=%s", (row["token"],))
+
+
+def _discard_staged_wakes(sid, source, token):
+    # Only a confirmed source cancellation retires a reservation. A lost
+    # commit/cancel reply remains recoverable, never guessed to be cancelled.
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE handoff_wakes SET finalized=TRUE,wakes='[]' "
+                              "WHERE token=%s AND session_id=%s AND source_id=%s AND finalized=FALSE",
+                              (token, sid, source))
+
+
+def _finalize_wakes(sid, source, payload, *, recovery_reason=None, discard_all=False):
+    """Source has stopped holding: atomically cancel or publish the staged wakes.
+
+    The receipt survives retries, including a lost commit/finalize reply. A
+    repeated finalize never recreates a wake already fired or superseded.
+    """
+    from app.db.base import parse_jsonb
+
+    token = str(payload.get("token") or "")
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM handoff_wakes WHERE token=%s AND session_id=%s "
+                    "AND source_id=%s FOR UPDATE", (token, sid, source))
+        row = cur.fetchone()
+        if not row:
+            raise ValueError("Unknown moved wake reservation")
+        wakes = parse_jsonb(row["wakes"])
+        device = engine.require_context().device_id
+        cur.execute("SELECT owner_device_id FROM sessions WHERE id=%s FOR UPDATE", (sid,))
+        session = cur.fetchone()
+        owner = session["owner_device_id"] if session else None
+        if row["finalized"] and owner != device:
+            return []  # A late receipt after a later move must not re-arm here.
+        if not session or owner not in (source, device):
+            raise ValueError("This wake reservation belongs to an earlier move; ownership was not changed.")
+        if not row["finalized"]:
+            if recovery_reason in ("owner_discarded_wakes", "owner_resumed_wakes"):
+                from app.network import membership, transport
+                member = engine.require_context().member(source)
+                revoked = member is not None and member.status == membership.STATUS_REVOKED
+                since = row["offline_since"]
+                # A contact may arrive after the status snapshot but before
+                # this locked decision. Never use the stale eligibility bit.
+                if not revoked and (source in transport.online_devices() or since is None
+                                    or time.time() - since < ABANDON_AFTER_S):
+                    raise ValueError("Wait until the source has been offline for five minutes before abandoning this transfer.")
+            # This authenticated message from the source confirms its commit,
+            # even when the earlier commit response never reached this worker.
+            _accept_owner_row(cur, sid, device, row["branch"])
+            # This authenticated committed transfer also supersedes older
+            # abandoned imports whose cancellation reply never arrived.
+            cur.execute("UPDATE handoff_wakes SET finalized=TRUE,wakes='[]' "
+                        "WHERE session_id=%s AND token<>%s AND finalized=FALSE", (sid, token))
+            superseded = row["superseded"] or payload.get("superseded") is True
+            if payload.get("release") is not True:
+                return []  # Confirm ownership, but keep wakes dormant during delivery.
+            from app.core.wakeup_service import HELD_PEER_SOURCE
+
+            for wake in wakes:
+                # A held peer row is the only copy of those messages. It is
+                # released after the human messages, not cancelled with a timer.
+                if discard_all:
+                    cur.execute("DELETE FROM pending_wakeups WHERE id=%s AND session_id=%s", (wake["id"], sid))
+                elif not superseded or (row["keep_peer"] and wake.get("source") == HELD_PEER_SOURCE):
+                    cur.execute("INSERT INTO pending_wakeups "
+                                "(id,session_id,profile_id,project_id,prompt,reason,model,source,instance_id,fire_at) "
+                                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (id) DO NOTHING",
+                                (wake["id"], sid, wake.get("profile_id"), wake.get("project_id"),
+                                 wake.get("prompt") or "", wake.get("reason"), wake.get("model"),
+                                 wake.get("source") or "schedule_wakeup", settings.effective_instance_id,
+                                 float(wake.get("fire_at") or 0)))
+            cur.execute("UPDATE handoff_wakes SET finalized=TRUE,recovery_reason=%s WHERE token=%s",
+                        (recovery_reason, token))
+        # Return only surviving rows, including on retries. Re-arming a pending
+        # row is safe; after a crash boot also re-arms these published rows.
+        rows = []
+        for wake in wakes:
+            cur.execute("SELECT * FROM pending_wakeups WHERE id=%s", (wake["id"],))
+            pending = cur.fetchone()
+            if pending:
+                rows.append(dict(pending))
     return rows
 
 
@@ -368,7 +579,7 @@ def _lease(cur, sid, target, token):
     return dict(row)
 
 
-def begin(sid, target, remote=None, note=None):
+def begin(sid, target, remote=None, note=None, wake_barrier=False):
     """Owner: export the chat for ``target``. ``note`` runs once every check passed,
     before the history is read, so what it records travels with the chat."""
     control._require_owned(sid)
@@ -399,9 +610,18 @@ def begin(sid, target, remote=None, note=None):
         state = checkout_transfer.export_checkout(cwd, branch, remote) if project else None
         if note is not None:
             note()
+        from app.db import session_moves
+
+        wakes = _session_wakes(sid)
+        queued = session_moves.get(sid)
+        if queued and wakes and not wake_barrier:
+            raise ValueError("Update both workers before moving a chat with pending wake-ups.")
+        barrier = bool(queued and wakes and wake_barrier)
+        if barrier:
+            session_moves.set_wake_token(sid, run["id"])
         data = dict(checkout=state, history=_history(session), sdk_session_id=session.get("sdk_session_id"),
                     project_id=project["id"] if project else None, token=run["id"],
-                    wakes=_session_wakes(sid))
+                    wakes=wakes, wake_barrier=barrier)
         raw = json.dumps(data, default=str).encode()
         ctx = engine.require_context()
         return {"payload": crypto.encrypt_payload(ctx.network_key, raw, _aad(sid, target)), "key_version": ctx.key_version}
@@ -508,6 +728,13 @@ async def handle(payload, peer_device_id):
     member = engine.require_context().member(peer_device_id)
     if not member or member.kind != "worker" or member.status != "active":
         raise PermissionError("A handoff requires an authenticated receiving worker.")
+    if payload.get("phase") == "finalize-wakes":
+        rows = await run_sync(_finalize_wakes, sid, peer_device_id, payload)
+        from app.core import wakeup_service
+
+        for row in rows:
+            wakeup_service.arm_persisted(row)
+        return {"finalized": True} if payload.get("release") is True else {"accepted": True}
     if payload.get("phase") == "receive":
         from app.api.git_helpers import invalidate_working_dir_cache
         from app.core import streaming_status
@@ -536,7 +763,8 @@ async def handle(payload, peer_device_id):
             except Exception:  # noqa: BLE001
                 logger.warning("Could not note the wakes of %s before a move", sid, exc_info=True)
         try:
-            return await run_sync(begin, sid, peer_device_id, payload.get("remote"), note)
+            return await run_sync(begin, sid, peer_device_id, payload.get("remote"), note,
+                                  payload.get("wake_barrier") is True)
         except BaseException:
             _wake_queued()
             raise
@@ -638,15 +866,18 @@ def install_history(sid, data, cwd):
     return sdk
 
 
+def _accept_owner_row(cur, sid, device_id, branch):
+    # instance_id moves too (as adopt/unpin do): left on the previous
+    # worker's id, the session listed as remote with an unknown state here.
+    cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, branch=%s, updated_at=NOW() WHERE id=%s",
+                (device_id, settings.effective_instance_id, json.dumps({"where": "runner:" + device_id}), branch, sid))
+    if branch is None:
+        cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
+
+
 def _accept_owner(sid, device_id, branch=None):
     with get_db() as conn:
-        cur = conn.cursor()
-        # instance_id moves too (as adopt/unpin do): left on the previous
-        # worker's id, the session listed as remote with an unknown state here.
-        cur.execute("UPDATE sessions SET owner_device_id=%s, instance_id=%s, placement=%s, branch=%s, updated_at=NOW() WHERE id=%s",
-                    (device_id, settings.effective_instance_id, json.dumps({"where": "runner:" + device_id}), branch, sid))
-        if branch is None:
-            cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
+        _accept_owner_row(conn.cursor(), sid, device_id, branch)
 
 
 async def move(session, target):
@@ -739,13 +970,15 @@ async def _pull(session, owner, ctx, project, base, remote, held, holder):
         # Refuse a busy receiving checkout before the owner commits or pushes.
         _, path = await run_sync(_receiving_path, base, expected_branch)
         await run_sync(_hold_checkout, session, project, str(path), expected_branch, holder, held)
-    reply = await control.call(owner, "handoff", {"session_id": sid, "phase": "begin", "remote": remote}, timeout=600)
+    reply = await control.call(owner, "handoff", {"session_id": sid, "phase": "begin", "remote": remote, "wake_barrier": True}, timeout=600)
     blob = reply.get("payload", "")
     raw = crypto.decrypt_payload(ctx.keyring[int(reply["key_version"])], blob, _aad(sid, ctx.device_id))
     data = json.loads(raw)
     token = data["token"]
     committed = False
     try:
+        if data.get("wakes") and "wake_barrier" not in data:
+            raise ValueError("Update both workers before moving a chat with pending wake-ups.")
         state = data["checkout"]
         if data["project_id"] != (project["id"] if project else None):
             raise ValueError("The owning worker's project changed; refresh before resuming.")
@@ -755,6 +988,8 @@ async def _pull(session, owner, ctx, project, base, remote, held, holder):
                 raise ValueError("Unexpected checkout for a project-less session.")
             cwd = str(settings.effective_workspace_dir)
             await run_sync(install_history, sid, data, cwd)
+            if data.get("wake_barrier"):
+                await run_sync(_stage_wakes, sid, owner, data, None)
             result = await control.call(owner, "handoff", {"session_id": sid,
                 "phase": "commit", "token": token,
                 "fingerprint": None, "branch": None, "session_branch": None,
@@ -764,7 +999,8 @@ async def _pull(session, owner, ctx, project, base, remote, held, holder):
                 raise ValueError("The owning worker did not confirm the transfer.")
             committed = True
             await run_sync(_accept_owner, sid, ctx.device_id, None)
-            await _arm_moved_wakes(sid, data.get("wakes"))
+            if not data.get("wake_barrier"):
+                await _arm_moved_wakes(sid, data.get("wakes"))
             return cwd
         if not state or (expected_branch and state["branch"] != expected_branch):
             raise ValueError("The owning worker's branch changed; refresh before resuming.")
@@ -784,6 +1020,8 @@ async def _pull(session, owner, ctx, project, base, remote, held, holder):
         session_branch = None if Path(cwd).resolve() == Path(base).resolve() else state["branch"]
         await run_sync(checkouts.upsert_checkout, project["id"], settings.effective_instance_id, cwd,
                        branch=session_branch or "", head_sha=state["head"], dirty=False, status="active")
+        if data.get("wake_barrier"):
+            await run_sync(_stage_wakes, sid, owner, data, session_branch)
         result = await control.call(owner, "handoff", {"session_id": sid,
             "phase": "commit", "token": token,
             "fingerprint": state["fingerprint"],
@@ -795,13 +1033,16 @@ async def _pull(session, owner, ctx, project, base, remote, held, holder):
             raise ValueError("The owning worker did not confirm the transfer.")
         committed = True
         await run_sync(_accept_owner, sid, ctx.device_id, session_branch)
-        await _arm_moved_wakes(sid, data.get("wakes"))
+        if not data.get("wake_barrier"):
+            await _arm_moved_wakes(sid, data.get("wakes"))
         return cwd
     finally:
         if not committed:
             # Best effort. A lost response/worker restart leaves a bounded lease,
             # not a permanent block; never force ownership after a timeout.
             try:
-                await control.call(owner, "handoff", {"session_id": sid,"phase": "cancel", "token": token})
+                cancelled = await control.call(owner, "handoff", {"session_id": sid,"phase": "cancel", "token": token})
+                if cancelled.get("cancelled") and data.get("wake_barrier"):
+                    await run_sync(_discard_staged_wakes, sid, owner, token)
             except (control.RunnerUnreachable, control.ControlRefused, ValueError):
                 pass

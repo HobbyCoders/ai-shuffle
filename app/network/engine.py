@@ -280,6 +280,12 @@ def kick() -> None:
 def _notify(touched: List[Tuple[str, str, str]]) -> None:
     if not touched:
         return
+    if any(collection == "membership" for collection, _, _ in touched):
+        try:
+            from app.network.handoff import recover_revoked_transfers
+            recover_revoked_transfers()
+        except Exception:  # noqa: BLE001 — retry when status is read or at boot
+            logger.warning("Could not recover revoked-source transfers", exc_info=True)
     for listener in list(_listeners):
         try:
             listener(touched)

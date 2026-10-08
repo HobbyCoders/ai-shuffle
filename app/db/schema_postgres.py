@@ -2088,7 +2088,25 @@ def create_postgres_schema(cursor) -> None:
             requested_by TEXT NOT NULL DEFAULT 'agent',
             requested_at DOUBLE PRECISION NOT NULL,
             expires_at DOUBLE PRECISION NOT NULL,
-            held JSONB NOT NULL DEFAULT '[]'
+            held JSONB NOT NULL DEFAULT '[]',
+            wake_token TEXT,
+            wakes_superseded BOOLEAN NOT NULL DEFAULT FALSE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS handoff_wakes (
+            token TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            branch TEXT,
+            wakes JSONB NOT NULL,
+            superseded BOOLEAN NOT NULL DEFAULT FALSE,
+            keep_peer BOOLEAN NOT NULL DEFAULT TRUE,
+            finalized BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+            offline_since DOUBLE PRECISION,
+            recovery_reason TEXT
         )
     """)
 

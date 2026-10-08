@@ -551,6 +551,8 @@ def note_contact(device_id: str) -> None:
     """
     now = time.monotonic()
     _last_contact[device_id] = now
+    from app.network.handoff import note_source_contact
+    note_source_contact(device_id)
     link = _links.get(device_id)
     if link is None or link.contact_kick_used:
         return
@@ -612,7 +614,9 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
             continue
         try:
             results[link.device_id] = await link.sync_once(client, ctx)
-            _last_contact[link.device_id] = time.monotonic()
+            # Both outbound sync and inbound/control traffic must reset the
+            # persisted recovery clock, not just the online-presence cache.
+            await asyncio.to_thread(note_contact, link.device_id)
             await asyncio.to_thread(store.upsert_peer, link.device_id, base_url=link.base_url, contacted=True,
                                     error=None)
         except (httpx.HTTPError, PeerError) as exc:

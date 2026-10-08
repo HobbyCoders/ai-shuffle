@@ -112,6 +112,12 @@ def pop_session_wakeups(
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
+        if source is None:
+            # Supersession also covers wakes staged by a moving chat. This
+            # serializes with receiver finalization, which locks the same row.
+            cursor.execute(f"UPDATE handoff_wakes SET superseded=TRUE, keep_peer=keep_peer AND {_ph} "
+                           f"WHERE session_id={_ph} AND finalized=FALSE",
+                           (exclude_source == "held_peer_promotion", session_id))
         if source is None and exclude_source is not None:
             cursor.execute(
                 f"SELECT id FROM pending_wakeups WHERE session_id = {_ph} "

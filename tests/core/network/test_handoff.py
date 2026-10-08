@@ -499,47 +499,542 @@ async def test_a_wake_created_during_the_move_refuses_the_commit(pair, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_a_message_held_during_the_move_does_not_refuse_it(pair, monkeypatch):
-    """N1: the person types while the move is under way. The held message
-    leaves the moved wake alone (the commit would refuse a changed set) and
-    supersedes it on the new worker once it arrives there."""
+@pytest.mark.parametrize("projectless", [False, True], ids=["project", "plain-chat"])
+@pytest.mark.parametrize("case", ["before_commit", "after_commit", "lost_commit", "lost_finalize",
+                                  "source_restart", "receiver_restart", "no_message", "removed_message",
+                                  "receiver_restart_after_finalize", "receiver_message", "held_peer"])
+async def test_moved_wake_waits_for_durable_human_supersession(pair, monkeypatch, projectless, case):
+    """#1963: a due wake cannot beat a held message, even across lost replies/boot."""
     import time
+    from unittest.mock import AsyncMock
+    from app.core import session_handoff as sh, turn_manager, turn_scheduler, wakeup_service
+    from app.db import session_moves, turns, wakeups
+
+    a, b, _, _ = pair
+    sid = "handoff-test"
+    if projectless:
+        for worker in (a, b):
+            with worker.active(), get_db() as conn:
+                conn.cursor().execute("UPDATE sessions SET project_v2_id=NULL,branch=NULL WHERE id=%s", (sid,))
+    pending = sh.PendingHandoff(b.device_id, "B", "", time.time(), by="owner")
+    monkeypatch.setattr(sh, "_pending", {})
+    monkeypatch.setattr(sh, "_moving", {sid: pending})
+    monkeypatch.setattr(sh, "_delivering", set())
+    monkeypatch.setattr(turn_manager, "_kick", lambda session_id: None)
+    monkeypatch.setattr(turn_scheduler, "kick", lambda session_id: None)
+    monkeypatch.setattr(sh, "_notify", AsyncMock())
+    monkeypatch.setattr(sh, "_resend_safe", lambda target: True)
+    monkeypatch.setattr(sh, "FORWARD_RETRY_S", 0)
+    armed = []
+    monkeypatch.setattr(wakeup_service, "arm_persisted", lambda row: armed.append(row))
+    with a.active():
+        session_moves.save(sid, target_id=b.device_id, label="B", note="", requested_by="owner",
+                           requested_at=pending.requested_at, expires_at=pending.expires_at)
+        wakeups.create_wakeup(id="wake-1", session_id=sid, prompt="stale wake", profile_id="default",
+                              fire_at=time.time() + 90, instance_id=settings.effective_instance_id)
+        if case == "held_peer":
+            wakeups.create_wakeup(id="wake-peer", session_id=sid, prompt="peer instruction", profile_id="default",
+                                  source=wakeup_service.HELD_PEER_SOURCE, fire_at=time.time() + 90,
+                                  instance_id=settings.effective_instance_id)
+
+    def speak():
+        message_id = turn_manager._submit_blocking(sid, "user", prompt="new human instruction", profile_id="default")
+        assert message_id.startswith(sh.HELD_PREFIX)
+        assert session_moves.get(sid)["wakes_superseded"]
+        if case == "removed_message":
+            assert sh.drop_held(sid, message_id)
+            assert session_moves.get(sid)["wakes_superseded"]
+
+    commits = []
+    finalizes = []
+    async def call(device, action, body, **kwargs):
+        worker, sender = (a, b) if device == a.device_id else (b, a)
+        with worker.active():
+            if action == "handoff" and body["phase"] == "commit":
+                commits.append(body)
+                if case not in ("no_message", "after_commit", "receiver_restart_after_finalize", "receiver_message"):
+                    speak()
+                result = await control.handle(action, body, from_device=sender.device_id)
+                if case == "after_commit":
+                    speak()
+                if case == "lost_commit":
+                    raise TimeoutError("commit response lost after ownership changed")
+                return result
+            if action == "handoff" and body["phase"] == "finalize-wakes":
+                if body.get("release"):
+                    finalizes.append(body)
+                if case == "receiver_restart_after_finalize" and body.get("release") and len(finalizes) == 1:
+                    # Receiver died after the DB transaction, before arming or
+                    # returning. Boot must recover the real published rows.
+                    handoff._finalize_wakes(sid, sender.device_id, body)
+                    monkeypatch.setattr(wakeup_service, "_arm", lambda row, delay: armed.append(row))
+                    assert await wakeup_service.rehydrate_pending() == 1
+                    raise TimeoutError("receiver restarted before arming")
+                result = await control.handle(action, body, from_device=sender.device_id)
+                if case == "lost_finalize" and body.get("release") and len(finalizes) == 1:
+                    raise TimeoutError("finalize response lost after receiver transaction committed")
+                return result
+            return await control.handle(action, body, from_device=sender.device_id)
+    monkeypatch.setattr(control, "call", call)
+    # The move outlasts the original 90-second timer. Boot must still see zero
+    # executable wakes, not arm one ahead of supersession.
+    monkeypatch.setattr(wakeup_service, "_now_epoch", lambda: time.time() + 120)
+    with b.active():
+        if case == "lost_commit":
+            with pytest.raises(TimeoutError, match="commit response lost"):
+                await handoff.receive(database.get_session(sid))
+        else:
+            await handoff.receive(database.get_session(sid))
+        assert armed == []
+        assert wakeups.get_session_wakeups(sid) == []
+        assert await wakeup_service.rehydrate_pending() == 0
+        if case == "receiver_restart":
+            # No process-local state is needed to keep staged wakes dormant.
+            monkeypatch.setattr(wakeup_service, "_timers", {})
+            assert await wakeup_service.rehydrate_pending() == 0
+        if case == "receiver_message":
+            pending.holding = False
+            turn_manager._submit_blocking(sid, "user", prompt="new human instruction", profile_id="default")
+    with a.active():
+        assert database.get_session(sid)["owner_device_id"] == b.device_id
+        assert wakeups.get_session_wakeups(sid) == []
+        if case == "source_restart":
+            sh._moving.clear()
+            spawned = []
+            monkeypatch.setattr(sh, "_spawn", spawned.append)
+            assert await sh.resume_queued() == 0
+            assert len(spawned) == 1
+            await spawned[0]
+        else:
+            await sh._moved(sid, pending, b.device_id)
+        assert session_moves.get(sid) is None
+    with b.active():
+        queued = turns.get_queued_turns(sid)
+        if case in ("no_message", "receiver_restart_after_finalize"):
+            assert {row["prompt"] for row in armed} == {"stale wake"}
+            await wakeup_service._fire(armed[0])
+            assert [row["prompt"] for row in turns.get_queued_turns(sid)] == ["stale wake"]
+        else:
+            expected = [] if case == "removed_message" else ["new human instruction"]
+            assert [row["prompt"] for row in queued] == expected
+            if case == "held_peer":
+                assert [row["prompt"] for row in armed] == ["peer instruction"]
+                await wakeup_service._fire(armed[0])
+                promoted = turns.get_queued_turns(sid)
+                assert [row["prompt"] for row in promoted] == [
+                    "new human instruction", turn_scheduler._held_peer_block("peer instruction", promoted=True),
+                ]
+                assert [row["source"] for row in promoted] == ["user", "promotion"]
+            else:
+                assert armed == []
+        assert wakeups.get_session_wakeups(sid) == []
+        # A retry after the row fired / was cancelled cannot resurrect it.
+        assert await control.handle("handoff", finalizes[-1], from_device=a.device_id) == {"finalized": True}
+        assert wakeups.get_session_wakeups(sid) == []
+    assert len(finalizes) == (2 if case in ("lost_finalize", "receiver_restart_after_finalize") else 1)
+
+
+
+@pytest.mark.asyncio
+async def test_finalization_retry_does_not_cancel_a_claimed_real_timer(pair, monkeypatch):
+    import asyncio
+    import time
+    from unittest.mock import AsyncMock
+    from app.core import turn_manager, wakeup_service
+    from app.db import session_moves, wakeups
+
+    a, b, _, _ = pair
+    sid = "handoff-test"
+    for worker in (a, b):
+        with worker.active(), get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET project_v2_id=NULL,branch=NULL WHERE id=%s", (sid,))
+    with a.active():
+        session_moves.save(sid, target_id=b.device_id, label="B", note="", requested_by="owner",
+                           requested_at=time.time(), expires_at=time.time() + 600)
+        wakeups.create_wakeup(id="wake-real", session_id=sid, prompt="run exactly once",
+                              profile_id="default", fire_at=time.time() - 1)
+    async def call(device, action, body, **kwargs):
+        with a.active():
+            return await control.handle(action, body, from_device=b.device_id)
+    monkeypatch.setattr(control, "call", call)
+    monkeypatch.setattr(wakeup_service, "_timers", {})
+    monkeypatch.setattr(wakeup_service, "_retry_attempts", {})
+    claimed = asyncio.Event()
+    finish_lookup = asyncio.Event()
+    async def profile_after_claim(row):
+        assert wakeups.get_session_wakeups(sid) == []
+        claimed.set()
+        await finish_lookup.wait()
+        return "default"
+    monkeypatch.setattr(wakeup_service, "_resolve_profile_id", profile_after_claim)
+    monkeypatch.setattr(wakeup_service, "_session_api_user_id", lambda sid: None)
+    submitted = AsyncMock(return_value="wake-turn")
+    monkeypatch.setattr(turn_manager, "submit_async", submitted)
+    with b.active():
+        await handoff.receive(database.get_session(sid))
+        token = session_moves.get(sid)  # Source move evidence is not replicated.
+        assert token is None
+        token = b.sql("SELECT token FROM handoff_wakes WHERE session_id=?", (sid,))[0]["token"]
+        body = {"session_id": sid, "phase": "finalize-wakes", "token": token, "release": True}
+        row = handoff._finalize_wakes(sid, a.device_id, body)[0]
+        wakeup_service.arm_persisted(row)  # Real _arm and _fire; no collected fake timers.
+        original = wakeup_service._timers["wake-real"]
+        # Capture the retry's DB snapshot BEFORE the first timer claims it.
+        snapshot = handoff._finalize_wakes(sid, a.device_id, body)
+        real_run_sync = handoff.run_sync
+        async def delayed_snapshot(fn, *args, **kwargs):
+            if fn is handoff._finalize_wakes:
+                await asyncio.wait_for(claimed.wait(), 2)
+                return snapshot
+            return await real_run_sync(fn, *args, **kwargs)
+        monkeypatch.setattr(handoff, "run_sync", delayed_snapshot)
+        try:
+            assert await control.handle("handoff", body, from_device=a.device_id) == {"finalized": True}
+            assert wakeup_service._timers["wake-real"] is original
+            assert not original.cancelling()
+            finish_lookup.set()
+            await asyncio.wait_for(original, 2)
+            submitted.assert_awaited_once()
+            assert submitted.await_args.kwargs["prompt"] == "run exactly once"
+            assert wakeups.get_session_wakeups(sid) == []
+        finally:
+            finish_lookup.set()
+            for task in list(wakeup_service._timers.values()):
+                task.cancel()
+            await asyncio.gather(*wakeup_service._timers.values(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_successive_move_waits_for_original_reservation_and_late_finalize_cannot_retake(pair, tmp_path, monkeypatch):
+    import time
+    from unittest.mock import AsyncMock
+    from app.core import session_handoff as sh, turn_manager, wakeup_service
+    from app.db import session_moves, turns, wakeups
+
+    a, b, _, _ = pair
+    c = Worker("c", tmp_path)
+    sid = "handoff-test"
+    try:
+        with c.active():
+            instance = settings.effective_instance_id
+        join(a, c, legacy_instance_id=instance)
+        converge([a, b, c])
+        for worker in (a, b, c):
+            with worker.active(), get_db() as conn:
+                conn.cursor().execute("UPDATE sessions SET project_v2_id=NULL,branch=NULL WHERE id=%s", (sid,))
+        monkeypatch.setattr(sh, "_pending", {})
+        monkeypatch.setattr(sh, "_moving", {})
+        monkeypatch.setattr(sh, "_waiting", {})
+        monkeypatch.setattr(sh, "_running", set())
+        monkeypatch.setattr(sh, "_delivering", set())
+        monkeypatch.setattr(sh, "_notify", AsyncMock())
+        monkeypatch.setattr(sh, "_resend_safe", lambda target: True)
+        monkeypatch.setattr(turn_manager, "_kick", lambda sid: None)
+        destinations = []
+        workers = {worker.device_id: worker for worker in (a, b, c)}
+        async def call(device, action, body, **kwargs):
+            sender = engine.require_context().device_id
+            if body.get("phase") == "finalize-wakes":
+                destinations.append(device)
+            with workers[device].active():
+                return await control.handle(action, body, from_device=sender)
+        monkeypatch.setattr(control, "call", call)
+        with a.active():
+            session_moves.save(sid, target_id=b.device_id, label="B", note="", requested_by="owner",
+                               requested_at=time.time(), expires_at=time.time() + 600)
+            session_moves.append_held(sid, {"id": "held-first", "source": "user", "prompt": "human first",
+                                            "profile_id": "default"})
+            wakeups.create_wakeup(id="wake-successive", session_id=sid, prompt="stale wake",
+                                  profile_id="default", fire_at=time.time() - 1)
+        with b.active():
+            await handoff.receive(database.get_session(sid))
+            assert await wakeup_service.rehydrate_pending() == 0
+            with pytest.raises(ValueError, match="previous move"):
+                sh.request(sid, c.device_id)
+            with pytest.raises(ValueError, match="previous move"):
+                await sh.queue_move(sid, c.device_id)
+        # Source crashes before finalization, while C sees B's new ownership.
+        converge([a, b, c])
+        with c.active():
+            with pytest.raises(ValueError, match="previous move"):
+                await handoff.receive(database.get_session(sid))
+            assert database.get_session(sid)["owner_device_id"] == b.device_id
+        with a.active():
+            token = session_moves.get(sid)["wake_token"]
+            # Even if recovery passes a different replicated owner, the token
+            # is routed to its durable destination B, never to C.
+            await sh._finalize_moved_wakes(sid, c.device_id, release=False)
+            assert destinations == [b.device_id]
+            spawned = []
+            monkeypatch.setattr(sh, "_spawn", spawned.append)
+            assert await sh.resume_queued() == 0
+            assert len(spawned) == 1
+            await spawned[0]
+            assert session_moves.get(sid) is None
+        with b.active():
+            assert [row["prompt"] for row in turns.get_queued_turns(sid)] == ["human first"]
+            assert wakeups.get_session_wakeups(sid) == []
+            with get_db() as conn:
+                conn.cursor().execute("UPDATE turns SET state='completed' WHERE session_id=%s", (sid,))
+        converge([a, b, c])
+        with c.active():
+            await handoff.receive(database.get_session(sid))  # B -> C now succeeds.
+            assert database.get_session(sid)["owner_device_id"] == c.device_id
+        body = {"session_id": sid, "phase": "finalize-wakes", "token": token, "release": True}
+        with b.active():
+            assert await control.handle("handoff", body, from_device=a.device_id) == {"finalized": True}
+            assert database.get_session(sid)["owner_device_id"] == c.device_id
+            # Also reject a stale unfinished receipt from an older/bypassed move.
+            with get_db() as conn:
+                conn.cursor().execute("UPDATE handoff_wakes SET finalized=FALSE WHERE token=%s", (token,))
+            with pytest.raises(ValueError, match="earlier move"):
+                await control.handle("handoff", body, from_device=a.device_id)
+            assert database.get_session(sid)["owner_device_id"] == c.device_id
+    finally:
+        c.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lost_cancel_reply", [False, True])
+async def test_aborted_wake_reservation_does_not_block_a_later_completed_move(pair, monkeypatch, lost_cancel_reply):
+    import time
+    from unittest.mock import AsyncMock
     from app.core import session_handoff as sh, turn_manager, wakeup_service
     from app.db import session_moves, wakeups
-    a, b, _, _ = pair
-    with a.active():
-        wakeups.create_wakeup(id="wake-1", session_id="handoff-test", prompt="check CI",
-                              fire_at=time.time() + 3600, instance_id=settings.effective_instance_id)
-    _owner_calls(a, b, monkeypatch)
-    monkeypatch.setattr(handoff, "wake_carry", lambda target: True)
-    monkeypatch.setattr(wakeup_service, "arm_persisted", lambda row: None)
-    monkeypatch.setattr(turn_manager, "_kick", lambda session_id: None)
-    pending = sh.PendingHandoff(b.device_id, "B", "", time.time(), by="owner")
-    monkeypatch.setitem(sh._moving, "handoff-test", pending)
-    original = handoff.install_history
-    held = []
 
-    def install_history(sid, data, cwd):
-        # Between begin and commit, the person sends a message on the owner.
-        with a.active():
-            session_moves.save("handoff-test", target_id=b.device_id, label="B", note="", requested_by="owner",
-                               requested_at=pending.requested_at, expires_at=pending.expires_at)
-            held.append(turn_manager._submit_blocking("handoff-test", "user", prompt="next step",
-                                                      profile_id="default"))
-        return original(sid, data, cwd)
-    monkeypatch.setattr(handoff, "install_history", install_history)
-    with b.active():
-        await handoff.receive(database.get_session("handoff-test"))
-        assert [row["id"] for row in wakeups.get_session_wakeups("handoff-test")] == ["wake-1"]
-    assert held[0].startswith(sh.HELD_PREFIX)
+    a, b, _, _ = pair
+    sid = "handoff-test"
+    for worker in (a, b):
+        with worker.active(), get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET project_v2_id=NULL,branch=NULL WHERE id=%s", (sid,))
     with a.active():
-        assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
-        entry = session_moves.get("handoff-test")["held"][0]
-    # The held message reaches the new worker as deliver_held sends it.
+        session_moves.save(sid, target_id=b.device_id, label="B", note="", requested_by="owner",
+                           requested_at=time.time(), expires_at=time.time() + 600)
+        wakeups.create_wakeup(id="wake-aborted", session_id=sid, prompt="later",
+                              profile_id="default", fire_at=time.time() + 3600)
+    reject_commit = True
+    workers = {worker.device_id: worker for worker in (a, b)}
+    async def call(device, action, body, **kwargs):
+        sender = engine.require_context().device_id
+        if body.get("phase") == "commit" and reject_commit:
+            raise ValueError("injected refusal before commit")
+        with workers[device].active():
+            result = await control.handle(action, body, from_device=sender)
+        if body.get("phase") == "cancel" and lost_cancel_reply:
+            raise ValueError("cancel reply lost")
+        return result
+    monkeypatch.setattr(control, "call", call)
+    monkeypatch.setattr(sh, "_notify", AsyncMock())
+    monkeypatch.setattr(sh, "_resend_safe", lambda target: True)
+    monkeypatch.setattr(turn_manager, "_kick", lambda sid: None)
+    monkeypatch.setattr(wakeup_service, "arm_persisted", lambda row: None)
     with b.active():
-        await control._turns({"session_id": "handoff-test", "source": entry["source"], "prompt": entry["prompt"],
-                              "profile_id": entry["profile_id"], "command_id": entry["id"]}, a.device_id)
-        assert wakeups.get_session_wakeups("handoff-test") == []
+        with pytest.raises(ValueError, match="injected refusal"):
+            await handoff.receive(database.get_session(sid))
+        old = b.sql("SELECT * FROM handoff_wakes WHERE session_id=?", (sid,))[0]
+        assert bool(old["finalized"]) is not lost_cancel_reply
+        assert database.get_session(sid)["owner_device_id"] == a.device_id
+    reject_commit = False
+    with b.active():
+        await handoff.receive(database.get_session(sid))
+    with a.active():
+        pending = sh.PendingHandoff(b.device_id, "B", "", time.time(), by="owner")
+        await sh._moved(sid, pending, b.device_id)
+        assert session_moves.get(sid) is None
+    with b.active():
+        assert all(row["finalized"] for row in b.sql("SELECT finalized FROM handoff_wakes WHERE session_id=?", (sid,)))
+        handoff.check_unfinished_wakes(sid)
+        wakeup_service.cancel_session_wakeups(sid)
+    with a.active():
+        await handoff.receive(database.get_session(sid))  # B -> A is not stranded by the aborted import.
+        assert database.get_session(sid)["owner_device_id"] == a.device_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scenario", ["offline", "online_reset", "outbound_reset", "poll_contact", "late_contact", "abandon_discard", "abandon_resume", "revoked"])
+async def test_incoming_transfer_recovers_without_the_source(pair, monkeypatch, scenario):
+    from types import SimpleNamespace
+    from app.api import network as network_api
+    from app.core import wakeup_service
+    from app.db import session_moves, wakeups
+    from app.network import hub
+
+    a, b, _, _ = pair
+    sid = "handoff-test"
+    clock = [1000.0]
+    monkeypatch.setattr(handoff, "time", SimpleNamespace(time=lambda: clock[0]))
+    for worker in (a, b):
+        with worker.active(), get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET project_v2_id=NULL,branch=NULL WHERE id=%s", (sid,))
+    with a.active():
+        session_moves.save(sid, target_id=b.device_id, label="B", note="", requested_by="owner",
+                           requested_at=clock[0], expires_at=clock[0] + 600)
+        session_moves.append_held(sid, {"id": "held-on-lost-source", "source": "user",
+                                      "prompt": "human instruction still on A", "profile_id": "default"})
+        wakeups.create_wakeup(id="wake-abandon", session_id=sid, prompt="possibly superseded",
+                              profile_id="default", fire_at=clock[0] - 1)
+    async def call(device, action, body, **kwargs):
+        with a.active():
+            return await control.handle(action, body, from_device=b.device_id)
+    monkeypatch.setattr(control, "call", call)
+    armed = []
+    monkeypatch.setattr(wakeup_service, "arm_persisted", armed.append)
+    with b.active():
+        await handoff.receive(database.get_session(sid))
+        async def disappeared(*args, **kwargs):
+            raise control.RunnerUnreachable("source permanently gone")
+        monkeypatch.setattr(control, "call", disappeared)
+        online = set()
+        monkeypatch.setattr(transport, "online_devices", lambda: online)
+        info = handoff.transfer_recovery_status()["pending"][0]
+        token = info["token"]
+        assert not info["can_abandon"]
+        with pytest.raises(ValueError, match="five minutes"):
+            handoff.abandon_transfer(token)
+        if scenario == "poll_contact":
+            from contextlib import contextmanager
+            original_db = handoff.get_db
+            contact = [False]
+            class Cursor:
+                def __init__(self, cursor):
+                    self.cursor = cursor
+                def __getattr__(self, name):
+                    return getattr(self.cursor, name)
+                def fetchall(self):
+                    rows = self.cursor.fetchall()  # Status has captured the old timestamp.
+                    if not contact[0]:
+                        contact[0] = True
+                        clock[0] = 1299.0
+                        transport.note_contact(a.device_id)  # Real contact commits before status UPDATE.
+                    return rows
+            class Connection:
+                def __init__(self, conn):
+                    self.conn = conn
+                def cursor(self):
+                    return Cursor(self.conn.cursor())
+            @contextmanager
+            def interleaved_db():
+                with original_db() as conn:
+                    yield Connection(conn)
+            clock[0] = 1298.0
+            with monkeypatch.context() as scoped:
+                scoped.setattr(handoff, "get_db", interleaved_db)
+                assert not handoff.transfer_recovery_status()["pending"][0]["can_abandon"]
+            assert contact[0]
+            with get_db() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT offline_since FROM handoff_wakes WHERE token=%s", (token,))
+                assert cur.fetchone()["offline_since"] == 1299.0
+            # The presence cache has expired; only 101 seconds have elapsed
+            # since contact. Neither status nor locked abandonment may use 0.
+            clock[0] = 1400.0
+            monkeypatch.setattr(transport, "_last_contact", {})
+            assert not handoff.transfer_recovery_status()["pending"][0]["can_abandon"]
+            with pytest.raises(ValueError, match="five minutes"):
+                handoff.abandon_transfer(token, release_wakes=True)
+            assert wakeups.get_session_wakeups(sid) == []
+            assert armed == []
+            return
+        if scenario in ("online_reset", "outbound_reset"):
+            # Devices is closed: a real authenticated transport contact must
+            # reset the durable clock without anyone reading recovery status.
+            clock[0] += 200
+            if scenario == "outbound_reset":
+                from unittest.mock import AsyncMock
+                async def synced(*args):
+                    # Applying membership during sync can invalidate context;
+                    # contact persistence must not depend on a warm cache.
+                    engine.reset_for_tests()
+                    return {"ok": True}
+                link = SimpleNamespace(device_id=a.device_id, endpoints=["http://peer"],
+                                       base_url="http://peer", backoff_until=0, failures=0,
+                                       contact_kick_used=False, sync_once=AsyncMock(side_effect=synced))
+                monkeypatch.setattr(transport, "_links", {a.device_id: link})
+                monkeypatch.setattr(transport, "_announce_own_endpoints_if_changed", AsyncMock())
+                monkeypatch.setattr(transport, "_refresh_links", AsyncMock())
+                assert await transport.sync_pass(None) == {a.device_id: {"ok": True}}
+            else:
+                transport.note_contact(a.device_id)
+            clock[0] += 100
+            assert not handoff.transfer_recovery_status()["pending"][0]["can_abandon"]
+            with pytest.raises(ValueError, match="five minutes"):
+                handoff.abandon_transfer(token)
+            # Persisted contact evidence also survives a transport restart.
+            monkeypatch.setattr(transport, "_last_contact", {})
+            clock[0] += 199
+            assert not handoff.transfer_recovery_status()["pending"][0]["can_abandon"]
+            clock[0] += 1
+            assert handoff.transfer_recovery_status()["pending"][0]["can_abandon"]
+            return
+        clock[0] += handoff.ABANDON_AFTER_S - 1
+        assert not handoff.transfer_recovery_status()["pending"][0]["can_abandon"]
+        clock[0] += 1
+        assert handoff.transfer_recovery_status()["pending"][0]["can_abandon"]
+        assert wakeups.get_session_wakeups(sid) == []
+        assert armed == []  # A timeout alone NEVER releases a possibly stale wake.
+        if scenario == "offline":
+            with pytest.raises(ValueError, match="previous move"):
+                handoff.check_unfinished_wakes(sid)
+            return
+        if scenario == "late_contact":
+            finalize = handoff._finalize_wakes
+            def contact_before_lock(*args, **kwargs):
+                transport.note_contact(a.device_id)
+                return finalize(*args, **kwargs)
+            monkeypatch.setattr(handoff, "_finalize_wakes", contact_before_lock)
+            with pytest.raises(ValueError, match="five minutes"):
+                handoff.abandon_transfer(token, release_wakes=True)
+            assert wakeups.get_session_wakeups(sid) == []
+            assert armed == []
+            assert handoff.transfer_recovery_status()["pending"]
+            return
+        if scenario == "revoked":
+            monkeypatch.setattr(hub, "notify_revoked", lambda device: None)
+            engine.revoke_device(a.device_id)  # Real membership transition/notification; A never returns.
+            assert handoff.transfer_recovery_status()["pending"] == []
+            assert handoff.transfer_recovery_status()["history"][0]["reason"] == "source_revoked"
+            assert wakeups.get_session_wakeups(sid) == []
+            assert armed == []
+        else:
+            release = scenario == "abandon_resume"
+            result = await network_api.abandon_handoff(token, network_api.AbandonTransfer(release_wakes=release), _="owner")
+            assert result["released_wakes"] == int(release)
+            assert len(armed) == int(release)
+            assert len(wakeups.get_session_wakeups(sid)) == int(release)
+            reason = "owner_resumed_wakes" if release else "owner_discarded_wakes"
+            assert handoff.transfer_recovery_status()["history"][0]["reason"] == reason
+        assert database.get_session(sid)["owner_device_id"] == b.device_id
+        handoff.check_unfinished_wakes(sid)  # Recovery opens the move gate locally.
+        assert handoff.transfer_recovery_status()["pending"] == []
+        # A late completion cannot resurrect discarded wakes or undo the audit.
+        if scenario != "revoked":
+            handoff._finalize_wakes(sid, a.device_id, {"token": token, "release": True})
+            assert len(wakeups.get_session_wakeups(sid)) == int(scenario == "abandon_resume")
+
+
+@pytest.mark.asyncio
+async def test_old_receiver_cannot_arm_a_queued_moves_wakes_early(pair, monkeypatch):
+    import time
+    from app.db import session_moves, wakeups
+
+    a, b, _, _ = pair
+    sid = "handoff-test"
+    with a.active():
+        session_moves.save(sid, target_id=b.device_id, label="B", note="", requested_by="owner",
+                           requested_at=time.time(), expires_at=time.time() + 600)
+        wakeups.create_wakeup(id="wake-old", session_id=sid, prompt="later", fire_at=time.time() + 90)
+    async def call(device, action, body, **kwargs):
+        with a.active():
+            body = {k: v for k, v in body.items() if k != "wake_barrier"}
+            return await control.handle(action, body, from_device=b.device_id)
+    monkeypatch.setattr(control, "call", call)
+    with b.active():
+        with pytest.raises(ValueError, match="Update both workers"):
+            await handoff.receive(database.get_session(sid))
+        assert wakeups.get_session_wakeups(sid) == []
+    with a.active():
+        assert database.get_session(sid)["owner_device_id"] == a.device_id
+        assert [row["id"] for row in wakeups.get_session_wakeups(sid)] == ["wake-old"]
 
 
 @pytest.mark.asyncio

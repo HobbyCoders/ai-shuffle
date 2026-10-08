@@ -75,9 +75,16 @@ def append_held(session_id: str, message: Dict[str, Any]) -> bool:
         held = parse_jsonb(row["held"])
         held = held if isinstance(held, list) else []
         held.append(message)
-        cursor.execute(f"UPDATE session_moves SET held={ph()} WHERE session_id={ph()}",
+        cursor.execute(f"UPDATE session_moves SET held={ph()}, wakes_superseded=TRUE WHERE session_id={ph()}",
                        (json.dumps(held), session_id))
         return cursor.rowcount > 0
+
+
+def set_wake_token(session_id: str, token: str) -> None:
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(f"UPDATE session_moves SET wake_token={ph()} WHERE session_id={ph()}",
+                       (token, session_id))
 
 
 def remove_held(session_id: str, held_id: str) -> bool:

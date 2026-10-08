@@ -32,6 +32,66 @@ def _clean(tmp_path):
     sh._moving.clear()
 
 
+def test_move_wake_barrier_schema_upgrade_is_idempotent(mock_db):
+    from app.db import database, session_moves
+    from tests.db.migration_helpers import column_names
+    from tests.pg_shim import ShimCursor
+
+    session_moves.save("legacy", target_id="dev-gaming", label="DesktopWorker", note="", requested_by="owner",
+                       requested_at=1, expires_at=2)
+    session_moves.append_held("legacy", {"id": "held-legacy", "prompt": "keep me"})
+    mock_db.execute("ALTER TABLE session_moves DROP COLUMN wake_token")
+    mock_db.execute("ALTER TABLE session_moves DROP COLUMN wakes_superseded")
+    mock_db.execute("DROP TABLE handoff_wakes")
+    mock_db.commit()
+    for _ in range(2):
+        database._run_column_migrations(ShimCursor(mock_db.cursor()))
+    assert {"wake_token", "wakes_superseded"} <= column_names(mock_db, "session_moves")
+    assert {"token", "session_id", "source_id", "branch", "wakes", "superseded", "keep_peer", "finalized"} <= column_names(mock_db, "handoff_wakes")
+    row = session_moves.get("legacy")
+    assert row["held"] == [{"id": "held-legacy", "prompt": "keep me"}]
+    assert row["wake_token"] is None
+    assert row["wakes_superseded"]
+
+
+@pytest.mark.parametrize("revoke_during_retry", [False, True])
+async def test_revoked_source_stops_retrying_and_keeps_human_evidence(mock_db, monkeypatch, revoke_during_retry):
+    from types import SimpleNamespace
+    from app.db import session_moves
+    from app.network import control, engine
+
+    session_moves.save("s1", target_id="dev-gaming", label="DesktopWorker", note="", requested_by="owner",
+                       requested_at=1, expires_at=time.time() + 600)
+    session_moves.set_wake_token("s1", "old-token")
+    held = {"id": "undelivered", "source": "user", "prompt": "preserve my human message"}
+    session_moves.append_held("s1", held)
+    member = SimpleNamespace(status="active" if revoke_during_retry else "revoked")
+    ctx = SimpleNamespace(device_id="self", member=lambda device: member)
+    monkeypatch.setattr(engine, "context", lambda: ctx)
+    async def rejected(*args, **kwargs):
+        member.status = "revoked"
+        raise control.ControlRefused("source revoked")
+    call = AsyncMock(side_effect=rejected)
+    monkeypatch.setattr(control, "call", call)
+    monkeypatch.setattr(sh, "FORWARD_RETRY_S", 0)
+    record, notify, spawn = AsyncMock(), AsyncMock(), []
+    monkeypatch.setattr(sh, "_record", record)
+    monkeypatch.setattr(sh, "_notify", notify)
+    monkeypatch.setattr(sh, "_spawn", spawn.append)
+    await sh._deliver("s1", "dev-gaming", "DesktopWorker")
+    assert call.await_count == int(revoke_during_retry)
+    assert session_moves.get("s1")["held"] == [held]
+    assert record.await_args.args[2]["reason"] == "source_revoked"
+    assert "preserve my human message" in record.await_args.args[1]
+    assert notify.await_args.args[1] == [held]
+    # A subsequent boot reports the retained evidence, but spawns no delivery.
+    monkeypatch.setattr("app.db.database.get_session", lambda sid: {"id": sid, "owner_device_id": "dev-gaming"})
+    assert await sh.resume_queued() == 0
+    assert spawn == []
+    assert call.await_count == int(revoke_during_retry)
+    assert session_moves.get("s1")["held"] == [held]
+
+
 def test_resolves_by_name_or_device_id_and_refuses_offline_or_self():
     assert sh.resolve_worker("desktopworker")["device_id"] == "dev-gaming"
     assert sh.resolve_worker("dev-gaming")["device_name"] == "DesktopWorker"
@@ -132,7 +192,7 @@ async def test_owner_move_is_queued_while_running_and_runs_when_the_turn_ends():
                                     "moving": False}
         assert state["busy"]["running"] is True
         busy.idle = True
-        assert await _settle(lambda: move.await_count)
+        assert await _settle(lambda: move.await_count and sh.pending_for("s1") is None)
     move.assert_awaited_once_with("s1", {"id": "s1"}, "dev-gaming")
     assert sh.pending_for("s1") is None
 
@@ -359,7 +419,7 @@ async def test_rule2_held_message_is_sent_on_the_new_worker_after_the_move():
         # An agent's own turn is not held.
         assert not turn_manager._submit_blocking("s1", "agent_message", prompt="peer").startswith(sh.HELD_PREFIX)
         busy.idle = True
-        assert await _settle(lambda: submit.await_count == 2)
+        assert await _settle(lambda: submit.await_count == 2 and session_moves.get("s1") is None)
     move.assert_awaited_once()
     assert [call.kwargs["prompt"] for call in submit.await_args_list] == ["one", "two"]
     assert [call.args for call in submit.await_args_list] == [("dev-gaming", "s1")] * 2

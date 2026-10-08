@@ -151,6 +151,19 @@ export interface HubStatus {
 	account_network?: AccountNetworkInfo | null;
 }
 
+export interface HandoffTransferRecovery {
+	token: string;
+	session_id: string;
+	title: string | null;
+	source: string;
+	can_abandon: boolean;
+	reason: 'source_revoked' | 'source_offline' | 'delivering';
+}
+
+export async function abandonHandoffTransfer(token: string, releaseWakes = false): Promise<{ session_id: string; released_wakes: number }> {
+	return api.post(`/network/handoff-transfers/${encodeURIComponent(token)}/abandon`, { release_wakes: releaseWakes });
+}
+
 export interface NetworkStatus {
 	device: NetworkDeviceIdentity;
 	enrolled: boolean;
@@ -168,6 +181,10 @@ export interface NetworkStatus {
 	recovery?: RecoveryStatus;
 	hub?: HubStatus;
 	startup_sync?: { status: string; reason?: string | null; peers?: number } | null;
+	handoff_transfers?: {
+		pending: HandoffTransferRecovery[];
+		history: { session_id: string; title: string | null; reason: string }[];
+	};
 }
 
 export async function getNetworkStatus(): Promise<NetworkStatus> {

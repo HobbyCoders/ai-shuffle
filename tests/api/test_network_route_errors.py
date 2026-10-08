@@ -55,3 +55,40 @@ def test_unlinked_and_unenrolled_worker_route_errors(workers, client):  # noqa: 
         assert client.post("/api/v1/network/enroll", json={
             "endpoint_url": "http://b.local", "code": "x"}).status_code == 409
         assert client.patch("/api/v1/network/members/dev_x", json={"name": "N"}).status_code == 404
+
+def test_abandon_transfer_requires_owner_admin(client, monkeypatch):
+    from fastapi import HTTPException
+    from unittest.mock import Mock
+    from app.network import handoff
+
+    recover = Mock()
+    monkeypatch.setattr(handoff, "abandon_transfer", recover)
+    def denied():
+        raise HTTPException(403, "Owner access required")
+    client.app.dependency_overrides[require_admin] = denied
+    response = client.post("/api/v1/network/handoff-transfers/token/abandon", json={"release_wakes": True})
+    assert response.status_code == 403
+    recover.assert_not_called()
+
+
+@pytest.mark.parametrize("body,release", [({}, False), ({"release_wakes": True}, True)])
+def test_abandon_transfer_defaults_to_discard_and_requires_explicit_resume(client, monkeypatch, body, release):
+    from unittest.mock import Mock
+    from app.network import handoff
+
+    recover = Mock(return_value=("chat", []))
+    monkeypatch.setattr(handoff, "abandon_transfer", recover)
+    response = client.post("/api/v1/network/handoff-transfers/token/abandon", json=body)
+    assert response.status_code == 200
+    assert response.json() == {"session_id": "chat", "released_wakes": 0}
+    recover.assert_called_once_with("token", release_wakes=release)
+
+
+def test_abandon_transfer_before_threshold_returns_conflict(client, monkeypatch):
+    from unittest.mock import Mock
+    from app.network import handoff
+
+    monkeypatch.setattr(handoff, "abandon_transfer", Mock(side_effect=ValueError("Wait five minutes")))
+    response = client.post("/api/v1/network/handoff-transfers/token/abandon", json={})
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Wait five minutes"

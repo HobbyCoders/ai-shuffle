@@ -151,8 +151,11 @@ def _status() -> dict:
     if ctx is None:
         base["enrollment"] = enrollment.enrollment_status()
         return base
+    from app.network import handoff
+    handoff.recover_revoked_transfers()
     counts = store.count_records()
     base.update({
+        "handoff_transfers": handoff.transfer_recovery_status(),
         "network": ctx.summary(),
         "members": sorted((_member_view(m, ctx) for m in store.list_members()),
                           key=lambda m: (not m["is_self"], m["status"] != "active", m["name"].lower())),
@@ -217,6 +220,25 @@ def _fingerprint(row: dict) -> Optional[str]:
 @router.get("/status")
 async def network_status(_: str = Depends(require_auth)) -> dict:
     return await run_sync(_status)
+
+
+class AbandonTransfer(BaseModel):
+    # Discard is the safe default; resuming requires an explicit owner choice.
+    release_wakes: bool = False
+
+
+@router.post("/handoff-transfers/{token}/abandon")
+async def abandon_handoff(token: str, body: AbandonTransfer, _: str = Depends(require_admin)) -> dict:
+    from app.network import handoff
+    from app.core import wakeup_service
+
+    try:
+        sid, rows = await run_sync(handoff.abandon_transfer, token, release_wakes=body.release_wakes)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    for row in rows:
+        wakeup_service.arm_persisted(row)
+    return {"session_id": sid, "released_wakes": len(rows)}
 
 
 @router.get("/policy")

@@ -343,8 +343,9 @@ def _submit_blocking(
             # here would let a wake start work here and hold the move. The
             # message lifts it where it runs. Once the move is under way the
             # wakes are left alone: begin sent them to the new worker and the
-            # commit refuses a changed set. The message supersedes them where
-            # it runs (the new worker, or here if the move fails).
+            # commit refuses a changed set. The durable held-message flag
+            # cancels the receiver's staged wakes before finalization (#1963),
+            # or the message supersedes them here if the move fails.
             _supersede_wakeups(session_id)
         return held_id
     overrides, window_base, has_window_base = _split_window_base(overrides)

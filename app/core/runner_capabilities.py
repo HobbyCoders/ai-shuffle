@@ -44,7 +44,8 @@ release can run (0 or absent: none), so a parent refuses an older worker by
 name before any round trip. ``move_wakes`` is the version of moving a chat's
 pending wake-ups with it (0 or absent: they are not kept); version 1 also drops
 a repeated forwarded-turn ``command_id`` and accepts the hand-off ``note`` op;
-version 2 also takes the resume turn of an agent hand-off (#2012).
+version 2 also takes the resume turn of an agent hand-off (#2012); version 3
+keeps moved wakes durably dormant until held-message delivery finishes (#1963).
 """
 
 from __future__ import annotations
@@ -171,7 +172,8 @@ REMOTE_TASK_VERSION = 3
 # accepts the hand-off ``note`` control op, so a held message may be resent.
 # Version 2 (#2012): the receiver takes the turn that resumes a chat the agent
 # handed off (HandOffSession) and drops it while the chat is stopped there.
-MOVE_WAKES_VERSION = 2
+# Version 3 (#1963): durable wake staging until held-message supersession is known.
+MOVE_WAKES_VERSION = 3
 
 
 def _detect_provider_kinds() -> List[str]:

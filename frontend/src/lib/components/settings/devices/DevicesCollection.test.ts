@@ -273,6 +273,37 @@ describe('Devices list', () => {
 		expect(screen.getByText('Pairing codes')).toBeTruthy();
 	});
 
+	it.each([false, true])('recovers an unfinished transfer with explicit wake choice %s', async (releaseWakes) => {
+		status.handoff_transfers = { pending: [{ token: 'transfer-1', session_id: 'chat-1', title: 'Moved chat',
+			source: 'Offline worker', can_abandon: true, reason: 'source_offline' }], history: [] };
+		await model.loadStatus();
+		api.post.mockImplementation(async () => {
+			status.handoff_transfers = { pending: [], history: [{ session_id: 'chat-1', title: 'Moved chat',
+				reason: releaseWakes ? 'owner_resumed_wakes' : 'owner_discarded_wakes' }] };
+			return { session_id: 'chat-1', released_wakes: Number(releaseWakes) };
+		});
+		show('self', 'Network');
+		expect(screen.getByText('Unfinished chat transfers')).toBeTruthy();
+		const checkbox = screen.getByRole('checkbox', { name: 'Resume remaining wake-ups' });
+		expect((checkbox as HTMLInputElement).checked).toBe(false);
+		if (releaseWakes) await fireEvent.click(checkbox);
+		await fireEvent.click(screen.getByRole('button', { name: 'Abandon transfer' }));
+		expect(api.post).not.toHaveBeenCalled();
+		expect(screen.getByText(releaseWakes ? 'Earlier messages may be missing. Resume remaining wake-ups anyway?' : 'Keep this chat here and discard its paused wake-ups?')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Abandon transfer' }));
+		await vi.waitFor(() => expect(api.post).toHaveBeenCalledWith('/network/handoff-transfers/transfer-1/abandon', { release_wakes: releaseWakes }));
+		expect(await screen.findByText('Recovered chat transfers')).toBeTruthy();
+	});
+
+	it('shows a waiting transfer without an abandon action before the threshold', async () => {
+		status.handoff_transfers = { pending: [{ token: 'early', session_id: 'chat', title: 'Waiting chat',
+			source: 'Worker', can_abandon: false, reason: 'source_offline' }], history: [] };
+		await model.loadStatus();
+		show('self', 'Network');
+		expect(screen.getByText('Recovery available after five minutes offline')).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'Abandon transfer' })).toBeNull();
+	});
+
 	it('joins another network only after "Leave Home?"', async () => {
 		api.post.mockResolvedValue({ join_id: 'j', status: 'approved', inviter: {}, your_fingerprint: 'x' });
 		show('self', 'Network');

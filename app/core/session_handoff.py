@@ -28,7 +28,9 @@ as the Stop button does, then moves. The rules (#1819):
   chat; none is dropped silently.
 * An open approval, question or private-access card refuses the move: those
   cards cannot follow the chat (``app.network.handoff.OPEN_PROMPT``).
-* Pending wake-ups move with the chat (``app.network.handoff``).
+* Pending wake-ups move with the chat (``app.network.handoff``). They remain
+  durably dormant on the receiver until holding ends; a held human message
+  cancels them before any overdue wake can run (#1963).
 * The outcome and any message the new worker did not take are recorded in the
   chat on the worker that owns it after the move (the ``note`` operation).
 * A move the AGENT queued (HandOffSession) resumes the chat on the new worker
@@ -173,6 +175,9 @@ def request(session_id: str, worker: str, note: str = "") -> Dict[str, Any]:
 
     if archive_guard.is_archived(session_id):
         raise ValueError(archive_guard.refusal("This chat", "be handed off to another worker"))
+    from app.network.handoff import check_unfinished_wakes
+
+    check_unfinished_wakes(session_id)
     row = resolve_worker(worker)
     current = _active(session_id)
     if current is not None and current.target_id != row["device_id"]:
@@ -564,16 +569,80 @@ async def _send_resume(session_id: str, target_id: str, resume: Dict[str, Any], 
         delay = min(delay * 2, FORWARD_RETRY_MAX_S)
 
 
+class _SourceRevoked(Exception):
+    pass
+
+
+def _check_source_membership():
+    from app.network import engine, membership
+
+    ctx = engine.context()
+    member = ctx.member(ctx.device_id) if ctx else None
+    if member is not None and member.status == membership.STATUS_REVOKED:
+        raise _SourceRevoked
+
+
+async def _report_revoked_source(session_id, label):
+    from app.db import session_moves
+
+    row = await asyncio.to_thread(session_moves.get, session_id)
+    entries = (row or {}).get("held") or []
+    content = (f"Delivery to {label} stopped because this worker was revoked. "
+               f"Your held messages remain saved on this worker: {_quoted(entries)}. "
+               "Check the destination before sending them again.")
+    await _record(session_id, content, {"status": "held_failed", "reason": "source_revoked",
+                                       "worker": label, "messages": [entry.get("prompt") or "" for entry in entries]})
+    await _notify(session_id, entries, content)
+
+
+async def _finalize_moved_wakes(session_id: str, target_id: str, *, release: bool) -> None:
+    from app.network import control
+    from app.db import session_moves
+
+    # Keep the durable human-message evidence until the receiver finalizes its
+    # dormant wakes. A lost reply is safe to retry; source boot resumes the row.
+    delay = FORWARD_RETRY_S
+    while True:
+        await asyncio.to_thread(_check_source_membership)
+        row = await asyncio.to_thread(session_moves.get, session_id)
+        if not row or not row.get("wake_token"):
+            break
+        try:
+            # The token belongs to this transfer's recorded destination, not
+            # whichever owner a later replicated session row happens to name.
+            result = await control.call(row["target_id"], "handoff", {
+                "session_id": session_id, "phase": "finalize-wakes",
+                "token": row["wake_token"], "superseded": bool(row.get("wakes_superseded")), "release": release,
+            })
+            if result.get("finalized" if release else "accepted"):
+                break
+        except Exception:  # noqa: BLE001 — keep the evidence and retry, never arm early
+            logger.warning("Could not finalize moved wakes of %s on %s", session_id, target_id, exc_info=True)
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, FORWARD_RETRY_MAX_S)
+
+
 async def _deliver(session_id: str, target_id: str, label: str,
                    resume: Optional[Dict[str, Any]] = None) -> None:
+    try:
+        await _deliver_active(session_id, target_id, label, resume)
+    except _SourceRevoked:
+        await _report_revoked_source(session_id, label)
+
+
+async def _deliver_active(session_id: str, target_id: str, label: str,
+                          resume: Optional[Dict[str, Any]] = None) -> None:
     from app.network import control
 
+    # Also repairs the receiver's ownership if its commit reply was lost.
+    await _finalize_moved_wakes(session_id, target_id, release=False)
     resend_safe = await asyncio.to_thread(_resend_safe, target_id)
     deadline = time.time() + FORWARD_WINDOW_S
     delay = FORWARD_RETRY_S
     unconfirmed: List[Dict[str, Any]] = []
     reason = ""
     while True:
+        await asyncio.to_thread(_check_source_membership)
         entry = await asyncio.to_thread(_first_held, session_id)
         if entry is None:
             break
@@ -606,6 +675,9 @@ async def _deliver(session_id: str, target_id: str, label: str,
             break
         await asyncio.sleep(delay)
         delay = min(delay * 2, FORWARD_RETRY_MAX_S)
+    # Publish only after human delivery: preserved held-peer wakes cannot run
+    # ahead of the person's newer instruction either.
+    await _finalize_moved_wakes(session_id, target_id, release=True)
     resume_reason: Optional[str] = None
     if resume is not None and await asyncio.to_thread(_first_held, session_id) is None:
         # Every held message is there: the resume runs after them. The row
@@ -921,8 +993,9 @@ async def queue_move(session_id: str, target: str, *, stop: bool = False) -> Dic
     Stop dismisses it.
     """
     from app.network import runners
-    from app.network.handoff import OPEN_PROMPT
+    from app.network.handoff import OPEN_PROMPT, check_unfinished_wakes
 
+    await asyncio.to_thread(check_unfinished_wakes, session_id)
     current = _active(session_id)
     if current is not None:
         raise ValueError(f"A move to {current.label} is already queued. Cancel it first.")
@@ -1090,6 +1163,11 @@ async def resume_queued() -> int:
             if not session:
                 await asyncio.to_thread(session_moves.take, session_id)
                 continue
+            try:
+                await asyncio.to_thread(_check_source_membership)
+            except _SourceRevoked:
+                await _report_revoked_source(session_id, row["label"])
+                continue
             owner = control.owner_of(session)
             pending = PendingHandoff(str(row["target_id"]), str(row["label"]), str(row.get("note") or ""),
                                      float(row["requested_at"]), by=str(row.get("requested_by") or "agent"),
@@ -1165,6 +1243,8 @@ async def on_boot() -> None:
     except Exception:  # noqa: BLE001 — boot continues
         logger.warning("Could not resume queued moves", exc_info=True)
     await announce_dropped()
+    from app.network.handoff import recover_revoked_transfers
+    await asyncio.to_thread(recover_revoked_transfers)
 
 
 def schedule(session_id: str) -> None:

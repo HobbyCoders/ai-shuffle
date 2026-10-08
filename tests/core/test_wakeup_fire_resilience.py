@@ -131,6 +131,36 @@ def _capture_submit(monkeypatch):
 # ── the happy path is unchanged ──────────────────────────────────────────────
 
 
+async def test_restored_held_peer_merge_disarms_old_row_and_arms_replacement(mock_db, monkeypatch):
+    from app.core import wakeup_service
+
+    session_id, profile_id = "s1", "pr"
+    first = await wakeup_service.hold_peer_messages(
+        session_id, "new peer message", delay_seconds=3600,
+        profile_id=profile_id, project_id=None, model=None,
+    )
+    first_task = wakeup_service._timers[first["id"]]
+    try:
+        restored = wakeup_service.restore_held_peer_messages(
+            session_id, "restored peer message", delay_seconds=3600,
+            profile_id=profile_id, project_id=None, model=None,
+        )
+        replacement = wakeup_service._timers[restored["id"]]
+        assert restored["id"] != first["id"]
+        assert first_task.cancelling()
+        assert _pending(first["id"]) is None
+        assert _pending(restored["id"])["prompt"] == "restored peer message\n\nnew peer message"
+        wakeup_service.arm_persisted(restored)
+        assert wakeup_service._timers[restored["id"]] is replacement
+        assert not replacement.cancelling()
+    finally:
+        tasks = set(wakeup_service._timers.values()) | {first_task}
+        wakeup_service.cancel_session_wakeups(session_id)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def test_successful_submit_consumes_the_row(mock_db, monkeypatch):
     from app.core import wakeup_service
 
