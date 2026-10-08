@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import http from 'node:http';
@@ -47,6 +47,31 @@ test('resolveRuntime finds a bundled runtime under resources/worker', async () =
 		assert.equal(runtime.nodeBinDir, path.join(dir, 'worker', 'node', 'bin'));
 		assert.equal(runtime.toolsDir, path.join(dir, 'worker', 'server', 'tools'));
 		assert.equal(runtime.manifest.python.version, '3.12.14');
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test('bundled gh precedes host gh and shares the worker config in agent commands', { skip: process.platform === 'win32' }, async () => {
+	const dir = await mkdtemp(path.join(tmpdir(), 'shuffle-worker-gh-'));
+	try {
+		await fakeBundle(path.join(dir, 'worker'), process.platform);
+		const runtime = resolveRuntime({ packaged: true, resourcesPath: dir, repoDir: '/nowhere' });
+		const bundledBin = path.join(runtime.root, 'bin');
+		const hostBin = path.join(dir, 'host-bin');
+		for (const [bin, label] of [[bundledBin, 'bundled'], [hostBin, 'host']]) {
+			await mkdir(bin, { recursive: true });
+			await writeFile(path.join(bin, 'gh'), `#!/bin/sh\nprintf '${label}:%s\\n' "$GH_CONFIG_DIR"\n`, { mode: 0o755 });
+		}
+		const config = path.join(dir, 'gh-config');
+		const env = buildWorkerEnv({ runtime, port: 8000, dataDir: dir, envFile: path.join(dir, 'unused'),
+			baseEnv: { PATH: hostBin, GH_CONFIG_DIR: config } });
+		const command = spawnSync('gh', ['--version'], { env, encoding: 'utf8' });
+		assert.equal(command.status, 0, command.stderr);
+		assert.equal(command.stdout.trim(), `bundled:${config}`);
+		const repoEnv = buildWorkerEnv({ runtime: { ...runtime, mode: 'repo', nodeBinDir: null }, port: 8000,
+			baseEnv: { PATH: hostBin, GH_CONFIG_DIR: config } });
+		assert.ok(!repoEnv.PATH.split(':').includes(bundledBin));
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
@@ -120,7 +145,8 @@ test('buildWorkerEnv preserves non-DB settings and drops ALL inherited DB settin
 		const parts = env.Path.split(';');
 		assert.equal(parts[0], path.dirname(runtime.python));
 		assert.equal(parts[1], runtime.nodeBinDir);
-		assert.equal(parts[2], 'C:\\Windows');
+		assert.equal(parts[2], path.join(runtime.root, 'bin'));
+		assert.equal(parts[3], 'C:\\Windows');
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}

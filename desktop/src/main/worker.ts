@@ -155,6 +155,8 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 	const pathKey = platform === 'win32' ? Object.keys(base).find((k) => k.toLowerCase() === 'path') ?? 'Path' : 'PATH';
 	const pathParts = [path.dirname(opts.runtime.python)];
 	if (opts.runtime.nodeBinDir) pathParts.push(opts.runtime.nodeBinDir);
+	// Like Node, bundled gh precedes host tools; agent subprocesses inherit it.
+	if (opts.runtime.mode === 'bundled') pathParts.push(path.join(opts.runtime.root, 'bin'));
 	if (base[pathKey]) pathParts.push(base[pathKey] as string);
 	for (const key of Object.keys(base)) {
 		if (/^(POSTGRES_|DATABASE_|PG|PYTHONHOME$|PYTHONPATH$|VIRTUAL_ENV$|SHUFFLE_DESKTOP_ISOLATED$|SHUFFLE_PROTECTED_PORT$|SHUFFLE_DESKTOP_PROTECTED_PORT$|SHUFFLE_DESKTOP_ATTACH_TOKEN$|SHUFFLE_DESKTOP_LISTENER_TOKEN$)/i.test(key)) delete base[key];

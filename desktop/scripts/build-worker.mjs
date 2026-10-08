@@ -7,6 +7,7 @@
  *     python/              CPython (python-build-standalone) with the server's
  *                          Python dependencies installed into its site-packages
  *     node/                Node.js for the AI tools and browser MCP packages
+ *     bin/                 pinned GitHub CLI (gh) and gh-LICENSE
  *     server/
  *       app/               backend source, with the built frontend in app/static
  *       tools/             built @ai-shuffle/tools with production node_modules
@@ -26,13 +27,14 @@
  *                                 [--arch x64|arm64] [--frontend-build <dir>]
  *                                 [--keep-python] [--stub] [--skip-postgres]
  *                                 [--postgres-out postgres] [--cache <dir>] [--runtime-only]
- *                                 [--postgres-only]
+ *                                 [--postgres-only] [--gh-only]
  *
  * --runtime-only downloads the native runtimes locally, keeps npm for source
  * builds, and skips application/frontend/tool assembly. --cache reuses verified
  * downloads across runtime versions. No Windows installer is produced.
  *
  * --postgres-only assembles and smoke-tests just PostgreSQL (no worker runtime).
+ * --gh-only assembles and smoke-tests just gh and writes its manifest entry.
  *
  * --stub writes only a manifest so electron-builder can package a shell without
  * a runtime (used by pull-request CI on platforms that do not build one).
@@ -60,6 +62,7 @@ import {
 	postgresTarget
 } from './postgres-binaries.mjs';
 import { validateBundledSymlinks } from './bundled-symlinks.mjs';
+import { installGh } from './gh-binaries.mjs';
 
 const PYTHON_VERSION = '3.12.14';
 const PYTHON_BUILD = '20260901';
@@ -121,7 +124,7 @@ function run(cmd, cmdArgs, opts = {}) {
 	}
 }
 
-async function download(url, dest, expectedSha256) {
+export async function download(url, dest, expectedSha256) {
 	if (existsSync(dest)) {
 		if (!expectedSha256 || (await sha256(dest)) === expectedSha256) {
 			log(`cached ${path.basename(dest)}`);
@@ -164,7 +167,7 @@ async function fetchText(url) {
  * Paths are made relative to the destination because bsdtar reads a Windows
  * drive letter (`D:\...`) as a remote host.
  */
-async function extract(archive, dest, stripComponents = 1) {
+export async function extract(archive, dest, stripComponents = 1) {
 	await rm(dest, { recursive: true, force: true });
 	await mkdir(dest, { recursive: true });
 	if (archive.endsWith('.zip') && process.platform === 'win32') {
@@ -254,7 +257,7 @@ async function installNode() {
  * The directory inside an extracted archive that holds `marker`: the archive
  * root itself, or a single wrapping directory (the release layout has varied).
  */
-async function findRoot(dir, marker, depth = 2) {
+export async function findRoot(dir, marker, depth = 2) {
 	if (existsSync(path.join(dir, marker))) return dir;
 	if (depth === 0) return null;
 	const { readdir } = await import('node:fs/promises');
@@ -377,6 +380,14 @@ async function main() {
 	if (!args.stub && (platform !== process.platform || arch !== process.arch)) {
 		throw new Error('Build the worker runtime on its target platform and architecture');
 	}
+	if (args['gh-only'] && !args.stub) {
+		const gh = await installGh({ platform, arch, outDir, cacheDir, download, extract, findRoot });
+		await validateBundledSymlinks(outDir, platform);
+		run(path.join(outDir, gh.binary), ['--version']);
+		await writeFile(path.join(outDir, 'manifest.json'), JSON.stringify({ gh, platform, arch, builtAt: new Date().toISOString() }, null, 2));
+		log(`assembled GitHub CLI into ${outDir}`);
+		return;
+	}
 	if (args['postgres-only']) {
 		await mkdir(cacheDir, { recursive: true });
 		await installPostgres();
@@ -397,6 +408,8 @@ async function main() {
 	await mkdir(cacheDir, { recursive: true });
 	const python = await installPython();
 	const node = await installNode();
+	const gh = await installGh({ platform, arch, outDir, cacheDir, download, extract, findRoot });
+	run(path.join(outDir, gh.binary), ['--version']);
 	let postgres = null;
 	if (args['skip-postgres']) log('skipping PostgreSQL (--skip-postgres)');
 	else postgres = await installPostgres();
@@ -417,6 +430,7 @@ async function main() {
 		arch,
 		python,
 		node,
+		gh,
 		postgres,
 		cloudflared,
 		builtAt: new Date().toISOString(),
@@ -439,7 +453,9 @@ async function dirSize(dir) {
 	return total;
 }
 
-main().catch((error) => {
-	console.error(`[build-worker] failed: ${error.message}`);
-	process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	main().catch((error) => {
+		console.error(`[build-worker] failed: ${error.message}`);
+		process.exit(1);
+	});
+}

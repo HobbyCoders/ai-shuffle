@@ -11,6 +11,33 @@ import pytest
 import yaml
 
 from app.core import auth as auth_module
+from app.core.platform import get_gh_executable
+from fluid.tools.child_env import scrub_child_env
+
+
+@pytest.mark.parametrize('resolver', [auth_module.find_gh_executable, get_gh_executable])
+def test_gh_prefers_bundled_path_then_system(tmp_path, monkeypatch, resolver):
+    bundled = tmp_path / 'worker' / 'bin'
+    system = tmp_path / 'system'
+    name = 'gh.exe' if os.name == 'nt' else 'gh'
+    for directory in (bundled, system):
+        directory.mkdir(parents=True)
+        cli = directory / name
+        cli.write_text('fixture')
+        cli.chmod(0o755)
+    monkeypatch.setenv('PATH', os.pathsep.join([str(bundled), str(system)]))
+    assert resolver() == str(bundled / name)
+    (bundled / name).unlink()
+    assert resolver() == str(system / name)
+
+
+def test_gh_child_environment_keeps_path_and_auth_config(tmp_path, monkeypatch):
+    monkeypatch.setenv('PATH', str(tmp_path / 'worker' / 'bin'))
+    monkeypatch.setenv('GH_CONFIG_DIR', str(tmp_path / 'profile' / 'gh'))
+    service = auth_module.AuthService()
+    child = scrub_child_env()
+    assert child['PATH'] == os.environ['PATH']
+    assert child['GH_CONFIG_DIR'] == str(service.gh_config_dir)
 
 
 @pytest.fixture

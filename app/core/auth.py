@@ -5,7 +5,6 @@ Authentication service for AI Hub
 import asyncio
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -20,24 +19,9 @@ from app.db import database
 logger = logging.getLogger(__name__)
 
 def find_gh_executable() -> Optional[str]:
-    """Find the gh executable, handling Windows installations"""
-    # First try shutil.which (works for PATH)
-    gh_path = shutil.which('gh')
-    if gh_path:
-        return gh_path
-
-    # On Windows, check common installation paths
-    if sys.platform == 'win32':
-        possible_paths = [
-            Path(os.environ.get('ProgramFiles', '')) / 'GitHub CLI' / 'gh.exe',
-            Path(os.environ.get('LOCALAPPDATA', '')) / 'Programs' / 'GitHub CLI' / 'gh.exe',
-            Path.home() / 'scoop' / 'apps' / 'gh' / 'current' / 'gh.exe',
-        ]
-        for p in possible_paths:
-            if p.exists():
-                return str(p)
-
-    return None
+    """Use the shared resolver: desktop prepends bundled gh to the worker PATH."""
+    from app.core.platform import get_gh_executable
+    return get_gh_executable()
 
 
 class AuthService:

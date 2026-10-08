@@ -198,7 +198,9 @@ class TestRunGh:
 
     def test_run_gh_success(self, service, mock_completed_process):
         """Should run gh command successfully."""
-        with patch('subprocess.run') as mock_run:
+        with patch('subprocess.run') as mock_run, patch(
+            'app.core.github_service.get_gh_executable', return_value='/bundled/bin/gh'
+        ):
             mock_run.return_value = mock_completed_process(
                 returncode=0,
                 stdout='{"status": "ok"}'
@@ -209,7 +211,7 @@ class TestRunGh:
             assert result.returncode == 0
             mock_run.assert_called_once()
             call_args = mock_run.call_args
-            assert call_args[0][0] == ['gh', 'auth', 'status']
+            assert call_args[0][0] == ['/bundled/bin/gh', 'auth', 'status']
 
     def test_run_gh_with_custom_timeout(self, service, mock_completed_process):
         """Should use custom timeout when provided."""

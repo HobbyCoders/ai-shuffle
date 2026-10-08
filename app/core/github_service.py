@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fluid.tools.child_env import scrub_child_env
 
+from app.core.platform import get_gh_executable
 from app.core.ttl_cache import CACHE_MISS, TTLCache  # noqa: F401  (re-exported)
 
 logger = logging.getLogger(__name__)
@@ -198,7 +199,7 @@ class GitHubService:
             subprocess.TimeoutExpired: If command times out
             subprocess.SubprocessError: If command fails to execute
         """
-        cmd = ['gh'] + args
+        cmd = [get_gh_executable() or 'gh'] + args
         timeout = timeout or self.timeout
 
         logger.debug(f"Running gh command: {' '.join(cmd)}")

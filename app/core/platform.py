@@ -168,7 +168,11 @@ def get_claude_executable() -> Optional[str]:
 
 def get_gh_executable() -> Optional[str]:
     """
-    Find the GitHub CLI executable.
+    Find the GitHub CLI executable, preferring PATH over fallback locations.
+
+    Desktop prepends worker/bin to PATH, just like bundled Node. This lets the
+    app, agent commands and gh's git credential helper use the same pinned CLI.
+    Native development and Docker retain their existing system-PATH behavior.
 
     Returns:
         Path to gh executable, or None if not found
@@ -182,8 +186,10 @@ def get_gh_executable() -> Optional[str]:
     # Check common installation locations
     if sys.platform == "win32":
         possible_paths = [
-            Path("C:/Program Files/GitHub CLI/gh.exe"),
+            Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "GitHub CLI" / "gh.exe",
             Path("C:/Program Files (x86)/GitHub CLI/gh.exe"),
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "GitHub CLI" / "gh.exe",
+            Path.home() / "scoop" / "apps" / "gh" / "current" / "gh.exe",
         ]
     else:
         possible_paths = [

@@ -196,6 +196,7 @@ ships under `resources/worker`:
 | --- | --- |
 | `python/` | CPython 3.12 from python-build-standalone, with `requirements.txt`, `requirements-native.txt` and the `fluid` harness installed into its site-packages. No Claude CLI is bundled: agents use the user's own `claude` install |
 | `node/` | Node.js 22 for the AI tools and the browser MCP server |
+| `bin/gh[.exe]`, `bin/gh-LICENSE` | GitHub CLI 2.102.0 and its MIT license; pinned release-asset SHA256 values in `scripts/gh-binaries.mjs` |
 | `server/app/` | the backend, with the built frontend in `app/static` |
 | `server/tools/`, `server/browser-mcp/` | the two Node packages, built, with production dependencies |
 | `server/downloads/cloudflared/<version>/` | pinned cloudflared for optional remote access, downloaded and checksum-verified during assembly |
@@ -231,9 +232,25 @@ back up both that directory and `<userData>/postgres/data`; keep them together.
 The worker's `.env` carries no database credentials (see above), so it cannot
 be used for a manual `pg_dump`. Uninstalling the app leaves both in place.
 
-Optional tools the worker looks for on PATH, as on any native install: the
-GitHub CLI for pull-request features, and a Chrome, Chromium or Edge for
-browser automation.
+GitHub CLI is included: desktop users do not need to install `gh` separately.
+Connect GitHub in setup or Settings. The worker prepends `worker/bin` to PATH,
+just as it does bundled Node, so sign-in, PR/check/run operations, agent `gh`
+commands and git credential helpers prefer the bundled CLI over a system copy.
+They inherit the same `GH_CONFIG_DIR` (or gh's standard home/XDG config path);
+isolated previews keep the existing private-profile `GH_CONFIG_DIR`.
+Development runs without a bundled runtime still use system `gh`.
+
+The five Linux x64/arm64, Windows x64 and macOS x64/arm64 assets are pinned to
+[cli/cli v2.102.0](https://github.com/cli/cli/releases/tag/v2.102.0), with digests
+copied from its `gh_2.102.0_checksums.txt`. Builds verify downloads and cached
+archives against those source pins, not network-supplied checksums. Only the
+binary and LICENSE ship; the worker manifest records the asset and digest.
+`--runtime-only` includes gh; `--stub` downloads nothing. For a narrow smoke build:
+`node desktop/scripts/build-worker.mjs --gh-only --out /tmp/shuffle-gh/worker --cache /tmp/shuffle-gh/cache`.
+Existing installs need a new installer to gain this native binary; source-only
+updates do not replace the bundled runtime.
+
+Optional browser automation still needs Chrome, Chromium or Edge on PATH.
 
 ## The bridge
 
