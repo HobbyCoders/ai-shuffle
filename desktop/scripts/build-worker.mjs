@@ -26,10 +26,13 @@
  *                                 [--arch x64|arm64] [--frontend-build <dir>]
  *                                 [--keep-python] [--stub] [--skip-postgres]
  *                                 [--postgres-out postgres] [--cache <dir>] [--runtime-only]
+ *                                 [--postgres-only]
  *
  * --runtime-only downloads the native runtimes locally, keeps npm for source
  * builds, and skips application/frontend/tool assembly. --cache reuses verified
  * downloads across runtime versions. No Windows installer is produced.
+ *
+ * --postgres-only assembles and smoke-tests just PostgreSQL (no worker runtime).
  *
  * --stub writes only a manifest so electron-builder can package a shell without
  * a runtime (used by pull-request CI on platforms that do not build one).
@@ -56,6 +59,7 @@ import {
 	postgresManifestEntry,
 	postgresTarget
 } from './postgres-binaries.mjs';
+import { validateBundledSymlinks } from './bundled-symlinks.mjs';
 
 const PYTHON_VERSION = '3.12.14';
 const PYTHON_BUILD = '20260901';
@@ -277,12 +281,15 @@ async function installPostgres() {
 	await rm(postgresDir, { recursive: true, force: true });
 	await mkdir(postgresDir, { recursive: true });
 	// include/ and the pkg-config files are for building against libpq; the app only runs the server.
+	// fs.cp otherwise turns relative Linux/macOS library links into absolute cache paths.
 	for (const item of ['bin', 'lib', 'share']) {
-		if (existsSync(path.join(root, item))) await cp(path.join(root, item), path.join(postgresDir, item), { recursive: true });
+		if (existsSync(path.join(root, item))) await cp(path.join(root, item), path.join(postgresDir, item), { recursive: true, verbatimSymlinks: true });
 	}
 	await rm(staging, { recursive: true, force: true });
+	await validateBundledSymlinks(postgresDir, platform);
 	if (platform === process.platform) {
 		run(path.join(postgresDir, 'bin', platform === 'win32' ? 'pg_ctl.exe' : 'pg_ctl'), ['--version']);
+		run(path.join(postgresDir, marker), ['--version']);
 	}
 	const entry = postgresManifestEntry(POSTGRES_VERSION, target);
 	await writeFile(path.join(postgresDir, 'manifest.json'), JSON.stringify({ ...entry, builtAt: new Date().toISOString() }, null, 2));
@@ -299,6 +306,7 @@ async function buildNodePackage(name) {
 	try {
 		await cp(path.join(repoDir, name), src, {
 			recursive: true,
+			verbatimSymlinks: true,
 			filter: (file) => !path.relative(path.join(repoDir, name), file).split(path.sep).some((part) => ['node_modules', 'dist', '.git', '.env'].includes(part))
 		});
 		run(npmCmd, ['ci', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: src, env, shell: process.platform === 'win32' });
@@ -307,7 +315,7 @@ async function buildNodePackage(name) {
 		await rm(dest, { recursive: true, force: true });
 		await mkdir(dest, { recursive: true });
 		for (const item of ['dist', 'node_modules', 'package.json']) {
-			await cp(path.join(src, item), path.join(dest, item), { recursive: true });
+			await cp(path.join(src, item), path.join(dest, item), { recursive: true, verbatimSymlinks: true });
 		}
 	} finally {
 		await rm(scratch, { recursive: true, force: true });
@@ -319,6 +327,7 @@ async function copyServer() {
 	await mkdir(dest, { recursive: true });
 	await cp(path.join(repoDir, 'app'), path.join(dest, 'app'), {
 		recursive: true,
+		verbatimSymlinks: true,
 		filter: (src) => {
 			const rel = path.relative(path.join(repoDir, 'app'), src);
 			const parts = rel.split(path.sep);
@@ -330,9 +339,9 @@ async function copyServer() {
 	if (!existsSync(path.join(frontendBuild, 'index.html'))) {
 		throw new Error('Frontend build missing. Build the frontend separately and pass --frontend-build; runtime assembly never installs into the source checkout.');
 	}
-	await cp(frontendBuild, path.join(dest, 'app', 'static'), { recursive: true });
+	await cp(frontendBuild, path.join(dest, 'app', 'static'), { recursive: true, verbatimSymlinks: true });
 	await cp(path.join(repoDir, 'fluid', 'fluid'), path.join(dest, 'fluid'), {
-		recursive: true, filter: src => !src.split(path.sep).includes('__pycache__') && !src.endsWith('.pyc')
+		recursive: true, verbatimSymlinks: true, filter: src => !src.split(path.sep).includes('__pycache__') && !src.endsWith('.pyc')
 	});
 	for (const file of ['requirements.txt', 'requirements-native.txt', 'LICENSE']) {
 		await cp(path.join(repoDir, file), path.join(dest, file));
@@ -368,6 +377,12 @@ async function main() {
 	if (!args.stub && (platform !== process.platform || arch !== process.arch)) {
 		throw new Error('Build the worker runtime on its target platform and architecture');
 	}
+	if (args['postgres-only']) {
+		await mkdir(cacheDir, { recursive: true });
+		await installPostgres();
+		log(`assembled PostgreSQL into ${postgresDir}`);
+		return;
+	}
 	// Each step replaces its own directory; --keep-python skips the slow
 	// dependency install when iterating locally. CI always starts clean.
 	if (!args['keep-python']) await rm(outDir, { recursive: true, force: true });
@@ -391,6 +406,8 @@ async function main() {
 		await buildNodePackage('tools');
 		await buildNodePackage('browser-mcp');
 	}
+	// Both resource trees must be relocatable, after all staging directories are gone.
+	await validateBundledSymlinks(outDir, platform);
 	const manifest = {
 		stub: false,
 		appVersion: pkg.version,
