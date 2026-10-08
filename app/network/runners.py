@@ -70,13 +70,9 @@ def installs_map() -> Dict[str, dict]:
     listing = directory()
     for row in listing["runners"]:
         out[row["id"]] = row
-        legacy = row.get("legacy_instance_id")
-        if legacy and legacy not in out:
-            out[legacy] = dict(row, id=legacy)
-    own_instance = settings.effective_instance_id
-    own = next((row for row in listing["runners"] if row.get("is_self")), None)
-    if own is not None and own_instance and own_instance != own["id"]:
-        out[own_instance] = dict(own, id=own_instance)
+    for alias, device_id in engine.instance_aliases().items():
+        if device_id in out:
+            out[alias] = dict(out[device_id], id=alias)
     return out
 
 
@@ -94,7 +90,7 @@ def device_for_instance(instance_id: Optional[str]) -> Optional[str]:
         return None
     if instance_id == settings.effective_instance_id:
         return ctx.device_id
-    return ctx.legacy_instance_map.get(instance_id)
+    return engine.instance_aliases().get(instance_id)
 
 
 def resolve_runner_id(runner_id: Optional[str]) -> Optional[str]:

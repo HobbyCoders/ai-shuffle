@@ -8,9 +8,12 @@ so every worker admitted through the account had none: its own startup
 treated it as an unapproved install and its peers dropped its usage rows.
 """
 import contextlib
+from datetime import datetime, timedelta, timezone
+from itertools import count
 from unittest.mock import patch
 
 import httpx
+import pytest
 
 from app.core.config import settings
 from app.db import database
@@ -19,6 +22,16 @@ from app.network import engine, hub, runners
 from app.network import startup as network_startup
 from tests.core.network.harness import exchange, join
 from tests.core.network.test_hub import _signed_in, fake, workers  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def ordered_membership_timestamps(monkeypatch):
+    # Windows' clock can return the same timestamp for successive membership
+    # writes. The SQLite harness then sorts certificates by random device id
+    # before their issuer, unrelated to the alias behavior under test.
+    start = datetime.now(timezone.utc)
+    ticks = count()
+    monkeypatch.setattr(store, "_now", lambda: (start + timedelta(microseconds=next(ticks))).isoformat())
 
 
 @contextlib.contextmanager
@@ -93,10 +106,16 @@ def test_startup_repairs_a_membership_without_an_install_id(workers):
     with as_install(a, "inst-a"):
         assert runners.device_for_instance("inst-b") == b.device_id
         assert database.get_installs_map()["inst-b"]["id"] == b.device_id
-    # A worker that joins later learns it from the snapshot.
-    with as_install(c, "inst-c"):
-        pass
+    # A later join receives the inviter's existing legacy map, but snapshot
+    # presence must not synthesize a member alias from an unauthenticated item.
     join(a, c, name="Laptop", legacy_instance_id="inst-c")
+    assert _legacy(c, b.device_id) is None
+    with as_install(c, "inst-c"):
+        assert runners.device_for_instance("inst-b") == b.device_id
+        assert c.sql("SELECT * FROM network_instance_aliases") == []
+    with as_install(b, "inst-b"):
+        engine.publish_presence(version="republished")
+    exchange(b, c)
     assert _legacy(c, b.device_id) == "inst-b"
 
 
@@ -170,6 +189,8 @@ def test_presence_applies_only_from_the_device_it_describes(workers):
         assert engine.presence_of(b.device_id)["endpoints"] == ["http://10.0.0.2:8000"]
         assert engine.presence_of(c.device_id) is None or \
             engine.presence_of(c.device_id)["device_id"] == c.device_id
+        assert runners.device_for_instance("inst-forged") is None
+        assert database.get_install("inst-forged") is None
     # Nor can a member retract another device's presence.
     with c.active():
         with store.get_db() as conn:
@@ -243,3 +264,131 @@ def test_a_changed_install_id_still_finds_this_worker(workers):
         # Only the worker itself knows its new id; this is the open part of #1716.
         assert "inst-new" not in database.get_installs_map()
         assert runners.device_for_instance("inst-new") is None
+
+
+@pytest.mark.parametrize("legacy", [None, "inst-old"])
+@pytest.mark.parametrize("lookup", ["install", "approved", "db-map", "runner-map", "device", "runner", "git", "owner", "backfill", "placement", "enrichment", "adopt"])
+def test_signed_current_instance_resolves_on_a_peer(workers, monkeypatch, legacy, lookup):
+    from app.network import control, git as network_git, transport
+
+    a, b = workers("a"), workers("b")
+    with as_install(a, "inst-a"):
+        engine.create_network("Home", legacy_instance_id="inst-a")
+    join(a, b, legacy_instance_id=legacy)
+    with as_install(b, "inst-current"):
+        engine.publish_presence()
+    assert exchange(b, a).applied >= 1
+    monkeypatch.setattr(transport, "online_devices", lambda: {b.device_id})
+    with as_install(a, "inst-a"):
+        # Reload to prove the signed claim survives a process restart.
+        engine.load_context()
+        if lookup == "install":
+            assert database.get_install("inst-current")["id"] == b.device_id
+        elif lookup == "approved":
+            assert database.is_install_approved("inst-current")
+        elif lookup == "db-map":
+            assert database.get_installs_map()["inst-current"]["id"] == b.device_id
+        elif lookup == "runner-map":
+            assert runners.installs_map()["inst-current"]["device_id"] == b.device_id
+        elif lookup == "device":
+            assert runners.device_for_instance("inst-current") == b.device_id
+        elif lookup == "runner":
+            assert runners.resolve_runner_id("inst-current") == b.device_id
+        elif lookup == "git":
+            assert network_git.device_id("inst-current") == b.device_id
+        elif lookup == "owner":
+            assert control.owner_of({"instance_id": "inst-current"}) == b.device_id
+        elif lookup == "placement":
+            from app.core import placement
+            assert placement.resolve_placement({"instance_id": "inst-current"}).kind == "runner"
+        elif lookup == "enrichment":
+            from app.api.sessions_helpers import _annotate_cluster_fields
+            session = {"id": "legacy-owner", "instance_id": "inst-current"}
+            _annotate_cluster_fields([session])
+            assert session["device_name"] == "b"
+            assert session["controllable"]
+        elif lookup == "adopt":
+            from app.api.sessions import _adopt_device_name
+            assert _adopt_device_name("inst-current") == "b"
+        else:
+            database.create_session("legacy-owner", "default", title="Legacy owner")
+            a.sql("UPDATE sessions SET owner_device_id = NULL, instance_id = ? WHERE id = ?",
+                  ("inst-current", "legacy-owner"))
+            network_startup.backfill_owner_device_ids(a.device_id, include_unscoped=False)
+            assert a.sql("SELECT owner_device_id FROM sessions WHERE id = ?", ("legacy-owner",))[0]["owner_device_id"] == b.device_id
+        if legacy:
+            assert runners.device_for_instance(legacy) == b.device_id
+            assert _legacy(a, b.device_id) == legacy
+
+
+def test_snapshot_presence_does_not_authorize_a_second_alias(workers):
+    a, b, c = workers("a"), workers("b"), workers("c")
+    with as_install(a, "inst-a"):
+        engine.create_network("Home", legacy_instance_id="inst-a")
+    join(a, b, legacy_instance_id="inst-old")
+    with as_install(b, "inst-current"):
+        engine.publish_presence()
+    exchange(b, a)
+    join(a, c, legacy_instance_id="inst-c")
+    with as_install(c, "inst-c"):
+        assert engine.presence_of(b.device_id)["instance_id"] == "inst-current"
+        assert runners.device_for_instance("inst-current") is None
+        assert database.get_install("inst-current") is None
+    # A fresh envelope, including one forwarded by another peer, supplies proof.
+    with as_install(b, "inst-current"):
+        engine.publish_presence(version="republished")
+    exchange(b, a)
+    exchange(a, c)
+    with as_install(c, "inst-c"):
+        assert runners.device_for_instance("inst-current") == b.device_id
+
+
+def test_current_alias_collisions_and_revocation_fail_closed(workers):
+    from app.network import git as network_git
+
+    a, b, c = workers("a"), workers("b"), workers("c")
+    with as_install(a, "inst-a"):
+        engine.create_network("Home", legacy_instance_id="inst-a")
+    join(a, b, legacy_instance_id="inst-b")
+    join(a, c, legacy_instance_id="inst-c")
+    with as_install(b, "inst-a"):
+        engine.publish_presence()
+    exchange(b, a)
+    with as_install(a, "inst-a"):
+        assert runners.device_for_instance("inst-a") == a.device_id
+    for worker in (b, c):
+        with as_install(worker, "inst-shared"):
+            engine.publish_presence()
+        exchange(worker, a)
+    with as_install(a, "inst-a"):
+        assert runners.device_for_instance("inst-shared") is None
+        assert "inst-shared" not in database.get_installs_map()
+        assert "inst-shared" not in runners.installs_map()
+        with pytest.raises(ValueError, match="Unknown or revoked"):
+            network_git.device_id("inst-shared")
+        engine.revoke_device(c.device_id)
+        assert runners.device_for_instance("inst-shared") == b.device_id
+        engine.revoke_device(b.device_id)
+        assert runners.device_for_instance("inst-shared") is None
+        assert runners.device_for_instance("inst-b") is None
+
+
+def test_only_the_latest_signed_current_alias_is_kept(workers):
+    a, b = workers("a"), workers("b")
+    with as_install(a, "inst-a"):
+        engine.create_network("Home", legacy_instance_id="inst-a")
+    join(a, b, legacy_instance_id="inst-old")
+    for alias in ("inst-first", "inst-second"):
+        with as_install(b, alias):
+            engine.publish_presence()
+        exchange(b, a)
+    with as_install(a, "inst-a"):
+        assert runners.device_for_instance("inst-old") == b.device_id
+        assert runners.device_for_instance("inst-first") is None
+        assert runners.device_for_instance("inst-second") == b.device_id
+    # Only a signed deletion by that device retracts its verified current id.
+    _forge_presence(b, b.device_id, None)
+    exchange(b, a)
+    with as_install(a, "inst-a"):
+        assert runners.device_for_instance("inst-second") is None
+        assert runners.device_for_instance("inst-old") == b.device_id

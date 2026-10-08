@@ -131,7 +131,7 @@ def backfill_owner_device_ids(device_id: str, *, include_unscoped: bool = True) 
     counts = {}
     me = settings.effective_instance_id
     ctx = engine.context()
-    legacy_map = dict(ctx.legacy_instance_map) if ctx else {}
+    legacy_map = engine.instance_aliases() if ctx else {}
     legacy_map[me] = device_id
     with store.get_db() as conn:
         cursor = conn.cursor()

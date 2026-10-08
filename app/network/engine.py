@@ -351,7 +351,7 @@ def leave_network() -> dict:
         store.lock_state(cursor)  # State lock first, like the other network-state writers.
         for table in ("sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
                       "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
-                      "network_joins", "network_member_names", "network_members"):
+                      "network_joins", "network_member_names", "network_instance_aliases", "network_members"):
             cursor.execute(f"DELETE FROM {table}")
         cursor.execute("DELETE FROM sync_blobs WHERE present = FALSE")
         store.delete_state(_conn=conn)
@@ -1291,6 +1291,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                                    winning_device_id=env.origin_device_id)
 
     if env.op == OP_DELETE:
+        if coll.name == "presence":
+            cursor.execute("DELETE FROM network_instance_aliases WHERE device_id = %s", (env.origin_device_id,))
         materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash="", deleted=True, order_seq=env.order_seq)
@@ -1967,8 +1969,8 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
                 row = materialize(cursor, coll, item["record_id"], prepared,
                                   origin_device_id=item["origin_device_id"])
                 _after_mirror(cursor, coll, prepared)
-                if coll.name == "presence":
-                    _learn_presence_alias(cursor, ctx, prepared, item["origin_device_id"])
+                # Snapshot items have no per-item signature. In particular,
+                # their claimed origin is not evidence for an instance alias.
                 local_hash = content_hash(coll, item["record"])
                 if row is not None:
                     try:
@@ -2334,7 +2336,7 @@ def _own_instance_id() -> Optional[str]:
 # every worker admitted through the account had none. The certificate cannot
 # be reissued by the device itself; instead each device fills in its OWN alias
 # locally at startup and publishes it in its presence record, which its peers
-# accept only from that device's own signed stream. An alias is only ever
+# accept only from that device's own signed stream. A membership alias is only
 # added where none is recorded: a value from a certificate is never replaced,
 # and an id another device already holds is never taken over.
 # ---------------------------------------------------------------------------
@@ -2401,7 +2403,53 @@ def _learn_presence_alias(cursor, ctx: NetworkContext, presence: Mapping[str, An
     if device_id != origin_device_id or device_id == ctx.device_id:
         # Only the device itself may name its alias; this worker names its own.
         return
-    _adopt_member_alias(cursor, ctx, device_id, instance_id.strip())
+    instance_id = instance_id.strip()
+    member = ctx.member(device_id)
+    if (not instance_id or len(instance_id) > MAX_INSTANCE_ID_LENGTH or member is None
+            or member.kind != membership.KIND_WORKER or member.status != membership.STATUS_ACTIVE):
+        return
+    # This function is called only after verifying a signed envelope. Keep
+    # that evidence separately from presence, which snapshots can overwrite.
+    cursor.execute("""INSERT INTO network_instance_aliases (device_id, instance_id) VALUES (%s, %s)
+                      ON CONFLICT (device_id) DO UPDATE SET instance_id = EXCLUDED.instance_id""",
+                   (device_id, instance_id))
+    _adopt_member_alias(cursor, ctx, device_id, instance_id)
+
+
+def instance_aliases() -> Dict[str, str]:
+    """Active worker aliases, including current ids learned from signed presence.
+
+    Certificate aliases are retained. A second alias cannot shadow an active
+    member's device/certificate id; conflicting current claims are unresolved.
+    Existing presence rows are deliberately not migrated: their provenance is
+    unknown until the worker publishes a new signed envelope.
+    """
+    ctx = context()
+    if ctx is None:
+        return {}
+    active = {m.device_id: m for m in ctx.active_members()}
+    reserved = {device_id: device_id for device_id in active}
+    reserved.update({alias: device_id for alias, device_id in ctx.legacy_instance_map.items()
+                     if device_id in active and alias not in reserved})
+    out = {alias: device_id for alias, device_id in reserved.items()
+           if active[device_id].kind == membership.KIND_WORKER}
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT device_id, instance_id FROM network_instance_aliases")
+        claims: Dict[str, set] = {}
+        for row in cursor.fetchall():
+            member = active.get(row["device_id"])
+            if member is not None and member.kind == membership.KIND_WORKER:
+                claims.setdefault(row["instance_id"], set()).add(row["device_id"])
+    own = _own_instance_id()
+    if own:
+        reserved[own] = ctx.device_id
+    for alias, devices in claims.items():
+        if alias not in reserved and len(devices) == 1:
+            out[alias] = next(iter(devices))
+    if own and ctx.device_id in active and active[ctx.device_id].kind == membership.KIND_WORKER:
+        out[own] = ctx.device_id
+    return out
 
 
 def heal_own_instance_alias() -> bool:

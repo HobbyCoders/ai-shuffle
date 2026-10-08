@@ -194,13 +194,11 @@ def get_install(install_id: str) -> Optional[InstallRow]:
     """
     directory = _network_directory()
     if directory is not None:
-        from app.core.config import settings
+        from app.network import runners
 
-        is_own_id = install_id == settings.effective_instance_id
+        device_id = runners.device_for_instance(install_id) or install_id
         for row in directory:
-            if row["id"] == install_id or row.get("legacy_instance_id") == install_id:
-                return row
-            if is_own_id and row.get("is_self"):
+            if row["id"] == device_id:
                 return row
         return None
     with get_db() as conn:
@@ -259,16 +257,12 @@ def get_installs_map() -> Dict[str, InstallRow]:
     after the data directory changed (#1716).
     """
     out = {row["id"]: row for row in get_installs()}
-    for row in list(out.values()):
-        legacy = row.get("legacy_instance_id")
-        if legacy and legacy not in out:
-            out[legacy] = row
-    own = _own_network_row(out.values())
-    if own is not None:
-        from app.core.config import settings
+    if _own_network_row(out.values()) is not None:
+        from app.network import engine
 
-        if settings.effective_instance_id:
-            out[settings.effective_instance_id] = own
+        for alias, device_id in engine.instance_aliases().items():
+            if device_id in out:
+                out[alias] = out[device_id]
     return out
 
 

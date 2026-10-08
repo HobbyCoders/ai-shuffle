@@ -95,6 +95,13 @@ def create_schema(cursor) -> None:
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
+    # Local evidence only: never included in join snapshots or scanned into sync.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS network_instance_aliases (
+            device_id TEXT PRIMARY KEY,
+            instance_id TEXT NOT NULL
+        )
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS network_membership_records (
             id TEXT PRIMARY KEY,
