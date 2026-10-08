@@ -68,6 +68,14 @@ describe('deriveNetworkState', () => {
 		).toBe('syncing');
 	});
 
+	it('is Syncing during inbound apply or peer catch-up, and returns to Ready', () => {
+		const sync = status().sync!;
+		expect(deriveNetworkState(status({ sync: { ...sync, syncing: true } }))).toBe('syncing');
+		const peer = { device_id: 'peer', base_url: null, endpoints: [], last_error: null, seconds_since_contact: 0, online: true, syncing: true };
+		expect(deriveNetworkState(status({ sync: { ...sync, peers: [peer] } }))).toBe('syncing');
+		expect(deriveNetworkState(status({ sync: { ...sync, peers: [{ ...peer, syncing: false }] } }))).toBe('ready');
+	});
+
 	it('is Needs local setup for a fresh worker', () => {
 		expect(deriveNetworkState(status({ enrolled: false, network: undefined, enrollment: null }))).toBe('needs-setup');
 	});

@@ -393,7 +393,7 @@ export function syncBeforeOpen(port: number, listener: string | null = null): Pr
 				if (res.statusCode !== 200) return reject(new Error(`Startup sync failed (${res.statusCode}). Update the worker and try again.`));
 				try {
 					const reply = JSON.parse(body);
-					if (!['synced', 'offline', 'partial', 'not_enrolled'].includes(reply.status)) throw new Error('Invalid startup sync response');
+					if (typeof reply?.status !== 'string' || !reply.status.trim()) throw new Error('Invalid startup sync response');
 					resolve(reply);
 				} catch (error) { reject(error); }
 			});

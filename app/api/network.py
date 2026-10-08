@@ -158,7 +158,8 @@ def _status() -> dict:
                           key=lambda m: (not m["is_self"], m["status"] != "active", m["name"].lower())),
         "pending_joins": enrollment.pending_joins(),
         "sync": {"records": counts, "ops": store.count_ops(), "holes": store.pending_holes(),
-                 "peers": transport.link_status(), "conflicts": len(store.list_conflicts(limit=1000))},
+                 "peers": transport.link_status(), "conflicts": len(store.list_conflicts(limit=1000)),
+                 "syncing": engine.applying_batch()},
         "recovery": recovery.status(),
         "hub": _hub_status(),
         "startup_sync": _startup_sync_status(),
@@ -512,12 +513,15 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
     transport.note_watermarks(device_id, body.watermarks, catalog_backlog=body.catalog_backlog)
 
     def _work():
+        released = False
         if engine.outbox_held():
-            # A peer we may be unable to dial just showed what it holds of our
-            # stream (#1621). Before a flush, so the flush can publish.
-            transport.release_hold_for_peer_view(device_id, body.watermarks.get(ctx.device_id) or {})
+            # The journal is the durable offline buffer. Once this comparison
+            # opens the hold, publish its delta in this very response (#1978).
+            released = transport.release_hold_for_peer_view(device_id, body.watermarks.get(ctx.device_id) or {})
         if body.flush:
             engine.scan_all(strict=True)
+        elif released:
+            catalog.publish_owned()
         store.touch_member(device_id, capabilities=body.capabilities or None, endpoints=body.endpoints or None,
                            version=body.version, incarnation=body.incarnation)
         ops, heads, snapshot = store.exchange_batch(body.watermarks, limit=body.limit, lane=body.lane,

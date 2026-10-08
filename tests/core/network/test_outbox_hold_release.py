@@ -268,3 +268,79 @@ async def test_offline_restart_holds_transcripts_then_drains_the_open_chat_first
         owner = transcript_ops()
     assert len(owner) == 60
     assert max(i for i, s in enumerate(owner) if s == "open-chat") < owner.index("agent")
+
+
+
+
+async def test_successful_exchange_without_signed_rollback_proof_keeps_the_hold(workers, monkeypatch):
+    a, b = _network(workers, "proof-a", "proof-b")
+    net = Network(monkeypatch, a=a)
+    with b.active():
+        with store.get_db() as conn:
+            held = store.own_watermark(conn.cursor(), b.device_id, 1)
+        store.touch_member(a.device_id, endpoints=[net.url("a")])
+        engine.hold_outbox(True)
+    with a.active():
+        with store.get_db() as conn:
+            store.set_watermark(conn.cursor(), b.device_id, 1, held + 1)
+    with b.active():
+        async with httpx.AsyncClient() as client:
+            results = await transport.sync_pass(client)
+        assert a.device_id in results  # HTTP exchange succeeded; proof fetch did not
+        assert engine.outbox_held()
+        set_owner_pref(b, "must-not-reuse-seq", 1)
+        assert _pref_ops(b, "must-not-reuse-seq") == []
+
+
+@pytest.mark.parametrize("direction", ["inbound", "outbound"])
+async def test_first_safe_contact_transfers_only_the_offline_delta_in_one_exchange(workers, monkeypatch, direction):
+    from app.network import catalog
+    from tests.core.network.test_owner_sync_speed import _append, _session
+    from tests.core.network.test_transport import ServedBy
+    a, b = _network(workers, "delta-a", "delta-b")
+    with b.active():
+        _session("delta-chat")
+        _append("delta-chat", 100)
+        catalog.publish_owned()
+    converge([a, b])
+    net = Network(monkeypatch)  # both peers unreachable during the restart
+    with b.active():
+        store.touch_member(a.device_id, endpoints=["http://a.local:8000"])
+        engine.load_context()  # disk context/cursor retained across the restart
+        engine.hold_outbox(True)
+        _append("delta-chat", 400)
+        assert catalog.publish_owned() == 0
+        async with httpx.AsyncClient() as client:
+            assert await transport.sync_pass(client) == {}
+        assert engine.outbox_held()
+        assert b.sql("SELECT published_seq FROM network_catalog_cursors WHERE session_id = ?", ("delta-chat",))[0]["published_seq"] == 100
+    caller, server = (a, b) if direction == "inbound" else (b, a)
+    served = ServedBy(server, "http://returned.local:8000")
+    net.served["returned"] = served
+    bulk = []
+    freshness = []
+    insert = store.insert_event_batch
+    def capture(cursor, coll, rows, envelopes, hashes):
+        assert engine.applying_batch()
+        freshness.append(transport.owner_sync_status(b.device_id))
+        bulk.append(len(rows))
+        return insert(cursor, coll, rows, envelopes, hashes)
+    monkeypatch.setattr(store, "insert_event_batch", capture)
+    result = await _dial(caller, server.device_id, served.base_url)
+    assert result["received" if direction == "inbound" else "sent"] == 400
+    transfers = [request for request in served.requests if request[1].endswith(("/peer/exchange", "/peer/ops"))]
+    assert len(transfers) == (1 if direction == "inbound" else 2)
+    assert bulk == [64] * 6 + [16]
+    assert all(status["state"] == "syncing" for status in freshness)
+    if direction == "inbound":
+        assert [status["pending_updates"] for status in freshness] == list(range(400, 0, -64))
+    else:
+        # The first request advertised the held journal backlog, not its newly
+        # allocated op frontier. A fresh comparison confirms it has drained.
+        assert (await _dial(caller, server.device_id, served.base_url))["sent"] == 0
+    with a.active():
+        assert transport.owner_sync_status(b.device_id) == {"state": "current", "pending_updates": 0}
+    assert [row["seq"] for row in a.sql("SELECT seq FROM session_events WHERE session_id = ? ORDER BY seq", ("delta-chat",))] == list(range(1, 501))
+    with b.active():
+        assert not engine.outbox_held()
+        assert catalog.publish_owned() == 0  # not a historical republish

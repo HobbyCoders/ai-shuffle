@@ -38,13 +38,13 @@ for (const external of [true, false]) {
   });
 }
 
-for (const outcome of ['offline', 'partial', 'not_enrolled']) {
+for (const outcome of ['offline', 'partial', 'not_enrolled', 'syncing', 'future_status']) {
   test(`accepts explicit ${outcome} fallback without claiming synced`, async t => {
     const port = await serve(t, (_req, res) => res.end(JSON.stringify({status: outcome})));
     assert.equal((await syncBeforeOpen(port)).status, outcome);
   });
 }
-for (const [status, body] of [[404, '{}'], [403, '{}'], [200, 'invalid'], [200, '{"status":"healthy"}']]) {
+for (const [status, body] of [[404, '{}'], [403, '{}'], [200, 'invalid'], [200, '{}'], [200, 'null'], [200, '{"status":3}'], [200, '{"status":" "}']]) {
   test(`rejects invalid startup reply ${status} ${body}`, async t => {
     const port = await serve(t, (_req, res) => {res.statusCode = status; res.end(body);});
     await assert.rejects(syncBeforeOpen(port));

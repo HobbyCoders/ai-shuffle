@@ -531,6 +531,9 @@ def list_membership_records(_conn=None) -> List[dict]:
             item = row_to_dict(row)
             item["record"] = _load(item.get("record"), {})
             out.append(item)
+        # Catch-up arrival times (or tied host timestamps) are not trust-chain
+        # order. Certificates must precede the generations they authorize.
+        out.sort(key=lambda item: int(item["record"].get("generation", 0)))
         return out
     if _conn is not None:
         return _rows(_conn.cursor())
@@ -743,6 +746,29 @@ def prune_ops(*, keep_days: int = 30, _conn=None) -> int:
 # ---------------------------------------------------------------------------
 # Record versions
 # ---------------------------------------------------------------------------
+
+def insert_event_batch(cursor, coll, rows: List[dict], envelopes: List[dict], hashes: List[str]) -> None:
+    """The append-only transcript fast path; caller verified ordering and ownership."""
+    now = _now()
+
+    def insert(table, columns, values, conflict):
+        placeholders = ", ".join(["(" + ", ".join(["%s"] * len(columns)) + ")"] * len(values))
+        cursor.execute(f"INSERT INTO {table} ({', '.join(columns)}) VALUES {placeholders} {conflict}",
+                       tuple(value for row in values for value in row))
+
+    insert("session_events", coll.fields,
+           [[_json(row.get(name)) if name in coll.json_fields else row.get(name) for name in coll.fields]
+            for row in rows], "")
+    insert("sync_records", ("collection", "record_id", "clock", "origin_device_id", "content_hash",
+                            "deleted", "order_seq", "updated_at"),
+           [(env["collection"], env["record_id"], env["clock"], env["origin_device_id"], digest,
+             False, env.get("order_seq"), now) for env, digest in zip(envelopes, hashes)], "")
+    insert("sync_ops", ("origin_device_id", "incarnation", "seq", "collection", "record_id", "op",
+                        "clock", "lane", "envelope", "created_at"),
+           [(env["origin_device_id"], env["origin_incarnation"], env["origin_seq"], env["collection"],
+             env["record_id"], env["op"], env["clock"], LANE_HISTORY, _json(env), now) for env in envelopes],
+           "ON CONFLICT (origin_device_id, incarnation, seq) DO NOTHING")
+
 
 def get_record(cursor, collection: str, record_id: str) -> Optional[dict]:
     cursor.execute("SELECT * FROM sync_records WHERE collection = %s AND record_id = %s", (collection, record_id))

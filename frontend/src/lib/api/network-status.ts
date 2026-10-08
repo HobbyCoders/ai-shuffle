@@ -48,6 +48,7 @@ export function deriveNetworkState(status: NetworkStatus | null | undefined, sta
 	if (status.hub?.linked && status.hub.status === 'conflict') return 'waiting';
 	if (status.network && status.network.bootstrap_state !== 'ready') return 'syncing';
 	if ((status.sync?.holes?.length ?? 0) > 0) return 'syncing';
+	if (status.sync?.syncing || status.sync?.peers?.some((peer) => peer.syncing)) return 'syncing';
 	return 'ready';
 }
 

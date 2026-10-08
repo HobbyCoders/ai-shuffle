@@ -338,6 +338,102 @@ def test_bad_envelope_inside_a_chunk_keeps_watermark_semantics(workers):
     assert [owner_pref(b, key) for key in keys] == list(range(5))
 
 
+def test_membership_replay_uses_generation_even_when_receive_timestamps_tie(workers, monkeypatch):
+    worker = workers("membership-order")
+    monkeypatch.setattr(store, "_now", lambda: "2026-10-08T00:00:00+00:00")
+    with worker.active():
+        store.put_membership_record("cert:z-founder", {"generation": 0})
+        store.put_membership_record("cert:a-child", {"generation": 1})
+        store.put_membership_record("cert:b-grandchild", {"generation": 2})
+        assert [row["record"]["generation"] for row in store.list_membership_records()] == [0, 1, 2]
+
+
+def test_fresh_transcript_delta_uses_bulk_sql_and_one_mirror_wake_per_chunk(workers, monkeypatch):
+    from tests.core.network.test_ownership_revocation import _network
+    a, b = _network(workers, "bulk-a", "bulk-b")
+    with a.active():
+        _session("bulk")
+        catalog.publish_owned()
+    converge([a, b])
+    with b.active():
+        marks = store.local_watermarks()
+    with a.active():
+        _append("bulk", 400)
+        catalog.publish_owned()
+        ops = store.ops_since(marks, exclude_origin=b.device_id)
+    assert len(ops) == 400
+    real_insert = store.insert_event_batch
+    bulk = Mock(wraps=real_insert)
+    mirrored = Mock(wraps=catalog.after_event_mirrored)
+    monkeypatch.setattr(store, "insert_event_batch", bulk)
+    monkeypatch.setattr(catalog, "after_event_mirrored", mirrored)
+    statements = []
+    b.raw.set_trace_callback(statements.append)
+    try:
+        with b.active():
+            result = engine.apply_batch(ops)
+            assert not engine.applying_batch()
+    finally:
+        b.raw.set_trace_callback(None)
+    assert result.applied == 400 and result.retry == result.rejected == result.pending == 0
+    assert bulk.call_count == mirrored.call_count == 7  # ceil(400 / APPLY_CHUNK=64)
+    assert len(statements) <= 20 * 7  # not ~19 statements * 400 envelopes
+    assert [row["seq"] for row in b.sql("SELECT seq FROM session_events WHERE session_id = ? ORDER BY seq", ("bulk",))] == list(range(1, 401))
+    assert b.sql("SELECT next_seq FROM session_event_counters WHERE session_id = ?", ("bulk",))[0]["next_seq"] == 400
+    assert b.sql("SELECT published_seq FROM network_catalog_cursors WHERE session_id = ?", ("bulk",))[0]["published_seq"] == 400
+    with b.active():
+        assert engine.apply_batch(ops).duplicate == 400
+
+
+@pytest.mark.parametrize("fault", ["signature", "hole", "rewrite", "commit"])
+def test_event_bulk_fallback_preserves_order_and_retries(workers, monkeypatch, fault):
+    from tests.core.network.test_ownership_revocation import _network
+    a, b = _network(workers, "fallback-a", "fallback-b")
+    with a.active():
+        _session("fallback")
+        catalog.publish_owned()
+    converge([a, b])
+    with b.active():
+        marks = store.local_watermarks()
+    with a.active():
+        _append("fallback", 5)
+        catalog.publish_owned()
+        ops = store.ops_since(marks, exclude_origin=b.device_id)
+    real_insert = store.insert_event_batch
+    bulk = Mock(wraps=real_insert)
+    monkeypatch.setattr(store, "insert_event_batch", bulk)
+    with b.active():
+        if fault == "signature":
+            forged = dict(ops[2], clock=ops[2]["clock"] + 1)
+            result = engine.apply_batch([*ops[:2], forged, *ops[3:]])
+            assert result.rejected == 1 and result.pending == 2
+            assert engine.apply_batch([ops[2]]).applied == 3
+        elif fault == "hole":
+            assert engine.apply_batch(ops[1:]).pending == 4
+            assert engine.apply_batch(ops[:1]).applied == 5
+        elif fault == "rewrite":
+            assert engine.apply_batch(ops).applied == 5
+            with a.active():
+                a.sql("UPDATE session_events SET payload = ? WHERE session_id = ? AND seq = 3",
+                      ('{"content":"rewritten"}', "fallback"))
+                a.sql("DELETE FROM network_catalog_cursors WHERE session_id = ?", ("fallback",))
+                catalog.publish_owned()
+            marks = store.local_watermarks()
+            with a.active():
+                changed = store.ops_since(marks, exclude_origin=b.device_id)
+            assert engine.apply_batch(changed).retry == 0
+            assert 'rewritten' in b.sql("SELECT payload FROM session_events WHERE session_id = ? AND seq = 3", ("fallback",))[0]["payload"]
+        else:
+            def fail_after_writes(*args):
+                real_insert(*args)
+                raise RuntimeError("bulk storage failed before commit")
+            bulk.side_effect = fail_after_writes
+            result = engine.apply_batch(ops)
+            assert result.applied == 5 and result.retry == result.rejected == 0
+        assert not engine.applying_batch()
+    assert [row["seq"] for row in b.sql("SELECT seq FROM session_events WHERE session_id = ? ORDER BY seq", ("fallback",))] == list(range(1, 6))
+
+
 # ---------------------------------------------------------------------------
 # D. Fair budget between lagging streams
 # ---------------------------------------------------------------------------

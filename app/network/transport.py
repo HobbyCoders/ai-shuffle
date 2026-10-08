@@ -168,6 +168,7 @@ class PeerLink:
         # pushed). The launch barrier compares it across its time limit to
         # tell a peer that is still delivering from one that never answered.
         self.batches = 0
+        self.syncing = False
         self._sync_lock = asyncio.Lock()
 
     def update_endpoints(self, endpoints: list[str]) -> None:
@@ -282,7 +283,11 @@ class PeerLink:
 
     async def sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, catch_up: bool = False) -> dict:
         async with self._sync_lock:
-            return await self._sync_once(client, ctx, catch_up=catch_up)
+            self.syncing = catch_up
+            try:
+                return await self._sync_once(client, ctx, catch_up=catch_up)
+            finally:
+                self.syncing = False
 
     async def _sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, catch_up: bool) -> dict:
         """Full exchange with this peer. Returns a small summary."""
@@ -313,6 +318,7 @@ class PeerLink:
                 ctx = engine.require_context()
             ops = exchange.get("ops") or []
             if ops:
+                self.syncing = True
                 result = await asyncio.to_thread(engine.apply_batch, ops)
                 summary["received"] += result.applied
                 summary["apply"] = result.as_dict()
@@ -341,6 +347,14 @@ class PeerLink:
             marks = current
         if await self._check_rollback(client, ctx, theirs):
             ctx = engine.require_context()
+        # Do not wait for the scanner's next wake or another network pass.
+        # Existing catalog cursors survive the hold; publish only their tail.
+        if engine.outbox_held():
+            released = await asyncio.to_thread(release_hold_for_peer_view, self.device_id,
+                                               theirs.get(ctx.device_id) or {})
+            if released:
+                self.syncing = True
+                await asyncio.to_thread(catalog.publish_owned)
         # Stored addresses follow the same rule as dialed ones (``endpoints``).
         their_endpoints = exchange.get("endpoints")
         their_endpoints = validate_endpoints(their_endpoints) if isinstance(their_endpoints, list) else []
@@ -365,6 +379,7 @@ class PeerLink:
                 break
             if not outbound:
                 break
+            self.syncing = True
             pushed = await self._request(client, "POST", "/api/v1/network/peer/ops", json_body={"ops": outbound})
             summary["sent"] += len(outbound)
             self.batches += 1
@@ -518,7 +533,7 @@ def link_status() -> List[dict]:
             age = round(time.monotonic() - _last_contact[link.device_id], 1)
         out.append({"device_id": link.device_id, "base_url": link.base_url, "endpoints": link.endpoints,
                     "last_error": link.last_error, "seconds_since_contact": age,
-                    "online": age is not None and age <= ONLINE_WINDOW_SECONDS})
+                    "online": age is not None and age <= ONLINE_WINDOW_SECONDS, "syncing": link.syncing})
     return out
 
 
@@ -611,9 +626,10 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
             link.backoff_until = time.monotonic() + 10.0
             logger.warning("Sync with %s failed", link.device_id, exc_info=True)
         _tried_since_hold.add(link.device_id)
-    if engine.outbox_held() and (results or not any(link.endpoints for link in _links.values())):
-        # Our stream was compared with at least one peer (or there is no
-        # peer to compare with): local writes may be published now.
+    if engine.outbox_held() and not any(link.endpoints for link in _links.values()):
+        # With no peer to compare, local writes may be published. Reachable
+        # peers release via their checked view above; a successful HTTP exchange
+        # alone must not release a hold when rollback proof was unavailable.
         engine.hold_outbox(False)
         request_scan()
     return results

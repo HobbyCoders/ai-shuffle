@@ -35,6 +35,7 @@ import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
+from itertools import groupby
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from uuid import uuid4
 
@@ -111,6 +112,7 @@ PENDING_CAP_PER_STREAM = 5000
 PENDING_WINDOW = 20000
 
 _outbox_held = False
+_outbox_device: Optional[str] = None
 
 
 def hold_outbox(held: bool) -> None:
@@ -118,12 +120,15 @@ def hold_outbox(held: bool) -> None:
     this device's stream with a peer (see ``transport.sync_pass``): a worker
     restored from a backup must learn its new incarnation before it allocates
     sequence numbers that peers already hold under different content."""
-    global _outbox_held
+    global _outbox_held, _outbox_device
     _outbox_held = bool(held)
+    ctx = cached_context()
+    _outbox_device = ctx.device_id if held and ctx is not None else None
 
 
 def outbox_held() -> bool:
-    return _outbox_held
+    ctx = cached_context()
+    return _outbox_held and (ctx is None or _outbox_device is None or ctx.device_id == _outbox_device)
 
 
 @dataclass
@@ -1547,8 +1552,75 @@ def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult
     _count_outcome(result, outcome)
 
 
+def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
+                        result: ApplyResult) -> bool:
+    """Batch only fresh, contiguous events from a known remote session owner.
+
+    Rewrites, holes, revocations, conflicts and malformed input use the normal
+    savepoint path. No SQL write happens until the whole chunk is checked.
+    The surrounding chunk transaction rolls back a failed bulk insert before
+    retrying envelopes individually.
+    """
+    if any(data.get("collection") != "session_events" or data.get("op") != OP_UPSERT for data in chunk):
+        return False
+    from app.network.keyring import open_envelope
+    from app.network import catalog
+    coll = policy.collection("session_events")
+    try:
+        envs = [Envelope.from_dict(data) for data in chunk]
+        first = envs[0]
+        origin, incarnation = first.origin_device_id, first.origin_incarnation
+        member = ctx.member(origin)
+        if origin == ctx.device_id or member is None or member.status != membership.STATUS_ACTIVE:
+            return False
+        highest = store.highest_incarnation(cursor, origin)
+        watermark = store.get_watermark(cursor, origin, incarnation)
+        if incarnation < highest or store.count_pending(cursor, origin, incarnation):
+            return False
+        rows = []
+        for index, env in enumerate(envs):
+            if (env.network_id != ctx.network_id or env.origin_device_id != origin
+                    or env.origin_incarnation != incarnation or env.origin_seq != watermark + index + 1
+                    or env.key_version not in ctx.keyring or not env.verify_signature(member.signing_public)):
+                return False
+            row, _key = open_envelope(ctx, env)
+            if (not isinstance(row, dict) or set(row) != set(coll.fields)
+                    or type(row.get("seq")) is not int or row["seq"] < 1
+                    or coll.record_id(row) != env.record_id or not _incoming_row_is_shared(coll, env.record_id, row)):
+                return False
+            rows.append(row)
+    except (ValueError, TypeError, KeyError, crypto.CryptoError):
+        return False
+    ids = [env.record_id for env in envs]
+    if len(set(ids)) != len(ids) or store.records_for_ids(cursor, coll.name, ids):
+        return False
+    sessions = sorted({row["session_id"] for row in rows})
+    placeholders = ", ".join(["%s"] * len(sessions))
+    cursor.execute(f"SELECT id, owner_device_id FROM sessions WHERE id IN ({placeholders})", tuple(sessions))
+    owners = {row["id"]: row["owner_device_id"] for row in cursor.fetchall()}
+    if any(owners.get(sid) != origin for sid in sessions):
+        return False
+    # A journal row without a sync record is a local/legacy write, not a fresh append.
+    clauses = " OR ".join(["(session_id = %s AND seq = %s)"] * len(rows))
+    cursor.execute(f"SELECT 1 FROM session_events WHERE {clauses} LIMIT 1",
+                   tuple(value for row in rows for value in (row["session_id"], row["seq"])))
+    if cursor.fetchone() is not None:
+        return False
+    store.insert_event_batch(cursor, coll, rows, [env.to_dict() for env in envs],
+                             [content_hash(coll, row) for row in rows])
+    for sid in sessions:
+        catalog.after_event_mirrored(cursor, max((row for row in rows if row["session_id"] == sid),
+                                                key=lambda row: int(row["seq"])))
+    store.set_watermark(cursor, origin, incarnation, envs[-1].origin_seq)
+    if incarnation > highest and highest:
+        store.clear_pending_stream(cursor, origin, highest)
+    result.applied += len(envs)
+    result.touched.extend((coll.name, env.record_id, env.op) for env in envs)
+    return True
+
+
 def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result: ApplyResult) -> bool:
-    """Apply envelopes in one transaction, each under its own savepoint.
+    """Apply fresh transcript appends in bulk; otherwise use per-op savepoints.
 
     A refused envelope rolls back to its savepoint and the rest of the chunk
     goes on, as if each had its own transaction. Without savepoints (the
@@ -1577,7 +1649,8 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
             savepoints = type(cursor).__module__.startswith("psycopg2")
             if seen:
                 store.observe_clock(cursor, seen)
-            for data in chunk:
+            appended = _apply_event_append(cursor, chunk, ctx, part)
+            for data in (() if appended else chunk):
                 if savepoints:
                     cursor.execute("SAVEPOINT apply_envelope")
                 try:
@@ -1619,8 +1692,34 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
     return True
 
 
+_applying: Dict[str, int] = {}
+
+
+def applying_batch() -> bool:
+    ctx = cached_context()
+    with _lock:
+        return bool(ctx is not None and _applying.get(ctx.device_id))
+
+
 def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
                 ctx: NetworkContext | None = None) -> ApplyResult:
+    """Expose inbound catch-up work too, including pushes without a local peer link."""
+    ctx = ctx or require_context()
+    with _lock:
+        _applying[ctx.device_id] = _applying.get(ctx.device_id, 0) + 1
+    try:
+        return _apply_batch(envelopes, ctx=ctx)
+    finally:
+        with _lock:
+            remaining = _applying[ctx.device_id] - 1
+            if remaining:
+                _applying[ctx.device_id] = remaining
+            else:
+                _applying.pop(ctx.device_id, None)
+
+
+def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
+                 ctx: NetworkContext | None = None) -> ApplyResult:
     """Apply a batch in chunks of ``APPLY_CHUNK`` envelopes per transaction.
 
     One bad op cannot poison the rest: each envelope applies under its own
@@ -1635,12 +1734,17 @@ def apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
         if isinstance(data, Mapping) and data.get("collection") == "agents" and data.get("op") == OP_DELETE
     }
     try:
-        for start in range(0, len(items), APPLY_CHUNK):
-            chunk = items[start:start + APPLY_CHUNK]
-            if len(chunk) > 1 and _apply_chunk(chunk, ctx, result):
-                continue
-            for data in chunk:
-                _apply_one(data, ctx, result)
+        # Keep wire order, but do not let a session header force the event
+        # tail behind it onto the per-envelope path.
+        for _events, group in groupby(items, key=lambda data: isinstance(data, Mapping)
+                                     and data.get("collection") == "session_events" and data.get("op") == OP_UPSERT):
+            run = list(group)
+            for start in range(0, len(run), APPLY_CHUNK):
+                chunk = run[start:start + APPLY_CHUNK]
+                if len(chunk) > 1 and _apply_chunk(chunk, ctx, result):
+                    continue
+                for data in chunk:
+                    _apply_one(data, ctx, result)
     finally:
         _batch_agent_deletions.ids = None
     if result.own_ahead:

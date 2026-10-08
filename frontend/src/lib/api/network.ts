@@ -93,6 +93,7 @@ export interface SyncPeer {
 	last_error: string | null;
 	seconds_since_contact: number | null;
 	online: boolean;
+	syncing?: boolean;
 }
 
 export interface SyncHole {
@@ -104,6 +105,7 @@ export interface SyncHole {
 }
 
 export interface SyncStatus {
+	syncing?: boolean;
 	records: Record<string, number>;
 	ops: number;
 	holes: SyncHole[];
