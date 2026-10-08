@@ -1,18 +1,18 @@
 <script lang="ts">
 	/**
-	 * "Connected to <worker>": the app-level bar at the top of the phone UI
-	 * (issue #1816). It names the worker this phone is connected to and opens
-	 * a sheet listing the owner's workers (online state, running chats, the
-	 * current one marked) to connect the app to another. This is never where a
-	 * chat runs: moving one chat is "Runs on" in Chat controls, and the sheet
-	 * says so.
+	 * "Connected to <worker>" (issue #1816): the worker chip on the second line
+	 * of the phone's one bar (AppTopBar). It names the worker this phone is
+	 * connected to and opens a sheet listing the owner's workers (online state,
+	 * running chats, the current one marked) to connect the app to another.
+	 * This is never where a chat runs: moving one chat is "Runs on" in Chat
+	 * controls, and the sheet says so.
 	 *
-	 * In the Android app this bar replaces the app's own worker-name bar: it
+	 * In the Android app this chip replaces the app's own worker-name bar: it
 	 * tells the app it is shown (native-shell.ts), and its sheet opens the
 	 * app's Workers screen, where workers are paired, renamed and removed.
 	 */
 	import { tick } from 'svelte';
-	import { Check, ChevronDown, Info, LoaderCircle, Server, Settings, X } from 'lucide-svelte';
+	import { Check, Info, LoaderCircle, Server, Settings, X } from 'lucide-svelte';
 	import { listInstalls, type Install } from '$lib/api/installs';
 	import { isBundledMobile, nativeCapability } from '$lib/api/runtime';
 	import { sessions } from '$lib/stores/app-data.svelte';
@@ -101,7 +101,7 @@
 <button
 	bind:this={barRef}
 	type="button"
-	class="conn-bar"
+	class="conn-chip"
 	class:busy={!!connecting}
 	aria-haspopup="dialog"
 	aria-expanded={open}
@@ -109,13 +109,11 @@
 	onclick={openSheet}
 >
 	{#if connecting}
-		<LoaderCircle size={14} class="conn-spin" aria-hidden="true" />
-		<span class="cap">Connecting to</span><b>{workers.find((w) => w.id === connecting)?.name ?? 'worker'}</b>
+		<LoaderCircle size={11} class="conn-spin" aria-hidden="true" />
+		<b>{workers.find((w) => w.id === connecting)?.name ?? 'worker'}</b>
 	{:else}
-		<span class="cap">Connected to</span>
 		<span class="dot" aria-hidden="true"></span>
 		<b>{currentName}</b>
-		<ChevronDown size={15} aria-hidden="true" />
 	{/if}
 </button>
 
@@ -165,38 +163,48 @@
 </script>
 
 <style>
-	.conn-bar {
-		flex-shrink: 0;
-		width: 100%;
-		min-height: 44px;
+	/* A 44px-tall tap target whose dot + name ride on the bar's second line
+	   (text at the bottom, 7px above the bar's edge). */
+	.conn-chip {
+		/* Keeps its own width (up to 40% of the line); the chat trail after it
+		   gives way first, so the worker name stays readable. */
+		flex: 0 0 auto;
+		min-width: 44px;
+		max-width: 40%;
+		/* 44px tall (a full tap target); the text rides on its bottom edge, so
+		   the top 28px reach up beside the title line without moving it. */
+		height: 44px;
 		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 7px;
-		padding: 0 16px;
+		align-items: flex-end;
+		gap: 5px;
+		padding: 0 2px 7px 0;
 		border: 0;
-		border-bottom: 1px solid var(--border-subtle);
-		background: var(--sidebar);
-		color: var(--foreground);
+		border-radius: 6px;
+		background: transparent;
+		color: var(--muted-foreground);
 		font: inherit;
-		font-size: 13px;
+		font-size: 11.5px;
+		line-height: 16px;
 		cursor: pointer;
 		-webkit-tap-highlight-color: transparent;
+		transition: color 120ms ease;
 	}
-	.conn-bar:hover { background: color-mix(in oklch, var(--sidebar) 85%, var(--foreground) 6%); }
-	.conn-bar:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-	.conn-bar :global(svg) { color: var(--muted-foreground); }
-	.conn-bar.busy b, .conn-bar.busy :global(svg) { color: var(--warning); }
-	.cap { font-size: 12.5px; color: var(--muted-foreground); }
-	.conn-bar b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+	.conn-chip:hover, .conn-chip[aria-expanded='true'] { color: var(--foreground); }
+	.conn-chip:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+	/* Centred on the 16px text line. */
+	.conn-chip .dot { margin-bottom: 5px; }
+	.conn-chip :global(.conn-spin) { flex: none; margin-bottom: 2.5px; color: var(--warning); }
+	.conn-chip.busy b { color: var(--warning); }
+	.conn-chip b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 	.dot { display: inline-block; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; background: var(--success, var(--primary)); }
 	.dot.off { background: var(--subtle-foreground); }
 
 	.scrim { position: fixed; inset: 0; z-index: 140; background: var(--modal-overlay, color-mix(in oklch, var(--background) 60%, transparent)); animation: conn-fade 0.2s ease; }
 	.sheet {
 		position: fixed;
-		left: 8px;
-		right: 8px;
+		/* Full width on a phone; a centred 560px card in a wide DeX window. */
+		left: max(8px, calc(50% - 280px));
+		right: max(8px, calc(50% - 280px));
 		bottom: calc(12px + env(safe-area-inset-bottom, 0px));
 		z-index: 141;
 		max-height: calc(var(--app-viewport-height, 100dvh) - 96px);

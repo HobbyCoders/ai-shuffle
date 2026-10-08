@@ -28,7 +28,7 @@
 	import { gitOperationState } from '$lib/stores/gitOperations.svelte';
 	import ChatExportActions from '../layout/ChatExportActions.svelte';
 	import { buildShell } from '$lib/utils/platform';
-	import { GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ExternalLink, X, GitMerge } from 'lucide-svelte';
+	import { Check, GitBranch, GitCommitHorizontal, GitPullRequest, ChevronDown, ArrowDownToLine, ArrowUpFromLine, FolderGit2, FolderClosed, Rocket, TriangleAlert, ExternalLink, X, GitMerge } from 'lucide-svelte';
 	import { autoMerge } from '$lib/stores/auto-merge.svelte';
 	import { git, gitSnapshot, gitMode } from '$lib/stores/git.svelte';
 	import { githubRepoInfo } from '$lib/stores/github.svelte';
@@ -37,7 +37,7 @@
 	import { computeShowShipIt } from '$lib/stores/derived/ship-it-visibility';
 	import { isCurrentHeadMerged } from '$lib/stores/derived/merged-pr';
 	import { computePrimaryAction, mergeBlockedByMergeability, type PrimaryGitAction } from '$lib/stores/derived/git-primary-action';
-	import { computeHeaderSummary, computePipeline, computeUncommittedChanges, computeUnreadableCheckoutSummary } from '$lib/stores/derived/git-header-summary';
+	import { computeCompactBadge, computeHeaderSummary, computePipeline, computeUncommittedChanges, computeUnreadableCheckoutSummary } from '$lib/stores/derived/git-header-summary';
 	import { shouldShowGitPanelTrigger } from '$lib/components/layout/git-header-visibility';
 	import GitActionOptionsDropdown from './GitActionOptionsDropdown.svelte';
 	import { computeShipItSteps } from '$lib/stores/derived/git-action-options';
@@ -87,9 +87,13 @@
 		onOpenDiffReview?: () => void;
 		/** Private backup and sharing exports live in the existing narrow-screen panel. */
 		showChatExports?: boolean;
+		/** The phone's one-bar header: an icon-sized trigger (glyph + count
+		 *  badge) instead of the labelled pill. The words stay in its
+		 *  accessible name and the panel; the panel itself is unchanged. */
+		compact?: boolean;
 	}
 
-	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview, showChatExports = false }: Props = $props();
+	let { sessionId = null, isStreaming = false, operationInProgress = false, error = null, isGitRepo = true, projectName = null, worktreeBranch = null, openPR = null, githubAvailable = true, onClickCommit, onClickCreatePR, onClickPush, onClickPull, onClickInitRepo, onClickShipIt, onOpenDiffReview, showChatExports = false, compact = false }: Props = $props();
 
 	// Mutating git actions are blocked while streaming OR while another git
 	// operation is in flight — the user must never fire a second action while
@@ -388,6 +392,11 @@
 		prNumber: shownPr?.number ?? null,
 		defaultBranch
 	}));
+	const compactBadge = $derived(compact ? computeCompactBadge(summary, {
+		filesChanged,
+		commitsAhead: commitsAheadUpstream,
+		commitsBehind: commitsBehindUpstream
+	}, isGitRepo) : null);
 	const pipeline = $derived(computePipeline({
 		hasChanges,
 		canPush,
@@ -502,12 +511,19 @@
 
 <div class="git-actions" class:sheet-layout={sheetLayout}>
 	{#if error}
-		<button class="git-btn" title={error} onclick={() => git.retryLoad()}>
-			<TriangleAlert size={13} /> Git unavailable · Retry
-		</button>
+		{#if compact}
+			<button class="git-btn compact-btn tone-blocked" title={error} aria-label="Git unavailable. Retry" onclick={() => git.retryLoad()}>
+				<span class="cg-glyph"><TriangleAlert size={20} strokeWidth={1.6} /></span>
+			</button>
+		{:else}
+			<button class="git-btn" title={error} onclick={() => git.retryLoad()}>
+				<TriangleAlert size={13} /> Git unavailable · Retry
+			</button>
+		{/if}
 	{:else if panelTriggerShown}
 	<button
 		class="git-btn trigger tone-{summary.tone}"
+		class:compact-btn={compact}
 		class:stale={snapshotPending}
 		class:open={panelOpen}
 		bind:this={triggerRef}
@@ -517,6 +533,19 @@
 		aria-label="Git actions: {summary.summary}{lastKnownSuffix}"
 		title="{summary.summary}{lastKnownSuffix}"
 	>
+		{#if compact}
+			<span class="cg-glyph">
+				{#if summary.icon === 'alert'}<TriangleAlert size={20} strokeWidth={1.6} />
+				{:else if summary.icon === 'pr'}<GitPullRequest size={20} strokeWidth={1.6} />
+				{:else}<GitBranch size={20} strokeWidth={1.6} />{/if}
+				{#if compactBadge === '✓'}
+					<span class="cg-badge tone-{summary.tone}" aria-hidden="true"><Check size={10} strokeWidth={3} /></span>
+				{:else if compactBadge}
+					<span class="cg-badge tone-{summary.tone}" aria-hidden="true">{compactBadge}</span>
+				{/if}
+				{#if prIsLastKnown}<span class="last-known-dot cg-last-known" aria-hidden="true"></span>{/if}
+			</span>
+		{:else}
 		{#if summary.icon === 'alert'}<TriangleAlert size={14} strokeWidth={1.6} />
 		{:else if summary.icon === 'pull'}<ArrowDownToLine size={14} strokeWidth={1.6} />
 		{:else if summary.icon === 'push'}<ArrowUpFromLine size={14} strokeWidth={1.6} />
@@ -534,6 +563,7 @@
 			<span class="last-known-dot" aria-label="Last known PR state — GitHub unreachable"></span>
 		{/if}
 		<ChevronDown size={12} strokeWidth={1.6} class="trigger-chev" />
+		{/if}
 	</button>
 
 	{#if panelOpen}
@@ -806,6 +836,12 @@
 	{:else}
 		<!-- Only non-repo projects reach here: a worktree or branch session keeps
 		     the panel button above, and its checkout is never initialized. -->
+		{#if compact}
+			<!-- The bar's subline already names the project. -->
+			<button class="git-btn compact-btn init-btn" onclick={onClickInitRepo} title="Initialize a git repository for this project" aria-label="Initialize a git repository">
+				<span class="cg-glyph"><FolderGit2 size={20} strokeWidth={1.5} /></span>
+			</button>
+		{:else}
 		{#if projectName}
 			<span class="git-btn project-only-badge" title="Project: {projectName}">
 				<FolderClosed size={13} strokeWidth={1.5} />
@@ -820,6 +856,7 @@
 			<FolderGit2 size={14} strokeWidth={1.5} />
 			<span class="btn-label">Init Repo</span>
 		</button>
+		{/if}
 	{/if}
 </div>
 
@@ -1623,6 +1660,56 @@
 			line-height: 1.3;
 		}
 	}
+
+	/* ── Phone one-bar: icon-sized trigger with a count badge ─────────────── */
+	/* Placed last so it outranks the sheet layout's pill sizing. */
+	.git-actions .git-btn.compact-btn {
+		position: relative;
+		justify-content: center;
+		width: 44px;
+		height: 48px;
+		min-width: 44px;
+		padding: 0;
+		border: 0;
+		border-radius: calc(var(--radius, 0.75rem) * 0.7);
+		background: transparent;
+		color: var(--muted-foreground);
+		-webkit-tap-highlight-color: transparent;
+	}
+	.git-actions .git-btn.compact-btn:hover:not(:disabled) { background: var(--hover-overlay); color: var(--foreground); }
+	.git-actions .git-btn.compact-btn:active:not(:disabled) { background: var(--active-overlay, var(--hover-overlay)); }
+	.git-actions .git-btn.compact-btn.open { background: var(--active-overlay, var(--hover-overlay)); color: var(--foreground); }
+	.git-actions .git-btn.compact-btn:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+	.git-actions .git-btn.compact-btn.tone-blocked { color: var(--destructive); }
+	.git-actions .git-btn.compact-btn.init-btn { color: var(--primary); }
+	.cg-glyph { position: relative; display: grid; place-items: center; width: 20px; height: 20px; }
+	/* The ring in the bar's own colour keeps the badge legible over the glyph. */
+	.cg-badge {
+		position: absolute;
+		top: -7px;
+		left: 11px;
+		box-sizing: border-box;
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 16px;
+		height: 16px;
+		padding: 0 4px;
+		border-radius: 5px;
+		box-shadow: 0 0 0 2px var(--background);
+		font-family: inherit;
+		font-size: 10px;
+		font-weight: 700;
+		line-height: 1;
+		letter-spacing: -0.01em;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
+	.cg-badge.tone-changes { background: var(--warning); color: var(--warning-foreground); }
+	.cg-badge.tone-push, .cg-badge.tone-behind { background: var(--info, var(--primary)); color: var(--background); }
+	.cg-badge.tone-blocked { background: var(--destructive); color: var(--destructive-foreground); }
+	.cg-badge.tone-idle { min-width: 14px; width: 14px; height: 14px; padding: 0; top: -5px; left: 12px; border-radius: 50%; background: var(--success); color: var(--success-foreground); }
+	.cg-last-known { position: absolute; bottom: -3px; right: -4px; }
 
 	@media (prefers-reduced-motion: reduce) {
 		.git-btn, .trigger :global(.trigger-chev), .row-opts, .ship-go .split-main, .ship-go .split-chevron {

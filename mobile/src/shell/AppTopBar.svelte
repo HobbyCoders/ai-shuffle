@@ -1,13 +1,21 @@
 <script lang="ts">
 	/**
-	 * AppTopBar - compact mobile app bar + navigation drawer.
+	 * AppTopBar - the phone's one bar (56px) + navigation drawer.
 	 *
 	 * Rendered by MobileAppLayout; the mobile shell is selected by build
 	 * (VITE_SHUFFLE_SHELL), never a viewport width, so a narrow desktop browser
-	 * keeps the desktop shell. The bar carries ☰ menu + current-page
-	 * title, and every navigation destination lives in the slide-in drawer,
-	 * which hosts the same Sidebar component the desktop shell shows beside the
-	 * main panel.
+	 * keeps the desktop shell. Every navigation destination lives in the
+	 * slide-in drawer, which hosts the same Sidebar component the desktop shell
+	 * shows beside the main panel.
+	 *
+	 * One row carries everything the phone used to stack in three:
+	 *   ☰ | page or chat title            | ⌄ | actions (shield, Git) | mic
+	 *     | ● worker · project › parent   |
+	 * The second line is the "Connected to" worker chip (which also tells the
+	 * Android app to hide its own worker bar) and, in a bound chat, the trail
+	 * (SessionBreadcrumbs mobile). The chevron opens the chat-actions sheet
+	 * (SessionTitleMenu variant="sheet") with the whole title. `actions` is
+	 * MainPanel's header cluster: private access + the compact Git button.
 	 *
 	 * The notification bell moved into that sidebar's header, so on this bar it
 	 * is represented by a dot on the ☰ while the drawer is closed. Unread state
@@ -17,7 +25,7 @@
 	 * On desktop the sidebar itself replaces this bar's old tab row, and the main
 	 * panel's StudioTopBar carries the breadcrumbs and actions.
 	 */
-	import { tick, untrack } from 'svelte';
+	import { tick, untrack, type Snippet } from 'svelte';
 	import { pushState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { Menu, Mic, X } from 'lucide-svelte';
@@ -29,6 +37,8 @@
 	import { unreadCount } from '$lib/stores/notifications';
 	import Sidebar from '$lib/components/layout/Sidebar.svelte';
 	import SessionBreadcrumbs from '$lib/components/layout/SessionBreadcrumbs.svelte';
+	import SessionTitleMenu from '$lib/components/layout/SessionTitleMenu.svelte';
+	import ConnectedWorkerBar from './ConnectedWorkerBar.svelte';
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { chatHeaderTitle } from '$lib/components/layout/chat-empty-state';
 	import { canStartDrawerSwipe, completes, dragOffset, lockAxis, type DrawerSwipe } from './drawer-gesture';
@@ -41,6 +51,8 @@
 		onOpenFeature: (type: ViewType) => void;
 		onOpenSpotlight?: () => void;
 		hideGlobalStt?: boolean;
+		/** Chat actions on the bar's right (private access, Git); omit off-chat. */
+		actions?: Snippet;
 	}
 
 	let {
@@ -50,7 +62,8 @@
 		onOpenSession,
 		onOpenFeature,
 		onOpenSpotlight,
-		hideGlobalStt = false
+		hideGlobalStt = false,
+		actions
 	}: Props = $props();
 
 	const BUILD_MEMBERS: ViewType[] = ['build', 'profile'];
@@ -72,8 +85,7 @@
 		mcp: 'Settings',
 		hooks: 'Settings'
 	};
-	// In a chat, the mobile bar shows the chat name (the old PageHeader title row
-	// is dropped on mobile, so the name lives here, centered). Mirrors MainPanel's
+	// In a chat, the bar's first line is the chat name. Mirrors MainPanel's
 	// headerTitle derivation.
 	const boundChatId = $derived(
 		currentType === 'session' ? ($activeSession.sessionId ?? null) : null
@@ -92,6 +104,9 @@
 		if (buildActive) return 'Build';
 		return (currentType && TITLES[currentType]) || 'AI Shuffle';
 	});
+	const projectLabel = $derived(
+		boundChatId ? ($projects.find((p) => p.id === $activeSession.project)?.name || 'Sessions') : null
+	);
 
 	// --- Navigation drawer ------------------------------------------------------
 	// The drawer mounts on first use and then stays mounted (inert while
@@ -310,14 +325,23 @@
 		{/if}
 	</button>
 
+	<div class="tb-context">
+		<span class="tb-title" title={mobileTitle}>{mobileTitle}</span>
+		<div class="tb-sub">
+			<ConnectedWorkerBar />
+			{#if boundChatId}
+				<span class="tb-dot-sep" aria-hidden="true">·</span>
+				<SessionBreadcrumbs title={mobileTitle} sessionId={boundChatId} {projectLabel} mobile />
+			{/if}
+		</div>
+	</div>
+
 	{#if boundChatId}
-		<SessionBreadcrumbs title={mobileTitle} sessionId={boundChatId}
-			projectLabel={$projects.find(p => p.id === $activeSession.project)?.name || 'Sessions'} mobile />
-	{:else}
-		<span class="tb-context-title">{mobileTitle}</span>
+		<SessionTitleMenu variant="sheet" title={mobileTitle} sessionId={boundChatId} {projectLabel} />
 	{/if}
 
 	<div class="tb-actions">
+		{@render actions?.()}
 		{#if $hotkeyPreferences.globalSttEnabled && !hideGlobalStt}
 			<button class="tb-hamburger" class:recording={$globalSttState.isRecording}
 				onclick={triggerToggle}
@@ -374,10 +398,11 @@
 	.topbar {
 		display: flex;
 		align-items: center;
-		gap: 4px;
-		height: 52px;
+		gap: 0;
+		height: 56px;
+		box-sizing: border-box;
 		flex-shrink: 0;
-		padding: 0 6px 0 4px;
+		padding: 0 4px;
 		background: var(--background);
 		border-bottom: 1px solid var(--border);
 		position: relative;
@@ -390,7 +415,7 @@
 		align-items: center;
 		justify-content: center;
 		width: 44px;
-		height: 44px;
+		height: 48px;
 		flex-shrink: 0;
 		background: transparent;
 		border: none;
@@ -400,14 +425,15 @@
 		transition: color 120ms ease, background-color 120ms ease;
 		-webkit-tap-highlight-color: transparent;
 	}
-	.tb-hamburger:hover { color: var(--foreground); background: var(--accent); }
+	.tb-hamburger:hover { color: var(--foreground); background: var(--hover-overlay, var(--accent)); }
+	.tb-hamburger:active { background: var(--active-overlay, var(--hover-overlay)); }
 
 	/* A dot, not a count: the exact number is one tap away on the bell inside the
 	   drawer, and a badge on a navigation control reads as a nav badge. */
 	.tb-unread {
 		position: absolute;
-		top: 7px;
-		right: 7px;
+		top: 11px;
+		right: 8px;
 		width: 7px;
 		height: 7px;
 		border-radius: 50%;
@@ -421,25 +447,66 @@
 	.tb-actions {
 		display: flex;
 		align-items: center;
-		gap: 4px;
+		gap: 0;
 		flex: none;
 		margin-left: auto;
 	}
-	.recording { color: var(--destructive); }
+	.tb-actions .tb-hamburger { color: var(--muted-foreground); }
+	.tb-actions .tb-hamburger:hover { color: var(--foreground); }
+	.recording, .tb-actions .recording { color: var(--destructive); }
 
-	/* Chat actions live below this bar, leaving room for the title. */
-	.tb-context-title {
+	/* The private-access shield, sized like the bar's other controls: a 44x48
+	   target and a 20px glyph, its count/dot riding the glyph's corner. */
+	.tb-actions :global(.pa-trigger) { width: 44px; height: 48px; border-radius: 8px; }
+	.tb-actions :global(.pa-glyph) { width: 20px; height: 20px; }
+	.tb-actions :global(.pa-glyph > svg) { width: 20px; height: 20px; }
+	.tb-actions :global(.pa-count) { top: -6px; left: 11px; }
+	.tb-actions :global(.pa-dot) { top: -1px; right: -2px; }
+
+	/* Title on line 1; line 2 (worker chip, trail) is laid over the bottom of
+	   the same 56px column so its 44px tap targets can reach the bar's edge. */
+	.tb-context {
+		position: relative;
 		flex: 1 1 auto;
+		align-self: stretch;
 		min-width: 0;
-		text-align: center;
-		padding: 0 4px;
+		padding: 8px 2px 0 4px;
+	}
+	.tb-title {
+		display: block;
 		font-size: 14px;
+		line-height: 21px;
 		font-weight: 600;
-		letter-spacing: -0.01em;
+		letter-spacing: -0.018em;
 		color: var(--foreground);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	.tb-sub {
+		position: absolute;
+		left: 4px;
+		right: 2px;
+		bottom: 0;
+		/* 44px so the chip and the parent link are full tap targets; their text
+		   sits 7px above the bar's bottom edge either way. */
+		height: 44px;
+		display: flex;
+		align-items: flex-end;
+		gap: 5px;
+		min-width: 0;
+		color: var(--muted-foreground);
+		font-size: 11.5px;
+		line-height: 16px;
+		/* Only the chip and the parent link take taps; the gaps fall through. */
+		pointer-events: none;
+	}
+	.tb-sub > :global(*) { pointer-events: auto; }
+	.tb-dot-sep {
+		flex: none;
+		margin-bottom: 7px;
+		color: var(--subtle-foreground);
+		pointer-events: none;
 	}
 
 	/* Drawer */

@@ -1,8 +1,8 @@
 <script lang="ts">
 	/**
 	 * The mobile app's one page: the shared AppPage (data bootstrap,
-	 * shortcuts, modals) wrapped in the mobile shell — compact app bar,
-	 * slide-in drawer, PageHeader over the shared MainPanel.
+	 * shortcuts, modals) wrapped in the mobile shell — the one app bar and
+	 * its slide-in drawer over the shared MainPanel.
 	 */
 	import AppPage from '$lib/components/layout/AppPage.svelte';
 	import MobileAppLayout from '../shell/MobileAppLayout.svelte';

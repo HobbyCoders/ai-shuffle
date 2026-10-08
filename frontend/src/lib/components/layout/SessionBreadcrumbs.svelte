@@ -43,6 +43,11 @@
 	});
 </script>
 
+<!--
+	`mobile` is the phone bar's second line: the trail only (project › parent).
+	The bar draws the chat title on its first line and the chat-actions chevron
+	beside it (SessionTitleMenu variant="sheet").
+-->
 <nav class="crumbs" class:mobile class:has-parent={!!parentId} aria-label="Breadcrumb">
 	{#if projectLabel}
 		{#if onOpenProject}
@@ -50,7 +55,7 @@
 		{:else}
 			<span class="crumb project" title={projectLabel}>{projectLabel}</span>
 		{/if}
-		{#if title}<ChevronRight class="crumb-sep" size={14} aria-hidden="true" />{/if}
+		{#if mobile ? !!parentId : !!title}<ChevronRight class="crumb-sep" size={mobile ? 11 : 14} aria-hidden="true" />{/if}
 	{/if}
 	{#if parentId}
 		{#if parent}
@@ -58,11 +63,11 @@
 		{:else}
 			<span class="crumb parent" title="Parent chat unavailable">Parent chat</span>
 		{/if}
-		<ChevronRight class="crumb-sep" size={14} aria-hidden="true" />
+		{#if !mobile}<ChevronRight class="crumb-sep" size={14} aria-hidden="true" />{/if}
 	{/if}
-	{#if title}
+	{#if title && !mobile}
 		<div class="current" aria-current="page">
-			<SessionTitleMenu {title} {sessionId} variant={mobile ? 'mobile' : 'crumb'} />
+			<SessionTitleMenu {title} {sessionId} variant="crumb" />
 		</div>
 	{/if}
 </nav>
@@ -83,8 +88,6 @@
 	   names and squeeze "Sessions" to "Se…" beside it (#1799). */
 	.project, .parent { flex: none; max-width: min(220px, 25%); }
 	.project { max-width: min(220px, max(25%, 4.5rem)); }
-	.mobile { flex: 1; }
-	.mobile:not(.has-parent) { justify-content: center; }
 	@media (max-width: 700px) {
 		.crumbs { gap: 3px; flex: 1; }
 		.project { max-width: 22%; font-size: 11px; }
@@ -95,4 +98,17 @@
 		.current :global(.menu) { left: auto; right: 0; }
 		.crumbs :global(.crumb-sep) { width: 10px; }
 	}
+	/* Phone bar subline: 11.5px muted text sitting on the bar's baseline. The
+	   parent link stays a 44px-tall tap target whose text rides at the bottom. */
+	.crumbs.mobile { flex: 0 1 auto; gap: 4px; align-items: flex-end; height: 44px; min-width: 0; }
+	.crumbs.mobile .crumb { font-size: 11.5px; line-height: 16px; max-width: none; margin-bottom: 7px; }
+	.crumbs.mobile .project { flex: 0 1 auto; min-width: 2.5em; }
+	/* Beside a parent link the project keeps its name (up to 45% of the
+	   trail) and the parent's title absorbs the shortfall. */
+	.crumbs.mobile.has-parent .project { flex: 0 0 auto; max-width: 45%; }
+	.crumbs.mobile .parent { flex: 0 1 auto; min-width: 3em; }
+	.crumbs.mobile.has-parent { flex: 1 1 0; }
+	.crumbs.mobile a.crumb { display: block; min-height: 44px; margin-bottom: 0; padding: 21px 0 7px; box-sizing: border-box; color: var(--foreground); font-weight: 500; }
+	.crumbs.mobile a.crumb:hover { text-decoration: underline; }
+	.crumbs.mobile :global(.crumb-sep) { width: 11px; height: 16px; margin-bottom: 7px; }
 </style>

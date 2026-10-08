@@ -83,3 +83,15 @@ describe('ConnectedWorkerBar elsewhere', () => {
 		expect(postMessage).not.toHaveBeenCalled();
 	});
 });
+
+describe('ConnectedWorkerBar chip', () => {
+	it('shows just the dot and the worker name on the bar, and the full sentence to assistive tech', async () => {
+		inApp(['worker-switch']);
+		render(ConnectedWorkerBar);
+		const chip = await screen.findByRole('button', { name: 'Connected to DesktopWorker. Switch worker' });
+		expect(chip.classList.contains('conn-chip')).toBe(true);
+		expect(chip.textContent?.trim()).toBe('DesktopWorker');
+		expect(chip.querySelector('.dot')).toBeTruthy();
+		expect(chip.getAttribute('aria-haspopup')).toBe('dialog');
+	});
+});

@@ -9,21 +9,6 @@ vi.mock('./AppTopBar.svelte', async () => ({
 }));
 vi.mock('$lib/components/CredentialStorageBanner.svelte', () => ({ default: () => {} }));
 vi.mock('$lib/stores/layout.svelte', () => ({ layout: { setSidebarOverlay: vi.fn() } }));
-vi.mock('$lib/api/installs', () => ({
-	listInstalls: vi.fn().mockResolvedValue({ installs: [
-		{ id: 'pc', device_name: 'DesktopWorker', base_url: 'https://pc.test', platform: null, version: null, capabilities: {}, last_seen: null, online: true, is_self: true }
-	], self_instance_id: 'pc' })
-}));
-// PageHeader's own stores: voice input off, idle.
-vi.mock('$lib/stores/hotkeyPreferences.svelte', async () => {
-	const { writable } = await import('svelte/store');
-	return { hotkeyPreferences: writable({ globalSttEnabled: false }) };
-});
-vi.mock('$lib/services/globalStt', async () => {
-	const { writable } = await import('svelte/store');
-	return { globalSttState: writable({}), triggerToggle: vi.fn() };
-});
-
 import MobileAppLayout from './MobileAppLayout.svelte';
 import { layout } from '$lib/stores/layout.svelte';
 import { mainPanelView } from './test-fixtures/main-panel-view';
@@ -63,40 +48,40 @@ describe('MobileAppLayout', () => {
 		expect(props.onOpenSpotlight).toHaveBeenCalledTimes(1);
 	});
 
-	it('opens with the "Connected to" bar, above the app bar', async () => {
+	it('draws one bar: no separate worker bar or chat-action row', () => {
+		mainPanelView.isSessionView = true;
 		const { container } = renderLayout();
-		const bar = await screen.findByRole('button', { name: 'Connected to DesktopWorker. Switch worker' });
-		expect(container.firstElementChild?.contains(bar)).toBe(true);
-		expect(bar.compareDocumentPosition(screen.getByTestId('app-top-bar')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(container.querySelectorAll('header')).toHaveLength(1);
+		expect(container.querySelector('.conn-chip, .conn-bar')).toBeNull();
+		expect(screen.queryByRole('banner', { name: 'Chat actions' })).toBeNull();
 	});
 
-	// #1816: export moved into the composer's Chat controls; the chat-action row keeps Git.
-	it('puts Git right in a second row, outside the session title bar, with no export there', () => {
+	// #1816: export moved into the composer's Chat controls; the bar keeps Git.
+	it('puts the chat actions (Git, private access) on the one bar in a chat, with no export there', () => {
 		mainPanelView.isSessionView = true;
 		mainPanelView.embedded = true;
-		const { container } = renderLayout();
+		renderLayout();
 		const header = screen.getByTestId('app-top-bar');
 		const git = screen.getByRole('button', { name: 'Commit' });
 		expect(screen.queryByRole('button', { name: 'Download chat' })).toBeNull();
-		expect(header.contains(git)).toBe(false);
-		const actions = screen.getByRole('banner', { name: 'Chat actions' });
-		expect(actions.querySelector('.hdr-right')?.contains(git)).toBe(true);
-		expect(header.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-		expect(container.querySelectorAll('header')).toHaveLength(2);
+		expect(screen.getByTestId('bar-actions').contains(git)).toBe(true);
+		expect(header.contains(git)).toBe(true);
 		expect(header.getAttribute('data-hide-stt')).toBe('true');
 	});
 
-	it('draws no empty chat-action row in a subagent chat (no Git or private access there)', () => {
+	it('passes no chat actions in a subagent chat (no Git or private access there)', () => {
 		mainPanelView.isSessionView = true;
 		mainPanelView.subagentChat = true;
 		const { container } = renderLayout();
-		expect(screen.queryByRole('banner', { name: 'Chat actions' })).toBeNull();
+		expect(screen.queryByTestId('bar-actions')).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Commit' })).toBeNull();
 		expect(container.querySelectorAll('header')).toHaveLength(1);
 	});
 
-	it('keeps one app bar and no chat-action row on non-session pages', () => {
+	it('passes no chat actions on non-session pages and keeps voice input there', () => {
 		const { container } = renderLayout();
 		expect(container.querySelectorAll('header')).toHaveLength(1);
+		expect(screen.queryByTestId('bar-actions')).toBeNull();
 		expect(screen.getByTestId('app-top-bar').getAttribute('data-hide-stt')).toBe('false');
 	});
 

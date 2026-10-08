@@ -55,7 +55,7 @@ reached) is unchanged.
 | Root layout | `src/routes/+layout.svelte` → shared `RootLayout` | `src/routes/+layout.svelte` → `RootLayout` with `mobileApp` |
 | `<html data-platform>` | `desktop`, static in `src/app.html` | `mobile`, static in `src/app.html` |
 | Mobile CSS | none | `src/mobile.css` (global rules) |
-| Mobile-only modules | none | `src/shell/*` (AppTopBar, PageHeader, MobileComposerControlsSheet, mobile-composer-collapse, mobile-panel-gesture) |
+| Mobile-only modules | none | `src/shell/*` (AppTopBar, ConnectedWorkerBar, MobileComposerControlsSheet, mobile-composer-collapse, mobile-panel-gesture) |
 | Build flag | `VITE_SHUFFLE_SHELL` unset → desktop | `VITE_SHUFFLE_SHELL=mobile` (set by `vite.config.js`) |
 | Dependencies | `node_modules` | linked to `../frontend/node_modules` (`npm run deps`) |
 
@@ -247,8 +247,10 @@ The rules for changing the contract:
 
 ### Switching workers and the worker bar
 
-The phone UI's "Connected to" bar (`mobile/src/shell/ConnectedWorkerBar.svelte`)
-names the worker the app is connected to and lists the owner's other workers.
+The phone UI's worker chip (`mobile/src/shell/ConnectedWorkerBar.svelte`) sits
+on the second line of the one app bar (`AppTopBar.svelte`), under the page or
+chat title. It names the worker the app is connected to; tapping it opens the
+"Connected to" sheet, which lists the owner's other workers.
 Tapping one in an Android build with `worker-switch` navigates the page to
 `/mobile/?connect=<worker origin>`. The app's WebView client catches that
 navigation and never loads it (`ui/WorkerSwitch.kt`):
@@ -267,16 +269,16 @@ where it is. The URL never carries credentials, and this path never pairs a
 new worker.
 
 The app draws its own bar (back, worker name, menu with Refresh chat and
-Workers) until the page says it draws the "Connected to" bar itself. The page
+Workers) until the page says it draws the worker switcher itself. The page
 says so over the `shuffleShell` web-message bridge, which is scoped like
 `shuffleFileSave` to the top-level phone UI page:
 
-- `{"type":"worker-bar","shown":true}` when the bar mounts, `false` when it
-  goes. The app hides or restores its bar.
+- `{"type":"worker-bar","shown":true}` when the worker chip mounts in the app
+  bar, `false` when it goes. The app hides or restores its bar.
 - `{"type":"workers"}` from the sheet's "Pair, rename or remove workers"
   button, which opens the app's Workers screen.
 
-A worker UI from before the "Connected to" bar sends nothing, so the app keeps
+A worker UI from before the page drew its own worker switcher sends nothing, so the app keeps
 its own bar there. The app also restores its bar when the page fails to load
 or chat cannot open, so Refresh chat stays reachable. The page side is in
 `mobile/src/shell/native-shell.ts` and `worker-connection.ts`.

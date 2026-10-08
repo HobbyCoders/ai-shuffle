@@ -103,7 +103,7 @@
 		onOpenSession?: (sessionId: string) => void;
 		/**
 		 * Replaces the StudioTopBar with the shell's own header. The mobile app
-		 * uses this for its PageHeader; the web UI leaves it unset.
+		 * uses this for its one-bar AppTopBar; the web UI leaves it unset.
 		 */
 		header?: Snippet<[MainPanelHeaderContext]>;
 		/** Desktop shell: sidebar state + toggle, surfaced in the top bar. */
@@ -943,7 +943,7 @@
 	{#if $activeView?.type === 'session' && activeTab?.sessionId && !activeIsSubagent}
 		{#key activeTab.sessionId}
 			<!-- Private access is managed here on every lane (desktop bar and the
-			     phone shell's PageHeader): a shield icon shows when the chat has a
+			     phone shell's one bar): a shield icon shows when the chat has a
 			     request, a grant or a saved connection, and opens a panel (a bottom
 			     sheet on phones) to approve, review or revoke. Waiting requests
 			     also show in the chat above the composer (PrivateAccessPrompt).
@@ -981,6 +981,7 @@
 				onClickShipIt={handleShipIt}
 				onOpenDiffReview={openDiffPanel}
 				showChatExports={!header}
+				compact={!!header}
 			/>
 		</div>
 	{/if}
@@ -988,7 +989,7 @@
 
 <div class="main-panel">
 	{#if header}
-		<!-- The mobile shell owns the title bar and its separate left/right action row. -->
+		<!-- The mobile shell owns its header: one bar with these actions on its right. -->
 		{@render header({
 			title: headerTitle,
 			isSessionView: $activeView?.type === 'session',

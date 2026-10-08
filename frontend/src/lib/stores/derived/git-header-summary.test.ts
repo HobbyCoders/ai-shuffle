@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeHeaderSummary, computePipeline, computeUncommittedChanges, computeUnreadableCheckoutSummary, type HeaderSummaryInput } from './git-header-summary';
+import { computeCompactBadge, computeHeaderSummary, computePipeline, computeUncommittedChanges, computeUnreadableCheckoutSummary, type HeaderSummaryInput } from './git-header-summary';
 
 const base: HeaderSummaryInput = {
 	mergeBlocked: false,
@@ -212,5 +212,31 @@ describe('computeUnreadableCheckoutSummary', () => {
 	it('falls back to a generic label when no branch is known', () => {
 		expect(computeUnreadableCheckoutSummary(null, false).label).toBe('Worktree');
 		expect(computeUnreadableCheckoutSummary('', true).label).toBe('Worktree');
+	});
+});
+
+describe('computeCompactBadge (phone bar Git button)', () => {
+	const counts = { filesChanged: 3, commitsAhead: 2, commitsBehind: 4 };
+	const tone = (t: Parameters<typeof computeCompactBadge>[0]['tone']) => ({ tone: t, icon: 'branch' as const, label: '', detail: null, summary: '' });
+
+	it('counts what the full button would name', () => {
+		expect(computeCompactBadge(tone('changes'), counts)).toBe('3');
+		expect(computeCompactBadge(tone('push'), counts)).toBe('↑2');
+		expect(computeCompactBadge(tone('behind'), counts)).toBe('↓4');
+		expect(computeCompactBadge(tone('blocked'), counts)).toBe('!');
+		expect(computeCompactBadge(tone('idle'), counts)).toBe('✓');
+	});
+
+	it('lets an open PR glyph speak for itself', () => {
+		expect(computeCompactBadge(tone('pr'), counts)).toBeNull();
+	});
+
+	it('caps long counts and never shows zero files for a dirty tree', () => {
+		expect(computeCompactBadge(tone('changes'), { ...counts, filesChanged: 140 })).toBe('99+');
+		expect(computeCompactBadge(tone('changes'), { ...counts, filesChanged: 0 })).toBe('1');
+	});
+
+	it('shows nothing for a checkout that cannot be read', () => {
+		expect(computeCompactBadge(computeUnreadableCheckoutSummary('feat/x', false), counts, false)).toBeNull();
 	});
 });

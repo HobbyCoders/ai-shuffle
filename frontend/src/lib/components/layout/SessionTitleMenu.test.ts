@@ -57,12 +57,13 @@ vi.mock('$lib/stores/notifications', () => ({
 import SessionTitleMenu from './SessionTitleMenu.svelte';
 import { openHeaderDropdown } from '$lib/stores/header-dropdowns';
 
-function renderMenu(props: { title?: string; sessionId?: string | null; variant?: 'crumb' | 'mobile' } = {}) {
+function renderMenu(props: { title?: string; sessionId?: string | null; variant?: 'crumb' | 'sheet'; projectLabel?: string } = {}) {
 	return render(SessionTitleMenu, {
 		props: {
 			title: props.title ?? 'Design review',
 			sessionId: props.sessionId === undefined ? 'session-a' : props.sessionId,
 			variant: props.variant,
+			projectLabel: props.projectLabel,
 		},
 	});
 }
@@ -170,5 +171,100 @@ describe('SessionTitleMenu', () => {
 
 		expect(mocks.deleteSession).not.toHaveBeenCalled();
 		expect(screen.queryByRole('dialog')).toBeNull();
+	});
+
+	describe('sheet variant (phone one-bar)', () => {
+		const longTitle = 'Investigate why the Android worker bar flickers when the drawer opens on DeX';
+
+		it('renders only a chevron, nothing for an unbound chat', () => {
+			const view = renderMenu({ variant: 'sheet', title: longTitle });
+			const chevron = screen.getByRole('button', { name: 'Chat actions' });
+			expect(chevron.getAttribute('aria-haspopup')).toBe('dialog');
+			expect(chevron.getAttribute('aria-expanded')).toBe('false');
+			expect(screen.queryByText(longTitle)).toBeNull();
+			view.unmount();
+			renderMenu({ variant: 'sheet', sessionId: null, title: 'New Chat' });
+			expect(screen.queryByRole('button')).toBeNull();
+			expect(screen.queryByText('New Chat')).toBeNull();
+		});
+
+		it('opens a sheet with the project, the whole title and the actions', async () => {
+			renderMenu({ variant: 'sheet', title: longTitle, projectLabel: 'AI Shuffle' });
+			await fireEvent.click(screen.getByRole('button', { name: 'Chat actions' }));
+			const sheet = screen.getByRole('dialog', { name: 'Chat actions' });
+			expect(sheet.parentElement?.parentElement).toBe(document.body);
+			expect(sheet.textContent).toContain('AI Shuffle');
+			expect(sheet.textContent).toContain(longTitle);
+			for (const name of ['Rename session', 'Fork session', 'Delete']) {
+				expect(screen.getByRole('button', { name })).toBeTruthy();
+			}
+			expect(screen.getByRole('button', { name: 'Chat actions' }).getAttribute('aria-expanded')).toBe('true');
+			await fireEvent.click(screen.getByRole('button', { name: 'Close chat actions' }));
+			expect(screen.queryByRole('dialog')).toBeNull();
+		});
+
+		it('closes on Escape and from the scrim', async () => {
+			renderMenu({ variant: 'sheet' });
+			await fireEvent.click(screen.getByRole('button', { name: 'Chat actions' }));
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			expect(screen.queryByRole('dialog')).toBeNull();
+			await fireEvent.click(screen.getByRole('button', { name: 'Chat actions' }));
+			await fireEvent.click(document.querySelector('.stm-scrim')!);
+			expect(screen.queryByRole('dialog')).toBeNull();
+		});
+
+		it('renames inside the sheet and closes it on save', async () => {
+			mocks.activeSession.set({ sessionId: 'session-a', title: 'Design review' });
+			renderMenu({ variant: 'sheet' });
+			await fireEvent.click(screen.getByRole('button', { name: 'Chat actions' }));
+			await fireEvent.click(screen.getByRole('button', { name: 'Rename session' }));
+			expect(screen.getByRole('dialog')).toBeTruthy();
+			const input = screen.getByLabelText('Rename session') as HTMLInputElement;
+			expect(input.value).toBe('Design review');
+			await fireEvent.input(input, { target: { value: 'Renamed chat' } });
+			await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+			expect(mocks.renameSession).toHaveBeenCalledWith('session-a', 'Renamed chat');
+			expect(screen.queryByRole('dialog')).toBeNull();
+		});
+
+		it('forks and deletes from the sheet', async () => {
+			mocks.activeSession.set({ sessionId: 'session-a', title: 'Design review' });
+			renderMenu({ variant: 'sheet' });
+			await fireEvent.click(screen.getByRole('button', { name: 'Chat actions' }));
+			await fireEvent.click(screen.getByRole('button', { name: 'Fork session' }));
+			expect(mocks.forkSession).toHaveBeenCalledWith('session-a');
+			await fireEvent.click(screen.getByRole('button', { name: 'Chat actions' }));
+			await fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+			expect(screen.getByRole('heading', { name: 'Delete session' })).toBeTruthy();
+			await fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+			expect(mocks.deleteSession).toHaveBeenCalledWith('session-a');
+		});
+
+		it('traps keyboard focus inside the sheet and returns it to the chevron on Escape', async () => {
+			renderMenu({ variant: 'sheet', title: longTitle });
+			const chevron = screen.getByRole('button', { name: 'Chat actions' });
+			chevron.focus();
+			await fireEvent.click(chevron);
+			// The trap focuses the first action on a microtask.
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Rename session' }));
+
+			const close = screen.getByRole('button', { name: 'Close chat actions' });
+			const del = screen.getByRole('button', { name: 'Delete' });
+
+			// Tab past the last action wraps to the first, not to the page behind.
+			del.focus();
+			await fireEvent.keyDown(del, { key: 'Tab' });
+			expect(document.activeElement).toBe(close);
+
+			// Shift+Tab before the first action wraps to the last.
+			await fireEvent.keyDown(close, { key: 'Tab', shiftKey: true });
+			expect(document.activeElement).toBe(del);
+
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			expect(screen.queryByRole('dialog')).toBeNull();
+			expect(document.activeElement).toBe(chevron);
+		});
 	});
 });

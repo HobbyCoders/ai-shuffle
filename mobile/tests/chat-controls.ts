@@ -6,7 +6,7 @@ import { installMobileShell } from '../src/shell/register';
 
 /**
  * Browser review fixture for the phone's chat controls (#1816): the
- * "Connected to" bar, the docked prompts, the composer with its quick bar and
+ * worker chip, the docked prompts, the composer with its quick bar and
  * the Chat controls panel, on the mockup's data. Every request is answered
  * here; nothing reaches a backend.
  *

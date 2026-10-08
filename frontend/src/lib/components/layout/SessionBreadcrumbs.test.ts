@@ -119,3 +119,19 @@ it('keeps inaccessible parents inert and keeps the current title usable', async 
 	expect(screen.queryByRole('link')).toBeNull();
 	expect(screen.getByRole('button', { name: /Worker/ })).toBeTruthy();
 });
+
+it('renders only the trail in the phone bar subline: the bar draws the title itself', () => {
+	const store = sessions as unknown as ReturnType<typeof writable<Session[]>>;
+	store.set([row('child', { hidden: true, parent_session_id: 'parent' }), row('parent', { title: 'Plan' })]);
+	const view = render(SessionBreadcrumbs, { projectLabel: 'AI Shuffle', title: 'Worker task', sessionId: 'child', mobile: true });
+	const nav = screen.getByRole('navigation');
+	expect(nav.textContent).toMatch(/AI Shuffle.*Plan/s);
+	expect(nav.textContent).not.toContain('Worker task');
+	expect(document.querySelector('[aria-current="page"]')).toBeNull();
+	expect(nav.querySelectorAll('.crumb-sep')).toHaveLength(1);
+	view.unmount();
+	store.set([row('plain')]);
+	render(SessionBreadcrumbs, { projectLabel: 'AI Shuffle', title: 'Plain chat', sessionId: 'plain', mobile: true });
+	expect(screen.getByRole('navigation').textContent?.trim()).toBe('AI Shuffle');
+	expect(document.querySelectorAll('.crumb-sep')).toHaveLength(0);
+});

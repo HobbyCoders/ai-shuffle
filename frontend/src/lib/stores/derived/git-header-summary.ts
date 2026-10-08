@@ -178,6 +178,33 @@ export function computeHeaderSummary(input: HeaderSummaryInput): HeaderSummary {
 	};
 }
 
+export interface CompactBadgeCounts {
+	filesChanged: number;
+	commitsAhead: number;
+	commitsBehind: number;
+}
+
+/**
+ * The badge on the phone bar's icon-only Git button (the mobile "one bar").
+ * The button keeps the summary's glyph and its full sentence as the
+ * accessible name; the badge is the one number worth a glance: files changed,
+ * commits to push (↑) or pull (↓), "!" for a conflict, "✓" when clean. An open
+ * PR's glyph says enough on its own, and an unreadable checkout has nothing
+ * to count, so both return null.
+ */
+export function computeCompactBadge(summary: HeaderSummary, counts: CompactBadgeCounts, readable = true): string | null {
+	if (!readable) return null;
+	const cap = (n: number) => (n > 99 ? '99+' : String(Math.max(0, n)));
+	switch (summary.tone) {
+		case 'blocked': return '!';
+		case 'behind': return `↓${cap(counts.commitsBehind)}`;
+		case 'changes': return cap(Math.max(1, counts.filesChanged));
+		case 'push': return `↑${cap(counts.commitsAhead)}`;
+		case 'pr': return null;
+		case 'idle': return '✓';
+	}
+}
+
 /**
  * The header button for a worktree or branch session whose status reads
  * "not a repository". It names the branch instead of a git state, so the

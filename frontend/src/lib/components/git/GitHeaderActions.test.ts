@@ -295,6 +295,52 @@ describe('GitHeaderActions chat exports', () => {
 
 // ── Header button label (priority ladder) ───────────────────────────────────
 
+describe('GitHeaderActions compact trigger (phone one-bar)', () => {
+	it('draws an icon and a count badge, keeping the words in the accessible name', () => {
+		dirtyFeatureBranch();
+		renderHeader({ compact: true });
+		const btn = trigger();
+		expect(btn.classList.contains('compact-btn')).toBe(true);
+		expect(btn.getAttribute('aria-label')).toMatch(/^Git actions: .*1 file/);
+		expect(btn.querySelector('.cg-badge')?.textContent?.trim()).toBe('1');
+		expect(btn.querySelector('.btn-label')).toBeNull();
+		expect(btn.textContent).not.toContain('+5');
+	});
+
+	it('badges commits to push and commits behind with arrows', () => {
+		cleanAheadBranch();
+		renderHeader({ compact: true });
+		expect(trigger().querySelector('.cg-badge')?.textContent?.trim()).toBe('↑2');
+		cleanup();
+		behindBranch();
+		renderHeader({ compact: true });
+		expect(trigger().querySelector('.cg-badge')?.textContent?.trim()).toBe('↓3');
+	});
+
+	it('still opens the same Git panel', async () => {
+		dirtyFeatureBranch();
+		renderHeader({ compact: true });
+		await openPanel();
+		expect(row('Commit')).toBeTruthy();
+	});
+
+	it('keeps the labelled pill when not compact (desktop and the narrow web rule)', () => {
+		dirtyFeatureBranch();
+		renderHeader();
+		const btn = trigger();
+		expect(btn.classList.contains('compact-btn')).toBe(false);
+		expect(btn.querySelector('.cg-badge')).toBeNull();
+		expect(btn.textContent).toContain('+5');
+	});
+
+	it('offers an icon-sized Initialize button for a project that is not a repository', () => {
+		setSnapshot({ status: { is_git_repo: false } });
+		renderHeader({ compact: true, isGitRepo: false });
+		const init = screen.getByRole('button', { name: 'Initialize a git repository' });
+		expect(init.classList.contains('compact-btn')).toBe(true);
+	});
+});
+
 describe('GitHeaderActions header label', () => {
 	it('shows the diff numbers for uncommitted changes', () => {
 		dirtyFeatureBranch();

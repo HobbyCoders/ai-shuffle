@@ -2,11 +2,12 @@
 	/**
 	 * MobileAppLayout - the mobile app shell.
 	 *
-	 * The "Connected to <worker>" bar (which worker this phone shows), then
-	 * AppTopBar's compact bar plus its slide-in drawer (which hosts the same
-	 * Sidebar the desktop shell docks), over the shared MainPanel. MainPanel's
-	 * header snippet renders the title bar, then a chat-action row with Git on
-	 * the right. Export lives in the composer's Chat controls (issue #1816).
+	 * AppTopBar's one bar plus its slide-in drawer (which hosts the same
+	 * Sidebar the desktop shell docks), over the shared MainPanel. The bar
+	 * carries the menu, the title, the "Connected to <worker>" chip and, in a
+	 * chat, the trail, the chat-actions chevron and MainPanel's header actions
+	 * (private access, Git). Export lives in the composer's Chat controls
+	 * (issue #1816).
 	 */
 	import { onMount } from 'svelte';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -14,8 +15,6 @@
 	import MainPanel from '$lib/components/layout/MainPanel.svelte';
 	import CredentialStorageBanner from '$lib/components/CredentialStorageBanner.svelte';
 	import AppTopBar from './AppTopBar.svelte';
-	import PageHeader from './PageHeader.svelte';
-	import ConnectedWorkerBar from './ConnectedWorkerBar.svelte';
 
 	let {
 		isAdmin,
@@ -34,7 +33,6 @@
 
 <div class="app-shell mobile">
 	<CredentialStorageBanner />
-	<ConnectedWorkerBar />
 	<div class="app-body">
 		<MainPanel {onOpenSession}>
 			{#snippet header(ctx)}
@@ -46,13 +44,8 @@
 					{onOpenFeature}
 					{onOpenSpotlight}
 					hideGlobalStt={ctx.isSessionView || ctx.embedded}
+					actions={ctx.isSessionView && !ctx.subagentChat ? ctx.headerActions : undefined}
 				/>
-				<!-- A subagent's chat has no Git or private access actions: no empty row. -->
-				{#if ctx.isSessionView && !ctx.subagentChat}
-					<PageHeader hideGlobalStt>
-						{#snippet actions()}{@render ctx.headerActions()}{/snippet}
-					</PageHeader>
-				{/if}
 			{/snippet}
 		</MainPanel>
 	</div>

@@ -11,6 +11,12 @@ vi.mock('$lib/components/layout/Sidebar.svelte', async () => ({
 vi.mock('$lib/components/layout/SessionBreadcrumbs.svelte', async () => ({
 	default: (await import('./test-fixtures/BreadcrumbsStub.svelte')).default
 }));
+vi.mock('$lib/components/layout/SessionTitleMenu.svelte', async () => ({
+	default: (await import('./test-fixtures/TitleMenuStub.svelte')).default
+}));
+vi.mock('./ConnectedWorkerBar.svelte', async () => ({
+	default: (await import('./test-fixtures/WorkerChipStub.svelte')).default
+}));
 vi.mock('$lib/stores/layout.svelte', async () => {
 	const { writable } = await import('svelte/store');
 	return { activeView: writable(null) };
@@ -37,6 +43,7 @@ vi.mock('$lib/services/globalStt', async () => {
 	return { globalSttState: writable({ isRecording: false }), triggerToggle: vi.fn() };
 });
 
+import { createRawSnippet } from 'svelte';
 import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 import { triggerToggle } from '$lib/services/globalStt';
 import AppTopBar from './AppTopBar.svelte';
@@ -88,11 +95,22 @@ describe('AppTopBar actions', () => {
 		expect(screen.queryByTestId('breadcrumbs')).toBeNull();
 	});
 
-	it('keeps chat action controls out of the title bar', () => {
+	it('draws only its own controls in the actions area when the page gives none', () => {
 		activeView.set({ type: 'session' });
 		const { container } = renderBar();
-		expect(container.querySelector('.tb-actions')?.textContent).toBe('');
-		expect(container.querySelector('.page-header')).toBeNull();
+		expect(container.querySelector('.tb-actions')?.children).toHaveLength(0);
+		expect(container.querySelectorAll('header')).toHaveLength(1);
+	});
+
+	it('renders the chat actions (private access, Git) on the right of the one bar', () => {
+		activeSession.set({ sessionId: 's-1', title: 'Fix login', messages: [], project: null });
+		activeView.set({ type: 'session' });
+		const actions = createRawSnippet(() => ({ render: () => '<button type="button">Git actions: 3 files changed</button>' }));
+		const { container } = renderBar({ actions, hideGlobalStt: true });
+		const git = screen.getByRole('button', { name: 'Git actions: 3 files changed' });
+		expect(container.querySelector('.tb-actions')?.contains(git)).toBe(true);
+		const order = [...container.querySelectorAll('header button')].map((b) => b.getAttribute('aria-label') ?? b.textContent);
+		expect(order).toEqual(['Open menu', 'Connected to Stub. Switch worker', 'Chat actions', 'Git actions: 3 files changed']);
 	});
 
 	it('retains global voice input in the single bar except when the chat owns it', async () => {
@@ -127,32 +145,53 @@ describe('AppTopBar title', () => {
 		expect(screen.getByText('AI Shuffle')).toBeTruthy();
 	});
 
-	it('shows "New Chat" for a session view with no session yet', async () => {
+	it('shows "New Chat" for a session view with no session yet, with no trail or chat-actions chevron', async () => {
 		activeView.set({ type: 'session' });
 		renderBar();
 		expect(screen.getByText('New Chat')).toBeTruthy();
 		expect(screen.queryByRole('navigation', { name: 'Breadcrumbs' })).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Chat actions' })).toBeNull();
 	});
 
-	it('renders breadcrumbs with the chat title and its project name for a bound session', async () => {
+	it('puts the chat title on line 1 and the worker chip, then the project trail, on line 2', async () => {
+		projects.set([{ id: 'p1', name: 'Website' }]);
+		activeSession.set({ sessionId: 's-1', title: 'Fix login', messages: [], project: 'p1' });
+		activeView.set({ type: 'session' });
+		const { container } = renderBar();
+		expect(container.querySelector('.tb-title')?.textContent).toBe('Fix login');
+		const sub = container.querySelector('.tb-sub')!;
+		const crumbs = screen.getByRole('navigation', { name: 'Breadcrumbs' });
+		const chip = screen.getByTestId('worker-chip');
+		expect(sub.contains(chip) && sub.contains(crumbs)).toBe(true);
+		expect(chip.compareDocumentPosition(crumbs) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(crumbs.getAttribute('data-session-id')).toBe('s-1');
+		expect(crumbs.getAttribute('data-mobile')).toBe('true');
+		expect(crumbs.textContent).toBe('Website');
+	});
+
+	it('opens the chat-actions sheet from a chevron that knows the chat, its title and project', () => {
 		projects.set([{ id: 'p1', name: 'Website' }]);
 		activeSession.set({ sessionId: 's-1', title: 'Fix login', messages: [], project: 'p1' });
 		activeView.set({ type: 'session' });
 		renderBar();
-		const crumbs = screen.getByRole('navigation', { name: 'Breadcrumbs' });
-		expect(crumbs.getAttribute('data-session-id')).toBe('s-1');
-		expect(crumbs.getAttribute('data-mobile')).toBe('true');
-		expect(crumbs.textContent).toContain('Website');
-		expect(crumbs.textContent).toContain('Fix login');
+		const chevron = screen.getByRole('button', { name: 'Chat actions' });
+		expect(chevron.dataset).toMatchObject({ variant: 'sheet', sessionId: 's-1', title: 'Fix login', project: 'Website' });
 	});
 
 	it('labels an untitled bound session and falls back to "Sessions" for an unknown project', async () => {
 		activeSession.set({ sessionId: 's-1', title: '  ', messages: [], project: 'gone' });
 		activeView.set({ type: 'session' });
-		renderBar();
-		const crumbs = screen.getByRole('navigation', { name: 'Breadcrumbs' });
-		expect(crumbs.textContent).toContain('Untitled');
-		expect(crumbs.textContent).toContain('Sessions');
+		const { container } = renderBar();
+		expect(container.querySelector('.tb-title')?.textContent).toBe('Untitled');
+		expect(screen.getByRole('navigation', { name: 'Breadcrumbs' }).textContent).toBe('Sessions');
+	});
+
+	it('keeps the worker chip on every page, with no trail off-chat', async () => {
+		activeView.set({ type: 'settings' });
+		const { container } = renderBar();
+		expect(container.querySelector('.tb-sub')?.contains(screen.getByTestId('worker-chip'))).toBe(true);
+		expect(screen.queryByRole('navigation', { name: 'Breadcrumbs' })).toBeNull();
+		expect(container.querySelector('.tb-dot-sep')).toBeNull();
 	});
 });
 
