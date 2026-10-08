@@ -2339,9 +2339,13 @@ async def dispatch_worker(
             _caller_context_window(parent_row), provider_id, model_id,
         )
         dispatch_mode = _caller_permission_mode(parent_row)
-        # The caller's fast mode, as it stands now: a worker started after the
-        # owner turned it on runs fast too (when its model can).
-        selected_fast = worker_fast(_caller_fast(parent_row), provider_id, model_id, profile_id)
+        # The owner's last fast-mode pick for this worker's model, else the
+        # caller's as it stands now (a worker started after the owner turned it
+        # on runs fast too), on only where the worker's model can.
+        from app.core.model_effort import resolve_child_fast
+        selected_fast = resolve_child_fast(
+            model_id, provider_id, parent=_caller_fast(parent_row), caller=parent_row,
+            profile_id=profile_id)
         project_v2_id = (parent_row or {}).get("project_v2_id")
         branch = (parent_row or {}).get("branch")
         target_instance_id = (parent_row or {}).get("instance_id")

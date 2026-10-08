@@ -62,6 +62,43 @@ describe('ControlsDock dynamic effort', () => {
   expect(get(activeSession).fastMode).toBe(false);
   expect(screen.queryByRole(surface === 'desktop' ? 'button' : 'switch', { name: 'Fast mode' })).toBeNull();
  });
+ it.each(['desktop', 'mobile'])('remembers fast mode per model on %s and restores it after an unsupported model', async (surface) => {
+  mocks.get.mockResolvedValue(payload);
+  await hydrateModelRegistry();
+  for (const model of ['opus', 'prov:codex:gpt-6.1-sol']) composerPreferences.rememberFast(model, null);
+  activeSession.newChat();
+  activeSession.setModelOverride('opus');
+  await activeSession.setFastMode(false);
+  renderDock();
+  await tick();
+  const toggle = async () => {
+   if (surface === 'desktop') await fireEvent.click(screen.getByRole('button', { name: /^Effort:/ }));
+   else await openPanel();
+   const control = screen.getByRole(surface === 'desktop' ? 'button' : 'switch', { name: 'Fast mode' });
+   await fireEvent.click(control);
+   await tick();
+   cleanup(); document.querySelectorAll('.mcp-portal').forEach((n) => n.remove());
+   renderDock();
+   await tick();
+  };
+  await toggle();
+  expect(get(activeSession).fastMode).toBe(true);
+  activeSession.setModelOverride('prov:codex:gpt-6.1-sol');
+  await tick();
+  expect(get(activeSession).fastMode).toBe(true);
+  await toggle();
+  expect(get(activeSession).fastMode).toBe(false);
+  activeSession.setModelOverride('prov:or:openai/gpt-6-astra');
+  await tick();
+  expect(get(activeSession).fastMode).toBe(false);
+  activeSession.setModelOverride('opus');
+  await tick();
+  expect(get(activeSession).fastMode).toBe(true);
+  activeSession.setModelOverride('prov:codex:gpt-6.1-sol');
+  await tick();
+  expect(get(activeSession).fastMode).toBe(false);
+  expect(composerPreferences.fastForModel('opus')).toBe(true);
+ });
  it.each(['desktop', 'mobile'])('offers six live Codex levels and no Ultra for sparse GLM on %s', async (surface) => {
   mocks.get.mockResolvedValue(payload);
   await hydrateModelRegistry();

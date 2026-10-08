@@ -39,10 +39,9 @@ _PREFERENCE_COLUMNS = (
 
 
 def _canonical_preference_key(key: str) -> str:
-    if key.startswith("composer.modelEffort."):
-        from urllib.parse import unquote
-        from app.core.model_effort import MODEL_EFFORT_PREFIX, effort_preference_key
-        return effort_preference_key(unquote(key[len(MODEL_EFFORT_PREFIX):]))
+    if key.startswith(("composer.modelEffort.", "composer.modelFast.")):
+        from app.core.model_effort import canonical_model_preference_key
+        return canonical_model_preference_key(key)
     return key
 
 
@@ -149,9 +148,9 @@ def set_user_preference(user_type: str, user_id: str, key: str, value: Any, only
 
 
 def delete_user_preference(user_type: str, user_id: str, key: str) -> bool:
-    """Delete a preference; retain model-effort clears as replicated nulls."""
+    """Delete a preference; retain per-model effort/fast clears as replicated nulls."""
     key = _canonical_preference_key(key)
-    if key.startswith("composer.modelEffort."):
+    if key.startswith(("composer.modelEffort.", "composer.modelFast.")):
         set_user_preference(user_type, user_id, key, None)
         return True
     with get_db() as conn:

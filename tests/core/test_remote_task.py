@@ -700,8 +700,8 @@ def test_the_child_runs_fast_when_the_caller_does(world, monkeypatch, supported)
     result = dispatch({})
     assert result["ok"] is True, result
     [(_, _, body)] = calls
-    assert body["fast"] is True
-    # The target decides for the model the child really runs on.
+    assert body.get("fast") is (True if supported else None)
+    # Both sender and target fit fast to the model the child really runs on.
     assert "sonnet" in checked
     row = database.get_session(result["worker_session_id"])
     [turn] = child_turns(result["worker_session_id"])
@@ -709,6 +709,76 @@ def test_the_child_runs_fast_when_the_caller_does(world, monkeypatch, supported)
         assert bool(row["fast"]) is True and turn["overrides"]["fast"] is True
     else:
         assert not row["fast"] and "fast" not in turn["overrides"]
+
+
+@pytest.mark.parametrize("entrypoint", ["Task", "Swarm"])
+@pytest.mark.parametrize("saved,parent,supported,expected", [
+    (False, True, True, False),
+    (True, False, True, True),
+    (None, False, True, False),
+    (None, True, False, False),
+])
+def test_sender_resolves_fast_for_a_preference_unaware_v4_receiver(
+        world, monkeypatch, entrypoint, saved, parent, supported, expected):
+    from unittest.mock import AsyncMock
+
+    from fluid.swarm import SwarmCoordinator, current_launch
+    from fluid.tools.registry import ToolCtx
+
+    from app.core import (
+        model_effort,
+        model_override,
+        preference_identity,
+        provider_agent,
+    )
+
+    _target_version(monkeypatch, 4)
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    # Sender supports Opus. Receiver must still fit the flag to its own model.
+    monkeypatch.setattr(model_override, "fast_mode_supported",
+                        lambda model, provider: model == "opus" and (world.net.device_id == PARENT or supported))
+    database.update_profile("coder", config={"model": "opus", "allowed_tools": ["Read", "Edit", "Bash"]})
+    database.set_session_run_binding("parent", fast=parent)
+    if saved is not None:
+        database.set_user_preference("account", "owner", model_effort.fast_preference_key("opus"), saved)
+    resolve = model_effort.resolve_child_fast
+
+    def old_receiver(model, provider, *, parent=None, caller=None, profile_id=None):
+        if world.net.device_id == TARGET:
+            # Main e9804d721's v4 receiver expression: no saved-pick lookup.
+            return provider_agent.worker_fast(parent, provider, model, profile_id)
+        return resolve(model, provider, parent=parent, caller=caller, profile_id=profile_id)
+
+    monkeypatch.setattr(model_effort, "resolve_child_fast", old_receiver)
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    if entrypoint == "Task":
+        result = dispatch({})
+    else:
+        results = []
+
+        async def launch_swarm():
+            async def task(args, ctx):
+                result = await td.dispatch_task_tool(args, caller_session_id="parent")
+                results.append(result)
+                current_launch.get().finish("completed", "stub provider report")
+                return result
+            coordinator = SwarmCoordinator("parent", task, AsyncMock(), AsyncMock(), AsyncMock())
+            snapshot, _ = await coordinator.start({"tasks": [
+                {"id": "fix", "agent": "coder", "prompt": "Fix the flaky test.", "worker": "Unraid"},
+            ]}, ToolCtx())
+            await coordinator.jobs[snapshot["id"]]
+            assert coordinator.snapshot(snapshot["id"])["status"] == "completed"
+
+        asyncio.run(launch_swarm())
+        [result] = results
+    assert result["ok"] is True, result
+    [(_, _, body)] = calls
+    assert body["fast"] is (saved if saved is not None else parent)
+    row = database.get_session(result["worker_session_id"])
+    [turn] = child_turns(result["worker_session_id"])
+    assert bool(row["fast"]) is expected
+    assert turn["overrides"].get("fast", False) is expected
 
 
 def test_an_older_target_gets_no_fast_mode_and_still_starts(world, monkeypatch):
@@ -723,6 +793,21 @@ def test_an_older_target_gets_no_fast_mode_and_still_starts(world, monkeypatch):
     [(_, _, body)] = calls
     assert "fast" not in body
     assert not database.get_session(result["worker_session_id"])["fast"]
+
+
+@pytest.mark.parametrize("saved,sent,expected", [(True, False, True), (False, True, False), (None, True, True)])
+def test_receiver_fast_pick_for_the_child_model_beats_the_sender(world, monkeypatch, saved, sent, expected):
+    from app.core import model_override, preference_identity
+    from app.core.model_effort import fast_preference_key
+    monkeypatch.setattr(model_override, "fast_mode_supported", lambda model, provider: model == "opus")
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    if saved is not None:
+        database.set_user_preference("account", "owner", fast_preference_key("opus"), saved)
+    answer = start_on_target(world, body_for(world, model_id="opus", fast=sent))
+    row = database.get_session(answer["worker_session_id"])
+    [turn] = child_turns(answer["worker_session_id"])
+    assert bool(row["fast"]) is expected
+    assert turn["overrides"].get("fast", False) is expected
 
 
 @pytest.mark.parametrize("value", ["true", 1, 0, "false"])

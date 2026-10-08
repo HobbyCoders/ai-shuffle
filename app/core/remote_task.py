@@ -388,6 +388,13 @@ async def dispatch_remote(
     worker_id = str(uuid.uuid4())
     permission_mode, origin, context_window, fast = await asyncio.to_thread(
         _caller_bindings, caller_row, caller_session_id)
+    from app.core.model_effort import resolve_child_fast
+
+    # Resolve before sending: v4 peers fit fast to the model but do not read
+    # per-model preferences. In particular, an owner's saved off stays off.
+    fast = await asyncio.to_thread(
+        resolve_child_fast, model_id, provider_id, parent=fast,
+        caller=caller_row, profile_id=profile_id)
     if fast is not None and not _accepts_fast(worker):
         # Same rule as the window: an older target refuses unknown fields, and
         # its child runs at standard speed.
@@ -848,9 +855,11 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
     # Fitted to the child's model on THIS worker's provider rows.
     context_window = provider_agent.worker_context_window(
         start.context_window, start.provider_id, start.model)
-    # Fitted to the child's model on THIS worker, as the window is.
-    fast = provider_agent.worker_fast(start.fast, start.provider_id, start.model, start.agent)
-    from app.core.model_effort import resolve_child_effort
+    # The owner's fast-mode pick for the child's model here, else the
+    # sender's; fitted to the child's model on THIS worker, as the window is.
+    from app.core.model_effort import resolve_child_effort, resolve_child_fast
+    fast = resolve_child_fast(start.model, start.provider_id, parent=start.fast,
+                              profile_id=start.agent)
     effort = resolve_child_effort(start.model, start.provider_id,
                                   explicit=start.effort if start.effort_explicit else None,
                                   parent=start.effort)

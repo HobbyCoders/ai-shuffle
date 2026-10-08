@@ -31,6 +31,8 @@ The model, reasoning effort and permission mode are picked per session in the co
 
 You can change **reasoning effort** and toggle **Fast mode** (where supported) while a session is running. The owning worker acknowledges the change without stopping the turn or requiring another message. It applies to subsequent model calls; a request already in flight keeps its original settings. If the worker is unreachable or the provider refuses the change, the composer does not claim it was applied. These changes are session-specific, not account-wide provider settings.
 
+The composer remembers your last effort and Fast mode pick for each model, synced across your devices. Switching back to a model restores its picks, and a model you have not used yet keeps the current ones. Switching to a model without Fast mode turns it off for that chat without forgetting the pick you made on the other model.
+
 ## Set Up a Project
 
 Projects link to directories on your system:

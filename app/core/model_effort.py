@@ -192,13 +192,54 @@ def effort_preference_key(model: str | None) -> str:
     return MODEL_EFFORT_PREFIX + quote(canonical_effort_model(model), safe="-_.!~*'()")
 
 
+MODEL_FAST_PREFIX = "composer.modelFast."
+#: Per-model composer records whose clears are kept as replicated nulls.
+MODEL_PREFERENCE_PREFIXES = (MODEL_EFFORT_PREFIX, MODEL_FAST_PREFIX)
+
+
+def fast_preference_key(model: str | None) -> str:
+    from urllib.parse import quote
+    return MODEL_FAST_PREFIX + quote(canonical_effort_model(model), safe="-_.!~*'()")
+
+
+def canonical_model_preference_key(key: str) -> str:
+    """One stored key per model, however the client spelled the model id."""
+    from urllib.parse import unquote
+    for prefix, build in ((MODEL_EFFORT_PREFIX, effort_preference_key),
+                          (MODEL_FAST_PREFIX, fast_preference_key)):
+        if key.startswith(prefix):
+            return build(unquote(key[len(prefix):]))
+    return key
+
+
+def _caller_preference_identity(caller: Mapping[str, Any] | None) -> tuple[str, str]:
+    """The preference owner behind a calling session row (the owner, or its API user)."""
+    from app.core import preference_identity
+    from app.db import mobile_tool_identity
+
+    row = caller or {}
+    principal = mobile_tool_identity.read(row["id"]) if row.get("id") else None
+    if row.get("api_user_id"):
+        principal = {"kind": "api_user", "principal_id": row["api_user_id"]}
+    return preference_identity.principal_preference_identity(principal or {"kind": "admin"})
+
+
+def _saved_model_preference(key: str, caller: Mapping[str, Any] | None) -> tuple[bool, Any]:
+    """``(found, value)`` of the caller's owner's per-model record.
+
+    A null record is a clear and counts as found.
+    """
+    from app.db import database
+
+    pref = database.get_user_preference(*_caller_preference_identity(caller), key)
+    return (True, pref.get("value")) if pref is not None else (False, None)
+
+
 def resolve_child_effort(model: str | None, provider_id: str | None, *,
                          explicit: Any = None, parent: Any = None,
                          caller: Mapping[str, Any] | None = None) -> str | None:
     """Explicit child choice > authenticated owner's model pick > parent > default."""
     import logging
-    from app.core import preference_identity
-    from app.db import mobile_tool_identity
     from app.core.query_options import decode_provider_model
     from app.core.provider.harness_adapter import _decide_provider_kind
     from app.core.provider.types import SessionOptions
@@ -214,11 +255,7 @@ def resolve_child_effort(model: str | None, provider_id: str | None, *,
     saved = None
     if explicit not in EFFORT_LEVELS and bare:
         try:
-            row = caller or {}
-            principal = mobile_tool_identity.read(row["id"]) if row.get("id") else None
-            if row.get("api_user_id"):
-                principal = {"kind": "api_user", "principal_id": row["api_user_id"]}
-            identity = preference_identity.principal_preference_identity(principal or {"kind": "admin"})
+            identity = _caller_preference_identity(caller)
             pref = database.get_user_preference(*identity, effort_preference_key(bare))
             if pref is not None:
                 # A null per-model record is a clear, not permission to resurrect
@@ -247,6 +284,40 @@ def resolve_child_effort(model: str | None, provider_id: str | None, *,
             logging.getLogger(__name__).warning("Could not read model effort preference; inheriting caller effort", exc_info=True)
     selected = next((v for v in (explicit, saved, parent) if isinstance(v, str) and v in EFFORT_LEVELS), None)
     return clamp_effort(selected, bare, provider, route=route)
+
+
+def resolve_child_fast(model: str | None, provider_id: str | None, *, parent: Any = None,
+                       caller: Mapping[str, Any] | None = None,
+                       profile_id: str | None = None) -> bool | None:
+    """The owner's last fast-mode pick for the child's model, else the parent's.
+
+    The result is fitted like any inherited fast mode
+    (:func:`app.core.provider_agent.worker_fast`): on only where the child's
+    model supports it. A child with no model of its own uses its agent's.
+    """
+    import logging
+    from app.core.provider_agent import worker_fast
+    from app.core.query_options import decode_provider_model
+
+    decoded = decode_provider_model(model) if model else None
+    bare = decoded[1] if decoded else model
+    provider_id = decoded[0] if decoded else provider_id
+    lookup = bare
+    if not lookup and profile_id:
+        try:
+            from app.db import database
+            lookup = ((database.get_profile(profile_id) or {}).get("config") or {}).get("model")
+        except Exception:
+            lookup = None
+    selected = parent if isinstance(parent, bool) else None
+    if lookup:
+        try:
+            found, saved = _saved_model_preference(fast_preference_key(lookup), caller)
+            if found and isinstance(saved, bool):
+                selected = saved
+        except Exception:
+            logging.getLogger(__name__).warning("Could not read model fast-mode preference; inheriting caller fast mode", exc_info=True)
+    return worker_fast(selected, provider_id, bare, profile_id)
 
 
 def normalize_effort(value: Any, model: str | None, provider: Mapping[str, Any] | None = None,

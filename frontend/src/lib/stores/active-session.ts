@@ -59,7 +59,7 @@ import { untrack } from 'svelte';
 import { createStore, createSubscribers, shallowEqual } from './store-utils';
 import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
 import { contextWindowForChoice, contextChoiceFromWindow, type ContextWindowChoice } from '$lib/constants/model-context';
-import { getDefaultModel } from '$lib/constants/models';
+import { getDefaultModel, isFastModeCapable } from '$lib/constants/models';
 // Shared types
 import type {
 	ChatMessage, MessageType,
@@ -754,6 +754,12 @@ function rememberBranchIntent() {
 	} : null);
 }
 
+/** The owner's fast-mode pick for `model`; a never-picked model keeps `current`. Off where unsupported. */
+function fastModeForModel(model: string | null, current: boolean): boolean {
+	if (!isFastModeCapable(model || getDefaultModel())) return false;
+	return composerPreferences.fastForModel(model) ?? current;
+}
+
 let permissionSelectionGeneration = 0;
 const runSettingGenerations = { effort: 0, fast: 0, context_window: 0 };
 const runSettingQueues = new Map<string, Promise<unknown>>();
@@ -807,10 +813,13 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		setPersistedRunBinding('contextWindowChoice', selected as ContextWindowChoice);
 	} else {
 		if (field === 'effort' && remember) composerPreferences.rememberEffort(selectedModel, selected as string | null);
+		// Only a model that offers fast mode keeps a pick; switching to one that
+		// does not turns it off without forgetting the owner's choice.
+		if (field === 'fast' && remember && isFastModeCapable(selectedModel)) composerPreferences.rememberFast(selectedModel, !!selected);
 		setPersistedRunBinding(field === 'effort' ? 'effort' : 'fastMode',
 			field === 'effort' ? selected as string | null : selected ? '1' : '');
 	}
-	if (_state.sessionId !== sessionId || (field === 'effort' && (_state.modelOverride || getDefaultModel()) !== selectedModel)) return;
+	if (_state.sessionId !== sessionId || (field !== 'context_window' && (_state.modelOverride || getDefaultModel()) !== selectedModel)) return;
 	_update(s => ({
 		...s, [stateKey]: selected,
 		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})
@@ -1062,7 +1071,7 @@ export const activeSession = {
 	// also update the running engine without interrupting its turn. Picks outlive
 	// this tab and become defaults for the NEXT new chat, including Bypass.
 
-	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model, effortLevelOverride: composerPreferences.effortForModel(model) ?? s.effortLevelOverride })); setPersistedRunBinding('model', model); persistSession(); },
+	setModelOverride(model: string | null) { _update(s => ({ ...s, modelOverride: model, effortLevelOverride: composerPreferences.effortForModel(model) ?? s.effortLevelOverride, fastMode: fastModeForModel(model, s.fastMode) })); setPersistedRunBinding('model', model); persistSession(); },
 	async setPermissionModeOverride(mode: string | null) {
 		mode = normalizePermissionMode(mode);
 		const generation = ++permissionSelectionGeneration;
@@ -1086,7 +1095,7 @@ export const activeSession = {
 		persistSession();
 	},
 	setEffortLevelOverride(level: string | null, remember = true) { return setLiveRunSetting('effort', level, remember); },
-	setFastMode(on: boolean) { return setLiveRunSetting('fast', on); },
+	setFastMode(on: boolean, remember = true) { return setLiveRunSetting('fast', on, remember); },
 	async setWorkspaceProjectIds(ids: string[]) {
 		const owner = { sessionId: _state.sessionId, project: _state.project, projectV2Id: _state.projectV2Id };
 		let next = [...new Set(ids)].filter(id => id !== owner.project);
@@ -1190,7 +1199,7 @@ export const activeSession = {
 		const code = _state.mode !== 'chat';
 		_update(s => ({...s,
 			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:composerPreferences.effortForModel(picks.model) ?? s.effortLevelOverride,
-			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : null, fastMode:picks.fastMode === '1',
+			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : null, fastMode:fastModeForModel(picks.model, picks.fastMode === '1'),
 			contextWindowChoice:getPersistedContextWindowChoice(),
 			...composerCheckoutDefaults(code),
 		}));

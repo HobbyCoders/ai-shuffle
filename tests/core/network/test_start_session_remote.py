@@ -103,6 +103,62 @@ async def test_remote_start_receiver_preference_beats_sender_fallback_not_explic
         assert row["effort"] == turn["overrides"]["effort"] == expected
 
 
+@pytest.mark.parametrize("old_receiver", [True, False])
+@pytest.mark.parametrize("saved,parent,supported,expected", [
+    (False, True, True, False),
+    (True, False, True, True),
+    (None, False, True, False),
+    (None, True, True, True),
+    (None, True, False, False),
+])
+async def test_remote_start_fast_pick_survives_mixed_versions(
+        workers, monkeypatch, kicks, old_receiver, saved, parent, supported, expected):
+    from app.core import (
+        model_effort,
+        model_override,
+        preference_identity,
+        provider_agent,
+    )
+    a, b, _ = network(workers, monkeypatch)
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    monkeypatch.setattr(model_override, "fast_mode_supported",
+                        lambda model, provider: model == "opus" and (engine.context().device_id == b.device_id or supported))
+    for worker in (a, b):
+        with worker.active():
+            if saved is not None:
+                database.set_user_preference("account", "owner", model_effort.fast_preference_key("opus"), saved)
+    resolve = model_effort.resolve_child_fast
+
+    def receiver(model, provider, *, parent=None, caller=None, profile_id=None):
+        if old_receiver and engine.context().device_id == a.device_id:
+            # Pre-PR StartSession fits fast but does not consult model picks.
+            return provider_agent.worker_fast(parent, provider, model, profile_id)
+        return resolve(model, provider, parent=parent, caller=caller, profile_id=profile_id)
+
+    monkeypatch.setattr(model_effort, "resolve_child_fast", receiver)
+    real_call = control.call
+    sent = []
+
+    async def capture(device_id, action, body, **kwargs):
+        if action == orch.REMOTE_ACTION:
+            sent.append(dict(body))
+        return await real_call(device_id, action, body, **kwargs)
+
+    monkeypatch.setattr(control, "call", capture)
+    with b.active():
+        database.set_session_run_binding("caller", model="opus", fast=parent)
+        result = await start(ARGS)
+        assert not result.is_error, result.text
+        child = json.loads(result.text)["session_id"]
+    [body] = sent
+    assert body["fast"] is (saved if saved is not None else parent)
+    with a.active():
+        row = database.get_session(child)
+        [turn] = agent_turns(child)
+        assert bool(row["fast"]) is expected
+        assert turn["overrides"].get("fast", False) is expected
+
+
 async def test_starts_on_the_chosen_worker_once(workers, monkeypatch, kicks):
     a, b, served = network(workers, monkeypatch)
     with b.active():

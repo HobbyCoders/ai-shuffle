@@ -193,6 +193,81 @@ def test_child_effort_uses_bare_model_across_providers_and_keeps_api_users_separ
     assert resolve_child_effort("shared-model", "first", caller={"api_user_id": "key-user"}) == "low"
 
 
+@pytest.mark.parametrize("saved,parent,expected", [
+    (True, False, True),
+    (False, True, False),
+    (None, True, True),
+    (None, False, False),
+    (None, None, None),
+    ("yes", True, True),
+])
+def test_child_fast_prefers_the_owner_pick_for_the_child_model(mock_db, monkeypatch, saved, parent, expected):
+    from app.core import preference_identity
+    from app.core.model_effort import fast_preference_key, resolve_child_fast
+    from app.db import database
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    if saved is not None:
+        database.set_user_preference("account", "owner", fast_preference_key("opus"), saved)
+    database.set_user_preference("account", "owner", fast_preference_key("another-model"), not parent)
+    assert resolve_child_fast("opus", None, parent=parent) is expected
+
+
+@pytest.mark.parametrize("model", ["opus", "prov:api:claude-opus-5", "opus[1m]", "prov:api:claude-opus-5[1m]"])
+def test_fast_aliases_share_reads_writes_and_clears(mock_db, monkeypatch, model):
+    from app.core import preference_identity
+    from app.core.model_effort import fast_preference_key, resolve_child_fast
+    from app.db import database
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    database.set_user_preference("account", "owner", "composer.modelFast." + model, True)
+    assert fast_preference_key(model) == "composer.modelFast.claude-opus-5"
+    assert database.get_user_preference("account", "owner", fast_preference_key("opus"))["value"] is True
+    assert resolve_child_fast(model, None, parent=False) is True
+    assert database.delete_user_preference("account", "owner", "composer.modelFast." + model)
+    # The clear stays as a replicated null and the parent's choice applies again.
+    assert database.get_user_preference("account", "owner", fast_preference_key("opus"))["value"] is None
+    assert resolve_child_fast(model, None, parent=False) is False
+
+
+@pytest.mark.parametrize("model", ["sonnet", "haiku", "never-seen-model"])
+def test_child_fast_is_never_on_where_the_model_lacks_it(mock_db, monkeypatch, model):
+    from app.core import preference_identity
+    from app.core.model_effort import fast_preference_key, resolve_child_fast
+    from app.db import database
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    assert resolve_child_fast(model, None, parent=True) is None
+    assert resolve_child_fast(model, None, parent=False) is False
+    # A saved pick cannot turn the tier on for a model that lacks it.
+    database.set_user_preference("account", "owner", fast_preference_key(model), True)
+    assert resolve_child_fast(model, None, parent=False) is None
+
+
+@pytest.mark.parametrize("older_pick,newer_pick", [(True, False), (False, True)])
+def test_child_fast_concrete_opus_versions_are_independent(mock_db, monkeypatch, older_pick, newer_pick):
+    from app.core import preference_identity
+    from app.core.model_effort import fast_preference_key, resolve_child_fast
+    from app.db import database
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    database.set_user_preference("account", "owner", fast_preference_key("claude-opus-4-6"), older_pick)
+    database.set_user_preference("account", "owner", fast_preference_key("opus"), newer_pick)
+    assert resolve_child_fast("claude-opus-4-6", None, parent=not older_pick) is older_pick
+    assert resolve_child_fast("claude-opus-5", None, parent=not newer_pick) is newer_pick
+    database.delete_user_preference("account", "owner", fast_preference_key("claude-opus-4-6"))
+    assert resolve_child_fast("claude-opus-4-6", None, parent=not older_pick) is not older_pick
+    assert resolve_child_fast("opus", None, parent=not newer_pick) is newer_pick
+
+
+def test_child_fast_reads_the_agent_model_and_keeps_api_users_separate(mock_db, monkeypatch):
+    from app.core import preference_identity
+    from app.core.model_effort import fast_preference_key, resolve_child_fast
+    from app.db import database
+    monkeypatch.setattr(preference_identity, "principal_preference_identity",
+                        lambda p: ("api_user", p["principal_id"]) if p["kind"] == "api_user" else ("account", "owner"))
+    monkeypatch.setattr(database, "get_profile", lambda pid: {"config": {"model": "opus"}} if pid == "reviewer" else None)
+    database.set_user_preference("account", "owner", fast_preference_key("opus"), True)
+    assert resolve_child_fast(None, None, parent=False, profile_id="reviewer") is True
+    assert resolve_child_fast("opus", None, parent=False, caller={"api_user_id": "key-user"}) is False
+
+
 def test_metadata_beats_official_and_legacy_upgrade():
     old = {"id": "gpt-5.6-sol", "supported_reasoning_levels": ["none", "max"], "default_reasoning_level": "none"}
     from app.db.model_providers import _normalize_model_capabilities

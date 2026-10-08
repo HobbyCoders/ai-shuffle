@@ -95,7 +95,10 @@ The app, not the agent, decides whether a different model is used:
 A model equal to the one that would run anyway needs no check. The choice
 covers one start only: it never changes an agent's pin or the subagent default.
 Effort, context window and fast mode settings the new model does not support
-fall back to that model's defaults. The receipt names the provider and model
+fall back to that model's defaults.
+A subagent, a Task worker or a chat started with StartSession takes your last
+effort and fast mode picks for its model, the same ones the composer restores,
+and otherwise the parent's. Agents cannot turn fast mode on by themselves. The receipt names the provider and model
 used and how it was asked for (`named_by_user` or `approved_by_owner`), and the
 running-tasks list marks such a subagent's model "your choice".
 

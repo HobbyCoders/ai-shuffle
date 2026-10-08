@@ -245,3 +245,31 @@ it('does not let an old queued callback consume a newer account snapshot', async
  await Promise.resolve();
  expect(seen).toEqual(['new-account-model']);
 });
+
+it('round-trips fast mode per canonical model through the account adapter', async () => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ expect(p.fastForModel('opus')).toBeNull();
+ p.rememberFast('prov:api:claude-opus-5[1m]', true);
+ expect(mocks.save).toHaveBeenLastCalledWith('composer.modelFast.claude-opus-5', true);
+ p.rememberFast('prov:codex:gpt-6.1-sol', false);
+ expect(mocks.save).toHaveBeenLastCalledWith('composer.modelFast.gpt-6.1-sol', false);
+ vi.resetModules();
+ const {composerPreferences:reloaded} = await import('./composer-preferences');
+ for (const alias of ['opus', 'prov:api:claude-opus-5', 'opus[1m]']) expect(reloaded.fastForModel(alias)).toBe(true);
+ expect(reloaded.fastForModel('gpt-6.1-sol')).toBe(false);
+ expect(reloaded.fastForModel('never-used')).toBeNull();
+ mocks.adapters.get('composer.modelFast.claude-opus-5')!.apply(false);
+ expect(reloaded.fastForModel('opus')).toBe(false);
+ mocks.adapters.get('composer.modelFast.claude-opus-5')!.apply(null);
+ expect(reloaded.fastForModel('opus')).toBeNull();
+ reloaded.rememberFast('opus', null);
+ expect(mocks.save).toHaveBeenLastCalledWith('composer.modelFast.claude-opus-5', null);
+});
+
+it('migrates the legacy fast flag only for the last selected model', async () => {
+ localStorage.setItem('aihub_lastModel','prov:api:claude-opus-5'); localStorage.setItem('aihub_lastFastMode','1');
+ const {composerPreferences:p} = await import('./composer-preferences');
+ expect(p.fastForModel('opus')).toBe(true);
+ expect(p.fastForModel('gpt-6.1-sol')).toBeNull();
+ expect(mocks.save).not.toHaveBeenCalled();
+});

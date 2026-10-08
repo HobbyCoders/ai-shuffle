@@ -647,8 +647,10 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         "model": overrides.get("model") or sender.get("model"),
         "effort": overrides.get("effort", sender.get("effort")),
         "permission_mode": permission_mode,
-        "context_window": sender.get("context_window"), "fast": sender.get("fast"),
+        "context_window": sender.get("context_window"),
     }
+    from app.core.provider_agent import _caller_fast
+    body["fast"] = _caller_fast(sender)
     if model_plan:
         from app.core import model_override
         mapped = model_override.settings_for_model(
@@ -658,7 +660,11 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         body["model_choice"] = _override_record(model_plan)
     if assistant:
         body["report_back"] = True
-    from app.core.model_effort import resolve_child_effort
+    from app.core.model_effort import resolve_child_effort, resolve_child_fast
+    # Older peers only fit the transmitted flag to their model; send the
+    # owner's resolved pick so a saved off cannot become a paid fast child.
+    body["fast"] = resolve_child_fast(body["model"], body["provider_id"], parent=body["fast"],
+                                      caller=sender, profile_id=sender["profile_id"])
     body["effort_explicit"] = data.get("effort") is not None
     body["effort"] = resolve_child_effort(body["model"], body["provider_id"], explicit=data.get("effort"),
                                           parent=overrides.get("effort", sender.get("effort")), caller=sender)
@@ -774,6 +780,8 @@ def accept_remote_start(body, from_device):
         raise ValueError("Invalid effort_explicit")
     effort = resolve_child_effort(model, provider_id,
                                   explicit=effort if effort_explicit else None, parent=effort)
+    from app.core.model_effort import resolve_child_fast
+    fast = resolve_child_fast(model, provider_id, parent=fast, profile_id=profile_id)
     payload = {
         "orchestration_depth": depth, "orchestration_sender": sender_session,
         "orchestration_fingerprint": fingerprint, "orchestration_remote_origin": from_device,
@@ -791,6 +799,8 @@ def accept_remote_start(body, from_device):
         payload["orchestration_report_device"] = from_device
     overrides = {key: value for key, value in (("model", model), ("effort", effort),
                                                 ("permission_mode", permission_mode)) if value}
+    if fast is not None:
+        overrides["fast"] = fast
     with transaction() as conn:
         sessions.create_session(
             session_id=session_id, title=title, profile_id=profile_id, project_v2_id=project_v2_id,
@@ -1211,10 +1221,11 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                 "worktree_path": sender.get("worktree_path")}
             if placement is not None:
                 workspace["project_v2_id"] = project_v2_id
+            from app.core.provider_agent import _caller_fast
             run = {"provider_id": sender.get("provider_id"),
                    "model": overrides.get("model") or sender.get("model"),
                    "effort": overrides.get("effort", sender.get("effort")),
-                   "context_window": sender.get("context_window"), "fast": sender.get("fast")}
+                   "context_window": sender.get("context_window"), "fast": _caller_fast(sender)}
             parent_effort = run["effort"]
             if plan:
                 # A model the user asked for (#1830): its provider, and only
@@ -1226,10 +1237,14 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
                 run.update(provider_id=plan["provider_id"], model=plan["model"], **mapped)
                 overrides = _start_overrides(overrides, plan, mapped)
                 payload["model_override"] = _override_record(plan)
-            from app.core.model_effort import resolve_child_effort
+            from app.core.model_effort import resolve_child_effort, resolve_child_fast
             run["effort"] = resolve_child_effort(run["model"], run["provider_id"],
                                                 explicit=data.get("effort"), parent=parent_effort, caller=sender)
-            overrides = {**overrides, "effort": run["effort"]}
+            run["fast"] = resolve_child_fast(run["model"], run["provider_id"], parent=run["fast"],
+                                             caller=sender, profile_id=sender["profile_id"])
+            overrides = {**{k: v for k, v in overrides.items() if k != "fast"}, "effort": run["effort"]}
+            if run["fast"] is not None:
+                overrides["fast"] = run["fast"]
             target = sessions.create_session(
                 session_id=new_id, title=title, profile_id=sender["profile_id"],
                 api_user_id=sender.get("api_user_id"), is_active=True,

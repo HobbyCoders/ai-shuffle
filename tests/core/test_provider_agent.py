@@ -623,6 +623,49 @@ class TestDispatchWorker:
         assert dispatch_env.create_kwargs["fast"] is False
         assert dispatch_env.tm.submitted[0]["overrides"]["fast"] is False
 
+    @pytest.mark.parametrize("entrypoint", ["Task", "Swarm"])
+    @pytest.mark.parametrize("caller,saved,expected", [(False, True, True), (True, False, False)])
+    def test_owner_fast_pick_for_the_worker_model_beats_the_caller(
+            self, dispatch_env, monkeypatch, entrypoint, caller, saved, expected):
+        from app.core import model_effort, model_override
+        from app.db import database
+
+        original = database.get_session
+        monkeypatch.setattr(database, "get_session", lambda sid: {**original(sid), "fast": caller})
+        monkeypatch.setattr(model_override, "fast_mode_supported", lambda model, provider: True)
+        keys = []
+        monkeypatch.setattr(model_effort, "_saved_model_preference",
+                            lambda key, row, *a, **k: keys.append(key) or (True, saved))
+        if entrypoint == "Task":
+            _dispatch()
+        else:
+            from unittest.mock import AsyncMock
+
+            from fluid.swarm import SwarmCoordinator, current_launch
+            from fluid.tools.registry import ToolCtx
+
+            async def launch_swarm():
+                async def task(args, ctx):
+                    # Real local worker creation and run binding; only provider
+                    # execution is stubbed by dispatch_env.
+                    outcome = await pa.dispatch_worker(
+                        parent_session_id="parent-1", profile_id="default",
+                        provider_id="prov-openai", model_id="gpt-5.5", prompt=args["prompt"])
+                    assert outcome.ok
+                    current_launch.get().finish("completed", outcome.report)
+                    return {"ok": True, "report": outcome.report}
+                coordinator = SwarmCoordinator("parent-1", task, AsyncMock(), AsyncMock(), AsyncMock())
+                snapshot, _ = await coordinator.start({"tasks": [
+                    {"id": "fix", "agent": "default", "prompt": "Do the thing."},
+                ]}, ToolCtx())
+                await coordinator.jobs[snapshot["id"]]
+                assert coordinator.snapshot(snapshot["id"])["status"] == "completed"
+
+            asyncio.run(launch_swarm())
+        assert [k for k in keys if "Fast" in k] == ["composer.modelFast.gpt-5.5"]
+        assert dispatch_env.create_kwargs["fast"] is expected
+        assert dispatch_env.tm.submitted[0]["overrides"]["fast"] is expected
+
     def test_caller_without_fast_mode_leaves_the_worker_unset(self, dispatch_env):
         _dispatch()
         assert "fast" not in dispatch_env.create_kwargs

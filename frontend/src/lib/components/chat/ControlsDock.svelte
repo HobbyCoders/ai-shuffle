@@ -260,10 +260,12 @@
 	const fastMode = $derived($activeSession.fastMode);
 	const fastSupported = $derived(isFastModeCapable(modelValue));
 
-	// Switching to a model without the tier must not leave a stale flag on the
-	// session — the toggle would be invisible while every send still asked for it.
+	// Each model remembers its own pick (composerPreferences.fastForModel), which
+	// a model switch restores. Switching to a model without the tier must not
+	// leave a stale flag on the session — the toggle would be invisible while
+	// every send still asked for it — and must not forget the owner's pick.
 	$effect(() => {
-		if (fastMode && !fastSupported) activeSession.setFastMode(false);
+		if (fastMode && !fastSupported) activeSession.setFastMode(false, false);
 	});
 
 	// Live reroute detection: the backend `model_info` note tells us which model

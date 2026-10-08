@@ -260,10 +260,13 @@ export function getPersistedPermissionMode(): string | null {
 	return rememberablePermissionMode(localStorage.getItem('aihub_lastPermissionMode'));
 }
 
-/** Last-used fast-tier pick. Stored as `'1'` / absent, so anything else is off. */
+/**
+ * Fast-tier pick for a new chat: the owner's last pick for its model, else the
+ * last pick on any model (stored as `'1'` / absent, so anything else is off).
+ */
 export function getPersistedFastMode(): boolean {
 	if (typeof window === 'undefined') return false;
-	return localStorage.getItem('aihub_lastFastMode') === '1';
+	return composerPreferences.fastForModel(getPersistedModel()) ?? localStorage.getItem('aihub_lastFastMode') === '1';
 }
 
 export function getPersistedContextWindowChoice(): ContextWindowChoice {

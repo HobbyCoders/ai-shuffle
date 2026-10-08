@@ -88,6 +88,22 @@ def test_per_model_effort_preferences_roundtrip(jsonb_client):
     assert jsonb_client.get(root + "composer.modelEffort.opus[1m]").json()["value"] is None
 
 
+def test_per_model_fast_preferences_roundtrip(jsonb_client):
+    root = "/api/v1/preferences/"
+    opus = "composer.modelFast.claude-opus-5"
+    sol = "composer.modelFast.gpt-6.1-sol"
+    saved = jsonb_client.put(root + "composer.modelFast.prov:api:claude-opus-5[1m]",
+                            json={"key": opus, "value": True, "expected_version": None})
+    other = jsonb_client.put(root + sol, json={"key": sol, "value": False, "expected_version": None})
+    assert saved.status_code == other.status_code == 200
+    assert saved.json()["key"] == opus
+    assert jsonb_client.get(root + opus).json()["value"] is True
+    assert jsonb_client.delete(root + opus).status_code == 200
+    values = jsonb_client.get(root + "all").json()["preferences"]
+    assert values[opus] is None and values[sol] is False
+    assert jsonb_client.get(root + "composer.modelFast.opus[1m]").json()["value"] is None
+
+
 @pytest.mark.parametrize(
     "value",
     [

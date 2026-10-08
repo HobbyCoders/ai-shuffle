@@ -102,6 +102,37 @@ async def test_ordinary_start_session_is_unchanged(mock_db, monkeypatch):
     assert await away_mode.answer_if_away(new_id, [{"question": "Which?", "options": ["A", "B"]}]) is None
 
 
+@pytest.mark.parametrize("source", ["binding", "live"])
+@pytest.mark.parametrize("saved,parent,model,expected", [
+    (False, True, "opus", False),
+    (True, False, "opus", True),
+    (None, True, "opus", True),
+    (None, False, "opus", False),
+    (True, True, "sonnet", False),
+])
+async def test_local_start_session_uses_child_model_fast_pick(mock_db, monkeypatch, source, saved, parent, model, expected):
+    from app.core import preference_identity
+    from app.core.model_effort import fast_preference_key
+    database.create_profile("agent", "Agent", None, {"model": model})
+    monkeypatch.setattr(orch, "_principal", lambda sid: None)
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    chat("caller")
+    database.set_session_run_binding("caller", model=model, fast=parent if source == "binding" else not parent)
+    if source == "live":
+        live = turns.enqueue_turn("caller", "user", prompt="Continue", profile_id="agent",
+                                  overrides={"model": model, "fast": parent})
+        assert turns.start_turn(live["id"])
+    if saved is not None:
+        database.set_user_preference("account", "owner", fast_preference_key(model), saved)
+    outcome = await call("caller", "start", start_args())
+    assert not outcome.is_error, outcome.text
+    result = json.loads(outcome.text)
+    row = database.get_session(result["session_id"])
+    turn = turns.get_turn(result["turn_id"])
+    assert bool(row["fast"]) is expected
+    assert turn["overrides"].get("fast", False) is expected
+
+
 async def test_ordinary_chat_cannot_name_a_project(mock_db, monkeypatch):
     database.create_profile("agent", "Agent", None, {"model": "sonnet"})
     monkeypatch.setattr(orch, "_principal", lambda sid: None)

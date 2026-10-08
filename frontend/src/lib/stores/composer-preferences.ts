@@ -158,7 +158,59 @@ preferenceSync.registerPrefix(MODEL_EFFORT_PREFIX, key => {
  } catch { return null; }
 });
 for (const model of Object.keys(values.modelEfforts)) registerEffort(model);
+
+// Fast mode per model, one account-synced record each. Unlike effort there is
+// no older whole-map preference: the map below is only this browser's cache.
+export const MODEL_FAST_PREFIX = 'composer.modelFast.';
+export const fastPreferenceKey = (model: string | null) => MODEL_FAST_PREFIX + encodeURIComponent(effortModelKey(model));
+const FAST_CACHE_KEY = 'ai-shuffle-composer:modelFast';
+let modelFast: Record<string, boolean> = {};
+const registeredFast = new Set<string>();
+function applyFast(model: string, value: unknown) {
+ const next = {...modelFast};
+ if (typeof value === 'boolean') next[model] = value; else delete next[model];
+ modelFast = next;
+ try { localStorage.setItem(FAST_CACHE_KEY, JSON.stringify(modelFast)); } catch { /* memory still works */ }
+}
+function fastAdapter(model: string) {
+ registeredFast.add(model);
+ return {
+  read: () => modelFast[model] ?? null,
+  apply(value: unknown) { applyFast(model, value); notifyRemote(); }
+ };
+}
+function registerFast(model: string) {
+ if (!registeredFast.has(model)) preferenceSync.register(fastPreferenceKey(model), fastAdapter(model));
+}
+try {
+ const cached = localStorage.getItem(FAST_CACHE_KEY);
+ const parsed: unknown = cached === null ? null : JSON.parse(cached);
+ if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+  for (const [model, on] of Object.entries(parsed)) if (model && typeof on === 'boolean') modelFast[effortModelKey(model)] = on;
+ } else if (cached === null && values.model && values.fastMode === '1') {
+  // Migrate only the last model/fast pair; never seed unrelated models.
+  applyFast(effortModelKey(values.model), true);
+ }
+} catch { /* SSR or unavailable storage */ }
+preferenceSync.registerPrefix(MODEL_FAST_PREFIX, key => {
+ try {
+  const model = decodeURIComponent(key.slice(MODEL_FAST_PREFIX.length));
+  return model && fastPreferenceKey(model) === key ? fastAdapter(model) : null;
+ } catch { return null; }
+});
+for (const model of Object.keys(modelFast)) registerFast(model);
+
 export const composerPreferences = {
+ /** The owner's last fast-mode pick for this model; null when never picked. */
+ fastForModel(model: string | null): boolean | null {
+  return modelFast[effortModelKey(model)] ?? null;
+ },
+ rememberFast(model: string | null, on: boolean | null) {
+  const key = effortModelKey(model);
+  registerFast(key);
+  applyFast(key, on);
+  preferenceSync.save(fastPreferenceKey(key), on);
+ },
  get current(): Readonly<Picks> { return values; },
  effortForModel(model: string | null): string | null {
   const key = effortModelKey(model), family = legacyEffortFamily(model || getDefaultModel());

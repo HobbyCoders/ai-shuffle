@@ -248,6 +248,46 @@ describe('per-model effort selection', () => {
  });
 });
 
+describe('per-model fast mode selection', () => {
+ beforeEach(() => { for (const model of ['opus', 'prov:codex:gpt-6.1-sol']) composerPreferences.rememberFast(model, null); });
+ it('restores each model pick, carries the current pick to a never-used model and forces it off where unsupported', async () => {
+  Object.assign(activeSession.current, {sessionId:null, modelOverride:'opus', fastMode:false});
+  await activeSession.setFastMode(true);
+  expect(composerPreferences.fastForModel('opus')).toBe(true);
+  activeSession.setModelOverride('prov:codex:gpt-6.1-sol');
+  expect(activeSession.current.fastMode).toBe(true);
+  await activeSession.setFastMode(false);
+  activeSession.setModelOverride('sonnet');
+  expect(activeSession.current.fastMode).toBe(false);
+  activeSession.setModelOverride('opus');
+  expect(activeSession.current.fastMode).toBe(true);
+  activeSession.setModelOverride('prov:codex:gpt-6.1-sol');
+  expect(activeSession.current.fastMode).toBe(false);
+ });
+ it('does not forget the pick when an unsupported model forces fast off', async () => {
+  Object.assign(activeSession.current, {sessionId:null, modelOverride:'opus', fastMode:false});
+  await activeSession.setFastMode(true);
+  activeSession.current.modelOverride = 'sonnet';
+  await activeSession.setFastMode(false, false);
+  expect(activeSession.current.fastMode).toBe(false);
+  expect(composerPreferences.fastForModel('opus')).toBe(true);
+  activeSession.setModelOverride('opus');
+  expect(activeSession.current.fastMode).toBe(true);
+ });
+ it('remembers the acknowledged model without replacing the newly selected model pick', async () => {
+  Object.assign(activeSession.current, {sessionId:'late-fast', modelOverride:'opus', fastMode:false});
+  composerPreferences.rememberFast('prov:codex:gpt-6.1-sol', false);
+  let acknowledge!: (value: {fast:boolean}) => void;
+  const put = vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => {acknowledge=resolve;}));
+  const pending = activeSession.setFastMode(true);
+  activeSession.setModelOverride('prov:codex:gpt-6.1-sol');
+  acknowledge({fast:true}); await pending;
+  expect(activeSession.current.fastMode).toBe(false);
+  expect(composerPreferences.fastForModel('opus')).toBe(true);
+  put.mockRestore(); activeSession.current.sessionId=null;
+ });
+});
+
 describe('live effort and Fast mode selection', () => {
 	describe('context window selection', () => {
 		it('saves the pin without sending a message and waits for acknowledgement', async () => {
