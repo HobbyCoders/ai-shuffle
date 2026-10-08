@@ -18,6 +18,7 @@ from cryptography.fernet import Fernet
 
 from app.core import encryption
 from app.core.config import settings
+from app.core.private_storage import protect_private_path
 from app.db import database
 
 _PREFIX = 'installation:v1:'
@@ -71,6 +72,8 @@ def _key_path():
         if info.st_uid != os.geteuid():
             raise ValueError('Installation key directory has another owner')
         directory.chmod(0o700)
+    else:
+        protect_private_path(directory, directory=True)
     name = hashlib.sha256(settings.effective_instance_id.encode()).hexdigest() + '.key'
     return directory / name
 
@@ -117,6 +120,8 @@ def _read_key(path):
     if (not stat.S_ISREG(path_info.st_mode) or
             getattr(path_info, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)):
         raise ValueError('Invalid installation key file')
+    if os.name == 'nt':
+        protect_private_path(path)
     flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
     fd = os.open(path, flags)
     with os.fdopen(fd, 'rb') as stream:
@@ -152,6 +157,7 @@ def _key(*, create=False):
     fd, temporary = tempfile.mkstemp(prefix='.pending-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
+            protect_private_path(temporary)
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())

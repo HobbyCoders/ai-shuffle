@@ -116,15 +116,16 @@ def child_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     obvious cause. Force UTF-8 for children so their output survives the
     trip.
 
-    Anything the caller (or the operator) already set wins: these are
-    ``setdefault``s, not overrides.
+    Host secrets are scrubbed before inheritance, as for Bash and delegated
+    CLI children. Explicit caller overlays remain deliberate handovers.
+    UTF-8 defaults do not override an operator setting.
     """
-    env = dict(os.environ)
+    from fluid.tools.child_env import child_env_with_overlay
+
+    env = child_env_with_overlay(extra)
     if _IS_WINDOWS:
         env.setdefault("PYTHONIOENCODING", "utf-8")
         env.setdefault("PYTHONUTF8", "1")
-    if extra:
-        env.update(extra)
     return env
 
 

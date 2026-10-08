@@ -167,6 +167,25 @@ class TestChildPriority:
 
 
 class TestChildEnv:
+    def test_terminal_environment_also_drops_app_dsn(self):
+        from app.core.terminals import shell_environment
+
+        source = {"PATH": "/usr/bin", "HOME": "/home/test", "APP_DSN": "fixture",
+                  "SESSION_SECRET": "fixture", "OPENAI_API_KEY": "fixture"}
+        env = shell_environment("bash", "/bin/bash", source)
+        assert not {"APP_DSN", "SESSION_SECRET", "OPENAI_API_KEY"} & env.keys()
+        assert env["PATH"] == source["PATH"]
+
+    def test_monitor_scrubs_host_secrets_without_mutating_parent(self, monkeypatch):
+        names = ("ADMIN_PASSWORD", "SHUFFLE_DESKTOP_LIFECYCLE_TOKEN", "DATABASE_URL",
+                 "PGPASSWORD", "DSN", "app_dsn", "SESSION_SECRET")
+        for name in names:
+            monkeypatch.setenv(name, "private-sentinel")
+        env = pt.child_env({"DEPLOY_TOKEN": "explicit-handover"})
+        assert not set(names) & env.keys()
+        assert env["DEPLOY_TOKEN"] == "explicit-handover"
+        assert all(os.environ[name] == "private-sentinel" for name in names)
+
     def test_windows_forces_utf8_io(self, monkeypatch):
         monkeypatch.setattr(pt, "_IS_WINDOWS", True)
         monkeypatch.delenv("PYTHONIOENCODING", raising=False)
@@ -435,6 +454,27 @@ async def test_windows_tree_kill_leaves_no_survivor(tmp_path):
         bt._background_tasks.pop(task.task_id, None)
         if task._reader_task is not None:
             task._reader_task.cancel()
+
+
+async def test_monitor_real_child_cannot_inherit_app_secrets(monkeypatch, tmp_path):
+    from app.mcp import builtin_tools as bt
+
+    names = ("DATABASE_URL", "SHUFFLE_DESKTOP_LIFECYCLE_TOKEN", "SESSION_SECRET", "APP_DSN")
+    for name in names:
+        monkeypatch.setenv(name, "private-sentinel")
+    script = tmp_path / "env_probe.py"
+    script.write_text(
+        "import os\nassert not set(" + repr(names) + ") & os.environ.keys()\n",
+        encoding="utf-8",
+    )
+    task = await bt._spawn_background(f'"{sys.executable}" "{script}"', str(tmp_path), None)
+    try:
+        await asyncio.wait_for(task.process.wait(), timeout=60)
+        assert task.process.returncode == 0
+    finally:
+        bt._background_tasks.pop(task.task_id, None)
+        if task._reader_task is not None:
+            await task._reader_task
 
 
 @pytest.mark.skipif(not _IS_WINDOWS, reason="Windows child encoding")

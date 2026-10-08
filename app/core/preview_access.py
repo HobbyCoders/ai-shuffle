@@ -53,7 +53,6 @@ import ipaddress
 import logging
 import os
 import secrets
-import tempfile
 import time
 from dataclasses import dataclass
 from hashlib import sha256
@@ -172,6 +171,9 @@ def _key_path() -> Path:
 
 
 def _read_key(path: Path) -> bytes:
+    from app.core.private_storage import protect_private_path
+
+    protect_private_path(path)
     raw = path.read_text(encoding="utf-8").strip()
     if len(raw) < 64:
         raise ValueError("Invalid preview access key")
@@ -187,7 +189,9 @@ def _key() -> bytes:
         pass
     fresh = secrets.token_hex(32)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix="preview-access-", suffix=".tmp", dir=path.parent)
+    from app.core.private_storage import private_mkstemp
+
+    fd, name = private_mkstemp(prefix="preview-access-", suffix=".tmp", dir=path.parent)
     tmp = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:

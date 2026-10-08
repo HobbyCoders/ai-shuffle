@@ -92,6 +92,8 @@ def _directory():
             raise IdentityError("Identity directory has another owner")
         if info.st_mode & 0o077:
             directory.chmod(0o700)
+    else:
+        custody.protect_private_path(directory, directory=True)
     return directory
 
 
@@ -137,6 +139,8 @@ def _read(path) -> DeviceIdentity:
     if (not stat.S_ISREG(info.st_mode)
             or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)):
         raise IdentityError("Identity file is not a regular file")
+    if os.name == "nt":
+        custody.protect_private_path(path)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags)
     with os.fdopen(fd, "rb") as stream:
@@ -154,6 +158,7 @@ def _write_new(path, identity: DeviceIdentity, *, replace: bool = False) -> Devi
     fd, temporary = tempfile.mkstemp(prefix=".pending-", dir=path.parent)
     try:
         with os.fdopen(fd, "wb") as stream:
+            custody.protect_private_path(temporary)
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())

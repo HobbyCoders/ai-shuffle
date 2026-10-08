@@ -17,6 +17,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from app.core.config import settings
+from app.core.private_storage import protect_private_path
 from app.core import managed_credentials as custody
 
 STATE_KEY = 'credential_key_state_v1'
@@ -66,6 +67,8 @@ def key_path(database_id, *, create=False):
         raise CredentialKeyError()
     if os.name != 'nt' and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
         raise CredentialKeyError()
+    if os.name == 'nt':
+        protect_private_path(directory, directory=True)
     return directory / (database_id + '.key')
 
 
@@ -76,6 +79,7 @@ def _publish(database_id, key):
     fd, temporary = tempfile.mkstemp(prefix='.pending-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
+            protect_private_path(temporary)
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())

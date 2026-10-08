@@ -31,7 +31,7 @@ _DENY_NAMES = frozenset({
     "SHUFFLE_DESKTOP_LIFECYCLE_TOKEN", "SHUFFLE_DESKTOP_ATTACH_TOKEN", "SHUFFLE_DESKTOP_LISTENER_TOKEN",
     "OWNER_PASSWORD", "LICENSE_KEY",
     "ADMIN_PASSWORD", "ADMIN_USERNAME", "SECRET_KEY", "CLUSTER_SECRET",
-    "DATABASE_URL",
+    "DATABASE_URL", "DSN", "JWT_SECRET", "SESSION_SECRET", "AUTH_SECRET",
 })
 # Database connection settings: libpq's PG* family, POSTGRES_* and DATABASE_*.
 # PGID is the container's group id (PUID/PGID), not a libpq setting.
@@ -39,7 +39,8 @@ _DENY_PREFIX_RE = re.compile(r"^(?:PG(?!ID$)|POSTGRES_|DATABASE_)", re.IGNORECAS
 # Credential-shaped names.
 _DENY_SUFFIX_RE = re.compile(
     r"(?:_SECRET|_TOKEN|_PASSWORD|_PASSWD|_API_KEY|_PRIVATE_KEY|_ACCESS_KEY|"
-    r"_SECRET_KEY|_SECRET_ACCESS_KEY|_ACCESS_KEY_ID|_CREDENTIALS)$",
+    r"_SECRET_KEY|_SECRET_ACCESS_KEY|_ACCESS_KEY_ID|_CREDENTIALS|_DSN|"
+    r"_COOKIE|_SIGNING_KEY|_ENCRYPTION_KEY|_JWT_KEY)$",
     re.IGNORECASE,
 )
 # What tools legitimately use from the inherited environment even though the
@@ -62,10 +63,12 @@ def _passthrough(environ: Mapping[str, str]) -> frozenset[str]:
 def is_host_secret(name: str, extra_allowed: frozenset[str] = frozenset()) -> bool:
     """True when ``name`` must not be inherited by an agent subprocess."""
     upper = name.upper()
+    # A passthrough may allow a build/deploy token, never the app database or
+    # authentication secrets. These remain private even with a broad override.
+    if is_app_secret(upper):
+        return True
     if upper in ALLOWED_CREDENTIAL_NAMES or upper in extra_allowed:
         return False
-    if upper in _DENY_NAMES:
-        return True
     return bool(_DENY_PREFIX_RE.match(upper) or _DENY_SUFFIX_RE.search(upper))
 
 
@@ -74,14 +77,15 @@ def is_app_secret(name: str) -> bool:
     database settings): the named part of :func:`is_host_secret`, without the
     credential-suffix rule that also matches the owner's own ``*_TOKEN``s."""
     upper = name.upper()
-    return upper in _DENY_NAMES or bool(_DENY_PREFIX_RE.match(upper))
+    return upper in _DENY_NAMES or upper.endswith("_DSN") or bool(_DENY_PREFIX_RE.match(upper))
 
 
 def scrub_child_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """A copy of ``environ`` (default ``os.environ``) without host secrets."""
     source = os.environ if environ is None else environ
     keep = _passthrough(source)
-    return {k: v for k, v in source.items() if not is_host_secret(k, keep)}
+    return {k: v for k, v in source.items()
+            if k.upper() not in {PASSTHROUGH_ENV, UNSET_ENV} and not is_host_secret(k, keep)}
 
 
 def _names(raw: str | None) -> list[str]:

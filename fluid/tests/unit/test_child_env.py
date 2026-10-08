@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import sys
+from types import SimpleNamespace
+
+import pytest
+
 
 
 from fluid.engine.delegated import DelegatedLoop
@@ -31,6 +37,25 @@ def test_scrub_keeps_tool_basics_and_drops_host_secrets() -> None:
         assert dropped not in env
 
 
+def test_database_and_auth_secrets_cannot_use_passthrough() -> None:
+    names = ("DSN", "app_dsn", "DATABASE_URL", "PGPASSWORD", "SESSION_SECRET",
+             "JWT_SECRET", "AUTH_SECRET", "SHUFFLE_DESKTOP_ATTACH_TOKEN")
+    source = {name: "private-sentinel" for name in names}
+    source[PASSTHROUGH_ENV] = ",".join(names) + ",NPM_TOKEN"
+    source[UNSET_ENV] = "ADMIN_PASSWORD"
+    source["NPM_TOKEN"] = "deploy-token"
+    env = scrub_child_env(source)
+    assert not set(names) & env.keys()
+    assert PASSTHROUGH_ENV not in env and UNSET_ENV not in env
+    assert env["NPM_TOKEN"] == "deploy-token"
+    assert source["DSN"] == "private-sentinel"
+
+
+def test_extra_secret_shapes_are_scrubbed() -> None:
+    names = ("APP_COOKIE", "APP_SIGNING_KEY", "APP_ENCRYPTION_KEY", "APP_JWT_KEY")
+    assert scrub_child_env({name: "private-sentinel" for name in names}) == {}
+
+
 def test_scrub_is_case_insensitive_and_honours_passthrough() -> None:
     env = scrub_child_env({"admin_password": "x", "NPM_TOKEN": "n", PASSTHROUGH_ENV: "npm_token"})
     assert "admin_password" not in env
@@ -48,6 +73,26 @@ def test_delegated_child_env_scrubs_inherited_but_keeps_handover(monkeypatch) ->
     # What the caller hands over on purpose is never scrubbed.
     assert env["OPENROUTER_API_KEY"] == "or"
     assert env["AIH_GATEWAY_TOKEN"] == "gw"
+
+
+@pytest.mark.parametrize("shell", ["bash", pytest.param("powershell", marks=pytest.mark.skipif(
+    os.name != "nt", reason="Windows PowerShell"))])
+async def test_real_shell_child_drops_dsn_and_auth_secrets(monkeypatch, tmp_path, shell) -> None:
+    from fluid.tools.builtins import bash
+
+    names = ("DSN", "APP_DSN", "SESSION_SECRET", "SHUFFLE_DESKTOP_ATTACH_TOKEN")
+    for name in names:
+        monkeypatch.setenv(name, "private-sentinel")
+    script = tmp_path / "env_probe.py"
+    script.write_text("import os\nassert not set(" + repr(names) + ") & os.environ.keys()\n",
+                      encoding="utf-8")
+    command = f'"{sys.executable}" "{script}"'
+    if shell == "powershell":
+        monkeypatch.setattr(bash, "resolve_shell", lambda: SimpleNamespace(
+            argv_prefix=("powershell.exe", "-NoProfile", "-NonInteractive", "-Command")))
+        command = "& " + command
+    out = await bash_handler({"command": command}, ToolCtx(cwd=str(tmp_path)))
+    assert not out.is_error, out.text
 
 
 async def test_bash_child_does_not_see_host_secrets(monkeypatch, tmp_path) -> None:
