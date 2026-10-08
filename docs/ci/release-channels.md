@@ -81,7 +81,7 @@ directory. Both defaults remain stable. Manual `docker-publish.yml` runs on
 
 `v0.8.18` was the newest final tag when this candidate was prepared. The
 source fallbacks, package and lockfile root versions, Android fallback,
-Compose pins, Unraid XML, and their website/in-app doc copies now say
+Compose pins and their website/in-app doc copies now say
 `0.8.19`. Release builds still derive their version from the actual tag;
 changing these literals does not create an image, installer or stable feed.
 Re-check tags immediately before release and choose another version if this
@@ -188,7 +188,7 @@ unchanged retry, not a way to replace its source.
 ### Draft buyer release notes (use only after release gates pass)
 
 AI Shuffle 0.8.19 prepares the first protected stable release channel:
-version-pinned Compose and Unraid install files, verified source updates,
+version-pinned Compose install files, verified source updates,
 owner sign-in, a guided setup with license and credential checks, and the
 stock CLI's own sign-in flow. Provider usage is billed by your provider;
 an AI Shuffle license is not a provider subscription. Back up persistent

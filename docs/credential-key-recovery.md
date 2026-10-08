@@ -39,7 +39,7 @@ Run these commands as the application's OS user with the intended DATA_DIR and
 PostgreSQL configuration. They print only readiness and a database identity.
 Passphrases are prompted, never accepted in command-line arguments.
 
-In the Docker/Unraid container console, the shell may start as `root` while
+In the Docker container console, the shell may start as `root` while
 Shuffle runs as `appuser`. The key owner must match the process user, so even
 root receives a recovery error when reading an appuser-owned key. Run the
 commands through the same user switch as the container entrypoint:

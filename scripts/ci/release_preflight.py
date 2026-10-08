@@ -76,7 +76,6 @@ def verify_versions(root: Path, tag: str | None = None) -> str:
         "android/app/build.gradle.kts": f'ANDROID_VERSION_NAME") ?: "{version}"',
         "docs/install/compose/compose.yaml": "${AI_SHUFFLE_VERSION:-" + version + "}",
         "docs/install/compose/env.example": f"AI_SHUFFLE_VERSION={version}\n",
-        "docs/install/unraid/ai-shuffle.xml": f"/ai-shuffle:{version}</Repository>",
     }
     for filename, needle in expected.items():
         if needle not in (root / filename).read_text():

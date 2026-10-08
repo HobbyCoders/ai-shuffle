@@ -2,17 +2,17 @@
 	/**
 	 * Wizard step: the workspace, where project checkouts live.
 	 *
-	 * On Docker and Unraid the path is inside the container (always
+	 * On Docker the path is inside the container (always
 	 * `/workspace`), so the step also says which host folder backs it: the
 	 * worker's own answer when it reports one (`host_path`), otherwise where to
-	 * look (WORKSPACE_DIR in `.env`, or the Unraid template's Workspace path).
+	 * look (WORKSPACE_DIR in `.env`).
 	 */
 	import { FolderOpen, HardDrive, Loader2 } from 'lucide-svelte';
 	import DirectoryBrowser from '$lib/components/DirectoryBrowser.svelte';
 
 	interface Props {
 		path: string;
-		/** A Docker or Unraid install (the worker is not in local mode). */
+		/** A Docker install (the worker is not in local mode). */
 		container: boolean;
 		/** The host folder behind /workspace, when the worker knows it. */
 		hostPath?: string | null;
@@ -49,7 +49,6 @@
 					<p>On the host it is the folder you mapped to it:</p>
 					<ul class="list-disc pl-5">
 						<li>Docker Compose: <code class="font-mono text-foreground">WORKSPACE_DIR</code> in <code class="font-mono">.env</code> (<code class="font-mono">./workspace</code> next to <code class="font-mono">compose.yaml</code> by default).</li>
-						<li>Unraid: the template's Workspace path (<code class="font-mono break-all">/mnt/user/appdata/ai-shuffle/workspace</code> by default).</li>
 					</ul>
 				{/if}
 			</div>

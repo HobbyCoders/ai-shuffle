@@ -59,7 +59,7 @@ export interface UpdateResultRow {
 }
 
 const IMAGE_HOW =
-	'To get a newer Docker image: in Unraid, choose Force update on the AI Shuffle container; with Docker Compose, run docker compose pull, then docker compose up -d. Your data stays on the data volume.';
+	'To get a newer Docker image: with Docker Compose, run docker compose pull, then docker compose up -d. Your data stays on the data volume.';
 
 /** How to replace a Docker image, for a worker whose update needs one now (#1821). */
 export const IMAGE_HINT = `Your current version keeps working. ${IMAGE_HOW}`;

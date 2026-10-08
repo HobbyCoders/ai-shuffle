@@ -1,4 +1,4 @@
-AI Shuffle is the phone companion for AI Shuffle, the self-hosted agent workspace from HobbyCoders. Your agents run on your own AI Shuffle worker: a home server, an Unraid box, a Docker host or the AI Shuffle desktop app. This app connects to it so you can keep working away from your desk.
+AI Shuffle is the phone companion for AI Shuffle, the self-hosted agent workspace from HobbyCoders. Your agents run on your own AI Shuffle worker: a home server or another Docker host, or the AI Shuffle desktop app. This app connects to it so you can keep working away from your desk.
 
 What you can do
 • Start sessions and chat with your agents, with streaming replies and file downloads.

@@ -241,12 +241,13 @@ describe('setup wizard v2', () => {
 		await screen.findByTestId('setup-workspace');
 	});
 
-	it('shows the host folder behind /workspace on Docker and Unraid', async () => {
+	it('shows the host folder behind /workspace on Docker Compose', async () => {
 		await throughProvider();
 		const host = screen.getByTestId('setup-workspace-host');
 		expect(host.textContent).toContain('/workspace');
 		expect(host.textContent).toContain('WORKSPACE_DIR');
-		expect(host.textContent).toContain('/mnt/user/appdata/ai-shuffle/workspace');
+		expect(host.textContent).toContain('./workspace');
+		expect(host.textContent).not.toMatch(/Unraid|template's Workspace path/);
 		await fireEvent.input(screen.getByLabelText('Or type a path manually'), { target: { value: '/tmp/projects' } });
 		expect(screen.getByText(/lost when the container is re-created/)).toBeTruthy();
 	});

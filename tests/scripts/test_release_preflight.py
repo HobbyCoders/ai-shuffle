@@ -158,6 +158,20 @@ def test_checked_in_version_surfaces_and_tag_agree():
         checks.verify_versions(ROOT, "v99.0.0")
 
 
+@pytest.mark.parametrize("filename", ["compose.yaml", "env.example"])
+def test_version_preflight_catches_compose_drift(tmp_path, filename):
+    for path in ("app/__init__.py", "frontend/package.json", "frontend/package-lock.json",
+                 "desktop/package.json", "desktop/package-lock.json", "android/app/build.gradle.kts",
+                 "docs/install/compose/compose.yaml", "docs/install/compose/env.example"):
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / path, target)
+    target = tmp_path / "docs/install/compose" / filename
+    target.write_text(target.read_text().replace(checks.verify_versions(ROOT), "99.0.0"))
+    with pytest.raises(ValueError, match=f"{filename}: release version drift"):
+        checks.verify_versions(tmp_path)
+
+
 def test_version_preflight_catches_lock_drift(tmp_path):
     for filename in ("app/__init__.py", "frontend/package.json", "frontend/package-lock.json"):
         target = tmp_path / filename

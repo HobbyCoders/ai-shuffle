@@ -161,9 +161,9 @@
 		{#if !status.signed_in && !cli.terminalOpen}
 			<div class="howto" data-testid="claude-cli-instructions">
 				{#if status.login.surface === 'docker'}
-					<p class="hint">{canUseTerminal ? 'Or sign in from the host:' : 'Sign in from the host:'} open a terminal on the machine running Docker (on Unraid, the >_ Terminal) and run</p>
+					<p class="hint">{canUseTerminal ? 'Or sign in from the host:' : 'Sign in from the host:'} open a terminal on the machine running Docker and run</p>
 					<pre class="cmd">{cli.hostCommand}</pre>
-					<p class="hint">with your container name for <code>&lt;container&gt;</code>: <code>ai-shuffle</code> with Docker Compose, <code>AI-Shuffle</code> on Unraid. Then choose Check again.</p>
+					<p class="hint">with your container name for <code>&lt;container&gt;</code>: <code>ai-shuffle</code> with Docker Compose. Then choose Check again.</p>
 				{:else if !canUseTerminal}
 					<p class="hint">Open a terminal on the computer running AI Shuffle and run</p>
 					<pre class="cmd">{status.login.command}</pre>

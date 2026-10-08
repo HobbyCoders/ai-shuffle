@@ -175,7 +175,7 @@
 				{/if}
 			{:else}
 				<label class="pa-field"><span>Folder on {where}</span><input class="card-form-input card-form-input--mono" required placeholder="/home/me/documents" spellcheck="false" bind:value={path} /></label>
-				<p class="pa-hint">Review or change the proposed path before granting access. The folder must already exist on {where}. For Docker or Unraid, use its mounted container path, not an unmounted host path.</p>
+				<p class="pa-hint">Review or change the proposed path before granting access. The folder must already exist on {where}. For Docker, use its mounted container path, not an unmounted host path.</p>
 				<label class="pa-option"><input type="checkbox" bind:checked={writable} /><strong>Allow text writes</strong><small>Writes follow this session’s permission mode; bypass skips repeat approvals.</small></label>
 			{/if}
 

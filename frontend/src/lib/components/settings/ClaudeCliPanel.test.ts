@@ -81,7 +81,8 @@ it('shows host instructions and no terminal on the phone', async () => {
 	render(ClaudeCliPanel, { isAdmin: true });
 	const howto = await screen.findByTestId('claude-cli-instructions');
 	expect(howto.textContent).toContain('docker exec -it -u appuser <container> claude auth login');
-	expect(howto.textContent).toContain('AI-Shuffle');
+	expect(howto.textContent).toContain('ai-shuffle');
+	expect(howto.textContent).not.toMatch(/Unraid|AI-Shuffle/);
 	expect(screen.queryByRole('button', { name: /Sign in/ })).toBeNull();
 });
 

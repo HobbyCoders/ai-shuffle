@@ -1,21 +1,18 @@
 # Installing AI Shuffle
 
 These files are the buyer-facing install kit. Their paths are stable so the
-website can link to them; the Unraid folder is also published on its own as the
-public community repository.
+website can link to them.
 
 | Path | What it is |
 | --- | --- |
 | [`compose/compose.yaml`](compose/compose.yaml) | Docker Compose file for Linux servers, NAS boxes and desktops. |
 | [`compose/env.example`](compose/env.example) | The settings a buyer fills in, copied to `.env`. |
 | [`compose/README.md`](compose/README.md) | Install, update, back up and remove with Compose. |
-| [`unraid/ai-shuffle.xml`](unraid/ai-shuffle.xml) | Unraid template (v2). |
-| [`unraid/README.md`](unraid/README.md) | Unraid install, and the Community Applications checklist. |
 | [`registry.md`](registry.md) | How customers pull the private image (internal design and owner steps). |
 
 Every file pins the current release. Each release bumps `AI_SHUFFLE_VERSION`
-in `compose/env.example` and `compose/compose.yaml` and the tag in the Unraid
-`Repository` together with `app/__init__.py`; `tests/core/test_install_files.py`
+in `compose/env.example` and `compose/compose.yaml` together with
+`app/__init__.py`; `tests/core/test_install_files.py`
 fails when they disagree. Every release is installed from `compose/` on a clean
 runner before its in-app update is published.
 

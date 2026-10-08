@@ -186,7 +186,7 @@
 				{#if status.installed}
 					<SettingRow
 						label={canUseTerminal ? 'Or on the host' : 'Run on the host'}
-						hint={status.login.surface === 'docker' ? 'Unraid: the Terminal button' : undefined}
+						hint={status.login.surface === 'docker' ? 'Open a terminal on the Docker host' : undefined}
 					>
 						<button type="button" class="st-btn" disabled={cli.checking} onclick={() => cli.load(true)}
 							><RefreshCw />Check again</button

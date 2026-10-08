@@ -1,7 +1,6 @@
 # Install AI Shuffle with Docker Compose
 
-For a Linux server, a NAS or a desktop running Docker. On Unraid, use the
-[Unraid template](../unraid/README.md) instead.
+For any Docker host: a Linux server, a NAS or a desktop running Docker.
 
 ## What you need
 

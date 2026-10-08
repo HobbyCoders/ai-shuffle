@@ -171,7 +171,8 @@ describe('PrivateAccessRequest', () => {
 		const { rerender, onComplete } = mount({ owner: 'Unraid', request });
 		expect(field('Folder on Unraid').value).toBe('/workspace/test');
 		expect(m.post).not.toHaveBeenCalled();
-		expect(screen.getByText(/mounted container path/)).toBeTruthy();
+		expect(screen.getByText(/mounted container path/).textContent).toContain('For Docker,');
+		expect(screen.getByText(/mounted container path/).textContent).not.toContain('Docker or Unraid');
 		await fireEvent.input(field('Folder on Unraid'), { target: { value: '/workspace/private-choice' } });
 		await rerender({ request: { ...request } });
 		expect(field('Folder on Unraid').value).toBe('/workspace/private-choice');

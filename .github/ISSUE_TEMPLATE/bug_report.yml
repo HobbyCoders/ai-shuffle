@@ -55,7 +55,6 @@ body:
       options:
         - Local Desktop (LOCAL_MODE=true)
         - Docker (self-hosted)
-        - Docker on Unraid
         - Other
     validations:
       required: true

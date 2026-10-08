@@ -32,7 +32,7 @@ otherwise the card starts with a new connection. Hints grant no access. Approved
 machine connection details remain private to the card, not tool results.
 For folder access, include suggested_path with the absolute folder path you want
 on the worker that runs this chat. The user can edit it before approving. Use a
-known path, not a guessed one; in Docker/Unraid this is the container path, not
+known path, not a guessed one; in Docker this is the container path, not
 an unmounted host path. The suggestion grants no access and does not create a
 folder. If the path is unknown, let the user choose privately in the card.
 For service access, set service_provider to cloudflare or custom and, when known,

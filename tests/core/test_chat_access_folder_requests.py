@@ -95,6 +95,9 @@ async def test_folder_failure_is_private_specific_and_retryable(client, broker, 
         })
         assert response.status_code == 400
         assert response.json()["detail"].startswith(expected)
+        if isinstance(error, FileNotFoundError):
+            assert "For Docker, use a mounted container path" in response.json()["detail"]
+            assert "Unraid" not in response.json()["detail"]
         assert "SSH" not in response.text
         assert "private-path-sentinel" not in response.text + caplog.text
         assert not pending.claiming and not requested.done() and not broker.grants

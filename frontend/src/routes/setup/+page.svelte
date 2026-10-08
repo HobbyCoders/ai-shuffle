@@ -1,6 +1,6 @@
 <script lang="ts">
 	/**
-	 * First-run setup (wizard v2). Docker, Unraid and the desktop app all land
+	 * First-run setup (wizard v2). Docker and the desktop app all land
 	 * here until setup is finished. Steps, in order:
 	 *
 	 * 1. Welcome: what AI Shuffle is, and the disclosures (agents act with this
@@ -12,7 +12,7 @@
 	 * 4. AI provider: connect at least one of the agent providers (Claude,
 	 *    OpenAI, xAI Grok, OpenRouter, a custom gateway), all equal choices.
 	 *    Blocking: there is no way to finish setup without one ready.
-	 * 5. Workspace, with the host folder behind it on Docker and Unraid.
+	 * 5. Workspace, with the host folder behind it on Docker.
 	 * 6. First run: one short prompt on a ready provider, the reply streamed in.
 	 * 7. Optional: HobbyCoders account (or a worker invite), GitHub, and
 	 *    earlier conversations found on this worker, when there are any.

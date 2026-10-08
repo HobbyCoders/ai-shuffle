@@ -174,7 +174,8 @@ describe('describeWorker', () => {
 describe('newer Docker image hint (#1821)', () => {
 	it('says the current version keeps working and how to get a newer image', () => {
 		expect(IMAGE_HINT).toMatch(/^Your current version keeps working\. /);
-		expect(IMAGE_HINT).toContain('Force update');
+		expect(IMAGE_HINT).not.toMatch(/Unraid|Force update/);
+		expect(IMAGE_HINT).toContain('docker compose up -d');
 		expect(IMAGE_HINT).toContain('docker compose pull');
 		expect(imageHint(self('image-required'))).toBe(IMAGE_HINT);
 		expect(imageHint(self('ready', { notice: 'A coming update needs a newer Docker image.' }))).toMatch(

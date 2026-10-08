@@ -721,7 +721,7 @@ class Broker:
                 except FileNotFoundError:
                     raise AccessDenied(
                         "Folder not found on the worker that runs this chat. Choose an existing folder. "
-                        "For Docker or Unraid, use a mounted container path, not an unmounted host path."
+                        "For Docker, use a mounted container path, not an unmounted host path."
                     ) from None
                 except NotADirectoryError:
                     raise AccessDenied("Choose a folder, not a file or symbolic link.") from None
