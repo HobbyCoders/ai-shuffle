@@ -44,6 +44,14 @@
 	/** The item on show; falls back to the first when it is answered or gone. */
 	let shownId = $state<string | null>(null);
 	const current = $derived(queue.find((item) => item.id === shownId) ?? queue[0] ?? null);
+	/**
+	 * The shown item's id as a plain string. The queue is rebuilt with new
+	 * objects on every session update (each streamed token while the agent
+	 * works), so per-item state must reset only when this id changes. Keying
+	 * the reset on `current` itself closed the typed-answer field, dropped the
+	 * draft and re-disabled the options many times a second.
+	 */
+	const currentId = $derived(current?.id ?? null);
 	const position = $derived(current ? queue.indexOf(current) + 1 : 0);
 
 	function next() {
@@ -63,7 +71,7 @@
 	let typeRef = $state<HTMLInputElement | null>(null);
 
 	$effect(() => {
-		const id = current?.id;
+		const id = currentId;
 		untrack(() => {
 			armed = false;
 			answered = false;

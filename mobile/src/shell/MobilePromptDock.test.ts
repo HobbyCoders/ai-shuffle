@@ -173,6 +173,30 @@ describe('agent question', () => {
 		}));
 	});
 
+	it('keeps the typed answer open while the session updates around it', async () => {
+		const view = renderDock({ permissions: [], questions: [question] });
+		await fireEvent.click(screen.getByRole('button', { name: 'Type an answer' }));
+		const input = screen.getByRole('textbox', { name: 'Your answer' }) as HTMLInputElement;
+		await fireEvent.input(input, { target: { value: 'Both' } });
+		// Each session update hands over fresh arrays and copies of the same request.
+		for (let i = 0; i < 3; i += 1) {
+			await view.rerender({ permissions: [], questions: [{ ...question, questions: [...question.questions] }] });
+		}
+		const after = screen.getByRole('textbox', { name: 'Your answer' }) as HTMLInputElement;
+		expect(after).toBe(input);
+		expect(after.value).toBe('Both');
+	});
+
+	it('keeps the options tappable while the session updates around them', async () => {
+		const view = renderDock({ permissions: [], questions: [question] });
+		await armed();
+		await view.rerender({ permissions: [], questions: [{ ...question }] });
+		const option = screen.getByRole('button', { name: /AppImage/ }) as HTMLButtonElement;
+		expect(option.disabled).toBe(false);
+		await fireEvent.click(option);
+		expect(view.onQuestion).toHaveBeenCalledOnce();
+	});
+
 	it('uses the shared question form for a multi-part request', () => {
 		renderDock({ permissions: [], questions: [{ ...question, questions: [question.questions[0], { ...question.questions[0], question: 'Second?' }] }] });
 		expect(screen.getByRole('form', { name: 'Answer questions' })).toBeTruthy();
