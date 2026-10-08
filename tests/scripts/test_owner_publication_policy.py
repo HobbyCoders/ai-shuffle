@@ -92,6 +92,34 @@ def test_owner_gate_covers_direct_and_reusable_publish_paths(name, job, kind):
         assert permits(condition, ref=TAG, event="push")
 
 
+@pytest.mark.parametrize("name,job,required_paths,commands", [
+    ("ci-license.yml", "license-server", ["android/license/**"],
+     ["npm run typecheck", "npm test"]),
+    ("ci-registry.yml", "registry", ["android/registry/**"],
+     ["npm run typecheck", "npm test"]),
+    ("ci-browser-workspace.yml", "smoke", ["browser-mcp/**", "app/core/browser*.py"],
+     ["npm run build --prefix browser-mcp", "npm test --prefix browser-mcp -- test/editors.test.ts"]),
+])
+def test_zero_failure_paid_checks_keep_automatic_coverage_on_standard_runners(
+        name, job, required_paths, commands):
+    config = workflow(name)
+    assert "workflow_dispatch" in config["on"]
+    for path in required_paths:
+        assert path in config["on"]["pull_request"]["paths"]
+    check = config["jobs"][job]
+    assert check["runs-on"] == "ubuntu-24.04"
+    assert "continue-on-error" not in check
+    assert all("continue-on-error" not in step for step in check["steps"])
+    for command in commands:
+        assert any(step.get("run") == command for step in check["steps"])
+    if name == "ci-browser-workspace.yml":
+        assert "ci:full" not in check["if"].replace("github.event.label.name == 'ci:full'", "")
+        workspace = config["jobs"]["workspace"]
+        assert workspace["needs"] == "smoke"
+        assert workspace["runs-on"] == "blacksmith-2vcpu-ubuntu-2404"
+        assert "contains(github.event.pull_request.labels.*.name, 'ci:full')" in workspace["if"]
+
+
 def test_no_automatic_production_site_publication_but_ci_still_automatic():
     for name in DEPLOY:
         assert set(workflow(name)["on"]) == {"workflow_dispatch"}

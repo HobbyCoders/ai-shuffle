@@ -1,7 +1,11 @@
 # What CI runs, and when
 
-CI runs on paid Blacksmith runners, so pull requests get only the fast checks.
-The slow platform suites run when someone asks for them, and before a release.
+Most test suites run on paid Blacksmith runners, so pull requests get only the
+fast checks. The browser editor smoke, license server and registry checks use
+standard GitHub `ubuntu-24.04` runners; their paths, tests and manual runs are
+unchanged. These consume GitHub Actions allowance rather than Blacksmith
+minutes (runner overages follow the platform billing policy). The slow platform suites run
+when someone asks for them, and before a release.
 
 ## On every pull request (path-filtered)
 
