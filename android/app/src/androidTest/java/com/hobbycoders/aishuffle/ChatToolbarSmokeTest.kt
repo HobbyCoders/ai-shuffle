@@ -5,6 +5,7 @@ import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.view.View
 import android.view.WindowManager
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -34,9 +35,12 @@ import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.ByteArrayInputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
-/** Uses the real native shell and the phone UI (served by PhoneUiFixture as the worker's /mobile/) in the WebView, with local HTTP fixtures for the worker API. */
+/** Real native shell with a self-contained worker page: tests toolbar/bridge layout, not worker bootstrap. */
 @RunWith(AndroidJUnit4::class)
 class ChatToolbarSmokeTest {
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -69,34 +73,87 @@ class ChatToolbarSmokeTest {
             Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")
                 .body("{\"session_token\":\"fixture-session\"}".toResponseBody("application/json".toMediaType())).build()
         }.build()
-        apiField.set(null, lazyOf(api)); PhoneUiFixture.install(context)
+        apiField.set(null, lazyOf(api))
+        // The bundled phone UI needs worker auth/bootstrap APIs, which this native
+        // layout test does not serve. Merely posting "worker-bar: true" from that
+        // document hid the only rendered controls and captured an empty WebView.
+        // Serve a complete, network-free worker page that really draws/removes its
+        // bar before sending the same shell message as ConnectedWorkerBar.
+        val workerPage = """
+            <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body { margin: 0; background: #101827; color: #f1f5f9; font: 16px sans-serif; }
+                header { padding: 16px; background: #243247; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+                main { padding: 24px; } textarea { width: 90%; padding: 12px; }
+            </style></head><body>
+            <header id="worker-bar" hidden>Connected to ${android.text.TextUtils.htmlEncode(name)}</header>
+            <main><h1>Chat toolbar fixture</h1><p>This page exercises the native worker bar contract.</p>
+            <label>Message <textarea rows="3" placeholder="Message this worker"></textarea></label></main>
+            <script>
+                window.fixtureWorkerBar = shown => {
+                    document.getElementById('worker-bar').hidden = !shown;
+                    window.${MobileUi.SHELL_BRIDGE}.postMessage(JSON.stringify({type: 'worker-bar', shown}));
+                };
+            </script></body></html>
+        """.trimIndent()
+        ChatActivity.uiFixture = {
+            WebResourceResponse("text/html", "utf-8", ByteArrayInputStream(workerPage.toByteArray(Charsets.UTF_8)))
+        }
         try {
             ActivityScenario.launch<ChatActivity>(Intent(context, ChatActivity::class.java).putExtra(ChatActivity.EXTRA_SERVER_ID, server.id)).use { scenario ->
                 fun loaded(orientation: Int) = waitFor("Chat did not load in the expected viewport") {
                     var ready = false
+                    var documentReady = false
+                    val checked = CountDownLatch(1)
                     scenario.onActivity { activity ->
                         val status = activity.findViewById<TextView>(R.id.screenStatus)
                         val shell = activity.findViewById<LinearLayout>(R.id.screenToolbar).parent as LinearLayout
                         val web = (0 until shell.childCount).map { shell.getChildAt(it) }.filterIsInstance<WebView>().single()
                         ready = activity.hasWindowFocus() && activity.resources.configuration.orientation == orientation &&
                             status.visibility == View.GONE && MobileUi.isUiUrl(server.baseUrl, web.url) && web.height > 0
+                        if (ready) web.evaluateJavascript("""
+                            document.readyState === 'complete' && typeof window.fixtureWorkerBar === 'function' &&
+                            document.querySelector('h1')?.textContent === 'Chat toolbar fixture'
+                        """.trimIndent()) { result -> documentReady = result == "true"; checked.countDown() }
+                        else checked.countDown()
                     }
-                    ready
+                    assertTrue("Worker fixture readiness callback timed out", checked.await(5, TimeUnit.SECONDS))
+                    ready && documentReady
                 }
                 fun page(run: (WebView) -> Unit) = scenario.onActivity { activity ->
                     val shell = activity.findViewById<LinearLayout>(R.id.screenToolbar).parent as LinearLayout
                     run((0 until shell.childCount).map { shell.getChildAt(it) }.filterIsInstance<WebView>().single())
                 }
-                // The page tells the shell over `shuffleShell` whether it draws its own
-                // "Connected to" bar; post that from the page itself, as the bar does.
+                fun rendered() {
+                    // onPageFinished and native frame commits do not guarantee that
+                    // Chromium has submitted the updated DOM to the next WebView draw.
+                    val ready = CountDownLatch(1)
+                    page { web ->
+                        web.postVisualStateCallback(0, object : WebView.VisualStateCallback() {
+                            override fun onComplete(requestId: Long) { ready.countDown() }
+                        })
+                    }
+                    assertTrue("Worker fixture did not submit a visual frame", ready.await(5, TimeUnit.SECONDS))
+                }
                 fun announce(shown: Boolean) {
-                    page { it.evaluateJavascript("window.${MobileUi.SHELL_BRIDGE}.postMessage(JSON.stringify({type: 'worker-bar', shown: $shown}))", null) }
+                    val updated = CountDownLatch(1)
+                    var barMatches = false
+                    page { it.evaluateJavascript("""
+                        (() => {
+                            window.fixtureWorkerBar($shown);
+                            const bar = document.getElementById('worker-bar');
+                            return bar.hidden === !$shown && (!$shown || bar.getBoundingClientRect().height > 0);
+                        })()
+                    """.trimIndent()) { result -> barMatches = result == "true"; updated.countDown() } }
+                    assertTrue("Worker fixture did not update its bar", updated.await(5, TimeUnit.SECONDS))
+                    assertTrue("Worker-bar announcement must match the page's visible bar", barMatches)
                     waitFor("The page's worker-bar message did not reach the shell") {
                         var done = false
                         scenario.onActivity { done = it.pageRendersWorkerBar == shown }
                         done
                     }
                     instrumentation.waitForIdleSync()
+                    rendered()
                 }
                 fun checkViewport() {
                     scenario.onActivity { activity ->
@@ -183,7 +240,7 @@ class ChatToolbarSmokeTest {
                 // Voice is the page's own; the shell adds no native call button.
                 onView(withContentDescription("Start voice call")).check(doesNotExist())
                 scenario.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
-                loaded(Configuration.ORIENTATION_LANDSCAPE); checkViewport()
+                loaded(Configuration.ORIENTATION_LANDSCAPE); checkViewport(); rendered()
                 TestScreenshots.capture("chat-toolbar-landscape")
                 scenario.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
                 loaded(Configuration.ORIENTATION_PORTRAIT); checkViewport()
