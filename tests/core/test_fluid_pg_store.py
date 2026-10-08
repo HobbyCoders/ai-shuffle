@@ -667,7 +667,8 @@ async def _seed_searchable(mock_db):
     ("fluid_session_nodes", "node_id", "ts", "message"),
     ("session_store_entries", "id", "created_at", "entry"),
 ])
-def test_search_ranks_row_keys_before_fetching_json(table, key, ts, payload):
+@pytest.mark.parametrize("patterns", [["%quokka%"], ["%quokka%", "%東京%", "%50%_complete%"]])
+def test_search_ranks_row_keys_before_fetching_json(table, key, ts, payload, patterns):
     from app.core.provider import fluid_pg_store as recall
 
     class Cursor:
@@ -678,7 +679,6 @@ def test_search_ranks_row_keys_before_fetching_json(table, key, ts, payload):
             return []
 
     cur = Cursor()
-    patterns = ["%quokka%", "%東京%", "%50%_complete%"]
     recall._top_rows(cur, table, "recall_text", ts, "session_id <> %s", ["caller"],
                      f"session_id, {ts}, {payload}", patterns)
     matching = cur.sql.split("), s AS", 1)[0]
@@ -687,7 +687,14 @@ def test_search_ranks_row_keys_before_fetching_json(table, key, ts, payload):
     assert f"d.{payload}" in cur.sql
     assert f"d.{key} = r.{key}" in cur.sql
     assert f"WHERE rn <= {recall._SEARCH_ROWS_PER_SESSION}" in cur.sql
-    assert cur.params == [*patterns, "caller", *patterns]
+    assert cur.params == [p for pattern in patterns for p in ("caller", pattern)]
+    assert cur.sql.count("UNION ALL") == len(patterns) - 1
+    assert ("COUNT(*)::integer AS h" in matching) == (len(patterns) > 1)
+    assert "1 AS h" in matching
+    assert "CASE WHEN" not in matching
+    assert "ORDER BY best DESC, last DESC, session_id LIMIT" in cur.sql
+    assert f"ORDER BY m.h DESC, m.t DESC, m.{key})" in cur.sql
+    assert cur.sql.endswith(f"ORDER BY r.session_id, r.h DESC, r.t DESC, r.{key}")
 
 
 @pytest.mark.parametrize("cached", [False, True])

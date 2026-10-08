@@ -471,8 +471,24 @@ def test_toasted_cache_selective_plan_and_transaction_local_cost(recall, monkeyp
                         yield from nodes(child)
 
                 if configured == "0.01":
+                    # The per-term UNION now avoids the old selective scan even
+                    # at default cost. Keep the old query as the negative control
+                    # for the TOAST/cost-floor regression, not a requirement that
+                    # the new query must still suffer it.
+                    captured = []
+
+                    class Capture:
+                        def execute(self, sql, params):
+                            captured.append((sql, params))
+
+                        def fetchall(self):
+                            return []
+
+                    _case_top_rows(Capture(), "fluid_session_nodes", "recall_text", "ts", "TRUE", [],
+                                   "session_id, ts, message", ["%zebrafish%", "%quokka%", "%capybara%"])
+                    old_sql, old_params = captured[0]
                     cur.execute("SELECT set_config('cpu_tuple_cost', '0.01', true)")
-                    cur.execute("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, params)
+                    cur.execute("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + old_sql, old_params)
                     baseline = cur.fetchone()["QUERY PLAN"][0]["Plan"]
                     assert any(n["Node Type"] == "Seq Scan" and
                                n.get("Relation Name") == "fluid_session_nodes"
@@ -523,20 +539,44 @@ def test_cache_cost_does_not_leak_after_rollback_on_same_backend(recall, monkeyp
         assert cur.fetchone() == before
 
 
+def _case_top_rows(cur, table, column, ts, where, where_params, select, patterns):
+    """Pre-#2084 CASE scoring control, with the shared deterministic tie policy."""
+    from app.core.provider import fluid_pg_store as recall
+
+    any_term = " OR ".join([f"{column} ILIKE %s"] * len(patterns))
+    key = "node_id" if table == "fluid_session_nodes" else "id"
+    selected = ", ".join(f"d.{name.strip()}" for name in select.split(","))
+    cur.execute(
+        f"WITH m AS (SELECT session_id, {key}, {ts} AS t, {recall._hits_sql(column, len(patterns))} AS h "
+        f"FROM {table} WHERE {where} AND ({any_term})), "
+        "s AS (SELECT session_id, MAX(h) AS best, MAX(t) AS last FROM m "
+        f"GROUP BY session_id ORDER BY best DESC, last DESC, session_id LIMIT {recall._SEARCH_PREFILTER_SESSIONS}), "
+        "r AS (SELECT m.*, ROW_NUMBER() OVER (PARTITION BY m.session_id "
+        f"ORDER BY m.h DESC, m.t DESC, m.{key}) AS rn FROM m JOIN s ON s.session_id = m.session_id) "
+        f"SELECT {selected} FROM r JOIN {table} d ON d.session_id = r.session_id "
+        f"AND d.{key} = r.{key} WHERE rn <= {recall._SEARCH_ROWS_PER_SESSION} "
+        f"ORDER BY r.session_id, r.h DESC, r.t DESC, r.{key}",
+        list(patterns) + list(where_params) + list(patterns),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
 def _legacy_top_rows(cur, table, column, ts, where, where_params, select, patterns):
-    """Freeze the pre-#2000 query for exact result/cap parity, not just index parity."""
+    """Pre-#2000 raw-JSON control, with the shared deterministic tie policy."""
     from app.core.provider import fluid_pg_store as recall
 
     column = "message::text" if table == "fluid_session_nodes" else "entry::text"
+    key = "node_id" if table == "fluid_session_nodes" else "id"
     any_term = " OR ".join([f"{column} ILIKE %s"] * len(patterns))
     cur.execute(
-        f"WITH m AS (SELECT {select}, {ts} AS t, {recall._hits_sql(column, len(patterns))} AS h "
+        f"WITH m AS (SELECT {select}, {key} AS tie_key, {ts} AS t, {recall._hits_sql(column, len(patterns))} AS h "
         f"FROM {table} WHERE {where} AND ({any_term})), "
         "s AS (SELECT session_id, MAX(h) AS best, MAX(t) AS last FROM m "
-        f"GROUP BY session_id ORDER BY best DESC, last DESC LIMIT {recall._SEARCH_PREFILTER_SESSIONS}), "
+        f"GROUP BY session_id ORDER BY best DESC, last DESC, session_id LIMIT {recall._SEARCH_PREFILTER_SESSIONS}), "
         "r AS (SELECT m.*, ROW_NUMBER() OVER (PARTITION BY m.session_id "
-        "ORDER BY m.h DESC, m.t DESC) AS rn FROM m JOIN s ON s.session_id = m.session_id) "
-        f"SELECT {select} FROM r WHERE rn <= {recall._SEARCH_ROWS_PER_SESSION}",
+        "ORDER BY m.h DESC, m.t DESC, m.tie_key) AS rn FROM m JOIN s ON s.session_id = m.session_id) "
+        f"SELECT {select} FROM r WHERE rn <= {recall._SEARCH_ROWS_PER_SESSION} "
+        "ORDER BY r.session_id, r.h DESC, r.t DESC, r.tie_key",
         list(patterns) + list(where_params) + list(patterns),
     )
     return [dict(r) for r in cur.fetchall()]
@@ -560,9 +600,91 @@ def _legacy_candidate_sessions(cur, source, source_params, column, ts, where, wh
     return [dict(r) for r in cur.fetchall()]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [True, False])
+async def test_tied_writer_rows_have_identical_capped_scores_and_snippets(recall, monkeypatch, cached):
+    """Forty equal-time/hit rows must choose the same twenty under every plan.
+
+    Some rows contain two matching text blocks, so choosing a different tied
+    row changes both the Python score and snippets despite equal SQL scores.
+    Drive both real writers; the CLI batch naturally shares its NOW() stamp.
+    """
+    from fluid.messages import Message, Text
+    from fluid.store.base import SessionNode
+
+    from app.core.pg_session_store import PgSessionStore
+    from app.db import base, schema_postgres
+
+    native, sdk = "ses_tied-native", "ses_tied-sdk"
+    with base.get_db() as conn:
+        schema_postgres.create_session_recall_text(conn.cursor())
+    store = recall.PgFluidStore()
+    await store.create_session(native)
+    entries = []
+    for i in reversed(range(40)):
+        texts = [f"{i:02d} tiesneedle"]
+        if i % 4 == 0:
+            texts.append(f"bonus{i:02d} tiesneedle")
+        await store.append(native, SessionNode(node_id=f"{i:02d}", parent_id=None, ts=42,
+                                              message=Message("user", [Text(t) for t in texts])))
+        entries.append({"type": "user", "message": {"content": [
+            {"type": "text", "text": t} for t in texts
+        ]}})
+    await PgSessionStore().append({"project_key": "tied", "session_id": sdk}, entries)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(DISTINCT created_at) AS stamps FROM session_store_entries WHERE session_id = %s",
+                    (sdk,))
+        assert cur.fetchone()["stamps"] == 1
+        if not cached:
+            cur.execute("ALTER INDEX idx_sse_recall_text_trgm RENAME TO tied_incomplete_cache")
+        assert schema_postgres.session_recall_cache_ready(cur) is cached
+
+    try:
+        terms = ["tiesneedle", "absentneedle"]
+        indexed = recall._search_sync(terms, 5, None)
+        hits = {h.session_id: h for h in indexed}
+        assert set(hits) == {native, sdk}
+        # Native node_id ASC selects 00..19, while CLI id ASC selects the
+        # earliest inserts (39..20); each contains exactly five double blocks.
+        assert hits[native].score == hits[sdk].score == 25
+        assert hits[native].texts == [("user", t) for t in
+                                      ("00 tiesneedle", "bonus00 tiesneedle", "01 tiesneedle")]
+        assert hits[sdk].texts == [("user", t) for t in
+                                   ("39 tiesneedle", "38 tiesneedle", "37 tiesneedle")]
+        with monkeypatch.context() as mp:
+            mp.setattr(recall, "_top_rows", _case_top_rows)
+            cases = recall._search_sync(terms, 5, None)
+        with monkeypatch.context() as mp:
+            mp.setattr(recall, "_top_rows", _legacy_top_rows)
+            legacy = recall._search_sync(terms, 5, None)
+        original = recall.get_db
+
+        @contextmanager
+        def scans():
+            with original() as conn:
+                conn.cursor().execute("SET LOCAL enable_indexscan = off")
+                conn.cursor().execute("SET LOCAL enable_bitmapscan = off")
+                yield conn
+
+        with monkeypatch.context() as mp:
+            mp.setattr(recall, "get_db", scans)
+            scanned = recall._search_sync(terms, 5, None)
+        expected = [asdict(h) for h in indexed]
+        assert expected == [asdict(h) for h in cases] == [asdict(h) for h in legacy] == [asdict(h) for h in scanned]
+    finally:
+        with base.get_db() as conn:
+            cur = conn.cursor()
+            if not cached:
+                cur.execute("ALTER INDEX tied_incomplete_cache RENAME TO idx_sse_recall_text_trgm")
+            for table in ("fluid_session_nodes", "fluid_sessions", "session_store_entries", "session_store_summaries"):
+                cur.execute(f"DELETE FROM {table} WHERE session_id IN (%s, %s)", (native, sdk))
+
+
 @pytest.mark.parametrize("terms", [
     ["recallneedle", "quokkaneedle", "capybaraneedle"], ["code", "log", "recallneedle"], ["xy"], ["x"],
     ["東京"], ["a.b"], ["50%_complete"], ["%"], ["_"], ["absentneedle"],
+    ["code", "code", "log"], ["%", "_", "xy"], ["50%_complete", "東京", "xy"],
 ])
 def test_index_and_scan_return_identical_ranked_hits(recall, monkeypatch, terms):
     original = recall.get_db
@@ -580,9 +702,124 @@ def test_index_and_scan_return_identical_ranked_hits(recall, monkeypatch, terms)
         mp.setattr(recall, "get_db", scans)
         scanned = recall._search_sync(terms, 5, "recall-remote-0")
     assert [asdict(h) for h in indexed] == [asdict(h) for h in scanned]
+    with monkeypatch.context() as mp:
+        mp.setattr(recall, "_top_rows", _case_top_rows)
+        cases = recall._search_sync(terms, 5, "recall-remote-0")
+    assert [asdict(h) for h in indexed] == [asdict(h) for h in cases]
     assert "recall-remote-0" not in {h.session_id for h in indexed}
     with monkeypatch.context() as mp:
         mp.setattr(recall, "_top_rows", _legacy_top_rows)
         mp.setattr(recall, "_candidate_sessions", _legacy_candidate_sessions)
         legacy = recall._search_sync(terms, 5, "recall-remote-0")
     assert [asdict(h) for h in indexed] == [asdict(h) for h in legacy]
+
+
+def test_events_heavy_toasted_recall_benchmark(recall, monkeypatch):
+    """#2084: 5,400 TOASTed nodes / 86,400 events (16:1), no timing gate.
+
+    Print warm end-to-end p50s for the frozen CASE query and the term union;
+    gate exact ranked parity and fewer native buffer accesses instead of a
+    flaky wall-clock budget. All data lives in ON COMMIT DROP temp tables.
+    """
+    import statistics
+    import time
+
+    from fluid.messages import Message, Text
+
+    from app.db import base, schema_postgres
+
+    optimized = recall._top_rows
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SET LOCAL statement_timeout = '60s'")
+        # Also support running just this benchmark on a fresh disposable DB.
+        schema_postgres.create_session_recall_text(cur)
+        cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+        assert cur.fetchone()["rolsuper"] is False
+        for table in ("sessions", "fluid_session_nodes", "session_store_entries", "session_events"):
+            cur.execute(f"CREATE TEMP TABLE {table} (LIKE public.{table} INCLUDING DEFAULTS) ON COMMIT DROP")
+        cur.execute("ALTER TABLE pg_temp.sessions ADD PRIMARY KEY (id)")
+        cur.execute("ALTER TABLE pg_temp.fluid_session_nodes ADD PRIMARY KEY (session_id, node_id)")
+        cur.execute("CREATE INDEX ON pg_temp.session_events (session_id, seq)")
+        for table in ("fluid_session_nodes", "session_store_entries", "session_events"):
+            cur.execute(f"ALTER TABLE pg_temp.{table} DROP COLUMN recall_text")
+        execute_values(cur, "INSERT INTO sessions(id,sdk_session_id,title,owner_device_id) VALUES %s", [
+            (f"bench-{arm}-{i}", f"ses_bench-{i}" if arm == "native" else None,
+             f"Benchmark {arm} {i}", "test-local" if arm == "native" else "test-remote")
+            for arm in ("native", "remote") for i in range(225)
+        ])
+        nodes = []
+        events = []
+        for i in range(225):
+            for j in range(24):
+                k = i * 24 + j
+                # Incompressible, TOAST-sized code/logs. Common terms overlap,
+                # but most OR matches do NOT match all three scoring terms.
+                tags = " ".join(t for t, stride in (("code", 2), ("log", 3), ("sample", 31), ("the", 1))
+                                if k % stride == 0)
+                if i < 3 and j == 0:
+                    tags += " recallneedle quokkaneedle capybaraneedle"
+                filler = " ".join(md5(f"{k}-{n}".encode()).hexdigest() for n in range(160))
+                nodes.append((f"ses_bench-{i}", str(j), k,
+                              Json(Message("user", [Text(tags + " " + filler)]).to_dict())))
+            for j in range(384):
+                textual = j % 16 == 0
+                events.append((f"bench-{i}-{j}", f"bench-remote-{i}", j,
+                               "message.user" if textual else "tool.result",
+                               Json({"content": "code log sample the" if textual else "ignored tool output"}),
+                               i * 384 + j))
+        execute_values(cur, "INSERT INTO fluid_session_nodes(session_id,node_id,ts,message) VALUES %s", nodes)
+        execute_values(cur, "INSERT INTO session_events(id,session_id,seq,event_type,payload,created_at) VALUES %s",
+                       events, template="(%s,%s,%s,%s,%s,to_timestamp(%s))")
+        shapes = (
+            ("fluid_session_nodes", "message::text", "TRUE"),
+            ("session_store_entries", "entry::text", "subpath IS NULL"),
+            ("session_events", "payload::text",
+             "event_type IN ('message.user', 'message.assistant', 'assistant.text_delta')"),
+        )
+        for table, expression, predicate in shapes:
+            cur.execute(f"ALTER TABLE pg_temp.{table} ADD COLUMN recall_text TEXT GENERATED ALWAYS AS "
+                        f"(CASE WHEN {predicate} THEN {expression} END) STORED")
+            cur.execute(f"CREATE INDEX ON pg_temp.{table} USING gin (recall_text gin_trgm_ops) WHERE {predicate}")
+            cur.execute(f"ANALYZE pg_temp.{table}")
+        cur.execute("ANALYZE pg_temp.sessions")
+
+        @contextmanager
+        def shared():
+            yield conn
+
+        monkeypatch.setattr(recall, "get_db", shared)
+        for terms in (["recallneedle", "quokkaneedle", "capybaraneedle"],
+                      ["log", "code", "sample"], ["the"]):
+            timings = {"before": [], "after": []}
+            for run in range(4):
+                results = {}
+                for name in (("before", "after") if run % 2 == 0 else ("after", "before")):
+                    monkeypatch.setattr(recall, "_top_rows", _case_top_rows if name == "before" else optimized)
+                    start = time.perf_counter()
+                    results[name] = [asdict(h) for h in recall._search_sync(terms, 5, "bench-remote-0")]
+                    if run:  # discard one warm-up pair
+                        timings[name].append((time.perf_counter() - start) * 1000)
+                assert results["before"] == results["after"] and results["after"]
+            print("events-heavy p50 ms", " ".join(terms),
+                  {name: round(statistics.median(values), 2) for name, values in timings.items()})
+
+        plans = {}
+        for name, query in (("before", _case_top_rows), ("after", optimized)):
+            class Explain:
+                def execute(self, sql, params):
+                    cur.execute("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql, params)
+                    plans[name] = cur.fetchone()["QUERY PLAN"][0]["Plan"]
+
+                def fetchall(self):
+                    return []
+
+            query(Explain(), "fluid_session_nodes", "recall_text", "ts", "TRUE", [],
+                  "session_id, ts, message", ["%log%", "%code%", "%sample%"])
+
+        def accesses(plan):
+            return sum(plan.get(key, 0) for key in
+                       ("Shared Hit Blocks", "Shared Read Blocks", "Local Hit Blocks", "Local Read Blocks"))
+
+        print("events-heavy native buffer accesses", {name: accesses(plan) for name, plan in plans.items()})
+        assert accesses(plans["after"]) < accesses(plans["before"]), plans

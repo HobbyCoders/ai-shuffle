@@ -524,24 +524,35 @@ def _top_rows(cur, table: str, column: str, ts: str, where: str, where_params: L
               select: str, patterns: List[str]) -> List[Dict[str, Any]]:
     """The strongest ``_SEARCH_ROWS_PER_SESSION`` rows of each of the arm's
     best ``_SEARCH_PREFILTER_SESSIONS`` sessions. Score the stored search text
-    first, then fetch JSON only for the capped rows."""
-    any_term = " OR ".join([f"{column} ILIKE %s"] * len(patterns))
-    # Rank narrow row keys, not full transcripts. Otherwise a broad query's
-    # materialized CTE copies every JSONB message to work_mem/temp files even
-    # though only the capped rows ever reach Python.
+    first, then fetch JSON only for the capped rows. Break session ties by
+    session_id and row ties by the unique row key, independent of scan plan."""
+    # Each term's index recheck already establishes one hit. Rechecking all
+    # terms again in CASE expressions repeatedly detoasts/scans large rows
+    # (including terms whose index did not select the row). UNION ALL retains
+    # duplicate patterns and LIKE wildcards exactly as the old hit sum did.
+    # Keep only row keys in the materialized CTE, never transcript bytes.
     key = "node_id" if table == "fluid_session_nodes" else "id"
+    matches = " UNION ALL ".join(
+        f"SELECT session_id, {key}, {ts} AS t, 1 AS h FROM {table} "
+        f"WHERE {where} AND {column} ILIKE %s" for _ in patterns
+    )
+    if len(patterns) > 1:
+        matches = (
+            f"SELECT session_id, {key}, t, COUNT(*)::integer AS h FROM ({matches}) terms "
+            f"GROUP BY session_id, {key}, t"
+        )
+    params = [p for pattern in patterns for p in [*where_params, pattern]]
     selected = ", ".join(f"d.{name.strip()}" for name in select.split(","))
     cur.execute(
-        f"WITH m AS (SELECT session_id, {key}, {ts} AS t, {_hits_sql(column, len(patterns))} AS h "
-        f"FROM {table} WHERE {where} AND ({any_term})), "
+        f"WITH m AS ({matches}), "
         "s AS (SELECT session_id, MAX(h) AS best, MAX(t) AS last FROM m "
-        f"GROUP BY session_id ORDER BY best DESC, last DESC LIMIT {_SEARCH_PREFILTER_SESSIONS}), "
+        f"GROUP BY session_id ORDER BY best DESC, last DESC, session_id LIMIT {_SEARCH_PREFILTER_SESSIONS}), "
         "r AS (SELECT m.*, ROW_NUMBER() OVER (PARTITION BY m.session_id "
-        "ORDER BY m.h DESC, m.t DESC) AS rn FROM m JOIN s ON s.session_id = m.session_id) "
+        f"ORDER BY m.h DESC, m.t DESC, m.{key}) AS rn FROM m JOIN s ON s.session_id = m.session_id) "
         f"SELECT {selected} FROM r JOIN {table} d ON d.session_id = r.session_id "
         f"AND d.{key} = r.{key} WHERE rn <= {_SEARCH_ROWS_PER_SESSION} "
-        "ORDER BY r.session_id, r.h DESC, r.t DESC",
-        list(patterns) + list(where_params) + list(patterns),
+        f"ORDER BY r.session_id, r.h DESC, r.t DESC, r.{key}",
+        params,
     )
     return [dict(r) for r in cur.fetchall()]
 
