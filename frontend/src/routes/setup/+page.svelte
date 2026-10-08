@@ -15,7 +15,9 @@
 	 * 5. Workspace, with the host folder behind it on Docker.
 	 * 6. First run: one short prompt on a ready provider, the reply streamed in.
 	 * 7. Optional: HobbyCoders account (or a worker invite), GitHub, and
-	 *    earlier conversations found on this worker, when there are any.
+	 *    earlier conversations found on this worker, when there are any. Each
+	 *    is a summary row that opens on demand (ExtraSection), so the step stays
+	 *    short on a small window and "Finish setup" is always in reach.
 	 */
 	import { goto } from '$app/navigation';
 	import { onMount, onDestroy } from 'svelte';
@@ -38,10 +40,14 @@
 	import WorkspaceStep from '$lib/components/setup/WorkspaceStep.svelte';
 	import FirstRunStep from '$lib/components/setup/FirstRunStep.svelte';
 	import CliHistoryImport from '$lib/components/setup/CliHistoryImport.svelte';
+	import ExtraSection from '$lib/components/setup/ExtraSection.svelte';
+	import {
+		accountSummary, githubSummary, historySummary, inviteJoinState, type GithubSummaryInput
+	} from '$lib/components/setup/extras-summary';
 	import {
 		hasOwnerStep, markWelcomeSeen, setupSteps, welcomeSeen, type SetupStepId
 	} from '$lib/components/setup/setup-steps';
-	import { Check, Loader2, ChevronLeft } from 'lucide-svelte';
+	import { Check, Loader2, ChevronLeft, Github, History, UserRound } from 'lucide-svelte';
 
 	// ── Steps ────────────────────────────────────────────────────────────────
 	let loadingConfig = $state(true);
@@ -133,6 +139,22 @@
 	}
 	function chooseNetwork(next: NetworkChoice) { networkChoice = next; void refreshNetwork(); }
 
+	// Each optional part is a summary row; the owner opens the ones they want.
+	const openExtras = $state({ account: false, github: false, history: false });
+	let github = $state<GithubSummaryInput>({ loading: true, authenticated: false, user: null, pending: false, error: '' });
+	let history = $state({ available: false, remaining: 0, imported: 0 });
+	const inviteJoin = $derived(inviteJoinState(enrolled, networkStatus?.enrollment?.status));
+	const accountState = $derived(accountSummary({
+		choice: networkChoice, syncing, joinedOther, networkName: networkStatus?.network?.name, linked, waitingOnAccount,
+		joining: inviteJoin === 'joining', joinFailed: inviteJoin === 'failed',
+	}));
+	// A join that ends badly opens its row once, so its error and Dismiss show.
+	$effect(() => {
+		if (inviteJoin === 'failed') openExtras.account = true;
+	});
+	const githubState = $derived(githubSummary(github));
+	const historyState = $derived(historySummary(history));
+
 	$effect(() => {
 		if (currentStep === 'extras' && networkStepNeeded) startNetworkPoll();
 		else stopNetworkPoll();
@@ -175,7 +197,8 @@
 		if (network.status === 'fulfilled') {
 			networkStatus = network.value;
 			networkStepNeeded = !network.value.enrolled || network.value.network?.bootstrap_state === 'syncing';
-			if (network.value.enrollment) networkChoice = 'invite';
+			// An invite join under way opens its row, so its progress shows.
+			if (network.value.enrollment) { networkChoice = 'invite'; openExtras.account = true; }
 		}
 		const ownerStatus = owner.status === 'fulfilled' ? owner.value : null;
 		desktop = Boolean(ownerStatus?.desktop_handoff) || auth.current.status?.claude_cli?.login?.surface === 'desktop';
@@ -235,63 +258,70 @@
 					onFixProvider={() => { completedSteps.delete('provider'); goTo('provider'); }} />
 
 			{:else if currentStep === 'extras'}
-				<div class="space-y-6" data-testid="setup-extras">
-					{#if networkStepNeeded}
-						<section class="space-y-3" aria-label="HobbyCoders account">
-							{#if syncing}
-								<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Copying settings from your other worker. This continues in the background.</div>
-							{:else if joinedOther}
-								<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
-									<Check size={16} strokeWidth={2} />
-									<span>This worker now syncs settings with {networkStatus?.network?.name || 'your other workers'}.</span>
-								</div>
-							{:else if networkChoice === 'account'}
-								<p class="text-sm text-muted-foreground">Sign in to link this worker to the Android app, your other workers and remote access. Local use never needs an account.</p>
-								{#if !linked}
-									<div>
-										<label for="workerName" class="block text-xs text-muted-foreground mb-1">Name for this worker</label>
-										<input type="text" id="workerName" bind:value={workerName} maxlength="80" class="input text-sm" placeholder="My worker" />
-									</div>
-								{/if}
-								<div class="bg-muted/30 border border-border rounded-lg p-4">
-									<AccountPanel {workerName} variant="setup" />
-								</div>
-								{#if waitingOnAccount}
-									<div class="space-y-1 bg-muted/30 border border-border rounded-lg p-4" role="status">
-										<div class="flex items-center gap-2 text-sm text-foreground font-medium">
-											<Loader2 size={14} strokeWidth={2} class="animate-spin" />
-											Joining your account's network
+				<div class="space-y-4" data-testid="setup-extras">
+					<p class="text-sm text-muted-foreground">Each of these is optional. Open the ones you want, or finish now and set them up later in Settings.</p>
+
+					<div class="space-y-3">
+						{#if networkStepNeeded}
+							<ExtraSection id="account" title="HobbyCoders account" icon={UserRound} action={networkChoice === 'invite' ? 'Join' : 'Sign in'} bind:open={openExtras.account}
+								tone={accountState.tone} summary={accountState.text}>
+								<div class="space-y-3">
+									{#if syncing}
+										<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Copying settings from your other worker. This continues in the background.</div>
+									{:else if joinedOther}
+										<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
+											<Check size={16} strokeWidth={2} />
+											<span>This worker now syncs settings with {networkStatus?.network?.name || 'your other workers'}.</span>
 										</div>
-										<p class="text-sm text-muted-foreground">
-											{#if accountWorkers.length}Your account already syncs settings between {accountWorkers.join(', ')}. This worker joins as soon as one of them is online.{:else}This worker joins as soon as another worker on your account is online.{/if}
-										</p>
-									</div>
-								{:else if linked}
-									<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Connecting this worker to your account…</div>
-								{/if}
-								{#if !linked}
-									<button type="button" onclick={() => chooseNetwork('invite')} class="btn btn-secondary w-full py-2.5 text-sm">Use a worker invite instead</button>
-								{/if}
-							{:else}
-								<div class="bg-muted/30 border border-border rounded-lg p-4">
-									<JoinNetworkPanel status={networkStatus} deviceName={workerName} onChanged={refreshNetwork} />
+									{:else if networkChoice === 'account'}
+										{#if !linked}
+											<div>
+												<label for="workerName" class="block text-xs text-muted-foreground mb-1">Name for this worker</label>
+												<input type="text" id="workerName" bind:value={workerName} maxlength="80" class="input text-sm" placeholder="My worker" />
+											</div>
+										{/if}
+										<AccountPanel {workerName} variant="setup" />
+										{#if waitingOnAccount}
+											<div class="space-y-1 bg-muted/30 border border-border rounded-lg p-3" role="status">
+												<div class="flex items-center gap-2 text-sm text-foreground font-medium">
+													<Loader2 size={14} strokeWidth={2} class="animate-spin" />
+													Joining your account's network
+												</div>
+												<p class="text-sm text-muted-foreground">
+													{#if accountWorkers.length}Your account already syncs settings between {accountWorkers.join(', ')}. This worker joins as soon as one of them is online.{:else}This worker joins as soon as another worker on your account is online.{/if}
+												</p>
+											</div>
+										{:else if linked}
+											<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Connecting this worker to your account…</div>
+										{/if}
+										{#if !linked}
+											<button type="button" onclick={() => chooseNetwork('invite')} class="btn btn-secondary w-full py-2.5 text-sm">Use a worker invite instead</button>
+										{/if}
+									{:else}
+										<JoinNetworkPanel status={networkStatus} deviceName={workerName} onChanged={refreshNetwork} />
+										{#if !(networkStatus?.enrollment)}
+											<button type="button" onclick={() => chooseNetwork('account')} class="btn btn-secondary w-full py-2.5 text-sm"><ChevronLeft size={16} class="inline-block" /> Back to account sign-in</button>
+										{/if}
+									{/if}
 								</div>
-								{#if !(networkStatus?.enrollment)}
-									<button type="button" onclick={() => chooseNetwork('account')} class="btn btn-secondary w-full py-2.5 text-sm"><ChevronLeft size={16} class="inline-block" /> Back to account sign-in</button>
-								{/if}
-							{/if}
-						</section>
-						<div class="border-t border-border"></div>
-					{/if}
+							</ExtraSection>
+						{/if}
 
-					<GitHubConnection />
+						<ExtraSection id="github" title="GitHub" icon={Github} action="Connect" bind:open={openExtras.github}
+							tone={githubState.tone} summary={githubState.text}>
+							<GitHubConnection bare onstate={(s) => (github = s)} />
+						</ExtraSection>
 
-					<CliHistoryImport />
+						<ExtraSection id="history" title="Earlier conversations" icon={History} action="Import" bind:open={openExtras.history}
+							hidden={!history.available} tone={historyState.tone} summary={historyState.text}>
+							<CliHistoryImport bare onstate={(s) => (history = s)} />
+						</ExtraSection>
+					</div>
 
 					<div class="border-t border-border pt-4 flex gap-3">
 						<button type="button" onclick={() => back('extras')} class="btn btn-secondary flex-1 py-3" disabled={finishing}>Back</button>
-						<button type="button" onclick={finishSetup} class="btn btn-primary flex-1 py-3" disabled={finishing}>
-							{#if finishing}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Finish
+						<button type="button" onclick={finishSetup} class="btn btn-primary flex-[2] py-3" disabled={finishing}>
+							{#if finishing}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Finish setup
 						</button>
 					</div>
 				</div>

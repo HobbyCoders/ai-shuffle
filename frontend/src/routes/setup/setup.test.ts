@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
 	license: vi.fn(), agent: vi.fn(), run: vi.fn(),
 	providerStore: { providers: [] as unknown[], claude: null, anthropicKeyMasked: null, falKeySet: false, falKeyMasked: '', falEnabled: true },
 	registry: [] as unknown[], defaultModel: 'sonnet',
+	cliConversations: [] as unknown[],
 }));
 vi.mock('$app/navigation', () => ({ goto: mocks.goto }));
 vi.mock('$lib/api/network', () => ({ getNetworkStatus: mocks.getStatus, createNetwork: mocks.create,
@@ -94,7 +95,7 @@ beforeEach(() => {
 	mocks.ownerStatus = dockerOwner;
 	mocks.authStatus = { setup_required: true, auth_mode: 'local', claude_cli: { installed: true, signed_in: false, login: { surface: 'docker' } }, agent_gate: gate([]) };
 	mocks.providerStore = { providers: [], claude: null, anthropicKeyMasked: null, falKeySet: false, falKeyMasked: '', falEnabled: true };
-	mocks.registry = []; mocks.defaultModel = 'sonnet';
+	mocks.registry = []; mocks.defaultModel = 'sonnet'; mocks.cliConversations = [];
 	vi.spyOn(window, 'open').mockReturnValue(null);
 	mocks.getStatus.mockImplementation(async () => status);
 	mocks.create.mockImplementation(async () => { status = enrolled(); return { network: status.network }; });
@@ -114,6 +115,7 @@ beforeEach(() => {
 	mocks.get.mockImplementation(async (path: string) => {
 		if (path === '/mobile/hub/connection') return connection;
 		if (path === '/mobile/hub/account') return { account: { id: 'a', username: 'owner', profile_complete: true }, servers: [] };
+		if (path.startsWith('/sessions/import/cli-history')) return { conversations: mocks.cliConversations };
 		throw new Error('Unexpected GET ' + path);
 	});
 });
@@ -160,6 +162,16 @@ async function throughFirstRun() {
 	await click('Continue');
 	await screen.findByTestId('setup-extras');
 }
+/** Opens one of the last step's optional rows; they all start collapsed. */
+async function openExtra(id: 'account' | 'github' | 'history') {
+	const row = screen.getByTestId(`setup-extra-${id}`);
+	const toggle = row.querySelector('button[aria-expanded]') as HTMLButtonElement;
+	if (toggle.getAttribute('aria-expanded') !== 'true') await fireEvent.click(toggle);
+	return row;
+}
+const summary = (id: string) => screen.getByTestId(`setup-extra-${id}-summary`).textContent ?? '';
+const convo = (i: number) => ({ jsonl_path: `/home/u/.claude/projects/app/${i}.jsonl`, sdk_session_id: `s${i}`, title: `Conversation ${i}`,
+	message_count: 4, modified_at: 1_790_000_000, cwd: '/work/app', project_id: null });
 
 describe('setup wizard v2', () => {
 	it('shows the seven steps in order and the disclosures first', async () => {
@@ -272,8 +284,9 @@ describe('setup wizard v2', () => {
 		expect((await screen.findByTestId('setup-first-run-reply')).textContent).toContain('Hello! I can help you write code.');
 		await click('Continue');
 		await screen.findByTestId('setup-extras');
+		await openExtra('github');
 		expect(await screen.findByRole('button', { name: 'Sign in with GitHub' })).toBeTruthy();
-		await click('Finish');
+		await click('Finish setup');
 		await waitFor(() => expect(mocks.goto).toHaveBeenCalledWith('/'));
 		expect(mocks.create).toHaveBeenCalledOnce(); expect(mocks.complete).toHaveBeenCalledOnce();
 		expect(mocks.enroll).not.toHaveBeenCalled();
@@ -335,15 +348,18 @@ describe('setup wizard v2', () => {
 		mocks.githubToken.mockResolvedValue({ success: true });
 		mocks.githubStatus.mockResolvedValueOnce({ authenticated: false, user: null }).mockResolvedValue({ authenticated: true, user: 'octocat' });
 		await throughFirstRun();
+		await openExtra('github');
 		await fireEvent.click(await screen.findByRole('button', { name: 'Personal access token' }));
 		await fireEvent.input(screen.getByLabelText('GitHub personal access token'), { target: { value: 'ghp_secret' } });
 		await click('Connect token');
 		expect(mocks.githubToken).toHaveBeenCalledWith('ghp_secret');
 		expect(await screen.findByText('GitHub is connected as @octocat.')).toBeTruthy();
+		await waitFor(() => expect(summary('github')).toContain('Connected as @octocat'));
 	});
 
 	it('signs in to an account in the last step and finishes without creating a network of its own', async () => {
 		await throughFirstRun();
+		await openExtra('account');
 		await screen.findByRole('button', { name: 'Sign in' });
 		await fireEvent.input(screen.getByLabelText('Name for this worker'), { target: { value: 'Studio laptop' } });
 		mocks.post.mockResolvedValue(waiting);
@@ -352,13 +368,14 @@ describe('setup wizard v2', () => {
 		connection = { ...disconnected, signed_in: true, status: 'connecting' };
 		status = { ...fresh(), hub: { linked: true, registered: false, status: 'pending', account_network: { network_id: 'n', name: null, founder_device_id: 'x', devices: [{ device_id: 'x', name: 'Office PC', platform: 'windows', kind: 'worker', status: 'active' }], recovery_available: true } } };
 		expect((await screen.findByText(/already syncs settings between/, {}, { timeout: 5000 })).textContent).toContain('Office PC');
-		await click('Finish');
+		await click('Finish setup');
 		await waitFor(() => expect(mocks.complete).toHaveBeenCalledOnce());
 		expect(mocks.create).not.toHaveBeenCalled();
 	});
 
 	it('joins from an invite in the last step', async () => {
 		await throughFirstRun();
+		await openExtra('account');
 		await click(/Use a worker invite instead/);
 		const join = screen.getByRole('button', { name: 'Join' }) as HTMLButtonElement;
 		expect(join.disabled).toBe(true);
@@ -367,17 +384,66 @@ describe('setup wizard v2', () => {
 		await fireEvent.click(join);
 		expect(mocks.enroll).toHaveBeenCalledWith({ link, device_name: 'My worker' });
 		await screen.findByText(/This worker now syncs settings with/);
-		await click('Finish');
+		expect(summary('account')).toContain('Syncing settings with Home');
+		await click('Finish setup');
 		await waitFor(() => expect(mocks.complete).toHaveBeenCalledOnce());
 		expect(mocks.create).not.toHaveBeenCalled();
 	});
+
+	it('flags an invite that fails while its row is closed and opens the row again', async () => {
+		const enrollment = (state: string, error: string | null = null) => ({ id: 'e', status: state, endpoint_url: 'http://10.0.0.5:8000', inviter_fingerprint: null, fingerprint, error });
+		await throughFirstRun();
+		const row = await openExtra('account');
+		await click(/Use a worker invite instead/);
+		await fireEvent.input(screen.getByLabelText('Invite link or code'), { target: { value: link } });
+		mocks.enroll.mockImplementation(async () => { status = { ...fresh(), enrollment: enrollment('pending') }; return { join_id: 'j', status: 'pending', inviter: {}, your_fingerprint: fingerprint }; });
+		await click('Join');
+		const toggle = row.querySelector('button[aria-expanded]') as HTMLButtonElement;
+		await waitFor(() => expect(summary('account')).toContain('Joining with a worker invite…'), { timeout: 5000 });
+		await fireEvent.click(toggle);
+		expect(toggle.getAttribute('aria-expanded')).toBe('false');
+		status = { ...fresh(), enrollment: enrollment('expired', 'The invite expired.') };
+		await waitFor(() => expect(summary('account')).toContain("Invite didn't go through"), { timeout: 5000 });
+		expect(screen.getByTestId('setup-extra-account').dataset.tone).toBe('error');
+		expect(toggle.getAttribute('aria-expanded')).toBe('true');
+		expect(screen.getByRole('button', { name: 'Dismiss' })).toBeTruthy();
+	}, 15000);
 
 	it('skips the account section for a worker that already belongs to a network', async () => {
 		status = enrolled();
 		await throughFirstRun();
 		expect(screen.queryByRole('button', { name: 'Create account' })).toBeNull();
-		await click('Finish');
+		expect(screen.queryByTestId('setup-extra-account')).toBeNull();
+		await click('Finish setup');
 		await waitFor(() => expect(mocks.complete).toHaveBeenCalledOnce());
 		expect(mocks.create).not.toHaveBeenCalled();
+	});
+
+	it('shows each optional part as a collapsed row that says where it stands', async () => {
+		mocks.githubStatus.mockResolvedValue({ authenticated: true, user: 'octocat' });
+		mocks.cliConversations = [convo(1), convo(2), convo(3)];
+		await throughFirstRun();
+		expect(screen.getByTestId('setup-extras').textContent).toContain('Each of these is optional');
+		for (const id of ['account', 'github', 'history']) {
+			const toggle = screen.getByTestId(`setup-extra-${id}`).querySelector('button[aria-expanded]')!;
+			expect(toggle.getAttribute('aria-expanded')).toBe('false');
+		}
+		expect(summary('account')).toContain('Not signed in');
+		await waitFor(() => expect(summary('github')).toContain('Connected as @octocat'));
+		await waitFor(() => expect(summary('history')).toContain('3 conversations found'));
+		// Collapsed content stays mounted but out of reach until its row opens.
+		expect(screen.queryByRole('button', { name: 'Disconnect GitHub' })).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Create account' })).toBeNull();
+		await openExtra('history');
+		expect(screen.getByText('Conversation 2')).toBeTruthy();
+		await openExtra('github');
+		expect(screen.getByRole('button', { name: 'Disconnect GitHub' })).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Finish setup' })).toBeTruthy();
+	});
+
+	it('leaves the history row out when there is nothing to import', async () => {
+		await throughFirstRun();
+		await waitFor(() => expect(summary('github')).toContain('Not connected'));
+		expect((screen.getByTestId('setup-extra-history') as HTMLElement).hidden).toBe(true);
 	});
 });

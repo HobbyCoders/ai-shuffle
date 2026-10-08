@@ -5,7 +5,14 @@
 	import { getGithubAuthStatus, startGithubWebLogin, loginGithubWithToken, cancelGithubWebLogin, logoutGithub } from '$lib/api/auth';
 	import { getErrorMessage } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
-	let { embedded = false }: { embedded?: boolean } = $props();
+	import type { GithubSummaryInput } from '$lib/components/setup/extras-summary';
+	let { embedded = false, bare = false, onstate }: {
+		embedded?: boolean;
+		/** No frame or heading: the parent (setup's summary row) supplies both. */
+		bare?: boolean;
+		/** Called with the connection's state whenever it changes. */
+		onstate?: (state: GithubSummaryInput) => void;
+	} = $props();
 
 	let method = $state<'web' | 'token'>('web');
 	let authenticated = $state(false);
@@ -19,6 +26,11 @@
 	let deadline = 0;
 	let disposed = false;
 	let generation = 0;
+	let loaded = $state(false);
+
+	$effect(() => {
+		onstate?.({ loading: !loaded, authenticated, user, pending: !!code, error });
+	});
 
 	function stopPolling() {
 		generation += 1;
@@ -37,7 +49,7 @@
 
 	onMount(() => {
 		readStatus().catch((e) => { error = getErrorMessage(e, 'Could not load GitHub status.'); })
-			.finally(() => { busy = false; });
+			.finally(() => { busy = false; loaded = true; });
 	});
 	onDestroy(() => { disposed = true; stopPolling(); });
 
@@ -146,8 +158,8 @@
 	}
 </script>
 
-<section class="github-connection" class:embedded class:linked={authenticated} aria-label="GitHub connection">
-	<h4><Github size={18} /> GitHub</h4>
+<section class="github-connection" class:embedded class:bare class:linked={authenticated} aria-label="GitHub connection">
+	{#if !bare}<h4><Github size={18} /> GitHub</h4>{/if}
 	{#if authenticated}
 		<p class="connected" role="status">{embedded ? (user ? `@${user}` : 'Connected') : `GitHub is connected${user ? ` as @${user}` : ''}.`}</p>
 		<button type="button" onclick={disconnect} disabled={busy} aria-label="Disconnect GitHub">{embedded ? 'Disconnect' : 'Disconnect GitHub'}</button>
@@ -199,6 +211,9 @@
 	.device-flow { margin-top: 12px; }
 	.connected { color: var(--success, #16a34a); }
 	.error { color: var(--destructive); margin-bottom: 0; }
+	.bare { padding: 0; border: 0; border-radius: 0; }
+	.bare > p:first-child { margin-top: 0; }
+	.bare > .actions:first-child { margin-top: 0; }
 	.embedded { padding: 10px 14px; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; }
 	.embedded.linked { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
 	.embedded.linked h4 { margin: 0; font-size: 13px; gap: 12px; }

@@ -69,4 +69,23 @@ describe('CliHistoryImport', () => {
 		expect((screen.getByRole('checkbox', { name: /Refactor parser/ }) as HTMLInputElement).checked).toBe(true);
 		expect((screen.getByRole('checkbox', { name: /Write tests/ }) as HTMLInputElement).checked).toBe(false);
 	});
+
+	it('reports what it found and imported to a parent that shows the heading', async () => {
+		listCliConversations.mockResolvedValue([convo('a', 'Fix the login bug'), convo('b', 'Write tests')]);
+		importCliConversation.mockResolvedValue({ session_id: 'ses', status: 'success' });
+		const onstate = vi.fn();
+		render(CliHistoryImport, { props: { bare: true, onstate } });
+		await waitFor(() => expect(onstate).toHaveBeenLastCalledWith({ available: true, remaining: 2, imported: 0 }));
+		// Bare keeps the heading for screen readers only.
+		expect(screen.getByRole('heading', { name: 'Claude Code conversations' }).parentElement?.classList.contains('sr-only')).toBe(true);
+		await fireEvent.click(screen.getByRole('button', { name: 'Import 2 conversations' }));
+		await waitFor(() => expect(onstate).toHaveBeenLastCalledWith({ available: true, remaining: 0, imported: 2 }));
+	});
+
+	it('reports nothing available when the list is empty', async () => {
+		listCliConversations.mockResolvedValue([]);
+		const onstate = vi.fn();
+		render(CliHistoryImport, { props: { onstate } });
+		await waitFor(() => expect(onstate).toHaveBeenCalledWith({ available: false, remaining: 0, imported: 0 }));
+	});
 });

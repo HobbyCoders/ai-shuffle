@@ -125,4 +125,15 @@ describe('GitHub connection', () => {
         await vi.advanceTimersByTimeAsync(6000);
         expect(mocks.status).toHaveBeenCalledTimes(calls);
     });
+
+    it('reports its state to a parent summary and drops its own heading when bare', async () => {
+        const onstate = vi.fn();
+        render(GitHubConnection, { props: { bare: true, onstate } });
+        expect(onstate).toHaveBeenCalledWith(expect.objectContaining({ loading: true, authenticated: false }));
+        await waitFor(() => expect(onstate).toHaveBeenLastCalledWith({ loading: false, authenticated: false, user: null, pending: false, error: '' }));
+        expect(screen.queryByRole('heading', { name: 'GitHub' })).toBeNull();
+        mocks.web.mockResolvedValue({ success: true, user_code: 'ABCD-1234' });
+        await fireEvent.click(screen.getByRole('button', { name: 'Sign in with GitHub' }));
+        await waitFor(() => expect(onstate).toHaveBeenLastCalledWith(expect.objectContaining({ pending: true })));
+    });
 });

@@ -15,9 +15,13 @@
 
 	interface Props {
 		onimported?: (count: number) => void;
+		/** No heading: the parent (setup's summary row) supplies it. */
+		bare?: boolean;
+		/** Called once the list is read and after each import. */
+		onstate?: (state: { available: boolean; remaining: number; imported: number }) => void;
 	}
 
-	let { onimported }: Props = $props();
+	let { onimported, bare = false, onstate }: Props = $props();
 
 	let conversations = $state<CliConversation[]>([]);
 	let selected = $state<Set<string>>(new Set());
@@ -25,6 +29,10 @@
 	let importing = $state(false);
 	let importedCount = $state(0);
 	let error = $state('');
+
+	$effect(() => {
+		if (loaded) onstate?.({ available: conversations.length > 0 || importedCount > 0, remaining: conversations.length, imported: importedCount });
+	});
 
 	const allSelected = $derived(conversations.length > 0 && selected.size === conversations.length);
 
@@ -92,7 +100,7 @@
 
 {#if loaded && (conversations.length > 0 || importedCount > 0)}
 	<section class="cli-import" aria-labelledby="cli-import-title">
-		<div class="cli-head">
+		<div class="cli-head" class:sr-only={bare}>
 			<History size={16} strokeWidth={2} aria-hidden="true" />
 			<h3 id="cli-import-title">Claude Code conversations</h3>
 		</div>
