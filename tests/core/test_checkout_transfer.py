@@ -1,11 +1,124 @@
+import http.server
+import os
 import subprocess
+import sys
+import threading
+import time
 
+import psutil
 import pytest
 from app.core.checkout_transfer import export_checkout, import_checkout, fingerprint, remote_identity, _remote_key
 
 
 def git(path, *args):
     return subprocess.check_output(["git", *args], cwd=path)
+
+
+@pytest.mark.parametrize("args", [("--version",), ("not-a-git-command",)])
+def test_run_preserves_completed_process_output(tmp_path, args):
+    from app.core.checkout_transfer import _run
+
+    expected = subprocess.run(["git", *args], cwd=tmp_path, capture_output=True)
+    actual = _run(tmp_path, *args)
+    assert actual.args == expected.args
+    assert actual.returncode == expected.returncode
+    assert actual.stdout == expected.stdout
+    assert actual.stderr == expected.stderr
+
+
+def test_run_timeout_bounds_cleanup_even_if_tree_kill_fails(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    from app.core import checkout_transfer as transfer
+
+    proc = Mock(pid=12345)
+    proc.wait.side_effect = subprocess.TimeoutExpired("git", 0.1)
+    popen = Mock(return_value=proc)
+    monkeypatch.setattr(transfer.subprocess, "Popen", popen)
+    if os.name == "nt":
+        kill_tree = Mock(side_effect=subprocess.TimeoutExpired("taskkill", 2))
+        monkeypatch.setattr(transfer.subprocess, "run", kill_tree)
+    else:
+        kill_tree = Mock(side_effect=ProcessLookupError)
+        monkeypatch.setattr(transfer.os, "killpg", kill_tree)
+
+    with pytest.raises(ValueError, match="Git timed out during resume"):
+        transfer._run(tmp_path, "ls-remote", timeout=0.1)
+    assert [call.kwargs["timeout"] for call in proc.wait.call_args_list] == [0.1, 1]
+    proc.kill.assert_called_once_with()
+    proc.communicate.assert_not_called()
+    assert popen.call_args.kwargs["stdout"] != subprocess.PIPE
+    assert popen.call_args.kwargs["stderr"] != subprocess.PIPE
+    if os.name == "nt":
+        assert popen.call_args.kwargs["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+        assert kill_tree.call_args.args[0] == ["taskkill", "/T", "/F", "/PID", "12345"]
+        assert kill_tree.call_args.kwargs["timeout"] == 2
+        assert kill_tree.call_args.kwargs["stdout"] == subprocess.DEVNULL
+        assert kill_tree.call_args.kwargs["stderr"] == subprocess.DEVNULL
+    else:
+        assert popen.call_args.kwargs["start_new_session"] is True
+        kill_tree.assert_called_once_with(12345, transfer.signal.SIGKILL)
+
+
+def test_default_branch_probe_kills_slow_credential_helper(repositories, tmp_path, monkeypatch):
+    from app.core import checkout_transfer as transfer
+
+    class Unauthorized(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="test"')
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    source, _ = repositories
+    marker = tmp_path / "helper-started"
+    helper = tmp_path / "slow-helper.py"
+    helper.write_text(
+        "import os, time\nfrom pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(10)\n"
+    )
+    git(source, "config", "credential.helper", "")
+    git(source, "config", "--add", "credential.helper",
+        f'!"{sys.executable.replace(os.sep, "/")}" "{helper.as_posix()}"')
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Unauthorized)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    real_run = transfer._run
+
+    def short_probe(cwd, *args, **kwargs):
+        if args == ("ls-remote", "--symref", "origin", "HEAD"):
+            kwargs["timeout"] = 1
+        return real_run(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(transfer, "_run", short_probe)
+    try:
+        git(source, "remote", "set-url", "origin", f"http://127.0.0.1:{server.server_port}/repo.git")
+        (source / "file.txt").write_text("local work\n")
+        before = git(source, "rev-parse", "HEAD")
+        status = git(source, "status", "--porcelain", "-uall")
+        started = time.monotonic()
+        with pytest.raises(ValueError, match="cannot establish origin's default branch"):
+            export_checkout(source, "feature/only-on-worker")
+        assert time.monotonic() - started < 5
+        assert marker.exists(), "The real Git credential-helper path must run"
+        helper_pid = int(marker.read_text())
+        if psutil.pid_exists(helper_pid):
+            assert psutil.Process(helper_pid).status() == psutil.STATUS_ZOMBIE
+        assert git(source, "rev-parse", "HEAD") == before
+        assert git(source, "status", "--porcelain", "-uall") == status
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        if marker.exists():
+            try:
+                psutil.Process(int(marker.read_text())).kill()
+            except psutil.NoSuchProcess:
+                pass
 
 
 @pytest.fixture
@@ -171,7 +284,8 @@ def test_old_bundle_protocol_and_changed_remote_branch_rejected(repositories, tm
 def test_existing_base_branch_is_reused(repositories, tmp_path):
     source, target = repositories
     git(source, "checkout", "main")
-    (source / "new-main.txt").write_text("updated main")
+    _commit(source, "new-main.txt", "updated main")
+    git(source, "push", "origin", "main")
     state = export_checkout(source, "main")
     assert import_checkout(target, tmp_path / "unused", state) == str(target)
     assert fingerprint(target) == state["head"]
@@ -260,6 +374,212 @@ def _record_pushes(monkeypatch):
 
     monkeypatch.setattr(transfer, "git", recording)
     return pushes
+
+
+@pytest.mark.parametrize("branch,origin_head", [("main", False), ("master", False), ("trunk", True)])
+@pytest.mark.parametrize("change", ["untracked", "tracked", "staged", "scratch"])
+def test_dirty_default_branch_refuses_without_committing_or_pushing(repositories, monkeypatch, branch, origin_head, change):
+    source, _ = repositories
+    git(source, "checkout", "main")
+    if branch != "main":
+        git(source, "branch", "-m", branch)
+        git(source, "push", "origin", branch)
+    git(source.parent / "remote.git", "symbolic-ref", "HEAD", "refs/heads/" + branch)
+    if origin_head:
+        git(source, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/" + branch)
+    name = "other-session.txt" if change == "untracked" else "file.txt"
+    if change == "scratch":
+        (source / "mockups").mkdir()
+        (source / "uploads").mkdir()
+        name = "mockups/owner.txt"
+        (source / "uploads" / "owner.txt").write_text("owner upload")
+    (source / name).write_text("owner work")
+    if change == "staged":
+        git(source, "add", name)
+    before = git(source, "rev-parse", "HEAD")
+    status = git(source, "status", "--porcelain", "-uall")
+    remote_refs = git(source, "ls-remote", "origin")
+    pushes = _record_pushes(monkeypatch)
+    with pytest.raises(ValueError, match=f"default branch {branch} with local changes.*task branch.*Ownership has not moved"):
+        export_checkout(source, branch)
+    assert git(source, "rev-parse", "HEAD") == before
+    assert git(source, "status", "--porcelain", "-uall") == status
+    assert git(source, "ls-remote", "origin") == remote_refs
+    assert pushes == []
+
+
+@pytest.mark.parametrize("cached_head", [None, "main"])
+def test_actual_default_branch_refuses_with_missing_or_stale_origin_head(repositories, monkeypatch, cached_head):
+    source, _ = repositories
+    git(source, "checkout", "main")
+    git(source, "branch", "-m", "trunk")
+    git(source, "push", "origin", "trunk")
+    git(source.parent / "remote.git", "symbolic-ref", "HEAD", "refs/heads/trunk")
+    if cached_head is None:
+        git(source, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+        git(source, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+    else:
+        git(source, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/" + cached_head)
+    (source / "other-session.txt").write_text("unrelated owner work")
+    before = git(source, "rev-parse", "HEAD")
+    status = git(source, "status", "--porcelain", "-uall")
+    remote_refs = git(source, "ls-remote", "origin")
+    pushes = _record_pushes(monkeypatch)
+    with pytest.raises(ValueError, match="default branch trunk with local changes"):
+        export_checkout(source, "trunk")
+    assert git(source, "rev-parse", "HEAD") == before
+    assert git(source, "status", "--porcelain", "-uall") == status
+    assert git(source, "ls-remote", "origin") == remote_refs
+    assert pushes == []
+
+
+@pytest.mark.parametrize("failure", ["missing_symref", "unavailable", "timeout"])
+def test_unknown_remote_default_refuses_before_staging(repositories, monkeypatch, failure):
+    from app.core import checkout_transfer as transfer
+
+    source, _ = repositories
+    (source / "other-session.txt").write_text("unrelated owner work")
+    before = git(source, "rev-parse", "HEAD")
+    status = git(source, "status", "--porcelain", "-uall")
+    remote_refs = git(source, "ls-remote", "origin")
+    real_run = transfer._run
+
+    def unavailable(cwd, *args, **kwargs):
+        if args == ("ls-remote", "--symref", "origin", "HEAD"):
+            assert 0 < kwargs["timeout"] <= 30
+            if failure == "timeout":
+                raise ValueError("Git timed out during resume.")
+            return subprocess.CompletedProcess(["git", *args], 1 if failure == "unavailable" else 0,
+                                               stdout=b"abc123\tHEAD\n", stderr=b"")
+        return real_run(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(transfer, "_run", unavailable)
+    pushes = _record_pushes(monkeypatch)
+    with pytest.raises(ValueError, match="cannot establish origin's default branch.*Ownership has not moved"):
+        export_checkout(source, "feature/only-on-worker")
+    assert git(source, "rev-parse", "HEAD") == before
+    assert git(source, "status", "--porcelain", "-uall") == status
+    assert git(source, "ls-remote", "origin") == remote_refs
+    assert pushes == []
+
+
+@pytest.mark.parametrize("folder", ["mockups", "uploads"])
+def test_task_handoff_saves_tracked_scratch_directory_changes(repositories, tmp_path, folder):
+    source, target = repositories
+    (source / folder).mkdir()
+    (source / folder / "tracked.txt").write_text("original")
+    git(source, "add", folder)
+    git(source, "commit", "-m", "tracked project file")
+    git(source, "push", "origin", "feature/only-on-worker")
+    (source / folder / "tracked.txt").write_text("modified")
+    (source / folder / "owner.txt").write_text("untracked scratch")
+    state = export_checkout(source, "feature/only-on-worker")
+    destination = tmp_path / "resumed"
+    import_checkout(target, destination, state)
+    assert (destination / folder / "tracked.txt").read_text() == "modified"
+    assert not (destination / folder / "owner.txt").exists()
+    assert git(source, "status", "--porcelain", "-uall").decode().splitlines() == [
+        f"?? {folder}/owner.txt",
+    ]
+    assert fingerprint(source) == fingerprint(destination) == state["head"]
+
+
+def test_nothing_staged_does_not_attempt_empty_commit(repositories, monkeypatch):
+    from app.core import checkout_transfer as transfer
+
+    source, _ = repositories
+    (source / "file.txt").write_text("temporary edit")
+    before = git(source, "rev-parse", "HEAD").decode().strip()
+    real_git = transfer.git
+    commits = []
+
+    def recording(cwd, *args):
+        if args[0] == "add":
+            # The edit disappeared after status was read but before staging.
+            (source / "file.txt").write_text("original\n")
+        if args[0] == "commit":
+            commits.append(args)
+        return real_git(cwd, *args)
+
+    monkeypatch.setattr(transfer, "git", recording)
+    state = export_checkout(source, "feature/only-on-worker")
+    assert state["head"] == before
+    assert commits == []
+    assert not git(source, "status", "--porcelain")
+
+
+def test_detached_head_refusal_is_specific_and_does_not_stage(repositories, monkeypatch):
+    source, _ = repositories
+    git(source, "checkout", "--detach")
+    (source / "other-session.txt").write_text("unrelated owner work")
+    before = git(source, "rev-parse", "HEAD")
+    status = git(source, "status", "--porcelain", "-uall")
+    pushes = _record_pushes(monkeypatch)
+    with pytest.raises(ValueError, match="detached HEAD.*task branch.*Ownership has not moved"):
+        export_checkout(source, "feature/only-on-worker")
+    assert git(source, "rev-parse", "HEAD") == before
+    assert git(source, "status", "--porcelain", "-uall") == status
+    assert pushes == []
+
+
+@pytest.mark.parametrize("remote_exists", [True, False])
+def test_clean_default_branch_with_unpublished_commits_never_pushes(repositories, monkeypatch, remote_exists):
+    source, _ = repositories
+    git(source, "checkout", "main")
+    branch = "main" if remote_exists else "trunk"
+    if not remote_exists:
+        git(source, "branch", "-m", branch)
+        git(source, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/" + branch)
+    _commit(source, "local.txt", "local commit")
+    before = git(source, "rev-parse", "HEAD")
+    remote_refs = git(source, "ls-remote", "origin")
+    pushes = _record_pushes(monkeypatch)
+    with pytest.raises(ValueError, match=f"Default branch {branch}.*not on origin/{branch}.*task branch.*Ownership has not moved"):
+        export_checkout(source, branch)
+    assert git(source, "rev-parse", "HEAD") == before
+    assert git(source, "ls-remote", "origin") == remote_refs
+    assert pushes == []
+
+
+@pytest.mark.parametrize("real_change", [True, False])
+def test_task_handoff_leaves_root_owner_scratch_untracked(repositories, tmp_path, real_change):
+    source, target = repositories
+    for folder in ("mockups", "uploads"):
+        (source / folder).mkdir()
+        (source / folder / "owner.txt").write_text("owner scratch")
+    if real_change:
+        (source / "file.txt").write_text("real change")
+        # Only root scratch is excluded, not similarly named project folders.
+        (source / "src" / "mockups").mkdir(parents=True)
+        (source / "src" / "mockups" / "fixture.txt").write_text("real fixture")
+    before = git(source, "rev-parse", "HEAD").decode().strip()
+    state = export_checkout(source, "feature/only-on-worker")
+    assert (state["head"] != before) == real_change
+    assert git(source, "status", "--porcelain", "-uall").decode().splitlines() == [
+        "?? mockups/owner.txt", "?? uploads/owner.txt",
+    ]
+    assert git(source, "ls-tree", "-r", "--name-only", "HEAD", "mockups", "uploads") == b""
+    destination = tmp_path / "resumed"
+    import_checkout(target, destination, state)
+    assert fingerprint(source) == fingerprint(destination) == state["head"]
+    if real_change:
+        assert git(source, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").decode().splitlines() == [
+            "file.txt", "src/mockups/fixture.txt",
+        ]
+        assert (destination / "file.txt").read_text() == "real change"
+    for folder in ("mockups", "uploads"):
+        assert (source / folder / "owner.txt").read_text() == "owner scratch"
+        assert not (destination / folder).exists()
+
+
+def test_owner_scratch_does_not_bypass_credential_preflight(repositories):
+    source, _ = repositories
+    (source / "uploads").mkdir()
+    (source / "uploads" / "secret.key").write_text(PRIVATE_PEM)
+    before = git(source, "rev-parse", "HEAD")
+    with pytest.raises(ValueError, match="Credential file uploads/secret.key"):
+        export_checkout(source, "feature/only-on-worker")
+    assert git(source, "rev-parse", "HEAD") == before
 
 
 def test_clean_main_in_sync_with_origin_resumes_without_pushing(repositories, tmp_path, monkeypatch):
@@ -375,7 +695,8 @@ def test_receiver_rebased_branch_does_not_block(repositories, tmp_path):
 def test_receiver_uncommitted_change_refuses_and_names_it(repositories, tmp_path):
     source, target = repositories
     git(source, "checkout", "main")
-    (source / "owner.txt").write_text("owner work")
+    _commit(source, "owner.txt", "owner work")
+    git(source, "push", "origin", "main")
     state = export_checkout(source, "main")
     (target / "file.txt").write_text("receiver edit")
     (target / "scratch.txt").write_text("receiver scratch")
@@ -398,7 +719,8 @@ def test_receiver_commit_ahead_of_upstream_refuses_and_names_it(repositories, tm
     if not checked_out:
         git(target, "checkout", "-b", "elsewhere")
     git(source, "checkout", "main")
-    (source / "owner.txt").write_text("owner work")
+    _commit(source, "owner.txt", "owner work")
+    git(source, "push", "origin", "main")
     state = export_checkout(source, "main")
     with pytest.raises(ValueError) as raised:
         import_checkout(target, tmp_path / "unused", state)

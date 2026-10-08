@@ -6,8 +6,11 @@ its own origin credentials and only fast-forwards clean local checkouts.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import signal
 import subprocess
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -15,13 +18,48 @@ from fluid.tools.child_env import scrub_child_env
 
 
 def _run(cwd, *args, timeout=120):
-    try:
-        return subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, timeout=timeout,
+    command = ["git", *args]
+    group = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
+    # Regular files avoid Windows communicate() draining pipes held open by a
+    # surviving credential helper. Read only a finite snapshot after Git exits.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        proc = subprocess.Popen(
+            command, cwd=cwd, stdout=stdout, stderr=stderr, **group,
             env={**scrub_child_env(), "GIT_TERMINAL_PROMPT": "0"},
         )
-    except subprocess.TimeoutExpired as exc:
-        raise ValueError("Git timed out during resume. Check the remote and retry; ownership has not moved.") from exc
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            # Bound cleanup independently: at most two seconds for the tree
+            # kill and one for reaping Git, with no pipe drain afterwards.
+            try:
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=2, env=scrub_child_env(),
+                    )
+                else:
+                    os.killpg(proc.pid, signal.SIGKILL)
+            except (OSError, subprocess.TimeoutExpired):
+                pass  # Still kill/reap Git if tree cleanup failed or timed out.
+            finally:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass  # Git may already have exited during tree cleanup.
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+            raise ValueError("Git timed out during resume. Check the remote and retry; ownership has not moved.") from exc
+        stdout.seek(0)
+        stderr.seek(0)
+        return subprocess.CompletedProcess(
+            command, proc.returncode,
+            stdout.read(os.fstat(stdout.fileno()).st_size),
+            stderr.read(os.fstat(stderr.fileno()).st_size),
+        )
 
 
 def git(cwd, *args):
@@ -169,7 +207,15 @@ def remote_identity(cwd):
 
 def _branch(cwd, branch):
     git(cwd, "check-ref-format", "refs/heads/" + branch)
-    if git(cwd, "symbolic-ref", "--short", "HEAD").decode().strip() != branch:
+    current = _run(cwd, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if current.returncode == 1:
+        raise ValueError(
+            "The worker checkout has a detached HEAD. Check out a task branch before "
+            "resuming elsewhere. Ownership has not moved."
+        )
+    if current.returncode:
+        git(cwd, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if current.stdout.decode().strip() != branch:
         raise ValueError("The worker checkout is on a different branch.")
 
 
@@ -177,9 +223,40 @@ def _status(cwd):
     return git(cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")
 
 
+def _transfer_status(cwd):
+    """Owner scratch stays untracked and does not participate in a task handoff."""
+    entries = iter(_status(cwd).split(b"\0"))
+    kept = []
+    for entry in entries:
+        if entry.startswith((b"?? mockups/", b"?? uploads/")):
+            continue
+        kept.append(entry)
+        if entry[:1] in (b"R", b"C"):
+            kept.append(next(entries))  # Preserve the source path of a rename/copy.
+    return b"\0".join(kept)
+
+
+def _default_branch(cwd):
+    """Resolve origin's current default, never relying on a stale local cache."""
+    message = (
+        "Resume cannot establish origin's default branch. Check the remote connection "
+        "and its HEAD, then retry. No files were staged or committed. Ownership has not moved."
+    )
+    try:
+        result = _run(cwd, "ls-remote", "--symref", "origin", "HEAD", timeout=15)
+    except ValueError as exc:
+        raise ValueError(message) from exc
+    if not result.returncode:
+        for line in result.stdout.decode(errors="replace").splitlines():
+            match = re.fullmatch(r"ref: refs/heads/(.+)\tHEAD", line)
+            if match and not _run(cwd, "check-ref-format", "refs/heads/" + match[1]).returncode:
+                return match[1]
+    raise ValueError(message)
+
+
 def fingerprint(cwd):
-    """Only a clean checkout can finish a handoff."""
-    if _status(cwd):
+    """Only a checkout clean apart from untracked owner scratch can finish a handoff."""
+    if _transfer_status(cwd):
         raise ValueError("The owning worker's files changed during resume; ownership was not moved.")
     return git(cwd, "rev-parse", "HEAD").decode().strip()
 
@@ -233,16 +310,36 @@ def export_checkout(cwd, branch, expected_remote=None):
     if expected_remote is not None and remote != expected_remote:
         raise ValueError("The workers' origin remotes refer to different repositories.")
     _preflight(cwd)
-    if _status(cwd):
-        git(cwd, "add", "-A", "--", ".")
+    default = _default_branch(cwd)
+    cached_default = _run(cwd, "symbolic-ref", "refs/remotes/origin/HEAD")
+    # A cached default can only add a refusal, never authorise publication.
+    on_default = branch == default or (
+        not cached_default.returncode
+        and cached_default.stdout.decode().strip() == "refs/remotes/origin/" + branch
+    )
+    if on_default and _status(cwd):
+        raise ValueError(
+            f"The owning worker's checkout is on default branch {branch} with local changes. "
+            "Move the work to a task branch before resuming elsewhere. Ownership has not moved."
+        )
+    if not on_default and _transfer_status(cwd):
+        # Include every tracked change, even inside owner scratch directories.
+        git(cwd, "add", "-u", "--", ".")
+        git(cwd, "add", "-A", "--", ".", ":(top,exclude)mockups", ":(top,exclude)uploads")
         _preflight(cwd)
-        git(cwd, "commit", "-m", "Save work before resuming on another worker")
+        if git(cwd, "diff", "--cached", "--name-only", "-z"):
+            git(cwd, "commit", "-m", "Save work before resuming on another worker")
     head = fingerprint(cwd)
     # Compare with origin as it is now, not a remote-tracking ref from the
     # last fetch: a checkout that is clean and already on origin (in sync, or
     # behind because others pushed since) has nothing to publish.
     upstream = _fetch_branch(cwd, branch)
     if upstream is None or not _is_ancestor(cwd, head, upstream):
+        if on_default:
+            raise ValueError(
+                f"Default branch {branch} in the owning worker's checkout has commits not on origin/{branch}. "
+                "Move the work to a task branch before resuming elsewhere. Ownership has not moved."
+            )
         if upstream is not None and not _is_ancestor(cwd, upstream, head):
             ahead = git(cwd, "rev-list", head, "--not", upstream).decode().split()
             behind = git(cwd, "rev-list", upstream, "--not", head).decode().split()

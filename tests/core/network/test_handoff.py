@@ -1057,6 +1057,27 @@ async def test_projectless_session_transfers_history_only(pair, monkeypatch):
         assert database.get_session("handoff-test")["owner_device_id"] == b.device_id
 
 @pytest.mark.asyncio
+async def test_dirty_default_branch_releases_holds_without_moving_owner(pair, monkeypatch):
+    a, b, source, _ = pair
+    _base_session_on_clean_main(pair, monkeypatch)
+    (source / "other-session.txt").write_text("keep untracked")
+    before = git(source, "rev-parse", "HEAD")
+    with b.active():
+        with pytest.raises(ValueError, match="default branch main.*task branch.*Ownership has not moved"):
+            await handoff.receive(database.get_session("handoff-test"))
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+    with a.active(), get_db() as conn:
+        assert database.get_session("handoff-test")["owner_device_id"] == a.device_id
+        cur = conn.cursor()
+        cur.execute("SELECT state FROM runs WHERE session_id=%s", ("handoff-test",))
+        assert cur.fetchone()["state"] == "released"
+        cur.execute("SELECT 1 FROM runs WHERE runner_id LIKE %s AND state='active'", (handoff.HOLD + "%",))
+        assert cur.fetchone() is None
+    assert git(source, "rev-parse", "HEAD") == before
+    assert git(source, "status", "--porcelain").strip() == b"?? other-session.txt"
+
+
+@pytest.mark.asyncio
 async def test_push_failure_releases_reservation_without_moving_owner(pair, monkeypatch):
     a, b, source, target = pair
     original_git = checkout_transfer.git
@@ -1112,6 +1133,9 @@ async def test_base_session_without_branch_metadata_resolves_after_resume(pair, 
     if reuse_base:
         git(source, "checkout", "main")
         (source / "file.txt").write_text("new base checkout work")
+        git(source, "add", "file.txt")
+        git(source, "commit", "-m", "published base checkout work")
+        git(source, "push", "origin", "main")
     # The shared fixture registers this path as a branch checkout. A base
     # session instead has a branch-NULL checkout row at that path.
     with a.active():
