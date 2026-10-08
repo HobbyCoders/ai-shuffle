@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import patch, MagicMock, AsyncMock, DEFAULT
 
 
 # =============================================================================
@@ -272,6 +272,35 @@ class TestLifespan:
                 mock_enc.assert_called_once()
                 mock_ws.assert_called_once()
                 mock_prereqs.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("runner_approved", [True, False])
+    async def test_loop_watchdog_lifecycle(self, runner_approved):
+        from app.main import lifespan
+
+        with patch.multiple(
+                 "app.core.startup", init_core=DEFAULT,
+                 init_encryption_and_sessions=DEFAULT, init_workspace=DEFAULT,
+                 check_prerequisites=DEFAULT, install_v2_turns_wiring=DEFAULT), \
+             patch("app.core.cluster.register_self", return_value=runner_approved), \
+             patch("app.network.startup.initialize"), \
+             patch("app.network.startup.start", AsyncMock(return_value=[])), \
+             patch("app.core.startup_reconcile.reconcile_at_boot", AsyncMock()), \
+             patch("app.core.startup.start_services", AsyncMock()), \
+             patch("app.core.startup.shutdown_services", AsyncMock()), \
+             patch("app.core.startup.start_background_tasks", return_value=[]), \
+             patch("app.core.fluid_memory.maintain_memories", AsyncMock()), \
+             patch("app.core.resource_monitor.reconcile_orphans_once", AsyncMock()), \
+             patch("app.core.resource_monitor.start_resource_monitor", AsyncMock(return_value=None)), \
+             patch("app.core.plugin_auto_update.start_plugin_auto_update", return_value=None), \
+             patch("app.core.provider_usage.provider_usage_monitor.start"), \
+             patch("app.core.provider_usage.provider_usage_monitor.stop", AsyncMock()), \
+             patch("app.core.loop_watchdog.start_loop_watchdog") as start_watchdog, \
+             patch("app.core.loop_watchdog.stop_loop_watchdog") as stop_watchdog:
+            async with lifespan(MagicMock()):
+                start_watchdog.assert_called_once()
+                stop_watchdog.assert_not_called()
+            stop_watchdog.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_failed_boot_task_does_not_interrupt_shutdown(self, caplog):

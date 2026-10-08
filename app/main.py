@@ -294,15 +294,14 @@ async def lifespan(app: FastAPI):
     monitor_task = None
     plugin_task = None
     orphan_backfill_task = None
+    # Thread-based diagnostics must also cover workers awaiting approval.
+    start_loop_watchdog()
     if runner_approved:
         await start_services()
         bg_tasks = start_background_tasks()
         from app.core.fluid_memory import maintain_memories
         bg_tasks.append(asyncio.create_task(maintain_memories(), name="memory-maintenance"))
         monitor_task = await start_resource_monitor(interval_seconds=300)
-        # Thread-based: keeps working while the loop is frozen and logs the
-        # loop thread's stack so a stall is diagnosable after the fact.
-        start_loop_watchdog()
         plugin_task = start_plugin_auto_update()
     else:
         logger.warning(

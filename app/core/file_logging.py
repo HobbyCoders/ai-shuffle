@@ -252,6 +252,23 @@ def install_asyncio_exception_handler(loop: Optional[asyncio.AbstractEventLoop] 
     loop.set_exception_handler(_handler)
 
 
+def dump_diagnostic_traceback(message: str) -> None:
+    """Write all thread stacks to the managed fatal log without logger locks.
+
+    Best effort when file logging is disabled or its stream is unavailable.
+    Do not log failures here: this is also used for stalls inside log handlers.
+    """
+    if _fatal_file is None:
+        return
+    try:
+        _fatal_file.write(f"\n--- {message} ---\n")
+        _fatal_file.flush()
+        faulthandler.dump_traceback(file=_fatal_file, all_threads=True)
+        _fatal_file.flush()
+    except Exception:  # noqa: BLE001 — diagnostics must not kill the watchdog
+        pass
+
+
 def setup_file_logging() -> Optional[Path]:
     """Attach the rotating file handler + faulthandler + excepthook (idempotent).
 

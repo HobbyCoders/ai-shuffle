@@ -124,6 +124,29 @@ def test_setup_attaches_rotating_file_handler_with_config(fake_settings, tmp_pat
     assert _log_dir(tmp_path).is_dir()
 
 
+def test_diagnostic_dump_uses_managed_fatal_log(fake_settings, tmp_path):
+    fake_settings()
+    file_logging.setup_file_logging()
+    file_logging.dump_diagnostic_traceback("Event loop stalled for 10.0s")
+    text = (_log_dir(tmp_path) / "fatal.log").read_text(encoding="utf-8")
+    assert "Event loop stalled for 10.0s" in text
+    assert "test_diagnostic_dump_uses_managed_fatal_log" in text
+
+
+def test_diagnostic_dump_without_fatal_stream(monkeypatch):
+    monkeypatch.setattr(file_logging, "_fatal_file", None)
+    file_logging.dump_diagnostic_traceback("disabled")
+
+
+def test_diagnostic_dump_io_failure_is_nonfatal(monkeypatch):
+    class BrokenStream:
+        def write(self, text):
+            raise OSError("diagnostic disk unavailable")
+
+    monkeypatch.setattr(file_logging, "_fatal_file", BrokenStream())
+    file_logging.dump_diagnostic_traceback("unwritable")
+
+
 def test_setup_is_idempotent(fake_settings, tmp_path):
     fake_settings()
     first = file_logging.setup_file_logging()
@@ -202,7 +225,7 @@ def test_importing_app_main_does_not_touch_log_dir(tmp_path):
         "TESTING": "1",
         "CORS_ORIGINS": "*",
         "DATA_DIR": str(tmp_path),
-        "PYTHONPATH": str(repo_root),
+        "PYTHONPATH": os.pathsep.join((str(repo_root), str(repo_root / "fluid"))),
     }
     result = subprocess.run(
         [sys.executable, "-c", code],

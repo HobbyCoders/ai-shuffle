@@ -1,31 +1,21 @@
 """Event-loop stall watchdog.
 
-A plain OS thread (not a coroutine — it has to keep working while the loop is
-frozen) pings the asyncio loop once a second with ``loop.call_soon_threadsafe``
-and measures how long the loop takes to answer. When an answer is overdue by
-more than ``LOOP_STALL_THRESHOLD_S`` (default 3 s) the watchdog logs the loop
-thread's current Python stack at ERROR — that is the frame that is blocking
-the loop, which is exactly what an after-the-fact log needs to say. While the
-stall persists it re-dumps every ``redump_interval_s`` (30 s); when the loop
-finally answers it logs the stall duration.
+A daemon OS thread pings the asyncio loop once a second. If its callback is
+unanswered for LOOP_STALL_THRESHOLD_S (default 10 s), it captures every
+thread's stack, marking the event-loop thread. A continuing stall gets one
+more dump at 45 s; recovery is logged with the stall duration.
 
-Why a thread and not ``resource_monitor``'s loop-lag metric: that metric is a
-coroutine, so it can only report a stall after the loop is back, and only as a
-number. This watchdog captures *where* the loop was stuck, while it is stuck.
-
-The stack is taken with ``sys._current_frames()`` and formatted with
-``traceback.format_stack`` so it goes through the normal app logger (file
-handler + error_log). ``faulthandler`` would bypass the logger's handler
-locks — safer if the loop is frozen *inside* a logging handler — so the dump
-is also written with ``faulthandler.dump_traceback`` to the file handler's raw
-stream when one is installed (best effort, all threads).
+Unlike resource_monitor's coroutine-based lag metric, this captures the
+blocking frame while the loop is stuck. The raw dump goes to file_logging's
+durable fatal.log before the ERROR record goes through normal app logging,
+so a loop holding a logging handler lock cannot prevent the durable dump.
 """
 
 from __future__ import annotations
 
 import asyncio
-import faulthandler
 import logging
+import math
 import os
 import sys
 import threading
@@ -35,9 +25,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_THRESHOLD_S = 3.0
+DEFAULT_THRESHOLD_S = 10.0
 DEFAULT_PING_INTERVAL_S = 1.0
-DEFAULT_REDUMP_INTERVAL_S = 30.0
+DEFAULT_SECOND_THRESHOLD_S = 45.0
 
 
 def _threshold_from_env() -> float:
@@ -51,11 +41,11 @@ def _threshold_from_env() -> float:
             "LOOP_STALL_THRESHOLD_S=%r is not a number; using %.1fs", raw, DEFAULT_THRESHOLD_S
         )
         return DEFAULT_THRESHOLD_S
-    return value if value > 0 else DEFAULT_THRESHOLD_S
+    return value if math.isfinite(value) and value > 0 else DEFAULT_THRESHOLD_S
 
 
 class LoopStallWatchdog:
-    """Ping the loop from a daemon thread; dump the loop thread's stack on a stall."""
+    """Ping the loop from a daemon thread; dump all thread stacks on a stall."""
 
     def __init__(
         self,
@@ -63,13 +53,13 @@ class LoopStallWatchdog:
         *,
         threshold_s: Optional[float] = None,
         ping_interval_s: float = DEFAULT_PING_INTERVAL_S,
-        redump_interval_s: float = DEFAULT_REDUMP_INTERVAL_S,
+        second_threshold_s: float = DEFAULT_SECOND_THRESHOLD_S,
         log: Optional[logging.Logger] = None,
     ) -> None:
         self._loop = loop
         self.threshold_s = threshold_s if threshold_s is not None else _threshold_from_env()
         self.ping_interval_s = ping_interval_s
-        self.redump_interval_s = redump_interval_s
+        self.second_threshold_s = second_threshold_s
         self._log = log or logger
 
         self._loop_thread_id: Optional[int] = None
@@ -81,7 +71,7 @@ class LoopStallWatchdog:
         self._pending_since: Optional[float] = None
         self._stalled = False
         self._stall_started_at: float = 0.0
-        self._last_dump_at: float = 0.0
+        self._second_dumped = False
         # Observability for tests / the resource monitor.
         self.stall_count = 0
         self.dump_count = 0
@@ -151,7 +141,7 @@ class LoopStallWatchdog:
             pending_since = self._pending_since
             stalled = self._stalled
             stall_started_at = self._stall_started_at
-            last_dump_at = self._last_dump_at
+            second_dumped = self._second_dumped
 
         if pending_since is None:
             if stalled:
@@ -172,59 +162,45 @@ class LoopStallWatchdog:
             with self._lock:
                 self._stalled = True
                 self._stall_started_at = pending_since
-                self._last_dump_at = now
+                self._second_dumped = False
                 self.stall_count += 1
             self._dump(age, first=True)
             return
 
-        if now - last_dump_at >= self.redump_interval_s:
+        if not second_dumped and age >= self.second_threshold_s:
             with self._lock:
-                self._last_dump_at = now
+                self._second_dumped = True
             self._dump(age, first=False)
 
     # ------------------------------------------------------------------
     # stack dump
     # ------------------------------------------------------------------
 
-    def format_loop_stack(self) -> str:
-        """The loop thread's current Python stack, innermost frame last."""
-        frames = sys._current_frames()
-        frame = frames.get(self._loop_thread_id) if self._loop_thread_id is not None else None
-        if frame is None:
-            return "<loop thread frame unavailable>"
-        return "".join(traceback.format_stack(frame))
+    def format_thread_stacks(self) -> str:
+        """All current Python stacks, with the event-loop thread identified."""
+        names = {thread.ident: thread.name for thread in threading.enumerate()}
+        stacks = []
+        for ident, frame in sys._current_frames().items():
+            label = " (event-loop thread)" if ident == self._loop_thread_id else ""
+            stacks.append(f"Thread {names.get(ident, 'unknown')} ({ident}){label}:\n")
+            stacks.extend(traceback.format_stack(frame))
+        return "".join(stacks)
 
     def _dump(self, age: float, *, first: bool) -> None:
         with self._lock:
             self.dump_count += 1
-        stack = self.format_loop_stack()
-        self._log.error(
-            "Event loop %s for %.1fs (threshold %.1fs) — loop thread stack "
-            "(innermost last):\n%s",
-            "stalled" if first else "still stalled", age, self.threshold_s, stack,
+        message = (
+            f"Event loop {'stalled' if first else 'still stalled'} for {age:.1f}s "
+            f"(threshold {self.threshold_s:.1f}s)"
         )
-        self._faulthandler_dump()
+        # Write before taking any logging handler locks: the loop may hold one.
+        from app.core.file_logging import dump_diagnostic_traceback
 
-    def _faulthandler_dump(self) -> None:
-        """Best-effort raw dump of every thread to the app log file's stream.
-
-        Bypasses the logging machinery — useful if the loop thread froze while
-        holding a logging handler lock, in which case the ERROR above is itself
-        blocked until the stall ends.
-        """
-        try:
-            from app.core import file_logging
-
-            handler = getattr(file_logging, "_file_handler", None)
-            stream = getattr(handler, "stream", None)
-            if stream is None:
-                return
-            stream.write("\n--- loop-stall-watchdog: faulthandler dump of all threads ---\n")
-            stream.flush()
-            faulthandler.dump_traceback(file=stream, all_threads=True)
-            stream.flush()
-        except Exception:  # noqa: BLE001 — never let the dump path raise
-            pass
+        dump_diagnostic_traceback(message)
+        self._log.error(
+            "%s — all thread stacks, including loop thread stack "
+            "(innermost last):\n%s", message, self.format_thread_stacks(),
+        )
 
 
 # ----------------------------------------------------------------------
