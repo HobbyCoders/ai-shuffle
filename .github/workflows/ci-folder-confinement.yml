@@ -4,6 +4,7 @@ name: Folder confinement (macOS)
 # runner.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'app/core/chat_files.py'
       - 'app/core/confined_files.py'
@@ -22,6 +23,8 @@ concurrency:
 jobs:
   macos:
     name: macOS folder confinement
+    # Drafts run no paid CI; marking the PR ready starts it.
+    if: github.event.pull_request.draft != true
     runs-on: blacksmith-6vcpu-macos-latest
     timeout-minutes: 5
     steps:

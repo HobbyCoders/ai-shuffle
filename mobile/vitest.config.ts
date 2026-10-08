@@ -9,6 +9,20 @@ process.env.VITE_SHUFFLE_SHELL = 'mobile';
 const lib = fileURLToPath(new URL('../frontend/src/lib', import.meta.url));
 const stubs = fileURLToPath(new URL('../frontend/src/lib/test-stubs', import.meta.url));
 
+// Same list as ../frontend/vitest.config.ts: a change to any of these runs
+// every test, including in CI's changed-only PR runs.
+const FULL_RUN_TRIGGERS = [
+	'**/package.json/**',
+	'**/{vitest,vite}.config.*/**',
+	'**/package-lock.json',
+	'**/svelte.config.js',
+	'**/tsconfig.json',
+	'**/app-version.js',
+	'**/src/lib/test-stubs/**',
+	'**/scripts/vitest-changed.mjs',
+	'**/.github/workflows/ci-frontend.yml'
+];
+
 export default defineConfig({
 	cacheDir: '.svelte-kit/vitest-cache',
 	plugins: [svelte({ hot: !process.env.VITEST })],
@@ -20,6 +34,7 @@ export default defineConfig({
 		environment: 'jsdom',
 		include: ['src/**/*.{test,spec}.{js,ts}'],
 		exclude: ['node_modules', 'build', '.svelte-kit'],
+		forceRerunTriggers: FULL_RUN_TRIGGERS,
 		// Mirrors ../frontend/vitest.config.ts: `$lib` is the shared library and
 		// the SvelteKit virtual modules are stubbed.
 		alias: [

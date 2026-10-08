@@ -171,8 +171,9 @@ def _pr_merge_commit(repo: Path, pr: int) -> Dict[str, Any]:
 
 
 # scripts/ci/edge_publication_gate.py annotates a refusal that only the owner
-# can clear (a combined main tree needs owner-dispatched CI) with this title and
-# the exact `gh workflow run` commands (#1940). The gate job itself stays green.
+# can clear (the full suites, or a combined main tree, need owner-dispatched
+# CI on main) with this title and the exact `gh workflow run` commands (#1940).
+# The gate job itself stays green.
 EDGE_REFUSAL_TITLE = "Edge publication refused"
 # Unrelated PR CI completions re-run the gate on the same main revision; bound
 # how many of its runs are read for the annotation.

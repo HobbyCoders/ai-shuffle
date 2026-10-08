@@ -18,7 +18,7 @@ on:
   pull_request:
     # Platform jobs are deferred on PRs. Add ci:full to run them on every push
     # (for PRs that really change this platform); removing it cancels them.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     paths:
       - 'android/**'
       - '.github/workflows/android.yml'
@@ -54,7 +54,7 @@ concurrency:
 jobs:
   changes:
     name: Classify Android APK inputs${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
-    if: github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full'
+    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -81,7 +81,7 @@ jobs:
           fi
 
   account-hub:
-    if: github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full'
+    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')
     name: Account hub Worker and D1 tests${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     timeout-minutes: 8
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -176,11 +176,11 @@ jobs:
           ./gradlew assembleDebug --max-workers=2 --stacktrace
           python3 ci/verify-mobile-apk.py app/build/outputs/apk/debug/app-debug.apk
       - name: Build Android test APK
-        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+        if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
         run: ./gradlew assembleDebugAndroidTest --max-workers=2 --stacktrace
 
       - name: Upload instrumentation APKs
-        if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+        if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
         uses: actions/upload-artifact@v4
         with:
           retention-days: 1
@@ -245,7 +245,7 @@ jobs:
 
   android-ui:
     name: Android emulator verification (API ${{ matrix.api }})${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     strategy:
       fail-fast: false
       matrix:
@@ -354,14 +354,14 @@ jobs:
   readiness:
     name: Android merge readiness${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     needs: ['changes', 'account-hub', 'build', 'android-ui']
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full') }}
+    if: ${{ !cancelled() && (github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
       - name: Require successful checks for this revision
         env:
-          CI_FULL_REQUESTED: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+          CI_FULL_REQUESTED: ${{ github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
           CI_REQUIRED_RESULTS: ${{ toJSON(needs) }}
           CI_DEFERRABLE_JOBS: '["android-ui"]'
           CI_ANDROID_APK_REQUIRED: ${{ needs.changes.outputs.apk }}

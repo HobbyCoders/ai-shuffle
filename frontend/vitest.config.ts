@@ -6,6 +6,21 @@ import { appVersion } from './app-version.js';
 const lib = fileURLToPath(new URL('./src/lib', import.meta.url));
 const stubs = fileURLToPath(new URL('./src/lib/test-stubs', import.meta.url));
 
+// Vitest's defaults (package.json, vite/vitest config) plus the lockfile,
+// compiler config and the SvelteKit stubs every store test runs on.
+// ../mobile/vitest.config.ts keeps the same list.
+const FULL_RUN_TRIGGERS = [
+	'**/package.json/**',
+	'**/{vitest,vite}.config.*/**',
+	'**/package-lock.json',
+	'**/svelte.config.js',
+	'**/tsconfig.json',
+	'**/app-version.js',
+	'**/src/lib/test-stubs/**',
+	'**/scripts/vitest-changed.mjs',
+	'**/.github/workflows/ci-frontend.yml'
+];
+
 export default defineConfig({
 	// Keep generated caches local when dependencies are shared by worktrees.
 	cacheDir: '.svelte-kit/vitest-cache',
@@ -27,6 +42,9 @@ export default defineConfig({
 		environment: 'jsdom',
 		include: ['src/**/*.{test,spec}.{js,ts}'],
 		exclude: ['node_modules', 'build', '.svelte-kit'],
+		// A change to any of these runs every test, including in CI's
+		// changed-only PR runs (scripts/vitest-changed.mjs).
+		forceRerunTriggers: FULL_RUN_TRIGGERS,
 		coverage: {
 			provider: 'v8',
 			reporter: ['text', 'json', 'html'],

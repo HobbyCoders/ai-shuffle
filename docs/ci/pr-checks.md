@@ -7,10 +7,31 @@ unchanged. These consume GitHub Actions allowance rather than Blacksmith
 minutes (runner overages follow the platform billing policy). The slow platform suites run
 when someone asks for them, and before a release.
 
+## Draft pull requests run no paid jobs
+
+Every workflow that uses a Blacksmith runner skips draft pull requests.
+Marking a PR ready for review starts its checks, and later pushes run them as
+usual. Agents should open PRs as drafts, push as often as they like, and mark
+the PR ready once the targeted local tests pass
+(`gh pr ready <number>`). Converting a PR back to draft stops new runs.
+
 ## On every pull request (path-filtered)
 
-- CI Backend: the backend test subset
-- CI JavaScript: the frontend, mobile, tools and browser-mcp packages that changed
+- CI Backend: the backend tests the change can reach. A manual full run on
+  `main` records which functions each test file runs; a PR compares its
+  changed Python files with the base, function by function, and runs the test
+  files that ran a changed function, plus changed test files
+  (`scripts/ci/backend_test_map.py`). It runs the whole fast subset when no
+  map exists yet, when dependencies, pytest settings or `conftest.py` change,
+  when the change touches code a session-wide fixture runs, or when most of
+  the suite is affected anyway. The job summary lists the selected files and
+  why.
+- CI JavaScript: the frontend, mobile, tools and browser-mcp packages that
+  changed. Builds, type checks and the contract check run in full; the
+  frontend and mobile unit tests run only the files the change reaches
+  (`frontend/scripts/vitest-changed.mjs`: Vitest's import graph, plus tests
+  that read a changed file as text). A lockfile or Vite, Vitest, Svelte or
+  TypeScript config change runs every test.
 - CI fluid: the fluid unit suite
 - Folder confinement (macOS): the folder and upload confinement tests on a
   native Mac, only when `app/core/chat_files.py`, `app/core/confined_files.py`
@@ -67,14 +88,29 @@ bridge tests. Native, mobile, shared frontend and unknown paths still build the
 APK. Renames check both old and new paths; missing or stale file evidence fails
 readiness. Manual and release runs always build and verify the APK.
 
-## Edge publication of a combined main tree
+## Full suites on main, and edge publication
 
-When a PR merges while its branch is behind `main` (another PR merged during
-its CI), the tree on `main` is one no PR CI tested. Edge publication then waits for the owner to run CI on
-`main`. The gate job stays green but adds an "Edge publication refused"
-warning to the "Publish desktop source update" run that lists the exact
-commands, for example `gh workflow run ci-backend.yml --ref main`. DeployStatus
-repeats them in its "publish edge first" next step.
+A PR runs only part of the backend and JavaScript tests, so the full suites run
+on `main`, and only when the owner starts them:
+
+```bash
+gh workflow run ci-backend.yml --ref main
+gh workflow run ci-frontend.yml --ref main
+```
+
+One run covers every PR merged since the last one. Edge publication waits for
+both to pass on the exact `main` revision, started by the owner
+(`MAIN_SUITES` in `scripts/ci/edge_publication_gate.py`); a PR's own green run
+never stands in for them. Every other check still counts from the merged PR
+when the PR tested the same tree. When the PR merged while its branch was
+behind `main`, the tree on `main` is one no PR CI tested, and every applicable
+workflow has to run on `main`.
+
+While it waits, the gate job stays green but adds an "Edge publication
+refused" warning to the "Publish desktop source update" run that lists the
+exact commands to run. DeployStatus repeats them in its "publish edge first"
+next step. The backend run on `main` also records the test map that later PRs
+select from, so a run after a batch of merges keeps PR selection current.
 
 ## Manual only
 

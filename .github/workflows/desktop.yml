@@ -8,7 +8,7 @@ on:
   pull_request:
     # Platform jobs are deferred on PRs. Add ci:full to run them on every push
     # (for PRs that really change this platform); removing it cancels them.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
     paths:
       - 'desktop/**'
       - '.github/workflows/desktop.yml'
@@ -35,7 +35,7 @@ concurrency:
 
 jobs:
   check:
-    if: github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full'
+    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')
     name: Typecheck and unit tests${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     timeout-minutes: 10
     runs-on: blacksmith-2vcpu-ubuntu-2404
@@ -56,7 +56,7 @@ jobs:
   package:
     name: Package Windows shell${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     timeout-minutes: 15
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     needs: check
     runs-on: blacksmith-2vcpu-windows-2025
     defaults:
@@ -121,7 +121,7 @@ jobs:
 
   windows-preview:
     name: Windows preview installer and fresh database${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')
+    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     needs: check
     runs-on: blacksmith-2vcpu-windows-2025
     timeout-minutes: 35
@@ -203,14 +203,14 @@ jobs:
   readiness:
     name: Desktop merge readiness${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
     needs: ['check', 'package', 'windows-preview']
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full') }}
+    if: ${{ !cancelled() && (github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - uses: actions/checkout@v4
       - name: Require successful checks for this revision
         env:
-          CI_FULL_REQUESTED: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full') }}
+          CI_FULL_REQUESTED: ${{ github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
           CI_REQUIRED_RESULTS: ${{ toJSON(needs) }}
           CI_DEFERRABLE_JOBS: '["package", "windows-preview"]'
         run: python3 scripts/ci/require-full-ci.py

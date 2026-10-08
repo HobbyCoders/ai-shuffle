@@ -9,9 +9,17 @@ run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '4' }} vCPU)"
 # docs copies match, and the website's rendered docs.json is current) and
 # nothing else.
 #
+# On a pull request the frontend and mobile unit tests run only the files a
+# change reaches (frontend/scripts/vitest-changed.mjs: Vitest's import graph
+# plus tests that read a changed file as text); a dependency or config change
+# still runs them all. Builds, type checks and the contract check always run
+# in full. Draft PRs run nothing. Edge publication waits for a manual full run
+# on main (scripts/ci/edge_publication_gate.py MAIN_SUITES).
+#
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'frontend/**'
       - 'mobile/**'
@@ -41,6 +49,8 @@ concurrency:
 jobs:
   frontend:
     name: JavaScript package checks
+    # Drafts run no paid CI; marking the PR ready starts it.
+    if: github.event.pull_request.draft != true
     # Cap well below the 6-hour default (paid runners).
     timeout-minutes: 20
     # Choose a frontend runner suited to the suite parallelism and keep a bounded job timeout.
@@ -51,8 +61,16 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    env:
+      # The checkout is the PR merge commit, so HEAD^1 is the base it merges
+      # into. The test selection diffs against it; empty on a manual run,
+      # which runs every test.
+      CHANGED_SINCE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The test selection needs the base commit next to the merge commit.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
       - uses: dorny/paths-filter@v3
         id: changes
         with:
@@ -115,7 +133,14 @@ jobs:
 
       - name: Frontend tests and contract consistency
         if: github.event_name != 'pull_request' || steps.changes.outputs.frontend == 'true'
-        run: npm test && npm run contract:check && npm audit --audit-level=high
+        run: |
+          if [ -n "$CHANGED_SINCE" ]; then
+            node scripts/vitest-changed.mjs "$CHANGED_SINCE"
+          else
+            npm test
+          fi
+          npm run contract:check
+          npm audit --audit-level=high
 
       # mobile/ is the phone UI every worker serves at /mobile/; the Android
       # and iOS apps load it from the paired worker (the APK keeps one copy
@@ -138,7 +163,12 @@ jobs:
       - name: Mobile tests
         if: github.event_name != 'pull_request' || steps.changes.outputs.mobile == 'true'
         working-directory: mobile
-        run: npx vitest run
+        run: |
+          if [ -n "$CHANGED_SINCE" ]; then
+            node ../frontend/scripts/vitest-changed.mjs "$CHANGED_SINCE"
+          else
+            npm test
+          fi
 
       # The frontend Build step above already built mobile/ when it ran, so
       # this runs only on a PR that changes mobile/ but not frontend/.

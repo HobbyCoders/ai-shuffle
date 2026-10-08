@@ -8,9 +8,16 @@ run-name: "${{ github.workflow }} (${{ inputs.runner_cpus || '2' }} vCPU)"
 # workflow not at all, so docs-only PRs run no CI whatsoever — intended, that
 # is the point of the split.
 #
+# A pull request runs only the fast-subset tests its change can reach, chosen
+# from the test map the last full run on main recorded
+# (scripts/ci/backend_test_map.py). Draft PRs run nothing. A manual run is the
+# full suite: on main it records a new test map, and edge publication waits
+# for it (scripts/ci/edge_publication_gate.py MAIN_SUITES).
+#
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'app/**'
       - 'tests/**'
@@ -50,6 +57,8 @@ concurrency:
 jobs:
   backend:
     name: Backend tests
+    # Drafts run no paid CI; marking the PR ready starts it.
+    if: github.event.pull_request.draft != true
     # Keep a hard job timeout so a silent suite wedge cannot run until the platform default. Schema creation is
     # reused per worker; validate the resulting behavior before lowering the cap.
     timeout-minutes: 35
@@ -103,6 +112,31 @@ jobs:
           python -m pytest tests/test_scan_blocking_db.py -o addopts="" -q
           python scripts/scan_blocking_db.py
 
+      - name: Restore the backend test map
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci/backend-test-map.json.gz
+          # Saved by the latest full run on main; the newest one wins.
+          key: backend-test-map-${{ github.sha }}
+          restore-keys: backend-test-map-
+
+      - name: Select the affected tests
+        id: select
+        # HEAD is the PR merge commit, so HEAD^1 is the base it merges into.
+        # Prints `all` when the map is missing or cannot place a change.
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            if ! python scripts/ci/backend_test_map.py select --map .ci/backend-test-map.json.gz --base HEAD^1 > .ci-selected-tests; then
+              echo "::warning::Test selection failed; running the full suite."
+              echo all > .ci-selected-tests
+            fi
+          else
+            echo all > .ci-selected-tests
+          fi
+          echo "selection=$(head -n 1 .ci-selected-tests)" >> "$GITHUB_OUTPUT"
+          { echo '### Backend test selection'; echo; sed 's/^/    /' .ci-selected-tests | head -n 200; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run fast test subset
         # The suite uses an in-memory SQLite shim — no Postgres service needed.
         # addopts="" overrides any pytest.ini addopts so this never fails on coverage.
@@ -119,14 +153,48 @@ jobs:
         # *_postgres.py and test_pg_session_store*.py files stay collected
         # here; they skip without ALLOW_REAL_PG=1 and run in the PostgreSQL
         # safety step.
-        run: >-
-          python -m pytest tests/api tests/core tests/db tests/middleware tests/contract
-          tests/performance tests/mcp tests/services tests/unit tests/scripts tests/test_*.py
-          --deselect=tests/test_scan_blocking_db.py
-          --ignore=tests/core/test_chat_shell.py
-          --ignore=tests/core/test_container_runtime.py
-          --ignore=tests/core/test_container_image_contract.py
-          -o addopts="" -q -p no:cacheprovider --timeout=120 -n "$PYTEST_WORKERS"
+        #
+        # A manual run also records the test map (tests/_test_map.py).
+        # The selected-tests branch keeps the same options; the selector never
+        # picks an excluded file.
+        if: steps.select.outputs.selection != 'none'
+        env:
+          BACKEND_TEST_MAP_DIR: ${{ github.event_name == 'workflow_dispatch' && '.ci/test-map-hits' || '' }}
+        run: |
+          options=(-o addopts="" -q -p no:cacheprovider --timeout=120 -n "$PYTEST_WORKERS")
+          if [ -n "$BACKEND_TEST_MAP_DIR" ]; then options+=(-p tests._test_map); fi
+          if [ "$(head -n 1 .ci-selected-tests)" = all ]; then
+            python -m pytest tests/api tests/core tests/db tests/middleware tests/contract \
+              tests/performance tests/mcp tests/services tests/unit tests/scripts tests/test_*.py \
+              --deselect=tests/test_scan_blocking_db.py \
+              --ignore=tests/core/test_chat_shell.py \
+              --ignore=tests/core/test_container_runtime.py \
+              --ignore=tests/core/test_container_image_contract.py \
+              "${options[@]}"
+          else
+            mapfile -t selected < .ci-selected-tests
+            python -m pytest "${selected[@]}" "${options[@]}"
+          fi
+
+      - name: Build the backend test map
+        if: success() && github.event_name == 'workflow_dispatch'
+        run: python scripts/ci/backend_test_map.py merge --hits .ci/test-map-hits --out .ci/backend-test-map.json.gz --commit "$GITHUB_SHA"
+
+      - name: Keep the test map for inspection
+        if: success() && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-map
+          path: .ci/backend-test-map.json.gz
+          retention-days: 3
+
+      # Only main's map reaches pull requests (a branch's cache stays on it).
+      - name: Cache the backend test map for pull requests
+        if: success() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: .ci/backend-test-map.json.gz
+          key: backend-test-map-${{ github.sha }}
 
       - name: Isolated folder shell escape tests (real bubblewrap)
         # The only run of tests/core/test_chat_shell.py: the fast subset

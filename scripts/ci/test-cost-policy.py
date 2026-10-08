@@ -12,9 +12,11 @@ import unittest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-RELEVANT = "github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full'"
+DRAFT = "github.event.pull_request.draft != true"
+RELEVANT = DRAFT + " && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')"
 NOOP = "github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full'"
-FULL = "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')"
+FULL = DRAFT + " && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))"
+PR_TYPES = {"opened", "synchronize", "reopened", "ready_for_review"}
 EXPENSIVE = {
     "ci-browser-workspace.yml": ["workspace"],
     "android.yml": ["android-ui"],
@@ -29,6 +31,10 @@ SCRIPT = ROOT / "scripts/ci/require-full-ci.py"
 spec = importlib.util.spec_from_file_location("readiness", SCRIPT)
 readiness = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(readiness)
+
+
+def js(expression):
+    return expression.replace("github.event.pull_request.draft", "github.event.pull_request?.draft")
 
 
 def workflow(name):
@@ -59,29 +65,58 @@ class CostPolicyTests(unittest.TestCase):
                 self.assertNotIn("continue-on-error", gate)
 
     def test_label_gate_truth_table_executes(self):
-        # GitHub's label projection is the only non-JS syntax in this expression.
-        expression = FULL.replace("labels.*.name", "labels.map(label => label.name)")
+        # GitHub's label projection is the only non-JS syntax in this expression;
+        # a missing pull_request is null in Actions, where JS would throw.
+        expression = js(FULL).replace("labels.*.name", "labels.map(label => label.name)")
         cases = []
-        for event, labels in itertools.product(
+        for event, labels, draft in itertools.product(
             ["pull_request", "workflow_dispatch", "workflow_call"],
             [[], [{"name": "bug"}], [{"name": "ci:full"}], [{"name": "ci:full-other"}]],
+            [False, True],
         ):
             github = {"event_name": event, "event": {}}
             if event == "pull_request":
-                github["event"]["pull_request"] = {"labels": labels}
-            cases.append({"github": github, "expected": event != "pull_request" or any(label["name"] == "ci:full" for label in labels)})
+                github["event"]["pull_request"] = {"labels": labels, "draft": draft}
+            expected = event != "pull_request" or (not draft and any(label["name"] == "ci:full" for label in labels))
+            cases.append({"github": github, "expected": expected})
         runner = "const {expr,cases}=JSON.parse(require('fs').readFileSync(0,'utf8')); const fn=new Function('github','contains','return '+expr); for(const c of cases) require('assert').strictEqual(fn(c.github,(xs,x)=>xs.includes(x)),c.expected);"
         subprocess.run(["node", "-e", runner], input=json.dumps({"expr": expression, "cases": cases}), text=True, check=True)
 
     def test_new_commits_and_label_removal_recheck_readiness(self):
         for name in EXPENSIVE:
             config = workflow(name)
-            self.assertEqual(set(config["on"]["pull_request"]["types"]), {"opened", "synchronize", "reopened", "labeled", "unlabeled"})
+            self.assertEqual(set(config["on"]["pull_request"]["types"]), PR_TYPES | {"labeled", "unlabeled"})
             self.assertIn("scripts/ci/require-full-ci.py", config["on"]["pull_request"]["paths"])
             self.assertIn("github.ref", config["concurrency"]["group"])
             self.assertIn(NOOP + " && github.run_id", config["concurrency"]["group"])
             self.assertEqual(config["run-name"], "${{ github.workflow }}${{ " + NOOP + " && ' (unrelated label event)' || '' }}")
             self.assertIn(config["concurrency"]["cancel-in-progress"], ["true", "${{ github.event_name == 'pull_request' }}"])
+
+    def test_draft_prs_start_no_paid_runner(self):
+        # Every paid job a pull request can start skips drafts (directly or
+        # through a skipped dependency), and marking the PR ready starts it.
+        paid = 0
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            config = workflow(path.name)
+            trigger = config["on"].get("pull_request") if isinstance(config["on"], dict) else None
+            if trigger is None and "pull_request" not in config["on"]:
+                continue
+            jobs = config["jobs"]
+            def skips_drafts(key):
+                job = jobs[key]
+                if DRAFT in job.get("if", ""):
+                    return True
+                needs = job.get("needs") or []
+                needs = [needs] if isinstance(needs, str) else needs
+                return any(skips_drafts(need) for need in needs) and "always()" not in job.get("if", "")
+            for key, job in jobs.items():
+                if "blacksmith" not in job.get("runs-on", "") or "github.event_name != 'pull_request' &&" in job.get("if", ""):
+                    continue
+                with self.subTest(workflow=path.name, job=key):
+                    paid += 1
+                    self.assertTrue(skips_drafts(key))
+                    self.assertTrue(PR_TYPES <= set((trigger or {}).get("types", [])))
+        self.assertGreaterEqual(paid, 10)
 
     def test_cheap_checks_do_not_require_the_label(self):
         for name, keys in {
@@ -108,16 +143,19 @@ class CostPolicyTests(unittest.TestCase):
 
     def test_irrelevant_labels_do_not_cancel_or_start_validation(self):
         cases = []
-        for event, action, label in itertools.product(
+        for event, action, label, draft in itertools.product(
             ["pull_request", "workflow_dispatch", "workflow_call"],
-            ["opened", "synchronize", "reopened", "labeled", "unlabeled"],
+            ["opened", "synchronize", "reopened", "ready_for_review", "labeled", "unlabeled"],
             ["ci:full", "bug", "ci:full-other"],
+            [False, True],
         ):
-            irrelevant = event == "pull_request" and action in {"labeled", "unlabeled"} and label != "ci:full"
+            irrelevant = event == "pull_request" and (draft or (action in {"labeled", "unlabeled"} and label != "ci:full"))
             github = {"event_name": event, "event": {"action": action, "label": {"name": label}}}
+            if event == "pull_request":
+                github["event"]["pull_request"] = {"draft": draft}
             cases.append({"github": github, "expected": not irrelevant})
         runner = "const {expr,cases}=JSON.parse(require('fs').readFileSync(0,'utf8')); const fn=new Function('github','return '+expr); for(const c of cases) require('assert').strictEqual(fn(c.github),c.expected);"
-        subprocess.run(["node", "-e", runner], input=json.dumps({"expr": RELEVANT, "cases": cases}), text=True, check=True)
+        subprocess.run(["node", "-e", runner], input=json.dumps({"expr": js(RELEVANT), "cases": cases}), text=True, check=True)
         for name in EXPENSIVE:
             config = workflow(name)
             group = config["concurrency"]["group"]
@@ -209,7 +247,7 @@ class CostPolicyTests(unittest.TestCase):
         # smoke start it. Releases still re-run it in docker-publish.yml.
         config = workflow("container-postgres.yml")
         self.assertEqual(set(config["on"]), {"pull_request", "workflow_dispatch"})
-        self.assertEqual(set(config["on"]["pull_request"]), {"paths"})
+        self.assertEqual(set(config["on"]["pull_request"]), {"types", "paths"})
         self.assertEqual(config["on"]["pull_request"]["paths"], [
             "Dockerfile", "docker/**", "entrypoint.sh", "scripts/verify_container_postgres.py",
             "tests/integration/container_ui_smoke.mjs", "frontend/src/routes/setup/**",

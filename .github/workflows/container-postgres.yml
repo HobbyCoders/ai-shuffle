@@ -11,6 +11,7 @@ name: Container PostgreSQL
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'Dockerfile'
       - 'docker/**'
@@ -31,6 +32,8 @@ concurrency:
 jobs:
   container-postgres:
     name: Single-container PostgreSQL and browser
+    # Drafts run no paid CI; marking the PR ready starts it.
+    if: github.event.pull_request.draft != true
     # Use the smaller image-build runner with the sticky layer cache; retain the full container verification.
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 40

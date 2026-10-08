@@ -1,5 +1,10 @@
 """Authorize edge publication using exact-tree PR or owner-started main CI.
 
+The backend and frontend suites run only the affected tests on a pull request,
+so their PR runs never count here: those two workflows always need a full run
+the owner dispatched on the exact main revision. Other workflows still accept
+the merged PR's own runs when its tree is the one on main.
+
 Run only from a checkout of protected main, never from a workflow_run artifact.
 This script reads GitHub metadata; it does not receive signing or Cloudflare keys.
 """
@@ -30,6 +35,11 @@ UNRELATED_LABEL_SUFFIX = " (unrelated label event)"
 # it is annotated on the run; app/core/deploy_status.py reads it by this title.
 COMBINED_TREE_REFUSAL = "Combined main tree was not tested by PR CI; edge publication needs owner-dispatched CI on main"
 REFUSAL_TITLE = "Edge publication refused"
+# Pull requests run only the tests a change can reach in these workflows; edge
+# publication waits for the owner to run them in full on main (any number of
+# merges at once).
+MAIN_SUITES = (".github/workflows/ci-backend.yml", ".github/workflows/ci-frontend.yml")
+MAIN_SUITE_REFUSAL = "Edge publication waits for the full backend and frontend suites on main"
 UNRELATED_LABEL_RUN_NAME = (
     "${{ github.workflow }}${{ github.event_name == 'pull_request' && "
     "(github.event.action == 'labeled' || github.event.action == 'unlabeled') && "
@@ -195,11 +205,38 @@ def publication_readiness(api, revision, directory, trigger_head=None):
         names.update(file["previous_filename"] for file in changed if "previous_filename" in file)
         if len(changed) >= 300:
             names = None
-    expected = applicable_workflows(directory, names)
+    # Earlier merges may still wait for these suites, so every revision needs
+    # them, whatever its own PR changed.
+    main_suites = {path for path in MAIN_SUITES if (directory / Path(path).name).is_file()}
+    expected = applicable_workflows(directory, names) | main_suites
     if not expected:
         return False, "No applicable PR CI; no source update will be published"
 
-    event, tested = ("workflow_dispatch", revision) if main_ci else ("pull_request", head)
+    def on_main(path):
+        return main_ci or path in main_suites
+
+    latest = {}
+    for event, tested, paths in [("workflow_dispatch", revision, {p for p in expected if on_main(p)}),
+                                 ("pull_request", head, {p for p in expected if not on_main(p)})]:
+        if paths:
+            latest.update(latest_runs(api, event, tested, paths, directory))
+    blocked = [path for path in sorted(expected) if path not in latest
+               or latest[path]["status"] != "completed" or latest[path]["conclusion"] != "success"
+               or (on_main(path) and not owner_main_ci(latest[path]))]
+    if blocked:
+        if not any(on_main(path) for path in blocked):
+            return False, "CI missing, pending, or unsuccessful: " + ", ".join(blocked)
+        prefix = COMBINED_TREE_REFUSAL if main_ci else MAIN_SUITE_REFUSAL
+        return False, main_refusal(prefix, blocked, [path for path in blocked if on_main(path)], latest)
+    # Recheck after the API reads. The publisher also checks main before writing its pointer.
+    if api("branches/main")["commit"]["sha"] != revision:
+        return False, "main moved during CI verification; skipping superseded revision"
+    source = "Combined main revision" if main_ci else f"PR #{pr['number']}"
+    return True, f"{source}: all {len(expected)} applicable workflows passed for the exact merged tree"
+
+
+def latest_runs(api, event, tested, paths, directory):
+    """The latest genuine run of each workflow in ``paths`` for one event and revision."""
     runs = pages(api, f"actions/runs?event={event}&head_sha={tested}", "workflow_runs", limit=10)
     latest = {}
     # Once the latest genuine run is found, older attempts (including label
@@ -209,30 +246,18 @@ def publication_readiness(api, revision, directory, trigger_head=None):
                 or (run.get("head_repository") or {}).get("full_name") != REPOSITORY):
             continue
         path = run["path"]
-        if path not in expected or path in latest or unrelated_label_run(api, run, directory):
+        if path not in paths or path in latest or unrelated_label_run(api, run, directory):
             continue
         latest[path] = run
-    blocked = [path for path in sorted(expected) if path not in latest
-               or latest[path]["status"] != "completed" or latest[path]["conclusion"] != "success"
-               or (main_ci and not owner_main_ci(latest[path]))]
-    if blocked:
-        reason = "CI missing, pending, or unsuccessful: " + ", ".join(blocked)
-        if main_ci:
-            reason = combined_tree_refusal(blocked, latest)
-        return False, reason
-    # Recheck after the API reads. The publisher also checks main before writing its pointer.
-    if api("branches/main")["commit"]["sha"] != revision:
-        return False, "main moved during CI verification; skipping superseded revision"
-    source = "Combined main revision" if main_ci else f"PR #{pr['number']}"
-    return True, f"{source}: all {len(expected)} applicable workflows passed for the exact merged tree"
+    return latest
 
 
-def combined_tree_refusal(blocked, latest):
+def main_refusal(prefix, blocked, on_main, latest):
     """The refusal plus the exact owner commands that would unblock it."""
-    running = [path for path in blocked if path in latest and latest[path]["status"] != "completed"
+    running = [path for path in on_main if path in latest and latest[path]["status"] != "completed"
                and owner_main_ci(latest[path])]
-    dispatch = [path for path in blocked if path not in running]
-    lines = [f"{COMBINED_TREE_REFUSAL}. CI missing, pending, or unsuccessful: {', '.join(blocked)}"]
+    dispatch = [path for path in on_main if path not in running]
+    lines = [f"{prefix}. CI missing, pending, or unsuccessful: {', '.join(blocked)}"]
     if dispatch:
         lines.append("Dispatch on main:")
         lines.extend(f"gh workflow run {Path(path).name} --ref main" for path in dispatch)
@@ -282,7 +307,7 @@ def main():
     trigger = event["workflow_run"]["head_sha"] if env["GITHUB_EVENT_NAME"] == "workflow_run" else None
     ready, reason = publication_readiness(GitHub(), revision, ROOT / ".github/workflows", trigger)
     print(reason)
-    if not ready and reason.startswith(COMBINED_TREE_REFUSAL):
+    if not ready and reason.startswith((COMBINED_TREE_REFUSAL, MAIN_SUITE_REFUSAL)):
         # The gate job still succeeds; this is what makes the refusal visible.
         print(warning_annotation(reason))
     with Path(env["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:

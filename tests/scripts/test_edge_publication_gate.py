@@ -690,3 +690,89 @@ def test_workflow_event_predicate_executes_for_authorized_events():
     assert not permits(expression, triggering_actor="other")
     for event in ["pull_request", "pull_request_target", "schedule"]:
         assert not permits(expression, event=event)
+
+
+@pytest.fixture
+def suite_evidence(evidence):
+    """The PR's own CI passed, but ci-backend.yml only ran the affected tests there."""
+    (evidence.directory / "ci-backend.yml").write_text(
+        "name: CI Backend\non:\n  pull_request:\n    paths: ['app/**']\n", encoding="utf-8")
+    backend = {**evidence.run, "id": 30, "path": gate.MAIN_SUITES[0]}
+    evidence.runs.update(workflow_runs=[evidence.run, backend], total_count=2)
+    main_run = {**evidence.run, "id": 31, "path": gate.MAIN_SUITES[0], "event": "workflow_dispatch",
+                "head_sha": REVISION, "head_branch": "main", "actor": {"id": int(gate.OWNER_ID)},
+                "triggering_actor": {"id": int(gate.OWNER_ID)}}
+    evidence.main_run = main_run
+    evidence.main_runs = evidence.data[f"actions/runs?event=workflow_dispatch&head_sha={REVISION}&per_page=100&page=1"]
+    return evidence
+
+
+def test_selected_pr_suite_never_authorizes_publication(suite_evidence):
+    ready, reason = check(suite_evidence)
+    assert not ready
+    assert reason.splitlines() == [
+        gate.MAIN_SUITE_REFUSAL + ". CI missing, pending, or unsuccessful: " + gate.MAIN_SUITES[0],
+        "Dispatch on main:",
+        "gh workflow run ci-backend.yml --ref main",
+    ]
+
+
+def test_owner_full_suite_on_main_plus_pr_ci_publishes(suite_evidence):
+    suite_evidence.main_runs.update(workflow_runs=[suite_evidence.main_run], total_count=1)
+    ready, reason = check(suite_evidence)
+    assert ready and reason.startswith("PR #12")
+    # The other workflow still needs the PR's own run.
+    suite_evidence.run["conclusion"] = "failure"
+    ready, reason = check(suite_evidence)
+    assert not ready and reason == "CI missing, pending, or unsuccessful: " + PATH
+
+
+@pytest.mark.parametrize("field,value", [
+    ("actor", {"id": 7}), ("head_branch", "other"), ("conclusion", "failure"), ("status", "in_progress"),
+])
+def test_main_suite_needs_a_finished_owner_run(suite_evidence, field, value):
+    suite_evidence.main_run[field] = value
+    suite_evidence.main_runs.update(workflow_runs=[suite_evidence.main_run], total_count=1)
+    ready, reason = check(suite_evidence)
+    assert not ready and reason.startswith(gate.MAIN_SUITE_REFUSAL)
+    if field == "status":
+        assert reason.splitlines()[-1] == "Still running on main: ci-backend.yml"
+
+
+def test_main_suites_cover_a_batch_that_ends_in_a_docs_merge(suite_evidence):
+    # Earlier merges changed app/; the last one did not. Its revision still
+    # needs the full suites, and they are all it needs.
+    suite_evidence.data["pulls/12/files?per_page=100&page=1"] = [{"filename": "docs/internal.md"}]
+    assert check(suite_evidence)[1].startswith(gate.MAIN_SUITE_REFUSAL)
+    suite_evidence.main_runs.update(workflow_runs=[suite_evidence.main_run], total_count=1)
+    assert check(suite_evidence)[0]
+
+
+def test_entrypoint_annotates_a_main_suite_refusal(suite_evidence, monkeypatch, tmp_path, capsys):
+    root = tmp_path / "repo"
+    directory = root / ".github/workflows"
+    directory.mkdir(parents=True)
+    for name in ["ci.yml", "ci-backend.yml"]:
+        (directory / name).write_text((suite_evidence.directory / name).read_text(), encoding="utf-8")
+    event_file = tmp_path / "push.json"
+    event_file.write_text("{}", encoding="utf-8")
+    output = tmp_path / "output"
+    for name, value in {**event_env("push"), "GITHUB_SHA": REVISION, "GITHUB_EVENT_PATH": str(event_file),
+                        "GITHUB_OUTPUT": str(output)}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(gate, "ROOT", root)
+    monkeypatch.setattr(gate, "GitHub", lambda: suite_evidence.data.__getitem__)
+    monkeypatch.setattr(gate.subprocess, "check_output", lambda *a, **k: REVISION + "\n")
+    gate.main()
+    assert output.read_text().strip() == "ready=false"
+    warnings = [line for line in capsys.readouterr().out.splitlines() if line.startswith("::warning")]
+    assert warnings == ["::warning title=Edge publication refused::" + gate.MAIN_SUITE_REFUSAL
+                        + ". CI missing, pending, or unsuccessful: " + gate.MAIN_SUITES[0]
+                        + "%0ADispatch on main:%0Agh workflow run ci-backend.yml --ref main"]
+
+
+def test_main_suites_are_the_selective_pr_workflows():
+    for path in gate.MAIN_SUITES:
+        config = yaml.load((ROOT / path).read_text(), Loader=gate.UniqueLoader)
+        assert "pull_request" in config["on"] and "workflow_dispatch" in config["on"]

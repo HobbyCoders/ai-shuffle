@@ -16,6 +16,7 @@ name: CI fluid
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'fluid/**'
       - '.github/workflows/ci-fluid.yml'
@@ -31,6 +32,8 @@ concurrency:
 jobs:
   unit:
     name: fluid unit tests
+    # Drafts run no paid CI; marking the PR ready starts it.
+    if: github.event.pull_request.draft != true
     timeout-minutes: 20
     # Use a smaller runner for the single-process Fluid test suite.
     runs-on: blacksmith-2vcpu-ubuntu-2404
