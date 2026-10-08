@@ -33,11 +33,29 @@ _recovery_upload_due = False
 _bootstrap_lock: Optional[asyncio.Lock] = None
 _pass_lock: Optional[asyncio.Lock] = None
 _directory_poll_at: dict[str, float] = {}
+_bootstrap_failures: set[str] = set()
 DIRECTORY_POLL_SECONDS = 240.0
 
 
 class HubError(RuntimeError):
     pass
+
+
+def _bootstrap_failure(peer: str, exc: Exception) -> str:
+    # HTTP timeouts often have no message. Log once per peer's failure streak,
+    # not on every account-loop retry, but keep the current reason in status.
+    reason = f"{type(exc).__name__}: {exc}".rstrip(": ")
+    message = f"Peer {peer}: {reason}"
+    if peer not in _bootstrap_failures:
+        logger.warning("Settings bootstrap failed from %s", message)
+        _bootstrap_failures.add(peer)
+    return message
+
+
+def _bootstrap_mismatch(reason: str) -> HubError:
+    exc = HubError(reason)
+    _bootstrap_failure(identity_mod.load().device_id, exc)
+    return exc
 
 
 # ---------------------------------------------------------------------------
@@ -448,13 +466,13 @@ async def _bootstrap_from_hub(response: dict | None = None, *, device_name: str 
         saved = marker.get("response") or {}
         if (marker.get("role") != "hub_bootstrap" or marker.get("device_id") != identity_mod.load().device_id
                 or saved.get("binding") != binding_identity):
-            raise HubError("Settings sync belongs to a different worker or account connection")
+            raise _bootstrap_mismatch("Settings sync belongs to a different worker or account connection")
         admission = saved.get("admission") or {}
         ctx = engine.context()
         if ctx is None:
             ctx = await asyncio.to_thread(engine.enroll_from_response, admission, device_name=marker["name"])
         if ctx.network_id != admission.get("network_id") or ctx.device_id != marker["device_id"]:
-            raise HubError("Settings sync does not match this worker's network")
+            raise _bootstrap_mismatch("Settings sync does not match this worker's network")
         if ctx.bootstrap_state == engine.BOOTSTRAP_SYNCING:
             if not (await run_sync(_hub_state)).get("registered"):
                 await asyncio.to_thread(register)
@@ -466,6 +484,8 @@ async def _bootstrap_from_hub(response: dict | None = None, *, device_name: str 
         await asyncio.to_thread(engine.publish_presence, version=settings.version)
         await asyncio.to_thread(store.delete_join, marker["id"])
         engine.kick()
+        _bootstrap_failures.clear()
+        _state["last_error"] = None
         return True
 
 
@@ -620,6 +640,7 @@ def reset_for_tests() -> None:
     _bootstrap_lock = None
     _pass_lock = None
     _directory_poll_at.clear()
+    _bootstrap_failures.clear()
 
 
 async def _bootstrap_from_peers(admission: dict) -> None:
@@ -632,14 +653,26 @@ async def _bootstrap_from_peers(admission: dict) -> None:
     for member in await run_sync(store.list_members):
         if member["device_id"] != ctx.device_id and member["status"] == "active":
             candidates.setdefault(member["device_id"], member.get("endpoints") or [])
+    errors = []
+
+    def waiting(reason: str) -> None:
+        _state["last_error"] = reason
+
     async with httpx.AsyncClient(follow_redirects=False) as client:
         for device_id, endpoints in candidates.items():
             if not device_id or not endpoints:
                 continue
             try:
                 link = transport.PeerLink(device_id, endpoints)
-                await link.receive_state(client, ctx)
+                waiting(f"Waiting for peer {device_id} to copy your settings")
+                await link.receive_state(client, ctx, on_wait=waiting)
+                _bootstrap_failures.clear()
+                _state["last_error"] = None
                 return
-            except (httpx.HTTPError, transport.PeerError, ValueError, engine.ApplyError):
-                continue
-    raise HubError("Waiting for another worker to come online to copy your data")
+            except (httpx.HTTPError, transport.PeerError, ValueError, engine.ApplyError) as exc:
+                errors.append(_bootstrap_failure(device_id, exc))
+    reason = "Waiting for another worker to come online to copy your data"
+    if errors:
+        reason += ": " + "; ".join(errors)
+    _state["last_error"] = reason[:200]
+    raise HubError(reason)

@@ -5,6 +5,7 @@ frontier; the receiver advances that frontier only after every page commits.
 """
 from __future__ import annotations
 
+import contextvars
 import copy
 import json
 import re
@@ -12,6 +13,7 @@ import shutil
 import threading
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from app.core.config import settings
@@ -21,6 +23,65 @@ from app.network import crypto, engine, keyring, policy
 TTL = 900
 MAX_PAGE = 8 * 1024 * 1024
 _lock = threading.Lock()
+_jobs_lock = threading.Lock()
+_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="peer-capture")
+_jobs: dict[tuple, Future] = {}
+
+
+def state(recipient: str, *, prepare: bool = False) -> dict:
+    """Share a capture across requests, including ones whose client went away.
+
+    New joiners opt in with ?prepare=true and poll without holding an HTTP
+    request open. Old joiners get the original synchronous manifest shape,
+    but wait on the SAME job; their timed-out retries do not restart capture.
+    The executor is independent of the request's cancellation/asyncio loop.
+    """
+    while True:
+        ctx = engine.require_context()
+        member = ctx.member(recipient)
+        if ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+            raise ValueError("This worker is still receiving its initial state")
+        if member is None or member.status != "active":
+            raise ValueError("Peer is no longer a member")
+        key = (str(settings.data_dir), recipient, ctx.network_id, ctx.generation)
+        with _jobs_lock:
+            for saved_key, job in list(_jobs.items()):
+                if job.done() and (job.exception() is not None
+                                   or job.result()["expires_at"] <= time.time()):
+                    # Preserve this request's error, then allow a later retry.
+                    if saved_key == key and job.exception() is not None:
+                        del _jobs[saved_key]
+                        return job.result()
+                    del _jobs[saved_key]
+            job = _jobs.get(key)
+            if job is None:
+                context = contextvars.copy_context()
+                job = _executor.submit(context.run, capture, recipient)
+                _jobs[key] = job
+        if prepare and not job.done():
+            return {"status": "preparing"}
+        manifest = job.result()
+        needs_snapshot = store.requires_snapshot(manifest["watermarks"], exclude_origin=recipient)
+        # Both capture and the tail query can wait while membership changes.
+        # Reacquire the live context AFTER those waits, immediately before
+        # returning a wrapped keyring; do not hold membership/job locks over DB.
+        current = engine.require_context()
+        member = current.member(recipient)
+        if current.bootstrap_state != engine.BOOTSTRAP_READY:
+            raise ValueError("This worker is still receiving its initial state")
+        if member is None or member.status != "active":
+            raise ValueError("Peer is no longer a member")
+        if (manifest["network_id"] != current.network_id or manifest["generation"] != current.generation
+                or manifest["recipient"] != recipient):
+            raise ValueError("Membership changed during peer capture; retry")
+        if not needs_snapshot:
+            return manifest
+        # Pruning or adopting another worker's snapshot can advance our head
+        # without retaining its ops. In that case this frontier cannot catch up
+        # by exchange: discard it and share one fresh capture, even within TTL.
+        with _jobs_lock:
+            if _jobs.get(key) is job:
+                del _jobs[key]
 
 
 def _root() -> Path:
@@ -69,7 +130,11 @@ def capture(recipient: str) -> dict:
                         manifest = json.loads(saved.read_text())
                         if (manifest["recipient"] == recipient and manifest["network_id"] == ctx.network_id
                                 and manifest["generation"] == ctx.generation
-                                and manifest["watermarks"] == store.local_watermarks()):
+                                and manifest["expires_at"] > time.time()
+                                and not store.requires_snapshot(manifest["watermarks"], exclude_origin=recipient)):
+                            # Ordinary writes may advance the frontier: reuse
+                            # it while its tail is retained. Snapshot adoption
+                            # or pruning can leave gaps that require recapture.
                             return manifest
         engine.scan_all()
         transfer = uuid.uuid4().hex
@@ -138,9 +203,12 @@ def verify_manifest(manifest: dict, publisher: str):
     ctx = copy.deepcopy(engine.require_context())
     member = ctx.member(publisher)
     unsigned = {k: v for k, v in manifest.items() if k != "signature"}
+    if manifest.get("network_id") != ctx.network_id:
+        raise ValueError("Peer state belongs to a different network")
+    if manifest.get("recipient") != ctx.device_id or manifest.get("publisher") != publisher:
+        raise ValueError("Peer state belongs to a different device")
     if (member is None or member.status != "active" or manifest.get("format") != 1
-            or manifest.get("network_id") != ctx.network_id or manifest.get("recipient") != ctx.device_id
-            or manifest.get("publisher") != publisher or manifest.get("expires_at", 0) <= time.time()
+            or manifest.get("expires_at", 0) <= time.time()
             or not re.fullmatch(r"[a-f0-9]{32}", manifest.get("transfer", ""))
             or not crypto.verify(member.signing_public, crypto.canonical_json(unsigned),
                                  crypto.b64u_decode(manifest.get("signature", "")))):

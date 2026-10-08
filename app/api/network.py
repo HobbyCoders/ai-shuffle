@@ -683,10 +683,10 @@ async def desktop_startup_sync(_: str = Depends(require_admin)) -> dict:
 
 
 @router.post("/peer/state")
-async def peer_state(device_id: str = Depends(tokens.require_device)) -> dict:
+async def peer_state(prepare: bool = False, device_id: str = Depends(tokens.require_device)) -> dict:
     from app.network import peer_snapshot
     try:
-        return await run_sync(peer_snapshot.capture, device_id)
+        return await run_sync(peer_snapshot.state, device_id, prepare=prepare)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 

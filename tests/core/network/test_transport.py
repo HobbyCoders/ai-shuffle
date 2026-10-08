@@ -105,6 +105,19 @@ class ServedBy:
             response = self.client.request(request.method, path, content=request.content,
                                            headers={k: v for k, v in request.headers.items()
                                                     if k.lower() in ("authorization", "content-type", "accept")})
+            if (path.split("?")[0] == "/api/v1/network/peer/state" and response.status_code == 200
+                    and response.json().get("status") == "preparing"):
+                # This synchronous mock swaps process-wide identity/path globals
+                # between workers. Drain the server job before restoring them;
+                # background timing is tested with a single active server below.
+                from app.network import peer_snapshot
+                recipient = tokens.verify_token(request.headers["authorization"].removeprefix("Bearer "))
+                ctx = engine.require_context()
+                job = peer_snapshot._jobs[(str(self.server.data_dir), recipient, ctx.network_id, ctx.generation)]
+                try:
+                    job.result()
+                except ValueError:
+                    pass  # Leave the failure for the next poll to expose through the API.
         return httpx.Response(response.status_code, content=response.content,
                               headers={"content-type": response.headers.get("content-type", "application/json")})
 

@@ -52,6 +52,10 @@ PRESENCE_INTERVAL_SECONDS = 300.0
 ONLINE_WINDOW_SECONDS = 90
 BATCH_LIMIT = 500
 REQUEST_TIMEOUT = 15.0
+STATE_REQUEST_TIMEOUT = 120.0  # Older inviters still capture inside the request.
+STATE_PREPARE_SECONDS = 30 * 60.0
+STATE_POLL_SECONDS = 1.0
+STATE_POLL_MAX_SECONDS = 10.0
 # A regular pass keeps pulling full batches for this long before it pushes.
 SYNC_PULL_SECONDS = 3.0
 # Set for the launch barrier's requests only (a context variable, so the
@@ -199,7 +203,7 @@ class PeerLink:
         headers = {"Accept": "application/json"}
         if auth:
             headers["Authorization"] = "Bearer " + (self.token or "")
-        seconds = 120 if path == "/api/v1/network/peer/state" else timeout
+        seconds = timeout
         connect = connect_timeout.get()
         response = await client.request(method, base + path, json=json_body, params=params,
                                         headers=headers,
@@ -402,11 +406,37 @@ class PeerLink:
         self.last_error = None
         return summary
 
-    async def receive_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext) -> int:
+    async def receive_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
+                            *, on_wait=None) -> int:
         from app.network import peer_snapshot
         _snapshot_peers.add(self.device_id)
-        await self.authenticate(client, ctx)
-        manifest = await self._request(client, "POST", "/api/v1/network/peer/state", json_body={})
+        deadline = time.monotonic() + STATE_PREPARE_SECONDS
+        delay = STATE_POLL_SECONDS
+        try:
+            # Bound authentication as well as polling, and reject even a ready
+            # manifest if its request outlasts the preparation budget. Downloads
+            # have their own per-page limits outside this preparation timeout.
+            async with asyncio.timeout(STATE_PREPARE_SECONDS):
+                while True:
+                    await self.authenticate(client, ctx)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise PeerError("Timed out waiting for peer state capture")
+                    # Older inviters ignore the query parameter and return a
+                    # manifest directly. Keep their 120s request allowance.
+                    manifest = await self._request(
+                        client, "POST", "/api/v1/network/peer/state", json_body={},
+                        params={"prepare": "true"}, timeout=min(STATE_REQUEST_TIMEOUT, remaining))
+                    if time.monotonic() >= deadline:
+                        raise PeerError("Timed out waiting for peer state capture")
+                    if manifest.get("status") != "preparing":
+                        break
+                    if on_wait:
+                        on_wait(f"Waiting for peer {self.device_id} to prepare your settings copy")
+                    await asyncio.sleep(min(delay, max(0, deadline - time.monotonic())))
+                    delay = min(delay * 2, STATE_POLL_MAX_SECONDS)
+        except TimeoutError as exc:
+            raise PeerError("Timed out waiting for peer state capture") from exc
         await asyncio.to_thread(peer_snapshot.verify_manifest, manifest, self.device_id)
         with tempfile.TemporaryDirectory(prefix="shuffle-peer-") as temporary:
             directory = Path(temporary)
@@ -425,7 +455,17 @@ class PeerLink:
                     raise PeerError("Peer state page was truncated")
                 await asyncio.to_thread((directory / f"{index}.json").write_bytes, raw)
             applied = await asyncio.to_thread(peer_snapshot.apply, manifest, directory, self.device_id)
-            note_watermarks(self.device_id, manifest["watermarks"],
+            # A reused snapshot can predate the frontier just advertised by
+            # exchange. Adopt only its committed frontier locally, but do not
+            # hide a known backlog in owner_sync_status by lowering the peer's
+            # observed head. The following exchange tails from local_watermarks;
+            # _check_rollback still uses the live exchange's own-stream proof.
+            observed = {origin: dict(streams) for origin, streams in manifest["watermarks"].items()}
+            for origin, streams in _peer_watermarks.get(self.device_id, {}).items():
+                bucket = observed.setdefault(origin, {})
+                for incarnation, seq in streams.items():
+                    bucket[incarnation] = max(int(bucket.get(incarnation, 0)), int(seq))
+            note_watermarks(self.device_id, observed,
                             catalog_backlog=_peer_catalog_backlog.get(self.device_id, False))
             _snapshot_peers.discard(self.device_id)
             return applied
