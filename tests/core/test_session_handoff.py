@@ -1,9 +1,14 @@
 """Agent-queued hand-off to another worker, run when the session is idle."""
+import sqlite3
+import threading
 import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
+
+from tests.pg_shim import ShimConnectionClosedError
 
 from app.core import session_handoff as sh
 
@@ -30,6 +35,51 @@ def _clean(tmp_path):
     sh._pending.clear()
     sh._waiting.clear()
     sh._moving.clear()
+
+
+@pytest.mark.parametrize("error", [
+    sqlite3.ProgrammingError("Cannot operate on a closed database"),
+    ShimConnectionClosedError("pg_shim: connection closed (teardown in progress)"),
+])
+async def test_on_boot_logs_revoked_transfer_recovery_failure(error, caplog):
+    with patch.object(sh, "resume_queued", AsyncMock()) as resume, \
+            patch.object(sh, "announce_dropped", AsyncMock()) as announce, \
+            patch("app.network.handoff.recover_revoked_transfers", side_effect=error) as recover:
+        await sh.on_boot()
+
+    resume.assert_awaited_once()
+    announce.assert_awaited_once()
+    recover.assert_called_once_with()
+    [warning] = [r for r in caplog.records if r.message == "Could not recover revoked transfers"]
+    assert warning.levelname == "WARNING"
+    assert warning.exc_info[1] is error
+
+
+def test_immediate_app_shutdown_after_revoked_transfer_recovery_failure(
+        mock_db, _api_unit_credentials, caplog):
+    from app.main import app
+
+    finished = threading.Event()
+    on_boot = sh.on_boot
+    error = sqlite3.ProgrammingError("Cannot operate on a closed database")
+
+    async def boot():
+        try:
+            await on_boot()
+        finally:
+            finished.set()
+
+    with patch.object(sh, "on_boot", boot), \
+            patch("app.core.cluster.register_self", return_value=True), \
+            patch("app.network.handoff.recover_revoked_transfers", side_effect=error) as recover:
+        # No requests: exit as soon as the real startup task has run recovery.
+        # The event makes the teardown race deterministic without a sleep.
+        with TestClient(app):
+            assert finished.wait(timeout=5), "handoff boot task did not finish"
+
+    recover.assert_called_once_with()
+    assert any(r.message == "Could not recover revoked transfers" and r.exc_info[1] is error
+               for r in caplog.records)
 
 
 def test_move_wake_barrier_schema_upgrade_is_idempotent(mock_db):

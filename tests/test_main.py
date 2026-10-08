@@ -10,6 +10,8 @@ Tests cover:
 - CORS configuration (wildcard vs specific origins)
 """
 
+import asyncio
+
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -270,6 +272,59 @@ class TestLifespan:
                 mock_enc.assert_called_once()
                 mock_ws.assert_called_once()
                 mock_prereqs.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_boot_task_does_not_interrupt_shutdown(self, caplog):
+        from app.main import lifespan
+
+        async def failed_boot():
+            raise RuntimeError("boot task failed")
+
+        async def remaining_loop():
+            await asyncio.Event().wait()
+
+        tasks = []
+
+        def start_tasks():
+            tasks.extend([
+                asyncio.create_task(failed_boot(), name="failed-boot"),
+                asyncio.create_task(remaining_loop(), name="remaining-loop"),
+            ])
+            return tasks
+
+        plugin_task, monitor_task = MagicMock(), MagicMock()
+        with patch("app.core.startup.init_core"), \
+             patch("app.core.startup.init_encryption_and_sessions"), \
+             patch("app.core.startup.init_workspace"), \
+             patch("app.core.startup.check_prerequisites"), \
+             patch("app.core.cluster.register_self", return_value=True), \
+             patch("app.network.startup.start", AsyncMock(return_value=[])), \
+             patch("app.core.startup.start_services", AsyncMock()), \
+             patch("app.core.startup.shutdown_services", AsyncMock()) as shutdown, \
+             patch("app.core.startup.start_background_tasks", side_effect=start_tasks), \
+             patch("app.core.fluid_memory.maintain_memories", AsyncMock()), \
+             patch("app.core.resource_monitor.reconcile_orphans_once", AsyncMock()), \
+             patch("app.core.resource_monitor.start_resource_monitor",
+                   AsyncMock(return_value=monitor_task)), \
+             patch("app.core.resource_monitor.stop_resource_monitor", AsyncMock()) as stop_monitor, \
+             patch("app.core.plugin_auto_update.start_plugin_auto_update", return_value=plugin_task), \
+             patch("app.core.plugin_auto_update.stop_plugin_auto_update", AsyncMock()) as stop_plugin, \
+             patch("app.core.loop_watchdog.start_loop_watchdog"), \
+             patch("app.core.loop_watchdog.stop_loop_watchdog") as stop_watchdog:
+            async with lifespan(MagicMock()):
+                # Leave the exception for lifespan to collect, not the test.
+                done, _ = await asyncio.wait([tasks[0]], timeout=5)
+                assert tasks[0] in done
+
+        assert tasks[1].cancelled()
+        stop_plugin.assert_awaited_once_with(plugin_task)
+        stop_monitor.assert_awaited_once_with(monitor_task)
+        stop_watchdog.assert_called_once()
+        shutdown.assert_awaited_once()
+        [failure] = [r for r in caplog.records
+                     if r.message == "Background task failed-boot failed during shutdown"]
+        assert failure.levelname == "ERROR"
+        assert isinstance(failure.exc_info[1], RuntimeError)
 
     @pytest.mark.asyncio
     async def test_lifespan_preserves_sessions_when_credential_recovery_required(self):

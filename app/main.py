@@ -357,6 +357,8 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             pass
+        except Exception:
+            logger.exception("Background task %s failed during shutdown", task.get_name())
     if plugin_task is not None:
         await stop_plugin_auto_update(plugin_task)
     if monitor_task is not None:

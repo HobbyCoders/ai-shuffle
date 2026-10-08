@@ -1244,7 +1244,10 @@ async def on_boot() -> None:
         logger.warning("Could not resume queued moves", exc_info=True)
     await announce_dropped()
     from app.network.handoff import recover_revoked_transfers
-    await asyncio.to_thread(recover_revoked_transfers)
+    try:
+        await asyncio.to_thread(recover_revoked_transfers)
+    except Exception:  # noqa: BLE001 — boot continues
+        logger.warning("Could not recover revoked transfers", exc_info=True)
 
 
 def schedule(session_id: str) -> None:
