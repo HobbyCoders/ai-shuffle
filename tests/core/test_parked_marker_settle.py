@@ -12,6 +12,7 @@ and only logged it.
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 
 from app.core.config import settings
 from app.core.turn_finalize import clear_parked_marker_if_idle
@@ -38,6 +39,7 @@ def _marker(test_db, session_id):
 def _registry(work):
     registry = MagicMock(name="task_registry")
     registry.get_parking_background_work.return_value = work
+    registry.has_unresolved_background_launches.return_value = False
     return registry
 
 
@@ -156,3 +158,155 @@ async def test_sweep_leaves_another_installs_sessions_alone(mock_db, test_db):
         assert await sweep_stale_parked_markers() == 0
 
     assert _marker(test_db, session_id) == "agent"
+
+
+@pytest.mark.parametrize("guard", ["none", "monitor", "launch", "durable", "live", "queued", "foreign"])
+async def test_sweep_repairs_a_superseded_park_without_a_session_marker(mock_db, test_db, guard):
+    from app.core.startup_reconcile import sweep_stale_parked_markers
+    from app.db import turns, background_tasks
+
+    sid = _parked_session(test_db, kind=None)
+    parked = turns.enqueue_turn(sid, "provider_agent", prompt="original")
+    turns.start_turn(parked["id"])
+    turns.park_turn(parked["id"], ["finished-monitor"])
+    wake = turns.enqueue_turn(sid, "unpark", prompt="completion")
+    turns.start_turn(wake["id"])
+    turns.settle_turn(wake["id"], "completed")
+    test_db.execute("UPDATE turns SET ended_at = ? WHERE id = ?", ("2026-10-08 01:00:00", parked["id"]))
+    test_db.execute("UPDATE turns SET started_at = ? WHERE id = ?", ("2026-10-08 01:01:00", wake["id"]))
+    registry = _registry([])
+    if guard == "monitor":
+        registry.get_parking_background_work.return_value = [{"id": "still-running", "kind": "shell"}]
+    elif guard == "launch":
+        registry.has_unresolved_background_launches.return_value = True
+    elif guard == "durable":
+        background_tasks.upsert_background_task({
+            "task_id": "still-running", "session_id": sid, "kind": "agent", "status": "running",
+            "title": "worker", "started_at": "2026-10-08T01:00:00+00:00",
+            "updated_at": "2026-10-08T01:01:00+00:00",
+        })
+    elif guard in ("live", "queued"):
+        pending = turns.enqueue_turn(sid, "unpark", prompt="another completion")
+        if guard == "live":
+            turns.start_turn(pending["id"])
+    elif guard == "foreign":
+        test_db.execute("UPDATE sessions SET instance_id = ? WHERE id = ?", ("other-install", sid))
+    test_db.commit()
+
+    with patch("app.core.task_registry.task_registry", new=registry):
+        assert await sweep_stale_parked_markers() == (1 if guard == "none" else 0)
+        assert await sweep_stale_parked_markers() == 0
+
+    assert turns.get_turn(parked["id"])["state"] == ("completed" if guard == "none" else "parked")
+    assert turns.get_turn(wake["id"])["state"] == "completed"
+    assert _marker(test_db, sid) is None
+
+
+async def test_sweep_does_not_close_a_newer_park_awaiting_its_wake(mock_db, test_db):
+    from app.core.startup_reconcile import sweep_stale_parked_markers
+    from app.db import turns
+
+    sid = _parked_session(test_db)
+    parked = turns.enqueue_turn(sid, "provider_agent", prompt="waiting for a Monitor")
+    turns.start_turn(parked["id"])
+    turns.park_turn(parked["id"], ["unpublished-monitor"])
+    # Even with a separate orphan to repair, a newer park is not resolved.
+    older = turns.enqueue_turn(sid, "provider_agent", prompt="older park")
+    turns.start_turn(older["id"])
+    turns.park_turn(older["id"], ["finished-monitor"])
+    turns.record_adhoc_turn(sid, "api", started_at="2026-10-08 01:00:00")
+    test_db.execute("UPDATE turns SET ended_at = ? WHERE id = ?", ("2026-10-08 00:59:00", older["id"]))
+    test_db.execute("UPDATE turns SET ended_at = ? WHERE id = ?", ("2026-10-08 01:01:00", parked["id"]))
+    test_db.commit()
+
+    with patch("app.core.task_registry.task_registry", new=_registry([])), patch(
+        "app.core.sync_engine.sync_engine",
+    ) as sync:
+        sync.broadcast_user_session_updated = AsyncMock()
+        # The existing marker cleanup is independent of turn-row repair.
+        assert await sweep_stale_parked_markers() == 1
+    # A newer unresolved park keeps the session busy, including older rows.
+    assert turns.get_turn(older["id"])["state"] == "parked"
+    assert turns.get_turn(parked["id"])["state"] == "parked"
+
+
+def _superseded_park(test_db):
+    from app.db import turns
+
+    sid = _parked_session(test_db, kind=None)
+    parked = turns.enqueue_turn(sid, "provider_agent", prompt="original")
+    turns.start_turn(parked["id"])
+    turns.park_turn(parked["id"], ["finished-monitor"])
+    wake = turns.enqueue_turn(sid, "unpark", prompt="completion")
+    turns.start_turn(wake["id"])
+    turns.settle_turn(wake["id"], "completed")
+    test_db.execute("UPDATE turns SET ended_at = ? WHERE id = ?", ("2026-10-08 01:00:00", parked["id"]))
+    test_db.execute("UPDATE turns SET started_at = ? WHERE id = ?", ("2026-10-08 01:01:00", wake["id"]))
+    test_db.commit()
+    return sid, parked, wake
+
+
+async def test_sweep_does_not_miss_a_queued_wake_starting_between_busy_reads(mock_db, test_db):
+    from app.core.startup_reconcile import sweep_stale_parked_markers
+    from app.core.task_registry import TaskRegistry
+    from app.db import turns
+
+    sid, parked, _ = _superseded_park(test_db)
+    pending = turns.enqueue_turn(sid, "unpark", prompt="another completion")
+    registry = TaskRegistry()
+    get_live = turns.get_live_turn
+    has_unsettled = turns.session_has_unsettled_turns
+
+    def start_wake_after_read(read):
+        result = read(sid)
+        assert turns.start_turn(pending["id"]) is not None
+        registry.start_task(sid, "new-monitor", "shell", "wake check")
+        registry.mark_monitor_shell_task(sid, "new-monitor")
+        return result
+
+    with patch("app.core.task_registry.task_registry", new=registry), patch.object(
+        turns, "get_live_turn", side_effect=lambda _: start_wake_after_read(get_live),
+    ), patch.object(
+        turns, "session_has_unsettled_turns", side_effect=lambda _: start_wake_after_read(has_unsettled),
+    ):
+        assert await sweep_stale_parked_markers() == 0
+
+    assert turns.get_turn(pending["id"])["state"] == "running"
+    assert registry.get_parking_background_work(sid)
+    assert turns.get_turn(parked["id"])["state"] == "parked"
+
+
+@pytest.mark.parametrize("race", ["queued", "running", "interrupting", "draining", "newer_park", "successor_aborted", "foreign"])
+async def test_sweep_rechecks_settlement_guards_at_mutation(mock_db, test_db, race):
+    from app.core.startup_reconcile import sweep_stale_parked_markers
+    from app.db import turns
+
+    sid, parked, wake = _superseded_park(test_db)
+    settle = turns.settle_parked_turns
+    registry = _registry([])
+
+    def change_before_settlement(*args, **kwargs):
+        if race == "foreign":
+            test_db.execute("UPDATE sessions SET instance_id = ? WHERE id = ?", ("other-install", sid))
+        elif race == "successor_aborted":
+            test_db.execute("UPDATE turns SET state = 'aborted' WHERE id = ?", (wake["id"],))
+        else:
+            pending = turns.enqueue_turn(sid, "unpark", prompt="another completion")
+            if race != "queued":
+                turns.start_turn(pending["id"])
+                if race == "newer_park":
+                    turns.park_turn(pending["id"], ["new-monitor"])
+                    test_db.execute("UPDATE turns SET ended_at = ? WHERE id = ?", ("2026-10-08 01:02:00", pending["id"]))
+                else:
+                    test_db.execute("UPDATE turns SET state = ? WHERE id = ?", (race, pending["id"]))
+                    registry.get_parking_background_work.return_value = [{"id": "new-monitor", "kind": "shell"}]
+        test_db.commit()
+        return settle(*args, **kwargs)
+
+    with patch("app.core.task_registry.task_registry", new=registry), patch.object(
+        turns, "settle_parked_turns", side_effect=change_before_settlement,
+    ) as mutation:
+        assert await sweep_stale_parked_markers() == 0
+        mutation.assert_called_once()
+
+    assert turns.get_turn(parked["id"])["state"] == "parked"

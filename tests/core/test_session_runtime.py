@@ -2351,6 +2351,85 @@ async def test_undelivered_task_notification_is_handed_back_at_finalize(mock_db)
     assert rt._task_steers == {}
 
 
+async def test_stranded_wake_closes_earlier_park_when_other_monitor_finishes(mock_db):
+    from app.core import turn_scheduler
+    from app.core.task_registry import TaskRegistry
+    from app.db import database
+
+    database.create_session(session_id="stranded-parent", profile_id="default")
+    sid = "stranded-child"
+    database.create_session(
+        session_id=sid, profile_id="default",
+        parent_session_id="stranded-parent", is_worker=True,
+    )
+    original = turns_db.enqueue_turn(sid, "provider_agent", prompt="work")
+    rt = session_runtime.SessionRuntime(original)
+    registry = TaskRegistry()
+    frame = {"task_id": "finished-monitor", "status": "completed", "summary": "check passed"}
+    adapter = MagicMock()
+    adapter.steer = AsyncMock()
+    pumped = []
+    wakes = []
+    enqueue_wake = turn_scheduler._enqueue_context_wake
+
+    async def capture_wake(*args, **kwargs):
+        assert rt._steering_closed
+        assert turns_db.get_turn(original["id"])["state"] == "running"
+        wake = await enqueue_wake(*args, **kwargs)
+        wakes.append(wake)
+        return wake
+
+    async def pump(**kwargs):
+        pumped.append(kwargs)
+        if len(pumped) == 1:
+            registry.complete_task(sid, "finished-monitor", "completed")
+            assert await rt.steer_task_notification(
+                "check passed", notification_id="task-notify:finished-monitor",
+                frames=[frame], task_ids=["finished-monitor"],
+            )
+            # No steer receipt: finalize must persist the completion as a wake.
+        else:
+            assert turns_db.get_turn(original["id"])["state"] == "parked"
+            assert registry.get_parking_background_work(sid)
+            registry.complete_task(sid, "other-monitor", "completed")
+        yield {"type": "done", "metadata": {}}
+
+    async def settled(sid, tid, outcome):
+        turn_scheduler.kick(sid)
+
+    with _runtime_env(pump=pump) as env, patch(
+        "app.core.task_registry.task_registry", new=registry,
+    ), patch.object(session_runtime.SessionRuntime, "_live_adapter", return_value=adapter), patch(
+        "app.core.query_engine._read_task_output_file", return_value="",
+    ), patch.object(turn_scheduler, "_enqueue_context_wake", new=capture_wake), patch.object(
+        turn_scheduler, "note_wake_pending",
+    ), patch(
+        "app.core.task_persistence.enqueue_task_snapshot",
+    ), patch.object(session_runtime, "_broadcast_work_time", new=AsyncMock()):
+        registry.start_task(sid, "finished-monitor", "shell", "first check")
+        registry.mark_monitor_shell_task(sid, "finished-monitor")
+        registry.start_task(sid, "other-monitor", "shell", "second check")
+        registry.mark_monitor_shell_task(sid, "other-monitor")
+        session_runtime.register_scheduler(settled)
+        assert await rt.execute() == "parked"
+        while turn_scheduler._kick_tasks:
+            await asyncio.gather(*list(turn_scheduler._kick_tasks))
+        # Calling finalize's hand-back again cannot enqueue a second delivery.
+        await rt._strand_task_steers()
+
+    assert len(pumped) == 2
+    assert rt._task_steers == {}
+    assert turns_db.get_turn(original["id"])["state"] == "completed"
+    (enqueued_wake,) = wakes
+    wake = turns_db.get_turn(enqueued_wake["id"])
+    assert wake["source"] == "unpark"
+    assert wake["state"] == "completed"
+    assert wake["payload"]["pending_frames"] == [frame]
+    env["recorder"].record_task_terminal.assert_awaited_once_with([frame])
+    assert pumped[1]["overrides"]["background_task_completions"] == [frame]
+    assert not turns_db.session_has_unsettled_turns(sid)
+
+
 async def test_wake_turn_latches_terminal_notified(mock_db):
     """The other delivery path: a wake turn carrying pending_frames IS the
     delivery of those completions, so it latches terminal_notified too. The flag

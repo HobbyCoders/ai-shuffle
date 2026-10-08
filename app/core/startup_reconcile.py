@@ -420,7 +420,7 @@ async def settle_stale_background_task_rows(
 
 
 async def sweep_stale_parked_markers() -> int:
-    """Clear ``parked_task_kind`` on sessions with nothing left to park on.
+    """Clear idle parked markers and parks left behind by completed wakes.
 
     The backstop behind ``turn_finalize.clear_parked_marker_if_idle``. That
     call rides the terminal-task callback, which covers terminals the idle
@@ -428,7 +428,9 @@ async def sweep_stale_parked_markers() -> int:
     settled by ``stop_session_task``, by force cleanup, or by a worker
     supervisor, none of which pass through the reader. Any marker those leave
     behind is caught here on the ordinary 5-minute tick instead of surviving
-    until the next boot.
+    until the next boot. It also closes older parked turn rows when a later
+    turn has completed: the session marker may already have been cleared by
+    that wake, so the row query includes those markerless orphans too.
 
     Only own-instance rows, and only when BOTH the in-memory registry and the
     durable mirror agree there is nothing running — a session whose worker
@@ -446,7 +448,9 @@ async def sweep_stale_parked_markers() -> int:
         return 0
 
     from app.core import pending_reconcile
+    from app.core.task_registry import task_registry
     from app.core.turn_finalize import clear_parked_marker_if_idle
+    from app.db import turns as turns_db
 
     cleared = 0
     for row in rows:
@@ -459,7 +463,20 @@ async def sweep_stale_parked_markers() -> int:
             )
             if outstanding:
                 continue
-            if await clear_parked_marker_if_idle(session_id):
+            repaired = False
+            # An earlier park may outlive a completed wake even though that
+            # wake already cleared the session marker. Repair only at rest:
+            # queued or live work still owns the context of its parked rows.
+            completed_started_at = _row_value(row, "completed_started_at", 1)
+            if (completed_started_at is not None
+                    and not task_registry.get_parking_background_work(session_id)
+                    and not task_registry.has_unresolved_background_launches(session_id)
+                    and not await asyncio.to_thread(turns_db.session_has_unsettled_turns, session_id)):
+                repaired = bool(await asyncio.to_thread(
+                    turns_db.settle_parked_turns, session_id,
+                    resolved_before=completed_started_at,
+                ))
+            if await clear_parked_marker_if_idle(session_id) or repaired:
                 cleared += 1
         except Exception:  # noqa: BLE001 — one bad row must not block the rest
             logger.warning(
@@ -468,8 +485,8 @@ async def sweep_stale_parked_markers() -> int:
             )
     if cleared:
         logger.info(
-            "Parked-marker sweep: cleared %d session(s) marked parked with no "
-            "background work left", cleared,
+            "Parked-marker sweep: repaired %d session(s) with resolved parks or "
+            "markers and no background work left", cleared,
         )
     return cleared
 
@@ -478,8 +495,21 @@ def _sessions_with_parked_marker(_ph: str, instance_id: str) -> Any:
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            f"""SELECT id FROM sessions
-                 WHERE instance_id = {_ph} AND parked_task_kind IS NOT NULL""",
+            f"""SELECT id, (
+                     SELECT MAX(started_at) FROM turns
+                     WHERE session_id = sessions.id AND state = 'completed'
+                 ) AS completed_started_at FROM sessions
+                 WHERE instance_id = {_ph} AND (
+                     parked_task_kind IS NOT NULL OR EXISTS (
+                         SELECT 1 FROM turns parked
+                         WHERE parked.session_id = sessions.id AND parked.state = 'parked'
+                         AND EXISTS (
+                             SELECT 1 FROM turns later
+                             WHERE later.session_id = sessions.id AND later.state = 'completed'
+                             AND later.started_at >= parked.ended_at
+                         )
+                     )
+                 )""",
             (instance_id,),
         )
         return cursor.fetchall()

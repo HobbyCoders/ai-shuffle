@@ -1041,7 +1041,8 @@ def list_stalled_parked_turns(min_parked_seconds: int) -> List[Dict[str, Any]]:
 
 
 def settle_parked_turns(
-    session_id: str, exclude_turn_id: Optional[str] = None
+    session_id: str, exclude_turn_id: Optional[str] = None,
+    *, resolved_before: Optional[datetime] = None,
 ) -> int:
     """Settle every ``parked`` turn row for ``session_id`` to ``completed``.
 
@@ -1055,28 +1056,46 @@ def settle_parked_turns(
     Does NOT loosen ``settle_turn``'s own guard.
 
     ``exclude_turn_id`` protects the turn currently going live (the self-heal
-    call site) from settling itself. Returns the number of rows settled.
+    call site) from settling itself. ``resolved_before`` restricts reconcile to
+    parks whose foreground ended before a completed successor started. In that
+    reconcile mode, take the session admission lock and recheck ownership,
+    successor completion and absence of busy/newer parked turns in the UPDATE
+    itself; a queued wake starting or a handoff after candidate selection must
+    not let the sweep settle its predecessor. Returns the row count.
     """
+    sql = (
+        "UPDATE turns SET state='completed', "
+        "stop_reason=COALESCE(stop_reason, 'parked_settled'), ended_at=NOW() "
+        "WHERE session_id=%s AND state='parked' "
+    )
+    params: tuple = (session_id,)
+    if exclude_turn_id is not None:
+        sql += "AND id != %s "
+        params += (exclude_turn_id,)
+    if resolved_before is not None:
+        sql += (
+            "AND ended_at <= %s "
+            "AND EXISTS (SELECT 1 FROM sessions owner "
+            "WHERE owner.id=%s AND owner.instance_id=%s) "
+            "AND EXISTS (SELECT 1 FROM turns later "
+            "WHERE later.session_id=turns.session_id AND later.state='completed' "
+            "AND later.started_at >= turns.ended_at AND later.started_at <= %s) "
+            "AND NOT EXISTS (SELECT 1 FROM turns busy "
+            "WHERE busy.session_id=%s AND ("
+            "busy.state IN ('queued','running','interrupting','draining') OR "
+            "(busy.state='parked' AND (busy.ended_at IS NULL OR busy.ended_at > %s)))) "
+        )
+        # Session-wide guards are uncorrelated so they run once, not once per
+        # parked row (a session may have a long completed-turn history).
+        params += (resolved_before, session_id, settings.effective_instance_id,
+                   resolved_before, session_id, resolved_before)
     with get_db() as conn:
         cursor = conn.cursor()
-        if exclude_turn_id is not None:
-            cursor.execute(
-                "UPDATE turns SET state='completed', "
-                "stop_reason=COALESCE(stop_reason, 'parked_settled'), "
-                "ended_at=NOW() "
-                "WHERE session_id=%s AND state='parked' AND id != %s "
-                "RETURNING id",
-                (session_id, exclude_turn_id),
-            )
-        else:
-            cursor.execute(
-                "UPDATE turns SET state='completed', "
-                "stop_reason=COALESCE(stop_reason, 'parked_settled'), "
-                "ended_at=NOW() "
-                "WHERE session_id=%s AND state='parked' "
-                "RETURNING id",
-                (session_id,),
-            )
+        if resolved_before is not None:
+            # enqueue_turn/start_turn use this same lock. The UPDATE gets a
+            # fresh snapshot after any admission/handoff we waited behind.
+            cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        cursor.execute(sql + "RETURNING id", params)
         rows = cursor.fetchall()
     return len(rows or [])
 

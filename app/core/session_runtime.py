@@ -2673,6 +2673,17 @@ class SessionRuntime:
             )
         except Exception:
             logger.warning("SessionRuntime: settle_turn(completed) failed for %s", tid, exc_info=True)
+        if settled is not None:
+            # A wake can start while another Monitor is still running, so the
+            # turn-start self-heal must leave its predecessor parked. If that
+            # work finishes DURING this wake, the park gate above is now empty:
+            # close the resolved predecessors here, not only at the next start.
+            try:
+                await asyncio.to_thread(turns_db.settle_parked_turns, sid, tid)
+            except Exception:
+                logger.warning(
+                    "SessionRuntime: resolved park cleanup failed for %s", sid, exc_info=True,
+                )
         await self._snapshot_working_set(sid)
         return "completed", settled is not None
 
