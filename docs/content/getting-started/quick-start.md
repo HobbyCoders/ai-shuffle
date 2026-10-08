@@ -1,76 +1,64 @@
 <!--
 title: Quick Start
-description: Get up and running with AI Shuffle in minutes
+description: The everyday basics once setup is done
 order: 8
 -->
 
-# Quick Start
+# Quick start
 
-This guide walks you through the essential workflows once [First run](/docs/getting-started/first-run) is done.
+These are the basics once [First run](/docs/getting-started/first-run) is done.
 
-## Start a Chat
+## Start a chat
 
-1. Click **New session** at the top of the sidebar
-2. Pick an **agent** and a **model** in the composer
-3. Type your message and press Enter
-4. The agent responds with streaming text, and you can see tool usage in real time
+1. Click **New session** at the top of the sidebar.
+2. Pick an **agent** and a **model** in the composer.
+3. Type your message and press Enter.
+4. Watch the reply and the agent's tool use stream in.
 
-## Create an Agent
+You can change the reasoning effort and turn **Fast mode** on or off (where the model supports it) while a chat is running. The composer remembers your picks for each model.
 
-Agents control how the AI behaves. To create one:
+## Create an agent
 
-1. Open **Agents** in the sidebar
-2. Click **New agent**
-3. Configure:
-   - **Name**: a descriptive name
-   - **Prompt**: instructions for the agent
-   - **Tools**: which tools the agent can use
-4. Changes save as you type. Click **Done** to close the editor
+Agents decide how the AI behaves.
 
-The model, reasoning effort and permission mode are picked per session in the composer, not stored on the agent. You can also choose **Generate** to create an agent from a description.
+1. Open **Agents** in the sidebar.
+2. Click **New agent**.
+3. Give it a **name**, write its **prompt** (its instructions), and choose its **tools**.
+4. Changes save as you type. Click **Done** to close the editor.
 
-You can change **reasoning effort** and toggle **Fast mode** (where supported) while a session is running. The owning worker acknowledges the change without stopping the turn or requiring another message. It applies to subsequent model calls; a request already in flight keeps its original settings. If the worker is unreachable or the provider refuses the change, the composer does not claim it was applied. These changes are session-specific, not account-wide provider settings.
+You can also choose **Generate** to create an agent from a short description. The model, effort and permission mode are picked per chat, not per agent. See [Agents](/docs/features/profiles).
 
-The composer remembers your last effort and Fast mode pick for each model, synced across your devices. Switching back to a model restores its picks, and a model you have not used yet keeps the current ones. Switching to a model without Fast mode turns it off for that chat without forgetting the pick you made on the other model.
+## Set up a project
 
-## Set Up a Project
+1. Open **Projects** in the sidebar.
+2. Click **New project**.
+3. Choose the folder with your code.
+4. Use the project's tabs to add project-only MCP servers, agents, hooks and memory.
 
-Projects link to directories on your system:
+New chats in this project can work with its files. See [Projects](/docs/features/projects).
 
-1. Navigate to **Projects** in the sidebar
-2. Click **New project**
-3. Set the **Path** to your code directory
-4. Use the project's tabs (MCP Servers, Agents, Hooks, Memory) for project-specific settings
-5. New sessions created with this project will have access to those files
+## Connect a messaging app
 
-## Connect a Platform
+1. Follow the setup guide for your platform under [Connectors](/docs/connectors) to create a bot.
+2. In AI Shuffle, open **Settings → Plugins**, filter **Apps** and choose the platform.
+3. Install it if asked, click **Connect account**, enter the details, choose the **Agent** that answers and click **Create Connector**.
+4. Add at least one allowed sender, then turn on **Activate**.
 
-To receive messages from Telegram, Discord, etc.:
+## Create an API key
 
-1. Navigate to the connector's setup guide in these docs
-2. Create the bot/app on the platform
-3. Open **Settings > Plugins > Explore plugins** in AI Shuffle, filter **Apps** and choose the platform
-4. Install it if asked, click **Connect account**, enter credentials, choose the **Agent** that answers its messages and click **Create Connector**
-5. Chat connectors need at least one allowed sender. Add yours, then turn on **Activate** to start receiving messages
+1. Open **Settings → Integrations**.
+2. Click **Add API User**.
+3. Give it a name. Optionally limit it to a project and to certain agents.
+4. Copy the key. It is shown only once.
+5. Send it as `Authorization: Bearer aih_...` with each request.
 
-## Create an API Key
+A key only sees its own chats and notes. See the [API reference](/docs/api-reference).
 
-For programmatic access:
+## Example API call
 
-1. Go to **Settings > Integrations**
-2. Click **Add API User**
-3. Set a name and optionally restrict it to a project and to specific agents
-4. Copy the generated API key (shown only once)
-5. Use it in the `Authorization: Bearer aih_...` header
-
-A key works only with its own sessions and notes. Agents in its sessions, and the workers they start, run with the key's agents, tools and credentials, and cannot read your usage, the app's logs or your scheduled jobs. See [API Users](/docs/api-reference/api-users#other-data-a-key-cannot-reach).
-
-## Example API Call
-
-Use the id of one of your agents. API fields still say `profile`.
+Use the id of one of your agents (the API calls it `profile`).
 
 ```bash
-# One-shot query
 curl -X POST http://localhost:8000/api/v1/query \
   -H "Authorization: Bearer aih_your_key_here" \
   -H "Content-Type: application/json" \
@@ -80,21 +68,9 @@ curl -X POST http://localhost:8000/api/v1/query \
   }'
 ```
 
-```bash
-# Start a conversation
-curl -X POST http://localhost:8000/api/v1/conversation/start \
-  -H "Authorization: Bearer aih_your_key_here" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Help me refactor this function",
-    "profile": "your-agent-id",
-    "project": "your-project-id"
-  }'
-```
+## Next steps
 
-## Next Steps
-
-- **[Connectors](/docs/connectors)**: set up Telegram, Discord, and more
-- **[Automations](/docs/features/automations)**: schedule AI workflows
-- **[API Reference](/docs/api-reference)**: full endpoint documentation
-- **[Hooks](/docs/features/hooks)**: custom event handlers
+- **[Connectors](/docs/connectors)**: Telegram, Discord and more.
+- **[Automations](/docs/features/automations)**: run agents on a schedule.
+- **[Hooks](/docs/features/hooks)**: run your own scripts at key moments.
+- **[API reference](/docs/api-reference)**: every endpoint.

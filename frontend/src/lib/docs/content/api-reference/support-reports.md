@@ -34,7 +34,7 @@ Drafts and diagnosis runs live in memory for one hour and are lost when the work
 
 ## Fingerprint
 
-A fingerprint is 32 hex characters: a SHA-256 of the error type, the normalised message and up to three innermost app frames. The normalised message has URLs, email addresses, ids, paths, quoted values, long hex strings and numbers replaced (`Session <id> not found in <path>`). Frames are `app/...` or `fluid/...` files with their function name and no line number; browser errors use function names only. The same bug on two installs or two versions therefore has the same fingerprint. `fingerprint_parts` in a preview shows what was hashed.
+A fingerprint is a 32-character id for a kind of error. The same bug on two installs or two versions has the same fingerprint, which is how the known-issue check finds it. `fingerprint_parts` in a preview shows what it was made from.
 
 ## Hub states
 

@@ -1,185 +1,94 @@
 <!--
 title: Slack
-description: Connect AI Shuffle to Slack using a Slack App with Socket Mode for real-time communication
+description: Chat with your agent through a Slack app
 order: 4
 -->
 
-# Slack Bot Connector
+# Slack
 
-## Overview
+Chat with your agent in Slack, in channels, threads and direct messages. It can react, pin messages and share files.
 
-The Slack connector integrates your AI Shuffle agent with Slack workspaces using the Slack API and Socket Mode. Your agent can respond to direct messages, participate in channel conversations, join and reply in threads, react to messages with emoji, and share files -- all within the familiar Slack interface.
+No public address or port forwarding is needed.
 
-Socket Mode is the recommended connection method because it does not require a publicly reachable URL. Instead of receiving HTTP webhooks, the bot establishes a WebSocket connection to Slack's servers, making it ideal for development environments, firewalled networks, and self-hosted deployments. The connector uses the `xoxb-` bot token for API calls and the `xapp-` app-level token for the Socket Mode WebSocket connection.
+## You need
 
-## Prerequisites
+- A Slack workspace where you can install apps.
 
-- A Slack workspace where you have permission to install apps (or are a workspace admin)
-- Access to the [Slack API portal](https://api.slack.com/apps)
-- AI Shuffle backend running (no public URL required thanks to Socket Mode)
+## Set up
 
-## Setup Guide
+### 1. Create the Slack app
 
-### Step 1: Create a Slack App
+1. Open [api.slack.com/apps](https://api.slack.com/apps) and choose **Create New App → From scratch**.
+2. Name it, for example "AI Shuffle", pick your workspace and choose **Create App**.
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) and click **Create New App**.
-2. Select **From scratch**.
-3. Enter an app name (e.g., "AI Shuffle") and select the workspace where you want to install it.
-4. Click **Create App**.
+### 2. Turn on Socket Mode
 
-### Step 2: Enable Socket Mode
+1. Open **Socket Mode** and turn on **Enable Socket Mode**.
+2. Create an **App-Level Token** with the `connections:write` scope.
+3. Copy the token. It starts with `xapp-`.
 
-Socket Mode allows the bot to receive events over a WebSocket connection instead of HTTP webhooks.
+### 3. Add permissions and install
 
-1. In the left sidebar, click **Socket Mode**.
-2. Toggle **Enable Socket Mode** to on.
-3. You will be prompted to create an **App-Level Token**. Give it a name (e.g., "socket-token") and add the `connections:write` scope.
-4. Click **Generate**. Copy the token that starts with `xapp-`. Store it securely.
-   ```
-   EXAMPLE-SLACK-APP-TOKEN...
-   ```
+1. Open **OAuth & Permissions**. Under **Bot Token Scopes**, add:
+   `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `files:read`, `files:write`, `groups:history`, `groups:read`, `im:history`, `im:read`, `im:write`, `reactions:read`, `reactions:write`, `users:read`, `pins:read`, `pins:write`.
+   Add `channels:manage` too if the agent should create and archive channels.
+2. Choose **Install to Workspace**, then **Allow**.
+3. Copy the **Bot User OAuth Token**. It starts with `xoxb-`.
 
-### Step 3: Configure Bot Token Scopes (OAuth & Permissions)
+### 4. Subscribe to events
 
-1. In the left sidebar, click **OAuth & Permissions**.
-2. Scroll to **Scopes > Bot Token Scopes** and add the following scopes:
+Open **Event Subscriptions**, turn on **Enable Events** and add these bot events: `message.channels`, `message.groups`, `message.im` and `app_mention`. Save.
 
-   | Scope | Purpose |
-   |-------|---------|
-   | `app_mentions:read` | Detect when users @mention the bot |
-   | `channels:history` | Read messages in public channels |
-   | `channels:read` | View basic channel info |
-   | `chat:write` | Send messages |
-   | `files:read` | Access files shared in conversations |
-   | `files:write` | Upload files |
-   | `groups:history` | Read messages in private channels |
-   | `groups:read` | View basic info about private channels |
-   | `im:history` | Read direct messages |
-   | `im:read` | View basic info about direct messages |
-   | `im:write` | Start direct message conversations |
-   | `reactions:read` | View emoji reactions |
-   | `reactions:write` | Add emoji reactions |
-   | `users:read` | View basic user info |
-   | `pins:read` | List pinned messages |
-   | `pins:write` | Pin and unpin messages |
-   | `channels:manage` | Create, archive, set topics and invite to channels (optional) |
+### 5. Find your channel IDs
 
-3. Scroll back to the top and click **Install to Workspace**, then **Allow**.
-4. Copy the **Bot User OAuth Token** that starts with `xoxb-`. Store it securely.
-   ```
-   EXAMPLE-SLACK-BOT-TOKEN
-   ```
+The bot only answers in channels you list. Right-click a channel, choose **Copy link** and take the last part of the link, such as `C01ABCD2EFG`.
 
-### Step 4: Subscribe to Events
+### 6. Connect it in AI Shuffle
 
-1. In the left sidebar, click **Event Subscriptions**.
-2. Toggle **Enable Events** to on.
-3. Under **Subscribe to Bot Events**, add the following events:
+1. Open **Settings → Plugins**, choose **Apps** and open **Slack**. Choose **Install Slack** if asked.
+2. Choose **Connect account** and paste the **Bot Token** (`xoxb-`) and **App Token** (`xapp-`).
+3. Add at least one **Allowed Channel ID**.
+4. Optional: choose a **Command Prefix**. The bot then only answers messages that start with it.
+5. Pick the agent, choose **Create Connector**, then turn on **Activate**.
 
-   | Event | Purpose |
-   |-------|---------|
-   | `message.channels` | Messages in public channels |
-   | `message.groups` | Messages in private channels |
-   | `message.im` | Direct messages |
-   | `app_mention` | When the bot is @mentioned |
+See [Common setup steps](/docs/connectors#common-setup-steps).
 
-4. Click **Save Changes**.
+### 7. Invite the bot
 
-### Step 5: Get Channel IDs
+In each channel, type `/invite @AI Shuffle`, with your bot's name.
 
-The bot only responds in channels you list, so you need at least one channel ID:
+## Settings
 
-1. In Slack, right-click on a channel name.
-2. Select **View channel details** (or **Copy link**).
-3. The channel ID is the last segment of the channel URL, starting with `C` (public) or `G` (private). For example, in `https://yourworkspace.slack.com/archives/C01ABCD2EFG`, the channel ID is `C01ABCD2EFG`.
+| Setting | Required | What it does |
+| --- | --- | --- |
+| `bot_token` | Yes | The `xoxb-` token |
+| `app_token` | Yes | The `xapp-` token |
+| `allowed_channel_ids` | Yes | The channels the bot answers in |
+| `command_prefix` | No | Only answer messages that start with this |
+| `enabled_action_categories` | No | Limit the agent to some kinds of actions: `messages`, `reactions`, `pins`, `channels`, `users`, `files`, `workspace`. Empty allows all |
+| `auto_approve_destructive` | No | `true` skips the Approve/Deny prompt for destructive actions |
 
-Alternatively, you can right-click a channel, select **Copy link**, and extract the ID from the URL.
+## What your agent can do
 
-### Step 6: Configure the Connector in AI Shuffle
+See [How AI actions work](/docs/connectors#how-ai-actions-work). The agent can send, read, edit, delete and schedule messages, reply in threads, react, pin, manage channels, look up people, upload files and read workspace info.
 
-1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Slack**.
-2. Click **Install Slack** if prompted, then click **Connect account**.
-3. Fill in the configuration fields:
-   - **Bot Token**: Paste the `xoxb-` token from Step 3
-   - **App Token**: Paste the `xapp-` token from Step 2
-   - **Allowed Channel IDs**: At least one channel ID. The bot only responds in these channels.
-   - **Command Prefix** (optional): If set, the bot only responds to messages that start with this prefix
-4. Click **Create Connector**, then turn on the connection's **Activate** switch.
-
-The connection needs an API user with an agent, or every message is refused. See [Common Setup Steps](/docs/connectors#common-setup-steps).
-
-### Step 7: Invite the Bot to Channels
-
-The bot must be invited to channels before it can read or send messages there:
-
-1. In Slack, go to the channel where you want the bot.
-2. Type the following message:
-   ```
-   /invite @AI Shuffle
-   ```
-   (Replace "AI Shuffle" with your bot's actual display name.)
-
-## Configuration Reference
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `bot_token` | string | Yes | The Bot User OAuth Token (starts with `xoxb-`). Used for all Slack API calls including sending messages, reading channels, and uploading files. |
-| `app_token` | string | Yes | The App-Level Token (starts with `xapp-`). Used exclusively for establishing the Socket Mode WebSocket connection. Must have the `connections:write` scope. |
-| `allowed_channel_ids` | array of strings | Yes (to enable) | Slack channel IDs the bot is allowed to respond in. At least one entry is required before the connector can be enabled. Channel IDs start with `C` (public) or `G` (private). |
-| `command_prefix` | string | No | If set, only messages that start with this prefix are processed. If empty, the bot processes all messages in allowed channels. |
-| `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `messages`, `reactions`, `pins`, `channels`, `users`, `files`, `workspace`. |
-| `auto_approve_destructive` | string | No | Set to `true` to skip the in-channel Approve/Deny prompt for destructive AI actions (message deletion, channel archiving). Default: prompts are required. |
-
-## Capabilities
-
-The Slack connector supports the following capabilities:
-
-| Capability | Supported | Notes |
-|------------|-----------|-------|
-| Acknowledgement | Partial | The bot adds an `:eyes:` reaction to acknowledge receipt while processing. There is no live typing indicator. |
-| Reactions | Yes | Can add and read emoji reactions on messages |
-| Rich text | Yes | Full Slack `mrkdwn` formatting: bold, italic, strikethrough, code, code blocks, blockquotes, lists, and links |
-| File upload | Yes | Upload files up to the workspace's file size limit (default 1 GB for paid plans) |
-| Threads | Yes | Can create threaded replies and follow conversation threads |
-| Buttons | Yes | Used for destructive-action prompts. Tool approvals are answered by the owner in the app; the channel only sees a waiting notice |
-
-**Message Length Limit:** 4,000 characters per message. Messages exceeding this limit are automatically split. Slack has a hard limit of 40,000 characters but recommends keeping messages under 4,000 for readability.
-
-## AI Actions
-
-See [How AI actions work](/docs/connectors#how-ai-actions-work).
-
-Your agent can use about 21 actions: send, read, edit, delete and schedule messages, threads, reactions, pins, channel management, user lookup, file upload and workspace info. Each action lists the OAuth scope it needs.
-
-- Message actions only work in the channel the session started from and the connector's `allowed_channel_ids`.
-- Destructive actions (`delete_message`, `archive_channel`) post an **Approve/Deny** button prompt in the channel and only run after a person clicks Approve.
-- Slack enforces OAuth scopes itself: an action whose scope is missing from the bot token fails with `missing_scope`. Add the scope under **OAuth & Permissions** and reinstall the app to make it available.
+- Messages stay in the channel the chat started from and your allowed channels.
+- Deleting a message and archiving a channel ask for **Approve** in the channel first.
+- The bot adds an :eyes: reaction while it works on your message.
+- Messages longer than 4,000 characters are split into several messages.
 
 ## Troubleshooting
 
-### Bot does not respond to messages
+**The bot does not answer.**
 
-- **Bot not invited to the channel.** The bot must be explicitly invited to each channel with `/invite @BotName`. It can only see messages in channels it has joined.
-- **Missing event subscriptions.** Verify that the `message.channels`, `message.groups`, `message.im`, and `app_mention` events are subscribed under **Event Subscriptions**.
-- **Socket Mode not connected.** Check the connector status in AI Shuffle. If it shows "Disconnected," verify the `xapp-` token is correct and has the `connections:write` scope.
+- Invite the bot to the channel with `/invite`.
+- Check the four event subscriptions in step 4.
+- Check that the connection shows **Connected**. If not, check the `xapp-` token and its `connections:write` scope.
 
-### "missing_scope" errors in logs
+**"missing_scope" errors.** Add the missing scope under **OAuth & Permissions**, then reinstall the app to the workspace. Slack needs a reinstall whenever scopes change.
 
-- The bot token is missing required OAuth scopes. Go to **OAuth & Permissions** in the Slack app settings, add the missing scope, and **reinstall the app to the workspace** (Slack requires reinstallation when scopes change).
+**The bot answers too often.** Remove channels from the allowed list, or set a command prefix.
 
-### Bot responds to every message (too noisy)
+**"invalid_auth" or "token_revoked".** Reinstalling the app creates new tokens, and an admin can revoke them. Copy the new tokens into the connection.
 
-- Remove channels from `allowed_channel_ids`.
-- Alternatively, set a `command_prefix` so the bot only processes messages that start with that prefix.
-
-### "invalid_auth" or "token_revoked" errors
-
-- The bot token or app token is invalid. This can happen if the app was reinstalled (which generates new tokens) or if an admin revoked the tokens. Generate new tokens in the Slack app settings and update the connector configuration.
-
-### Messages appear out of order
-
-- Slack message delivery through Socket Mode is generally ordered, but during reconnections, messages may arrive out of sequence. The connector processes events in the order Slack delivers them; check the AI Shuffle logs for WebSocket reconnection events.
-
-### Bot cannot upload files
-
-- Verify the `files:write` scope is included in the bot token. After adding it, you must reinstall the app to the workspace for the new scope to take effect.
+**The bot cannot upload files.** Add `files:write` and reinstall the app.

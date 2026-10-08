@@ -216,7 +216,7 @@ A `Stop` bash hook gets the same variables, also with no stdin. `HOOK_DATA` hold
 - Each `HOOK_*` value is capped at 64 KiB. A longer `HOOK_<KEY>` value is cut and ends in `...[truncated]`.
 - `HOOK_DATA` is always valid JSON. When it would be too long, its longest strings are shortened, each ending in `...[truncated]`, and `"truncated": true` is added at the top level. A guard that reads `HOOK_DATA` should block when `truncated` is `true`.
 - A `PreToolUse` bash hook runs in the session's working directory. `Stop` hooks and hooks on the background events run in the app's working directory; `cwd` in `HOOK_DATA` names the session's.
-- Hook commands (bash hooks, `PreToolUse` guards and plugin hooks) do not inherit the app's secrets: `DATABASE_*`, `PG*`, `POSTGRES_*`, `OWNER_PASSWORD`, `SECRET_KEY` and names ending in `_TOKEN`, `_SECRET`, `_PASSWORD`, `_API_KEY`, `_PRIVATE_KEY`, `_ACCESS_KEY` or `_CREDENTIALS` are removed, except model-provider keys, `FAL_KEY`, `GH_TOKEN` and `GITHUB_TOKEN`. List extra names to keep in `FLUID_CHILD_ENV_PASSTHROUGH` (comma separated).
+- Hook commands (bash hooks, `PreToolUse` guards and plugin hooks) do not get AI Shuffle's own passwords, tokens and keys from the environment. Model-provider keys, `FAL_KEY`, `GH_TOKEN` and `GITHUB_TOKEN` are kept. List extra variable names to keep in `FLUID_CHILD_ENV_PASSTHROUGH` (comma separated).
 
 ## Blocking a tool call
 

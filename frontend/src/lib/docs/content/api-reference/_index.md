@@ -132,4 +132,4 @@ The `session_id` is sent in the message body (e.g. `{"type": "query", "prompt": 
 | [Voice](/docs/api-reference/voice) | `/voice`, `/settings/voice` | Voice settings and voice calls |
 | [Miscellaneous](/docs/api-reference/miscellaneous) | Various | Tags, analytics, git (including Ship It and worktrees), GitHub pull requests and actions, settings, loop guard, computer use, license, files |
 
-Internal routes are not part of this reference: anything under `/api/v1/internal`, worker-to-worker traffic (`/api/v1/network/peer/*` and the network join handshake), the pairing and account-link handshakes (`/api/v1/pairing/exchange`, `/api/v1/mobile/hub/endpoint`, `/ingress`, `/link`, `/enroll`), and the desktop app's local listener.
+Routes not listed in this reference are internal and can change without notice.

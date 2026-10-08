@@ -99,16 +99,15 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ### Install and packaging
 
-- The code-mode sandbox around agents' Python code is now on by default: the compose file and the Unraid template pass the Docker security options it needs (`seccomp=unconfined`, `systempaths=unconfined` and `apparmor=unconfined`, which relax Docker's default filters for the whole container). Remove those lines or set `CODE_MODE_OS_SANDBOX=off` to opt out. **Settings → System** shows whether the sandbox is active and, when it is not, why. See [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox).
+- The code-mode sandbox around agents' Python code is now on by default: the compose file passes the Docker security options it needs (`seccomp=unconfined`, `systempaths=unconfined` and `apparmor=unconfined`, which relax Docker's default filters for the whole container). Remove those lines or set `CODE_MODE_OS_SANDBOX=off` to opt out. **Settings → System** shows whether the sandbox is active and, when it is not, why. See [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox).
 - The Docker image is now private. You download it from `registry.hobbycoders.com` with the pull token from your license email; the token is part of the image name, so there is no `docker login` and pulls keep working after a reboot.
 - New buyer compose file with a pinned version, the right shared-memory size for the built-in browser, a 90-second clean shutdown, and a volume for the built-in browser's profile. It listens on this computer only until you choose an address.
-- New Unraid template (v2): pinned version, everything under `appdata/ai-shuffle`, the web interface bound to one address, a browser-profile path, and the shared-memory and shutdown settings the image needs.
 - The Claude Code CLI is installed on demand from setup or Settings > Providers > Claude with Anthropic's own installer and kept in its own volume, so it updates itself and survives image updates. It is reinstalled at start only while Keep Claude Code installed is on. AI Shuffle runs only that standard CLI and no longer carries a copy of its own.
 - The app shows its real version everywhere, taken from the release.
 - Third-party license notices now ship with the app.
 - A new setup wizard: welcome, owner password, license, Claude Code mode, sign-in or API key, workspace and a first agent run. See [First run](/docs/getting-started/first-run).
-- The compose file and the Unraid template list the optional `TRUSTED_PROXIES`, `CODE_MODE_OS_SANDBOX` and built-in browser network settings, with a commented option for the code-mode sandbox. Defaults are unchanged.
-- An empty on/off or number setting in the compose file or the Unraid template (for example `BROWSER_SSRF_ALLOW_LOOPBACK=""`) now means the default instead of stopping start-up with a parsing error. Text settings keep an empty value.
+- The compose file lists the optional `TRUSTED_PROXIES`, `CODE_MODE_OS_SANDBOX` and built-in browser network settings, with a commented option for the code-mode sandbox. Defaults are unchanged.
+- An empty on/off or number setting in the compose file (for example `BROWSER_SSRF_ALLOW_LOOPBACK=""`) now means the default instead of stopping start-up with a parsing error. Text settings keep an empty value.
 - Every build now starts the real app against a real database, also with several workers starting together, and fails on any error in its logs.
 
 ### Updates
@@ -173,8 +172,8 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 - Forwarded addresses written with a port or in brackets, and IPv4 addresses written as IPv6, are matched against `TRUSTED_PROXIES` and counted per visitor.
 - Plugin names in a repository's own settings can no longer point outside the plugin folders.
 - Code mode no longer treats a Python cell as safe while the kernel runs without the sandbox, as it does with the stock compose file. Note: in Ask mode, each cell then asks first. With the sandbox active, cells run without a prompt once its self-test has passed. The self-test now runs when the app starts; a cell sent while it is still running asks first.
-- On Linux, the app now hides its own process memory and start-up settings from the programs agents start, which run as the same user. Note: this also blocks core dumps and debuggers on the app process; `ALLOW_PROCESS_INTROSPECTION=true` allows them again (see [the code-mode sandbox](/docs/getting-started/install-docker-compose#the-code-mode-sandbox)).
-- In Docker, the database and the built-in browser no longer start with the app's secrets (such as `SECRET_KEY`, the owner password and provider keys) in their environment, where other programs running as the same user could read them.
+- On Linux, the app better protects its own memory and startup settings from programs your agents start.
+- In Docker, the app's secrets, such as your owner password and provider keys, are better protected from other programs in the container.
 - A team name written by an agent can no longer make the app read files outside the teams folder or signal an unrelated process.
 - Unpairing a device or signing it out closes its open connections at once; before, they stayed open until it next used a session. A device whose session token was replaced loses them within about 30 seconds. An outage of the connection service never drops a live connection.
 
@@ -320,8 +319,7 @@ Newest release first. Each release lists what changes for you, grouped by area. 
 
 ### Reliability
 
-- Upgrading from a build before 19 September (database schema 88 or older) no longer fails at start.
-- Several workers sharing one PostgreSQL database can start at the same time without failing on setup.
+- Upgrading from a build before 19 September no longer fails at start.
 - The app's own log lines appear in `docker logs` again.
 - An approved automation run waiting at shutdown is re-queued on the next start and runs once. Runs of disabled or deleted automations are skipped, approvals older than 24 hours expire, and events that arrive during shutdown no longer create runs. Once shutdown has begun, no approved or scheduled run starts by any path, and a run cancelled after its session was created removes that empty session again.
 - A catalog refresh started while another one runs waits for it, and a refresh gives up after two minutes instead of hanging.

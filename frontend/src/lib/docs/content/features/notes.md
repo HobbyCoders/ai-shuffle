@@ -1,69 +1,28 @@
 <!--
 title: Notes
-description: Global notes for ideas, bugs, and planning
+description: Global notes for ideas, bugs and planning
 order: 8
 -->
 
 # Notes
 
-Notes provide a simple, global space for capturing ideas, tracking bugs, and planning work. They support markdown formatting, tags, and search.
+Notes are a simple place for ideas, bugs and plans. They are not tied to a project or chat.
 
-Notes are not tied to a project or session. Each [API key](/docs/api-reference/api-users) has its own notes and sees only those; as the owner you see every note, including the ones API keys wrote.
+## Create a note
 
-## Features
+1. Open **Notes** in the sidebar.
+2. Choose **New note**.
+3. Type a title and the note. Notes save as you type.
+4. Add tags if you like.
 
-- **Markdown** — Write notes in markdown with live preview
-- **Tags** — Organize notes with custom tags
-- **Pinning** — Pin important notes to the top
-- **Search** — Find notes by title or content
-- **Auto-save** — Changes save automatically with debouncing
-- **Attachments** — Attach files to a note (**Attach file**), then type `@` in the note to link one
+## What notes can do
 
-## Using Notes
+- **Markdown**, with a preview.
+- **Tags**, such as "bug", "idea" or "todo". Filter the list by tag. A note can have several.
+- **Pin** important notes to the top.
+- **Search** by title or text.
+- **Attachments:** use **Attach file**, then type `@` in the note to link it.
 
-### Creating a Note
+Each [API key](/docs/api-reference/api-users) has its own notes and sees only those. As the owner, you see every note.
 
-1. Navigate to **Notes** in the sidebar
-2. Click **New note**
-3. Enter a title and content
-4. Add tags for organization
-5. Notes auto-save as you type
-
-### Organizing with Tags
-
-- Create tags to categorize notes (e.g., "bug", "idea", "todo")
-- Filter the notes list by tag
-- A note can have multiple tags
-
-### Markdown Preview
-
-Toggle between edit and preview mode to see your markdown rendered.
-
-## API Access
-
-```bash
-# List notes
-curl http://localhost:8000/api/v1/notes \
-  -H "Authorization: Bearer aih_your_key"
-
-# Create a note
-curl -X POST http://localhost:8000/api/v1/notes \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "API Redesign Ideas",
-    "content": "## Goals\n- Simplify auth flow\n- Add pagination everywhere",
-    "tags": ["idea", "api"],
-    "is_pinned": true
-  }'
-
-# Update a note (PATCH; all fields optional)
-curl -X PATCH http://localhost:8000/api/v1/notes/NOTE_ID \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{ "is_pinned": false }'
-
-# Delete a note
-curl -X DELETE http://localhost:8000/api/v1/notes/NOTE_ID \
-  -H "Authorization: Bearer aih_your_key"
-```
+To manage notes from your own code, see the [Notes API](/docs/api-reference/notes).

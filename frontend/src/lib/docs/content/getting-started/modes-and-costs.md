@@ -6,138 +6,99 @@ order: 7
 
 # Modes and costs
 
-AI Shuffle includes no AI usage. You pay HobbyCoders for the app, and you pay your AI provider for the AI. The two bills never mix: AI Shuffle never pays for, resells, marks up or routes AI usage, and never uses anyone else's account for your work.
+AI Shuffle includes no AI usage. You pay HobbyCoders for the app, and you pay your AI provider for the AI. The two bills never mix: AI Shuffle never pays for, resells or marks up AI usage, and never uses anyone else's account for your work.
 
 ## Providers
 
-Connect any of these, one or several. Each uses your own account and bills you under its own terms.
+Connect one or several. Each uses your own account and bills you under its own terms.
 
-- **Claude:** a Claude subscription (Pro or Max) through the Claude Code CLI, an Anthropic API key, or, if you turn it on, your own cloud provider or gateway (see [Claude through a cloud provider or gateway](#claude-through-a-cloud-provider-or-gateway)).
+- **Claude:** a Claude subscription (Pro or Max) through the Claude Code CLI, an Anthropic API key, or your own cloud provider or gateway.
 - **OpenAI:** a ChatGPT subscription sign-in, or an OpenAI API key.
-- **OpenRouter:** an OpenRouter API key, one key for many models.
+- **OpenRouter:** one API key for many models.
 - **xAI Grok:** a SuperGrok subscription sign-in, or an xAI API key.
 - **Custom gateway:** any compatible endpoint with your own token, including a local model server.
-- **fal.ai:** a media key for images, video and audio. It does not run agents on its own.
+- **fal.ai:** a key for images, video and audio. It does not run agents on its own.
 
-Images can also come from a ChatGPT subscription sign-in. Under **Settings > Models**, choose **ChatGPT subscription (OpenAI built-in)** for Text to Image or Image Editing, and every chat can make or edit images with it, whatever its text model. It needs no fal.ai key. If that ChatGPT account is not signed in on the worker, the image tools say so and use nothing else. Without that choice, OpenAI's built-in image tool appears only in chats that run on an OpenAI model.
+A ChatGPT subscription can also make images for every chat. Under **Settings → Models**, choose **ChatGPT subscription (OpenAI built-in)** for Text to Image or Image Editing.
 
-Voice mode uses your own OpenAI account.
+Voice calls use your own OpenAI API account.
 
 ## Subscription or API key
 
-Agents run on exactly the credential you chose. AI Shuffle never moves your work to another account on its own, and if a credential stops working, agents wait instead of falling back to anything.
+Agents run on exactly the account you chose. If it stops working, agents wait. AI Shuffle never switches to another account on its own.
 
 ### Subscription
 
-You sign in to your own subscription on the provider's own sign-in page (see [First run](/docs/getting-started/first-run)).
+You sign in to your own plan on the provider's own sign-in page.
 
-- **What it costs you:** your plan's fixed monthly price, paid to the provider. AI Shuffle adds nothing.
-- **Limits:** your plan's usage limits apply, exactly as in the provider's own apps. Providers size these plans for one person's ordinary, hands-on use. When you reach a limit, agents pause until it resets.
-- **Good for:** interactive work while you are at the keyboard: chatting with an agent, reviewing its changes, a few sessions at a time.
-- **Not good for:** anything that runs without you. Unattended loops on a subscription can use up your plan's limits quickly, and running them is at your own risk under the provider's terms.
+- **Cost:** your plan's monthly price, paid to the provider. AI Shuffle adds nothing.
+- **Limits:** your plan's usage limits, as in the provider's own apps. When you reach one, agents pause until it resets.
+- **Good for:** hands-on work at your desk, a few chats at a time.
+- **Not good for:** anything that runs without you. Unattended runs can use up your limits quickly, and running them is at your own risk under the provider's terms.
 
-Your subscription is for you. Do not share one account between several people or let other people's work run on it; that is against the providers' terms, and AI Shuffle is not built for it.
+A subscription is for one person. Do not share one account between several people.
 
 ### API key
 
-You paste an API key from your own account in the provider's console. AI Shuffle sends it only to that provider, or passes it to the agent processes it starts, and to nothing else.
+You paste a key from your provider's console.
 
-- **What it costs you:** the provider bills your account per use, by the number of tokens each request reads and writes, at the prices on its pricing page. There is usually no monthly minimum.
+- **Cost:** the provider bills you per use, by the tokens each request reads and writes.
 - **Limits:** your account's rate limits and the spend limit you set there.
-- **Good for:** scheduled automations, overnight runs, connectors that answer messages while you are away, and many agents at once.
+- **Good for:** automations, overnight runs, connectors that answer while you are away, and many agents at once.
 
 ## How much does an API key cost?
 
-It depends on the model you pick and how much the agent reads. A rough way to estimate a session:
+It depends on the model and on how much the agent reads.
 
-- An agent working in a code repository mostly **reads**: files, command output, its own earlier turns. Input tokens are often ten or more times the output tokens.
-- Repeated context is billed at a much lower **cached** rate, so a long session usually costs far less than its raw token count suggests.
-- To estimate: take a typical session's input and output tokens (your provider's usage page lists them), multiply each by the model's price per million tokens, and add them.
+- An agent working in a code project mostly **reads**: files, command output and its own earlier turns.
+- Repeated context is billed at a much lower **cached** rate, so long chats cost less than their raw size suggests.
+- Your provider's usage page shows your real numbers.
 
-Start with a low monthly spend limit in your provider's console, run your normal workload for a few days, and look at its usage page. Then set the limit you are comfortable with. AI Shuffle cannot see or change your provider's bill.
+Start with a low monthly spend limit in your provider's console, work normally for a few days, check the usage page, and then set a limit you are comfortable with.
 
 ## When usage numbers are estimates
 
-The Stats page and the cost shown under each reply are added up by AI Shuffle from the token counts your provider reports for each turn. When a provider reports no counts for a call (some local and OpenAI-compatible servers do not), or when you stop a reply before its counts arrive, AI Shuffle counts the text itself at about four characters per token. Such turns are marked: **≈** next to the cost under the reply, and **est.** on the Stats tiles and rows that include them, with the reason on hover. Estimated amounts still count toward budgets and limits; only their precision is in question. Claude Code sessions always report their own counts and are never estimated. Local models never get a dollar price, even when a local model's name matches a hosted one; their cost is shown as 0.
+The Stats page and the cost under each reply come from the token counts your provider reports. When a provider reports none, or you stop a reply early, AI Shuffle estimates them. Estimated amounts are marked **≈** under the reply and **est.** on the Stats page. They still count toward budgets and limits. Local models are always shown as free.
 
 ## When to use an API key
 
-Use an API key for anything that runs when you are not watching:
+Use an API key for anything that runs while you are not watching:
 
-- **Automations** on a schedule, an interval, a webhook or a connector event;
-- **Scheduled wake-ups** and background agents that keep working after you close the tab;
-- **Connectors** that answer Telegram, Discord, Slack or other messages;
-- **Many agents at once**, for example a batch of parallel tasks.
+- **automations** on a schedule, an interval, a webhook or a connector event;
+- **scheduled wake-ups** and background agents that keep going after you close the tab;
+- **connectors** that answer Telegram, Discord, Slack or other messages;
+- **many agents at once**.
 
-If you run much of this kind of work, an API key is the safer choice. The setup wizard gives the same advice.
+## Claude: choosing a mode
 
-## Claude: subscription or API key mode
-
-Claude runs in exactly one mode at a time, the one you chose: **Subscription**, **API key**, **Cloud** or **Off**. Change it at any time in **Settings → Providers → Claude**, which also shows the account the Claude Code CLI is signed in to and the last four characters of your key. If both a sign-in and a key are set up, the mode you picked decides; AI Shuffle never switches on its own.
+Claude runs in one mode at a time: **Subscription**, **API key**, **Cloud** or **Off**. Change it in **Settings → Providers → Claude**, which also shows the signed-in account. AI Shuffle never switches modes on its own.
 
 ## Claude through a cloud provider or gateway
 
-The Claude Code CLI can also run Claude through Amazon Bedrock, Google Vertex AI, Microsoft Foundry, or an LLM gateway that you run. In AI Shuffle this is a third Claude method, **Cloud provider or gateway**. Configure it in Settings, or use the stock CLI's worker-environment configuration, including its built-in cloud credential chains.
+Claude can also run through Amazon Bedrock, Google Vertex AI, Microsoft Foundry, or an LLM gateway you run. Set it up in **Settings → Providers → Claude → Add → Cloud provider or gateway** (owner only), then choose **Save and use for Claude**. Your cloud provider or gateway bills this usage.
 
-- **Explicit configuration.** A saved-and-selected Settings cloud method is authoritative. Otherwise, a cloud selector (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` or `CLAUDE_CODE_USE_FOUNDRY`) or gateway configuration (`ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN`) in the worker environment selects Cloud. A stray cloud key without a selector does not. **Off** still prevents Claude from running. Profile environment values are not used as cloud credentials.
-- **Owner only.** Only the owner of the worker can view, set or remove it.
-- **One method at a time.** Enter values in **Settings → Providers → Claude → Add → Cloud provider or gateway**, or configure one method in the worker environment. AI Shuffle passes only the method's allowlisted variables to the delegated `claude` subprocess. Multiple cloud selectors are refused. A selected Settings configuration never falls back to the worker's credentials when its secrets are unavailable. A gateway may use `ANTHROPIC_API_KEY` instead of an auth token; other cloud methods do not receive an Anthropic key or subscription token.
-- **Secrets stay on the worker.** Values entered in Settings are stored encrypted, the same way as the Anthropic API key. The app never shows secrets again; a stored secret shows as "Stored", and you can replace it but not read it. Worker-environment credentials remain under your existing worker configuration; AI Shuffle does not copy them into its credential store or inspect cloud credential files.
-- **This worker only.** Like the Claude mode itself, the method and its secrets apply to the worker you set them on. They are not copied to your other paired workers; set each worker up on its own.
-- **Turning it on.** **Save and use for Claude** turns it on. **Save** only stores the values. Choosing **Cloud** under **Runs on** opens this page; it does not switch on its own.
-- **Turning it off.** For Settings credentials, pick **Subscription** or **API key** under **Runs on**, or remove the credential. For worker-environment configuration, remove its selector/gateway variables and restart the worker to return to the saved mode. Choose **Off** to disable Claude regardless of environment configuration.
+| Method | What you enter | Setup guide |
+|---|---|---|
+| Amazon Bedrock | Region, and access keys or a Bedrock API key | [Amazon Bedrock](https://code.claude.com/docs/en/amazon-bedrock) |
+| Google Vertex AI | Region, project ID and the service account key file | [Google Vertex AI](https://code.claude.com/docs/en/google-vertex-ai) |
+| Microsoft Foundry | Resource name or base URL, and an API key | [Microsoft Foundry](https://code.claude.com/docs/en/microsoft-foundry) |
+| LLM gateway | Base URL and auth token | [LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect) |
 
-Before you can save, you must confirm that you have read this warning. It stays on the page while the method is set up:
-
-> Agents on this worker can run shell commands and can read these credentials, including the Vertex AI key file on this worker's disk, with their own tools and in terminals. A project's or your own .claude/settings.json can still change where Claude connects, and this worker's proxy and certificate settings still apply. Use an account with the smallest permissions that work, and only on a worker you trust.
-
-For a gateway, also:
-
-> All Claude traffic from this worker goes to the address you enter. AI Shuffle passes this address and token only to Claude Code, not to the browser tool or other app-launched tools. Claude Code's own commands can still read them.
-
-The warning is accurate:
-
-- **App-owned child isolation is not a sandbox.** AI Shuffle does not pass cloud credentials, account selectors or gateway routing to other agents' Fluid Bash/Monitor shells, NativeLoop sessions, terminals, browser tools, status probes, or app-launched MCP/plugin processes. App-configured stdio MCP entries launched by the CLI are masked and scrubbed too. The stock CLI's own Bash tool and user-configured Claude plugin/hook commands still inherit its environment, just as when you run Claude Code directly. Same-UID processes can also read each other's accessible files or process state; see [the same-user security boundary discussion](https://github.com/HobbyCoders/ai-shuffle/issues/1957).
-- For Vertex AI, the service account key is written to a file in the worker's data folder that only the app's user can read. Agents' Bash and Read tools and the in-app terminals run as that same user, so they can read it too. Only a key of type `service_account` is accepted.
-- The CLI still reads `.claude/settings.json` in a project and in your home folder. An `env` block there can point Claude at another address.
-- The worker's own proxy and certificate settings (`HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`) still apply, since a company network may need them. `NODE_TLS_REJECT_UNAUTHORIZED` is always removed in this mode, so certificate checks stay on.
-
-Give the account only the permissions it needs to call Claude.
-
-Cloud account and endpoint variables are removed from generic child environments, including profile/settings overlays; `FLUID_CHILD_ENV_PASSTHROUGH` cannot override this. Only the Claude spawn restores the selected method's allowlist. If Settings values cannot be prepared (for example the Vertex key file cannot be written), the run stops with an error rather than continuing on another account. Switching the selected account or mode forces a fresh pooled Claude process without placing the credentials in the shared tool environment.
-
-| Method | Values you enter | What the CLI gets | Setup guide |
-|---|---|---|---|
-| Amazon Bedrock | Region, and either access keys (an optional session token) or a Bedrock API key | `CLAUDE_CODE_USE_BEDROCK=1`, `AWS_REGION`, then `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN`, or `AWS_BEARER_TOKEN_BEDROCK` | [Amazon Bedrock](https://code.claude.com/docs/en/amazon-bedrock) |
-| Google Vertex AI | Region, project ID, and the service account key file pasted as JSON | `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`, `GOOGLE_APPLICATION_CREDENTIALS` (a file only the app's user can read) | [Google Vertex AI](https://code.claude.com/docs/en/google-vertex-ai) |
-| Microsoft Foundry | Resource name or base URL, and an API key | `CLAUDE_CODE_USE_FOUNDRY=1`, `ANTHROPIC_FOUNDRY_RESOURCE` or `ANTHROPIC_FOUNDRY_BASE_URL`, `ANTHROPIC_FOUNDRY_API_KEY` | [Microsoft Foundry](https://code.claude.com/docs/en/microsoft-foundry) |
-| LLM gateway | Base URL and auth token | `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` | [LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect) |
-
-A base URL must start with `https://`. Plain `http://` is accepted only for an address on the worker itself, such as `http://127.0.0.1:4000`. It cannot contain a user name, password, query or fragment.
-
-Usage on this method is billed by your cloud provider or gateway, not by a Claude plan, so the loop guard does not apply. The status in Settings checks only that the values are present; it does not call your cloud account. A wrong key shows up as an error on the first run.
-
-### Stock CLI worker-environment setup
-
-Set variables on the worker process using your existing deployment or service configuration, then restart the worker. They are never forwarded to other workers or to app-owned tool processes. Settings reports the active method as **Cloud provider or gateway**, with **(worker environment)** in its method label; it checks configuration presence, not a live cloud sign-in.
-
-- **Bedrock:** `CLAUDE_CODE_USE_BEDROCK=1` with `AWS_REGION` or `AWS_DEFAULT_REGION`. Use access keys/session token, `AWS_BEARER_TOKEN_BEDROCK`, or the CLI's default AWS credential chain (`AWS_PROFILE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, role/web-identity or container-credential variables). AWS profiles and SSO are handled by the CLI, not AI Shuffle.
-- **Vertex:** `CLAUDE_CODE_USE_VERTEX=1`, `CLOUD_ML_REGION`, and `ANTHROPIC_VERTEX_PROJECT_ID`. Use `GOOGLE_APPLICATION_CREDENTIALS` or the CLI's default Google login/ADC; `CLOUDSDK_CONFIG`, Google project aliases and `VERTEX_REGION_CLAUDE_*` overrides are passed only to Claude. This path does not require pasting a service-account key into Settings.
-- **Foundry:** `CLAUDE_CODE_USE_FOUNDRY=1` and `ANTHROPIC_FOUNDRY_RESOURCE` or `ANTHROPIC_FOUNDRY_BASE_URL`. Use the API key/auth-token variables or the CLI's Microsoft Entra/default Azure credential chain, including `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`, certificate or federated-token configuration.
-- **Gateway:** `ANTHROPIC_BASE_URL`, with `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY` or `ANTHROPIC_CUSTOM_HEADERS` as required by the gateway. An auth token by itself is also passed to the CLI. Follow the official setup guides above for the CLI's endpoint and skip-auth switches.
-
-No real Bedrock, Vertex, Foundry or gateway account was used to verify this support. Automated tests use fake values and exercise the CLI spawn environment and app-owned child isolation; a configuration-presence check is not proof that your account can authenticate.
+- The values apply to this worker only. Set up each worker on its own.
+- Secrets are encrypted at rest and never shown again.
+- You can also use the Claude Code CLI's standard environment variables for these methods on the worker. Settings then shows **(worker environment)**.
+- Agents on this worker can read these credentials. Use an account with the smallest permissions that work, and only on a worker you trust. You confirm this before saving.
 
 ## The loop guard
 
 With a Claude subscription, AI Shuffle protects your plan from runaway automation:
 
-- Turns that start without you (automations, wake-ups, connectors, and the background agents they start) count against an **unattended budget**: by default 12 per session and 60 per worker in any rolling hour. Past either budget, the next such turn does not start on its own. The session shows why, and the turn waits under **Settings → Providers → Claude subscription → Policy** until you choose **Confirm** (it runs now) or **Dismiss**.
-- Background agents on Claude that an automation, wake-up or connector started get a default **time limit** of 60 minutes, so one that loops cannot run all night.
-- Creating an automation or arming a wake-up on a Claude subscription shows a reminder to use an API key for scheduled runs.
+- Turns that start without you (automations, wake-ups, connectors and the background agents they start) have an hourly budget: by default 12 per chat and 60 per worker. Past it, the next one waits for you under **Settings → Providers → Claude subscription → Policy**, where you choose **Confirm** or **Dismiss**.
+- Background agents started that way stop after 60 minutes by default.
+- Creating an automation on a Claude subscription reminds you to use an API key.
 
-You can change the budgets and the time limit, or turn the guard off, under **Settings → Providers → Claude subscription → Policy**. A change also applies to work that is already running: a lowered time limit stops an agent already past it within about a minute, and a raised one lets it keep going. The counts start again when the worker restarts. The loop guard does not apply in Claude's API key mode, where your Anthropic Console spend limit is the control, or to agents on other providers. It never holds or times work you started yourself: a chat you are driving, and every agent that chat starts, has no loop guard budget or time limit.
+Change the budgets and time limit, or turn the guard off, on the same **Policy** page. Work you start yourself is never held or timed.
 
 ## What AI Shuffle costs
 
-The license covers the app and its updates for one account with up to 3 workers, and the Android app. Every license starts with a 14-day trial with every feature, and your first charge can be refunded within 7 days. Current prices are on [hobbycoders.com](https://hobbycoders.com/ai-shuffle). See [License](/docs/getting-started/license).
+The license covers the app and its updates for one account with up to 3 workers, plus the Android app. Every license starts with a 14-day trial with every feature, and your first charge can be refunded within 7 days. Current prices are on [hobbycoders.com](https://hobbycoders.com/ai-shuffle). See [License](/docs/getting-started/license).

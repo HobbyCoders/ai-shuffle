@@ -10,13 +10,13 @@ You bring your own AI account. HobbyCoders sells the workspace, not the AI. Thes
 
 ## Do I need my own AI account?
 
-Yes, one from any supported provider. AI Shuffle doesn't include any AI usage. You connect your own account with Claude, OpenAI, OpenRouter, xAI Grok or a custom gateway, by subscription sign-in or API key, and that provider bills you directly.
+Yes. AI Shuffle doesn't include any AI usage. You connect your own account with Claude, OpenAI, OpenRouter, xAI Grok or a custom gateway, by subscription sign-in or API key, and that provider bills you directly.
 
 You need one provider to start. You can add more later in **Settings → Providers**, and each one bills you under its own terms.
 
 ## Does AI Shuffle use or resell my AI subscription?
 
-No. You sign in to your subscription yourself, on the provider's own sign-in page. A Claude subscription runs through the standard Claude Code program, which keeps its own sign-in; HobbyCoders doesn't copy or store it. A ChatGPT or SuperGrok sign-in gives your installation a token, which it keeps encrypted on your own machine and never sends to HobbyCoders. HobbyCoders never routes other people's work through your account, and doesn't resell or mark up AI usage.
+No. You sign in to your subscription yourself, on the provider's own sign-in page. Your sign-in is stored encrypted on your own workers, and HobbyCoders cannot read it. HobbyCoders never routes other people's work through your account, and doesn't resell or mark up AI usage.
 
 ## Subscription or API key: which should I pick?
 
@@ -26,15 +26,21 @@ Use your subscription for normal, hands-on work at your desk. Use an API key for
 
 Your projects, sessions and database stay on the machine running AI Shuffle. Prompts go from that machine straight to the AI provider you chose. They never pass through HobbyCoders' servers.
 
-If you use remote access from your phone or another browser, that traffic travels through a Cloudflare tunnel for your worker. [Remote access](/docs/getting-started/remote-access) and the [privacy policy](https://hobbycoders.com/privacy#remote-access) explain what that means.
+If you use remote access from your phone or another browser, that traffic travels through HobbyCoders' secure connection. [Remote access](/docs/getting-started/remote-access) and the [privacy policy](https://hobbycoders.com/privacy#remote-access) explain what that means.
 
 ## What does AI Shuffle's own server see?
 
-Very little, and never your prompts. Your install checks for updates and, once licensing is live, checks its license: activation sends the license key, a random install ID, a fingerprint made from that ID and the machine ID, the host name and the app version, and the daily check sends the install ID, the fingerprint and the app version. If you link a phone or use remote access, the connection service keeps your account and device records. AI Shuffle has no analytics or tracking. The [privacy policy](https://hobbycoders.com/privacy) lists every address the app contacts and why.
+Very little, and never your prompts. Your install checks for updates and, once licensing is live, checks its license. Activation sends your license key, an install ID, a machine ID, the machine name and the app version. The daily check sends only the install ID, the machine ID and the app version. If you link a phone or use remote access, the connection service keeps your account and device records. AI Shuffle has no analytics or tracking. The [privacy policy](https://hobbycoders.com/privacy) lists every address the app contacts and why.
 
 ## What do I need to run it?
 
-A Linux server or NAS with Docker (64-bit x86), an Unraid server, or a Windows 10 or 11 PC. macOS and Linux desktop builds are coming. An Android phone is optional, for using your workspace away from your desk. See [Requirements](/docs/getting-started/requirements).
+Any of these:
+
+- **Docker** on a Linux computer, NAS or home server (64-bit Intel or AMD).
+- **Windows 10 or 11**, with the desktop app (in beta).
+- **macOS or Linux desktop app**: coming soon.
+
+The **Android app** is optional, for using your workspace away from your desk. An iPhone and iPad app is coming soon; use a browser for now. See [Requirements](/docs/getting-started/requirements).
 
 ## How many machines does a license cover?
 

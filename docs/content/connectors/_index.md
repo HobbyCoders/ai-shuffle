@@ -1,129 +1,64 @@
 <!--
 title: Connectors Overview
-description: Overview of the connector system for integrating external platforms
+description: Connect AI Shuffle to messaging apps, email, music, smart home and other services
 order: 0
 -->
 
 # Connectors
 
-Connectors link AI Shuffle to messaging platforms, smart home systems and other services. Chat connectors (Telegram, Discord, WhatsApp, Slack, Signal and iMessage) carry messages to your agent and send its replies back. LINE, BlueBubbles and Microsoft Teams do not receive messages. Gmail, Spotify, Philips Hue, Home Assistant and Personal Finance (Plaid) give your agent tools rather than chats.
+Connectors link AI Shuffle to the apps and services you already use.
 
-## How Connectors Work
+- **Chat connectors** let you talk to your agent from Telegram, Discord, WhatsApp, Slack, Signal or iMessage. Your message goes to the agent, and its reply comes back in the same chat.
+- **Sending-only connectors** (LINE, BlueBubbles) let your agent send messages but not receive them. Microsoft Teams can be connected but cannot send or receive messages yet.
+- **Tool connectors** (Gmail, Spotify, Philips Hue, Home Assistant and Personal Finance) give your agent tools, such as reading email or turning on a light.
+- **Webhook** sends and receives plain web requests, for anything else.
 
-```
-External Platform  ──▶  Connector  ──▶  AI Shuffle  ──▶  Agent
-     (Telegram)          (Bridge)       (Session)       (Response)
-                                                           │
-External Platform  ◀──  Connector  ◀──  AI Shuffle  ◀─────┘
-```
+## Available connectors
 
-For a chat connector:
+| Connector | What it does |
+| --- | --- |
+| [Telegram](/docs/connectors/telegram) | Chat with your agent through a Telegram bot |
+| [Discord](/docs/connectors/discord) | Chat with your agent through a Discord bot |
+| [WhatsApp](/docs/connectors/whatsapp) | Chat with your agent on WhatsApp Business |
+| [Slack](/docs/connectors/slack) | Chat with your agent through a Slack app |
+| [Signal](/docs/connectors/signal) | Chat with your agent on Signal |
+| [iMessage](/docs/connectors/imessage) | Chat with your agent through iMessage. Needs AI Shuffle on a Mac (macOS app coming soon) |
+| [LINE](/docs/connectors/line) | Send LINE messages |
+| [BlueBubbles](/docs/connectors/bluebubbles) | Send iMessages through a BlueBubbles server |
+| [Microsoft Teams](/docs/connectors/msteams) | Connect a Teams app (messages not supported yet) |
+| [Gmail](/docs/connectors/gmail) | Search, read, send and organize email |
+| [Spotify](/docs/connectors/spotify) | Control playback and playlists |
+| [Philips Hue](/docs/connectors/hue) | Control lights and scenes |
+| [Home Assistant](/docs/connectors/homeassistant) | Control your smart home |
+| Personal Finance | Read-only bank balances and transactions |
+| [Webhook](/docs/connectors/webhook) | Send and receive web requests |
 
-1. A message arrives from the external platform (e.g., a Telegram message)
-2. The connector converts it into a standard message
-3. AI Shuffle creates or continues a session for that conversation
-4. Your agent processes the message and writes a response
-5. The response is sent back through the connector to the platform
+## Common setup steps
 
-## Available Connectors
+1. **Get your credentials** from the other service, such as a bot token or an API key. Each connector's page explains how.
+2. **Install the connector app:** open **Settings → Plugins**, choose the **Apps** filter, open the app and choose **Install** if asked. This needs internet access.
+3. **Add the connection:** choose **Connect account**, fill in the form and choose **Create Connector**.
+4. **Add at least one allowed sender** (chat and sending connectors). Only the accounts or chats on this list can use your agent, and the connector will not start without one.
+5. **Pick an agent.** The connector answers with that agent. Under **Advanced settings** you can reuse an existing API user instead, with its own agents.
+6. **Test the connection** to check your credentials.
+7. **Turn it on** with the **Activate** switch.
 
-| Connector | Type | Key Features |
-|-----------|------|-------------|
-| **Telegram** | Messaging | Bot API, group chats, inline keyboards |
-| **Discord** | Messaging | Bot with prefix commands, multiple channels |
-| **WhatsApp** | Messaging | Business API, phone number verification |
-| **Slack** | Messaging | Bot with app tokens, channel management |
-| **LINE** | Messaging | Channel API, sending only |
-| **Signal** | Messaging | Signal CLI integration, end-to-end encrypted |
-| **MS Teams** | Messaging | Azure AD app registration; cannot send or receive messages |
-| **iMessage** | Messaging | Via the `imsg` CLI on the macOS host |
-| **BlueBubbles** | Messaging | macOS iMessage bridge, sending only |
-| **Home Assistant** | Smart Home | Entity control, automations |
-| **Philips Hue** | Smart Home | Light control, scenes |
-| **Spotify** | Music | Playback control, playlists |
-| **Gmail** | Email | Send, search, read and organize email |
-| **Personal Finance (Plaid)** | Finance | Read-only bank balances and transactions |
-| **Webhook** | Generic | Inbound/outbound HTTP webhooks |
-
-## Connector Capabilities
-
-Each connector declares what it supports:
-
-| Capability | Description |
-|-----------|-------------|
-| `typing_indicator` | Show "typing..." in the platform |
-| `reactions` | Add emoji reactions to messages |
-| `read_receipts` | Mark messages as read |
-| `threads` | Support threaded replies |
-| `buttons` | Interactive buttons/keyboards |
-| `rich_text` | Markdown or formatted text |
-| `file_upload` | Send files/images |
-
-## Common Setup Steps
-
-1. **Create credentials** on the external platform (bot token, API key, etc.)
-2. **Install the app's runtime**: open **Settings > Plugins**, choose the **Apps** filter, open the app and click **Install <app name>** if prompted. Installing needs internet access to PyPI. You can only add a connection after the runtime is installed and enabled.
-3. **Add the connection**: click **Connect account**, fill in the form and click **Create Connector**.
-4. **Add at least one allowed sender** (chat connectors only). Telegram, Discord, WhatsApp, Slack, LINE, Signal, iMessage, Microsoft Teams and BlueBubbles will not start until their allowlist has an entry. Only listed senders or chats can use the bot.
-5. **Assign an agent**: each connection runs as an API user. Messaging connectors and inbound or bidirectional webhooks ask for an **Agent** when you create them, and the new API user gets that agent. To reuse an existing API user instead, pick it under **Advanced settings**; it keeps its own agents, which you manage in **Settings > Integrations**. Without an agent, every incoming message is refused.
-6. **Test the connection** with the **Test connection** button to verify credentials work
-7. **Activate** the connection with its **Activate** switch
+Connectors that answer while you are away should use an API key rather than a subscription. See [Modes and costs](/docs/getting-started/modes-and-costs).
 
 ## How AI actions work
 
-Most connectors give your agent a set of actions, such as sending a message, pinning a message or turning on a light. Your agent gets two tools per connector: one lists the available actions and the inputs each one takes, the other runs one action. AI Shuffle checks the inputs before it runs the action.
+Most connectors give your agent actions, such as sending a message, pinning a message or turning on a light.
 
-- **Chat connectors**: only sessions that started from a chat on that connector get its tools. Message actions stay within that chat and the connector's allowlist.
-- **Gmail, Spotify, Philips Hue, Home Assistant and Plaid**: every agent session gets the tools while the connector is active.
-- **`enabled_action_categories`** limits which categories of actions your agent can see and use. Leave it empty to allow all.
-- **Destructive actions** (for example deleting a message or banning a member) ask a person in the chat to approve first. If nobody approves within 2 minutes, the action is denied. Set `auto_approve_destructive` to `true` to skip the prompt.
-- **Automations** can also run connector actions, with a **Connector Action** step. Actions run from an automation do not ask for approval.
+- **Chat connectors:** only chats that started on that connector get its actions, and they stay within that chat.
+- **Gmail, Spotify, Philips Hue, Home Assistant and Personal Finance:** every chat can use them while the connector is on.
+- **Action categories:** each connector's settings let you choose which kinds of actions your agent may use. Leave it empty to allow all.
+- **Destructive actions,** such as deleting a message or banning a member, ask someone in the chat to approve first. With no answer within 2 minutes, the action is denied. You can turn this check off in the connector's settings.
+- **Automations** can run connector actions as a step. Those do not ask for approval.
 
-## Connector Sessions
+## Conversations
 
-Each unique conversation on a chat connector (e.g., a Telegram chat, a Discord channel) gets its own AI Shuffle session. This means:
-- Conversation history is preserved across messages
-- The AI remembers context from earlier in the chat
-- Sessions can be viewed and managed in the AI Shuffle UI
+Each conversation on a chat connector, such as one Telegram chat or one Discord channel, becomes its own chat in AI Shuffle. The agent remembers what was said earlier, and you can read every conversation in the app.
 
-## Lifecycle Notifications Across Installs
+## API management
 
-Each connector runs on its assigned install. When a session runs on another install sharing the same database, its lifecycle notifications are forwarded to the connector owner. Only chats linked to that session receive the notification. Webhooks and automation triggers are dispatched once by the originating install.
-
-Delivery is best effort: an offline owner, disconnected database listener, full notification queue, or process restart can lose notifications. Failed or dropped deliveries are logged; missed notifications are not replayed. Repeated messages are suppressed by event ID within a bounded, 15-minute cache on the receiving install.
-
-## API Management
-
-Connectors can also be managed through the REST API. These calls need owner access. API-user keys (`aih_...`) are rejected with 403. From the machine running AI Shuffle, sign in with the owner password to get an owner token, then send it as a Bearer token (see [Owner password](/docs/api-reference/authentication#owner-password)):
-
-```bash
-# Get an owner token (local listener only)
-curl -X POST http://localhost:8000/api/v1/owner/login \
-  -H "Content-Type: application/json" \
-  -d '{"password": "your-owner-password", "bearer": true}'
-# The response's "token" field is the owner token
-OWNER_TOKEN="<token>"
-
-# List connector types
-curl http://localhost:8000/api/v1/connectors/types \
-  -H "Authorization: Bearer $OWNER_TOKEN"
-
-# Create a connector
-curl -X POST http://localhost:8000/api/v1/connectors \
-  -H "Authorization: Bearer $OWNER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "My Telegram Bot",
-    "type": "telegram",
-    "config": { "bot_token": "123:ABC...", "allowed_chat_ids": ["123456789"] },
-    "profile_ids": ["<agent-id>"]
-  }'
-
-# Activate it
-curl -X POST http://localhost:8000/api/v1/connectors/{id}/activate \
-  -H "Authorization: Bearer $OWNER_TOKEN"
-```
-
-`profile_ids` gives the new API user its agents. You can pass `api_user_id` instead to reuse an existing API user. The response's `is_active` field shows whether a connector is enabled. Each connector page lists the `config` fields for that connector.
-
-See the [API Reference](/docs/api-reference/connectors) for full details.
+You can also manage connectors from your own code with an owner sign-in. See the [Connectors API](/docs/api-reference/connectors). Each connector's page lists its settings.

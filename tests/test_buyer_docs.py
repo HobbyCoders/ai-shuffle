@@ -16,7 +16,7 @@ BUYER = ROOT / "docs/content/getting-started"
 FRONTEND_BUYER = ROOT / "frontend/src/lib/docs/content/getting-started"
 
 REQUIRED = {
-    "_index", "overview", "requirements", "installation", "install-unraid", "install-docker-compose",
+    "_index", "overview", "requirements", "installation", "install-docker-compose",
     "first-run", "modes-and-costs", "quick-start", "remote-access", "updates", "license",
     "troubleshooting", "faq", "changelog",
 }
@@ -85,7 +85,7 @@ def test_backend_docs_index_serves_the_buyer_pages_in_order():
     slugs = [d["slug"] for d in listed]
     assert slugs[0] == "_index"
     assert REQUIRED <= set(slugs)
-    assert slugs.index("requirements") < slugs.index("install-unraid") < slugs.index("first-run")
+    assert slugs.index("requirements") < slugs.index("install-docker-compose") < slugs.index("first-run")
     doc = index.get_doc("getting-started", "first-run")
     assert not doc["content_markdown"].startswith("<!--\ntitle")
     assert any(s["title"].endswith("Password") for s in doc["sections"])

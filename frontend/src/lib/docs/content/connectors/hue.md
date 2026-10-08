@@ -4,50 +4,30 @@ description: Control Philips Hue smart lights through your AI Shuffle agent
 order: 11
 -->
 
-# Philips Hue Connector
+# Philips Hue
 
-## Overview
+Ask your agent to turn lights on and off, change brightness and color, set scenes and control whole rooms. Commands go straight to your Hue Bridge at home, so they are fast and do not need the Philips cloud.
 
-The Philips Hue connector lets your agent control your Philips Hue smart lighting system through AI Shuffle. Once connected, you can use natural language to turn lights on and off, adjust brightness and color, activate scenes, and manage light groups -- all by chatting with your agent.
+## You need
 
-Philips Hue uses a local bridge device that communicates with your bulbs via the Zigbee protocol. The connector talks directly to the Hue Bridge's REST API on your local network, so all commands are fast and do not depend on Philips' cloud services. You will need the bridge's IP address and an API key (historically called a "username" in Hue terminology) to get started.
+- A Philips Hue Bridge on your home network, with lights paired to it.
+- AI Shuffle on the same network as the bridge, or able to reach it over a VPN.
+- To be near the bridge once, to press its button.
 
-## Prerequisites
+## Set up
 
-- A **Philips Hue Bridge** (v2 recommended) connected to your local network via Ethernet
-- One or more **Philips Hue lights** paired with the bridge
-- The Hue Bridge and the AI Shuffle host must be on the **same local network** (or the bridge must be accessible via routing/VPN)
-- Physical access to the Hue Bridge for the initial API key generation (you need to press the button on the bridge)
+### 1. Find the bridge's address
 
-## Setup Guide
+Use any of these:
 
-### 1. Find your Hue Bridge IP address
+- In the Hue app, open **Settings → Hue Bridges** and tap the **(i)** next to your bridge.
+- Open [discovery.meethue.com](https://discovery.meethue.com/) in a browser on your home network.
+- Look for "Philips Hue" in your router's device list.
 
-There are several ways to discover your bridge's IP address:
+### 2. Get an API key
 
-**Option A: Use the Philips Hue discovery endpoint**
-
-```bash
-curl -s https://discovery.meethue.com/ | python3 -m json.tool
-```
-
-This returns a JSON array with your bridge's IP address and ID.
-
-**Option B: Check your router's admin page**
-
-Log into your router and look for a device named "Philips Hue" or with a MAC address starting with `00:17:88` or `EC:B5:FA`.
-
-**Option C: Use the Hue app**
-
-Open the Philips Hue app on your phone, go to **Settings > Hue Bridges**, and tap the `(i)` icon next to your bridge to see its IP address.
-
-### 2. Generate an API key (username)
-
-The Hue Bridge requires an authorized API key for all requests. To create one:
-
-1. **Press the physical button** on top of your Hue Bridge (the large round button). You have about 30 seconds to complete the next step.
-
-2. **Immediately run this command:**
+1. Press the round button on top of the bridge.
+2. Within 30 seconds, run this on a computer on your network, with your bridge's address:
 
 ```bash
 curl -X POST "http://YOUR_BRIDGE_IP/api" \
@@ -55,112 +35,44 @@ curl -X POST "http://YOUR_BRIDGE_IP/api" \
   -d '{"devicetype": "ai_shuffle#connector"}'
 ```
 
-3. If successful, you will receive a response like:
+3. Copy the `username` from the reply. That is your API key. It does not expire.
 
-```json
-[{"success": {"username": "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"}}]
-```
+If you see `link button not pressed`, press the button and run the command again.
 
-4. **Save the `username` value** -- this is your API key. It does not expire and will be used in the connector configuration.
+### 3. Connect it in AI Shuffle
 
-If you see an error like `"link button not pressed"`, press the bridge button again and immediately re-run the curl command.
+1. Open **Settings → Plugins**, choose **Apps** and open **Philips Hue**. Choose **Install Philips Hue** if asked.
+2. Choose **Connect account** and enter the **Bridge IP Address** (just the address, such as `192.168.1.42`) and **API Key (Username)**.
+3. Choose **Create Connector**, then turn on **Activate**.
 
-### 3. Verify the API key works
+Try "Turn on the living room lights" or "Set the bedroom to 50%".
 
-```bash
-# List all lights
-curl -s "http://YOUR_BRIDGE_IP/api/YOUR_API_KEY/lights" | python3 -m json.tool
+## Settings
 
-# List all groups/rooms
-curl -s "http://YOUR_BRIDGE_IP/api/YOUR_API_KEY/groups" | python3 -m json.tool
+| Setting | Required | What it does |
+| --- | --- | --- |
+| `bridge_ip` | Yes | The bridge's address on your network |
+| `api_key` | Yes | The key from step 2 |
+| `poll_interval_seconds` | No | How often to check the lights. Default `60`. `0` turns it off |
+| `enabled_action_categories` | No | Limit the agent to some kinds of actions: `control`, `discovery`. Empty allows all |
 
-# List all scenes
-curl -s "http://YOUR_BRIDGE_IP/api/YOUR_API_KEY/scenes" | python3 -m json.tool
-```
+## What your agent can do
 
-You should see JSON objects describing your lights, rooms, and scenes.
+While Hue is on, every chat can use it. See [How AI actions work](/docs/connectors#how-ai-actions-work). Nothing asks for approval.
 
-### 4. Create the Hue connector in AI Shuffle
-
-1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Philips Hue**.
-2. Click **Install Philips Hue** if prompted, then click **Connect account**.
-3. Fill in **Bridge IP Address** and **API Key (Username)**.
-4. Click **Create Connector**.
-
-To create the connector through the API instead, see [API Management](/docs/connectors#api-management); the `config` object takes the fields in the table below.
-
-### 5. Activate the connector
-
-Turn on the connection's **Activate** switch.
-
-### 6. Test with a command
-
-In your AI Shuffle chat, try:
-
-- "Turn on the living room lights"
-- "Set the bedroom to 50% brightness"
-- "Change the kitchen light to blue"
-- "Activate the 'Movie Night' scene"
-
-## Configuration Reference
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `bridge_ip` | string | Yes | The local IP address of your Philips Hue Bridge (e.g., `192.168.1.42`). Do not include `http://` or a port number. |
-| `api_key` | string | Yes | The API key (labeled "API Key (Username)" in the UI) generated by pressing the bridge button and calling the registration endpoint. Historically called "username" in Hue documentation. |
-| `poll_interval_seconds` | string | No | How often (in seconds) the connector polls the bridge for light state changes. Defaults to `60`. Set to `0` to disable polling. |
-| `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all. Valid values: `control`, `discovery`. |
-
-## Capabilities
-
-The Philips Hue connector supports the following capabilities:
-
-| Capability | Supported | Description |
-|------------|-----------|-------------|
-| `rich_text` | No | This connector is not messaging-based, so rich-text formatting is not used |
-| `typing_indicator` | No | Not applicable for light control |
-| `reactions` | No | Not applicable for light control |
-| `file_upload` | No | Not supported |
-| `threads` | No | Not supported |
-| `buttons` | No | Not supported |
-
-### AI Actions
-
-See [How AI actions work](/docs/connectors#how-ai-actions-work). While a Hue connector is active, every agent session gets its tools.
-
-Your agent can use 12 actions across control and discovery: set/turn on/off lights, color temperature presets, effects, group/room control, scene activation, and listings for lights, groups, scenes and the bridge config. Hue has no destructive actions, so nothing asks for approval. Your agent uses `list_lights`, `list_groups` and `list_scenes` to find valid IDs before acting on them.
-
-What that lets your agent do:
-
-- **Individual light control** -- Turn lights on/off, set brightness/hue/saturation, adjust color temperature, set dynamic effects
-- **Room/group control** -- Control all lights in a room at once (e.g., "turn off the bedroom"), including group_id "0" for every light
-- **Scene activation** -- Activate predefined Hue scenes created in the Hue app
-- **Status queries** -- Ask which lights are on, what color they are, or their current brightness
-- **Dynamic effects** -- Set lights to color loop or turn effects off
+- Turn single lights on and off, and set brightness, color, color temperature and effects such as color loop.
+- Control a room or group, or every light at once.
+- Turn on scenes you made in the Hue app.
+- Say which lights are on and how they are set.
 
 ## Troubleshooting
 
-### Cannot discover the bridge
+**The bridge cannot be found.** The bridge needs a network cable and three blue lights. AI Shuffle and the bridge must be able to reach each other, so check separate networks or VLANs. If discovery finds nothing, use your router's device list.
 
-- **Check network connection.** The Hue Bridge must be connected to your router via Ethernet (it does not support Wi-Fi). Verify the Ethernet cable is plugged in and the bridge shows three blue LED lights.
-- **Same network.** The AI Shuffle host and the Hue Bridge must be on the same local network. If you are using VLANs or network segmentation, ensure traffic can flow between the subnets.
-- **Try the IP directly.** If `https://discovery.meethue.com/` returns nothing, the bridge may not be registered with Philips' cloud. Use your router's admin page to find the IP instead.
+**Getting a key fails.** Have the command ready before you press the button, then run it within 30 seconds.
 
-### API key generation fails
+**"Unauthorized user".** The key was removed, for example by a factory reset. Make a new one (step 2) and update the connection.
 
-- **Timing.** You must press the bridge button and run the curl command within 30 seconds. Have the command ready to paste before pressing the button.
-- **Bridge button.** Press the large round button firmly until the LED ring blinks. On some bridge models, you need to press and release, not hold.
-- **Existing keys.** The bridge supports many API keys. If you already have one from a previous attempt, it will still work -- you do not need to generate a new one.
+**Lights respond slowly.** Lights far from the bridge may need another Hue light in between. The bridge also handles only a few commands a second, so ask for rooms or scenes rather than many single lights.
 
-### "Unauthorized user" error after connector activation
-
-- The API key may have been deleted from the bridge (e.g., by a factory reset or through the Hue app under **Settings > Hue Bridges > Remove API key**). Generate a new key following step 2 above and update your connector config.
-
-### Lights respond slowly or not at all
-
-- **Zigbee range.** Hue lights communicate via Zigbee. If a light is far from the bridge and other lights, the signal may be weak. Adding more Hue lights between the bridge and the distant light extends the mesh network.
-- **Bridge overload.** The Hue Bridge has a rate limit of approximately 10 commands per second for individual lights and 1 command per second for groups. If your agent sends many commands at once, some may be dropped. For bulk operations, use group or scene commands rather than individual light commands.
-
-### Bridge IP address changed
-
-- If your router assigns dynamic IPs, the bridge IP may change after a router restart. Either assign a static IP to the bridge via your router's DHCP settings (recommended), or re-discover the IP using the methods in step 1.
+**The bridge's address changed.** Give the bridge a fixed address in your router, or find it again (step 1) and update the connection.

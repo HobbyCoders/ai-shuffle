@@ -1,16 +1,24 @@
 <!--
-title: Install with Docker Compose
-description: Install AI Shuffle on Linux, a NAS or any Docker host with the buyer compose file
+title: Install with Docker
+description: Install AI Shuffle with Docker Compose or docker run on Linux, a NAS, a home server or any machine with Docker
 order: 5
 -->
 
-# Install with Docker Compose
+# Install with Docker
 
-For a Linux server, a NAS or a desktop running Docker. On Unraid, use [Install on Unraid](/docs/getting-started/install-unraid) instead.
+Use this guide for a Linux server, a NAS or home server with Docker, or a PC running Docker. Docker Compose is the easiest way. A plain `docker run` command works too.
 
-You need a 64-bit Intel or AMD host, Docker Engine 24 or later with Docker Compose 2.24 or later (`docker compose version` prints it), and your **pull token** from your license email. See [Requirements](/docs/getting-started/requirements).
+You need:
 
-## 1. Create the two files
+- a 64-bit Intel or AMD machine (see [Requirements](/docs/getting-started/requirements));
+- Docker Engine 24 or later with Docker Compose 2.24 or later (`docker compose version` shows yours);
+- your **pull token**, from your license email or your account page on hobbycoders.com.
+
+Many NAS and home server systems have a Docker or "Container" app with a Compose or "Project" screen. Paste the two files below there, or use a terminal on the machine.
+
+## Install with Docker Compose
+
+### 1. Create the two files
 
 Make an empty folder, for example `~/ai-shuffle`, and put two files in it.
 
@@ -228,137 +236,135 @@ PGID=1000
 #BROWSER_SSRF_BLOCK=192.168.1.1/32
 ```
 
-## 2. Set your pull token
+### 2. Fill in your settings
 
-Paste your pull token after `AI_SHUFFLE_PULL_TOKEN=`. It is part of the image name, so Docker downloads the image without `docker login`, and pulls keep working after a reboot.
+- **`AI_SHUFFLE_PULL_TOKEN`**: paste your pull token. It only downloads the image. It is not your license key and cannot sign in to anything. Docker needs no `docker login`.
+- **`LICENSE_KEY`** (optional): paste your license key and AI Shuffle activates it on the first start. You can also enter it in the app later. During the beta, no key is needed.
+- **`OWNER_PASSWORD`** (optional): set the owner password now, or leave it empty and create it in your browser on the first visit.
+- **`WORKSPACE_DIR`**: the folder where your projects live. The default is `./workspace` next to `compose.yaml`.
+- **`PUID` and `PGID`**: the user and group that should own your project files. On Linux, `id -u` and `id -g` show yours. Keep 1000 on a single-user machine.
 
-The pull token only downloads the image; it is not your license key and cannot sign in to anything. It shows in `docker ps` and in logs, so if you share it by accident, get a new one from your account on hobbycoders.com, put it in `.env` and run `docker compose up -d`. The old token stops working within a minute; the running container is not affected.
+### 3. Choose who can reach it
 
-Optionally, paste your **license key** (`ASH-XXXXX-XXXXX-XXXXX-XXXXX`) after `LICENSE_KEY=` too. AI Shuffle activates it on the first start and ignores the line after that, so you can clear it once the license shows in **Settings → System → License**. Leave it empty to paste the key there instead. While the beta runs, no key is needed. See [License](/docs/getting-started/license).
+By default, AI Shuffle only answers on the machine itself, at <http://localhost:8000>.
 
-## 3. Choose who can reach it
+To use it from a laptop or phone on your network, set `BIND_HOST` to **one** address of the machine:
 
-By default AI Shuffle listens only on this computer (`BIND_HOST=127.0.0.1`), so you open it at <http://localhost:8000>.
+- its home network address, for example `192.168.1.20`;
+- or its Tailscale address (`100.x.y.z`), to reach it only over your tailnet.
 
-To use it from a laptop or phone on your network, set `BIND_HOST` to **one** address of this host:
+Do not use `0.0.0.0`, and never forward the port from your router. Keep `COOKIE_SECURE=false` for a plain `http://` address. Set it to `true` only when you reach AI Shuffle through HTTPS. For access away from home, see [Remote access](/docs/getting-started/remote-access).
 
-- its LAN address, for example `192.168.1.20`, to reach it from your home network;
-- its Tailscale address (`100.x.y.z`), to reach it only over your tailnet.
+### 4. Start it
 
-Do not use `0.0.0.0`: that publishes AI Shuffle on every network the host is on, including VPN and Docker networks, and Docker-published ports can bypass the host firewall. Never forward the port from your router to the internet. For access away from home, see [Remote access](/docs/getting-started/remote-access).
-
-Keep `COOKIE_SECURE=false` for plain `http://` on your LAN. Set it to `true` only when you reach AI Shuffle exclusively through HTTPS, for example with Tailscale Serve.
-
-## 4. Choose the workspace folder
-
-`WORKSPACE_DIR` is the folder on this host where your projects live (`./workspace` next to `compose.yaml` by default). Inside the container it is always `/workspace`. Set `PUID` and `PGID` to the user and group that should own the files; on Linux, `id -u` and `id -g` print yours.
-
-## 5. Start it
+In the folder with the two files, run:
 
 ```bash
 docker compose up -d
 ```
 
-The first start downloads the image and sets it up, so it can take a few minutes. Claude Code is downloaded with Anthropic's own installer only when you choose Claude and install it from setup or **Settings > Providers > Claude**. It is reinstalled at start only while **Keep Claude Code installed** is on. `docker compose ps` shows `healthy` when AI Shuffle is ready; `docker compose logs -f` shows progress.
+The first start downloads the image and sets everything up, which can take a few minutes. `docker compose ps` shows `healthy` when AI Shuffle is ready. `docker compose logs -f` shows progress.
 
-## 6. First launch
+### 5. Open it
 
-Open the address you chose (<http://localhost:8000> on the host itself) and follow [First run](/docs/getting-started/first-run). The welcome screen and the owner password come first; the rest of the wizard follows once the password is set.
+Open the address you chose, for example <http://localhost:8000>, and follow [First run](/docs/getting-started/first-run).
 
-If you use a Claude subscription, you can sign in to the Claude Code CLI from the host's terminal instead of the in-app one:
+## Install with docker run
+
+If you prefer one command, this starts the same container as the compose file. Replace `YOUR_PULL_TOKEN`, and use the current version number.
 
 ```bash
-docker exec -it -u appuser ai-shuffle claude auth login
+mkdir -p ~/ai-shuffle/workspace
+
+docker run -d \
+  --name ai-shuffle \
+  --restart unless-stopped \
+  --stop-timeout 90 \
+  --shm-size 1g \
+  --pids-limit 8192 \
+  --security-opt seccomp=unconfined \
+  --security-opt systempaths=unconfined \
+  --security-opt apparmor=unconfined \
+  -e PUID=1000 \
+  -e PGID=1000 \
+  -e COOKIE_SECURE=false \
+  -p 127.0.0.1:8000:8000 \
+  -v ai-shuffle_data:/data \
+  -v ~/ai-shuffle/workspace:/workspace \
+  -v ai-shuffle_fluid-settings:/home/appuser/.fluid \
+  -v ai-shuffle_claude-home:/home/appuser/.claude \
+  -v ai-shuffle_local-home:/home/appuser/.local \
+  -v ai-shuffle_gh-auth:/home/appuser/.config/gh \
+  -v ai-shuffle_browser-profile:/home/appuser/chrome-profile \
+  registry.hobbycoders.com/YOUR_PULL_TOKEN/ai-shuffle:0.9.1
 ```
 
-## The built-in browser's network access (optional)
+- Change `127.0.0.1` in `-p` to one address of the machine to reach it from other devices, as in [step 3](#3-choose-who-can-reach-it).
+- Add `-e LICENSE_KEY=...` or `-e OWNER_PASSWORD=...` to set them on the first start.
+- Keep `--stop-timeout 90`. AI Shuffle needs up to 90 seconds to shut down cleanly.
+- Set `PUID` and `PGID` to the owner of your workspace folder.
 
-Agents can open public websites in the built-in browser. By default it cannot reach:
+## Where your data lives
 
-- cloud metadata addresses such as `169.254.169.254` (this cannot be changed);
-- your private network: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10` (which includes Tailscale) and IPv6 `fc00::/7`;
-- AI Shuffle's own port and the browser's DevTools port, on any internal address (this cannot be changed either).
+Everything you keep is in Docker volumes and in your workspace folder, not in the container. You can delete and re-create the container, or update it, without losing anything.
 
-`localhost` inside the container is allowed, so an agent can view a dev server it started. A page the agent visits can then reach other services listening inside the container too.
+| Where | What it holds |
+| --- | --- |
+| `data` volume | Your database, settings, chats and saved credentials |
+| Workspace folder | Your projects, as ordinary files you can open directly |
+| `fluid-settings` volume | App settings, skills and plugins |
+| `claude-home` and `local-home` volumes | The Claude Code CLI and its sign-in, if you use it |
+| `gh-auth` volume | Your GitHub CLI sign-in |
+| `browser-profile` volume | The built-in browser's profile, so sites stay signed in |
 
-To change this, add a line under `environment:` in `compose.yaml` (a line in `.env` alone does not reach the container), then run `docker compose up -d`:
-
-```yaml
-    environment:
-      # (keep the lines already there)
-      # Let the browser open one LAN service. This list replaces the localhost
-      # default, so keep the first two ranges to still allow localhost.
-      BROWSER_SSRF_ALLOW: "127.0.0.0/8,::1/128,192.168.1.20/32"
-```
-
-- `BROWSER_SSRF_ALLOW`: address ranges the browser may open, separated by commas.
-- `BROWSER_SSRF_ALLOW_LOOPBACK: "false"`: refuse `localhost` as well. Use it when people you do not trust can prompt agents on this install. It has no effect when `BROWSER_SSRF_ALLOW` is set.
-- `BROWSER_SSRF_BLOCK`: ranges to refuse even if `BROWSER_SSRF_ALLOW` lists them.
-
-## The code-mode sandbox
-
-Agents on the Fluid harness (every model except the Claude Code CLI, outside chat sessions) run their work as Python code in a separate process, the code-mode kernel. The tools that code calls still run in AI Shuffle with their usual permissions; the sandbox limits the Python code itself.
-
-On Linux, AI Shuffle runs that process inside bubblewrap: no network, none of the host's files except the Python runtime, a private `/tmp` and its own process list. The image includes bubblewrap, and the `compose.yaml` above turns the sandbox on: its `security_opt` lines let the container create the user namespaces the sandbox needs and mount its own `/proc`, which Docker's default profile refuses.
-
-```yaml
-    security_opt:
-      - seccomp=unconfined
-      # Lets the sandbox mount its own /proc:
-      - systempaths=unconfined
-      # Docker ignores this on hosts without AppArmor:
-      - apparmor=unconfined
-```
-
-What these relax, for the whole container: `seccomp=unconfined` turns off Docker's default system-call filter, which blocks `unshare`, `clone` with namespace flags and `mount`. `apparmor=unconfined` turns off Docker's default AppArmor profile on hosts that have AppArmor, such as Ubuntu and Debian, and does nothing elsewhere. `systempaths=unconfined` removes Docker's masking of the container's `/proc` (it normally hides entries such as `/proc/kcore` and makes `/proc/sys` read-only), because the kernel refuses a fresh `/proc` mount while those masks are in place. AI Shuffle is a one-person install, so a sandbox around the code an agent wrote is worth more than these defaults; if that is not your situation, weigh it. A custom seccomp profile that allows `unshare`, `clone` with namespace flags and `mount` can replace `seccomp=unconfined`, but not `systempaths=unconfined`.
-
-To opt out, remove the `security_opt` lines, or set `CODE_MODE_OS_SANDBOX: "off"` under `environment:` (a line in `.env` alone does not reach the container), then run `docker compose up -d`. The kernel then runs without the sandbox, and the log says so once: `code-mode OS sandbox unavailable, kernel child runs without it`.
-
-**Ubuntu 24.04 and later**: the host itself restricts unprivileged user namespaces through AppArmor (`kernel.apparmor_restrict_unprivileged_userns=1`), and that reaches into containers too. The sandbox then fails its self-test with `No permissions to create a new namespace` even with the lines above. Allow it on the host with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (put the same line in a file under `/etc/sysctl.d/` to keep it across reboots), or accept running without the sandbox.
-
-`CODE_MODE_OS_SANDBOX` chooses how the sandbox is used:
-
-- `auto` (the default): use the sandbox when its self-test (run in the background when AI Shuffle starts) passes, otherwise run without it after the one log line above.
-- `required`: never run code without the sandbox. When it is unavailable, every Python cell fails with the reason.
-- `off`: never use it.
-
-**Settings → Security → Code sandbox** distinguishes an active sandbox, an explicitly disabled sandbox, and one that is unavailable because its self-test failed. With the sandbox active, Python cells run without a prompt in Ask mode. While the kernel runs without it, Ask mode asks before each cell. Bypass skips ordinary tool approvals whether or not the sandbox is active; private-access consent and other explicit approval requirements still apply.
-
-The OS sandbox currently supports Linux only. Windows and macOS workers run without it. The Python kernel's in-process restrictions and host-side tool permission checks still apply, but those in-process restrictions are not an OS security boundary: code that escapes them can access files and the network as the worker's app account. Leaving the sandbox off does not disable ordinary tools, but it removes this extra protection against malicious code.
-
-The kernel's own checks inside the process stay on in every mode, as a second layer; the sandbox is the boundary that holds.
-
-On Linux, AI Shuffle also hides its own process memory and start-up settings from every program agents start, which run as the same user. `ALLOW_PROCESS_INTROSPECTION` is off by default; set it to `"true"` under `environment:` only while you debug AI Shuffle with tools that read the app process's `/proc` entries, such as a debugger or a core dump.
-
-## Behind a reverse proxy (optional)
-
-AI Shuffle takes a visitor's address from the `X-Forwarded-For` or `X-Real-IP` header only when the connection comes from loopback or from an address listed in `TRUSTED_PROXIES`. The security audit log records that address, and the attempt limits for pairing a device and for joining a worker network count by it. The owner sign-in limit always counts by the direct connection, so this setting does not change it.
-
-A reverse proxy in another container, or one on the host (Tailscale Serve included) that reaches AI Shuffle through the published port, connects from a Docker network address instead of loopback. Without `TRUSTED_PROXIES`, every visitor then counts as the proxy: the audit log shows only the proxy's address, and one visitor's failed pairing or network-join attempts can block everyone's. Add the proxy's address as the container sees it under `environment:` in `compose.yaml`, then run `docker compose up -d`:
-
-```yaml
-    environment:
-      # (keep the lines already there)
-      # The reverse proxy's address, as AI Shuffle sees it.
-      TRUSTED_PROXIES: "172.18.0.1"
-```
-
-It takes IP addresses or ranges (`172.18.0.0/16`), separated by commas. For a proxy on the host, use the gateway of the `ai-shuffle_default` network (`docker network inspect ai-shuffle_default` shows it). Never list your whole LAN: any host in a trusted range can choose the address AI Shuffle records for it. On Docker Desktop and rootless Docker, every connection to the published port arrives from that gateway address, so when `BIND_HOST` is not `127.0.0.1`, trusting the gateway lets any LAN device choose its own address again.
-
-## Back up
-
-Stop the container (`docker compose stop`), then back up the Docker volumes whose names start with `ai-shuffle_` and your `WORKSPACE_DIR` folder. The `data` volume holds the database and the key that encrypts your saved credentials; always keep them together. Start again with `docker compose start`.
+With Docker Compose, the volumes are named `ai-shuffle_data`, `ai-shuffle_fluid-settings` and so on. `docker volume ls` lists them.
 
 ## Update
+
+With Docker Compose:
 
 1. Read the release notes for the new version in AI Shuffle.
 2. Set `AI_SHUFFLE_VERSION` in `.env` to the new version.
 3. Run `docker compose up -d`.
 
-Your data stays in the volumes and in `WORKSPACE_DIR`. See [Updates](/docs/getting-started/updates) for in-app updates and what the update check sends.
+With `docker run`: pull the new version, then stop and remove the container and run the same command again with the new version number. Your volumes and workspace stay as they are.
+
+```bash
+docker pull registry.hobbycoders.com/YOUR_PULL_TOKEN/ai-shuffle:NEW_VERSION
+docker stop ai-shuffle
+docker rm ai-shuffle
+```
+
+Many releases can also be installed from inside the app. See [Updates](/docs/getting-started/updates).
+
+## Back up
+
+1. Stop AI Shuffle: `docker compose stop` (or `docker stop ai-shuffle`).
+2. Back up every volume whose name starts with `ai-shuffle_`, and your workspace folder. Always back up the whole `data` volume. Your saved credentials cannot be restored from part of it.
+3. Start it again: `docker compose start` (or `docker start ai-shuffle`).
+
+To move to another machine, restore the same volumes and workspace folder there, then start AI Shuffle with the same settings.
+
+## Optional settings
+
+These are only needed in special cases. Uncomment the matching line under `environment:` in `compose.yaml` (or add `-e NAME=value` to `docker run`), then run `docker compose up -d`. A line in `.env` alone does not reach the container.
+
+- **`BROWSER_SSRF_ALLOW`**: by default the built-in browser can open public websites and the container itself, but not your home network. List the address ranges it may also open, for example one service on your network.
+- **`BROWSER_SSRF_ALLOW_LOOPBACK`**: set `false` to stop the built-in browser from opening services inside the container too.
+- **`BROWSER_SSRF_BLOCK`**: ranges the browser must never open.
+
+## Behind a reverse proxy (optional)
+
+If a reverse proxy (in another container, or on the host, Tailscale Serve included) sits in front of AI Shuffle, set **`TRUSTED_PROXIES`** to the proxy's address as the container sees it. Then AI Shuffle sees each visitor's real address instead of the proxy's. For a proxy on the host, use the gateway address of the `ai-shuffle_default` network (`docker network inspect ai-shuffle_default` shows it). Never list your whole network. Set `COOKIE_SECURE=true` when you only reach AI Shuffle through HTTPS.
+
+## The code-mode sandbox
+
+On Linux, agents' Python code runs in a sandbox with no network access and no access to your files. The `security_opt` lines in the compose file (and the `--security-opt` flags in `docker run`) turn it on. **Settings → Security → Code sandbox** shows whether it is active.
+
+- To turn it off, remove those lines, or set `CODE_MODE_OS_SANDBOX` to `off`. To refuse to run code without it, set `required`.
+- **Ubuntu 24.04 and later** block the sandbox by default. Allow it with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, and put the same setting in a file under `/etc/sysctl.d/` to keep it after a reboot. Or run without the sandbox.
 
 ## Uninstall
 
-`docker compose down` removes the container and keeps your data.
-
-`docker compose down -v` also **deletes every volume**, including the database and your saved credentials. Use it only when you mean to start over.
+- `docker compose down` (or `docker rm -f ai-shuffle`) removes the container and keeps your data.
+- `docker compose down -v` also **deletes every volume**, including your database and saved credentials. Only use it when you mean to start over.

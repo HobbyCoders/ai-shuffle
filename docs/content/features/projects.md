@@ -1,118 +1,57 @@
 <!--
 title: Projects
-description: Organize work into directory-based projects with git integration
+description: Organize your work into project folders with Git built in
 order: 7
 -->
 
 # Projects
 
-Projects link AI Shuffle to directories on your system, providing file access, git integration, and organized session management.
+A project is a folder on your worker, usually a code repository. Chats started in a project can read and change its files, and the project's Git tools are one click away.
 
-## Overview
+## Add a project
 
-A project is a reference to a directory (e.g., your code repository). When you create a session with a project, the agent has access to that directory's files and can browse, read, and modify them.
+1. Open the workspace picker at the top of the app.
+2. Choose **Add Project**.
+3. Pick the folder, or type its path.
+4. Give it a display name and a project ID (lowercase letters, numbers and hyphens).
+5. Choose **Add Project**.
 
-## Creating a Project
+## Files
 
-### Via the UI
+Browse, upload, download, rename and delete a project's files from the file browser. See [File Management](/docs/features/file-management).
 
-1. Open the workspace picker dropdown at the top of the app
-2. Click **Add Project** to open the Add Project modal
-3. Choose a **Location** (browse a directory) or type a **Path** to your code directory
-4. Set a **Display Name** and a **Project ID** (required, lowercase letters, numbers, and hyphens)
-5. Click **Add Project**
+## Git
 
-### Via the API
+When the project folder is a Git repository, you can:
 
-Creating a project needs owner access; API-user keys (`aih_...`) get `403`. Send an owner token from `POST /api/v1/owner/login` (see [Owner password](/docs/api-reference/authentication#owner-password)):
+- see changed, staged and new files;
+- view, create and switch branches;
+- view history and make commits;
+- pull and push.
 
-```bash
-curl -X POST http://localhost:8000/api/v1/projects \
-  -H "Authorization: Bearer $OWNER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "id": "my-web-app",
-    "name": "My Web App",
-    "path": "/home/user/projects/my-web-app",
-    "settings": {
-      "default_profile_id": "YOUR_AGENT_ID"
-    }
-  }'
-```
+When you sign in to GitHub, you can also create pull requests, follow their checks and merge them.
 
-Use the id of one of your agents (`GET /api/v1/agents`). API fields still say `profile`.
+## Separate branches for each chat
 
-## File Management
+A chat can work on its own branch in its own copy of the project (a Git worktree). The agent works there without touching your main folder, so several chats can work on different changes at once.
 
-Browse, upload, download, rename and delete a project's files from the file browser. See [File Management](/docs/features/file-management). Files are accessible to the agent during sessions.
+Choose the branch in the new chat's branch picker, or pick **New branch…**. The choice applies to that one chat. The next new chat starts on **Auto** again.
 
-## Git Integration
+## Per-project settings
 
-If the project directory is a git repository, you get:
+Each project has its own tabs for:
 
-- **Status** — See modified, staged, and untracked files
-- **Branches** — View, create, and switch branches
-- **Commits** — View commit history, create commits
-- **Pull/Push** — Sync with remote repositories
+- **MCP servers** only for this project;
+- **Agents** stored in the project;
+- **Hooks** only for this project;
+- **Memory** for this project.
 
-### GitHub Integration
+## Bring in Claude Code chats
 
-With GitHub authenticated, you can also:
-- Create pull requests
-- View PR status and checks
-- Merge pull requests
+You can import the Claude Code CLI chats you already had for a project's folder, so they show up in AI Shuffle.
 
-## Worktrees
+## Past chats
 
-Git worktrees allow parallel development on multiple branches without switching:
+Type `@` in the message box to point the agent at an earlier chat in the same project.
 
-1. Create a session with a worktree (specify branch name)
-2. AI Shuffle creates a git worktree for that branch
-3. The agent works in the isolated worktree directory
-4. Changes stay separate from the main branch
-
-A branch chosen in the new-session composer's branch chip is a one-time choice,
-whether it was made with **New branch...** or picked from the list. It is cleared
-after a session is successfully created on it, so the next new chat starts from
-**Auto** again. Failed creation keeps the choice for retry. Clearing it does not
-delete the branch or change the session using it, and project, model and other
-composer preferences remain remembered. A new chat opened while that creation is
-still running does not pick the branch up, and a newer branch choice made in the
-meantime is not cleared.
-
-```bash
-curl -X POST http://localhost:8000/api/v1/sessions/with-worktree \
-  -H "Authorization: Bearer aih_your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "project_id": "proj_abc",
-    "branch_name": "feature/new-feature",
-    "create_new_branch": true,
-    "base_branch": "main"
-  }'
-```
-
-## Per-Project Configuration
-
-Each project has tabs for its own:
-- **MCP servers** — Project-scoped tool servers
-- **Agents** — Project-scoped agent files
-- **Hooks** — Project-specific event handlers
-- **Memory** — The project's memory
-
-Plugins can be installed to a project scope through the API.
-
-## Session Import
-
-Import sessions from the Claude Code CLI:
-
-```bash
-curl -X POST "http://localhost:8000/api/v1/projects/proj_abc/sync-sessions?profile_id=YOUR_AGENT_ID" \
-  -H "Authorization: Bearer $OWNER_TOKEN"
-```
-
-This finds Claude Code CLI sessions recorded for this project's directory (in the CLI's own session store) and imports any not yet listed. `profile_id` is the agent the imported sessions use; without it, the project's default agent is used. Imported sessions belong to the owner, so an API key cannot open them afterwards.
-
-## Chat History
-
-Previous sessions in a project are available for @ mention references, allowing the agent to reference context from past conversations.
+To manage projects from your own code, see the [Projects API](/docs/api-reference/projects).

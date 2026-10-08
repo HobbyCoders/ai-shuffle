@@ -162,7 +162,7 @@ curl http://localhost:8000/api/v1/auth/claude/cli?refresh=true \
   "org_name": null,
   "plan": "max",
   "cli_version": "2.1.280",
-  "binary_path": "/home/appuser/.local/bin/claude",
+  "binary_path": "/usr/local/bin/claude",
   "error": null,
   "login": {
     "surface": "docker",

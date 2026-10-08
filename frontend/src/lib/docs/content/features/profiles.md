@@ -1,353 +1,102 @@
 <!--
 title: Agents
-description: Agents are the configurations that control an AI's behavior and capabilities
+description: Agents decide how the AI behaves, which tools it can use and which other agents it can call
 order: 6
 -->
 
 # Agents
 
-An agent is a configuration that controls how the AI behaves during a session. Each agent defines the system prompt, available tools, the other agents it can call, plugins, memory, and other settings. Switch between agents to get different behaviors from the same AI Shuffle instance. Manage them on the **Agents** page in the sidebar. Each agent is a row; click it to open its editor in place, or click its tool or subagent count to jump straight to that section.
+An agent is a saved setup for the AI: its instructions, the tools it may use, the other agents it can call, its plugins and its memory. Switch agents to get different behavior from the same install. A coding assistant, a code reviewer and a plain chatbot can each be their own agent.
 
-The API and some field names still say "profile": the endpoints are `/api/v1/agents`, but ids are passed as `profile_id` and `{profile_id}`.
+Manage agents on the **Agents** page in the sidebar. Click an agent to edit it.
 
-An agent does **not** pin a model. The model, reasoning effort, and permission mode belong to the session: you pick them in the composer when you start a chat, and they stay with that chat (changeable mid-conversation) no matter which agent it runs. That way the same agent can run cheap on one conversation and expensive on the next.
+An agent does not fix the model. You pick the model, reasoning effort and permission mode in the composer for each chat, and you can change them mid-conversation. The same agent can run on a cheap model in one chat and a powerful one in the next.
 
-## Overview
+## Built-in agents
 
-Every session uses an agent. Agents let you create specialized configurations for different use cases -- a coding assistant, a code reviewer, a chatbot, a documentation writer -- each with its own personality, permissions, and toolset.
+AI Shuffle comes with three agents:
 
-Key concepts:
+- **General Purpose** for most coding and research work.
+- **Plan** for writing implementation plans.
+- **Frontend Designer** for visual and UI work.
 
-- **Three built-in agents** ship with the app: **General Purpose**, **Plan** and **Frontend Designer**. Any that is missing is created again on every start. You can edit them and put an edited one back with **Restore defaults** (`POST /api/v1/agents/{profile_id}/restore`), but you cannot delete them (`DELETE` returns 403)
-- **General Purpose** mainly implements code, but also completes assigned searches, investigations, root-cause diagnosis, code or PR reviews, audits and reproductions. Report-only work needs no edits or commits. Searches and investigations can be done by the calling agent or General Purpose. For callers choosing a role, Plan fits implementation plans, and Frontend Designer fits rendered UI work; this is advice, not grounds for General Purpose to refuse an assignment. If it cannot render-verify assigned UI work, its report must say so.
-- **Updated built-in definitions** reach existing installs on startup when you have not edited them. A built-in's name, description and prompt are checked one by one: a field that still holds text an earlier release shipped is replaced with the current default, and a field you edited is kept. Tools, model, memory, skills, MCP servers and subagent settings are never changed by an update. **Restore defaults** puts every default back, including an edited name, description, prompt, tools and legacy model; skills, memory and MCP servers are kept.
-- **A starter agent** ("Assistant") is created by the setup wizard's first run if you have not made an agent of your own; the built-ins do not count. It is an ordinary agent: rename, edit or delete it
-- **Generate** creates an agent from a description
-- **Export/import** agents as JSON for sharing across instances
-- **Per-agent roster and plugins** for fine-grained control
+You can edit them, and **Restore defaults** puts an edited one back. You cannot delete them. The setup wizard also creates a starter agent called **Assistant**, which you can rename, change or delete.
 
-## Agent Configuration
+## Create an agent
 
-An agent contains a `config` object with the following settings:
+1. Open **Agents** and choose **New agent**.
+2. Give it a name and a short description.
+3. Write its instructions in the **Prompt** section.
+4. Choose its tools, the agents it may call, and any plugins.
+5. Save. It now appears in the composer's agent picker.
 
-### Core Settings
+**Generate** writes an agent for you from a short description. You can then edit the result.
 
-| Field              | Type   | Default    | Description                                    |
-|--------------------|--------|------------|------------------------------------------------|
-| `max_turns`        | int    | null       | Optional model-call cap; null means unlimited    |
-| `provider_models`  | dict   | null       | Model this agent runs on when another agent dispatches it, per provider, including the Voice row (the editor's **Models** section). A provider left out keeps the agent hidden from callers on that provider |
-| `memory`           | string | null       | Durable notes this agent keeps across sessions; the agent writes them with its Memory tool |
+## What you can set
 
-`model`, `permission_mode` and `effort` are session settings, not agent settings. Agents saved by older versions may still carry them; they are used only as a fallback for sessions created before the move.
+- **Prompt:** the agent's instructions, for example "You are a careful code reviewer. Point out bugs and security problems."
+- **Tools:** which tools the agent can use. See [Tool configuration](#tool-configuration).
+- **Subagents:** which other agents it can call: all of them, only the ones you select, or none.
+- **Plugins:** extra plugins loaded only for this agent, on top of the ones turned on for everyone.
+- **Models:** the model this agent runs on when another agent calls it, per provider.
+- **Memory:** notes the agent keeps for itself across chats.
+- **Working folder and extra folders:** where its chats start, and other folders it may use.
+- **Environment variables** for its chats.
+- **Turn limit:** an optional cap on how many steps one reply can take.
 
-Text the app generates for you outside a chat — session titles, commit messages, PR descriptions, branch names, generated agents — runs on its own model and effort, set once under **Settings → Default models → Text tasks**.
+## Tool configuration
 
-The vocabularies below describe what you can pick per session.
+The **Tools** section lists every tool the agent could use, including the tools from your MCP servers. Pick one of four modes:
 
-#### Models
+| Mode | The agent gets |
+| --- | --- |
+| All | Every tool |
+| None | No tools. Good for a plain chatbot |
+| Allow | Only the tools you tick |
+| Disallow | Every tool except the ones you tick |
 
-| Value    | Description                                    |
-|----------|------------------------------------------------|
-| `haiku`  | Claude Haiku (fast, cheap)                     |
-| `sonnet` | Claude Sonnet (balanced, default)              |
-| `opus`   | Claude Opus (powerful)                         |
-| `fable`  | Claude Fable (most capable)                    |
+Ticking a whole MCP server also covers tools that server adds later.
 
-Any other string is treated as a custom model ID and passed through unchanged (e.g. `claude-sonnet-4-5`). Older stored full model IDs (`claude-sonnet-4-6`, `claude-opus-4-8`, etc.) are still recognized: the app displays them as the matching shorthand and rewrites them to it the next time the agent is saved from the UI.
+A read-only reviewer, for example, uses **Allow** with only the read and search tools ticked.
 
-#### Permission Modes
+## Permission modes
 
-| Mode                | In the composer | Description                                                 |
-|---------------------|-----------------|-------------------------------------------------------------|
-| `default`           | Ask             | Ask before tools that change something; read-only tools run without a prompt |
-| `auto`              | Auto            | The provider checks each tool call and approves safe ones (shown only where available) |
-| `acceptEdits`       | Accept Edits    | File edits (Edit, Write, MultiEdit, NotebookEdit) run without asking; every other tool asks, as in Ask |
-| `bypassPermissions` | Bypass          | Skip all permission prompts, including screen control (use with caution) |
+The permission mode decides when the agent asks you before using a tool. Pick it in the composer under **Tool access**. You can change it while the agent is working, and it applies at once.
 
-The mode picker appears in code and voice sessions, not in chat sessions. Chat sessions always run in Ask. **Auto** is listed only for models that run on the Claude Code CLI, which are the built-in Claude models. A session on another provider that still has Auto saved runs in Ask. The retired `plan` value is treated as Ask.
+| Mode | What happens |
+| --- | --- |
+| Ask | Tools that only read run straight away. Tools that change something ask you first |
+| Auto | Your provider checks each tool call and approves safe ones. Only on Claude models |
+| Accept Edits | File edits run without asking. Everything else asks, as in Ask |
+| Bypass | Nothing asks. Use with care |
 
-Change **Tool access** in the composer while a session is working to apply a new permission mode immediately—no Stop, resend or restart is needed. On mobile, open chat controls to find the same picker. The displayed choice changes after the running device confirms it; connection or provider errors leave the previous choice visible. The new mode also stays with the session for later turns. An explicitly selected mode is remembered for new sessions, including Bypass; opening an existing session restores that session’s own mode rather than replacing it with the new-session default.
+Chat sessions always use Ask. Code and voice sessions show the picker.
 
-Switching to Bypass releases ordinary tool-approval prompts already waiting in that session. Accept Edits releases waiting file-edit prompts only (saved Deny rules still win). Questions, private-access cards, existing screen-access prompts and approvals from already-running child agents still need their own answers. Returning to Ask affects future permission checks; it does not undo tools already allowed or running.
+**Answering a prompt:**
 
-In Ask mode:
+- Choose **Approve** or **Deny**. On a keyboard, Enter approves and Escape denies.
+- A prompt nobody answers within 5 minutes is denied, and the agent carries on.
+- Tick **Always do this for** *tool* to save your answer for that agent in every chat. Only do this for tools you always want handled the same way.
 
-- **Built-in Claude models (Claude Code CLI):** the app's own read-only tools run without a prompt. The app's tools that change something (for example Monitor, hooks, MCP server settings, scheduling, memory, starting agents, paid image or video generation and screen control) ask first, as do tools from your own MCP servers and the browser. Claude Code's built-in tools follow Claude Code's own rules.
-- **Other providers:** read-only tools, including read-only shell commands, run without a prompt; tools that write or run something ask first.
+**Runs with nobody to ask**, such as API queries and automation **Send prompt** steps, follow the mode alone. Anything that would ask is denied. Give them a mode that allows the tools they need.
 
-A prompt appears in the app. If nobody answers it within 5 minutes, the call is denied and the agent carries on. On the keyboard, Enter approves and Escape denies. Enter works only once the prompt has been on screen for half a second and a key has been released since it appeared, so an Enter meant for the message box, or a held key, does not approve it; each press answers one prompt. Tick **Always do this for** *tool* before choosing Approve or Deny to save that answer as a rule for the agent: from then on, every call of that tool by that agent is allowed (or denied) without a prompt, in every session. A saved rule lasts as long as the agent does and there is no list to edit it from, so save one only for a tool you always want handled that way.
+### Screen control
 
-Accept Edits is Ask for everything but file edits: Edit, Write, MultiEdit and NotebookEdit run without a prompt, and a shell command, a Python cell, a web fetch, a tool from your own MCP servers or screen control asks exactly as it does in Ask. A remembered **Deny** rule for a tool still wins, in Accept Edits as in Ask. Use Bypass when the agent should run everything.
+Computer use (screen control) always asks the first time in each chat, in every mode, including Bypass. After you allow it, later requests in that chat follow the mode. Stopping the chat or restarting the worker resets it.
 
-Runs where nobody can answer a prompt (the one-shot and streaming REST endpoints, `POST /api/v1/conversation/start`, and automation **Send prompt** steps) decide from the mode alone. On the built-in Claude models, a call the Claude Code CLI asks about is denied at once in Ask and in Accept Edits (the CLI runs file edits itself under Accept Edits), Bypass allows it, and Auto allows it except a screen-control access request, which it denies. On other providers, Bypass runs the tool and Accept Edits runs a file edit; a call that would prompt (every write-class call in Ask, everything but a file edit in Accept Edits, and a screen-control access request short of Bypass) waits and is denied after 15 minutes. A session that still has the old `auto` setting runs as Ask on other providers. Automation runs, connector messages and `POST /api/v1/conversation` put their prompts in the app like any other session.
+On a computer nobody works at, such as a virtual machine set aside for agents, you can turn on **Settings → Security → Only agents use this computer**. Screen control then follows the mode from the first request. Leave it off on a computer you use yourself.
 
-Screen control (computer use) runs only after the agent's access request was allowed. The first request in each session always asks you, in every mode including Bypass, and a remembered rule cannot answer it. After you allow it, later requests in that session follow the mode: Bypass grants them without a prompt, and the other modes ask as for any other tool. Stopping the session, or restarting the worker, clears the grant, so the next request asks again. A run where nobody can answer a prompt, such as the one-shot REST endpoints, cannot start screen control.
+## Reasoning effort
 
-On a computer nobody works at, such as a virtual machine set aside for agents, turn on **Only agents use this computer** in **Settings > Security**. The first request in a session then follows the mode like later ones: Bypass sessions, automations and one-shot runs in Bypass take the screen without asking, and the other modes ask as for any other tool. Stop still takes the screen back. Leave it off on a computer you use yourself.
+On models that support it, pick how hard the model thinks in the composer: **low**, **medium**, **high**, and on some models **xhigh** and **max**. Higher effort is slower and uses more tokens.
 
-#### Effort
+## Text the app writes for you
 
-Available on current Sonnet, Opus and Fable models (not Haiku). Pick it per session from the composer, which only lists the levels the selected model supports:
+Session titles, commit messages, pull request descriptions, branch names and generated agents use their own model. Set it once under **Settings → Default models → Text tasks**.
 
-| Level    | Description                                   |
-|----------|-----------------------------------------------|
-| `low`    | Quick responses, minimal reasoning             |
-| `medium` | Balanced reasoning and speed                   |
-| `high`   | Thorough reasoning                             |
-| `xhigh`  | Extra-high reasoning (not on every model)      |
-| `max`    | Maximum reasoning depth, the highest level     |
+## Export and import
 
-Changing the model or permission mode of an existing session applies live. Changing the effort restarts the session's engine process and keeps the conversation; on the built-in Claude models, background subagents still running in that session end.
+- **Export** downloads an agent as a JSON file to share or keep. Paths that only make sense on your machine are left out.
+- **Import** creates a new agent from such a file. You can rename it as you import.
 
-### Tool Configuration
-
-| Field                 | Type          | Description                                                          |
-|-----------------------|---------------|----------------------------------------------------------------------|
-| `tool_selection_mode` | string        | `all`, `none`, `allow`, or `disallow` — decides what the lists mean   |
-| `allowed_tools`       | list[string]  | The surface in `allow` mode; ignored in every other mode              |
-| `disallowed_tools`    | list[string]  | The block list in `disallow` mode; ignored in every other mode        |
-| `tools`               | list[string]  | LEGACY, no longer written                                              |
-| `tools_preset`        | string        | LEGACY, no longer written                                              |
-
-`tool_selection_mode` is the authority, not the shape of the lists:
-
-| Mode       | What the agent gets                                        |
-|------------|------------------------------------------------------------|
-| `all`      | Every tool. No list is stored.                              |
-| `none`     | No tools at all. No list is stored.                         |
-| `allow`    | Only `allowed_tools`. An empty list means no tools.         |
-| `disallow` | Everything except `disallowed_tools`.                       |
-
-**The tool list is discovered live, never hardcoded.** `GET /api/v1/tools/surface` enumerates every tool a session can be given, straight from the running registries: the built-in tools, the app's bridged servers, the AI tools, the browser, computer use, app configuration, and each configured MCP server. The agent editor's **Tools** section is that inventory — a new built-in tool shows up there on the next refresh, with no list to update anywhere.
-
-Entries in either list are exact tool names (`Read`, `mcp__github__create_issue`) or `fnmatch` patterns. Selecting a whole MCP server in the editor saves `mcp__<server>__*`, so tools added to that server later are covered too; unchecking one of its tools expands the pattern back to explicit names.
-
-`ai_tools` and `app_config_tools` are no longer separate switches. The AI tools and app-configuration tools are permitted through the same list as everything else; both fields survive only so older exports still import.
-
-### System Prompt
-
-The `system_prompt` field holds the agent's instructions (the editor's **Prompt** section):
-
-```json
-{
-  "system_prompt": {
-    "type": "custom",
-    "content": "You are a senior code reviewer. Focus on security, performance, and readability."
-  }
-}
-```
-
-When the GitHub CLI is signed in, the app adds a short GitHub section after the agent's prompt. It limits every instruction to open a pull request, including one in the agent's own prompt, to changes inside the git repository the task is for. In a folder that is not a git repository, the agent delivers the files and says nothing about pull requests.
-
-### Session Behavior
-
-| Field                     | Type | Default | Description                                    |
-|---------------------------|------|---------|------------------------------------------------|
-| `include_partial_messages`| bool | false   | Stream partial messages during generation       |
-
-### Working Directory and Paths
-
-| Field      | Type          | Description                                           |
-|------------|---------------|-------------------------------------------------------|
-| `cwd`      | string        | Override the working directory for sessions             |
-| `add_dirs` | list[string]  | Additional directories the agent can access             |
-
-### Settings Loading
-
-| Field            | Type          | Description                                       |
-|------------------|---------------|---------------------------------------------------|
-| `setting_sources`| list[string]  | Which config sources to load: `user`, `project`, `local` |
-
-Controls which Claude Code configuration files are loaded. By default, all sources are used. Set this to restrict which settings apply.
-
-### Environment
-
-| Field        | Type              | Description                             |
-|--------------|-------------------|-----------------------------------------|
-| `env`        | dict[string, string] | Environment variables for the session |
-
-### Agent Roster and Plugins
-
-| Field              | Type          | Description                                     |
-|--------------------|---------------|-------------------------------------------------|
-| `enabled_agents`   | list[string]  | The agents this one may call when `agent_invoke_mode` is `custom` |
-| `agent_invoke_mode`| string        | Who it can call (the **Subagents** tab): `all` (every other agent), `custom` ("Selected only": exactly `enabled_agents`; an empty list calls none of the listed agents), `none` (no subagents at all: the Task and Swarm tools are not offered, the prompt lists no agents, and choosing it clears `enabled_agents`), or null (legacy: a non-empty `enabled_agents` means those ids, empty/absent means all). The caller's provider still narrows the roster at run time. Under `all` and `custom`, agents defined in files or plugins stay callable |
-| `enabled_plugins`  | list[string]  | Extra plugins (`name@marketplace` or a path) to load for this agent's sessions, on top of the globally enabled ones |
-
-### Advanced
-
-| Field                       | Type | Description                                   |
-|-----------------------------|------|-----------------------------------------------|
-| `app_config_tools`          | bool | LEGACY. The app-configuration tools are now granted through the tool list like any others (owner sessions only); kept so older exports still import |
-
-## API Reference
-
-### List All Agents
-
-```bash
-curl http://localhost:8000/api/v1/agents \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-### Get an Agent
-
-```bash
-curl http://localhost:8000/api/v1/agents/{profile_id} \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-### Create an Agent
-
-```bash
-curl -X POST http://localhost:8000/api/v1/agents \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Code Reviewer",
-    "description": "Reviews code for quality, security, and best practices",
-    "config": {
-      "system_prompt": {
-        "type": "custom",
-        "content": "You are a senior code reviewer. Analyze code for bugs, security issues, performance problems, and style violations. Provide specific, actionable feedback."
-      },
-      "tool_selection_mode": "allow",
-      "allowed_tools": ["Read", "Grep", "Glob"]
-    }
-  }'
-```
-
-If `id` is omitted, it is automatically derived from the name (e.g., "Code Reviewer" becomes `code-reviewer`).
-
-### Update an Agent
-
-```bash
-curl -X PUT http://localhost:8000/api/v1/agents/{profile_id} \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Senior Code Reviewer",
-    "description": "Updated description"
-  }'
-```
-
-`config` is a full replacement, not a merge: any field you leave out is removed. To change one setting, fetch the agent (`GET /api/v1/agents/{profile_id}`), edit that field, and send the whole `config` back.
-
-### Delete an Agent
-
-```bash
-curl -X DELETE http://localhost:8000/api/v1/agents/{profile_id} \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-## Export and Import
-
-### Export an Agent
-
-Download an agent as a JSON file for sharing:
-
-```bash
-curl http://localhost:8000/api/v1/agents/{profile_id}/export \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -o my-agent.json
-```
-
-The export includes all configuration except system-specific paths (cwd, add_dirs, plugin paths). Sensitive data is sanitized.
-
-The exported JSON has this structure:
-
-```json
-{
-  "version": "1.0",
-  "type": "ai-shuffle-agent",
-  "exported_at": "2026-02-16T12:00:00Z",
-  "agent": {
-    "name": "Code Reviewer",
-    "description": "Reviews code for quality",
-    "system_prompt_content": "You are a senior code reviewer...",
-    "tool_selection_mode": "allow",
-    "allowed_tools": ["Read", "Grep", "Glob"]
-  }
-}
-```
-
-### Import an Agent
-
-Create a new agent from exported JSON:
-
-```bash
-curl -X POST http://localhost:8000/api/v1/agents/import \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "version": "1.0",
-    "type": "ai-shuffle-agent",
-    "agent": {
-      "name": "Imported Reviewer",
-      "description": "Imported code reviewer agent",
-      "system_prompt_content": "You are a senior code reviewer..."
-    },
-    "new_name": "My Code Reviewer",
-    "new_id": "my-code-reviewer"
-  }'
-```
-
-Both `new_name` and `new_id` are optional. If omitted, the original name and a generated ID are used. If the ID conflicts with an existing agent, a numeric suffix is appended automatically.
-
-## Practical Examples
-
-Pick the model, effort and permission mode in the composer when you start a chat with each of these.
-
-### Coding Assistant
-
-A general-purpose coding agent with full tool access:
-
-```json
-{
-  "name": "Coding Assistant",
-  "description": "Full-featured coding assistant with all tools",
-  "config": {
-    "system_prompt": {
-      "type": "custom",
-      "content": "Prefer writing clean, well-documented code. Always run tests after making changes."
-    },
-    "tool_selection_mode": "all"
-  }
-}
-```
-
-### Code Reviewer (Read-Only)
-
-A review-focused agent that cannot modify files, because it only has read tools:
-
-```json
-{
-  "name": "Code Reviewer",
-  "description": "Reviews code without making changes",
-  "config": {
-    "system_prompt": {
-      "type": "custom",
-      "content": "You are a thorough code reviewer. Analyze code for correctness, security, performance, and style. Never make changes directly -- only provide feedback and suggestions."
-    },
-    "tool_selection_mode": "allow",
-    "allowed_tools": ["Read", "Grep", "Glob"]
-  }
-}
-```
-
-### Chatbot (No Tools)
-
-A conversational agent with no tool access:
-
-```json
-{
-  "name": "Chatbot",
-  "description": "Conversational assistant without code tools",
-  "config": {
-    "system_prompt": {
-      "type": "custom",
-      "content": "You are a helpful conversational assistant. Answer questions clearly and concisely."
-    },
-    "tool_selection_mode": "none"
-  }
-}
-```
+To manage agents from your own scripts, see the [Agents API](/docs/api-reference/agents).

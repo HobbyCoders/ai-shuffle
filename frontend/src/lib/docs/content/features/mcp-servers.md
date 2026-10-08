@@ -1,300 +1,56 @@
 <!--
 title: MCP Servers
-description: Extend your agents' capabilities with Model Context Protocol servers
+description: Give your agents more tools with Model Context Protocol servers
 order: 3
 -->
 
 # MCP Servers
 
-MCP (Model Context Protocol) servers extend your agents' capabilities by providing external tools, data sources, and integrations. AI Shuffle manages MCP server configuration and discovery so agents can use tools from databases, file systems, APIs, and more.
+MCP (Model Context Protocol) servers give your agents more tools: a database, a file system, GitHub, a search service and many more. Add a server, and its tools show up next to the agent's own tools.
 
-## Overview
+Only the owner can add, change or remove servers.
 
-MCP is an open protocol that lets AI models interact with external systems through a standardized interface. When you configure an MCP server in AI Shuffle, agents gain access to the tools that server provides. Tools from MCP servers appear alongside the agent's built-in tools and are invoked the same way.
+## Add a server
 
-Key concepts:
+1. Open **Settings → MCP servers** for a server every project can use. For a server only one project uses, open the project's **MCP Servers** tab instead.
+2. Choose **Add server**.
+3. Give it a name and pick its type:
+   - **Command (stdio):** AI Shuffle runs a program on your worker, for example `npx -y @modelcontextprotocol/server-filesystem /workspace/docs`. Add any environment variables it needs, such as an access token.
+   - **HTTP:** a server at a URL, with any headers it needs, such as an API key.
+   - **SSE:** an older kind of URL server. It only works with Claude models, so use HTTP when the server offers it.
+4. Save. Use the switch next to a server to turn it off and on.
 
-- **Three server types:** stdio (subprocess), SSE (Server-Sent Events), HTTP
-- **Multiple scopes:** USER (global), LOCAL (project root config), PROJECT (project-scoped config), and INSTALLED (per-project entries in `~/.claude.json`)
-- **Built-in servers:** AI Shuffle ships managed integrations (e.g. `browser`) that appear alongside configured servers
-- **Tool discovery:** MCP tools are automatically discovered and namespaced
-- **Owner-only management:** Creating, updating, deleting, and toggling servers requires the owner
-- **Secrets stay with the owner:** API keys and paired devices that are not the owner's can list servers, but environment and header values, URL credentials and secret-looking arguments read `********` (see [the API reference](/docs/api-reference/mcp#get-apiv1mcpservers))
+Values you enter, such as tokens and keys, are only shown to you as the owner. Anyone else sees `********`.
 
-## Server Types
+## Where a server applies
 
-### stdio
+- **Everywhere:** servers added under **Settings → MCP servers**.
+- **One project, just for you:** kept with the project but out of Git.
+- **One project, shared:** saved in the project's `.mcp.json`, so everyone who clones the repository gets it.
+- **Installed with the Claude Code CLI:** servers you added to a project with the CLI also show up, and you can turn them off here.
 
-Runs the MCP server as a local subprocess. AI Shuffle starts the command and communicates over stdin/stdout using the MCP protocol.
+## Built-in servers
 
-Best for: locally installed tools, CLI-based integrations, development tools.
+AI Shuffle comes with a built-in browser server, so agents can open and use web pages. You can turn it off, but not remove it.
 
-**Configuration fields:**
+## Choosing which tools an agent gets
 
-| Field     | Type          | Description                         |
-|-----------|---------------|-------------------------------------|
-| `command` | string        | Command to execute                  |
-| `args`    | list[string]  | Command-line arguments              |
-| `env`     | dict          | Environment variables for the process |
+An MCP server's tools are named `mcp__<server>__<tool>`, for example `mcp__github__create_issue`. In an agent's **Tools** section you can give it a whole server or only some of its tools. See [Tool configuration](/docs/features/profiles#tool-configuration).
 
-### SSE (Server-Sent Events)
+## Examples
 
-Connects to a remote MCP server over HTTP using Server-Sent Events for streaming communication.
-
-Best for: remote services, shared team tools, cloud-hosted integrations.
-
-**Configuration fields:**
-
-| Field     | Type   | Description                              |
-|-----------|--------|------------------------------------------|
-| `url`     | string | Server URL (e.g., `http://host:port/sse`) |
-| `headers` | dict   | HTTP headers (e.g., authorization)        |
-
-SSE servers currently work only in Claude Code sessions. Sessions on other providers skip them, so their tools are missing there. Prefer HTTP where the server offers it.
-
-### HTTP
-
-Connects to a remote MCP server using standard HTTP request/response.
-
-Best for: stateless tools, REST-like integrations, serverless functions.
-
-**Configuration fields:**
-
-| Field     | Type   | Description                                |
-|-----------|--------|--------------------------------------------|
-| `url`     | string | Server URL (e.g., `http://host:port/mcp`)   |
-| `headers` | dict   | HTTP headers (e.g., authorization)          |
-
-## Scopes
-
-MCP servers can be configured at several levels:
-
-### USER (Global)
-
-Available across all projects. Managed from **Settings → MCP servers**. Only the owner can add, update, or remove global servers.
-
-Use for: tools you want available everywhere, such as a database explorer or a documentation search server.
-
-### LOCAL
-
-Stored in `<project>/.claude/.mcp.json` and kept out of git. Available when working within that specific project directory. Project scopes are managed on the project's **MCP Servers** tab (**Projects**, then select the project).
-
-Use for: project-specific development tools, local database connections, test fixtures.
-
-### PROJECT
-
-Stored in the project's `.mcp.json` at the repository root, so it is shared with anyone who clones the repo.
-
-Use for: project-level integrations the whole team should get.
-
-### INSTALLED
-
-Per-project servers stored in `~/.claude.json` under the project's `mcpServers` entry (the same place the Claude Code CLI tracks installed servers). When adding a project server, pass `"scope": "installed"` to write here. Removing or toggling an installed server targets this same location.
-
-Use for: servers installed for a project outside AI Shuffle's project config files.
-
-### Built-in servers
-
-AI Shuffle also ships managed built-in integrations (currently `browser`, a login-less browser-automation server exposing `mcp__browser__*` tools) that are surfaced through the same API. These are not user-configured and cannot be created or deleted; they are enabled or disabled via the toggle endpoints and the global `settings.json` disable list.
-
-When listing MCP servers for a project, every scope is returned grouped by scope, plus a `total_count` that sums all of them:
-
-```json
-{
-  "builtin": [...],
-  "user": [...],
-  "installed": [...],
-  "local": [...],
-  "project": [...],
-  "total_count": 0
-}
-```
-
-## Tool Discovery
-
-MCP tools are automatically discovered from configured servers. Tools follow a namespaced naming convention:
-
-```
-mcp__<server_name>__<tool_name>
-```
-
-For example, a server named `filesystem` providing a `read_file` tool appears as `mcp__filesystem__read_file`.
-
-To list all discovered MCP tools:
-
-```bash
-curl http://localhost:8000/api/v1/mcp/tools \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-Tools are discovered live from each server and cached for 10 minutes. To bypass the cache:
-
-```bash
-curl "http://localhost:8000/api/v1/mcp/tools?refresh=true" \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-Each tool in the response includes:
-
-- `name` -- The tool name (without the `mcp__server__` prefix)
-- `server` -- The server that provides it
-- `description` -- What the tool does (if available)
-
-## API Reference
-
-### Global (USER Scope) Servers
-
-#### List Global Servers
-
-```bash
-curl http://localhost:8000/api/v1/mcp/servers \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-#### Add a Global Server
-
-```bash
-curl -X POST http://localhost:8000/api/v1/mcp/servers \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "filesystem",
-    "type": "stdio",
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/dir"],
-    "description": "Filesystem access"
-  }'
-```
-
-#### Update a Global Server
-
-```bash
-curl -X PUT http://localhost:8000/api/v1/mcp/servers/{server_name} \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/new/path"]
-  }'
-```
-
-#### Remove a Global Server
-
-```bash
-curl -X DELETE http://localhost:8000/api/v1/mcp/servers/{server_name} \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-#### Toggle a Global Server
-
-Enable or disable a global (or built-in) server via `settings.json`:
-
-```bash
-curl -X PATCH http://localhost:8000/api/v1/mcp/servers/{server_name}/toggle \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{ "enabled": false }'
-```
-
-### Project-Scoped Servers
-
-#### List Project Servers (All Scopes)
-
-```bash
-curl http://localhost:8000/api/v1/projects/{project_id}/mcp/servers \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-#### Add a Project Server
-
-```bash
-curl -X POST http://localhost:8000/api/v1/projects/{project_id}/mcp/servers \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "project-db",
-    "type": "stdio",
-    "command": "npx",
-    "args": ["-y", "@modelcontextprotocol/server-sqlite", "./project.db"],
-    "scope": "local",
-    "description": "Project SQLite database"
-  }'
-```
-
-The `scope` field accepts `"local"`, `"project"`, or `"installed"` (not `"user"` -- use the global endpoint for that). It defaults to `"local"`.
-
-#### Update a Project Server
-
-```bash
-curl -X PUT "http://localhost:8000/api/v1/projects/{project_id}/mcp/servers/{server_name}?scope=local" \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "args": ["-y", "@modelcontextprotocol/server-sqlite", "./new-database.db"]
-  }'
-```
-
-#### Remove a Project Server
-
-```bash
-curl -X DELETE "http://localhost:8000/api/v1/projects/{project_id}/mcp/servers/{server_name}?scope=local" \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-The `scope` query parameter accepts `local`, `project`, `installed`, or `user`.
-
-#### Toggle a Project Server
-
-Enable or disable a server for a specific project (written to the project's `disabledMcpServers` list in `~/.claude.json`). Built-in servers have no per-project setting: toggling one here changes the global setting.
-
-```bash
-curl -X PATCH http://localhost:8000/api/v1/projects/{project_id}/mcp/servers/{server_name}/toggle \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{ "enabled": false }'
-```
-
-### Statistics
-
-```bash
-curl http://localhost:8000/api/v1/mcp/stats \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-Returns the count of global servers configured.
-
-## Example Configurations
-
-### Filesystem Server (stdio)
-
-Give agents read/write access to a specific directory:
+**A folder (command):**
 
 ```json
 {
   "name": "filesystem",
   "type": "stdio",
   "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"],
-  "description": "Filesystem access"
+  "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace/docs"]
 }
 ```
 
-### SQLite Database Server (stdio)
-
-Let agents query and modify a SQLite database:
-
-```json
-{
-  "name": "sqlite",
-  "type": "stdio",
-  "command": "npx",
-  "args": ["-y", "@modelcontextprotocol/server-sqlite", "/path/to/database.db"],
-  "description": "SQLite database access"
-}
-```
-
-### GitHub Server (stdio)
-
-Provide GitHub API access:
+**GitHub (command, with a token):**
 
 ```json
 {
@@ -302,41 +58,19 @@ Provide GitHub API access:
   "type": "stdio",
   "command": "npx",
   "args": ["-y", "@modelcontextprotocol/server-github"],
-  "env": {
-    "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxxxxxxxxxxx"
-  },
-  "description": "GitHub API integration"
+  "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxxxxxxxxxxx" }
 }
 ```
 
-### Remote SSE Server
-
-Connect to a remote MCP server over SSE:
-
-```json
-{
-  "name": "remote-tools",
-  "type": "sse",
-  "url": "https://mcp.example.com/sse",
-  "headers": {
-    "Authorization": "Bearer your-api-key"
-  },
-  "description": "Remote tool server"
-}
-```
-
-### HTTP Server
-
-Connect to a stateless HTTP-based MCP server:
+**A remote server (HTTP):**
 
 ```json
 {
   "name": "api-tools",
   "type": "http",
   "url": "https://mcp.example.com/mcp",
-  "headers": {
-    "X-API-Key": "your-api-key"
-  },
-  "description": "Stateless API tools"
+  "headers": { "X-API-Key": "your-api-key" }
 }
 ```
+
+To manage MCP servers from your own code, see the [MCP API](/docs/api-reference/mcp).

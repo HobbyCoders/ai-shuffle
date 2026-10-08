@@ -1,52 +1,59 @@
 <!--
 title: Requirements
-description: Hardware, software, network access and accounts AI Shuffle needs
+description: Hardware, accounts and network access AI Shuffle needs
 order: 2
 -->
 
 # Requirements
 
-## The machine that runs AI Shuffle
+The machine that runs AI Shuffle is called a **worker**. You can run it with Docker on a server, NAS or PC, or with the desktop app.
 
-AI Shuffle runs as one Docker container. The machine that runs it is called a **worker**.
+## Docker
 
 | | Minimum | Recommended |
 | --- | --- | --- |
 | Processor | 64-bit Intel or AMD (amd64) | 4 cores or more |
 | Memory | 4 GB free for light use | 8 GB or more if you run several agents at once, plus swap |
-| Disk | 20 GB free for the image, database and a few projects | More for large repositories and long session histories |
+| Disk | 20 GB free | More for large projects and long chat histories |
 | Docker | Docker Engine 24 with Docker Compose 2.24 | The current Docker release |
 
 - **ARM is not supported yet.** Raspberry Pi, ARM NAS boxes and ARM servers cannot run the image. On an Apple silicon Mac, Docker runs it in emulation, which is slow.
-- **Swap matters.** Each agent is its own process with its own memory. Without swap on the host, a burst of agents can run the whole machine out of memory.
-- **Unraid** works with its built-in Docker support; see [Install on Unraid](/docs/getting-started/install-unraid).
+- **Add swap.** Each agent uses its own memory. Without swap, a burst of agents can run the machine out of memory.
 
-The container carries everything else it needs: its own private PostgreSQL database, the built-in browser (Chromium), Node.js and the GitHub CLI. If you choose Claude, install the Claude Code CLI from setup or **Settings > Providers > Claude**. Anthropic's own installer downloads it. It is reinstalled at worker start only while **Keep Claude Code installed** is on, and the CLI keeps itself up to date.
+Everything else is inside the image, including its database and a built-in browser. You never set up a database.
 
-## Network access
+## Desktop app
 
-The worker needs outbound HTTPS to:
+The desktop app runs a worker on your computer without Docker.
 
-- `registry.hobbycoders.com`, to download the AI Shuffle image with your pull token (image layers then come from GitHub's container storage);
-- `claude.ai` and Anthropic's download servers, to install and update the Claude Code CLI;
-- the AI providers you connect, for example OpenAI, xAI, OpenRouter or Anthropic;
-- `hobbycoders.com`, for update checks, license checks and (only if you turn it on) remote access;
-- the Python package index (`pypi.org`, with downloads from `files.pythonhosted.org`) and the npm registry (`registry.npmjs.org`), only while an in-app update installs;
-- the Python package index again when you install a connector's runtime in **Settings > Plugins** (Apps), which downloads that connector's Python packages.
+- **Windows 10 or 11 (64-bit):** available as a beta.
+- **macOS and Linux:** coming soon.
 
-Nothing needs to reach the worker from the internet. Never forward its port from your router. See [Remote access](/docs/getting-started/remote-access) for safe ways to use it away from home.
-
-## Accounts you need
-
-- **An AI Shuffle license**, or a trial. Your license email contains your **license key** (you enter it in the app) and your **pull token** (Docker uses it to download the image). See [License](/docs/getting-started/license).
-- **Your own AI account** with at least one supported provider: Claude, OpenAI, OpenRouter, xAI Grok or a custom gateway. Connect it by subscription sign-in or API key. AI Shuffle includes no AI usage. See [Modes and costs](/docs/getting-started/modes-and-costs).
-- **Optional:** more AI providers, fal.ai for images, video and audio, a GitHub account for repository features, and a free HobbyCoders account for the Android app and remote access.
+Its built-in browser is your installed Google Chrome, or Microsoft Edge when Chrome is not installed.
 
 ## Devices you use it from
 
 - Any current desktop browser: Chrome, Edge, Firefox or Safari.
-- The [Android app](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle), Android 8.0 or later. It connects to your workers; it does not run agents itself.
-- A desktop app for Windows is available in beta. It runs a worker on the PC itself, without Docker. Its built-in browser is your installed Google Chrome, or Microsoft Edge when Chrome is not installed.
+- The [Android app](https://play.google.com/store/apps/details?id=com.hobbycoders.aishuffle), Android 8.0 or later. It connects to your workers and does not run agents itself.
+- An iPhone and iPad app is coming soon. Use a browser for now.
+
+## Accounts you need
+
+- **An AI Shuffle license**, or a trial. Your license email contains your **license key** (you enter it in the app) and your **pull token** (Docker uses it to download the image). See [License](/docs/getting-started/license).
+- **Your own AI account** with at least one supported provider: Claude, OpenAI, OpenRouter, xAI Grok or a custom gateway. AI Shuffle includes no AI usage. See [Modes and costs](/docs/getting-started/modes-and-costs).
+- **Optional:** more AI providers, fal.ai for images, video and audio, a GitHub account for repository features, and a free HobbyCoders account for the Android app and remote access.
+
+## Network access
+
+The worker needs outbound internet access to:
+
+- `registry.hobbycoders.com`, to download the AI Shuffle image;
+- `hobbycoders.com`, for update checks, license checks and (only if you turn it on) remote access;
+- the AI providers you connect;
+- Anthropic's download servers, if you install the Claude Code CLI;
+- the public Python and npm package registries, while an in-app update or a connector installs.
+
+Nothing needs to reach the worker from the internet. Never forward its port from your router. See [Remote access](/docs/getting-started/remote-access) for safe ways to use it away from home.
 
 ## Where you can buy
 

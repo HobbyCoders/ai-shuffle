@@ -1,172 +1,83 @@
 <!--
 title: BlueBubbles
-description: Direct BlueBubbles connector for sending iMessages from AI Shuffle
+description: Send iMessages from AI Shuffle through a BlueBubbles server
 order: 9
 -->
 
-# BlueBubbles Connector
+# BlueBubbles
 
-## Overview
+Send iMessages from AI Shuffle through [BlueBubbles](https://bluebubbles.app/), a free app that runs on a Mac. AI Shuffle can run on any other machine.
 
-The BlueBubbles connector provides a direct integration between AI Shuffle and a [BlueBubbles](https://bluebubbles.app/) server. BlueBubbles is an open-source application that runs on macOS and exposes Apple's iMessage service through a REST API and WebSocket interface. This connector communicates directly with the BlueBubbles API, letting AI Shuffle send iMessages. It does not receive messages (see [Send a test message](#7-send-a-test-message)).
+**Sending only.** Incoming iMessages do not reach your agent. Send messages from an [automation](/docs/features/automations) with a **Connector Action** step.
 
-The [iMessage connector](/docs/connectors/imessage) is a separate option: it runs the `imsg` CLI on the Mac that hosts AI Shuffle, and it does not use BlueBubbles. Use BlueBubbles when AI Shuffle runs on a different machine from the Mac.
+## You need
 
-## Prerequisites
+- A Mac with macOS 12 (Monterey) or later, always on, signed in to iMessage.
+- A network path from AI Shuffle to the Mac: the same home network, or a tunnel.
 
-- A **Mac computer** (Mac mini recommended for always-on operation) running **macOS Monterey (12.0)** or later
-- An **Apple ID** signed into iMessage on the Mac
-- **Xcode Command Line Tools** installed (`xcode-select --install`)
-- Network access between the AI Shuffle host and the Mac (local network or tunnel)
+## Set up
 
-## Setup Guide
+### 1. Install BlueBubbles Server
 
-### 1. Download and install BlueBubbles server
+Download the macOS server from [bluebubbles.app/downloads](https://bluebubbles.app/downloads/) and drag it into **Applications**, or run `brew install --cask bluebubbles`. Open it.
 
-Download the latest BlueBubbles server release from the [official website](https://bluebubbles.app/downloads/):
+### 2. Give it permissions
 
-1. Go to [https://bluebubbles.app/downloads/](https://bluebubbles.app/downloads/) and download the macOS Server `.dmg` file
-2. Open the `.dmg` and drag **BlueBubbles Server** into your Applications folder
-3. Launch BlueBubbles Server from Applications
+In **System Settings → Privacy & Security**:
 
-Alternatively, install via Homebrew:
+- **Full Disk Access:** add BlueBubbles Server. Required.
+- **Accessibility:** add it if you turn on the Private API (below).
+- **Contacts:** optional, to show contact names.
 
-```bash
-brew install --cask bluebubbles
-```
+Restart BlueBubbles Server afterwards.
 
-### 2. Grant required macOS permissions
+### 3. Finish the BlueBubbles setup
 
-BlueBubbles needs several permissions to function. macOS will prompt for these on first launch, but you can also set them manually:
+1. Set a strong **server password**.
+2. Pick a connection method: **Cloudflare Tunnel** (no port forwarding), **Dynamic DNS**, or **Local Network Only** when AI Shuffle is on the same network.
+3. Optional: turn on the **Private API**. Tapbacks, renaming group chats and leaving chats need it. Plain messages do not.
+4. Keep the default port, `1234`, unless you need another.
 
-1. **Full Disk Access** -- Required to read the iMessage database
-   - Go to **System Settings > Privacy & Security > Full Disk Access**
-   - Click the `+` button and add BlueBubbles Server
-2. **Accessibility** (optional) -- Required only if you enable the BlueBubbles Private API. The Private API is needed for the AI Shuffle actions that send tapbacks, rename group chats or leave chats. Plain text sending works without it.
-   - Go to **System Settings > Privacy & Security > Accessibility**
-   - Click the `+` button and add BlueBubbles Server
-3. **Contacts** (optional) -- Allows BlueBubbles to resolve contact names
-   - Go to **System Settings > Privacy & Security > Contacts**
-   - Grant access to BlueBubbles Server
+The status page should show **Running**.
 
-After granting permissions, restart BlueBubbles Server.
+### 4. Connect it in AI Shuffle
 
-### 3. Configure the BlueBubbles server
+1. Open **Settings → Plugins**, choose **Apps** and open **BlueBubbles**. Choose **Install BlueBubbles** if asked.
+2. Choose **Connect account** and enter the **Server URL** with its port, such as `http://192.168.1.50:1234`, and the **API Password**.
+3. Add at least one **Allowed Handle**: a phone number or email address.
+4. Choose **Create Connector**, then turn on **Activate**.
 
-On first launch, BlueBubbles will walk you through a setup wizard:
+### 5. Send a test message
 
-1. **Set a server password** -- Choose a strong password. You will need this for the AI Shuffle connector config.
-2. **Choose a connection method** -- Options include:
-   - **Cloudflare Tunnel** (recommended for remote access) -- Free, stable, and requires no port forwarding
-   - **Dynamic DNS** -- Requires port forwarding on your router
-   - **Local Network Only** -- Only works if AI Shuffle runs on the same network
-3. **Configure the Private API** (optional) -- Required for the AI Shuffle actions that send tapbacks, rename group chats or leave chats. Plain text sending works without it.
-4. **Set the port** -- Default is `1234`. Change if needed.
+Make an automation with a **Connector Action** step that runs `send_message`, run it, and check the message arrives.
 
-### 4. Verify the server is running
+## Settings
 
-Once setup is complete, the BlueBubbles status page should show:
+| Setting | Required | What it does |
+| --- | --- | --- |
+| `server_url` | Yes | The BlueBubbles address with port |
+| `password` | Yes | The BlueBubbles server password |
+| `allowed_handles` | Yes | The phone numbers and emails it can message |
 
-- Server status: **Running**
-- Private API: **Connected** (if enabled)
-- Connection method: Your chosen method with a URL
+## Actions
 
-Test the API from your AI Shuffle host:
+BlueBubbles actions send messages and tapbacks, list chats, look up a chat, rename a chat and leave a chat. Run them from an automation's **Connector Action** step. They do not ask for approval there.
 
-```bash
-# Check server info
-curl "http://YOUR_BLUEBUBBLES_URL:1234/api/v1/server?password=YOUR_PASSWORD"
-
-# List recent chats
-curl "http://YOUR_BLUEBUBBLES_URL:1234/api/v1/chat?password=YOUR_PASSWORD&limit=5"
-```
-
-### 5. Create the BlueBubbles connector in AI Shuffle
-
-1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **BlueBubbles**.
-2. Click **Install BlueBubbles** if prompted, then click **Connect account**.
-3. Fill in the configuration fields:
-   - **Server URL**: Full URL of the BlueBubbles server including port (e.g., `http://192.168.1.50:1234`)
-   - **API Password**: The server password you set in BlueBubbles
-   - **Allowed Handles**: At least one phone number or email address. The connector will not start without one.
-4. Click **Create Connector**.
-
-To create the connector through the API instead, see [API Management](/docs/connectors#api-management); the `config` object takes the fields in the table below.
-
-### 6. Activate the connector
-
-Turn on the connection's **Activate** switch.
-
-### 7. Send a test message
-
-With the connector active, AI Shuffle can send outgoing iMessages through the BlueBubbles REST API. Trigger a send from an [automation](/docs/features/automations) with a **Connector Action** step (`send_message`) and confirm the message arrives on the recipient's device.
-
-> **Note:** The BlueBubbles connector does not receive messages. AI Shuffle has no URL that BlueBubbles can send its webhooks to, so incoming iMessages never reach your agent.
-
-## Configuration Reference
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `server_url` | string | Yes | Full URL of the BlueBubbles server including port (e.g., `http://192.168.1.50:1234` or `https://bb.yourdomain.com`) |
-| `password` | string | Yes | The server password set during BlueBubbles configuration |
-| `allowed_handles` | list | Yes (to enable) | Phone numbers or emails the connector is allowed to work with. At least one entry is required before the connector can be enabled. |
-
-## Capabilities
-
-The BlueBubbles connector supports the following capabilities:
-
-| Capability | Supported | Description |
-|------------|-----------|-------------|
-| `typing_indicator` | No | Not advertised by the connector |
-| `reactions` | No | Not advertised by the connector |
-| `rich_text` | No | Messages are sent as plain text |
-| `file_upload` | No | Not advertised by the connector |
-| `read_receipts` | No | Not supported by the connector |
-| `threads` | No | iMessage does not have a threading model |
-| `buttons` | No | iMessage does not support interactive buttons |
-
-**Message length limit:** 4,000 characters per message. Longer messages are automatically split.
-
-## AI Actions
-
-BlueBubbles has 6 actions: send message, send tapback reaction, list chats, get chat info, rename chat and leave chat.
-
-Your agent does not get these actions in its sessions, because no BlueBubbles chat ever reaches it. You can run them from an [automation](/docs/features/automations) with a **Connector Action** step. Actions run this way, including `leave_chat`, do not ask for approval.
+Messages are plain text. Messages longer than 4,000 characters are split.
 
 ## Troubleshooting
 
-### BlueBubbles server won't start
+**BlueBubbles will not start.** Check you have macOS 12 or later, reinstall the latest version, and look for "BlueBubbles" in the macOS Console app.
 
-- **Check macOS version.** BlueBubbles requires macOS Monterey (12.0) or later.
-- **Reinstall.** Delete BlueBubbles from Applications and reinstall from the latest `.dmg`.
-- **Check Console logs.** Open the macOS Console app and filter for "BlueBubbles" to see detailed error messages.
+**The Private API shows Disconnected.** Allow **Accessibility**, restart BlueBubbles, and try **Settings → Private API → Re-install**. Newer macOS versions may need extra steps: see the [BlueBubbles Private API guide](https://docs.bluebubbles.app/private-api/).
 
-### Private API not connecting
+**Messages do not send.**
 
-The Private API is required for the tapback, rename chat and leave chat actions. If it shows "Disconnected":
+- Send a message by hand in Messages on the Mac to check iMessage works.
+- Check the password matches BlueBubbles exactly.
+- Check AI Shuffle can reach the server URL and port.
+- Check **Logs** in BlueBubbles Server.
 
-1. Ensure you have granted **Accessibility** permission to BlueBubbles
-2. Restart BlueBubbles Server
-3. If still disconnected, try re-injecting the Private API helper from **BlueBubbles > Settings > Private API > Re-install**
-4. On macOS Ventura and later, you may need to disable SIP (System Integrity Protection) for the Private API. See the [BlueBubbles documentation](https://docs.bluebubbles.app/private-api/) for instructions.
+**The Cloudflare Tunnel drops.** Update BlueBubbles and check the Mac's internet connection. On the same network, a local address is more stable.
 
-### Outgoing messages fail to send
-
-- **Check iMessage sign-in.** Open Messages.app on the Mac and verify you can send a message manually.
-- **Check password.** Ensure the `password` in your connector config exactly matches the one in BlueBubbles Server settings.
-- **Check the server URL.** Confirm `server_url` (host and port) is reachable from the AI Shuffle host.
-- **Check BlueBubbles logs.** In the BlueBubbles Server app, go to **Logs** to see detailed send/receive errors.
-
-### Cloudflare Tunnel disconnects frequently
-
-- Update BlueBubbles to the latest version -- tunnel stability is regularly improved.
-- Check your Mac's internet connection stability.
-- Consider switching to a static local network connection if AI Shuffle is on the same network.
-
-### High memory usage on Mac
-
-BlueBubbles caches message data. If memory usage grows large:
-
-1. In BlueBubbles, go to **Settings > Database > Clear Cache**
-2. Restart the BlueBubbles server
-3. If the Mac has limited RAM (8 GB or less), consider limiting the number of chats BlueBubbles syncs
+**BlueBubbles uses a lot of memory.** Clear its cache in **Settings → Database**, restart it, and sync fewer chats on a Mac with 8 GB or less.

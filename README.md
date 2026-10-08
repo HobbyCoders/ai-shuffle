@@ -24,7 +24,6 @@ If you choose Claude, install Claude Code from setup or **Settings > Providers >
 AI Shuffle is sold as a license with a 14-day trial. Your license email has your license key and your pull token.
 
 - [Requirements](docs/content/getting-started/requirements.md): a 64-bit Intel or AMD machine with Docker, 8 GB of memory recommended.
-- [Install on Unraid](docs/content/getting-started/install-unraid.md)
 - [Install with Docker Compose](docs/content/getting-started/install-docker-compose.md)
 - [First run](docs/content/getting-started/first-run.md), then [Modes and costs](docs/content/getting-started/modes-and-costs.md)
 

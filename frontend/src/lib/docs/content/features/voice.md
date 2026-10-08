@@ -1,101 +1,71 @@
 <!--
 title: Voice Mode
-description: Start voice calls and understand how each engine handles audio and tasks
+description: Talk to your agents in a voice call and hand them work out loud
 order: 10
 -->
 
 # Voice Mode
 
-Voice mode adds a spoken conversation to a chat session. New calls use **GPT Live**: audio passes through the AI Shuffle server, and task requests run through the chat model you select. Existing sessions can retain **OpenAI Realtime** or **PersonaPlex** bindings, which handle audio, delegation, and transcripts differently.
+Voice mode adds a spoken conversation to a chat. You talk, the assistant answers out loud, and anything that needs real work is handed to the chat's agent while you keep talking.
 
-This guide describes AI Shuffle's integration, not a guarantee that a model is available on your provider account.
+## Set up
 
-## Setup
+1. **Add an OpenAI API key** under **Settings → Providers**. Voice calls are paid from your own OpenAI API account. A ChatGPT subscription sign-in cannot pay for them.
+2. **Turn on Voice calls** under **Settings → Voice**. Choose a voice (the play button plays a sample), set **Max call length**, and change the **Call prompts** if you like.
+3. In the voice chat's composer, **choose the model** that does the work, with its effort and permission mode.
 
-1. **Add an OpenAI API-key provider** under Settings → Providers. GPT Live and Realtime require an enabled provider with a stored API key; a ChatGPT-subscription login cannot fund their calls. AI Shuffle selects the voice provider automatically for new calls.
-2. **Turn on Voice calls** under Settings → Voice. Choose a voice, set **Max call length**, and adjust **Call prompts** if needed. The play button beside each voice generates a GPT Live sample using your OpenAI API account.
-3. **Choose the chat model for tasks** in the voice session's composer controls, along with its effort and permissions. GPT Live uses these selections for client delegation. You do not need to assign a per-agent Voice model for this path.
+The **Dictation** settings on the same page, including the **Voice input hotkey**, are for speaking into the message box. They do not affect calls.
 
-Settings → Voice currently configures GPT Live for new calls; it does not offer an engine or provider dropdown. The **Dictation** settings on the same page, including the **Voice input hotkey**, control dictation into the composer, not the voice call engine. Existing sessions keep their saved voice configuration when settings change.
+## Start a call
 
-## Starting a call
+Choose **Voice** in the session mode switcher, then **Start a voice call**. To call again on an existing voice chat, use **Start a call on this voice session** in the composer.
 
-Select **Voice** in the session mode switcher and press **Start a voice call** on the new-session screen. On an existing voice session, use the composer button labelled **Start a call on this voice session** to reconnect. The call button is not offered in every ordinary text chat.
+During a call, the call dock shows whether it is connected and who is speaking, how long the call has run, and buttons to:
 
-During a call, the call dock shows connection and speaking state, elapsed time, and controls to stop the call, mute your mic, or mute the agent's audio. Realtime calls can also show a worker count and an estimated call spend; GPT Live and PersonaPlex do not show those Realtime indicators. GPT Live waits for you to speak unless opening words are configured.
+- end the call;
+- mute your microphone;
+- mute the assistant.
 
-Mic mute stops outgoing microphone frames and discards partial buffered samples on streaming calls; it does not retract audio or tasks already sent before you muted. Muting the agent's audio only silences playback, not your microphone. Typed messages can still be sent while your mic is muted.
+You can still type messages and attach files during a call. They go to the same chat.
 
-During a GPT Live app call, you can send composer text and attachments to the same chat model without ending the call. The composer waits for the voice server to accept the request before clearing your draft. Rejected or unconfirmed requests retain the draft; check the conversation before retrying an unconfirmed send. PersonaPlex has no text/attachment delegation in this integration: end its call to send your draft in chat.
+Hanging up ends the audio. Work already handed to the chat keeps running. Stop it separately if you want to cancel it.
 
-Hanging up ends the audio connection. Realtime workers and GPT Live tasks already submitted to the chat can continue; stop the work separately if you want to cancel it.
+## Handing work to the chat
+
+Ask for something in plain words, for example "fix the failing test" or "summarize today's emails". The request goes to the voice chat itself, with its model, agent, tools and approval rules.
+
+- Results, failures and approval requests are spoken.
+- Routine progress is not announced. Ask "how is it going?" whenever you want an update.
+- What you and the assistant say is saved in the chat as text.
 
 ## Calling the assistant while it works
 
-You can call your personal assistant's conversation at any time, including while it is working, waiting on background jobs, or waiting for your decision. Other conversations still take a call only when they are ready or finished. A call never starts on its own: the app does not listen until you press the call button.
+You can call your personal assistant at any time, even while it is busy. A call never starts by itself: nothing listens until you press the call button.
 
-- **Status.** Ask "what are you working on?" or "is it done yet?" and the assistant answers from the app's task list: whether the chat is working or waiting on background jobs, the running jobs by name, finished jobs with a report waiting, and decisions waiting for you. Answering does not start a chat turn. A call that starts in the middle of work gets the same summary when it begins.
-- **Finished jobs.** When a background job finishes during the call, the assistant mentions it in a sentence at the next pause, not in the middle of someone speaking.
-- **Approvals.** When work needs your permission, the assistant asks in one plain sentence and you answer out loud. Only a clear yes approves and a clear no declines. A hedged or off-topic answer ("I guess", "you decide", "maybe") counts as unclear: the assistant asks once more, and a second unclear answer declines. One answer settles one request. The app decides from your own speech after the question, never from the voice model's judgment, typed text, or text read from tool output, and it applies the same access checks as tapping the approval.
-- **What stays on screen.** Private access requests and anything that carries a secret are answered on screen; the assistant tells you when that is needed. Questions with options are also answered in the chat.
+- **Ask for status**, such as "what are you working on?" or "is it done yet?". It answers from the app's task list.
+- **Finished jobs** are mentioned at the next pause.
+- **Approvals:** when work needs your permission, the assistant asks one plain question. Only a clear yes approves and a clear no declines. An unclear answer is asked once more, then declined.
+- **Secrets stay on screen.** Private access requests are answered on screen, and the assistant tells you when that is needed.
 
-## How the engines differ
+## Background noise
 
-### GPT Live
+If breathing or room noise keeps starting a turn, raise the microphone threshold in the voice options. If a quiet microphone gets cut off, lower it.
 
-The browser streams microphone audio to AI Shuffle over a WebSocket. The server connects to OpenAI and sends response audio back to the browser. This is a server-owned audio transport, not a direct browser-to-OpenAI call.
+## Dropped connections
 
-With **client delegation**, task requests are submitted to the **same chat session**, using its selected model, agent instructions, conversation, tools, effort, and approval rules. The handoff does not create a background worker or use the Realtime agent roster. The handoff waits briefly until your transcript goes quiet, so the last words of a request are not cut off; a handoff with no words in it, such as a breath or a cough, is not sent to the chat. Results, failures, finished tasks and approval requests are spoken. Routine progress is passed to the voice model as quiet context: it answers when you ask about status but does not announce each step.
+If the connection drops, for example when your phone moves from Wi-Fi to mobile data, the call shows **reconnecting** and picks up where it left off. Anything said while it shows **reconnecting** is not heard. If it cannot reconnect, the call ends with a message, and you can start it again.
 
-The backend also retains a **Responses delegation** path for saved GPT Live session configurations. OpenAI handles those requests using a model on the call's OpenAI API provider. AI Shuffle exposes **no app tools** to that backend and does not also dispatch a local chat turn for the same delegation. This is not the current settings UI's task-model selector; new calls use client delegation and the composer selections.
+## Costs
 
-GPT Live input and output transcript events are saved as user and assistant text. Because this stream has no authoritative transcript turn-end event in the integration, saved text is segmented and may not align exactly with spoken turns. A short listening sound from the assistant, such as "Mm-hmm", in the middle of your sentence does not split your words into two messages.
+- Call audio is billed to your OpenAI API account.
+- Work handed to the chat is billed to that chat model's own provider.
+- **Max call length** limits the length of a call, not its cost. Check your provider's usage page for real charges.
 
-GPT Live has no turn-detection or noise settings of its own. To keep breaths and room noise from starting a turn, the browser sends microphone audio quieter than the `mic_threshold_db` voice option (default -42 dBFS) as silence. Raise the value if background noise still triggers the assistant; lower it if a quiet microphone is cut off.
+## Older voice chats
 
-### OpenAI Realtime
+Voice chats created with earlier versions may still use the **OpenAI Realtime** or **PersonaPlex** engines, and keep them.
 
-Existing Realtime sessions use **WebRTC audio directly between the browser and OpenAI**. AI Shuffle still handles credentials, server-side tools, transcript events, and usage. The direct-audio claim applies to this browser transport only, not to GPT Live or PersonaPlex.
+- **OpenAI Realtime** calls hand work to background agents instead of the chat. Only agents with a **Voice** model set in their **Models** section can take that work. The call dock shows an estimated cost.
+- **PersonaPlex** calls use your fal.ai key. They are spoken conversation only, with no tools or hand-offs, and only the assistant's side is saved as text.
 
-The Realtime voice agent is a **coordinator**, not a coder. It does not edit files, run commands, or read a codebase itself. Its instructions direct substantive work to background agents while the spoken conversation continues.
-
-It can do the things you would expect of an assistant you talk to:
-
-- **Dispatch work** to any agent that has a voice model assigned (see below), by name or by letting it pick.
-- **Steer running work.** If you change your mind mid-task ("actually make the toggle default to dark"), it sends a follow-up to the worker that is already on it instead of starting a second one. A running worker gets the message mid-work; a finished worker resumes with its full context.
-- **Stop a worker** when you cancel.
-- **Check on progress** and report what landed.
-- **Relay permission prompts.** When a worker needs approval for a tool, the voice agent reads the request to you and acts only on your spoken yes or no.
-- **Manage the app**: create and change automations, hooks, agents, MCP servers and connectors during the call. This is always available to the owner, but never to API-key users. It says what it is about to do first and waits for a yes before anything destructive.
-
-For the **Realtime worker roster only**, open an agent's *Provider models* and set its **Voice** row. This selects the model that agent uses for delegated work. Agents without a Voice model are excluded from that roster. The agent selected when the session was created is the default worker: "just get an agent on it" goes to that agent if eligible, otherwise to the alphabetically first eligible agent.
-
-Realtime saves user transcription and assistant speech transcripts in the session. User transcription uses the input transcription model in that session's voice options.
-
-### PersonaPlex
-
-Existing PersonaPlex sessions use the configured **fal.ai API key**, rather than an OpenAI provider. Microphone and response audio pass through the AI Shuffle server over WebSockets to and from fal.ai.
-
-This integration supports a spoken conversation with a voice prompt, but **no tools, agent roster, or delegation**. Assigning an agent a Voice model does not add those capabilities.
-
-Only assistant text returned by the provider is saved. **User transcription is not provided** in this integration, so the session does not contain a complete two-sided transcript.
-
-## Billing and call limits
-
-Voice audio and delegated tasks can use different accounts: OpenAI funds GPT Live and Realtime audio, while fal.ai funds PersonaPlex. GPT Live client-delegated chat turns and Realtime workers use their selected model's provider or subscription independently of the voice account. Responses delegation stays with the call's OpenAI API provider.
-
-The Realtime cost display is an **estimate based on reported token usage**, including audio and text, not a flat per-minute conversation charge. It is not a combined bill for delegated work. GPT Live and PersonaPlex do not provide that Realtime estimate in the call dock; no displayed estimate does not mean the call is free. Check the provider's usage and pricing for actual charges. Generating voice previews also uses your OpenAI API account.
-
-**Max call minutes** limits call duration, not spending. Realtime's browser connection is renewed during longer calls while retaining the total call limit. GPT Live's connection is also kept going: the server opens a fresh provider session shortly before the current one expires, and reconnects on its own if the connection drops. The new session gets the saved conversation, so the call picks up where it left off. The server keeps trying for about 20 seconds, and the call shows **reconnecting** meanwhile. If the connection cannot be restored, the call ends with a message saying so, and you can start it again. The same applies to the app's own connection to the server, for example when a phone moves between Wi-Fi and mobile data: during a GPT Live call the app keeps trying to reopen it for about 30 seconds, showing **reconnecting** the whole time, and the new connection picks up from the saved conversation. Anything said while the call shows **reconnecting** is not heard. PersonaPlex calls are not reconnected; they end with a message instead.
-
-## API
-
-- `GET /api/v1/settings/voice`, `PUT /api/v1/settings/voice` — current GPT Live defaults, prompts, call limit, and separate dictation settings. These settings do not select Realtime or PersonaPlex for new calls.
-- `GET /api/v1/voice/providers` — configured voice-provider credentials eligible for the integration; this is not a live model-access probe.
-- `GET /api/v1/voice/agents` — the Realtime worker roster: agents with a Voice model and the provider each uses.
-- `POST /api/v1/voice/sessions` — create a voice session. Realtime uses a short-lived browser credential; stream engines do not send the upstream API key to the browser.
-- `GET /api/v1/voice/sessions/{id}/config` — the session's saved voice binding.
-- `POST /api/v1/voice/sessions/{id}/secret`, `/call`, `/hangup`, `GET .../state` — the call lifecycle. Only Realtime needs a short-lived provider credential for the browser.
-- `WS /api/v1/voice/sessions/{id}/audio` — server-owned GPT Live and PersonaPlex audio transport. `?resume=1` reopens a dropped call and replaces its leftover connection.
-
-The session routes above and the audio socket apply the same access check as other session requests: an API key can use only the voice sessions it started (and only within its project and agents), while the owner can use any. Workers the call hands work to run as the same key, on the key's agents only.
+To control voice calls from your own code, see the [Voice API](/docs/api-reference/voice).

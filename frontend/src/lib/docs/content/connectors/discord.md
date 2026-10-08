@@ -1,163 +1,88 @@
 <!--
 title: Discord
-description: Connect AI Shuffle to Discord using a bot application from the Discord Developer Portal
+description: Chat with your agent through a Discord bot
 order: 2
 -->
 
-# Discord Bot Connector
+# Discord
 
-## Overview
+Chat with your agent in your Discord servers through your own bot. It can answer in channels and threads, react, share files and, if you allow it, help run your server.
 
-The Discord connector integrates your AI Shuffle agent with Discord, one of the most popular communication platforms for communities and teams. Once configured, your agent can respond to messages in Discord channels, participate in threads, react to messages, and share files -- all through a Discord bot account.
+## You need
 
-Setting up the connector involves creating a Discord Application in the Developer Portal, adding a Bot user to it, and inviting the bot to your server(s). The connector communicates with Discord using the Gateway API (WebSocket) for real-time message reception and the REST API for sending responses. You list the servers or channels the bot may operate in, so you control exactly where it responds.
+- A Discord account.
+- **Manage Server** permission on the server, or a server admin who can invite the bot.
 
-## Prerequisites
+## Set up
 
-- A Discord account
-- **Manage Server** permission on the Discord server(s) where you want to add the bot (or have a server admin invite it)
-- AI Shuffle backend running and accessible
-- Access to the [Discord Developer Portal](https://discord.com/developers/applications)
+### 1. Create the application and bot
 
-## Setup Guide
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and choose **New Application**.
+2. Name it, for example "AI Shuffle Bot", and choose **Create**. Note the **Application ID**.
+3. Open **Bot** in the sidebar. Under **Token**, choose **Reset Token** and copy the token. Keep it private.
+4. Under **Privileged Gateway Intents**, turn on **Message Content Intent** and save. Without it, the bot cannot read messages.
 
-### Step 1: Create a Discord Application
+### 2. Invite the bot to your server
 
-1. Go to the [Discord Developer Portal](https://discord.com/developers/applications).
-2. Click **New Application** in the top-right corner.
-3. Enter a name for your application (e.g., "AI Shuffle Bot") and click **Create**.
-4. On the **General Information** page, note the **Application ID** -- you will need it for the invite link.
-
-### Step 2: Create the Bot User
-
-1. In the left sidebar of your application, click **Bot**.
-2. Click **Add Bot**, then confirm with **Yes, do it!**.
-3. Under the **Token** section, click **Reset Token** to generate a new bot token. Copy this token and store it securely. You will not be able to view it again.
-   ```
-   Example token format: EXAMPLE-DISCORD-BOT-TOKEN
-   ```
-
-### Step 3: Enable Message Content Intent
-
-The bot needs the **Message Content** privileged intent to read message text:
-
-1. On the **Bot** settings page, scroll down to **Privileged Gateway Intents**.
-2. Enable **Message Content Intent**.
-3. Click **Save Changes**.
-
-Without this intent enabled, the bot will receive message events but the message content will be empty.
-
-### Step 4: Invite the Bot to Your Server
-
-Construct an invite URL using your **Application ID** (from Step 1). The bot needs the following permissions:
-
-- Send Messages
-- Send Messages in Threads
-- Read Message History
-- Add Reactions
-- Attach Files
-- Manage Messages (optional, for cleanup)
-
-You can grant the bot **any additional permissions** you want the AI to be able to use (Manage Roles, Manage Channels, Kick/Ban Members, Manage Webhooks, Manage Events, ...). The AI's available actions automatically reflect whatever the bot is actually allowed to do in the server — see [AI Actions](#ai-actions) below.
-
-The permissions integer for the baseline scopes is `277025770560`. Use this invite URL format:
+Open this link in your browser, with your Application ID:
 
 ```
 https://discord.com/api/oauth2/authorize?client_id=YOUR_APPLICATION_ID&permissions=277025770560&scope=bot
 ```
 
-Replace `YOUR_APPLICATION_ID` with the actual Application ID, then open the URL in your browser. Select the server you want to add the bot to and click **Authorize**.
+Pick your server and choose **Authorize**. This gives the bot the basics: send messages (also in threads), read history, add reactions and attach files.
 
-### Step 5: Get Guild and Channel IDs (Optional)
+You can give the bot more Discord permissions, such as Manage Roles or Ban Members. The agent can then use the matching actions.
 
-The bot only responds in servers or channels you list. The guided setup in Step 6 can find these for you. To enter them by hand, you need their IDs:
+### 3. Connect it in AI Shuffle
 
-1. In Discord, go to **User Settings > Advanced** and enable **Developer Mode**.
-2. Right-click on a **server name** and select **Copy Server ID** to get the guild ID.
-3. Right-click on a **channel name** and select **Copy Channel ID** to get the channel ID.
+1. Open **Settings → Plugins**, choose **Apps** and open **Discord Bot**. Choose **Install Discord Bot** if asked.
+2. Choose **Connect account**, enter a name and paste the **Bot Token**.
+3. Choose **Validate**. AI Shuffle confirms the bot and lists the servers it can see. If it is in none yet, use the **Open Discord invite** link, then **Re-validate**.
+4. Tick the servers and channels the bot should answer in. At least one is required.
+5. Optional: choose a **Command Prefix**, such as `!`. The bot then only answers messages that start with it.
+6. Pick the agent, choose **Create Connector**, then turn on **Activate**.
 
-### Step 6: Configure the Connector in AI Shuffle
+See [Common setup steps](/docs/connectors#common-setup-steps).
 
-AI Shuffle offers a **guided setup** that discovers the servers and channels your bot can see, so you can pick them from a list instead of copying IDs by hand. (Step 5 is only needed if you prefer to enter IDs manually.)
+Prefer typing IDs? Choose **Enter IDs manually**. To copy IDs in Discord, turn on **User Settings → Advanced → Developer Mode**, then right-click a server or channel and choose **Copy ID**.
 
-1. Open the AI Shuffle web UI and go to **Settings > Plugins**, choose the **Apps** filter and open **Discord Bot**.
-2. Click **Install Discord Bot** if prompted, then click **Connect account**.
-3. Enter a **Connector Name** and paste the **Bot Token** from Step 2. To choose an existing **API User** instead of auto-creating one, open **Advanced settings**.
-4. Click **Validate**. AI Shuffle logs into Discord with the token and confirms the bot identity ("Authenticated as ...") along with how many servers it can see.
-   - If the bot is not in any server yet, an **Open Discord invite** link appears -- use it to add the bot, then click **Re-validate**.
-5. Select the servers (guilds) and text channels the bot should operate in from the checklists. You must select at least one server or channel before the connector can be enabled.
-6. Choose a **Command Prefix** from the preset chips (`!`, `?`, `.`), pick **None**, or choose **Custom** to type your own.
-7. Click **Create Connector**, then turn on the connection's **Activate** switch.
+## Settings
 
-The connection needs an API user with an agent, or every message is refused. See [Common Setup Steps](/docs/connectors#common-setup-steps).
+| Setting | Required | What it does |
+| --- | --- | --- |
+| `bot_token` | Yes | The bot's token |
+| `guild_ids` | One of these two | The servers the bot answers in |
+| `allowed_channel_ids` | One of these two | The channels the bot answers in |
+| `command_prefix` | No | Only answer messages that start with this |
+| `enabled_action_categories` | No | Limit the agent to some kinds of actions: `messages`, `reactions`, `threads`, `channels`, `roles`, `members`, `moderation`, `webhooks`, `invites`, `emojis`, `events`, `server`. Empty allows all |
+| `auto_approve_destructive` | No | `true` skips the Approve/Deny prompt for destructive actions |
 
-Prefer to type IDs yourself? Click **Enter IDs manually** under the Bot Token field to switch to plain text inputs for Guild IDs, Allowed Channel IDs, and Command Prefix (see Step 5 for how to obtain the IDs).
+## What your agent can do
 
-When editing an existing Discord connector, the stored token is masked. Click **Validate** to re-run discovery against the saved token (you do not need to re-enter it), or paste a new token first to validate that instead.
+See [How AI actions work](/docs/connectors#how-ai-actions-work). The agent can work with messages, embeds, polls, files, reactions, pins, threads, channels, roles, members, moderation, webhooks, invites, custom emojis, scheduled events and server info, as far as the bot's Discord permissions allow.
 
-## Configuration Reference
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `bot_token` | string | Yes | The bot token from the Discord Developer Portal. This authenticates the bot with the Discord Gateway and REST APIs. |
-| `guild_ids` | array of strings | Yes (to enable, or `allowed_channel_ids`) | Discord server (guild) IDs where the bot should operate. `guild_ids` or `allowed_channel_ids` must be set before the connector can be enabled. |
-| `allowed_channel_ids` | array of strings | Yes (to enable, or `guild_ids`) | Channel IDs the bot is allowed to respond in. This filter applies in addition to `guild_ids`. |
-| `command_prefix` | string | No | If set, only messages starting with this prefix are processed. Defaults to none: all messages in allowed channels are processed. |
-| `enabled_action_categories` | array of strings | No | Restrict the AI's actions to these categories. Empty = all categories. Valid values: `messages`, `reactions`, `threads`, `channels`, `roles`, `members`, `moderation`, `webhooks`, `invites`, `emojis`, `events`, `server`. |
-| `auto_approve_destructive` | string | No | Set to `true` to skip the in-channel Approve/Deny prompt for destructive AI actions (deletes, bans, purges, ...). Default: prompts are required. |
-
-## Capabilities
-
-The Discord connector supports the following capabilities:
-
-| Capability | Supported | Notes |
-|------------|-----------|-------|
-| Typing indicator | Yes | Shows the bot as "typing..." while the agent processes a response |
-| Reactions | Yes | Can add emoji reactions to user messages |
-| Rich text | Yes | Full Discord Markdown support including bold, italic, code blocks, blockquotes, spoiler tags, and embeds |
-| File upload | Yes | Supports file attachments up to 25 MB (or higher with server boost level) |
-| Threads | Yes | The AI can create, list, and manage threads through the action gateway |
-| Buttons | Yes | Supports interactive message components including buttons and select menus |
-
-**Message Length Limit:** 2,000 characters per message. Messages exceeding this limit are automatically split across multiple messages. Embed descriptions have a separate limit of 4,096 characters.
-
-## AI Actions
-
-See [How AI actions work](/docs/connectors#how-ai-actions-work).
-
-Your agent can use about 45 actions across messages, embeds, polls, files, reactions, pins, threads, channels, roles, members, moderation, webhooks, invites, custom emojis, scheduled events and server info. The list your agent sees also depends on the permissions the bot holds in the server: grant the bot a new Discord permission and the matching actions become available.
-
-- Message actions only work in the channel the session started from, the connector's `allowed_channel_ids`, and threads in those channels. Server-level actions are limited to the server containing that channel.
-- Destructive actions (delete message/channel/role, kick, ban, timeout, purge, webhook create/delete, ...) post an **Approve/Deny** button prompt in the channel and only run after a person clicks Approve.
-- The bot token never passes through the AI; AI Shuffle makes all Discord calls itself.
+- Messages stay in the channel the chat started from, your allowed channels and their threads.
+- Destructive actions, such as deleting, kicking, banning or purging, ask for **Approve** in the channel first.
+- The bot token is never shown to the agent.
+- Messages longer than 2,000 characters are split into several messages.
 
 ## Troubleshooting
 
-### Bot appears online but does not respond to messages
+**The bot is online but does not answer.**
 
-- **Message Content Intent not enabled.** This is the most common issue. Go to the Developer Portal, open your application's Bot settings, and ensure **Message Content Intent** is toggled on. Without it, the bot receives empty message bodies.
-- **Command prefix mismatch.** If `command_prefix` is set to `!`, the bot only responds to messages starting with `!`. Either change the prefix or remove it to respond to all messages.
-- **Channel permissions.** Verify the bot has **Read Messages** and **Send Messages** permissions in the target channel. Check both the server role permissions and any channel-specific permission overrides.
+- Turn on **Message Content Intent** in the Developer Portal. This is the most common cause.
+- If you set a command prefix, start your message with it.
+- Check the bot can read and send messages in that channel.
 
-### Bot is offline in Discord
+**The bot is offline.**
 
-- **Invalid token.** If the token was regenerated in the Developer Portal, the old token no longer works. Update the connector configuration with the new token.
-- **Connector not enabled.** Check **Settings > Plugins > Discord Bot** to ensure the connection is activated and shows a "Connected" status.
-- **Rate limit or session limit.** Discord limits bots to one active Gateway session per token (by default). Ensure no other instance is running with the same token.
+- The token was reset. Paste the new one into the connection.
+- Check that the connection is activated and shows **Connected**.
+- Only one program can use a bot token at a time. Stop any other copy using it.
 
-### "Missing Access" or 403 errors
+**"Missing Access" errors.** The bot lacks a permission there. Invite it again with the link above, and check channel permission overrides.
 
-- The bot lacks required permissions in the server or channel. Re-invite the bot using the invite link from Step 4, which includes all necessary permission scopes.
-- For thread access, the bot needs **Send Messages in Threads** permission.
+**"Disallowed Intents" error.** Turn on **Message Content Intent** under **Bot → Privileged Gateway Intents**.
 
-### Messages are being truncated or split awkwardly
-
-- Discord enforces a strict **2,000-character limit** per message. The connector splits at the last line break before the limit, or mid-text if there is none. If code blocks are being broken, consider configuring your agent to produce shorter code examples or use file attachments for long code.
-
-### Bot responds in unwanted channels
-
-- Configure `allowed_channel_ids` to restrict the bot to specific channels. Alternatively, remove the bot's permissions from channels where it should not respond using Discord's channel permission overrides.
-
-### "Disallowed Intents" error at startup
-
-- Your bot is trying to use a privileged intent that has not been enabled. Go to the Developer Portal and enable all required intents under **Bot > Privileged Gateway Intents**: **Message Content Intent** is required; **Server Members Intent** and **Presence Intent** are optional.
+**The bot answers where it should not.** Limit it with allowed channels, or remove its permissions in those channels.
