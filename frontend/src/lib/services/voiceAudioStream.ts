@@ -1,4 +1,5 @@
 import { wsUrl } from '$lib/api/runtime';
+import { createVoiceOutput } from './voiceVolume';
 
 export interface VoiceAudioStream {
  close(): Promise<void>;
@@ -15,7 +16,7 @@ interface Handlers {
  /** The microphone stopped (false) or started again (true) reaching the call (#1824). */
  micHealth?(ok: boolean): void;
  /** A fresh microphone stream, when the current track ended or went silent. */
- reacquireMic?(): Promise<MediaStream>;
+ reacquireMic?(refreshSignal?: AbortSignal): Promise<MediaStream>;
 }
 /**
  * Why the stream ended without the client asking it to (#1671). The labels are
@@ -106,13 +107,13 @@ export function createInputGate(thresholdDb = DEFAULT_MIC_THRESHOLD_DB): (pcm: I
  */
 export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, handlers: Handlers, signal: AbortSignal, micThresholdDb = DEFAULT_MIC_THRESHOLD_DB, resume = false): Promise<VoiceAudioStream> {
  const context = new AudioContext();
- const output = context.createGain();
- output.connect(context.destination);
+ const output = createVoiceOutput(context);
  let socket: WebSocket | null = null;
  let worklet: AudioWorkletNode | null = null;
  let player: AudioWorkletNode | null = null;
  let source: MediaStreamAudioSourceNode | null = null;
  let stopped = false;
+ const refreshAbort = new AbortController();
  // Counted per stall so the console names it once, not per dropped frame.
  let droppedUpload = 0;
  let error: string | null = null;
@@ -125,7 +126,8 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
  let serverMicAgeMs: number | null = null, serverHealthAt = 0;
  let reconnecting = false, micOk = true, micRetryAt = 0, lastTick = performance.now();
  let watchTimer: ReturnType<typeof setInterval> | null = null, statsTimer: ReturnType<typeof setInterval> | null = null;
- const onDeviceChange = () => { stats.device_changes++; };
+ let refreshMic: (() => void) | null = null;
+ const onDeviceChange = () => { stats.device_changes++; refreshMic?.(); };
  // Unlock / BFCache restoration must revive the existing audio graph, not
  // replace the document or socket. Ignore stale watchdog readings until fresh
  // microphone frames and server health have had a chance to arrive.
@@ -144,15 +146,17 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
  const close = async () => {
   if (stopped) return;
   stopped = true;
+  refreshAbort.abort();
   settlePending();
   if (watchTimer) clearInterval(watchTimer);
   if (statsTimer) clearInterval(statsTimer);
   navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
+  window.removeEventListener('voiceaudiochange', onDeviceChange);
   document.removeEventListener('visibilitychange', onPageResume);
   window.removeEventListener('pageshow', onPageResume);
   signal.removeEventListener('abort', abort);
   socket?.close(); worklet?.disconnect(); player?.disconnect(); source?.disconnect();
-  output.disconnect();
+  output.close();
   if (context.state !== 'closed') await context.close();
  };
  const abort = () => { void close(); };
@@ -165,7 +169,7 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
   // Speech plays on the audio thread through a jitter buffer, so a busy main
   // thread or a late frame no longer cuts the voice in and out (#1824).
   player = new AudioWorkletNode(context, 'voice-playback', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] });
-  player.connect(output);
+  player.connect(output.input);
   player.port.onmessage = event => {
    const message = event.data;
    if (stopped || !message) return;
@@ -263,13 +267,27 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
 
   // Microphone watchdog (#1824): an unmuted call never looks healthy while
   // its microphone audio is not reaching the call.
-  const replaceMic = async (reacquire: () => Promise<MediaStream>) => {
-   const next = await reacquire();
-   if (stopped) return;
-   source?.disconnect();
-   source = context.createMediaStreamSource(next);
-   source.connect(capture);
-   mic = next;
+  let replacing = false, replaceAgain = false;
+  const replaceMic = async (reacquire: (refreshSignal?: AbortSignal) => Promise<MediaStream>) => {
+   if (replacing) { replaceAgain = true; return; }
+   replacing = true;
+   try {
+    do {
+     replaceAgain = false;
+     const next = await reacquire(refreshAbort.signal);
+     if (stopped) { next.getTracks?.().forEach(track => track.stop()); return; }
+     const nextSource = context.createMediaStreamSource(next);
+     nextSource.connect(capture);
+     source?.disconnect();
+     source = nextSource;
+     mic = next;
+     lastCaptureAt = performance.now(); graceUntil = lastCaptureAt + MIC_SILENT_MS;
+    } while (replaceAgain && !stopped);
+   } finally { replacing = false; }
+  };
+  refreshMic = () => {
+   if (stopped || !handlers.reacquireMic) return;
+   replaceMic(handlers.reacquireMic).catch(e => console.warn('[voice] could not follow the microphone device change:', e));
   };
   const recover = (problem: MicProblem, now: number) => {
    if (problem === 'not-reaching-server') {
@@ -325,11 +343,12 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    stats.stall_ms = 0; stats.max_depth_ms = 0;
   }, CLIENT_STATS_MS);
   navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
+  window.addEventListener('voiceaudiochange', onDeviceChange);
   document.addEventListener('visibilitychange', onPageResume);
   window.addEventListener('pageshow', onPageResume);
   return {
    close,
-   muteOutput: muted => { output.gain.value = muted ? 0 : 1; },
+   muteOutput: muted => { output.mute(muted); },
    muteInput: muted => {
     micMuted = muted; micGeneration++; gate = createInputGate(micThresholdDb);
     capture.port.postMessage({ type: 'mute', muted, generation: micGeneration });

@@ -63,6 +63,14 @@ class MobileUiTest {
         assertTrue(json.getBoolean("sendCookies"))
     }
 
+    @Test fun voiceRoutingMessagesRequireBooleanCallState() {
+        assertTrue(MobileUi.CAPABILITIES.contains("voice-routing"))
+        assertEquals(MobileUi.ShellMessage.VoiceCall(true), MobileUi.shellMessage("{\"type\":\"voice-call\",\"active\":true}"))
+        assertEquals(MobileUi.ShellMessage.VoiceCall(false), MobileUi.shellMessage("{\"type\":\"voice-call\",\"active\":false}"))
+        assertNull(MobileUi.shellMessage("{\"type\":\"voice-call\",\"active\":\"true\"}"))
+        assertNull(MobileUi.shellMessage("{\"type\":\"voice-call\"}"))
+    }
+
     @Test fun shellMessagesAreParsedStrictly() {
         assertEquals(MobileUi.ShellMessage.WorkerBar(true), MobileUi.shellMessage("{\"type\":\"worker-bar\",\"shown\":true}"))
         assertEquals(MobileUi.ShellMessage.WorkerBar(false), MobileUi.shellMessage("{\"type\":\"worker-bar\",\"shown\":false}"))

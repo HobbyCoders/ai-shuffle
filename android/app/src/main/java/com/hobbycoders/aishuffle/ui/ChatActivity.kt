@@ -60,8 +60,8 @@ import java.io.ByteArrayInputStream
  * when it draws its own "Connected to" bar (MobileUi.SHELL_BRIDGE), which
  * replaces the native worker-name bar. The paired session is handed to the
  * page as a Bearer token through a document-start script, never as a cookie.
- * Voice calls are the page's own (the same as the website); the shell only
- * grants the microphone to that page.
+ * Voice calls are the page's own (the same as the website); the shell grants
+ * the microphone and follows headset routes while the page has a call.
  */
 class ChatActivity : NativeScreen() {
     private lateinit var server: Server
@@ -93,6 +93,7 @@ class ChatActivity : NativeScreen() {
     /** The native worker-name bar (back, name, menu); hidden while the page draws its own. */
     private var nativeBar: View? = null
     private var shellBridgeInstalled = false
+    private var voiceRouting: VoiceAudioRouting? = null
     /** Whether the loaded page said it draws its own "Connected to" bar. False until told. */
     @androidx.annotation.VisibleForTesting internal var pageRendersWorkerBar = false
         private set
@@ -381,6 +382,14 @@ class ChatActivity : NativeScreen() {
             when (val parsed = MobileUi.shellMessage(message.data)) {
                 is MobileUi.ShellMessage.WorkerBar -> applyPageWorkerBar(parsed.shown)
                 is MobileUi.ShellMessage.OpenWorkers -> openWorkers()
+                is MobileUi.ShellMessage.VoiceCall -> {
+                    if (parsed.active) {
+                        if (voiceRouting == null) voiceRouting = VoiceAudioRouting(this) {
+                            if (validDocument()) web.evaluateJavascript("window.dispatchEvent(new Event('voiceaudiochange'))", null)
+                        }
+                        voiceRouting?.start()
+                    } else voiceRouting?.stop()
+                }
                 null -> Unit
             }
         }
@@ -408,6 +417,7 @@ class ChatActivity : NativeScreen() {
         }
     }
     private fun cancelPagePermissions() {
+        voiceRouting?.stop()
         microphone?.deny(); microphone = null; microphoneReady = false
         fileCallback?.onReceiveValue(null); fileCallback = null
     }
@@ -542,6 +552,7 @@ class ChatActivity : NativeScreen() {
         }
     }
     override fun onDestroy() {
+        voiceRouting?.stop()
         workerDocumentAllowed = false
         workerAssets.cancel()
         if (::fileNotice.isInitialized) { fileNotice.clear(); savedNotice.clear() }

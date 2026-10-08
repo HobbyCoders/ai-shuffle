@@ -38,6 +38,7 @@
 import { get, writable } from 'svelte/store';
 import { attachVoiceCall, hangupVoiceCall, mintVoiceSecret, prepareConversationCall, getVoiceCallState, type VoiceOptions } from '$lib/api/voice';
 import { usesAudioStream } from '$lib/constants/voice-engines';
+import { createVoiceOutput } from './voiceVolume';
 import type { VoiceAudioStream, VoiceStreamEndReason } from './voiceAudioStream';
 let audioStream: VoiceAudioStream | null = null;
 let audioAbort: AbortController | null = null;
@@ -184,6 +185,19 @@ let connection: Connection | null = null;
 /** Owned by the controller (survives re-handshakes), stopped only on hangup. */
 let micStream: MediaStream | null = null;
 let audioEl: HTMLAudioElement | null = null;
+let playbackContext: AudioContext | null = null;
+let playbackOutput: ReturnType<typeof createVoiceOutput> | null = null;
+let removeDeviceListeners: (() => void) | null = null;
+let playbackSource: MediaStreamAudioSourceNode | null = null;
+let pendingMicStream: MediaStream | null = null;
+let micHandover: Promise<void> = Promise.resolve();
+
+/** A refresh cannot retire tracks while a replacement peer is attaching them. */
+function withMicHandover<T>(action: () => Promise<T>): Promise<T> {
+	const next = micHandover.then(action, action);
+	micHandover = next.then(() => {}, () => {});
+	return next;
+}
 
 let audioContext: AudioContext | null = null;
 let analyser: AnalyserNode | null = null;
@@ -221,6 +235,60 @@ async function acquireMic(): Promise<MediaStream> {
 		);
 	}
 	return navigator.mediaDevices.getUserMedia({ audio: MIC_CONSTRAINTS });
+}
+
+/** New APKs own Bluetooth communication routing; old apps and browsers ignore it. */
+function nativeVoiceRouting(active: boolean): void {
+	if (typeof window === 'undefined' || !window.__SHUFFLE_MOBILE__?.native?.capabilities.includes('voice-routing')) return;
+	const shell = (window as unknown as { shuffleShell?: { postMessage(message: string): void } }).shuffleShell;
+	try { shell?.postMessage(JSON.stringify({ type: 'voice-call', active })); }
+	catch (e) { console.warn('[voice] native audio routing unavailable:', e); }
+}
+
+/** Swap the default input on the existing peer, never renegotiate or end the call. */
+function listenForRealtimeDevices(epoch: number): void {
+	removeDeviceListeners?.();
+	let busy = false, again = false;
+	const refresh = async () => {
+		if (busy) { again = true; return; }
+		busy = true;
+		try {
+			do {
+				again = false;
+				await withMicHandover(async () => {
+					if (epoch !== generation) return;
+					const next = await acquireMic();
+					if (epoch !== generation) { next.getTracks().forEach(t => t.stop()); return; }
+					pendingMicStream = next;
+					try {
+						const sender = connection?.pc.getSenders().find(s => s.track?.kind === 'audio');
+						if (!sender) throw new Error('No active microphone sender.');
+						applyMicMuted(get(voiceCallState).micMuted);
+						await sender.replaceTrack(next.getAudioTracks()[0]);
+						if (epoch !== generation) { next.getTracks().forEach(t => t.stop()); return; }
+						const old = micStream; micStream = next;
+						old?.getTracks().forEach(t => t.stop()); startLevelMonitor(next);
+					} catch (e) { next.getTracks().forEach(t => t.stop()); throw e; }
+					finally { if (pendingMicStream === next) pendingMicStream = null; }
+				});
+			} while (again && epoch === generation);
+		} catch (e) { console.warn('[voice] could not follow the microphone device change:', e); }
+		finally { busy = false; }
+	};
+	const onChange = () => { void refresh(); };
+	const onResume = () => {
+		if (document.visibilityState === 'visible' && playbackContext?.state === 'suspended') void playbackContext.resume().catch(() => {});
+	};
+	document.addEventListener('visibilitychange', onResume);
+	window.addEventListener('pageshow', onResume);
+	navigator.mediaDevices?.addEventListener?.('devicechange', onChange);
+	window.addEventListener('voiceaudiochange', onChange);
+	removeDeviceListeners = () => {
+		navigator.mediaDevices?.removeEventListener?.('devicechange', onChange);
+		window.removeEventListener('voiceaudiochange', onChange);
+		document.removeEventListener('visibilitychange', onResume);
+		window.removeEventListener('pageshow', onResume);
+	};
 }
 
 /** AudioContext + analyser RMS loop feeding `level` (orb animation). */
@@ -276,26 +344,34 @@ function stopLevelMonitor(): void {
 // ============================================================================
 
 /**
- * The single `<audio>` sink for the agent's voice. Reused across re-handshakes
- * so the mute state (and the browser's autoplay grant) survives the swap.
+ * Keep a muted media element for browser playback lifecycle/autoplay. Only the
+ * MediaStream source → gain → compressor graph is audible, across handovers.
  */
 function ensureAudioElement(): HTMLAudioElement {
 	if (audioEl) return audioEl;
 	const el = document.createElement('audio');
 	el.autoplay = true;
+	el.muted = true;
 	// Keeps iOS Safari from taking the element fullscreen.
 	el.setAttribute('playsinline', '');
 	el.style.display = 'none';
 	document.body.appendChild(el);
+	playbackContext = new AudioContext();
+	playbackOutput = createVoiceOutput(playbackContext);
+	// MediaElementAudioSource does not carry srcObject MediaStream audio in Chrome.
+	void playbackContext.resume().catch(err => console.warn('[voice] playback blocked:', err));
 	audioEl = el;
 	return el;
 }
 
 function teardownAudioElement(): void {
 	if (!audioEl) return;
+	playbackSource?.disconnect(); playbackSource = null;
 	audioEl.srcObject = null;
 	audioEl.remove();
 	audioEl = null;
+	playbackOutput?.close(); playbackOutput = null;
+	void playbackContext?.close(); playbackContext = null;
 }
 
 // ============================================================================
@@ -456,8 +532,12 @@ async function openConnection(
 	pc.addEventListener('track', (e) => {
 		if (epoch !== generation || pc.connectionState === 'closed') return;
 		const el = ensureAudioElement();
-		el.srcObject = e.streams[0] ?? new MediaStream([e.track]);
-		el.muted = get(voiceCallState).agentMuted;
+		const remote = e.streams[0] ?? new MediaStream([e.track]);
+		el.srcObject = remote;
+		playbackSource?.disconnect();
+		playbackSource = playbackContext!.createMediaStreamSource(remote);
+		playbackSource.connect(playbackOutput!.input);
+		playbackOutput?.mute(get(voiceCallState).agentMuted);
 		el.play().catch((err) => console.warn('[voice] playback blocked:', err));
 	});
 
@@ -590,7 +670,14 @@ function clearReconnectTimer(): void {
  * registered) before the old one is torn down, so there is no audio gap beyond
  * the swap itself.
  */
-async function reconnect(): Promise<void> {
+function reconnect(): Promise<void> {
+	const epoch = generation;
+	return withMicHandover(async () => {
+		if (epoch === generation) await reconnectWithMic();
+	});
+}
+
+async function reconnectWithMic(): Promise<void> {
 	const myGeneration = generation;
 	const current = get(voiceCallState);
 	if (current.status !== 'live' || !sessionId || !micStream) return;
@@ -669,9 +756,9 @@ async function reconnect(): Promise<void> {
 
 function applyMicMuted(muted: boolean): void {
 	audioStream?.muteInput(muted);
-	micStream?.getAudioTracks().forEach((t) => {
-		t.enabled = !muted;
-	});
+	for (const stream of [micStream, pendingMicStream]) {
+		stream?.getAudioTracks().forEach((t) => { t.enabled = !muted; });
+	}
 }
 
 /** Mute/unmute the microphone (the track stays attached; it is just disabled). */
@@ -686,7 +773,7 @@ export function toggleMic(): void {
 
 /** Mute/unmute the agent's voice (playback only — the model keeps talking). */
 function setAgentMuted(muted: boolean): void {
-	if (audioEl) audioEl.muted = muted;
+	playbackOutput?.mute(muted);
 	audioStream?.muteOutput(muted);
 	patch({ agentMuted: muted });
 }
@@ -727,6 +814,7 @@ export async function startCall(
 	});
 
 	try {
+		nativeVoiceRouting(true);
 		const acquired = await acquireMic();
 		if (myGeneration !== generation) {
 			acquired.getTracks().forEach(track => track.stop());
@@ -752,9 +840,9 @@ export async function startCall(
 			};
 			// A fresh microphone when the call's track ended or went silent
 			// (#1824); the call keeps its socket and provider session.
-			const reacquireMic = async (): Promise<MediaStream> => {
+			const reacquireMic = async (refreshSignal?: AbortSignal): Promise<MediaStream> => {
 				const next = await acquireMic();
-				if (myGeneration !== generation) {
+				if (myGeneration !== generation || refreshSignal?.aborted) {
 					next.getTracks().forEach(track => track.stop());
 					throw new Error('The call has ended.');
 				}
@@ -860,6 +948,7 @@ export async function startCall(
 		if (myGeneration !== generation) return;
 
 		startLevelMonitor(micStream);
+		listenForRealtimeDevices(myGeneration);
 		if (conn.callId) await attachVoiceCall(sessionIdIn, conn.callId);
 		if (myGeneration !== generation) return;
 
@@ -949,6 +1038,10 @@ async function teardown(opts: {
 	reason?: VoiceEndReason;
 }): Promise<void> {
 	generation++;
+	micHandover = Promise.resolve();
+	pendingMicStream?.getTracks().forEach(t => t.stop()); pendingMicStream = null;
+	removeDeviceListeners?.(); removeDeviceListeners = null;
+	nativeVoiceRouting(false);
 	responseInProgress = false;
 	typedResponsePending = false;
 	clearReconnectTimer();

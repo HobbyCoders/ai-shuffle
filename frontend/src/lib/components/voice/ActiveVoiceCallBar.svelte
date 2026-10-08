@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import VoiceVolume from './VoiceVolume.svelte';
 	import { Mic, MicOff, PhoneOff, Volume2, VolumeX, ArrowUpRight } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -41,6 +42,7 @@
 		<button aria-label={call.agentMuted ? 'Unmute speaker' : 'Mute speaker'} aria-pressed={call.agentMuted} onclick={toggleAgent}>
 			{#if call.agentMuted}<VolumeX size={18} />{:else}<Volume2 size={18} />{/if}
 		</button>
+		<div class="volume"><VoiceVolume /></div>
 		<button class="end" aria-label="End voice call" onclick={() => hangup()}><PhoneOff size={18} /></button>
 	</aside>
 	</NotificationSlot>
@@ -52,7 +54,9 @@
 	button { display: flex; align-items: center; justify-content: center; flex-shrink: 0; min-width: 40px; min-height: 40px; padding: 8px; border: 0; border-radius: var(--radius); background: transparent; color: inherit; cursor: pointer; }
 	button:hover, button[aria-pressed='true'] { background: var(--muted); }
 	button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-	.return { gap: 12px; min-width: 0; text-align: left; }
+	.volume { flex-basis: 100%; padding: 0 8px; order: 1; }
+	.active-call { flex-wrap: wrap; }
+	.return { flex: 1; gap: 12px; min-width: 0; text-align: left; }
 	.return > span { min-width: 0; }
 	strong, .owner { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
 	.owner { color: var(--muted-foreground); max-width: min(260px, 35vw); }

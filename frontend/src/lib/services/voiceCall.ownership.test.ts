@@ -3,7 +3,7 @@ import { get } from 'svelte/store';
 const api = vi.hoisted(() => ({ prepareConversationCall: vi.fn(), mintVoiceSecret: vi.fn(), attachVoiceCall: vi.fn(), hangupVoiceCall: vi.fn(), getVoiceCallState: vi.fn() }));
 vi.mock('$lib/api/voice', () => api);
 const streamed = vi.hoisted(() => ({ close: vi.fn(), muteInput: vi.fn(), muteOutput: vi.fn(), sendText: vi.fn() }));
-const streamHandlers = vi.hoisted(() => ({ current: null as null | { closed(message: string | null, reason: string): void; reconnecting?(active: boolean): void; micHealth?(ok: boolean): void; reacquireMic?(): Promise<MediaStream> } }));
+const streamHandlers = vi.hoisted(() => ({ current: null as null | { closed(message: string | null, reason: string): void; reconnecting?(active: boolean): void; micHealth?(ok: boolean): void; reacquireMic?(refreshSignal?: AbortSignal): Promise<MediaStream> } }));
 vi.mock('./voiceAudioStream', () => ({
 	openVoiceAudioStream: vi.fn(async (_session: string, _mic: unknown, handlers: typeof streamHandlers.current) => {
 		streamHandlers.current = handlers;
@@ -42,6 +42,30 @@ afterEach(async () => { await hangup(); vi.restoreAllMocks(); vi.unstubAllGlobal
 const start = () => startCall('owner', { client_secret: 'test', model: 'test-model' });
 
 describe('voice owner lifecycle', () => {
+ it('does not publish a microphone acquired for an already closed stream', async () => {
+  await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+  const closed = new AbortController();
+  const next = { enabled: true, stop: vi.fn() };
+  let finish!: (mic: unknown) => void;
+  capture.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  const pending = streamHandlers.current!.reacquireMic!(closed.signal);
+  closed.abort(); finish({ getTracks: () => [next], getAudioTracks: () => [next] });
+  await expect(pending).rejects.toThrow('The call has ended.');
+  expect(next.stop).toHaveBeenCalledOnce(); expect(track.stop).not.toHaveBeenCalled();
+  toggleMic(); expect(track.enabled).toBe(false);
+ });
+ it('starts and stops authorized native routing without requiring it on older apps', async () => {
+  const postMessage = vi.fn();
+  const nativeWindow = window as unknown as { shuffleShell?: unknown };
+  window.__SHUFFLE_MOBILE__ = { apiOrigin: 'https://worker.test', token: 'test', native: { platform: 'android', bridge: 1, capabilities: ['voice-routing'] } };
+  nativeWindow.shuffleShell = { postMessage };
+  try {
+   await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
+   expect(postMessage).toHaveBeenLastCalledWith(JSON.stringify({ type: 'voice-call', active: true }));
+   await hangup();
+   expect(postMessage).toHaveBeenLastCalledWith(JSON.stringify({ type: 'voice-call', active: false }));
+  } finally { delete nativeWindow.shuffleShell; delete window.__SHUFFLE_MOBILE__; }
+ });
  it('uses the live streaming owner for attachments and gates microphone mute on that transport', async () => {
   await startCall('owner', { client_secret: 'test', model: 'gpt-live-1' });
   expect(sendVoiceText('other', 'Wrong owner')).toBe(false);

@@ -26,7 +26,7 @@ object MobileUi {
      * newer worker UI can tell an older app apart and degrade.
      */
     const val BRIDGE_VERSION = 1
-    val CAPABILITIES = listOf("file-save", "file-chooser", "microphone", "device-tools", WorkerSwitch.CAPABILITY)
+    val CAPABILITIES = listOf("file-save", "file-chooser", "microphone", "device-tools", "voice-routing", WorkerSwitch.CAPABILITY)
 
     /**
      * Web-message bridge the page uses to tell the shell about its own chrome
@@ -43,6 +43,7 @@ object MobileUi {
 
     sealed class ShellMessage {
         data class WorkerBar(val shown: Boolean) : ShellMessage()
+        data class VoiceCall(val active: Boolean) : ShellMessage()
         object OpenWorkers : ShellMessage()
     }
 
@@ -53,6 +54,7 @@ object MobileUi {
         return when (json.optString("type")) {
             "worker-bar" -> (json.opt("shown") as? Boolean)?.let { ShellMessage.WorkerBar(it) }
             "workers" -> ShellMessage.OpenWorkers
+            "voice-call" -> (json.opt("active") as? Boolean)?.let { ShellMessage.VoiceCall(it) }
             else -> null
         }
     }

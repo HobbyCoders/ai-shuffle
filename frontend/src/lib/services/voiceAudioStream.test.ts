@@ -18,7 +18,9 @@ class Context {
  resume = vi.fn(async () => {});
  close = vi.fn(async () => { this.state = 'closed'; });
  constructor() { contexts.push(this); }
- createGain() { return { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() }; }
+ gains: any[] = [];
+ createGain() { const node = { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() }; this.gains.push(node); return node; }
+ createDynamicsCompressor() { return { threshold: {}, knee: {}, ratio: {}, attack: {}, release: {}, connect: vi.fn(), disconnect: vi.fn() }; }
  createMediaStreamSource() { return { connect: vi.fn(), disconnect: vi.fn() }; }
  createBuffer(_channels: number, length: number) { const samples = new Float32Array(length); return { getChannelData: () => samples, duration: length / 24000 }; }
  createBufferSource() { return { connect: vi.fn(), disconnect: vi.fn(), start: vi.fn(), stop: vi.fn(), buffer: null, onended: null }; }
@@ -51,6 +53,72 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(
 const handlers = () => ({ caption: vi.fn(), speaking: vi.fn(), closed: vi.fn() });
 
 describe('voice PCM stream', () => {
+ it('coalesces rapid devicechange bursts into one pending and one follow-up refresh', async () => {
+  const devices = new EventTarget();
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: devices });
+  let finish!: (stream: MediaStream) => void;
+  const h = { ...handlers(), reacquireMic: vi.fn()
+   .mockReturnValueOnce(new Promise<MediaStream>(resolve => { finish = resolve; }))
+   .mockResolvedValue({ getTracks: () => [] }) };
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, h, new AbortController().signal);
+  for (let i = 0; i < 20; i++) devices.dispatchEvent(new Event('devicechange'));
+  expect(h.reacquireMic).toHaveBeenCalledOnce();
+  finish({ getTracks: () => [] } as unknown as MediaStream);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(h.reacquireMic).toHaveBeenCalledTimes(2);
+  expect(sockets).toHaveLength(1); await stream.close();
+ });
+ it('cancels a refresh owned by a dropped socket while its replacement keeps capturing', async () => {
+  const devices = new EventTarget();
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: devices });
+  let finish!: (stream: MediaStream) => void;
+  const h = { ...handlers(), reacquireMic: vi.fn((_signal?: AbortSignal) => new Promise<MediaStream>(resolve => { finish = resolve; })) };
+  const old = await openVoiceAudioStream('owner', {} as MediaStream, h, new AbortController().signal);
+  devices.dispatchEvent(new Event('devicechange'));
+  const refreshSignal = h.reacquireMic.mock.calls[0][0] as AbortSignal;
+  await old.close(); expect(refreshSignal.aborted).toBe(true);
+  const restored = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal, undefined, true);
+  const stale = { stop: vi.fn() };
+  finish({ getTracks: () => [stale] } as unknown as MediaStream);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  expect(stale.stop).toHaveBeenCalledOnce();
+  const activeCapture = nodes.filter(n => n.name === 'voice-pcm')[1];
+  activeCapture.port.onmessage({ data: { pcm: new Int16Array([12000]).buffer, generation: 0 } });
+  expect(sockets[1].send).toHaveBeenCalledOnce(); expect(sockets[1].close).not.toHaveBeenCalled();
+  await restored.close();
+ });
+ it('follows device changes on the same socket, including native routing, and cleans up', async () => {
+  const devices = new EventTarget();
+  Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: devices });
+  const next = { getTracks: () => [] } as unknown as MediaStream;
+  const h = { ...handlers(), reacquireMic: vi.fn(async () => next) };
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, h, new AbortController().signal);
+  devices.dispatchEvent(new Event('devicechange'));
+  await Promise.resolve(); await Promise.resolve();
+  expect(h.reacquireMic).toHaveBeenCalledOnce();
+  window.dispatchEvent(new Event('voiceaudiochange'));
+  await Promise.resolve(); await Promise.resolve();
+  expect(h.reacquireMic).toHaveBeenCalledTimes(2);
+  capture().port.onmessage({ data: { pcm: new Int16Array([12000]).buffer, generation: 0 } });
+  expect(sockets[0].send).toHaveBeenCalledOnce();
+  expect(sockets).toHaveLength(1); expect(sockets[0].close).not.toHaveBeenCalled();
+  expect(h.closed).not.toHaveBeenCalled();
+  await stream.close();
+  devices.dispatchEvent(new Event('devicechange')); window.dispatchEvent(new Event('voiceaudiochange'));
+  expect(h.reacquireMic).toHaveBeenCalledTimes(2);
+ });
+ it('applies boosted volume during playback and keeps mute independent', async () => {
+  const { setVoiceVolume } = await import('./voiceVolume');
+  setVoiceVolume(100);
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), new AbortController().signal);
+  const gain = contexts[0].gains[0].gain;
+  expect(gain.value).toBe(1);
+  setVoiceVolume(250); expect(gain.value).toBe(2.5);
+  stream.muteOutput(true); setVoiceVolume(300); expect(gain.value).toBe(0);
+  stream.muteOutput(false); expect(gain.value).toBe(3);
+  await stream.close(); setVoiceVolume(50); expect(gain.value).toBe(3);
+  setVoiceVolume(100);
+ });
  it('keeps the same socket and microphone across lock and unlock, resuming suspended audio', async () => {
   const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
   const h = handlers();
