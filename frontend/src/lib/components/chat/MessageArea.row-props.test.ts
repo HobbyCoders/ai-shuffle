@@ -38,7 +38,6 @@ describe('MessageArea per-row props', () => {
 
 	it('passes the session id from a store that only emits when the id changes', () => {
 		expect(rowBody).toContain('sessionId={activeSessionId}');
-		expect(rowBody).toContain('parentSessionId={activeSessionId}');
 		expect(source).toMatch(/const activeSessionIdStore = derivedStore\(activeSession, \(\$session\) => \$session\.sessionId\);/);
 		expect(source).toContain('const activeSessionId = $derived($activeSessionIdStore);');
 	});

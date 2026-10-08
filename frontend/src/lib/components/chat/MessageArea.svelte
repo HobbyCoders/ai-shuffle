@@ -394,12 +394,6 @@
 		)
 	);
 
-	// A remote mirror is not an owner control surface. The endpoint independently
-	// validates the parent/child relationship and current owner route (#2039).
-	const stopParentRow = $derived($sessions.find(row => row.id === $activeSession.sessionId));
-	const canStopChild = $derived(!!stopParentRow && stopParentRow.controllable !== false
-		&& (!stopParentRow.is_remote || stopParentRow.controllable === true));
-
 	// Worker task names for attributed agent messages, keyed by session id.
 	const agentNames = $derived(agentSenderNames($activeSession.messages, $activeSession.activeTasks ?? []));
 
@@ -2151,7 +2145,7 @@
 	{:else if message.type === 'subagent'}
 		<div class="w-full">
 			<div class="min-w-0">
-				<SubagentMessage {message} {runningToolIds} parentSessionId={activeSessionId} canControl={canStopChild} />
+				<SubagentMessage {message} {runningToolIds} />
 			</div>
 		</div>
 	{:else if message.type === 'team_member'}

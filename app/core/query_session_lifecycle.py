@@ -205,71 +205,7 @@ async def _durable_force_settle(session_id: str, task_id: str) -> Optional[dict]
     return None
 
 
-async def terminal_task_stop_state(session_id: str, task_id: str) -> dict:
-    """Authoritative eligibility for a terminal agent's automatic continuation."""
-    from app.core.task_registry import task_registry
-    from app.db import database, remote_tasks, turns
-    from app.db.async_database import run_sync
-    from app.network import control
-
-    parent = await run_sync(database.get_session, session_id)
-    if not parent or control.owner_of(parent):
-        return {"eligible": False}  # read-only mirror: never advertise a local control
-    task = await run_sync(task_registry.get_task, session_id, task_id, durable=True)
-    if not task or task.get("kind") != "agent" or task.get("status") == "running":
-        return {"eligible": False}
-    dispatch = await run_sync(remote_tasks.get_dispatch, task_id)
-    if dispatch and session_id in (dispatch["root_session_id"], dispatch["owner_session_id"]):
-        return await control.call(dispatch["target_device_id"], "terminal-task-stop-state",
-                                  {"session_id": session_id, "task_id": task_id})
-    child = await run_sync(database.get_session, task_id)
-    if (not child or control.owner_of(child)
-            or child.get("api_user_id") not in (None, parent.get("api_user_id"))):
-        return {"eligible": False}
-    return await run_sync(turns.terminal_child_stop_state, session_id, task_id)
-
-
-async def stop_terminal_task(session_id: str, task_id: str, expected_turn_id: str) -> dict:
-    """Consume a fresh capability without tearing down/re-writing a finished task."""
-    from app.db import remote_tasks
-    from app.db.async_database import run_sync
-    from app.network import control
-
-    state = await terminal_task_stop_state(session_id, task_id)
-    if not state.get("eligible") or state.get("turn_id") != expected_turn_id:
-        return {"ok": False, "kind": "agent", "task_id": task_id, "detail": "stop target changed"}
-    dispatch = await run_sync(remote_tasks.get_dispatch, task_id)
-    if dispatch and session_id in (dispatch["root_session_id"], dispatch["owner_session_id"]):
-        return await control.call(dispatch["target_device_id"], "terminal-task-stop",
-                                  {"session_id": session_id, "task_id": task_id,
-                                   "expected_turn_id": expected_turn_id})
-    return await stop_terminal_child_here(session_id, task_id, expected_turn_id)
-
-
-async def stop_terminal_child_here(session_id: str, task_id: str, expected_turn_id: str) -> dict:
-    from app.core import turn_manager
-    from app.db import turns
-    from app.db.async_database import run_sync
-
-    row = await run_sync(turns.stop_terminal_child, session_id, task_id, expected_turn_id)
-    if row is None:
-        return {"ok": False, "kind": "agent", "task_id": task_id, "detail": "stop target changed"}
-    # Identity-fenced executor only: a later owner send can release the latch
-    # during this await. Never run a session-wide async sweep over its new work.
-    if row.get("live_turn_id"):
-        turn_manager._fire_interrupt_executor(task_id, "stop", row["live_turn_id"])
-    if row.get("aborted_turn_ids"):
-        from app.db.session_events import append_events
-        await run_sync(append_events, task_id, [
-            {"type": "turn.aborted", "turn_id": tid,
-             "payload": {"reason": "interrupt", "message": "Session stopped"}}
-            for tid in row["aborted_turn_ids"]
-        ])
-    return {"ok": True, "kind": "agent", "task_id": task_id, "detail": "automatic continuation stopped"}
-
-
-async def stop_session_task(session_id: str, task_id: str, *, source: str = "user_stop",
-                            expected_turn_id: Optional[str] = None) -> dict:
+async def stop_session_task(session_id: str, task_id: str, *, source: str = "user_stop") -> dict:
     """Stop ONE background task (sub-agent OR Monitor shell) in a session.
 
     Two kinds of task surface in the UI's ``activeTasks`` strip:
@@ -296,9 +232,7 @@ async def stop_session_task(session_id: str, task_id: str, *, source: str = "use
     # Idempotent / stale-UI guard: if the registry already holds this task in a
     # terminal state, the strip is just showing a stale row — report success so
     # the "x" clears it on the next poll instead of erroring.
-    existing = task_registry.get_task(session_id, task_id, durable=bool(expected_turn_id))
-    if expected_turn_id:
-        return await stop_terminal_task(session_id, task_id, expected_turn_id)
+    existing = task_registry.get_task(session_id, task_id)
     if existing is not None and existing.get("status") != "running":
         return {
             "ok": True,

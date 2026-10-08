@@ -4,6 +4,7 @@ Two in-process workers over the real signed control endpoint: Unraid runs the
 child, Windows runs the parent chat. No provider, no second machine.
 """
 import asyncio
+import logging
 
 import pytest
 
@@ -66,63 +67,81 @@ def assert_stopped_on_target(a, b, child):
         assert dispatch["stop_state"] == remote_tasks.STOP_SENT and dispatch["stop_error"] is None
 
 
-# --- every stop path ------------------------------------------------------------
+# --- compatibility for older peers ---------------------------------------------
 
-def test_terminal_task_stop_uses_signed_owner_state_and_preserves_report(workers, monkeypatch, kicks):
-    from app.core.query_session_lifecycle import terminal_task_stop_state
+@pytest.mark.parametrize("terminal", [False, True])
+def test_legacy_terminal_stop_is_ineligible_and_refused_without_errors(
+    workers, monkeypatch, kicks, caplog, terminal,
+):
     a, b, router = network(workers, monkeypatch)
     child = started_child(a, b)
     with a.active():
-        finish_child(child)
-        assert asyncio.run(remote_task.sweep()) == 1
-        report = remote_tasks.get_child(child)["report"]
-        continuation = turns.enqueue_turn(child, "unpark", prompt="sibling finished")
-    with b.active():
-        before = task_registry.get_task("caller", child)
-        assert before["status"] == "completed"
-        state = asyncio.run(terminal_task_stop_state("caller", child))
-        assert state == {"eligible": True, "turn_id": continuation["id"]}
-        result = asyncio.run(stop_session_task("caller", child, expected_turn_id=state["turn_id"]))
-        assert result["ok"]
-        assert task_registry.get_task("caller", child) == before
+        if terminal:
+            finish_child(child)
+            assert asyncio.run(remote_task.sweep()) == 1
+            turns.enqueue_turn(child, "unpark", prompt="sibling finished")
+        before_turns = all_turns(child)
+        before_child = remote_tasks.get_child(child)
+    caplog.clear()
+    with caplog.at_level(logging.ERROR), b.active():
+        body = {"session_id": "caller", "task_id": child}
+        # Repeated polls from the old parent must succeed and hide its button.
+        for _ in range(3):
+            assert asyncio.run(control.call(a.device_id, "terminal-task-stop-state", body)) == {
+                "eligible": False,
+            }
+        # A click using a previously cached capability (or no capability) is
+        # a normal old-style refusal, not a transport error or a task mutation.
+        for expected in (before_turns[-1]["id"], None, ""):
+            result = asyncio.run(control.call(a.device_id, "terminal-task-stop", {
+                **body, "expected_turn_id": expected,
+            }))
+            assert result == {"ok": False, "kind": "agent", "task_id": child,
+                              "detail": "stop target changed"}
+        # Other registered operations and unknown-action refusals keep working.
+        assert asyncio.run(control.call(a.device_id, "hydrate", {"session_id": child}))["published"] >= 0
+        with pytest.raises(control.ControlRefused, match="Unknown control action"):
+            asyncio.run(control.call(a.device_id, "not-a-control-action", {}))
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
     assert ("POST", "/api/v1/network/peer/control/terminal-task-stop-state") in router.requests(UNRAID_URL)
     assert ("POST", "/api/v1/network/peer/control/terminal-task-stop") in router.requests(UNRAID_URL)
     with a.active():
-        assert turns.get_turn(continuation["id"])["state"] == "aborted"
-        assert task_registry.is_user_stopped(child)
-        assert remote_tasks.get_child(child)["report"] == report
-        assert turns.enqueue_turn(child, "unpark")["id"] is None
-        owner = turns.enqueue_turn(child, "user", prompt="new owner work")
-        assert owner["id"] and not task_registry.is_user_stopped(child)
-    with b.active():
-        assert not asyncio.run(terminal_task_stop_state("caller", child))["eligible"]
-        assert not asyncio.run(stop_session_task("caller", child, expected_turn_id=state["turn_id"]))["ok"]
-    with a.active():
-        assert turns.get_turn(owner["id"])["state"] == "queued"
-
-
-def test_signed_terminal_stop_refuses_wrong_parent_and_foreign_worker(workers, monkeypatch, kicks):
-    a, b, _ = network(workers, monkeypatch)
-    child = started_child(a, b)
-    with a.active():
-        finish_child(child)
-        asyncio.run(remote_task.sweep())
-        wake = turns.enqueue_turn(child, "unpark")
-    with b.active():
-        result = asyncio.run(control.call(a.device_id, "terminal-task-stop", {
-            "session_id": "other", "task_id": child, "expected_turn_id": wake["id"],
-        }))
-        assert not result["ok"]
-    c = workers("foreign")
-    join(a, c, name="Foreign")
-    with a.active():
-        store_child = remote_tasks.get_child(child)
-        assert store_child["parent_device_id"] == b.device_id
-        with pytest.raises(PermissionError, match="Only the worker"):
-            asyncio.run(control._terminal_task_stop_state({"session_id": "caller", "task_id": child}, c.device_id))
-        assert turns.get_turn(wake["id"])["state"] == "queued"
+        assert all_turns(child) == before_turns
+        assert remote_tasks.get_child(child) == before_child
         assert not task_registry.is_user_stopped(child)
 
+
+@pytest.mark.parametrize("action", ["terminal-task-stop-state", "terminal-task-stop"])
+def test_legacy_terminal_stop_keeps_parent_and_worker_authorization(
+    workers, monkeypatch, kicks, caplog, action,
+):
+    a, b, _ = network(workers, monkeypatch)
+    child = started_child(a, b)
+    c = workers("foreign")
+    join(a, c, name="Foreign")
+    with caplog.at_level(logging.ERROR), a.active():
+        body = {"session_id": "caller", "task_id": child}
+        with pytest.raises(PermissionError, match="Only the worker that started"):
+            asyncio.run(control.handle(action, body, from_device=c.device_id))
+        with pytest.raises(PermissionError, match="Only active workers"):
+            asyncio.run(control.handle(action, body, from_device="unknown-worker"))
+        # The parent's replicated row is not an owned child on this worker.
+        with pytest.raises(PermissionError, match="does not own"):
+            asyncio.run(control.handle(action, {**body, "task_id": "caller"}, from_device=b.device_id))
+        with pytest.raises(LookupError, match="Unknown session"):
+            asyncio.run(control.handle(action, {**body, "task_id": "missing"}, from_device=b.device_id))
+        assert not remote_tasks.get_child(child)["stop_requested_at"]
+        database.create_session(session_id="not-child", profile_id="default", project_id=None,
+                                title="Ordinary local session")
+    with c.active(), pytest.raises(control.ControlRefused, match="Only the worker that started"):
+        asyncio.run(control.call(a.device_id, action, body))
+    with b.active(), pytest.raises(control.ControlRefused, match="Only the worker that started"):
+        # An ordinary owned session is not a registered remote child.
+        asyncio.run(control.call(a.device_id, action, {"session_id": "caller", "task_id": "not-child"}))
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+# --- every stop path ------------------------------------------------------------
 
 def test_routed_no_live_session_stop_latches_but_stale_turn_stop_does_not(workers, monkeypatch, kicks):
     a, b, _ = network(workers, monkeypatch)
