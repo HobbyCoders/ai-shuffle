@@ -1,6 +1,8 @@
 package com.hobbycoders.aishuffle.ui
 
 import android.app.Activity
+import android.content.ComponentName
+import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.view.View
 import android.view.ViewGroup
@@ -17,10 +19,20 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 
 /** The chat view tree must build on create (a double-parented view crashed chat) and status must take no layout space (#1946). */
 @RunWith(RobolectricTestRunner::class)
 class ChatScreenLayoutTest {
+    @Test fun unlockConfigurationChangesDoNotRecreateTheChatDocument() {
+        val app = RuntimeEnvironment.getApplication()
+        val info = app.packageManager.getActivityInfo(ComponentName(app, ChatActivity::class.java), 0)
+        val changes = ActivityInfo.CONFIG_ORIENTATION or ActivityInfo.CONFIG_SCREEN_SIZE or
+            ActivityInfo.CONFIG_SMALLEST_SCREEN_SIZE or ActivityInfo.CONFIG_SCREEN_LAYOUT or
+            ActivityInfo.CONFIG_KEYBOARD or ActivityInfo.CONFIG_KEYBOARD_HIDDEN or ActivityInfo.CONFIG_UI_MODE
+        assertEquals(changes, info.configChanges and changes)
+    }
+
     private class Screen(val root: FrameLayout, val toolbar: View, val status: TextView, val web: View)
 
     /** As ChatActivity does: start from NativeScreen's layout, detach its toolbar and status, build the chat tree. */

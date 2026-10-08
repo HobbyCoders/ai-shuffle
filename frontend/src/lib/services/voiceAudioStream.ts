@@ -126,6 +126,16 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
  let reconnecting = false, micOk = true, micRetryAt = 0, lastTick = performance.now();
  let watchTimer: ReturnType<typeof setInterval> | null = null, statsTimer: ReturnType<typeof setInterval> | null = null;
  const onDeviceChange = () => { stats.device_changes++; };
+ // Unlock / BFCache restoration must revive the existing audio graph, not
+ // replace the document or socket. Ignore stale watchdog readings until fresh
+ // microphone frames and server health have had a chance to arrive.
+ const onPageResume = () => {
+  if (stopped || document.visibilityState !== 'visible') return;
+  const now = performance.now();
+  lastTick = now;
+  graceUntil = now + MIC_SILENT_MS;
+  if (context.state === 'suspended') void context.resume().catch(() => {});
+ };
  const pendingText = new Map<string, { resolve: (sent: boolean) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
  const settlePending = () => {
   for (const pending of pendingText.values()) { clearTimeout(pending.timer); pending.resolve(false); }
@@ -138,6 +148,8 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
   if (watchTimer) clearInterval(watchTimer);
   if (statsTimer) clearInterval(statsTimer);
   navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
+  document.removeEventListener('visibilitychange', onPageResume);
+  window.removeEventListener('pageshow', onPageResume);
   signal.removeEventListener('abort', abort);
   socket?.close(); worklet?.disconnect(); player?.disconnect(); source?.disconnect();
   output.disconnect();
@@ -313,6 +325,8 @@ export async function openVoiceAudioStream(sessionId: string, mic: MediaStream, 
    stats.stall_ms = 0; stats.max_depth_ms = 0;
   }, CLIENT_STATS_MS);
   navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
+  document.addEventListener('visibilitychange', onPageResume);
+  window.addEventListener('pageshow', onPageResume);
   return {
    close,
    muteOutput: muted => { output.gain.value = muted ? 0 : 1; },

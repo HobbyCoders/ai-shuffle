@@ -47,10 +47,79 @@ beforeEach(() => {
  vi.stubGlobal('AudioWorkletNode', Worklet);
  vi.stubGlobal('WebSocket', Socket);
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
 const handlers = () => ({ caption: vi.fn(), speaking: vi.fn(), closed: vi.fn() });
 
 describe('voice PCM stream', () => {
+ it('keeps the same socket and microphone across lock and unlock, resuming suspended audio', async () => {
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  const h = handlers();
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, h, new AbortController().signal);
+  const context = contexts[0], socket = sockets[0], microphone = capture();
+  context.resume.mockClear(); context.state = 'suspended';
+  visibility.mockReturnValue('hidden');
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(context.resume).not.toHaveBeenCalled();
+  expect(socket.close).not.toHaveBeenCalled();
+  visibility.mockReturnValue('visible');
+  document.dispatchEvent(new Event('visibilitychange'));
+  expect(context.resume).toHaveBeenCalledOnce();
+  context.state = 'running';
+  document.dispatchEvent(new Event('visibilitychange'));
+  window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  expect(context.resume).toHaveBeenCalledOnce();
+  expect(sockets).toEqual([socket]);
+  expect(capture()).toBe(microphone);
+  microphone.port.onmessage({ data: { pcm: new Int16Array([12000]).buffer, generation: 0 } });
+  expect(socket.send).toHaveBeenCalledOnce();
+  expect(socket.close).not.toHaveBeenCalled();
+  expect(h.closed).not.toHaveBeenCalled();
+  await stream.close();
+ });
+ it('gives the microphone watchdog fresh readings after unlock without disabling later recovery', async () => {
+  vi.useFakeTimers();
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+  const h = { ...handlers(), reacquireMic: vi.fn(async () => ({} as MediaStream)) };
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, h, new AbortController().signal);
+  await vi.advanceTimersByTimeAsync(10000);
+  h.reacquireMic.mockClear();
+  visibility.mockReturnValue('visible');
+  document.dispatchEvent(new Event('visibilitychange'));
+  await vi.advanceTimersByTimeAsync(MIC_SILENT_MS - 1000);
+  expect(h.reacquireMic).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1000);
+  // Recovery is still rate limited; give the previous attempt its retry window.
+  await vi.advanceTimersByTimeAsync(10000);
+  expect(h.reacquireMic).toHaveBeenCalled();
+  await stream.close();
+ });
+ it('revives BFCache audio but removes resume listeners on hangup', async () => {
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  const abort = new AbortController();
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, handlers(), abort.signal);
+  const context = contexts[0]; context.resume.mockClear(); context.state = 'suspended';
+  window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  expect(context.resume).toHaveBeenCalledOnce();
+  abort.abort();
+  context.resume.mockClear(); context.state = 'suspended';
+  document.dispatchEvent(new Event('visibilitychange'));
+  window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+  expect(context.resume).not.toHaveBeenCalled();
+  expect(sockets).toHaveLength(1);
+  await stream.close();
+ });
+ it('tolerates a denied audio resume without hanging up or replacing the socket', async () => {
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  const h = handlers();
+  const stream = await openVoiceAudioStream('owner', {} as MediaStream, h, new AbortController().signal);
+  contexts[0].state = 'suspended';
+  contexts[0].resume.mockRejectedValueOnce(new Error('not allowed'));
+  document.dispatchEvent(new Event('visibilitychange'));
+  await Promise.resolve();
+  expect(h.closed).not.toHaveBeenCalled();
+  expect(sockets[0].close).not.toHaveBeenCalled();
+  await stream.close();
+ });
  it('passes on the server status while it restores the provider connection', async () => {
   const h = { ...handlers(), reconnecting: vi.fn() };
   const stream = await openVoiceAudioStream('owner', {} as MediaStream, h, new AbortController().signal);

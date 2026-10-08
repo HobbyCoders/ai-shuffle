@@ -3,6 +3,8 @@ package com.hobbycoders.aishuffle
 import android.app.Activity
 import android.app.Instrumentation
 import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.net.Uri
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
@@ -10,6 +12,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -115,6 +118,44 @@ class ChatCapabilitiesSmokeTest {
             a.href = url; a.download = 'fixture.txt'; a.click(); URL.revokeObjectURL(url); })()
         """.trimIndent(), null) }
     }
+    @Test fun backgroundAndOrientationKeepTheLiveDocument() {
+        fixture({ _, _ -> null }) { scenario, _ ->
+            lateinit var originalActivity: ChatActivity
+            lateinit var originalWeb: WebView
+            val marker = "voice-unlock-document"
+            var initialOrientation = Configuration.ORIENTATION_UNDEFINED
+            scenario.onActivity { activity ->
+                originalActivity = activity
+                originalWeb = web(activity)
+                originalWeb.evaluateJavascript("window.unlockMarker = '$marker'", null)
+            }
+            instrumentation.waitForIdleSync()
+            scenario.moveToState(Lifecycle.State.CREATED)
+            scenario.moveToState(Lifecycle.State.RESUMED)
+            scenario.onActivity { activity ->
+                assertSame(originalActivity, activity)
+                assertSame(originalWeb, web(activity))
+                initialOrientation = activity.resources.configuration.orientation
+                activity.requestedOrientation = if (initialOrientation == Configuration.ORIENTATION_LANDSCAPE)
+                    ActivityInfo.SCREEN_ORIENTATION_PORTRAIT else ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            }
+            waitFor("Requested orientation did not change") {
+                var changed = false
+                scenario.onActivity { changed = it.resources.configuration.orientation != initialOrientation }
+                changed
+            }
+            var retained = false
+            waitFor("Configuration change discarded the live document") {
+                scenario.onActivity { activity ->
+                    assertSame(originalActivity, activity)
+                    assertSame(originalWeb, web(activity))
+                    web(activity).evaluateJavascript("window.unlockMarker === '$marker'") { retained = it == "true" }
+                }
+                retained
+            }
+        }
+    }
+
     // Run this method alone in a fresh instrumentation process to cover Chromium
     // cold start (not just a WebView warmed by another test). WebView 151 used to
     // throw in ChatDownloads.install before the activity could show its first page.

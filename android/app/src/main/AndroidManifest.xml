@@ -31,7 +31,10 @@
         <activity android:name=".ui.QrCaptureActivity" android:exported="false" android:stateNotNeeded="true" />
         <activity android:name=".ui.ToolSettingsActivity" android:exported="false" />
         <activity android:name=".ui.SettingsActivity" android:exported="false" />
-        <activity android:name=".ui.ChatActivity" android:exported="false" />
+        <!-- Keep the live document (including voice sockets) when unlocking changes
+             orientation, screen dimensions, keyboard visibility or system theme. -->
+        <activity android:name=".ui.ChatActivity" android:exported="false"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|uiMode" />
         <activity android:name=".ui.OfflineDemoActivity" android:exported="false" />
         <activity android:name=".ui.WorkerRepairActivity" android:exported="false" />
         <service android:name=".tools.ShuffleAccessibilityService" android:exported="true"
