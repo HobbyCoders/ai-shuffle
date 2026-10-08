@@ -1662,7 +1662,9 @@ class HarnessAdapter(ProviderAdapter):
         the rendered text on the session row. Every later connect — a
         cold-evicted park coming back, a worker restart, another worker on
         the same database — reuses those exact bytes
-        (:func:`_reusable_workspace_snapshot`). Re-probing there put the
+        (:func:`_reusable_workspace_snapshot`), except a no-link card is retried
+        when the preview listener becomes available to an owner session.
+        Re-probing there put the
         session's own setup work (``npm ci`` turning "MISSING in frontend"
         into "installed") into the system prefix and cost a full uncached
         prompt on the next call (#1237). Fresh facts belong in turn receipts.
@@ -1672,17 +1674,26 @@ class HarnessAdapter(ProviderAdapter):
         """
         cwd = options.cwd or "."
         try:
+            from app.core import preview_access
+
             session_id = self._resolve_app_session_id()
             now = time.time()
             if session_id:
                 snapshot = _load_workspace_snapshot(session_id)
                 card = _reusable_workspace_snapshot(snapshot, cwd, now)
-                if card is not None:
-                    return card
+                if card is not None and snapshot is not None:
+                    # A first connect with no listener (or a failed mint) stores
+                    # a no-link card with no expiry. Do not freeze that omission
+                    # forever once an owner session can obtain its preview.
+                    if (
+                        snapshot.get("preview_expires_at") is not None
+                        or not preview_access.listener_port()
+                        or not self._session_runs_as_owner(session_id)
+                    ):
+                        return card
 
             from app.core.config import settings
             from app.core.environment import workspace_facts_card
-            from app.core import preview_access
             from app.core.mcp_config import _browser_loopback_host
 
             browser_host = _browser_loopback_host(os.environ.get("BROWSER_LOOPBACK_HOST"))
