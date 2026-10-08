@@ -79,7 +79,10 @@ def test_startup_never_backfills_optional_recall_cache(mock_db, monkeypatch):
         assert "recall_text" not in column_names(mock_db, table)
 
 
-@pytest.mark.parametrize("free_bytes,allowed", [(0, False), (100 * 1024 ** 3, True)])
+@pytest.mark.parametrize("free_bytes,allowed", [
+    (0, False), (3 * 1000 + 1024 ** 3 - 1, False),
+    (3 * 1000 + 1024 ** 3, True), (100 * 1024 ** 3, True),
+])
 def test_maintenance_requires_capacity_and_bounds_ddl(monkeypatch, free_bytes, allowed):
     from app.db import schema_postgres
     from scripts.session_recall_cache import apply_cache
@@ -151,6 +154,147 @@ def test_cache_requires_all_valid_ready_indexes(indexes, ready):
             return [{"relname": name} for name in indexes]
 
     assert session_recall_cache_ready(Cursor()) is ready
+
+
+@pytest.fixture
+def managed_cluster_layout(tmp_path, monkeypatch):
+    from scripts import session_recall_cache as maintenance
+
+    monkeypatch.setenv("LOCAL_MODE", "0")
+    data = tmp_path / "postgres" / "data"
+    (data / "base").mkdir(parents=True)
+    (data / "global").mkdir()
+    (data / "global" / "pg_control").write_bytes(b"fixture control data")
+    (data / "PG_VERSION").write_text("16\n")
+    (data / "postmaster.pid").write_text(f"123\n{data}\n1000\n54321\n")
+
+    class Cursor:
+        def execute(self, sql):
+            assert "SHOW" not in sql
+            assert "inet_server_port()" in sql
+
+        def fetchone(self):
+            return {"host": "127.0.0.1", "port": 54321, "started": 1000}
+
+    return maintenance, Cursor(), tmp_path, data
+
+
+def test_managed_container_data_directory(managed_cluster_layout):
+    maintenance, cursor, root, data = managed_cluster_layout
+    assert maintenance.managed_data_directory(cursor, root) == data
+
+
+def test_custom_desktop_data_directory(managed_cluster_layout):
+    maintenance, cursor, root, data = managed_cluster_layout
+    assert maintenance.managed_data_directory(cursor, root / "worker-data", root) == data
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin", "win32"])
+def test_default_desktop_data_directory(managed_cluster_layout, monkeypatch, platform):
+    maintenance, cursor, root, data = managed_cluster_layout
+    profile = root / "AI Shuffle"
+    profile.mkdir()
+    (root / "postgres").rename(profile / "postgres")
+    monkeypatch.setenv("LOCAL_MODE", "1")
+    monkeypatch.setenv("APPDATA", str(root))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(root))
+    monkeypatch.setattr(maintenance.sys, "platform", platform)
+    monkeypatch.setattr(maintenance.Path, "home", lambda: root)
+    if platform == "darwin":
+        app_data = root / "Library" / "Application Support"
+        app_data.mkdir(parents=True)
+        profile.rename(app_data / "AI Shuffle")
+        profile = app_data / "AI Shuffle"
+    data = profile / "postgres" / "data"
+    (data / "postmaster.pid").write_text(f"123\n{data}\n1000\n54321\n")
+    assert maintenance.managed_data_directory(cursor, root / "worker-data") == data
+
+
+@pytest.mark.parametrize("invalid", ["missing", "unreadable", "version", "port", "path", "started", "symlink"])
+def test_refuse_invalid_managed_directory(managed_cluster_layout, monkeypatch, invalid):
+    maintenance, cursor, root, data = managed_cluster_layout
+    if invalid == "missing":
+        root = root / "absent"
+    elif invalid == "unreadable":
+        monkeypatch.setattr(maintenance.os, "access", lambda *_: False)
+    elif invalid == "version":
+        (data / "PG_VERSION").write_text("not a PG16 cluster")
+    elif invalid == "symlink":
+        (data / "PG_VERSION").unlink()
+        (root / "version").write_text("16\n")
+        (data / "PG_VERSION").symlink_to(root / "version")
+    else:
+        fields = ["123", str(data), "1000", "54321"]
+        fields[{"port": 3, "path": 1, "started": 2}[invalid]] = "997"
+        (data / "postmaster.pid").write_text("\n".join(fields))
+    with pytest.raises(maintenance.ManagedDataDirectoryError, match="missing, unreadable or invalid"):
+        maintenance.managed_data_directory(cursor, root)
+
+
+def test_refuse_nonlocal_server(managed_cluster_layout, monkeypatch):
+    maintenance, cursor, root, _ = managed_cluster_layout
+    monkeypatch.setattr(cursor, "fetchone", lambda: {"host": "192.0.2.1"})
+    with pytest.raises(maintenance.ManagedDataDirectoryError, match="not a managed loopback server"):
+        maintenance.managed_data_directory(cursor, root)
+
+
+@pytest.mark.parametrize("unmeasurable", [False, True])
+def test_cli_measures_managed_path_or_refuses(managed_cluster_layout, monkeypatch, capsys, unmeasurable):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from app.db import base
+
+    maintenance, cursor, root, data = managed_cluster_layout
+    monkeypatch.setattr(base.settings, "data_dir", root)
+    monkeypatch.setattr(base, "init_pool", lambda **_: None)
+    monkeypatch.setattr(base, "close_pool", lambda: None)
+
+    @contextmanager
+    def connection():
+        yield SimpleNamespace(cursor=lambda: cursor)
+
+    monkeypatch.setattr(base, "get_db", connection)
+    applied = []
+    measured = []
+
+    def disk_usage(path):
+        measured.append(path)
+        if unmeasurable:
+            raise PermissionError("private filesystem details")
+        return SimpleNamespace(free=123456)
+
+    monkeypatch.setattr(maintenance.shutil, "disk_usage", disk_usage)
+    monkeypatch.setattr(maintenance, "apply_cache", lambda cur, free, **_: applied.append((cur, free)))
+    assert maintenance.main(["--apply"]) == (1 if unmeasurable else 0)
+    assert measured == [data]
+    assert applied == ([] if unmeasurable else [(cursor, 123456)])
+    output = capsys.readouterr().out
+    if unmeasurable:
+        assert "cannot be measured" in output
+        assert "private filesystem details" not in output
+
+
+def test_cli_reports_invalid_layout_before_rewrite(managed_cluster_layout, monkeypatch, capsys):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from app.db import base
+
+    maintenance, cursor, root, _ = managed_cluster_layout
+    monkeypatch.setattr(base.settings, "data_dir", root / "absent")
+    monkeypatch.setattr(base, "init_pool", lambda **_: None)
+    monkeypatch.setattr(base, "close_pool", lambda: None)
+
+    @contextmanager
+    def connection():
+        yield SimpleNamespace(cursor=lambda: cursor)
+
+    monkeypatch.setattr(base, "get_db", connection)
+    monkeypatch.setattr(maintenance.shutil, "disk_usage", lambda _: pytest.fail("Invalid layout"))
+    monkeypatch.setattr(maintenance, "apply_cache", lambda *_: pytest.fail("Invalid layout"))
+    assert maintenance.main(["--apply"]) == 1
+    assert "managed PostgreSQL data directory is missing, unreadable or invalid" in capsys.readouterr().out
 
 
 def _index_exists(conn, name):

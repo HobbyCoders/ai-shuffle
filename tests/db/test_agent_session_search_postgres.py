@@ -166,10 +166,53 @@ def test_maintenance_cli_uses_real_database_capacity_check(monkeypatch, capsys):
     from app.db import base, schema_postgres
     from scripts.session_recall_cache import main
 
-    # Keep the fixture's pool/search path while exercising the CLI's real
-    # SHOW data_directory, local disk check, bounded transaction and commit.
+    import os
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from app.core.config import settings
+    from scripts import session_recall_cache
+
+    # The caller must own this disposable cluster. conftest deliberately replaces
+    # DATA_DIR, so inject the fixture layout explicitly rather than inspecting
+    # a connection descriptor (or a privileged SHOW setting).
+    fixture_root = os.environ.get("RECALL_TEST_DATA_DIR")
+    assert fixture_root, "Set RECALL_TEST_DATA_DIR to the owned disposable cluster's managed layout root"
+    fixture_data = Path(fixture_root)
+    assert fixture_data.is_absolute()
+    assert (fixture_data / "postgres" / "data" / "PG_VERSION").is_file()
+    monkeypatch.setattr(settings, "data_dir", fixture_data)
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT rolsuper, pg_has_role(current_user, 'pg_read_all_settings', 'USAGE') AS can_read "
+                    "FROM pg_roles WHERE rolname = current_user")
+        role = cur.fetchone()
+        assert role["rolsuper"] is False
+        assert role["can_read"] is False
+
+    # Keep the fixture pool while driving the CLI's real local disk check,
+    # capacity refusal, rollback, bounded transaction and success commit.
     monkeypatch.setattr(base, "init_pool", lambda **_: None)
     monkeypatch.setattr(base, "close_pool", lambda: None)
+    disk_usage = session_recall_cache.shutil.disk_usage
+    measured = []
+
+    def no_capacity(path):
+        measured.append(path)
+        return SimpleNamespace(free=0)
+
+    monkeypatch.setattr(session_recall_cache.shutil, "disk_usage", no_capacity)
+    assert main(["--apply"]) == 1
+    refusal = capsys.readouterr().out
+    assert "Recall maintenance failed" in refusal
+    assert measured == [fixture_data / "postgres" / "data"], refusal
+    with base.get_db() as conn:
+        cur = conn.cursor()
+        assert not schema_postgres.session_recall_cache_ready(cur)
+        for table in ("fluid_session_nodes", "session_store_entries", "session_events"):
+            assert not base.column_exists(cur, table, "recall_text")
+
+    monkeypatch.setattr(session_recall_cache.shutil, "disk_usage", disk_usage)
     assert main(["--apply"]) == 0
     assert "Recall cache committed" in capsys.readouterr().out
     with base.get_db() as conn:

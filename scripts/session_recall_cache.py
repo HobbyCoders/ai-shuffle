@@ -1,6 +1,9 @@
 """Opt-in, offline maintenance: cache SessionSearch JSON text. Never run at startup."""
 import argparse
+import os
+from pathlib import Path
 import shutil
+import sys
 
 
 def apply_cache(cursor, free_bytes: int, *, lock_timeout_ms: int = 2000,
@@ -28,6 +31,64 @@ def apply_cache(cursor, free_bytes: int, *, lock_timeout_ms: int = 2000,
     create_session_recall_text(cursor)
 
 
+class ManagedDataDirectoryError(RuntimeError):
+    """Safe, credential-free diagnostic for a refused filesystem check."""
+
+
+def managed_data_directory(cursor, data_dir: Path, desktop_user_data: Path | None = None) -> Path:
+    """Match a readable managed PG16 layout to the connected loopback server.
+
+    Container clusters live under DATA_DIR; Electron clusters live under
+    userData, separately from the worker DATA_DIR. Only non-secret PostgreSQL
+    markers are read, never the managed connection descriptor or desktop config.
+    """
+    roots = [Path(data_dir)]
+    if desktop_user_data is not None:
+        roots.append(Path(desktop_user_data))
+    else:
+        from app.core.platform import DeploymentMode, detect_deployment_mode
+
+        if detect_deployment_mode() == DeploymentMode.LOCAL:
+            if sys.platform == "win32":
+                app_data = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+            elif sys.platform == "darwin":
+                app_data = Path.home() / "Library" / "Application Support"
+            else:
+                app_data = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+            roots.append(app_data / "AI Shuffle")
+    cursor.execute("SELECT host(inet_server_addr()) AS host, inet_server_port() AS port, "
+                   "EXTRACT(EPOCH FROM pg_postmaster_start_time())::bigint AS started")
+    server = cursor.fetchone()
+    if server["host"] not in {"127.0.0.1", "::1"}:
+        raise ManagedDataDirectoryError("Refusing disk check: PostgreSQL is not a managed loopback server.")
+    for root in roots:
+        data = root.absolute() / "postgres" / "data"
+        try:
+            # Never follow a redirected layout or a marker symlink.
+            markers = [data / "PG_VERSION", data / "postmaster.pid", data / "global" / "pg_control"]
+            if any(p.is_symlink() for p in (data, *data.parents, *markers, data / "global", data / "base")):
+                continue
+            if not all(p.is_dir() and os.access(p, os.R_OK | os.X_OK)
+                       for p in (data, data / "base", data / "global")):
+                continue
+            if not all(p.is_file() and os.access(p, os.R_OK) for p in markers):
+                continue
+            if markers[0].read_text(encoding="ascii").strip() != "16":
+                continue
+            pid = markers[1].read_text(encoding="utf-8").splitlines()
+            if (len(pid) < 4 or int(pid[0]) <= 0 or Path(pid[1]) != data
+                    or int(pid[3]) != server["port"] or abs(int(pid[2]) - server["started"]) > 1):
+                continue
+            return data
+        except (OSError, ValueError, UnicodeError):
+            continue
+    raise ManagedDataDirectoryError(
+        "Refusing disk check: managed PostgreSQL data directory is missing, unreadable or invalid, "
+        "or does not match the connected server. Expected DATA_DIR/postgres/data or "
+        "desktop userData/postgres/data; use --desktop-user-data for a custom desktop profile."
+    )
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=(
         "Optional SessionSearch cache. Stop worker traffic and schedule maintenance: "
@@ -35,6 +96,9 @@ def main(argv=None) -> int:
         "It is not a background or startup migration. Without --apply no database is opened."
     ))
     parser.add_argument("--apply", action="store_true", help="Explicitly approve the offline table rewrites")
+    parser.add_argument("--desktop-user-data", type=Path, help=(
+        "Electron userData directory for a custom/preview desktop profile (not the worker DATA_DIR)"
+    ))
     parser.add_argument("--lock-timeout-ms", type=int, default=2000)
     parser.add_argument("--statement-timeout-ms", type=int, default=300000)
     args = parser.parse_args(argv)
@@ -49,14 +113,20 @@ def main(argv=None) -> int:
         base.init_pool(min_conn=1, max_conn=1)
         with base.get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute("SHOW data_directory")
-            # Managed PG is local. Refuse when its filesystem cannot be checked.
-            free = shutil.disk_usage(cursor.fetchone()["data_directory"]).free
+            data = managed_data_directory(cursor, base.settings.effective_data_dir, args.desktop_user_data)
+            try:
+                free = shutil.disk_usage(data).free
+            except OSError:
+                raise ManagedDataDirectoryError(
+                    "Refusing disk check: managed PostgreSQL data directory cannot be measured."
+                ) from None
             apply_cache(cursor, free, lock_timeout_ms=args.lock_timeout_ms,
                         statement_timeout_ms=args.statement_timeout_ms)
         print("Recall cache committed; the optional cache is now available to searches.")
         return 0
     except Exception as exc:  # noqa: BLE001 — do not print connection/transcript details
+        if isinstance(exc, ManagedDataDirectoryError):
+            print(str(exc))
         print(f"Recall maintenance failed ({type(exc).__name__}); uncommitted changes were rolled back. "
               "Check free space, permissions and lock contention before retrying. Legacy search remains available.")
         return 1
