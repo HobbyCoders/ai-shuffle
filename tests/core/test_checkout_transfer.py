@@ -106,8 +106,15 @@ def test_default_branch_probe_kills_slow_credential_helper(repositories, tmp_pat
         assert time.monotonic() - started < 5
         assert marker.exists(), "The real Git credential-helper path must run"
         helper_pid = int(marker.read_text())
-        if psutil.pid_exists(helper_pid):
-            assert psutil.Process(helper_pid).status() == psutil.STATUS_ZOMBIE
+        try:
+            helper_process = psutil.Process(helper_pid)
+            deadline = time.monotonic() + 3
+            # SIGKILL delivery and orphan reaping can lag behind Git's exit.
+            while helper_process.status() != psutil.STATUS_ZOMBIE and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert helper_process.status() == psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            pass  # The helper was reaped, possibly during a status read.
         assert git(source, "rev-parse", "HEAD") == before
         assert git(source, "status", "--porcelain", "-uall") == status
     finally:
