@@ -77,15 +77,16 @@ set `{"channel":"edge"}` in `updates/update-channel.json` under the app's user-d
 directory. Both defaults remain stable. Manual `docker-publish.yml` runs on
 `main` produce the `edge` image tag.
 
-## Prepared candidate: 0.8.19 (not released)
+## Cutting a release
 
-`v0.8.18` was the newest final tag when this candidate was prepared. The
-source fallbacks, package and lockfile root versions, Android fallback,
-Compose pins and their website/in-app doc copies now say
-`0.8.19`. Release builds still derive their version from the actual tag;
-changing these literals does not create an image, installer or stable feed.
-Re-check tags immediately before release and choose another version if this
-one has been used. Do not update public install assets ahead of the image.
+This section was written for the 0.8.19 candidate, the first protected stable
+release. Releases have been published since (`v0.9.1` was the newest tag on
+2026-10-09), so read `0.8.19` below as the version you are cutting. Release
+builds derive their version from the actual tag; the source fallbacks,
+Compose pins and their website/in-app doc copies only need to agree with it,
+which preflight checks. Re-check tags immediately before release and choose
+another version if one has been used. Do not update public install assets
+ahead of the image.
 
 ### Executable source checks (safe before owner setup)
 
@@ -185,7 +186,7 @@ A fixes-only follow-up needs a new reviewed patch version when artifacts
 have already been published. Re-running from an existing tag is for an
 unchanged retry, not a way to replace its source.
 
-### Draft buyer release notes (use only after release gates pass)
+### Draft buyer release notes for 0.8.19 (historical)
 
 AI Shuffle 0.8.19 prepares the first protected stable release channel:
 version-pinned Compose install files, verified source updates,

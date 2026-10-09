@@ -339,11 +339,36 @@ Many releases can also be installed from inside the app. See [Updates](/docs/get
 
 ## Back up
 
-1. Stop AI Shuffle: `docker compose stop` (or `docker stop ai-shuffle`).
-2. Back up every volume whose name starts with `ai-shuffle_`, and your workspace folder. Always back up the whole `data` volume. Your saved credentials cannot be restored from part of it.
-3. Start it again: `docker compose start` (or `docker start ai-shuffle`).
+Stop AI Shuffle first: `docker compose stop` (or `docker stop ai-shuffle`). Never copy the volumes while it runs; a copy of a running database may not start.
 
-To move to another machine, restore the same volumes and workspace folder there, then start AI Shuffle with the same settings.
+Then copy every volume to a file. This writes one file per volume to `~/ai-shuffle-backup`:
+
+```bash
+mkdir -p ~/ai-shuffle-backup
+for v in data fluid-settings claude-home local-home gh-auth browser-profile; do
+  docker run --rm -v ai-shuffle_$v:/from:ro -v ~/ai-shuffle-backup:/to ubuntu \
+    tar --numeric-owner -czf /to/$v.tar.gz -C /from .
+done
+```
+
+Copy your workspace folder as well, with any backup tool you like. Then start AI Shuffle again: `docker compose start` (or `docker start ai-shuffle`).
+
+Always back up the whole `data` volume. It holds your database and the key that decrypts your saved credentials, and neither works without the other. Keep the backup files private.
+
+### Restore
+
+Restore into new, empty volumes, for example on another machine. Use the same `compose.yaml` and `.env` as before, with the same `PUID`, `PGID` and version, and put your workspace folder back where `WORKSPACE_DIR` points.
+
+```bash
+docker compose create
+for v in data fluid-settings claude-home local-home gh-auth browser-profile; do
+  docker run --rm -v ai-shuffle_$v:/to -v ~/ai-shuffle-backup:/from:ro ubuntu \
+    tar --numeric-owner -xzpf /from/$v.tar.gz -C /to
+done
+docker compose start
+```
+
+With `docker run`, leave out the two `docker compose` lines: run the loop first (it creates the volumes), then your `docker run` command.
 
 ## Optional settings
 

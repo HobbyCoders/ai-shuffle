@@ -72,6 +72,8 @@ The permission mode decides when the agent asks you before using a tool. Pick it
 
 Chat sessions always use Ask. Code and voice sessions show the picker.
 
+**What a shell can reach.** An agent's shell commands run as the same user as AI Shuffle on that worker. A command you approve, or any command in Bypass, can read what AI Shuffle itself can read there, including its database and the key for your saved credentials. Owner-only features such as terminals do not limit that. Use Bypass only with work and sources you trust, and keep Ask when an agent reads untrusted web pages or repositories.
+
 **Answering a prompt:**
 
 - Choose **Approve** or **Deny**. On a keyboard, Enter approves and Escape denies.

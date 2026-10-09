@@ -70,7 +70,8 @@ host), but new versions need an active license.
 Stop the container (`docker compose stop`), then back up the Docker volumes
 whose names start with `ai-shuffle_` and your `WORKSPACE_DIR` folder. The `data`
 volume holds the database and the key that encrypts your saved credentials;
-keep them together.
+keep them together. The "Back up" section of the install guide has the
+commands, and how to restore.
 
 ## Remove
 
