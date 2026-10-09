@@ -66,6 +66,7 @@
 	import FeaturePanelHost from './FeaturePanelHost.svelte';
 	import { pageHeader } from '$lib/stores/page-header.svelte';
 	import GitHeaderActions from '$lib/components/git/GitHeaderActions.svelte';
+	import { workerGitTargetFromKey, workerGitTargetKey } from './worker-git-target';
 	import { shouldShowHeaderGitActions } from './git-header-visibility';
 	import { chatHeaderTitle } from './chat-empty-state';
 	import { warmHighlighter } from '$lib/utils/shiki';
@@ -337,11 +338,10 @@
 	const activeIsSubagent = $derived(!!activeSessionId && $subagentChats.has(activeSessionId));
 	// Adoption refreshes the session list, not the tab's initial snapshot.
 	const activeWorktreeDeleted = $derived(activeSessionRow?.worktree_deleted ?? activeTab?.worktreeDeleted ?? false);
-	const selectedWorkerTarget = $derived(!activeSessionId && (activeTab?.deviceIntent
-		|| (activeTab?.projectV2Id && !activeTab.worktreeId)
-		|| (activeTab?.worktreeBranch && !activeTab.worktreeId))
-		? { workerId: activeTab?.deviceIntent?.id ?? 'local', branch: activeTab?.worktreeBranch || activeTab?.selectedWorktreeBranch || null }
-		: null);
+	// Keyed by value so the Git load effect below re-runs only when the
+	// target really changes (see worker-git-target.ts).
+	const selectedWorkerTargetKey = $derived(workerGitTargetKey(activeTab));
+	const selectedWorkerTarget = $derived(workerGitTargetFromKey(selectedWorkerTargetKey));
 	const activeWorktreeId = $derived(
 		!selectedWorkerTarget && (activeTab?.worktreeId || activeTab?.worktreeBranch) && !activeWorktreeDeleted
 			? (activeTab.worktreeId ?? null)

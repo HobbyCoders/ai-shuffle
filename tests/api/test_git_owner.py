@@ -304,6 +304,43 @@ async def test_sessionless_worker_status_and_real_pull(worker_repositories):
         await control.handle("project-git", payload("ship"), from_device="worker-a")
 
 
+async def test_legacy_relative_row_for_same_folder_is_not_ambiguous(worker_repositories, monkeypatch):
+    """A v60-seeded workspace-relative row beside the absolute V2 row for the
+    SAME folder is one checkout. It used to 409 "missing or ambiguous", which
+    left the new-chat Git button stuck on "Git unavailable" and re-polling."""
+    from app.core.config import settings
+    from app.db import checkouts
+    from app.db.base import get_db
+    project, a, b, git_at = worker_repositories
+    monkeypatch.setattr(type(settings), "effective_workspace_dir", property(lambda self: b.parent))
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO checkouts (id, project_id, runner_id, path, branch, status) VALUES (%s, %s, %s, %s, %s, %s)",
+            (checkouts.checkout_id_for(project["id"], "worker-b", b.name), project["id"], "worker-b", b.name, None, "active"),
+        )
+    for branch in (None, "main"):
+        status = await control.handle("project-git", {
+            "action": "get_git_status", "project_id": project["id"], "branch": branch,
+            "params": {"project_id": project["id"]},
+        }, from_device="worker-a")
+        assert status["status"] == 200, status
+        assert status["result"]["behind"] == 1
+
+
+async def test_two_distinct_unbound_checkouts_stay_ambiguous(worker_repositories):
+    from app.db import checkouts
+    project, a, b, git_at = worker_repositories
+    other = b.parent / "b-second"
+    git_at(b.parent, "clone", str(b), str(other))
+    checkouts.upsert_checkout(project["id"], "worker-b", str(other))
+    status = await control.handle("project-git", {
+        "action": "get_git_status", "project_id": project["id"], "branch": None,
+        "params": {"project_id": project["id"]},
+    }, from_device="worker-a")
+    assert status["status"] == 409
+    assert "ambiguous" in status["detail"]
+
+
 def test_local_canonical_scope_does_not_call_a_peer(worker_repositories, monkeypatch):
     project, a, b, git_at = worker_repositories
     application = FastAPI()

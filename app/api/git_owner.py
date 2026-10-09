@@ -5,6 +5,7 @@ the session/project binding; the owner supplies its own checkout identifiers.
 The regular endpoint remains the implementation for local and remote actions.
 """
 import inspect
+import os
 from functools import wraps
 from typing import get_type_hints
 
@@ -273,8 +274,11 @@ async def handle_project_git(body, from_device):
                   and (r.get("status") or "active") == "active"
                   and (not r.get("branch") or r.get("branch") == branch)]
     # A named branch must match the repository too, not only stale DB metadata.
-    paths = []
-    for row in candidates:
+    # Several rows can name one folder (a legacy workspace-relative row seeded
+    # by the v60 migration beside its absolute V2 row): that is one checkout,
+    # not an ambiguity. A branch-bound row wins, then the absolute one.
+    found: dict = {}
+    for row in sorted(candidates, key=lambda r: (not r.get("branch"), _resolve_checkout_path(r["path"]) != r["path"])):
         path = _resolve_checkout_path(row["path"])
         if not await run_sync(_dir_is_worktree, path):
             continue
@@ -283,10 +287,10 @@ async def handle_project_git(body, from_device):
             continue
         if branch is not None and actual != branch:
             continue
-        paths.append((path, row))
-    if len(paths) != 1:
+        found.setdefault(os.path.normcase(os.path.realpath(path)), (path, row))
+    if len(found) != 1:
         return {"status": 409, "detail": "Selected checkout is missing or ambiguous on this worker"}
-    path, checkout = paths[0]
+    path, checkout = next(iter(found.values()))
     if name == "checkout_branch" and checkout.get("branch"):
         return {"status": 400, "detail": "Cannot checkout branches in a worktree. Worktrees are bound to their branch."}
     if name == "create_commit" and checkout.get("branch") and isinstance(params.get("body"), dict) \
