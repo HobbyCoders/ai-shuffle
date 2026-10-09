@@ -36,6 +36,8 @@ export interface RunnerBadgeMenuItem {
 	action: RunnerBadgeMenuAction | null;
 	disabled: boolean;
 	title: string;
+	/** Drives the presence dot. "Continue here" is this worker, always online. */
+	online: boolean;
 }
 
 export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMenuItem[] {
@@ -45,6 +47,7 @@ export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMe
 			label: 'Continue here',
 			action: { kind: 'adopt' },
 			disabled: false,
+			online: true,
 			title: input.hasProject
 				? 'Commit and push on the owning worker, then fetch the branch and sync context here'
 				: 'Move this chat and its history to this runner'
@@ -58,6 +61,7 @@ export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMe
 			label: install.device_name,
 			action: blocked ? null : { kind: 'move', targetInstanceId: install.id },
 			disabled: blocked,
+			online: install.online,
 			title: runnerTitle(install, input.isWorktree, input.eligibility)
 		});
 	}

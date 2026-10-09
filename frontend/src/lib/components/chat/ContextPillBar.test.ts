@@ -5,6 +5,7 @@ import { writable } from 'svelte/store';
 import ContextPillBar from './ContextPillBar.svelte';
 import { adoptSession, moveSession, getQueuedMove, queueMove, cancelQueuedMove } from '$lib/api/sessions';
 import { notify } from '$lib/stores/notifications';
+import { refreshWorkerPresence, resetWorkerPresence } from '$lib/stores/worker-presence';
 
 const { session, execution, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
 	session: { store: null as any },
@@ -64,6 +65,7 @@ afterEach(() => {
 	listInstallsMock.mockResolvedValue({ installs: [] });
 	getClusterGitStateMock.mockReset();
 	getClusterGitStateMock.mockResolvedValue(null);
+	resetWorkerPresence();
 });
 
 const base = {
@@ -463,5 +465,130 @@ describe('a subagent’s chat (read and message only)', () => {
 		expect(branch?.textContent).toContain('task/49fa37fa');
 		expect(view.container.querySelector('.ctx-chip.runner')).toBeNull();
 		expect(view.queryByRole('button', { name: /^Runner:/ })).toBeNull();
+	});
+});
+
+describe('worker presence dots', () => {
+	const dotOf = (el: Element | null) => el?.querySelector('.worker-status-dot')?.getAttribute('data-status') ?? null;
+
+	it('marks a local session green and colours each worker in the move menu', async () => {
+		session.store.set({ ...base, messages: [], projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
+			instance_id: 'local', is_remote: false, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [
+			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'serverworker', is_self: false, online: true, device_name: 'Unraid' },
+			{ id: 'linux-worker', is_self: false, online: false, device_name: 'linux-worker' }
+		] });
+		const view = render(ContextPillBar);
+		const chip = view.getByRole('button', { name: 'Runner: Local' });
+		expect(dotOf(chip)).toBe('online');
+		await fireEvent.click(chip);
+		expect(dotOf(await view.findByRole('menuitem', { name: 'Unraid' }))).toBe('online');
+		const popOs = view.getByRole('menuitem', { name: 'linux-worker' }) as HTMLButtonElement;
+		expect(dotOf(popOs)).toBe('offline');
+		// Offline workers keep their existing disabled state.
+		expect(popOs.disabled).toBe(true);
+	});
+
+	it.each([true, false])('reflects the owning worker\'s presence on a remote session (online=%s)', async (online) => {
+		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner',
+			device_name: 'Unraid', device_online: online, is_remote: true, controllable: true }]);
+		const view = render(ContextPillBar);
+		const chip = view.container.querySelector('.ctx-chip.runner');
+		expect(dotOf(chip)).toBe(online ? 'online' : 'offline');
+		await fireEvent.click(chip!);
+		// "Continue here" is this worker, which is always online.
+		expect(dotOf(await view.findByRole('menuitem', { name: 'Continue here' }))).toBe('online');
+	});
+
+	it('turns a worker red and disabled when it goes offline while the menu is open', async () => {
+		session.store.set({ ...base, messages: [], projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project',
+			instance_id: 'local', is_remote: false, controllable: true }]);
+		const registry = (online: boolean) => ({ installs: [
+			{ id: 'local', is_self: true, online: true, device_name: 'This worker' },
+			{ id: 'serverworker', is_self: false, online, device_name: 'Unraid' }
+		] });
+		listInstallsMock.mockResolvedValue(registry(true));
+		const view = render(ContextPillBar);
+		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
+		const before = await view.findByRole('menuitem', { name: 'Unraid' }) as HTMLButtonElement;
+		expect(dotOf(before)).toBe('online');
+		expect(before.disabled).toBe(false);
+
+		// The next presence refresh (the open menu's poll) reports it offline.
+		listInstallsMock.mockResolvedValue(registry(false));
+		await refreshWorkerPresence();
+		await tick();
+		const after = view.getByRole('menuitem', { name: 'Unraid' }) as HTMLButtonElement;
+		expect(dotOf(after)).toBe('offline');
+		expect(after.disabled).toBe(true);
+	});
+});
+
+describe('the read-only runner chip of a subagent’s chat', () => {
+	const dotOf = (el: Element | null) => el?.querySelector('.worker-status-dot')?.getAttribute('data-status') ?? null;
+	const chip = (container: HTMLElement) => container.querySelector('.ctx-chip.readonly:not([title^="Branch:"])');
+	afterEach(async () => {
+		const { subagentChats } = await import('$lib/stores/subagent-chats');
+		subagentChats.mark(base.sessionId, false);
+	});
+
+	it('shows a remote owner that is offline in red, by name, with offline text', async () => {
+		const { subagentChats } = await import('$lib/stores/subagent-chats');
+		subagentChats.mark(base.sessionId, true);
+		session.store.set({ ...base, projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project', instance_id: 'owner',
+			device_name: 'Unraid', device_online: false, is_remote: true, controllable: true }]);
+		const view = render(ContextPillBar);
+		const el = chip(view.container);
+		expect(dotOf(el)).toBe('offline');
+		expect(el?.textContent).toContain('Unraid');
+		expect(el?.textContent).not.toContain('Local');
+		expect(el?.textContent).toContain('(offline)');
+		expect(el?.getAttribute('title')).toBe('Runs on Unraid, which is offline');
+	});
+
+	it('follows the owner\'s live presence while the chat is open', async () => {
+		const { subagentChats } = await import('$lib/stores/subagent-chats');
+		subagentChats.mark(base.sessionId, true);
+		session.store.set({ ...base, projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project', instance_id: 'owner',
+			device_name: 'Unraid', device_online: true, is_remote: true, controllable: true }]);
+		listInstallsMock.mockResolvedValue({ installs: [{ id: 'owner', online: true, device_name: 'Unraid' }] });
+		const view = render(ContextPillBar);
+		await waitFor(() => expect(listInstallsMock).toHaveBeenCalled());
+		expect(dotOf(chip(view.container))).toBe('online');
+		listInstallsMock.mockResolvedValue({ installs: [{ id: 'owner', online: false, device_name: 'Unraid' }] });
+		await refreshWorkerPresence();
+		await tick();
+		expect(dotOf(chip(view.container))).toBe('offline');
+	});
+
+	it('shows no dot while an unlisted remote owner\'s presence is unknown', async () => {
+		const { subagentChats } = await import('$lib/stores/subagent-chats');
+		subagentChats.mark(base.sessionId, true);
+		session.store.set({ ...base, projectV2Id: 'pv2-project', isRemote: true, ownerDeviceName: 'Elsewhere' });
+		const view = render(ContextPillBar);
+		await waitFor(() => expect(listInstallsMock).toHaveBeenCalled());
+		await tick();
+		const el = chip(view.container);
+		expect(el?.textContent).toContain('Elsewhere');
+		expect(dotOf(el)).toBeNull();
+	});
+
+	it('keeps a local owner green', async () => {
+		const { subagentChats } = await import('$lib/stores/subagent-chats');
+		subagentChats.mark(base.sessionId, true);
+		session.store.set({ ...base, projectV2Id: 'pv2-project' });
+		appSessions.store.set([{ id: base.sessionId, project_v2_id: 'pv2-project', instance_id: 'local',
+			is_remote: false, controllable: true }]);
+		const view = render(ContextPillBar);
+		const el = chip(view.container);
+		expect(el?.textContent).toContain('Local');
+		expect(dotOf(el)).toBe('online');
+		expect(listInstallsMock).not.toHaveBeenCalled();
 	});
 });

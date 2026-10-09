@@ -99,6 +99,15 @@ describe('runnerBadgeMenuItems', () => {
 		expect(offline.title).toBe('Garage is offline');
 	});
 
+	it('carries each runner\'s presence for the status dot; Continue here is always online', () => {
+		const online = Object.fromEntries(runnerBadgeMenuItems(input()).map((i) => [i.id, i.online]));
+		expect(online).toEqual({
+			'continue-here': true,
+			'move-inst-online': true,
+			'move-inst-offline': false
+		});
+	});
+
 	it('disables an ineligible online runner when the session has a project', () => {
 		const items = runnerBadgeMenuItems(
 			input({ eligibility: { 'inst-online': false, 'inst-offline': true } })

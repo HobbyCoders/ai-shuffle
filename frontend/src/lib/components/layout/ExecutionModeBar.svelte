@@ -17,7 +17,8 @@
 	 */
 	import { activeSession } from '$lib/stores/active-session';
 	import { type Worktree, type Branch } from '$lib/api/git';
-	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
+	import { getClusterGitState, type Install } from '$lib/api/installs';
+	import { workerInstalls, refreshWorkerPresence, watchWorkerPresence, presenceOf } from '$lib/stores/worker-presence';
 	import {
 		peerRunners,
 		checkoutEligibility,
@@ -26,6 +27,7 @@
 		runnerTitle,
 		emptyRunnersCopy
 	} from './execution-mode-eligibility';
+	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git.svelte';
 	import { ChevronDown, ChevronRight, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { untrack, type Snippet } from 'svelte';
@@ -220,8 +222,13 @@
 	// its own outside-click/placement handling on mobile. The list is `installs`
 	// (full processes that can host a session), not `mobile_devices` (phones).
 	let cloudExpanded = $state(false);
-	let installs = $state<Install[]>([]);
 	let installsLoading = $state(false);
+	// The last open's load failed: list nothing, as before, until a later load
+	// succeeds.
+	let installsFailed = $state(false);
+	// Live presence (shared store, refreshed while watched below), so a worker
+	// that goes offline while the menu is open turns red and blocked in place.
+	const installs = $derived<Install[]>(installsFailed ? [] : ($workerInstalls ?? []));
 
 	// Per-install checkout eligibility for the selected project (ruling D6),
 	// keyed by install id. `null` = UNKNOWN — no project selected, the git-state
@@ -235,6 +242,27 @@
 	const peers = $derived(peerRunners(installs));
 
 	const deviceIntent = $derived($activeSession.deviceIntent);
+
+	// Presence of the picked runner for the chip's dot. Local is this worker and
+	// always online; a picked peer not in the loaded list has unknown presence,
+	// so the chip shows no dot.
+	const deviceIntentOnline = $derived.by((): boolean | null => {
+		if (!deviceIntent) return true;
+		return presenceOf(installs, [deviceIntent.id]);
+	});
+
+	// Keep presence fresh while it is on screen: the open menu, or the chip of
+	// a picked peer (which shows its dot with the menu closed).
+	const watchPresence = $derived(showModeDropdown || !!deviceIntent);
+	$effect(() => {
+		if (!watchPresence) return;
+		return watchWorkerPresence();
+	});
+
+	// A later successful refresh lifts a failed open's empty list.
+	$effect(() => {
+		if ($workerInstalls) untrack(() => { installsFailed = false; });
+	});
 
 	// Worktree and runner compose freely (D7): picking a runner sends the
 	// worktree request to that install, which materializes the checkout on its
@@ -254,10 +282,11 @@
 			})
 			: Promise.resolve(null);
 		try {
-			installs = (await listInstalls()).installs;
+			await refreshWorkerPresence();
+			installsFailed = false;
 		} catch (e) {
 			console.warn('[ExecutionModeBar] Failed to list runners:', e);
-			installs = [];
+			installsFailed = true;
 		} finally {
 			installsLoading = false;
 		}
@@ -367,7 +396,7 @@
 				class:open={showModeDropdown}
 				onclick={toggleModeDropdown}
 				title={deviceIntent ? `Run this session on ${deviceIntent.name}` : 'Run this session on this device'}
-				aria-label="Runner: {deviceIntent ? deviceIntent.name : 'Local'}"
+				aria-label="Runner: {deviceIntent ? deviceIntent.name : 'Local'}{deviceIntentOnline === false ? ' (offline)' : ''}"
 				aria-haspopup="menu"
 				aria-expanded={showModeDropdown}
 			>
@@ -375,6 +404,9 @@
 					<Server size={12} strokeWidth={1.6} />
 				{:else}
 					<Monitor size={12} strokeWidth={1.6} />
+				{/if}
+				{#if deviceIntentOnline !== null}
+					<WorkerStatusDot online={deviceIntentOnline} />
 				{/if}
 				<span class="ctx-chip-label mode-trigger-label">{deviceIntent ? deviceIntent.name : 'Local'}</span>
 				{#if sheetMode}
@@ -395,6 +427,7 @@
 						aria-checked={!deviceIntent}
 					>
 						<Monitor size={13} strokeWidth={1.5} />
+						<WorkerStatusDot online />
 						<span class="branch-item-name">Local</span>
 					</button>
 
@@ -435,6 +468,7 @@
 										aria-disabled={isBlocked(install, worktreeOn, eligibility)}
 									>
 										<Server size={13} strokeWidth={1.5} />
+										<WorkerStatusDot online={install.online} />
 										<span class="branch-item-name">{install.device_name}</span>
 										{#if !install.online}
 											<span class="device-nocheckout">offline</span>
@@ -788,6 +822,16 @@
 	.branch-item.disabled {
 		opacity: 0.45;
 		cursor: not-allowed;
+	}
+
+	/* Worker rows dim their contents instead, so an offline worker's red dot
+	   stays readable next to its greyed name. */
+	.branch-item.device-item.disabled {
+		opacity: 1;
+	}
+
+	.branch-item.device-item.disabled > :global(:not(.worker-status-dot)) {
+		opacity: 0.45;
 	}
 
 	.branch-item.disabled:hover {

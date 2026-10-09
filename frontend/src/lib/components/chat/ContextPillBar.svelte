@@ -21,7 +21,7 @@
 	 * controls sheet. The chip dropdowns open upward since this row sits just
 	 * above the input.
 	 */
-	import { onDestroy } from 'svelte';
+	import { onDestroy, untrack } from 'svelte';
 	import ProfileSelector from './ProfileSelector.svelte';
 	import WorkspaceFolderSelector from './WorkspaceFolderSelector.svelte';
 	import BranchSelector from './BranchSelector.svelte';
@@ -31,6 +31,7 @@
 	import { computeContextBadge, shouldShowBranchPill, shouldShowEmptyStateBranchPill } from './contextPills';
 	import { gitStateQuery, runnerBadgeMenuItems } from './runner-badge-menu';
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
+	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
 	import { pendingHandoff, handoffActivitySince, moveBlocked } from './pending-handoff';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
@@ -38,7 +39,8 @@
 	import { git, gitStatus } from '$lib/stores/git.svelte';
 	import { subagentChats } from '$lib/stores/subagent-chats';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
-	import { listInstalls, getClusterGitState, type Install } from '$lib/api/installs';
+	import { getClusterGitState } from '$lib/api/installs';
+	import { workerInstalls, refreshWorkerPresence, watchWorkerPresence, presenceOf } from '$lib/stores/worker-presence';
 	import {
 		adoptSession,
 		moveSession,
@@ -155,7 +157,9 @@
 
 	const showRunnerMenu = $derived($openHeaderDropdown === 'runner');
 	let runnerMenuRef = $state<HTMLDivElement | null>(null);
-	let runnerInstalls = $state<Install[]>([]);
+	// Live presence (shared store, refreshed while the menu is open), so a
+	// worker that goes offline while the menu is open turns red and disabled.
+	const runnerInstalls = $derived($workerInstalls ?? []);
 	let runnerEligibility = $state<EligibilityMap>(null);
 	let runnerMenuLoading = $state(false);
 	let runnerMenuError = $state('');
@@ -238,6 +242,33 @@
 		})
 	);
 
+	// The read-only runner chip (a subagent's chat, or a chat with no board row
+	// yet) names the owning worker. A remote owner shows its own presence:
+	// live when the registry knows it, else the board row's flag, else unknown
+	// (no dot). A local owner is this worker, always online.
+	const readOnlyRemote = $derived(sessionRow ? !!sessionRow.is_remote : !!$activeSession.isRemote);
+	const readOnlyOwner = $derived.by((): { name: string; online: boolean | null } | null => {
+		if (!readOnlyRemote) return null;
+		const name = sessionRow?.device_name ?? $activeSession.ownerDeviceName ?? null;
+		const live = presenceOf($workerInstalls, [sessionRow?.owner_device_id, sessionRow?.instance_id], name);
+		const fromRow = typeof sessionRow?.device_online === 'boolean' ? sessionRow.device_online : null;
+		return { name: name || 'Another worker', online: live ?? fromRow };
+	});
+	const showsReadOnlyRunner = $derived(!isEmptyState && !badge?.degraded && (!sessionRow || isSubagentChat));
+
+	// Keep presence fresh while it is on screen: the open move menu, or a
+	// read-only chip for a remote owner.
+	const watchPresence = $derived(showRunnerMenu || (showsReadOnlyRunner && readOnlyRemote));
+	$effect(() => {
+		if (!watchPresence) return;
+		return watchWorkerPresence();
+	});
+
+	// A later successful refresh lifts a failed load's error.
+	$effect(() => {
+		if ($workerInstalls) untrack(() => { runnerMenuError = ''; });
+	});
+
 	async function loadRunnerMenu() {
 		runnerMenuLoading = true;
 		runnerMenuError = '';
@@ -255,10 +286,9 @@
 				})
 			: Promise.resolve(null);
 		try {
-			runnerInstalls = (await listInstalls()).installs;
+			await refreshWorkerPresence();
 		} catch (e) {
 			console.warn('[ContextPillBar] Failed to list runners:', e);
-			runnerInstalls = [];
 			runnerMenuError = 'Could not load workers. Try again.';
 		}
 		const gitState = await gitStateReq;
@@ -508,6 +538,7 @@
 						{:else}
 							<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
 						{/if}
+						<WorkerStatusDot online={!badge?.runner || badge.runner.online} />
 						<span class="ctx-chip-label">{badge?.runner?.deviceName ?? 'Local'}</span>
 					{/if}
 				</button>
@@ -579,6 +610,7 @@
 									title={item.title}
 									onclick={() => runMenuAction(item)}
 								>
+									<WorkerStatusDot online={item.online} />
 									<span class="ctx-chip-label">{item.label}</span>
 								</button>
 							{/each}
@@ -587,9 +619,30 @@
 					</div>
 				{/if}
 			</div>
+		{:else if readOnlyOwner}
+			<span
+				class="ctx-chip readonly"
+				title={readOnlyOwner.online === false
+					? `Runs on ${readOnlyOwner.name}, which is offline`
+					: `Runs on ${readOnlyOwner.name}`}
+			>
+				{#if readOnlyOwner.online === false}
+					<MonitorOff size={12} strokeWidth={1.6} aria-hidden="true" />
+				{:else}
+					<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
+				{/if}
+				{#if readOnlyOwner.online !== null}
+					<WorkerStatusDot online={readOnlyOwner.online} />
+				{/if}
+				<span class="ctx-chip-label">{readOnlyOwner.name}</span>
+				{#if readOnlyOwner.online === false}
+					<span class="sr-only">(offline)</span>
+				{/if}
+			</span>
 		{:else}
 			<span class="ctx-chip readonly" title="Runs on this device">
 				<Monitor size={12} strokeWidth={1.6} aria-hidden="true" />
+				<WorkerStatusDot online />
 				<span class="ctx-chip-label">Local</span>
 			</span>
 		{/if}
@@ -854,10 +907,16 @@
 		outline-offset: 1px;
 	}
 
+	/* Dim the row's contents, not the row, so an offline worker's red dot
+	   stays readable next to its greyed name. */
 	.runner-item.disabled,
 	.runner-item:disabled {
-		opacity: 0.45;
 		cursor: default;
+	}
+
+	.runner-item.disabled > :global(:not(.worker-status-dot)),
+	.runner-item:disabled > :global(:not(.worker-status-dot)) {
+		opacity: 0.45;
 	}
 
 	:global(.spin) {

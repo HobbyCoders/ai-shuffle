@@ -74,8 +74,12 @@ import { getPersistedDeviceIntent } from '$lib/stores/worker-selection';
 import { composerPreferences } from '$lib/stores/composer-preferences';
 import { getPersistedWorktreeIntent } from '$lib/stores/session/session-switcher';
 import { tick } from 'svelte';
+import { refreshWorkerPresence, resetWorkerPresence } from '$lib/stores/worker-presence';
 
-afterEach(() => cleanup());
+afterEach(() => {
+	cleanup();
+	resetWorkerPresence();
+});
 afterAll(() => vi.unstubAllGlobals());
 
 beforeEach(() => {
@@ -266,6 +270,88 @@ describe('worker picker persistence', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Unraid' }));
 		await fireEvent.click(screen.getByRole('menuitemradio', { name: 'Local' }));
 		expect(getPersistedDeviceIntent()).toBeNull();
+	});
+});
+
+describe('worker presence dots', () => {
+	const dotOf = (el: Element | null) => el?.querySelector('.worker-status-dot')?.getAttribute('data-status') ?? null;
+
+	it('marks Local and online workers green, offline workers red, and the picked worker on the chip', async () => {
+		vi.mocked(listInstalls).mockResolvedValue({ self_instance_id: 'local', installs: [
+			{ id: 'runner-1', device_name: 'Unraid', online: true, base_url: null,
+				platform: 'linux', version: null, capabilities: {}, last_seen: null },
+			{ id: 'runner-2', device_name: 'linux-worker', online: false, base_url: null,
+				platform: 'linux', version: null, capabilities: {}, last_seen: null }
+		] });
+		try {
+			render(ExecutionModeBar);
+			expect(dotOf(screen.getByRole('button', { name: 'Runner: Local' }))).toBe('online');
+			await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
+			expect(dotOf(screen.getByRole('menuitemradio', { name: 'Local' }))).toBe('online');
+			await fireEvent.click(screen.getByRole('button', { name: 'Other workers' }));
+			const unraid = await screen.findByRole('menuitemradio', { name: 'Unraid' });
+			expect(dotOf(unraid)).toBe('online');
+			// The offline row keeps its existing greyed, blocked state.
+			const popOs = screen.getByRole('menuitemradio', { name: /linux-worker/ });
+			expect(dotOf(popOs)).toBe('offline');
+			expect(popOs.getAttribute('aria-disabled')).toBe('true');
+			await fireEvent.click(unraid);
+			expect(dotOf(screen.getByRole('button', { name: 'Runner: Unraid' }))).toBe('online');
+		} finally {
+			vi.mocked(listInstalls).mockResolvedValue({ self_instance_id: 'local', installs: [] });
+		}
+	});
+
+	it('shows no dot on the chip while a picked worker\'s presence is unknown', () => {
+		activeSession.setDeviceIntent({ id: 'runner-9', name: 'Elsewhere' });
+		render(ExecutionModeBar);
+		expect(dotOf(screen.getByRole('button', { name: 'Runner: Elsewhere' }))).toBeNull();
+	});
+
+	const registry = (online: boolean) => ({ self_instance_id: 'local', installs: [
+		{ id: 'runner-1', device_name: 'Unraid', online, base_url: null,
+			platform: 'linux', version: null, capabilities: {}, last_seen: null }
+	] });
+
+	it('greys out and blocks a worker that goes offline while the menu is open', async () => {
+		vi.mocked(listInstalls).mockResolvedValue(registry(true));
+		try {
+			render(ExecutionModeBar);
+			await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
+			await fireEvent.click(screen.getByRole('button', { name: 'Other workers' }));
+			const before = await screen.findByRole('menuitemradio', { name: 'Unraid' });
+			expect(dotOf(before)).toBe('online');
+			expect(before.getAttribute('aria-disabled')).toBe('false');
+
+			// The next presence refresh (the open menu's poll) reports it offline.
+			vi.mocked(listInstalls).mockResolvedValue(registry(false));
+			await refreshWorkerPresence();
+			await tick();
+			const after = screen.getByRole('menuitemradio', { name: /Unraid/ });
+			expect(dotOf(after)).toBe('offline');
+			expect(after.getAttribute('aria-disabled')).toBe('true');
+			await fireEvent.click(after);
+			expect(activeSession.current.deviceIntent).toBeNull();
+		} finally {
+			vi.mocked(listInstalls).mockResolvedValue({ self_instance_id: 'local', installs: [] });
+		}
+	});
+
+	it('turns the picked worker\'s chip red when it goes offline with the menu closed', async () => {
+		vi.mocked(listInstalls).mockResolvedValue(registry(true));
+		try {
+			activeSession.setDeviceIntent({ id: 'runner-1', name: 'Unraid' });
+			render(ExecutionModeBar);
+			// A picked worker is watched with the menu closed, so its presence loads.
+			await vi.waitFor(() => expect(dotOf(screen.getByRole('button', { name: 'Runner: Unraid' }))).toBe('online'));
+
+			vi.mocked(listInstalls).mockResolvedValue(registry(false));
+			await refreshWorkerPresence();
+			await tick();
+			expect(dotOf(screen.getByRole('button', { name: 'Runner: Unraid (offline)' }))).toBe('offline');
+		} finally {
+			vi.mocked(listInstalls).mockResolvedValue({ self_instance_id: 'local', installs: [] });
+		}
 	});
 });
 
