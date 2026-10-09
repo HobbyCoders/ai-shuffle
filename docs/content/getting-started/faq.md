@@ -38,7 +38,8 @@ Any of these:
 
 - **Docker** on a Linux computer, NAS or home server (64-bit Intel or AMD).
 - **Windows 10 or 11**, with the desktop app (in beta).
-- **macOS or Linux desktop app**: coming soon.
+- **Linux** (64-bit Intel or AMD), with the desktop app (in beta).
+- **macOS desktop app**: coming soon.
 
 The **Android app** is optional, for using your workspace away from your desk. An iPhone and iPad app is coming soon; use a browser for now. See [Requirements](/docs/getting-started/requirements).
 
