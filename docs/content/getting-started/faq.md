@@ -61,7 +61,7 @@ Yes. The app keeps working for up to 14 days between license checks, so a short 
 
 ## What happens if I cancel?
 
-Your license stays active until the end of the period you paid for. After that, the app stops starting new agent runs. Your projects, sessions and database are untouched, and you can export them at any time. We never hold your data hostage.
+Your license stays active until the end of the period you paid for. After that, the app stops starting new agent runs. Your projects, sessions and database stay on your machine, untouched. You can download any chat, one at a time, as a private backup (`.jsonl`) or a Markdown file for sharing. To keep everything at once, back up your install; [Back up](/docs/getting-started/install-docker-compose#back-up) shows how for Docker. We never hold your data hostage.
 
 ## Can I get a refund?
 
@@ -81,4 +81,4 @@ No. AI Shuffle is an independent product by HobbyCoders. It is not affiliated wi
 
 ## Where do I get help?
 
-Start with [Troubleshooting](/docs/getting-started/troubleshooting). Then email support@hobbycoders.com. Once the beta opens, you can also ask in the #install-help channel on [our Discord](https://hobbycoders.com/discord). Don't send passwords, API keys or sign-in codes in either.
+Start with [Troubleshooting](/docs/getting-started/troubleshooting). Then email support@hobbycoders.com, or send a report from **Report a problem** in Settings. Don't send passwords, API keys or sign-in codes.
