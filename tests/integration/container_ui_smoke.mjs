@@ -98,6 +98,9 @@ export async function verifyOfflineSetup(page, { ownerPassword } = {}) {
   assert.equal(auth.onboarding_complete, false, 'A credential-blocked wizard must stay unfinished');
   assert.equal(auth.agent_gate.ready, false);
   assert.equal(auth.owner_linked, false);
+  // The last pick is the stored mode. On a fresh worker that is the mode the
+  // worker did not record at startup, so callers must not hard-code it.
+  return picks.at(-1)[0];
 }
 
 export async function configurePersistenceFixture(page, workspace) {

@@ -231,7 +231,7 @@ try {
   page.on('request', request => {
     if (request.url().endsWith('/auth/onboarding/complete')) completed.push(request.method());
   });
-  await verifyOfflineSetup(page);
+  const setupMode = await verifyOfflineSetup(page);
   passed('Actual welcome/license/mode steps persist both modes; missing subscription/API credentials block Continue and first run');
   // The workspace is a separate persistence fixture written through the real
   // owner API. Never fake a credential or complete onboarding to reach it.
@@ -270,7 +270,7 @@ try {
     if (request.url().endsWith('/auth/onboarding/complete')) completed.push(request.method());
   });
   const credentials = await workerJson(page, '/api/v1/settings/claude-auth');
-  assert.equal(credentials.mode, 'api_key', 'The mode must persist across worker restart');
+  assert.equal(credentials.mode, setupMode, 'The mode must persist across worker restart');
   await page.goto('http://127.0.0.1:8000/setup', { waitUntil: 'domcontentloaded' });
   await verifyOfflineSetup(page);
   assert.deepEqual(completed, [], 'Restart must not bypass onboarding completion');

@@ -80,7 +80,7 @@ try{
  const before=await page.evaluate(async()=>({worker:await window.shuffleDesktop.worker.getState(),updates:await window.shuffleDesktop.updates.getState()}));
  assert.equal(before.worker.external,false);assert(before.worker.logPath.toLowerCase().startsWith(profile.toLowerCase()));assert.notEqual(before.updates.phase,'unsupported');
  assert(!await exists(path.join(sourceRoot,'versions',build.revision)),'First startup must run bundled code without a source build');
- await verifyOfflineSetup(page);
+ const setupMode=await verifyOfflineSetup(page);
  const workspace=path.join(temporary,'workspace');await fs.mkdir(workspace,{recursive:true});
  const workspaceURL=await configurePersistenceFixture(page,workspace);
  const expected=await auth();assert.equal(expected.onboarding,false);
@@ -91,7 +91,7 @@ try{
   assert.equal((await workerJson(page,workspaceURL)).workspace_path,workspace);
   assert.equal((await workerJson(page,'/api/v1/network/status')).instance_id,network.instance_id);
   const credentials=await workerJson(page,'/api/v1/settings/claude-auth');
-  assert.equal(credentials.mode,'api_key');assert.equal(credentials.gate.ready,false);
+  assert.equal(credentials.mode,setupMode);assert.equal(credentials.gate.ready,false);
   assert.equal(await fs.readFile(path.join(profile,'installer-preservation.txt'),'utf8'),'keep existing user data');
  };
  await fs.writeFile(path.join(profile,'installer-preservation.txt'),'keep existing user data');
