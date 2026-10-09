@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { forwardTool } from "../src/proxy.js";
+import { errorResult } from "../src/tools/result.js";
 
 const env = { AIS_SESSION_ID: "session", AIS_PANEL_TOKEN: "private-token", AIS_PANEL_REGISTER_URL: "http://127.0.0.1:9999/api/v1/browser/panel/register" };
 
@@ -44,6 +45,14 @@ describe("shared runtime proxy", () => {
     const transport = vi.fn(async () => { throw new Error("private-token"); });
     const result = await forwardTool("browser_navigate", {}, env, transport);
     expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).not.toContain("private-token");
+    expect(transport).toHaveBeenCalledTimes(1);
+  });
+  it.each([403, 404, 503])("names only the HTTP status %i of a refused call", async (status) => {
+    const transport = vi.fn(async () => new Response("secret body private-token", { status }));
+    const result = await forwardTool("browser_navigate", {}, env, transport);
+    expect(result).toEqual(errorResult(`Browser runtime unavailable (HTTP ${status}); outcome unknown, not replayed`));
+    expect(JSON.stringify(result)).not.toContain("secret body");
     expect(JSON.stringify(result)).not.toContain("private-token");
     expect(transport).toHaveBeenCalledTimes(1);
   });

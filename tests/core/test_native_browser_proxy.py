@@ -291,7 +291,14 @@ async def test_failed_rpc_is_never_replayed_or_leaked(monkeypatch, status):
     result = await proxy.forward_tool(
         "browser_navigate", {"url": "https://example.com"}, ENV
     )
-    assert result == proxy._error(proxy._UNAVAILABLE)
+    # Only the status reaches the agent: it tells a refused token, a gone
+    # session and a failed runtime apart without exposing the response.
+    assert result == proxy._error(
+        f"Browser runtime unavailable (HTTP {status}); outcome unknown, not replayed"
+    )
+    text = json.dumps(result)
+    assert "secret response" not in text and "other.example" not in text
+    assert "private-test-token" not in text
     assert len(requests) == 1
 
 

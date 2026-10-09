@@ -259,8 +259,15 @@ class Runtime:
         try:
             await self.ensure()
             return await self.client.call_tool(tool, arguments)
-        except Exception:
+        except Exception as exc:
             # Unknown outcomes are never replayed. The next request may restart.
+            # The caller only ever sees the generic reason below, so record the
+            # real one here; RuntimeUnavailable texts are fixed, safe constants.
+            reason = str(exc) if isinstance(exc, RuntimeUnavailable) else ""
+            logger.warning(
+                "Browser tool %s failed for session %s (%s%s)", tool, self.session_id,
+                type(exc).__name__, f": {reason}" if reason else "",
+            )
             await self.close()
             raise RuntimeUnavailable("Browser runtime disconnected; outcome unknown") from None
         finally:

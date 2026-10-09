@@ -189,6 +189,22 @@ async def test_failure_not_replayed_then_recovers(fake):
 
 
 @pytest.mark.asyncio
+async def test_failed_call_logs_its_real_reason(fake, caplog):
+    """The caller only sees "outcome unknown"; the log must keep why."""
+    await runtime.start("runtime-test")
+    await control.get("runtime-test").retire()
+    with caplog.at_level("WARNING", logger=runtime.logger.name):
+        with pytest.raises(runtime.RuntimeUnavailable, match="outcome unknown"):
+            await runtime.call("runtime-test", "browser_status", {})
+    messages = [r.getMessage() for r in caplog.records if r.name == runtime.logger.name]
+    assert any(
+        "browser_status" in m and "runtime-test" in m
+        and "RuntimeUnavailable: Browser runtime expired" in m
+        for m in messages
+    ), messages
+
+
+@pytest.mark.asyncio
 async def test_cleanup_releases_browser_actor_created_outside_engine_pool(fake, monkeypatch):
     from app.api.git_operations import _release_session_cwd
     from app.core import session_pool, session_runtime

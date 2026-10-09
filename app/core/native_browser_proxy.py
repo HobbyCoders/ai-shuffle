@@ -25,6 +25,10 @@ TIMEOUT_SECONDS = 90
 _UNAVAILABLE = "Browser runtime unavailable; outcome unknown, not replayed"
 
 
+def _unavailable(status: int) -> str:
+    return f"Browser runtime unavailable (HTTP {int(status)}); outcome unknown, not replayed"
+
+
 def _error(message):
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
@@ -100,7 +104,10 @@ async def forward_tool(name: str, arguments: dict, env: dict):
                 headers={"content-type": "application/json", "origin": origin},
             ) as response,
         ):
-            response.raise_for_status()
+            if not response.is_success:
+                # The status alone is safe to show and tells a refused token
+                # (403), a gone session (404) and a failed runtime (503) apart.
+                return _error(_unavailable(response.status_code))
             raw = bytearray()
             async for chunk in response.aiter_bytes():
                 if len(raw) + len(chunk) > MAX_RESPONSE:

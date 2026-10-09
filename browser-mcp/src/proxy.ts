@@ -7,6 +7,10 @@ import { errorResult } from "./tools/result.js";
 
 const MAX_RESPONSE = 16 * 1024 * 1024;
 
+function unavailable(status: number): string {
+  return `Browser runtime unavailable (HTTP ${Math.trunc(status)}); outcome unknown, not replayed`;
+}
+
 export async function forwardTool(name: string, args: Record<string, unknown>, env = process.env, transport: typeof fetch = fetch): Promise<CallToolResult> {
   try {
     if (!env.AIS_SESSION_ID || !env.AIS_PANEL_TOKEN || !env.AIS_PANEL_REGISTER_URL) throw new Error();
@@ -18,7 +22,10 @@ export async function forwardTool(name: string, args: Record<string, unknown>, e
     // Node fetch has no browser Origin; satisfy the worker's same-origin guard.
     // The per-session body token still authenticates this internal request.
     const response = await transport(url, { method: "POST", headers: { "content-type": "application/json", origin: url.origin }, body, signal: AbortSignal.timeout(90000), redirect: "error" });
-    if (!response.ok || !response.body) throw new Error();
+    // The status alone is safe to show and tells a refused token (403), a gone
+    // session (404) and a failed runtime (503) apart. Never the body.
+    if (!response.ok) return errorResult(unavailable(response.status));
+    if (!response.body) throw new Error();
     const chunks: Uint8Array[] = []; let length = 0;
     const reader = response.body.getReader();
     try {
