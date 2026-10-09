@@ -22,12 +22,18 @@ SAVABLE_KINDS = ("machine", "service")
 
 
 def describe(spec) -> dict:
-    """Catalogue fields shown to the owner. Never includes a secret."""
+    """Catalogue fields shown to the owner. Never includes a secret.
+
+    The separate address fields prefill the panel's edit form; ``uses_key``
+    says only which kind of secret is stored, never the secret.
+    """
     if spec.kind == "service":
         return {"kind": "service", "label": spec.label, "target": spec.url,
-                "fingerprint": spec.fingerprint, "writable": spec.writable}
+                "fingerprint": spec.fingerprint, "writable": spec.writable,
+                "auth_header": spec.auth_header, "auth_scheme": spec.auth_scheme}
     return {"kind": "machine", "label": spec.label, "target": f"{spec.username}@{spec.host}:{spec.port}",
-            "fingerprint": spec.fingerprint}
+            "fingerprint": spec.fingerprint, "host": spec.host, "port": spec.port, "username": spec.username,
+            "uses_key": bool(spec.private_key.get_secret_value())}
 
 
 def prefix(owner: tuple) -> str:
@@ -105,6 +111,32 @@ def load(owner: tuple, connection_id: str):
     return unpack(owner, connection_id, raw)
 
 
+def _store(binding: str, spec) -> None:
+    """Encrypt ``spec`` (secrets included) under its owner-scoped binding."""
+    from app.core.chat_access import SECRET_FIELDS
+    payload = spec.model_dump(exclude=set(SECRET_FIELDS))
+    payload.update({name: getattr(spec, name).get_secret_value() for name in SECRET_FIELDS})
+    ciphertext = encryption.encrypt_value(json.dumps({"binding": binding, "connection": payload}))
+    if not encryption.is_encrypted(ciphertext):
+        raise AccessDenied("Secure storage refused an unencrypted value.")
+    database.set_system_setting(binding, ciphertext)
+
+
+def _label_taken(owner: tuple, label: str, *, except_id: str = "") -> bool:
+    return any(item["label"].casefold() == label.casefold() and item["id"] != except_id
+               for item in catalog(owner))
+
+
+# Edits, delete and post-connect host-key pinning read and rewrite one entry;
+# serialising them means none can resurrect or overwrite another's result.
+_write_lock = threading.Lock()
+
+
+def same_connection(a, b) -> bool:
+    """Whether two specs describe the same saved connection (grant length aside)."""
+    return a.model_copy(update={"minutes": b.minutes}) == b
+
+
 def save(owner: tuple, spec) -> str:
     if not encryption.is_encryption_ready() or spec.kind not in SAVABLE_KINDS:
         raise AccessDenied("Secure connection storage is unavailable.")
@@ -114,19 +146,53 @@ def save(owner: tuple, spec) -> str:
     if any(item["label"].casefold() == spec.label.casefold() for item in existing):
         raise AccessDenied("That connection name is already saved. Choose a different name.")
     connection_id = uuid.uuid4().hex
-    from app.core.chat_access import SECRET_FIELDS
-    payload = spec.model_dump(exclude=set(SECRET_FIELDS))
-    payload.update({name: getattr(spec, name).get_secret_value() for name in SECRET_FIELDS})
-    binding = key(owner, connection_id)
-    ciphertext = encryption.encrypt_value(json.dumps({"binding": binding, "connection": payload}))
-    if not encryption.is_encrypted(ciphertext):
-        raise AccessDenied("Secure storage refused an unencrypted value.")
-    database.set_system_setting(binding, ciphertext)
+    _store(key(owner, connection_id), spec)
     _invalidate_catalog()
     return connection_id
 
 
+def update(owner: tuple, connection_id: str, change):
+    """Replace a saved connection with ``change(current)``; returns ``(old, new)``.
+
+    ``change`` validates and raises ``AccessDenied``; nothing is written then.
+    The id, and so the binding, stays the same.
+    """
+    if not encryption.is_encryption_ready():
+        raise AccessDenied("Secure connection storage is unavailable or locked.")
+    with _write_lock:
+        current = load(owner, connection_id)
+        new = change(current)
+        if new.kind != current.kind or new.kind not in SAVABLE_KINDS:
+            raise AccessDenied("A saved connection keeps its type.")
+        if new.label.casefold() != current.label.casefold() and _label_taken(owner, new.label, except_id=connection_id):
+            raise AccessDenied("That connection name is already saved. Choose a different name.")
+        _store(key(owner, connection_id), new)
+    _invalidate_catalog()
+    return current, new
+
+
+def pin_fingerprint(owner: tuple, connection_id: str, expected, fingerprint: str) -> bool:
+    """Remember the SSH host key a saved connection without one was first verified with.
+
+    Only when the entry still holds exactly ``expected`` (no edit or delete in
+    between) and still has no pinned key; later uses then verify against it.
+    """
+    if not fingerprint:
+        return False
+    with _write_lock:
+        try:
+            current = load(owner, connection_id)
+        except AccessDenied:
+            return False
+        if current.kind != "machine" or current.fingerprint.strip() or not same_connection(current, expected):
+            return False
+        _store(key(owner, connection_id), current.model_copy(update={"fingerprint": fingerprint}))
+    _invalidate_catalog()
+    return True
+
+
 def delete(owner: tuple, connection_id: str):
-    if not database.delete_system_setting(key(owner, connection_id)):
-        raise AccessDenied("Unknown saved connection.")
+    with _write_lock:
+        if not database.delete_system_setting(key(owner, connection_id)):
+            raise AccessDenied("Unknown saved connection.")
     _invalidate_catalog()

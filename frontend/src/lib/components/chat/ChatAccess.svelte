@@ -25,6 +25,7 @@
 	import { buildShell } from '$lib/utils/platform';
 	import { focusableWithin } from '$lib/components/ui/focus-trap';
 	import PrivateAccessRequest from './PrivateAccessRequest.svelte';
+	import SavedConnectionEditor, { type SavedConnection, type EditResult } from './SavedConnectionEditor.svelte';
 	import '../deck/cards/card-design-system.css';
 	import './private-access.css';
 	let { sessionId }: { sessionId: string } = $props();
@@ -33,9 +34,23 @@
 	type Grant = FromSubagent & { id: string; label: string; kind: string; target: string; expires_at: number; writable: boolean; fingerprint?: string };
 	type Action = FromSubagent & { id: string; grant_id: string; operation: string; arguments: Record<string, string>; expires_at: number };
 	type Request = FromSubagent & { id: string; kind: string; purpose: string; expires_at: number; suggested_path?: string; suggested_host?: string; suggested_port?: number; suggested_username?: string; service_provider?: string; suggested_url?: string; plugin?: string; service?: string };
-	type Saved = {id: string; label: string; target: string; fingerprint: string; kind?: string; writable?: boolean};
+	type Saved = SavedConnection;
 	let data = $state<{grants: Grant[]; actions: Action[]; requests: Request[]; saved_connections: Saved[]; vault_available: boolean}>({grants: [], actions: [], requests: [], saved_connections: [], vault_available: false});
 	let confirmingDelete = $state<string | null>(null);
+	/** The saved connection whose row is expanded into its edit form. */
+	let editingSaved = $state<string | null>(null);
+	/** What the last edit did, shown once under the saved list. */
+	let editNotice = $state('');
+	function editSaved(id: string | null) { editingSaved = id; confirmingDelete = null; editNotice = ''; }
+	async function savedEdited(result: EditResult, label: string) {
+		editingSaved = null;
+		editNotice = [
+			`Saved changes to ${label}.`,
+			result.revoked && `${plural(result.revoked, 'active grant')} using it ${result.revoked === 1 ? 'was' : 'were'} revoked.`,
+			result.host_key_cleared && 'Its host key is checked and saved again on the next connection.'
+		].filter(Boolean).join(' ');
+		await refresh();
+	}
 	/** The device a mirrored conversation runs on, where its grants and saved connections live. */
 	let owner = $state<string | null>(null);
 	async function removeSaved(id: string) {
@@ -82,7 +97,7 @@
 	$effect(() => {
 		const open = panelOpen;
 		untrack(() => {
-			if (wasOpen && !open) { clearSecretsKey++; cancelSheetDrag(); }
+			if (wasOpen && !open) { clearSecretsKey++; cancelSheetDrag(); editingSaved = null; editNotice = ''; }
 			if (!wasOpen && open) void tick().then(() => { if (panelOpen) { placePanel(); panelRef?.focus({ preventScroll: true }); } });
 			wasOpen = open;
 		});
@@ -551,28 +566,36 @@
 				<h3 class="pa-group">Saved connections</h3>
 				<ul class="pa-list" aria-label="Saved connections">
 					{#each data.saved_connections as saved (saved.id)}
-						<li class="pa-row">
+						{@const editing = editingSaved === saved.id}
+						<li class="pa-row" class:editing>
 							<span class="pa-icon row-icon">{#if saved.kind === 'service'}{@render serviceIcon()}{:else}{@render serverIcon()}{/if}</span>
 							<div class="pa-row-main">
 								<strong>{saved.label}</strong>
 								<code>{saved.target}</code>
 								<small>Encrypted on {owner ?? 'this worker'}{#if saved.fingerprint}{` · host key ${saved.fingerprint.slice(0, 19)}…`}{/if}</small>
 							</div>
-							<div class="pa-row-actions">
-								{#if confirmingDelete === saved.id}
-									<button class="pa-small-btn" onclick={() => confirmingDelete = null}>Keep</button>
-									<button class="pa-small-btn danger solid" disabled={busy} onclick={() => removeSaved(saved.id)}>Delete</button>
-								{:else}
-									<button class="pa-small-btn danger" aria-label="Delete {saved.label}" onclick={() => confirmingDelete = saved.id}>Delete</button>
-								{/if}
-							</div>
+							{#if editing}
+								<!-- The row itself opens into the form: no nested popover. -->
+								<SavedConnectionEditor endpoint={`${base}/saved`} {saved} {owner} {clearSecretsKey} onSaved={savedEdited} onCancel={() => editSaved(null)} />
+							{:else}
+								<div class="pa-row-actions">
+									{#if confirmingDelete === saved.id}
+										<button class="pa-small-btn" onclick={() => confirmingDelete = null}>Keep</button>
+										<button class="pa-small-btn danger solid" disabled={busy} onclick={() => removeSaved(saved.id)}>Delete</button>
+									{:else}
+										<button class="pa-small-btn" aria-label="Edit {saved.label}" onclick={() => editSaved(saved.id)}>Edit</button>
+										<button class="pa-small-btn danger" aria-label="Delete {saved.label}" onclick={() => confirmingDelete = saved.id}>Delete</button>
+									{/if}
+								</div>
+							{/if}
 						</li>
 					{/each}
 				</ul>
 			{/if}
 
+			{#if editNotice}<p class="pa-hint pa-foot" role="status">{editNotice}</p>{/if}
 			{#if data.grants.length || data.saved_connections.length}
-				<p class="pa-hint pa-foot">Worker restart or expiry ends access. Revoking closes open connections but can’t undo changes already made. Deleting a saved connection also revokes access that uses it.</p>
+				<p class="pa-hint pa-foot">Worker restart or expiry ends access. Revoking closes open connections but can’t undo changes already made. Deleting a saved connection, or editing more than its name, also revokes access that uses it.</p>
 			{/if}
 		</div>
 	</div>
@@ -760,6 +783,8 @@
 		overflow: hidden;
 	}
 	.pa-list > .pa-row:first-child { border-top: 0; }
+	/* A saved connection being edited opens its form inside the row, full width. */
+	.pa-row.editing { flex-wrap: wrap; align-items: flex-start; }
 	.row-icon { width: 2rem; height: 2rem; border-radius: 0.5rem; }
 	.row-icon :global(svg) { width: 0.9rem; height: 0.9rem; }
 	.pa-empty {

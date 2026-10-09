@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.auth import require_admin
 from app.api.sessions_helpers import require_session
-from app.core.chat_access import AccessDenied, GrantSubmission, broker, grant_failure
+from app.core.chat_access import AccessDenied, GrantSubmission, SavedConnectionEdit, broker, grant_failure
 from app.db.async_database import run_sync
 from app.network import chat_access_routing as routing
 from app.network import control
@@ -124,6 +124,26 @@ async def forget_connection(session_id: str, connection_id: str, request: Reques
         return {"deleted": True}
     except AccessDenied as exc:
         raise HTTPException(409, str(exc)) from None
+
+
+@router.patch("/{session_id}/saved/{connection_id}")
+async def edit_connection(session_id: str, connection_id: str, request: Request, body: dict,
+                          token: str = Depends(require_admin)):
+    row = await checked(request, session_id)
+    # Validate manually so a Pydantic error never echoes a supplied secret.
+    try:
+        edit = SavedConnectionEdit.model_validate(body)
+    except ValueError:
+        raise HTTPException(422, "Invalid saved connection change. Check the fields.") from None
+    owner = await owning_device(row)
+    if owner is not None:
+        # Relayed in memory only; a new secret goes to the owner over HTTPS or not at all.
+        return await forward(owner, session_id, "edit", {"connection_id": connection_id, "changes": body},
+                             secure=routing.edit_carries_secret(edit))
+    try:
+        return await broker.edit_saved(session_id, connection_id, edit)
+    except AccessDenied as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @router.delete("/{session_id}/requests/{request_id}")

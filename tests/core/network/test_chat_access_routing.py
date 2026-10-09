@@ -290,6 +290,45 @@ async def test_owner_refuses_private_inputs_that_arrived_without_https(pair, ssh
     assert not commands
 
 
+async def test_saved_connection_edit_runs_on_the_owner_and_new_secrets_need_https(pair, monkeypatch):
+    calls = []
+
+    async def edit_saved(session_id, connection_id, edit):
+        calls.append((session_id, connection_id, edit.label, edit.password.get_secret_value()))
+        return {"updated": True, "revoked": 0, "host_key_cleared": False}
+
+    monkeypatch.setattr(pair.broker, "edit_saved", edit_saved)
+    plain = "http://a.local:8000"
+    network = Network(monkeypatch, {plain: pair.a})
+    _reach(pair.b, pair.a, plain)
+    endpoint = f"{BASE}/saved/{'c' * 32}"
+    with pair.b.active():
+        async with network.ui() as ui:
+            # A replaced password never crosses a plain-HTTP route ...
+            response = await ui.patch(endpoint, json={"password": PASSWORD})
+            assert response.status_code == 409 and response.json()["detail"] == routing.INSECURE_INPUTS
+            assert not any(PASSWORD.encode() in body for _, _, body in network.seen) and not calls
+            # ... but a rename carries nothing private.
+            response = await ui.patch(endpoint, json={"label": "Renamed"})
+            assert response.status_code == 200, response.text
+    assert calls == [(SESSION, "c" * 32, "Renamed", "")]
+    body = {"op": "edit", "session_id": SESSION, "connection_id": "c" * 32}
+    with pair.a.active():
+        # The owner refuses a secret that arrived without HTTPS, and never echoes one.
+        with pytest.raises(PermissionError, match="only over HTTPS"):
+            await routing.handle({**body, "changes": {"password": PASSWORD}}, pair.b.device_id)
+        with pytest.raises(ValueError) as invalid:
+            await routing.handle({**body, "changes": {"password": PASSWORD, "port": "22"}}, pair.b.device_id)
+        assert PASSWORD not in str(invalid.value)
+        token = control.inbound_https.set(True)
+        try:
+            result = await routing.handle({**body, "changes": {"password": PASSWORD}}, pair.b.device_id)
+        finally:
+            control.inbound_https.reset(token)
+    assert result == {"updated": True, "revoked": 0, "host_key_cleared": False}
+    assert calls[-1] == (SESSION, "c" * 32, None, PASSWORD)
+
+
 async def test_unreachable_owner_shows_nothing_and_refuses_changes(pair, monkeypatch):
     network = Network(monkeypatch, {})  # nobody answers
     _reach(pair.b, pair.a, A_URL)

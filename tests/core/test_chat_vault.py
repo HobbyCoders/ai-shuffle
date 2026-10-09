@@ -191,7 +191,8 @@ def test_service_credentials_are_encrypted_and_never_catalogued(vault):
         "https://api.example.com/v1", "X-API-Key", "", True)
     catalogue = chat_vault.catalog(owner)
     assert catalogue == [{"id": connection_id, "kind": "service", "label": "Inventory API",
-                          "target": "https://api.example.com/v1", "fingerprint": "", "writable": True}]
+                          "target": "https://api.example.com/v1", "fingerprint": "", "writable": True,
+                          "auth_header": "X-API-Key", "auth_scheme": ""}]
     assert "vault-only-api-key" not in json.dumps(catalogue)
     machine = chat_vault.save(owner, spec())
     assert {item["kind"] for item in chat_vault.catalog(owner)} == {"machine", "service"}
@@ -202,3 +203,48 @@ def test_folder_grants_are_never_saved(vault):
     with pytest.raises(AccessDenied):
         chat_vault.save(("local", "worker", None), GrantInput(kind="folder", label="Docs", path="/srv/docs"))
     assert not vault
+
+
+def test_update_rewrites_in_place_and_refuses_without_writing(vault):
+    owner = ("local", "worker", None)
+    first = chat_vault.save(owner, spec())
+    other = chat_vault.save(owner, spec().model_copy(update={"label": "Backup"}))
+    old, new = chat_vault.update(owner, first, lambda current: current.model_copy(update={"label": "serverworker", "port": 2222}))
+    assert (old.label, old.port, new.label, new.port) == ("Unraid", 22, "serverworker", 2222)
+    loaded = chat_vault.load(owner, first)
+    # Same id and binding; the stored secret survives an edit that did not touch it.
+    assert (loaded.label, loaded.port) == ("serverworker", 2222)
+    assert loaded.password.get_secret_value() == "vault-only-password"
+    assert len(vault) == 2 and "vault-only-password" not in json.dumps(chat_vault.catalog(owner))
+    before = dict(vault)
+    with pytest.raises(AccessDenied, match="already saved"):
+        chat_vault.update(owner, other, lambda current: current.model_copy(update={"label": "UNRAID"}))
+    def refuse(current):
+        raise AccessDenied("refused")
+    with pytest.raises(AccessDenied, match="refused"):
+        chat_vault.update(owner, first, refuse)
+    with pytest.raises(AccessDenied, match="keeps its type"):
+        chat_vault.update(owner, first, lambda current: GrantInput(kind="folder", label="Docs", path="/srv"))
+    with pytest.raises(AccessDenied):
+        chat_vault.update(owner, "c" * 32, lambda current: current)
+    assert vault == before
+    with pytest.raises(AccessDenied):
+        chat_vault.update(("local", "worker", "someone-else"), first, lambda current: current)
+
+
+def test_pin_fingerprint_only_fills_a_blank_pin_on_unchanged_details(vault):
+    owner = ("local", "worker", None)
+    unpinned = spec().model_copy(update={"fingerprint": ""})
+    connection_id = chat_vault.save(owner, unpinned)
+    key = "SHA256:" + "b" * 43
+    # Edited after the handshake started: the key seen is not saved.
+    edited = unpinned.model_copy(update={"port": 2222})
+    assert not chat_vault.pin_fingerprint(owner, connection_id, edited, key)
+    assert chat_vault.pin_fingerprint(owner, connection_id, unpinned.model_copy(update={"minutes": 5}), key)
+    assert chat_vault.load(owner, connection_id).fingerprint == key
+    # An existing pin is never replaced this way.
+    assert not chat_vault.pin_fingerprint(owner, connection_id, chat_vault.load(owner, connection_id),
+                                          "SHA256:" + "c" * 43)
+    assert chat_vault.load(owner, connection_id).fingerprint == key
+    chat_vault.delete(owner, connection_id)
+    assert not chat_vault.pin_fingerprint(owner, connection_id, unpinned, key) and not vault

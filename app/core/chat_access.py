@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import asyncssh
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictBool, StrictInt
 
 from app.core import chat_files, chat_services, chat_shell
 from app.core.chat_files import AccessDenied
@@ -67,6 +67,131 @@ class GrantInput(BaseModel):
 
 
 SECRET_FIELDS = frozenset({"password", "private_key", "passphrase", "secret"})
+
+
+class SavedConnectionEdit(BaseModel):
+    """The owner's change to a saved connection. ``None`` keeps a field.
+
+    Secrets are never sent to the client, so a blank secret keeps the stored
+    one and a typed secret replaces it.
+    """
+    model_config = ConfigDict(extra="forbid")
+    label: str | None = Field(default=None, max_length=80)
+    # SSH machine
+    host: str | None = Field(default=None, max_length=64)
+    port: StrictInt | None = Field(default=None, ge=1, le=65535)
+    username: str | None = Field(default=None, max_length=128)
+    password: SecretStr = Field(default_factory=lambda: SecretStr(""))
+    private_key: SecretStr = Field(default_factory=lambda: SecretStr(""))
+    passphrase: SecretStr = Field(default_factory=lambda: SecretStr(""))
+    # SSH host-key or HTTPS certificate fingerprint; blank keeps (see apply_saved_edit).
+    fingerprint: str | None = Field(default=None, max_length=100)
+    # HTTPS API service
+    url: str | None = Field(default=None, max_length=2048)
+    auth_header: str | None = Field(default=None, max_length=64)
+    auth_scheme: str | None = Field(default=None, max_length=32)
+    writable: StrictBool | None = None
+    secret: SecretStr = Field(default_factory=lambda: SecretStr(""))
+
+
+MACHINE_EDIT_FIELDS = frozenset({"host", "port", "username", "password", "private_key", "passphrase"})
+SERVICE_EDIT_FIELDS = frozenset({"url", "auth_header", "auth_scheme", "writable", "secret"})
+POSIX_USERNAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,127}")
+
+
+def machine_address(host: str) -> str:
+    """A unicast IP literal without an interface scope, normalised; never a hostname."""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        raise AccessDenied("Enter the machine IP as an IPv4 or IPv6 literal, not a hostname, URL or credentials.") from None
+    if "%" in host or address.is_unspecified or address.is_multicast or address.is_link_local:
+        raise AccessDenied("Use a unicast IP address without an interface scope for this machine.")
+    return str(address)
+
+
+def _same_address(a: str, b: str) -> bool:
+    try:
+        return ipaddress.ip_address(a) == ipaddress.ip_address(b)
+    except ValueError:
+        return a == b
+
+
+def apply_saved_edit(current: GrantInput, edit: SavedConnectionEdit) -> GrantInput:
+    """The saved connection after ``edit``, validated like the access card.
+
+    Changing a machine's host or port clears its pinned host key, unless the
+    owner supplies the new one: the next connection then pins the key the
+    server presents. Changing a service's address clears its certificate pin
+    the same way. Username and secret changes keep the pin. Error messages
+    never quote the submitted values.
+    """
+    sent = {name for name in edit.model_fields_set
+            if getattr(edit, name) is not None and not (name in SECRET_FIELDS and not getattr(edit, name).get_secret_value())}
+    other = SERVICE_EDIT_FIELDS if current.kind == "machine" else MACHINE_EDIT_FIELDS
+    if sent & other:
+        raise AccessDenied(f"Those settings do not apply to a saved {current.kind} connection.")
+    update: dict[str, Any] = {}
+    if "label" in sent:
+        label = edit.label.strip()
+        if not label:
+            raise AccessDenied("Give the connection a name.")
+        update["label"] = label
+    fingerprint = (edit.fingerprint or "").strip() if "fingerprint" in sent else ""
+    if current.kind == "machine":
+        if "host" in sent:
+            update["host"] = machine_address(edit.host.strip())
+        if "port" in sent:
+            update["port"] = edit.port
+        if "username" in sent:
+            username = edit.username.strip()
+            if not POSIX_USERNAME.fullmatch(username):
+                raise AccessDenied("Enter a POSIX username: letters, digits, dot, dash or underscore.")
+            update["username"] = username
+        if fingerprint:
+            if not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}=?", fingerprint):
+                raise AccessDenied("A host-key fingerprint looks like SHA256: followed by 43 characters. "
+                                   "Leave it blank to keep the pinned key.")
+            update["fingerprint"] = fingerprint.rstrip("=")
+        elif not _same_address(update.get("host", current.host), current.host) or update.get("port", current.port) != current.port:
+            update["fingerprint"] = ""  # A key pinned for another address is never reused.
+        password, key = edit.password.get_secret_value(), edit.private_key.get_secret_value()
+        passphrase = edit.passphrase.get_secret_value()
+        if password and (key or passphrase):
+            raise AccessDenied("Replace the password or the private key, not both.")
+        if password:
+            update.update(password=edit.password, private_key=SecretStr(""), passphrase=SecretStr(""))
+        elif key or passphrase:
+            # A new key comes with its own passphrase (blank for none); a
+            # passphrase alone replaces the stored key's passphrase.
+            key = key or current.private_key.get_secret_value()
+            if not key:
+                raise AccessDenied("This connection signs in with a password. Enter a private key to use one.")
+            try:
+                asyncssh.import_private_key(key, passphrase or None)
+            except (asyncssh.KeyImportError, ValueError, TypeError):
+                raise AccessDenied("The private key could not be read. Check the key and its passphrase.") from None
+            update.update(private_key=SecretStr(key), passphrase=SecretStr(passphrase), password=SecretStr(""))
+    else:
+        if "url" in sent:
+            update["url"] = chat_services.parse_origin(edit.url.strip()).url
+        header = edit.auth_header if "auth_header" in sent else current.auth_header
+        scheme = edit.auth_scheme if "auth_scheme" in sent else current.auth_scheme
+        secret = edit.secret.get_secret_value() or current.secret.get_secret_value()
+        chat_services.credential_header(header, scheme, secret)
+        if "auth_header" in sent:
+            update["auth_header"] = header.strip()
+        if "auth_scheme" in sent:
+            update["auth_scheme"] = scheme.strip()
+        if "writable" in sent:
+            update["writable"] = edit.writable
+        if "secret" in sent:
+            update["secret"] = edit.secret
+        if fingerprint:
+            update["fingerprint"] = chat_services.certificate_pin(fingerprint)
+        elif update.get("url", current.url) != current.url:
+            update["fingerprint"] = ""  # A certificate pinned for another address is never reused.
+    return current.model_copy(update=update)
 
 
 class RequestUnavailable(AccessDenied):
@@ -558,7 +683,7 @@ class Broker:
         try:
             from app.core import chat_vault
             from app.db.async_database import run_sync
-            plugin = None
+            plugin = stored = None
             if request.plugin_id or submission.sign_in:
                 # Answered only with the owner's sign-in to the declared service:
                 # never a typed key, a saved connection or another address.
@@ -571,7 +696,7 @@ class Broker:
             elif submission.saved_id:
                 if submission.connection is not None or submission.save_connection:
                     raise AccessDenied("Choose either a saved connection or new private inputs.")
-                spec = await run_sync(chat_vault.load, request.owner, submission.saved_id)
+                spec = stored = await run_sync(chat_vault.load, request.owner, submission.saved_id)
             else:
                 spec = submission.connection
             if spec is None or request.kind != spec.kind:
@@ -590,15 +715,27 @@ class Broker:
             current = await self.get(session_id, grant["id"], preparing=True)
             current.saved_id = saved_id
             if saved_id:
-                # Deletion may race the SSH handshake or the save. Attach the
-                # binding before rechecking storage so deletion either revokes
-                # this grant or makes this lookup fail; it cannot be resurrected.
-                await run_sync(chat_vault.load, request.owner, saved_id)
+                # Deletion or an edit may race the SSH handshake or the save.
+                # Attach the binding before rechecking storage so either one
+                # revokes this grant or makes this check fail; a grant on
+                # deleted or replaced details cannot survive.
+                latest = await run_sync(chat_vault.load, request.owner, saved_id)
+                if submission.saved_id and not chat_vault.same_connection(latest, stored):
+                    raise AccessDenied("This saved connection changed while connecting. Try again.")
                 await self.get(session_id, grant["id"], preparing=True)
             await self._check_request(request)
             current.ready = True
             request.result.set_result(grant["id"])
             self._notify(session_id, request.owner)
+            if submission.saved_id and stored.kind == "machine" and not stored.fingerprint.strip():
+                # A saved machine without a pinned key (its address was
+                # edited) keeps the key this first connection verified, as a
+                # newly saved connection does.
+                try:
+                    if await run_sync(chat_vault.pin_fingerprint, request.owner, saved_id, stored, grant["fingerprint"]):
+                        self._notify(session_id, request.owner, saved=True)
+                except Exception as exc:  # noqa: BLE001 — the grant stands; the next use pins again
+                    logger.warning("Saved connection host key not recorded: %s", type(exc).__name__)
             if request.kind == "service":
                 self._finish_request(request)
             return {"granted": True, "saved": bool(saved_id)}
@@ -621,6 +758,29 @@ class Broker:
         # Clients no longer poll empty snapshots, so tell every panel of this
         # owner (on any session) that the saved list changed.
         self._notify(session_id, owner, saved=True)
+
+    async def edit_saved(self, session_id: str, connection_id: str, edit: SavedConnectionEdit) -> dict:
+        """Change one of the owner's saved connections in place.
+
+        Grants built on it are revoked when anything but its name changes, as
+        deletion does: they hold the old address and credential, and a grant
+        is never silently re-pointed. A rename keeps them. The result carries
+        no secret and no submitted value.
+        """
+        from app.core import chat_vault
+        from app.db.async_database import run_sync
+        owner = await session_owner(session_id)
+        old, new = await run_sync(chat_vault.update, owner, connection_id,
+                                  lambda current: apply_saved_edit(current, edit))
+        revoked = 0
+        if not chat_vault.same_connection(old.model_copy(update={"label": new.label}), new):
+            for grant in list(self.grants.values()):
+                if grant.owner[2:] == owner[2:] and grant.saved_id == connection_id:
+                    self.revoke(grant.session_id, grant.id)
+                    revoked += 1
+        self._notify(session_id, owner, saved=True)
+        return {"updated": True, "revoked": revoked,
+                "host_key_cleared": bool(old.fingerprint) and not new.fingerprint}
 
     async def decline(self, session_id: str, request_id: str):
         request = self.requests.get(request_id)

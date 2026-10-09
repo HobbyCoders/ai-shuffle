@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, fireEvent, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 const m = vi.hoisted(() => {
- const api = { get: vi.fn(), post: vi.fn(), delete: vi.fn(),
+ const api = { get: vi.fn(), post: vi.fn(), delete: vi.fn(), patch: vi.fn(),
   // The session check reads /live metadata; it answers with the row the test set up.
   getShared: vi.fn(async (url: string) => ({ session_meta: { is_remote: false, device_name: null, ...(await api.get(url)) } })) };
  return api;
@@ -38,6 +38,7 @@ beforeEach(() => {
  vi.useFakeTimers(); vi.clearAllMocks(); hidden(false); snapshot = empty(); accessAuth.current = {status: {preview_access: false}};
  m.get.mockImplementation(async (url: string) => url.startsWith('/sessions/') ? { mode: 'code' } : snapshot);
  m.post.mockResolvedValue({}); m.delete.mockResolvedValue({});
+ m.patch.mockResolvedValue({updated: true, revoked: 0, host_key_cleared: false});
 });
 afterEach(() => { cleanup(); resourceSync.clear(); vi.useRealTimers(); });
 const trigger = () => screen.getByRole('button', {name: /^Private access/});
@@ -626,5 +627,129 @@ describe('a subagent’s private access in its main chat', () => {
   expect(panel()!.querySelector('.pa-from')).toBeNull();
   await fireEvent.click(within(panel()!).getByRole('button', {name: 'Approve once'})); await flush();
   expect(m.post).toHaveBeenCalledWith('/chat-access/main/actions/a2', {allow: true});
+ });
+});
+
+describe('editing a saved connection inline', () => {
+ const machine = {id: 'c'.repeat(32), label: 'NAS', kind: 'machine', target: 'root@10.0.0.2:22', fingerprint: 'SHA256:' + 'a'.repeat(43),
+  host: '10.0.0.2', port: 22, username: 'root', uses_key: false};
+ const service = {id: 'd'.repeat(32), label: 'Home API', kind: 'service', target: 'https://10.0.0.5/api', fingerprint: '',
+  writable: false, auth_header: 'Authorization', auth_scheme: 'Bearer'};
+ const endpoint = (id: string) => `/chat-access/s1/saved/${id}`;
+ const row = (label: string) => screen.getByRole('list', {name: 'Saved connections'}).querySelectorAll('li')[
+  [...screen.getByRole('list', {name: 'Saved connections'}).querySelectorAll('li')].findIndex(li => li.textContent?.includes(label))] as HTMLElement;
+ async function openEditor(label: string) {
+  render(ChatAccess, {sessionId: 's1'}); await flush();
+  await openAccess(); await flush();
+  await fireEvent.click(screen.getByRole('button', {name: `Edit ${label}`})); await flush();
+  return within(row(label));
+ }
+ // What each PATCH carried when it was sent: the component blanks typed
+ // secrets in the request body as soon as the request settles.
+ let sent: Record<string, unknown>[] = [];
+ let reply: () => Promise<unknown> = async () => ({updated: true, revoked: 0, host_key_cleared: false});
+ const lastSent = () => sent[sent.length - 1];
+ beforeEach(() => {
+  sent = [];
+  reply = async () => ({updated: true, revoked: 0, host_key_cleared: false});
+  m.patch.mockImplementation(async (_path: string, body: Record<string, unknown>) => { sent.push({...body}); return reply(); });
+  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: true });
+  snapshot = {...empty(), vault_available: true, saved_connections: [machine, service]};
+ });
+ it('expands the row into a form with the details but never a secret, and sends only what changed', async () => {
+  const form = await openEditor('NAS');
+  // Inline in the same row of the same panel, not a nested dialog.
+  expect(screen.getAllByRole('dialog')).toHaveLength(1);
+  expect(within(row('NAS')).getByRole('form', {name: 'Edit NAS'})).toBeTruthy();
+  expect(within(row('NAS')).queryByRole('button', {name: 'Delete NAS'})).toBeNull();
+  expect((form.getByLabelText('Name') as HTMLInputElement).value).toBe('NAS');
+  expect((form.getByLabelText('Server IP address') as HTMLInputElement).value).toBe('10.0.0.2');
+  expect((form.getByLabelText('Port') as HTMLInputElement).value).toBe('22');
+  expect((form.getByLabelText('Username') as HTMLInputElement).value).toBe('root');
+  const password = form.getByLabelText('Password') as HTMLInputElement;
+  expect(password.value).toBe('');
+  expect(password.placeholder).toBe('Unchanged');
+  expect(password.required).toBe(false);
+  expect((form.getByLabelText('Host-key fingerprint') as HTMLInputElement).value).toBe('');
+  // The other saved row keeps its own actions.
+  expect(screen.getByRole('button', {name: 'Edit Home API'})).toBeTruthy();
+  await fireEvent.input(form.getByLabelText('Port'), {target: {value: '2222'}});
+  expect(form.getByText(/clears the pinned host key/)).toBeTruthy();
+  reply = async () => ({updated: true, revoked: 1, host_key_cleared: true});
+  await fireEvent.submit(form.getByRole('form', {name: 'Edit NAS'})); await flush();
+  // A blank password keeps the stored one: it is not sent at all.
+  expect(m.patch.mock.calls[0][0]).toBe(endpoint(machine.id));
+  expect(lastSent()).toEqual({port: 2222});
+  expect(screen.queryByRole('form', {name: 'Edit NAS'})).toBeNull();
+  const notice = screen.getByRole('status');
+  expect(notice.textContent).toContain('1 active grant using it was revoked');
+  expect(notice.textContent).toContain('host key is checked and saved again');
+ });
+ it('sends a typed password once, clears it, and shows a refusal inline', async () => {
+  const form = await openEditor('NAS');
+  reply = async () => { throw {status: 400, detail: 'Enter a POSIX username: letters, digits, dot, dash or underscore.'}; };
+  await fireEvent.input(form.getByLabelText('Username'), {target: {value: 'bad name'}});
+  await fireEvent.input(form.getByLabelText('Password'), {target: {value: 'test-only-new-password'}});
+  await fireEvent.submit(form.getByRole('form', {name: 'Edit NAS'})); await flush();
+  expect(lastSent()).toEqual({username: 'bad name', password: 'test-only-new-password'});
+  // The request body itself no longer holds the password once it settled.
+  expect(m.patch.mock.calls[0][1]).toEqual({username: 'bad name', password: ''});
+  // Still open with the error in the row; the typed secret is gone.
+  expect(form.getByRole('alert').textContent).toContain('POSIX username');
+  expect((form.getByLabelText('Password') as HTMLInputElement).value).toBe('');
+  expect((form.getByLabelText('Username') as HTMLInputElement).value).toBe('bad name');
+  expect(JSON.stringify(sent)).not.toContain('Unchanged');
+ });
+ it('switching to a private key requires the key and drops the password', async () => {
+  const form = await openEditor('NAS');
+  await fireEvent.click(form.getByRole('button', {name: /Use a private key instead/}));
+  expect(form.queryByLabelText('Password')).toBeNull();
+  expect((form.getByLabelText('Private key') as HTMLTextAreaElement).required).toBe(true);
+  await fireEvent.input(form.getByLabelText('Private key'), {target: {value: 'test-only-key'}});
+  await fireEvent.submit(form.getByRole('form', {name: 'Edit NAS'})); await flush();
+  expect(lastSent()).toEqual({private_key: 'test-only-key'});
+ });
+ it('cancel and closing the panel send nothing and drop typed secrets', async () => {
+  let form = await openEditor('NAS');
+  await fireEvent.input(form.getByLabelText('Password'), {target: {value: 'test-only-password'}});
+  await fireEvent.click(form.getByRole('button', {name: 'Cancel'})); await flush();
+  expect(screen.queryByRole('form', {name: 'Edit NAS'})).toBeNull();
+  await fireEvent.click(screen.getByRole('button', {name: 'Edit NAS'})); await flush();
+  form = within(row('NAS'));
+  expect((form.getByLabelText('Password') as HTMLInputElement).value).toBe('');
+  await fireEvent.input(form.getByLabelText('Password'), {target: {value: 'test-only-password'}});
+  await fireEvent.keyDown(document.body, {key: 'Escape'}); await flush();
+  await openAccess(); await flush();
+  expect(screen.queryByRole('form', {name: 'Edit NAS'})).toBeNull();
+  await fireEvent.click(screen.getByRole('button', {name: 'Edit NAS'})); await flush();
+  expect((within(row('NAS')).getByLabelText('Password') as HTMLInputElement).value).toBe('');
+  // Saving with nothing changed closes without a request.
+  await fireEvent.submit(screen.getByRole('form', {name: 'Edit NAS'})); await flush();
+  expect(screen.queryByRole('form', {name: 'Edit NAS'})).toBeNull();
+  expect(m.patch).not.toHaveBeenCalled();
+ });
+ it('edits a service: a blank token keeps the stored one, a typed one replaces it', async () => {
+  const form = await openEditor('Home API');
+  expect((form.getByLabelText('Service address') as HTMLInputElement).value).toBe('https://10.0.0.5/api');
+  expect((form.getByLabelText('Credential header') as HTMLInputElement).value).toBe('Authorization');
+  const token = form.getByLabelText('API key or token') as HTMLInputElement;
+  expect(token.value).toBe('');
+  expect(token.placeholder).toBe('Unchanged');
+  await fireEvent.click(form.getByRole('checkbox', {name: /Allow changes/}));
+  await fireEvent.submit(form.getByRole('form', {name: 'Edit Home API'})); await flush();
+  expect(m.patch.mock.calls[0][0]).toBe(endpoint(service.id));
+  expect(lastSent()).toEqual({writable: true});
+  await fireEvent.click(screen.getByRole('button', {name: 'Edit Home API'})); await flush();
+  const again = within(row('Home API'));
+  await fireEvent.input(again.getByLabelText('API key or token'), {target: {value: 'test-only-token'}});
+  await fireEvent.submit(again.getByRole('form', {name: 'Edit Home API'})); await flush();
+  expect(lastSent()).toEqual({secret: 'test-only-token'});
+ });
+ it('refuses to take private details outside a secure context', async () => {
+  Object.defineProperty(window, 'isSecureContext', { configurable: true, value: false });
+  const form = await openEditor('NAS');
+  expect(form.getByRole('alert').textContent).toContain('HTTPS');
+  expect((form.getByLabelText('Password') as HTMLInputElement).disabled).toBe(true);
+  expect((form.getByRole('button', {name: 'Save changes'}) as HTMLButtonElement).disabled).toBe(true);
  });
 });

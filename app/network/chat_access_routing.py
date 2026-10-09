@@ -23,7 +23,7 @@ from app.network import control
 
 logger = logging.getLogger(__name__)
 
-OPERATIONS = frozenset({"snapshot", "grant", "decline", "revoke", "decide", "forget"})
+OPERATIONS = frozenset({"snapshot", "grant", "decline", "revoke", "decide", "forget", "edit"})
 # An SSH grant probes several host-key types before signing in.
 GRANT_TIMEOUT = 120.0
 INSECURE_INPUTS = ("Private inputs reach the device that runs this conversation only over HTTPS. "
@@ -41,6 +41,12 @@ def carries_secret(submission) -> bool:
     connection = submission.connection
     return connection is not None and any(
         getattr(connection, name).get_secret_value() for name in SECRET_FIELDS)
+
+
+def edit_carries_secret(edit) -> bool:
+    """Whether a saved-connection edit replaces a password, key or token."""
+    from app.core.chat_access import SECRET_FIELDS
+    return any(getattr(edit, name).get_secret_value() for name in SECRET_FIELDS)
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +131,7 @@ def _identifier(body: Dict[str, Any], name: str) -> str:
 
 async def handle(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     """Owner side of ``chat-access``: the same operations as the local access API."""
-    from app.core.chat_access import AccessDenied, GrantSubmission, broker, grant_failure
+    from app.core.chat_access import AccessDenied, GrantSubmission, SavedConnectionEdit, broker, grant_failure
     operation = body.get("op")
     session_id = body.get("session_id")
     if operation not in OPERATIONS or not isinstance(session_id, str) or not session_id:
@@ -163,6 +169,15 @@ async def handle(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
                 raise ValueError("Supply a single boolean approval decision.")
             await broker.decide(session_id, _identifier(body, "action_id"), allow)
             return {"accepted": True}
+        if operation == "edit":
+            try:
+                edit = SavedConnectionEdit.model_validate(body.get("changes"))
+            except ValueError:
+                # Never echo a validation error: it would quote the private inputs.
+                raise ValueError("Invalid saved connection change. Check the fields.") from None
+            if edit_carries_secret(edit) and not control.inbound_https.get():
+                raise PermissionError(INSECURE_INPUTS)
+            return await broker.edit_saved(session_id, _identifier(body, "connection_id"), edit)
         await broker.forget(session_id, _identifier(body, "connection_id"))
         return {"deleted": True}
     except AccessDenied as exc:

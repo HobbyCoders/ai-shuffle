@@ -1,5 +1,6 @@
 """Resource authorization, real SSH transport, one-shot approval, and file fences."""
 import asyncio
+import json
 import os
 import re
 from unittest.mock import AsyncMock
@@ -10,10 +11,12 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from app.core import chat_access, chat_files
+from app.core import chat_access, chat_files, chat_vault
 from app.core.chat_access import AccessDenied, Broker, GrantInput
+from tests.core.test_chat_vault import vault  # noqa: F401 - fixture
 
 _real_session_owner = chat_access.session_owner
+_REAL_CATALOG = chat_vault.catalog
 
 
 @pytest.fixture
@@ -571,6 +574,9 @@ def test_preview_cannot_grant_or_approve():
     for path in ("/api/v1/chat-access/chat/grants", "/api/v1/chat-access/chat/actions/action"):
         assert not mutation_allowed(path, "POST")
         assert mutation_allowed(path, "GET")
+    # Nor edit or delete a saved connection.
+    for method in ("PATCH", "DELETE"):
+        assert not mutation_allowed(f"/api/v1/chat-access/chat/saved/{'c' * 32}", method)
 
 
 def test_tool_surface_has_scoped_tools_not_escape_routes():
@@ -922,6 +928,227 @@ async def test_deleted_saved_connection_cannot_race_into_a_new_grant(broker, ssh
     await broker.decline("chat", request.id)
     with pytest.raises(AccessDenied):
         await requested
+
+
+# ---------------------------------------------------------------------------
+# Editing a saved connection
+# ---------------------------------------------------------------------------
+
+EDIT_OWNER = ("local", "worker")
+
+
+@pytest.fixture
+def saved_vault(broker, vault, monkeypatch):
+    """The broker over the real encrypted saved-connection store (in memory)."""
+    from app.core import chat_vault
+    monkeypatch.setattr(chat_vault, "catalog", _REAL_CATALOG)
+    return vault
+
+
+async def _grant_saved(broker, saved_id):
+    from app.core.chat_access import GrantSubmission
+    requested = asyncio.create_task(broker.request("chat", "machine", "Reuse a saved server"))
+    await asyncio.sleep(0)
+    request = next(r for r in broker.requests.values() if not r.result.done())
+    try:
+        await broker.fulfill("chat", request.id, GrantSubmission(saved_id=saved_id))
+    except BaseException:
+        await broker.decline("chat", request.id)
+        await asyncio.gather(requested, return_exceptions=True)
+        raise
+    return await requested
+
+
+@pytest.mark.asyncio
+async def test_saved_edit_keeps_blank_secrets_replaces_typed_ones_and_never_returns_them(broker, saved_vault, ssh_target):
+    from app.core import chat_vault
+    from app.core.chat_access import SavedConnectionEdit
+    spec, commands, _ = ssh_target
+    saved_id = chat_vault.save(EDIT_OWNER, spec)
+    handle = await _grant_saved(broker, saved_id)
+
+    # A rename with blank secrets keeps the stored password, the pin and the grant.
+    renamed = await broker.edit_saved("chat", saved_id, SavedConnectionEdit(label=" Renamed ", password=""))
+    assert renamed == {"updated": True, "revoked": 0, "host_key_cleared": False}
+    stored = chat_vault.load(EDIT_OWNER, saved_id)
+    assert stored.label == "Renamed" and stored.password.get_secret_value() == "test-only-password"
+    assert stored.fingerprint == spec.fingerprint and handle["id"] in broker.grants
+
+    # A typed password replaces the stored one, keeps the pin, and revokes
+    # grants that were built on the old details.
+    replaced = await broker.edit_saved("chat", saved_id, SavedConnectionEdit(password="replacement-only-secret"))
+    assert replaced == {"updated": True, "revoked": 1, "host_key_cleared": False}
+    assert handle["id"] not in broker.grants
+    stored = chat_vault.load(EDIT_OWNER, saved_id)
+    assert stored.password.get_secret_value() == "replacement-only-secret"
+    assert stored.fingerprint == spec.fingerprint
+    shown = json.dumps([renamed, replaced, chat_vault.catalog(EDIT_OWNER), await broker.snapshot("chat")])
+    assert "replacement-only-secret" not in shown and "test-only-password" not in shown
+    listed = chat_vault.catalog(EDIT_OWNER)[0]
+    assert {k: listed[k] for k in ("label", "host", "port", "username", "uses_key")} == {
+        "label": "Renamed", "host": "127.0.0.1", "port": spec.port, "username": "operator", "uses_key": False}
+
+    # The replacement is what the next use signs in with.
+    with pytest.raises(asyncssh.PermissionDenied):
+        await _grant_saved(broker, saved_id)
+    await broker.edit_saved("chat", saved_id, SavedConnectionEdit(password="test-only-password"))
+    again = await _grant_saved(broker, saved_id)
+    assert again["id"] in broker.grants and not commands
+    broker.revoke("chat", again["id"])
+
+
+@pytest.mark.asyncio
+async def test_saved_edit_of_address_clears_the_pin_and_next_use_pins_the_presented_key(broker, saved_vault, ssh_target):
+    from app.core import chat_vault
+    from app.core.chat_access import SavedConnectionEdit
+    spec, _, _ = ssh_target
+    saved_id = chat_vault.save(EDIT_OWNER, spec.model_copy(update={"port": 1, "username": "nobody"}))
+    # Username changes keep the pinned host key.
+    kept = await broker.edit_saved("chat", saved_id, SavedConnectionEdit(username="operator"))
+    assert kept["host_key_cleared"] is False
+    assert chat_vault.load(EDIT_OWNER, saved_id).fingerprint == spec.fingerprint
+    # A key pinned for another port is never reused for this one.
+    moved = await broker.edit_saved("chat", saved_id, SavedConnectionEdit(port=spec.port))
+    assert moved["host_key_cleared"] is True
+    assert chat_vault.load(EDIT_OWNER, saved_id).fingerprint == ""
+    assert chat_vault.catalog(EDIT_OWNER)[0]["fingerprint"] == ""
+    # Trust on first use, then remembered like a newly saved connection.
+    handle = await _grant_saved(broker, saved_id)
+    assert chat_vault.load(EDIT_OWNER, saved_id).fingerprint == spec.fingerprint
+    assert broker.grants[handle["id"]].fingerprint == spec.fingerprint
+    # The pin is bookkeeping, not a change of details: the grant stays.
+    assert handle["id"] in broker.grants
+    broker.revoke("chat", handle["id"])
+
+
+def test_apply_saved_edit_address_and_credential_rules():
+    from app.core.chat_access import SavedConnectionEdit, apply_saved_edit
+    pin = "SHA256:" + "a" * 43
+    machine = GrantInput(kind="machine", label="NAS", host="fd00::1", port=22, username="root",
+                         fingerprint=pin, password="stored-password")
+    def edit(current, **changes):
+        return apply_saved_edit(current, SavedConnectionEdit.model_validate(changes))
+    # The same address written differently is no change.
+    assert edit(machine, host="fd00:0:0::1").fingerprint == pin
+    assert edit(machine, host="fd00::2").fingerprint == ""
+    assert edit(machine, port=2222).fingerprint == ""
+    assert edit(machine, username="admin", password="new-password").fingerprint == pin
+    # The owner may supply the new server's key with the new address.
+    other = "SHA256:" + "b" * 43
+    assert edit(machine, host="10.0.0.9", fingerprint=other + "=").fingerprint == other
+    # A private key replaces the password; a passphrase alone re-checks the stored key.
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    locked = key.export_private_key("openssh", passphrase="key-passphrase").decode()
+    keyed = edit(machine, private_key=locked, passphrase="key-passphrase")
+    assert keyed.password.get_secret_value() == "" and keyed.private_key.get_secret_value() == locked
+    with pytest.raises(AccessDenied, match="could not be read"):
+        edit(keyed, passphrase="wrong-passphrase")
+    assert edit(keyed, password="back-to-password").private_key.get_secret_value() == ""
+    assert edit(keyed, label="Renamed").private_key.get_secret_value() == locked
+
+    service = GrantInput(kind="service", label="API", url="https://api.example.com/v1",
+                         fingerprint="a" * 64, secret="stored-token-value")
+    assert edit(service, writable=True).fingerprint == "a" * 64
+    assert edit(service, secret="replacement-token").secret.get_secret_value() == "replacement-token"
+    assert edit(service, secret="").secret.get_secret_value() == "stored-token-value"
+    moved = edit(service, url="https://API.example.com:8443/v2/")
+    assert (moved.url, moved.fingerprint) == ("https://api.example.com:8443/v2", "")
+    assert edit(service, auth_header="X-API-Key", auth_scheme="").auth_header == "X-API-Key"
+
+
+@pytest.mark.parametrize("kind, changes, message", [
+    ("machine", {"host": "nas-LEAKCHECK.local"}, "not a hostname"),
+    ("machine", {"host": "https://10.0.0.1/LEAKCHECK"}, "not a hostname"),
+    ("machine", {"host": "224.0.0.1"}, "unicast"),
+    ("machine", {"host": "0.0.0.0"}, "unicast"),
+    ("machine", {"host": "fd00::1%LEAKCHECK"}, "interface scope"),
+    ("machine", {"username": "root LEAKCHECK"}, "POSIX username"),
+    ("machine", {"username": "-LEAKCHECK"}, "POSIX username"),
+    ("machine", {"label": "   "}, "name"),
+    ("machine", {"fingerprint": "SHA256:LEAKCHECK"}, "fingerprint"),
+    ("machine", {"url": "https://LEAKCHECK.example"}, "do not apply"),
+    ("machine", {"password": "LEAKCHECK-password", "private_key": "LEAKCHECK-key"}, "not both"),
+    ("machine", {"private_key": "LEAKCHECK not a key"}, "could not be read"),
+    ("machine", {"passphrase": "LEAKCHECK"}, "signs in with a password"),
+    ("service", {"url": "http://LEAKCHECK.example"}, "HTTPS"),
+    ("service", {"url": "https://user:LEAKCHECK@api.example.com"}, "without credentials"),
+    ("service", {"url": "https://api.example.com/?LEAKCHECK=1"}, "without credentials"),
+    ("service", {"secret": "LEAK"}, "8 to 8,192"),
+    ("service", {"auth_header": "Host"}, "credential header"),
+    ("service", {"fingerprint": "LEAKCHECK"}, "SHA-256"),
+    ("service", {"host": "10.0.0.1"}, "do not apply"),
+])
+def test_apply_saved_edit_validates_like_the_card_without_echoing(kind, changes, message):
+    from app.core.chat_access import SavedConnectionEdit, apply_saved_edit
+    current = (GrantInput(kind="machine", label="NAS", host="10.0.0.5", username="root", password="stored-password")
+               if kind == "machine" else
+               GrantInput(kind="service", label="API", url="https://api.example.com", secret="stored-token-value"))
+    with pytest.raises(AccessDenied, match=message) as error:
+        apply_saved_edit(current, SavedConnectionEdit.model_validate(changes))
+    assert "LEAK" not in str(error.value) and "stored-" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_saved_edit_racing_the_handshake_refuses_the_grant(broker, ssh_target, monkeypatch):
+    from pydantic import SecretStr
+    from app.core import chat_vault
+    from app.core.chat_access import GrantSubmission
+    spec, commands, _ = ssh_target
+    loads = []
+    def load(owner, saved_id):
+        loads.append(saved_id)
+        # Edited between the first read and the post-handshake recheck.
+        return spec if len(loads) == 1 else spec.model_copy(update={"password": SecretStr("edited-meanwhile")})
+    monkeypatch.setattr(chat_vault, "load", load)
+    requested = asyncio.create_task(broker.request("chat", "machine", "Reuse a saved connection"))
+    await asyncio.sleep(0)
+    request = next(iter(broker.requests.values()))
+    with pytest.raises(AccessDenied, match="changed while connecting"):
+        await broker.fulfill("chat", request.id, GrantSubmission(saved_id="a" * 32))
+    assert not broker.grants and not commands
+    await broker.decline("chat", request.id)
+    with pytest.raises(AccessDenied):
+        await requested
+
+
+@pytest.mark.asyncio
+async def test_saved_edit_api_is_owner_only_and_never_echoes_secrets(broker, saved_vault, ssh_target, monkeypatch):
+    from app.api import chat_access as api
+    from app.core import chat_vault
+    from app.api.auth import require_admin
+    spec, _, _ = ssh_target
+    saved_id = chat_vault.save(EDIT_OWNER, spec)
+    monkeypatch.setattr(api, "broker", broker)
+    monkeypatch.setattr(api, "checked", AsyncMock(return_value={"id": "chat"}))
+    monkeypatch.setattr(api, "owning_device", AsyncMock(return_value=None))
+    app = FastAPI()
+    app.include_router(api.router)
+    # Same owner guard as deleting a saved connection.
+    routes = {(tuple(r.methods), r.path): r for r in api.router.routes if r.path.endswith("/saved/{connection_id}")}
+    for route in routes.values():
+        assert any(dep.call is require_admin for dep in route.dependant.dependencies)
+    assert {methods for methods, _ in routes} == {("PATCH",), ("DELETE",)}
+    app.dependency_overrides[api.require_admin] = lambda: "owner"
+    endpoint = f"/api/v1/chat-access/chat/saved/{saved_id}"
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+        for invalid in ({"password": "MUST-NOT-ECHO", "port": "22"},
+                        {"password": "MUST-NOT-ECHO", "port": 70000},
+                        {"password": "MUST-NOT-ECHO", "port": 0},
+                        {"password": "MUST-NOT-ECHO", "unknown": True}):
+            response = await client.patch(endpoint, json=invalid)
+            assert response.status_code == 422 and "MUST-NOT-ECHO" not in response.text
+        response = await client.patch(endpoint, json={"host": "nas.local", "password": "MUST-NOT-ECHO"})
+        assert response.status_code == 400 and "MUST-NOT-ECHO" not in response.text
+        response = await client.patch(f"/api/v1/chat-access/chat/saved/{'f' * 32}", json={"label": "Missing"})
+        assert response.status_code == 400
+        response = await client.patch(endpoint, json={"label": "Renamed", "password": "fresh-only-secret"})
+        assert response.status_code == 200, response.text
+        assert response.json() == {"updated": True, "revoked": 0, "host_key_cleared": False}
+        assert "fresh-only-secret" not in response.text
+        listed = await client.get("/api/v1/chat-access/chat")
+        assert "fresh-only-secret" not in listed.text and "test-only-password" not in listed.text
+    stored = chat_vault.load(EDIT_OWNER, saved_id)
+    assert (stored.label, stored.password.get_secret_value()) == ("Renamed", "fresh-only-secret")
 
 
 @pytest.mark.asyncio
