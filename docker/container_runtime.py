@@ -50,12 +50,35 @@ HANDOVER_TRIAL = "handover.json"
 _handover_confirmed = False
 
 
+# An application update copies the database before the new code first starts
+# and puts the copy back if that start fails (docker/application_updates.py).
+ROLLBACK_PATTERN = r"^ai_shuffle_(rollback|failed)_[0-9a-f]{12}$"
+SNAPSHOT_MARGIN = 256 * 1024**2
+SNAPSHOT_TIMEOUT = 1800
+# An application that exits or stops answering readiness is restarted in place,
+# without restarting the container, at most this often. Past that the
+# supervisor exits and the container's restart policy takes over (#2112).
+RELAUNCH_LIMIT = 3
+RELAUNCH_WINDOW = 15 * 60.0
+
+
+def _rollback_name(name, kind):
+    if not re.fullmatch(ROLLBACK_PATTERN, name) or not name.startswith(f"ai_shuffle_{kind}_"):
+        raise RuntimeFailure("invalid update database name")
+
+
 class RuntimeFailure(Exception):
     """Deliberately secret-free operator diagnostic."""
 
 
 class RestartRejected(RuntimeFailure):
-    """Preflight failed before any request could quiesce the running worker."""
+    """Preflight failed before any request could quiesce the running worker.
+
+    ``reason`` is shown to the user when it says what to do next."""
+
+    def __init__(self, message, reason=None):
+        super().__init__(message)
+        self.reason = reason
 
 
 def log(message):
@@ -307,6 +330,68 @@ class Database:
     def query(self, sql="SELECT 1", *, admin=False):
         env = self.admin_env() if admin else client_env(self.url)
         return self.command(["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1"], env=env, text=sql, timeout=10).strip()
+
+    def admin_script(self, sql, *, timeout=10):
+        """Statements run one at a time (psql autocommit) on the admin socket."""
+        return self.command(["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1"], env=self.admin_env(),
+                            text=sql, timeout=timeout).strip()
+
+    # Update rollback copies (docker/application_updates.py). Only these names
+    # are ever created, renamed or dropped here; pg_hba admits the app role to
+    # APP_DB alone, so nothing but the admin socket can reach a copy.
+    def update_databases(self):
+        listed = self.query(f"SELECT datname FROM pg_database WHERE datname ~ '{ROLLBACK_PATTERN}'", admin=True)
+        return [name for name in listed.splitlines() if re.fullmatch(ROLLBACK_PATTERN, name)]
+
+    def snapshot_space(self):
+        """(free, needed) bytes on the data volume for one more copy of APP_DB."""
+        size = int(self.query(f"SELECT pg_database_size('{APP_DB}')", admin=True))
+        return shutil.disk_usage(self.data).free, size + max(size // 10, SNAPSHOT_MARGIN)
+
+    def snapshot(self, name):
+        """Copy APP_DB to ``name`` while the application is stopped."""
+        _rollback_name(name, "rollback")
+        self.admin_script(f"DROP DATABASE IF EXISTS {name}")
+        for attempt in range(3):
+            try:
+                # CREATE DATABASE waits up to 5 s for terminated sessions to end.
+                self.admin_script(f"SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
+                                  f"WHERE datname = '{APP_DB}' AND pid <> pg_backend_pid();\n"
+                                  f"CREATE DATABASE {name} TEMPLATE {APP_DB} OWNER {APP_USER} STRATEGY FILE_COPY",
+                                  timeout=SNAPSHOT_TIMEOUT)
+                return
+            except RuntimeFailure:
+                if attempt == 2 or STOP.is_set():
+                    raise
+
+    def restore_snapshot(self, name, discard):
+        """Put copy ``name`` back as APP_DB; the replaced database is renamed
+        ``discard`` in the same transaction, so APP_DB always exists. Safe to
+        repeat after an interruption: a finished swap leaves ``discard``."""
+        _rollback_name(name, "rollback")
+        _rollback_name(discard, "failed")
+        present = set(self.update_databases())
+        if name not in present:
+            if discard in present:
+                return
+            raise RuntimeFailure("the database copy taken before the update is missing")
+        if discard in present:
+            self.admin_script(f"DROP DATABASE {discard}")
+        for attempt in range(3):
+            try:
+                self.admin_script(f"SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity "
+                                  f"WHERE datname = '{APP_DB}' AND pid <> pg_backend_pid();\n"
+                                  f"BEGIN;\nALTER DATABASE {APP_DB} RENAME TO {discard};\n"
+                                  f"ALTER DATABASE {name} RENAME TO {APP_DB};\nCOMMIT", timeout=60)
+                return
+            except RuntimeFailure:
+                if attempt == 2 or STOP.is_set():
+                    raise
+
+    def drop_update_database(self, name):
+        if not re.fullmatch(ROLLBACK_PATTERN, name):
+            raise RuntimeFailure("refusing to drop a database the updater did not create")
+        self.admin_script(f"DROP DATABASE IF EXISTS {name}", timeout=120)
 
     def record_mode(self):
         write_private(self.mode_file, json.dumps({"version": 1, "mode": self.mode}), replace=True)
@@ -679,33 +764,35 @@ class ReadinessMonitor:
         return self.failures >= (self.limit if self.ever_ready else self.startup_limit)
 
 
-def watch(app, db, chrome, monitor=None, updates=None, restart=None):
+def watch(app, db, chrome, monitor=None, updates=None, restart=None, relaunch=None):
+    """Supervise until STOP (returns 0) or a failure the container must restart for (1).
+
+    An application that exits or stops answering readiness is handed to
+    ``relaunch(app)``, which stops it, rolls back an update's failed first
+    start, and returns the new process (None when the worker cannot run).
+    At most RELAUNCH_LIMIT relaunches per RELAUNCH_WINDOW; then, or without
+    ``relaunch``, the supervisor exits and the restart policy takes over."""
     next_probe = time.monotonic() + READY_PROBE_INTERVAL
     next_update = time.monotonic() + 1
+    relaunched = []
     while not STOP.is_set():
+        failure = update_failure = None
         if app.poll() is not None:
-            if updates is not None:
-                updates.failed()
-            log("application exited unexpectedly")
-            return 1
-        if db.process is not None and db.process.poll() is not None:
+            failure = "application exited unexpectedly"
+        elif db.process is not None and db.process.poll() is not None:
             log("managed PostgreSQL exited unexpectedly")
             return 1
-        if chrome is not None and chrome.poll() is not None:
+        elif chrome is not None and chrome.poll() is not None:
             log("Chromium supervisor exited unexpectedly")
             return 1
-        if monitor is not None and time.monotonic() >= next_probe:
+        elif monitor is not None and time.monotonic() >= next_probe:
             next_probe = time.monotonic() + READY_PROBE_INTERVAL
             if monitor.check():
-                if updates is not None:
-                    updates.failed()
-                log(f"application readiness probe failed {monitor.failures} times in a row; "
-                    "exiting so the container restarts")
-                return 1
-            if updates is not None and monitor.ever_ready and monitor.failures == 0:
+                failure = f"application readiness probe failed {monitor.failures} times in a row"
+            elif updates is not None and monitor.ever_ready and monitor.failures == 0:
                 updates.healthy()
                 confirm_handover(updates.root)
-        if updates is not None and time.monotonic() >= next_update:
+        if failure is None and updates is not None and time.monotonic() >= next_update:
             next_update = time.monotonic() + 1
             if updates.install_requested.is_set():
                 updates.install_requested.clear()
@@ -713,19 +800,94 @@ def watch(app, db, chrome, monitor=None, updates=None, restart=None):
                     app = restart(app)
                     monitor = ReadinessMonitor(monitor.url)
                     next_probe = time.monotonic() + 1
-                except RestartRejected:
-                    updates.publish("ready", error="Could not restart for the update. Finish active sessions, check Allow updates, then retry.")
+                except RestartRejected as exc:
+                    updates.publish("ready", error=exc.reason or "Could not restart for the update. Finish active sessions, check Allow updates, then retry.")
                 except Exception:
                     # A stop request may have latched shutdown even when its
-                    # response failed or timed out. Never advertise that worker
-                    # as usable, clear its latch, or roll back migrated code.
-                    log("application update restart failed after preflight; "
-                        "exiting so the container restarts")
-                    return 1
+                    # response failed or timed out, so this worker is never
+                    # advertised as usable again: relaunch replaces it with a
+                    # fresh process (rolling back a started first boot).
+                    failure = "application update restart failed after preflight"
+                    update_failure = ("The update could not be started, so this worker went back to the "
+                                      "version it was running. Try again later.")
             elif monitor.ever_ready and monitor.failures == 0:
                 updates.tick()
+        if failure is not None:
+            now = time.monotonic()
+            relaunched = [moment for moment in relaunched if now - moment < RELAUNCH_WINDOW]
+            if relaunch is None or len(relaunched) >= RELAUNCH_LIMIT:
+                if relaunch is None and updates is not None:
+                    updates.failed()
+                log(f"{failure}; exiting so the container restarts")
+                return 1
+            log(f"{failure}; restarting the application")
+            try:
+                app = relaunch(app)
+            except Exception as exc:
+                log(f"could not restart the application ({type(exc).__name__}); exiting so the container restarts")
+                return 1
+            if app is None:
+                log("the application cannot be started again; exiting so the container restarts")
+                return 1
+            relaunched.append(now)
+            if updates is not None and update_failure and updates.state.get("pending"):
+                updates.publish("ready", error=update_failure)
+            if monitor is not None:
+                monitor = ReadinessMonitor(monitor.url)
+            next_probe = time.monotonic() + READY_PROBE_INTERVAL
+            continue
         STOP.wait(0.2)
     return 0
+
+
+def _update_error(exc):
+    # UpdateError comes from the updater module loaded beside this file.
+    return type(exc).__name__ == "UpdateError"
+
+
+def restart_into_update(current, updates, env):
+    """Replace the running app with the staged update; returns the new process.
+
+    RestartRejected leaves ``current`` untouched and serving. Any other error
+    comes after the worker was asked to quiesce, and watch replaces it with a
+    fresh process (start_current)."""
+    try:
+        busy = updates.lifecycle("active-sessions").get("active_sessions") != 0
+    except Exception as exc:
+        raise RestartRejected("Application update preflight failed") from exc
+    if busy:
+        raise RestartRejected("Finish active sessions before restarting")
+    try:
+        # Validate staged files, policy and room for the database copy
+        # before stopping the healthy app.
+        command, cwd, child_env = updates.launch(env, activate=True)
+        updates.snapshot_room()
+    except Exception as exc:
+        raise RestartRejected("Application update preflight failed", str(exc) if _update_error(exc) else None) from exc
+    # Once sent, even a timeout cannot prove the worker is still usable.
+    if updates.lifecycle("stop-sessions").get("stopped") is not True:
+        raise RuntimeFailure("Could not quiesce the worker")
+    stop_group(current, 30)
+    updates.activating()  # copies the database, then records the first start
+    return subprocess.Popen(command, cwd=cwd, env=child_env, start_new_session=True)
+
+
+def start_current(current, updates, env):
+    """Stop ``current`` and start the version that should run now: after a
+    failed first start, the previous one over the restored database copy.
+    None when the worker cannot run (blocked, or its build fails to verify)."""
+    stop_group(current, 30)
+    command, cwd, child_env = [sys.executable, "-m", "app.main"], None, env
+    if updates is not None:
+        updates.failed()
+        if updates.state.get("blocked"):
+            return None
+        try:
+            command, cwd, child_env = updates.launch(env)
+        except Exception as exc:
+            log(str(exc) if _update_error(exc) else f"cannot start the application ({type(exc).__name__})")
+            return None
+    return subprocess.Popen(command, cwd=cwd, env=child_env, start_new_session=True)
 
 
 def shutdown(app, chrome, db):
@@ -807,7 +969,7 @@ def run(settings, action, filename=None):
                 try:
                     updates = ContainerUpdates(root, image, (image_dir() / "application-update-key.pem").read_bytes(),
                                                lambda: lifecycle("update-policy").get("allow_updates") is True, lifecycle,
-                                               channel=channel, lease=lease)
+                                               channel=channel, lease=lease, database=db)
                 except UpdateError as exc:
                     raise RuntimeFailure(str(exc)) from exc
         if os.environ.get("START_CHROME", "1") == "1":
@@ -827,24 +989,17 @@ def run(settings, action, filename=None):
 
         def restart(current):
             nonlocal app
-            try:
-                if updates.lifecycle("active-sessions").get("active_sessions") != 0:
-                    raise UpdateError("Finish active sessions before restarting")
-                # Validate staged files and policy before stopping the healthy app.
-                command, cwd, child_env = updates.launch(env, activate=True)
-            except Exception as exc:
-                raise RestartRejected("Application update preflight failed") from exc
-            # Once sent, even a timeout cannot prove the worker is still usable.
-            # Let watch fail closed; run's finally stops children with DB alive.
-            if updates.lifecycle("stop-sessions").get("stopped") is not True:
-                raise UpdateError("Could not quiesce the worker")
-            stop_group(current, 30)
-            updates.activating()
-            app = subprocess.Popen(command, cwd=cwd, env=child_env, start_new_session=True)
+            app = restart_into_update(current, updates, env)
+            return app
+
+        def relaunch(current):
+            nonlocal app
+            app = start_current(current, updates, env)
             return app
 
         log("authenticated database ready; application started")
-        return watch(app, db, chrome, ReadinessMonitor(f"http://127.0.0.1:{settings.port}/health/ready"), updates, restart)
+        return watch(app, db, chrome, ReadinessMonitor(f"http://127.0.0.1:{settings.port}/health/ready"), updates,
+                     restart, relaunch)
     finally:
         try:
             if updates is not None:

@@ -106,10 +106,24 @@ def atomic_json(path, value):
     try:
         with os.fdopen(fd, "w") as stream:
             json.dump(value, stream)
+            # Durable before the rename: after a power loss the supervisor's
+            # state.json is the old or the new record, never an empty file
+            # that keeps the container from starting.
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+    if hasattr(os, "O_DIRECTORY"):  # POSIX: make the rename itself durable
+        try:
+            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError:
+            pass
 
 
 def allowed():

@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -254,6 +255,88 @@ def test_watch_exits_non_zero_when_live_app_stops_answering_readiness(monkeypatc
     assert "readiness probe failed 3 times in a row" in capsys.readouterr().err
 
 
+def test_watch_restarts_a_crashed_or_unready_app_in_place_within_a_budget(monkeypatch, capsys):
+    # #2112: a container whose restart policy is "no" stayed down after the
+    # readiness watchdog exited it. The app is restarted inside the container
+    # first; only repeated failures exit, for the restart policy to handle.
+    db = Mock(process=None)
+    monkeypatch.setattr(runtime, "READY_PROBE_INTERVAL", 0.01)
+    crashed = Mock()
+    crashed.poll.return_value = 1
+    started = []
+    def relaunch(current):
+        started.append(current)
+        app = Mock()
+        app.poll.return_value = 1  # every replacement crashes too
+        return app
+    assert runtime.watch(crashed, db, None, relaunch=relaunch) == 1
+    assert len(started) == runtime.RELAUNCH_LIMIT and started[0] is crashed
+    err = capsys.readouterr().err
+    assert err.count("restarting the application") == runtime.RELAUNCH_LIMIT
+    assert "application exited unexpectedly; exiting so the container restarts" in err
+
+    # A live app that stops answering readiness is replaced, then supervised
+    # until the external stop when the replacement is healthy.
+    hung, healthy = Mock(), Mock()
+    hung.poll.return_value = healthy.poll.return_value = None
+    answers = iter([False, False] + [True] * 10000)
+    monitor_type = runtime.ReadinessMonitor
+    def monitor(url):
+        return monitor_type(url, probe=lambda _: next(answers), failures=2, startup_failures=2)
+    monkeypatch.setattr(runtime, "ReadinessMonitor", monitor)
+    replaced = []
+    def relaunch_hung(current):
+        replaced.append(current)
+        threading.Timer(0.3, runtime.STOP.set).start()
+        return healthy
+    runtime.STOP.clear()
+    try:
+        assert runtime.watch(hung, db, None, monitor("http://127.0.0.1:1/health/ready"), relaunch=relaunch_hung) == 0
+    finally:
+        runtime.STOP.clear()
+    assert replaced == [hung]
+    assert "readiness probe failed 2 times in a row; restarting the application" in capsys.readouterr().err
+
+
+def test_watch_budget_forgets_old_restarts(monkeypatch):
+    from types import SimpleNamespace
+    clock = [0.0]
+    monkeypatch.setattr(runtime, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    db = Mock(process=None)
+    crashes = []
+    def relaunch(current):
+        crashes.append(clock[0])
+        clock[0] += runtime.RELAUNCH_WINDOW / 2  # one crash every 7.5 minutes
+        app = Mock()
+        app.poll.return_value = None if len(crashes) > 6 else 1
+        if len(crashes) > 6:
+            runtime.STOP.set()
+        return app
+    first = Mock()
+    first.poll.return_value = 1
+    runtime.STOP.clear()
+    try:
+        assert runtime.watch(first, db, None, relaunch=relaunch) == 0
+    finally:
+        runtime.STOP.clear()
+    assert len(crashes) == 7, "spaced-out crashes never exhaust the budget"
+
+
+def test_watch_without_a_replacement_or_when_blocked_exits():
+    db = Mock(process=None)
+    app = Mock()
+    app.poll.return_value = 1
+    assert runtime.watch(app, db, None, relaunch=lambda current: None) == 1
+    def broken(current):
+        raise OSError("synthetic spawn failure")
+    assert runtime.watch(app, db, None, relaunch=broken) == 1
+    # PostgreSQL or Chromium exiting still exits the container.
+    db.process = Mock()
+    db.process.poll.return_value = 1
+    app.poll.return_value = None
+    assert runtime.watch(app, db, None, relaunch=Mock()) == 1
+
+
 def test_run_probes_the_application_port(settings_factory, monkeypatch):
     cfg = settings_factory(port=18080)
     db = runtime.Database(cfg)
@@ -264,7 +347,7 @@ def test_run_probes_the_application_port(settings_factory, monkeypatch):
     monkeypatch.setenv("START_CHROME", "0")
     monkeypatch.setattr(runtime.subprocess, "Popen", lambda *args, **kwargs: Mock())
     seen = {}
-    monkeypatch.setattr(runtime, "watch", lambda app, db, chrome, monitor=None, updates=None, restart=None: seen.update(url=monitor.url) or 0)
+    monkeypatch.setattr(runtime, "watch", lambda app, db, chrome, monitor=None, updates=None, restart=None, relaunch=None: seen.update(url=monitor.url) or 0)
     monkeypatch.setattr(runtime, "shutdown", Mock())
     runtime.STOP.clear()
     assert runtime.run(cfg, "run") == 0
@@ -658,6 +741,181 @@ def test_real_pg_failed_role_ddl_never_logs_generated_password(settings_factory,
         assert db.password not in str(caught.value)
         assert db.query() == "1"
     finally:
+        db.close()
+
+
+def test_real_pg_update_copy_is_taken_put_back_and_dropped(settings_factory, pg_enabled):
+    import psycopg2
+    cfg = settings_factory()
+    db = runtime.Database(cfg, port=pg_enabled)
+    snapshot, discard = "ai_shuffle_rollback_" + "b" * 12, "ai_shuffle_failed_" + "b" * 12
+    try:
+        db.open()
+        db.publish_descriptor()
+        db.query("CREATE TABLE kept (value text); INSERT INTO kept VALUES ('before');")
+        free, need = db.snapshot_space()
+        assert free > 0 and need >= runtime.SNAPSHOT_MARGIN
+        # A connection the supervisor did not close in time is ended, not waited on.
+        lingering = psycopg2.connect(**cfg.get_database_connection())
+        try:
+            db.snapshot(snapshot)
+        finally:
+            lingering.close()
+        assert db.update_databases() == [snapshot]
+        db.query("CREATE TABLE migrated (value text); UPDATE kept SET value = 'after';")
+        lingering = psycopg2.connect(**cfg.get_database_connection())
+        try:
+            db.restore_snapshot(snapshot, discard)
+        finally:
+            lingering.close()
+        assert db.query("SELECT value FROM kept") == "before"
+        assert db.query("SELECT to_regclass('migrated') IS NULL") == "t"
+        assert db.update_databases() == [discard]
+        db.restore_snapshot(snapshot, discard)  # repeated after an interruption: already done
+        with pytest.raises(runtime.RuntimeFailure, match="copy taken before the update is missing"):
+            db.restore_snapshot("ai_shuffle_rollback_" + "c" * 12, "ai_shuffle_failed_" + "c" * 12)
+        db.drop_update_database(discard)
+        assert db.update_databases() == []
+        for name in ("ai_shuffle", "postgres", "ai_shuffle_rollback_x; DROP DATABASE ai_shuffle"):
+            with pytest.raises(runtime.RuntimeFailure):
+                db.drop_update_database(name)
+        with pytest.raises(runtime.RuntimeFailure):
+            db.snapshot("ai_shuffle_failed_" + "b" * 12)
+        # The application role still reaches only its own database.
+        db.snapshot(snapshot)
+        with pytest.raises(psycopg2.OperationalError):
+            psycopg2.connect(**dict(cfg.get_database_connection(), dbname=snapshot)).close()
+        assert db.query("SELECT value FROM kept") == "before"
+    finally:
+        db.close()
+
+
+def _signed_release_feed(monkeypatch, updater_module, tmp_path):
+    """A test-signed release feed served to the real updater module."""
+    import base64
+    import hashlib
+    import io
+    import zipfile
+    import httpx
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    key = Ed25519PrivateKey.generate()
+    responses = {}
+
+    def publish(revision, sequence):
+        entries = {f"ai-shuffle-{revision}/source.txt": revision}
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, "w") as archive:
+            for name, value in entries.items():
+                archive.writestr(name, value)
+        archive = output.getvalue()
+        files = [(name.split("/", 1)[1], hashlib.sha256(value.encode()).hexdigest()) for name, value in entries.items()]
+        payload = json.dumps({"format": 2, "revision": revision, "sequence": sequence, "version": f"0.{sequence}.0",
+                              "sha256": hashlib.sha256(archive).hexdigest(), "size": len(archive),
+                              "container": {"sequence": sequence, "runtime": "d" * 64}, "channel": "stable",
+                              "tree": hashlib.sha256(updater_module.tree_lines(files)).hexdigest()}).encode()
+        responses["/v1/desktop/manifest"] = json.dumps({"payload": base64.b64encode(payload).decode(),
+                                                        "signature": base64.b64encode(key.sign(payload)).decode()}).encode()
+        responses["/v1/desktop/sources/" + revision] = archive
+
+    client = httpx.Client
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=responses[request.url.path]))
+    monkeypatch.setattr(updater_module.httpx, "Client", lambda **kwargs: client(transport=transport, **kwargs))
+    public = key.public_key().public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+    return public, publish
+
+
+def test_real_pg_update_that_crashes_after_migrating_is_rolled_back(settings_factory, tmp_path, pg_enabled,
+                                                                     monkeypatch):
+    """Acceptance: version A runs, update B migrates the database and then
+    crashes on its first start. The supervisor puts the database back, runs A
+    again and does not offer B automatically; the worker never stays down."""
+    A, B = "a" * 40, "b" * 40
+    module = runtime.load_updater()
+    public, publish = _signed_release_feed(monkeypatch, module, tmp_path)
+    marker = tmp_path / "started.log"
+    programs = {
+        # The previous version: records each start, then serves until stopped.
+        A: '#!/bin/sh\necho "$GIT_SHA" >> "$TEST_MARKER"\nexec sleep 600\n',
+        # The new version: migrates the schema, then crashes before it is ready.
+        B: ('#!/bin/sh\npsql -X -q -v ON_ERROR_STOP=1 -c "CREATE TABLE migrated (value text);'
+            ' UPDATE kept SET value = \'after\';" || exit 9\nexit 3\n'),
+    }
+
+    def build(directory, revision, version=None):
+        for name in ("source/app/static/index.html", "complete"):
+            (directory / name).parent.mkdir(parents=True, exist_ok=True)
+            (directory / name).write_text(revision)
+        python = directory / "venv/bin/python"
+        python.parent.mkdir(parents=True, exist_ok=True)
+        python.write_text(programs[revision])
+        python.chmod(0o755)
+
+    cfg = settings_factory()
+    db = runtime.Database(cfg, port=pg_enabled)
+    app = None
+    try:
+        db.open()
+        db.query("CREATE TABLE kept (value text); INSERT INTO kept VALUES ('before');")
+        lifecycle = {"active-sessions": {"active_sessions": 0}, "stop-sessions": {"stopped": True}}
+        updates = module.ContainerUpdates(tmp_path / "application-updates",
+                                          {"revision": "c" * 40, "sequence": 1, "runtime": "d" * 64}, public,
+                                          lambda: True, lambda action: lifecycle.get(action, {}), database=db)
+        monkeypatch.setattr(updates, "build", build)
+        # Version A is the installed update the worker runs today.
+        publish(A, 2)
+        updates.check(download=True)
+        updates.activating()
+        updates.running = A
+        updates.healthy()
+        assert updates.state == {"active": A} and db.update_databases() == []
+        env = dict(runtime.client_env(db.url), PATH=os.environ["PATH"], TEST_MARKER=str(marker))
+        command, cwd, child_env = updates.launch(env)
+        app = runtime.subprocess.Popen(command, cwd=cwd, env=child_env, start_new_session=True)
+        # B is released, downloaded and installed by the owner.
+        publish(B, 3)
+        updates.check(download=True)
+        assert updates.state == {"active": A, "pending": B}
+        updates.install_requested.set()
+        current = {"app": app}
+
+        def restart(process):
+            current["app"] = runtime.restart_into_update(process, updates, env)
+            return current["app"]
+
+        def relaunch(process):
+            current["app"] = runtime.start_current(process, updates, env)
+            return current["app"]
+
+        result = {}
+        supervisor = threading.Thread(target=lambda: result.update(code=runtime.watch(
+            app, db, None, runtime.ReadinessMonitor("http://127.0.0.1:9/health/ready"), updates, restart, relaunch)))
+        supervisor.start()
+        deadline = runtime.time.monotonic() + 60
+        while runtime.time.monotonic() < deadline and supervisor.is_alive():
+            if marker.exists() and len(marker.read_text().split()) >= 2:
+                break
+            runtime.time.sleep(0.1)
+        runtime.STOP.set()
+        supervisor.join(10)
+        app = current["app"]
+        assert result.get("code") == 0, "the supervisor kept the worker up"
+        assert marker.read_text().split() == [A, A], "the previous version started again"
+        assert app.poll() is None, "the previous version is still serving"
+        assert updates.state == {"active": A, "failed": [B]}
+        assert db.query("SELECT value FROM kept") == "before"
+        assert db.query("SELECT to_regclass('migrated') IS NULL") == "t", "the migration was undone"
+        assert db.update_databases() == [], "no copies are left behind"
+        status = json.loads((updates.root / "status.json").read_text())
+        assert status["phase"] == "error" and status["version"] == B[:12] and "0.3.0 failed to start" in status["error"]
+        # The rolled-back release is not offered again by an automatic check.
+        updates.check()
+        assert updates.state == {"active": A, "failed": [B]}
+        assert json.loads((updates.root / "status.json").read_text())["phase"] == "error"
+    finally:
+        runtime.STOP.clear()
+        if app is not None and app.poll() is None:
+            runtime.stop_group(app, 5)
         db.close()
 
 

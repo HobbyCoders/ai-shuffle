@@ -22,6 +22,49 @@ A, B, C = "a" * 40, "b" * 40, "c" * 40
 RUNTIME = "d" * 64
 
 
+class FakeDatabase:
+    """The container_runtime.Database rollback-copy surface, in memory.
+
+    ``databases`` maps a name to its content; the updater only ever names
+    ai_shuffle_rollback_* and ai_shuffle_failed_* copies."""
+
+    def __init__(self, free=10**12, need=1000):
+        self.databases = {"ai_shuffle": "before"}
+        self.calls = []
+        self.free, self.need = free, need
+        self.fail = set()
+
+    def _call(self, *call):
+        self.calls.append(call)
+        if call[0] in self.fail:
+            raise RuntimeError(f"synthetic {call[0]} failure")
+
+    def snapshot_space(self):
+        self._call("space")
+        return self.free, self.need
+
+    def update_databases(self):
+        self._call("list")
+        return sorted(name for name in self.databases if name != "ai_shuffle")
+
+    def snapshot(self, name):
+        self._call("snapshot", name)
+        self.databases[name] = self.databases["ai_shuffle"]
+
+    def restore_snapshot(self, name, discard):
+        self._call("restore", name, discard)
+        if name not in self.databases:
+            if discard in self.databases:
+                return
+            raise RuntimeError("copy missing")
+        self.databases[discard] = self.databases["ai_shuffle"]
+        self.databases["ai_shuffle"] = self.databases.pop(name)
+
+    def drop_update_database(self, name):
+        self._call("drop", name)
+        self.databases.pop(name, None)
+
+
 @pytest.fixture(autouse=True)
 def _no_inherited_update_settings(monkeypatch):
     """Start every test from a customer container's defaults.
@@ -269,7 +312,9 @@ def test_image_behind_the_installed_update_names_both_sides_and_the_way_out(feed
     assert recovered.state == {} and recovered.launch({})[1] is None
 
 
-def test_failed_first_boot_never_rolls_back_and_newer_milestone_can_recover(feed):
+def test_failed_first_boot_without_a_database_copy_blocks_and_newer_milestone_can_recover(feed):
+    # A first start recorded without a copy (an older supervisor, or no
+    # managed database) is never rolled back over possibly migrated data.
     updater, publish, _, _, _ = feed
     publish()
     updater.check(download=True)
@@ -281,6 +326,144 @@ def test_failed_first_boot_never_rolls_back_and_newer_milestone_can_recover(feed
         ContainerUpdates(updater.root, dict(updater.image, revision=B, sequence=2), updater.public_key, lambda: True, lambda _: {})
     newer = ContainerUpdates(updater.root, dict(updater.image, revision=C, sequence=3), updater.public_key, lambda: True, lambda _: {})
     assert newer.state == {} and newer.launch({})[1] is None
+
+
+def staged_first_start(updater, database, publish, **fields):
+    """Stage B, copy the database and record its first start, as restart does."""
+    publish(**fields)
+    updater.database = database
+    updater.check(download=True)
+    updater.launch({}, activate=True)
+    updater.snapshot_room()
+    updater.activating()
+    database.databases["ai_shuffle"] = "migrated"  # what the new code did
+    return "ai_shuffle_rollback_" + B[:12]
+
+
+def test_failed_first_start_puts_the_database_copy_back_and_runs_the_previous_version(feed):
+    updater, publish, _, _, _ = feed
+    database = FakeDatabase()
+    snapshot = staged_first_start(updater, database, publish, version="1.2.3")
+    assert updater.state == {"pending": B, "booting": B, "snapshot": snapshot}
+    assert database.databases[snapshot] == "before"
+    assert updater.failed() is True
+    assert database.databases == {"ai_shuffle": "before"}, "the copy is back and the migrated database removed"
+    assert updater.state == {"failed": [B]}
+    status = status_of(updater)
+    assert status["phase"] == "error" and status["version"] == B[:12]
+    assert "1.2.3 failed to start" in status["error"] and "data is as it was before" in status["error"]
+    # The version that ran before: here the image's own code.
+    assert updater.launch({})[1] is None and updater.running is None
+    assert updater.failed() is False, "nothing left to roll back"
+
+
+def test_rolled_back_release_is_not_offered_again_unless_asked_for(feed):
+    updater, publish, _, requests, _ = feed
+    database = FakeDatabase()
+    staged_first_start(updater, database, publish, version="1.2.3")
+    updater.failed()
+    updater.check()
+    status = status_of(updater)
+    assert status["phase"] == "error" and status["version"] == B[:12] and "Choose Update to try it again" in status["error"]
+    assert updater.state == {"failed": [B]}
+    # The Update button asks for a download: one more try, from a fresh build.
+    updater.check(download=True)
+    assert updater.state == {"failed": [B], "pending": B}
+    updater.launch({}, activate=True)
+    updater.activating()
+    updater.healthy()
+    assert updater.state == {"active": B}, "a successful retry clears the failure"
+    assert database.databases == {"ai_shuffle": "before"}, "the copy is dropped once the new version is ready"
+
+
+def test_power_loss_during_a_first_start_rolls_back_at_the_next_container_start(feed):
+    updater, publish, _, _, _ = feed
+    database = FakeDatabase()
+    staged_first_start(updater, database, publish)
+    restarted = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {},
+                                 database=database)
+    assert restarted.state == {"failed": [B]} and database.databases == {"ai_shuffle": "before"}
+    assert status_of(restarted)["phase"] == "error", "the rollback notice is not replaced by an idle status"
+    assert restarted.launch({})[1] is None
+
+
+def test_interrupted_rollback_is_finished_at_the_next_start(feed):
+    updater, publish, _, _, _ = feed
+    database = FakeDatabase()
+    snapshot = staged_first_start(updater, database, publish)
+    # Power loss after the swap committed, before the state was saved.
+    discard = snapshot.replace("rollback", "failed")
+    database.databases.update({discard: "migrated", "ai_shuffle": database.databases.pop(snapshot)})
+    restarted = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {},
+                                 database=database)
+    assert restarted.state == {"failed": [B]} and database.databases == {"ai_shuffle": "before"}
+
+
+def test_rollback_that_cannot_restore_blocks_and_keeps_every_copy(feed):
+    updater, publish, _, _, _ = feed
+    database = FakeDatabase()
+    snapshot = staged_first_start(updater, database, publish)
+    database.fail.add("restore")
+    assert updater.failed() is False
+    assert updater.state["blocked"] is True and updater.state["snapshot"] == snapshot
+    with pytest.raises(UpdateError, match="failed first boot"):
+        ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {}, database=database)
+    assert database.databases == {"ai_shuffle": "migrated", snapshot: "before"}, "nothing is dropped on a blocked worker"
+
+
+def test_first_start_recorded_without_a_copy_still_blocks_with_a_database(feed):
+    updater, publish, _, _, _ = feed
+    publish()
+    updater.check(download=True)
+    updater.launch({}, activate=True)
+    updater.activating()  # an older supervisor: no copy
+    with pytest.raises(UpdateError, match="failed first boot"):
+        ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {},
+                         database=FakeDatabase())
+
+
+def test_a_copy_that_fails_never_records_a_first_start(feed):
+    updater, publish, _, _, _ = feed
+    publish()
+    database = FakeDatabase()
+    database.fail.add("snapshot")
+    updater.database = database
+    updater.check(download=True)
+    with pytest.raises(RuntimeError, match="snapshot"):
+        updater.activating()
+    assert updater.state == {"pending": B}, "the previous version is started again over unchanged data"
+
+
+def test_too_little_disk_for_the_copy_refuses_before_anything_stops(feed):
+    updater, publish, _, _, _ = feed
+    publish()
+    updater.database = FakeDatabase(free=2 * 1024**3, need=int(3.3 * 1024**3))
+    updater.check(download=True)
+    with pytest.raises(UpdateError, match=r"Not enough free disk space.*2\.0 GB free, 3\.3 GB needed.*keeps running"):
+        updater.snapshot_room()
+    updater.database.fail.add("space")
+    with pytest.raises(UpdateError, match="Could not check free disk space"):
+        updater.snapshot_room()
+
+
+def test_left_over_copies_are_removed_at_start(feed):
+    updater, _, _, _, _ = feed
+    database = FakeDatabase()
+    database.databases.update({"ai_shuffle_rollback_" + C[:12]: "old", "ai_shuffle_failed_" + C[:12]: "old"})
+    ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {}, database=database)
+    assert database.databases == {"ai_shuffle": "before"}
+    database.fail.add("list")
+    ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: True, lambda _: {}, database=database)
+
+
+def test_state_file_survives_power_loss_as_a_complete_record(tmp_path, monkeypatch):
+    synced = []
+    real = os.fsync
+    monkeypatch.setattr(policy.os, "fsync", lambda fd: synced.append(stat.S_ISDIR(os.fstat(fd).st_mode)) or real(fd))
+    policy.atomic_json(tmp_path / "state.json", {"active": A})
+    assert json.loads((tmp_path / "state.json").read_text()) == {"active": A}
+    assert synced == [False, True], "the file is flushed to disk before the rename, then the directory"
+    assert [p.name for p in tmp_path.iterdir()] == ["state.json"]
 
 
 def test_bad_signature_and_checksum_rejected_before_build(feed):
@@ -389,10 +572,14 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
         "from docker.application_updates import ContainerUpdates, UpdateError\n"
     )
     monkeypatch.setattr(supervisor, "__file__", str(packaging / "container_runtime.py"))
-    def factory(root, image, public_key, allowed, lifecycle, channel, lease):
+    database = FakeDatabase()
+    def factory(root, image, public_key, allowed, lifecycle, channel, lease, database=None):
         assert channel == "stable", "customers follow signed releases unless UPDATE_CHANNEL says otherwise"
+        assert database is db, "the supervisor hands the updater its managed database"
         updater.allowed, updater.lifecycle, updater.lease = allowed, lifecycle, lease
+        updater.database = fake_database
         return updater
+    fake_database = database
     monkeypatch.setattr(update_module, "ContainerUpdates", factory)
     monkeypatch.setattr(startup, "is_shutting_down", False)
     monkeypatch.setattr(internal, "_shutdown_task", None)
@@ -454,28 +641,35 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
         db = Mock(process=None)
         db.close.side_effect = lambda: events.append("db-close")
         monkeypatch.setattr(supervisor, "Database", lambda settings: db)
-        old, new = Mock(name="old"), Mock(name="new")
-        old.poll.return_value = new.poll.return_value = None
+        old, new, recovered = Mock(name="old"), Mock(name="new"), Mock(name="recovered")
+        old.poll.return_value = new.poll.return_value = recovered.poll.return_value = None
         def popen(*args, **kwargs):
             if "initial-start" not in events:
                 events.append("initial-start")
                 monkeypatch.setenv("SHUFFLE_DESKTOP_LIFECYCLE_TOKEN", kwargs["env"]["SHUFFLE_DESKTOP_LIFECYCLE_TOKEN"])
                 return old
+            if not updater.state.get("booting"):
+                # The version that ran before, over the database it had.
+                events.append("recovered-start")
+                assert kwargs["cwd"] is None and database.databases["ai_shuffle"] == "before"
+                return recovered
             events.append("replacement-start")
-            assert updater.state["booting"] == B
+            assert updater.state["booting"] == B and updater.state["snapshot"] in database.databases, \
+                "the database is copied before the update's code first runs"
             if failure == "popen":
                 raise OSError("synthetic spawn failure")
+            database.databases["ai_shuffle"] = "migrated"
             return new
         spawn = Mock(side_effect=popen)
         monkeypatch.setattr(supervisor.subprocess, "Popen", spawn)
         def stop_group(process, timeout):
             if process is None:
                 return
-            events.append("stop-old" if process is old else "stop-new")
+            events.append({id(old): "stop-old", id(new): "stop-new"}.get(id(process), "stop-recovered"))
             if failure == "stop-group" and events.count("stop-old") == 1:
                 raise OSError("synthetic process stop failure")
             process.poll.return_value = 0
-            if failure == "stop-timeout":
+            if failure == "stop-timeout" and events.count("stop-old") == 1 and process is old:
                 assert startup.is_shutting_down
                 assert not internal._shutdown_task.done()
                 release_flush.set()
@@ -512,32 +706,51 @@ def test_supervisor_restart_failure_boundary(feed, monkeypatch, tmp_path, failur
         # read with the lifecycle token from /internal/desktop/source-lease.
         assert updater.lease() == "bGVhc2U" and actions[-1] == "source-lease"
 
-        assert result == (0 if safe or failure == "none" else 1)
+        # The worker is never left down: every outcome keeps supervising an
+        # application until the external stop.
+        assert result == 0
+        assert events[-1] == "db-close"
         if safe:
             assert not startup.is_shutting_down
             flush_mock.assert_not_awaited()
             assert "stop-sessions" not in actions
             assert status.call_args.args == ("ready",)
             assert stop_event.wait.call_count == 2, "old worker remains supervised until external shutdown"
-        else:
-            assert startup.is_shutting_down, "recovery must never clear a real shutdown latch"
-            flush_mock.assert_awaited_once()
-            status.assert_not_called()
-            if failure != "none":
-                stop_event.wait.assert_not_called(), "fatal restart must exit watch immediately"
-        assert events[-1] == "db-close"
-        assert "stop-old" in events
-        if failure in {"popen", "none"}:
-            assert spawn.call_count == 2
-            assert updater.state == {"pending": B, "booting": B}
-            if failure == "none":
-                assert events[-2] == "stop-new", "finally owns the replacement process"
-            # A potentially migrated boot never falls back to the image on restart.
-            with pytest.raises(UpdateError, match="older code cannot safely run"):
-                ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: False, lambda _: {})
-        else:
+            assert "stop-old" in events
             spawn.assert_called_once()
+            assert updater.state == {"pending": B} and database.calls == []
+            return
+        assert startup.is_shutting_down, "the quiesced old process is never advertised as usable"
+        flush_mock.assert_awaited_once()
+        assert "stop-old" in events
+        if failure == "none":
+            assert spawn.call_count == 2
+            assert events[-2] == "stop-new", "finally owns the replacement process"
+            status.assert_not_called()
+            snapshot = "ai_shuffle_rollback_" + B[:12]
+            assert updater.state == {"pending": B, "booting": B, "snapshot": snapshot}
+            # The next start (power loss, kill) during that first boot puts the
+            # copy back instead of blocking or running older code over migrated data.
+            restarted = ContainerUpdates(updater.root, updater.image, updater.public_key, lambda: False, lambda _: {},
+                                         database=database)
+            assert restarted.state == {"failed": [B]} and restarted.launch({})[1] is None
+            assert database.databases == {"ai_shuffle": "before"}
+            assert status_of(restarted)["phase"] == "error" and status_of(restarted)["version"] == B[:12]
+            return
+        # A failure after the old process was quiesced: it is replaced by a
+        # fresh process of the version that ran before, over unchanged data.
+        assert events.count("recovered-start") == 1 and events[-2] == "stop-recovered"
+        assert database.databases == {"ai_shuffle": "before"}, "no copy is left behind"
+        if failure == "popen":
+            assert spawn.call_count == 3
+            assert updater.state == {"failed": [B]}
+            assert status.call_args.args == ("error",) and status.call_args.kwargs["version"] == B
+            assert "went back to the previous version" in status.call_args.kwargs["error"]
+        else:
+            assert spawn.call_count == 2
             assert updater.state == {"pending": B}
+            assert status.call_args.args == ("ready",)
+            assert "went back to the version it was running" in status.call_args.kwargs["error"]
 
 
 def test_only_a_signed_release_for_the_configured_channel_is_offered(feed):

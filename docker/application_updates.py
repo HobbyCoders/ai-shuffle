@@ -2,7 +2,10 @@
 
 Never edits /app, installs OS packages, or opens the Docker socket. Builds run
 unprivileged with a credential-free environment. State and versions live on the
-existing data volume. A failed first boot blocks rollback over migrated data.
+existing data volume. Before an update first starts, the stopped application's
+database is copied; if that first start fails, the copy is put back and the
+previous version runs again. Without a copy, a failed first boot blocks
+rollback over migrated data.
 """
 from __future__ import annotations
 
@@ -51,8 +54,15 @@ IMAGE_NOTICE = ("A coming update needs a newer Docker image. This version keeps 
                 "update the image when convenient.")
 
 
+SNAPSHOT = re.compile(r"ai_shuffle_rollback_[0-9a-f]{12}")
+
+
 class UpdateError(Exception):
     pass
+
+
+def _log(message):
+    print(f"container runtime: {message}", file=sys.stderr, flush=True)
 
 
 def tree_lines(files):
@@ -144,6 +154,11 @@ def missing_capabilities(container, image):
 # What a hand-over runs from the update's source (docker/container_runtime.py).
 HANDOVER_FILES = ("docker/container_runtime.py", "docker/application_updates.py",
                   "docker/chrome-supervisor.sh", "docker/start-chrome.sh")
+
+
+def discard_name(snapshot):
+    """What the database an update left behind is renamed to on rollback."""
+    return snapshot.replace("_rollback_", "_failed_", 1)
 
 
 def handover_target(root, image, public_key):
@@ -251,10 +266,14 @@ CHECK_INTERVAL_SECONDS = 24 * 3600
 
 
 class ContainerUpdates:
-    def __init__(self, root, image, public_key, allowed, lifecycle, channel="stable", lease=None):
+    def __init__(self, root, image, public_key, allowed, lifecycle, channel="stable", lease=None, database=None):
         if channel not in CHANNELS:
             raise UpdateError("Unknown update channel")
         self.channel = channel
+        # The supervisor's managed database (container_runtime.Database), for
+        # the copy taken before an update's first start. None keeps the
+        # original contract: a failed first boot blocks.
+        self.database = database
         # Returns the X-Shuffle-Lease value, or None (beta mode, no lease yet,
         # app not answering). The supervisor reads it from the app's
         # token-protected /api/v1/internal/desktop/source-lease.
@@ -272,6 +291,8 @@ class ContainerUpdates:
         self.thread = None
         self.install_requested = threading.Event()
         self.running = None
+        # The revision whose failed first start was last rolled back, if any.
+        self.rolled_back = None
         # When the feed was last read (epoch seconds). Workers compare it with
         # each other's to tell "checked and found nothing" from "not checked
         # since another worker found an update".
@@ -290,6 +311,8 @@ class ContainerUpdates:
             for revision in self.state.get("failed", []):
                 if not REVISION.fullmatch(revision):
                     raise ValueError("failed revision")
+            if "snapshot" in self.state and not SNAPSHOT.fullmatch(self.state["snapshot"]):
+                raise ValueError("snapshot")
         except FileNotFoundError:
             pass
         except Exception as exc:
@@ -297,7 +320,10 @@ class ContainerUpdates:
         # An interrupted explicit restart must not become permission on next boot.
         self.request_path.unlink(missing_ok=True)
         if self.state.get("booting"):
+            # Power loss or a kill during an update's first start: put the
+            # database copy back and run the previous version.
             self.failed()
+        self.discard_copies()
         pending = self.state.get("pending")
         if pending:
             staged_manifest = self.manifest(pending)
@@ -316,7 +342,8 @@ class ContainerUpdates:
             self.save()
         if self.state.get("blocked"):
             raise UpdateError("An application update failed first boot. Install a newer image; older code cannot safely run over this database. Files retained.")
-        self.publish("ready" if self.state.get("pending") else "idle")
+        if not self.rolled_back:
+            self.publish("ready" if self.state.get("pending") else "idle")
 
     def directory(self, revision):
         if not REVISION.fullmatch(revision):
@@ -346,13 +373,72 @@ class ContainerUpdates:
                     "release": offered.get("release"), "notes": offered.get("notes"), "channel": self.channel,
                     "checked_at": self.checked_at, "notice": self.notice})
 
+    def release_name(self, revision):
+        try:
+            return self.manifest(revision).get("version") or revision[:12]
+        except Exception:
+            return revision[:12]
+
     def failed(self):
-        revision = self.state.pop("booting", None)
-        if revision:
-            self.state["failed"] = sorted({*self.state.get("failed", []), revision})
-            self.state.pop("pending", None)
+        """An update's first start failed. Returns True when its database copy
+        was put back, so the previous version (state["active"], or the
+        image's own code) may run again; the update stays in state["failed"]
+        and is not offered automatically again. Without a copy, or when
+        putting it back fails, the worker is blocked as before: older code
+        never runs over a database the update may have migrated.
+
+        The caller has stopped the failed application first."""
+        revision = self.state.get("booting")
+        if not revision:
+            return False
+        snapshot = self.state.get("snapshot")
+        restored = False
+        if snapshot and self.database is not None:
+            try:
+                self.database.restore_snapshot(snapshot, discard_name(snapshot))
+                restored = True
+            except Exception as exc:
+                _log(f"could not put back the database copy taken before update {revision[:12]} "
+                     f"({type(exc).__name__}); the copy {snapshot} is kept")
+        self.state.pop("booting")
+        self.state["failed"] = sorted({*self.state.get("failed", []), revision})
+        self.state.pop("pending", None)
+        if not restored:
             self.state["blocked"] = True
             self.save()
+            return False
+        self.state.pop("snapshot")
+        self.save()
+        self.rolled_back = revision
+        self.running = None
+        _log(f"application update {revision[:12]} failed to start; restored the database copy "
+             "and starting the previous version")
+        self.drop_copy(discard_name(snapshot))
+        self.publish("error", error=(
+            f"Version {self.release_name(revision)} failed to start, so this worker went back to the "
+            "previous version. Your data is as it was before the update."), version=revision)
+        return True
+
+    def drop_copy(self, name):
+        try:
+            self.database.drop_update_database(name)
+        except Exception as exc:
+            _log(f"could not remove the database copy {name} ({type(exc).__name__}); "
+                 "it is removed at the next start")
+
+    def discard_copies(self):
+        """Remove database copies no update state refers to (an interrupted
+        activation or clean-up). Never blocks a start."""
+        if self.database is None or self.state.get("blocked"):
+            return  # a blocked worker keeps everything for the operator
+        try:
+            names = self.database.update_databases()
+        except Exception as exc:
+            _log(f"could not list update database copies ({type(exc).__name__})")
+            return
+        for name in names:
+            if name != self.state.get("snapshot"):
+                self.drop_copy(name)
 
     def healthy(self):
         if self.state.get("booting") == self.running and self.running:
@@ -361,7 +447,15 @@ class ContainerUpdates:
             self.state["active"] = self.running
             self.state.pop("pending", None)
             self.state.pop("booting", None)
+            snapshot = self.state.pop("snapshot", None)
+            if self.running in self.state.get("failed", []):
+                # An earlier failed attempt of this revision, retried by request.
+                self.state["failed"] = [r for r in self.state["failed"] if r != self.running]
+                if not self.state["failed"]:
+                    self.state.pop("failed")
             self.save()
+            if snapshot and self.database is not None:
+                self.drop_copy(snapshot)
             self.publish("idle", "Updated version is running.")
             self.prune()
 
@@ -387,6 +481,8 @@ class ContainerUpdates:
             if not revision:
                 raise UpdateError("No application update is ready")
         if not revision:
+            if not activate:
+                self.running = None  # the image's own code
             return [sys.executable, "-m", "app.main"], None, env
         manifest = self.manifest(revision)
         if missing_capabilities(manifest["container"], self.image):
@@ -426,10 +522,35 @@ class ContainerUpdates:
                 "the existing data anyway, stop the container and delete application-updates/state.json "
                 "from the data volume; files retained.")
 
+    def snapshot_room(self):
+        """Refuse an install before stopping anything when the database copy
+        would not fit; the message says how much space is needed."""
+        if self.database is None:
+            return
+        try:
+            free, need = self.database.snapshot_space()
+        except Exception as exc:
+            raise UpdateError("Could not check free disk space for the update; the current version keeps running") from exc
+        if free < need:
+            raise UpdateError(
+                "Not enough free disk space for the copy of the database the update keeps until the new "
+                f"version has started ({free / 1024**3:.1f} GB free, {need / 1024**3:.1f} GB needed). "
+                "Free some space on the data volume and try again; the current version keeps running.")
+
     def activating(self):
-        self.running = self.state["pending"]
-        self.state["booting"] = self.running
-        self.save()  # after old app stopped, before anything could migrate the DB
+        # After the old app stopped, before anything could migrate the DB: copy
+        # it, then record the first start. A failed copy raises before booting
+        # is saved, and the old version is started again over the same data.
+        revision = self.state["pending"]
+        snapshot = None
+        if self.database is not None:
+            snapshot = f"ai_shuffle_rollback_{revision[:12]}"
+            self.database.snapshot(snapshot)
+        self.running = revision
+        self.state["booting"] = revision
+        if snapshot:
+            self.state["snapshot"] = snapshot
+        self.save()
 
     def current_lease(self):
         """The lease header value, or None. Never raises: without a lease the
@@ -539,6 +660,13 @@ class ContainerUpdates:
             # The offered revision, not the running one: a status naming the
             # running revision reads as "Already up to date" (#1901).
             self.publish("image-required", IMAGE_REQUIRED, version=revision)
+            return
+        if revision in self.state.get("failed", []) and not download:
+            # Rolled back once already: never offered on its own again. An
+            # explicit download (the Update button) may try it once more.
+            self.publish("error", error=(
+                f"Version {manifest.get('version') or revision[:12]} failed to start on this worker and was "
+                "rolled back. Choose Update to try it again, or wait for a newer release."), version=revision)
             return
         self.remember(manifest)
         if not download:
