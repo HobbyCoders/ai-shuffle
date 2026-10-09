@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import os
 import sys
 import threading
 import types
@@ -59,6 +60,25 @@ def sdk(package_path):
     base = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = base
     spec.loader.exec_module(base)
+    # Standard library only; the Signal, iMessage and BlueBubbles connectors import it.
+    detached_path = Path(__file__).parent.parent / "detached_tasks.py"
+    spec = importlib.util.spec_from_file_location("app.core.detached_tasks", detached_path)
+    detached = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = detached
+    spec.loader.exec_module(detached)
+    process_tree = types.ModuleType("app.core.process_tree")
+
+    def child_env(extra=None):
+        # The host already limited this worker's environment (worker_environment).
+        env = dict(os.environ)
+        env.update(extra or {})
+        if os.name == "nt":
+            env.setdefault("PYTHONIOENCODING", "utf-8")
+            env.setdefault("PYTHONUTF8", "1")
+        return env
+
+    process_tree.child_env = child_env
+    sys.modules[process_tree.__name__] = process_tree
     db = types.ModuleType("app.db.database")
     db.update_connector_status = lambda *args, **kwargs: host_call("status", [list(args), kwargs])
     sys.modules[db.__name__] = db

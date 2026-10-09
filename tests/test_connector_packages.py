@@ -248,3 +248,43 @@ async def test_ready_worker_updates_saved_connection_status(local_package, monke
 
 
 
+
+
+def test_catalog_sources_import_only_what_the_worker_provides():
+    # The isolated worker has no app package: sdk() stands in for the few app
+    # modules a connector may import. A connector importing anything else fails
+    # to install (#2188); install tests stub the worker, so check it here.
+    import ast
+    import json
+    import subprocess
+    connectors = Path(packages.__file__).parent / "connectors"
+    probe = (
+        "import importlib.util, json, sys\n"
+        "spec = importlib.util.spec_from_file_location('package_worker', sys.argv[1])\n"
+        "worker = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(worker)\n"
+        "worker.sdk(worker.Path(sys.argv[2]))\n"
+        "worker.OUTPUT.write(json.dumps({n: dir(m) for n, m in sys.modules.items() if n.startswith('app')}))\n"
+    )
+    out = subprocess.run([sys.executable, "-I", "-c", probe, str(connectors / "package_worker.py"), str(connectors)],
+                         capture_output=True, text=True, check=True).stdout
+    provided = json.loads(out)
+    problems = []
+    for kind, spec in packages.CATALOG["packages"].items():
+        own = {"app.core.connectors." + Path(name).stem for name in spec["files"]}
+        for name in spec["files"]:
+            for node in ast.walk(ast.parse((connectors / name).read_text(encoding="utf-8"))):
+                if isinstance(node, ast.Import):
+                    imports = [(alias.name, None) for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    imports = [(node.module, alias.name) for alias in node.names]
+                else:
+                    continue
+                for module, attr in imports:
+                    if module.split(".")[0] != "app" or module in own:
+                        continue
+                    if module not in provided:
+                        problems.append(f"{kind}: {name} imports {module}")
+                    elif attr and attr not in provided[module] and f"{module}.{attr}" not in own:
+                        problems.append(f"{kind}: {name} imports {attr} from {module}")
+    assert not problems, problems
