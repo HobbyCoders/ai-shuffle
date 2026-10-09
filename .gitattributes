@@ -5,3 +5,15 @@
 entrypoint.sh text eol=lf
 # Connector catalog digests cover exact bytes, including in Windows bundles.
 app/core/connectors/*.py text eol=lf
+# The site tests read these as raw text and compare exact content (#2124): the
+# docs.json hash covers the docs sources and the render script, the buyer install
+# files (and their served copies) are published with SHA-256 sums and embedded
+# verbatim in the docs, and _headers and wrangler.toml are parsed line by line.
+# Keep LF on Windows checkouts with core.autocrlf=true.
+docs/content/**/*.md text eol=lf
+docs/install/compose/compose.yaml text eol=lf
+docs/install/compose/env.example text eol=lf
+android/site/public/ai-shuffle/install/* text eol=lf
+android/site/scripts/render-docs.mjs text eol=lf
+android/site/public/_headers text eol=lf
+android/site/wrangler.toml text eol=lf
