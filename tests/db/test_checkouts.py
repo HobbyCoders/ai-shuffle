@@ -270,3 +270,80 @@ def test_list_active_base_checkouts_empty_string_branch_is_base(project):
     rows = checkouts.list_active_base_checkouts()
     assert len(rows) == 1
     assert rows[0]["path"] == "/work/base"
+
+
+# ---------------------------------------------------------------------------
+# Legacy relative rows: boot repair + seed guard (#654 follow-up)
+# ---------------------------------------------------------------------------
+
+def _raw_row(project_id, runner_id, path, branch=None, row_id=None):
+    from app.db.base import get_db
+    with get_db() as conn:
+        conn.cursor().execute(
+            "INSERT INTO checkouts (id, project_id, runner_id, path, branch, status) "
+            "VALUES (%s, %s, %s, %s, %s, 'active')",
+            (row_id or "ck-legacy-" + path.replace("/", "-"), project_id, runner_id, path, branch),
+        )
+
+
+def _paths(project_id):
+    return sorted((c["path"], c["branch"] or "") for c in checkouts.list_checkouts(project_id))
+
+
+def test_repair_drops_relative_duplicate_of_a_base_row(project, tmp_path):
+    (tmp_path / "repo").mkdir()
+    checkouts.upsert_checkout(project["id"], "me", str(tmp_path / "repo"), branch="")
+    _raw_row(project["id"], "me", "repo")
+
+    assert checkouts.repair_relative_checkout_paths("me", tmp_path)["deleted"] == 1
+    assert _paths(project["id"]) == [(str(tmp_path / "repo"), "")]
+    assert checkouts.repair_relative_checkout_paths("me", tmp_path) == {"deleted": 0, "rewritten": 0, "kept": 0}
+
+
+def test_repair_makes_a_lone_relative_row_absolute_in_place(project, tmp_path):
+    (tmp_path / "repo").mkdir()
+    _raw_row(project["id"], "me", "repo", row_id="ck-lone")
+
+    assert checkouts.repair_relative_checkout_paths("me", tmp_path)["rewritten"] == 1
+    row = checkouts.get_checkout(project["id"], "me")
+    assert row["id"] == "ck-lone" and row["path"] == str(tmp_path / "repo")
+
+
+def test_repair_keeps_a_relative_base_whose_twin_is_branch_tagged(project, tmp_path):
+    # The relative row is the project's only BASE checkout; dropping it would
+    # leave none and make the app clone a fresh copy.
+    (tmp_path / "repo").mkdir()
+    checkouts.upsert_checkout(project["id"], "me", str(tmp_path / "repo"), branch="main")
+    _raw_row(project["id"], "me", "repo")
+
+    assert checkouts.repair_relative_checkout_paths("me", tmp_path) == {"deleted": 0, "rewritten": 0, "kept": 1}
+    assert checkouts.get_checkout(project["id"], "me")["path"] == "repo"
+
+
+def test_repair_leaves_missing_folders_and_other_runners_alone(project, tmp_path):
+    _raw_row(project["id"], "me", "gone")
+    _raw_row(project["id"], "other", "repo")
+    (tmp_path / "repo").mkdir()
+
+    assert checkouts.repair_relative_checkout_paths("me", tmp_path)["kept"] == 1
+    assert _paths(project["id"]) == [("gone", ""), ("repo", "")]
+
+
+def test_legacy_seed_is_redundant_only_for_a_relative_copy_of_a_base_folder(project, mock_db):
+    from app.db.base import get_db
+    checkouts.upsert_checkout(project["id"], "me", "/workspace/ai-shuffle", branch="")
+    checkouts.upsert_checkout(project["id"], "me", "/workspace/tagged", branch="main")
+    with get_db() as conn:
+        cur = conn.cursor()
+        assert checkouts.legacy_seed_is_redundant(cur, project["id"], "me", "ai-shuffle")
+        assert not checkouts.legacy_seed_is_redundant(cur, project["id"], "me", "shuffle")
+        assert not checkouts.legacy_seed_is_redundant(cur, project["id"], "me", "tagged")
+        assert not checkouts.legacy_seed_is_redundant(cur, project["id"], "other", "ai-shuffle")
+        assert not checkouts.legacy_seed_is_redundant(cur, project["id"], "me", "/workspace/ai-shuffle")
+
+
+def test_names_same_folder_handles_windows_paths():
+    assert checkouts._names_same_folder(r"D:\Projects\AI-Shuffle", "ai-shuffle")
+    assert checkouts._names_same_folder("/w/a/b", "a/b")
+    assert not checkouts._names_same_folder("/w/AI-Shuffle", "ai-shuffle")
+    assert not checkouts._names_same_folder("/w/b", "a/b")

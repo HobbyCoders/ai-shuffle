@@ -1794,8 +1794,13 @@ def _run_column_migrations(cursor):
         # on the (project_id, runner_id, path) unique — `(id)`-scoped conflict
         # would raise UniqueViolation and abort EVERY boot; bare skips the dup.
         seeded_ck = 0
+        from app.db.checkouts import legacy_seed_is_redundant
         for row in legacy_projects:
             origin = _origin_for(row)
+            # This pass re-runs whenever the migration code changes: never
+            # re-add a relative legacy path whose folder already has a base row.
+            if legacy_seed_is_redundant(cursor, _pv2_id(origin), row["instance_id"] or "", row["path"]):
+                continue
             cursor.execute(
                 "INSERT INTO checkouts "
                 "(id, project_id, runner_id, path, branch, status) "

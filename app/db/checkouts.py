@@ -19,7 +19,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import ntpath
 import os
+import posixpath
+import re
 from typing import Any, Dict, List, Optional
 
 from app.db.base import get_db
@@ -417,3 +420,122 @@ def archive_checkout_by_path(project_id: str, path: str, *,
     if not row or row.get("status") == "archived":
         return row
     return set_checkout_status(row["id"], "archived")
+
+
+# ---------------------------------------------------------------------------
+# Legacy workspace-relative rows (#654 follow-up)
+# ---------------------------------------------------------------------------
+#
+# The v60 collapse (and the resolver's lazy legacy self-seed) copy a legacy
+# ``projects.path`` into ``checkouts`` verbatim, and an old one can be
+# workspace-relative (``ai-shuffle``). V2 records the same folder again under its
+# absolute path, so one folder ends up with two rows. Readers that pick "the"
+# checkout then saw two candidates and refused ("missing or ambiguous").
+
+
+def is_absolute_checkout_path(path: Optional[str]) -> bool:
+    """Absolute on POSIX OR Windows, so a path written on one OS is never
+    mistaken for a relative one when read on another."""
+    return bool(path) and (posixpath.isabs(path) or ntpath.isabs(path))
+
+
+def _is_base(row: Dict[str, Any]) -> bool:
+    return not (row.get("branch") or "")
+
+
+def _path_parts(path: str) -> List[str]:
+    return [p for p in re.split(r"[\\/]+", path) if p and p != "."]
+
+
+def _names_same_folder(absolute: str, relative: str) -> bool:
+    """Whether ``absolute`` ends with the components of ``relative``
+    (``/workspace/ai-shuffle`` and ``ai-shuffle``). Used where the workspace
+    folder is not known yet (the boot migration runs before it is loaded)."""
+    rel = _path_parts(relative)
+    tail = _path_parts(absolute)[-len(rel):] if rel else []
+    if not rel or len(tail) != len(rel):
+        return False
+    if ntpath.splitdrive(absolute)[0]:  # Windows paths compare case-insensitively
+        return [p.casefold() for p in tail] == [p.casefold() for p in rel]
+    return tail == rel
+
+
+def legacy_seed_is_redundant(cursor: Any, project_id: str, runner_id: str,
+                             path: Optional[str]) -> bool:
+    """True when seeding a legacy relative ``path`` as a base checkout would only
+    duplicate a base row this project already has for the same folder.
+
+    The legacy seeders re-run (the collapse on every migration pass, the
+    resolver on demand), so without this check a duplicate removed by
+    :func:`repair_relative_checkout_paths` would come straight back.
+    """
+    if not path or is_absolute_checkout_path(path):
+        return False
+    cursor.execute(
+        "SELECT path FROM checkouts WHERE project_id = %s AND runner_id = %s "
+        "AND (branch IS NULL OR branch = '')",
+        (project_id, runner_id),
+    )
+    return any(
+        is_absolute_checkout_path(r["path"]) and _names_same_folder(r["path"], path)
+        for r in cursor.fetchall()
+    )
+
+
+def _folder_key(path: str) -> str:
+    return os.path.normcase(os.path.realpath(path))
+
+
+def repair_relative_checkout_paths(runner_id: str, workspace_dir: Any) -> Dict[str, int]:
+    """Repair this runner's legacy workspace-relative checkout rows.
+
+    Runs at boot once the workspace folder is known. For each relative row:
+
+    * another row of the same project already records that folder in the same
+      role (base, or the same branch): the relative row is a duplicate and is
+      deleted;
+    * no row records that folder and it exists on disk: the path is rewritten
+      to its absolute form, in place (same id);
+    * otherwise it is kept. A relative BASE row whose only twin is tagged with a
+      branch is still the project's base checkout; dropping it would leave the
+      project without one and make the app clone a fresh copy.
+
+    Only rows of ``runner_id`` are touched. Returns counts per outcome.
+    """
+    result = {"deleted": 0, "rewritten": 0, "kept": 0}
+    workspace = str(workspace_dir)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM checkouts WHERE runner_id = %s", (runner_id,))
+        rows = _rows(cursor.fetchall())
+        absolute = [r for r in rows if is_absolute_checkout_path(r.get("path"))]
+        for row in rows:
+            path = row.get("path")
+            if not path or is_absolute_checkout_path(path):
+                continue
+            target = os.path.normpath(os.path.join(workspace, path))
+            key = _folder_key(target)
+            twins = [a for a in absolute
+                     if a["project_id"] == row["project_id"] and _folder_key(a["path"]) == key]
+            same_role = [a for a in twins
+                         if _is_base(a) == _is_base(row)
+                         and (_is_base(row) or a.get("branch") == row.get("branch"))]
+            if same_role:
+                cursor.execute("DELETE FROM checkouts WHERE id = %s AND path = %s",
+                               (row["id"], path))
+                result["deleted"] += 1
+                logger.info("checkouts: removed duplicate relative row %s (%r = %s)",
+                            row["id"], path, same_role[0]["path"])
+            elif not twins and os.path.isdir(target):
+                cursor.execute(
+                    "UPDATE checkouts SET path = %s, updated_at = NOW() "
+                    "WHERE id = %s AND path = %s",
+                    (target, row["id"], path),
+                )
+                result["rewritten"] += 1
+                absolute.append({**row, "path": target})
+                logger.info("checkouts: made relative row %s absolute (%r -> %s)",
+                            row["id"], path, target)
+            else:
+                result["kept"] += 1
+    return result

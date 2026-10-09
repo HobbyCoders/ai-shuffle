@@ -547,3 +547,23 @@ def test_step_g_rerun_is_zero_write(test_db):
         assert cur.fetchall() == after_first
         cur.execute("SELECT * FROM checkouts ORDER BY id")
         assert cur.fetchall() == cks_first
+
+
+def test_rerun_does_not_reseed_a_repaired_relative_duplicate(test_db, tmp_path):
+    # A legacy relative path ("repo") beside V2's absolute base row for the same
+    # folder: the boot repair deletes the relative copy, and a later migration
+    # pass (it re-runs whenever migration code changes) must not put it back.
+    from tests.pg_shim import route_db_to
+    from app.db import checkouts
+
+    (tmp_path / "repo").mkdir()
+    with route_db_to(test_db) as shim:
+        _seed_project(shim, "repo", "repo", "repo", "me", "git:shared")
+        database._run_column_migrations(shim.cursor())
+        project_id = origin_id("git:shared")
+        checkouts.upsert_checkout(project_id, "me", str(tmp_path / "repo"), branch="")
+
+        assert checkouts.repair_relative_checkout_paths("me", tmp_path)["deleted"] == 1
+        database._run_column_migrations(shim.cursor())
+
+        assert [c["path"] for c in checkouts.list_checkouts(project_id)] == [str(tmp_path / "repo")]

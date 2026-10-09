@@ -296,6 +296,16 @@ def init_workspace() -> None:
     """Phase 3: Configure and verify workspace directory."""
     load_workspace_from_database()
     settings.effective_workspace_dir.mkdir(parents=True, exist_ok=True)
+    # Legacy workspace-relative checkout rows can only be resolved now that the
+    # workspace folder is known; repair them before anything reads checkouts.
+    try:
+        from app.db import checkouts
+        repaired = checkouts.repair_relative_checkout_paths(
+            settings.effective_instance_id, settings.effective_workspace_dir)
+        if repaired["deleted"] or repaired["rewritten"]:
+            logger.info("Repaired legacy relative checkout rows: %s", repaired)
+    except Exception:  # noqa: BLE001 - a repair must never block boot
+        logger.warning("Legacy checkout row repair failed", exc_info=True)
 
 
 def check_prerequisites() -> None:

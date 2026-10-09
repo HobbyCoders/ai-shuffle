@@ -155,18 +155,15 @@ def _seed_pv2_from_legacy(
                 "ON CONFLICT (origin) DO NOTHING",
                 (pv2_id, origin, legacy.get("name") or origin, "{}"),
             )
-            cursor.execute(
-                "INSERT INTO checkouts "
-                "(id, project_id, runner_id, path, branch, status) "
-                "VALUES (%s, %s, %s, %s, NULL, 'active') "
-                "ON CONFLICT DO NOTHING",
-                (
-                    "ck-" + str(legacy.get("id")),
-                    pv2_id,
-                    legacy.get("instance_id") or "",
-                    legacy.get("path"),
-                ),
-            )
+            runner = legacy.get("instance_id") or ""
+            if not checkouts_db.legacy_seed_is_redundant(cursor, pv2_id, runner, legacy.get("path")):
+                cursor.execute(
+                    "INSERT INTO checkouts "
+                    "(id, project_id, runner_id, path, branch, status) "
+                    "VALUES (%s, %s, %s, %s, NULL, 'active') "
+                    "ON CONFLICT DO NOTHING",
+                    ("ck-" + str(legacy.get("id")), pv2_id, runner, legacy.get("path")),
+                )
     except Exception as e:  # pragma: no cover - best-effort self-seed
         logger.warning(
             "project_resolver: failed to self-seed project_v2 for origin %s: %s",
