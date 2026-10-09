@@ -1043,37 +1043,9 @@ async def disable_subagent(
 # Agent Export/Import Endpoints
 # ============================================================================
 
-@router.get("/{profile_id}/export", response_model=AgentExport)
-async def export_profile(
-    request: Request,
-    profile_id: str,
-    token: str = Depends(require_auth)
-):
-    """
-    Export a profile/agent as JSON for sharing.
-
-    Returns a downloadable JSON file containing the agent's configuration.
-    Sensitive data like paths and secrets are sanitized.
-    """
-    api_user = get_api_user_from_request(request)
-
-    # Check if API user is restricted to its assigned agents
-    profile_ids = api_user.get("profile_ids") if api_user else None
-    if profile_ids:
-        if profile_id not in profile_ids:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied to this profile"
-            )
-
-    # One isolated read — everything below is pure formatting of the row.
-    profile = await run_sync(database.get_profile, profile_id)
-    if not profile:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Profile not found: {profile_id}"
-        )
-
+def build_agent_export(profile: dict, profile_id: Optional[str] = None) -> AgentExport:
+    """The ``ai-shuffle-agent`` export of one profile row (pure formatting)."""
+    profile_id = profile_id or profile.get("id")
     config = profile.get("config", {})
     system_prompt = config.get("system_prompt", {}) or {}
     ai_tools = config.get("ai_tools")
@@ -1121,12 +1093,46 @@ async def export_profile(
         # prompts, max_buffer_size, …) are not exported.
     )
 
-    export_data = AgentExport(
+    return AgentExport(
         version="1.0",
         type="ai-shuffle-agent",
         exported_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         agent=agent_data
     )
+
+
+@router.get("/{profile_id}/export", response_model=AgentExport)
+async def export_profile(
+    request: Request,
+    profile_id: str,
+    token: str = Depends(require_auth)
+):
+    """
+    Export a profile/agent as JSON for sharing.
+
+    Returns a downloadable JSON file containing the agent's configuration.
+    Sensitive data like paths and secrets are sanitized.
+    """
+    api_user = get_api_user_from_request(request)
+
+    # Check if API user is restricted to its assigned agents
+    profile_ids = api_user.get("profile_ids") if api_user else None
+    if profile_ids:
+        if profile_id not in profile_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this profile"
+            )
+
+    # One isolated read — everything below is pure formatting of the row.
+    profile = await run_sync(database.get_profile, profile_id)
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Profile not found: {profile_id}"
+        )
+
+    export_data = build_agent_export(profile, profile_id)
 
     # Return with headers suggesting download
     filename = f"{profile_id}-agent.json"

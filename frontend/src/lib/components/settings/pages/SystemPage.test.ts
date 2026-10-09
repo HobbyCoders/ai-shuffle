@@ -2,8 +2,10 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const transport = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), post: vi.fn(), delete: vi.fn(), patch: vi.fn() }));
+const fetchAndDownload = vi.hoisted(() => vi.fn());
 vi.mock('$lib/api/client', () => ({
 	api: transport,
+	fetchAndDownload,
 	getErrorMessage: (e: { detail?: string; message?: string }, fallback: string) => e?.detail ?? e?.message ?? fallback,
 	isApiError: (e: unknown) => typeof e === 'object' && e !== null && 'status' in e
 }));
@@ -175,6 +177,30 @@ describe('workspace', () => {
 		expect(input.value).toBe('/data/mine');
 		await fireEvent.click(screen.getByRole('button', { name: 'Load latest' }));
 		expect(input.value).toBe('/data/theirs');
+	});
+});
+
+describe('export all data', () => {
+	it('downloads one ZIP of everything and says to keep it private', async () => {
+		let finish!: () => void;
+		fetchAndDownload.mockImplementation(() => new Promise<void>((resolve) => (finish = resolve)));
+		render(SystemPage);
+		await fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+		expect(fetchAndDownload).toHaveBeenCalledExactlyOnceWith('/data-export/all', 'ai-shuffle-export-private.zip');
+		const busy = screen.getByRole('button', { name: 'Exporting…' }) as HTMLButtonElement;
+		expect(busy.disabled).toBe(true);
+		expect(screen.getByText(/A long history takes a few minutes/)).toBeTruthy();
+		finish();
+		expect(await screen.findByText(/Downloaded\. Chats are raw backups, so keep the file private\./)).toBeTruthy();
+		expect((screen.getByRole('button', { name: 'Export' }) as HTMLButtonElement).disabled).toBe(false);
+	});
+
+	it('reports a refused export', async () => {
+		fetchAndDownload.mockRejectedValue({ detail: 'Owner access required', status: 403 });
+		render(SystemPage);
+		await fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+		expect(await screen.findByText('Owner access required')).toBeTruthy();
+		expect(screen.queryByText(/A long history takes a few minutes/)).toBeNull();
 	});
 });
 

@@ -1,6 +1,6 @@
 /**
- * System: workspace folder, import from Claude Code and Codex, updates, memory health,
- * license, and Help (report a problem to HobbyCoders support). The legacy 'license' tab and AccountPanel land on `system.license`.
+ * System: workspace folder, import from Claude Code and Codex, export all data,
+ * updates, memory health, license, and Help (report a problem to HobbyCoders support). The legacy 'license' tab and AccountPanel land on `system.license`.
  * SystemPage.svelte renders one `<SettingRow id>` per entry.
  */
 import type { SettingEntry } from '../types';
@@ -20,6 +20,15 @@ export const entries: SettingEntry[] = [
 		label: 'Import from Claude Code and Codex',
 		hint: 'Skills, agents, MCP, projects',
 		keywords: ['import settings', 'instructions', 'skills', 'agents', 'mcp', 'codex', 'claude code']
+	},
+	{
+		id: 'system.exportAll',
+		category: 'system',
+		section: 'Your data',
+		label: 'Export all data',
+		hint: 'Every chat, agent, project',
+		help: 'Downloads one ZIP: every chat as a private backup (.jsonl) and as Markdown, each agent\'s settings and your project list. AI sign-ins, API keys, tokens, settings and agents\' environment variables are never included. Chats are raw backups, so anything typed or shown in a chat is in the file: keep it private. A long history takes a few minutes.',
+		keywords: ['export', 'download', 'backup', 'zip', 'all chats', 'history', 'take out', 'data access', 'markdown', 'jsonl']
 	},
 	{
 		id: 'system.allowUpdates',

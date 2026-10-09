@@ -1,6 +1,7 @@
 <script lang="ts">
 	/**
-	 * System: Workspace (folder, import from Claude Code and Codex), Updates
+	 * System: Workspace (folder, import from Claude Code and Codex), Your data
+	 * (export everything as one ZIP), Updates
 	 * (policy, check for updates, version), Memory (read-only health),
 	 * License and Help (report a problem to HobbyCoders support).
 	 *
@@ -12,6 +13,7 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { getErrorMessage } from '$lib/api/client';
 	import { getWorkspaceConfig, setWorkspaceConfig, validateWorkspacePath } from '$lib/api/auth';
+	import { exportAllData } from '$lib/api/sessions';
 	import {
 		activateLicense,
 		deactivateLicense,
@@ -94,6 +96,28 @@
 	const importValue = $derived(
 		importStep === 'preview' ? 'Choosing items' : imported !== null ? `Imported ${imported}` : 'Scan'
 	);
+
+	/* ---------- export all data ---------- */
+
+	let exporting = $state(false);
+	let exportNotice = $state('');
+	let exportError = $state('');
+
+	async function runExport() {
+		if (exporting) return;
+		exporting = true;
+		exportError = '';
+		exportNotice = 'Building the ZIP. A long history takes a few minutes; keep this page open.';
+		try {
+			await exportAllData();
+			exportNotice = 'Downloaded. Chats are raw backups, so keep the file private.';
+		} catch (cause) {
+			exportNotice = '';
+			exportError = getErrorMessage(cause, 'The export could not be downloaded');
+		} finally {
+			exporting = false;
+		}
+	}
 
 	/* ---------- updates ---------- */
 
@@ -369,6 +393,16 @@
 		</InlineBanner>
 	{/if}
 	{#if workspaceLoad === 'error'}<p class="st-msg err" role="alert">Could not load the workspace folder.</p>{/if}
+
+	<RowGroup title="Your data">
+		<SettingRow id="system.exportAll">
+			<button type="button" class="st-btn" aria-busy={exporting} disabled={exporting} onclick={runExport}>
+				{exporting ? 'Exporting…' : 'Export'}
+			</button>
+		</SettingRow>
+	</RowGroup>
+	{#if exportNotice}<p class="st-msg" role="status">{exportNotice}</p>{/if}
+	{#if exportError}<p class="st-msg err" role="alert">{exportError}</p>{/if}
 
 	<RowGroup title="Updates">
 		<SettingRow

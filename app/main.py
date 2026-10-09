@@ -582,6 +582,8 @@ app.include_router(agents.router)
 app.include_router(assistant.router)
 app.include_router(projects.router)
 app.include_router(sessions.router)
+from app.api import data_export
+app.include_router(data_export.router)
 from app.api import chat_access
 app.include_router(chat_access.router)
 from app.api.swarms import router as swarm_router

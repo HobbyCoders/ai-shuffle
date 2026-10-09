@@ -277,6 +277,15 @@ export async function exportSession(
 }
 
 /**
+ * Download one ZIP of every chat (private .jsonl backup and Markdown), each
+ * agent's export file and the project list. Owner only. The worker builds
+ * the ZIP while it downloads, so a long history takes a few minutes.
+ */
+export async function exportAllData(): Promise<void> {
+	await fetchAndDownload('/data-export/all', 'ai-shuffle-export-private.zip');
+}
+
+/**
  * Fork a session from a specific message index
  * @param sessionId The session to fork from
  * @param messageIndex The 0-based message index to fork after

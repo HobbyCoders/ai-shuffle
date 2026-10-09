@@ -61,7 +61,7 @@ Yes. The app keeps working for up to 14 days between license checks, so a short 
 
 ## What happens if I cancel?
 
-Your license stays active until the end of the period you paid for. After that, the app stops starting new agent runs. Your projects, sessions and database stay on your machine, untouched. You can download any chat, one at a time, as a private backup (`.jsonl`) or a Markdown file for sharing. To keep everything at once, back up your install; [Back up](/docs/getting-started/install-docker-compose#back-up) shows how for Docker. We never hold your data hostage.
+Your license stays active until the end of the period you paid for. After that, the app stops starting new agent runs. Your projects, sessions and database stay on your machine, untouched. At any time, **Settings → System → Export all data** downloads every chat (as a private backup `.jsonl` and as Markdown), every agent and your project list in one ZIP. To keep everything else, including project files, back up your install; [Back up](/docs/getting-started/install-docker-compose#back-up) shows how for Docker. We never hold your data hostage.
 
 ## Can I get a refund?
 

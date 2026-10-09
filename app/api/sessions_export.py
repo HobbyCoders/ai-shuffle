@@ -158,6 +158,164 @@ async def _load_jsonl_content(session: dict, working_dir: str) -> str:
     )
 
 
+def _safe_filename_title(title: str) -> str:
+    """A session title reduced to a short, portable file-name stem."""
+    safe_title = "".join(c if c.isalnum() or c in "-_ " else "" for c in title)
+    return safe_title.strip().replace(" ", "-")[:50]
+
+
+def _session_export_metadata(session: dict) -> dict:
+    """The session block of the JSON export."""
+    return {
+        "id": session.get("id"),
+        "title": session.get("title"),
+        "status": session.get("status"),
+        "profile_id": session.get("profile_id"),
+        "project_id": session.get("project_id"),
+        "created_at": session.get("created_at"),
+        "updated_at": session.get("updated_at"),
+        "total_cost_usd": session.get("total_cost_usd"),
+        "total_tokens_in": session.get("total_tokens_in"),
+        "total_tokens_out": session.get("total_tokens_out"),
+        "turn_count": session.get("turn_count"),
+        # Model attribution: what it started on AND what it ended on.
+        # A session that switched mid-flight exported only the latter.
+        "first_model": session.get("first_model"),
+        "launched_model": session.get("launched_model"),
+    }
+
+
+def _render_markdown(session: dict, messages: list, share_safe: bool = False) -> str:
+    """Render a session transcript as the Markdown export."""
+    import json
+    from datetime import datetime
+
+    md_lines = []
+
+    # Header
+    md_lines.append(f"# {session.get('title') or 'Untitled Session'}")
+    md_lines.append("")
+    if share_safe:
+        md_lines.append("> Sharing export: recognized credentials filtered; review before posting. Not a raw backup.")
+        md_lines.append("")
+
+    # Metadata
+    md_lines.append("## Session Info")
+    md_lines.append("")
+    md_lines.append(f"- **Created:** {session.get('created_at')}")
+    md_lines.append(f"- **Updated:** {session.get('updated_at')}")
+    if session.get("total_cost_usd"):
+        md_lines.append(f"- **Cost:** ${session.get('total_cost_usd'):.4f}")
+    if session.get("turn_count"):
+        md_lines.append(f"- **Turns:** {session.get('turn_count')}")
+    md_lines.append("")
+
+    # Messages
+    md_lines.append("## Conversation")
+    md_lines.append("")
+
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+        msg_type = msg.get("type")
+        timestamp = msg.get("metadata", {}).get("timestamp") if isinstance(msg.get("metadata"), dict) else None
+
+        if role == "system" and msg.get("systemSubtype") == "compact_boundary":
+            meta = (msg.get("systemData") or {}).get("compact_metadata") or {}
+            md_lines.append(
+                f"*Context Compacted ({meta.get('trigger', 'unknown')}): "
+                f"{meta.get('pre_tokens', '?')} → {meta.get('post_tokens', '?')} tokens; "
+                f"window {meta.get('context_window', '?')}.*"
+            )
+            md_lines.append("")
+            continue
+
+        # Skip empty messages and certain system messages
+        if not content and msg_type not in ("tool_use", "subagent"):
+            continue
+
+        if role == "user":
+            md_lines.append("### Human")
+            if timestamp:
+                md_lines.append(f"*{timestamp}*")
+            md_lines.append("")
+            md_lines.append(content)
+            md_lines.append("")
+
+        elif role == "assistant":
+            if msg_type == "tool_use":
+                tool_name = msg.get("toolName") or msg.get("tool_name", "Unknown Tool")
+                tool_input = msg.get("toolInput") or msg.get("tool_input", {})
+                tool_result = msg.get("toolResult", "")
+
+                md_lines.append(f"### Tool: {tool_name}")
+                if timestamp:
+                    md_lines.append(f"*{timestamp}*")
+                md_lines.append("")
+
+                # Format tool input
+                if tool_input:
+                    md_lines.append("**Input:**")
+                    md_lines.append("```json")
+                    md_lines.append(json.dumps(tool_input, indent=2, default=str))
+                    md_lines.append("```")
+                    md_lines.append("")
+
+                # Format tool result
+                if tool_result:
+                    # Coerce to string (tool_result can be a dict from JSONL)
+                    if not isinstance(tool_result, str):
+                        tool_result = json.dumps(tool_result, indent=2, default=str)
+                    md_lines.append("**Result:**")
+                    # Check if result looks like code or file content
+                    if "\n" in tool_result or len(tool_result) > 100:
+                        md_lines.append("```")
+                        md_lines.append(tool_result)
+                        md_lines.append("```")
+                    else:
+                        md_lines.append(tool_result)
+                    md_lines.append("")
+
+            elif msg_type == "subagent":
+                agent_type = msg.get("agentType", "Agent")
+                agent_desc = msg.get("agentDescription", "")
+
+                md_lines.append(f"### Subagent: {agent_type}")
+                if timestamp:
+                    md_lines.append(f"*{timestamp}*")
+                md_lines.append("")
+                if agent_desc:
+                    md_lines.append(f"**Task:** {agent_desc}")
+                    md_lines.append("")
+                if content:
+                    md_lines.append(content)
+                    md_lines.append("")
+
+            else:
+                # Regular text message
+                md_lines.append("### Assistant")
+                if timestamp:
+                    md_lines.append(f"*{timestamp}*")
+                md_lines.append("")
+                md_lines.append(content)
+                md_lines.append("")
+
+        elif role == "system":
+            # Include system messages as notes
+            subtype = msg.get("subtype", "")
+            if content:
+                md_lines.append("---")
+                md_lines.append(f"*System ({subtype}):* {content[:500]}")
+                md_lines.append("---")
+                md_lines.append("")
+
+    # Footer
+    md_lines.append("---")
+    md_lines.append(f"*Exported from AI Shuffle on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
+
+    return "\n".join(md_lines)
+
+
 @export_router.get("/{session_id}/export")
 async def export_session(
     request: Request,
@@ -215,8 +373,7 @@ async def export_session(
 
     # Generate base filename
     # Sanitize title for filename
-    safe_title = "".join(c if c.isalnum() or c in "-_ " else "" for c in title)
-    safe_title = safe_title.strip().replace(" ", "-")[:50]
+    safe_title = _safe_filename_title(title)
     date_str = datetime.now().strftime("%Y%m%d")
 
     filtered_jsonl = None
@@ -277,23 +434,7 @@ async def export_session(
     if format == "json":
         # JSON export - include full session data
         export_data = {
-            "session": {
-                "id": session.get("id"),
-                "title": session.get("title"),
-                "status": session.get("status"),
-                "profile_id": session.get("profile_id"),
-                "project_id": session.get("project_id"),
-                "created_at": session.get("created_at"),
-                "updated_at": session.get("updated_at"),
-                "total_cost_usd": session.get("total_cost_usd"),
-                "total_tokens_in": session.get("total_tokens_in"),
-                "total_tokens_out": session.get("total_tokens_out"),
-                "turn_count": session.get("turn_count"),
-                # Model attribution: what it started on AND what it ended on.
-                # A session that switched mid-flight exported only the latter.
-                "first_model": session.get("first_model"),
-                "launched_model": session.get("launched_model"),
-            },
+            "session": _session_export_metadata(session),
             "messages": messages,
             "exported_at": datetime.now().isoformat(),
             "format_version": "1.0"
@@ -313,131 +454,8 @@ async def export_session(
 
     else:
         # Markdown export
-        md_lines = []
-
-        # Header
-        md_lines.append(f"# {session.get('title') or 'Untitled Session'}")
-        md_lines.append("")
-        if share_safe:
-            md_lines.append("> Sharing export: recognized credentials filtered; review before posting. Not a raw backup.")
-            md_lines.append("")
-
-        # Metadata
-        md_lines.append("## Session Info")
-        md_lines.append("")
-        md_lines.append(f"- **Created:** {session.get('created_at')}")
-        md_lines.append(f"- **Updated:** {session.get('updated_at')}")
-        if session.get("total_cost_usd"):
-            md_lines.append(f"- **Cost:** ${session.get('total_cost_usd'):.4f}")
-        if session.get("turn_count"):
-            md_lines.append(f"- **Turns:** {session.get('turn_count')}")
-        md_lines.append("")
-
-        # Messages
-        md_lines.append("## Conversation")
-        md_lines.append("")
-
-        for msg in messages:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            msg_type = msg.get("type")
-            timestamp = msg.get("metadata", {}).get("timestamp") if isinstance(msg.get("metadata"), dict) else None
-
-            if role == "system" and msg.get("systemSubtype") == "compact_boundary":
-                meta = (msg.get("systemData") or {}).get("compact_metadata") or {}
-                md_lines.append(
-                    f"*Context Compacted ({meta.get('trigger', 'unknown')}): "
-                    f"{meta.get('pre_tokens', '?')} → {meta.get('post_tokens', '?')} tokens; "
-                    f"window {meta.get('context_window', '?')}.*"
-                )
-                md_lines.append("")
-                continue
-
-            # Skip empty messages and certain system messages
-            if not content and msg_type not in ("tool_use", "subagent"):
-                continue
-
-            if role == "user":
-                md_lines.append("### Human")
-                if timestamp:
-                    md_lines.append(f"*{timestamp}*")
-                md_lines.append("")
-                md_lines.append(content)
-                md_lines.append("")
-
-            elif role == "assistant":
-                if msg_type == "tool_use":
-                    tool_name = msg.get("toolName") or msg.get("tool_name", "Unknown Tool")
-                    tool_input = msg.get("toolInput") or msg.get("tool_input", {})
-                    tool_result = msg.get("toolResult", "")
-
-                    md_lines.append(f"### Tool: {tool_name}")
-                    if timestamp:
-                        md_lines.append(f"*{timestamp}*")
-                    md_lines.append("")
-
-                    # Format tool input
-                    if tool_input:
-                        md_lines.append("**Input:**")
-                        md_lines.append("```json")
-                        md_lines.append(json.dumps(tool_input, indent=2, default=str))
-                        md_lines.append("```")
-                        md_lines.append("")
-
-                    # Format tool result
-                    if tool_result:
-                        # Coerce to string (tool_result can be a dict from JSONL)
-                        if not isinstance(tool_result, str):
-                            tool_result = json.dumps(tool_result, indent=2, default=str)
-                        md_lines.append("**Result:**")
-                        # Check if result looks like code or file content
-                        if "\n" in tool_result or len(tool_result) > 100:
-                            md_lines.append("```")
-                            md_lines.append(tool_result)
-                            md_lines.append("```")
-                        else:
-                            md_lines.append(tool_result)
-                        md_lines.append("")
-
-                elif msg_type == "subagent":
-                    agent_type = msg.get("agentType", "Agent")
-                    agent_desc = msg.get("agentDescription", "")
-
-                    md_lines.append(f"### Subagent: {agent_type}")
-                    if timestamp:
-                        md_lines.append(f"*{timestamp}*")
-                    md_lines.append("")
-                    if agent_desc:
-                        md_lines.append(f"**Task:** {agent_desc}")
-                        md_lines.append("")
-                    if content:
-                        md_lines.append(content)
-                        md_lines.append("")
-
-                else:
-                    # Regular text message
-                    md_lines.append("### Assistant")
-                    if timestamp:
-                        md_lines.append(f"*{timestamp}*")
-                    md_lines.append("")
-                    md_lines.append(content)
-                    md_lines.append("")
-
-            elif role == "system":
-                # Include system messages as notes
-                subtype = msg.get("subtype", "")
-                if content:
-                    md_lines.append("---")
-                    md_lines.append(f"*System ({subtype}):* {content[:500]}")
-                    md_lines.append("---")
-                    md_lines.append("")
-
-        # Footer
-        md_lines.append("---")
-        md_lines.append(f"*Exported from AI Shuffle on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*")
-
+        content = _render_markdown(session, messages, share_safe)
         filename = f"{safe_title}-{date_str}{suffix}.md"
-        content = "\n".join(md_lines)
 
         return Response(
             content=content,

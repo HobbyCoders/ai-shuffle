@@ -697,6 +697,23 @@ curl "http://localhost:8000/api/v1/sessions/sess_abc123/export?format=jsonl" \
   -o session.jsonl
 ```
 
+### GET /api/v1/data-export/all
+
+Download everything in one ZIP: every chat, every agent and the project list. This is **Settings → System → Export all data**. Owner only: API keys and paired devices without owner rights get `403`.
+
+The ZIP is built while it downloads, one chat at a time, so a long history can take a few minutes. It holds one folder, `ai-shuffle-export-<date>-<time>/`:
+
+| Path | Contents |
+|------|----------|
+| `README.txt` | What the export holds and what it leaves out. |
+| `chats/<date>-<title>-<id>/chat-private.jsonl` | The chat's private raw backup, the same file as `format=jsonl` above. Missing for a chat with no saved history. |
+| `chats/<date>-<title>-<id>/chat-private.md` | The same chat as Markdown, the same as `format=markdown`. |
+| `agents/<agent_id>-agent.json` | The agent's export file, importable with `POST /api/v1/agents/import`. `env` is always `null`. |
+| `projects.json` | The projects, as `GET /api/v1/projects` returns them. |
+| `manifest.json` | `type: "ai-shuffle-export"`, the counts, and each chat's metadata, files and any `problems` (why a file is missing). |
+
+**Never included:** AI provider sign-ins and API keys, tokens, saved credentials, app settings, the install key, `.env` files, and agents' environment variables. **Private:** chats are raw backups, so anything typed into a chat or printed by a tool is in the file. The response carries `X-Transcript-Privacy: private-raw`; keep the file private.
+
 ### POST /api/v1/sessions/import
 
 Import a session from JSON file.
