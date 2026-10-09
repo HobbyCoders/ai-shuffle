@@ -288,3 +288,28 @@ def test_catalog_sources_import_only_what_the_worker_provides():
                     elif attr and attr not in provided[module] and f"{module}.{attr}" not in own:
                         problems.append(f"{kind}: {name} imports {attr} from {module}")
     assert not problems, problems
+
+
+def test_failed_runtime_check_names_the_step_and_logs_the_cause(local_package, monkeypatch, caplog):
+    import logging
+    import subprocess
+
+    def broken(*_):
+        raise subprocess.CalledProcessError(1, ["python"], stderr=b"ModuleNotFoundError: No module named 'app.core.x'")
+
+    monkeypatch.setattr(packages, "_validate_worker", broken)
+    with caplog.at_level(logging.WARNING, logger=packages.__name__):
+        with pytest.raises(ValueError, match="start-up check") as raised:
+            packages.install("signal")
+    assert "PyPI" not in str(raised.value)
+    assert "No module named 'app.core.x'" in caplog.text
+    assert packages.record("signal") is None
+
+    def offline(*_):
+        raise subprocess.CalledProcessError(1, ["pip"], stderr=b"Could not find a version")
+
+    monkeypatch.setattr(packages, "_prepare_environment", offline)
+    with caplog.at_level(logging.WARNING, logger=packages.__name__):
+        with pytest.raises(ValueError, match="PyPI"):
+            packages.install("signal")
+    assert "Could not find a version" in caplog.text

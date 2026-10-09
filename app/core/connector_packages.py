@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import tempfile
 import threading
@@ -26,6 +27,7 @@ _MAX_FILE_BYTES = 2_000_000
 CATALOG = json.loads((_SOURCE_DIR / "catalog.json").read_text())
 _DISPLAY_NAMES = {"discord": "Discord Bot"}
 _LOCK = threading.RLock()
+logger = logging.getLogger(__name__)
 
 
 def root() -> Path:
@@ -146,9 +148,14 @@ def install(kind: str, scope: str = "user") -> PluginInfo:
         _verify(staged, kind)
         try:
             _prepare_environment(staged, kind)
+        except Exception as exc:
+            logger.warning("Connector runtime %s: environment setup failed: %s", kind, _failure_detail(exc))
+            raise ValueError("The isolated connector environment could not be installed. Check this host's Python support and access to PyPI, then retry. The previous version is unchanged.") from exc
+        try:
             _validate_worker(staged, CATALOG["packages"][kind])
         except Exception as exc:
-            raise ValueError("The isolated connector environment could not be installed or validated. Check this host's Python support and access to PyPI, then retry. The previous version is unchanged.") from exc
+            logger.warning("Connector runtime %s: validation failed: %s", kind, _failure_detail(exc))
+            raise ValueError("The connector runtime installed but failed its start-up check. The worker log has the details. The previous version is unchanged.") from exc
         with lifecycle_lock():
             old = record(kind)
             if old and old.get("release") != CATALOG["release"]:
@@ -243,6 +250,15 @@ def _prepare_environment(path: Path, kind: str) -> None:
                     "--disable-pip-version-check", "--no-input", "--no-cache-dir", "--only-binary=:all:",
                     "--index-url", "https://pypi.org/simple", *requirements],
                    check=True, timeout=240, capture_output=True, env=worker_environment())
+
+
+def _failure_detail(exc: BaseException) -> str:
+    """The end of a failed child's stderr, for the worker log."""
+    stderr = getattr(exc, "stderr", None)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", "replace")
+    detail = (stderr or "").strip()
+    return f"{exc}: {detail[-2000:]}" if detail else repr(exc)
 
 
 def _validate_worker(path: Path, spec: dict) -> None:
