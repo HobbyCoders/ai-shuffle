@@ -545,6 +545,17 @@ def test_signed_manifest_with_malformed_release_fields_is_refused(feed, field, v
         verify_manifest(publish(**{field: value}), updater.public_key)
 
 
+def test_desktop_launcher_field_is_ignored_by_the_container_updater(feed):
+    # #1821 D5: the shared signed manifest gains desktop.launcher (the minimum
+    # Windows launcher). The container verifies the same envelope; the field
+    # must neither break the signature check nor stop the release staging.
+    updater, publish, _, _, _ = feed
+    envelope = publish(desktop={"launcher": 3})
+    assert verify_manifest(envelope, updater.public_key)["desktop"] == {"launcher": 3}
+    updater.check(download=True)
+    assert updater.state == {"pending": B}
+
+
 def test_archive_that_differs_from_the_signed_tree_is_never_built(feed, monkeypatch):
     updater, publish, _, _, _ = feed
     publish(tree="0" * 64)

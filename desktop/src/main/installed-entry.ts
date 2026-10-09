@@ -26,7 +26,10 @@ export async function startInstalled(): Promise<void> {
     return;
   }
   if (!/^[a-f0-9]{40}$/.test(baseline.revision) || !Number.isSafeInteger(baseline.sequence) || baseline.sequence <= 0) throw Error('Invalid installed desktop revision');
-  const updates = new SourceUpdates({ root, baseline,
+  // Installers built before the launcher stamp (#1821 D5) have none: version 0.
+  const launcher = baseline.launcher === undefined ? 0 : baseline.launcher;
+  if (!Number.isSafeInteger(launcher) || launcher < 0) throw Error('Invalid installed desktop launcher version');
+  const updates = new SourceUpdates({ root, baseline: { revision: baseline.revision, sequence: baseline.sequence },
     publicKey: await fs.readFile(path.join(app.getAppPath(), 'build/application-update-key.pem'), 'utf8'),
     bootstrapNode: path.join(process.resourcesPath, process.platform === 'win32' ? 'worker/node/node.exe' : 'worker/node/bin/node'),
   });
@@ -92,7 +95,7 @@ export async function startInstalled(): Promise<void> {
       const selected = await updates.select();
       app.releaseSingleInstanceLock();
       // Launch the GUI executable directly; no console shell is needed.
-      await launchInstalledSource(selected, root, installedLaunchArgs(process.argv.slice(1), app.commandLine.getSwitchValue('remote-debugging-port')));
+      await launchInstalledSource(selected, root, installedLaunchArgs(process.argv.slice(1), app.commandLine.getSwitchValue('remote-debugging-port')), launcher);
       app.quit();
       return;
     }

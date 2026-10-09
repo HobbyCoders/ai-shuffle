@@ -10,12 +10,13 @@
 //
 // The archive is scripts/source_archive.py's runtime-only tree, never GitHub's
 // zipball of the whole repository. The signed payload keeps format 2 and every
-// existing field, and adds channel, version, notes and tree.
+// existing field, and adds channel, version, notes, tree and desktop.launcher.
 import { sign, verify } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readFile, writeFile, unlink } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { readLauncher } from './launcher-contract.mjs';
 const repo = 'HobbyCoders/ai-shuffle';
 const channel = process.env.SOURCE_CHANNEL || 'edge';
 if (!['stable', 'edge'].includes(channel)) throw new Error('SOURCE_CHANNEL must be stable or edge');
@@ -125,8 +126,11 @@ try {
   const { runtime, requires, recommends } = contract;
   const capabilities = list => Array.isArray(list) && list.length <= 32 && list.every(name => typeof name === 'string' && /^[a-z0-9][a-z0-9.-]{0,39}$/.test(name));
   if (!/^[a-f0-9]{64}$/.test(runtime) || !capabilities(requires) || !capabilities(recommends)) throw Error('Invalid container runtime contract');
+  // The oldest Windows launcher (the code in an installed app.asar) this
+  // revision runs under (desktop/launcher.json, #1821 D5). Clients before it ignore the field.
+  const { minimum: launcher } = readLauncher(await readFile(new URL('../launcher.json', import.meta.url), 'utf8'));
   const payload = Buffer.from(JSON.stringify({ format: 2, revision, sequence, sha256, size, container: { sequence: containerSequence, runtime, requires, recommends },
-   channel, version, notes, tree }));
+   desktop: { launcher }, channel, version, notes, tree }));
   const signature = sign(null, payload, key);
   if (!verify(null, payload, await readFile(new URL('../build/application-update-key.pem', import.meta.url), 'utf8'), signature)) throw new Error('Signing key does not match launcher trust key');
   const signed = JSON.stringify({ payload: payload.toString('base64'), signature: signature.toString('base64') });

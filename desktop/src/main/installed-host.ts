@@ -27,6 +27,15 @@ export function installedExecutable(): string {
   if (!path.isAbsolute(executable)) throw new Error('Invalid installed desktop executable');
   return executable;
 }
+/**
+ * The installed launcher's version (desktop-build.json `launcher`, from
+ * desktop/launcher.json), passed to the updated app it starts (#1821 D5).
+ * Launchers built before the stamp pass nothing, which reads as 0.
+ */
+export const LAUNCHER_VERSION_ENV = 'SHUFFLE_LAUNCHER_VERSION';
+export function launcherVersion(value: unknown): number {
+  return typeof value === 'string' && /^(?:0|[1-9]\d{0,8})$/.test(value) ? Number(value) : 0;
+}
 /** Preserve an explicitly requested debugger across a restart; never enable one. */
 export function installedLaunchArgs(args: string[], debuggingPort = ''): string[] {
   // Chromium consumes some switches before process.argv reaches the app.
@@ -54,7 +63,7 @@ export async function saveInstalledHost(root: string, host: InstalledHost): Prom
   await fs.writeFile(file + '.tmp', JSON.stringify(host));
   await fs.rename(file + '.tmp', file);
 }
-export function sourceLaunch(application: SourceApplication, root: string, args: string[] = []) {
+export function sourceLaunch(application: SourceApplication, root: string, args: string[] = [], launcher = 0) {
   return {
     executable: application.electron,
     args: [application.desktopDir, ...args],
@@ -67,12 +76,13 @@ export function sourceLaunch(application: SourceApplication, root: string, args:
         // this variable. The allowlisted environment above would drop it, and the
         // updated app would wait on the dialog before starting its worker (#1801).
         ...(process.env[DISCLOSURE_ACCEPTED_ENV] === '1' ? { [DISCLOSURE_ACCEPTED_ENV]: '1' } : {}),
-        SHUFFLE_SOURCE_ROOT: root, SHUFFLE_SOURCE_REVISION: application.revision, SHUFFLE_SOURCE_NODE: application.node },
+        SHUFFLE_SOURCE_ROOT: root, SHUFFLE_SOURCE_REVISION: application.revision, SHUFFLE_SOURCE_NODE: application.node,
+        [LAUNCHER_VERSION_ENV]: String(launcher) },
     },
   };
 }
-export async function launchInstalledSource(application: SourceApplication, root: string, args: string[]): Promise<void> {
-  const launch = sourceLaunch(application, root, args);
+export async function launchInstalledSource(application: SourceApplication, root: string, args: string[], launcher = 0): Promise<void> {
+  const launch = sourceLaunch(application, root, args, launcher);
   const log = await fs.open(path.join(root, 'launch.log'), 'a');
   try {
     await new Promise<void>((resolve, reject) => {

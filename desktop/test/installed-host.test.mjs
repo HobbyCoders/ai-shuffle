@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 const require=createRequire(import.meta.url);
-const {readInstalledHostSync,saveInstalledHost,sourceLaunch,installedLaunchArgs,installedExecutable,requireInstalledElectron,InstallerRequired}=require('../dist/main/installed-host.js');
+const {readInstalledHostSync,saveInstalledHost,sourceLaunch,installedLaunchArgs,installedExecutable,requireInstalledElectron,InstallerRequired,launcherVersion}=require('../dist/main/installed-host.js');
 test('an explicit Chromium debugging port survives even when Electron omits it from argv',()=>{
  assert.deepEqual(installedLaunchArgs(['aishuffle://callback'],'19229'),['--remote-debugging-port=19229'],'NC-16: no URL scheme is registered, so no link argument is forwarded');
  assert.deepEqual(installedLaunchArgs([]),[]);
@@ -77,6 +77,23 @@ test('#1801: an accepted agent-access disclosure survives the installed launcher
   if(value===undefined)delete process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS;else process.env.SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS=value;
   assert.equal('SHUFFLE_DESKTOP_ACCEPT_AGENT_ACCESS' in sourceLaunch(app,'/r',[]).options.env,false,String(value));
  }
+});
+
+test('#1821 D5: the launcher passes its own version to the updated app through the allowlisted environment',t=>{
+ const saved=process.env.SHUFFLE_LAUNCHER_VERSION;t.after(()=>{if(saved===undefined)delete process.env.SHUFFLE_LAUNCHER_VERSION;else process.env.SHUFFLE_LAUNCHER_VERSION=saved;});
+ const app={electron:'/r/electron.exe',desktopDir:'/r/desktop',revision:'d'.repeat(40),node:'/r/node.exe',python:'/r/python.exe'};
+ delete process.env.SHUFFLE_LAUNCHER_VERSION;
+ assert.equal(sourceLaunch(app,'/r',[],3).options.env.SHUFFLE_LAUNCHER_VERSION,'3');
+ // No stamp (an installer built before it) reads as launcher 0.
+ assert.equal(sourceLaunch(app,'/r',[]).options.env.SHUFFLE_LAUNCHER_VERSION,'0');
+ // An inherited value (the updated app relaunching the EXE) never overrides the launcher's own.
+ process.env.SHUFFLE_LAUNCHER_VERSION='9';
+ assert.equal(sourceLaunch(app,'/r',[],1).options.env.SHUFFLE_LAUNCHER_VERSION,'1');
+});
+
+test('#1821 D5: the updated app reads a missing or malformed launcher version as 0',()=>{
+ for(const [value,expected] of [['0',0],['1',1],['42',42],[undefined,0],['',0],['-1',0],['1.5',0],['01',0],[' 2',0],['abc',0],['9999999999',0],[3,0]])
+  assert.equal(launcherVersion(value),expected,String(value));
 });
 
 test('a corrupt or foreign installed-host.json fails closed instead of choosing a profile',async t=>{

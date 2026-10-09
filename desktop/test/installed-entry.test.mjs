@@ -4,20 +4,20 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import path from 'node:path';
 const code=readFileSync(new URL('../dist/main/installed-entry.js',import.meta.url),'utf8');
-function fixture({locked=true,source=false,broken=false,blocked=false,answer=1,platform='win32',env={},missingStamp=false,badStamp=false,incompatible=false,activeFallback=false,state=null,recovery=false,recovered=false,confirmable=false,retryAvailable=true,installerError=false}={}){
- const events=[];const module={exports:{}};let options;
+function fixture({locked=true,source=false,broken=false,blocked=false,answer=1,platform='win32',env={},missingStamp=false,badStamp=false,incompatible=false,activeFallback=false,state=null,recovery=false,recovered=false,confirmable=false,retryAvailable=true,installerError=false,build={revision:'a'.repeat(40),sequence:100}}={}){
+ const events=[];const module={exports:{}};let options;let launched;
  const app={requestSingleInstanceLock:()=>{events.push('lock');return locked;},quit:()=>events.push('quit'),
   getPath:()=>path.resolve('existing-profile'),getName:()=> 'existing-name',getAppPath:()=>path.resolve('installed-app'),releaseSingleInstanceLock:()=>events.push('unlock'),commandLine:{getSwitchValue:()=>''},whenReady:async()=>{}};
  const dialog={showMessageBox:async options=>{events.push({dialog:options});return {response:answer};}};
  class SourceUpdates{constructor(value){options=value;}get hasSourceState(){return state?!!(state.active||state.pending):this.sourceState;}sourceState=source;get pendingVersion(){return state?.staged??state?.pending??null;}async application(revision){events.push('application');return {revision,desktopDir:path.resolve('staged-desktop'),node:path.resolve('runtime/node/bin/node')};}blocked=blocked;async load(){events.push('load');}async useNewerBaseline(confirmed=false){events.push('baseline');if(confirmed&&confirmable){this.recoveryRequired=false;this.blocked=false;}}canConfirmBaselineRecovery=confirmable;recoveryRequired=recovery;recoveredState=recovered;async retryFailed(){events.push('retry');return retryAvailable;}async select(preflight){events.push('select');if(broken)throw Error('No healthy source build');const selected={revision:state?(state.pending??state.active):'b'.repeat(40),desktopDir:path.resolve('staged-desktop'),node:path.resolve('runtime/node/bin/node')};await preflight?.(selected);if(preflight&&(!state||state.pending)){events.push('booting');if(state)state.booting=selected.revision;}return selected;}stageDownloads(){events.push('stage');}async cancelInstall(){events.push('cancel');if(state?.pending){state.staged=state.pending;delete state.pending;}this.sourceState=activeFallback;this.cancelled=true;}}
  class InstallerRequired extends Error {}
- const host={InstallerRequired,requireInstalledElectron:async application=>{events.push('preflight');if(incompatible&&(state?application.revision==='b'.repeat(40):!events.includes('cancel')))throw new InstallerRequired('New installer required');},installedExecutable:()=>env.APPIMAGE??path.resolve('Programs/AI Shuffle.exe'),saveInstalledHost:async(root,value)=>events.push({host:value,root}),installedLaunchArgs:args=>args.filter(x=>x.startsWith('aishuffle:')),launchInstalledSource:async()=>events.push('launch-source')};
+ const host={InstallerRequired,requireInstalledElectron:async application=>{events.push('preflight');if(incompatible&&(state?application.revision==='b'.repeat(40):!events.includes('cancel')))throw new InstallerRequired('New installer required');},installedExecutable:()=>env.APPIMAGE??path.resolve('Programs/AI Shuffle.exe'),saveInstalledHost:async(root,value)=>events.push({host:value,root}),installedLaunchArgs:args=>args.filter(x=>x.startsWith('aishuffle:')),launchInstalledSource:async(...args)=>{launched=args;events.push('launch-source');}};
  vm.runInNewContext(code,{module,exports:module.exports,process:{platform,arch:'x64',env,versions:{electron:'44.2.0'},execPath:path.resolve('Programs/AI Shuffle.exe'),resourcesPath:path.resolve('resources'),argv:['AI Shuffle.exe','aishuffle://test']},require:id=>{
   if(id==='electron')return {app,dialog,shell:{openExternal:async url=>events.push(['open',url]),showItemInFolder:file=>events.push(['reveal',file])}};if(id==='node:path')return path;
   if(id==='node:fs')return {promises:{readFile:async file=>{
    if(!file.endsWith('desktop-build.json'))return 'trusted-public-key';
    if(missingStamp)throw Object.assign(Error('Missing stamp'),{code:'ENOENT'});
-   return badStamp?'{}':JSON.stringify({revision:'a'.repeat(40),sequence:100});
+   return badStamp?'{}':JSON.stringify(build);
   }}};
   if(id==='./source-updates')return {SourceUpdates};if(id==='./installed-host')return host;
   if(id==='./installer-updates')return {installerPlatform:()=>platform==='linux'?'linux':null,InstallerUpdates:class {
@@ -27,7 +27,7 @@ function fixture({locked=true,source=false,broken=false,blocked=false,answer=1,p
   if(id==='./index'){events.push('run-bundled');return {};}
   throw Error('Unexpected module '+id);
  }});
- return {entry:module.exports,events,get options(){return options;}};
+ return {entry:module.exports,events,get options(){return options;},get launched(){return launched;}};
 }
 test('initial installed launch is offline and uses bundled code with the existing profile',async()=>{
  const f=fixture();await f.entry.startInstalled();assert.equal(f.events.at(-1),'run-bundled');
@@ -125,4 +125,17 @@ test('the blocked prompt says why nothing older runs and offers to try the updat
  const {dialog}=f.events.find(e=>e?.dialog);
  assert.deepEqual([...dialog.buttons],['Try Again','Quit']);assert.equal(dialog.cancelId,1);
  assert.match(dialog.detail,/will not go back to an older version/);
+});
+test('#1821 D5: the launcher passes its stamped version to the updated app, and an unstamped installer passes 0',async()=>{
+ const stamped=fixture({source:true,build:{revision:'a'.repeat(40),sequence:100,launcher:2}});await stamped.entry.startInstalled();
+ assert.equal(stamped.launched[3],2);
+ // SourceUpdates still receives exactly the baseline it always did.
+ assert.deepEqual({...stamped.options.baseline},{revision:'a'.repeat(40),sequence:100});
+ const old=fixture({source:true});await old.entry.startInstalled();
+ assert.equal(old.launched[3],0);
+ for(const launcher of [-1,1.5,'2',null]){
+  const bad=fixture({source:true,build:{revision:'a'.repeat(40),sequence:100,launcher}});
+  await assert.rejects(bad.entry.startInstalled(),/Invalid installed desktop launcher version/,String(launcher));
+  assert(!bad.events.includes('launch-source'));
+ }
 });

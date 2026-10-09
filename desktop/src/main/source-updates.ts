@@ -46,7 +46,11 @@ export interface SourceManifest {
   format: 2; revision: string; sequence: number; sha256: string; size: number;
   /** Added after format 2 shipped; older signed manifests (and installed release.json files) lack them. */
   channel?: UpdateChannel; version?: string; notes?: string; tree?: string;
+  /** launcher: the oldest Windows launcher (installed app.asar) this release runs under (#1821 D5). Absent means any. */
+  desktop?: { launcher?: number };
 }
+/** The launcher version a release needs; 0 for manifests signed before desktop.launcher existed. */
+export function requiredLauncher(manifest: SourceManifest): number { return manifest.desktop?.launcher ?? 0; }
 export interface SourceOptions {
   root: string;
   /** Overrides the update-channel.json setting; tests and owner builds only. */
@@ -95,7 +99,9 @@ export function verifySourceManifest(text: string, publicKey: string): SourceMan
   if (('channel' in m && !(CHANNELS as readonly unknown[]).includes(m.channel))
     || ('tree' in m && !(typeof m.tree === 'string' && DIGEST.test(m.tree)))
     || ('version' in m && !(typeof m.version === 'string' && VERSION.test(m.version)))
-    || ('notes' in m && !(typeof m.notes === 'string' && m.notes.length <= MAX_NOTES))) throw new Error('Invalid source manifest release fields');
+    || ('notes' in m && !(typeof m.notes === 'string' && m.notes.length <= MAX_NOTES))
+    || ('desktop' in m && !(m.desktop && typeof m.desktop === 'object' && !Array.isArray(m.desktop)
+      && (!('launcher' in m.desktop) || (Number.isSafeInteger(m.desktop.launcher) && m.desktop.launcher! >= 0))))) throw new Error('Invalid source manifest release fields');
   return m;
 }
 

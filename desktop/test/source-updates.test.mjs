@@ -9,7 +9,7 @@ import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 const require = createRequire(import.meta.url);
-const { SourceUpdates, verifySourceManifest, treeDigest } = require('../dist/main/source-updates.js');
+const { SourceUpdates, verifySourceManifest, treeDigest, requiredLauncher } = require('../dist/main/source-updates.js');
 const { buildEnvironment, removeSourceDirectory } = require('../dist/main/source-build.js');
 const extractor = fileURLToPath(new URL('./helpers/source-archive.py', import.meta.url));
 const repoScripts = fileURLToPath(new URL('../../scripts', import.meta.url));
@@ -661,10 +661,10 @@ test('a tree digest that does not match the extracted files stops the update bef
 });
 test('the desktop tree digest matches the publisher for ordering and non-ASCII paths',async t=>{
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-tree-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
- const top=path.join(root,'pack','ai-shuffle-'+A);const names=['z.txt','a-b/x','a.b','a/b','A/B','é/ü.md','日本/語.txt','a/b c','requirements.lock'];
- const files=[];
- for(const name of names){await fs.mkdir(path.dirname(path.join(top,name)),{recursive:true});await fs.writeFile(path.join(top,name),'content of '+name);files.push([name,createHash('sha256').update('content of '+name).digest('hex')]);}
- const archive=path.join(root,'tree.zip');execFileSync(process.env.PYTHON||'python',[extractor,'pack',path.join(root,'pack'),archive]);
+ const names=['z.txt','a-b/x','a.b','a/b','A/B','é/ü.md','日本/語.txt','a/b c','requirements.lock'];
+ const files=names.map(name=>[name,createHash('sha256').update('content of '+name).digest('hex')]);
+ // ZIP names are case-sensitive even when the test host's filesystem is not.
+ const archive=path.join(root,'tree.zip');execFileSync(process.env.PYTHON||'python',['-c','import sys,json,zipfile; z=zipfile.ZipFile(sys.argv[1],"w"); [z.writestr(sys.argv[2]+name,"content of "+name) for name in json.loads(sys.argv[3])]; z.close()',archive,'ai-shuffle-'+A+'/',JSON.stringify(names)]);
  assert.equal(treeDigest(files),publishedTree(archive));assert.equal(treeDigest([...files].reverse()),treeDigest(files));
 });
 test('release fields are validated when present and older installed manifests without them stay readable',async t=>{
@@ -686,6 +686,21 @@ test('a compatibility preflight failure never writes booting or blocks the next 
  const next=f.create();await next.load();assert.equal(next.blocked,false);
  next.stageDownloads();await next.cancelInstall();state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
  assert.equal(state.pending,undefined);assert.equal(state.staged,A);assert.equal(next.hasSourceState,false);
+});
+test('#1821 D5: desktop.launcher is validated when present; manifests without it need no launcher and still install',async t=>{
+ const f=await fixture(t);const {privateKey,publicKey}=generateKeyPairSync('ed25519');
+ const signed=fields=>{const payload=Buffer.from(JSON.stringify({format:2,revision:A,sequence:5,sha256:KEY,size:10,...fields}));return JSON.stringify({payload:payload.toString('base64'),signature:sign(null,payload,privateKey).toString('base64')});};
+ assert.equal(requiredLauncher(verifySourceManifest(signed({}),publicKey)),0);
+ assert.equal(requiredLauncher(verifySourceManifest(signed({desktop:{}}),publicKey)),0);
+ assert.equal(requiredLauncher(verifySourceManifest(signed({desktop:{launcher:0}}),publicKey)),0);
+ assert.equal(requiredLauncher(verifySourceManifest(signed({desktop:{launcher:3}}),publicKey)),3);
+ // Later desktop fields are tolerated, like the top-level ones older clients ignore.
+ assert.equal(requiredLauncher(verifySourceManifest(signed({desktop:{launcher:2,future:true}}),publicKey)),2);
+ for(const desktop of [null,[],'1',1,{launcher:-1},{launcher:1.5},{launcher:'2'},{launcher:null}])
+  assert.throws(()=>verifySourceManifest(signed({desktop}),publicKey),/release fields/,JSON.stringify(desktop));
+ // A signed release carrying the field downloads, builds and activates like any other: nothing acts on it yet.
+ await f.release(A,undefined,{desktop:{launcher:1}});const u=f.create();await u.load();
+ assert.equal((await u.download()).kind,'ready');assert.equal((await u.select()).revision,A);
 });
 test('Python dependencies install only from the hash-pinned locks, like the container updater',async t=>{
  const {pythonInstallSteps,pythonDependencyKey,buildSource}=require('../dist/main/source-build.js');

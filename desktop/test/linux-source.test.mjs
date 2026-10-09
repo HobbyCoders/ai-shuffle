@@ -68,6 +68,7 @@ test('build:worker stamps the trusted baseline on Linux; repeated Windows stampi
  const file=path.join(out,'desktop-build.json');const bytes=await fs.readFile(file,'utf8');const baseline=JSON.parse(bytes);
  assert.equal(baseline.revision,execFileSync('git',['rev-parse','HEAD'],{cwd:desktop,encoding:'utf8'}).trim());
  assert.equal(baseline.sequence,Number(execFileSync('git',['show','-s','--format=%ct','HEAD'],{cwd:desktop,encoding:'utf8'}).trim())*1000);
+ assert.equal(baseline.launcher,JSON.parse(readFileSync(new URL('../launcher.json',import.meta.url),'utf8')).version);
  await stampDesktopBuild(out,desktop);assert.equal(await fs.readFile(file,'utf8'),bytes);
  const mac=path.join(out,'mac');
  execFileSync(process.platform==='win32'?'npm.cmd':'npm',['run','build:worker','--','--stub','--platform','darwin','--arch','arm64','--out',mac],{cwd:desktop,shell:process.platform==='win32'});

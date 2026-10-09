@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { verify } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { promises as fs, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +26,9 @@ for(const scenario of ['new','reuse','moved','corrupt','stable','offmain','older
  }else{
   const row=JSON.parse(await fs.readFile(path.join(root,'record.json'),'utf8')),signed=JSON.parse(row.manifest);
   assert.equal(row.asset_id,123);assert(verify(null,Buffer.from(signed.payload,'base64'),await fs.readFile(path.join(root,'public.pem'),'utf8'),Buffer.from(signed.signature,'base64')));
-  const manifest=JSON.parse(Buffer.from(signed.payload,'base64'));assert.equal(manifest.format,2);assert.equal(manifest.revision,'a'.repeat(40));assert.deepEqual(manifest.container,{sequence:42,runtime:'b'.repeat(64),requires:['base-1'],recommends:[]});assert(events.includes('publish'));
+  const manifest=JSON.parse(Buffer.from(signed.payload,'base64'));assert.equal(manifest.format,2);assert.equal(manifest.revision,'a'.repeat(40));assert.deepEqual(manifest.container,{sequence:42,runtime:'b'.repeat(64),requires:['base-1'],recommends:[]});
+  // #1821 D5: the minimum launcher from desktop/launcher.json is signed with the release.
+  assert.deepEqual(manifest.desktop,{launcher:JSON.parse(readFileSync(new URL('../launcher.json',import.meta.url),'utf8')).minimum});assert(events.includes('publish'));
   assert.equal(manifest.tree,'c'.repeat(64));assert(events.includes('archive'));
   if(stable(scenario)){
    assert.equal(row.channel,'stable');assert.equal(manifest.channel,'stable');assert.equal(manifest.version,'1.2.3');assert.equal(manifest.notes,'Faster startup.');
