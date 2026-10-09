@@ -270,9 +270,15 @@ def test_startup_barrier_requires_owner_access(monkeypatch):
 
 
 async def test_peer_still_delivering_at_the_launch_limit_is_reported_as_syncing(workers, monkeypatch, caplog):
-    """A large backlog that outlasts PEER_TIMEOUT is not an outage (#1978)."""
+    """A large backlog that outlasts PEER_TIMEOUT is not an outage (#1978).
+
+    The peer delivers batches until the first backlog row has landed, then
+    stalls until the launch limit fires. Racing fixed per-batch sleeps against
+    a 0.3 s limit flaked on a loaded host when the first batch arrived late
+    (#2056); the limit here is generous and only the stall reaches it.
+    """
     import logging
-    import time as time_mod
+    import threading
     a, b = workers("backlog-source"), workers("backlog-target")
     with a.active():
         engine.create_network("Home")
@@ -281,19 +287,30 @@ async def test_peer_still_delivering_at_the_launch_limit_is_reported_as_syncing(
         set_owner_pref(a, f"backlog-{i}", i)
     served = connect(monkeypatch, a, b)
     monkeypatch.setattr(transport, "BATCH_LIMIT", 2)
-    monkeypatch.setattr(startup_sync, "PEER_TIMEOUT", 0.3)
+    monkeypatch.setattr(startup_sync, "PEER_TIMEOUT", 2.0)
     real_apply = engine.apply_batch
+    backlog_landed = threading.Event()
+    release = threading.Event()
 
-    def slow_apply(ops):
-        time_mod.sleep(0.08)  # each batch arrives, slowly
-        return real_apply(ops)
-    monkeypatch.setattr(engine, "apply_batch", slow_apply)
-    with b.active(), caplog.at_level(logging.INFO, logger="app.network.startup_sync"):
-        result = await startup_sync.synchronize()
-        assert result["status"] == "partial" and result["status"] != "offline"
-        assert result["peers"] == 0 and result["syncing"] == 1
-        assert "syncing" in result["reason"] and "background" in result["reason"]
-        assert 0 < sum(owner_pref(b, f"backlog-{i}") == i for i in range(12)) < 12
+    def stalling_apply(ops):
+        if backlog_landed.is_set():
+            release.wait()  # the peer stops answering mid-backlog
+            raise RuntimeError("stalled batch abandoned at the launch limit")
+        result = real_apply(ops)
+        if "backlog-" in repr(ops):
+            backlog_landed.set()
+        return result
+    monkeypatch.setattr(engine, "apply_batch", stalling_apply)
+    try:
+        with b.active(), caplog.at_level(logging.INFO, logger="app.network.startup_sync"):
+            result = await startup_sync.synchronize()
+            assert backlog_landed.is_set()
+            assert result["status"] == "partial" and result["status"] != "offline"
+            assert result["peers"] == 0 and result["syncing"] == 1
+            assert "syncing" in result["reason"] and "background" in result["reason"]
+            assert 0 < sum(owner_pref(b, f"backlog-{i}") == i for i in range(12)) < 12
+    finally:
+        release.set()  # free the executor thread before the loop shuts down
     assert sum(path.endswith("/exchange") for _, path in served.requests) > 1
     assert "still syncing in the background" in caplog.text
     assert "unreachable" not in caplog.text
