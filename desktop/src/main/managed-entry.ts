@@ -50,8 +50,18 @@ export async function startManagedSource(root: string, revision: string, bootstr
   setManagedContext({ updates, application, root, profile, host, installersOnly, subprocessEnv });
   require('./index');
 }
-if (require.main === module) void start().catch(async error => {
-  await app.whenReady();
-  dialog.showErrorBox('AI Shuffle could not start', String(error));
-  app.quit();
-});
+function run(): void {
+  void start().catch(async error => {
+    await app.whenReady();
+    dialog.showErrorBox('AI Shuffle could not start', String(error));
+    app.quit();
+  });
+}
+// The installed Linux app requires this entry and calls startManagedSource
+// itself, so loading it there must start nothing. Its installer looks for this
+// exact guard (requireInstalledElectron).
+if (require.main === module) run();
+// npm Electron loads the app through its default_app, so require.main is never
+// this module there. Windows source updates launch that way and sat windowless
+// without this branch. Linux delegation only ever runs in a packaged app.
+else if (!app.isPackaged) run();

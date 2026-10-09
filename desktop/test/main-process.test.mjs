@@ -18,7 +18,8 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	const appEvents = new EventEmitter();
 	const errors = [];
 	const app = {
-		isPackaged: !!installers,
+		// Linux delegation only ever runs inside the packaged app.
+		isPackaged: !!installers || !!delegatedApplication,
 		getAppPath: () => desktopDir,
 		getPath: () => path.join(desktopDir, 'no-user-data'),
 		getVersion: () => '0.0.0-test',

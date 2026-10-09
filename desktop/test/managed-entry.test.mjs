@@ -53,6 +53,16 @@ test('unpackaged source launches still attach their selected revision and develo
  assert.deepEqual(await launch({ packaged: false, env: sourceEnv }), [['attach', sourceEnv.SHUFFLE_SOURCE_REVISION], 'managed', 'run']);
  assert.deepEqual(await launch({ packaged: false }), ['run']);
 });
+test('npm Electron starts the entry although its default_app owns require.main', async () => {
+ // `electron.exe <desktopDir>` is how Windows source updates launch; a guard on
+ // require.main alone left those processes idle with no window.
+ assert.deepEqual(await launch({ packaged: false, env: sourceEnv, asMain: false }), [['attach', sourceEnv.SHUFFLE_SOURCE_REVISION], 'managed', 'run']);
+ assert.deepEqual(await launch({ packaged: false, asMain: false }), ['run']);
+});
+test('the installed Linux guard stays where requireInstalledElectron looks for it', () => {
+ assert.match(code, /exports\.startManagedSource\s*=/);
+ assert.match(code, /if\s*\(require\.main\s*===\s*module\)/);
+});
 test('#1821 D5: an installed source start settles a launcher swap right after attach, with the launcher version it was given', async () => {
  const host = { executable: path.resolve('Programs/AI Shuffle.exe'), name: 'AI Shuffle', userData: path.resolve('profile') };
  const events = await launch({ packaged: false, env: { ...sourceEnv, SHUFFLE_LAUNCHER_VERSION: '2' }, host });
