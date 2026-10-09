@@ -95,6 +95,10 @@ tools/node_modules/
 unban.py
 frontend/build-frontend.bat
 /generated-audio
+# Remotion browser cache and the tour soundtrack, which `npm run render` rebuilds
+/.remotion/
+android/site/public/media/ai-shuffle-tour-music.wav
+videos/ai-shuffle-showcase/out/
 frontend/build.bat
 
 # Generated reports
