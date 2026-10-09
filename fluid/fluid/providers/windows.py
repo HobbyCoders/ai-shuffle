@@ -26,6 +26,7 @@ _WINDOWS: list[tuple[str, int]] = [
     # (prefix, context window in tokens) — 200K Claude families first, so they
     # beat the family-wide 1M rows below them.
     ("claude-3", 200_000),
+    ("claude-haiku-5-5", 1_000_000),
     ("claude-haiku", 200_000),
     ("claude-opus-4-0", 200_000),
     ("claude-opus-4-1", 200_000),

@@ -45,7 +45,8 @@ def test_an_effort_stored_on_the_home_runs_at_the_model_default(assistant_fixtur
 def test_a_model_without_effort_levels_gets_none(assistant_fixture, tmp_path):
     home = assistant_fixture["id"]
     database.set_session_run_binding(home, effort="max")
-    assert _options(home, "haiku", tmp_path, {"effort": "high"}).effort is None
+    assert _options(home, "claude-haiku-4-5", tmp_path, {"effort": "high"}).effort is None
+    assert _options(home, "haiku", tmp_path, {"effort": "high"}).effort == "medium"
 
 
 def test_an_ordinary_chat_keeps_the_picked_effort(assistant_fixture, tmp_path):
@@ -59,7 +60,8 @@ def test_the_adapter_resolves_the_home_to_the_model_default():
     home = SessionOptions(model="opus", extra={"assistant_home": True})
     assert _effective_effort(home, "low", "anthropic") == "high"
     assert _effective_effort(home, None, "anthropic") == "high"
-    assert _effective_effort(SessionOptions(model="haiku", extra={"assistant_home": True}), "high", "anthropic") is None
+    assert _effective_effort(SessionOptions(model="haiku", extra={"assistant_home": True}), "high", "anthropic") == "medium"
+    assert _effective_effort(SessionOptions(model="claude-haiku-4-5", extra={"assistant_home": True}), "high", "anthropic") is None
     assert _effective_effort(SessionOptions(model="opus"), "low", "anthropic") == "low"
 
 

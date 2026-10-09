@@ -20,6 +20,22 @@ def test_known_model_applies_cache_multipliers() -> None:
     assert estimate_cost("claude-opus-5", usage) == pytest.approx(36.75)
 
 
+@pytest.mark.parametrize("prompt,rate", [(99_999, 0.10), (100_000, 0.10), (100_001, 0.50)])
+def test_haiku_5_5_native_long_context_pricing(prompt, rate) -> None:
+    usage = {"input_tokens": prompt, "output_tokens": 1000}
+    expected = (prompt * rate + 1000 * rate * 5) / 1_000_000
+    assert estimate_cost("claude-haiku-5-5", usage) == pytest.approx(expected)
+    assert estimate_cost("claude-haiku-5-5[1m]", usage) == pytest.approx(expected)
+    assert estimate_cost("claude-haiku-4-5", usage) == pytest.approx((prompt + 5000) / 1_000_000)
+
+
+def test_haiku_5_5_long_tier_counts_cached_prompt_tokens() -> None:
+    usage = {"input_tokens": 1, "cache_read_input_tokens": 50_000,
+             "cache_creation_input_tokens": 50_000, "output_tokens": 1000}
+    expected = (0.50 + 50_000 * 0.05 + 50_000 * 0.625 + 1000 * 2.50) / 1_000_000
+    assert estimate_cost("claude-haiku-5-5", usage) == pytest.approx(expected)
+
+
 def test_unknown_model_returns_none() -> None:
     assert estimate_cost("gpt-5", {"input_tokens": 1_000_000}) is None
 

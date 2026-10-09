@@ -1,6 +1,6 @@
 /** Effective effort capabilities shared by every composer surface. */
 import {
-	decodeProviderModel, encodeProviderModel, getDefaultModel, getModels, getProviders,
+	decodeProviderModel, encodeProviderModel, getDefaultModel, getNativeModel, getProviders,
 	isRegistryHydrated, isReroute, normalizeModel
 } from './models.svelte';
 
@@ -38,7 +38,7 @@ export function resolveEffortModel(
 export function resolveModelEffort(value: string | null | undefined) {
 	const selected = value || getDefaultModel();
 	let composite = decodeProviderModel(selected);
-	const nativeModel = composite ? undefined : getModels().find(m => m.value === normalizeModel(selected));
+	const nativeModel = composite ? undefined : getNativeModel(selected);
 	// Older sessions may store a bare provider model. Resolve it only when the
 	// catalog is unambiguous; never borrow a different provider's capabilities.
 	if (!composite && !nativeModel) {

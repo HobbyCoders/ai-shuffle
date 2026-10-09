@@ -108,7 +108,7 @@ def _resolve_setting_sources(
     opt-in to extra scopes when the user explicitly configures a non-empty list.
 
     Blocking matters because `~/.claude/settings.json` commonly carries
-    `effortLevel: medium`. Haiku doesn't support effort, and when the CLI
+    `effortLevel: medium`. Haiku 4.5 doesn't support effort, and when the CLI
     receives it the call takes a slow fallback path (12-17s for a 50-byte
     prompt vs 1-3s baseline). Chat sessions use their own options builder and
     are unaffected by this default.

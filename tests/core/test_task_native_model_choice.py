@@ -48,7 +48,7 @@ def test_native_caller_contract_takes_any_model_string(native):
     ("haiku", "haiku"),
     ("opus", "opus"),
     (" fable ", "fable"),
-    ("claude-haiku-4-5", "haiku"),  # a legacy full id normalizes onto its alias
+    ("claude-haiku-5-5", "haiku"),  # the first-party full id normalizes onto its alias
 ])
 async def test_native_dispatch_runs_the_chosen_claude_model(native, model, expected):
     _, seen = native

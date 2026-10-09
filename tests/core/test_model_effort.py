@@ -64,6 +64,34 @@ def test_unknown_routes_preserve_explicit_union(route):
         assert normalize_effort(value, "gpt-6-astra", row, route=route) == expected
 
 
+@pytest.mark.parametrize("route", ["anthropic", "delegated"])
+@pytest.mark.parametrize("model", ["haiku", "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5"])
+def test_claude_5_5_capabilities(model, route):
+    cap = effort_capabilities(model, route=route)
+    assert cap["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
+    assert cap["default_effort"] == "medium"
+    for level in cap["effort_levels"]:
+        assert normalize_effort(level, model, route=route) == level
+
+
+@pytest.mark.parametrize("route", ["anthropic", "delegated"])
+@pytest.mark.parametrize("model", ["claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-haiku-4-5-20261101"])
+def test_haiku_4_5_remains_effortless(model, route):
+    assert effort_capabilities(model, route=route)["effort_levels"] == []
+    assert effort_capabilities(model, route=route)["default_effort"] is None
+    assert normalize_effort("max", model, route=route) is None
+
+
+def test_cloud_cli_haiku_alias_remains_effortless(monkeypatch):
+    from app.core import claude_auth_mode
+    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: "cloud")
+    assert effort_capabilities("haiku", route="delegated")["effort_levels"] == []
+    assert effort_capabilities("haiku", route="delegated")["default_effort"] is None
+    assert normalize_effort("max", "haiku", route="delegated") is None
+    assert effort_capabilities("claude-haiku-5-5", route="delegated")["default_effort"] == "medium"
+    assert effort_capabilities("haiku", route="anthropic")["default_effort"] == "medium"
+
+
 def test_official_defaults_and_cli_difference():
     # https://developers.openai.com/api/docs/models/gpt-5.6-sol.md
     assert effort_capabilities("gpt-5.6-sol", {"provider_type": "openai"})["default_effort"] == "medium"
@@ -165,7 +193,8 @@ def test_legacy_map_concrete_entry_beats_family_fallback(mock_db, monkeypatch):
 
 
 @pytest.mark.parametrize("model,parent,expected", [
-    ("haiku", "max", None),
+    ("haiku", "max", "max"),
+    ("claude-haiku-4-5", "max", None),
     ("never-seen-model", "xhigh", "xhigh"),
     ("never-seen-model", None, None),
 ])
@@ -293,11 +322,13 @@ def test_adapter_reconnect_suppresses_inherited_effort(monkeypatch):
     from app.core.provider.types import SessionOptions
     adapter = ha.HarnessAdapter()
     adapter._options = SessionOptions(model="sonnet", effort="max")
-    assert adapter.requires_reconnect(SessionOptions(model="haiku"))
-    assert ha._effective_effort(SessionOptions(model="haiku"), "high") is None
+    assert adapter.requires_reconnect(SessionOptions(model="claude-haiku-4-5"))
+    assert not adapter.requires_reconnect(SessionOptions(model="haiku"))
+    assert ha._effective_effort(SessionOptions(model="haiku"), "high") == "high"
+    assert ha._effective_effort(SessionOptions(model="claude-haiku-4-5"), "high") is None
 
 
-@pytest.mark.parametrize("model,expected", [("sonnet", "max"), ("haiku", None)])
+@pytest.mark.parametrize("model,expected", [("sonnet", "max"), ("haiku", "max"), ("claude-haiku-4-5", None)])
 def test_query_preserves_effort_until_adapter_resolves_route(mock_db, model, expected):
     from app.core.query_options import build_options_from_profile
     options, _ = build_options_from_profile(

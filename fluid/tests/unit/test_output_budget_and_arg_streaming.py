@@ -58,6 +58,33 @@ def test_anthropic_resolves_a_cap_because_the_api_demands_one() -> None:
     assert body["max_tokens"] > 8192
 
 
+@pytest.mark.parametrize("model", [
+    "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+    "claude-opus-5-5[1m]", "claude-sonnet-5-5-latest",
+    "claude-opus-5-5-20260601", "claude-sonnet-5-5-20260601",
+    "CLAUDE-SONNET-5-5",
+])
+@pytest.mark.parametrize("requested", [None, 96_000, 128_000, 999_999])
+def test_claude_5_5_output_ceiling_on_the_wire(model, requested) -> None:
+    assert max_output_tokens(model) == 128_000
+    body = anthropic_body(_request(model=model, max_tokens=requested))
+    assert body["max_tokens"] == (96_000 if requested == 96_000 else 128_000)
+
+
+@pytest.mark.parametrize(("model", "ceiling"), [
+    ("claude-opus-5", 64_000), ("claude-sonnet-5", 64_000),
+    ("claude-opus-4-8", 64_000), ("claude-opus-4-7", 64_000),
+    ("claude-opus-4-6", 64_000), ("claude-opus-4-5", 64_000),
+    ("claude-sonnet-4-6", 64_000), ("claude-sonnet-4-5", 64_000),
+    ("claude-haiku-4-5", 64_000), ("claude-opus-4-1", 32_000),
+    ("claude-opus-4-20250514", 32_000), ("claude-3-opus-20240229", 4096),
+])
+def test_older_claude_output_ceilings_are_unchanged(model, ceiling) -> None:
+    assert max_output_tokens(model) == ceiling
+    assert resolve_max_tokens(model, None) == ceiling
+    assert resolve_max_tokens(model, 999_999) == ceiling
+
+
 def test_anthropic_clamps_an_over_large_explicit_cap() -> None:
     body = anthropic_body(_request(model="claude-3-opus-20240229", max_tokens=999_999))
     assert body["max_tokens"] == 4096

@@ -110,7 +110,12 @@ def test_captured_absence_cannot_read_a_later_parent_setting(dispatch_env, monke
     ("delegated", "sonnet", "xhigh"),
     ("delegated", "fable", "xhigh"),
     ("delegated", "opus", "xhigh"),
-    ("delegated", "haiku", None),
+    ("delegated", "haiku", "xhigh"),
+    ("delegated", "claude-haiku-5-5", "xhigh"),
+    ("delegated", "claude-haiku-4-5", None),
+    ("anthropic", "haiku", "xhigh"),
+    ("anthropic", "claude-haiku-5-5", "xhigh"),
+    ("anthropic", "claude-haiku-4-5", None),
 ])
 def test_worker_effort_reaches_native_wire_and_cli_argv(
     dispatch_env, monkeypatch, route, model, expected,
@@ -149,6 +154,15 @@ def test_worker_effort_reaches_native_wire_and_cli_argv(
     if route == "openai_responses":
         body = build_request_body(ProviderRequest(model=model, messages=[], effort=effective))
         assert body["reasoning"]["effort"] == expected
+    elif route == "anthropic":
+        from app.core.model_registry import resolve_api_model_id
+        from fluid.providers.anthropic.serialize import build_request_body as anthropic_body
+        body = anthropic_body(ProviderRequest(model=resolve_api_model_id(model), messages=[], effort=effective))
+        if expected:
+            assert body["output_config"]["effort"] == expected
+            assert body["model"] == "claude-haiku-5-5"
+        else:
+            assert "output_config" not in body
     else:
         argv = DelegatedLoop(store=None, model=model, effort=effective)._build_argv()
         if expected:

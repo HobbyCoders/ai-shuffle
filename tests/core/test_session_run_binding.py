@@ -303,7 +303,7 @@ class TestTurnResolution:
     def test_stale_window_is_ignored_for_an_ineligible_model(self, mock_db, tmp_path):
         make_profile("agent", {"cwd": str(tmp_path)})
         db.create_session(
-            "s-haiku", profile_id="agent", model="haiku", context_window=1_000_000
+            "s-haiku", profile_id="agent", model="claude-haiku-4-5", context_window=1_000_000
         )
         opts = _build_options(
             {"id": "agent", "config": {"cwd": str(tmp_path)}},
@@ -708,10 +708,10 @@ class TestUnofferedWindowIsIgnored:
         self._profile(tmp_path)
         db.create_session("s-switch", profile_id="agent", model="sonnet")
         turn_manager.submit("s-switch", "user", prompt="hi", profile_id="agent",
-                            overrides={"model": "haiku", "context_window": 1_000_000},
+                            overrides={"model": "claude-haiku-4-5", "context_window": 1_000_000},
                             no_kick=True)
         row = db.get_session("s-switch")
-        assert (row["model"], row["context_window"]) == ("haiku", None)
+        assert (row["model"], row["context_window"]) == ("claude-haiku-4-5", None)
         turn_manager.submit("s-switch", "user", prompt="hi", profile_id="agent",
                             overrides={"model": "opus", "context_window": 1_000_000},
                             no_kick=True)
@@ -796,8 +796,8 @@ class TestUnofferedWindowIsIgnored:
                           context_window=200_000)
         assert _persist_patch("s-voice", VoiceContextPatch(context_window=150_000))[
             "context_window"] == 200_000
-        row = _persist_patch("s-voice", VoiceContextPatch(model="haiku", context_window=1_000_000))
-        assert (row["model"], row["context_window"]) == ("haiku", 200_000)
+        row = _persist_patch("s-voice", VoiceContextPatch(model="claude-haiku-4-5", context_window=1_000_000))
+        assert (row["model"], row["context_window"]) == ("claude-haiku-4-5", 200_000)
         _persist_patch("s-voice", VoiceContextPatch(model="sonnet"))
         # The voice row's provider funds Realtime, not the text model.
         assert _persist_patch("s-voice", VoiceContextPatch(context_window=1_000_000))[
@@ -821,7 +821,7 @@ class TestUnofferedWindowIsIgnored:
         self._profile(tmp_path)
         base = {"session_id": "s-branch", "profile_id": "agent"}
         merged = _merge_session_create_overrides(
-            base, {"model": "haiku", "context_window": 1_000_000})
+            base, {"model": "claude-haiku-4-5", "context_window": 1_000_000})
         assert merged["context_window"] is None
         merged = _merge_session_create_overrides(base, {
             "model": "sonnet", "mode": "voice", "provider_id": "realtime-provider",

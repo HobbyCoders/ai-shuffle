@@ -461,13 +461,13 @@ describe('ContextUsageBar — pill', () => {
 				isAutoCompactEnabled: true,
 			},
 		});
-		// Pin the local model to haiku (200k) — sonnet/opus/fable are natively 1M,
+		// Pin the local model to Haiku 4.5 (200k) — current Claude aliases are natively 1M,
 		// which would make this assertion pass for the wrong reason.
-		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'haiku' });
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'claude-haiku-4-5' });
 		const { container } = render(ContextUsageBar);
 		const pill = container.querySelector('.usage-indicator') as HTMLButtonElement;
 
-		// The local model (haiku) has a 200k window — if the title fell back to it,
+		// The local model (Haiku 4.5) has a 200k window — if the title fell back to it,
 		// it would read "200k". It must read the breakdown's 1M instead.
 		await waitFor(() => expect(pill.getAttribute('title')).toContain('1M'));
 		expect(pill.getAttribute('title')).not.toContain('200k');
@@ -510,7 +510,7 @@ describe('ContextUsageBar — the chat\'s picked context window', () => {
 	});
 
 	it('caps a 1M preference at what the model can hold', async () => {
-		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'haiku', contextWindowChoice: '1m' });
+		mocks.activeSession.set({ ...mocks.DEFAULT, sessionId: 's1', modelOverride: 'claude-haiku-4-5', contextWindowChoice: '1m' });
 		const { container } = render(ContextUsageBar);
 		expect(pillOf(container).getAttribute('title')).toContain('0 / 200k tokens');
 	});

@@ -32,7 +32,7 @@ export interface ModelOption {
 	family: ModelFamily;
 	/**
 	 * Maximum input context in tokens, as the model natively runs. The current
-	 * Claude slugs (sonnet/opus/fable) are 1M; haiku is 200k. There is no
+	 * Claude slugs (haiku/sonnet/opus/fable) are 1M. There is no
 	 * opt-in toggle — the old `[1m]` suffix mechanism is retired.
 	 */
 	context_window?: number;
@@ -51,7 +51,7 @@ export interface ModelOption {
 const LEGACY_1M_SUFFIX = '[1m]';
 // Concrete IDs for true shorthand aliases, not the version-folding profile migration map.
 const STATIC_EFFORT_MODEL_ALIASES: Record<string, string> = {
- haiku: 'claude-haiku-4-5', sonnet: 'claude-sonnet-5', opus: 'claude-opus-5', fable: 'claude-fable-5'
+ haiku: 'claude-haiku-5-5', sonnet: 'claude-sonnet-5', opus: 'claude-opus-5', fable: 'claude-fable-5'
 };
 function effortBareModel(value: string): string {
  const bare = (decodeProviderModel(value)?.modelId ?? value).replace(/\[1m\]$/, '');
@@ -75,17 +75,26 @@ export function legacyEffortFamily(value: string): string | null {
 // ---------------------------------------------------------------------------
 
 const STATIC_MODELS: readonly ModelOption[] = [
-	{ value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 200_000, effort_levels: [], default_effort: null, effort_metadata_version: 1 },
+	{ value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium', effort_metadata_version: 1 },
 	{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high', effort_metadata_version: 1 },
 	{ value: 'opus', label: 'Opus', family: 'opus', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high', effort_metadata_version: 1 },
 	{ value: 'fable', label: 'Fable', family: 'fable', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high', effort_metadata_version: 1 }
 ] as const;
 
+// Metadata for explicit version pins; these do not add picker presets.
+// Keep aligned with model_registry._VERSIONED_MODELS and model_effort._CLI.
+const STATIC_VERSIONED_MODELS: readonly ModelOption[] = [
+	{ value: 'claude-haiku-5-5', label: 'Haiku 5.5', family: 'haiku', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium' },
+	{ value: 'claude-haiku-4-5', label: 'Haiku 4.5', family: 'haiku', context_window: 200_000, effort_levels: [], default_effort: null },
+	{ value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', family: 'haiku', context_window: 200_000, effort_levels: [], default_effort: null },
+	{ value: 'claude-opus-5-5', label: 'Opus 5.5', family: 'opus', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium' },
+	{ value: 'claude-sonnet-5-5', label: 'Sonnet 5.5', family: 'sonnet', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium' }
+];
+
 const STATIC_DEFAULT = 'sonnet';
 
 const STATIC_LEGACY_MAP: Readonly<Record<string, string>> = {
-	'claude-haiku-4-5': 'haiku',
-	'claude-haiku-4-5-20251001': 'haiku',
+	'claude-haiku-5-5': 'haiku',
 	'claude-sonnet-4-6': 'sonnet',
 	'claude-sonnet-4-6[1m]': 'sonnet',
 	'claude-sonnet-5': 'sonnet',
@@ -556,7 +565,10 @@ export function formatProviderDisplay(display: ProviderDisplay): string {
 export function normalizeModel(value: string | null | undefined): string {
 	if (!value) return INHERIT_VALUE;
 	const mapped = _registry.legacyMap[value] ?? STATIC_LEGACY_MAP[value];
-	if (mapped !== undefined) return mapped;
+	if (mapped !== undefined) {
+		if (mapped === 'haiku' && _registry.effortModelAliases.haiku !== STATIC_EFFORT_MODEL_ALIASES.haiku) return value;
+		return mapped;
+	}
 	return value.endsWith(LEGACY_1M_SUFFIX)
 		? value.slice(0, -LEGACY_1M_SUFFIX.length)
 		: value;
@@ -568,15 +580,18 @@ export function isPresetModel(value: string | null | undefined): boolean {
 	return _registry.models.some((m) => m.value === base);
 }
 
-/**
- * Registered context window (tokens) for a Claude preset model, or `null` when
- * the value isn't a preset. Claude slugs carry their NATIVE window here
- * (sonnet/opus/fable = 1M, haiku = 200k) — there is no opt-in suffix.
+/** Metadata for a native Claude alias or an explicit, supported version pin. */
+export function getNativeModel(value: string | null | undefined): ModelOption | undefined {
+	const base = normalizeModel(value);
+	const version = base.startsWith('claude-') ? base.replace(/-\d{8}$/, '') : base;
+	return _registry.models.find((m) => m.value === base) ?? STATIC_VERSIONED_MODELS.find((m) => m.value === version);
+}
+
+/** Native window for a Claude alias or version pin; null for unknown models.
+ * First-party aliases are 1M; cloud Haiku and Haiku 4.5 pins stay at 200K.
  */
 export function getClaudeContextWindow(value: string | null | undefined): number | null {
-	const base = normalizeModel(value);
-	if (!base) return null;
-	return _registry.models.find((m) => m.value === base)?.context_window ?? null;
+	return getNativeModel(value)?.context_window ?? null;
 }
 
 /**
@@ -614,7 +629,7 @@ export function isFastModeCapable(value: string | null): boolean {
 	}
 	const base = normalizeModel(value);
 	if (!base) return false;
-	return _registry.models.find((m) => m.value === base)?.family === 'opus';
+	return getNativeModel(base)?.family === 'opus';
 }
 
 /**
@@ -635,7 +650,7 @@ export function getModelLabel(value: string | null | undefined): string {
 		return match?.label ?? composite.modelId;
 	}
 	const base = normalizeModel(value);
-	const match = _registry.models.find((m) => m.value === base);
+	const match = getNativeModel(base);
 	if (match) return match.label;
 	for (const provider of _registry.providers) {
 		const providerMatch = provider.models.find((m) => m.id === base);
@@ -647,7 +662,7 @@ export function getModelLabel(value: string | null | undefined): string {
 /** Resolved family for a stored model value, or `null` for non-preset values. */
 export function getModelFamily(value: string | null | undefined): ModelFamily | null {
 	const base = normalizeModel(value);
-	return _registry.models.find((m) => m.value === base)?.family ?? null;
+	return getNativeModel(base)?.family ?? null;
 }
 
 /**

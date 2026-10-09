@@ -25,7 +25,13 @@ describe('model registry presets', () => {
 
 	it('carries each model native context window (Claude slugs are 1M)', () => {
 		const byValue = Object.fromEntries(getModels().map((mdl) => [mdl.value, mdl]));
-		expect(byValue.haiku.context_window).toBe(200_000);
+		expect(byValue.haiku.context_window).toBe(1_000_000);
+			expect(byValue.haiku.effort_levels).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+			expect(byValue.haiku.default_effort).toBe('medium');
+			expect(getClaudeContextWindow('claude-haiku-5-5')).toBe(1_000_000);
+			expect(getClaudeContextWindow('claude-haiku-4-5')).toBe(200_000);
+			expect(getClaudeContextWindow('claude-opus-5-5')).toBe(1_000_000);
+			expect(getClaudeContextWindow('claude-sonnet-5-5')).toBe(1_000_000);
 		expect(byValue.sonnet.context_window).toBe(1_000_000);
 		expect(byValue.opus.context_window).toBe(1_000_000);
 		expect(byValue.fable.context_window).toBe(1_000_000);
@@ -34,7 +40,8 @@ describe('model registry presets', () => {
 
 describe('normalizeModel — flipped legacy map + pass-through', () => {
 	it('maps legacy full model IDs to the shorthand alias', () => {
-		expect(normalizeModel('claude-haiku-4-5')).toBe('haiku');
+		expect(normalizeModel('claude-haiku-5-5')).toBe('haiku');
+			expect(normalizeModel('claude-haiku-4-5')).toBe('claude-haiku-4-5');
 		expect(normalizeModel('claude-sonnet-4-6')).toBe('sonnet');
 		expect(normalizeModel('claude-opus-4-6')).toBe('opus');
 		expect(normalizeModel('claude-opus-4-7')).toBe('opus');
@@ -77,7 +84,7 @@ describe('preset detection and Claude context windows', () => {
 		expect(getClaudeContextWindow('sonnet')).toBe(1_000_000);
 		expect(getClaudeContextWindow('opus[1m]')).toBe(1_000_000);
 		expect(getClaudeContextWindow('claude-opus-4-8')).toBe(1_000_000);
-		expect(getClaudeContextWindow('haiku')).toBe(200_000);
+		expect(getClaudeContextWindow('haiku')).toBe(1_000_000);
 		expect(getClaudeContextWindow('totally-custom')).toBe(null);
 		expect(getClaudeContextWindow('')).toBe(null);
 	});

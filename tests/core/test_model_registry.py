@@ -24,8 +24,8 @@ def test_registry_contents_and_default():
     # No registry entry carries the retired [1m] suffix.
     assert all(not opt.value.endswith("[1m]") for opt in m.MODELS)
     by_value = {opt.value: opt for opt in m.MODELS}
-    # Current Claude slugs are natively 1M; haiku stays on the standard window.
-    assert by_value["haiku"].context_window == 200_000
+    # Current Claude aliases, including Haiku 5.5, are natively 1M.
+    assert by_value["haiku"].context_window == 1_000_000
     assert by_value["sonnet"].context_window == 1_000_000
     assert by_value["opus"].context_window == 1_000_000
     assert by_value["fable"].context_window == 1_000_000
@@ -37,7 +37,8 @@ def test_registry_contents_and_default():
 
 def test_legacy_map_flips_full_ids_to_shorthand():
     # Older stored full model IDs normalize to the shorthand alias.
-    assert m.normalize_model("claude-haiku-4-5") == "haiku"
+    assert m.normalize_model("claude-haiku-5-5") == "haiku"
+    assert m.normalize_model("claude-haiku-4-5") == "claude-haiku-4-5"
     assert m.normalize_model("claude-sonnet-4-6") == "sonnet"
     assert m.normalize_model("claude-opus-4-6") == "opus"
     assert m.normalize_model("claude-opus-4-7") == "opus"
@@ -115,8 +116,31 @@ def test_family_resolves_through_legacy_ids():
     assert m.get_model_family("opus[1m]") == "opus"
 
 
-def test_context_window_lookup():
+def test_cloud_haiku_alias_stays_4_5_without_changing_explicit_5_5(monkeypatch):
+    from app.core import claude_auth_mode
+    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: "cloud")
+    monkeypatch.setattr(m, "_providers_payload", lambda: [])
+    monkeypatch.setattr(m, "_claude_payload", lambda: {})
     assert m.get_context_window("haiku") == 200_000
+    assert m.get_context_window("haiku", delegated=False) == 1_000_000
+    assert m.get_model("haiku", delegated=False).value == "haiku"
+    assert m.resolve_api_model_id("haiku") == "claude-haiku-5-5"
+    assert m.normalize_model("claude-haiku-5-5") == "claude-haiku-5-5"
+    assert m.get_context_window("claude-haiku-5-5") == 1_000_000
+    haiku = m.registry_payload()["models"][0]
+    assert haiku["value"] == "haiku"
+    assert haiku["context_window"] == 200_000
+    assert haiku["effort_levels"] == []
+    assert m.registry_payload()["effort_model_aliases"]["haiku"] == "claude-haiku-4-5"
+    assert "claude-haiku-5-5" not in m.registry_payload()["legacy_map"]
+
+
+def test_context_window_lookup():
+    assert m.get_context_window("haiku") == 1_000_000
+    assert m.get_context_window("claude-haiku-5-5") == 1_000_000
+    assert m.get_context_window("claude-haiku-4-5") == 200_000
+    assert m.get_context_window("claude-opus-5-5") == 1_000_000
+    assert m.get_context_window("claude-sonnet-5-5") == 1_000_000
     assert m.get_context_window("sonnet") == 1_000_000
     assert m.get_context_window("opus[1m]") == 1_000_000
     # Unknown/custom models fall back to the standard window.
@@ -130,7 +154,8 @@ def test_model_values_has_no_suffix_variants():
 def test_resolve_api_model_id_maps_each_preset_alias():
     # The registry stores short aliases; the native Anthropic leg needs the
     # full API model id.
-    assert m.resolve_api_model_id("haiku") == "claude-haiku-4-5"
+    assert m.resolve_api_model_id("haiku") == "claude-haiku-5-5"
+    assert m.resolve_api_model_id("claude-haiku-4-5") == "claude-haiku-4-5"
     assert m.resolve_api_model_id("sonnet") == "claude-sonnet-5"
     assert m.resolve_api_model_id("opus") == "claude-opus-5"
     assert m.resolve_api_model_id("fable") == "claude-fable-5"
@@ -170,7 +195,9 @@ def test_registry_payload_shape():
     # Claude windows travel to the frontend so the context meter is right.
     by_value = {entry["value"]: entry for entry in models}
     assert by_value["sonnet"]["context_window"] == 1_000_000
-    assert by_value["haiku"]["context_window"] == 200_000
+    assert by_value["haiku"]["context_window"] == 1_000_000
+    assert by_value["haiku"]["default_effort"] == "medium"
+    assert by_value["haiku"]["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
     # Flipped legacy map is serialized for the frontend — [1m] ids land on base.
     assert payload["legacy_map"]["claude-opus-4-8"] == "opus"
     assert payload["legacy_map"]["claude-opus-4-8[1m]"] == "opus"
@@ -273,7 +300,9 @@ class TestContextWindowChoices:
 
     @pytest.mark.parametrize("model_id,provider,expected", [
         ("sonnet", None, [200_000, 1_000_000]),
-        ("haiku", None, []),
+        ("haiku", None, [200_000, 1_000_000]),
+        ("claude-haiku-5-5", None, [200_000, 1_000_000]),
+        ("claude-haiku-4-5", None, []),
         ("gpt-6-astra", {"provider_type": "openai"}, [256_000, 1_000_000]),
         ("gpt-6-astra-custom", {"provider_type": "openai"}, []),
         ("gpt-6-astra", {"provider_type": "custom", "context_window": 272000}, []),

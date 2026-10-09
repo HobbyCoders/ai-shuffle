@@ -37,7 +37,7 @@ beforeEach(async () => {
 		models: [
 			{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 },
 			{ value: 'opus', label: 'Opus', family: 'opus', context_window: 1_000_000 },
-			{ value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 200_000 }
+			{ value: 'claude-haiku-4-5', label: 'Haiku 4.5', family: 'haiku', context_window: 200_000 }
 		],
 		default: 'sonnet', legacy_map: {},
 		providers: [{
@@ -85,7 +85,7 @@ describe('ModelPickerPanel', () => {
 		expect(onContextChoiceSelect).toHaveBeenLastCalledWith('1m');
 		expect(document.activeElement).toBe(extended);
 		expect(onSelect).not.toHaveBeenCalled();
-		await rerender({ value: 'haiku' });
+		await rerender({ value: 'claude-haiku-4-5' });
 		expect(screen.queryByRole('radiogroup', { name: 'Context window' })).toBeNull();
 	});
 

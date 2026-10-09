@@ -21,7 +21,7 @@ import AutomationForm from './AutomationForm.svelte';
 beforeAll(async () => {
 	mocks.get.mockResolvedValueOnce({
 		models: [
-			{ value: 'haiku', label: 'Haiku', family: 'haiku', supports_1m: false },
+			{ value: 'haiku', label: 'Haiku', family: 'haiku', supports_1m: true },
 			{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', supports_1m: true }
 		],
 		default: 'sonnet',

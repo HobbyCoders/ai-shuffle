@@ -32,8 +32,11 @@ _MAX_OUTPUT: list[tuple[str, int]] = [
     ("claude-3-sonnet", 4_096),
     ("claude-fable-5", 64_000),
     ("claude-mythos", 64_000),
+    ("claude-opus-5-5", 128_000),
+    ("claude-sonnet-5-5", 128_000),
     ("claude-opus", 64_000),   # Opus 5 / 4.8 / 4.7 / 4.6 / 4.5
     ("claude-sonnet", 64_000),  # Sonnet 5 / 4.6 / 4.5 / 4.0
+    ("claude-haiku-5-5", 128_000),
     ("claude-haiku", 64_000),   # Haiku 4.5
 ]
 

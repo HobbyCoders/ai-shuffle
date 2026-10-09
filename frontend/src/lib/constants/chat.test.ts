@@ -28,7 +28,7 @@ describe('getContextMaxForModel — before hydration (static registry)', () => {
 	it('uses the static Claude windows (sonnet/opus/fable are natively 1M)', () => {
 		expect(getContextMaxForModel('sonnet')).toBe(CONTEXT_MAX_1M);
 		expect(getContextMaxForModel('opus')).toBe(CONTEXT_MAX_1M);
-		expect(getContextMaxForModel('haiku')).toBe(CONTEXT_MAX);
+		expect(getContextMaxForModel('haiku')).toBe(CONTEXT_MAX_1M);
 		expect(CONTEXT_MAX_1M).toBe(1_000_000);
 	});
 
@@ -54,7 +54,7 @@ describe('getContextMaxForModel — after hydration (registry-aware)', () => {
 		mocks.get.mockResolvedValueOnce({
 			models: [
 				{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 },
-				{ value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 200_000 }
+				{ value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 1_000_000 }
 			],
 			default: 'sonnet',
 			legacy_map: {},
@@ -91,7 +91,7 @@ describe('getContextMaxForModel — after hydration (registry-aware)', () => {
 
 		// Claude slugs come from the hydrated Claude side of the registry.
 		expect(getContextMaxForModel('sonnet')).toBe(CONTEXT_MAX_1M);
-		expect(getContextMaxForModel('haiku')).toBe(CONTEXT_MAX);
+		expect(getContextMaxForModel('haiku')).toBe(CONTEXT_MAX_1M);
 
 		// Unknown-to-registry id → default 200k (no "1m" guessing).
 		expect(getContextMaxForModel('some-other-1m-model')).toBe(CONTEXT_MAX);

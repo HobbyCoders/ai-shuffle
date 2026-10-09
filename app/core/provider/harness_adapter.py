@@ -6939,8 +6939,8 @@ def _native_context_window(kind: str, options: SessionOptions) -> Optional[int]:
             return window
     # Fall through for env-credentialed native Claude (no row) and for a row
     # that knows nothing about this model but still runs a Claude slug.
-    if get_model(options.model) is not None:
-        return get_context_window(options.model)
+    if get_model(options.model, delegated=False) is not None:
+        return get_context_window(options.model, delegated=False)
     return None
 
 

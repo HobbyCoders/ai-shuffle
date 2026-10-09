@@ -6,7 +6,7 @@ model-family check across the backend picks it up automatically.
 Callers should never hardcode a model ID inline — import from this module.
 
 Context windows are the models' NATIVE windows: the current Claude slugs
-(sonnet/opus/fable) run 1M by default and there is no ``[1m]`` opt-in suffix
+(haiku/sonnet/opus/fable) run 1M by default and there is no ``[1m]`` opt-in suffix
 any more — see ``LEGACY_MODEL_MAP`` / ``_LEGACY_1M_SUFFIX`` for how stored
 legacy ids are normalized.
 
@@ -52,9 +52,9 @@ class ModelOption:
     context_window: int
     """Maximum input context in tokens, as the model natively runs.
 
-    The current Claude slugs (sonnet/opus/fable) run the 1M window by DEFAULT —
+    The current Claude slugs (haiku/sonnet/opus/fable) run the 1M window by DEFAULT —
     there is no opt-in toggle any more (the old ``[1m]`` suffix mechanism is
-    retired). Haiku stays on the standard 200k window."""
+    retired). Explicit Haiku 4.5 ids still use 200k."""
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +64,7 @@ class ModelOption:
 # Order here is the order shown in every dropdown in the UI and the order
 # reported by ``GET /api/models``.
 MODELS: Tuple[ModelOption, ...] = (
-    ModelOption("haiku",  "Haiku",  "haiku",     200_000),
+    ModelOption("haiku",  "Haiku",  "haiku",   1_000_000),
     ModelOption("sonnet", "Sonnet", "sonnet",  1_000_000),
     ModelOption("opus",   "Opus",   "opus",    1_000_000),
     ModelOption("fable",  "Fable",  "fable",   1_000_000),
@@ -84,8 +84,7 @@ INHERIT_VALUE = ""
 # resolve to the BASE slug (the 1M window is the Claude default, so the suffix
 # no longer selects anything).
 LEGACY_MODEL_MAP: Dict[str, str] = {
-    "claude-haiku-4-5": "haiku",
-    "claude-haiku-4-5-20251001": "haiku",
+    "claude-haiku-5-5": "haiku",
     "claude-sonnet-4-6": "sonnet",
     "claude-sonnet-4-6[1m]": "sonnet",
     "claude-sonnet-5": "sonnet",
@@ -115,7 +114,14 @@ _LEGACY_1M_SUFFIX = "[1m]"
 # Helpers
 # ---------------------------------------------------------------------------
 
-_BY_VALUE: Dict[str, ModelOption] = {m.value: m for m in MODELS}
+_VERSIONED_MODELS: Tuple[ModelOption, ...] = (
+    ModelOption("claude-haiku-5-5", "Haiku 5.5", "haiku", 1_000_000),
+    ModelOption("claude-haiku-4-5", "Haiku 4.5", "haiku", 200_000),
+    ModelOption("claude-haiku-4-5-20251001", "Haiku 4.5", "haiku", 200_000),
+    ModelOption("claude-opus-5-5", "Opus 5.5", "opus", 1_000_000),
+    ModelOption("claude-sonnet-5-5", "Sonnet 5.5", "sonnet", 1_000_000),
+)
+_BY_VALUE: Dict[str, ModelOption] = {m.value: m for m in (*MODELS, *_VERSIONED_MODELS)}
 
 
 def normalize_model(value: Optional[str]) -> str:
@@ -131,15 +137,22 @@ def normalize_model(value: Optional[str]) -> str:
         return INHERIT_VALUE
     mapped = LEGACY_MODEL_MAP.get(value)
     if mapped is not None:
+        # The first-party 5.5 pin must not become the cloud CLI's 4.5 alias.
+        if mapped == "haiku" and delegated_model_aliases()["haiku"] != API_MODEL_IDS["haiku"]:
+            return value
         return mapped
     if value.endswith(_LEGACY_1M_SUFFIX):
         return value[: -len(_LEGACY_1M_SUFFIX)]
     return value
 
 
-def get_model(value: Optional[str]) -> Optional[ModelOption]:
-    """Look up the ``ModelOption`` for a stored value, honouring legacy slugs."""
-    return _BY_VALUE.get(normalize_model(value))
+def get_model(value: Optional[str], *, delegated: bool = True) -> Optional[ModelOption]:
+    """Look up a stored value; cloud CLI aliases apply only to delegated routes."""
+    normalized = normalize_model(value)
+    if delegated and normalized == "haiku" and delegated_model_aliases()["haiku"] != API_MODEL_IDS["haiku"]:
+        return _BY_VALUE["claude-haiku-4-5"]
+    version = re.sub(r"-\d{8}$", "", normalized) if normalized.startswith("claude-") else normalized
+    return _BY_VALUE.get(normalized) or _BY_VALUE.get(version)
 
 
 def display_provider_model_label(
@@ -179,9 +192,9 @@ def get_model_family(value: Optional[str]) -> Optional[ModelFamily]:
     return match.family if match is not None else None
 
 
-def get_context_window(value: Optional[str]) -> int:
-    """Registered context window for the given Claude model; 200k when unknown."""
-    match = get_model(value)
+def get_context_window(value: Optional[str], *, delegated: bool = True) -> int:
+    """Registered context window for the given route; 200k when unknown."""
+    match = get_model(value, delegated=delegated)
     return match.context_window if match is not None else 200_000
 
 
@@ -329,11 +342,21 @@ def offered_context_window(session: Optional[Dict[str, Any]], window: Any) -> Op
 # matches the pricing table). Dateless ids on purpose — they track the current
 # model in each family.
 API_MODEL_IDS: Dict[str, str] = {
-    "haiku": "claude-haiku-4-5",
+    "haiku": "claude-haiku-5-5",
     "sonnet": "claude-sonnet-5",
     "opus": "claude-opus-5",
     "fable": "claude-fable-5",
 }
+
+
+def delegated_model_aliases() -> Dict[str, str]:
+    """CLI aliases differ on cloud/gateway auth; first-party Haiku is 5.5."""
+    from app.core import claude_auth_mode
+
+    aliases = dict(API_MODEL_IDS)
+    if claude_auth_mode.current_mode() == claude_auth_mode.MODE_CLOUD:
+        aliases["haiku"] = "claude-haiku-4-5"
+    return aliases
 
 
 def resolve_api_model_id(value: Optional[str]) -> Optional[str]:
@@ -548,6 +571,10 @@ def _default_selection() -> str:
 
 def registry_payload() -> Dict[str, object]:
     """Serialized registry for the ``GET /api/models`` endpoint."""
+    aliases = delegated_model_aliases()
+    legacy_map = dict(LEGACY_MODEL_MAP)
+    if aliases["haiku"] != API_MODEL_IDS["haiku"]:
+        legacy_map.pop("claude-haiku-5-5", None)
     return {
         "models": [
             {
@@ -555,15 +582,16 @@ def registry_payload() -> Dict[str, object]:
                 "label": m.label,
                 "family": m.family,
                 "auto_permission_supported": supports_auto_permission(m.value),
-                "context_window": m.context_window,
+                "context_window": (_BY_VALUE[aliases["haiku"]].context_window
+                                   if m.value == "haiku" else m.context_window),
                 **effort_capabilities(m.value, route="delegated"),
             }
             for m in MODELS
         ],
         "default": _default_selection(),
         "inherit_value": INHERIT_VALUE,
-        "legacy_map": dict(LEGACY_MODEL_MAP),
-        "effort_model_aliases": dict(API_MODEL_IDS),
+        "legacy_map": legacy_map,
+        "effort_model_aliases": aliases,
         "providers": _providers_payload(),
         "claude": _claude_payload(),
     }

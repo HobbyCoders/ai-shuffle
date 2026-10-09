@@ -12,7 +12,8 @@ Derived rates follow the published multipliers:
   ``_CACHE_READ_OVERRIDES``.
 
 Long context: models from the 4.6 generation on ship the 1M window at
-standard pricing, so a ``[1m]`` suffix changes nothing for them. The
+standard pricing, except Haiku 5.5 ($0.50/$2.50 above 100K prompt tokens).
+A ``[1m]`` suffix changes nothing for these native-1M models. The
 earlier 200K families reached 1M only through the ``context-1m`` beta, which
 billed the whole call at a higher tier once the prompt passed 200K tokens;
 that tier applies here when such an id carries ``[1m]``.
@@ -45,6 +46,7 @@ _PRICES: list[tuple[str, float, float]] = [
     ("claude-opus", 5.0, 25.0),   # Opus 5 / 4.8 / 4.7 / 4.6 / 4.5
     ("claude-sonnet-5", 2.0, 10.0),  # the launch price became the list price
     ("claude-sonnet", 3.0, 15.0), # Sonnet 4.6 / 4.5 / 4.0
+    ("claude-haiku-5-5", 0.10, 0.50),
     ("claude-haiku", 1.0, 5.0),
 ]
 
@@ -113,7 +115,10 @@ def estimate_cost(model: str, usage: dict) -> float | None:
     cache_write = usage.get("cache_creation_input_tokens", 0) or 0
     cache_read = usage.get("cache_read_input_tokens", 0) or 0
     output_tokens = usage.get("output_tokens", 0) or 0
-    if _long_context_tier(model, input_tokens + cache_write + cache_read):
+    prompt_tokens = input_tokens + cache_write + cache_read
+    if (model or "").lower().startswith("claude-haiku-5-5") and prompt_tokens > 100_000:
+        input_rate, output_rate = 0.50, 2.50
+    elif _long_context_tier(model, prompt_tokens):
         input_rate *= _LONG_CONTEXT_INPUT_MULTIPLIER
         output_rate *= _LONG_CONTEXT_OUTPUT_MULTIPLIER
     write_5m, write_1h = _cache_write_split(usage, cache_write)

@@ -1385,7 +1385,7 @@ def build_options_from_profile(
                    else native.context_window if native is not None else None)
         if context_window is not None and (_binding_row or {}).get("context_window"):
             if maximum is not None and maximum <= context_window:
-                # The default is already no larger than the pin (e.g. haiku).
+                # The default is already no larger than the pin (e.g. Haiku 4.5).
                 # No override is needed; leave that model's default unchanged.
                 context_window = None
         else:
@@ -1837,8 +1837,7 @@ def build_options_from_profile(
         enable_file_checkpointing=config.get("enable_file_checkpointing", False),
 
         # Extended thinking configuration
-        # For Opus 4.6+: use effort-based adaptive thinking
-        # For Sonnet/Haiku: use token budget-based thinking
+        # The provider serializer applies version-aware thinking/effort rules.
         **_build_thinking_config(
             config, model_to_use,
             # The assistant's home ignores every effort pick (this turn's, the

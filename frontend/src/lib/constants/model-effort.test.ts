@@ -13,6 +13,31 @@ beforeEach(async () => {
 });
 
 describe('authoritative effort capabilities', () => {
+ it('keeps Haiku 5.5 and explicit 5.5 pins version-aware without upgrading Haiku 4.5', async () => {
+  mocks.get.mockResolvedValue({ models: [
+   { value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 1_000_000 }
+  ], default: 'haiku', providers: [], legacy_map: { 'claude-haiku-5-5': 'haiku' } });
+  await hydrateModelRegistry();
+  for (const model of ['haiku', 'claude-haiku-5-5', 'claude-opus-5-5', 'claude-sonnet-5-5']) {
+   expect(levels(model)).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+   expect(resolveModelEffort(model).defaultValue).toBe('medium');
+  }
+  for (const model of ['claude-haiku-4-5', 'claude-haiku-4-5-20251001', 'claude-haiku-4-5-20261101']) {
+   expect(levels(model)).toEqual([]);
+   expect(resolveModelEffort(model).known).toBe(true);
+   expect(resolveModelEffort(model).defaultValue).toBeNull();
+   expect(reconcileModelEffort('max', resolveModelEffort(model))).toBeNull();
+  }
+ });
+ it('honors the cloud Haiku alias while keeping an explicit 5.5 pin', async () => {
+  mocks.get.mockResolvedValue({ models: [
+   { value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 200_000, effort_levels: [], default_effort: null }
+  ], default: 'haiku', providers: [], legacy_map: {}, effort_model_aliases: { haiku: 'claude-haiku-4-5' } });
+  await hydrateModelRegistry();
+  expect(levels('haiku')).toEqual([]);
+  expect(levels('claude-haiku-5-5')).toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+  expect(resolveModelEffort('claude-haiku-5-5').defaultValue).toBe('medium');
+ });
  it('uses live Codex levels and defaults without adding Ultra to Luna or OpenRouter GLM', () => {
   for (const id of ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra']) {
    const caps = resolveModelEffort(`prov:codex:${id}`);

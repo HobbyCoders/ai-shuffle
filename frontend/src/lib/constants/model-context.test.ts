@@ -14,7 +14,7 @@ beforeAll(async () => {
 	mocks.get.mockResolvedValueOnce({
 		models: [
 			{ value: 'sonnet', label: 'Sonnet', family: 'sonnet', context_window: 1_000_000 },
-			{ value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 200_000 }
+			{ value: 'haiku', label: 'Haiku', family: 'haiku', context_window: 1_000_000 }
 		],
 		default: 'sonnet',
 		legacy_map: {},
@@ -76,7 +76,7 @@ describe('model context choices', () => {
 	});
 
 	it('does not offer a 1M choice to models without a 1M registered ceiling or another family', () => {
-		expect(getModelContextControl('haiku')).toBeNull();
+		expect(getModelContextControl('claude-haiku-4-5')).toBeNull();
 		expect(
 			getModelContextControl(encodeProviderModel('openai-row', 'gpt-5.6-terra'))
 		).toBeNull();
@@ -91,7 +91,9 @@ describe('model context choices', () => {
 			contextWindowForChoice(encodeProviderModel('openai-row', 'gpt-5.6-sol'), 'standard')
 		).toBe(256_000);
 		expect(contextWindowForChoice('sonnet', '1m')).toBe(1_000_000);
-		expect(contextWindowForChoice('haiku', '1m')).toBeNull();
+		expect(contextWindowForChoice('haiku', '1m')).toBe(1_000_000);
+			expect(contextWindowForChoice('haiku', 'standard')).toBe(200_000);
+			expect(contextWindowForChoice('claude-haiku-4-5', '1m')).toBeNull();
 	});
 
 	it('restores semantic choices from persisted numeric session values', () => {

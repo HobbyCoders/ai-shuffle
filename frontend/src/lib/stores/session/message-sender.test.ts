@@ -434,7 +434,7 @@ describe('message-sender context-window override', () => {
 	it('omits context_window for a model without a 1M choice', async () => {
 		const { deps, wsConn } = makeDeps(baseState({
 			worktreeIntent: 'local',
-			modelOverride: 'haiku',
+			modelOverride: 'claude-haiku-4-5',
 			contextWindowChoice: '1m'
 		}));
 		const sender = createMessageSender(deps);
@@ -442,7 +442,7 @@ describe('message-sender context-window override', () => {
 		await sender.sendMessage('small and fast');
 
 		const frame = wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any;
-		expect(frame.overrides.model).toBe('haiku');
+		expect(frame.overrides.model).toBe('claude-haiku-4-5');
 		expect(frame.overrides.context_window).toBeUndefined();
 	});
 

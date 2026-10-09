@@ -2997,7 +2997,26 @@ def test_native_context_window_uses_the_claude_registry_for_claude_slugs():
         opts = SessionOptions(model=slug, extra={"fluid_engine": "native"})
         assert _native_context_window("anthropic", opts) == 1_000_000
     haiku = SessionOptions(model="haiku", extra={"fluid_engine": "native"})
-    assert _native_context_window("anthropic", haiku) == 200_000
+    assert _native_context_window("anthropic", haiku) == 1_000_000
+    legacy = SessionOptions(model="claude-haiku-4-5", extra={"fluid_engine": "native"})
+    assert _native_context_window("anthropic", legacy) == 200_000
+
+
+@pytest.mark.parametrize("model", [
+    "haiku", "haiku[1m]", "claude-haiku-5-5", "claude-haiku-5-5-20260601",
+])
+def test_native_haiku_context_ignores_delegated_cloud_alias(monkeypatch, model):
+    from app.core import claude_auth_mode
+    from app.core.model_registry import get_context_window, resolve_api_model_id
+    from app.core.provider.harness_adapter import _native_context_window
+
+    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: "cloud")
+    opts = SessionOptions(model=model, extra={"fluid_engine": "native"})
+    assert resolve_api_model_id("haiku") == "claude-haiku-5-5"
+    assert _native_context_window("anthropic", opts) == 1_000_000
+    assert get_context_window("haiku") == 200_000
+    legacy = SessionOptions(model="claude-haiku-4-5")
+    assert _native_context_window("anthropic", legacy) == 200_000
 
 
 def test_native_context_window_none_for_an_unknown_model():
@@ -5272,7 +5291,8 @@ def test_effort_change_requires_reconnect():
     assert not adapter.requires_reconnect(
         SessionOptions(model="claude-sonnet-5")
     )
-    assert adapter.requires_reconnect(SessionOptions(model="haiku"))
+    assert adapter.requires_reconnect(SessionOptions(model="claude-haiku-4-5"))
+    assert not adapter.requires_reconnect(SessionOptions(model="haiku"))
 
 
 # ─── _amend_native_task_spec ───────────────────────────────────────────────────

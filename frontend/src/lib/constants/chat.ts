@@ -22,7 +22,7 @@ export const CONTEXT_MAX_1M = 1_000_000;
  *      id (optionally scoped to `providerId`), already per-model on the
  *      backend. Checked FIRST so a provider session always uses its own window.
  *   2. Registry, Claude side — the native window of a Claude preset slug
- *      (sonnet/opus/fable = 1M, haiku = 200k).
+ *      (haiku/sonnet/opus/fable = 1M).
  *   3. Default — the standard 200k window for genuinely unknown models.
  *
  * There is deliberately NO "the id contains 1m" heuristic any more: the

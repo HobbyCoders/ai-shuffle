@@ -85,19 +85,22 @@ def effort_route(provider: Mapping[str, Any] | None) -> str:
 _ANTHROPIC = {name: _capability(list(ANTHROPIC_EFFORT_LEVELS), "high") for name in (
     "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
     "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5")}
+_ANTHROPIC.update({name: _capability(list(ANTHROPIC_EFFORT_LEVELS), "medium")
+                   for name in ("claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5")})
 _ANTHROPIC.update({name: _capability(["low", "medium", "high", "max"], "high")
                    for name in ("claude-mythos-preview", "claude-opus-4-6", "claude-sonnet-4-6")})
 _ANTHROPIC["claude-opus-4-5-20251101"] = _capability(["low", "medium", "high"], "high")
 # Native aliases are resolved by app/core/model_registry.py, not model-name patterns.
-_ALIASES = {"sonnet": "claude-sonnet-5", "opus": "claude-opus-5", "fable": "claude-fable-5"}
+_ALIASES = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5", "opus": "claude-opus-5", "fable": "claude-fable-5"}
 # https://code.claude.com/docs/en/model-config.md#adjust-effort-level
 _CLI = {name: dict(_ANTHROPIC[name]) for name in (
+    "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5",
     "claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5",
     "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6")}
 _CLI["claude-opus-4-7"]["default_effort"] = "xhigh"
 for _name in _ANTHROPIC:
     _CLI.setdefault(_name, _capability([]))
-for _name in ("haiku", "claude-haiku-4-5", "claude-haiku-4-5-20251001"):
+for _name in ("claude-haiku-4-5", "claude-haiku-4-5-20251001"):
     _ANTHROPIC[_name] = _capability([])
     _CLI[_name] = _capability([])
 # https://developers.openai.com/api/docs/models/<exact-id>.md
@@ -128,7 +131,12 @@ def effort_capabilities(model: str | None, provider: Mapping[str, Any] | None = 
     route = route or effort_route(provider)
     if cap is None:
         if provider is None:
-            cap = (_CLI if route == "delegated" else _ANTHROPIC).get(_ALIASES.get(model, model))
+            table = _CLI if route == "delegated" else _ANTHROPIC
+            aliases = _ALIASES
+            if route == "delegated":
+                from app.core.model_registry import delegated_model_aliases
+                aliases = delegated_model_aliases()
+            cap = table.get(aliases.get(model, model)) or table.get(canonical_effort_model(model))
         elif provider.get("provider_type") == "openai" and provider.get("auth_mode") not in ("chatgpt", "grok"):
             cap = _OPENAI.get(model)
         elif provider.get("provider_type") in ("xai", "grok"):
@@ -174,9 +182,9 @@ def _effort_bare_model(model: str | None) -> str:
 def canonical_effort_model(model: str | None) -> str:
     """Preserve concrete versions; unwrap only true aliases of that version."""
     import re
-    from app.core.model_registry import API_MODEL_IDS
+    from app.core.model_registry import delegated_model_aliases
     bare = _effort_bare_model(model)
-    bare = API_MODEL_IDS.get(bare, bare)
+    bare = delegated_model_aliases().get(bare, bare)
     return re.sub(r"-\d{8}$", "", bare) if bare.startswith("claude-") else bare
 
 

@@ -49,6 +49,9 @@ ADAPTIVE_SUMMARIZED = {"type": "adaptive", "display": "summarized"}
         ("claude-sonnet-5", "xhigh", "xhigh"),
         ("claude-opus-5", "max", "max"),
         ("claude-opus-5-5", "xhigh", "xhigh"),
+        ("claude-sonnet-5-5", "max", "max"),
+        ("claude-haiku-5-5", "xhigh", "xhigh"),
+        ("claude-haiku-5-5", "max", "max"),
         ("claude-fable-5-1", "xhigh", "xhigh"),
         # Non-Claude ids and unset effort pass through.
         ("glm-5.3", "xhigh", "xhigh"),
@@ -63,6 +66,40 @@ def test_xhigh_never_reaches_a_4_6_model_on_the_wire() -> None:
     for model in ("claude-opus-4-6", "claude-sonnet-4-6"):
         body = build_request_body(ProviderRequest(model=model, messages=[], effort="xhigh"))
         assert body["output_config"] == {"effort": "high"}
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_haiku_5_5_wire_accepts_effort_and_uses_native_limits(effort) -> None:
+    body = build_request_body(ProviderRequest(
+        model="claude-haiku-5-5", messages=[], effort=effort,
+        thinking={"type": "disabled"},
+    ))
+    assert body["output_config"]["effort"] == effort
+    assert body["max_tokens"] == 128_000
+    assert "thinking" not in body
+    adaptive = build_request_body(ProviderRequest(
+        model="claude-haiku-5-5", messages=[], effort=effort,
+        thinking={"type": "enabled", "budget_tokens": 8000},
+    ))
+    assert adaptive["thinking"]["type"] == "adaptive"
+    assert "budget_tokens" not in adaptive["thinking"]
+
+
+@pytest.mark.parametrize("model", [
+    "claude-sonnet-5-5",
+    "claude-sonnet-5-5[1m]",
+    "claude-sonnet-5-5-latest",
+    "claude-sonnet-5-5-20260601",
+    "anthropic.claude-sonnet-5-5-v1:0",
+])
+@pytest.mark.parametrize("effort", [None, "low", "medium", "high", "xhigh", "max"])
+def test_sonnet_5_5_never_sends_disabled_thinking(model, effort) -> None:
+    body = build_request_body(ProviderRequest(
+        model=model, messages=[], effort=effort, thinking={"type": "disabled"},
+    ))
+    assert "thinking" not in body
+    if effort is not None:
+        assert body["output_config"]["effort"] == effort
 
 
 def test_a_model_that_rejects_effort_gets_no_output_config() -> None:
@@ -92,6 +129,11 @@ def test_a_model_that_rejects_effort_gets_no_output_config() -> None:
         ("claude-opus-5", {"display": "summarized"}, None, ADAPTIVE_SUMMARIZED),
         # Always-thinking models reject "disabled"; Opus 5 only at xhigh/max.
         ("claude-opus-5-5", {"type": "disabled"}, "low", None),
+        ("claude-haiku-5-5", {"type": "disabled"}, "low", None),
+        ("claude-haiku-5-5", {"type": "disabled"}, "max", None),
+        ("claude-haiku-5-5", {"type": "adaptive"}, "medium", {"type": "adaptive"}),
+        ("claude-haiku-5-5", {"type": "enabled", "budget_tokens": 8000}, None, {"type": "adaptive"}),
+        ("claude-haiku-5-5", {"display": "summarized"}, None, ADAPTIVE_SUMMARIZED),
         ("claude-fable-5-1", {"type": "disabled"}, None, None),
         ("claude-opus-5", {"type": "disabled"}, "xhigh", None),
         ("claude-opus-5", {"type": "disabled"}, "high", {"type": "disabled"}),

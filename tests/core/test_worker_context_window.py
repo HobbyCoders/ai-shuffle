@@ -69,8 +69,11 @@ def test_voice_reads_only_its_live_binding(monkeypatch):
     # The caller chose "standard" on GPT (272K): a Claude worker runs 200K.
     (272_000, "sonnet", 200_000),
     (256_000, "fable", 200_000),
-    # No choice for this model: query_options drops it, as for a session turn.
+    # Haiku 5.5 offers both windows; unknown choices pass through to query_options.
     (200_000, "haiku", 200_000),
+    (1_000_000, "haiku", 1_000_000),
+    (1_000_000, "claude-haiku-5-5", 1_000_000),
+    (1_000_000, "claude-haiku-4-5", 1_000_000),
     # The model is inherited, so its choices are not known here.
     (200_000, None, 200_000),
 ])
@@ -154,11 +157,12 @@ def _leg_for_worker(mock_db, model, window, overrides=None):
     return options, captured["opts"]
 
 
-def test_standard_window_pins_the_delegated_cli_below_1m(mock_db):
+@pytest.mark.parametrize("model", ["opus", "haiku", "claude-haiku-5-5"])
+def test_standard_window_pins_the_delegated_cli_below_1m(mock_db, model):
     from app.core.provider import harness_adapter as ha
     from fluid.engine.delegated import DelegatedLoop
 
-    options, opts = _leg_for_worker(mock_db, "opus", 200_000)
+    options, opts = _leg_for_worker(mock_db, model, 200_000)
     assert options.aih_context_window == 200_000
     # What the delegated leg hands the claude CLI's process env.
     env = DelegatedLoop(store=None, model=opts.model, env=opts.env)._child_env()
@@ -168,18 +172,19 @@ def test_standard_window_pins_the_delegated_cli_below_1m(mock_db):
     assert ha._native_context_window("anthropic", opts) == 200_000
 
 
-def test_1m_window_selects_1m_on_the_delegated_cli(mock_db):
+@pytest.mark.parametrize("model", ["opus", "haiku", "claude-haiku-5-5"])
+def test_1m_window_selects_1m_on_the_delegated_cli(mock_db, model):
     from app.core.provider import harness_adapter as ha
     from fluid.engine.delegated import DelegatedLoop
 
-    _, opts = _leg_for_worker(mock_db, "opus", 1_000_000)
+    _, opts = _leg_for_worker(mock_db, model, 1_000_000)
     env = DelegatedLoop(store=None, model=opts.model, env=opts.env)._child_env()
     assert env[DISABLE_1M] == "0"
     assert env[AUTO_COMPACT] == env[MAX_CONTEXT] == "1000000"
     assert ha._native_context_window("anthropic", opts) == 1_000_000
 
 
-@pytest.mark.parametrize("model,window", [("opus", None), ("haiku", 200_000)])
+@pytest.mark.parametrize("model,window", [("opus", None), ("haiku", None), ("claude-haiku-4-5", 200_000), ("claude-haiku-4-5", 1_000_000)])
 def test_no_or_unsupported_choice_falls_back_like_a_session_turn(mock_db, model, window):
     from app.core.model_registry import get_context_window
     from app.core.provider import harness_adapter as ha

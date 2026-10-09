@@ -20,6 +20,7 @@ import { encodeProviderModel, hydrateModelRegistry, isFastModeCapable } from './
 describe('isFastModeCapable — native Claude models', () => {
 	it('accepts the opus family', () => {
 		expect(isFastModeCapable('opus')).toBe(true);
+			expect(isFastModeCapable('claude-opus-5-5')).toBe(true);
 	});
 
 	it('accepts a legacy opus id that normalizes onto the preset', () => {
@@ -29,6 +30,8 @@ describe('isFastModeCapable — native Claude models', () => {
 	it('rejects every other family', () => {
 		expect(isFastModeCapable('sonnet')).toBe(false);
 		expect(isFastModeCapable('haiku')).toBe(false);
+			expect(isFastModeCapable('claude-haiku-5-5')).toBe(false);
+			expect(isFastModeCapable('claude-sonnet-5-5')).toBe(false);
 		expect(isFastModeCapable('fable')).toBe(false);
 	});
 

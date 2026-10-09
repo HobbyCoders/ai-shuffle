@@ -25,7 +25,7 @@ class TestSubagentDefaultApi:
 
     def test_put_roundtrip_normalizes(self, authenticated_client, mock_db):
         _provider()
-        resp = authenticated_client.put(ENDPOINT, json={"model": "claude-haiku-4-5"})
+        resp = authenticated_client.put(ENDPOINT, json={"model": "claude-haiku-5-5"})
         assert resp.status_code == 200, resp.text
         assert resp.json() == {"model": "haiku"}
         assert authenticated_client.get(ENDPOINT).json() == resp.json()

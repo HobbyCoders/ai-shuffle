@@ -376,7 +376,7 @@ def _claude_alias(model: Optional[str]) -> Optional[str]:
 
     match = get_model(model)
     if match is not None:
-        return match.value
+        return match.family
     lowered = (model or "").lower()
     if lowered.startswith("claude"):
         for family in _CLAUDE_FAMILIES:
