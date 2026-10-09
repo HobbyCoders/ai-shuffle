@@ -9,7 +9,9 @@
 //   minimum  signed into every published manifest as desktop.launcher. 0 means
 //            any launcher, including those built before the stamp existed.
 //
-// Nothing acts on either value yet.
+// When a launcher older than `minimum` starts a release, the release replaces
+// it from its own verified source (desktop/LAUNCHER.md). Raise `minimum` only
+// after a Windows acceptance run of the new launcher has passed.
 export function readLauncher(text) {
  const value = JSON.parse(text);
  const count = n => Number.isSafeInteger(n) && n >= 0;

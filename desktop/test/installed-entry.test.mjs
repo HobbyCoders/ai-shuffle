@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import path from 'node:path';
 const code=readFileSync(new URL('../dist/main/installed-entry.js',import.meta.url),'utf8');
-function fixture({locked=true,source=false,broken=false,blocked=false,answer=1,platform='win32',env={},missingStamp=false,badStamp=false,incompatible=false,activeFallback=false,state=null,recovery=false,recovered=false,confirmable=false,retryAvailable=true,installerError=false,build={revision:'a'.repeat(40),sequence:100}}={}){
+function fixture({locked=true,source=false,broken=false,blocked=false,answer=1,platform='win32',env={},missingStamp=false,badStamp=false,incompatible=false,activeFallback=false,state=null,recovery=false,recovered=false,confirmable=false,retryAvailable=true,installerError=false,build={revision:'a'.repeat(40),sequence:100},launcherJson=null,trial='none'}={}){
  const events=[];const module={exports:{}};let options;let launched;
  const app={requestSingleInstanceLock:()=>{events.push('lock');return locked;},quit:()=>events.push('quit'),
   getPath:()=>path.resolve('existing-profile'),getName:()=> 'existing-name',getAppPath:()=>path.resolve('installed-app'),releaseSingleInstanceLock:()=>events.push('unlock'),commandLine:{getSwitchValue:()=>''},whenReady:async()=>{}};
@@ -15,10 +15,14 @@ function fixture({locked=true,source=false,broken=false,blocked=false,answer=1,p
  vm.runInNewContext(code,{module,exports:module.exports,process:{platform,arch:'x64',env,versions:{electron:'44.2.0'},execPath:path.resolve('Programs/AI Shuffle.exe'),resourcesPath:path.resolve('resources'),argv:['AI Shuffle.exe','aishuffle://test']},require:id=>{
   if(id==='electron')return {app,dialog,shell:{openExternal:async url=>events.push(['open',url]),showItemInFolder:file=>events.push(['reveal',file])}};if(id==='node:path')return path;
   if(id==='node:fs')return {promises:{readFile:async file=>{
+   if(file.endsWith('launcher.json')){if(launcherJson===null)throw Object.assign(Error('ENOENT'),{code:'ENOENT'});return launcherJson;}
    if(!file.endsWith('desktop-build.json'))return 'trusted-public-key';
    if(missingStamp)throw Object.assign(Error('Missing stamp'),{code:'ENOENT'});
    return badStamp?'{}':JSON.stringify(build);
   }}};
+  if(id==='./launcher-swap')return {LAUNCHER_FILE:'launcher.json',parseLauncher:text=>JSON.parse(text),
+   launcherTrial:(root,own)=>{events.push({trial:own});return trial;},countLauncherStart:()=>events.push('count'),
+   restoreLauncher:(root,exe)=>events.push({restore:exe})};
   if(id==='./source-updates')return {SourceUpdates};if(id==='./installed-host')return host;
   if(id==='./installer-updates')return {installerPlatform:()=>platform==='linux'?'linux':null,InstallerUpdates:class {
    constructor(options){events.push(['installer-options',options]);}async check(){events.push('installer-check');if(installerError)throw Error('Offline');return {kind:'available'};}async download(){events.push('installer-download');return {file:'verified-installer.AppImage',version:'0.9.2'};}
@@ -43,7 +47,8 @@ test('Linux baseline uses userData and bundled bin/node, retaining the AppImage 
  assert.equal(f.entry.installedContext().executable,appimage);
  assert.equal(f.events.find(e=>e?.host)?.host.executable,appimage);
  assert.equal(f.events.at(-1),'run-bundled');
- const staged=fixture({platform:'linux',source:true});await staged.entry.startInstalled();
+ assert(!f.events.some(e=>e?.trial!==undefined),'Linux never enters Windows launcher trials');
+ const staged=fixture({platform:'linux',source:true,launcherJson:'not a Windows launcher',trial:'restore'});await staged.entry.startInstalled();
  assert.deepEqual(staged.events.slice(-4),['select','preflight','booting',['delegate',false]]);assert(!staged.events.includes('launch-source'));
 });
 test('Linux incompatible Electron preflight preserves installer offers without recording a failed boot',async()=>{
@@ -80,7 +85,7 @@ test('installed EXE selects staged source and releases the instance lock before 
 test('a source build that cannot be selected never silently runs the old bundled app over its database',async()=>{
  const f=fixture({source:true,broken:true});await assert.rejects(f.entry.startInstalled(),/No healthy/);assert(!f.events.includes('run-bundled'));assert(!f.events.includes('launch-source'));
 });
-const kinds=events=>events.map(e=>typeof e==='string'?e:e.dialog?'dialog':'host');
+const kinds=events=>events.filter(e=>e?.trial===undefined).map(e=>typeof e==='string'?e:e.dialog?'dialog':'host');
 test('unrecoverable state offers an installer without loading source or bundled worker code',async()=>{
  const f=fixture({platform:'linux',recovery:true});await f.entry.startInstalled();
  assert.deepEqual(kinds(f.events),['lock','load','baseline','dialog','quit']);const prompt=f.events.find(e=>e.dialog).dialog;
@@ -104,7 +109,6 @@ test('recovered source startup failures and exhausted retries offer installers, 
   const f=fixture({platform:'linux',answer:0,...settings});await f.entry.startInstalled();assert(f.events.includes('installer-download'));assert(!f.events.includes('run-bundled'));assert(!f.events.includes('launch-source'));assert.equal(f.events.at(-1),'quit');
  }
 });
-
 test('DESK-02: a blocked newer source never falls back to an older database-incompatible baseline',async()=>{
  const f=fixture({source:true,blocked:true});
  await f.entry.startInstalled();
@@ -138,4 +142,30 @@ test('#1821 D5: the launcher passes its stamped version to the updated app, and 
   await assert.rejects(bad.entry.startInstalled(),/Invalid installed desktop launcher version/,String(launcher));
   assert(!bad.events.includes('launch-source'));
  }
+});
+test('#1821 D5: a swapped-in launcher reports the version in its own archive, not the installer stamp',async()=>{
+ const f=fixture({source:true,build:{revision:'a'.repeat(40),sequence:100,launcher:1},launcherJson:'{"version":2,"minimum":0}'});
+ await f.entry.startInstalled();
+ assert.equal(f.launched[3],2);assert.deepEqual(f.events.find(e=>e?.trial!==undefined),{trial:2});
+ assert(!f.events.includes('count'));
+});
+test('#1821 D5: a launcher on trial counts its start just before it hands over',async()=>{
+ const f=fixture({source:true,launcherJson:'{"version":2,"minimum":0}',trial:'trial'});
+ await f.entry.startInstalled();
+ assert.deepEqual(f.events.slice(-4),['unlock','count','launch-source','quit']);
+ assert(!f.events.some(e=>e?.restore));
+});
+test('#1821 D5: a launcher whose trial start never reached the app restores the previous launcher and starts nothing',async()=>{
+ const f=fixture({source:true,launcherJson:'{"version":2,"minimum":0}',trial:'restore'});
+ await f.entry.startInstalled();
+ assert.deepEqual(f.events.slice(-2),[{restore:path.resolve('Programs/AI Shuffle.exe')},'quit']);
+ assert(!f.events.includes('load'));assert(!f.events.includes('launch-source'));assert(!f.events.includes('run-bundled'));
+});
+test('#1821 D5: a launcher on trial that fails before the hand-over restores the previous one and still reports the error',async()=>{
+ const f=fixture({source:true,broken:true,launcherJson:'{"version":2,"minimum":0}',trial:'trial'});
+ await assert.rejects(f.entry.startInstalled(),/No healthy/);
+ assert(f.events.some(e=>e?.restore));assert(!f.events.includes('launch-source'));
+ // Outside a trial the same failure restores nothing.
+ const plain=fixture({source:true,broken:true,launcherJson:'{"version":2,"minimum":0}'});
+ await assert.rejects(plain.entry.startInstalled(),/No healthy/);assert(!plain.events.some(e=>e?.restore));
 });

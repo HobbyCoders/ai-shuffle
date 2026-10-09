@@ -21,6 +21,8 @@ files:
   - build/icon.png
   - build/application-update-key.pem
   - scripts/source-profile.cjs
+  # The launcher version this archive holds (desktop/LAUNCHER.md).
+  - launcher.json
 
 # The worker runtime assembled by scripts/build-worker.mjs: Python with the
 # server's dependencies, Node, and the server itself, plus the PostgreSQL

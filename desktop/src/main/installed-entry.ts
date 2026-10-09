@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { SourceUpdates } from './source-updates';
 import { saveInstalledHost, launchInstalledSource, installedLaunchArgs, installedExecutable, requireInstalledElectron, InstallerRequired } from './installed-host';
+import { countLauncherStart, launcherTrial, parseLauncher, restoreLauncher, LAUNCHER_FILE } from './launcher-swap';
 
 let installed: { updates: SourceUpdates; executable: string; root: string; installersOnly?: boolean } | null = null;
 export const installedContext = () => installed;
@@ -27,8 +28,26 @@ export async function startInstalled(): Promise<void> {
   }
   if (!/^[a-f0-9]{40}$/.test(baseline.revision) || !Number.isSafeInteger(baseline.sequence) || baseline.sequence <= 0) throw Error('Invalid installed desktop revision');
   // Installers built before the launcher stamp (#1821 D5) have none: version 0.
-  const launcher = baseline.launcher === undefined ? 0 : baseline.launcher;
+  let launcher = baseline.launcher === undefined ? 0 : baseline.launcher;
   if (!Number.isSafeInteger(launcher) || launcher < 0) throw Error('Invalid installed desktop launcher version');
+  // Launcher swaps are Windows-only; Linux keeps its installed Electron in process.
+  if (process.platform === 'win32') {
+    // A launcher the updated app swapped in carries its own version; the installer's stamp is older.
+    try { launcher = parseLauncher(await fs.readFile(path.join(app.getAppPath(), LAUNCHER_FILE), 'utf8')).version; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  }
+  // A swapped-in launcher on trial (desktop/LAUNCHER.md): if its first start never
+  // reached the updated app, put the previous launcher back before anything else.
+  const trial = process.platform === 'win32' ? launcherTrial(root, launcher) : 'none';
+  if (trial === 'restore') { restoreLauncher(root, process.execPath); app.quit(); return; }
+  try { await startWith(root, userData, baseline, launcher, trial === 'trial'); }
+  catch (error) {
+    if (trial === 'trial') try { restoreLauncher(root, process.execPath); } catch { /* the error below is the one to show */ }
+    throw error;
+  }
+}
+
+async function startWith(root: string, userData: string, baseline: { revision: string; sequence: number }, launcher: number, trial: boolean): Promise<void> {
   const updates = new SourceUpdates({ root, baseline: { revision: baseline.revision, sequence: baseline.sequence },
     publicKey: await fs.readFile(path.join(app.getAppPath(), 'build/application-update-key.pem'), 'utf8'),
     bootstrapNode: path.join(process.resourcesPath, process.platform === 'win32' ? 'worker/node/node.exe' : 'worker/node/bin/node'),
@@ -94,6 +113,7 @@ export async function startInstalled(): Promise<void> {
       }
       const selected = await updates.select();
       app.releaseSingleInstanceLock();
+      if (trial) countLauncherStart(root);
       // Launch the GUI executable directly; no console shell is needed.
       await launchInstalledSource(selected, root, installedLaunchArgs(process.argv.slice(1), app.commandLine.getSwitchValue('remote-debugging-port')), launcher);
       app.quit();

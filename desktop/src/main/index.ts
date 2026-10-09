@@ -12,7 +12,8 @@ import { showCloseDialog } from './close-dialog';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { managedContext } from './managed-context';
 import { installedContext } from './installed-entry';
-import { installedLaunchArgs } from './installed-host';
+import { installedLaunchArgs, launcherVersion, LAUNCHER_VERSION_ENV } from './installed-host';
+import { replaceInstalledLauncher } from './launcher-swap';
 import path from 'node:path';
 import { registerIpc, type DesktopState, type PostgresStatus, type WorkerControl } from './ipc';
 import { installMenu } from './menu';
@@ -266,6 +267,14 @@ async function main(): Promise<void> {
 	registerIpc({ window, updater, worker });
 	updater.subscribe((state) => window.send('desktop:update-state', state));
 
+	/** An older installed launcher than this release needs is replaced from this verified source (desktop/LAUNCHER.md). */
+	function replaceLauncher(): void {
+		const host = managed?.host;
+		if (!managed || !host || managed.profile || process.platform !== 'win32') return;
+		void replaceInstalledLauncher({ ...managed, host }, launcherVersion(process.env[LAUNCHER_VERSION_ENV]))
+			.then(result => { if (result !== 'current') console.log(`Launcher swap: ${result}`); })
+			.catch(error => console.error('Could not replace the installed launcher', error));
+	}
 	let quitting = false;
 	let applicationFailed = false;
 	/** Set once the agent-access disclosure is accepted; no database or worker before that. */
@@ -281,7 +290,7 @@ async function main(): Promise<void> {
 		// says so there. No launch dialog for everyone.
 		if (applications && state.phase === 'ready' && !state.external) {
 			// The initial timer may have fired while this revision was still booting.
-			void applications.healthy().then(() => updater.check()).catch(error => console.error('Could not record healthy application', error));
+			void applications.healthy().then(() => { replaceLauncher(); return updater.check(); }).catch(error => console.error('Could not record healthy application', error));
 		}
 		if (applications && state.phase === 'failed') {
 			applicationFailed = true;

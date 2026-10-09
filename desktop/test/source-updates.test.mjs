@@ -64,6 +64,7 @@ async function installedLauncher(f, rejectRevision = null, {baseline={revision:A
   if(id==='node:path')return path;
   if(id==='node:fs')return {promises:{readFile:async file=>file.endsWith('desktop-build.json')?JSON.stringify(baseline):f.options.publicKey}};
   if(id==='./source-updates')return {SourceUpdates:InstalledUpdates};
+  if(id==='./launcher-swap')return require('../dist/main/launcher-swap.js');
   if(id==='./installed-host')return {InstallerRequired,installedExecutable:()=>'/test/AI Shuffle.AppImage',saveInstalledHost:async()=>{},requireInstalledElectron:async()=>{}};
   if(id==='./index'){events.push('bundled');return {};}
   if(id.endsWith(path.join('dist','main','managed-entry.js'))){

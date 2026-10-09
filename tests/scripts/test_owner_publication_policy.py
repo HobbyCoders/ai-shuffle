@@ -41,7 +41,7 @@ def permits(expression, *, actor_id=OWNER, actor="Quickkill0", triggering_actor=
     """
     inputs = dict(publish_download=True, publish_to_play=True, workers_ready=True,
                   confirm_existing_key_export=True, build_macos=True,
-                  release_tag="v0.8.19", candidate_run_id="")
+                  release_tag="v0.8.19", candidate_run_id="", launcher_acceptance=False)
     inputs.update(input_changes)
     expression = expression.removeprefix("${{").removesuffix("}}").strip()
     expression = expression.replace("&&", " and ").replace("||", " or ")
@@ -158,6 +158,29 @@ def test_existing_opt_ins_and_success_dependencies_still_fail_closed():
     assert "needs.verify.result == 'success'" in jobs["publish"]["if"]
     assert "needs.build.result == 'success'" in jobs["verify"]["if"]
     assert not permits(jobs["build"]["if"], candidate_run_id="previous-run")
+    for job in ["check", "build", "verify", "publish"]:
+        assert not permits(jobs[job]["if"], launcher_acceptance=True), job
+
+
+def test_launcher_acceptance_is_owner_only_and_publishes_nothing():
+    """#1821 D5: the launcher swap is proven on Windows from a branch, without any release power."""
+    jobs = workflow("desktop-installer.yml")["jobs"]
+    job = jobs["launcher-acceptance"]
+    assert permits(job["if"], launcher_acceptance=True)
+    assert permits(job["if"], launcher_acceptance=True, ref="refs/heads/fix/1821-launcher-swap")
+    assert not permits(job["if"])
+    for changes in [{"actor_id": "7"}, {"triggering_actor": "another-maintainer"}, {"repo": "someone/ai-shuffle"},
+                    {"event": "pull_request"}, {"event": "push"}, {"event": "workflow_run"}, {"event": "schedule"}]:
+        assert not permits(job["if"], launcher_acceptance=True, **changes), changes
+    assert job["permissions"] == {"contents": "read"}
+    assert "needs" not in job and "environment" not in job
+    text = yaml.safe_dump(job)
+    assert "secrets." not in text and "vars." not in text
+    for forbidden in ["gh release upload", "gh release create", "publish-installer", "wrangler", "git push", "git tag"]:
+        assert forbidden not in text, forbidden
+    uploads = [step["with"]["name"] for step in job["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact")]
+    assert uploads == ["launcher-swap-evidence"]
+    assert "windows" in job["runs-on"]
 
 
 def test_windows_installer_requires_tagged_unit_tests_before_building():

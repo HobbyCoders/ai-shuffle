@@ -5,7 +5,8 @@ import path from 'node:path';
 import { SourceUpdates } from './source-updates';
 import { setManagedContext } from './managed-context';
 import { readProfile, localFeed } from './source-profile';
-import { readInstalledHostSync } from './installed-host';
+import { readInstalledHostSync, launcherVersion, LAUNCHER_VERSION_ENV } from './installed-host';
+import { confirmLauncher } from './launcher-swap';
 import { buildEnvironment } from './source-build';
 
 async function start(): Promise<void> {
@@ -37,6 +38,11 @@ export async function startManagedSource(root: string, revision: string, bootstr
   const publicKey = profile?.publicKey ?? await fs.readFile(path.resolve(__dirname, '../../build/application-update-key.pem'), 'utf8');
   const updates = new SourceUpdates({ root, publicKey, bootstrapNode, fetch: localFeed(profile) });
   await updates.attach(revision);
+  // Settle a launcher swap (desktop/LAUNCHER.md): this start proves which launcher runs.
+  if (host && process.platform === 'win32') {
+    try { const result = confirmLauncher(root, host.executable, launcherVersion(process.env[LAUNCHER_VERSION_ENV]), revision); if (result !== 'none') console.log(`Launcher swap: ${result}`); }
+    catch (error) { console.error('Could not settle the launcher swap', error); }
+  }
   const application = await updates.application(revision);
   // In-process Linux delegation must give userData runtimes the same clean
   // environment as a sourceLaunch child, without changing the host's AppImage target.

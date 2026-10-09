@@ -79,7 +79,17 @@ export interface SourceApplication {
  * attempt of the same revision may still have a persistent migration fence.
  * Only builds that write it are ever treated that way; older ones never set it.
  */
-interface SourceState { schemaVersion?: 1; recoveredState?: boolean; recoveryRequired?: boolean; active?: string; previous?: string; pending?: string; staged?: string; booting?: string; waiting?: string; blocked?: boolean; failed?: string[]; mayHaveMigrated?: Record<string, number | null>; supersededFailed?: string[] }
+export interface SourceState { schemaVersion?: 1; recoveredState?: boolean; recoveryRequired?: boolean; active?: string; previous?: string; pending?: string; staged?: string; booting?: string; waiting?: string; blocked?: boolean; failed?: string[]; mayHaveMigrated?: Record<string, number | null>; supersededFailed?: string[] }
+/** state.json as every launcher reads it (desktop/LAUNCHER.md); throws on anything else. */
+export function parseSourceState(text: string): SourceState {
+  const state = JSON.parse(text) as SourceState;
+  if (!state || typeof state !== 'object' || Array.isArray(state)) throw new Error('Invalid source update state');
+  for (const field of ['active', 'previous', 'pending', 'staged', 'booting', 'waiting'] as const) {
+    if (state[field] !== undefined && (typeof state[field] !== 'string' || !REVISION.test(state[field]!))) throw new Error('Invalid installed revision');
+  }
+  if (state.failed !== undefined && (!Array.isArray(state.failed) || state.failed.some(v => typeof v !== 'string' || !REVISION.test(v)))) throw new Error('Invalid failed revisions');
+  return state;
+}
 export type SourceProgress = (percent: number | null, message: string) => void;
 /** The signed release name and notes shown beside the update button. */
 export interface ReleaseInfo { release?: string; notes?: string }
@@ -646,6 +656,12 @@ export class SourceUpdates {
       this.state[field] = manifest.revision;
       try { await this.save(); } catch (error) { delete this.state[field]; throw error; }
     } finally { await removeSourceDirectory(stage); }
+  }
+  /** The signed manifest an installed revision was built from, verified again. */
+  async release(revision: string): Promise<SourceManifest> {
+    const manifest = verifySourceManifest(await fs.readFile(path.join(this.directory(revision), 'release.json'), 'utf8'), this.options.publicKey);
+    if (manifest.revision !== revision) throw new Error('Invalid built application');
+    return manifest;
   }
   async application(revision: string): Promise<SourceApplication> {
     const dir = this.directory(revision);
