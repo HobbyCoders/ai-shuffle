@@ -289,6 +289,31 @@ async def test_subscription_run_touches_no_token_file_and_hands_over_no_key(
     assert file_audit.touched(fake_cli["credentials"]) == []
 
 
+async def test_subscription_host_oauth_token_reaches_only_the_cli(
+    mock_db, tmp_path, fake_cli, file_audit, monkeypatch
+):
+    """#2079: a worker-set CLAUDE_CODE_OAUTH_TOKEN goes to the stock CLI's turn
+    and to no other child (process tree, hooks, git)."""
+    monkeypatch.setattr(claude_cli_status, "get_status", lambda force=False, resolver=None: _cli_status(True))
+    claude_auth_mode.set_mode("subscription")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", HOST_OAUTH)
+    _seed(tmp_path, "c14-sub-oauth")
+
+    frames = await _run_turn("c14-sub-oauth", audit=file_audit)
+
+    assert [f for f in frames if f.get("type") == "error"] == []
+    runs = _turn_calls(fake_cli["calls"]())
+    assert len(runs) == 1
+    assert runs[0]["env"].get("CLAUDE_CODE_OAUTH_TOKEN") == HOST_OAUTH
+    from app.core.hook_executor import hook_base_env
+    from app.core.process_tree import child_env
+    from fluid.tools.child_env import scrub_child_env
+    for env in (child_env(), hook_base_env(), scrub_child_env()):
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env and HOST_OAUTH not in env.values()
+
+
 # ---------------------------------------------------------------------------
 # 3. API key mode: the user's key and nothing else
 # ---------------------------------------------------------------------------

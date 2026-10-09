@@ -84,8 +84,7 @@ key (never the key), so a changed or removed environment key hides it.
 
 Claude usage is still read passively from Claude Code's own live usage
 reports; refresh cannot fetch usage spent outside a running CLI session. The
-reset controls described under [Claude resets](#claude-resets) are the one
-place the app reads the CLI's sign-in, and they do not feed the usage meters.
+app never reads the CLI's sign-in.
 Old readings are labeled "Last reported" with their age, on Claude and on every
 provider row. A passed reset does not prove
 100% remains: the panel retains the last reported percentage and says it awaits
@@ -205,39 +204,14 @@ picture. Snapshots carry no Claude account identity or plan.
 
 ### Claude resets
 
-Claude offers two resets, shown under Settings > Providers > Claude
-subscription > Usage for the owner while the CLI is signed in:
-
-- **Weekly resets** (program `cedar_ember`): banked grants, each with a count
-  of resets left and a use-by date. They clear the weekly limits and usually
-  open only once a weekly limit is hit.
-- **The 5-hour reset** (program `juniper_tide`): clears the current 5-hour
-  window a set number of times a week, only at the 5-hour limit. It counts
-  against the weekly limit.
-
-The worker routes are `GET /api/v1/usage/claude/resets` (both programs),
-`POST /api/v1/usage/claude/resets/weekly` with `grant_id` and
-`idempotency_key`, and `POST /api/v1/usage/claude/resets/session`. Upstream,
-status comes from `GET https://api.anthropic.com/api/oauth/usage` and claims go
-to `POST https://api.anthropic.com/api/organizations/{org}/reset_rate_limits`,
-the same calls the Claude Code CLI makes. These endpoints are unofficial and
-subscription-specific, like the Codex and SuperGrok reset readers.
-
-Credential policy:
-
-- The organization ID comes from `claude auth status` and stays on the worker.
-- The access token is read from the CLI's own credentials file only when the
-  owner opens the Usage tab, presses refresh, or confirms a reset. It is never
-  refreshed, written, cached, logged or returned to the browser.
-- An expired or missing token answers 409 with "run a Claude turn", which lets
-  the CLI refresh its own sign-in. On macOS the CLI keeps its token in the
-  Keychain, which the app does not read, so resets are unavailable there.
-- `tests/core/test_claude_cli_no_token_access.py` fails if any other module
-  names the credentials file.
-
-A weekly claim reuses its idempotency key on retry, so an ambiguous failure
-cannot spend a second reset. After a successful reset the app refills only the
-windows the panel already shows, and the next CLI report replaces them.
+AI Shuffle has no Claude reset controls. An earlier version read the Claude
+Code CLI's sign-in token to show and claim weekly and 5-hour resets; that was
+removed because Anthropic's terms do not allow third-party apps to collect or
+intermediate Claude.ai session tokens. Settings > Providers > Claude
+subscription > Usage links to
+[claude.ai/settings/usage](https://claude.ai/settings/usage) instead.
+`tests/core/test_claude_cli_no_token_access.py` fails if any app or Fluid
+module names the CLI's credentials file or its `claudeAiOauth` token again.
 
 ## OpenRouter setup and account separation
 

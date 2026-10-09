@@ -9,6 +9,7 @@
 	import { Check, Copy, ExternalLink, TriangleAlert } from 'lucide-svelte';
 	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 	import { DeviceEnrollment, type DeviceKind } from '../device-enrollment.svelte';
+	import UnofficialBadge from '../UnofficialBadge.svelte';
 
 	interface Props {
 		kind: DeviceKind;
@@ -70,6 +71,7 @@
 
 <div class="st-card pv-card">
 	<div class="pv-flow" data-testid="device-code-setup">
+		<div><UnofficialBadge help="line" /></div>
 		{#if enrollment.phase === 'awaiting'}
 			<div class="pv-flow-head">Enter this code at {service}</div>
 			<div class="pv-row-inline">

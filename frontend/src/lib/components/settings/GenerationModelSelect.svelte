@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
+	import { UNOFFICIAL_SIGN_IN_HELP } from './providers/providers-model';
 
 	interface Props {
 		value?: string;
@@ -15,7 +16,10 @@
 	<select bind:value {disabled}>
 		<option value="">Use Settings default</option>
 		{#each catalog.groups as group (group.key)}
-			<optgroup label={group.subtext ? `${group.name} · ${group.subtext}` : group.name}>
+			<optgroup
+				label={`${group.subtext ? `${group.name} · ${group.subtext}` : group.name}${group.unofficial ? ' · Unofficial' : ''}`}
+				title={group.unofficial ? UNOFFICIAL_SIGN_IN_HELP : undefined}
+			>
 				{#each catalog.options.filter((option) => option.groupKey === group.key) as option (option.value)}
 					<option value={option.value}>{option.label}</option>
 				{/each}

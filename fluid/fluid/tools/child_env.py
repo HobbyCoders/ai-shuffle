@@ -43,12 +43,17 @@ _DENY_SUFFIX_RE = re.compile(
     r"_COOKIE|_SIGNING_KEY|_ENCRYPTION_KEY|_JWT_KEY)$",
     re.IGNORECASE,
 )
+# The Claude subscription token the stock CLI reads from its environment.
+CLAUDE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 # Claude Code cloud/gateway authentication belongs ONLY to the delegated CLI.
 # Do not allow these through generic inheritance, explicit tool overlays, or
 # FLUID_CHILD_ENV_PASSTHROUGH. Non-secret account/endpoint selectors are included:
 # inheriting them without the key can silently route another child elsewhere.
 CLAUDE_AUTH_NAMES = frozenset({
     "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
+    # A Claude subscription token set on the host: only the stock ``claude``
+    # program may see it (``claude_cli_env_with_overlay``, ``claude_program_env``).
+    CLAUDE_OAUTH_TOKEN_ENV,
     "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT", "GCLOUD_PROJECT",
     "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES", "CLOUDSDK_CONFIG",
     "IDENTITY_ENDPOINT", "IDENTITY_HEADER", "IDENTITY_SERVER_THUMBPRINT", "IMDS_ENDPOINT",
@@ -80,7 +85,7 @@ def scrub_claude_auth_env(environ: Mapping[str, str]) -> dict[str, str]:
 # on the container, and the GitHub CLI token. Plain variables (PATH, HOME,
 # LANG, TERM, proxies, ...) never match the deny rules in the first place.
 ALLOWED_CREDENTIAL_NAMES = frozenset({
-    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
     "OPENAI_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY", "GEMINI_API_KEY",
     "GOOGLE_API_KEY", "FAL_KEY", "FAL_API_KEY",
     "GH_TOKEN", "GITHUB_TOKEN",
@@ -147,6 +152,35 @@ def claude_cli_env_with_overlay(overlay: Mapping[str, str] | None,
     env.update({k: v for k, v in (overlay or {}).items() if is_claude_auth(k)})
     if any(is_claude_auth(k) for k in (overlay or {})) and (overlay or {}).get("ANTHROPIC_API_KEY"):
         env["ANTHROPIC_API_KEY"] = overlay["ANTHROPIC_API_KEY"]
+    _restore_host_oauth_token(env, overlay, environ)
+    return env
+
+
+def _restore_host_oauth_token(env: dict[str, str], overlay: Mapping[str, str] | None,
+                              environ: Mapping[str, str] | None) -> None:
+    """Give the ``claude`` program the host's subscription token, and nothing else.
+
+    Skipped when the caller's overlay names it in ``FLUID_CHILD_ENV_UNSET`` (an
+    API-key, cloud or off mode) or routes the CLI some other way (a gateway,
+    base URL or cloud selector), so the token never goes to another endpoint.
+    """
+    source = os.environ if environ is None else environ
+    token = source.get(CLAUDE_OAUTH_TOKEN_ENV)
+    extra = overlay or {}
+    if not token or CLAUDE_OAUTH_TOKEN_ENV in env:
+        return
+    unset = {n.upper() for n in _names(extra.get(UNSET_ENV))}
+    other_route = any(is_claude_auth(k) and k.upper() != CLAUDE_OAUTH_TOKEN_ENV for k in extra)
+    if CLAUDE_OAUTH_TOKEN_ENV not in unset and not other_route:
+        env[CLAUDE_OAUTH_TOKEN_ENV] = token
+
+
+def claude_program_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The environment for a one-off run of the stock ``claude`` program (for
+    example ``claude auth status``): scrubbed, plus the host's subscription
+    token so the CLI reports the sign-in it would actually use."""
+    env = scrub_child_env(environ)
+    _restore_host_oauth_token(env, None, environ)
     return env
 
 

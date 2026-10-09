@@ -158,6 +158,16 @@ def test_probe_environment_drops_api_keys(monkeypatch):
     assert "ANTHROPIC_API_KEY" not in env and "ANTHROPIC_AUTH_TOKEN" not in env
 
 
+def test_probe_environment_keeps_the_hosts_claude_oauth_token(monkeypatch):
+    """`claude auth status` is the stock CLI: it may see the subscription token
+    it would run on (#2079), unlike every other child."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "host-oauth")
+    monkeypatch.setenv("ADMIN_PASSWORD", "pw")
+    env = cs._probe_env()
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "host-oauth"
+    assert "ADMIN_PASSWORD" not in env
+
+
 def test_cache_positive_and_negative(monkeypatch):
     results = iter([cs.ClaudeCliStatus(installed=True, signed_in=False),
                     cs.ClaudeCliStatus(installed=True, signed_in=True),

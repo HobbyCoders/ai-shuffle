@@ -782,25 +782,6 @@ class UsageLimitsMonitor:
         if await run_sync(self._persist_observed, due, observed_at):
             await self._broadcast(await run_sync(self._cluster_snapshot))
 
-    async def note_reset_and_broadcast(
-        self, window_types: List[str], resets_at: Optional[Dict[str, Optional[str]]] = None,
-    ) -> None:
-        """A Claude reset refilled these windows: show them unused until the CLI reports again.
-
-        Only windows already on screen are touched. The 5-hour window restarts
-        with the next request, so its old reset time is dropped; other windows
-        keep theirs unless *resets_at* names a new one.
-        """
-        for window_type in dict.fromkeys(window_types):
-            current = next((w for w in self._windows if w.get("type") == window_type), None)
-            if current is None:
-                continue
-            if resets_at and window_type in resets_at:
-                at = resets_at[window_type]
-            else:
-                at = None if window_type == "five_hour" else current.get("resets_at")
-            await self.apply_live_event_and_broadcast(window_type, 0.0, at, status="allowed")
-
     async def peer_changed_and_broadcast(self) -> None:
         """A network peer's usage row landed here: show it on every open client."""
         self._cluster_cache = None

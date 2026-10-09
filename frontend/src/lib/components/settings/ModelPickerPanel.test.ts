@@ -201,4 +201,33 @@ describe('ModelPickerPanel', () => {
 		expect(within(list).getByRole('option', { name: /sonnet/i })).toBeTruthy();
 		expect(within(list).queryByRole('option', { name: /grok 4/i })).toBeNull();
 	});
+
+	it('labels a ChatGPT or SuperGrok subscription Unofficial, an API key not', () => {
+		const chatgpt = { key: 'gpt-row', name: 'OpenAI', subtext: 'PRO', glyph: 'openai' as const, isApi: false, unofficial: true };
+		const xai = { key: 'xai-row', name: 'Grok', subtext: 'API', glyph: 'grok' as const, isApi: true };
+		const option = (groupKey: string, group: string, groupSubtext: string, id: string) => ({
+			value: `prov:${groupKey}:${id}`,
+			label: id,
+			description: id,
+			groupKey,
+			group,
+			groupSubtext
+		});
+		render(ModelPickerPanel, {
+			props: {
+				groups: [chatgpt, xai],
+				options: [option('gpt-row', 'OpenAI', 'PRO', 'gpt-5'), option('xai-row', 'Grok', 'API', 'grok-4')],
+				value: '',
+				onSelect: vi.fn(),
+				startOnAll: true
+			}
+		});
+		const list = screen.getByRole('listbox', { name: 'Model' });
+		const gpt = within(list).getByRole('option', { name: /gpt-5/ });
+		expect(within(gpt).getByTestId('model-unofficial').textContent).toContain('Unofficial');
+		expect(gpt.getAttribute('title')).toContain('unofficial sign-in. The provider may change or block it.');
+		const grok = within(list).getByRole('option', { name: /grok-4/ });
+		expect(within(grok).queryByTestId('model-unofficial')).toBeNull();
+		expect(screen.getByRole('tab', { name: 'OpenAI · PRO · Unofficial sign-in' })).toBeTruthy();
+	});
 });

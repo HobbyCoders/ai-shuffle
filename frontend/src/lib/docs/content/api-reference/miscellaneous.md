@@ -156,66 +156,6 @@ curl "http://localhost:8000/api/v1/usage/limits?refresh=true" \
 
 When a Codex or SuperGrok banked reset is used (`POST /api/v1/model-providers/{provider_id}/codex/rate-limit-reset-credits/consume`, or `.../grok/...`) and the outcome is `reset`, the provider's windows that were 100% used are removed from its row. The other windows keep their last reading until the provider next reports usage.
 
-## Claude subscription resets
-
-A Claude subscription can have two kinds of reset: weekly resets, banked as grants that each hold a number of resets and a use-by date, and the 5-hour reset, which clears the current 5-hour window a set number of times a week. These endpoints read and use them for the Claude Code CLI signed in on this worker.
-
-Each call reads the CLI's current sign-in for that one request. AI Shuffle never refreshes, stores or returns it. When the sign-in has expired, the endpoint answers `409` and asks you to run a Claude turn, which lets the CLI refresh it. On macOS the CLI keeps its sign-in in the Keychain, which AI Shuffle does not read, so these endpoints answer `409` there.
-
-**Auth:** Owner only for every endpoint in this section.
-
-| Method | Path | Body | Notes |
-|--------|------|------|-------|
-| `GET` | `/api/v1/usage/claude/resets` | | Both kinds of reset |
-| `POST` | `/api/v1/usage/claude/resets/weekly` | `grant_id`, `idempotency_key` | Spend one weekly reset |
-| `POST` | `/api/v1/usage/claude/resets/session` | `{}` | Use the 5-hour reset |
-
-The status response. `weekly` or `session` is `null` when the account has no such reset:
-
-```json
-{
-  "weekly": {
-    "eligible": true,
-    "ineligible_reason": null,
-    "at_limit": true,
-    "exhausted": ["seven_day"],
-    "grants": [
-      { "id": "launch", "label": "Launch bonus", "resets_total": 3, "resets_left": 2, "starts_at": null, "ends_at": "2026-10-30T12:00:00Z", "clears": ["seven_day"], "paused": false, "usable_now": true, "use_requires_limit": true, "blocking": [] }
-    ],
-    "next_grant_id": "launch",
-    "weekly_resets_at": null,
-    "cooldown_until": null
-  },
-  "session": {
-    "eligible": true,
-    "ineligible_reason": null,
-    "available": true,
-    "next_available_at": null,
-    "weekly_resets_at": null,
-    "resets_per_week": 1
-  }
-}
-```
-
-A grant with `use_requires_limit` opens only while a weekly limit is hit (`at_limit`). The 5-hour reset's `ineligible_reason` is `not_at_wall` until the 5-hour limit is hit.
-
-The weekly body is JSON with two required strings: `grant_id` (lowercase letters, digits, `-` or `_`, at most 40) and `idempotency_key` (letters, digits, `-` or `_`, at most 64). Any other field is `422`. Reuse the same `idempotency_key` when retrying, so a retry cannot spend a second reset.
-
-```bash
-curl -X POST http://localhost:8000/api/v1/usage/claude/resets/weekly \
-  -H "Authorization: Bearer $OWNER_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"grant_id": "launch", "idempotency_key": "b7e1c9d2-reset-1"}'
-```
-
-**Weekly response:** `{"result": "reset", "reason": null, "resets_left": 1, "cleared": ["seven_day"], "weekly_resets_at": null, "cooldown_until": null}`. `result` is `reset`, `already_used`, `not_limited`, `cooldown`, `ineligible` or `unavailable`.
-
-**5-hour response:** `{"result": "reset", "next_available_at": null}`. `result` is `reset`, `already_used`, `not_limited`, `ineligible` or `unavailable`.
-
-After a `reset`, the cleared windows in [usage limits](#get-apiv1usagelimits) show as unused until the CLI next reports them.
-
-**Errors:** `409` the CLI is not signed in, its sign-in has expired, it cannot be read on this machine, or it lacks the profile scope. `429` too many reset requests. `502` Claude's reset service is unavailable.
-
 ## Git Integration
 
 A git route that takes a `worktree_id` query parameter accepts only a worktree of the project in the path; a worktree of another project returns `404`, the same answer as an unknown id.

@@ -27,6 +27,7 @@
 	import { tick } from 'svelte';
 	import ProviderGlyph from './ProviderGlyph.svelte';
 	import type { PickerGroup, PickerOption } from '$lib/constants/model-picker';
+	import { UNOFFICIAL_SIGN_IN_HELP } from '$lib/components/settings/providers/providers-model';
 	import { matchesPickerQuery } from '$lib/constants/model-picker';
 	import { getModelLabel } from '$lib/constants/models';
 	import {
@@ -145,6 +146,12 @@
 	const showProviderLine = $derived(
 		isSearching || effectiveRailKey === FAVORITES || effectiveRailKey === ALL || !showRail
 	);
+
+	/** Rail tooltip: brand, auth subtext and, for a ChatGPT/SuperGrok subscription, the unofficial note. */
+	function railLabel(g: PickerGroup): string {
+		const base = g.subtext ? `${g.name} · ${g.subtext}` : g.name;
+		return g.unofficial ? `${base} · Unofficial sign-in` : base;
+	}
 
 	function groupFor(o: PickerOption): PickerGroup | undefined {
 		return groups.find((g) => g.key === o.groupKey);
@@ -265,8 +272,8 @@
 					class="mpp-rail-btn"
 					class:selected={effectiveRailKey === g.key}
 					aria-selected={effectiveRailKey === g.key}
-					aria-label={g.subtext ? `${g.name} · ${g.subtext}` : g.name}
-					title={g.subtext ? `${g.name} · ${g.subtext}` : g.name}
+					aria-label={railLabel(g)}
+					title={railLabel(g)}
 					onclick={() => pickRail(g.key)}
 				>
 					<span class="mpp-rail-icon">
@@ -316,7 +323,7 @@
 					aria-selected={value === o.value}
 					tabindex="-1"
 					data-value={o.value}
-					title={o.description}
+					title={g?.unofficial ? `${o.description}\n${UNOFFICIAL_SIGN_IN_HELP}` : o.description}
 					onclick={() => onSelect(o.value)}
 					onmouseenter={() => (highlighted = o.value)}
 				>
@@ -325,7 +332,11 @@
 						{#if showProviderLine && g}
 							<div class="mpp-row-sub">
 								<ProviderGlyph kind={g.glyph} size={12} />
-								<span>{g.name}{#if g.subtext}<span class="mpp-row-subtext"> · {g.subtext}</span>{/if}</span>
+								<span>{g.name}{#if g.subtext}<span class="mpp-row-subtext"> · {g.subtext}</span>{/if}{#if g.unofficial}<span
+											class="mpp-row-unofficial"
+											data-testid="model-unofficial"
+											title={UNOFFICIAL_SIGN_IN_HELP}> · Unofficial</span
+										>{/if}</span>
 							</div>
 						{/if}
 					</div>
@@ -679,6 +690,9 @@
 	}
 	.mpp-row-subtext {
 		opacity: 0.85;
+	}
+	.mpp-row-unofficial {
+		color: var(--warning);
 	}
 
 	.mpp-fav {

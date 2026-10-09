@@ -3,7 +3,7 @@
 	 * The Claude subscription: the stock CLI's own sign-in on this worker.
 	 * Overview has the CLI facts and the sign-in (in-app terminal on the
 	 * desktop, the host command on the phone); Usage the unattended budget, the
-	 * plan windows and the weekly and 5-hour resets; Policy the loop guard and
+	 * plan windows and a link to claude.ai's usage page; Policy the loop guard and
 	 * held turns.
 	 */
 	import { onDestroy, onMount } from 'svelte';
@@ -27,7 +27,6 @@
 	import ClaudePolicy from './tabs/ClaudePolicy.svelte';
 	import { ClaudeCliLogin } from './claude-cli-login.svelte';
 	import { LoopGuard } from './loop-guard.svelte';
-	import { ClaudeResets } from './claude-resets.svelte';
 	import { claudePlan, CLAUDE_SUB_ITEM, type CredentialView, type ProviderView } from './providers-model';
 	import { changeClaudeMode } from './provider-actions';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -43,7 +42,6 @@
 
 	const access = getSettingsAccess();
 	const guard = new LoopGuard();
-	const resets = new ClaudeResets();
 	const cli = new ClaudeCliLogin({
 		onStatus: (next) => {
 			// Keep the mode summary (list rows, header) in step with the CLI.
@@ -86,7 +84,7 @@
 	const tabs = $derived([
 		{ id: 'Overview' },
 		{ id: 'Models' },
-		{ id: 'Usage', count: resets.weekly?.eligible && resets.weeklyLeft ? resets.weeklyLeft : undefined },
+		{ id: 'Usage' },
 		{ id: 'Policy', count: guard.status?.held.length || undefined }
 	]);
 
@@ -153,7 +151,7 @@
 		{#if tab === 'Models'}
 			<BuiltInModels />
 		{:else if tab === 'Usage'}
-			<ClaudeUsage {guard} resets={signedIn ? resets : null} />
+			<ClaudeUsage {guard} />
 		{:else if tab === 'Policy'}
 			<ClaudePolicy {guard} {mode} />
 		{:else if cli.terminalOpen}

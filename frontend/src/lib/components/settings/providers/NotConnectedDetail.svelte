@@ -11,7 +11,8 @@
 	import SettingRow from '../rows/SettingRow.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
-	import { kindsOf, type ProviderView } from './providers-model';
+	import UnofficialBadge from './UnofficialBadge.svelte';
+	import { kindsOf, UNOFFICIAL_SIGN_IN_HELP, type ProviderView } from './providers-model';
 	import { startSetup } from './provider-actions';
 
 	interface Props {
@@ -52,7 +53,8 @@
 	{#snippet tile()}<ProviderTile {provider} size="lg" dashed />{/snippet}
 	<RowGroup title="Connect" id="providers-connect">
 		{#each kinds as k (k.flavor)}
-			<SettingRow label={k.label} hint={k.hint}>
+			<SettingRow label={k.label} hint={k.hint} help={k.unofficial ? UNOFFICIAL_SIGN_IN_HELP : undefined}>
+				{#if k.unofficial}<UnofficialBadge />{/if}
 				<button type="button" class="st-btn primary" onclick={() => startSetup(provider, k.flavor)}>Set up</button>
 			</SettingRow>
 		{/each}

@@ -286,3 +286,106 @@ def test_delegated_child_env_applies_every_forced_override_last(monkeypatch) -> 
     loop.env = {name: "overlay" for name in FORCED_CHILD_ENV}
     env = loop._child_env()
     assert {name: env[name] for name in FORCED_CHILD_ENV} == FORCED_CHILD_ENV
+
+
+# ── CLAUDE_CODE_OAUTH_TOKEN reaches the stock ``claude`` program only (#2079) ──
+
+OAUTH = "CLAUDE_CODE_OAUTH_TOKEN"
+OAUTH_VALUE = "fake-claude-oauth-sentinel"
+
+
+def test_oauth_token_is_scrubbed_from_inheritance_passthrough_and_overlays() -> None:
+    from fluid.tools.child_env import is_claude_auth
+
+    assert is_claude_auth(OAUTH) and is_claude_auth(OAUTH.lower())
+    source = {OAUTH: OAUTH_VALUE, PASSTHROUGH_ENV: OAUTH, "PATH": "/bin"}
+    assert scrub_child_env(source) == {"PATH": "/bin"}
+    # A tool, MCP or settings overlay cannot hand it to a child either.
+    env = child_env_with_overlay({OAUTH: OAUTH_VALUE, "FOO": "bar"}, source)
+    assert OAUTH not in env and env["FOO"] == "bar"
+
+
+async def test_real_bash_never_sees_the_oauth_token(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv(OAUTH, OAUTH_VALUE)
+    ctx = ToolCtx(cwd=str(tmp_path), extra={"settings_env": {OAUTH: OAUTH_VALUE}})
+    out = await bash_handler({"command": "env"}, ctx)
+    assert not out.is_error, out.text
+    assert OAUTH_VALUE not in out.text and OAUTH not in out.text
+
+
+async def test_fluid_hook_child_never_sees_the_oauth_token(monkeypatch, tmp_path) -> None:
+    from fluid.hooks.bus import PRE_TOOL_USE
+    from fluid.hooks.command import CommandHook
+
+    monkeypatch.setenv(OAUTH, OAUTH_VALUE)
+    script = tmp_path / "hook_oauth_probe.py"
+    script.write_text(f"import os\nassert {OAUTH!r} not in os.environ\nprint('clean')\n")
+    hook = CommandHook(event=PRE_TOOL_USE, command=f'"{sys.executable}" "{script}"', cwd=str(tmp_path), timeout=5)
+    code, stdout, stderr = await hook._run(b"{}")
+    assert code == 0, stderr
+    assert stdout.strip() == "clean"
+
+
+def test_codemode_kernel_never_sees_the_oauth_token() -> None:
+    from fluid.codemode.subprocess_kernel import scrub_env
+
+    assert scrub_env({OAUTH: OAUTH_VALUE, "PATH": "/bin"}) == {"PATH": "/bin"}
+
+
+def test_mcp_stdio_child_never_sees_the_oauth_token(monkeypatch) -> None:
+    monkeypatch.setenv(OAUTH, OAUTH_VALUE)
+    assert OAUTH not in child_env_with_overlay({"MCP_SETTING": "x"})
+    assert OAUTH not in child_env_with_overlay({OAUTH: OAUTH_VALUE})
+
+
+def test_cli_spawned_mcp_server_has_the_oauth_token_masked() -> None:
+    from fluid.tools.mcp.bundled_server import isolated_cli_server_entry
+
+    entry = isolated_cli_server_entry({"type": "stdio", "command": "srv", "args": []}, {OAUTH: OAUTH_VALUE})
+    assert entry["env"][OAUTH] == ""
+    assert entry["args"][:2] == ["-m", "fluid.tools.child_env"]
+
+
+def test_delegated_claude_keeps_the_hosts_oauth_token(monkeypatch) -> None:
+    """Subscription mode: the stock CLI is the one child that may read it."""
+    monkeypatch.setenv(OAUTH, OAUTH_VALUE)
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.env = {UNSET_ENV: "ANTHROPIC_API_KEY,ANTHROPIC_AUTH_TOKEN"}
+    assert loop._child_env()[OAUTH] == OAUTH_VALUE
+
+
+def test_delegated_claude_drops_the_oauth_token_when_the_caller_unsets_it(monkeypatch) -> None:
+    """API-key, cloud and off modes list it in FLUID_CHILD_ENV_UNSET."""
+    monkeypatch.setenv(OAUTH, OAUTH_VALUE)
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.env = {UNSET_ENV: "ANTHROPIC_AUTH_TOKEN," + OAUTH, "ANTHROPIC_API_KEY": "user-key"}
+    env = loop._child_env()
+    assert OAUTH not in env and env["ANTHROPIC_API_KEY"] == "user-key"
+
+
+@pytest.mark.parametrize("route", [
+    {"ANTHROPIC_BASE_URL": "https://other-gateway.invalid", "ANTHROPIC_AUTH_TOKEN": "gw"},
+    {"CLAUDE_CODE_USE_BEDROCK": "1"},
+])
+def test_delegated_claude_never_sends_the_oauth_token_down_another_route(monkeypatch, route) -> None:
+    monkeypatch.setenv(OAUTH, OAUTH_VALUE)
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.env = dict(route)
+    env = loop._child_env()
+    assert OAUTH not in env
+    assert all(env[k] == v for k, v in route.items())
+
+
+def test_delegated_claude_takes_an_explicit_oauth_overlay(monkeypatch) -> None:
+    monkeypatch.delenv(OAUTH, raising=False)
+    loop = DelegatedLoop.__new__(DelegatedLoop)
+    loop.env = {OAUTH: "handed-over"}
+    assert loop._child_env()[OAUTH] == "handed-over"
+
+
+def test_claude_program_env_carries_the_oauth_token_and_nothing_else_secret() -> None:
+    from fluid.tools.child_env import claude_program_env
+
+    env = claude_program_env({OAUTH: OAUTH_VALUE, "ADMIN_PASSWORD": "pw", "PATH": "/bin"})
+    assert env == {OAUTH: OAUTH_VALUE, "PATH": "/bin"}
+    assert claude_program_env({"PATH": "/bin"}) == {"PATH": "/bin"}

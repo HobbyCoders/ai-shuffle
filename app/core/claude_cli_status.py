@@ -91,9 +91,9 @@ class ClaudeCliStatus:
 
 
 def _probe_env() -> dict:
-    from fluid.tools.child_env import scrub_child_env
+    from fluid.tools.child_env import claude_program_env
 
-    env = {k: v for k, v in scrub_child_env().items() if k not in _STRIPPED_ENV}
+    env = {k: v for k, v in claude_program_env().items() if k not in _STRIPPED_ENV}
     env.setdefault("NO_COLOR", "1")
     return env
 

@@ -23,12 +23,13 @@
 	import '$lib/components/settings/shell/settings.css';
 	import '$lib/components/settings/providers/providers.css';
 	import DeviceCodeSetup from '$lib/components/settings/providers/setup/DeviceCodeSetup.svelte';
+	import UnofficialBadge from '$lib/components/settings/providers/UnofficialBadge.svelte';
 	import KeySetup from '$lib/components/settings/providers/setup/KeySetup.svelte';
 	import GatewaySetup from '$lib/components/settings/providers/setup/GatewaySetup.svelte';
 	import ModelCuration from '$lib/components/settings/providers/ModelCuration.svelte';
 	import { providerDrafts } from '$lib/components/settings/providers/drafts.svelte';
 	import {
-		kindsOf, type CredentialFlavor, type CredentialView, type ProviderId
+		kindsOf, UNOFFICIAL_SIGN_IN_HELP, type CredentialFlavor, type CredentialView, type ProviderId
 	} from '$lib/components/settings/providers/providers-model';
 
 	interface Props {
@@ -176,8 +177,12 @@
 				<button type="button" class="kind" onclick={() => start(k.flavor)}>
 					{#if k.flavor === 'device'}<LogIn size={18} strokeWidth={1.75} />{:else if k.flavor === 'gateway'}<Plug size={18} strokeWidth={1.75} />{:else}<KeyRound size={18} strokeWidth={1.75} />{/if}
 					<span>
-						<span class="kind-title">{k.flavor === 'device' ? DEVICE_LABEL[provider] ?? k.label : k.label}</span>
+						<span class="kind-title"
+							>{k.flavor === 'device' ? DEVICE_LABEL[provider] ?? k.label : k.label}{#if k.unofficial}
+								<UnofficialBadge />{/if}</span
+						>
 						<span class="kind-hint">{k.hint}</span>
+						{#if k.unofficial}<span class="kind-hint" aria-hidden="true">{UNOFFICIAL_SIGN_IN_HELP}</span>{/if}
 					</span>
 				</button>
 			{/each}

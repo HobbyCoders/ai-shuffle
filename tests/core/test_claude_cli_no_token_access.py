@@ -1,9 +1,12 @@
-"""The app never refreshes, writes or deletes the Claude CLI's credentials.
+"""The app never reads, refreshes, writes or deletes the Claude CLI's credentials.
 
 Sign-in state comes from `claude auth status` and logout goes through
-`claude auth logout`. The one reader of the CLI's credential file is the reset
-client (app/core/claude_rate_limit_resets.py), and only when the owner asks for
-reset status or presses Reset; turns, status routes and startup never open it.
+`claude auth logout`. No module reads the CLI's credential file or its
+`claudeAiOauth` token, and none calls Anthropic's private subscription
+endpoints with it: Anthropic's terms do not let a third-party app collect or
+intermediate Claude.ai session tokens (docs/reviews/compliance-2026-10-09.md,
+finding 1; docs/reviews/prod-readiness-2026-09-23/BRIEF.md). Claude plan usage
+comes only from what the stock `claude` CLI reports in its own output.
 """
 
 import builtins
@@ -54,13 +57,64 @@ def test_no_refresh_call_sites_remain():
         assert ".credentials.json" not in (ROOT / rel).read_text(), rel
 
 
-def test_only_the_reset_client_names_the_credentials_file():
-    readers = sorted(
-        str(p.relative_to(ROOT)).replace("\\", "/")
-        for p in (ROOT / "app").rglob("*.py")
-        if ".credentials.json" in p.read_text(encoding="utf-8", errors="ignore")
-    )
-    assert readers == ["app/core/claude_rate_limit_resets.py"]
+# Names that only a reader of the CLI's sign-in, or a client of Anthropic's
+# private subscription endpoints, would need.
+_FORBIDDEN_MARKERS = (
+    ".credentials.json",
+    "claudeAiOauth",
+    "/api/oauth/usage",
+    "reset_rate_limits",
+    "oauth-2025-04-20",
+)
+# Deny lists that stop agents reading the file; they name it to protect it.
+_DENY_LISTS = {
+    "fluid/fluid/tools/builtins/bash_risk.py": (".credentials.json",),
+    "fluid/fluid/tools/hardening.py": (".credentials.json",),
+}
+_SCANNED_SUFFIXES = {".py", ".ts", ".js", ".mjs", ".cjs", ".svelte", ".rs", ".sh"}
+
+
+def _offenders(root: Path) -> list[str]:
+    """Every scanned file under *root* that names a forbidden marker."""
+    paths = [root / rel for rel in ("run_local.py", "entrypoint.sh")]
+    for top in ("app", "fluid/fluid", "frontend/src", "desktop/src", "browser-mcp/src", "tools"):
+        if (root / top).is_dir():
+            paths += [p for p in (root / top).rglob("*")
+                      if p.suffix in _SCANNED_SUFFIXES and "node_modules" not in p.parts]
+    found = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        rel = str(path.relative_to(root)).replace("\\", "/")
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        allowed = _DENY_LISTS.get(rel, ())
+        found += [f"{rel}: {m}" for m in _FORBIDDEN_MARKERS if m in text and m not in allowed]
+    return found
+
+
+def test_no_code_reads_the_cli_sign_in():
+    """No app, Fluid, frontend or desktop code reads the CLI's sign-in token."""
+    assert _offenders(ROOT) == []
+
+
+def test_scan_catches_a_reader(tmp_path):
+    """The scan is not vacuous: a reader anywhere it looks is caught."""
+    (tmp_path / "app" / "core").mkdir(parents=True)
+    (tmp_path / "app" / "core" / "x.py").write_text('P = "~/.claude/.credentials.json"\n')
+    (tmp_path / "frontend" / "src").mkdir(parents=True)
+    (tmp_path / "frontend" / "src" / "y.ts").write_text("data.claudeAiOauth.accessToken\n")
+    (tmp_path / "fluid" / "fluid" / "tools").mkdir(parents=True)
+    (tmp_path / "fluid" / "fluid" / "tools" / "hardening.py").write_text('"/.claude/.credentials.json"\n')
+    assert sorted(_offenders(tmp_path)) == [
+        "app/core/x.py: .credentials.json",
+        "frontend/src/y.ts: claudeAiOauth",
+    ]
+
+
+def test_claude_resets_routes_are_gone(authenticated_client):
+    assert authenticated_client.get("/api/v1/usage/claude/resets").status_code in (404, 405)
+    assert authenticated_client.post("/api/v1/usage/claude/resets/weekly", json={}).status_code in (404, 405)
+    assert authenticated_client.post("/api/v1/usage/claude/resets/session", json={}).status_code in (404, 405)
 
 
 def test_cli_status_keeps_org_and_config_dir_server_side():

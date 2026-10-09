@@ -20,6 +20,7 @@
 	import LinkValue from '../rows/LinkValue.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import ProviderTile from './ProviderTile.svelte';
+	import UnofficialBadge from './UnofficialBadge.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import {
@@ -28,6 +29,7 @@
 		claudeHeaderStatus,
 		MODE_LABEL,
 		MODE_OPTIONS,
+		UNOFFICIAL_SIGN_IN_HELP,
 		type CredentialView,
 		type ProviderView
 	} from './providers-model';
@@ -175,7 +177,8 @@
 	{#if kinds.length && !provider.draft}
 		<RowGroup title="Add">
 			{#each kinds as k (k.menuLabel)}
-				<SettingRow label={k.menuLabel} hint={k.hint}>
+				<SettingRow label={k.menuLabel} hint={k.hint} help={k.unofficial ? UNOFFICIAL_SIGN_IN_HELP : undefined}>
+					{#if k.unofficial}<UnofficialBadge />{/if}
 					<button type="button" class="st-btn" onclick={() => startSetup(provider, k.flavor)}><Plus />Add</button>
 				</SettingRow>
 			{/each}
