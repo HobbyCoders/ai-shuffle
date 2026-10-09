@@ -11,6 +11,12 @@ Fails safe: a missing or unreadable map, a dependency or pytest config change,
 a change to code that session-wide fixtures run, a function the map cannot
 place, or a selection that is most of the suite anyway prints ``all``.
 
+A changed file that is not Python selects the tests that name it and the tests
+of the code that names it in a string literal: the function holding the
+literal, the users of a module constant bound to it, or the whole file when it
+is named in code that runs at import. Docstrings, comments and messages (a
+literal with whitespace) only mention a file; they do not read it.
+
     python scripts/ci/backend_test_map.py merge --hits DIR --out MAP --commit SHA
     python scripts/ci/backend_test_map.py select --map MAP --base REV [--head REV]
 
@@ -153,6 +159,69 @@ class Blocks:
                     self.names[name] += ast.dump(node)
                 if not bound:
                     self.loose.append(ast.dump(node))
+
+
+def mention_scopes(source: str, needles: set[str]) -> tuple[set[str], set[str], bool] | None:
+    """Where the code of ``source`` names a needle in a string literal.
+
+    ``(functions, names, loose)``: the functions (qualnames as ``Blocks``
+    names them) whose bodies hold such a string, the module-level names whose
+    binding statements do, and whether one sits in other code that runs at
+    import (a bare module statement, a class body, a decorator or default).
+    Prose is not a read and does not count: docstrings, other bare string
+    statements, comments, and any literal with whitespace in it (a message or
+    note naming the file; a path built in an f-string is a literal of its own).
+    ``None`` when the source does not parse.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    prose = {id(node.value) for node in ast.walk(tree)
+             if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)}
+
+    def names_one(*nodes) -> bool:
+        return any(isinstance(item, ast.Constant) and isinstance(item.value, str) and id(item) not in prose
+                   and not any(c.isspace() for c in item.value) and any(needle in item.value for needle in needles)
+                   for node in nodes if isinstance(node, ast.AST) for item in ast.walk(node))
+
+    functions: set[str] = set()
+    names: set[str] = set()
+    loose = False
+
+    def visit(body, prefix: str, module_level: bool) -> None:
+        nonlocal loose
+        for node in body:
+            if isinstance(node, FUNCTIONS):
+                if names_one(*node.body):
+                    functions.add(prefix + node.name)
+                loose |= names_one(*node.decorator_list, node.args, node.returns)
+            elif isinstance(node, ast.ClassDef):
+                loose |= names_one(*node.bases, *node.keywords, *node.decorator_list,
+                                   *(n for n in node.body if not isinstance(n, (*FUNCTIONS, ast.ClassDef))))
+                visit([n for n in node.body if isinstance(n, (*FUNCTIONS, ast.ClassDef))], prefix + node.name + ".", False)
+            elif not module_level:
+                continue
+            elif any(getattr(node, field, None) for field in STATEMENT_LISTS):
+                # if/try/with/for at module level: its own parts run at import,
+                # its nested statements are module-level ones.
+                loose |= names_one(*(v for f, v in ast.iter_fields(node) if f not in STATEMENT_LISTS),
+                                   *(i for f, v in ast.iter_fields(node) if f not in STATEMENT_LISTS
+                                     and isinstance(v, list) for i in v))
+                for field in STATEMENT_LISTS:
+                    for child in getattr(node, field, None) or []:
+                        if isinstance(child, (ast.excepthandler, ast.match_case)):
+                            loose |= names_one(*(v for f, v in ast.iter_fields(child) if f != "body"))
+                            visit(child.body, prefix, True)
+                        else:
+                            visit([child], prefix, True)
+            elif names_one(node):
+                bound = bound_names(node)
+                names.update(bound)
+                loose |= not bound
+
+    visit(tree.body, "", True)
+    return functions, names, loose
 
 
 def bound_names(node) -> list[str]:
@@ -446,12 +515,32 @@ class Selector:
         needles = {path} | ({p.name} if p.name not in GENERIC_NAMES and len(p.name) >= 6 else set())
         tests = {t for t in self.files if fast_subset(t) and any(n in self.files[t] for n in needles)}
         sources = {f for f in self.files if not fast_subset(f) and any(n in self.files[f] for n in needles)}
-        if not sources and p.parts and p.parts[0] in {"app", "fluid", "docker", "scripts"}:
-            sources = {f for f in self.files if PurePosixPath(f).parent == p.parent}
         self.selected |= tests
+        readers = 0
         for source in sorted(sources):
-            self.file_level(source, f"reads changed {path}")
-        self.reasons.append(f"{path}: {len(tests)} tests and {len(sources)} sources name it")
+            found = mention_scopes(self.files[source], needles)
+            if found is None or found[2]:
+                readers += 1
+                self.file_level(source, f"reads changed {path}")
+                continue
+            # Only code that names the file can read it: the functions whose
+            # bodies do, and the users of a module-level name bound to it. A
+            # docstring, comment or message naming it reads nothing.
+            functions, names, _ = found
+            readers += bool(functions or names)
+            for qualname in sorted(functions):
+                if not self._covered(source, qualname):
+                    self.file_level(source, f"{qualname} reads changed {path} but the map does not know it")
+            self.name_changes(source, module_name(source), names)
+        if not readers and p.parts and p.parts[0] in {"app", "fluid", "docker", "scripts"}:
+            # Nothing names it in code; code beside it may load it by folder.
+            neighbours = {f for f in self.files if f.endswith(".py") and PurePosixPath(f).parent == p.parent}
+            for source in sorted(neighbours):
+                self.file_level(source, f"sits beside changed {path}")
+            self.reasons.append(f"{path}: {len(tests)} tests name it; {len(neighbours)} sources sit beside it")
+            return
+        self.reasons.append(f"{path}: {len(tests)} tests and {len(sources)} sources name it, "
+                            f"{readers} of them in code")
 
     def subprocess_users(self, path: str) -> None:
         module = module_name(path)

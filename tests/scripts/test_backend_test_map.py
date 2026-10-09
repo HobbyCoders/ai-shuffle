@@ -86,6 +86,52 @@ def test_a_non_python_file_selects_the_tests_of_code_that_reads_it():
     assert any("system.md" in reason for reason in reasons)
 
 
+GUIDE = "docs/guide.md"
+
+
+@pytest.mark.parametrize("addition", [
+    '\ndef h():\n    """Reads nothing; see docs/guide.md."""\n    return 0\n',
+    "\n# docs/guide.md explains LIMIT\n",
+    '\nprint(note="Read docs/guide.md before changing LIMIT.")\n',
+    '\nclass Note:\n    text = "see docs/guide.md for the rules"\n',
+], ids=["docstring", "comment", "import-time-prose", "class-prose"])
+def test_a_file_named_only_in_prose_selects_nothing(addition):
+    # app.a runs in every mapped test: reading it file-wide would be the suite.
+    chosen, reasons = select([GUIDE], **{"app/a.py": BASE["app/a.py"] + addition})
+    assert chosen == []
+    assert any("0 of them in code" in reason for reason in reasons)
+
+
+def test_a_file_read_in_a_function_selects_only_that_functions_tests():
+    source = BASE["app/a.py"].replace("def g():\n    return 2", f"def g():\n    return open('{GUIDE}')")
+    assert select([GUIDE], **{"app/a.py": source})[0] == B_TESTS
+
+
+def test_a_file_named_by_an_fstring_path_counts_as_read():
+    source = BASE["app/a.py"].replace("def g():\n    return 2", "def g(root):\n    return open(f\"{root}/guide.md\")")
+    assert select(["docs/guide.md"], **{"app/a.py": source})[0] == B_TESTS
+
+
+def test_a_module_constant_naming_a_file_follows_its_users():
+    source = f"GUIDE = '{GUIDE}'\n\ndef uses_limit():\n    return open(GUIDE).read()\n"
+    assert select([GUIDE], **{"app/b.py": source})[0] == B_TESTS
+
+
+@pytest.mark.parametrize("addition", [
+    f"\nopen('{GUIDE}')\n",
+    f"\n@register('{GUIDE}')\ndef h():\n    return 0\n",
+    f"\nclass Loader:\n    path = '{GUIDE}'\n",
+], ids=["import-time-read", "decorator", "class-attribute"])
+def test_a_file_read_at_import_runs_every_test_of_the_reader(addition):
+    result, reasons = select([GUIDE], **{"app/a.py": BASE["app/a.py"] + addition})
+    assert result == "all"
+    assert "of" in reasons[0]
+
+
+def test_a_reader_that_does_not_parse_is_read_file_wide():
+    assert select([GUIDE], **{"app/a.py": BASE["app/a.py"] + f"\nx = '{GUIDE}'\ndef broken(:\n"})[0] == "all"
+
+
 @pytest.mark.parametrize("changed, files, reason", [
     (["requirements.txt"], {}, "dependencies"),
     ([".github/workflows/ci-backend.yml"], {}, "dependencies"),
@@ -198,3 +244,16 @@ def test_recorder_attributes_calls_to_the_running_test_file(tmp_path):
     # The nested function folds into the function that defines it.
     assert ("tests/scripts/test_backend_test_map.py", "_recorded_helper") in hits
     assert all(not qualname.endswith("nested") for _, qualname in hits)
+
+
+
+def test_a_source_dir_file_no_code_names_selects_the_code_beside_it():
+    # Code beside a file may load it by folder; a comment naming it is no read.
+    sibling = "def load():\n    # app/prompts/other.md is read with the rest of the folder\n    return 1\n"
+    test_map = fake_map()
+    test_map["covered"]["app/prompts/sibling.py"] = {"load": [test_map["tests"].index(B_TESTS[0])]}
+    test_map["known"]["app/prompts/sibling.py"] = ["load"]
+    chosen, reasons = tm.select(["app/prompts/other.md"], test_map,
+                                head_files(**{"app/prompts/sibling.py": sibling}), BASE.get)
+    assert chosen == B_TESTS
+    assert any("beside" in reason for reason in reasons)
