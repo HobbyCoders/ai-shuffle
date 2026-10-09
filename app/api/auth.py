@@ -640,7 +640,7 @@ async def claude_logout(token: str = Depends(require_admin)):
 # GitHub CLI Authentication
 # =========================================================================
 
-def _invalidate_github_auth_caches(value: Optional[bool] = None) -> None:
+def _invalidate_github_auth_caches(value: Optional[bool] = None, *, account_changed: bool = True) -> None:
     """Propagate an explicit GitHub auth change to every cached copy.
 
     Two caches hold ``gh auth status``: the module-level one in
@@ -649,6 +649,10 @@ def _invalidate_github_auth_caches(value: Optional[bool] = None) -> None:
     stale answer across a deliberate login or logout, so both are updated here
     rather than waiting out their TTLs. Pass *value* when the new state is
     known first-hand; otherwise both are simply dropped.
+
+    A sign-in or sign-out may switch accounts, so it also drops the cached
+    repository list (clone picker); a status read (*account_changed* False)
+    keeps it.
     """
     from app.core.github_service import github_service
 
@@ -657,6 +661,8 @@ def _invalidate_github_auth_caches(value: Optional[bool] = None) -> None:
     else:
         set_github_auth_cached(value)
     github_service.invalidate_auth_cache(value)
+    if account_changed:
+        github_service.invalidate_repos_cache()
 
 
 @router.get("/github/status")
@@ -667,7 +673,7 @@ async def github_auth_status(token: str = Depends(require_auth)):
     # This endpoint is the completion poll for the device-code flow, so its
     # first-hand answer is the freshest one anybody has: seed the caches with it
     # instead of letting them expire on their own schedule.
-    _invalidate_github_auth_caches(bool(info.get("authenticated")))
+    _invalidate_github_auth_caches(bool(info.get("authenticated")), account_changed=False)
     return info
 
 

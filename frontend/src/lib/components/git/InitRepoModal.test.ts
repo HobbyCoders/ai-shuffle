@@ -1,16 +1,30 @@
 /**
  * Set up Git modal: init payloads (initial commit, GitHub repo name and
- * visibility), clone payload, submit guards, worker errors and reset on reopen.
+ * visibility), clone payload, submit guards, worker errors and reset on reopen,
+ * and the GitHub repository picker inside the clone section.
  */
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 
 const gitApi = vi.hoisted(() => ({ initRepository: vi.fn(), cloneRepository: vi.fn() }));
 vi.mock('$lib/api/git', () => gitApi);
+const githubApi = vi.hoisted(() => ({ listGitHubRepos: vi.fn() }));
+vi.mock('$lib/api/github', () => githubApi);
+const layoutMock = vi.hoisted(() => ({ openFeaturePage: vi.fn() }));
+vi.mock('$lib/stores/layout.svelte', () => ({ layout: layoutMock }));
 import InitRepoModal from './InitRepoModal.svelte';
 
 const submit = (name: RegExp) => screen.getAllByRole('button', { name }).find((b) => !b.hasAttribute('aria-pressed')) as HTMLButtonElement;
 const modeButton = (name: string) => screen.getAllByRole('button', { name }).find((b) => b.hasAttribute('aria-pressed')) as HTMLButtonElement;
+
+function reposPage(names: string[], connected = true) {
+	const items = names.map((full_name) => ({
+		full_name, name: full_name.split('/')[1], owner: full_name.split('/')[0], private: true, fork: false,
+		archived: false, description: null, clone_url: `https://github.com/${full_name}.git`,
+		html_url: `https://github.com/${full_name}`, default_branch: 'main', updated_at: '2026-01-01T00:00:00Z'
+	}));
+	return { connected, items, total: items.length, page: 1, per_page: 30, has_more: false, truncated: false };
+}
 
 let onClose: Mock<() => void>;
 let onInitialized: Mock<() => void>;
@@ -18,6 +32,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	gitApi.initRepository.mockResolvedValue({});
 	gitApi.cloneRepository.mockResolvedValue({});
+	githubApi.listGitHubRepos.mockResolvedValue(reposPage([]));
 	onClose = vi.fn();
 	onInitialized = vi.fn();
 });
@@ -122,5 +137,44 @@ describe('InitRepoModal clone', () => {
 		await fireEvent.keyDown(window, { key: 'Escape' });
 		expect(onClose).toHaveBeenCalledOnce();
 		expect(gitApi.initRepository).not.toHaveBeenCalled();
+	});
+});
+
+describe('InitRepoModal GitHub picker', () => {
+	it('is only asked for in clone mode', async () => {
+		mount();
+		expect(githubApi.listGitHubRepos).not.toHaveBeenCalled();
+		await fireEvent.click(modeButton('Clone'));
+		await waitFor(() => expect(githubApi.listGitHubRepos).toHaveBeenCalledOnce());
+	});
+
+	it('picking a repo fills the URL and clones it', async () => {
+		githubApi.listGitHubRepos.mockResolvedValue(reposPage(['acme/private-app', 'me/site']));
+		mount();
+		await fireEvent.click(modeButton('Clone'));
+		await fireEvent.click(await screen.findByRole('button', { name: /^acme\/private-app, private/ }));
+		const url = screen.getByLabelText('Repository URL') as HTMLInputElement;
+		expect(url.value).toBe('https://github.com/acme/private-app.git');
+		await fireEvent.click(submit(/^Clone$/));
+		await waitFor(() => expect(gitApi.cloneRepository).toHaveBeenCalledWith('p1', { clone_url: 'https://github.com/acme/private-app.git' }, 's1'));
+	});
+
+	it('Enter in the repository search does not clone', async () => {
+		githubApi.listGitHubRepos.mockResolvedValue(reposPage(['me/site']));
+		mount();
+		await fireEvent.click(modeButton('Clone'));
+		await fireEvent.input(screen.getByLabelText('Repository URL'), { target: { value: 'https://x/y.git' } });
+		const search = await screen.findByLabelText('Search repositories');
+		await fireEvent.keyDown(search, { key: 'Enter' });
+		expect(gitApi.cloneRepository).not.toHaveBeenCalled();
+	});
+
+	it('links to GitHub settings when GitHub is not connected', async () => {
+		githubApi.listGitHubRepos.mockResolvedValue(reposPage([], false));
+		mount();
+		await fireEvent.click(modeButton('Clone'));
+		await fireEvent.click(await screen.findByRole('button', { name: /Connect GitHub/ }));
+		expect(onClose).toHaveBeenCalledOnce();
+		expect(layoutMock.openFeaturePage).toHaveBeenCalledWith('settings', 'category=integrations&item=github');
 	});
 });

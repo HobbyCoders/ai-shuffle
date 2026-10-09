@@ -233,6 +233,16 @@ Logout from GitHub.
 
 **Auth:** Owner only
 
+### GET /api/v1/github/repos
+
+List the repositories the signed-in GitHub account can clone (owned, collaborator and organization repositories, most recently pushed first). The project clone dialog uses it.
+
+Query parameters: `q` (matches name, owner or description), `page` (default 1), `per_page` (default 30, max 100) and `refresh=true` to refetch instead of using the list cached for two minutes. Up to 1,000 repositories are fetched; `truncated: true` means older ones were left out.
+
+Returns `connected`, `items` (each with `full_name`, `name`, `owner`, `private`, `fork`, `archived`, `description`, `clone_url`, `html_url`, `default_branch`, `updated_at`), `total`, `page`, `per_page`, `has_more` and `truncated`. When GitHub is not signed in on this server it returns `200` with `connected: false`; when GitHub cannot answer it returns `502`. The token is never part of the response.
+
+**Auth:** Owner only
+
 ## Onboarding
 
 ### POST /api/v1/auth/onboarding/complete

@@ -153,3 +153,51 @@ export async function getPullRequestInbox(
 ): Promise<PullRequestInbox> {
     return api.get<PullRequestInbox>(`/github/inbox?state=${state}&limit=${limit}`);
 }
+
+// ============================================================================
+// The connected account's repositories (clone picker)
+// ============================================================================
+
+export interface GitHubRepo {
+    full_name: string;
+    name: string;
+    owner: string;
+    private: boolean;
+    fork: boolean;
+    archived: boolean;
+    description: string | null;
+    /** HTTPS clone URL; private repos authenticate through the server's gh sign-in. */
+    clone_url: string;
+    html_url: string;
+    default_branch: string | null;
+    /** Last push (or update) time, ISO 8601. */
+    updated_at: string | null;
+}
+
+export interface GitHubRepoPage {
+    /** False when GitHub is not signed in on this server. */
+    connected: boolean;
+    items: GitHubRepo[];
+    total: number;
+    page: number;
+    per_page: number;
+    has_more: boolean;
+    /** The account has more repositories than were fetched; the oldest are left out. */
+    truncated: boolean;
+}
+
+/**
+ * Repositories the server's GitHub sign-in can clone. Search and paging run
+ * on the server's cached list; `refresh` refetches it from GitHub.
+ */
+export async function listGitHubRepos(
+    params: { q?: string; page?: number; perPage?: number; refresh?: boolean } = {},
+    options?: { signal?: AbortSignal }
+): Promise<GitHubRepoPage> {
+    const qs = new URLSearchParams();
+    if (params.q?.trim()) qs.set('q', params.q.trim());
+    qs.set('page', String(params.page ?? 1));
+    qs.set('per_page', String(params.perPage ?? 30));
+    if (params.refresh) qs.set('refresh', 'true');
+    return api.get<GitHubRepoPage>(`/github/repos?${qs}`, options);
+}

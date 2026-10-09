@@ -4,11 +4,15 @@
 	 *
 	 * Offers two modes:
 	 * - "init": git init with optional initial commit and GitHub repo creation
-	 * - "clone": clone an existing remote repository by URL
+	 * - "clone": clone an existing remote repository by URL, or pick one of the
+	 *   connected GitHub account's repositories (GitHubRepoPicker fills the URL)
 	 */
 	import { FolderGit2, X, Github, Lock, Globe, Download } from 'lucide-svelte';
 	import { initRepository, cloneRepository } from '$lib/api/git';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
+	import { layout } from '$lib/stores/layout.svelte';
+	import GitHubRepoPicker from './GitHubRepoPicker.svelte';
+	import type { GitHubRepo } from '$lib/api/github';
 
 	interface Props {
 		open: boolean;
@@ -105,6 +109,16 @@
 		}
 	}
 
+	function pickRepo(repo: GitHubRepo) {
+		cloneUrl = repo.clone_url;
+		error = null;
+	}
+
+	function openGitHubSettings() {
+		onClose();
+		layout.openFeaturePage('settings', 'category=integrations&item=github');
+	}
+
 	function handleKeydown(e: KeyboardEvent) {
 		if (!open) return;
 		if (e.key === 'Escape') {
@@ -113,7 +127,8 @@
 		}
 		// Enter on a focused button (Close, a mode or visibility choice) is that
 		// button's own activation, not a submit.
-		const onButton = e.target instanceof Element && !!e.target.closest('button');
+		// Enter in the repository search is a search, not a submit either.
+		const onButton = e.target instanceof Element && !!e.target.closest('button, [data-repo-picker]');
 		if (e.key === 'Enter' && !onButton && !loading && canSubmit) {
 			e.preventDefault();
 			handleSubmit();
@@ -192,6 +207,13 @@
 						/>
 						<span class="field-hint">HTTPS or SSH URL of the repository to clone</span>
 					</div>
+					<div class="divider" aria-hidden="true"><span>or pick one</span></div>
+					<GitHubRepoPicker
+						selectedUrl={cloneUrl}
+						disabled={loading}
+						onSelect={pickRepo}
+						onConnect={openGitHubSettings}
+					/>
 				</div>
 			{:else}
 				<!-- Initial commit option -->
@@ -318,6 +340,8 @@
 		border-radius: 16px;
 		padding: 28px;
 		box-shadow: var(--shadow-l);
+		max-height: calc(100dvh - 32px);
+		overflow-y: auto;
 		display: flex;
 		flex-direction: column;
 		gap: 12px;
@@ -426,6 +450,22 @@
 		flex-direction: column;
 		gap: 10px;
 		animation: expand-in 150ms ease;
+	}
+
+	.divider {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		font-size: 0.75rem;
+		color: var(--muted-foreground);
+	}
+
+	.divider::before,
+	.divider::after {
+		content: '';
+		flex: 1;
+		height: 1px;
+		background: var(--border);
 	}
 
 	/* Checkbox rows */

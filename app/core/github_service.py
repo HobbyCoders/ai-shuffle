@@ -9,11 +9,13 @@ import json
 import logging
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from fluid.tools.child_env import scrub_child_env
 
+from app.core.export_redaction import redact_export_text
 from app.core.platform import get_gh_executable
 from app.core.ttl_cache import CACHE_MISS, TTLCache  # noqa: F401  (re-exported)
 
@@ -76,6 +78,31 @@ def _looks_like_not_found(stderr: str) -> bool:
 # outside the app (``gh auth login`` in a terminal) is picked up quickly.
 GH_AUTH_TTL_SECONDS = 300.0
 GH_AUTH_NEGATIVE_TTL_SECONDS = 30.0
+
+# The signed-in user's repositories (clone picker). Fetched a page of 100 at a
+# time up to USER_REPOS_MAX_PAGES and then searched/paged in memory, so typing
+# in the picker never costs a GitHub request. Repos change rarely; the picker
+# offers a refresh for the one that was created a minute ago.
+USER_REPOS_TTL_SECONDS = 120.0
+USER_REPOS_PAGE_SIZE = 100
+USER_REPOS_MAX_PAGES = 10
+USER_REPOS_PAGE_TIMEOUT = 20
+# Fields kept from each REST repository object. Never the owner's token: gh
+# reads it from its own config and it never appears in the API payload.
+_USER_REPOS_JQ = (
+    '.[] | {full_name, name, owner: .owner.login, private, fork, archived,'
+    ' description, clone_url, html_url, default_branch,'
+    ' updated_at: (.pushed_at // .updated_at)}'
+)
+
+
+
+def user_repos_endpoint(page: int) -> str:
+    """The REST path for one page of the signed-in user's repositories."""
+    return (
+        f"/user/repos?per_page={USER_REPOS_PAGE_SIZE}&page={page}"
+        "&sort=pushed&affiliation=owner,collaborator,organization_member"
+    )
 
 
 def _parse_mergeable(value: Any) -> Optional[bool]:
@@ -177,6 +204,12 @@ class GitHubService:
         self._auth_cache = TTLCache(
             ttl=GH_AUTH_TTL_SECONDS, max_entries=1, name="gh-auth"
         )
+        self._repos_cache = TTLCache(
+            ttl=USER_REPOS_TTL_SECONDS, max_entries=1, name="gh-user-repos"
+        )
+        # One fetch at a time: concurrent cold-cache requests wait for the
+        # first instead of each walking every page.
+        self._repos_lock = threading.Lock()
 
     def _run_gh(
         self,
@@ -220,7 +253,9 @@ class GitHubService:
             )
 
             if result.returncode != 0:
-                logger.warning(f"gh command failed: {result.stderr}")
+                # gh's error text is not expected to carry a credential, but
+                # it is free text from another program: redact before logging.
+                logger.warning("gh command failed: %s", redact_export_text(result.stderr or ""))
 
             return result
         except subprocess.TimeoutExpired:
@@ -418,6 +453,91 @@ class GitHubService:
         except Exception as e:
             logger.error(f"Failed to create GitHub repo: {e}")
             return None
+
+    # =========================================================================
+    # The signed-in user's repositories
+    # =========================================================================
+
+    _REPOS_CACHE_KEY = "user-repos"
+
+    def invalidate_repos_cache(self) -> None:
+        """Forget the cached repository list (sign-in changed, or refresh)."""
+        self._repos_cache.invalidate()
+
+    def list_user_repos(self, *, refresh: bool = False) -> Tuple[List[Dict[str, Any]], bool]:
+        """Every repository the signed-in account can clone. Blocking.
+
+        Owned, collaborator and organization-member repositories, most
+        recently pushed first. Returns ``(repos, truncated)``; *truncated* is
+        True when the account has more than
+        ``USER_REPOS_PAGE_SIZE * USER_REPOS_MAX_PAGES`` and the oldest were
+        left out (the URL field still clones any of them).
+
+        The list is cached for :data:`USER_REPOS_TTL_SECONDS`; pass
+        ``refresh=True`` to refetch. A failed fetch is never cached.
+
+        Raises:
+            GitHubCliError: gh could not answer (offline, rate-limited, token
+                revoked, timed out, unparseable output).
+        """
+        with self._repos_lock:
+            if not refresh:
+                cached = self._repos_cache.get_or_miss(self._REPOS_CACHE_KEY)
+                if cached is not CACHE_MISS:
+                    return cached
+            value = self._fetch_user_repos()
+            self._repos_cache.set(self._REPOS_CACHE_KEY, value)
+            return value
+
+    def _fetch_user_repos(self) -> Tuple[List[Dict[str, Any]], bool]:
+        repos: List[Dict[str, Any]] = []
+        seen: set = set()
+        truncated = False
+        for page in range(1, USER_REPOS_MAX_PAGES + 1):
+            try:
+                result = self._run_gh(
+                    ['api', '--hostname', 'github.com', user_repos_endpoint(page), '--jq', _USER_REPOS_JQ],
+                    timeout=USER_REPOS_PAGE_TIMEOUT,
+                )
+            except Exception as e:
+                raise GitHubCliError(f"gh api user/repos failed: {e}") from e
+            if result.returncode != 0:
+                raise GitHubCliError("gh api user/repos failed", stderr=result.stderr)
+            count = 0
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError as e:
+                    raise GitHubCliError(f"gh api user/repos returned invalid JSON: {e}") from e
+                count += 1
+                full_name = item.get('full_name')
+                if not isinstance(full_name, str) or full_name in seen:
+                    continue
+                seen.add(full_name)
+                repos.append({
+                    'full_name': full_name,
+                    'name': item.get('name') or full_name.split('/')[-1],
+                    'owner': item.get('owner') or full_name.split('/')[0],
+                    'private': bool(item.get('private')),
+                    'fork': bool(item.get('fork')),
+                    'archived': bool(item.get('archived')),
+                    'description': item.get('description') or None,
+                    # HTTPS so a private clone uses the credential helper gh
+                    # set up at sign-in; no token is ever put in the URL.
+                    'clone_url': item.get('clone_url') or f"https://github.com/{full_name}.git",
+                    'html_url': item.get('html_url') or f"https://github.com/{full_name}",
+                    'default_branch': item.get('default_branch') or None,
+                    'updated_at': item.get('updated_at') or None,
+                })
+            if count < USER_REPOS_PAGE_SIZE:
+                break
+        else:
+            truncated = True
+        repos.sort(key=lambda r: r['updated_at'] or '', reverse=True)
+        return repos, truncated
 
     # =========================================================================
     # Pull Requests

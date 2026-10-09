@@ -24,7 +24,7 @@ from app.core.cors import configured_origins
 from app.core import desktop_listener  # noqa: F401
 
 # Import API routers
-from app.api import auth, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, security, github, github_inbox, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, model_registry, computer_use, cluster, notifications, usage, voice
+from app.api import auth, model_providers, agents, projects, sessions, query, system, websocket, commands, preferences, settings as settings_api, settings_import, generated_images, generated_videos, generated_audio, shared_files, tags, analytics, templates, security, github, github_inbox, github_repos, git, git_operations, plugins, notes, hooks, generation, project_agents, project_plugins, project_memory, mcp, browser_panel, mobile, pairing, internal, workspace_files, connectors, automations, api_users, documentation, catalog, logs, model_registry, computer_use, cluster, notifications, usage, voice
 from app.api import voice_context, assistant
 from app.api import tools as tools_api
 from app.api import events as events_api
@@ -605,6 +605,7 @@ app.include_router(automations.router)
 app.include_router(security.router)
 app.include_router(github.router)
 app.include_router(github_inbox.router)
+app.include_router(github_repos.router)
 app.include_router(git.router)
 app.include_router(git_operations.router)
 # Before plugins.router: its catch-all /{plugin_id:path} would take /oauth/*.
