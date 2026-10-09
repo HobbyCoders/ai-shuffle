@@ -232,7 +232,9 @@
 		display: inline-flex;
 		align-items: center;
 		gap: 7px;
-		white-space: nowrap;
+		/* Moves to its own line first (.st-dhs wraps); only a pane narrower
+		   than the status itself wraps its words instead of scrolling (#2118). */
+		min-width: 0;
 	}
 	.st-dha {
 		display: flex;

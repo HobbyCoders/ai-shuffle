@@ -63,13 +63,9 @@
 		padding: 2px;
 		gap: 2px;
 		max-width: 100%;
-		overflow-x: auto;
-		scrollbar-width: none;
-	}
-	/* app.css gives every element an 8px WebKit scrollbar; the Android WebView
-	   keeps that track inside the control, so hide it here too. */
-	.st-seg::-webkit-scrollbar {
-		display: none;
+		/* A pane narrower than every choice in a row wraps the last ones onto
+		   a second line. Scrolling hid them and pushed the pane sideways (#2118). */
+		flex-wrap: wrap;
 	}
 	.st-seg button {
 		border: 0;

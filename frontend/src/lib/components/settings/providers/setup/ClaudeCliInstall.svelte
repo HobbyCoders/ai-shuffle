@@ -101,7 +101,9 @@
 
 <style>
 	.cli-install-host { display: block; height: auto; grid-template-columns: none; }
-	.cli-install { min-width: 0; padding: 16px; display: grid; gap: 12px; font-size: 13px; }
+	/* minmax(0, 1fr): an implicit auto column grew to the rows' widest content
+	   and pushed a narrow detail pane sideways (#2118). */
+	.cli-install { min-width: 0; padding: 16px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; font-size: 13px; }
 	.cli-install p { margin: 0; line-height: 1.6; }
 	.cli-helper { color: var(--st-mfg, var(--muted-foreground)); font-size: 12px; }
 	.cli-install > button { justify-self: start; min-height: 44px; }
