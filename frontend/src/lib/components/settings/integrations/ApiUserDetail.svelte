@@ -42,6 +42,9 @@
 
 	const PERMS_HELP =
 		'Connector sessions never inherit bypass. Tool approval requests go to the connected platform, such as Discord, for the user to approve or deny.';
+	// Compliance review 2026-10-09: provider subscription terms cover one person's own use.
+	const MODEL_HELP =
+		'Subscription sign-ins (Claude, ChatGPT, SuperGrok) are for your own use. If someone else uses this key, pick a model on an API-key provider.';
 
 	const isDraft = $derived(id === DRAFT_ID);
 	const user = $derived(isDraft ? undefined : model.userById(id));
@@ -315,7 +318,7 @@
 
 {#snippet runRows(current: string, effort: string, onModel: (m: string) => void, onEffort: (e: string) => void)}
 	<RowGroup title="Runs with">
-		<SettingRow label="Model">
+		<SettingRow label="Model" help={MODEL_HELP}>
 			<span class="picker">
 				<ModelPicker id="api-user-model" value={current} allowEmpty emptyLabel="Agent default" onSelect={onModel} />
 			</span>
