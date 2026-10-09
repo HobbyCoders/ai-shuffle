@@ -7,9 +7,9 @@ endpoint. Each pass, for every reachable peer:
     2. ``exchange``: send our watermarks, receive what we lack, learn theirs
     3. push what the peer lacks from our log (any origin, forwarded verbatim)
 
-A pass runs every ``SYNC_IDLE_SECONDS`` when nothing happens and immediately
-after a local write (``engine.kick``), so two workers on a LAN converge
-within a couple of seconds. The scanner publishes rows domain code changed
+A pass runs immediately after a local write (``engine.kick``), so two workers
+on a LAN converge within a couple of seconds. When nothing happens the wait
+grows from ``SYNC_IDLE_SECONDS`` to ``SYNC_IDLE_MAX_SECONDS``. The scanner publishes rows domain code changed
 without calling ``engine.record`` itself.
 
 Restore-from-backup detection: when a peer's watermark for our current
@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import random
 import threading
 import time
 import tempfile
@@ -38,7 +39,15 @@ from app.network.envelope import Envelope
 logger = logging.getLogger(__name__)
 
 SYNC_IDLE_SECONDS = 10.0
+# Each quiet pass doubles the wait up to this; any activity or wake resets it.
+# It stays well inside ONLINE_WINDOW_SECONDS so connected peers still read as online.
+SYNC_IDLE_MAX_SECONDS = 30.0
 SYNC_ACTIVE_SECONDS = 1.0
+# A peer that does not answer is retried after an exponentially growing,
+# jittered wait (half fixed, half random) of at most this long. A success,
+# a change of its addresses or of the membership ends the wait.
+PEER_BACKOFF_BASE_SECONDS = 2.0
+PEER_BACKOFF_MAX_SECONDS = 900.0
 SCAN_INTERVAL_SECONDS = 2.0
 # While a transcript backlog remains, the scanner rests as long as the pass
 # took (at least this long, at most SCAN_INTERVAL_SECONDS): about half its
@@ -79,6 +88,7 @@ _owner_candidates: Optional[set[str]] = set()
 _owner_collections: set[str] = set()
 _tasks: List[asyncio.Task] = []
 _links: Dict[str, "PeerLink"] = {}
+_links_generation: Optional[int] = None
 _last_contact: Dict[str, float] = {}
 # Authenticated peer frontiers, retained across failed/retried pulls. A failed
 # request does not make a known backlog disappear. Only committed watermarks do.
@@ -174,6 +184,24 @@ class PeerLink:
         self.batches = 0
         self.syncing = False
         self._sync_lock = asyncio.Lock()
+        self._announced = tuple(self.endpoints)
+
+    def reset_backoff(self) -> None:
+        self.failures = 0
+        self.backoff_until = 0.0
+        self.contact_kick_used = False
+
+    def note_failure(self) -> None:
+        """Back off before the next attempt; the first failure of a streak also
+        asks the account directory for the peer's current address."""
+        self.failures += 1
+        self.backoff_until = time.monotonic() + peer_backoff_seconds(self.failures)
+        if self.failures == 1:
+            try:
+                from app.network import hub
+                hub.request_directory_refresh()
+            except Exception:  # the regular directory poll follows
+                logger.debug("Could not request a directory refresh", exc_info=True)
 
     def update_endpoints(self, endpoints: list[str]) -> None:
         """Rebuild the dial list from the peer's current addresses.
@@ -187,6 +215,11 @@ class PeerLink:
         when the peer's tunnel appears, the plain-http connection is dropped
         and the next request authenticates over the tunnel.
         """
+        announced = tuple(dial_endpoints(endpoints))
+        if announced != self._announced:
+            # New addresses may answer where the old ones did not.
+            self._announced = announced
+            self.reset_backoff()
         candidates = ([self.base_url] if self.base_url else []) + list(endpoints)
         self.endpoints = dial_endpoints(candidates)
         if self.base_url is not None and self.base_url not in self.endpoints:
@@ -537,6 +570,16 @@ def _capabilities() -> dict:
 # Peer discovery
 # ---------------------------------------------------------------------------
 
+def peer_backoff_seconds(failures: int) -> float:
+    """The wait after ``failures`` consecutive failures: 4 s, 8 s, ... up to 15 min.
+
+    Equal jitter: half the exponential step is fixed, the other half random,
+    so peers that went offline together do not retry in lockstep.
+    """
+    step = min(PEER_BACKOFF_MAX_SECONDS, PEER_BACKOFF_BASE_SECONDS * 2 ** min(max(failures, 1), 20))
+    return step / 2 + random.random() * step / 2
+
+
 async def _refresh_links(ctx: engine.NetworkContext) -> None:
     def _read():
         return engine.all_presence(), store.list_members(include_revoked=False)
@@ -647,6 +690,12 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
     except Exception:  # noqa: BLE001 — the presence loop publishes the change later
         logger.debug("Could not announce changed addresses", exc_info=True)
     await _refresh_links(ctx)
+    global _links_generation
+    if ctx.generation != _links_generation:
+        # A member joined or left: every peer is worth trying again.
+        _links_generation = ctx.generation
+        for link in _links.values():
+            link.failures, link.backoff_until, link.contact_kick_used = 0, 0.0, False
     results: Dict[str, Any] = {}
     now = time.monotonic()
     for link in list(_links.values()):
@@ -660,14 +709,12 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
             await asyncio.to_thread(store.upsert_peer, link.device_id, base_url=link.base_url, contacted=True,
                                     error=None)
         except (httpx.HTTPError, PeerError) as exc:
-            link.failures += 1
             link.last_error = f"{type(exc).__name__}: {exc}"[:200]
-            link.backoff_until = time.monotonic() + min(60.0, 2.0 * (2 ** min(link.failures, 5)))
+            link.note_failure()
             await asyncio.to_thread(store.upsert_peer, link.device_id, error=link.last_error)
             logger.debug("Peer %s unreachable: %s", link.device_id, link.last_error)
         except Exception:  # noqa: BLE001
-            link.failures += 1
-            link.backoff_until = time.monotonic() + 10.0
+            link.note_failure()
             logger.warning("Sync with %s failed", link.device_id, exc_info=True)
         _tried_since_hold.add(link.device_id)
     if engine.outbox_held() and not any(link.endpoints for link in _links.values()):
@@ -771,6 +818,7 @@ async def sync_loop() -> None:
     global _wake
     _wake = asyncio.Event()
     engine.set_kick(_kick_from_thread)
+    idle = SYNC_IDLE_SECONDS
     async with httpx.AsyncClient(follow_redirects=False) as client:
         while True:
             try:
@@ -783,16 +831,21 @@ async def sync_loop() -> None:
             # A push that landed completely needs no follow-up exchange: the
             # peer already compared frontiers with us before we pushed.
             busy = any((r.get("received") or r.get("unsettled")) for r in results.values())
+            moved = any(r.get("sent") for r in results.values())
             try:
                 from app.network import blobs
                 busy = bool(await blobs.fetch_missing(limit=4)) or busy
             except Exception:  # noqa: BLE001
                 logger.debug("Peer file catch-up will retry", exc_info=True)
-            timeout = SYNC_ACTIVE_SECONDS if busy else SYNC_IDLE_SECONDS
+            if busy or moved:
+                idle = SYNC_IDLE_SECONDS
+            timeout = SYNC_ACTIVE_SECONDS if busy else idle
             try:
                 await asyncio.wait_for(_wake.wait(), timeout=timeout)
+                idle = SYNC_IDLE_SECONDS  # woken by a write or a peer
             except asyncio.TimeoutError:
-                pass
+                if not busy:
+                    idle = min(idle * 2, SYNC_IDLE_MAX_SECONDS)
             _wake.clear()
 
 
@@ -1029,7 +1082,9 @@ async def stop() -> None:
 
 def forget_peers() -> None:
     """Drop every peer link and contact record (the worker left its network)."""
+    global _links_generation
     _links.clear()
+    _links_generation = None
     _last_contact.clear()
     _peer_watermarks.clear()
     _snapshot_peers.clear()

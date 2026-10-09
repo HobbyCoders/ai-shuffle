@@ -1,5 +1,8 @@
 """Connected peers settle to the idle exchange cadence (#1285).
 
+Quiet peers back off from ``SYNC_IDLE_SECONDS`` to ``SYNC_IDLE_MAX_SECONDS``;
+a local write still reaches the peer at once.
+
 Both workers run their real ``sync_loop`` and ``scan_loop`` concurrently on a
 virtual clock. Each worker gets its own copy of the transport module, so the
 loop globals (wake events, links, contact times) stay separate; every database
@@ -212,13 +215,21 @@ def _gaps(times):
     return {round(later - earlier, 6) for earlier, later in itertools.pairwise(times)}
 
 
-async def test_quiet_connected_peers_exchange_at_the_idle_interval(peers):
-    await peers.run(300)
+async def test_quiet_connected_peers_back_off_to_the_idle_ceiling(peers):
+    await peers.run(900)
     for node in (peers.na, peers.nb):
-        exchanges = _times(node, "/peer/exchange")
-        assert _gaps(exchanges) == {transport.SYNC_IDLE_SECONDS}
-        assert exchanges[0] <= WARMUP + transport.SYNC_IDLE_SECONDS and exchanges[-1] >= 290
-        assert _times(node, "/peer/ops") == []
+        exchanges = _times(node, "/peer/exchange", since=0)
+        gaps = [round(later - earlier, 6) for earlier, later in itertools.pairwise(exchanges)]
+        # Each quiet pass doubles the wait, up to the ceiling.
+        assert gaps[:2] == [transport.SYNC_IDLE_SECONDS, 2 * transport.SYNC_IDLE_SECONDS]
+        assert set(gaps[2:]) == {transport.SYNC_IDLE_MAX_SECONDS}
+        assert exchanges[-1] >= 900 - transport.SYNC_IDLE_MAX_SECONDS
+        # 15 quiet minutes: 32 exchanges where a fixed 10 s wait made 91
+        # (per day per peer: 2,880 instead of 8,640).
+        assert len(exchanges) == 32
+        assert _times(node, "/peer/ops", since=0) == []
+        # Connected peers still count as online between two idle passes.
+        assert transport.SYNC_IDLE_MAX_SECONDS < transport.ONLINE_WINDOW_SECONDS / 2
 
 
 async def test_remote_writes_arrive_promptly_without_echo_exchanges(peers):
@@ -246,8 +257,10 @@ async def test_remote_writes_arrive_promptly_without_echo_exchanges(peers):
         extra = [t for t in _times(peers.na, "/peer/exchange", since=0)
                  if pushed < t < pushed + transport.SYNC_IDLE_SECONDS - 0.5]
         assert extra == []
-    # The receiver keeps its idle cadence: pushed ops do not trigger a pass back.
-    assert _gaps(_times(peers.nb, "/peer/exchange")) == {transport.SYNC_IDLE_SECONDS}
+    # The writer was idle when each write came (its wait had grown past the
+    # gap between writes), yet it pushed within a scan interval: a write wakes it.
+    # The receiver keeps backing off: pushed ops do not trigger a pass back.
+    assert _gaps(_times(peers.nb, "/peer/exchange")) == {transport.SYNC_IDLE_MAX_SECONDS}
     assert _times(peers.nb, "/peer/ops", since=0) == []
 
 
@@ -294,3 +307,76 @@ async def test_follow_up_pass_only_when_work_remains(monkeypatch, summary, expec
         await transport.sync_loop()
     engine.set_kick(None)
     assert timeouts == [expected]
+
+
+async def test_offline_peer_backoff_is_jittered_capped_and_reset(monkeypatch):
+    """A day against an offline peer: ~130 attempts where the 60 s cap made ~1,400."""
+    from app.network import hub
+
+    clock = SimpleNamespace(now=0.0)
+    draws = iter(itertools.cycle([0.0, 1.0, 0.5]))
+    refreshes = []
+    ctx = SimpleNamespace(bootstrap_state=engine.BOOTSTRAP_READY, generation=1)
+
+    class OfflineLink(transport.PeerLink):
+        online = False
+        attempts = 0
+
+        async def sync_once(self, client, ctx):
+            self.attempts += 1
+            if not self.online:
+                raise transport.PeerConnectFailed("connect timeout")
+            self.reset_backoff()
+            return {"received": 0, "sent": 0}
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(transport, "time", SimpleNamespace(monotonic=lambda: clock.now, time=time.time))
+    monkeypatch.setattr(transport, "random", SimpleNamespace(random=lambda: next(draws)))
+    monkeypatch.setattr(transport.engine, "context", lambda: ctx)
+    monkeypatch.setattr(transport, "_refresh_links", nothing)
+    monkeypatch.setattr(transport, "_announce_own_endpoints_if_changed", nothing)
+    monkeypatch.setattr(transport.store, "upsert_peer", lambda *a, **k: None)
+    monkeypatch.setattr(transport, "note_contact", lambda device_id: None)
+    monkeypatch.setattr(hub, "request_directory_refresh", lambda: refreshes.append(clock.now))
+    transport.reset_for_tests()
+    link = transport._links["offline"] = OfflineLink("offline", ["https://offline.example.com"])
+    try:
+        # Equal jitter: the wait lies between half and all of the exponential step.
+        waits = []
+        for failures in range(1, 12):
+            low, high = transport.peer_backoff_seconds(failures), transport.peer_backoff_seconds(failures)
+            waits.append((low, high))
+            next(draws)  # keep the 0, 1, 0.5 cycle aligned
+        assert waits[0] == (2.0, 4.0)
+        assert waits[-1] == (450.0, 900.0)
+        assert all(high <= transport.PEER_BACKOFF_MAX_SECONDS for _, high in waits)
+
+        # The sync loop passes at most every SYNC_IDLE_MAX_SECONDS while idle.
+        while clock.now < 86400:
+            await transport.sync_pass(None)
+            clock.now += transport.SYNC_IDLE_MAX_SECONDS
+        assert 100 <= link.attempts <= 160
+        assert refreshes == [0.0]  # one directory refresh per failure streak
+
+        # A changed address ends the wait at once.
+        assert link.backoff_until > clock.now
+        link.update_endpoints(["https://moved.example.com"])
+        assert link.failures == 0 and link.backoff_until == 0.0
+        before = link.attempts
+        await transport.sync_pass(None)
+        assert link.attempts == before + 1 and link.failures == 1 and len(refreshes) == 2
+        # So does a membership change.
+        ctx.generation = 2
+        await transport.sync_pass(None)
+        assert link.attempts == before + 2
+        # And a success.
+        link.online = True
+        clock.now = link.backoff_until
+        await transport.sync_pass(None)
+        assert link.failures == 0 and link.backoff_until == 0.0
+        await transport.sync_pass(None)
+        assert link.attempts == before + 4
+    finally:
+        transport.reset_for_tests()

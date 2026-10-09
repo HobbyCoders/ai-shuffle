@@ -182,6 +182,16 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
 
 _recent_authorization = {}
 
+# The worker's one background account check: the network directory poll
+# (app.network.hub) every ten minutes. Any successful network call proves this
+# server is still active, so the remote-access supervisor reuses that proof for
+# one interval plus a minute of slack instead of asking ``status`` on its own
+# (docs/reviews/cloudflare-cost-1000-users-2026-10.md).
+BACKGROUND_CHECK_SECONDS = 600.0
+AUTHORIZATION_REUSE_SECONDS = BACKGROUND_CHECK_SECONDS + 60.0
+# Network routes the hub answers only for an active, unrevoked server.
+_AUTHORIZING_SUFFIXES = ('network', 'network/pending')
+
 # The hub answers 503 with Retry-After when an operator kill switch is on
 # (android/hub/src/switches.ts). Until then every call is answered locally, so
 # no loop on this worker keeps asking a paused hub. Keyed by hub origin.
@@ -342,7 +352,7 @@ def call(binding, method, suffix, body=None, *, credential=None, max_bytes=16384
         result = json.loads(raw)
         if not isinstance(result, dict):
             raise ValueError('Invalid hub response')
-        if suffix == 'network/pending' or (suffix == 'status' and result.get('active') is True):
+        if suffix in _AUTHORIZING_SUFFIXES or (suffix == 'status' and result.get('active') is True):
             # One worker binding, bounded cache, no identity/provider secrets.
             if len(_recent_authorization) >= 16:
                 _recent_authorization.clear()
@@ -530,6 +540,6 @@ def _authorization_key(binding):
     return tuple(binding.get(key) for key in ('hub_url', 'server_id', 'encrypted_secret'))
 
 
-def recently_authorized(binding, *, max_age=300):
+def recently_authorized(binding, *, max_age=AUTHORIZATION_REUSE_SECONDS):
     import time
     return time.monotonic() - _recent_authorization.get(_authorization_key(binding), float('-inf')) < max_age

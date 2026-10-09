@@ -1,7 +1,9 @@
 # ruff: noqa: F811
 """Account hub client: refusals, deferred notices, adoption and the enrollment poll."""
 import asyncio
+from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -11,6 +13,7 @@ from app.db import network as store
 from app.network import crypto, engine, hub, membership, recovery
 from tests.core.network.harness import join
 from tests.core.network.test_hub import _signed_in, fake, workers  # noqa: F401
+from tests.core.network.test_transport import ServedBy
 
 
 def _description(worker, **overrides):
@@ -283,3 +286,138 @@ async def test_loop_wakes_on_kick_and_stops(monkeypatch):
     await hub.stop()
     assert hub._loop is None and hub._tasks == []
     hub.reset_for_tests()
+
+
+def _directory_polls(fake, server, since=0):
+    return [call for call in fake.calls[since:] if call[0] == server and call[1:] == ("GET", "network")]
+
+
+async def test_one_account_call_every_ten_minutes_admits_and_refreshes(workers, fake, monkeypatch):
+    """A day of loop passes: 144 directory calls where two calls every 4 min made 720."""
+    a, b = workers("a"), workers("b")
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(hub, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        _signed_in(fake, a)
+        hub.register()
+    with b.active():
+        _signed_in(fake, b)
+        await hub._loop_body()  # B registers through the account and waits
+    assert fake.devices[b.device_id]["status"] == "pending"
+    with a.active():
+        _signed_in(fake, a)
+        start = len(fake.calls)
+        end = clock.now + 86400
+        while clock.now < end:
+            await hub._loop_body()
+            clock.now += 60.0
+        mine = [call for call in fake.calls[start:] if call[0] == "server-a"]
+        assert len(_directory_polls(fake, "server-a", start)) == 86400 / hub.DIRECTORY_POLL_SECONDS == 144
+        assert ("server-a", "GET", "network/pending") not in mine
+        # The pending device came from the same response and was admitted on the first poll.
+        assert fake.devices[b.device_id]["status"] == "approved"
+        assert hub.status()["pending_devices"] == []
+        # The poll keeps the remote-access supervisor from asking ``status`` on its own.
+        assert hub.DIRECTORY_POLL_SECONDS < account_hub.AUTHORIZATION_REUSE_SECONDS
+
+
+async def test_a_worker_that_is_not_active_in_the_directory_does_not_admit(workers, fake, monkeypatch):
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        _signed_in(fake, a)
+        hub.register()
+    with b.active():
+        _signed_in(fake, b)
+        await hub._loop_body()
+    fake.devices[a.device_id]["status"] = "rejected"
+    with a.active():
+        _signed_in(fake, a)
+        await hub._loop_body()
+        assert fake.devices[b.device_id]["status"] == "pending"
+        assert [d["device_id"] for d in hub.status()["pending_devices"]] == [b.device_id]
+
+
+async def test_early_directory_refresh_is_bounded(workers, fake, monkeypatch):
+    a = workers("a")
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(hub, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        _signed_in(fake, a)
+        hub.register()
+        await hub._loop_body()
+        assert len(_directory_polls(fake, "server-a")) == 1
+        # Asked right away: the next poll still waits for the floor ...
+        for _ in range(50):
+            hub.request_directory_refresh()
+        clock.now += hub.DIRECTORY_REFRESH_MIN_SECONDS - 1
+        await hub._loop_body()
+        assert len(_directory_polls(fake, "server-a")) == 1
+        # ... then runs once, however often it was asked.
+        clock.now += 1
+        await hub._loop_body()
+        await hub._loop_body()
+        assert len(_directory_polls(fake, "server-a")) == 2
+        # Asked late in an interval: the poll runs at once.
+        clock.now += hub.DIRECTORY_POLL_SECONDS - 10
+        hub.request_directory_refresh()
+        await hub._loop_body()
+        assert len(_directory_polls(fake, "server-a")) == 3
+        # Unasked, the next one is a full interval later.
+        clock.now += hub.DIRECTORY_POLL_SECONDS - 1
+        await hub._loop_body()
+        assert len(_directory_polls(fake, "server-a")) == 3
+        clock.now += 1
+        await hub._loop_body()
+        assert len(_directory_polls(fake, "server-a")) == 4
+
+
+async def test_a_new_worker_nudges_members_to_admit_it_within_minutes(workers, fake, monkeypatch):
+    """Admission of a joining worker takes about two minutes, not a full poll interval."""
+    a, b, c = workers("a"), workers("b"), workers("c")
+    clock = SimpleNamespace(now=1000.0)
+    monkeypatch.setattr(hub, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    served_a = ServedBy(a, "https://a.example.com")
+    real_info = fake.info
+
+    def info_with_endpoints(server, body, params):
+        info = real_info(server, body, params)
+        for device in info["devices"]:
+            if device["device_id"] == a.device_id:
+                device["endpoints"] = [served_a.base_url]
+        return info
+
+    monkeypatch.setattr(fake, "info", info_with_endpoints)
+    real_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real_client(transport=served_a.transport(), **kw))
+    with a.active():
+        engine.create_network("Home", device_name="A")
+        _signed_in(fake, a)
+        hub.register()
+        await hub._loop_body()  # A's regular poll: nobody waits yet
+    join_at = clock.now + 30
+    clock.now = join_at
+    with b.active():
+        _signed_in(fake, b)
+        await hub._loop_body()  # registers, then asks A for a challenge in its own name
+        await hub._loop_body()  # asks only once per enrollment
+    challenges = [r for r in served_a.requests if r[1] == "/api/v1/network/peer/auth/challenge"]
+    assert len(challenges) == 1
+    with a.active():
+        _signed_in(fake, a)
+        while fake.devices[b.device_id]["status"] == "pending":
+            clock.now += 15.0
+            await hub._loop_body()
+        assert clock.now - join_at <= hub.DIRECTORY_REFRESH_MIN_SECONDS
+        # A member's own challenge does not move the poll forward.
+        polls = len(_directory_polls(fake, "server-a"))
+    join(a, c)
+    with c.active():
+        assert hub.nudge_admitting_workers(info_with_endpoints("server-c", {}, {})) == 1
+    with a.active():
+        _signed_in(fake, a)
+        clock.now += hub.DIRECTORY_REFRESH_MIN_SECONDS
+        await hub._loop_body()
+        assert len(_directory_polls(fake, "server-a")) == polls

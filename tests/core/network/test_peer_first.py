@@ -76,13 +76,13 @@ async def test_peer_mode_never_uploads_or_polls_cloud_data(workers, monkeypatch)
         monkeypatch.setattr(hub, '_recovery_upload_due', False)
         for _ in range(60):
             await hub._loop_body()
-        assert calls == [('GET', 'pending'), ('GET', '')]
+        assert calls == [('GET', '')]
         assert hub.status()['sync_mode'] == 'peers'
         assert 'backup_enabled' not in hub.status()
         # A legacy enabled preference cannot reactivate removed transports.
         hub._save_hub_state(backup_enabled=True)
         await hub._loop_body()
-        assert calls == [('GET', 'pending'), ('GET', '')]
+        assert calls == [('GET', '')]
 
 
 

@@ -33,8 +33,16 @@ _recovery_upload_due = False
 _bootstrap_lock: Optional[asyncio.Lock] = None
 _pass_lock: Optional[asyncio.Lock] = None
 _directory_poll_at: dict[str, float] = {}
+_directory_polled_at: dict[str, float] = {}
 _bootstrap_failures: set[str] = set()
-DIRECTORY_POLL_SECONDS = 240.0
+# One account call per interval: ``GET network`` lists every device with its
+# status, so it carries what ``GET network/pending`` returned as well.
+DIRECTORY_POLL_SECONDS = account_hub.BACKGROUND_CHECK_SECONDS
+# A worker waiting to be admitted keeps the shorter cap it always had.
+ENROLLMENT_POLL_MAX_SECONDS = 240.0
+# An early directory poll (``request_directory_refresh``) runs at most this
+# long after the previous one, whoever asks for it.
+DIRECTORY_REFRESH_MIN_SECONDS = 120.0
 
 
 class HubError(RuntimeError):
@@ -224,7 +232,10 @@ def refresh_peer_endpoints() -> None:
     ctx = engine.context()
     if _binding() is None or ctx is None:
         return
-    info = _call("GET", "", None, max_bytes=1 << 20)
+    _refresh_endpoints_from(_call("GET", "", None, max_bytes=1 << 20), ctx)
+
+
+def _refresh_endpoints_from(info: dict, ctx) -> None:
     if info.get("network_id") != ctx.network_id:
         return
     for device in info.get("devices") or []:
@@ -238,6 +249,80 @@ def refresh_peer_endpoints() -> None:
             merged = validate_endpoints(endpoints + list(existing))
             if merged:
                 store.touch_member(member.device_id, endpoints=merged)
+
+
+def poll_directory() -> None:
+    """The background account check: one ``GET network`` per interval.
+
+    Admits the devices waiting in the account's network and refreshes peer
+    addresses from the same response. Only a worker the hub lists as an
+    active device of the same network admits, as ``GET network/pending``
+    required. Every hub version since #1264 lists each device's status.
+    """
+    ctx = engine.context()
+    if _binding() is None or ctx is None:
+        return
+    info = _call("GET", "", None, max_bytes=1 << 20)
+    if info.get("network_id") != ctx.network_id:
+        _state["pending_devices"] = []
+        return
+    devices = [d for d in info.get("devices") or [] if isinstance(d, dict)]
+    me = next((d for d in devices if d.get("device_id") == ctx.device_id), None)
+    pending = [d for d in devices if d.get("status") == "pending"]
+    _state["pending_devices"] = pending
+    if pending and me is not None and me.get("status") == "active":
+        admit_pending_devices(pending)
+    _refresh_endpoints_from(info, ctx)
+
+
+def request_directory_refresh() -> None:
+    """Run the directory poll soon instead of at the end of its interval.
+
+    For events that hint the account changed: an unknown device asking this
+    worker for a challenge (a worker that just registered and waits to be
+    admitted), or a peer that stopped answering at its known address. Bounded
+    to one poll per ``DIRECTORY_REFRESH_MIN_SECONDS`` however often it is asked.
+    """
+    now = time.monotonic()
+    for scope, due in list(_directory_poll_at.items()):
+        earliest = max(now, _directory_polled_at.get(scope, now) + DIRECTORY_REFRESH_MIN_SECONDS)
+        if earliest < due:
+            _directory_poll_at[scope] = earliest
+    kick()
+
+
+NUDGE_TIMEOUT_SECONDS = 5.0
+
+
+def nudge_admitting_workers(info: Optional[dict]) -> int:
+    """Ask the account's active workers to look for this pending one now.
+
+    Members admit through their ten-minute directory poll. A worker that just
+    registered asks each active one for a challenge in its own name; the
+    member does not know the id yet, refuses the challenge and moves its next
+    poll forward (``request_directory_refresh``). Returns how many answered.
+    """
+    import httpx
+
+    if not info:
+        return 0
+    own_id = identity_mod.load().device_id
+    urls: list[str] = []
+    for device in info.get("devices") or []:
+        if not isinstance(device, dict) or device.get("status") != "active" or device.get("device_id") == own_id:
+            continue
+        endpoints = device.get("endpoints")
+        if isinstance(endpoints, list) and all(isinstance(url, str) for url in endpoints):
+            urls.extend(url for url in validate_endpoints(endpoints)[:1] if url not in urls)
+    answered = 0
+    with httpx.Client(follow_redirects=False, timeout=NUDGE_TIMEOUT_SECONDS) as client:
+        for base in urls[:8]:
+            try:
+                client.post(base.rstrip("/") + "/api/v1/network/peer/auth/challenge", json={"device_id": own_id})
+                answered += 1
+            except httpx.HTTPError as exc:
+                logger.debug("Admission nudge to %s failed: %s", base, exc)
+    return answered
 
 
 def pending_devices() -> List[dict]:
@@ -524,7 +609,7 @@ async def _account_pass() -> bool:
                 if time.monotonic() < pending["next"]:
                     return False
                 result = pending["result"]
-                pending["delay"] = min(DIRECTORY_POLL_SECONDS, pending["delay"] * 2)
+                pending["delay"] = min(ENROLLMENT_POLL_MAX_SECONDS, pending["delay"] * 2)
                 pending["next"] = time.monotonic() + pending["delay"]
             else:
                 result = await asyncio.to_thread(register)
@@ -542,6 +627,10 @@ async def _account_pass() -> bool:
                     await asyncio.to_thread(found_account_network)
                     _state["last_error"] = None
                     return True
+                poll = _state.get("enrollment_poll") or {}
+                if info is not None and not poll.get("nudged"):
+                    poll["nudged"] = True
+                    await asyncio.to_thread(nudge_admitting_workers, info)
                 response = await asyncio.to_thread(_await_approval_sync)
                 if response:
                     await _bootstrap_from_hub(response)
@@ -571,9 +660,9 @@ async def _account_pass() -> bool:
         if ctx.bootstrap_state == engine.BOOTSTRAP_READY:
             scope = hub_state.get("binding_scope", "")
             if time.monotonic() >= _directory_poll_at.get(scope, 0):
-                _directory_poll_at[scope] = time.monotonic() + DIRECTORY_POLL_SECONDS
-                await asyncio.to_thread(admit_pending_devices)
-                await asyncio.to_thread(refresh_peer_endpoints)
+                _directory_polled_at[scope] = time.monotonic()
+                _directory_poll_at[scope] = _directory_polled_at[scope] + DIRECTORY_POLL_SECONDS
+                await asyncio.to_thread(poll_directory)
             _state["last_error"] = None
             return False
 
@@ -640,6 +729,7 @@ def reset_for_tests() -> None:
     _bootstrap_lock = None
     _pass_lock = None
     _directory_poll_at.clear()
+    _directory_polled_at.clear()
     _bootstrap_failures.clear()
 
 

@@ -498,6 +498,12 @@ async def peer_challenge(body: ChallengeRequest, request: Request) -> dict:
     # a named active member and spendable only by that member's key.
     requester = get_client_ip(request)
     _challenge_limiter.check(requester)
+    ctx = engine.context()
+    if ctx is not None and ctx.member(body.device_id) is None:
+        # A worker that just registered through the account asks before it
+        # is admitted: look at the account directory soon (bounded in ``hub``).
+        from app.network import hub
+        hub.request_directory_refresh()
     member_address = False
     if tokens.at_capacity():
         # Past the global ceiling only member addresses get a challenge: one

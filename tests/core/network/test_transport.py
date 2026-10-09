@@ -467,8 +467,10 @@ async def test_peer_loop_quiets_after_apply_and_wakes_for_a_real_write(workers, 
             await transport.sync_loop()
         await transport.stop()
         assert engine._kick is None
-    # Each push landed completely, so no pass needs a quick follow-up.
-    assert timeouts == [transport.SYNC_IDLE_SECONDS] * 4
+    # Each push landed completely, so no pass needs a quick follow-up. A pass
+    # that pushed waits the base idle time; a quiet one after it waits twice that.
+    idle = transport.SYNC_IDLE_SECONDS
+    assert timeouts == [idle, 2 * idle, idle, 2 * idle]
     assert clients and all(c.is_closed for c in clients)
     assert [path for _, path in served.requests].count("/api/v1/network/peer/ops") == 2
     with a.active():
