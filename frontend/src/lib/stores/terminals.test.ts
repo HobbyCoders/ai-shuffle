@@ -9,7 +9,7 @@ vi.mock('$lib/api/terminals', async (importOriginal) => {
 });
 
 import { TerminalApiError, type TerminalInfo, type TerminalTargets } from '$lib/api/terminals';
-import { terminals, probeFromTargets, probeFromError, REQUEST_TTL, REQUEST_EXPIRED } from './terminals.svelte';
+import { terminals, probeFromTargets, probeFromError, REQUEST_TTL, REQUEST_EXPIRED, WORKER_TERMINALS } from './terminals.svelte';
 import { sidePanel, sessionPanelKey } from './side-panel.svelte';
 
 const info = (id: string, over: Partial<TerminalInfo> = {}): TerminalInfo => ({
@@ -205,5 +205,39 @@ describe('terminals store', () => {
 		expect(terminals.isOpen('s1')).toBe(false);
 		expect(terminals.pendingRequest('s1')).toBeNull();
 		expect(terminals.notice('s1')).toBeNull();
+	});
+});
+
+describe('terminals with no chat (the Terminal page)', () => {
+	it('probes, lists and creates without a chat id', async () => {
+		api.targets.mockResolvedValue({ ...targets, default_folder: { path: '/workspace', source: 'workspace' } });
+		await terminals.ensureProbe(WORKER_TERMINALS);
+		expect(api.targets).toHaveBeenCalledWith(null);
+		expect(terminals.probeFor(WORKER_TERMINALS)).toMatchObject({ status: 'ready', folder: '/workspace', folderSource: 'workspace' });
+
+		api.create.mockResolvedValue(info('t9', { session_id: null, cwd: '/workspace', folder_source: 'workspace' }));
+		const made = await terminals.create(WORKER_TERMINALS, { shell: 'bash' });
+		expect(api.create).toHaveBeenCalledWith({ session_id: null, shell: 'bash' });
+		expect(made?.id).toBe('t9');
+		expect(terminals.tabsFor(WORKER_TERMINALS)).toMatchObject({ ids: ['t9'], active: 't9' });
+	});
+
+	it("lists only the worker's chatless terminals, never a chat's", async () => {
+		api.list.mockResolvedValue({
+			terminals: [info('chat', { session_id: 's1' }), info('own', { session_id: null })],
+			open: 2, running: 2, limit: 8, worker: { id: 'w', name: 'Unraid', platform: 'linux' },
+		});
+		await terminals.load(WORKER_TERMINALS);
+		expect(api.list).toHaveBeenCalledWith(null);
+		expect(terminals.tabsFor(WORKER_TERMINALS).ids).toEqual(['own']);
+		expect(terminals.terminal('chat')).toBeNull();
+		// The worker-wide count still includes the chat's terminal.
+		expect(terminals.counts.open).toBe(2);
+	});
+
+	it('a chat scope still sends its own id', async () => {
+		api.create.mockResolvedValue(info('t1'));
+		await terminals.create('s1');
+		expect(api.create).toHaveBeenCalledWith({ session_id: 's1' });
 	});
 });

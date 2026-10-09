@@ -1,9 +1,11 @@
 <script lang="ts">
- import { tick } from 'svelte';
+ import { tick, untrack } from 'svelte';
  import { Search, ArrowUpRight } from 'lucide-svelte';
  import type { Session } from '$lib/api/client';
  import type { ViewType } from '$lib/stores/layout.svelte';
- import { createSearchSources, searchPages, matches, type SearchGroup, type SearchItem } from '$lib/api/search';
+ import { createSearchSources, searchPages, terminalPage, matches, type SearchGroup, type SearchItem } from '$lib/api/search';
+ import { terminals } from '$lib/stores/terminals.svelte';
+ import { terminalAccess } from '$lib/terminal/gating';
  import { focusTrap } from '$lib/components/ui/focus-trap';
 
  interface Props {
@@ -36,15 +38,19 @@
   ...(onImportSession ? [{ id: 'import', label: 'Import session', action: onImportSession }] : []),
   ...(onManageTags ? [{ id: 'tags', label: 'Manage session tags', action: onManageTags }] : [])
  ]);
+ // The worker's terminal probe is the only gate for the Terminal page.
+ const pages = $derived(terminalAccess(terminals.capability).kind === 'ready' ? [...searchPages, terminalPage] : searchPages);
  const groups = $derived<SearchGroup[]>([
   ...results,
-  ...(trimmed && onOpenFeature ? [{ id: 'pages', label: 'App pages', items: searchPages.filter(item => matches(item, trimmed)) }] : []),
+  ...(trimmed && onOpenFeature ? [{ id: 'pages', label: 'App pages', items: pages.filter(item => matches(item, trimmed)) }] : []),
   { id: 'actions', label: 'Quick actions', items: actions.filter(item => !trimmed || matches(item, trimmed)) }
  ].filter(group => group.items.length));
  const items = $derived(groups.flatMap(group => group.items));
 
  $effect(() => {
   if (!visible) return;
+  // Untracked: the probe's answer must not reset the query.
+  untrack(() => void terminals.ensureCapability());
   sources = createSearchSources(currentProjectId);
   query = '';
   selectedIndex = 0;

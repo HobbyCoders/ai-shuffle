@@ -8,6 +8,7 @@
 		busy = false,
 		disabledReason = null,
 		inline = false,
+		blurb = 'A shell for this chat. It keeps running when you close the panel.',
 		onOpen,
 		onCancel,
 	}: {
@@ -16,6 +17,8 @@
 		/** The cap is reached: say why instead of opening. */
 		disabledReason?: string | null;
 		inline?: boolean;
+		/** The empty state's line under the title. */
+		blurb?: string;
 		onOpen: (choice: { cwd: string | null; shell: string | null }) => void;
 		onCancel?: () => void;
 	} = $props();
@@ -53,7 +56,7 @@
 			<span class="glyph" aria-hidden="true"><TerminalSquare size={20} /></span>
 			<div>
 				<h3>Open a terminal on {probe.worker}</h3>
-				<p>A shell for this chat. It keeps running when you close the panel.</p>
+				<p>{blurb}</p>
 			</div>
 		</div>
 	{/if}

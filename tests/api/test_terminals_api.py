@@ -234,6 +234,31 @@ def test_create_list_get_and_filter_by_chat(ctx, monkeypatch):
         "detail": "That terminal is closed or never existed.", "code": "not_found"}
 
 
+def test_a_terminal_needs_no_chat(ctx, monkeypatch):
+    """The Terminal page: the owner opens a shell before any chat exists (to
+    sign in to a CLI, say). No chat is looked up, it opens in the workspace,
+    and it belongs to no chat's list."""
+    def no_chat_lookup(sid):
+        raise AssertionError(f"a chatless terminal looked up chat {sid!r}")
+
+    monkeypatch.setattr(service, "chat_folder", no_chat_lookup)
+    tc = owner(ctx)
+    targets = tc.get("/api/v1/terminals/targets").json()
+    assert targets["supported"] is True
+    assert targets["default_folder"] == {"path": str(ctx.work), "source": "workspace"}
+    term = create(tc)
+    assert (term["session_id"], term["cwd"], term["folder_source"]) == (None, str(ctx.work), "workspace")
+    assert [t["id"] for t in tc.get("/api/v1/terminals").json()["terminals"]] == [term["id"]]
+    monkeypatch.setattr(service, "chat_folder", lambda sid: (str(ctx.tmp), "worktree"))
+    assert tc.get("/api/v1/terminals?session_id=s1").json()["terminals"] == []
+    wait_live(tc, term["id"])
+    with wsc(tc, ws_url(term["id"])) as ws:
+        attach(ws)
+        ws.send_text(json.dumps({"type": "input", "data": "pwd; echo NOCHAT_$((6*7))\n"}))
+        out = read_until(ws, b"NOCHAT_42")
+    assert str(ctx.work).encode() in strip(out)
+
+
 @pytest.mark.parametrize("cwd,message", [
     ("relative", "The folder must be a full path, for example /workspace/my-project."),
     ("/definitely/not/here", "The folder /definitely/not/here doesn't exist on this worker."),

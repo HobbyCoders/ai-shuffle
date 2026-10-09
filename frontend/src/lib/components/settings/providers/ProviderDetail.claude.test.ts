@@ -24,6 +24,9 @@ import ProvidersCollection from './ProvidersCollection.svelte';
 import { providerDrafts } from './drafts.svelte';
 import { claudeSummary } from './fixtures';
 import { fakeWorker } from './fake-worker';
+import { CLAUDE_SUB_ITEM } from './providers-model';
+import { terminals } from '$lib/stores/terminals.svelte';
+import { layout } from '$lib/stores/layout.svelte';
 
 let worker: ReturnType<typeof fakeWorker>;
 
@@ -51,6 +54,8 @@ beforeEach(() => {
 	providerDrafts.gateways = [];
 	settingsNav.reset();
 	sessionStorage.clear();
+	terminals.reset();
+	layout.reset();
 	worker = fakeWorker({
 		claude: claudeSummary({ api_key: { set: true, last4: 'WXYZ' } }),
 		integrations: {
@@ -175,4 +180,38 @@ it('offers only setup when Claude is not connected and the CLI is absent', async
 	expect(screen.getByRole('region', { name: 'Connect' })).toBeTruthy();
 	expect(screen.queryByRole('switch', { name: 'Keep Claude Code installed' })).toBeNull();
 	expect(screen.queryByRole('button', { name: 'Install Claude Code' })).toBeNull();
+});
+
+const terminalTargets = {
+	worker: { id: 'w', name: 'Unraid', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
+	shells: [{ name: 'bash', default: true }], default_shell: 'bash',
+	default_folder: { path: '/workspace', source: 'workspace' }, limit: 8, open: 0
+};
+
+it('opens the chatless Terminal page from the subscription when the worker allows shells', async () => {
+	worker = fakeWorker({ claude: claudeSummary() }, { 'GET /terminals/targets': () => terminalTargets });
+	vi.stubGlobal('fetch', worker.fetch);
+	await providers.refreshAll();
+	settingsNav.go({ category: 'providers', item: CLAUDE_SUB_ITEM });
+	render(ProvidersCollection);
+	await flush(10);
+
+	// The worker-wide probe: no chat id on the request.
+	expect(worker.calls.some((c) => c.method === 'GET' && c.path === '/terminals/targets')).toBe(true);
+	await fireEvent.click(await screen.findByRole('button', { name: 'Open terminal' }));
+	expect(layout.current.activeView?.type).toBe('terminal');
+});
+
+it('offers no Open terminal when the worker refuses terminals', async () => {
+	worker = fakeWorker({ claude: claudeSummary() }, {
+		'GET /terminals/targets': () => { throw { status: 403, detail: 'Only the owner can use terminals.' }; }
+	});
+	vi.stubGlobal('fetch', worker.fetch);
+	await providers.refreshAll();
+	settingsNav.go({ category: 'providers', item: CLAUDE_SUB_ITEM });
+	render(ProvidersCollection);
+	await flush(10);
+
+	expect(terminals.capability.status).toBe('denied');
+	expect(screen.queryByRole('button', { name: 'Open terminal' })).toBeNull();
 });

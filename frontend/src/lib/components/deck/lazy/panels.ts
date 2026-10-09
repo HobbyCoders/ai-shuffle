@@ -48,6 +48,11 @@ export const DocsPanel = createLazyComponent(
 	{ prepare: () => import('$lib/docs/index').then((m) => m.preloadAllDocs()) }
 );
 
+/** Terminals that belong to no chat. xterm.js loads with it, as with the side panel. */
+export const TerminalPagePanel = createLazyComponent('terminal', () =>
+	import('$lib/components/terminal/TerminalPage.svelte')
+);
+
 // ── Surfaces that are not nav destinations ──────────────────────────────────
 export const BrowserSidePanel = createLazyComponent('browser-panel', () =>
 	import('$lib/components/browser/BrowserPanel.svelte')
@@ -76,7 +81,8 @@ export type FeaturePanelKey =
 	| 'automations'
 	| 'prs'
 	| 'stats'
-	| 'docs';
+	| 'docs'
+	| 'terminal';
 
 /** The Build page hosts these view types as sub-tabs. */
 const BUILD_MEMBER_VIEWS = new Set(['build', 'profile']);
@@ -95,7 +101,8 @@ const PANEL_BY_KEY: Record<FeaturePanelKey, LazyComponentHandle<unknown>> = {
 	automations: AutomationsPanel,
 	prs: PrInboxPanel,
 	stats: StatsPanel,
-	docs: DocsPanel
+	docs: DocsPanel,
+	terminal: TerminalPagePanel
 };
 
 /** Resolve a layout view type to the feature panel that renders it, or null for chat. */

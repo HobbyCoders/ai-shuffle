@@ -30,6 +30,15 @@ export const searchPages: SearchItem[] = [
  ['settings', 'Settings', 'Appearance, voice, providers, default models, plugins, MCP servers, hooks, devices and security']
 ].map(([view, label, description]) => ({ id: `page:${view}`, view: view as ViewType, label, description }));
 
+/**
+ * The Terminal page. Listed only when the worker admits this viewer to
+ * terminals (the palette checks), so it is not in `searchPages`.
+ */
+export const terminalPage: SearchItem = {
+ id: 'page:terminal', view: 'terminal', label: 'Terminal',
+ description: 'Open a shell on this worker without a chat: sign in to a CLI or finish setup'
+};
+
 export function matches(item: SearchItem, query: string): boolean {
  const text = `${item.label} ${item.description ?? ''}`.toLowerCase();
  return query.toLowerCase().split(/\s+/).every(term => text.includes(term));

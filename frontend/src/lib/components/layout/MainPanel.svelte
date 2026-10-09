@@ -140,6 +140,7 @@
 		'prs': 'Pull requests',
 		'stats': 'Stats',
 		'docs': 'Documentation',
+		'terminal': 'Terminal',
 	};
 
 	// Feature pages that provide their own header.
@@ -147,7 +148,7 @@
 	const embeddedViews = new Set([
 		'board', 'build',
 		'profile', 'project', 'settings',
-		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'automations', 'prs', 'stats', 'docs'
+		'file-browser', 'plugins', 'mcp', 'notes', 'hooks', 'automations', 'prs', 'stats', 'docs', 'terminal'
 	]);
 
 	// The Agents page renders the `build` view and its `profile` deep links
@@ -1079,6 +1080,8 @@
 							props={{ mobile: isMobile, initialItemId: $activeView?.type === 'docs' ? $activeView.itemId : null }}
 							label="Documentation"
 						/>
+					{:else if key === 'terminal'}
+						<LazyPanel handle={panelForKey('terminal')} label="the terminal" />
 					{/if}
 					</FeaturePanelHost>
 				</div>

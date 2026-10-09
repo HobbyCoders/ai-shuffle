@@ -5,19 +5,27 @@
 	 * Tabs are per chat and come back from the worker after a reload. Each tab
 	 * keeps its emulator mounted while the panel is open so output never stops;
 	 * closing the panel only detaches, the shells keep running.
+	 *
+	 * With `sessionId` set to WORKER_TERMINALS it is the Terminal page instead:
+	 * the worker's terminals that belong to no chat.
 	 */
 	import { onMount, onDestroy, tick, untrack, type Snippet } from 'svelte';
 	import { Plus, X, Search, Copy, Check, Eraser, Square, ChevronUp, ChevronDown, LoaderCircle } from 'lucide-svelte';
 	import TerminalView from './TerminalView.svelte';
 	import NewTerminalPicker from './NewTerminalPicker.svelte';
 	import TerminalKeyBar from './TerminalKeyBar.svelte';
-	import { terminals, type TerminalRequest } from '$lib/stores/terminals.svelte';
+	import { terminals, WORKER_TERMINALS, type TerminalRequest } from '$lib/stores/terminals.svelte';
 	import { terminalAccess, blockAccess, folderName } from '$lib/terminal/gating';
 	import { pasteNeedsConfirm, pasteConfirmLabel, pasteHint, normalizePaste, pasteLines, pasteRefusal } from '$lib/terminal/paste';
 	import { mayTakeFocus } from '$lib/terminal/focus';
 	import { copyText, COPY_ERROR_MESSAGE } from '$lib/utils/clipboard';
 
 	let { sessionId, panelActions, mobile = false }: { sessionId: string; panelActions?: Snippet; mobile?: boolean } = $props();
+
+	const chatless = $derived(sessionId === WORKER_TERMINALS);
+	const blurb = $derived(chatless
+		? 'Not tied to a chat: sign in to a CLI or finish a setup step. It keeps running when you leave this page.'
+		: undefined);
 
 	type View = ReturnType<typeof TerminalView>;
 	let views = $state<Record<string, View | undefined>>({});
@@ -264,7 +272,7 @@
 <section class="tpanel" class:mobile aria-label="Terminal" bind:this={panelEl}>
 	<header class="bar">
 		{#if ready && tabState.ids.length}
-			<div class="tabs" role="tablist" aria-label="Terminals in this chat" bind:this={tabsEl}>
+			<div class="tabs" role="tablist" aria-label={chatless ? 'Terminals on this worker' : 'Terminals in this chat'} bind:this={tabsEl}>
 				{#each tabState.ids as id, index (id)}
 					{@const info = terminals.terminal(id)}
 					{@const link = terminals.connection(id)}
@@ -345,7 +353,7 @@
 		{:else if ready && !tabState.ids.length}
 			<div class="state empty">
 				{#if tabState.error}<p class="err" role="alert">{tabState.error}</p>{/if}
-				<NewTerminalPicker inline probe={ready} busy={creating} disabledReason={capReason} onOpen={openTerminal} />
+				<NewTerminalPicker inline probe={ready} busy={creating} disabledReason={capReason} {blurb} onOpen={openTerminal} />
 			</div>
 		{/if}
 		{#if ready}

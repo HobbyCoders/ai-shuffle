@@ -29,7 +29,8 @@ export type ViewType =
 	| 'notes'
 	| 'prs'
 	| 'stats'
-	| 'docs';
+	| 'docs'
+	| 'terminal';
 
 interface ActiveView {
 	type: ViewType;

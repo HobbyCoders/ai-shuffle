@@ -4,6 +4,14 @@ import { tick } from 'svelte';
 const mocks = vi.hoisted(() => ({ get: vi.fn(), sessions: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api: { get: mocks.get } }));
 vi.mock('$lib/api/sessions', () => ({ searchSessionsPaginated: mocks.sessions }));
+// The Terminal page is listed only when the worker's terminal probe says yes.
+const terminalTargets = vi.hoisted(() => vi.fn());
+vi.mock('$lib/api/terminals', async (importOriginal) => {
+ const actual = await importOriginal<typeof import('$lib/api/terminals')>();
+ return { ...actual, terminalsApi: { ...actual.terminalsApi, targets: terminalTargets } };
+});
+import { terminals } from '$lib/stores/terminals.svelte';
+import { TerminalApiError } from '$lib/api/terminals';
 import SpotlightSearch from './SpotlightSearch.svelte';
 
 const props = () => ({ visible: true, sessions: [], onClose: vi.fn(), onSelectSession: vi.fn(),
@@ -24,6 +32,8 @@ beforeEach(() => {
   if (path.startsWith('/documentation/')) return { results: [{ category: 'features', slug: 'orchid', title: 'Orchid guide', snippets: ['Orchid help'] }] };
   return [];
  });
+ terminals.reset();
+ terminalTargets.mockReset().mockRejectedValue(new TerminalApiError('Only the owner can use terminals.', 403, 'http_403'));
  mocks.sessions.mockReset().mockResolvedValue({ items: [{ id: 'session', title: 'Unrelated title', match_type: 'content', match_snippet: 'Assistant discussed orchid' }] });
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
@@ -108,5 +118,21 @@ describe('universal search', () => {
   expect(mocks.get.mock.calls.filter(([path]) => path === '/agents')).toHaveLength(1);
   await view.rerender({ ...p, visible: false }); await view.rerender(p); await search('orchid');
   expect(mocks.get.mock.calls.filter(([path]) => path === '/agents')).toHaveLength(2);
+ });
+ it('lists the Terminal page only when this viewer may open shells', async () => {
+  terminalTargets.mockResolvedValue({ worker: { id: 'w', name: 'Unraid', platform: 'linux' }, supported: true,
+   unsupported_reason: null, targets: [], shells: [{ name: 'bash', default: true }], default_shell: 'bash',
+   default_folder: { path: '/workspace', source: 'workspace' }, limit: 8, open: 0 });
+  const p = props(); render(SpotlightSearch, { props: p });
+  await terminals.ensureCapability(); await search('terminal');
+  expect(terminalTargets).toHaveBeenCalledWith(null);
+  await fireEvent.click(screen.getByText('Terminal'));
+  expect(p.onOpenFeature).toHaveBeenCalledWith('terminal', undefined);
+ });
+ it('leaves the Terminal page out for a refused viewer', async () => {
+  render(SpotlightSearch, { props: props() });
+  await terminals.ensureCapability(); await search('terminal');
+  expect(terminals.capability.status).toBe('denied');
+  expect(screen.queryByText('Terminal')).toBeNull();
  });
 });

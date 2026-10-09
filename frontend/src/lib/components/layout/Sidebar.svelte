@@ -40,7 +40,8 @@
 		BarChart3,
 		GitPullRequest,
 		Settings,
-		BookOpen
+		BookOpen,
+		SquareTerminal
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
 	import { getPullRequests, type PullRequest } from '$lib/api/github';
@@ -56,6 +57,8 @@
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { preloadPanelForView } from '$lib/components/deck/lazy/panels';
+	import { terminals } from '$lib/stores/terminals.svelte';
+	import { terminalAccess } from '$lib/terminal/gating';
 	import { appMode, sessionMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { notify } from '$lib/stores/notifications';
@@ -386,7 +389,15 @@
 	// Each lane names its own nothing-here state; "No sessions yet" under a
 	// voice-only list reads as though the whole app were empty.
 	const emptyLabel = 'No sessions yet';
-	onMount(() => { if (isAdmin) void refreshAssistant().catch(() => {}); });
+	onMount(() => {
+		if (!isAdmin) return;
+		void refreshAssistant().catch(() => {});
+		// The worker's answer is the only terminal gate (see terminal/gating.ts).
+		void terminals.ensureCapability();
+	});
+	// Terminal page (a shell with no chat, for CLI sign-ins and setup): only
+	// for a viewer the terminal routes admit, on a worker that has terminals.
+	const terminalReady = $derived(isAdmin && terminalAccess(terminals.capability).kind === 'ready');
 
 	// Keep the ticker in step with what's actually on screen. The prompt-parked
 	// states keep their live timer too — a session blocked on you is still live.
@@ -414,7 +425,10 @@
 		{ id: 'project', label: 'Projects', icon: FolderKanban, on: currentType === 'project' },
 		{ id: 'prs', label: 'Pull requests', icon: GitPullRequest, on: currentType === 'prs' },
 		{ id: 'stats', label: 'Stats', icon: BarChart3, on: currentType === 'stats' },
-		{ id: 'docs', label: 'Docs', icon: BookOpen, on: currentType === 'docs' }
+		{ id: 'docs', label: 'Docs', icon: BookOpen, on: currentType === 'docs' },
+		...(terminalReady
+			? [{ id: 'terminal' as const, label: 'Terminal', icon: SquareTerminal, on: currentType === 'terminal' }]
+			: [])
 	]);
 	/** Settings is pinned at the rail's foot, never under More. */
 	const settingsItem = $derived<WorkspaceNavItem | null>(

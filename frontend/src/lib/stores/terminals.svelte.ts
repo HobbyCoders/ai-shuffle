@@ -25,6 +25,19 @@ export const REQUEST_TTL = 15_000;
 export const REQUEST_EXPIRED = "The terminal didn't open in time, so nothing was pasted. Click the button again.";
 const emptyTabs: SessionTabs = { ids: [], active: null, loaded: false, error: null };
 
+/**
+ * The scope of terminals that belong to no chat: the Terminal page, opened
+ * from the navigation or from Settings before any chat exists (signing in to
+ * a CLI, other setup). Chat ids are UUIDs, so this key never collides with
+ * one. Its terminals are created with no `session_id`, open in the worker's
+ * workspace (else home) folder, and are the worker's terminals whose
+ * `session_id` is null.
+ */
+export const WORKER_TERMINALS = ':worker';
+
+/** The chat id to send for a scope: null for the worker's own terminals. */
+const chatFor = (scope: string | null): string | null => (scope === WORKER_TERMINALS ? null : scope);
+
 let capability = $state<ProbeState>({ status: 'idle' });
 let probes = $state<Record<string, ProbeState>>({});
 let tabs = $state<Record<string, SessionTabs>>({});
@@ -74,7 +87,7 @@ export function probeFromError(error: unknown): ProbeState {
 
 async function probe(sessionId: string | null): Promise<ProbeState> {
 	try {
-		return probeFromTargets(await terminalsApi.targets(sessionId));
+		return probeFromTargets(await terminalsApi.targets(chatFor(sessionId)));
 	} catch (error) {
 		return probeFromError(error);
 	}
@@ -146,11 +159,14 @@ export const terminals = {
 	/** List the chat's terminals: this is how tabs come back after a reload. */
 	async load(sessionId: string): Promise<void> {
 		try {
-			const result = await terminalsApi.list(sessionId);
+			const chat = chatFor(sessionId);
+			const result = await terminalsApi.list(chat);
 			counts = { open: result.open, running: result.running, limit: result.limit };
-			for (const info of result.terminals) terms[info.id] = info;
+			// Unfiltered, the list holds every chat's terminals too: keep the chatless ones.
+			const own = chat ? result.terminals : result.terminals.filter((t) => t.session_id === null);
+			for (const info of own) terms[info.id] = info;
 			const current = tabs[sessionId] ?? emptyTabs;
-			const listed = result.terminals.map((t) => t.id);
+			const listed = own.map((t) => t.id);
 			// Keep the owner's tab order; append terminals opened elsewhere.
 			const ids = [...current.ids.filter((id) => listed.includes(id)), ...listed.filter((id) => !current.ids.includes(id))];
 			const active = current.active && ids.includes(current.active) ? current.active : ids[ids.length - 1] ?? null;
@@ -168,7 +184,7 @@ export const terminals = {
 	async create(sessionId: string, options: { cwd?: string | null; shell?: string | null; cols?: number; rows?: number } = {}): Promise<TerminalInfo | null> {
 		notices[sessionId] = null;
 		try {
-			const info = await terminalsApi.create({ session_id: sessionId, ...options });
+			const info = await terminalsApi.create({ session_id: chatFor(sessionId), ...options });
 			terms[info.id] = info;
 			const current = this.tabsFor(sessionId);
 			setTabs(sessionId, { ids: [...current.ids.filter((id) => id !== info.id), info.id], active: info.id, loaded: true });

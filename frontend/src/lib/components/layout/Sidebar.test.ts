@@ -108,6 +108,15 @@ vi.mock('$lib/api/github', () => ({
 	getPullRequests: mocks.getPullRequests,
 }));
 
+// The Terminal destination is gated on the worker's terminal probe. Refused
+// by default (as for a viewer or the preview cookie); a test that wants the
+// item resolves a supported worker instead.
+const terminalTargets = vi.hoisted(() => vi.fn());
+vi.mock('$lib/api/terminals', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('$lib/api/terminals')>();
+	return { ...actual, terminalsApi: { ...actual.terminalsApi, targets: terminalTargets } };
+});
+
 // ── Lazy-panel prefetch (workspace nav intent) ──────────────────────────────
 // The handles are built from the REAL `createLazyComponent`, so the dedupe the
 // "repeated hover" test asserts is production behaviour, not a test double.
@@ -152,6 +161,8 @@ import { appMode } from '$lib/stores/sessionMode.svelte';
 // Also unmocked: the workspace nav's shown/hidden split IS what those tests
 // assert. Module-level state, hence the reset in beforeEach.
 import { sidebarWorkspace } from '$lib/stores/sidebar-prefs.svelte';
+import { terminals } from '$lib/stores/terminals.svelte';
+import { TerminalApiError } from '$lib/api/terminals';
 import Sidebar from './Sidebar.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import { acceptAssistant, assistantState } from '$lib/stores/assistant';
@@ -240,6 +251,8 @@ beforeEach(() => {
 	mocks.save.mockClear();
 	appMode.set('code');
 	sidebarWorkspace.reset();
+	terminals.reset();
+	terminalTargets.mockReset().mockRejectedValue(new TerminalApiError('Only the owner can use terminals.', 403, 'http_403'));
 	vi.mocked(sessionTimestamp).mockClear();
 	mocks.sessionsHasMore.set(false);
 	mocks.sessionsLoadingMore.set(false);
@@ -1241,6 +1254,44 @@ describe('Sidebar rail prefetch', () => {
 });
 
 describe('Sidebar rail customization', () => {
+	it('offers Terminal in More to the owner once the worker can run shells', async () => {
+		terminalTargets.mockResolvedValue({
+			worker: { id: 'w', name: 'Unraid', platform: 'linux' }, supported: true, unsupported_reason: null, targets: [],
+			shells: [{ name: 'bash', default: true }], default_shell: 'bash',
+			default_folder: { path: '/workspace', source: 'workspace' }, limit: 8, open: 0,
+		});
+		const onOpenFeature = vi.fn();
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true, onOpenFeature } });
+		await terminals.ensureCapability();
+		await tick();
+
+		// The worker-wide probe: no chat id.
+		expect(terminalTargets).toHaveBeenCalledWith(null);
+		const items = await openMore();
+		expect(items.map((n) => itemLabel(n))).toContain('Terminal');
+		await fireEvent.click(menuItem('Terminal'));
+		expect(onOpenFeature).toHaveBeenCalledWith('terminal');
+	});
+
+	it('hides Terminal when the worker refuses terminals to this viewer', async () => {
+		render(Sidebar, { props: { ...sidebarProps, isAdmin: true } });
+		await terminals.ensureCapability();
+		await tick();
+
+		expect(terminals.capability.status).toBe('denied');
+		const items = await openMore();
+		expect(items.map((n) => itemLabel(n))).not.toContain('Terminal');
+	});
+
+	it('never probes or offers Terminal to a non-admin', async () => {
+		render(Sidebar, { props: sidebarProps });
+		await tick();
+
+		expect(terminalTargets).not.toHaveBeenCalled();
+		const items = await openMore();
+		expect(items.map((n) => itemLabel(n))).not.toContain('Terminal');
+	});
+
 	it('shows the default five destinations on the rail and folds the rest into More', async () => {
 		render(Sidebar, { props: sidebarProps });
 

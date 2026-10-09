@@ -43,6 +43,7 @@ export type WorkspaceItemId =
 	| 'prs'
 	| 'stats'
 	| 'docs'
+	| 'terminal'
 	| 'settings';
 
 /** Canonical order — also the fallback order for a fresh install. */
@@ -55,6 +56,7 @@ export const WORKSPACE_ITEM_IDS: readonly WorkspaceItemId[] = [
 	'prs',
 	'stats',
 	'docs',
+	'terminal',
 	'settings'
 ];
 

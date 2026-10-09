@@ -21,8 +21,8 @@ import {
 } from './sidebar-prefs.svelte';
 
 const ALL: { id: WorkspaceItemId }[] = WORKSPACE_ITEM_IDS.map((id) => ({ id }));
-/** What a non-admin is allowed to see (Automations / Settings are gated out). */
-const NON_ADMIN = ALL.filter((i) => i.id !== 'automations' && i.id !== 'settings');
+/** What a non-admin is allowed to see (Automations, Terminal and Settings are gated out). */
+const NON_ADMIN = ALL.filter((i) => i.id !== 'automations' && i.id !== 'terminal' && i.id !== 'settings');
 
 function stored(): { version: number; order: string[]; shown: string[] } {
 	return JSON.parse(localStorage.getItem(WORKSPACE_PREFS_KEY) ?? '{}');
@@ -42,7 +42,7 @@ describe('sidebar-prefs defaults', () => {
 	it('splits the shown rows from the ones that fold into More', () => {
 		const { shown, hidden } = splitWorkspaceItems(ALL, sidebarWorkspace.current);
 		expect(shown.map((i) => i.id)).toEqual(['file-browser', 'notes', 'build', 'project', 'prs']);
-		expect(hidden.map((i) => i.id)).toEqual(['automations', 'stats', 'docs', 'settings']);
+		expect(hidden.map((i) => i.id)).toEqual(['automations', 'stats', 'docs', 'terminal', 'settings']);
 	});
 
 	it('never surfaces a destination the caller did not offer (admin gating)', () => {
@@ -52,6 +52,7 @@ describe('sidebar-prefs defaults', () => {
 		const labels = [...shown, ...hidden].map((i) => i.id);
 		expect(labels).not.toContain('automations');
 		expect(labels).not.toContain('settings');
+		expect(labels).not.toContain('terminal');
 		// Customize lists the same set, in nav order rather than shown-then-hidden.
 		expect(orderedWorkspaceItems(NON_ADMIN).map((i) => i.id)).toEqual([
 			'file-browser',
@@ -121,7 +122,7 @@ describe('sidebar-prefs editing', () => {
 		// A member's Customize lists no Automations; its slot (index 3) must stay put.
 		sidebarWorkspace.arrange(['notes', 'file-browser', 'project', 'build', 'prs', 'stats', 'docs']);
 		expect(sidebarWorkspace.current.order).toEqual([
-			'notes', 'file-browser', 'project', 'automations', 'build', 'prs', 'stats', 'docs', 'settings',
+			'notes', 'file-browser', 'project', 'automations', 'build', 'prs', 'stats', 'docs', 'terminal', 'settings',
 		]);
 		// The rail follows the new order.
 		expect(sidebarWorkspace.current.shown).toEqual(['notes', 'file-browser', 'project', 'build', 'prs']);

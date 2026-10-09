@@ -30,6 +30,9 @@
 	import { ClaudeResets } from './claude-resets.svelte';
 	import { claudePlan, CLAUDE_SUB_ITEM, type CredentialView, type ProviderView } from './providers-model';
 	import { changeClaudeMode } from './provider-actions';
+	import { layout } from '$lib/stores/layout.svelte';
+	import { terminals } from '$lib/stores/terminals.svelte';
+	import { terminalAccess } from '$lib/terminal/gating';
 
 	interface Props {
 		credential: CredentialView;
@@ -53,6 +56,10 @@
 	const signedIn = $derived(status ? !!status.signed_in : !!providers.current.claude?.cli.signed_in);
 	const canUseTerminal = $derived(cli.terminalAvailable(!access.readOnly, platform.isMobile));
 	const summaryCli = $derived(providers.current.claude?.cli);
+	// A shell with no chat (the Terminal page), for sign-in or any other setup
+	// step. The worker's terminal probe is the gate: it refuses non-owners and
+	// agent previews.
+	const shellReady = $derived(!access.readOnly && terminalAccess(terminals.capability).kind === 'ready');
 
 	const position = $derived(
 		mode === 'off'
@@ -109,6 +116,7 @@
 
 	onMount(() => {
 		void cli.init(() => canUseTerminal);
+		void terminals.ensureCapability();
 		void guard.load();
 		void providers.loadUsage();
 	});
@@ -196,6 +204,15 @@
 				{/if}
 			</RowGroup>
 			{#if status.error}<p class="pv-msg">{status.error}</p>{/if}
+		{/if}
+		{#if shellReady && status && !cli.terminalOpen && tab !== 'Models' && tab !== 'Usage' && tab !== 'Policy'}
+			<RowGroup title="Terminal">
+				<SettingRow label="Open a terminal" hint="A shell on this worker with no chat. Sign in by hand or finish another setup step.">
+					<button type="button" class="st-btn" onclick={() => layout.openFeaturePage('terminal')}
+						><SquareTerminal />Open terminal</button
+					>
+				</SettingRow>
+			</RowGroup>
 		{/if}
 		{#if cli.loginError && !cli.terminalOpen && tab === 'Overview'}<p class="pv-msg err" role="alert">
 				{cli.loginError}

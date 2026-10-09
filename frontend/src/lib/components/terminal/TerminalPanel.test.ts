@@ -69,8 +69,9 @@ vi.mock('$lib/terminal/connection', () => ({
 }));
 
 import TerminalPanel from './TerminalPanel.svelte';
+import TerminalPage from './TerminalPage.svelte';
 import { TerminalApiError, type TerminalInfo, type TerminalTargets } from '$lib/api/terminals';
-import { terminals } from '$lib/stores/terminals.svelte';
+import { terminals, WORKER_TERMINALS } from '$lib/stores/terminals.svelte';
 import { sidePanel, sessionPanelKey } from '$lib/stores/side-panel.svelte';
 import type { CommandBlock } from '$lib/terminal/commands';
 
@@ -384,5 +385,54 @@ describe('emulator options', () => {
 		await mount([info('t9')]);
 		await waitFor(() => expect(fx.terms).toHaveLength(1));
 		expect(fx.terms[0].options.logLevel).toBe('off');
+	});
+});
+
+describe('Terminal page (no chat)', () => {
+	const workspace = { ...targets, default_folder: { path: '/workspace', source: 'workspace' } };
+
+	async function mountPage(listed: TerminalInfo[] = []) {
+		api.targets.mockResolvedValue(workspace);
+		api.list.mockResolvedValue({ terminals: listed, open: listed.length, running: 0, limit: 8, worker: targets.worker });
+		const view = render(TerminalPage);
+		await waitFor(() => expect(terminals.tabsFor(WORKER_TERMINALS).loaded && terminals.probeFor(WORKER_TERMINALS).status === 'ready').toBe(true));
+		return view;
+	}
+
+	it('opens a shell in the workspace folder with no chat id', async () => {
+		const view = await mountPage();
+		expect(api.targets).toHaveBeenCalledWith(null);
+		expect(api.list).toHaveBeenCalledWith(null);
+		expect(view.getByText(/Not tied to a chat/)).toBeTruthy();
+		expect((view.getByRole('textbox', { name: /^Folder/ }) as HTMLInputElement).value).toBe('/workspace');
+		expect(view.getByText('Workspace folder')).toBeTruthy();
+		await fireEvent.click(view.getByRole('button', { name: 'Open terminal' }));
+		await waitFor(() => expect(api.create).toHaveBeenCalledTimes(1));
+		expect(api.create.mock.calls[0][0]).toMatchObject({ session_id: null, cwd: null, shell: 'bash' });
+		await waitFor(() => expect(view.getByRole('tablist', { name: 'Terminals on this worker' })).toBeTruthy());
+		expect(fx.terms).toHaveLength(1);
+	});
+
+	it("reattaches the worker's chatless shells and leaves a chat's alone", async () => {
+		const view = await mountPage([info('own', { session_id: null, cwd: '/workspace' }), info('chat', { session_id: 's1' })]);
+		const tabs = view.getAllByRole('tab');
+		expect(tabs).toHaveLength(1);
+		expect(tabs[0].id).toBe('terminal-tab-own');
+	});
+
+	it('shows the refusal, not a shell, to a viewer the worker denies', async () => {
+		api.targets.mockRejectedValue(new TerminalApiError('Agent previews can\'t use terminals.', 403, 'http_403'));
+		const view = render(TerminalPage);
+		await waitFor(() => expect(view.getByText('Only the owner can use terminals')).toBeTruthy());
+		expect(view.queryByRole('button', { name: 'Open terminal' })).toBeNull();
+		expect(api.create).not.toHaveBeenCalled();
+	});
+
+	it('closing the shell closes it on the worker', async () => {
+		api.close.mockResolvedValue({ closed: true });
+		const view = await mountPage([info('own', { session_id: null, cwd: '/workspace' })]);
+		await fireEvent.click(view.getByRole('button', { name: 'Close terminal 1' }));
+		await waitFor(() => expect(api.close).toHaveBeenCalledWith('own'));
+		await waitFor(() => expect(terminals.tabsFor(WORKER_TERMINALS).ids).toEqual([]));
 	});
 });
