@@ -17,7 +17,7 @@ import asyncio
 import logging
 import threading
 import time
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from app.core.config import settings
 from app.db import database
@@ -27,6 +27,7 @@ from app.network import engine, identity as identity_mod, policy
 logger = logging.getLogger(__name__)
 
 _tasks: List[asyncio.Task] = []
+_unsubscribe_applied: Optional[Callable[[], None]] = None
 
 
 class PrivateDatabaseRequiredError(RuntimeError):
@@ -415,9 +416,18 @@ def _on_applied(touched) -> None:
 async def start() -> List[asyncio.Task]:
     from app.network import transport, enrollment, hub
     from app.core import managed_connection
-    engine.on_applied(_on_applied)
-    _tasks[:] = transport.start()
-    enrollment.resume_enrollment()
+    global _unsubscribe_applied
+    # One subscription per lifecycle: stop() (or a failed start) removes it,
+    # and a start without a stop replaces it, so applies are never delivered
+    # twice (#2097).
+    _drop_applied_subscription()
+    _unsubscribe_applied = engine.on_applied(_on_applied)
+    try:
+        _tasks[:] = transport.start()
+        enrollment.resume_enrollment()
+    except BaseException:
+        _drop_applied_subscription()
+        raise
     try:
         _tasks.extend(hub.start())
     except Exception:  # noqa: BLE001
@@ -428,8 +438,16 @@ async def start() -> List[asyncio.Task]:
     return list(_tasks)
 
 
+def _drop_applied_subscription() -> None:
+    global _unsubscribe_applied
+    unsubscribe, _unsubscribe_applied = _unsubscribe_applied, None
+    if unsubscribe is not None:
+        unsubscribe()
+
+
 async def stop() -> None:
     from app.network import transport, hub, startup_sync
+    _drop_applied_subscription()
     await startup_sync.stop()
     await transport.stop()
     try:

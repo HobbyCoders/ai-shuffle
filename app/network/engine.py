@@ -258,9 +258,26 @@ def reset_for_tests() -> None:
         _kick = None
 
 
-def on_applied(listener: Callable[[List[Tuple[str, str, str]]], None]) -> None:
-    """Register a post-commit listener: receives [(collection, record_id, op)]."""
+def on_applied(listener: Callable[[List[Tuple[str, str, str]]], None]) -> Callable[[], None]:
+    """Register a post-commit listener: receives [(collection, record_id, op)].
+
+    Returns a function that removes this one registration (#2097). Calling it
+    again, or after reset_for_tests, does nothing; other listeners stay.
+    """
     _listeners.append(listener)
+    removed = False
+
+    def unsubscribe() -> None:
+        nonlocal removed
+        if removed:
+            return
+        removed = True
+        for index in range(len(_listeners) - 1, -1, -1):
+            if _listeners[index] is listener:
+                del _listeners[index]
+                return
+
+    return unsubscribe
 
 
 def set_kick(callback: Optional[Callable[[], None]]) -> None:
