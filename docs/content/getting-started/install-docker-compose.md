@@ -303,6 +303,14 @@ docker run -d \
 - Add `-e LICENSE_KEY=...` or `-e OWNER_PASSWORD=...` to set them on the first start.
 - Keep `--stop-timeout 90`. AI Shuffle needs up to 90 seconds to shut down cleanly.
 - Set `PUID` and `PGID` to the owner of your workspace folder.
+- Keep `--restart unless-stopped`. When AI Shuffle stops answering, the container restarts it on its own. If that keeps failing, the container exits so that Docker can start it again. Without a restart policy it stays stopped until you start it.
+
+### Unraid, Portainer and other container managers
+
+If you create the container in a web interface instead of a terminal, set the same options as the `docker run` command above. Most important is the restart policy: many of these tools create containers with no restart policy, and then AI Shuffle stays down after a failure.
+
+- **Unraid:** in **Add Container**, switch to **Advanced View** and put the options without their own field into **Extra Parameters**: `--restart unless-stopped --stop-timeout 90 --shm-size 1g --pids-limit 8192 --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt apparmor=unconfined`. Add the ports, volumes and variables from the command with **Add another Path, Port, Variable, Label or Device**.
+- **Portainer:** under **Restart policy**, choose **Unless stopped**.
 
 ## Where your data lives
 

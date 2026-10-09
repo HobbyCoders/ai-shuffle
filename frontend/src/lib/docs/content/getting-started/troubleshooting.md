@@ -30,6 +30,7 @@ With Docker, most problems show up in the container log. Read it first:
 - **First start:** setting up takes a few minutes. Wait for the log to settle.
 - **Check from inside:** `docker exec ai-shuffle curl -fsS http://localhost:8000/health/ready`. If that answers, AI Shuffle is running and the problem is the address or network (next section).
 - **It keeps restarting:** look for the first error in the log. `Killed` or `out of memory` means the machine ran out of memory. Add swap, run fewer agents at once, or add memory.
+- **It stopped and stays stopped:** the container has no restart policy. Add `restart: unless-stopped` to the compose file or `--restart unless-stopped` to `docker run`, then start it again. See [Unraid, Portainer and other container managers](/docs/getting-started/install-docker-compose#unraid-portainer-and-other-container-managers).
 - **`Permission denied` on `/workspace` or `/data`:** set `PUID` and `PGID` to the owner of your workspace folder.
 
 ## I cannot open it from another device
