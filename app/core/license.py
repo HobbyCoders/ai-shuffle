@@ -205,9 +205,11 @@ def _read_host_machine_id() -> str:
             return ""
     if sys.platform == "darwin":
         import subprocess
+
+        from fluid.tools.child_env import scrub_child_env
         try:
             out = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
-                                 capture_output=True, text=True, timeout=5).stdout
+                                 capture_output=True, text=True, timeout=5, env=scrub_child_env()).stdout
         except (OSError, subprocess.SubprocessError):
             return ""
         for line in out.splitlines():
