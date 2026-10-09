@@ -584,6 +584,38 @@ function reportedWindows(bucket: UsageBucket, nowMs?: number): UsageWindow[] {
 	return nowMs == null ? all : all.filter((w) => !windowRolledOver(w, nowMs));
 }
 
+/**
+ * Claude's main windows, reported with every poll and turn. The narrower ones
+ * (per-model weekly, Fable, overage) can go hours without a report (#2117).
+ */
+const MAIN_WINDOWS = new Set(['five_hour', 'seven_day']);
+
+/**
+ * The reported windows that date the bucket: its main windows when it has
+ * any, so one rarely reported window cannot age the whole bucket (#2117).
+ * A bucket without main windows (a single live event, another provider) is
+ * dated by all of them.
+ */
+function datingWindows(bucket: UsageBucket, nowMs?: number): UsageWindow[] {
+	const reported = reportedWindows(bucket, nowMs);
+	const main = reported.filter((w) => MAIN_WINDOWS.has(w.type));
+	return main.length > 0 ? main : reported;
+}
+
+/**
+ * Dated reported windows checked well before the bucket's check time
+ * (more than `BUCKET_STALE_MS` earlier), oldest first, so a caller can name
+ * their own age next to it.
+ */
+export function bucketLaggingWindows(bucket: UsageBucket, nowMs?: number): UsageWindow[] {
+	const observedAt = bucketObservedAt(bucket, nowMs);
+	if (observedAt == null) return [];
+	return reportedWindows(bucket, nowMs)
+		.filter(windowObservedAtKnown)
+		.filter((w) => observedAt - w.received_at > BUCKET_STALE_MS)
+		.sort((a, b) => a.received_at - b.received_at);
+}
+
 /** Whether any of the bucket's reported windows has an unknown observation time. */
 export function bucketHasUndatedWindow(bucket: UsageBucket, nowMs?: number): boolean {
 	return reportedWindows(bucket, nowMs).some((w) => !windowObservedAtKnown(w));
@@ -591,12 +623,13 @@ export function bucketHasUndatedWindow(bucket: UsageBucket, nowMs?: number): boo
 
 /**
  * When the bucket's OLDEST dated reported window was last observed (epoch ms),
- * or the bucket's `fetchedAt` when it has no dated windows. A live event dates
+ * counting only its main windows when it has any (see `datingWindows`), or
+ * the bucket's `fetchedAt` when it has no dated windows. A live event dates
  * only its own window, so the other windows keep their age. Undated windows
  * are reported by `bucketHasUndatedWindow`, never by borrowing `fetchedAt`.
  */
 export function bucketObservedAt(bucket: UsageBucket, nowMs?: number): number | null {
-	const times = reportedWindows(bucket, nowMs)
+	const times = datingWindows(bucket, nowMs)
 		.filter(windowObservedAtKnown)
 		.map((w) => w.received_at);
 	if (times.length > 0) return Math.min(...times);

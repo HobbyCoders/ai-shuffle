@@ -27,6 +27,8 @@ import {
 	selfBucketKey,
 	isBucketStale,
 	bucketObservedAt,
+	bucketLaggingWindows,
+	formatAsOf,
 	bucketHasUndatedWindow,
 	bucketReporters,
 	BUCKET_STALE_MS,
@@ -1053,6 +1055,61 @@ describe('network devices and refilled windows', () => {
 		const saved = JSON.parse(localStorage.getItem('usage-limit-buckets-v3') ?? '{}');
 		expect(saved.selfDeviceId).toBe('dev_local');
 		expect(saved.buckets['ai-shuffle-unraid'].deviceId).toBe('dev_unraid');
+	});
+});
+
+describe('mixed-age Claude windows (#2117)', () => {
+	beforeEach(() => {
+		localStorage.clear();
+		rateLimit.__resetForTests();
+	});
+
+	it('dates the bucket by its main windows, not a rarely reported one', () => {
+		const now = 1791498899062;
+		const fable = 1791425510282; // about 20 hours earlier, as observed live
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [{ instance_id: 'self', available: true, fetched_at: now, windows: [
+				{ type: 'five_hour', utilization: 60, resets_at: String(now + 3_600_000), observed_at: now - 15 * 60_000 },
+				{ type: 'seven_day', utilization: 40, resets_at: String(now + 86_400_000), observed_at: now - 15 * 60_000 },
+				{ type: 'seven_day_overage_included', utilization: 90,
+					resets_at: String(now + 3 * 86_400_000), observed_at: fable },
+			] }],
+		});
+		const bucket = resolveBucket(rateLimit.current, null)!;
+		expect(bucketObservedAt(bucket, now)).toBe(now - 15 * 60_000);
+		expect(formatAsOf(bucketObservedAt(bucket, now), now)).toBe('15m ago');
+		// The old window is still reported on its own, not hidden.
+		expect(bucketLaggingWindows(bucket, now).map((w) => w.type)).toEqual(['seven_day_overage_included']);
+		expect(formatAsOf(bucketLaggingWindows(bucket, now)[0].received_at, now)).toBe('20h ago');
+	});
+
+	it('still ages the bucket when a main window is old', () => {
+		const now = 1791498899062;
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [{ instance_id: 'self', available: true, fetched_at: now, windows: [
+				{ type: 'five_hour', utilization: 60, resets_at: String(now + 3_600_000), observed_at: now },
+				{ type: 'seven_day', utilization: 40, resets_at: String(now + 86_400_000), observed_at: now - 2 * 3_600_000 },
+				{ type: 'seven_day_opus', utilization: 10, resets_at: String(now + 86_400_000), observed_at: now },
+			] }],
+		});
+		const bucket = resolveBucket(rateLimit.current, null)!;
+		expect(bucketObservedAt(bucket, now)).toBe(now - 2 * 3_600_000);
+		expect(isBucketStale(bucket, now)).toBe(true);
+		expect(bucketLaggingWindows(bucket, now)).toEqual([]);
+	});
+
+	it('a bucket with no main window is dated by every window', () => {
+		const now = 1791498899062;
+		rateLimit.applySnapshot({
+			available: true, windows: [], self_instance_id: 'self',
+			snapshots: [{ instance_id: 'self', available: true, fetched_at: now, windows: [
+				{ type: 'seven_day_opus', utilization: 10, resets_at: String(now + 86_400_000), observed_at: now - 3_600_000 },
+				{ type: 'seven_day_sonnet', utilization: 10, resets_at: String(now + 86_400_000), observed_at: now },
+			] }],
+		});
+		expect(bucketObservedAt(resolveBucket(rateLimit.current, null)!, now)).toBe(now - 3_600_000);
 	});
 });
 

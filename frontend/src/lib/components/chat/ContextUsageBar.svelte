@@ -86,6 +86,7 @@
 		formatCountdown,
 		formatAsOf,
 		bucketObservedAt,
+		bucketLaggingWindows,
 		bucketHasUndatedWindow,
 		bucketReporters,
 		resolveBucket,
@@ -558,10 +559,15 @@
 			return { text: 'Check time unknown', guidance: false, title: 'Check time unknown' };
 		}
 		const checked = checkedText(observedAt, nowMs) as string;
+		// A rarely reported window (Fable, per-model weekly) does not date the
+		// line (#2117): give its own age in the tooltip instead.
+		const lagging = bucketLaggingWindows(bucket, nowMs)
+			.filter((w) => !w.reportedBy)
+			.map((w) => `${windowLabel(w.type)}: checked ${formatAsOf(w.received_at, nowMs)}`);
 		// Installs on one Claude account share the freshest reading: name the
 		// install(s) it came from, since it may not be the target itself.
 		const reporters = bucketReporters(bucket);
-		if (reporters.length === 0) return { text: checked, guidance: false, title: checked };
+		if (reporters.length === 0) return { text: checked, guidance: false, title: [checked, ...lagging].join('\n') };
 		const text = `${checked} · from ${reporters.join(' and ')}`;
 		const detail = Object.values(bucket.windows)
 			.filter((w) => w.reportedBy)
@@ -570,7 +576,7 @@
 				const when = w.received_at != null ? formatAsOf(w.received_at, nowMs) : 'at an unknown time';
 				return `${windowLabel(w.type)}: reported from ${who} ${when}`;
 			});
-		return { text, guidance: false, title: [text, ...detail].join('\n') };
+		return { text, guidance: false, title: [text, ...detail, ...lagging].join('\n') };
 	}
 
 	/** Something the user can act on for this provider row, or null. */
