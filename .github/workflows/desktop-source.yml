@@ -20,6 +20,7 @@ on:
       - "CI JavaScript"
       - "License server CI"
       - "Registry CI"
+      - "Uptime monitor CI"
       - "Desktop source update checks"
       - "Desktop CI"
       - "iOS CI"

@@ -1,8 +1,8 @@
 # What CI runs, and when
 
 Most test suites run on paid Blacksmith runners, so pull requests get only the
-fast checks. The browser editor smoke, license server and registry checks use
-standard GitHub `ubuntu-24.04` runners; their paths, tests and manual runs are
+fast checks. The browser editor smoke, license server, registry and uptime monitor
+checks use standard GitHub `ubuntu-24.04` runners; their paths, tests and manual runs are
 unchanged. These consume GitHub Actions allowance rather than Blacksmith
 minutes (runner overages follow the platform billing policy). The slow platform suites run
 when someone asks for them, and before a release.
@@ -53,7 +53,7 @@ branch. If the fix needs several tries, convert the PR back to draft first
   an unsigned iOS Simulator build with the unit and WebKit tests on a macOS
   runner. It never signs or uploads.
 - The small policy and service checks (artifact policy, desktop source
-  update checks, license server, registry, Android Play)
+  update checks, license server, registry, uptime monitor, Android Play)
 - In-app update reach, on PRs that touch the Docker image, `docker/`, the
   desktop main process or the update archive: fails when a change cannot reach
   installed apps through the in-app update (`scripts/ci/update_reach.py`). The
