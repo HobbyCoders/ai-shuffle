@@ -4,8 +4,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  # PR CI may finish before or after its merge. Both events re-evaluate the
-  # current main revision; no PR checkout, artifacts or caches enter this job.
+  # PR CI may finish before or after its merge. A completion after the merge
+  # re-evaluates the current main revision; one before it is covered by the
+  # merge's push event (see the gate's if). No PR checkout, artifacts or caches
+  # enter this job.
   workflow_run:
     types: [completed]
     workflows:
@@ -34,13 +36,16 @@ permissions:
 
 jobs:
   gate:
+    # Filter non-publishable CI completions before allocating the publication runner.
     if: >-
       github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' ||
        (github.event_name == 'workflow_dispatch' && github.actor_id == '76577322' && github.triggering_actor == github.actor) ||
        (github.event_name == 'workflow_run' &&
-        (github.event.workflow_run.event == 'pull_request' ||
+        ((github.event.workflow_run.event == 'pull_request' &&
+          !contains(github.event.workflow_run.pull_requests.*.head.sha, github.event.workflow_run.head_sha)) ||
          (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.head_sha == github.sha &&
           github.event.workflow_run.actor.id == 76577322 && github.event.workflow_run.triggering_actor.id == 76577322)) &&
         github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'HobbyCoders/ai-shuffle'))
     runs-on: ubuntu-latest

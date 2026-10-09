@@ -143,17 +143,36 @@ def test_owner_main_completion_event_reenters_gate(main_evidence):
     ("event", "workflow_dispatch", True), ("head_branch", "other", False),
     ("actor.id", 7, False), ("triggering_actor.id", 7, False),
     ("conclusion", "failure", False), ("head_repository.full_name", "other/repo", False),
+    # Main moved on: the gate refuses CI for a superseded revision, so the job never starts.
+    ("head_sha", "b" * 40, False),
 ])
 def test_workflow_predicate_admits_only_owner_main_ci(field, value, allowed):
-    from test_owner_publication_policy import permits, workflow
+    from test_owner_publication_policy import MAIN_SHA, permits, workflow
     expression = workflow("desktop-source.yml")["jobs"]["gate"]["if"]
     fields = {"event": "workflow_dispatch", "head_branch": "main", "actor.id": 76577322,
               "triggering_actor.id": 76577322, "conclusion": "success",
-              "head_repository.full_name": gate.REPOSITORY}
+              "head_repository.full_name": gate.REPOSITORY, "head_sha": MAIN_SHA}
     fields[field] = value
     for key, item in fields.items():
         expression = expression.replace("github.event.workflow_run." + key, repr(item))
     assert permits(expression, event="workflow_run") is allowed
+
+
+@pytest.mark.parametrize("open_pr_heads,allowed", [
+    # The PR is still open at this exact commit: it cannot be main's merged PR.
+    (["c" * 40], False),
+    (["d" * 40, "c" * 40], False),
+    # Merged (GitHub lists only open PRs), or the branch has moved on: evaluate.
+    ([], True),
+    (["d" * 40], True),
+])
+def test_pr_ci_for_an_open_pr_head_never_starts_the_gate(open_pr_heads, allowed):
+    from test_owner_publication_policy import permits, workflow
+    expression = workflow("desktop-source.yml")["jobs"]["gate"]["if"]
+    assert permits(expression, event="workflow_run", run_head="c" * 40,
+                   open_pr_heads=open_pr_heads) is allowed
+    # The skip never widens authorization.
+    assert not permits(expression, event="workflow_run", run_head="c" * 40, repo="other/repo")
 
 
 def test_main_ci_event_produces_entrypoint_authorization(main_evidence, monkeypatch, tmp_path):

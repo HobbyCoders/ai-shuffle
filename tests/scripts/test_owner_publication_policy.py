@@ -1,4 +1,5 @@
 """Exercise the actual owner-only publishing predicates without secrets/deploys."""
+import functools
 from pathlib import Path
 import re
 from types import SimpleNamespace as NS
@@ -11,6 +12,7 @@ OWNER = "76577322"
 REPO = "HobbyCoders/ai-shuffle"
 MAIN = "refs/heads/main"
 TAG = "refs/tags/v0.8.19"
+MAIN_SHA = "a" * 40
 DEPLOY = ["deploy-hub.yml", "deploy-license.yml", "deploy-registry.yml", "deploy-site.yml", "deploy-uptime.yml"]
 JOBS = [(name, "deploy", "main") for name in DEPLOY] + [
     ("release.yml", "preflight", "tag"),
@@ -34,7 +36,8 @@ def workflow(name):
 
 
 def permits(expression, *, actor_id=OWNER, actor="Quickkill0", triggering_actor=None,
-            repo=REPO, event="workflow_dispatch", ref=MAIN, **input_changes):
+            repo=REPO, event="workflow_dispatch", ref=MAIN, sha=MAIN_SHA, run_head=MAIN_SHA,
+            open_pr_heads=(), **input_changes):
     """Small evaluation harness for the checked-in, boolean Actions predicates.
 
     Values are the event context, not a separately implemented authorization rule.
@@ -49,18 +52,25 @@ def permits(expression, *, actor_id=OWNER, actor="Quickkill0", triggering_actor=
     expression = expression.replace("needs.create-release.", "needs.create_release.")
     expression = re.sub(r"(?<![\w'\"])true(?![\w'\"])", "True", expression)
     expression = re.sub(r"(?<![\w'\"])false(?![\w'\"])", "False", expression)
+    expression = re.sub(r"!(?!=)", " not ", expression)
+    # Object filter: ``a.list.*.b.c`` is the list of each item's ``b.c``.
+    expression = re.sub(r"([\w.]+)\.\*\.([\w.]+)", r"[_path(item, '\2') for item in \1]", expression)
     context = dict(
-        github=NS(repository=repo, actor_id=actor_id, actor=actor,
+        github=NS(repository=repo, actor_id=actor_id, actor=actor, sha=sha,
                   triggering_actor=actor if triggering_actor is None else triggering_actor,
                   event_name=event, ref=ref, event=NS(repository=NS(private=True),
-                      workflow_run=NS(event="pull_request", conclusion="success",
+                      workflow_run=NS(event="pull_request", conclusion="success", head_sha=run_head,
+                                      pull_requests=[NS(head=NS(sha=head)) for head in open_pr_heads],
                                       head_repository=NS(full_name=REPO)))),
         inputs=NS(**inputs),
         needs=NS(build=NS(result="success"), verify=NS(result="success"),
                  create_release=NS(outputs=NS(promote_latest="true"))),
         startsWith=lambda value, prefix: value.startswith(prefix), always=lambda: True,
+        contains=lambda items, value: value in items,
+        _path=lambda item, path: functools.reduce(getattr, path.split("."), item),
     )
-    return bool(eval(expression, {"__builtins__": {}}, context))
+    # Globals, so that object-filter comprehensions can resolve the context.
+    return bool(eval(expression, {"__builtins__": {}, **context}))
 
 
 @pytest.mark.parametrize("name,job,kind", JOBS)
