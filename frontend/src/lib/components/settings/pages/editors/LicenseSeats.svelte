@@ -40,4 +40,4 @@
 		</SettingRow>
 	{/each}
 </div>
-<p class="st-note">Free a seat you no longer use, then activate again.</p>
+<p class="st-note">Free a seat you no longer use, then activate again. The freed worker stops starting agent runs at its next license check.</p>

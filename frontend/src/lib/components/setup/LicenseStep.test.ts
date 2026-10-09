@@ -46,12 +46,14 @@ describe('setup license step', () => {
 
 	it('lets the owner add the key later, and explains a full seat count', async () => {
 		mocks.getLicense.mockResolvedValue(base);
-		mocks.activate.mockResolvedValue({ activated: false, code: 'seats_full', detail: 'All 3 workers are in use.', seats: 3, installs: [] });
+		const detail = 'This license is in use on 3 of 3 workers. Remove one at hobbycoders.com/account, or deactivate it in Settings > System > License on that worker, then try again.';
+		mocks.activate.mockResolvedValue({ activated: false, code: 'seats_full', detail, seats: 3, installs: [] });
 		const onContinue = vi.fn();
 		render(LicenseStep, { onContinue });
 		await fireEvent.input(await screen.findByLabelText('License key'), { target: { value: 'ASH-1' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Activate' }));
-		await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('All 3 workers are in use.'));
+		// The server's message is shown as it is, once.
+		await waitFor(() => expect(screen.getByRole('alert').textContent?.trim()).toBe(detail));
 		await fireEvent.click(screen.getByRole('button', { name: 'Add it later' }));
 		expect(onContinue).toHaveBeenCalledOnce();
 	});

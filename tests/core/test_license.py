@@ -45,6 +45,7 @@ def store(monkeypatch, keys):
     monkeypatch.setattr(licensing, "LEASE_PUBLIC_KEYS", {"test": keys.spki})
     monkeypatch.setattr(licensing.settings, "license_server_url", "https://license.example.com")
     monkeypatch.setattr(licensing.settings, "license_beta", False)
+    monkeypatch.setattr(licensing.settings, "local_mode", False)
     licensing._verified.clear()
     licensing._lock = None
     return values
@@ -310,6 +311,93 @@ async def test_release_seat_uses_the_key_to_free_another_worker(store, server):
     with pytest.raises(licensing.LicenseError) as err:
         await licensing.release_seat("ASH-AAAAA-AAAAA-AAAAA-AAAAA", "other-install")
     assert err.value.status == 404 and err.value.message == "No such worker on this license"
+    server.answers["deactivate"] = (429, {"error": "Seats on this license can be freed 3 times a day.", "code": "release_limit"})
+    with pytest.raises(licensing.LicenseError) as err:
+        await licensing.release_seat("ASH-AAAAA-AAAAA-AAAAA-AAAAA", "other-install")
+    assert err.value.status == 429 and err.value.message.startswith("Seats on this license can be freed")
+
+
+# ---------------------------------------------------------------------------
+# Seats: rolling install tokens, losing a seat, same-machine reinstall
+# ---------------------------------------------------------------------------
+
+async def test_renewal_keeps_the_new_install_token_it_is_given(store, keys, server):
+    save(store, install_id="inst-1", install_token="a" * 64, lease=keys.lease("inst-1"))
+    server.answers["renew"] = lambda body: (200, {"lease": keys.lease("inst-1"), "install_token": "b" * 64})
+    await licensing.refresh()
+    assert state(store)["install_token"] == "b" * 64
+    await licensing.refresh()
+    assert server.requests[-1][1]["install_token"] == "b" * 64
+    # An answer without a usable token keeps the one it has.
+    server.answers["renew"] = lambda body: (200, {"lease": keys.lease("inst-1"), "install_token": "short"})
+    await licensing.refresh()
+    assert state(store)["install_token"] == "b" * 64
+
+
+@pytest.mark.parametrize("code,answer", [
+    (401, {"error": "This worker is no longer activated, for example because its data was copied to another machine. Enter your license key to activate it again.", "code": "unknown_install"}),
+    (410, {"error": "This worker was deactivated. Enter your license key to activate it again.", "code": "deactivated"}),
+    (409, {"error": "This license is in use on 3 of 3 workers. Remove one at hobbycoders.com/account, or deactivate it in Settings > System > License on that worker, then try again.", "code": "seats_full", "seats": 3, "installs": []}),
+])
+async def test_losing_the_seat_pauses_new_runs_at_once(store, keys, server, code, answer):
+    save(store, install_id="inst-1", install_token="a" * 64, lease=keys.lease("inst-1"), key_hint="7QK2")
+    server.answers["renew"] = (code, answer)
+    s = await licensing.refresh()
+    assert s["state"] == "unlicensed" and not s["allowed"]
+    assert s["reason"].startswith(answer["error"]) and "paused" in s["reason"] and "data is not affected" in s["reason"]
+    assert answer["error"] in s["banner"]["message"] and s["banner"]["severity"] == "error"
+    assert s["server_status"]["code"] == answer["code"]
+    saved = state(store)
+    assert "lease" not in saved and "install_token" not in saved
+    assert saved["install_id"] == "inst-1" and saved["key_hint"] == "7QK2"
+    assert licensing.license_allows_agent_runs()[0] is False
+    # Nothing left to renew until the key is entered again.
+    assert licensing._seconds_until_refresh(time.time()) == licensing.REFRESH_INTERVAL
+    # Entering the key again reuses the install id (no second seat) and clears the message.
+    server.answers["activate"] = lambda body: (200, {"lease": keys.lease(body["install_id"]), "install_token": "c" * 64})
+    s = await licensing.activate("ASH-AAAAA-AAAAA-AAAAA-AAAAA")
+    assert server.requests[-1][1]["install_id"] == "inst-1"
+    assert s["state"] == "active" and s["server_status"] is None
+
+
+async def test_an_unexplained_refusal_does_not_drop_the_lease(store, keys, server):
+    lease = keys.lease("inst-1")
+    save(store, install_id="inst-1", install_token="a" * 64, lease=lease)
+    server.answers["renew"] = (401, {"error": "Unauthorized"})
+    s = await licensing.refresh()
+    assert s["allowed"] and state(store)["lease"] == lease
+
+
+async def test_desktop_activation_sends_a_machine_hash(store, keys, server, monkeypatch):
+    server.answers["activate"] = lambda body: (200, {"lease": keys.lease(body["install_id"]), "install_token": "a" * 64})
+    monkeypatch.setattr(licensing, "_read_host_machine_id", lambda: "4c4c4544-0042-3510-8051-b4c04f4e4d32")
+    await licensing.activate("ASH-AAAAA-AAAAA-AAAAA-AAAAA")
+    assert "machine" not in server.requests[-1][1], "Docker workers share an image machine id"
+    monkeypatch.setattr(licensing.settings, "local_mode", True)
+    await licensing.activate("ASH-AAAAA-AAAAA-AAAAA-AAAAA")
+    machine = server.requests[-1][1]["machine"]
+    assert len(machine) == 64 and "4c4c4544" not in machine
+    assert machine == licensing._host_machine_id()
+    monkeypatch.setattr(licensing, "_read_host_machine_id", lambda: "")
+    await licensing.activate("ASH-AAAAA-AAAAA-AAAAA-AAAAA")
+    assert "machine" not in server.requests[-1][1]
+
+
+def test_host_machine_id_reads_the_linux_machine_id(monkeypatch):
+    import sys
+    monkeypatch.setattr(sys, "platform", "linux")
+    seen = []
+    real = licensing.Path
+
+    class FakePath(type(real())):
+        def read_text(self, *a, **k):
+            seen.append(str(self))
+            if str(self) == "/etc/machine-id":
+                return "abc123\n"
+            raise OSError
+    monkeypatch.setattr(licensing, "Path", FakePath)
+    assert licensing._read_host_machine_id() == "abc123"
+    assert seen == ["/etc/machine-id"]
 
 
 def test_refresh_schedule(store, keys):
@@ -352,6 +440,13 @@ async def test_post_uses_https_and_maps_server_trouble_to_503(store, transport):
     assert err.value.status == 503
     handler["fn"] = lambda request: httpx.Response(402, json={"error": "no", "status": "canceled"})
     assert await licensing._post("renew", {}) == (402, {"error": "no", "status": "canceled"})
+    handler["fn"] = lambda request: httpx.Response(429, json={"error": "slow down"})
+    with pytest.raises(licensing.LicenseError) as err:
+        await licensing._post("renew", {})
+    assert err.value.status == 503
+    # The daily seat-release budget is an answer, not a busy server.
+    handler["fn"] = lambda request: httpx.Response(429, json={"error": "limit", "code": "release_limit"})
+    assert await licensing._post("deactivate", {}) == (429, {"error": "limit", "code": "release_limit"})
 
 
 async def test_post_refuses_plain_http_to_a_remote_host(store, monkeypatch, transport):

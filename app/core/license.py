@@ -21,8 +21,16 @@ every call reports an always-valid beta lease and no network call is made.
 
 What the worker sends to the license server: the license key (on activation
 only), a random install id, a SHA-256 fingerprint of that id and the machine
-id, the host name as a display name, and the app version. Never prompts,
-model traffic or provider credentials.
+id, on desktop installs a SHA-256 hash of the computer's machine id (so a
+reinstall on the same computer reuses its seat), the host name as a display
+name, and the app version. Never prompts, model traffic or provider
+credentials.
+
+Seats: each renewal returns a new install token and the old one stops working
+a day later, so two copies of one data directory cannot share a seat. When the
+server says this worker holds no seat any more (freed elsewhere, taken over by
+a copy, or no seat left after going stale) the lease is dropped at once and new
+agent runs pause until the key is entered again.
 
 First-install key: a key given before the worker ever ran is activated on its
 own when the worker starts (:func:`activate_first_install_key`). It comes from
@@ -82,6 +90,9 @@ FIRST_CHECK_DELAY = 60.0
 WARN_BEFORE_EXPIRY = 3 * DAY
 HTTP_TIMEOUT = 15.0
 MAX_RESPONSE_BYTES = 64 * 1024
+# Renewal answers meaning this worker holds no seat any more (the license
+# server's error codes): the lease is dropped at once instead of running out.
+SEAT_LOST_CODES = frozenset({"unknown_install", "deactivated", "seats_full"})
 
 
 class LicenseError(Exception):
@@ -179,6 +190,51 @@ def _install_fingerprint(install_id: str) -> str:
     if not machine:
         machine = socket.gethostname()
     return hashlib.sha256(f"shuffle-install:{install_id}:{machine}".encode()).hexdigest()
+
+
+def _read_host_machine_id() -> str:
+    """The operating system's own id for this computer, or "" when unknown."""
+    import sys
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography",
+                                0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+                return str(winreg.QueryValueEx(key, "MachineGuid")[0]).strip()
+        except OSError:
+            return ""
+    if sys.platform == "darwin":
+        import subprocess
+        try:
+            out = subprocess.run(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        for line in out.splitlines():
+            if "IOPlatformUUID" in line:
+                return line.split("=", 1)[-1].strip().strip('"')
+        return ""
+    for path in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        try:
+            value = Path(path).read_text().strip()
+        except OSError:
+            continue
+        if value:
+            return value
+    return ""
+
+
+def _host_machine_id() -> str | None:
+    """A hash of this computer's machine id, sent on activation so that
+    reinstalling on the same computer takes over its old seat instead of
+    using another one. Desktop installs only: a Docker container's machine id
+    comes from its image and is shared by every container of that build."""
+    if not settings.is_local_mode():
+        return None
+    machine = _read_host_machine_id()
+    if not machine:
+        return None
+    return hashlib.sha256(f"shuffle-machine:{machine}".encode()).hexdigest()
 
 
 def _display_name() -> str:
@@ -282,6 +338,14 @@ def status(now: float | None = None, *, cached: bool = False) -> dict:
         "last_error": state.get("last_error"), "server_status": state.get("server_status"),
     }
     lease = state.get("lease")
+    lost = state.get("server_status") or {}
+    if not lease and lost.get("code") in SEAT_LOST_CODES:
+        message = lost.get("message") or "This worker no longer holds a seat on its license."
+        return result | {
+            "state": "unlicensed", "allowed": False,
+            "reason": f"{message} New agent runs are paused until this worker is activated again. Your data is not affected.",
+            "banner": {"severity": "error", "message": f"{message} New agent runs are paused until this worker is activated again."},
+        }
     if not lease:
         return result | {
             "state": "unlicensed", "allowed": False,
@@ -401,6 +465,9 @@ async def _post(path: str, body: dict) -> tuple[int, dict]:
         data = {}
     if not isinstance(data, dict):
         data = {}
+    if response.status_code == 429 and data.get("code") == "release_limit":
+        # Not a busy server: the license's daily budget for freeing seats is used up.
+        return response.status_code, data
     if response.status_code in (429,) or response.status_code >= 500:
         retry = response.headers.get("Retry-After")
         raise LicenseError(503, "The license server is busy. Try again in a few minutes.", retry_after=retry)
@@ -426,10 +493,14 @@ async def activate(key: str) -> dict:
         state = await asyncio.to_thread(_load_state)
         install_id = state.get("install_id") or str(uuid.uuid4())
         fingerprint = _install_fingerprint(install_id)
-        code, data = await _post("activate", {
+        body = {
             "key": key.strip(), "install_id": install_id, "fingerprint": fingerprint,
             "name": _display_name(), "app_version": _app_version(),
-        })
+        }
+        machine = await asyncio.to_thread(_host_machine_id)
+        if machine:
+            body["machine"] = machine
+        code, data = await _post("activate", body)
         if code != 200:
             extra = {}
             if code == 409 and data.get("code") == "seats_full":
@@ -503,7 +574,7 @@ async def release_seat(key: str, install_id: str) -> dict:
         raise LicenseError(400, "Choose a worker to deactivate.")
     code, data = await _post("deactivate", {"key": key.strip(), "install_id": install_id})
     if code != 200:
-        raise LicenseError(code if code in (400, 404) else 502, _server_message(data, "The license server could not free that seat."))
+        raise LicenseError(code if code in (400, 404, 429) else 502, _server_message(data, "The license server could not free that seat."))
     return {"ok": True, "seats_used": data.get("seats_used")}
 
 
@@ -550,9 +621,27 @@ async def refresh() -> dict:
                 return await asyncio.to_thread(status)
             state |= {"lease": data["lease"], "last_refresh_at": now, "next_refresh_at": _next_daily(now),
                       "failures": 0, "last_error": None, "server_status": None}
+            # Every renewal hands out the token to use next time; the old one
+            # stops working a day later (that is what keeps a copied data
+            # directory from running a second worker on one seat).
+            new_token = data.get("install_token")
+            if isinstance(new_token, str) and len(new_token) == 64:
+                state["install_token"] = _seal(new_token)
+        elif data.get("code") in SEAT_LOST_CODES and code in (401, 409, 410):
+            # The server says this worker no longer holds a seat (freed from
+            # the account page or another worker, taken by a copy of this
+            # worker's data, or gone stale with no seat left). Stop now
+            # instead of running out the lease, so a freed seat is really
+            # free. The install id stays, so entering the key again reuses it.
+            code_name = data.get("code") or f"http_{code}"
+            state = {"install_id": install_id, "key_hint": state.get("key_hint"),
+                     "last_refresh_at": now, "failures": 0, "last_error": None,
+                     "server_status": {"code": str(code_name)[:40],
+                                       "message": _server_message(data, "This worker no longer holds a seat on its license.")}}
+            logger.warning("License server says this worker holds no seat (%s); new agent runs are paused", code_name)
         else:
-            # The server answered and said no (cancelled, revoked, seat given
-            # back). The current lease still runs to its end; check again daily.
+            # The server answered and said no (cancelled, expired, revoked).
+            # The current lease still runs to its end; check again daily.
             code_name = data.get("status") or data.get("code") or f"http_{code}"
             state |= {"last_refresh_at": now, "next_refresh_at": _next_daily(now), "failures": 0, "last_error": None,
                       "server_status": {"code": str(code_name)[:40],

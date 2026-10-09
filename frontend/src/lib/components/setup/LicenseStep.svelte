@@ -45,7 +45,8 @@
 		try {
 			const result = await activateLicense(value);
 			if (!result.activated) {
-				error = `${result.detail} Free a seat on your account page at hobbycoders.com, or in Settings > System > License on the worker you no longer use, then activate again.`;
+				// The license server's message already says where to free a seat.
+				error = result.detail;
 				return;
 			}
 			const { activated: _, ...next } = result;

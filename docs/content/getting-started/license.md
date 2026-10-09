@@ -42,15 +42,19 @@ Activation sends your license key, an install ID, a machine ID, the machine name
 
 ### All 3 seats are taken
 
-Activation lists the workers holding seats. Free one, then activate again:
+Activation says "This license is in use on 3 of 3 workers" and lists the workers holding seats. Free one, then activate again:
 
-- Choose **Deactivate** next to the old worker in that list.
+- Choose **Deactivate** next to the old worker in that list, or remove it from your account page on hobbycoders.com.
 - Or, on the old worker: **Settings → System → License → Deactivate on this worker**.
 - A worker that has not checked in for 21 days frees its seat by itself.
 
-### Moving to a new machine
+A worker whose seat was freed elsewhere stops starting new agent runs at its next license check, about once a day. Seats of other workers can be freed 3 times a day; deactivating a worker on itself is not counted.
 
-Deactivate the old worker (or let its seat free itself), install on the new machine, and activate there with the same key. To bring your data along, restore a backup (see [Install with Docker](/docs/getting-started/install-docker-compose#back-up)).
+### Reinstalling and moving to a new machine
+
+Reinstalling the desktop app on the same computer reuses that computer's seat. A Docker container that is recreated with the same data folder keeps its seat; one started with a fresh data folder is a new worker.
+
+To move, deactivate the old worker (or let its seat free itself), install on the new machine, and activate there with the same key. To bring your data along, restore a backup (see [Install with Docker](/docs/getting-started/install-docker-compose#back-up)). A copy of a worker's data folder does not get its own seat: if both copies run, one of them stops starting agent runs within about a day, and activating it again moves the seat away from the other.
 
 ## Offline use
 
