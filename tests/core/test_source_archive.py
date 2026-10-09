@@ -107,6 +107,17 @@ def test_real_allow_list_excludes_internal_material():
     assert "docs/content" in spec and "requirements.lock" in spec and "requirements-native.lock" in spec
 
 
+def test_owner_maintenance_commands_ship_in_the_update_archive():
+    """Installed workers have no checkout: owner maintenance must live under app/ (#2083)."""
+    shipped = subprocess.run(
+        ["git", "ls-files", "--", *source_archive.pathspec()],
+        cwd=source_archive.ROOT, check=True, capture_output=True, text=True,
+    ).stdout.splitlines()
+    assert "app/maintenance/session_recall_cache.py" in shipped
+    assert "app/maintenance/__init__.py" in shipped
+    assert not (source_archive.ROOT / "scripts/session_recall_cache.py").exists()
+
+
 def test_archive_refuses_a_revision_without_the_native_lock(repo, tmp_path):
     git(repo, "rm", "-q", "requirements-native.lock")
     git(repo, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "drop native lock")

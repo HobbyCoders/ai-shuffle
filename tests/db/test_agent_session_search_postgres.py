@@ -104,7 +104,7 @@ def test_upgrade_creates_mirror_index_and_is_idempotent(monkeypatch):
 
 def test_capacity_and_column_failure_leave_startup_and_legacy_search_intact(monkeypatch):
     from app.db import base, database, schema_postgres
-    from scripts.session_recall_cache import apply_cache
+    from app.maintenance.session_recall_cache import apply_cache
 
     with pytest.raises(RuntimeError, match="Insufficient free space"):
         with base.get_db() as conn:
@@ -149,7 +149,7 @@ def test_maintenance_lock_wait_is_bounded_and_rolls_back():
     from psycopg2.errors import LockNotAvailable
 
     from app.db import base
-    from scripts.session_recall_cache import apply_cache
+    from app.maintenance.session_recall_cache import apply_cache
 
     with base.get_db() as blocker:
         blocker.cursor().execute("LOCK TABLE fluid_session_nodes IN ACCESS SHARE MODE")
@@ -164,14 +164,14 @@ def test_maintenance_lock_wait_is_bounded_and_rolls_back():
 
 def test_maintenance_cli_uses_real_database_capacity_check(monkeypatch, capsys):
     from app.db import base, schema_postgres
-    from scripts.session_recall_cache import main
+    from app.maintenance.session_recall_cache import main
 
     import os
     from pathlib import Path
     from types import SimpleNamespace
 
     from app.core.config import settings
-    from scripts import session_recall_cache
+    from app.maintenance import session_recall_cache
 
     # The caller must own this disposable cluster. conftest deliberately replaces
     # DATA_DIR, so inject the fixture layout explicitly rather than inspecting
@@ -243,7 +243,7 @@ def test_offline_migration_backfills_stored_text_and_follows_updates(monkeypatch
 
     monkeypatch.setattr(schema_postgres, "create_postgres_schema", unexpected_bootstrap)
     database.init_database()  # Normal startup must leave the optional cache alone.
-    from scripts.session_recall_cache import apply_cache
+    from app.maintenance.session_recall_cache import apply_cache
 
     with base.get_db() as conn:
         cur = conn.cursor()

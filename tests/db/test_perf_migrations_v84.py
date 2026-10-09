@@ -85,7 +85,7 @@ def test_startup_never_backfills_optional_recall_cache(mock_db, monkeypatch):
 ])
 def test_maintenance_requires_capacity_and_bounds_ddl(monkeypatch, free_bytes, allowed):
     from app.db import schema_postgres
-    from scripts.session_recall_cache import apply_cache
+    from app.maintenance.session_recall_cache import apply_cache
 
     statements = []
 
@@ -110,7 +110,7 @@ def test_maintenance_requires_capacity_and_bounds_ddl(monkeypatch, free_bytes, a
 
 def test_maintenance_without_apply_never_opens_database(monkeypatch, capsys):
     from app.db import base
-    from scripts.session_recall_cache import main
+    from app.maintenance.session_recall_cache import main
 
     monkeypatch.setattr(base, "init_pool", lambda **_: pytest.fail("No explicit approval"))
     assert main([]) == 0
@@ -119,7 +119,7 @@ def test_maintenance_without_apply_never_opens_database(monkeypatch, capsys):
 
 @pytest.mark.parametrize("lock_ms,statement_ms", [(0, 300000), (2000, -1)])
 def test_maintenance_rejects_unbounded_timeouts(lock_ms, statement_ms):
-    from scripts.session_recall_cache import apply_cache
+    from app.maintenance.session_recall_cache import apply_cache
 
     with pytest.raises(ValueError, match="positive"):
         apply_cache(None, 100 * 1024 ** 3, lock_timeout_ms=lock_ms, statement_timeout_ms=statement_ms)
@@ -127,7 +127,7 @@ def test_maintenance_rejects_unbounded_timeouts(lock_ms, statement_ms):
 
 def test_maintenance_failure_does_not_print_connection_details(monkeypatch, capsys):
     from app.db import base
-    from scripts.session_recall_cache import main
+    from app.maintenance.session_recall_cache import main
 
     def fail(**_):
         raise RuntimeError("private connection detail")
@@ -158,7 +158,7 @@ def test_cache_requires_all_valid_ready_indexes(indexes, ready):
 
 @pytest.fixture
 def managed_cluster_layout(tmp_path, monkeypatch):
-    from scripts import session_recall_cache as maintenance
+    from app.maintenance import session_recall_cache as maintenance
 
     monkeypatch.setenv("LOCAL_MODE", "0")
     data = tmp_path / "postgres" / "data"

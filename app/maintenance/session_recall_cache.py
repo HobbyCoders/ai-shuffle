@@ -1,4 +1,11 @@
-"""Opt-in, offline maintenance: cache SessionSearch JSON text. Never run at startup."""
+"""Opt-in, offline maintenance: cache SessionSearch JSON text. Never run at startup.
+
+Ships in the runtime source archive, so an installed worker (Docker or
+desktop, no git checkout) runs it from its installed source with the
+worker's own interpreter and environment (#2083):
+
+    python -m app.maintenance.session_recall_cache --apply
+"""
 import argparse
 import os
 from pathlib import Path
@@ -90,10 +97,11 @@ def managed_data_directory(cursor, data_dir: Path, desktop_user_data: Path | Non
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=(
+    parser = argparse.ArgumentParser(prog="python -m app.maintenance.session_recall_cache", description=(
         "Optional SessionSearch cache. Stop worker traffic and schedule maintenance: "
         "this rewrites three tables under exclusive locks, may take minutes and uses extra disk. "
-        "It is not a background or startup migration. Without --apply no database is opened."
+        "It is not a background or startup migration. Without --apply no database is opened. "
+        "On an installed worker, run it from the installed source directory with the worker's interpreter."
     ))
     parser.add_argument("--apply", action="store_true", help="Explicitly approve the offline table rewrites")
     parser.add_argument("--desktop-user-data", type=Path, help=(
