@@ -141,3 +141,21 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           ACCOUNT_HUB_DATABASE_ID: ${{ vars.ACCOUNT_HUB_DATABASE_ID }}
         run: node desktop/scripts/publish-platform-installer.mjs "$PLATFORM" artifact "$RELEASE_TAG"
+      - name: Copy the installer to the R2 installer bucket
+        # Skipped until the owner sets the repository variable
+        # R2_INSTALLER_BUCKET (android/hub/README.md, "Installer downloads from
+        # R2"). The hub serves the copy only when it matches the row the step
+        # above published; until then it streams the GitHub release asset.
+        if: vars.R2_INSTALLER_BUCKET != ''
+        env:
+          R2_INSTALLER_BUCKET: ${{ vars.R2_INSTALLER_BUCKET }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          # The one file the publisher picked: same extension, same directory.
+          case "$PLATFORM" in mac) extension=.dmg;; linux) extension=.AppImage;; android) extension=.apk;; *) exit 1;; esac
+          shopt -s nullglob
+          files=(artifact/*"$extension")
+          [ "${#files[@]}" -eq 1 ] || { echo "::error::Expected exactly one $extension"; exit 1; }
+          bash desktop/scripts/upload-installer-r2.sh "$PLATFORM" "${RELEASE_TAG#v}" "${files[0]}"

@@ -371,7 +371,10 @@ a fix has shipped since, the fix stays served.
      pattern `v*` only.
    - Secrets: `DESKTOP_APPLICATION_SIGNING_KEY`, `CLOUDFLARE_API_TOKEN`,
      `CLOUDFLARE_ACCOUNT_ID` (the same values `account-hub-production` has
-     today). Variable: `ACCOUNT_HUB_DATABASE_ID`.
+     today). Variable: `ACCOUNT_HUB_DATABASE_ID`. Optional, for installer
+     copies in R2: `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` with the
+     repository variable `R2_INSTALLER_BUCKET`
+     ([android/hub/README.md](../../android/hub/README.md#installer-downloads-from-r2)).
 4. **Decide what edge signing keeps.** `desktop-source.yml` still signs edge
    builds with the same key from `account-hub-production`. Customer workers
    reject edge manifests, but desktop builds and images already in the field
