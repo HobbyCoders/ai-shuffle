@@ -126,6 +126,23 @@ def test_the_authorize_url_carries_state_and_a_pkce_challenge():
     assert first.code_verifier not in repr(first)
 
 
+def test_a_google_sign_in_asks_for_an_offline_refresh_token():
+    manifest = {"name": "dns-reader", "extensions": {"ai.shuffle": {"services": [
+        {"name": "mail", "provider": "custom", "url": "https://gmail.googleapis.com",
+         "access": "write", "purpose": "Support mail", "auth": {
+             "type": "oauth2", "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",
+             "token_url": "https://oauth2.googleapis.com/token",
+             "scopes": ["https://www.googleapis.com/auth/gmail.modify"], "pkce": True}},
+    ]}}}
+    config = plugin_oauth.config_from_manifest(PLUGIN, manifest, "mail")
+    request = plugin_oauth.start_sign_in(config, OAuthClient("client-1", SECRET), "https://shuffle.example/cb")
+    query = {k: v[0] for k, v in parse_qs(urlsplit(request.url).query).items()}
+    assert (query["access_type"], query["prompt"]) == ("offline", "consent")
+    # Other providers get no extra parameters.
+    other = plugin_oauth.start_sign_in(_config(), OAuthClient("client-1"), "https://shuffle.example/cb")
+    assert not {"access_type", "prompt"} & set(parse_qs(urlsplit(other.url).query))
+
+
 def test_the_rfc_7636_example_challenge():
     assert plugin_oauth.pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk") == (
         "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")

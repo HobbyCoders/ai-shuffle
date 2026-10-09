@@ -271,6 +271,11 @@ _AUTH_KEYS = {"type", "authorize_url", "token_url", "scopes", "pkce", "revoke_ur
 _AUTH_URL_KEYS = ("authorize_url", "token_url", "revoke_url", "registration_url")
 _AUTH_OPTIONAL_URLS = ("revoke_url", "registration_url")
 _AUTH_ORDER = ("type", "authorize_url", "token_url", "scopes", "pkce", "revoke_url", "client_id", "registration_url")
+# Providers whose APIs live on one registrable domain and whose sign-in page
+# on another: an API on the key's domain may also name these exact hosts in
+# its auth URLs. Google serves its APIs on googleapis.com and signs in on
+# accounts.google.com.
+_SIGN_IN_HOSTS = {"googleapis.com": frozenset({"accounts.google.com"})}
 # A public OAuth client ID: printable ASCII without spaces, as the sign-in
 # routes accept for an owner-entered client.
 _CLIENT_ID_RE = re.compile(r"^[\x21-\x7e]{1,512}$")
@@ -330,7 +335,7 @@ def check_service_auth(sname: str, service_url: str, auth: Any) -> dict[str, Any
     "pkce": true}`` and the optional ``revoke_url``, ``client_id`` and
     ``registration_url``. Every URL is plain ``https://`` with no
     credentials, query or fragment, on the same registrable domain as the
-    service ``url``.
+    service ``url`` (or a provider's known sign-in host, :data:`_SIGN_IN_HOSTS`).
 
     ``client_id`` is a public client the plugin author registered, so the
     owner signs in without entering a client: it needs ``"pkce": true`` and is
@@ -392,7 +397,7 @@ def check_service_auth(sname: str, service_url: str, auth: Any) -> dict[str, Any
                 f"service {sname}: auth {key} must be an https:// address with no query, "
                 "fragment or credentials"
             )
-        if registrable_domain(host) != domain:
+        if registrable_domain(host) != domain and host.lower() not in _SIGN_IN_HOSTS.get(domain, ()):
             raise PluginDraftError(
                 f"service {sname}: auth {key} must be on {domain}, the same domain as the service url"
             )

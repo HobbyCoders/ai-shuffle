@@ -102,6 +102,20 @@ def test_each_bad_declaration_is_refused_in_plain_words(entry, expected) -> None
     assert expected in _refusal(entry)
 
 
+def test_a_google_api_may_sign_in_on_accounts_google_com_only() -> None:
+    google = {**_service(authorize_url="https://accounts.google.com/o/oauth2/v2/auth",
+                         token_url="https://oauth2.googleapis.com/token",
+                         revoke_url="https://oauth2.googleapis.com/revoke"),
+              "url": "https://gmail.googleapis.com"}
+    [checked] = check_services([google])
+    assert checked["auth"]["authorize_url"] == "https://accounts.google.com/o/oauth2/v2/auth"
+    # Only that exact host, and only for an API on googleapis.com.
+    lookalike = {**google, "auth": {**google["auth"], "authorize_url": "https://evil.google.com/auth"}}
+    assert "authorize_url must be on googleapis.com" in _refusal(lookalike)
+    other_api = _service(authorize_url="https://accounts.google.com/o/oauth2/v2/auth")
+    assert "authorize_url must be on example.com" in _refusal(other_api)
+
+
 def test_a_shipped_public_client_and_a_registration_url_are_kept_and_shown() -> None:
     entry = _service(client_id="public-client.apps.example",
                      registration_url="https://dash.example.com/oauth2/register")

@@ -97,6 +97,13 @@ _MESSAGES = {
                           "Shuffle account (Settings > Account). You can also enter your own OAuth client."),
 }
 
+# Extra authorize parameters a provider needs, by authorize host. Google
+# returns a refresh token only with access_type=offline, and only on a
+# consent screen, so without these a Google sign-in ends after an hour.
+_AUTHORIZE_EXTRAS: dict[str, dict[str, str]] = {
+    "accounts.google.com": {"access_type": "offline", "prompt": "consent"},
+}
+
 
 class PluginOAuthError(Exception):
     """A refused OAuth step. ``reason`` is one of a fixed set; the message is
@@ -332,6 +339,7 @@ def start_sign_in(config: OAuthConfig, client: OAuthClient, redirect_uri: str) -
     }
     if config.scopes:
         params["scope"] = " ".join(config.scopes)
+    params.update(_AUTHORIZE_EXTRAS.get(urlsplit(config.authorize_url).hostname or "", {}))
     return AuthorizationRequest(
         url=config.authorize_url + "?" + urlencode(params), state=state,
         code_verifier=verifier, redirect_uri=redirect_uri, scopes=config.scopes,
