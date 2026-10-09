@@ -171,10 +171,11 @@ def _key_path() -> Path:
 
 
 def _read_key(path: Path) -> bytes:
-    from app.core.private_storage import protect_private_path
+    from app.core.private_storage import protect_private_path, service_files
 
-    protect_private_path(path)
-    raw = path.read_text(encoding="utf-8").strip()
+    with service_files():
+        protect_private_path(path)
+        raw = path.read_text(encoding="utf-8").strip()
     if len(raw) < 64:
         raise ValueError("Invalid preview access key")
     return bytes.fromhex(raw)
@@ -189,26 +190,27 @@ def _key() -> bytes:
         pass
     fresh = secrets.token_hex(32)
     path.parent.mkdir(parents=True, exist_ok=True)
-    from app.core.private_storage import private_mkstemp
+    from app.core.private_storage import private_mkstemp, service_files
 
-    fd, name = private_mkstemp(prefix="preview-access-", suffix=".tmp", dir=path.parent)
-    tmp = Path(name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            stream.write(fresh)
-        # Both operations publish a complete file without replacing a winner.
-        # Windows rename is exclusive; POSIX rename would overwrite. Avoid a
-        # second Windows hard link whose cleanup could race a reader's handle.
+    with service_files():
+        fd, name = private_mkstemp(prefix="preview-access-", suffix=".tmp", dir=path.parent)
+        tmp = Path(name)
         try:
-            if os.name == "nt":
-                os.rename(tmp, path)
-            else:
-                os.link(tmp, path)
-        except FileExistsError:
-            pass
-        return _read_key(path)
-    finally:
-        tmp.unlink(missing_ok=True)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(fresh)
+            # Both operations publish a complete file without replacing a winner.
+            # Windows rename is exclusive; POSIX rename would overwrite. Avoid a
+            # second Windows hard link whose cleanup could race a reader's handle.
+            try:
+                if os.name == "nt":
+                    os.rename(tmp, path)
+                else:
+                    os.link(tmp, path)
+            except FileExistsError:
+                pass
+            return _read_key(path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def _sign(payload: str) -> str:

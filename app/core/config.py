@@ -1083,12 +1083,16 @@ class Settings(BaseSettings):
             for component in (path, *path.absolute().parents):
                 if component.is_symlink():
                     raise ValueError()
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+            from app.core.private_storage import owner_uid, service_files
+
+            with service_files():
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+                owner = owner_uid()
             with os.fdopen(fd, "r", encoding="utf-8") as stream:
                 info = os.fstat(stream.fileno())
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 16384:
                     raise ValueError()
-                if os.name != "nt" and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
+                if os.name != "nt" and (info.st_uid != owner or info.st_mode & 0o077):
                     raise ValueError()
                 def unique_object(pairs):
                     result = {}

@@ -154,13 +154,17 @@ class McpClient:
         if transport == "stdio":
             from mcp.client.stdio import StdioServerParameters, stdio_client
 
+            from fluid.tools import agent_runner
             from fluid.tools.child_env import child_env_with_overlay
 
+            argv, cwd, env = agent_runner.wrap(
+                [self.config["command"], *self.config.get("args", [])],
+                self.config.get("cwd"), child_env_with_overlay(self.config.get("env")))
             params = StdioServerParameters(
-                command=self.config["command"],
-                args=list(self.config.get("args", [])),
-                env=child_env_with_overlay(self.config.get("env")),
-                cwd=self.config.get("cwd"),
+                command=argv[0],
+                args=list(argv[1:]),
+                env=env,
+                cwd=cwd,
             )
             return stdio_client(params), None
         if transport in ("http", "streamable_http"):

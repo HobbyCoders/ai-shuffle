@@ -397,6 +397,31 @@ On Linux, agents' Python code runs in a sandbox with no network access and no ac
 - To turn it off, remove those lines, or set `CODE_MODE_OS_SANDBOX` to `off`. To refuse to run code without it, set `required`.
 - **Ubuntu 24.04 and later** block the sandbox by default. Allow it with `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, and put the same setting in a file under `/etc/sysctl.d/` to keep it after a reboot. Or run without the sandbox.
 
+## Keep agents away from AI Shuffle's own keys (optional)
+
+Agents' shell commands run as the `PUID` user. By default that user can also read AI Shuffle's own database password and the key that protects your saved credentials. Set **`AGENT_ISOLATION=on`** to change that. AI Shuffle then gives those files and its database to a separate service account inside the container (user and group 64000). Agents' shells, background commands, hooks, MCP servers and terminals still run as `PUID`, and opening those files gives them "Permission denied".
+
+**Turn it on**
+
+1. Back up (see [Back up](#back-up)).
+2. Under `environment:` in `compose.yaml`, add `AGENT_ISOLATION: "on"` (or add `-e AGENT_ISOLATION=on` to `docker run`).
+3. Run `docker compose up -d`. The log says `agent isolation is on`.
+
+AI Shuffle notes who owned each file before changing anything. Your database, keys and saved credentials stay as they are; nothing is created again. The container must start as root, which is the default; with `--user` the setting is ignored and the log says so. If the setting cannot be applied, AI Shuffle undoes the change, starts without it and says why in the log. Your projects keep their owner.
+
+**Turn it off**
+
+Remove the line (or set `AGENT_ISOLATION=off`) and run `docker compose up -d`. On that start AI Shuffle gives every file back to `PUID` exactly as it was.
+
+**Good to know**
+
+- Agents still start only in the workspace, their home folder, the data volume and `/tmp`. To allow another folder, set `AGENT_ISOLATION_EXTRA_DIRS` to absolute paths separated by `:`.
+- If user or group 64000 is already used on your host, set `AGENT_ISOLATION_SERVICE_UID` and `AGENT_ISOLATION_SERVICE_GID` to free numbers. They must differ from `PUID` and `PGID`.
+- While it is on, the data volume's top folder and those files show owner 64000 on the host. Back up with `docker compose exec -T ai-shuffle bash /app/scripts/backup.sh`, or copy the stopped volumes as root.
+- Anything an agent could read before you turned it on may have been copied. If that matters, change the owner password and replace your provider keys afterwards.
+- An agent can still stop AI Shuffle's own processes, for example by ending them. It cannot read their secrets.
+- It needs this release's image. On an older image the setting has no effect.
+
 ## Uninstall
 
 - `docker compose down` (or `docker rm -f ai-shuffle`) removes the container and keeps your data.

@@ -143,6 +143,13 @@ RUN groupadd -g 1000 appuser && \
     mkdir -p /data /workspace && \
     chown -R appuser:appuser /home/appuser /data /workspace
 
+# ── Agent isolation service account (#1957) ──
+# Used only when the container setting AGENT_ISOLATION=on: it then owns the
+# install's keys, database descriptor and PostgreSQL files, and PostgreSQL runs
+# as it. No home, no login shell, no sudo; appuser is not in its group.
+RUN groupadd -g 64000 shuffle && \
+    useradd -M -d /nonexistent -s /usr/sbin/nologin -u 64000 -g 64000 shuffle
+
 # ── Python dependencies ──
 # requirements.lock is the hash-pinned closure of requirements.txt, fluid's own
 # dependencies and its build backend (scripts/lock_requirements.sh). A changed
@@ -195,6 +202,7 @@ COPY --chown=appuser:appuser THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 # Copy entrypoint + browser (Chromium supervisor) helper scripts
 COPY entrypoint.sh /entrypoint.sh
 COPY docker/container_runtime.py docker/application_updates.py docker/update_contract.py ./docker/
+COPY docker/agent_isolation.py ./docker/
 COPY Dockerfile entrypoint.sh ./
 COPY docker/start-chrome.sh docker/chrome-supervisor.sh docker/chrome-doctor.sh docker/install-claude-cli.sh ./docker/
 COPY desktop/build/application-update-key.pem ./docker/application-update-key.pem

@@ -55,7 +55,10 @@ def _managed_database_process(psutil):
     # process type and start time against the existing private descriptor.
     for data in dict.fromkeys(candidates):
         try:
-            lines = (data / "postmaster.pid").read_text(encoding="utf-8").splitlines()
+            from app.core.private_storage import service_files
+
+            with service_files():
+                lines = (data / "postmaster.pid").read_text(encoding="utf-8").splitlines()
             if len(lines) < 4 or Path(lines[1]).resolve() != data or int(lines[3]) != port:
                 continue
             process = psutil.Process(int(lines[0]))

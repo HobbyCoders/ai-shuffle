@@ -30,6 +30,7 @@ from typing import Optional
 
 from app.core.config import settings
 from app.core import managed_credentials as custody
+from app.core.private_storage import owner_uid, service_files
 from app.network import crypto
 from app.network.membership import device_id_for
 
@@ -80,6 +81,7 @@ class DeviceIdentity:
         }
 
 
+@service_files()
 def _directory():
     directory = settings.effective_data_dir / ".credential-keys"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -88,7 +90,7 @@ def _directory():
             or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)):
         raise IdentityError("Identity directory must be local storage")
     if os.name != "nt":
-        if info.st_uid != os.geteuid():
+        if info.st_uid != owner_uid():
             raise IdentityError("Identity directory has another owner")
         if info.st_mode & 0o077:
             directory.chmod(0o700)
@@ -134,6 +136,7 @@ def _decode(raw: bytes) -> DeviceIdentity:
         raise IdentityError("Identity file is corrupt") from exc
 
 
+@service_files()
 def _read(path) -> DeviceIdentity:
     info = path.lstat()
     if (not stat.S_ISREG(info.st_mode)
@@ -145,7 +148,7 @@ def _read(path) -> DeviceIdentity:
     fd = os.open(path, flags)
     with os.fdopen(fd, "rb") as stream:
         fstat = os.fstat(stream.fileno())
-        if os.name != "nt" and (fstat.st_uid != os.geteuid() or fstat.st_mode & 0o077):
+        if os.name != "nt" and (fstat.st_uid != owner_uid() or fstat.st_mode & 0o077):
             raise IdentityError("Identity file permissions are unsafe")
         raw = stream.read(8193)
     if len(raw) > 8192:
@@ -153,6 +156,7 @@ def _read(path) -> DeviceIdentity:
     return _decode(raw)
 
 
+@service_files()
 def _write_new(path, identity: DeviceIdentity, *, replace: bool = False) -> DeviceIdentity:
     raw = _encode(identity)
     fd, temporary = tempfile.mkstemp(prefix=".pending-", dir=path.parent)

@@ -12,6 +12,7 @@ import tempfile
 import time
 import threading
 
+from app.core.private_storage import service_files
 from app.db import database
 
 KEY = "allow_updates"
@@ -101,29 +102,32 @@ def desktop_exchange(state):
 
 def atomic_json(path, value):
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd, temporary = tempfile.mkstemp(prefix=".update-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump(value, stream)
-            # Durable before the rename: after a power loss the supervisor's
-            # state.json is the old or the new record, never an empty file
-            # that keeps the container from starting.
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
-    if hasattr(os, "O_DIRECTORY"):  # POSIX: make the rename itself durable
+    # The container's update directory belongs to the service account under
+    # Docker agent isolation; elsewhere this is a no-op.
+    with service_files():
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, temporary = tempfile.mkstemp(prefix=".update-", dir=path.parent)
         try:
-            directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            with os.fdopen(fd, "w") as stream:
+                json.dump(value, stream)
+                # Durable before the rename: after a power loss the supervisor's
+                # state.json is the old or the new record, never an empty file
+                # that keeps the container from starting.
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        if hasattr(os, "O_DIRECTORY"):  # POSIX: make the rename itself durable
             try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        except OSError:
-            pass
+                directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            except OSError:
+                pass
 
 
 def allowed():
@@ -142,7 +146,8 @@ def mirror_policy():
     if path:
         atomic_json(path, {"allow_updates": enabled})
     if not enabled and control_root():
-        (control_root() / "request.json").unlink(missing_ok=True)
+        with service_files():
+            (control_root() / "request.json").unlink(missing_ok=True)
     return enabled
 
 
@@ -159,7 +164,8 @@ def status():
     if root:
         try:
             path = root / "status.json"
-            saved = json.loads(path.read_text())
+            with service_files():
+                saved = json.loads(path.read_text())
             # notice: a coming update needs a newer Docker image (#1821).
             result.update({key: saved.get(key) for key in ("phase", "version", "error", "message",
                                                            "release", "notes", "channel", "notice")})
@@ -171,13 +177,15 @@ def status():
             if "checked_at" in saved:
                 result["checked_at"] = saved["checked_at"] if isinstance(saved["checked_at"], (int, float)) else None
             elif result["phase"] in ("idle", "available"):
-                result["checked_at"] = path.stat().st_mtime
+                with service_files():
+                    result["checked_at"] = path.stat().st_mtime
         except FileNotFoundError:
             result["message"] = "Starting application updater…"
         except (ValueError, TypeError, AttributeError, OSError):
             result.update(phase="error", error="Cannot read application updater status. Check the container logs.")
         # The supervisor deletes request.json when it takes the request.
-        result["request_pending"] = (root / "request.json").exists()
+        with service_files():
+            result["request_pending"] = (root / "request.json").exists()
     else:
         with _bridge_lock:
             if _desktop_present():

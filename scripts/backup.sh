@@ -33,8 +33,18 @@ umask 077
 # docker exec defaults to root, but the lifecycle CLI runs as appuser. Run the
 # entire backup as that same mapped identity so its 0700 destination is writable
 # by the dump process and the private files retain a consistent owner.
+# With AGENT_ISOLATION=on (a root-owned agent-isolation.json in DATA_DIR) the
+# install's keys and database files belong to a service account appuser cannot
+# read: stay root, which can read them, and stream the dump through this shell
+# (the lifecycle CLI drops to the service account by itself).
+ISOLATED=0
 if [ -f /app/docker/container_runtime.py ] && [ "$(id -u)" -eq 0 ]; then
-  exec setpriv --reuid=appuser --regid="$(id -g appuser)" --init-groups bash "$0" "$@"
+  if [ -f "${DATA_DIR:-/data}/agent-isolation.json" ] && [ ! -L "${DATA_DIR:-/data}/agent-isolation.json" ] \
+      && [ "$(stat -c %u "${DATA_DIR:-/data}/agent-isolation.json")" = 0 ]; then
+    ISOLATED=1
+  else
+    exec setpriv --reuid=appuser --regid="$(id -g appuser)" --init-groups bash "$0" "$@"
+  fi
 fi
 
 DRY_RUN=0
@@ -115,7 +125,11 @@ exclude_backup_destination() {
 # Let the supervisor resolve the private descriptor used by normal startup.
 # Never retrieve connection values into this shell or log them.
 log "Dumping managed database via container lifecycle CLI"
-run python /app/docker/container_runtime.py dump --file "$DB_DUMP"
+if [ "$ISOLATED" -eq 1 ] && [ "$DRY_RUN" -ne 1 ]; then
+  python /app/docker/container_runtime.py dump --file - > "$DB_DUMP" || { rm -f "$DB_DUMP"; exit 1; }
+else
+  run python /app/docker/container_runtime.py dump --file "$DB_DUMP"
+fi
 log "DB dump -> ${DB_DUMP}"
 
 # ---------------------------------------------------------------------------

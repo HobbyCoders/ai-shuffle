@@ -48,6 +48,12 @@ STOP = threading.Event()
 HANDOVER_PROTOCOL = "1"
 HANDOVER_TRIAL = "handover.json"
 _handover_confirmed = False
+# Opt-in agent account split (#1957, agent_isolation.py). With it on, the
+# supervisor itself runs with a PATH of root-owned directories only; the app
+# and its children get the image's full PATH back from this.
+_agent_path = None
+_isolation = None
+_ISOLATION_FILE = Path(__file__).with_name("agent_isolation.py")
 
 
 # An application update copies the database before the new code first starts
@@ -213,7 +219,9 @@ def postgres_base_env(environ=None):
     path, library path, home, user, locale and time zone. No PG* is inherited
     either; the callers set the ones they mean."""
     source = os.environ if environ is None else environ
-    return {k: v for k, v in source.items() if k in _POSTGRES_ENV_NAMES or k.startswith("LC_")}
+    env = {k: v for k, v in source.items() if k in _POSTGRES_ENV_NAMES or k.startswith("LC_")}
+    env.update(isolation().service_env())
+    return env
 
 
 def chrome_env(environ):
@@ -301,7 +309,7 @@ class Database:
         process = subprocess.Popen(args, env=env or client_env(""),
             stdin=source if source is not None else subprocess.PIPE,
             stdout=output if output is not None else subprocess.PIPE,
-            stderr=subprocess.PIPE, start_new_session=True)
+            stderr=subprocess.PIPE, start_new_session=True, **isolation().service_spawn())
         deadline = time.monotonic() + timeout
         first = True
         try:
@@ -408,7 +416,7 @@ class Database:
         if not self.pg.exists():
             if purpose == "dump":
                 raise RuntimeFailure("dump requires a retained database; it never initializes one")
-            if self.root.exists() and any(self.root.iterdir()):
+            if self.root.exists() and any(not isolation().own_record(p) for p in self.root.iterdir()):
                 raise RuntimeFailure("unrecognized legacy data; refusing to initialize PostgreSQL")
             self.root.mkdir(parents=True, exist_ok=True)
             self.pg.mkdir(mode=0o700)
@@ -536,7 +544,8 @@ class Database:
             "-p", str(self.port), "-k", str(self.socket), "-c", "unix_socket_permissions=0700",
             "-c", "hba_file=" + str(hba), "-c", "password_encryption=scram-sha-256",
             "-c", "log_statement=none", "-c", "log_min_error_statement=panic"],
-            env=client_env(""), stdout=self.pg_log, stderr=self.pg_log, start_new_session=True)
+            env=client_env(""), stdout=self.pg_log, stderr=self.pg_log, start_new_session=True,
+            **isolation().service_spawn())
 
     def wait_ready(self, *, admin=False):
         deadline = time.monotonic() + 30
@@ -621,6 +630,55 @@ def is_production(image):
     return image.get("sequence", 0) > 0 and bool(re.fullmatch(r"[a-f0-9]{40}", image.get("revision", "")))
 
 
+def isolation():
+    """The agent isolation helpers beside this file (#1957). A copy of this
+    file without them (packaging tests) behaves as with the mode off."""
+    global _isolation
+    if _isolation is None:
+        import importlib.util
+        import types
+        path = _ISOLATION_FILE
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location("shuffle_agent_isolation", path)
+            _isolation = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(_isolation)
+        else:
+            import contextlib
+            _isolation = types.SimpleNamespace(ACTIVE=None, service_env=dict, service_spawn=dict,
+                                               agent_spawn=dict, agent_files=contextlib.nullcontext,
+                                               own_record=lambda path: False)
+    return _isolation
+
+
+def isolate(settings, account):
+    """Root, before the drop: migrate for AGENT_ISOLATION and return the
+    identity to drop to, or None for the usual single-account drop."""
+    module = isolation()
+    if not hasattr(module, "bootstrap"):
+        return None
+    try:
+        ident = module.identity(account.pw_uid, account.pw_gid)
+    except module.IsolationError as error:
+        if module.setting() == "on":
+            log(f"agent isolation could NOT be enabled ({error}); agents run unisolated")
+        return None
+    try:
+        return module.bootstrap(Path(settings.effective_data_dir), ident,
+                                app_dir=Path(__file__).resolve().parents[1], log=log)
+    except module.IsolationError as error:
+        raise RuntimeFailure(str(error)) from None
+
+
+def start_app(command, cwd, env, updates_root=None):
+    """The app process; through the isolation launcher when the split is on."""
+    module = isolation()
+    if module.ACTIVE is not None:
+        if updates_root is not None:
+            module.ensure_traversable(updates_root, log)
+        command = module.app_command(command)
+    return subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
+
+
 def load_updater():
     """The updater beside this file (the image's, or the update's after a hand-over)."""
     import importlib.util
@@ -642,6 +700,11 @@ def handover(settings, execve=os.execve):
     when this image's supervisor should run; on success it does not return.
     """
     if os.environ.get("SHUFFLE_HANDED_OVER") or os.environ.get("SHUFFLE_SOURCE_SUPERVISOR", "1").strip() == "0":
+        return False
+    if isolation().ACTIVE is not None:
+        # An update's supervisor would start with the service account's ids
+        # and code the agent could have written before the mode was on.
+        log("agent isolation: running this image's supervisor; updates still apply to the app")
         return False
     here = Path(__file__).resolve().parent
     try:
@@ -706,6 +769,7 @@ def chrome_command(env):
 
 def drop_privileges(settings):
     """Root may prepare mount roots, never recursively repair database files."""
+    global _agent_path
     if os.geteuid() == 0:
         account = pwd.getpwnam("appuser")
         if not account.pw_uid or not account.pw_gid:
@@ -717,11 +781,21 @@ def drop_privileges(settings):
             # PUID changes. Retained contents (especially PG) are never chowned.
             if not any(path.iterdir()):
                 os.chown(path, account.pw_uid, account.pw_gid)
-        os.initgroups(account.pw_name, account.pw_gid)
-        os.setgid(account.pw_gid)
-        os.setuid(account.pw_uid)
+        split = isolate(settings, account)
+        if split is not None:
+            isolation().drop(split)
+            _agent_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = isolation().trusted_path(_agent_path)
+        else:
+            os.initgroups(account.pw_name, account.pw_gid)
+            os.setgid(account.pw_gid)
+            os.setuid(account.pw_uid)
         os.environ["HOME"] = account.pw_dir
-    for name, actual in (("PUID", os.geteuid()), ("PGID", os.getegid())):
+    elif getattr(isolation(), "setting", lambda: "off")() == "on":
+        log("agent isolation could NOT be enabled: the container did not start as root "
+            "(--user or a hand-over); agents run unisolated")
+    # Real ids: with agent isolation the effective ids are the service account's.
+    for name, actual in (("PUID", os.getuid()), ("PGID", os.getgid())):
         if name in os.environ and int(os.environ[name]) != actual:
             raise RuntimeFailure("direct --user identity must match PUID/PGID; ownership is never repaired recursively")
     if not os.geteuid():
@@ -869,7 +943,7 @@ def restart_into_update(current, updates, env):
         raise RuntimeFailure("Could not quiesce the worker")
     stop_group(current, 30)
     updates.activating()  # copies the database, then records the first start
-    return subprocess.Popen(command, cwd=cwd, env=child_env, start_new_session=True)
+    return start_app(command, cwd, child_env, updates.root)
 
 
 def start_current(current, updates, env):
@@ -887,7 +961,7 @@ def start_current(current, updates, env):
         except Exception as exc:
             log(str(exc) if _update_error(exc) else f"cannot start the application ({type(exc).__name__})")
             return None
-    return subprocess.Popen(command, cwd=cwd, env=child_env, start_new_session=True)
+    return start_app(command, cwd, child_env, updates.root if updates is not None else None)
 
 
 def shutdown(app, chrome, db):
@@ -930,6 +1004,8 @@ def run(settings, action, filename=None):
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(("DATABASE_", "POSTGRES_", "PG"))}
         env["DATA_DIR"] = str(settings.effective_data_dir)
+        if isolation().ACTIVE is not None:
+            env.update(isolation().app_environment(settings, _agent_path))
         # A provenance-free development image stays pinned. Production images
         # carry a main-history ordinal and what they provide (update_contract).
         image_file = image_dir() / "image.json"
@@ -973,19 +1049,23 @@ def run(settings, action, filename=None):
                 except UpdateError as exc:
                     raise RuntimeFailure(str(exc)) from exc
         if os.environ.get("START_CHROME", "1") == "1":
-            logdir = Path.home() / ".config"
-            logdir.mkdir(parents=True, exist_ok=True)
-            chrome_log = open(logdir / "chrome.log", "ab")
-            # Only the app's copy carries secrets and the lifecycle token.
-            command, child_env, chrome_scripts = chrome_command(chrome_env(env))
-            chrome = subprocess.Popen(command, env=child_env, stdout=chrome_log, stderr=chrome_log, start_new_session=True)
+            # Chromium is the agent's: with agent isolation its log and launch
+            # scripts are created as, and it runs as, PUID (no-ops otherwise).
+            with isolation().agent_files():
+                logdir = Path.home() / ".config"
+                logdir.mkdir(parents=True, exist_ok=True)
+                chrome_log = open(logdir / "chrome.log", "ab")
+                # Only the app's copy carries secrets and the lifecycle token.
+                command, child_env, chrome_scripts = chrome_command(chrome_env(env))
+            chrome = subprocess.Popen(command, env=child_env, stdout=chrome_log, stderr=chrome_log, start_new_session=True,
+                                      **isolation().agent_spawn())
         if STOP.is_set():
             return 0
         try:
             command, cwd, child_env = updates.launch(env) if updates else ([sys.executable, "-m", "app.main"], None, env)
         except UpdateError as exc:
             raise RuntimeFailure(str(exc)) from exc
-        app = subprocess.Popen(command, cwd=cwd, env=child_env, start_new_session=True)
+        app = start_app(command, cwd, child_env, updates and updates.root)
 
         def restart(current):
             nonlocal app
@@ -1011,7 +1091,8 @@ def run(settings, action, filename=None):
             if chrome_log is not None:
                 chrome_log.close()
             if chrome_scripts is not None:
-                shutil.rmtree(chrome_scripts, ignore_errors=True)
+                with isolation().agent_files():
+                    shutil.rmtree(chrome_scripts, ignore_errors=True)
 
 
 def main(argv=None):

@@ -1,11 +1,74 @@
 """Owner-private files, not isolation from processes running as that owner."""
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 import stat
 import secrets
 import tempfile
+import threading
+
+# Set by the Docker supervisor when AGENT_ISOLATION=on (docker/agent_isolation.py).
+AGENT_ISOLATION_FLAG = "SHUFFLE_AGENT_ISOLATION"
+_service_state = threading.local()
+
+
+def _service_ids() -> tuple[int, int] | None:
+    """The service account kept as this process's saved ids, under Docker
+    agent isolation. None otherwise, so every check below is unchanged."""
+    environ = getattr(os, "environ", None) or {}
+    if environ.get(AGENT_ISOLATION_FLAG) != "on" or not hasattr(os, "getresuid"):
+        return None
+    real, _effective, saved = os.getresuid()
+    real_gid, _effective_gid, saved_gid = os.getresgid()
+    if saved == real or saved_gid == real_gid:
+        return None
+    return saved, saved_gid
+
+
+def owner_uid() -> int:
+    """The uid private files must belong to here: the effective uid, or the
+    service account inside :func:`service_files` under Docker agent
+    isolation (the uid this thread's file access runs as)."""
+    ids = _service_ids()
+    return ids[0] if ids and getattr(_service_state, "depth", 0) else os.geteuid()
+
+
+def _set_file_ids(uid: int, gid: int) -> None:
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.setfsgid(gid)
+    libc.setfsuid(uid)
+    # Each call returns the previous value; an invalid id (-1) changes nothing,
+    # so these report the ids now in force.
+    if libc.setfsuid(-1) != uid or libc.setfsgid(-1) != gid:
+        raise OSError("Could not switch file access identity")
+
+
+@contextlib.contextmanager
+def service_files():
+    """File access as the service account for this thread only (Linux fsuid).
+
+    A no-op unless Docker agent isolation is on. Reentrant. Keep the block
+    synchronous: an ``await`` inside would let other coroutines on this
+    thread run with the service account's file access.
+    """
+    ids = _service_ids()
+    if ids is None:
+        yield
+        return
+    depth = getattr(_service_state, "depth", 0)
+    if depth == 0:
+        _set_file_ids(*ids)
+    _service_state.depth = depth + 1
+    try:
+        yield
+    finally:
+        _service_state.depth = depth
+        if depth == 0:
+            _set_file_ids(os.geteuid(), os.getegid())
 
 
 def protect_private_path(path: Path, *, directory: bool = False) -> None:
@@ -25,7 +88,7 @@ def protect_private_path(path: Path, *, directory: bool = False) -> None:
     if os.name == "nt":
         _windows_private_acl(path, directory=directory)
     else:
-        if info.st_uid != os.geteuid():
+        if info.st_uid != owner_uid():
             raise OSError("Private storage has another owner")
         mode = 0o700 if directory else 0o600
         # Already-private read-only mounts need no metadata write. Retain
@@ -33,7 +96,7 @@ def protect_private_path(path: Path, *, directory: bool = False) -> None:
         if stat.S_IMODE(info.st_mode) & ~mode:
             path.chmod(mode)
             after = path.lstat()
-            if (not expected(after.st_mode) or after.st_uid != os.geteuid()
+            if (not expected(after.st_mode) or after.st_uid != owner_uid()
                     or stat.S_IMODE(after.st_mode) & ~mode):
                 raise OSError("Private storage permissions were not enforced")
 
@@ -44,7 +107,7 @@ def private_mkstemp(*, prefix: str, suffix: str, dir: Path) -> tuple[int, str]:
         fd, name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=dir)
         try:
             info = os.fstat(fd)
-            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != owner_uid()
                     or stat.S_IMODE(info.st_mode) & ~0o600):
                 raise OSError("Private temporary file permissions were not enforced")
             return fd, name

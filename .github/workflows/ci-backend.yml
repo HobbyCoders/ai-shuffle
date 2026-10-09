@@ -213,6 +213,18 @@ jobs:
           bwrap --version
           python -m pytest tests/core/test_chat_shell.py -o addopts="" -q -rs -p no:cacheprovider --timeout=120
 
+      - name: Agent isolation with real accounts (root)
+        # tests/core/test_agent_isolation_root.py (#1957) needs root: it
+        # migrates a throwaway DATA_DIR to a second uid and runs the Bash tool
+        # and Monitor shells through the spawn runner as a third, checking
+        # each protected entry gives "Permission denied". sudo keeps the
+        # runner's Python; no bytecode is written as root. ~10 s.
+        env:
+          AGENT_ISOLATION_ROOT_REQUIRED: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: .:fluid
+        run: sudo -E env "PATH=$PATH" python -m pytest tests/core/test_agent_isolation_root.py -o addopts="" -q -rs -p no:cacheprovider --timeout=180
+
       - name: Boot smoke test (real server process)
         # Starts `python -m app.main` as a subprocess against a private
         # PostgreSQL 16 cluster (initialized on a free port by the container

@@ -1197,10 +1197,13 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         Any other failure just leaves ``cli_version`` unset.
         """
         try:
+            from fluid.tools import agent_runner
+
+            argv, cwd, env = agent_runner.wrap([*self.claude_cmd, "--version"], None, self._child_env())
             proc = await asyncio.create_subprocess_exec(
-                *self.claude_cmd, "--version",
+                *argv,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                env=self._child_env(),
+                env=env, **({"cwd": cwd} if cwd is not None else {}),
             )
         except FileNotFoundError as exc:
             self.cli_version = None
@@ -1609,12 +1612,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         argv = self._build_argv()
         # After the argv, which decides whether this spawn gets the mod.
         child_env = {**self._child_env(), **self._claude_mod_env()}
+        from fluid.tools import agent_runner
+
+        argv, cwd, child_env = agent_runner.wrap(argv, self.cwd, child_env)
         self._proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            cwd=self.cwd,
+            cwd=cwd,
             env=child_env,
             limit=STREAM_LINE_LIMIT,
             **spawn_kwargs,

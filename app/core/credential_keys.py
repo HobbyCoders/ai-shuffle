@@ -17,7 +17,7 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from app.core.config import settings
-from app.core.private_storage import protect_private_path
+from app.core.private_storage import owner_uid, protect_private_path, service_files
 from app.core import managed_credentials as custody
 
 STATE_KEY = 'credential_key_state_v1'
@@ -55,6 +55,7 @@ def _read_state(cursor, *, lock=False):
     return _state(row['value']) if row else None
 
 
+@service_files()
 def key_path(database_id, *, create=False):
     if str(uuid.UUID(database_id)) != database_id:
         raise CredentialKeyError()
@@ -65,13 +66,14 @@ def key_path(database_id, *, create=False):
     if (not stat.S_ISDIR(info.st_mode) or
             getattr(info, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)):
         raise CredentialKeyError()
-    if os.name != 'nt' and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
+    if os.name != 'nt' and (info.st_uid != owner_uid() or info.st_mode & 0o077):
         raise CredentialKeyError()
     if os.name == 'nt':
         protect_private_path(directory, directory=True)
     return directory / (database_id + '.key')
 
 
+@service_files()
 def _publish(database_id, key):
     """Publish complete, fsynced bytes without replacing any existing key."""
     path = key_path(database_id, create=True)
@@ -98,6 +100,7 @@ def _publish(database_id, key):
     return key
 
 
+@service_files()
 def _wrapping_key(database_id, *, create=False):
     try:
         path = key_path(database_id)

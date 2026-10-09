@@ -11,6 +11,7 @@ import sys
 from typing import Any
 
 from fluid.context.settings_stack import layered_env
+from fluid.tools import agent_runner
 from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi, truncate
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
@@ -289,9 +290,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # Ask the child not to colourise; anything that ignores the hint gets
     # its escapes stripped from the captured output below.
     env.update(NO_COLOR="1", FORCE_COLOR="0")
+    # Under Docker agent isolation the command starts through the spawn
+    # runner as the agent account; otherwise all three come back unchanged.
+    argv, cwd, env = agent_runner.wrap([*resolve_shell().argv_prefix, command], cwd, env)
     proc = await asyncio.create_subprocess_exec(
-        *resolve_shell().argv_prefix,
-        command,
+        *argv,
         # No stdin, as the description promises: a command that reads it
         # gets EOF instead of the user's next keystrokes.
         stdin=asyncio.subprocess.DEVNULL,

@@ -1285,11 +1285,13 @@ async def _spawn_background(
     # cp1252 doesn't die before it binds its port. The tree runs below the
     # server's CPU priority (child_process_nice) so a test run or build
     # cannot starve the event loop.
+    from fluid.tools import agent_runner
+
+    argv, spawn_cwd, env = agent_runner.wrap([*resolve_shell().argv_prefix, command], cwd, child_env())
     proc = await asyncio.create_subprocess_exec(
-        *resolve_shell().argv_prefix,
-        command,
-        cwd=cwd,
-        env=child_env(),
+        *argv,
+        cwd=spawn_cwd,
+        env=env,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,

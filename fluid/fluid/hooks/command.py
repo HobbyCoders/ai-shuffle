@@ -203,15 +203,18 @@ class CommandHook:
         if os.name != "nt":
             # Own process group so a timeout can kill the whole tree.
             spawn_kwargs["start_new_session"] = True
+        from fluid.tools import agent_runner
+
+        argv, cwd, env = agent_runner.wrap(
+            [*resolve_shell().argv_prefix, self.command], self.cwd or None, scrub_child_env())
         proc = await asyncio.create_subprocess_exec(
-            *resolve_shell().argv_prefix,
-            self.command,
+            *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=self.cwd or None,
+            cwd=cwd,
             **spawn_kwargs,
-            env=scrub_child_env(),
+            env=env,
         )
         try:
             out, err = await asyncio.wait_for(proc.communicate(stdin), self.timeout)

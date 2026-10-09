@@ -208,6 +208,21 @@ async def spawn_hook_shell(
             "bash-syntax hooks (including blocking guards) may silently misbehave. "
             "Install Git for Windows or set AI_SHUFFLE_HOOK_BASH."
         )
+    from fluid.tools import agent_runner
+
+    if agent_runner.enabled():
+        # Docker agent isolation: the same /bin/sh -c, started through the
+        # spawn runner as the agent account.
+        argv, cwd, env = agent_runner.wrap(["/bin/sh", "-c", command], cwd, env)
+        return await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=stdin,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,
+        )
     return await asyncio.create_subprocess_shell(
         command,
         stdin=stdin,

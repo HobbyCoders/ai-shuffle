@@ -104,7 +104,11 @@ def _same_start(current: Any, recorded: Any) -> bool:
 
 def _cmdline(proc: Any) -> str:
     try:
-        return " ".join(proc.cmdline() or ())[:_CMDLINE_CHARS]
+        # A process recorded while the agent spawn runner was still starting
+        # it is the same process as the command the runner then became.
+        from fluid.tools.agent_runner import strip
+
+        return " ".join(strip(proc.cmdline() or ()))[:_CMDLINE_CHARS]
     except Exception:  # noqa: BLE001 — unreadable command line
         return ""
 

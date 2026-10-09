@@ -42,6 +42,31 @@ class ManagedDataDirectoryError(RuntimeError):
     """Safe, credential-free diagnostic for a refused filesystem check."""
 
 
+def _check_cluster(data, server):
+    """``data`` when it is the connected server's cluster, else None."""
+    # Under Docker agent isolation the cluster belongs to the service account,
+    # which only this thread's file identity (service_files) holds.
+    # With the mode off the checks call os.access exactly as before.
+    access = {"effective_ids": True} if (os.access in os.supports_effective_ids
+                                         and os.environ.get("SHUFFLE_AGENT_ISOLATION") == "on") else {}
+    # Never follow a redirected layout or a marker symlink.
+    markers = [data / "PG_VERSION", data / "postmaster.pid", data / "global" / "pg_control"]
+    if any(p.is_symlink() for p in (data, *data.parents, *markers, data / "global", data / "base")):
+        return None
+    if not all(p.is_dir() and os.access(p, os.R_OK | os.X_OK, **access)
+               for p in (data, data / "base", data / "global")):
+        return None
+    if not all(p.is_file() and os.access(p, os.R_OK, **access) for p in markers):
+        return None
+    if markers[0].read_text(encoding="ascii").strip() != "16":
+        return None
+    pid = markers[1].read_text(encoding="utf-8").splitlines()
+    if (len(pid) < 4 or int(pid[0]) <= 0 or Path(pid[1]) != data
+            or int(pid[3]) != server["port"] or abs(int(pid[2]) - server["started"]) > 1):
+        return None
+    return data
+
+
 def managed_data_directory(cursor, data_dir: Path, desktop_user_data: Path | None = None) -> Path:
     """Match a readable managed PG16 layout to the connected loopback server.
 
@@ -68,25 +93,15 @@ def managed_data_directory(cursor, data_dir: Path, desktop_user_data: Path | Non
     server = cursor.fetchone()
     if server["host"] not in {"127.0.0.1", "::1"}:
         raise ManagedDataDirectoryError("Refusing disk check: PostgreSQL is not a managed loopback server.")
+    from app.core.private_storage import service_files
+
     for root in roots:
         data = root.absolute() / "postgres" / "data"
         try:
-            # Never follow a redirected layout or a marker symlink.
-            markers = [data / "PG_VERSION", data / "postmaster.pid", data / "global" / "pg_control"]
-            if any(p.is_symlink() for p in (data, *data.parents, *markers, data / "global", data / "base")):
-                continue
-            if not all(p.is_dir() and os.access(p, os.R_OK | os.X_OK)
-                       for p in (data, data / "base", data / "global")):
-                continue
-            if not all(p.is_file() and os.access(p, os.R_OK) for p in markers):
-                continue
-            if markers[0].read_text(encoding="ascii").strip() != "16":
-                continue
-            pid = markers[1].read_text(encoding="utf-8").splitlines()
-            if (len(pid) < 4 or int(pid[0]) <= 0 or Path(pid[1]) != data
-                    or int(pid[3]) != server["port"] or abs(int(pid[2]) - server["started"]) > 1):
-                continue
-            return data
+            with service_files():
+                found = _check_cluster(data, server)
+            if found is not None:
+                return found
         except (OSError, ValueError, UnicodeError):
             continue
     raise ManagedDataDirectoryError(

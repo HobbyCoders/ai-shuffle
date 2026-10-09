@@ -18,7 +18,7 @@ from cryptography.fernet import Fernet
 
 from app.core import encryption
 from app.core.config import settings
-from app.core.private_storage import protect_private_path
+from app.core.private_storage import owner_uid, protect_private_path, service_files
 from app.db import database
 
 _PREFIX = 'installation:v1:'
@@ -61,6 +61,7 @@ def _windows_protect(value, *, decrypt=False):
         kernel.LocalFree(output.data)
 
 
+@service_files()
 def _key_path():
     directory = settings.effective_data_dir / '.managed-connection'
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -69,7 +70,7 @@ def _key_path():
             getattr(info, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)):
         raise ValueError('Installation key directory must be local storage')
     if os.name != 'nt':
-        if info.st_uid != os.geteuid():
+        if info.st_uid != owner_uid():
             raise ValueError('Installation key directory has another owner')
         directory.chmod(0o700)
     else:
@@ -88,6 +89,7 @@ def _sync_directory(path):
         os.close(fd)
 
 
+@service_files()
 def _publish_key(temporary, path):
     if os.name == 'nt':
         import ctypes
@@ -108,6 +110,7 @@ def _publish_key(temporary, path):
         os.link(temporary, path)
 
 
+@service_files()
 def _sync_key_location(path):
     # Always sync both, including retries where an earlier process created the
     # directory or key but died before its directory entries became durable.
@@ -115,6 +118,7 @@ def _sync_key_location(path):
     _sync_directory(path.parent.parent)
 
 
+@service_files()
 def _read_key(path):
     path_info = path.lstat()
     if (not stat.S_ISREG(path_info.st_mode) or
@@ -129,7 +133,7 @@ def _read_key(path):
         if (not stat.S_ISREG(info.st_mode) or
                 getattr(info, 'st_file_attributes', 0) & getattr(stat, 'FILE_ATTRIBUTE_REPARSE_POINT', 0)):
             raise ValueError('Invalid installation key file')
-        if os.name != 'nt' and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
+        if os.name != 'nt' and (info.st_uid != owner_uid() or info.st_mode & 0o077):
             raise ValueError('Installation key file permissions are unsafe')
         raw = stream.read(4097)
     if len(raw) > 4096:
@@ -142,6 +146,7 @@ def _read_key(path):
     return raw
 
 
+@service_files()
 def _key(*, create=False):
     path = _key_path()
     try:

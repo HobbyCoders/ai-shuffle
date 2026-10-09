@@ -37,6 +37,8 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 
+from fluid.tools import agent_runner
+
 logger = logging.getLogger(__name__)
 
 _PTY_OK = False
@@ -498,9 +500,13 @@ class Terminal:
         master, slave = os.openpty()
         try:
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", self.rows, self.cols, 0, 0))
+            # Under Docker agent isolation an owner terminal also starts as
+            # the agent account, through the spawn runner.
+            argv, cwd, env = agent_runner.wrap(
+                [sys.executable, "-I", "-S", "-c", _TRAMPOLINE, self.shell_path, "-i"], self.cwd, env)
             proc = subprocess.Popen(
-                [sys.executable, "-I", "-S", "-c", _TRAMPOLINE, self.shell_path, "-i"],
-                stdin=slave, stdout=slave, stderr=slave, cwd=self.cwd, env=env,
+                argv,
+                stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env,
                 start_new_session=True, close_fds=True,
             )
         except BaseException:
