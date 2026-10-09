@@ -22,10 +22,32 @@ from app.network import crypto, engine, keyring, policy
 
 TTL = 900
 MAX_PAGE = 8 * 1024 * 1024
+# A transfer stays downloadable for TTL plus a budget for its size. The signed
+# expires_at is checked by this worker's page endpoint and by the recipient's
+# apply, so a fixed TTL failed every large copy: a worker with millions of
+# transcript events serves tens of thousands of pages (gigabytes), and a
+# joiner restarted from page 0 each time the copy expired mid-download.
+# The budget assumes a slow link: PAGE_SECONDS of latency per page plus
+# BYTES_PER_SECOND of throughput. Reuse for a NEW download stays within TTL
+# of capture (``_reusable``) so the extra time is left for downloading.
+PAGE_SECONDS = 0.25
+BYTES_PER_SECOND = 256 * 1024
+MAX_LIFETIME = 24 * 3600
 _lock = threading.Lock()
 _jobs_lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="peer-capture")
 _jobs: dict[tuple, Future] = {}
+
+
+def _download_allowance(pages: list) -> int:
+    """Seconds beyond TTL a finished transfer of these pages stays valid."""
+    total = sum(int(page["bytes"]) for page in pages)
+    return int(min(MAX_LIFETIME - TTL, len(pages) * PAGE_SECONDS + total / BYTES_PER_SECOND))
+
+
+def _reusable(manifest: dict) -> bool:
+    """A finished capture may start a new download only within TTL of capture."""
+    return manifest["expires_at"] - _download_allowance(manifest["pages"]) > time.time()
 
 
 def state(recipient: str, *, prepare: bool = False) -> dict:
@@ -46,8 +68,7 @@ def state(recipient: str, *, prepare: bool = False) -> dict:
         key = (str(settings.data_dir), recipient, ctx.network_id, ctx.generation)
         with _jobs_lock:
             for saved_key, job in list(_jobs.items()):
-                if job.done() and (job.exception() is not None
-                                   or job.result()["expires_at"] <= time.time()):
+                if job.done() and (job.exception() is not None or not _reusable(job.result())):
                     # Preserve this request's error, then allow a later retry.
                     if saved_key == key and job.exception() is not None:
                         del _jobs[saved_key]
@@ -103,11 +124,35 @@ def _remove(directory: Path) -> None:
     shutil.rmtree(directory)
 
 
+def _transfer_dirs():
+    for entry in _root().iterdir():
+        if entry.is_dir() and not entry.is_symlink() and re.fullmatch(r"[a-f0-9]{32}", entry.name):
+            yield entry
+
+
+def _saved_manifest(directory: Path) -> dict | None:
+    try:
+        return json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _expired(directory: Path, manifest: dict | None) -> bool:
+    """A finished transfer lives until its signed expiry, not TTL after it was written.
+
+    A directory without a readable manifest is an abandoned capture: callers
+    hold ``_lock``, so no capture is writing it now.
+    """
+    try:
+        return manifest["expires_at"] <= time.time()
+    except (KeyError, TypeError):
+        return time.time() - directory.stat().st_mtime > TTL
+
+
 def cleanup() -> None:
     with _lock:
-        for entry in _root().iterdir():
-            if (entry.is_dir() and not entry.is_symlink() and re.fullmatch(r"[a-f0-9]{32}", entry.name)
-                    and time.time() - entry.stat().st_mtime > TTL):
+        for entry in _transfer_dirs():
+            if _expired(entry, _saved_manifest(entry)):
                 _remove(entry)
 
 
@@ -120,22 +165,18 @@ def capture(recipient: str) -> dict:
         if member is None or member.status != "active":
             raise ValueError("Peer is no longer a member")
         # Expired transfers contain only encrypted pages. Never touch user files.
-        for entry in _root().iterdir():
-            if entry.is_dir() and not entry.is_symlink() and re.fullmatch(r"[a-f0-9]{32}", entry.name):
-                if time.time() - entry.stat().st_mtime > TTL:
-                    _remove(entry)
-                else:
-                    saved = entry / "manifest.json"
-                    if saved.exists():
-                        manifest = json.loads(saved.read_text())
-                        if (manifest["recipient"] == recipient and manifest["network_id"] == ctx.network_id
-                                and manifest["generation"] == ctx.generation
-                                and manifest["expires_at"] > time.time()
-                                and not store.requires_snapshot(manifest["watermarks"], exclude_origin=recipient)):
-                            # Ordinary writes may advance the frontier: reuse
-                            # it while its tail is retained. Snapshot adoption
-                            # or pruning can leave gaps that require recapture.
-                            return manifest
+        for entry in _transfer_dirs():
+            manifest = _saved_manifest(entry)
+            if _expired(entry, manifest):
+                _remove(entry)
+            elif (manifest is not None and manifest["recipient"] == recipient
+                    and manifest["network_id"] == ctx.network_id
+                    and manifest["generation"] == ctx.generation and _reusable(manifest)
+                    and not store.requires_snapshot(manifest["watermarks"], exclude_origin=recipient)):
+                # Ordinary writes may advance the frontier: reuse it while its
+                # tail is retained. Snapshot adoption or pruning can leave gaps
+                # that require recapture.
+                return manifest
         engine.scan_all()
         transfer = uuid.uuid4().hex
         directory = _directory(transfer)
@@ -177,8 +218,9 @@ def capture(recipient: str) -> dict:
                         after_record_id = next_record_id
                         if not chunk["more"]:
                             break
-                # Give the recipient the full download window after capture.
-                manifest["expires_at"] = int(time.time()) + TTL
+                # Give the recipient the full download window after capture,
+                # sized to the transfer so a large copy can finish.
+                manifest["expires_at"] = int(time.time()) + TTL + _download_allowance(manifest["pages"])
                 manifest["signature"] = crypto.b64u_encode(crypto.sign(ctx.identity.signing_private,
                                                                        crypto.canonical_json(manifest)))
                 (directory / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

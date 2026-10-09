@@ -1,6 +1,7 @@
 """Background state capture, mixed-version peers, and bootstrap diagnostics."""
 import asyncio
 import logging
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -235,6 +236,76 @@ def test_finished_capture_expires_and_revoked_recipient_cannot_reuse(workers, mo
         engine.revoke_device(b.device_id)
         with pytest.raises(ValueError, match="no longer a member"):
             peer_snapshot.state(b.device_id, prepare=True)
+
+
+def test_large_transfer_stays_downloadable_past_ttl_but_is_not_reused(workers, monkeypatch):
+    """A copy too large to fetch within TTL must not expire mid-download.
+
+    Seen live: 2.2M transcript events made ~22k pages; the joiner fetched
+    ~9k of them, hit the 15-minute expiry (HTTP 409) and restarted forever.
+    """
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    set_owner_pref(a, "big_copy", 1)
+    clock = [time.time()]
+    monkeypatch.setattr(peer_snapshot.time, "time", lambda: clock[0])
+    # Pretend each page is huge so the allowance dominates TTL.
+    monkeypatch.setattr(peer_snapshot, "BYTES_PER_SECOND", 1)
+    with a.active():
+        captured_at = clock[0]
+        manifest = peer_snapshot.state(b.device_id)
+        assert manifest["expires_at"] > captured_at + peer_snapshot.TTL
+        assert manifest["expires_at"] <= captured_at + peer_snapshot.MAX_LIFETIME
+        # Well past TTL the recipient can still read every page...
+        clock[0] = captured_at + peer_snapshot.TTL + 60
+        last = len(manifest["pages"]) - 1
+        assert peer_snapshot.page(b.device_id, manifest["transfer"], last)
+        # ...cleanup keeps it, keyed on the signed expiry, not file age...
+        directory = peer_snapshot._directory(manifest["transfer"])
+        old = captured_at - 2 * peer_snapshot.TTL
+        for path in [directory, *directory.iterdir()]:
+            os.utime(path, (old, old))
+        peer_snapshot.cleanup()
+        assert directory.exists()
+        # ...but a NEW download gets a fresh capture, not the aging one.
+        fresh = peer_snapshot.state(b.device_id)
+        assert fresh["transfer"] != manifest["transfer"]
+        assert peer_snapshot.capture(b.device_id)["transfer"] == fresh["transfer"]
+        # Once the signed expiry passes, the page endpoint and cleanup refuse it.
+        clock[0] = manifest["expires_at"]
+        with pytest.raises(ValueError, match="expired"):
+            peer_snapshot.page(b.device_id, manifest["transfer"], 0)
+        peer_snapshot.cleanup()
+        assert not directory.exists()
+    # The recipient's apply re-verifies the signed expiry; it holds past TTL.
+    with b.active():
+        clock[0] = captured_at + peer_snapshot.TTL + 60
+        assert peer_snapshot.verify_manifest(manifest, a.device_id) is not None
+
+
+def test_abandoned_capture_without_manifest_is_cleaned_after_ttl(workers, monkeypatch):
+    a = workers("a")
+    with a.active():
+        engine.create_network("Home")
+        directory = peer_snapshot._directory("ab" * 16)
+        directory.mkdir()
+        (directory / "0.json").write_bytes(b"{}")
+        peer_snapshot.cleanup()
+        assert directory.exists(), "a recent partial capture is kept"
+        old = time.time() - peer_snapshot.TTL - 1
+        os.utime(directory, (old, old))
+        peer_snapshot.cleanup()
+        assert not directory.exists()
+
+
+def test_download_allowance_is_bounded():
+    pages = [{"bytes": 400_000}] * 22_000  # The live case: ~8.8 GB in 22k pages.
+    allowance = peer_snapshot._download_allowance(pages)
+    assert allowance > 22_000 * 0.25
+    assert peer_snapshot.TTL + allowance <= peer_snapshot.MAX_LIFETIME
+    assert peer_snapshot._download_allowance([]) == 0
 
 
 @pytest.mark.parametrize("cache", ["future", "disk"])
