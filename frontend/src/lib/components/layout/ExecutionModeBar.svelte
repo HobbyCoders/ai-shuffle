@@ -73,6 +73,12 @@
 	let forgetting = $state<string | null>(null);
 	let forgetError = $state<string | null>(null);
 
+	// The Forget confirm opens with Cancel focused, so a stray Enter or Space
+	// backs out instead of confirming (#2072).
+	function focusOnMount(node: HTMLElement) {
+		node.focus();
+	}
+
 	async function forgetWorktree(wt: Worktree) {
 		forgetting = wt.id;
 		forgetError = null;
@@ -591,9 +597,9 @@
 									<p class="stale-detail">{wt.binding_warning || wt.status_error || 'Directory missing; needs cleanup. Existing files are preserved.'}</p>
 									{#if !$git.workerTarget && !wt.binding_warning && (wt.exists === false || wt.status_error?.includes('not its own Git working tree'))}
 										{#if forgetConfirm === wt.id}
-											<p class="stale-detail">Forget this registration? Files, branches and chat history will be kept.</p>
+											<p class="stale-detail">Forget this registration? This removes Git's record of this worktree and its entry in AI Shuffle. Checkout files, branches and chat history are kept.</p>
 											<button type="button" class="branch-item" disabled={forgetting !== null} onclick={() => forgetWorktree(wt)}>{forgetting === wt.id ? 'Forgetting…' : 'Confirm forget'}</button>
-											<button type="button" class="branch-item" disabled={forgetting !== null} onclick={(event) => { event.stopPropagation(); forgetConfirm = null; forgetError = null; }}>Cancel</button>
+											<button type="button" class="branch-item" use:focusOnMount disabled={forgetting !== null} onclick={(event) => { event.stopPropagation(); forgetConfirm = null; forgetError = null; }}>Cancel</button>
 											{#if forgetError}<p class="stale-detail" role="alert">{forgetError}</p>{/if}
 										{:else}
 											<button type="button" class="branch-item" disabled={forgetting !== null} onclick={(event) => { event.stopPropagation(); forgetConfirm = wt.id; forgetError = null; }} aria-label={`Forget ${wt.branch_name}`}>Forget</button>
