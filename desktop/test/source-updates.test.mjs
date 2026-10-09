@@ -15,6 +15,15 @@ const extractor = fileURLToPath(new URL('./helpers/source-archive.py', import.me
 const repoScripts = fileURLToPath(new URL('../../scripts', import.meta.url));
 // The publisher's own digest (scripts/source_archive.py), so the desktop check is tested against it, not against itself.
 const publishedTree = archive => execFileSync(process.env.PYTHON||'python',['-c','import sys; sys.path.insert(0, sys.argv[1]); import source_archive as s; print(s.tree_digest(s.archive_files(sys.argv[2])))',repoScripts,archive],{encoding:'utf8'}).trim();
+// Unmodified origin/main producer at 802f93bf20bb96f5f091c0fde895bf879d197a70.
+// Keep a fixture so shallow CI checkouts exercise the real legacy writes too.
+const legacyModule={exports:{}};
+vm.runInNewContext(require('typescript').transpileModule(await fs.readFile(new URL('./helpers/legacy-source-updates.ts',import.meta.url),'utf8'),{compilerOptions:{module:require('typescript').ModuleKind.CommonJS,target:require('typescript').ScriptTarget.ES2022,esModuleInterop:true}}).outputText,{module:legacyModule,exports:legacyModule.exports,require:createRequire(new URL('../dist/main/source-updates.js',import.meta.url)),process,Buffer,console,Response,AbortSignal,setTimeout,clearTimeout});
+// Keep the legacy state producer unchanged, but resolve its test runtime with
+// the current application's platform-aware paths (the snapshot is Windows-only).
+class LegacyUpdates extends legacyModule.exports.SourceUpdates {
+ application(revision){return SourceUpdates.prototype.application.call(this,revision);}
+}
 const A='a'.repeat(40), B='b'.repeat(40), C='c'.repeat(40), KEY='d'.repeat(64);
 test('browser download verification and launcher share one public trust key',async()=>{
  const pem=await fs.readFile(new URL('../build/application-update-key.pem',import.meta.url),'utf8');
@@ -29,8 +38,8 @@ async function fixture(t) {
  const options={root,publicKey,bootstrapNode:process.execPath,fetch:async url=>{requests.push(url);const feed=url.endsWith('/manifest')||url.endsWith('/manifest/edge');return new Response(feed?signed:bodies.get(url)||'missing',{status:feed||bodies.has(url)?200:404});},build:async(source,stage,revision)=>{
   builds++;if(fail)throw Error('Local build failed');
   for(const name of ['server/app/main.py','server/app/static/index.html','source/desktop/dist/main/managed-entry.js']){await fs.mkdir(path.dirname(path.join(stage,name)),{recursive:true});await fs.writeFile(path.join(stage,name),revision);}
-  const electron=path.join(root,'dependencies',KEY,'electron.exe');
-  for(const name of [electron,path.join(root,'runtimes',KEY,'worker/python/python.exe')]){await fs.mkdir(path.dirname(name),{recursive:true});await fs.writeFile(name,'runtime');}
+  const electron=path.join(root,'dependencies',KEY,process.platform==='win32'?'electron.exe':'electron');
+  for(const name of [electron,path.join(root,'runtimes',KEY,process.platform==='win32'?'worker/python/python.exe':'worker/python/bin/python3')]){await fs.mkdir(path.dirname(name),{recursive:true});await fs.writeFile(name,'runtime');}
   return {revision,pythonKey:null,electron,runtimeKey:KEY};
  }};
  async function release(revision,hostile,fields={}) {
@@ -45,8 +54,336 @@ async function fixture(t) {
  }
  return {root,options,create:()=>new SourceUpdates(options),release,bodies,requests,get builds(){return builds;},set fail(value){fail=value;},set signed(value){signed=value;}};
 }
+async function installedLauncher(f, rejectRevision = null, {baseline={revision:A,sequence:50},answer=1} = {}) {
+ let manager;const events=[];const dialogs=[];const module={exports:{}};
+ class InstalledUpdates extends SourceUpdates{constructor(options){super({...f.options,baseline:options.baseline});manager=this;}}
+ const app={requestSingleInstanceLock:()=>true,getPath:()=>f.root,getName:()=> 'test',getAppPath:()=>f.root,whenReady:async()=>{},quit:()=>events.push('quit'),commandLine:{getSwitchValue:()=>''}};
+ class InstallerRequired extends Error{}
+ vm.runInNewContext(await fs.readFile(new URL('../dist/main/installed-entry.js',import.meta.url),'utf8'),{module,exports:module.exports,process:{platform:'linux',env:{},versions:{electron:'44.2.0'},resourcesPath:f.root,argv:[]},require:id=>{
+  if(id==='electron')return {app,dialog:{showMessageBox:async options=>{events.push(options.title);dialogs.push(options);return {response:answer};}}};
+  if(id==='node:path')return path;
+  if(id==='node:fs')return {promises:{readFile:async file=>file.endsWith('desktop-build.json')?JSON.stringify(baseline):f.options.publicKey}};
+  if(id==='./source-updates')return {SourceUpdates:InstalledUpdates};
+  if(id==='./installed-host')return {InstallerRequired,installedExecutable:()=>'/test/AI Shuffle.AppImage',saveInstalledHost:async()=>{},requireInstalledElectron:async()=>{}};
+  if(id==='./index'){events.push('bundled');return {};}
+  if(id.endsWith(path.join('dist','main','managed-entry.js'))){
+   if(rejectRevision && id.includes(rejectRevision))return createRequire(import.meta.url)(id);
+   return {startManagedSource:async(_root,revision)=>events.push(revision)};
+  }
+  throw Error('Unexpected module '+id);
+ }});
+ return {start:()=>module.exports.startInstalled(),events,dialogs,get manager(){return manager;}};
+}
+test('Linux startup drops only incomplete unselected downloads, validates healthy code and permits a real re-download',async t=>{
+ for(const active of [false,true])for(const missing of ['build.json','release.json']){
+  const f=await fixture(t);const seed=f.create();await seed.load();
+  if(active){await f.release(A);await seed.download();await seed.select();await seed.healthy();}
+  seed.stageDownloads();await f.release(B);await seed.download();await fs.unlink(path.join(f.root,'versions',B,missing));
+  const launch=await installedLauncher(f);await launch.start();const {manager,events}=launch;assert.deepEqual(events,[active?A:'bundled']);assert.equal(manager.pendingVersion,null);
+  assert.equal((await manager.check()).kind,'available');manager.stageDownloads();await manager.download();assert.equal((await manager.application(B)).revision,B);
+ }
+});
+test('discardStaged never forgets active, previous, pending or possibly migrated failed code',async t=>{
+ const f=await fixture(t);
+ for(const protectedState of [{active:B},{previous:B},{pending:B},{failed:[B]},{booting:B},{blocked:true}]){
+  await fs.mkdir(path.join(f.root,'versions'),{recursive:true});await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({staged:B,...protectedState}));
+  const loader=f.create();await loader.load();assert.equal(await loader.discardStaged(B),false);assert.equal(loader.pendingVersion,B);
+ }
+});
+test('Linux retry API rejection never forgets a migrated revision or launches older source/bundled code',async t=>{
+ const f=await fixture(t);const u=f.create();await u.load();await f.release(A);await u.download();await u.select();await u.healthy();
+ u.stageDownloads();const {manifest}=await f.release(B);await u.download();await u.prepareInstall();await u.select();await u.attach(B);await u.databaseStarting();await u.failed();
+ assert.equal(await u.retryFailed(),true);
+ await fs.writeFile(path.join(f.root,'versions',B,'source/desktop/dist/main/managed-entry.js'),'');
+ const launch=await installedLauncher(f,B);await assert.rejects(launch.start(),/may have been migrated/);
+ assert.deepEqual(launch.events,[],'neither older A nor bundled code ran');
+ const state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+ assert.deepEqual(state.mayHaveMigrated,{[B]:manifest.sequence});assert.equal(state.active,A);assert.equal(state.staged,B);assert.equal(state.blocked,true);
+ assert.equal(await launch.manager.discardStaged(B),false);await assert.rejects(launch.manager.select(),/No healthy/);
+});
+test('migration fence persists through the transition table: no older selection, attachment or discard',async t=>{
+ const f=await fixture(t);let u=f.create();await u.load();await f.release(A);await u.download();await u.select();await u.healthy();
+ u.stageDownloads();const {manifest}=await f.release(B);await u.download();await u.prepareInstall();await u.select();await u.attach(B);
+ const rows=[
+  ['database starting',async()=>u.databaseStarting()],
+  ['failed boot',async()=>u.failed()],
+  ['retry',async()=>assert.equal(await u.retryFailed(),true)],
+  ['cancel retry',async()=>assert.rejects(u.cancelInstall(),/may have been migrated/)],
+  ['discard refused',async()=>assert.equal(await u.discardStaged(B),false)],
+  ['restart',async()=>{u=f.create();await u.load();}],
+  ['retry before database',async()=>{await u.retryFailed();await u.select();await u.attach(B);}],
+  ['defer retry boot',async()=>u.deferBoot()],
+  ['disabled updates on restart',async()=>{await fs.writeFile(path.join(f.root,'allow-updates.json'),JSON.stringify({allow_updates:false}));u=f.create();await u.load();}],
+  ['retry then pre-database crash',async()=>{await fs.writeFile(path.join(f.root,'allow-updates.json'),JSON.stringify({allow_updates:true}));await u.retryFailed();await u.select();await u.attach(B);u=f.create();await u.load();}]
+ ];
+ for(const [name,step] of rows)await t.test(name,async()=>{
+  await step();assert.equal(u.hasMigrationRisk,true);
+  const readState=async()=>JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+  assert.deepEqual((await readState()).mayHaveMigrated,{[B]:manifest.sequence});
+  const stopped=Error('preflight probe: do not actually start another boot');
+  await assert.rejects(u.select(async application=>{assert.equal(application.revision,B,'never preflight older A');throw stopped;}),error=>error===stopped||/No healthy|may have been migrated/.test(error.message));
+  await assert.rejects(f.create().attach(A),/may have been migrated/);
+  assert.deepEqual((await readState()).mayHaveMigrated,{[B]:manifest.sequence});assert.equal(await u.discardStaged(B),false);
+ });
+ // Recovery by the same revision is allowed; only its healthy transition clears the fence.
+ await u.retryFailed();await u.select();await u.attach(B);await u.databaseStarting();await u.healthy();
+ assert.equal(u.hasMigrationRisk,false);assert.equal(u.version,B);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).mayHaveMigrated,undefined);
+});
+test('multiple migration fences require same/newer code and only healthy newer code or a newer installer clears them',async t=>{
+ for(const recovery of ['healthy revision','newer installer']){
+  const f=await fixture(t);let u=f.create();await u.load();const a=await f.release(A);await u.download();await u.select();await u.attach(A);await u.databaseStarting();await u.failed();
+  const b=await f.release(B);await u.download();await u.select();await u.attach(B);await u.databaseStarting();await u.failed();
+  const fences={[A]:a.manifest.sequence,[B]:b.manifest.sequence};assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).mayHaveMigrated,fences);
+  if(recovery==='healthy revision'){
+   await f.release(C);await u.download();await u.select();await u.attach(C);await u.databaseStarting();assert.equal(u.hasMigrationRisk,true);await u.healthy();assert.equal(u.version,C);
+  }else{
+   // Losing B's files must not permit retrying older failed A, nor an equal/older installer.
+   await fs.unlink(path.join(f.root,'versions',B,'release.json'));assert.equal(await u.retryFailed(),false);
+   const equal=new SourceUpdates({...f.options,baseline:{revision:C,sequence:b.manifest.sequence}});await equal.load();await equal.useNewerBaseline();assert.equal(equal.hasMigrationRisk,true);await assert.rejects(equal.select(),/No healthy/);
+   u=new SourceUpdates({...f.options,baseline:{revision:C,sequence:b.manifest.sequence+1}});await u.load();await u.useNewerBaseline();assert.equal(u.hasSourceState,false);assert.equal(u.version,C);
+  }
+  assert.equal(u.hasMigrationRisk,false);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).mayHaveMigrated,undefined);
+ }
+});
+test('partially upgraded legacy failures are fenced on load and attach, including unreadable revision metadata',async t=>{
+ const f=await fixture(t);let u=f.create();await u.load();const a=await f.release(A);await u.download();await u.select();await u.healthy();
+ const b=await f.release(B);await u.download();await u.select();await u.attach(B);await u.databaseStarting();await u.failed();
+ for(const unreadable of [false,true])for(const entry of ['load','attach']){
+  const state={active:A,blocked:true,failed:[A,B],mayHaveMigrated:{[A]:a.manifest.sequence}};
+  await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify(state));
+  if(unreadable)await fs.writeFile(path.join(f.root,'versions',B,'release.json'),'{}');else await fs.writeFile(path.join(f.root,'versions',B,'release.json'),b.signed);
+  u=f.create();if(entry==='attach')await assert.rejects(u.attach(A),/may have been migrated/);else await u.load();
+  const persisted=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+  assert.deepEqual(persisted.mayHaveMigrated,{[A]:a.manifest.sequence,[B]:unreadable?null:b.manifest.sequence});
+  assert.equal(await u.retryFailed(),!unreadable,'an unreadable newer marked B never permits older A');
+ }
+});
+// Faithful snapshots of origin/main's producer (before migration fences):
+// healthy A -> B databaseStarting -> failed -> retryFailed saves only these
+// two pointers; cancelInstall replaces pending with staged, and attach adds
+// booting/waiting. In particular, retryFailed deletes both failed and blocked.
+const legacyRetriedState = () => ({active:A,pending:B});
+async function migratedPair(t) {
+ const f=await fixture(t);const u=f.create();await u.load();await f.release(A);await u.download();await u.select();await u.attach(A);await u.databaseStarting();await u.healthy();
+ u.stageDownloads();const b=await f.release(B);await u.download();await u.prepareInstall();await u.select();await u.attach(B);await u.databaseStarting();await u.failed();
+ return {f,b};
+}
+async function legacyFailedPair(t,{schemaMarker=false,retry=true}={}){
+ const f=await fixture(t);let legacy=new LegacyUpdates(f.options);await legacy.load();await f.release(A);await legacy.download();await legacy.select();await legacy.attach(A);await legacy.databaseStarting();await legacy.healthy();
+ if(schemaMarker){const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,[A]);assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).schemaVersion,1);}
+ legacy=new LegacyUpdates(f.options);await legacy.load();const b=await f.release(B);await legacy.download();
+ if(schemaMarker){const prepared=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.equal(prepared.schemaVersion,1);assert.equal(prepared.mayHaveMigrated,undefined);const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,[B]);}else await legacy.select();
+ legacy=new LegacyUpdates(f.options);await legacy.attach(B);await legacy.databaseStarting();await legacy.failed();if(retry)assert.equal(await legacy.retryFailed(),true);
+ return {f,b,legacy};
+}
+test('real main producer cannot use a sticky schema marker to roll back a migrated retry',async t=>{
+ for(const action of ['PR cancel','legacy cancel','disabled restart','attach A'])await t.test(action,async t=>{
+  const {f,b,legacy}=await legacyFailedPair(t,{schemaMarker:true});const before=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+  assert.equal(before.schemaVersion,1);assert.equal(before.pending,B);
+  if(action==='legacy cancel'){legacy.stageDownloads();await legacy.cancelInstall();}
+  if(action==='disabled restart')await fs.writeFile(path.join(f.root,'allow-updates.json'),JSON.stringify({allow_updates:false}));
+  if(action==='attach A')await assert.rejects(f.create().attach(A),/may have been migrated/);
+  const u=f.create();await u.load();assert.equal(u.hasMigrationRisk,true);assert.equal(u.recoveryRequired,false);
+  if(action==='PR cancel'){u.stageDownloads();await assert.rejects(u.cancelInstall(),/may have been migrated/);}
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).mayHaveMigrated,{[B]:b.manifest.sequence});
+  await assert.rejects(f.create().attach(A),/may have been migrated/);assert.equal(await u.discardStaged(B),false);
+  if(action!=='disabled restart')await u.prepareInstall();assert.equal((await u.select()).revision,B);await u.attach(B);await u.databaseStarting();await u.healthy();
+  const healthy=f.create();await healthy.load();assert.equal(healthy.hasMigrationRisk,false);assert.equal((await healthy.select()).revision,B);
+ });
+});
+test('real healthy main producer remains unaffected by write-provenance tracking',async t=>{
+ const f=await fixture(t);const legacy=new LegacyUpdates(f.options);await legacy.load();await f.release(A);await legacy.download();await legacy.select();await legacy.attach(A);await legacy.databaseStarting();await legacy.healthy();
+ for(let i=0;i<2;i++){const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,[A]);assert.equal(launch.manager.hasMigrationRisk,false);await new LegacyUpdates(f.options).attach(A);}
+});
+test('real main missing retry metadata cannot recover below any known healthy or migration floor',async t=>{
+ for(const evidence of ['healthy manifest','migration entry','database marker'])for(const sequence of (evidence==='healthy manifest'?[50,100]:[50,100,150]))await t.test(`${evidence}, installer=${sequence}`,async t=>{
+  const {f}=await legacyFailedPair(t);await fs.rm(path.join(f.root,'versions',B),{recursive:true});
+  if(evidence==='migration entry'){const file=path.join(f.root,'state.json');const state=JSON.parse(await fs.readFile(file,'utf8'));state.mayHaveMigrated={[C]:150};await fs.writeFile(file,JSON.stringify(state));}
+  if(evidence==='database marker')await fs.writeFile(path.join(f.root,'database-floor.json'),JSON.stringify({schemaVersion:1,revision:C,sequence:150}));
+  const baseline={revision:'d'.repeat(40),sequence};
+  const launch=await installedLauncher(f,null,{baseline,answer:2});await launch.start();
+  assert.deepEqual(launch.events,['AI Shuffle needs an installer','quit']);assert.equal(launch.manager.canConfirmBaselineRecovery,false);
+  assert(!launch.dialogs[0].buttons.includes('Use This Installer'));
+  for(const consent of [false,true]){await launch.manager.useNewerBaseline(consent);assert.equal(launch.manager.recoveryRequired,true);assert.equal(launch.manager.hasSourceState,true);}
+  const state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.equal(state.active,A);assert.equal(state.mayHaveMigrated[B],null);
+  if(evidence==='database marker')assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'),'utf8')).sequence,150);
+  else await assert.rejects(fs.readFile(path.join(f.root,'database-floor.json')),/ENOENT/);
+ });
+});
+test('real main healthy completion reconciles the entry fence without a permanent retry warning',async t=>{
+ for(const retry of [false,true])for(const marker of [false,true])await t.test(`retry=${retry}, marker=${marker}`,async t=>{
+  const f=await fixture(t);let legacy=new LegacyUpdates(f.options);await legacy.load();await f.release(A);await legacy.download();await legacy.select();await legacy.attach(A);await legacy.databaseStarting();await legacy.healthy();
+  if(marker){const current=f.create();await current.attach(A);await current.databaseStarting();}
+  legacy=new LegacyUpdates(f.options);await legacy.load();const b=await f.release(B);await legacy.download();
+  if(retry){await legacy.select();await legacy.attach(B);await legacy.databaseStarting();await legacy.failed();assert.equal(await legacy.retryFailed(),true);}
+  const selected=await installedLauncher(f);await selected.start();assert.deepEqual(selected.events,[B]);
+  assert.equal(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).mayHaveMigrated[B],b.manifest.sequence);
+  legacy=new LegacyUpdates(f.options);await legacy.attach(B);await legacy.databaseStarting();await legacy.healthy();
+  const completed=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.equal(completed.active,B);assert.equal(completed.pending,undefined);assert.equal(completed.booting,undefined);assert.equal(completed.blocked,undefined);assert.equal(completed.mayHaveMigrated[B],b.manifest.sequence);
+  for(let i=0;i<2;i++){
+   const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,[B]);assert.equal(launch.manager.hasMigrationRisk,false);assert.equal(launch.manager.blocked,false);assert.equal(launch.dialogs.length,0);
+   await assert.rejects(f.create().attach(A),/Unexpected desktop launch revision/);
+   legacy=new LegacyUpdates(f.options);await legacy.attach(B);await legacy.databaseStarting();await legacy.healthy();
+  }
+  const floor=JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'),'utf8'));assert.equal(floor.revision,B);assert.equal(floor.sequence,b.manifest.sequence);assert.equal(floor.uncertain,undefined);
+ });
+});
+test('real main missing failed or retried metadata offers only owner-confirmed installer recovery',async t=>{
+ for(const retry of [false,true])for(const sequence of [200,201])await t.test(`retry=${retry}, installer=${sequence}`,async t=>{
+  const {f}=await legacyFailedPair(t,{retry});await fs.rm(path.join(f.root,'versions',B),{recursive:true});
+  const baseline={revision:C,sequence};
+  for(let i=0;i<2;i++){const declined=await installedLauncher(f,null,{baseline});await declined.start();assert.deepEqual(declined.events,['AI Shuffle needs an installer','quit']);assert.equal(declined.manager.recoveryRequired,true);assert.equal(declined.manager.canConfirmBaselineRecovery,true);assert.equal(await declined.manager.retryFailed(),false);}
+  const accepted=await installedLauncher(f,null,{baseline,answer:2});await accepted.start();assert.deepEqual(accepted.events,['AI Shuffle needs an installer','bundled']);assert.equal(accepted.manager.hasSourceState,false);
+  const again=await installedLauncher(f,null,{baseline});await again.start();assert.deepEqual(again.events,['bundled']);assert.equal(again.manager.recoveryRequired,false);
+ });
+});
+test('legacy main retry snapshot restores the fence before cancel and permits healthy recovery without an installer',async t=>{
+ const {f,b}=await migratedPair(t);await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify(legacyRetriedState()));
+ let u=f.create();await u.load();u.stageDownloads();await assert.rejects(u.cancelInstall(),/may have been migrated/);
+ assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).mayHaveMigrated,{[B]:b.manifest.sequence});
+ await assert.rejects(u.select(),/No healthy/);await assert.rejects(f.create().attach(A),/may have been migrated/);assert.equal(await u.discardStaged(B),false);
+ u=f.create();await u.load();await u.prepareInstall();assert.equal((await u.select()).revision,B);await u.attach(B);await u.databaseStarting();await u.healthy();
+ const healthy=f.create();await healthy.load();assert.equal(healthy.hasMigrationRisk,false);assert.equal((await healthy.select()).revision,B);
+});
+test('disabled updates cannot discard a legacy retried revision and installed Linux launches B, never older A',async t=>{
+ const {f,b}=await migratedPair(t);await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify(legacyRetriedState()));await fs.writeFile(path.join(f.root,'allow-updates.json'),JSON.stringify({allow_updates:false}));
+ const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,[B]);assert.equal(launch.manager.hasMigrationRisk,true);
+ assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).mayHaveMigrated,{[B]:b.manifest.sequence});
+ await assert.rejects(f.create().attach(A),/may have been migrated/);await launch.manager.attach(B);await launch.manager.databaseStarting();await launch.manager.healthy();assert.equal(launch.manager.version,B);assert.equal(launch.manager.hasMigrationRisk,false);
+});
+test('legacy staged and waiting snapshots fence prior attempts; healthy legacy installs remain unaffected',async t=>{
+ const {f,b}=await migratedPair(t);
+ for(const state of [{active:A,staged:B},{...legacyRetriedState(),booting:B,waiting:B}]){
+  await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify(state));const u=f.create();await u.load();assert.equal(u.hasMigrationRisk,true);
+  assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).mayHaveMigrated,{[B]:b.manifest.sequence});await assert.rejects(u.select(),/No healthy/);await assert.rejects(f.create().attach(A),/may have been migrated/);
+  await u.prepareInstall();await u.select();await u.attach(B);await u.databaseStarting();await u.healthy();assert.equal(u.hasMigrationRisk,false);
+ }
+ const legacy=await fixture(t);const seed=legacy.create();await seed.load();await legacy.release(A);await seed.download();await seed.select();await seed.healthy();await fs.writeFile(path.join(legacy.root,'state.json'),JSON.stringify({active:A}));const healthy=legacy.create();await healthy.load();assert.equal(healthy.hasMigrationRisk,false);assert.equal((await healthy.select()).revision,A);
+});
+test('legacy pending with unverifiable signed provenance stays fenced under disabled update policy',async t=>{
+ const {f}=await migratedPair(t);await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify(legacyRetriedState()));await fs.unlink(path.join(f.root,'versions',B,'release.json'));await fs.writeFile(path.join(f.root,'allow-updates.json'),JSON.stringify({allow_updates:false}));
+ const u=f.create();await u.load();assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).mayHaveMigrated,{[B]:null});await assert.rejects(u.select());await assert.rejects(f.create().attach(A),/may have been migrated/);await u.useNewerBaseline();assert.equal(u.hasMigrationRisk,true);
+});
+test('damaged and unknown-version state is preserved and recovers using the independent database floor',async t=>{
+ for(const text of ['[]','{','{"active":17}',JSON.stringify({schemaVersion:999,active:A})]){
+  const {f}=await migratedPair(t);
+  await fs.writeFile(path.join(f.root,'state.json'),text);const before=new Set(await fs.readdir(f.root));const u=f.create();await u.load();
+  const backup=(await fs.readdir(f.root)).find(name=>name.startsWith('state.json.corrupt-')&&!before.has(name));assert(backup);assert.equal(await fs.readFile(path.join(f.root,backup),'utf8'),text);
+  assert.equal(u.recoveryRequired,false);assert.equal(u.hasMigrationRisk,true);await assert.rejects(f.create().attach(A),/Unexpected desktop launch revision/);
+  const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,[B]);await launch.manager.attach(B);await launch.manager.databaseStarting();await launch.manager.healthy();assert.equal(launch.manager.hasMigrationRisk,false);
+ }
+});
+test('missing retried B plus corrupted state never delegates to remaining A, including marker-less legacy installs',async t=>{
+ for(const legacy of [false,true])for(const text of ['[]','{','{"active":17}','{"schemaVersion":999}']){
+  const {f}=await migratedPair(t);const retry=f.create();await retry.load();assert.equal(await retry.retryFailed(),true);
+  // Legacy main writes no independent marker, but can have this exact retry state.
+  if(legacy)await fs.unlink(path.join(f.root,'database-floor.json'));
+  await fs.rm(path.join(f.root,'versions',B),{recursive:true});await fs.writeFile(path.join(f.root,'state.json'),text);
+  const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,['AI Shuffle needs an installer','quit']);
+  assert.equal(launch.manager.recoveryRequired,true);await assert.rejects(launch.manager.select());
+  const backup=(await fs.readdir(f.root)).find(name=>name.startsWith('state.json.corrupt-'));assert.equal(await fs.readFile(path.join(f.root,backup),'utf8'),text);
+ }
+});
+test('selecting a different producer invalidates a stale floor until databaseStarting records the new one',async t=>{
+ const f=await fixture(t);const u=f.create();await u.load();await f.release(A);await u.download();await u.select();await u.databaseStarting();await u.healthy();
+ await f.release(B);await u.download();await u.select();
+ const marker=JSON.parse(await fs.readFile(path.join(f.root,'database-floor.json'),'utf8'));assert.equal(marker.revision,A);assert.equal(marker.uncertain,true);
+ // An older delegated producer can migrate B without rewriting the marker.
+ await fs.rm(path.join(f.root,'versions',B),{recursive:true});await fs.writeFile(path.join(f.root,'state.json'),'[]');
+ const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,['AI Shuffle needs an installer','quit']);
+});
+test('a marker written before the database-state save keeps the floor across a crash',async t=>{
+ const f=await fixture(t);const u=f.create();await u.load();await f.release(A);await u.download();await u.select();await u.databaseStarting();await u.healthy();
+ await f.release(B);await u.download();await u.select();await u.attach(B);
+ const waiting=await fs.readFile(path.join(f.root,'state.json'),'utf8');await u.databaseStarting();await fs.writeFile(path.join(f.root,'state.json'),waiting);
+ const restarted=f.create();await restarted.load();assert.equal(restarted.hasMigrationRisk,true);await assert.rejects(restarted.select());await assert.rejects(f.create().attach(A),/may have been migrated/);
+});
+test('trusted installer at or above the durable floor repairs missing-code recovery without losing quarantine',async t=>{
+ for(const delta of [-1,0,1]){
+  const {f,b}=await migratedPair(t);await fs.rm(path.join(f.root,'versions',B),{recursive:true});await fs.writeFile(path.join(f.root,'state.json'),'[]');
+  const old=await installedLauncher(f);await old.start();assert(old.events.includes('quit'));
+  const baseline={revision:C,sequence:b.manifest.sequence+delta};const launch=await installedLauncher(f,null,{baseline,answer:2});await launch.start();
+  if(delta<0){assert.deepEqual(launch.events,['AI Shuffle needs an installer','quit']);continue;}
+  assert.deepEqual(launch.events,['bundled']);assert.equal(launch.manager.recoveryRequired,false);assert.equal(launch.manager.hasSourceState,false);
+  const again=await installedLauncher(f,null,{baseline});await again.start();assert.deepEqual(again.events,['bundled']);
+  const backup=(await fs.readdir(f.root)).find(name=>name.startsWith('state.json.corrupt-'));assert.equal(await fs.readFile(path.join(f.root,backup),'utf8'),'[]');
+ }
+});
+test('installer with no provable floor needs explicit recovery-dialog consent, then stays repaired on relaunch',async t=>{
+ const f=await fixture(t);await fs.mkdir(path.join(f.root,'versions'),{recursive:true});await fs.writeFile(path.join(f.root,'state.json'),'{');
+ const old=await installedLauncher(f);await old.start();assert.deepEqual(old.events,['AI Shuffle needs an installer','quit']);
+ const baseline={revision:C,sequence:200};const declined=await installedLauncher(f,null,{baseline});await declined.start();assert.deepEqual(declined.events,['AI Shuffle needs an installer','quit']);
+ const accepted=await installedLauncher(f,null,{baseline,answer:2});await accepted.start();assert.deepEqual(accepted.events,['AI Shuffle needs an installer','bundled']);assert.equal(accepted.manager.recoveryRequired,false);
+ const again=await installedLauncher(f,null,{baseline});await again.start();assert.deepEqual(again.events,['bundled']);
+ const backup=(await fs.readdir(f.root)).find(name=>name.startsWith('state.json.corrupt-'));assert.equal(await fs.readFile(path.join(f.root,backup),'utf8'),'{');
+});
+test('owner consent cannot bypass a recorded floor in an unsupported marker format',async t=>{
+ const f=await fixture(t);await fs.mkdir(path.join(f.root,'versions'),{recursive:true});await fs.writeFile(path.join(f.root,'database-floor.json'),JSON.stringify({schemaVersion:999,revision:B,sequence:300}));await fs.writeFile(path.join(f.root,'state.json'),'[]');
+ const launch=await installedLauncher(f,null,{baseline:{revision:C,sequence:200},answer:2});await launch.start();assert.deepEqual(launch.events,['AI Shuffle needs an installer','quit']);assert.equal(launch.manager.canConfirmBaselineRecovery,false);
+});
+test('a corrupt independent marker fails closed and owner-confirmed repair preserves both quarantines',async t=>{
+ const f=await fixture(t);const seed=f.create();await seed.load();await f.release(A);await seed.download();await seed.select();await seed.databaseStarting();await seed.healthy();
+ await fs.writeFile(path.join(f.root,'database-floor.json'),'{');await fs.writeFile(path.join(f.root,'state.json'),'[]');
+ const baseline={revision:C,sequence:200};const declined=await installedLauncher(f,null,{baseline});await declined.start();assert.deepEqual(declined.events,['AI Shuffle needs an installer','quit']);
+ const accepted=await installedLauncher(f,null,{baseline,answer:2});await accepted.start();assert.deepEqual(accepted.events,['AI Shuffle needs an installer','bundled']);
+ for(const prefix of ['state.json.corrupt-','database-floor.json.corrupt-']){const file=(await fs.readdir(f.root)).find(name=>name.startsWith(prefix));assert(file);assert.equal(await fs.readFile(path.join(f.root,file),'utf8'),prefix.startsWith('state')?'[]':'{');}
+});
+test('corrupt state without provable recovery offers an installer on every launch without running any worker',async t=>{
+ for(const text of ['[]','{','{"active":17}',JSON.stringify({schemaVersion:999})]){
+  const f=await fixture(t);await fs.mkdir(path.join(f.root,'versions'),{recursive:true});await fs.writeFile(path.join(f.root,'state.json'),text);
+  for(let launchCount=0;launchCount<2;launchCount++){
+   const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,['AI Shuffle needs an installer','quit']);assert.equal(launch.manager.recoveryRequired,true);await assert.rejects(launch.manager.select(),/No healthy/);
+  }
+  const backup=(await fs.readdir(f.root)).find(name=>name.startsWith('state.json.corrupt-'));assert.equal(await fs.readFile(path.join(f.root,backup),'utf8'),text);
+ }
+});
+test('corrupt recovery honors retained fence floors and never falls back to an older complete revision',async t=>{
+ const {f,b}=await migratedPair(t);
+ for(const damage of ['missing highest build','unverifiable highest signature','fence without directory','equal signed sequences']){
+  await fs.writeFile(path.join(f.root,'versions',B,'release.json'),b.signed);await fs.writeFile(path.join(f.root,'versions',B,'source/desktop/dist/main/managed-entry.js'),B);
+  const state={active:17,mayHaveMigrated:{[B]:b.manifest.sequence}};
+  if(damage==='missing highest build')await fs.unlink(path.join(f.root,'versions',B,'source/desktop/dist/main/managed-entry.js'));
+  if(damage==='unverifiable highest signature')await fs.writeFile(path.join(f.root,'versions',B,'release.json'),'{}');
+  if(damage==='fence without directory')state.mayHaveMigrated[C]=b.manifest.sequence+1;
+  if(damage==='equal signed sequences'){const equal=await f.release(A,undefined,{sequence:b.manifest.sequence});await fs.writeFile(path.join(f.root,'versions',A,'release.json'),equal.signed);}
+  await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify(state));const launch=await installedLauncher(f);await launch.start();assert.deepEqual(launch.events,['AI Shuffle needs an installer','quit'],damage);assert.equal(launch.manager.recoveryRequired,damage!=='missing highest build');
+  if(damage==='missing highest build'){
+   const newer=new SourceUpdates({...f.options,baseline:{revision:C,sequence:b.manifest.sequence+1}});await newer.load();await newer.useNewerBaseline();assert.equal(newer.hasSourceState,false,'a verified newer installer can supersede an incomplete build with a known migration floor');
+  }
+ }
+});
+test('invalid migration recovery state fails closed on both load and direct attachment',async t=>{
+ const f=await fixture(t);
+ for(const mayHaveMigrated of [[],null,{bad:100},{[B]:0},{[B]:1.5},{[B]:'100'}]){
+  await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({active:A,mayHaveMigrated}));
+  await assert.rejects(f.create().attach(A),/Invalid migration recovery state/);const recovered=f.create();await recovered.load();assert.equal(recovered.recoveryRequired,true);assert.equal(recovered.blocked,true);await assert.rejects(recovered.select(),/No healthy/);
+ }
+});
+test('pre-database failures do not create migration fences, and an equal-sequence different revision never builds over a fence',async t=>{
+ const f=await fixture(t);let u=f.create();await u.load();await f.release(A);await u.download();await u.select();await u.healthy();
+ const b=await f.release(B);await u.download();await u.select();await u.attach(B);await u.failed();
+ u=f.create();await u.load();assert.equal(u.hasMigrationRisk,false);assert.equal(u.blocked,false);assert.equal((await u.select()).revision,A);
+ await u.prepareInstall();await u.select();await u.attach(B);await u.databaseStarting();await u.failed();
+ u=f.create();await u.load();assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')).mayHaveMigrated,{[B]:b.manifest.sequence});assert.equal(u.pendingVersion,null);
+ const builds=f.builds;await f.release(C,null,{sequence:b.manifest.sequence});await assert.rejects(u.download(),/may have been migrated/);assert.equal(f.builds,builds,'never run older/equal source build scripts');
+ await f.release(C);await u.download();await u.select();await u.attach(C);await u.databaseStarting();await u.healthy();
+ const recovered=f.create();await recovered.load();assert.equal(recovered.hasMigrationRisk,false);assert.equal(recovered.blocked,false);assert.equal((await recovered.select()).revision,C);
+});
+test('healthy supersession preserves failed diagnostics without resurrecting old fences or permitting a stale staged downgrade',async t=>{
+ const D='d'.repeat(40);const f=await fixture(t);let u=f.create();await u.load();await f.release(A);await u.download();await u.select();await u.healthy();
+ await f.release(B);await u.download();await u.select();await u.attach(B);await u.databaseStarting();await u.failed();
+ await f.release(C);await u.download();await u.select();await u.attach(C);await u.databaseStarting();await u.healthy();
+ let state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.deepEqual(state.failed,[B]);assert.deepEqual(state.supersededFailed,[B]);assert.equal(state.mayHaveMigrated,undefined);
+ await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({...state,staged:A}));u=f.create();await u.load();await assert.rejects(u.prepareInstall(),/older code/);assert.equal((await u.select()).revision,C);
+ await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({...state,pending:A}));u=f.create();await u.load();await assert.rejects(u.select(),/older code/);
+ await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify(state));u=f.create();await u.load();await fs.unlink(path.join(f.root,'versions',B,'release.json'));
+ await f.release(D);await u.download();await u.select();await u.attach(D);await u.databaseStarting();await u.failed();
+ u=f.create();await u.load();state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.deepEqual(Object.keys(state.mayHaveMigrated),[D]);assert.equal(await u.retryFailed(),true);assert.equal((await u.select()).revision,D);
+});
 test('source builds stage without replacing running files and activate on restart; offline launches work',async t=>{
  const f=await fixture(t);await f.release(A);let u=f.create();await u.load();assert.equal((await u.download()).kind,'ready');const old=await u.select();await u.healthy();
+ assert.equal(old.node,path.join(old.resources,process.platform==='win32'?'worker/node/node.exe':'worker/node/bin/node'));
+ assert.equal(old.python,path.join(old.resources,process.platform==='win32'?'worker/python/python.exe':'worker/python/bin/python3'));
  await fs.writeFile(path.join(f.root,'data-sentinel'),'keep');await f.release(B);await u.download();assert.equal(u.version,A);assert.equal(await fs.readFile(path.join(old.serverDir,'app/main.py'),'utf8'),A);
  u=f.create();await u.load();const current=await u.select();await u.healthy();assert.equal(current.revision,B);assert.equal(await fs.readFile(path.join(f.root,'data-sentinel'),'utf8'),'keep');
  assert.equal((await u.download()).kind,'current');assert.equal(f.builds,2);assert.equal(await fs.readFile(path.join(f.root,'node-path.txt'),'utf8'),current.node);
@@ -99,8 +436,8 @@ test('signature, checksum, traversal and Windows alias failures are rejected bef
  }
 });
 test('older signed manifests cannot roll back a healthy revision; corrupt state fails closed',async t=>{
- const f=await fixture(t);const a=await f.release(A);await f.release(B);const u=f.create();await u.load();await u.download();await u.select();await u.healthy();f.signed=a.signed;assert.equal((await u.check()).kind,'current');assert.equal(u.version,B);
- assert.throws(()=>verifySourceManifest('{}',f.options.publicKey),/Unsigned/);await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({active:'../elsewhere'}));await assert.rejects(f.create().load(),/Invalid/);
+ const f=await fixture(t);const a=await f.release(A);await f.release(B);const u=f.create();await u.load();await u.download();await u.select();await u.databaseStarting();await u.healthy();f.signed=a.signed;assert.equal((await u.check()).kind,'current');assert.equal(u.version,B);
+ assert.throws(()=>verifySourceManifest('{}',f.options.publicKey),/Unsigned/);await fs.writeFile(path.join(f.root,'state.json'),JSON.stringify({active:'../elsewhere'}));const recovered=f.create();await recovered.load();assert.equal((await recovered.select()).revision,B);assert.equal(recovered.hasMigrationRisk,true);
 });
 test('cleanup detaches dependency junctions; builds do not inherit credentials',async t=>{
  const root=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-cache-test-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));
@@ -194,18 +531,18 @@ test('installer baseline rejects source metadata older than its bundled build',a
  assert.equal((await u.check()).kind,'current');assert.equal(f.builds,0);
 });
 
-test('compact Windows native and Python dependency caches resolve after activation; legacy layouts stay readable',async t=>{
+test('compact native and Python dependency caches resolve after activation; legacy layouts stay readable',async t=>{
  const f=await fixture(t);const build=f.options.build;const pythonKey='e'.repeat(64);
  f.options.build=async(...args)=>{
   const built=await build(...args);
   await fs.rename(path.join(f.root,'runtimes',KEY),path.join(f.root,'runtimes',KEY.slice(0,24)));
-  const python=path.join(f.root,'dependencies',KEY.slice(0,24),'python',pythonKey.slice(0,24),'Scripts/python.exe');
+  const python=path.join(f.root,'dependencies',KEY.slice(0,24),'python',pythonKey.slice(0,24),process.platform==='win32'?'Scripts/python.exe':'bin/python');
   await fs.mkdir(path.dirname(python),{recursive:true});await fs.writeFile(python,'python runtime');
   return {...built,layout:2,pythonKey};
  };
  await f.release(A);const u=f.create();await u.load();await u.download();
  const app=await u.select();assert.equal(app.resources,path.join(f.root,'runtimes',KEY.slice(0,24)));
- assert.equal(app.python,path.join(f.root,'dependencies',KEY.slice(0,24),'python',pythonKey.slice(0,24),'Scripts/python.exe'));
+ assert.equal(app.python,path.join(f.root,'dependencies',KEY.slice(0,24),'python',pythonKey.slice(0,24),process.platform==='win32'?'Scripts/python.exe':'bin/python'));
  await u.healthy();assert.equal(u.version,A);assert.equal((await u.application(A)).revision,A);
 });
 
@@ -226,7 +563,7 @@ test('DESK-02: a failed first boot stays blocked until a newer download or insta
  const f=await fixture(t);await f.release(A);let u=f.create();await u.load();await u.download();await u.select();
  // Crash during the first boot of A: the next launch records the failure.
  u=f.create();await u.load();assert.equal(u.hasSourceState,true);assert.equal(u.blocked,true);assert.equal(u.pendingVersion,null);
- await assert.rejects(u.select(),/No healthy/);assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')),{failed:[A],blocked:true});
+ await assert.rejects(u.select(),/No healthy/);assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8')),{schemaVersion:1,failed:[A],blocked:true,mayHaveMigrated:{[A]:100}});
  // The installer baseline is older than the failed revision: the block prevents unsafe fallback.
  u=new SourceUpdates({...f.options,baseline:{revision:B,sequence:50}});await u.load();await u.useNewerBaseline();
  assert.equal(u.blocked,true);assert.equal(u.hasSourceState,true);assert.equal(u.version,B);await assert.rejects(u.select(),/No healthy/);
@@ -342,9 +679,18 @@ test('release fields are validated when present and older installed manifests wi
  await fs.writeFile(path.join(f.root,'versions',B,'release.json'),legacy.signed);
  u=f.create();await u.load();await u.select();await f.release(C);assert.equal((await u.check()).kind,'available');
 });
+test('a compatibility preflight failure never writes booting or blocks the next installed launch',async t=>{
+ const f=await fixture(t);await f.release(A);const u=f.create();await u.load();await u.download();
+ await assert.rejects(u.select(async()=>{throw Error('Installer required');}),/Installer required/);
+ let state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));assert.equal(state.booting,undefined);assert.equal(state.pending,A);
+ const next=f.create();await next.load();assert.equal(next.blocked,false);
+ next.stageDownloads();await next.cancelInstall();state=JSON.parse(await fs.readFile(path.join(f.root,'state.json'),'utf8'));
+ assert.equal(state.pending,undefined);assert.equal(state.staged,A);assert.equal(next.hasSourceState,false);
+});
 test('Python dependencies install only from the hash-pinned locks, like the container updater',async t=>{
  const {pythonInstallSteps,pythonDependencyKey,buildSource}=require('../dist/main/source-build.js');
  const steps=pythonInstallSteps();
+ assert(!steps[1].includes('--no-deps'));assert(steps[1].includes('--only-binary=pynput,evdev-binary'));assert(steps[1].includes('desktop/vendor'));
  assert.deepEqual(steps.map(args=>args.slice(-3)),[['--require-hashes','-r','requirements.lock'],['--require-hashes','-r','requirements-native.lock'],['--no-deps','--no-build-isolation','./fluid']]);
  for(const args of steps){assert.deepEqual(args.slice(0,3),['-m','pip','install']);assert(!args.includes('requirements.txt')&&!args.includes('requirements-native.txt'));}
  // The bundled runtime is reused only when it was installed from the same locks.

@@ -178,15 +178,29 @@ class TestLogChildExit:
         assert "died unexpectedly (exit=1)" in line
 
 
-def test_linux_native_fallback_installs_pynput_without_evdev(tmp_path):
-    reqs = tmp_path / "requirements-native.txt"
-    reqs.write_text("# comment\nmss>=9.0.1  # screenshots\npynput>=1.7.6  # input\nPillow>=12.1.1\n")
-    assert run_local.linux_native_fallback(reqs) == [
-        ["install", "mss>=9.0.1", "Pillow>=12.1.1", "python-xlib>=0.17", "six"],
-        ["install", "--no-deps", "pynput>=1.7.6"],
-    ]
-    real = Path(__file__).resolve().parent.parent / "requirements-native.txt"
-    steps = run_local.linux_native_fallback(real)
-    assert steps[-1][:2] == ["install", "--no-deps"] and steps[-1][2].startswith("pynput")
-    reqs.write_text("mss>=9.0.1\n")
-    assert run_local.linux_native_fallback(reqs) == []
+def test_native_install_uses_complete_hash_pinned_binary_closure(monkeypatch):
+    calls = []
+    monkeypatch.setattr(run_local, "get_venv_python", lambda: Path("fixture-python"))
+    monkeypatch.setattr(run_local, "get_venv_pip", lambda: Path("fixture-pip"))
+    monkeypatch.setattr(run_local.subprocess, "run", lambda args, **kwargs: calls.append(args))
+    monkeypatch.setattr(run_local, "print_status", lambda *args: None)
+    assert run_local.install_dependencies()
+    native = [args for args in calls if args[-1].endswith("requirements-native.lock")]
+    assert native == [["fixture-pip", "install", "--find-links", str(Path(run_local.__file__).parent / "desktop/vendor"),
+                       "--only-binary=pynput,evdev-binary", "--require-hashes", "-r", str(Path(run_local.__file__).parent / "requirements-native.lock")]]
+
+
+def test_native_install_failure_does_not_skip_dependencies_to_report_success(monkeypatch):
+    calls = []
+    statuses = []
+    monkeypatch.setattr(run_local, "get_venv_python", lambda: Path("fixture-python"))
+    monkeypatch.setattr(run_local, "get_venv_pip", lambda: Path("fixture-pip"))
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[-1].endswith("requirements-native.lock"):
+            raise run_local.subprocess.CalledProcessError(1, args)
+    monkeypatch.setattr(run_local.subprocess, "run", run)
+    monkeypatch.setattr(run_local, "print_status", lambda *args: statuses.append(args))
+    assert run_local.install_dependencies(), "optional computer-use failure must not block worker startup"
+    assert len(calls) == 4, "never bypass the lock with a --no-deps fallback"
+    assert statuses[-1][1] == "warning" and "unavailable" in statuses[-1][0]

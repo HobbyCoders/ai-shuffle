@@ -27,6 +27,7 @@
  *                                 [--arch x64|arm64] [--frontend-build <dir>]
  *                                 [--keep-python] [--stub] [--skip-postgres]
  *                                 [--postgres-out postgres] [--cache <dir>] [--runtime-only]
+ *                                 [--python-from <trusted bundled worker>]
  *                                 [--postgres-only] [--gh-only]
  *
  * --runtime-only downloads the native runtimes locally, keeps npm for source
@@ -51,6 +52,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runtimeContract, pythonDependencies } from './runtime-contract.mjs';
+import { stampDesktopBuild } from './stamp-desktop-build.mjs';
 import {
 	POSTGRES_VERSION,
 	initdbRelativePath,
@@ -195,9 +197,40 @@ function pythonExe(dir) {
 	return platform === 'win32' ? path.join(dir, 'python.exe') : path.join(dir, 'bin', 'python3');
 }
 
+/** Reuse installer/cache packages only when the signed source requires exactly that environment. */
+export async function reuseBundledPython(worker, destination, expected, copy = cp) {
+	let manifest;
+	try { manifest = JSON.parse(await readFile(path.join(worker, 'manifest.json'), 'utf8')); }
+	catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+	if (manifest.stub || manifest.platform !== expected.platform || manifest.arch !== expected.arch ||
+		manifest.pythonDependencies !== expected.pythonDependencies ||
+		!['version', 'build', 'triple'].every(key => manifest.python?.[key] === expected.python[key])) return null;
+	const source = path.join(worker, 'python');
+	// Relative internal links stay relocatable; never import a package through an
+	// escaping link, or turn a read-only installer into a writable live runtime.
+	await validateBundledSymlinks(source, expected.platform, true);
+	await copy(source, destination, { recursive: true, verbatimSymlinks: true });
+	// Copy can race a source-root replacement. Validate the completed tree before
+	// the caller may execute Python, on Windows as well as POSIX.
+	await validateBundledSymlinks(destination, expected.platform, true);
+	return { ...manifest.python, reused: true };
+}
+
 async function installPython() {
 	const triple = PYTHON_TRIPLES[`${platform}-${arch}`];
 	if (!triple) throw new Error(`no python-build-standalone build for ${platform}-${arch}`);
+	if (args['python-from']) {
+		const reused = await reuseBundledPython(path.resolve(args['python-from']), path.join(outDir, 'python'), {
+			platform, arch, pythonDependencies: await pythonDependencies(repoDir),
+			python: { version: PYTHON_VERSION, build: PYTHON_BUILD, triple }
+		});
+		if (reused) {
+			log('reusing bundled hash-pinned Python dependencies (matching locks and interpreter)');
+			run(pythonExe(path.join(outDir, 'python')), ['--version']);
+			return reused;
+		}
+	}
+
 	if (args['keep-python'] && existsSync(pythonExe(path.join(outDir, 'python')))) {
 		log('keeping the existing python/ directory (--keep-python)');
 		return { version: PYTHON_VERSION, build: PYTHON_BUILD, triple, kept: true };
@@ -221,7 +254,7 @@ async function installPython() {
 	// package, including fluid's build backend, must match a hash in the locks.
 	const pip = ['-m', 'pip', 'install', '--no-cache-dir', '--prefer-binary', '--timeout', '120', '--retries', '10'];
 	run(py, [...pip, '--require-hashes', '-r', path.join(repoDir, 'requirements.lock')], { env, cwd: repoDir });
-	run(py, [...pip, '--require-hashes', '-r', path.join(repoDir, 'requirements-native.lock')], { env, cwd: repoDir });
+	run(py, [...pip, '--find-links', path.join(repoDir, 'desktop/vendor'), '--only-binary=pynput,evdev-binary', '--require-hashes', '-r', path.join(repoDir, 'requirements-native.lock')], { env, cwd: repoDir });
 	run(py, [...pip, '--no-deps', '--no-build-isolation', path.join(repoDir, 'fluid')], { env, cwd: repoDir });
 	run(py, ['-c', 'import importlib.util; import fluid, mcp, psycopg2, pygit2, fastapi; assert importlib.util.find_spec("claude_agent_sdk") is None; print("python deps ok (no agent SDK)")'], { env });
 	return { version: PYTHON_VERSION, build: PYTHON_BUILD, triple };
@@ -401,6 +434,7 @@ async function main() {
 	await rm(path.join(outDir, 'manifest.json'), { force: true });
 	if (args.stub) {
 		await writeFile(path.join(outDir, 'manifest.json'), JSON.stringify({ stub: true, appVersion: pkg.version, builtAt: new Date().toISOString() }, null, 2));
+		if (platform !== 'darwin' && !args['runtime-only'] && !args['gh-only']) await stampDesktopBuild(outDir, repoDir);
 		log(`wrote stub manifest to ${outDir}`);
 		return;
 	}
@@ -437,6 +471,7 @@ async function main() {
 		host: os.hostname()
 	};
 	await writeFile(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+	if (platform !== 'darwin' && !args['runtime-only']) await stampDesktopBuild(outDir, repoDir);
 	const size = await dirSize(outDir);
 	log(`done: ${(size / 1024 / 1024).toFixed(0)} MB in ${outDir}`);
 	if (postgres) log(`PostgreSQL ${postgres.version} (${postgres.target}): ${((await dirSize(postgresDir)) / 1024 / 1024).toFixed(0)} MB in ${postgresDir}`);

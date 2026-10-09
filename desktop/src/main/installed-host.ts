@@ -1,4 +1,4 @@
-/** The installed EXE remains the entry point after locally built source updates. */
+/** The installed executable remains the entry point after locally built source updates. */
 import { promises as fs, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -7,6 +7,26 @@ import { DISCLOSURE_ACCEPTED_ENV } from './disclosure';
 import type { SourceApplication } from './source-updates';
 
 export interface InstalledHost { executable: string; userData: string; name: string }
+export class InstallerRequired extends Error {}
+/** Keep the installed AppArmor/setuid sandbox; never execute npm Electron on Linux. */
+export async function requireInstalledElectron(application: SourceApplication, installedVersion: string): Promise<void> {
+  const lock = JSON.parse(await fs.readFile(path.join(application.desktopDir, 'package-lock.json'), 'utf8'));
+  const version = lock.packages?.['node_modules/electron']?.version;
+  if (!/^\d+\.\d+\.\d+$/.test(version ?? '') || version !== installedVersion) {
+    throw new InstallerRequired('This update requires a newer AI Shuffle installer to preserve the Linux Electron sandbox.');
+  }
+  // Do not import an older auto-starting entry while probing its exported API.
+  const entry = await fs.readFile(path.join(application.desktopDir, 'dist/main/managed-entry.js'), 'utf8');
+  if (!/exports\.startManagedSource\s*=/.test(entry) || !/if\s*\(require\.main\s*===\s*module\)/.test(entry)) {
+    throw new InstallerRequired('This source build needs a newer AI Shuffle installer entry.');
+  }
+}
+/** AppImage's execPath is in an ephemeral, read-only squashfs mount. */
+export function installedExecutable(): string {
+  const executable = process.platform === 'linux' && process.env.APPIMAGE ? process.env.APPIMAGE : process.execPath;
+  if (!path.isAbsolute(executable)) throw new Error('Invalid installed desktop executable');
+  return executable;
+}
 /** Preserve an explicitly requested debugger across a restart; never enable one. */
 export function installedLaunchArgs(args: string[], debuggingPort = ''): string[] {
   // Chromium consumes some switches before process.argv reaches the app.
@@ -17,8 +37,9 @@ export function installedLaunchArgs(args: string[], debuggingPort = ''): string[
 }
 export function validateInstalledHost(root: string, host: InstalledHost): InstalledHost {
   if (!host || !path.isAbsolute(host.executable ?? '') || !path.isAbsolute(host.userData ?? '') ||
-      !host.executable.toLowerCase().endsWith('.exe') || typeof host.name !== 'string' || !host.name ||
-      path.resolve(root).toLowerCase() !== path.resolve(host.userData, 'updates').toLowerCase()) {
+      (process.platform === 'win32' && !host.executable.toLowerCase().endsWith('.exe')) || typeof host.name !== 'string' || !host.name ||
+      (process.platform === 'win32' ? path.resolve(root).toLowerCase() !== path.resolve(host.userData, 'updates').toLowerCase()
+        : path.resolve(root) !== path.resolve(host.userData, 'updates'))) {
     throw new Error('Invalid installed desktop host');
   }
   return host;

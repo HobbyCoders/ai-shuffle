@@ -23,4 +23,5 @@ compile() {
 compile requirements.txt fluid/pyproject.toml requirements-build.txt \
   -o requirements.lock "$@"
 compile requirements-native.txt -c requirements.lock \
+  --find-links desktop/vendor --only-binary pynput --only-binary evdev-binary \
   -o requirements-native.lock "$@"

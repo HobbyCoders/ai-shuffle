@@ -144,6 +144,8 @@ export interface EnvOptions {
 	/** Only set for an isolated preview; isolates inherited CLI credential/config paths. */
 	profileDir?: string;
 	baseEnv?: NodeJS.ProcessEnv;
+	/** Computed by the app, never recovered from a delegated environment snapshot. */
+	updatePolicyFile?: string;
 	platform?: NodeJS.Platform;
 }
 
@@ -198,6 +200,7 @@ export function buildWorkerEnv(opts: EnvOptions): NodeJS.ProcessEnv {
 		DATA_DIR: opts.dataDir,
 		...(opts.workspaceDir ? { WORKSPACE_DIR: opts.workspaceDir } : {}),
 		AI_SHUFFLE_ENV_FILE: opts.envFile,
+		...(opts.updatePolicyFile ? { SHUFFLE_UPDATE_POLICY_FILE: opts.updatePolicyFile } : {}),
 		TOOLS_DIR: opts.runtime.toolsDir, BROWSER_MCP_ENTRY: opts.runtime.browserMcpEntry,
 		PYTHONPATH: opts.runtime.mode === 'bundled' ? opts.runtime.serverDir : path.join(opts.runtime.serverDir, 'fluid'),
 		PYTHONNOUSERSITE: '1', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', SHUFFLE_DESKTOP: '1'
@@ -501,6 +504,7 @@ export interface SupervisorOptions {
 	/** Private directory for the spawned worker's pid and attach token; defaults to the env file's directory. */
 	stateDir?: string;
 	baseEnv?: NodeJS.ProcessEnv;
+	updatePolicyFile?: string;
 	postgres: () => PostgresConfig | null;
 	readyTimeoutMs?: number;
 	/** Overall limit of one health probe; defaults to HEALTH_TOTAL_TIMEOUT_MS. */

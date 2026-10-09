@@ -33,7 +33,7 @@ export function buildEnvironment(node: string, python: string): NodeJS.ProcessEn
   // Also the source-managed app's environment, and so its worker's: keep the
   // user's own Claude Code config dir so `claude` finds the user's login (D5).
   for (const [key, value] of Object.entries(process.env)) {
-    if (/^(path|systemroot|windir|comspec|pathext|userprofile|home|appdata|localappdata|temp|tmp|programfiles|programfiles\(x86\)|programdata|processor_architecture|number_of_processors|claude_config_dir)$/i.test(key)) env[key] = value;
+    if (/^(path|systemroot|windir|comspec|pathext|userprofile|home|appdata|localappdata|temp|tmp|programfiles|programfiles\(x86\)|programdata|processor_architecture|number_of_processors|claude_config_dir|display|wayland_display|xdg_runtime_dir|xdg_config_home|xdg_data_home|xdg_cache_home|xdg_session_type|dbus_session_bus_address|xauthority|lang|lc_[a-z_]+|user|logname)$/i.test(key)) env[key] = value;
   }
   const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') ?? 'PATH';
   env[pathKey] = [path.dirname(node), path.dirname(python), env[pathKey] ?? ''].join(path.delimiter);
@@ -68,7 +68,8 @@ export function pythonInstallSteps(): string[][] {
   const pip = ['-m', 'pip', 'install', '--prefer-binary', '--timeout', '120', '--retries', '10'];
   return [
     [...pip, '--require-hashes', '-r', 'requirements.lock'],
-    [...pip, '--require-hashes', '-r', 'requirements-native.lock'],
+    // The signed source carries a metadata-corrected, hash-pinned pynput wheel.
+    [...pip, '--find-links', 'desktop/vendor', '--only-binary=pynput,evdev-binary', '--require-hashes', '-r', 'requirements-native.lock'],
     [...pip, '--no-deps', '--no-build-isolation', './fluid'],
   ];
 }

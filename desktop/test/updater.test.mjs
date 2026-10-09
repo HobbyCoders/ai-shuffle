@@ -67,6 +67,18 @@ test('metadata checks expose available; only explicit download builds, then inst
  await updater.install(); assert.equal(calls.length, 4, 'double-click does not restart twice');
 });
 
+test('Linux worker bridge reports source phases and running_version, then restarts the original AppImage',async()=>{
+ const {updater,calls}=fixture();const states=[];let request={};
+ updater.useApplications(source({options:{root:'/home/me/.config/AI Shuffle/updates'},download:async progress=>{progress(50,'Building Linux application');return ready;}}),'/home/me/Applications/AI Shuffle.AppImage');
+ updater.setPolicy(async()=>true);updater.subscribe(state=>states.push(state));
+ updater.setBridge(async state=>{assert.equal(state.running_version,'a'.repeat(40));const next=request;request={};return next;},async()=>true);
+ updater.start();await new Promise(setImmediate);
+ for(const action of ['check','download','install']){
+  request={action,expires_at:Date.now()/1000+10};await updater.exchange();await new Promise(setImmediate);
+ }
+ for(const phase of ['checking','available','downloading','ready'])assert(states.some(state=>state.phase===phase),phase);
+ assert.equal(calls[0].execPath,'/home/me/Applications/AI Shuffle.AppImage');assert.deepEqual([...calls[0].args],[]);assert.equal(calls[1],'quit');updater.stop();
+});
 test('build errors retain the available version and retry without another check', async () => {
  const { updater } = fixture(); let attempts = 0;
  updater.useApplications(source({ download: async progress => { progress(42, 'Downloading…'); if (++attempts === 1) throw Error('Build interrupted'); return ready; } }));

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
 const require=createRequire(import.meta.url);
-const {readInstalledHostSync,saveInstalledHost,sourceLaunch,installedLaunchArgs}=require('../dist/main/installed-host.js');
+const {readInstalledHostSync,saveInstalledHost,sourceLaunch,installedLaunchArgs,installedExecutable,requireInstalledElectron,InstallerRequired}=require('../dist/main/installed-host.js');
 test('an explicit Chromium debugging port survives even when Electron omits it from argv',()=>{
  assert.deepEqual(installedLaunchArgs(['aishuffle://callback'],'19229'),['--remote-debugging-port=19229'],'NC-16: no URL scheme is registered, so no link argument is forwarded');
  assert.deepEqual(installedLaunchArgs([]),[]);
@@ -26,6 +26,36 @@ test('installed source versions preserve the original profile and EXE across res
  assert(!launch.args.some(arg=>/bootstrap|\.cmd|powershell/.test(arg)));
 });
 
+test('Linux compatibility requires the installed Electron exact pinned version before source activation',async t=>{
+ const desktopDir=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-electron-preflight-'));t.after(()=>fs.rm(desktopDir,{recursive:true,force:true}));
+ const application={desktopDir};const file=path.join(desktopDir,'package-lock.json');
+ await fs.mkdir(path.join(desktopDir,'dist/main'),{recursive:true});const entry=path.join(desktopDir,'dist/main/managed-entry.js');
+ await fs.writeFile(entry,'exports.startManagedSource = startManagedSource; if (require.main === module) start();');
+ await fs.writeFile(file,JSON.stringify({packages:{'node_modules/electron':{version:'44.2.0'}}}));
+ await requireInstalledElectron(application,'44.2.0');
+ await fs.writeFile(entry,'start();');await assert.rejects(requireInstalledElectron(application,'44.2.0'),InstallerRequired);
+ await assert.rejects(requireInstalledElectron(application,'44.1.0'),InstallerRequired);
+ await fs.writeFile(file,'{}');await assert.rejects(requireInstalledElectron(application,'44.2.0'),InstallerRequired);
+});
+test('Linux keeps the original AppImage rather than its temporary mount, and deb uses execPath', {skip:process.platform!=='linux'},async t=>{
+ const saved=process.env.APPIMAGE;t.after(()=>{if(saved===undefined)delete process.env.APPIMAGE;else process.env.APPIMAGE=saved;});
+ process.env.APPIMAGE='/home/me/Applications/AI Shuffle.AppImage';assert.equal(installedExecutable(),process.env.APPIMAGE);
+ const userData=await fs.mkdtemp(path.join(os.tmpdir(),'shuffle-linux-host-'));t.after(()=>fs.rm(userData,{recursive:true,force:true}));
+ const root=path.join(userData,'updates');await fs.mkdir(root);
+ const host={executable:installedExecutable(),userData,name:'AI Shuffle'};
+ await saveInstalledHost(root,host);assert.deepEqual(readInstalledHostSync(root),host);
+ delete process.env.APPIMAGE;assert.equal(installedExecutable(),process.execPath);
+ process.env.APPIMAGE='relative.AppImage';assert.throws(()=>installedExecutable(),/Invalid installed/);
+});
+test('Linux source Electron launch retains desktop session variables but not AppImage mount overrides', {skip:process.platform!=='linux'},t=>{
+ const saved={...process.env};t.after(()=>{for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);});
+ Object.assign(process.env,{DISPLAY:':1',WAYLAND_DISPLAY:'wayland-0',XDG_RUNTIME_DIR:'/run/user/1000',DBUS_SESSION_BUS_ADDRESS:'unix:path=/run/user/1000/bus',XAUTHORITY:'/home/me/.Xauthority',APPIMAGE:'/home/me/app.AppImage',APPDIR:'/tmp/.mount_app',LD_LIBRARY_PATH:'/tmp/.mount_app/lib'});
+ const application={electron:'/r/electron',desktopDir:'/r/desktop',revision:'b'.repeat(40),node:'/r/node/bin/node',python:'/r/python/bin/python3'};
+ const launch=sourceLaunch(application,'/home/me/.config/AI Shuffle/updates',[]);
+ assert.equal(launch.executable,'/r/electron');assert.deepEqual(launch.args,['/r/desktop']);
+ for(const key of ['DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS','XAUTHORITY'])assert.equal(launch.options.env[key],process.env[key]);
+ for(const key of ['APPIMAGE','APPDIR','LD_LIBRARY_PATH'])assert.equal(launch.options.env[key],undefined);
+});
 test('D5: the source-managed relaunch keeps the user\'s home and Claude Code config dir',t=>{
  const saved={...process.env};t.after(()=>{for(const k of Object.keys(process.env))if(!(k in saved))delete process.env[k];Object.assign(process.env,saved);});
  Object.assign(process.env,{HOME:'/home/me',USERPROFILE:'C:\\Users\\me',CLAUDE_CONFIG_DIR:'D:\\claude-config',ANTHROPIC_API_KEY:'sk-not-forwarded'});
@@ -58,7 +88,7 @@ test('a corrupt or foreign installed-host.json fails closed instead of choosing 
  for(const bad of [
   {...host,userData:path.join(userData,'..','someone-else')},  // a profile other than the one owning these updates
   {...host,executable:'AI Shuffle.exe'},                       // relative executable
-  {...host,executable:path.join(userData,'run.sh')},           // not an EXE
+  ...(process.platform==='win32'?[{...host,executable:path.join(userData,'run.sh')}]:[]), // Windows requires an EXE
   {...host,name:''},{executable:host.executable,userData},null,[]
  ]){
   await fs.writeFile(file,JSON.stringify(bad));

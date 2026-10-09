@@ -3,13 +3,19 @@
 # These power the computer-use feature (host desktop control) and are intentionally
 # kept out of requirements.txt so they are NOT installed into the Docker image:
 #   - computer-use is auto-disabled in containers anyway, and
-#   - pynput pulls in `evdev` on Linux, whose sdist build needs the kernel input
-#     headers + a C toolchain that the runtime image doesn't ship, breaking the build.
+#   - desktop control is native-only, not a container capability.
+# Linux x64 uses python-evdev's prebuilt distribution (same `evdev` import).
+# A reproducible metadata-only pynput wheel declares that binary distribution.
+# Its upstream code and LGPL license are unchanged; see vendor-pynput.py.
+--find-links desktop/vendor
+--only-binary pynput
+--only-binary evdev-binary
 #
-# Native install paths (run_local.py / run_local.sh) install this on top of
-# requirements.txt, best-effort: a failure here disables computer-use but does not
+# Native install paths (run_local.py / run_local.sh) install the generated lock
+# on top of requirements.txt, best-effort: a failure disables computer-use but does not
 # block startup.
+evdev-binary==2.0.0 ; sys_platform == "linux" and platform_machine == "x86_64"
 mss>=9.0.1  # fast cross-platform screenshots + multi-monitor enumeration
-pynput>=1.8  # mouse/keyboard control; 1.8 reports injected keys (Esc listener)
+pynput==1.8.2+shuffle1  # upstream 1.8.2 code with consistent binary dependency metadata
 Pillow>=12.1.1  # screenshot resizing and PNG encoding; not supplied by mss/pynput
 comtypes>=1.4.17 ; sys_platform == "win32"  # Windows UI Automation for element targeting (ui_tree)

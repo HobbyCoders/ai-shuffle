@@ -12,7 +12,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 const URL_READY = 'http://127.0.0.1:8000';
 
 /** Runs dist/main/index.js against fakes of Electron and of every module with side effects. */
-async function launch({ stop = async () => {}, acknowledge = async () => true, realUpdater = false, postgresStart = null, installed = null, registered = false, messageBox = async () => ({ response: 0 }), installers = null } = {}) {
+async function launch({ stop = async () => {}, acknowledge = async () => true, realUpdater = false, postgresStart = null, installed = null, registered = false, messageBox = async () => ({ response: 0 }), installers = null, heldLock = false, managed = null, platform = 'darwin', env = {}, delegatedApplication = null } = {}) {
 	const file = path.join(desktopDir, 'dist/main/index.js');
 	const localRequire = createRequire(file);
 	const appEvents = new EventEmitter();
@@ -24,7 +24,9 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		getVersion: () => '0.0.0-test',
 		setAppUserModelId() {}, setName() {}, setPath() {},
 		commandLine: { getSwitchValue: () => '' },
-		requestSingleInstanceLock: () => true,
+		hasSingleInstanceLock: () => heldLock,
+		lockRequests: 0,
+		requestSingleInstanceLock() { this.lockRequests++; return true; },
 		on: (name, fn) => appEvents.on(name, fn),
 		whenReady: async () => {},
 		quits: 0,
@@ -50,8 +52,9 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	}
 	let worker;
 	class WorkerSupervisor extends EventEmitter {
-		constructor() {
+		constructor(options) {
 			super();
+			this.options = options;
 			worker = this;
 			this.state = { phase: 'idle', port: 8000, url: URL_READY, pid: null, external: false, error: null, exitCode: null, startedAt: null, logPath: '' };
 			this.listenerToken = null;
@@ -72,8 +75,9 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		async clearConnectionFile() {}
 		async updatesAllowed() { return true; }
 	}
+	let postgres;
 	class PostgresSupervisor extends EventEmitter {
-		constructor() { super(); this.state = { phase: 'idle', port: null, error: null, logPath: '' }; }
+		constructor(options) { super(); postgres = this; this.options = options; this.state = { phase: 'idle', port: null, error: null, logPath: '' }; }
 		async start() { if (postgresStart) await postgresStart(); this.state = { ...this.state, phase: 'ready', port: 5432 }; return this.state; }
 		async stop() { this.state = { ...this.state, phase: 'stopped' }; }
 		connection() { return {}; }
@@ -91,7 +95,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	const replacements = {
 		electron: electronFake(app, errors, messageBox),
 		'./close-dialog': { showCloseDialog: async () => true },
-		'./managed-context': { managedContext: () => null },
+		'./managed-context': { managedContext: () => managed, setManagedContext: context => { managed = context; } },
 		'./installed-entry': { installedContext: () => installed },
 		'./installed-host': { installedLaunchArgs: () => [] },
 		'./ipc': { registerIpc: (deps) => { ipc = deps; } },
@@ -103,19 +107,42 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 		'./settings': { plainCipher: {}, SettingsStore: class { async load() {} postgres() { return null; } } },
 		'./tray': { installTray: (actions, name) => { tray = actions; trayName = name; } },
 		'./updater': { Updater: class extends (realUpdater ? loadUpdater(electronFake(app, errors, messageBox)) : FakeUpdater) { constructor(...args) { super(...args); updater = this; } } },
-		'./installer-updates': { InstallerUpdates: installers ?? class {}, installerPlatform: () => (installers ? 'mac' : null) },
+		'./installer-updates': { InstallerUpdates: installers ?? class {}, installerPlatform: () => (installers ? (platform==='linux'?'linux':'mac') : null) },
 		'./window': { MainWindow, PARTITION: 'test' },
 		'./worker': { WorkerSupervisor, resolveRuntime: () => ({ mode: 'repo' }) }
 	};
 	const module = { exports: {} };
-	vm.runInNewContext(readFileSync(file, 'utf8'), {
+	const sandbox = {
 		module, exports: module.exports, __dirname: path.dirname(file),
 		require: (id) => (id in replacements ? replacements[id] : localRequire(id)),
-		process: { ...process, env: {}, platform: 'darwin' }, console, setTimeout, clearTimeout, Error
-	}, { filename: file });
+		process: { ...process, env, platform }, console, setTimeout, clearTimeout, Error
+	};
+	const runIndex = () => vm.runInNewContext(readFileSync(file, 'utf8'), sandbox, { filename: file });
+	if (delegatedApplication) {
+		const buildModule = { exports: {} };
+		vm.runInNewContext(readFileSync(path.join(desktopDir, 'dist/main/source-build.js'), 'utf8'), {
+			...sandbox, module: buildModule, exports: buildModule.exports, require: localRequire
+		});
+		const entryModule = { exports: {} };
+		const entryModules = {
+			'./source-build': buildModule.exports,
+			'./source-updates': { SourceUpdates: class {
+				constructor(options) { this.options = options; }
+				async attach() {} async application() { return delegatedApplication; } async databaseStarting() {} async healthy() {}
+			} },
+			'./source-profile': { readProfile: () => null, localFeed: () => undefined },
+			'./installed-host': { readInstalledHostSync: () => null },
+			'./index': null
+		};
+		vm.runInNewContext(readFileSync(path.join(desktopDir, 'dist/main/managed-entry.js'), 'utf8'), {
+			...sandbox, module: entryModule, exports: entryModule.exports,
+			require: id => id === './index' ? runIndex() : id in entryModules ? entryModules[id] : sandbox.require(id)
+		});
+		await entryModule.exports.startManagedSource(path.join(desktopDir, 'no-user-data/updates'), 'a'.repeat(40), delegatedApplication.node);
+	} else runIndex();
 	for (let i = 0; i < 20 && !(worker && worker.state.phase === 'ready'); i++) await tick();
 	await tick();
-	return { app, appEvents, pages, errors, serviceWorkerClears, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get tray() { return tray; }, get trayName() { return trayName; }, get ipc() { return ipc; }, get updater() { return updater; } };
+	return { app, appEvents, pages, errors, serviceWorkerClears, get postgres() { return postgres; }, get window() { return mainWindow; }, get worker() { return worker; }, get menu() { return menu; }, get tray() { return tray; }, get trayName() { return trayName; }, get ipc() { return ipc; }, get updater() { return updater; } };
 }
 
 function electronFake(app, errors, messageBox) {
@@ -139,6 +166,9 @@ function loadUpdater(electron) {
 	return module.exports.Updater;
 }
 
+test('in-process source delegation inherits the installed lock without requesting or releasing it',async()=>{
+ const main=await launch({heldLock:true});assert.equal(main.app.lockRequests,0);assert.equal(main.app.quits,0);assert.equal(main.worker.state.phase,'ready');
+});
 test('reopening the window while the worker still runs goes straight back to the worker UI', async () => {
 	const main = await launch();
 	assert.deepEqual(main.pages, ['status', URL_READY], 'first launch: status page, then the worker once it is ready');
@@ -320,6 +350,41 @@ test('restarting into an update waits for running sessions without a native prom
 	assert.deepEqual(asked, []);
 });
 
+test('Linux in-process delegation produces scrubbed worker/PostgreSQL environments but keeps the AppImage host environment',async()=>{
+ const env={PATH:'/usr/bin',HOME:'/home/owner',APPIMAGE:'/downloads/AI Shuffle.AppImage',APPDIR:'/tmp/.mount-old',LD_LIBRARY_PATH:'/tmp/.mount-old/usr/lib',LD_PRELOAD:'/tmp/.mount-old/preload.so',DISPLAY:':7',WAYLAND_DISPLAY:'wayland-0',XDG_RUNTIME_DIR:'/run/user/1000',DBUS_SESSION_BUS_ADDRESS:'unix:path=/run/user/1000/bus',XAUTHORITY:'/home/owner/.Xauthority',CLAUDE_CONFIG_DIR:'/home/owner/.claude',SHUFFLE_UPDATE_POLICY_FILE:'/wrong/inherited-policy.json'};
+ const application={resources:path.join(desktopDir,'resources'),python:'/staged/python/bin/python3',serverDir:'/staged/server',node:'/staged/node/bin/node',desktopDir};
+ const main=await launch({heldLock:true,platform:'linux',env,delegatedApplication:application});
+ assert.equal(main.worker.state.phase,'ready');assert.deepEqual(main.errors,[]);
+ const {buildWorkerEnv}=createRequire(import.meta.url)('../dist/main/worker.js');
+ const workerEnv=buildWorkerEnv({...main.worker.options,platform:'linux'});
+ assert.equal(workerEnv.SHUFFLE_UPDATE_POLICY_FILE,path.join(desktopDir,'no-user-data/updates','allow-updates.json'));
+ assert.equal(main.worker.options.baseEnv.SHUFFLE_UPDATE_POLICY_FILE,undefined,'do not broadly restore inherited variables');
+ assert.equal(env.SHUFFLE_UPDATE_POLICY_FILE,'/wrong/inherited-policy.json','the policy path is injected at worker spawn, not into global env');
+ let pgEnv;const {PostgresSupervisor:RealPostgres}=createRequire(import.meta.url)('../dist/main/postgres.js');
+ const postgres=new RealPostgres({...main.postgres.options,runtime:{...main.postgres.options.runtime,exec:async(_file,_args,options)=>{pgEnv=options.env;return {code:0,stdout:'',stderr:''};}}});
+ // Exercise the real PostgreSQL command-environment consumer, intercepting only spawn.
+ await postgres.exec('/staged/postgres/bin/pg_ctl',['--version']);
+ for(const childEnv of [workerEnv,pgEnv]){
+  for(const key of ['APPIMAGE','APPDIR','LD_LIBRARY_PATH','LD_PRELOAD'])assert.equal(childEnv[key],undefined,key+' must not leak to managed runtimes');
+  for(const key of ['DISPLAY','WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS','XAUTHORITY','HOME','CLAUDE_CONFIG_DIR'])assert.equal(childEnv[key],env[key],key+' must survive');
+ }
+ assert.equal(env.APPIMAGE,'/downloads/AI Shuffle.AppImage');assert.equal(env.LD_LIBRARY_PATH,'/tmp/.mount-old/usr/lib','never scrub the running host in place');
+});
+test('Linux installer-only baseline context suppresses the incompatible staged source offer on subsequent launches',async()=>{
+ class Installers{async check(){return {kind:'available',version:'0.9.9',release:'0.9.9',installer:{}};}}
+ const updates=new Proxy({},{get(){throw Error('Must use installer updates');}});
+ const main=await launch({realUpdater:true,installers:Installers,heldLock:true,platform:'linux',installed:{updates,root:'/installed/application-updates',executable:'/downloads/AI Shuffle.AppImage',installersOnly:true}});
+ assert.equal(main.worker.options.updatePolicyFile,path.join('/installed/application-updates','allow-updates.json'));
+ await main.updater.check();assert.equal(main.updater.current.phase,'available');assert.equal(main.updater.current.release,'0.9.9');assert.deepEqual(main.errors,[]);
+});
+test('Linux fallback with an active source keeps that worker but offers installers, never repeats incompatible source activation',async()=>{
+ class Installers{async check(){return {kind:'available',version:'0.9.9',release:'0.9.9',installer:{}};}}
+ const application={resources:path.join(desktopDir,'resources'),python:'/staged/bin/python',serverDir:'/staged/server',node:'/staged/bin/node',desktopDir};
+ const updates=new Proxy({},{get(){throw Error('Must use installer updates');}});
+ const main=await launch({realUpdater:true,installers:Installers,heldLock:true,platform:'linux',managed:{application,updates,root:'/active/application-updates',installersOnly:true}});
+ assert.equal(main.worker.options.updatePolicyFile,path.join('/active/application-updates','allow-updates.json'));
+ await main.updater.check();assert.equal(main.worker.state.phase,'ready');assert.equal(main.updater.current.phase,'available');assert.equal(main.updater.current.release,'0.9.9');assert.deepEqual(main.errors,[]);assert.equal(main.app.lockRequests,0);
+});
 test('packaged macOS/Linux: a found installer is offered only in the web UI, and a download is revealed and announced', async () => {
 	const asked = [];
 	class Installers {

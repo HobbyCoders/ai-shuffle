@@ -4,17 +4,26 @@ import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import path from 'node:path';
 const code=readFileSync(new URL('../dist/main/installed-entry.js',import.meta.url),'utf8');
-function fixture({locked=true,source=false,broken=false,blocked=false,answer=1}={}){
+function fixture({locked=true,source=false,broken=false,blocked=false,answer=1,platform='win32',env={},missingStamp=false,badStamp=false,incompatible=false,activeFallback=false,state=null,recovery=false,recovered=false,confirmable=false,retryAvailable=true,installerError=false}={}){
  const events=[];const module={exports:{}};let options;
  const app={requestSingleInstanceLock:()=>{events.push('lock');return locked;},quit:()=>events.push('quit'),
   getPath:()=>path.resolve('existing-profile'),getName:()=> 'existing-name',getAppPath:()=>path.resolve('installed-app'),releaseSingleInstanceLock:()=>events.push('unlock'),commandLine:{getSwitchValue:()=>''},whenReady:async()=>{}};
  const dialog={showMessageBox:async options=>{events.push({dialog:options});return {response:answer};}};
- class SourceUpdates{constructor(value){options=value;}hasSourceState=source;blocked=blocked;async load(){events.push('load');}async useNewerBaseline(){events.push('baseline');}async retryFailed(){events.push('retry');return true;}async select(){events.push('select');if(broken)throw Error('No healthy source build');return {revision:'b'.repeat(40)};}}
- const host={saveInstalledHost:async(root,value)=>events.push({host:value,root}),installedLaunchArgs:args=>args.filter(x=>x.startsWith('aishuffle:')),launchInstalledSource:async()=>events.push('launch-source')};
- vm.runInNewContext(code,{module,exports:module.exports,process:{execPath:path.resolve('Programs/AI Shuffle.exe'),resourcesPath:path.resolve('resources'),argv:['AI Shuffle.exe','aishuffle://test']},require:id=>{
-  if(id==='electron')return {app,dialog};if(id==='node:path')return path;
-  if(id==='node:fs')return {promises:{readFile:async file=>file.endsWith('desktop-build.json')?JSON.stringify({revision:'a'.repeat(40),sequence:100}):'trusted-public-key'}};
+ class SourceUpdates{constructor(value){options=value;}get hasSourceState(){return state?!!(state.active||state.pending):this.sourceState;}sourceState=source;get pendingVersion(){return state?.staged??state?.pending??null;}async application(revision){events.push('application');return {revision,desktopDir:path.resolve('staged-desktop'),node:path.resolve('runtime/node/bin/node')};}blocked=blocked;async load(){events.push('load');}async useNewerBaseline(confirmed=false){events.push('baseline');if(confirmed&&confirmable){this.recoveryRequired=false;this.blocked=false;}}canConfirmBaselineRecovery=confirmable;recoveryRequired=recovery;recoveredState=recovered;async retryFailed(){events.push('retry');return retryAvailable;}async select(preflight){events.push('select');if(broken)throw Error('No healthy source build');const selected={revision:state?(state.pending??state.active):'b'.repeat(40),desktopDir:path.resolve('staged-desktop'),node:path.resolve('runtime/node/bin/node')};await preflight?.(selected);if(preflight&&(!state||state.pending)){events.push('booting');if(state)state.booting=selected.revision;}return selected;}stageDownloads(){events.push('stage');}async cancelInstall(){events.push('cancel');if(state?.pending){state.staged=state.pending;delete state.pending;}this.sourceState=activeFallback;this.cancelled=true;}}
+ class InstallerRequired extends Error {}
+ const host={InstallerRequired,requireInstalledElectron:async application=>{events.push('preflight');if(incompatible&&(state?application.revision==='b'.repeat(40):!events.includes('cancel')))throw new InstallerRequired('New installer required');},installedExecutable:()=>env.APPIMAGE??path.resolve('Programs/AI Shuffle.exe'),saveInstalledHost:async(root,value)=>events.push({host:value,root}),installedLaunchArgs:args=>args.filter(x=>x.startsWith('aishuffle:')),launchInstalledSource:async()=>events.push('launch-source')};
+ vm.runInNewContext(code,{module,exports:module.exports,process:{platform,arch:'x64',env,versions:{electron:'44.2.0'},execPath:path.resolve('Programs/AI Shuffle.exe'),resourcesPath:path.resolve('resources'),argv:['AI Shuffle.exe','aishuffle://test']},require:id=>{
+  if(id==='electron')return {app,dialog,shell:{openExternal:async url=>events.push(['open',url]),showItemInFolder:file=>events.push(['reveal',file])}};if(id==='node:path')return path;
+  if(id==='node:fs')return {promises:{readFile:async file=>{
+   if(!file.endsWith('desktop-build.json'))return 'trusted-public-key';
+   if(missingStamp)throw Object.assign(Error('Missing stamp'),{code:'ENOENT'});
+   return badStamp?'{}':JSON.stringify({revision:'a'.repeat(40),sequence:100});
+  }}};
   if(id==='./source-updates')return {SourceUpdates};if(id==='./installed-host')return host;
+  if(id==='./installer-updates')return {installerPlatform:()=>platform==='linux'?'linux':null,InstallerUpdates:class {
+   constructor(options){events.push(['installer-options',options]);}async check(){events.push('installer-check');if(installerError)throw Error('Offline');return {kind:'available'};}async download(){events.push('installer-download');return {file:'verified-installer.AppImage',version:'0.9.2'};}
+  }};
+  if(id===path.join(path.resolve('staged-desktop'),'dist/main/managed-entry.js'))return {startManagedSource:async(...args)=>events.push(['delegate',args[3]])};
   if(id==='./index'){events.push('run-bundled');return {};}
   throw Error('Unexpected module '+id);
  }});
@@ -24,6 +33,43 @@ test('initial installed launch is offline and uses bundled code with the existin
  const f=fixture();await f.entry.startInstalled();assert.equal(f.events.at(-1),'run-bundled');
  assert.equal(f.entry.installedContext().updates.hasSourceState,false);assert.equal(f.options.root,path.resolve('existing-profile','updates'));
  assert.equal(f.events.find(e=>e?.host)?.host.userData,path.resolve('existing-profile'));
+});
+test('Linux baseline uses userData and bundled bin/node, retaining the AppImage relaunch target',async()=>{
+ const appimage=path.resolve('Downloads/AI Shuffle.AppImage');
+ const f=fixture({platform:'linux',env:{APPIMAGE:appimage}});await f.entry.startInstalled();
+ assert.equal(f.options.bootstrapNode,path.resolve('resources/worker/node/bin/node'));
+ assert.equal(f.options.baseline.revision,'a'.repeat(40));assert.equal(f.options.baseline.sequence,100);
+ assert.equal(f.options.root,path.resolve('existing-profile/updates'));
+ assert.equal(f.entry.installedContext().executable,appimage);
+ assert.equal(f.events.find(e=>e?.host)?.host.executable,appimage);
+ assert.equal(f.events.at(-1),'run-bundled');
+ const staged=fixture({platform:'linux',source:true});await staged.entry.startInstalled();
+ assert.deepEqual(staged.events.slice(-4),['select','preflight','booting',['delegate',false]]);assert(!staged.events.includes('launch-source'));
+});
+test('Linux incompatible Electron preflight preserves installer offers without recording a failed boot',async()=>{
+ const f=fixture({platform:'linux',source:true,incompatible:true});await f.entry.startInstalled();
+ assert.deepEqual(f.events.slice(-6),['select','preflight','stage','cancel','unlock','run-bundled']);
+ assert(!f.events.includes('booting'));assert(!f.events.includes('launch-source'));assert.equal(f.entry.installedContext(),null);
+ const old=fixture({platform:'linux',source:true,incompatible:true,activeFallback:true});await old.entry.startInstalled();
+ assert.deepEqual(old.events.at(-1),['delegate',true]);assert(!old.events.includes('run-bundled'),'never downgrade an active source database');
+});
+test('second Linux launch rechecks incompatible staged updates with and without an active source; recovery clears installer-only mode',async()=>{
+ for(const active of [undefined,'a'.repeat(40)]){
+  const state={pending:'b'.repeat(40),...(active?{active}:{})};
+  const first=fixture({platform:'linux',state,incompatible:true});await first.entry.startInstalled();
+  assert.equal(state.staged,'b'.repeat(40));assert.equal(state.pending,undefined);assert.equal(state.booting,undefined);
+  const assertMode=(f,only)=>active?assert.deepEqual(f.events.at(-1),['delegate',only]):assert.equal(f.entry.installedContext().installersOnly,only);
+  assertMode(first,true);
+  const second=fixture({platform:'linux',state,incompatible:true});await second.entry.startInstalled();assertMode(second,true);assert(second.events.includes('application'));assert(!second.events.includes('booting'));
+  const restored=fixture({platform:'linux',state,incompatible:false});await restored.entry.startInstalled();assertMode(restored,false);
+  state.staged='c'.repeat(40);const replaced=fixture({platform:'linux',state,incompatible:true});await replaced.entry.startInstalled();assertMode(replaced,false);
+ }
+});
+test('unstamped Linux keeps the bundled/installer path; malformed stamps fail closed',async()=>{
+ const f=fixture({platform:'linux',missingStamp:true});await f.entry.startInstalled();
+ assert.deepEqual(f.events,['lock','unlock','run-bundled']);assert.equal(f.entry.installedContext(),null);assert.equal(f.options,undefined);
+ await assert.rejects(fixture({platform:'linux',badStamp:true}).entry.startInstalled(),/Invalid installed desktop revision/);
+ await assert.rejects(fixture({missingStamp:true}).entry.startInstalled(),/Missing stamp/);
 });
 test('existing shortcut defers to the running app before interpreting first-boot state',async()=>{
  const f=fixture({locked:false});await f.entry.startInstalled();assert.deepEqual(f.events,['lock','quit']);
@@ -35,6 +81,30 @@ test('a source build that cannot be selected never silently runs the old bundled
  const f=fixture({source:true,broken:true});await assert.rejects(f.entry.startInstalled(),/No healthy/);assert(!f.events.includes('run-bundled'));assert(!f.events.includes('launch-source'));
 });
 const kinds=events=>events.map(e=>typeof e==='string'?e:e.dialog?'dialog':'host');
+test('unrecoverable state offers an installer without loading source or bundled worker code',async()=>{
+ const f=fixture({platform:'linux',recovery:true});await f.entry.startInstalled();
+ assert.deepEqual(kinds(f.events),['lock','load','baseline','dialog','quit']);const prompt=f.events.find(e=>e.dialog).dialog;
+ assert.equal(prompt.buttons[0],'Get Latest Installer');assert.match(prompt.detail,/data have been kept/);assert.match(prompt.detail,/next launch/);assert.equal(f.entry.installedContext(),null);
+});
+test('unknown floor recovery offers an explicit installer choice without making it the default',async()=>{
+ const declined=fixture({platform:'linux',recovery:true,confirmable:true});await declined.entry.startInstalled();
+ const prompt=declined.events.find(e=>e.dialog).dialog;assert.deepEqual([...prompt.buttons],['Get Latest Installer','Quit','Use This Installer']);assert.equal(prompt.defaultId,0);assert.equal(prompt.cancelId,1);assert.match(prompt.detail,/older installer could damage your data/);assert(!declined.events.includes('run-bundled'));
+ const accepted=fixture({platform:'linux',recovery:true,confirmable:true,answer:2});await accepted.entry.startInstalled();assert.equal(accepted.events.at(-1),'run-bundled');assert.equal(accepted.events.filter(e=>e==='baseline').length,2);
+});
+test('recovery downloads and reveals a verified Linux installer; an offline failure remains a recovery offer',async()=>{
+ const f=fixture({platform:'linux',recovery:true,answer:0});await f.entry.startInstalled();
+ assert(f.events.includes('installer-check'));assert(f.events.includes('installer-download'));assert.deepEqual(f.events.at(-2),['reveal','verified-installer.AppImage']);assert.equal(f.events.at(-1),'quit');
+ const options=f.events.find(e=>Array.isArray(e)&&e[0]==='installer-options')[1];assert.equal(options.platform,'linux');assert.equal(options.arch,'x64');assert.equal(options.publicKey,'trusted-public-key');
+ assert(!f.events.includes('select'));assert(!f.events.includes('run-bundled'));
+ const offline=fixture({platform:'linux',recovery:true,answer:0,installerError:true});await offline.entry.startInstalled();
+ assert.equal(offline.events.filter(e=>e.dialog).length,2);assert.match(offline.events.filter(e=>e.dialog).at(-1).dialog.detail,/Offline.*data is unchanged/);assert(!offline.events.includes('installer-download'));assert.equal(offline.events.at(-1),'quit');
+});
+test('recovered source startup failures and exhausted retries offer installers, never older workers',async()=>{
+ for(const settings of [{source:true,recovered:true,broken:true},{source:true,blocked:true,retryAvailable:false}]){
+  const f=fixture({platform:'linux',answer:0,...settings});await f.entry.startInstalled();assert(f.events.includes('installer-download'));assert(!f.events.includes('run-bundled'));assert(!f.events.includes('launch-source'));assert.equal(f.events.at(-1),'quit');
+ }
+});
+
 test('DESK-02: a blocked newer source never falls back to an older database-incompatible baseline',async()=>{
  const f=fixture({source:true,blocked:true});
  await f.entry.startInstalled();

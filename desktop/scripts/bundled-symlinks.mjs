@@ -1,9 +1,13 @@
-import { readdir, readlink, realpath } from 'node:fs/promises';
+import { lstat, readdir, readlink, realpath } from 'node:fs/promises';
 import path from 'node:path';
 
 /** Reject non-relocatable links, including relative links that escape through another link. */
-export async function validateBundledSymlinks(dir, platform = process.platform) {
-	if (platform === 'win32') return;
+export async function validateBundledSymlinks(dir, platform = process.platform, strict = false) {
+	if (strict) {
+		const stat = await lstat(dir);
+		if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`Bundled root is a link or not a directory: ${dir}`);
+	}
+	if (platform === 'win32' && !strict) return;
 	const root = await realpath(dir);
 	const isOutside = (target) => {
 		const relative = path.relative(root, target);

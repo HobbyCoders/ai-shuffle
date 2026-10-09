@@ -35,7 +35,7 @@ export class Updater {
   private timer: ReturnType<typeof setInterval> | null = null;
   private initialCheck: ReturnType<typeof setTimeout> | null = null;
   private applications: SourceUpdates | null = null;
-  /** macOS and Linux: new releases arrive as installers (installer-updates.ts); no in-place install. */
+  /** macOS and legacy Linux: signed installers rather than in-place updates. */
   private installers: Pick<InstallerUpdates, 'check' | 'download'> | null = null;
   private saved: (file: string) => void = () => {};
   private installedExecutable: string | undefined;
@@ -112,10 +112,10 @@ export class Updater {
     }).catch(() => {});
   }
   /**
-   * macOS and Linux: check the signed installer list on launch and daily (D22,
+   * macOS and legacy Linux: check the signed installer list on launch and daily (D22,
    * no consent prompt) and offer newer installers. Download saves and verifies
-   * the installer and hands its path to saved(); the owner runs it. Windows
-   * uses useApplications instead, and a source-managed app never uses both.
+   * the installer and hands its path to saved(); the owner runs it. Windows and
+   * stamped Linux use useApplications instead; a source-managed app never uses both.
    */
   useInstallers(installers: Pick<InstallerUpdates, 'check' | 'download'>, saved: (file: string) => void): void {
     if (!this.releaseUpdates || process.env.SHUFFLE_DESKTOP_NO_UPDATES === '1' || this.applications) return;

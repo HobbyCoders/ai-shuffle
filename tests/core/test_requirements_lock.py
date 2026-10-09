@@ -78,7 +78,7 @@ def test_image_and_updater_install_only_from_the_lock():
 
 def native_requirements():
     lines = [line.split("#", 1)[0].strip() for line in (ROOT / "requirements-native.txt").read_text().splitlines()]
-    return [Requirement(line) for line in lines if line]
+    return [Requirement(line) for line in lines if line and not line.startswith("--")]
 
 
 def test_native_lock_is_hash_pinned_and_covers_requirements_native():
@@ -94,6 +94,61 @@ def test_native_lock_is_hash_pinned_and_covers_requirements_native():
             f"requirements-native.lock pins {name} outside {requirement.specifier}; run scripts/lock_requirements.sh")
 
 
+def test_native_linux_x64_replaces_evdev_sdist_with_hash_pinned_wheels():
+    text = (ROOT / "requirements-native.lock").read_text()
+    entries = locked("requirements-native.lock")
+    assert "evdev==2.0.0 ; platform_machine != 'x86_64'" in text
+    assert entries["evdev-binary"][0][0] == Version("2.0.0")
+    assert "--hash=sha256:4721296f6439fd2a923f9e174c9a4dede44efee6aef3470775154d9cf7b54ba3" in text
+    assert "platform_machine == 'x86_64' and sys_platform == 'linux'" in text
+    script = (ROOT / "scripts/lock_requirements.sh").read_text()
+    assert "--find-links desktop/vendor --only-binary pynput --only-binary evdev-binary" in script
+    assert "requirements-native.lock" not in (ROOT / "Dockerfile").read_text()
+    local = (ROOT / "run_local.py").read_text()
+    assert '"--only-binary=pynput,evdev-binary"' in local
+    assert '"--require-hashes", "-r", str(project_root / "requirements-native.lock")' in local
+
+
+def test_vendored_pynput_hash_and_dependency_closure_are_consistent():
+    import base64
+    import csv
+    import hashlib
+    import io
+    from email.parser import BytesParser
+    import zipfile
+    from packaging.markers import default_environment
+
+    wheel = ROOT / "desktop/vendor/pynput-1.8.2+shuffle1-py2.py3-none-any.whl"
+    digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    assert "--hash=sha256:" + digest in locked("requirements-native.lock")["pynput"][0][1]
+    with zipfile.ZipFile(wheel) as archive:
+        metadata = BytesParser().parsebytes(archive.read("pynput-1.8.2+shuffle1.dist-info/METADATA"))
+        assert metadata["Version"] == "1.8.2+shuffle1"
+        assert any(name.endswith("COPYING.LGPL") for name in archive.namelist())
+        record = archive.read("pynput-1.8.2+shuffle1.dist-info/RECORD").decode()
+        for name, checksum, size in csv.reader(io.StringIO(record)):
+            if checksum:
+                data = archive.read(name)
+                actual = base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+                assert checksum == "sha256=" + actual and int(size) == len(data)
+    requirements = [Requirement(line) for line in metadata.get_all("Requires-Dist")]
+    heads = []
+    for name in ("requirements.lock", "requirements-native.lock"):
+        for line in (ROOT / name).read_text().splitlines():
+            if line and line[0].isalnum():
+                heads.append(Requirement(line.rstrip("\\").strip()))
+    for platform, machine in [("linux", "x86_64"), ("linux", "aarch64"), ("win32", "AMD64"), ("darwin", "arm64")]:
+        env = {**default_environment(), "sys_platform": platform, "platform_machine": machine,
+               "python_version": "3.12", "python_full_version": "3.12.14", "extra": ""}
+        pins = {canonicalize_name(r.name): next(iter(r.specifier)).version for r in heads if not r.marker or r.marker.evaluate(env)}
+        for req in requirements:
+            if not req.marker or req.marker.evaluate(env):
+                assert canonicalize_name(req.name) in pins, f"{platform}/{machine}: missing {req}"
+                assert req.specifier.contains(pins[canonicalize_name(req.name)]), f"{platform}/{machine}: incompatible {req}"
+        if platform == "linux" and machine == "x86_64":
+            assert "evdev" not in pins and "evdev-binary" in pins
+
+
 def test_packages_in_both_locks_are_pinned_identically():
     # The native lock is compiled with -c requirements.lock; the desktop
     # installs them one after the other and they must never disagree.
@@ -105,12 +160,12 @@ def test_packages_in_both_locks_are_pinned_identically():
 def test_desktop_installs_only_from_the_locks():
     build = (ROOT / "desktop/src/main/source-build.ts").read_text()
     assert "'--require-hashes', '-r', 'requirements.lock'" in build
-    assert "'--require-hashes', '-r', 'requirements-native.lock'" in build
+    assert "'--find-links', 'desktop/vendor', '--only-binary=pynput,evdev-binary', '--require-hashes', '-r', 'requirements-native.lock'" in build
     assert "'--no-deps', '--no-build-isolation', './fluid'" in build
     assert "'requirements.txt'" not in build and "'requirements-native.txt'" not in build
     runtime = (ROOT / "desktop/scripts/build-worker.mjs").read_text()
     assert "'--require-hashes', '-r', path.join(repoDir, 'requirements.lock')" in runtime
-    assert "'--require-hashes', '-r', path.join(repoDir, 'requirements-native.lock')" in runtime
+    assert "'--find-links', path.join(repoDir, 'desktop/vendor'), '--only-binary=pynput,evdev-binary', '--require-hashes', '-r', path.join(repoDir, 'requirements-native.lock')" in runtime
     assert "'--no-deps', '--no-build-isolation', path.join(repoDir, 'fluid')" in runtime
     # The bundled runtime's fingerprint and the source build's must hash the same inputs.
     contract = (ROOT / "desktop/scripts/runtime-contract.mjs").read_text()

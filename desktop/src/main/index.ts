@@ -50,7 +50,8 @@ if (!app.isPackaged && !managedContext() && process.env.SHUFFLE_DESKTOP_USER_DAT
 	app.setPath('userData', process.env.SHUFFLE_DESKTOP_USER_DATA);
 }
 
-if (!app.requestSingleInstanceLock()) {
+// Linux source delegation keeps the installed process and its existing lock.
+if (!app.hasSingleInstanceLock() && !app.requestSingleInstanceLock()) {
 	app.quit();
 } else {
 	// A startup failure must not leave a windowless process behind.
@@ -65,9 +66,11 @@ async function main(): Promise<void> {
 	const window = new MainWindow(userData, isolation ? identity.name : 'AI Shuffle', !isolation);
 	const updater = new Updater(identity.updates);
 	const managed = managedContext();
-	const applications = managed?.updates ?? installedContext()?.updates ?? null;
+	const installation = installedContext();
+	const applications = managed?.installersOnly || installation?.installersOnly ? null : managed?.updates ?? installation?.updates ?? null;
 	const installedExecutable = managed?.host?.executable ?? installedContext()?.executable;
-	if (applications) process.env.SHUFFLE_UPDATE_POLICY_FILE = path.join(applications.options.root, 'allow-updates.json');
+	const updateRoot = managed?.root ?? installation?.root;
+	const updatePolicyFile = updateRoot ? path.join(updateRoot, 'allow-updates.json') : undefined;
 	if (applications) updater.useApplications(applications, installedExecutable, installedLaunchArgs(process.argv.slice(1), app.commandLine.getSwitchValue('remote-debugging-port')).filter(arg => arg.startsWith('--')));
 
 	app.on('second-instance', () => window.focus());
@@ -97,6 +100,7 @@ async function main(): Promise<void> {
 					binaries: pgResolved,
 					root: path.join(userData, 'postgres'),
 					logDir,
+					...(managed?.subprocessEnv ? { runtime: { env: managed.subprocessEnv } } : {}),
 					credentials: {
 						load: () => settings.postgres(),
 						save: (config) => settings.savePostgres({ ...config, managed: true })
@@ -125,6 +129,8 @@ async function main(): Promise<void> {
 				? null
 				: new WorkerSupervisor({
 						runtime: resolved,
+						baseEnv: managed?.subprocessEnv,
+						updatePolicyFile,
 						logDir,
 						envFile: path.join(userData, 'worker', '.env'),
 						stateDir: path.join(userData, 'worker'),
@@ -243,8 +249,8 @@ async function main(): Promise<void> {
 	applications?.useLease?.(() => supervisor?.sourceLease() ?? Promise.resolve(null));
 	updater.setBridge(state => supervisor?.exchangeUpdateState(state) ?? Promise.resolve({}),
 		async () => !!supervisor && await supervisor.activeSessionCount() === 0);
-	// macOS and Linux: new releases come as signed installers (D22: checked on
-	// launch and daily without asking). Windows keeps its source-update path.
+	// macOS and legacy unstamped Linux installs keep signed installer offers
+	// (D22: checked on launch and daily). Stamped Linux uses source updates.
 	const platform = installerPlatform();
 	if (!applications && platform && app.isPackaged && !isolation) {
 		try {
