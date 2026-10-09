@@ -12,17 +12,23 @@ Three audiences share the ``/api/v1/network`` prefix:
   active worker of the account (``tokens.require_worker_device``)
 - a joining worker with a pairing code (unauthenticated, rate limited):
   ``POST /join`` and ``GET /join/{id}``
+- peer workers on the same LAN (``/peer/lan/*``): a mutually authenticated,
+  encrypted session (``app.network.lan``) that carries the sync subset of
+  ``/peer/*`` without a device token, so nothing readable crosses the LAN
 
 A valid one-time code admits the joiner on contact; account sign-in admits
 devices through the hub. Neither needs a second approval on another screen.
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field, field_validator
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.api.auth import require_admin, require_auth
 from app.core.request_identity import get_client_ip
@@ -30,7 +36,7 @@ from app.api.pairing import _ExchangeRateLimiter
 from app.core.config import settings
 from app.db import network as store
 from app.db.async_database import run_sync
-from app.network import catalog, engine, enrollment, identity as identity_mod, policy, recovery, runners, tokens, transport
+from app.network import catalog, engine, enrollment, identity as identity_mod, lan, policy, recovery, runners, tokens, transport
 from app.network import endpoints as endpoints_mod
 from app.api.network_usage import router as usage_budget_router
 
@@ -124,6 +130,7 @@ class ExchangeRequest(BaseModel):
     endpoints: List[str] = Field(default_factory=list, max_length=8)
     capabilities: Dict[str, Any] = Field(default_factory=dict)
     version: Optional[str] = Field(default=None, max_length=40)
+    platform: Optional[str] = Field(default=None, max_length=40)
 
     @field_validator("endpoints")
     @classmethod
@@ -133,6 +140,27 @@ class ExchangeRequest(BaseModel):
 
 class OpsRequest(BaseModel):
     ops: List[Dict[str, Any]] = Field(default_factory=list, max_length=2000)
+
+
+class LanHelloRequest(BaseModel):
+    v: int = Field(default=lan.PROTOCOL, ge=1)
+    device_id: str = Field(min_length=4, max_length=64)
+    ephemeral: str = Field(min_length=40, max_length=64)
+
+
+class LanSessionRequest(BaseModel):
+    v: int = Field(default=lan.PROTOCOL, ge=1)
+    device_id: str = Field(min_length=4, max_length=64)
+    challenge: str = Field(min_length=16, max_length=128)
+    signature: str = Field(min_length=64, max_length=128)
+    # Nothing else: this request crosses the LAN in the clear and only the
+    # transcript is signed, so the member's endpoints, capabilities, version
+    # and platform arrive only in the sealed exchange (extra fields are ignored).
+
+
+class LanSettings(BaseModel):
+    enabled: Optional[bool] = None
+    addresses: Optional[List[str]] = Field(default=None, max_length=lan.MAX_OWNER_ADDRESSES)
 
 
 
@@ -206,6 +234,8 @@ def _member_view(row: dict, ctx) -> dict:
         "revision": engine.running_revision() if is_self else presence.get("source_revision"),
         "online": is_self or row["device_id"] in online,
         "legacy_instance_id": row.get("legacy_instance_id"),
+        # "lan" (sealed, direct), "tunnel", "direct" (plain-http token) or None.
+        "route": None if is_self else transport.route_of(row["device_id"]),
     }
 
 
@@ -551,7 +581,7 @@ async def peer_exchange(body: ExchangeRequest, device_id: str = Depends(tokens.r
         elif released:
             catalog.publish_owned()
         store.touch_member(device_id, capabilities=body.capabilities or None, endpoints=body.endpoints or None,
-                           version=body.version, incarnation=body.incarnation)
+                           version=body.version, incarnation=body.incarnation, platform=body.platform)
         ops, heads, snapshot = store.exchange_batch(body.watermarks, limit=body.limit, lane=body.lane,
                                                    exclude_origin=device_id)
         return {"ops": ops, "watermarks": heads, "generation": ctx.generation,
@@ -718,3 +748,158 @@ async def peer_file_part(hash_value: str, index: int, device_id: str = Depends(t
         raise HTTPException(404, "File not held here") from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# Peer plane on the LAN (sealed sessions, see ``app.network.lan``)
+# ---------------------------------------------------------------------------
+
+async def _require_lan() -> engine.NetworkContext:
+    """The network context, or 404 (an older worker answers the same) when LAN-direct is off here."""
+    ctx = engine.context()
+    if ctx is None or not await run_sync(lan.lan_direct_enabled):
+        raise HTTPException(404, "Not Found")
+    return ctx
+
+
+@router.post(lan.HELLO_PATH.removeprefix("/api/v1/network"))
+async def peer_lan_hello(body: LanHelloRequest, request: Request) -> dict:
+    # Bounded like ``/peer/auth/challenge``: the challenge comes from the same
+    # pool, and once a hello answers it, it buys only this LAN session (never a device token).
+    requester = get_client_ip(request)
+    _challenge_limiter.check(requester)
+    ctx = await _require_lan()
+    member_address = False
+    if tokens.at_capacity():
+        row = await run_sync(store.get_member, body.device_id)
+        member_address = tokens.is_member_endpoint(requester, (row or {}).get("endpoints") or [])
+    challenge = tokens.new_challenge(body.device_id, requester, member_address=member_address)
+    try:
+        return lan.server_hello(ctx, device_id=body.device_id, client_ephemeral=body.ephemeral, challenge=challenge,
+                                requester=requester)
+    except lan.LanBusy as exc:
+        raise HTTPException(429, str(exc), headers={"Retry-After": str(tokens.CHALLENGE_RETRY_AFTER_SECONDS)}) from exc
+    except lan.LanRejected as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post(lan.SESSION_PATH.removeprefix("/api/v1/network"))
+async def peer_lan_session(body: LanSessionRequest) -> dict:
+    ctx = await _require_lan()
+    try:
+        result = lan.server_session(ctx, device_id=body.device_id, challenge=body.challenge, signature=body.signature)
+    except lan.LanRejected as exc:
+        raise HTTPException(403, str(exc)) from exc
+    # Only liveness here: the member's description arrives sealed, with the exchange.
+    await run_sync(store.touch_member, body.device_id)
+    transport.note_contact(body.device_id)
+    return result
+
+
+def _flag(value: Any) -> bool:
+    return str(value).lower() in ("1", "true", "yes")
+
+
+_LAN_PREFIX = "/api/v1/network/peer"
+# The sync subset of the peer plane: every one is safe to repeat over the
+# tunnel when a LAN answer is lost. Control, workspace, browser and usage
+# routes stay on device tokens.
+_LAN_ROUTES = (
+    ("GET", re.compile(r"/ping"), lambda m, q, b, d: peer_ping(device_id=d)),
+    ("POST", re.compile(r"/exchange"), lambda m, q, b, d: peer_exchange(ExchangeRequest.model_validate(b or {}), d)),
+    ("POST", re.compile(r"/ops"), lambda m, q, b, d: peer_ops(OpsRequest.model_validate(b or {}), d)),
+    ("GET", re.compile(r"/ops/([^/]{1,64})/(\d{1,18})/(\d{1,18})"),
+     lambda m, q, b, d: peer_op(m[1], int(m[2]), int(m[3]), _flag(q.get("at_or_after", False)), d)),
+    ("POST", re.compile(r"/state"), lambda m, q, b, d: peer_state(_flag(q.get("prepare", False)), d)),
+    ("GET", re.compile(r"/state/([A-Za-z0-9_-]{1,128})/(\d{1,9})"),
+     lambda m, q, b, d: peer_state_page(m[1], int(m[2]), d)),
+    ("GET", re.compile(r"/blob/([0-9a-f]{64})/parts/(\d{1,9})"),
+     lambda m, q, b, d: peer_file_part(m[1], int(m[2]), d)),
+)
+
+
+async def _dispatch_lan(call: dict, device_id: str) -> tuple[int, str, bytes]:
+    method, path = call["m"], call["p"]
+    query = call.get("q") if isinstance(call.get("q"), dict) else {}
+    handler = match = None
+    if path.startswith(_LAN_PREFIX):
+        for verb, pattern, fn in _LAN_ROUTES:
+            found = pattern.fullmatch(path[len(_LAN_PREFIX):])
+            if verb == method and found:
+                handler, match = fn, found
+                break
+    if handler is None:
+        return 404, "application/json", b'{"detail":"Not available on the LAN session"}'
+    try:
+        result = await handler(match, query, call.get("b"), device_id)
+    except HTTPException as exc:
+        return exc.status_code, "application/json", json.dumps({"detail": exc.detail}).encode("utf-8")
+    except ValidationError as exc:
+        detail = jsonable_encoder(exc.errors(include_url=False, include_context=False))
+        return 422, "application/json", json.dumps({"detail": detail}).encode("utf-8")
+    except Exception:  # noqa: BLE001
+        logger.exception("LAN call %s %s from %s failed", method, path, device_id)
+        return 500, "application/json", b'{"detail":"Internal error"}'
+    if isinstance(result, Response):
+        return result.status_code, result.media_type or "application/octet-stream", bytes(result.body)
+    return 200, "application/json", json.dumps(jsonable_encoder(result), separators=(",", ":")).encode("utf-8")
+
+
+@router.post(lan.CALL_PATH.removeprefix("/api/v1/network"))
+async def peer_lan_call(request: Request) -> Response:
+    """One sealed request; the answer is sealed to the same session and sequence number."""
+    ctx = await _require_lan()
+    session_id = request.headers.get(lan.SESSION_HEADER, "")
+    try:
+        seq = int(request.headers.get(lan.SEQ_HEADER, ""))
+    except ValueError:
+        raise HTTPException(401, "LAN session refused") from None
+    # Refuse a session this worker does not hold before reading a body of up
+    # to CALL_MAX_BYTES (the caller opens a new session or uses the tunnel).
+    if not lan.session_known(session_id):
+        raise HTTPException(401, "LAN session refused")
+    body = bytearray()
+    async for piece in request.stream():
+        body.extend(piece)
+        if len(body) > lan.CALL_MAX_BYTES:
+            raise HTTPException(413, "Call too large")
+    try:
+        session, call = await run_sync(lan.server_open_call, ctx, session_id, seq, bytes(body))
+    except lan.LanRejected as exc:
+        # Unsealed and generic: the caller opens a new session or uses the tunnel.
+        logger.debug("LAN call refused: %s", exc)
+        raise HTTPException(401, "LAN session refused") from exc
+    status_code, media_type, raw = await _dispatch_lan(call, session.device_id)
+    return Response(lan.seal_reply(session, seq, status_code, media_type, raw), media_type="application/octet-stream")
+
+
+def _lan_settings() -> dict:
+    return {"enabled": lan.lan_direct_enabled(), "addresses": lan.owner_addresses(),
+            "advertised": engine._own_endpoints()}
+
+
+@router.get("/lan")
+async def get_lan_settings(_: str = Depends(require_admin)) -> dict:
+    """Direct LAN sync between this account's workers: on or off, and extra addresses to advertise."""
+    return await run_sync(_lan_settings)
+
+
+@router.put("/lan")
+async def put_lan_settings(body: LanSettings, _: str = Depends(require_admin)) -> dict:
+    def _save() -> dict:
+        if body.addresses is not None:
+            lan.set_owner_addresses(body.addresses)
+        if body.enabled is not None:
+            lan.set_lan_direct_enabled(body.enabled)
+        return _lan_settings()
+
+    try:
+        result = await run_sync(_save)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if body.enabled is False:
+        # Off at once, both ways: sessions peers opened here and ours to them.
+        lan.drop_sessions()
+        transport.drop_lan_sessions()
+    engine.kick()
+    return result

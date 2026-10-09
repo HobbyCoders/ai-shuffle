@@ -28,6 +28,7 @@ import {
 	dismissNetworkConflict,
 	forkSessionHere,
 	getEnrollment,
+	getLanSettings,
 	getNetworkPolicy,
 	getNetworkStatus,
 	getRecoveryStatus,
@@ -40,7 +41,9 @@ import {
 	rejectJoin,
 	renameNetworkMember,
 	revokeNetworkMember,
-	startEnrollment
+	routeLabel,
+	startEnrollment,
+	updateLanSettings
 } from './network';
 
 beforeEach(() => {
@@ -189,5 +192,25 @@ describe('fork here', () => {
 		const result = await forkSessionHere('old');
 		expect(api.post).toHaveBeenCalledWith('/network/sessions/old/fork-here', {});
 		expect(result.session_id).toBe('new');
+	});
+});
+
+describe('LAN-direct sync', () => {
+	it('reads the setting uncached and saves only what changed', async () => {
+		api.get.mockResolvedValue({ enabled: true, addresses: [], advertised: [] });
+		await getLanSettings();
+		expect(api.get).toHaveBeenCalledWith('/network/lan', { cache: 'no-store' });
+		api.put.mockResolvedValue({ enabled: false, addresses: [], advertised: [] });
+		await updateLanSettings({ enabled: false });
+		expect(api.put).toHaveBeenCalledWith('/network/lan', { enabled: false });
+		await updateLanSettings({ addresses: ['10.0.0.200:8001'] });
+		expect(api.put).toHaveBeenLastCalledWith('/network/lan', { addresses: ['10.0.0.200:8001'] });
+	});
+
+	it('labels each peer route', () => {
+		expect(routeLabel('lan')).toBe('Direct (LAN)');
+		expect(routeLabel('tunnel')).toBe('Via tunnel');
+		expect(routeLabel('direct')).toBe('Direct');
+		expect(routeLabel(null)).toBe('Not connected');
 	});
 });

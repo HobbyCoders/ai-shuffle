@@ -34,16 +34,15 @@ async def fetch(client, link, digest: str):
     data = bytearray()
     index, total = 0, None
     while total is None or len(data) < total:
-        await link.authenticate(client, ctx)
-        raw = bytearray()
-        async with client.stream("GET", link.base_url + f"/api/v1/network/peer/blob/{digest}/parts/{index}",
-                                 headers={"Authorization": "Bearer " + link.token}, timeout=120) as response:
-            if response.status_code != 200:
-                return None
-            async for chunk in response.aiter_bytes():
-                raw.extend(chunk)
-                if len(raw) > MAX_RESPONSE:
-                    raise ValueError("Peer file part is too large")
+        from app.network import transport
+        await link.open(client, ctx)
+        try:
+            status, raw = await link.fetch_bytes(client, ctx, f"/api/v1/network/peer/blob/{digest}/parts/{index}",
+                                                 limit=MAX_RESPONSE, timeout=120)
+        except transport.PeerResponseTooLarge as exc:
+            raise ValueError("Peer file part is too large") from exc
+        if status != 200:
+            return None
         import json
         try:
             item = json.loads(raw)

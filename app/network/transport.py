@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import logging
 import random
 import threading
@@ -32,8 +33,9 @@ import httpx
 
 from app.core.config import settings
 from app.db import network as store
-from app.network import catalog, engine, identity as identity_mod, membership, policy, tokens
-from app.network.endpoints import dial_endpoints, peer_endpoints, validate_endpoints
+from app.network import catalog, engine, identity as identity_mod, lan, membership, policy, tokens
+from app.network.crypto import CryptoError
+from app.network.endpoints import dial_endpoints, known_endpoints, peer_endpoints, validate_endpoints
 from app.network.envelope import Envelope
 
 logger = logging.getLogger(__name__)
@@ -152,23 +154,35 @@ class PeerConnectFailed(PeerError):
     """No address accepted a connection; no request reached the peer."""
 
 
+class PeerResponseTooLarge(PeerError):
+    """A peer's answer exceeded the size the caller accepts."""
+
+
 # Longest detail kept from a peer's error response. Refusals pass through a
 # second worker before reaching the UI, so this must fit a full sentence.
 ERROR_DETAIL_LIMIT = 300
 
 
 class PeerLink:
-    """One peer: endpoint candidates, a cached token, and an HTTP client.
+    """One peer: endpoint candidates, a sealed LAN session or a cached token.
 
     ``endpoints`` is what ``dial_endpoints`` selects from the addresses the
-    peer is known at: its https tunnel alone when it advertises one, its
-    plain-http LAN address only when it does not.
+    peer is known at for device-token requests: its https tunnel alone when
+    it advertises one, its plain-http address only when it does not.
+    ``lan_endpoints`` are its private LAN addresses, dialed first through a
+    sealed session (``lan``) whenever the peer supports one; every failure
+    there falls back to ``endpoints`` at once (``open``, ``call``).
     """
 
     def __init__(self, device_id: str, endpoints: list[str]):
         self.device_id = device_id
         # Member-advertised addresses are dialed: usable http(s) URLs, https only when present.
         self.endpoints = dial_endpoints(endpoints)
+        self.lan_endpoints = lan.lan_candidates(endpoints)
+        self.lan: lan.ClientSession | None = None
+        # Monotonic time before which the LAN is not tried again after it failed.
+        self.lan_retry_at = 0.0
+        self.lan_last_error: str | None = None
         self.base_url: str | None = None
         self.token: str | None = None
         self.token_expires = 0.0
@@ -225,6 +239,137 @@ class PeerLink:
         if self.base_url is not None and self.base_url not in self.endpoints:
             self.base_url = None
             self.token = None
+        local = lan.lan_candidates(endpoints)
+        if local != self.lan_endpoints:
+            # A changed LAN address is worth trying at once; a withdrawn one
+            # is not dialed again, even through a session already open.
+            self.lan_endpoints = local
+            self.lan_retry_at = 0.0
+            if self.lan is not None and self.lan.base not in local:
+                self.lan = None
+
+    @property
+    def active_url(self) -> str | None:
+        """The address sync traffic goes to right now."""
+        return self.lan.base if self.lan is not None else self.base_url
+
+    @property
+    def route(self) -> str | None:
+        """``lan`` (sealed, direct), ``tunnel`` (https), ``direct`` (plain-http token), or None."""
+        if self.lan is not None:
+            return "lan"
+        if self.base_url is None:
+            return None
+        return "tunnel" if self.base_url.startswith("https://") else "direct"
+
+    async def open(self, client: httpx.AsyncClient, ctx: engine.NetworkContext) -> None:
+        """Make a route ready: a sealed LAN session when one works, else a device token.
+
+        The LAN is tried first when the peer advertises a private address,
+        LAN-direct is on here and it did not fail in the last
+        ``lan.LAN_REPROBE_SECONDS``. Any failure there is silent and the
+        device token path (the tunnel) is used straight away.
+        """
+        now = time.monotonic()
+        if self.lan is not None:
+            if self.lan.usable(now) and self.lan.base in self.lan_endpoints:
+                return
+            self.lan = None
+        if self.lan_endpoints and now >= self.lan_retry_at and await self._open_lan(client, ctx):
+            return
+        await self.authenticate(client, ctx)
+
+    async def _open_lan(self, client: httpx.AsyncClient, ctx: engine.NetworkContext) -> bool:
+        if not await asyncio.to_thread(lan.lan_direct_enabled):
+            return False
+        last: BaseException | None = None
+        for base in self.lan_endpoints[:lan.LAN_PROBE_ADDRESSES]:
+            try:
+                self.lan = await lan.handshake(client, ctx, self.device_id, base,
+                                               connect_limit=connect_timeout.get())
+            except lan.LanIdentityMismatch as exc:
+                logger.warning("LAN address %s of peer %s refused: %s", base, self.device_id, exc)
+                last = exc
+                continue
+            except (lan.LanError, httpx.HTTPError, CryptoError) as exc:
+                last = exc
+                continue
+            self.lan_retry_at = 0.0
+            self.lan_last_error = None
+            logger.debug("Peer %s reached directly on the LAN at %s", self.device_id, base)
+            return True
+        self._lan_failed(last)
+        return False
+
+    def _lan_failed(self, exc: BaseException | None) -> None:
+        """Leave the LAN for the tunnel until the next re-probe (or an address change)."""
+        if self.lan is not None:
+            logger.info("LAN path to peer %s failed (%s); using the tunnel", self.device_id, exc)
+        self.lan = None
+        self.lan_retry_at = time.monotonic() + lan.LAN_REPROBE_SECONDS
+        self.lan_last_error = f"{type(exc).__name__}: {exc}"[:200] if exc is not None else "unreachable"
+
+    async def _lan_exchange(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, method: str, path: str,
+                            *, json_body=None, params=None, timeout: float = REQUEST_TIMEOUT,
+                            max_bytes: int = lan.REPLY_MAX_BYTES) -> tuple[int, str, bytes] | None:
+        """One call through the LAN session, or None when the tunnel must take it.
+
+        A session the peer no longer knows (it restarted, the membership
+        changed) is reopened once on the LAN. Every request sent this way is
+        safe to repeat over the tunnel: reads, idempotent op batches, the
+        exchange and the state preparation.
+        """
+        for attempt in range(2):
+            if self.lan is None:
+                return None
+            try:
+                return await lan.sealed_call(client, self.lan, method, path, json_body=json_body, params=params,
+                                             timeout=timeout, max_bytes=max_bytes,
+                                             connect_limit=connect_timeout.get())
+            except lan.LanSessionRejected as exc:
+                self.lan = None
+                if attempt or not await self._open_lan(client, ctx):
+                    if self.lan_last_error is None:
+                        self._lan_failed(exc)
+                    return None
+            except lan.LanError as exc:
+                self._lan_failed(exc)
+                return None
+        return None
+
+    async def call(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, method: str, path: str, *,
+                   json_body=None, params=None, timeout: float = REQUEST_TIMEOUT) -> Any:
+        """A sync request to the peer: through the LAN session when open, else with a device token."""
+        if self.lan is not None:
+            answer = await self._lan_exchange(client, ctx, method, path, json_body=json_body, params=params,
+                                              timeout=timeout)
+            if answer is not None:
+                status, _type, raw = answer
+                return _decode_answer(status, raw)
+        await self.authenticate(client, ctx)
+        return await self._request(client, method, path, json_body=json_body, params=params, timeout=timeout)
+
+    async def fetch_bytes(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, path: str, *,
+                          limit: int, timeout: float = 60.0) -> tuple[int, bytes]:
+        """GET a byte body (a snapshot page, a file part) of at most ``limit`` bytes: ``(status, body)``."""
+        if self.lan is not None:
+            answer = await self._lan_exchange(client, ctx, "GET", path, timeout=timeout, max_bytes=limit)
+            if answer is not None:
+                status, _type, raw = answer
+                if len(raw) > limit:
+                    raise PeerResponseTooLarge("Peer answer exceeds the transfer limit")
+                return status, (raw if status == 200 else b"")
+        await self.authenticate(client, ctx)
+        raw = bytearray()
+        async with client.stream("GET", self.base_url + path, headers={"Authorization": "Bearer " + self.token},
+                                 timeout=timeout) as response:
+            if response.status_code != 200:
+                return response.status_code, b""
+            async for piece in response.aiter_bytes():
+                raw.extend(piece)
+                if len(raw) > limit:
+                    raise PeerResponseTooLarge("Peer answer exceeds the transfer limit")
+        return 200, bytes(raw)
 
     async def _request(self, client: httpx.AsyncClient, method: str, path: str, *, json_body=None,
                        params=None, auth: bool = True, timeout: float = REQUEST_TIMEOUT,
@@ -328,17 +473,18 @@ class PeerLink:
 
     async def _sync_once(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, catch_up: bool) -> dict:
         """Full exchange with this peer. Returns a small summary."""
-        await self.authenticate(client, ctx)
+        await self.open(client, ctx)
         summary: dict[str, Any] = {"received": 0, "sent": 0}
         target = None
         marks = await asyncio.to_thread(store.local_watermarks)
         pull_deadline = time.monotonic() + SYNC_PULL_SECONDS
         while True:
-            exchange = await self._request(client, "POST", "/api/v1/network/peer/exchange", json_body={
+            exchange = await self.call(client, ctx, "POST", "/api/v1/network/peer/exchange", json_body={
                 "watermarks": marks, "limit": BATCH_LIMIT, "incarnation": ctx.identity.incarnation,
                 "flush": catch_up and target is None,
                 "catalog_backlog": await asyncio.to_thread(catalog.has_events_backlog, ctx=ctx),
                 **(await asyncio.to_thread(_description)), "version": settings.version,
+                "platform": identity_mod.platform_name(),
             })
             theirs = exchange.get("watermarks") or {}
             note_watermarks(self.device_id, theirs, catalog_backlog=bool(exchange.get("catalog_backlog")))
@@ -401,11 +547,9 @@ class PeerLink:
                                 endpoints=their_endpoints or None, version=exchange.get("version"),
                                 incarnation=exchange.get("incarnation"))
         if their_endpoints:
+            # When the peer's tunnel appeared, the plain-http token is dropped
+            # and the push below authenticates over the tunnel (``call``).
             self.update_endpoints(their_endpoints)
-            if self.base_url is None:
-                # The peer's tunnel appeared: the plain-http connection is
-                # dropped and the push below already goes over the tunnel.
-                await self.authenticate(client, ctx)
         # Push what the peer lacks, in bounded batches.
         while True:
             outbound, _, snapshot = await asyncio.to_thread(
@@ -417,7 +561,7 @@ class PeerLink:
             if not outbound:
                 break
             self.syncing = True
-            pushed = await self._request(client, "POST", "/api/v1/network/peer/ops", json_body={"ops": outbound})
+            pushed = await self.call(client, ctx, "POST", "/api/v1/network/peer/ops", json_body={"ops": outbound})
             summary["sent"] += len(outbound)
             self.batches += 1
             if pushed.get("retry") or pushed.get("pending"):
@@ -451,14 +595,14 @@ class PeerLink:
             # have their own per-page limits outside this preparation timeout.
             async with asyncio.timeout(STATE_PREPARE_SECONDS):
                 while True:
-                    await self.authenticate(client, ctx)
+                    await self.open(client, ctx)
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise PeerError("Timed out waiting for peer state capture")
                     # Older inviters ignore the query parameter and return a
                     # manifest directly. Keep their 120s request allowance.
-                    manifest = await self._request(
-                        client, "POST", "/api/v1/network/peer/state", json_body={},
+                    manifest = await self.call(
+                        client, ctx, "POST", "/api/v1/network/peer/state", json_body={},
                         params={"prepare": "true"}, timeout=min(STATE_REQUEST_TIMEOUT, remaining))
                     if time.monotonic() >= deadline:
                         raise PeerError("Timed out waiting for peer state capture")
@@ -474,16 +618,15 @@ class PeerLink:
         with tempfile.TemporaryDirectory(prefix="shuffle-peer-") as temporary:
             directory = Path(temporary)
             for index, expected in enumerate(manifest["pages"]):
-                await self.authenticate(client, ctx)
-                raw = bytearray()
-                async with client.stream("GET", self.base_url + f"/api/v1/network/peer/state/{manifest['transfer']}/{index}",
-                                         headers={"Authorization": "Bearer " + self.token}, timeout=60) as response:
-                    if response.status_code != 200:
-                        raise PeerError("Peer transfer interrupted; retrying from a verified state")
-                    async for piece in response.aiter_bytes():
-                        raw.extend(piece)
-                        if len(raw) > peer_snapshot.MAX_PAGE:
-                            raise PeerError("Peer state page exceeds transfer limit")
+                await self.open(client, ctx)
+                try:
+                    status, raw = await self.fetch_bytes(
+                        client, ctx, f"/api/v1/network/peer/state/{manifest['transfer']}/{index}",
+                        limit=peer_snapshot.MAX_PAGE, timeout=60)
+                except PeerResponseTooLarge as exc:
+                    raise PeerError("Peer state page exceeds transfer limit") from exc
+                if status != 200:
+                    raise PeerError("Peer transfer interrupted; retrying from a verified state")
                 if len(raw) != expected["bytes"]:
                     raise PeerError("Peer state page was truncated")
                 await asyncio.to_thread((directory / f"{index}.json").write_bytes, raw)
@@ -526,9 +669,9 @@ class PeerLink:
         if remote <= local:
             return False
         try:
-            answer = await self._request(client, "GET",
-                                         f"/api/v1/network/peer/ops/{ctx.device_id}/{ctx.identity.incarnation}/{local + 1}",
-                                         params={"at_or_after": "true"})
+            answer = await self.call(client, ctx, "GET",
+                                     f"/api/v1/network/peer/ops/{ctx.device_id}/{ctx.identity.incarnation}/{local + 1}",
+                                     params={"at_or_after": "true"})
             env = Envelope.from_dict(answer["op"])
         except (PeerError, httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
             logger.warning("Peer %s claims %d ops of our stream (we hold %d) but produced no proof: %s",
@@ -549,6 +692,21 @@ class PeerLink:
             return False
         await asyncio.to_thread(engine.publish_presence, capabilities=_capabilities(), version=settings.version)
         return True
+
+
+def _decode_answer(status: int, raw: bytes) -> Any:
+    """A sealed LAN answer, read like ``PeerLink._request`` reads an HTTP one."""
+    if status >= 400:
+        detail = ""
+        try:
+            detail = str(json.loads(raw).get("detail", ""))[:ERROR_DETAIL_LIMIT]
+        except Exception:  # noqa: BLE001
+            pass
+        raise PeerError(f"HTTP {status} {detail}".strip())
+    try:
+        return json.loads(raw)
+    except ValueError as exc:
+        raise PeerError("Peer answer is not JSON") from exc
 
 
 def _description() -> dict:
@@ -590,7 +748,7 @@ async def _refresh_links(ctx: engine.NetworkContext) -> None:
         device_id = row["device_id"]
         if device_id == ctx.device_id:
             continue
-        endpoints = peer_endpoints(row, presence.get(device_id))
+        endpoints = known_endpoints(row, presence.get(device_id))
         link = _links.get(device_id)
         if link is None:
             _links[device_id] = PeerLink(device_id, endpoints)
@@ -614,10 +772,24 @@ def link_status() -> List[dict]:
         age = None
         if link.device_id in _last_contact:
             age = round(time.monotonic() - _last_contact[link.device_id], 1)
-        out.append({"device_id": link.device_id, "base_url": link.base_url, "endpoints": link.endpoints,
+        out.append({"device_id": link.device_id, "base_url": link.active_url, "endpoints": link.endpoints,
+                    "lan_endpoints": link.lan_endpoints, "route": link.route,
+                    "lan_error": link.lan_last_error if link.lan is None and link.lan_endpoints else None,
                     "last_error": link.last_error, "seconds_since_contact": age,
                     "online": age is not None and age <= ONLINE_WINDOW_SECONDS, "syncing": link.syncing})
     return out
+
+
+def route_of(device_id: str) -> Optional[str]:
+    """How sync reaches ``device_id`` right now (``PeerLink.route``), None before the first contact."""
+    link = _links.get(device_id)
+    return link.route if link is not None else None
+
+
+def drop_lan_sessions() -> None:
+    """Stop using LAN sessions to peers now (the owner turned LAN-direct off)."""
+    for link in _links.values():
+        link.lan = None
 
 
 def note_contact(device_id: str) -> None:
@@ -706,7 +878,7 @@ async def sync_pass(client: httpx.AsyncClient) -> dict:
             # Both outbound sync and inbound/control traffic must reset the
             # persisted recovery clock, not just the online-presence cache.
             await asyncio.to_thread(note_contact, link.device_id)
-            await asyncio.to_thread(store.upsert_peer, link.device_id, base_url=link.base_url, contacted=True,
+            await asyncio.to_thread(store.upsert_peer, link.device_id, base_url=link.active_url, contacted=True,
                                     error=None)
         except (httpx.HTTPError, PeerError) as exc:
             link.last_error = f"{type(exc).__name__}: {exc}"[:200]
@@ -1095,6 +1267,7 @@ def forget_peers() -> None:
 def reset_for_tests() -> None:
     global _full_scan_requested, _dirty_sessions, _advertised, _owner_candidates
     forget_peers()
+    lan.reset_for_tests()
     _advertised = None
     with _scan_requests_lock:
         _dirty_collections.clear()

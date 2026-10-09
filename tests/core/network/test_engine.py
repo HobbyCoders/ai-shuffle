@@ -386,17 +386,20 @@ def test_presence_advertises_the_tunnel_first_while_the_account_link_exists(work
     including while the connector restarts: peers dial only the tunnel once
     they see it, so a momentarily down tunnel reads as offline rather than
     letting peer traffic drop back to plain http. Signed out, refused or
-    unassigned states advertise the LAN address alone."""
+    unassigned states advertise the LAN address alone. Beside the tunnel,
+    Docker's guessed bridge address is left out: no other host reaches it."""
     from app.core import cluster, managed_connection
+    from app.core.config import settings
     a, b = workers("docker"), workers("desktop")
     lan, cloud = "http://172.17.0.11:8000", "https://worker.example.com"
+    monkeypatch.setattr(settings, "local_mode", False)
     monkeypatch.setattr(cluster, "advertise_url", lambda: (lan, "guess"))
     monkeypatch.setattr(managed_connection, "status", lambda: {"status": state, "url": cloud})
     with a.active():
         engine.create_network("Home")
         engine.publish_presence(version="test")
         endpoints = engine.presence_of(a.device_id)["endpoints"]
-        assert endpoints == ([cloud, lan] if state in ("connected", "connecting", "reconnecting") else [lan])
+        assert endpoints == ([cloud] if state in ("connected", "connecting", "reconnecting") else [lan])
     join(a, b)
     with b.active():
         assert engine.presence_of(a.device_id)["endpoints"] == endpoints

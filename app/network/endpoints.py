@@ -1,20 +1,51 @@
 """Validation and selection of the addresses members advertise for each other.
 
 A member tells its peers where it can be reached (``endpoints`` on the
-token, exchange and presence paths) and every peer later POSTs to those
-addresses with a device token. The same rule applies where an address is
-stored and where it is dialed: plain ``http``/``https`` URLs with a host, no
-credentials, and no link-local address. Private LAN addresses are the normal
-case and stay allowed.
+token, exchange and presence paths) and every peer later dials those
+addresses. The same rule applies where an address is stored and where it is
+dialed: plain ``http``/``https`` URLs with a host, no credentials, and no
+link-local address. Private LAN addresses are the normal case and stay
+allowed.
 
-Which of a member's stored addresses are dialed is one rule for every caller
-(``dial_endpoints``): a worker that advertises an ``https`` address, which is
-its Shuffle-account tunnel, is dialed there and nowhere else, even when its
-plain-http LAN address is also known and the two workers share a LAN. Plain
-http is dialed only for a worker that advertises no ``https`` address. A
-tunnel that does not answer is reported as the peer being unreachable, never
-quietly replaced by the LAN address (a device token would then travel in the
-clear for five minutes of replay).
+Two ways to reach a peer
+------------------------
+*Device token* (``tokens``, ``dial_endpoints``): a worker that advertises an
+``https`` address, which is its Shuffle-account tunnel, is authenticated and
+dialed there and nowhere else with a device token. The token is a bearer
+good for five minutes and gives every ``/peer`` route, so it never travels
+over plain http to a worker that has a tunnel. Plain http is dialed this way
+only for a worker that advertises no ``https`` address (as before).
+
+*Sealed LAN session* (``lan``, #2169): a plain-http private LAN address the
+peer advertises (``lan.lan_candidates``) is tried first, with a short
+connect timeout, through a session that needs no TLS and carries no bearer:
+
+- Authentication is mutual and at least as strong as the tunnel's. The peer
+  signs the handshake transcript with the Ed25519 key in this worker's
+  membership records before this worker signs anything; an address that
+  answers as another device or network, or cannot sign, is refused and the
+  tunnel used. This worker's own signature over the same transcript is
+  checked by the peer against its membership records, exactly like a token
+  request, and spends a ``tokens`` challenge. The tunnel path, by contrast,
+  identifies the server only by Cloudflare TLS and its JSON ``device_id``.
+- Confidentiality and integrity come from the session itself: X25519 with
+  fresh keys on both sides, HKDF-SHA256 over the signed transcript, one
+  AES-256-GCM key per direction, a sequence-number nonce and a replay
+  window. Method, path, query, body and reply are all inside the seal, so
+  watermarks, addresses and capabilities (which TLS hides on the tunnel)
+  are hidden here too; the handshake itself carries none of them. The data itself is protected end to end on either
+  path (sealed, signed ops; snapshot pages and file parts encrypted to the
+  recipient).
+- Only sync routes are reachable through a session (exchange, ops, rollback
+  proof, state snapshot, file parts, ping). ``/peer/control`` and the other
+  bearer users stay on the tunnel.
+
+Any failure on the LAN (no answer within ``lan.LAN_CONNECT_TIMEOUT``, an
+older worker without the protocol, a session the peer refused, a reply that
+does not verify, the owner's kill switch ``network_lan_direct``) moves the
+link to the tunnel at once without an error; the LAN is tried again after
+``lan.LAN_REPROBE_SECONDS`` or as soon as the peer's addresses change. An
+address the peer withdrew stops being dialed: a session at it is dropped.
 """
 from __future__ import annotations
 
@@ -116,13 +147,13 @@ def dial_endpoints(endpoints: Iterable[object] | None) -> List[str]:
     return secure or usable
 
 
-def peer_endpoints(member: Optional[Mapping[str, object]], presence: Optional[Mapping[str, object]]) -> List[str]:
-    """The addresses to dial a member at, from its stored row and its presence record.
+def known_endpoints(member: Optional[Mapping[str, object]], presence: Optional[Mapping[str, object]]) -> List[str]:
+    """Every usable address a member is known at, from its stored row and its presence record.
 
     The stored row holds what the member itself last announced on the token
     and exchange paths (and what the account directory reported); the presence
     record is the replicated announcement, which can lag by one presence
-    interval. Both are combined, then ``dial_endpoints`` picks the group.
+    interval. Both are combined; the LAN addresses among them stay listed.
     """
     combined: List[object] = []
     for source in (member, presence):
@@ -130,7 +161,12 @@ def peer_endpoints(member: Optional[Mapping[str, object]], presence: Optional[Ma
             urls = source.get("endpoints")
             if isinstance(urls, list):
                 combined.extend(urls)
-    return dial_endpoints(combined)
+    return validate_endpoints(combined)
+
+
+def peer_endpoints(member: Optional[Mapping[str, object]], presence: Optional[Mapping[str, object]]) -> List[str]:
+    """The addresses to dial a member at with a device token (``dial_endpoints`` of ``known_endpoints``)."""
+    return dial_endpoints(known_endpoints(member, presence))
 
 
 def plain_http_is_local(url: str) -> bool:

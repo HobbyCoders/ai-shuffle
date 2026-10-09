@@ -109,7 +109,7 @@ async def _sync() -> dict:
                 async with asyncio.timeout(PEER_TIMEOUT):
                     await link.sync_once(client, ctx, catch_up=True)
                     transport.note_contact(link.device_id)
-                    await run_sync(store.upsert_peer, link.device_id, base_url=link.base_url, contacted=True, error=None)
+                    await run_sync(store.upsert_peer, link.device_id, base_url=link.active_url, contacted=True, error=None)
                 outcome = "synced"
                 return SYNCED
             except TimeoutError:

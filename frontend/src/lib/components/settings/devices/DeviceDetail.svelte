@@ -17,6 +17,7 @@
 	import StatusDot from '../rows/StatusDot.svelte';
 	import type { DangerAction } from '../shell/DangerZone.svelte';
 	import { clientKind, clientPlatform, type DevicesModel } from './devices-model.svelte';
+	import { routeLabel } from '$lib/api/network';
 
 	interface Props {
 		model: DevicesModel;
@@ -103,6 +104,15 @@
 		<RowGroup title="Device">
 			{@render nameRow(member.name, 100)}
 			<SettingRow label="Platform"><ValueText value={member.platform ?? 'Unknown'} tone="fg" /></SettingRow>
+			{#if member.route !== undefined}
+				<SettingRow
+					label="Connection"
+					hint={member.route === 'lan' ? 'Tunnel is the fallback' : undefined}
+					help="Workers on the same local network sync directly, encrypted end to end. Anything else goes through the tunnel."
+				>
+					<ValueText value={routeLabel(member.route)} tone="fg" />
+				</SettingRow>
+			{/if}
 		</RowGroup>
 	</DetailPane>
 {:else if joining}

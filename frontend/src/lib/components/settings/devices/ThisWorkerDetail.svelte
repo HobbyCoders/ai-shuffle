@@ -6,7 +6,13 @@
 	 */
 	import { LogIn, Server } from 'lucide-svelte';
 	import { NETWORK_STATE_LABELS } from '$lib/api/network-status';
-	import { abandonHandoffTransfer, type HandoffTransferRecovery } from '$lib/api/network';
+	import {
+		abandonHandoffTransfer,
+		getLanSettings,
+		updateLanSettings,
+		type HandoffTransferRecovery,
+		type LanSettings
+	} from '$lib/api/network';
 	import { getErrorMessage } from '$lib/api/client';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import type { StatusTone } from '$lib/settings/types';
@@ -18,6 +24,7 @@
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import InlineConfirm from '../rows/InlineConfirm.svelte';
 	import StatusDot from '../rows/StatusDot.svelte';
+	import Switch from '../rows/Switch.svelte';
 	import { JoinFlow } from './join-flow.svelte';
 	import type { DevicesModel } from './devices-model.svelte';
 
@@ -63,6 +70,45 @@
 	async function rename(name: string) {
 		if (await model.rename('self', name)) flashSaved();
 		else rev += 1;
+	}
+
+	const LAN_HELP =
+		'Workers on the same local network sync directly instead of through the tunnel. The connection is authenticated and encrypted by the workers themselves; if it fails, sync uses the tunnel.';
+	let lan = $state<LanSettings | null>(null);
+	let lanAddresses = $state('');
+	let lanError = $state('');
+	let lanRev = $state(0);
+	const lanAdvertised = $derived((lan?.advertised ?? []).filter((url) => url.startsWith('http://')));
+
+	$effect(() => {
+		if (model.enrolled && lan === null) void loadLan();
+	});
+
+	async function loadLan() {
+		try {
+			lan = await getLanSettings();
+			lanAddresses = lan.addresses.join(', ');
+		} catch (e) {
+			lanError = getErrorMessage(e, 'Could not load the local network settings');
+		}
+	}
+
+	async function saveLan(body: { enabled?: boolean; addresses?: string[] }): Promise<boolean> {
+		lanError = '';
+		try {
+			lan = await updateLanSettings(body);
+			lanAddresses = lan.addresses.join(', ');
+			flashSaved();
+			return true;
+		} catch (e) {
+			lanError = getErrorMessage(e, 'Could not save the local network settings');
+			lanRev += 1;
+			return false;
+		}
+	}
+
+	function saveLanAddresses(text: string) {
+		void saveLan({ addresses: text.split(/[\s,]+/).filter(Boolean) });
 	}
 </script>
 
@@ -165,6 +211,30 @@
 				/>
 			</SettingRow>
 		</RowGroup>
+		{#if lan}
+			<RowGroup title="Local network">
+				<SettingRow label="Sync directly on the LAN" hint="Tunnel is the fallback" help={LAN_HELP}>
+					<Switch checked={lan.enabled} onchange={(enabled) => saveLan({ enabled })} />
+				</SettingRow>
+				{#key lanRev}
+					<SettingRow label="Extra LAN addresses" hint="Docker: the host's IP and port">
+						<TextField
+							value={lanAddresses}
+							mono
+							width={220}
+							placeholder="10.0.0.200:8001"
+							label="Extra LAN addresses"
+							disabled={!lan.enabled}
+							onchange={saveLanAddresses}
+						/>
+					</SettingRow>
+				{/key}
+				<SettingRow label="Peers on this network dial">
+					<ValueText value={lanAdvertised.length ? lanAdvertised.join(', ') : 'No LAN address'} mono />
+				</SettingRow>
+			</RowGroup>
+		{/if}
+		{#if lanError}<InlineBanner tone="warn"><span role="alert">{lanError}</span></InlineBanner>{/if}
 		{#if status.handoff_transfers?.pending.length}
 			<RowGroup title="Unfinished chat transfers">
 				<InlineBanner tone="warn">Messages held on the source worker may be missing. Wake-ups stay paused until delivery finishes or you abandon the transfer.</InlineBanner>

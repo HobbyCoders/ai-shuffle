@@ -5,6 +5,8 @@ process through the real engine, like the rest of this package.
 """
 import sqlite3
 
+import time
+
 import pytest
 
 from app.db import database
@@ -597,6 +599,7 @@ async def test_old_network_proof_is_rejected_at_recovery_boundary(workers, monke
     with a.active():
         old = engine.create_network("Old")
         link = transport.PeerLink("peer", ["http://peer.local:8000"])
+        link.token, link.token_expires = "dvt_test", time.time() + 300  # authenticated, as in a sync pass
         proof = envelope_mod.build(
             network_id=old.network_id, collection="user_preferences",
             record_id="admin|@owner|lost", op="upsert", clock=999,

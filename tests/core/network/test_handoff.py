@@ -947,7 +947,7 @@ async def test_incoming_transfer_recovers_without_the_source(pair, monkeypatch, 
                     engine.reset_for_tests()
                     return {"ok": True}
                 link = SimpleNamespace(device_id=a.device_id, endpoints=["http://peer"],
-                                       base_url="http://peer", backoff_until=0, failures=0,
+                                       base_url="http://peer", active_url="http://peer", backoff_until=0, failures=0,
                                        contact_kick_used=False, sync_once=AsyncMock(side_effect=synced))
                 monkeypatch.setattr(transport, "_links", {a.device_id: link})
                 monkeypatch.setattr(transport, "_announce_own_endpoints_if_changed", AsyncMock())

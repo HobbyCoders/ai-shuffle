@@ -487,6 +487,7 @@ async def test_leave_between_proof_and_claim_does_not_bump_or_rejoin(workers, mo
             origin_seq=1000, schema_version=1, key_version=old.key_version, network_key=old.network_key,
             signing_private=old.identity.signing_private, record={"key": "lost"})
         link = transport.PeerLink(b.device_id, ["http://b.local:8000"])
+        link.token, link.token_expires = "dvt_test", time.time() + 300  # authenticated, as in a sync pass
 
         async def answer(*args, **kwargs):
             return {"op": proof.to_dict()}

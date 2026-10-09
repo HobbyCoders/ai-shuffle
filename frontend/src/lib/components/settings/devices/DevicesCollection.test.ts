@@ -133,6 +133,7 @@ function reads(path: string): unknown {
 				}
 			]
 		};
+	if (path === '/network/lan') return { enabled: true, addresses: [], advertised: ['https://desk.example.com', 'http://10.0.0.5:8000'] };
 	if (path === '/mobile/hub/connection') return connection;
 	if (path === '/mobile/hub/account') return structuredClone(profile);
 	if (path === '/mobile/hub/devices/confirmations') return [{ ...request }];
@@ -334,6 +335,28 @@ describe('Devices list', () => {
 		show('self', 'Network');
 		await fireEvent.click(screen.getByRole('button', { name: 'Keep separate settings' }));
 		expect(api.post).toHaveBeenCalledWith('/network/create', {});
+	});
+
+	it('shows how a peer is reached', async () => {
+		status.members![1] = member('laptop', { route: 'lan' });
+		await model.loadStatus();
+		show('member:laptop');
+		expect(screen.getByText('Connection').closest('.st-row, [class*=row]')?.textContent).toContain('Direct (LAN)');
+	});
+
+	it('turns LAN-direct sync off and saves an extra address', async () => {
+		api.put.mockImplementation(async (_path: string, body: { enabled?: boolean; addresses?: string[] }) => ({
+			enabled: body.enabled ?? true,
+			addresses: body.addresses ?? [],
+			advertised: []
+		}));
+		show('self', 'Network');
+		const toggle = await screen.findByRole('switch', { name: /Sync directly on the LAN/ });
+		expect(toggle.getAttribute('aria-checked')).toBe('true');
+		expect(screen.getByText('http://10.0.0.5:8000')).toBeTruthy();
+		await fireEvent.click(toggle);
+		expect(api.put).toHaveBeenCalledWith('/network/lan', { enabled: false });
+		await vi.waitFor(() => expect(screen.getByRole('switch', { name: /Sync directly on the LAN/ }).getAttribute('aria-checked')).toBe('false'));
 	});
 
 	it('shows the tunnel limit refusal with a License link', async () => {

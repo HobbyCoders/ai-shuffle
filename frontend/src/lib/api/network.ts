@@ -71,7 +71,12 @@ export interface NetworkMember {
 	revision?: string | null;
 	online: boolean;
 	legacy_instance_id: string | null;
+	/** How this worker reaches it now; absent on workers predating LAN-direct sync. */
+	route?: PeerRoute | null;
 }
+
+/** `lan`: sealed session on the local network; `tunnel`: https; `direct`: plain-http device token. */
+export type PeerRoute = 'lan' | 'tunnel' | 'direct';
 
 /** A join request parked on THIS worker (the inviter) awaiting approval. */
 export interface PendingJoin {
@@ -90,6 +95,10 @@ export interface SyncPeer {
 	device_id: string;
 	base_url: string | null;
 	endpoints: string[];
+	lan_endpoints?: string[];
+	route?: PeerRoute | null;
+	/** Why the LAN path is not in use, while the peer has LAN addresses. */
+	lan_error?: string | null;
 	last_error: string | null;
 	seconds_since_contact: number | null;
 	online: boolean;
@@ -444,4 +453,31 @@ export interface NetworkPolicy {
 
 export async function getNetworkPolicy(): Promise<NetworkPolicy> {
 	return api.get<NetworkPolicy>('/network/policy');
+}
+
+// ─── LAN-direct sync ─────────────────────────────────────────────────────────
+
+export interface LanSettings {
+	/** Sync with workers on the same network directly; the tunnel is the fallback. */
+	enabled: boolean;
+	/** Addresses the owner added for this worker, e.g. the Docker host's LAN IP. */
+	addresses: string[];
+	/** Everything this worker currently tells its peers to dial. */
+	advertised: string[];
+}
+
+export async function getLanSettings(): Promise<LanSettings> {
+	return api.get<LanSettings>('/network/lan', { cache: 'no-store' });
+}
+
+export async function updateLanSettings(body: { enabled?: boolean; addresses?: string[] }): Promise<LanSettings> {
+	return api.put<LanSettings>('/network/lan', body);
+}
+
+/** The label a peer's route reads as in the UI. */
+export function routeLabel(route: PeerRoute | null | undefined): string {
+	if (route === 'lan') return 'Direct (LAN)';
+	if (route === 'tunnel') return 'Via tunnel';
+	if (route === 'direct') return 'Direct';
+	return 'Not connected';
 }

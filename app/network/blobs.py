@@ -158,7 +158,7 @@ async def fetch_missing(limit: int = 20) -> int:
                 if link is None:
                     continue
                 try:
-                    await link.authenticate(client, ctx)
+                    await link.open(client, ctx)
                     from app.network import peer_files
                     data = await peer_files.fetch(client, link, blob['hash'])
                 except (httpx.HTTPError, transport.PeerError, ValueError):
@@ -189,7 +189,7 @@ async def fetch_one(hash_value: str) -> bool:
             if link is None:
                 continue
             try:
-                await link.authenticate(client, ctx)
+                await link.open(client, ctx)
                 from app.network import peer_files
                 data = await peer_files.fetch(client, link, hash_value)
             except (httpx.HTTPError, transport.PeerError, ValueError):

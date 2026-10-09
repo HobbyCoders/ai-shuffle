@@ -145,6 +145,23 @@ def new_challenge(device_id: str, requester: str = "", *, member_address: bool =
     return challenge
 
 
+def _peek_challenge(challenge: str, device_id: str) -> Optional[str]:
+    """The address ``challenge`` was issued to when it is live and for ``device_id``; it stays unspent.
+
+    The LAN session verifies the member's signature first and only then
+    spends the challenge, so a caller who merely saw it (a LAN hello answers
+    in the clear) cannot burn it with a junk signature.
+    """
+    with _lock:
+        entry = _challenges.get(challenge)
+    if entry is None:
+        return None
+    expires, issued_to, requester, _reserved = entry
+    if expires > time.monotonic() and hmac.compare_digest(issued_to, device_id):
+        return requester
+    return None
+
+
 def _take_challenge(challenge: str, device_id: str) -> Optional[str]:
     """Spend ``challenge`` for ``device_id``; the address it was issued to, or None."""
     with _lock:
@@ -173,6 +190,11 @@ def issue_token(*, device_id: str, challenge: str, signature: str) -> dict:
     member = ctx.member(device_id)
     if member is None or member.status != membership.STATUS_ACTIVE:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Device is not an active member of this network")
+    from app.network import lan
+    if lan.is_pending(challenge):
+        # A LAN hello answered this challenge, in the clear: it buys only that
+        # LAN session, and an attempt here must not spend it either.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Challenge expired or unknown")
     requester = _take_challenge(challenge, device_id)
     if requester is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Challenge expired or unknown")

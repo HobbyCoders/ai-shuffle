@@ -163,7 +163,7 @@ async def test_peer_link_exchanges_both_ways_and_detects_rollback(workers, monke
 
             with patch.object(transport, "_description", side_effect=describe_off_loop) as descriptions:
                 summary = await link.sync_once(client, engine.context())
-            assert descriptions.call_count == 2  # authentication and exchange
+            assert descriptions.call_count == 2  # authentication and exchange (a LAN probe sends none)
             assert summary["received"] >= 1 and summary["sent"] >= 1
             assert link.base_url == "https://a.example.com" and link.token
             token_before = link.token

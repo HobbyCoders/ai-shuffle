@@ -367,7 +367,10 @@ def _admit(device: dict) -> dict:
     response = engine.admit_device(device_id=device_id, signing_public=signing_public,
                                    encryption_public=encryption_public, name=device.get("name") or device_id,
                                    platform=device.get("platform"), legacy_instance_id=device.get("legacy_instance_id"))
-    # Only the device can read the wrapped keys; the rest is public membership data.
+    # Only the device can read the wrapped keys; the rest is public membership
+    # data, except members' LAN addresses: they are sealed to the device too.
+    from app.network import lan
+    response = lan.seal_admission_addresses(response, device_id=device_id, encryption_public=encryption_public)
     _call("POST", f"devices/{device_id}/approve", {"response": response}, max_bytes=65536)
     kick()
     return {"device_id": device_id, "status": "approved"}
@@ -743,6 +746,11 @@ async def _bootstrap_from_peers(admission: dict) -> None:
     for member in await run_sync(store.list_members):
         if member["device_id"] != ctx.device_id and member["status"] == "active":
             candidates.setdefault(member["device_id"], member.get("endpoints") or [])
+    # LAN addresses the issuer sealed to this device: dialed first, in a sealed session.
+    from app.network import lan
+    for device_id, local in lan.open_admission_addresses(admission, ctx).items():
+        if device_id in candidates:
+            candidates[device_id] = list(candidates[device_id]) + [u for u in local if u not in candidates[device_id]]
     errors = []
 
     def waiting(reason: str) -> None:

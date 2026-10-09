@@ -164,11 +164,14 @@ class CSRFProtectionMiddleware(BaseHTTPMiddleware):
         return is_match
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        # These two bootstrap endpoints authenticate a network device by its
-        # signed challenge, not by cookies or local-owner access. Peers have no
-        # browser Origin, on either the LAN listener or the managed tunnel.
+        # These bootstrap endpoints authenticate a network device by its
+        # signed challenge (the LAN ones by a signed key exchange and sealed
+        # calls), not by cookies or local-owner access. Peers have no browser
+        # Origin, on either the LAN listener or the managed tunnel.
         if request.url.path in (
-            "/api/v1/network/peer/auth/challenge", "/api/v1/network/peer/auth/token"
+            "/api/v1/network/peer/auth/challenge", "/api/v1/network/peer/auth/token",
+            "/api/v1/network/peer/lan/hello", "/api/v1/network/peer/lan/session",
+            "/api/v1/network/peer/lan/call",
         ):
             return await call_next(request)
         from app.core import owner_auth

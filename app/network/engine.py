@@ -2133,6 +2133,10 @@ def _own_endpoints() -> List[str]:
     being reached over plain http. The LAN address follows for workers that
     have no account link. Docker's guessed LAN address can also be private to
     its bridge; peers authenticate the device identity at either address.
+
+    Beside a tunnel only private LAN addresses follow (``lan.advertised_addresses``):
+    peers on the same network dial them first through a sealed session
+    (``app.network.lan``) and never dial anything else there in the clear.
     """
     endpoints: List[str] = []
     try:
@@ -2143,13 +2147,23 @@ def _own_endpoints() -> List[str]:
             endpoints.append(url)
     except Exception:  # noqa: BLE001
         pass
+    from app.core.config import settings
+    from app.network import lan
+    url, source = None, "none"
     try:
         from app.core.cluster import advertise_url
-        url, _ = advertise_url()
-        if url and url not in endpoints:
-            endpoints.append(url)
+        url, source = advertise_url()
     except Exception:  # noqa: BLE001
         pass
+    try:
+        enabled = lan.lan_direct_enabled()
+        extra = lan.owner_addresses() if enabled else []
+    except Exception:  # noqa: BLE001
+        enabled, extra = False, []
+    for address in lan.advertised_addresses(tunnel=bool(endpoints), advertise=url, source=source,
+                                            docker=not settings.is_local_mode(), enabled=enabled, extra=extra):
+        if address not in endpoints:
+            endpoints.append(address)
     return endpoints
 
 
