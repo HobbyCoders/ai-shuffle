@@ -1,6 +1,8 @@
 """Exercise the actual HTTP/WS listener boundary, including forwarded headers."""
 import asyncio
 import json
+import os
+import sys
 import threading
 import time
 
@@ -112,6 +114,44 @@ def test_isolated_remote_port_is_explicit_and_cannot_claim_normal_ports():
     for value in ('8000', '8001', '80', '65536', 'invalid'):
         with pytest.raises(ValueError):
             configured_remote_port({'SHUFFLE_DESKTOP_ISOLATED': '1', 'SHUFFLE_PROTECTED_PORT': value})
+
+
+def test_listeners_are_close_on_exec():
+    with bind_listener('127.0.0.1', 0) as sock:
+        assert sock.get_inheritable() is False
+
+
+_CHILD_HOLDS = (
+    "import os, sys\n"
+    "fd, inode = int(sys.argv[1]), int(sys.argv[2])\n"
+    "try:\n"
+    "    print('held' if os.fstat(fd).st_ino == inode else 'free')\n"
+    "except OSError:\n"
+    "    print('free')\n"
+)
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX descriptor inheritance')
+def test_uvloop_children_do_not_receive_the_listener():
+    """uvloop spawns through libuv, which ignores close_fds: only close-on-exec
+    keeps a worker listener out of cloudflared, CLI harnesses and agent shell
+    commands (#2145)."""
+    uvloop = pytest.importorskip('uvloop')
+    with bind_listener('127.0.0.1', 0) as sock:
+        sock.listen()
+        inode = os.fstat(sock.fileno()).st_ino
+
+        async def child_view() -> str:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, '-c', _CHILD_HOLDS, str(sock.fileno()), str(inode),
+                stdout=asyncio.subprocess.PIPE)
+            out, _ = await proc.communicate()
+            return out.decode().strip()
+
+        assert uvloop.run(child_view()) == 'free'
+        # Guard the test itself: an inheritable listener does reach the child.
+        sock.set_inheritable(True)
+        assert uvloop.run(child_view()) == 'held'
 
 
 def test_same_listener_port_is_rejected():

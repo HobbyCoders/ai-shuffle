@@ -159,7 +159,12 @@ def bind_listener(host: str, port: int) -> socket.socket:
         if sock.family == socket.AF_INET6:
             sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
         sock.bind((host, port))
-        sock.set_inheritable(True)
+        # Close-on-exec, always: uvicorn serves these in this one process, and
+        # uvloop spawns children through libuv, which ignores close_fds. An
+        # inheritable listener reached every child (cloudflared, CLI
+        # harnesses, MCP servers, agent shell commands), any of which could
+        # then accept() owner traffic on the protected port (#2145).
+        sock.set_inheritable(False)
         return sock
     except BaseException:
         sock.close()
