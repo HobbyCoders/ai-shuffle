@@ -961,3 +961,344 @@ def test_a_rejected_provider_is_never_the_default_model(mock_db):
     assert credential_gate.default_run_model() == ("oa", "gpt-5")
     database.record_credential_check("oa", False)
     assert credential_gate.default_run_model() == (None, DEFAULT_MODEL)
+
+
+# ---------------------------------------------------------------------------
+# D4: subscriptions are the owner's own
+#
+# A run for anyone but the owner (an API user, or a connector message, which
+# runs as its connector's API user) never uses a subscription sign-in: Claude
+# on the CLI in subscription mode, a ChatGPT/Codex row or a SuperGrok row.
+# API keys stay allowed, and the owner is allowed everything.
+# ---------------------------------------------------------------------------
+
+OWNER = None
+API_USER = "u-d4"
+CONNECTOR_USER = "connector:discord:d4"
+REQUESTERS = [OWNER, API_USER, CONNECTOR_USER]
+
+
+def _requesters():
+    from app.api.auth import hash_api_key
+
+    database.create_api_user(API_USER, "Friend", hash_api_key("aih_d4_friend"))
+    database.create_api_user(CONNECTOR_USER, "Discord", hash_api_key("aih_d4_connector"))
+
+
+def _claude(mode):
+    def setup():
+        claude_auth_mode.set_mode(mode)
+        if mode == "api_key":
+            database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
+        return "sonnet"
+    return setup
+
+
+def _row(provider_type, model, **fields):
+    def setup():
+        claude_auth_mode.set_mode("subscription")  # never decides a provider row's run
+        # A plain token: the Anthropic-compatible rows decrypt theirs at build time.
+        _provider_row("p", provider_type, auth_token="sk-test-plain",
+                      models=[{"id": model, "label": model}], default_model=model, **fields)
+        return f"prov:p:{model}"
+    return setup
+
+
+SUBSCRIPTION_KINDS = {
+    "claude_cli_subscription": _claude("subscription"),
+    "chatgpt_row": _row("chatgpt", "gpt-5"),
+    "openai_row_chatgpt_sign_in": _row("openai", "gpt-5", auth_mode="chatgpt"),
+    "grok_row": _row("grok", "grok-4"),
+    "xai_row_grok_sign_in": _row("xai", "grok-4", auth_mode="grok"),
+    "anthropic_row_plan_login": _row("anthropic", "claude-sonnet-4-5", auth_mode="oauth"),
+}
+API_KEY_KINDS = {
+    "claude_cli_api_key": _claude("api_key"),
+    "claude_cli_cloud": _claude("cloud"),
+    "anthropic_api_key_row": _row("anthropic", "claude-sonnet-4-5"),
+    "openai_api_key_row": _row("openai", "gpt-5"),
+    "xai_api_key_row": _row("xai", "grok-4"),
+    "openrouter_row": _row("openrouter", "meta-llama/llama-3.3-70b"),
+    "local_model_row": _row("custom", "llama-3"),
+}
+
+
+@pytest.mark.parametrize("requester", REQUESTERS, ids=["owner", "api_user", "connector"])
+@pytest.mark.parametrize("kind", sorted(SUBSCRIPTION_KINDS) + sorted(API_KEY_KINDS))
+def test_requester_against_every_provider_kind(mock_db, tmp_path, requester, kind):
+    _requesters()
+    setup = SUBSCRIPTION_KINDS.get(kind) or API_KEY_KINDS[kind]
+    model = setup()
+    options = _build(tmp_path, {"model": model})
+    is_subscription = kind in SUBSCRIPTION_KINDS
+    assert credential_gate.options_use_subscription(options) is is_subscription
+    assert credential_gate.selection_uses_subscription(model) is is_subscription
+
+    refusal = credential_gate.requester_refusal(options, requester)
+    if requester is not OWNER and is_subscription:
+        assert refusal == credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE
+        # The run-start check every engine path calls refuses it first.
+        assert credential_gate.refusal_for_options(options, requester) == refusal
+    else:
+        assert refusal is None
+        # With the leg itself set up, nothing else refuses the run.
+        with patch.object(credential_gate, "claude_credential_ready", return_value=(True, None)):
+            assert credential_gate.refusal_for_options(options, requester) is None
+
+
+def test_the_refusal_message_and_frame():
+    assert credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE == (
+        "This model uses the owner's personal subscription and can't run for other "
+        "people. Pick a model on an API-key provider.")
+    assert credential_gate.refusal_event(credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE) == {
+        "type": "error", "message": credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE,
+        "code": credential_gate.SUBSCRIPTION_OWNER_ONLY_CODE}
+    assert credential_gate.refusal_event(credential_gate.NO_CLI_MESSAGE)["code"] == credential_gate.SETUP_CODE
+
+
+def test_an_unreadable_provider_choice_is_refused_for_other_people(mock_db, tmp_path):
+    _requesters()
+    _row("openai", "gpt-5")()
+    options = _build(tmp_path, {"model": "prov:p:gpt-5"})
+    with patch.object(credential_gate, "options_use_subscription", side_effect=RuntimeError("db down")):
+        assert credential_gate.requester_refusal(options, API_USER) == credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE
+        assert credential_gate.requester_refusal(options, OWNER) is None
+
+
+@pytest.mark.parametrize("source,payload", [
+    ("api", {"api_user_id": API_USER}),
+    ("connector", {"api_user_id": CONNECTOR_USER}),
+    ("wakeup", None),  # no principal on the turn: the session's key decides
+])
+async def test_a_turn_for_someone_else_on_a_subscription_is_refused_end_to_end(
+    mock_db, tmp_path, source, payload,
+):
+    """Through the real SessionRuntime and pump: refused before any CLI is built."""
+    _requesters()
+    claude_auth_mode.set_mode("subscription")
+    owner_key = (payload or {}).get("api_user_id", API_USER)
+    database.create_profile("gate-profile", "Gate", None, {"cwd": str(tmp_path), "model": "sonnet"})
+    database.create_session(session_id="d4", profile_id="gate-profile", title="t", api_user_id=owner_key)
+    turn = turns_db.enqueue_turn("d4", source, prompt="hello", profile_id="gate-profile", payload=payload)
+    with _real_pump_env() as recorder, \
+         patch.object(credential_gate, "claude_credential_ready", return_value=(True, None)):
+        outcome = await session_runtime.execute(turn)
+    assert outcome == "aborted"
+    frames = [c.args[0] for c in recorder.on_event.await_args_list]
+    assert [(f["type"], f["code"], f["message"]) for f in frames] == [
+        ("error", credential_gate.SUBSCRIPTION_OWNER_ONLY_CODE, credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE)]
+
+
+async def test_the_rest_query_paths_refuse_an_api_user_on_a_subscription(mock_db, tmp_path):
+    from app.core import query_engine
+
+    _requesters()
+    claude_auth_mode.set_mode("subscription")
+    database.create_profile("gate-profile", "Gate", None, {"cwd": str(tmp_path), "model": "sonnet"})
+    with patch("app.core.provider.factory.make_adapter", side_effect=AssertionError("no spawn")), \
+         patch.object(credential_gate, "claude_credential_ready", return_value=(True, None)):
+        frames = [f async for f in query_engine.stream_query("hello", "gate-profile", api_user_id=API_USER)]
+        assert frames[-1] == credential_gate.refusal_event(credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE)
+        with pytest.raises(credential_gate.AgentSetupRequired, match="owner's personal subscription"):
+            await query_engine.execute_query("hello", "gate-profile", api_user_id=API_USER)
+
+
+# Existing setups: the settings warning and the save check.
+
+def test_subscription_warning_for_a_saved_setup(mock_db):
+    from app.core import api_user_scope
+
+    _row("chatgpt", "gpt-5")()
+    _provider_row("oa", "openai", auth_token="enc:key", models=[{"id": "gpt-5", "label": "GPT-5"}])
+    assert api_user_scope.subscription_warning({"model": "prov:p:gpt-5"}) == api_user_scope.SUBSCRIPTION_MODEL_WARNING
+    assert api_user_scope.subscription_warning({"model": "sonnet"}) == api_user_scope.SUBSCRIPTION_MODEL_WARNING
+    assert api_user_scope.subscription_warning({"model": "prov:oa:gpt-5"}) is None
+    claude_auth_mode.set_mode("api_key")
+    assert api_user_scope.subscription_warning({"model": "sonnet"}) is None
+    # Agent default: each assigned agent's saved model decides.
+    database.create_profile("sub-agent", "Codex helper", None, {"model": "prov:p:gpt-5"})
+    database.create_profile("key-agent", "Key helper", None, {"model": "gpt-5", "provider": "oa"})
+    assert api_user_scope.subscription_warning({"model": None, "profile_ids": ["key-agent"]}) is None
+    assert api_user_scope.subscription_warning({"model": None, "profile_ids": ["key-agent", "sub-agent"]}) == (
+        api_user_scope.SUBSCRIPTION_AGENT_WARNING.format(agent="Codex helper"))
+    # The key's own API-key model overrides a subscription agent.
+    assert api_user_scope.subscription_warning({"model": "prov:oa:gpt-5", "profile_ids": ["sub-agent"]}) is None
+    assert api_user_scope.subscription_warning(None) is None
+
+
+def test_api_users_endpoint_refuses_a_subscription_model_and_warns_on_old_setups(authenticated_client):
+    from app.core import api_user_scope
+
+    client = authenticated_client
+    _row("chatgpt", "gpt-5")()
+    _provider_row("oa", "openai", auth_token="enc:key", models=[{"id": "gpt-5", "label": "GPT-5"}])
+
+    refused = client.post("/api/v1/api-users", json={"name": "Friend", "model": "prov:p:gpt-5"})
+    assert refused.status_code == 400
+    assert refused.json()["detail"] == credential_gate.SUBSCRIPTION_OWNER_ONLY_MESSAGE
+
+    created = client.post("/api/v1/api-users", json={"name": "Friend", "model": "prov:oa:gpt-5"})
+    assert created.status_code == 201, created.text
+    user = created.json()
+    assert user["subscription_warning"] is None
+    patched = client.patch(f"/api/v1/api-users/{user['id']}", json={"model": "prov:p:gpt-5"})
+    assert patched.status_code == 400
+
+    # A key saved on a subscription before this check keeps its setting but
+    # shows the warning (and its runs are refused at start).
+    database.update_api_user(user["id"], model="prov:p:gpt-5")
+    listed = {u["id"]: u for u in client.get("/api/v1/api-users").json()}
+    assert listed[user["id"]]["subscription_warning"] == api_user_scope.SUBSCRIPTION_MODEL_WARNING
+    assert client.get(f"/api/v1/api-users/{user['id']}").json()["subscription_warning"]
+    # Moving it to an API-key model clears the warning.
+    fixed = client.patch(f"/api/v1/api-users/{user['id']}", json={"model": "prov:oa:gpt-5"})
+    assert fixed.status_code == 200 and fixed.json()["subscription_warning"] is None
+
+
+# The owner's own account on a connector. A connector message runs as the
+# connector's API user, so it is refused on a subscription unless its sender
+# is one of the owner's own accounts saved on that connector
+# (``owner_sender_ids``), matched by the platform's immutable user id only.
+
+OWNER_TG_ID = "111"
+
+
+def _owner_connector(owner_ids=(OWNER_TG_ID,), connector_type="telegram", api_user_id=CONNECTOR_USER,
+                     connector_id="c-d4"):
+    database.create_connector(connector_id, connector_type, "Owner bot",
+                              {"owner_sender_ids": list(owner_ids)}, [], api_user_id=api_user_id)
+    return connector_id
+
+
+def _sender(platform_user_id, connector_id="c-d4"):
+    return {"connector_id": connector_id, "platform_user_id": platform_user_id}
+
+
+def test_only_the_owners_own_sender_id_counts_as_the_owner(mock_db):
+    _requesters()
+    _owner_connector(owner_ids=[OWNER_TG_ID, "@owner_handle"])
+    is_owner = credential_gate.connector_sender_is_owner
+    assert is_owner(_sender(OWNER_TG_ID), CONNECTOR_USER) is True
+    assert is_owner(_sender(" 111 "), CONNECTOR_USER) is True
+    # Anyone else on the platform.
+    assert is_owner(_sender("222"), CONNECTOR_USER) is False
+    # A turn for another API user, or one with no principal, never borrows it.
+    assert is_owner(_sender(OWNER_TG_ID), API_USER) is False
+    assert is_owner(_sender(OWNER_TG_ID), None) is False
+    # A sender that names a different (or unknown) connector.
+    assert is_owner(_sender(OWNER_TG_ID, "c-missing"), CONNECTOR_USER) is False
+    assert is_owner({"platform_user_id": OWNER_TG_ID}, CONNECTOR_USER) is False
+    assert is_owner(None, CONNECTOR_USER) is False
+    assert is_owner("111", CONNECTOR_USER) is False
+
+
+def test_a_spoofed_name_or_the_no_sender_fallback_is_not_the_owner(mock_db):
+    _requesters()
+    # Even if the owner typed a name or the fallback id into the list.
+    _owner_connector(owner_ids=[OWNER_TG_ID, "Owner Name", "unknown"])
+    is_owner = credential_gate.connector_sender_is_owner
+    # Display names and usernames are never on the turn; only the id is matched.
+    spoof = {**_sender("999"), "platform_user_name": "Owner Name", "username": OWNER_TG_ID}
+    assert is_owner(spoof, CONNECTOR_USER) is False
+    # Telegram's "unknown" (no sender on the update) and an empty id never match.
+    assert is_owner(_sender("unknown"), CONNECTOR_USER) is False
+    assert is_owner(_sender(""), CONNECTOR_USER) is False
+    assert is_owner(_sender(None), CONNECTOR_USER) is False
+
+
+def test_an_empty_list_or_a_connector_without_a_stable_sender_is_never_the_owner(mock_db):
+    from app.core import connector_service
+
+    _requesters()
+    _owner_connector(owner_ids=[], connector_id="c-empty")
+    assert credential_gate.connector_sender_is_owner(_sender(OWNER_TG_ID, "c-empty"), CONNECTOR_USER) is False
+    for kind in ("bluebubbles", "line", "msteams", "webhook", "homeassistant"):
+        assert kind not in connector_service.OWNER_SENDER_TYPES
+        _owner_connector(connector_type=kind, connector_id=f"c-{kind}")
+        assert credential_gate.connector_sender_is_owner(_sender(OWNER_TG_ID, f"c-{kind}"), CONNECTOR_USER) is False
+    assert connector_service.OWNER_SENDER_TYPES == {"telegram", "discord", "slack", "whatsapp", "signal", "imessage"}
+
+
+@pytest.mark.parametrize("case,sender,owner_ids,refused", [
+    ("owner_sender", OWNER_TG_ID, [OWNER_TG_ID], False),
+    ("other_sender", "222", [OWNER_TG_ID], True),
+    ("empty_list", OWNER_TG_ID, [], True),
+    ("no_sender_on_turn", None, [OWNER_TG_ID], True),
+])
+async def test_a_connector_turn_on_a_subscription_runs_only_for_the_owners_account(
+    mock_db, tmp_path, case, sender, owner_ids, refused,
+):
+    """Through the real SessionRuntime and pump: the owner's own account gets
+    past the subscription check; anyone else is refused before any CLI."""
+    _requesters()
+    claude_auth_mode.set_mode("subscription")
+    _owner_connector(owner_ids=owner_ids)
+    database.create_profile("gate-profile", "Gate", None, {"cwd": str(tmp_path), "model": "sonnet"})
+    database.create_session(session_id="d4c", profile_id="gate-profile", title="t", api_user_id=CONNECTOR_USER)
+    payload = {"api_user_id": CONNECTOR_USER}
+    if sender is not None:
+        payload["connector_sender"] = _sender(sender)
+    turn = turns_db.enqueue_turn("d4c", "connector", prompt="hello", profile_id="gate-profile", payload=payload)
+    built = []
+
+    def _reached(*_a, **_k):
+        built.append(True)
+        raise RuntimeError("stop after the gate")
+
+    with _real_pump_env() as recorder, \
+         patch.object(credential_gate, "claude_credential_ready", return_value=(True, None)), \
+         patch("app.core.provider.factory.make_adapter", new=_reached):
+        try:
+            await session_runtime.execute(turn)
+        except RuntimeError:
+            pass
+    codes = [c.args[0].get("code") for c in recorder.on_event.await_args_list]
+    if refused:
+        assert codes == [credential_gate.SUBSCRIPTION_OWNER_ONLY_CODE]
+        assert built == []
+    else:
+        assert credential_gate.SUBSCRIPTION_OWNER_ONLY_CODE not in codes
+        assert built == [True]
+
+
+async def test_the_sender_is_honoured_only_on_a_connector_turn(mock_db, tmp_path):
+    """An API key's own turn can't claim to be the owner by carrying a sender."""
+    _requesters()
+    claude_auth_mode.set_mode("subscription")
+    _owner_connector()
+    database.create_profile("gate-profile", "Gate", None, {"cwd": str(tmp_path), "model": "sonnet"})
+    database.create_session(session_id="d4a", profile_id="gate-profile", title="t", api_user_id=CONNECTOR_USER)
+    payload = {"api_user_id": CONNECTOR_USER, "connector_sender": _sender(OWNER_TG_ID)}
+    turn = turns_db.enqueue_turn("d4a", "api", prompt="hello", profile_id="gate-profile", payload=payload)
+    with _real_pump_env() as recorder, \
+         patch.object(credential_gate, "claude_credential_ready", return_value=(True, None)):
+        assert await session_runtime.execute(turn) == "aborted"
+    assert [c.args[0]["code"] for c in recorder.on_event.await_args_list] == [
+        credential_gate.SUBSCRIPTION_OWNER_ONLY_CODE]
+
+
+def test_connector_warning_and_save_check_follow_the_owner_account(authenticated_client):
+    from app.core import api_user_scope
+
+    client = authenticated_client
+    _row("chatgpt", "gpt-5")()
+    _requesters()
+    # A plain API key still can't be set to a subscription model.
+    assert client.patch(f"/api/v1/api-users/{API_USER}", json={"model": "prov:p:gpt-5"}).status_code == 400
+    # The connector's key can: only the owner's own messages will use it.
+    _owner_connector(owner_ids=[])
+    saved = client.patch(f"/api/v1/api-users/{CONNECTOR_USER}", json={"model": "prov:p:gpt-5"})
+    assert saved.status_code == 200, saved.text
+    body = saved.json()
+    assert body["owner_sender_connector"] is True
+    # No account saved yet: every message is refused, so it says how to fix it.
+    assert body["subscription_warning"] == api_user_scope.CONNECTOR_NO_OWNER_WARNING.format(connector="Owner bot")
+    database.update_connector("c-d4", config={"owner_sender_ids": [OWNER_TG_ID]})
+    listed = {u["id"]: u for u in client.get("/api/v1/api-users").json()}
+    assert listed[CONNECTOR_USER]["subscription_warning"] is None
+    assert listed[API_USER]["owner_sender_connector"] is False
+    # A connector that can't recognise a sender keeps the plain warning.
+    database.update_api_user(API_USER, model="prov:p:gpt-5")
+    _owner_connector(connector_type="msteams", api_user_id=API_USER, connector_id="c-teams")
+    assert client.get(f"/api/v1/api-users/{API_USER}").json()["subscription_warning"] == (
+        api_user_scope.SUBSCRIPTION_MODEL_WARNING)

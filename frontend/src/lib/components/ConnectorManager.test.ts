@@ -19,6 +19,7 @@ const conn = vi.hoisted(() => ({
 	getConnectorTypes: vi.fn(),
 	getConnectorEvents: vi.fn(),
 	getConnectorLogs: vi.fn(),
+	getConnectorSenders: vi.fn(),
 	discoverDiscord: vi.fn()
 }));
 vi.mock('$lib/api/connectors', async (importOriginal) => ({
@@ -36,6 +37,11 @@ vi.mock('$lib/stores/notifications', () => ({ notify }));
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
 vi.mock('$lib/components/plugins/GoogleConnection.svelte', () => ({ default: () => {} }));
 vi.mock('$lib/components/plugins/PlaidConnection.svelte', () => ({ default: () => {} }));
+const usesSubscription = vi.hoisted(() => vi.fn(() => false));
+vi.mock('$lib/constants/model-picker', async (importOriginal) => ({
+	...(await importOriginal<typeof import('$lib/constants/model-picker')>()),
+	selectionUsesSubscription: usesSubscription
+}));
 
 import ConnectorManager from './ConnectorManager.svelte';
 
@@ -73,6 +79,7 @@ beforeEach(() => {
 	getApiUsers.mockResolvedValue([]);
 	apiGet.mockResolvedValue(agents);
 	listInstalls.mockResolvedValue({ self_instance_id: 'self', installs: [] });
+	usesSubscription.mockImplementation(() => false);
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
@@ -283,5 +290,105 @@ describe('ConnectorManager create and edit', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Update Connector' }));
 		expect(await screen.findByText('Name is required')).toBeTruthy();
 		expect(conn.updateConnector).not.toHaveBeenCalled();
+	});
+});
+
+describe('subscription sign-ins are the owner\'s own', () => {
+	it('warns on a connection whose API user is set to a subscription model', async () => {
+		getApiUsers.mockResolvedValue([
+			{ id: 'u1', name: 'connector:telegram', is_active: true, subscription_warning: 'refused' }
+		]);
+		conn.getConnectors.mockResolvedValue([connector(), connector({ id: 'c2', name: 'Other bot', api_user_id: 'u2' })]);
+		await loaded();
+		const warnings = await screen.findAllByTestId('connector-subscription-warning');
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0].textContent).toContain('Incoming messages are refused');
+	});
+
+	it('shows no warning for a connection on an API-key model', async () => {
+		getApiUsers.mockResolvedValue([{ id: 'u1', name: 'connector:telegram', is_active: true, subscription_warning: null }]);
+		await loaded();
+		expect(screen.queryByTestId('connector-subscription-warning')).toBeNull();
+	});
+
+	it('disables agents on a subscription in the Agent choice, with the reason', async () => {
+		apiGet.mockResolvedValue([
+			{ id: 'a1', name: 'Helper', config: { model: 'prov:codex:gpt-5' } },
+			{ id: 'a2', name: 'Planner', config: { model: 'gpt-5', provider: 'oa' } }
+		]);
+		usesSubscription.mockImplementation((model?: string | null) => model === 'prov:codex:gpt-5');
+		await loaded();
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect account' }));
+		await fireEvent.click(screen.getByRole('button', { name: /Telegram/ }));
+		const helper = screen.getByRole('option', { name: /Helper/ }) as HTMLOptionElement;
+		const planner = screen.getByRole('option', { name: 'Planner' }) as HTMLOptionElement;
+		expect(helper.disabled).toBe(true);
+		expect(helper.textContent).toContain('(your subscription)');
+		expect(planner.disabled).toBe(false);
+		expect(screen.getByTestId('connector-agent-subscription-reason').textContent).toContain(
+			"can't run for other people"
+		);
+	});
+	it('lets a connection that knows your account save it, with recent senders to copy', async () => {
+		conn.getConnectorTypes.mockResolvedValue([{ ...telegram, owner_sender: true }, webhook]);
+		getApiUsers.mockResolvedValue([
+			{ id: 'u1', name: 'connector:telegram', is_active: true, subscription_warning: 'refused' }
+		]);
+		conn.getConnectorSenders.mockResolvedValue([
+			{ platform_user_id: '111', platform_user_name: 'Sam', last_seen: null }
+		]);
+		await loaded();
+		expect((await screen.findByTestId('connector-subscription-warning')).textContent).toContain(
+			'Add your own account below'
+		);
+		const field = screen.getByTestId('connector-owner-account');
+		expect(field.textContent).toContain(
+			'Your own account on this platform. Messages from it can use your subscriptions'
+		);
+		await fireEvent.click(screen.getByRole('button', { name: 'Recent senders' }));
+		expect(conn.getConnectorSenders).toHaveBeenCalledWith('c1');
+		await fireEvent.click(await screen.findByRole('button', { name: 'Sam · 111' }));
+		const input = screen.getByLabelText('Your account') as HTMLInputElement;
+		expect(input.value).toBe('111');
+		await fireEvent.input(input, { target: { value: '111, 222 111' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+		await waitFor(() =>
+			expect(conn.updateConnector).toHaveBeenCalledWith('c1', { config: { owner_sender_ids: ['111', '222'] } })
+		);
+	});
+
+	it('keeps a saved account editable once the warning is gone', async () => {
+		conn.getConnectorTypes.mockResolvedValue([{ ...telegram, owner_sender: true }, webhook]);
+		conn.getConnectors.mockResolvedValue([connector({ config: { owner_sender_ids: ['111'] } })]);
+		await loaded();
+		expect(screen.queryByTestId('connector-subscription-warning')).toBeNull();
+		expect(((await screen.findByLabelText('Your account')) as HTMLInputElement).value).toBe('111');
+	});
+
+	it('offers no account field where the connection cannot recognise a sender', async () => {
+		getApiUsers.mockResolvedValue([
+			{ id: 'u1', name: 'connector:webhook', is_active: true, subscription_warning: 'refused' }
+		]);
+		conn.getConnectors.mockResolvedValue([connector({ type: 'webhook' })]);
+		await loaded();
+		expect((await screen.findByTestId('connector-subscription-warning')).textContent).not.toContain(
+			'Add your own account'
+		);
+		expect(screen.queryByTestId('connector-owner-account')).toBeNull();
+	});
+
+	it('allows a subscription agent where only your own messages will use it', async () => {
+		conn.getConnectorTypes.mockResolvedValue([{ ...telegram, owner_sender: true }, webhook]);
+		apiGet.mockResolvedValue([{ id: 'a1', name: 'Helper', config: { model: 'prov:codex:gpt-5' } }]);
+		usesSubscription.mockImplementation((model?: string | null) => model === 'prov:codex:gpt-5');
+		await loaded();
+		await fireEvent.click(screen.getByRole('button', { name: 'Connect account' }));
+		await fireEvent.click(screen.getByRole('button', { name: /Telegram/ }));
+		const helper = screen.getByRole('option', { name: /Helper/ }) as HTMLOptionElement;
+		expect(helper.disabled).toBe(false);
+		expect(helper.textContent).toContain('your messages only');
+		expect(screen.getByTestId('connector-agent-subscription-reason').textContent).toContain(
+			'answers only your own account'
+		);
 	});
 });

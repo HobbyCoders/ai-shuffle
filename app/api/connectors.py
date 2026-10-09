@@ -244,6 +244,16 @@ async def get_connection_dependencies(connector_id: str, token: str = Depends(re
     return await run_sync(connection_dependencies, connector_id)
 
 
+@router.get("/{connector_id}/senders")
+async def list_connection_senders(connector_id: str, token: str = Depends(require_admin)):
+    """The newest people who messaged this connection, so the owner can copy
+    their own account id into ``owner_sender_ids``."""
+    from app.core.connector_service import recent_senders
+    if not await run_sync(database.get_connector, connector_id):
+        raise HTTPException(status_code=404, detail="Connection not found")
+    return await run_sync(recent_senders, connector_id)
+
+
 @router.get("/{connector_id}", response_model=Connector)
 async def get_connector(connector_id: str, token: str = Depends(require_admin)):
     """Get a connector by ID."""

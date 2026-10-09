@@ -197,7 +197,7 @@ async def _run_background_query_impl(
     # Credential gate (see query_engine._stream_to_websocket_impl).
     from app.core import credential_gate
 
-    _refusal = await credential_gate.refusal_for_options_async(options)
+    _refusal = await credential_gate.refusal_for_options_async(options, api_user_id)
     if _refusal:
         logger.warning(f"[Background] Turn refused for session {session_id}: {_refusal}")
         if recorder:

@@ -847,8 +847,17 @@ class ConnectorManager:
                     project_id=project_id,
                     overrides=overrides or None,
                     # The connector's API user is the turn's principal: its
-                    # tool surface and credentials, never the owner's.
-                    payload={"api_user_id": api_user_id},
+                    # tool surface and credentials, never the owner's. The
+                    # sender only decides whether the owner's subscription
+                    # sign-ins may run it (connector_service.sender_is_owner,
+                    # checked when the turn starts).
+                    payload={
+                        "api_user_id": api_user_id,
+                        "connector_sender": {
+                            "connector_id": message.connector_id,
+                            "platform_user_id": message.platform_user_id,
+                        },
+                    },
                 )
                 idle = await turn_manager.wait_session_idle(
                     ai_session_id, timeout=3600

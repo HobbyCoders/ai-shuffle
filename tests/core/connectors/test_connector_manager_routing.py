@@ -614,6 +614,12 @@ class TestIncomingMessage:
         args, kwargs = turns.submit.await_args
         assert args == (ai_session, "connector")
         assert kwargs["prompt"] == "x" * 60 and kwargs["profile_id"] == "prof-1"
+        # The sender travels by the platform's id only, never its display name
+        # ("Alice"): only the id can say the owner sent it (D4).
+        assert kwargs["payload"] == {
+            "api_user_id": "au-1",
+            "connector_sender": {"connector_id": "c1", "platform_user_id": "u-1"},
+        }
         overrides = kwargs["overrides"]
         assert overrides["permission_mode"] == "default"
         assert overrides["model"] == "claude-sonnet" and overrides["effort"] == "high"

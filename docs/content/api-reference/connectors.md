@@ -322,6 +322,21 @@ List the automations that use this connector, so you can update them before dele
 
 `uses` names where the connector appears: `trigger`, `action` (a Connector Action step) or `output`. An automation triggered by events from any connector is listed for every connector.
 
+### GET /api/v1/connectors/{connector_id}/senders
+
+List the newest people who started a chat with this connector, so you can find your own account id on that platform. Returns up to five entries, newest first, or `404` for an unknown connector.
+
+**Auth:** Owner only
+
+**Response:**
+```json
+[
+  { "platform_user_id": "123456789", "platform_user_name": "Sam", "last_seen": "2026-10-09T12:00:00+00:00" }
+]
+```
+
+A connector runs as its API user, so its messages can't use your personal subscriptions (the Claude CLI sign-in, ChatGPT/Codex or SuperGrok). The one exception is your own account: save your platform user ids in the connector's `owner_sender_ids` config (`PATCH` with `{"config": {"owner_sender_ids": ["123456789"]}}`), and messages from those ids can use them. Only the platform's user id is matched, never a display name or username. Telegram, Discord, Slack, WhatsApp, Signal and iMessage support it. Other connectors return `400` for it, and their messages never use a subscription.
+
 ### GET /api/v1/connectors/{connector_id}/triggers
 
 List the triggers exposed by the connector's type.

@@ -206,18 +206,174 @@ def leg_for_options(options) -> str:
         return "delegated"
 
 
-def refusal_for_options(options) -> Optional[str]:
-    """:func:`turn_refusal` for a built options object (may read the DB)."""
+# ─── Subscriptions are the owner's own ──────────────────────────────────────
+#
+# Claude (the Claude Code CLI signed in to a plan), ChatGPT/Codex and SuperGrok
+# subscriptions are for the subscriber's personal use: Anthropic, OpenAI and
+# xAI all forbid serving other people's requests from them, and so do our own
+# terms. A run started for anyone other than the owner (an API user, which
+# includes every connector message: a connector turn runs as the connector's
+# API user) must use an API-key provider instead. API keys (Anthropic, OpenAI,
+# xAI, OpenRouter, custom gateways, local models) stay allowed. The owner,
+# their paired devices and their own workers are unrestricted.
+
+SUBSCRIPTION_OWNER_ONLY_CODE = "subscription_owner_only"
+SUBSCRIPTION_OWNER_ONLY_MESSAGE = (
+    "This model uses the owner's personal subscription and can't run for other "
+    "people. Pick a model on an API-key provider."
+)
+
+
+def provider_row_is_subscription(provider_type: Optional[str], auth_mode: Optional[str]) -> bool:
+    """Whether a ``model_providers`` row signs in with a subscription.
+
+    ChatGPT/Codex (``chatgpt``) and SuperGrok (``grok``) rows, by type or auth
+    mode, and any row whose auth mode is a subscription login
+    (``fluid_credentials._SUBSCRIPTION_AUTH_MODES``, e.g. an Anthropic row on a
+    Claude plan, which runs on the CLI).
+    """
+    from app.core.provider.fluid_credentials import _SUBSCRIPTION_AUTH_MODES
+
+    ptype = (provider_type or "").strip().lower()
+    mode = (auth_mode or "").strip().lower()
+    return ptype in ("chatgpt", "grok") or mode == "codex" or mode in _SUBSCRIPTION_AUTH_MODES
+
+
+def claude_cli_uses_subscription() -> bool:
+    """Whether a Claude run on the CLI leg uses the owner's Claude plan.
+
+    True in subscription mode. API key and cloud modes use a key; off refuses
+    every Claude run anyway. Unreadable reads as a subscription: this answer
+    only ever narrows what other people may run.
+    """
+    try:
+        from app.core import claude_auth_mode
+
+        return claude_auth_mode.current_mode() == claude_auth_mode.MODE_SUBSCRIPTION
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read the Claude auth mode; treating it as a subscription", exc_info=True)
+        return True
+
+
+def options_use_subscription(options) -> bool:
+    """Whether a built options object runs on a subscription sign-in.
+
+    The bound provider row decides when there is one (its shape is stamped on
+    the options as ``aih_provider_type`` / ``aih_provider_auth_mode``; looked
+    up when missing). A run on the Claude Code CLI leg uses a subscription
+    when Claude is in subscription mode.
+    """
+    provider_id = getattr(options, "aih_provider_id", None)
+    if provider_id:
+        ptype = getattr(options, "aih_provider_type", None)
+        mode = getattr(options, "aih_provider_auth_mode", None)
+        if not ptype and not mode:
+            from app.core.provider.harness_adapter import _lookup_provider_row_shape
+
+            ptype, mode, _dialect = _lookup_provider_row_shape(str(provider_id))
+        if provider_row_is_subscription(ptype, mode):
+            return True
+    if leg_for_options(options) == "delegated":
+        return claude_cli_uses_subscription()
+    return False
+
+
+def selection_uses_subscription(model: Optional[str], provider_id: Optional[str] = None) -> bool:
+    """Whether a saved model choice (an API user's, or an agent's) would run
+    on a subscription sign-in. Blocking (may read one provider row).
+
+    ``model`` is a picker value: a ``prov:<row>:<model>`` composite or a bare
+    id, with ``provider_id`` for an agent's separate provider field. A native
+    Claude id with no provider runs on the CLI. Anything else (no model, a
+    bare non-Claude id) is not a known subscription choice.
+    """
+    from app.core.query_options import decode_provider_model, is_native_claude_model
+
+    decoded = decode_provider_model(model)
+    if decoded:
+        provider_id, model = decoded
+    if provider_id:
+        from app.db import database
+
+        row = database.get_model_provider(provider_id, include_token=False)
+        if not row:
+            return False
+        if provider_row_is_subscription(row.get("provider_type"), row.get("auth_mode")):
+            return True
+        # An Anthropic row's plain Claude pick keeps its own (API-key) leg.
+        return False
+    if is_native_claude_model(model):
+        return claude_cli_uses_subscription()
+    return False
+
+
+def requester_refusal(options, api_user_id: Optional[str]) -> Optional[str]:
+    """Refuse a run for someone other than the owner on a subscription.
+
+    ``api_user_id`` is who the run is for (``None`` is the owner). A connector
+    message runs as its connector's API user; the caller passes ``None`` only
+    when :func:`connector_sender_is_owner` says the sender is the owner's own
+    account on that platform. Blocking.
+    """
+    if not api_user_id:
+        return None
+    try:
+        uses_subscription = options_use_subscription(options)
+    except Exception:  # noqa: BLE001 — fail closed for other people
+        logger.warning("Could not tell whether a run uses a subscription; refusing it", exc_info=True)
+        uses_subscription = True
+    if uses_subscription:
+        logger.warning(
+            "Refused a run for API user %s: its model uses the owner's subscription", api_user_id,
+        )
+        return SUBSCRIPTION_OWNER_ONLY_MESSAGE
+    return None
+
+
+def connector_sender_is_owner(sender: Optional[dict], api_user_id: Optional[str]) -> bool:
+    """True when a connector turn's ``sender`` (``{"connector_id",
+    "platform_user_id"}`` from its payload) is one of the owner's own accounts
+    on a connector bound to ``api_user_id``, the API user the turn runs as.
+    Only the platform's immutable user id is matched
+    (``connector_service.sender_is_owner``). Any doubt is ``False``. Blocking.
+    """
+    if not isinstance(sender, dict) or not api_user_id:
+        return False
+    connector_id = sender.get("connector_id")
+    try:
+        from app.core import connector_service
+        from app.db import database
+
+        row = database.get_connector(connector_id) if connector_id else None
+        if not row or row.get("api_user_id") != api_user_id:
+            return False
+        return connector_service.sender_is_owner(connector_id, sender.get("platform_user_id"))
+    except Exception:  # noqa: BLE001 — fail closed
+        logger.warning("Could not check a connector sender; treating it as not the owner", exc_info=True)
+        return False
+
+
+def refusal_for_options(options, api_user_id: Optional[str] = None) -> Optional[str]:
+    """Why a run with these built options must not start, or None.
+
+    The single run-start check every engine path calls once its options are
+    built: first who the run is for (:func:`requester_refusal`), then
+    :func:`turn_refusal` for the leg. May read the DB.
+    """
+    refusal = requester_refusal(options, api_user_id)
+    if refusal:
+        return refusal
     return turn_refusal(leg_for_options(options))
 
 
-async def refusal_for_options_async(options) -> Optional[str]:
-    return await asyncio.to_thread(refusal_for_options, options)
+async def refusal_for_options_async(options, api_user_id: Optional[str] = None) -> Optional[str]:
+    return await asyncio.to_thread(refusal_for_options, options, api_user_id)
 
 
 def refusal_event(reason: str) -> dict:
     """The stream's error frame for a refused turn."""
-    return {"type": "error", "message": reason, "code": SETUP_CODE}
+    code = SUBSCRIPTION_OWNER_ONLY_CODE if reason == SUBSCRIPTION_OWNER_ONLY_MESSAGE else SETUP_CODE
+    return {"type": "error", "message": reason, "code": code}
 
 
 def provider_id_for_row(row: Mapping[str, Any]) -> str:

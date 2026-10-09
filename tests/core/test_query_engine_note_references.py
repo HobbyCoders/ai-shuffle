@@ -55,6 +55,8 @@ def _engine_patches(stack, pool, cwd):
     options.model = None
     options.aih_provider_id = None
     stack.enter_context(patch("app.core.sdk_options.build_options_from_profile", return_value=(options, {})))
+    # An API user may run Claude only on an API key, never the owner's plan.
+    stack.enter_context(patch("app.core.credential_gate.claude_cli_uses_subscription", return_value=False))
     stack.enter_context(patch.object(qe, "get_session_pool", return_value=pool))
     stack.enter_context(patch.object(qe, "is_subprocess_alive", return_value=True))
     stack.enter_context(patch.object(qe, "requires_reconnect", return_value=False))

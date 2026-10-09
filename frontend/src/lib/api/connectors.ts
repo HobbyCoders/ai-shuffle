@@ -103,6 +103,9 @@ export interface ConnectorTypeInfo {
 	triggers: ConnectorTriggerInfo[];
 	actions: ConnectorActionInfo[];
 	tools: ConnectorToolInfo[];
+	/** The connector can recognise the owner's own account by its platform
+	 * user id (``config.owner_sender_ids``). */
+	owner_sender?: boolean;
 }
 
 // ---- Discord guided setup ----
@@ -207,6 +210,22 @@ export interface ConnectionDependency {
 
 export async function getConnectionDependencies(id: string): Promise<ConnectionDependency[]> {
 	return api.get<ConnectionDependency[]>(`/connectors/${id}/dependencies`);
+}
+
+export interface ConnectorSender {
+	platform_user_id: string;
+	platform_user_name?: string | null;
+	last_seen?: string | null;
+}
+
+/** The newest people who messaged a connection, to find the owner's own id. */
+export async function getConnectorSenders(id: string): Promise<ConnectorSender[]> {
+	return api.get<ConnectorSender[]>(`/connectors/${id}/senders`);
+}
+
+/** Parse the owner's account ids as typed: commas or spaces between them. */
+export function parseOwnerSenderIds(text: string): string[] {
+	return [...new Set(text.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean))];
 }
 
 export async function deleteConnector(id: string): Promise<void> {

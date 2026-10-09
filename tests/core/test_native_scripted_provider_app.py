@@ -564,6 +564,9 @@ async def _chat_turn_outcome(tmp_path: Path, result: ResultMessage) -> dict:
         bounds = engine_patches(stack, cwd=str(tmp_path), adapter=fresh_adapter([result]))
         stack.enter_context(
             patch("app.services.notification_service.emit_notification", new=emit))
+        # An API user may run Claude only on an API key, never the owner's plan.
+        stack.enter_context(
+            patch("app.core.credential_gate.claude_cli_uses_subscription", return_value=False))
         events = await collect(qe._stream_to_websocket_impl(
             "hi", "native-429", "claude-code", api_user_id="u-1"))
     metadata = bounds.persist.await_args.kwargs["metadata"]

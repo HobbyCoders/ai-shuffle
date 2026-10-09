@@ -62,11 +62,13 @@ def normalize_config(config: Dict, connector_type: str) -> Dict:
     declared as ``type: "list"``.  This normalizes them so downstream code
     can always iterate safely.
     """
+    normalized = dict(config)
+    if OWNER_SENDER_KEY in normalized:
+        normalized[OWNER_SENDER_KEY] = _id_list(normalized[OWNER_SENDER_KEY])
     list_fields = _get_list_fields(connector_type)
     if not list_fields:
-        return config
+        return normalized
 
-    normalized = dict(config)
     for key in list_fields:
         value = normalized.get(key)
         if value is None or value == "":
@@ -301,10 +303,15 @@ async def update_connector(connector_id: str, **kwargs) -> Optional[Dict]:
                     # Masked value — keep the original encrypted value from DB
                     new_config[key] = existing_config.get(key, new_val)
 
+            if new_config.get(OWNER_SENDER_KEY) and connector_type not in OWNER_SENDER_TYPES:
+                raise ValueError(OWNER_SENDER_UNSUPPORTED_MESSAGE)
+
             # Check if config actually changed vs what's in the DB
             if new_config != existing_config:
                 kwargs["config"] = encrypt_config(new_config, connector_type)
-                config_changed = True
+                # The owner's sender ids are read per message, so changing
+                # only them needs no reconnect.
+                config_changed = _without_owner_ids(new_config) != _without_owner_ids(existing_config)
             else:
                 # No real change — drop config from the update
                 del kwargs["config"]
@@ -476,9 +483,82 @@ def missing_sender_allowlist(connector_type: str, config: Dict[str, Any]) -> boo
     return True
 
 
+# ---------------------------------------------------------------------------
+# The owner's own accounts (compliance decision D4)
+# ---------------------------------------------------------------------------
+
+# A connector runs as its API user, so its turns may not use the owner's
+# subscription sign-ins. A message whose sender is one of the owner's own
+# accounts on that platform is the owner's, and may. Only the platform's
+# immutable user id counts, never a display name or username, and only on
+# connectors whose sender id comes from the platform itself over an
+# authenticated channel: Telegram, Discord and Slack ids, the WhatsApp number
+# on a Meta-signed webhook, the Signal account from signal-cli, the iMessage
+# handle from the local Messages database. BlueBubbles, LINE and Microsoft
+# Teams have no authenticated inbound route here, so their senders are never
+# the owner. An empty list means no sender is the owner.
+OWNER_SENDER_KEY = "owner_sender_ids"
+OWNER_SENDER_TYPES = frozenset({"telegram", "discord", "slack", "whatsapp", "signal", "imessage"})
+OWNER_SENDER_UNSUPPORTED_MESSAGE = (
+    "This connector can't tell which messages are yours, so it can't use your subscriptions."
+)
+# Fallback ids a connector uses when the platform gave no sender.
+_NOT_A_SENDER = frozenset({"", "unknown"})
+
+
+def _id_list(value: Any) -> List[str]:
+    if isinstance(value, str):
+        value = value.replace(",", " ").split()
+    if not isinstance(value, (list, tuple)):
+        return []
+    ids: List[str] = []
+    for item in value:
+        text = str(item).strip() if item is not None else ""
+        if text and text not in ids:
+            ids.append(text)
+    return ids
+
+
+def _without_owner_ids(config: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: v for k, v in config.items() if k != OWNER_SENDER_KEY}
+
+
+def owner_sender_ids(row: Optional[Dict[str, Any]]) -> List[str]:
+    """The owner's own sender ids saved on connector ``row`` (empty for a
+    type that can't recognise them)."""
+    if not row or row.get("type") not in OWNER_SENDER_TYPES:
+        return []
+    return _id_list((row.get("config") or {}).get(OWNER_SENDER_KEY))
+
+
+def sender_is_owner(connector_id: Optional[str], platform_user_id: Optional[str]) -> bool:
+    """True when ``platform_user_id`` is one of the owner's own accounts on
+    connector ``connector_id``. Read fresh, so removing an id applies to
+    queued turns too. Any doubt is ``False``. Blocking (DB read).
+    """
+    sender = str(platform_user_id or "").strip()
+    if not connector_id or sender in _NOT_A_SENDER:
+        return False
+    try:
+        row = database.get_connector(connector_id)
+    except Exception:  # noqa: BLE001 — fail closed
+        logger.warning("Could not read connector %s for its owner ids", connector_id, exc_info=True)
+        return False
+    return sender in owner_sender_ids(row)
+
+
+def recent_senders(connector_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """The newest distinct senders that started a chat with this connector,
+    so the owner can copy their own id. Blocking (DB read)."""
+    return database.list_connector_senders(connector_id, limit)
+
+
 def _annotate_allowlist_fields(types: List[Dict]) -> List[Dict]:
     """Tell the connector form which fields gate starting the connector."""
     for entry in types:
+        # The connection card offers "your own account" only where a sender
+        # can be recognised (see OWNER_SENDER_TYPES).
+        entry["owner_sender"] = entry["type"] in OWNER_SENDER_TYPES
         keys = SENDER_ALLOWLIST_KEYS.get(entry["type"])
         if not keys:
             continue

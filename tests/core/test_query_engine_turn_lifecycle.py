@@ -721,6 +721,8 @@ async def test_api_error_status_frames_and_notifies(tmp_path, status, notifies, 
         adapter = fresh_adapter([_result(api_error_status=status)])
         b = engine_patches(stack, cwd=str(tmp_path), adapter=adapter)
         stack.enter_context(patch("app.services.notification_service.emit_notification", new=emit))
+        # An API user may run Claude only on an API key, never the owner's plan.
+        stack.enter_context(patch("app.core.credential_gate.claude_cli_uses_subscription", return_value=False))
         events = await _turn(stack, api_user_id="api-7")
     types = [e["type"] for e in events]
     assert types.index("api_error") < types.index("done")

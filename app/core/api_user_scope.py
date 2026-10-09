@@ -125,6 +125,93 @@ def visible_store_ids(store_ids: Iterable[str], api_user_id: str) -> Set[str]:
     return visible
 
 
+SUBSCRIPTION_MODEL_WARNING = (
+    "This API user's model uses your personal subscription, so its runs are "
+    "refused. Pick a model on an API-key provider."
+)
+SUBSCRIPTION_AGENT_WARNING = (
+    "Agent “{agent}” runs on your personal subscription, so this API "
+    "user's runs on it are refused. Pick a model on an API-key provider here, "
+    "or change the agent's model."
+)
+
+
+CONNECTOR_NO_OWNER_WARNING = (
+    "{connector} runs on your personal subscription, so its messages are "
+    "refused. Add your own account under the connection so your messages can "
+    "use it, or pick a model on an API-key provider."
+)
+
+
+def owner_sender_connector(user_id: Optional[str]) -> Optional[Mapping[str, Any]]:
+    """The connector bound to API user ``user_id`` that can recognise the
+    owner's own account (``connector_service.OWNER_SENDER_TYPES``), or
+    ``None``. Messages from the owner's account on it may use the owner's
+    subscriptions, so its API user may be set to one. Blocking.
+    """
+    if not user_id:
+        return None
+    from app.core import connector_service
+    from app.db import database
+
+    for row in database.get_all_connectors() or []:
+        if row.get("api_user_id") == user_id and row.get("type") in connector_service.OWNER_SENDER_TYPES:
+            return row
+    return None
+
+
+def _subscription_reason(user: Mapping[str, Any]) -> Optional[str]:
+    from app.core import credential_gate
+
+    model = user.get("model")
+    if model:
+        return SUBSCRIPTION_MODEL_WARNING if credential_gate.selection_uses_subscription(model) else None
+    from app.db import database
+
+    for profile_id in user.get("profile_ids") or []:
+        profile = database.get_profile(profile_id)
+        if not profile:
+            continue
+        config = profile.get("config") or {}
+        if (config.get("model") or config.get("provider")) and credential_gate.selection_uses_subscription(
+            config.get("model"), config.get("provider")
+        ):
+            return SUBSCRIPTION_AGENT_WARNING.format(agent=profile.get("name") or profile_id)
+    return None
+
+
+def subscription_warning(user: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Why ``user``'s saved setup would be refused for using the owner's
+    subscription sign-in (``credential_gate.requester_refusal``), or ``None``.
+
+    The key's own model decides when it has one. With none ("Agent default")
+    each of its assigned agents' saved models is checked. An agent with no
+    saved model, or a key open to every agent, is not flagged here: the run
+    is still refused at start if it lands on a subscription. A key that runs a
+    connector which knows the owner's own account is fine once that account
+    is set: only the owner's messages use the subscription. Blocking.
+    """
+    if not user:
+        return None
+    try:
+        reason = _subscription_reason(user)
+        if not reason:
+            return None
+        connector = owner_sender_connector(user.get("id"))
+        if connector is None:
+            return reason
+        from app.core import connector_service
+
+        if connector_service.owner_sender_ids(connector):
+            return None
+        return CONNECTOR_NO_OWNER_WARNING.format(connector=connector.get("name") or "This connection")
+    except Exception:  # noqa: BLE001 — a warning must never break the settings list
+        import logging
+
+        logging.getLogger(__name__).warning("Could not check an API user's model", exc_info=True)
+    return None
+
+
 def worker_refusal(api_user_id: Optional[str], profile_id: str) -> Optional[str]:
     """Why a session running as ``api_user_id`` may not start a worker on
     ``profile_id``; ``None`` = allowed.

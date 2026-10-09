@@ -14,6 +14,7 @@ import {
 	getProviderDisplay,
 	getClaudeDisplay,
 	getClaudeAuth,
+	decodeProviderModel,
 	NATIVE_PROVIDER_KEY,
 	type ModelFamily
 } from './models.svelte';
@@ -69,16 +70,28 @@ export interface BuildCatalogOptions {
 	providerScope?: string;
 	/** Use the family blurb ("Deep reasoning") as the native rows' description instead of the alias. */
 	familyBlurbs?: boolean;
+	/**
+	 * Only providers that sign in with an API credential. Subscription sign-ins
+	 * (Claude, ChatGPT, SuperGrok) are the owner's own, so a picker for an API
+	 * user or a connector leaves them out; the server refuses them for anyone
+	 * but the owner either way.
+	 */
+	apiKeyOnly?: boolean;
 }
+
+/** Why a picker for other people leaves the subscription sign-ins out. */
+export const SUBSCRIPTION_OWNER_ONLY_REASON =
+	"Subscription sign-ins (Claude, ChatGPT, SuperGrok) are only for your own use, so they can't run for other people. Pick a model on an API-key provider.";
 
 /** Build the grouped catalog from the live registry. Call inside `$derived` for reactivity. */
 export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerCatalog {
 	const groups: PickerGroup[] = [];
 	const options: PickerOption[] = [];
-	const { providerModelsOnly = false, providerScope, familyBlurbs = false } = opts;
+	const { providerModelsOnly = false, providerScope, familyBlurbs = false, apiKeyOnly = false } = opts;
 
 	for (const p of getProviders()) {
 		if (providerScope && providerScope !== p.id) continue;
+		if (apiKeyOnly && p.auth_kind !== 'api') continue;
 		const display = getProviderDisplay(p);
 		groups.push({
 			key: p.id,
@@ -104,7 +117,12 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 	// providers. Bundled Claude metadata also labels historical sessions. It is not proof
 	// that this worker has an account or API key that can run those models.
 	const claudeAuth = getClaudeAuth();
-	if (claudeAuth.auth_kind && !providerModelsOnly && (!providerScope || providerScope === NATIVE_PROVIDER_KEY)) {
+	if (
+		claudeAuth.auth_kind &&
+		!(apiKeyOnly && claudeAuth.auth_kind !== 'api') &&
+		!providerModelsOnly &&
+		(!providerScope || providerScope === NATIVE_PROVIDER_KEY)
+	) {
 		const claude = getClaudeDisplay({
 			planType: claudeAuth.plan_type,
 			authKind: claudeAuth.auth_kind
@@ -132,6 +150,25 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 	}
 
 	return { groups, options };
+}
+
+/**
+ * Whether a saved model choice (an agent's `model` + `provider`, or a picker
+ * value) runs on a subscription sign-in, which only the owner may use. Mirrors
+ * the server's `credential_gate.selection_uses_subscription`; a choice the
+ * registry does not know (no model, a removed row) is not flagged here.
+ */
+export function selectionUsesSubscription(
+	model: string | null | undefined,
+	providerId?: string | null
+): boolean {
+	const pid = decodeProviderModel(model)?.providerId ?? providerId ?? null;
+	if (pid) {
+		const row = getProviders().find((p) => p.id === pid);
+		return !!row && row.auth_kind !== 'api';
+	}
+	if (model && getModels().some((m) => m.value === model)) return getClaudeAuth().auth_kind === 'subscription';
+	return false;
 }
 
 /** Case-insensitive substring match over label, description and group name. */

@@ -468,6 +468,45 @@ class TestReadUpdateDelete:
         assert owner.patch(f"{BASE}/{cid}", json={"config": {"allowed_chat_ids": ["7", "8"]}}).status_code == 200
         assert fake_manager.calls == []
 
+    def test_owner_sender_ids_persist_without_restarting_the_client(self, owner, fake_manager):
+        cid = create(owner, name="Tg", type_="telegram",
+                     config={"bot_token": "123:secret-token", "allowed_chat_ids": ["1"]})["id"]
+        assert owner.post(f"{BASE}/{cid}/activate").status_code == 200
+        fake_manager.calls.clear()
+        response = owner.patch(f"{BASE}/{cid}", json={"config": {"owner_sender_ids": "111, 222 111"}})
+        assert response.status_code == 200, response.text
+        assert response.json()["config"]["owner_sender_ids"] == ["111", "222"]
+        # Who counts as the owner is read per message; the bot needs no restart.
+        assert fake_manager.calls == []
+        assert owner.get(f"{BASE}/{cid}").json()["config"]["owner_sender_ids"] == ["111", "222"]
+        stored = decrypt_config(database.get_connector(cid)["config"], "telegram")
+        assert stored["owner_sender_ids"] == ["111", "222"]
+        assert stored["bot_token"] == "123:secret-token"
+        # Clearing it is saved too.
+        assert owner.patch(f"{BASE}/{cid}", json={"config": {"owner_sender_ids": []}}).status_code == 200
+        assert database.get_connector(cid)["config"]["owner_sender_ids"] == []
+
+    def test_owner_sender_ids_are_refused_where_no_sender_can_be_recognised(self, owner):
+        cid = create(owner, name="Hook")["id"]
+        response = owner.patch(f"{BASE}/{cid}", json={"config": {"owner_sender_ids": ["111"]}})
+        assert response.status_code == 400
+        assert "can't tell which messages are yours" in response.json()["detail"]
+        assert "owner_sender_ids" not in database.get_connector(cid)["config"]
+
+    def test_types_say_which_connectors_know_the_owners_account(self, owner):
+        types = {t["type"]: t for t in owner.get(f"{BASE}/types").json()}
+        assert types["telegram"]["owner_sender"] is True
+        assert types["webhook"]["owner_sender"] is False
+
+    def test_senders_lists_who_messaged_the_connection(self, owner):
+        cid = create(owner, name="Tg", type_="telegram",
+                     config={"bot_token": "123:secret-token", "allowed_chat_ids": ["1"]})["id"]
+        assert owner.get(f"{BASE}/{cid}/senders").json() == []
+        database.create_connector_session("cs-1", cid, "chat-1", "111", "Owner")
+        senders = owner.get(f"{BASE}/{cid}/senders").json()
+        assert [(s["platform_user_id"], s["platform_user_name"]) for s in senders] == [("111", "Owner")]
+        assert owner.get(f"{BASE}/nope/senders").status_code == 404
+
     def test_disable_through_patch_stops_the_live_client(self, owner, fake_manager):
         cid = create(owner, name="Hook")["id"]
         owner.post(f"{BASE}/{cid}/activate")

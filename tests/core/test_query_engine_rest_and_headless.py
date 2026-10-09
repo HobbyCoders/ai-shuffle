@@ -350,6 +350,8 @@ async def test_headless_turn_returns_the_answer_and_records_an_automation_step()
     ])
     with ExitStack() as stack:
         b = _headless_patches(stack, adapter)
+        # An API user may run Claude only on an API key, never the owner's plan.
+        stack.enter_context(patch("app.core.credential_gate.claude_cli_uses_subscription", return_value=False))
         out = await qe.execute_query("do the thing", "claude-code", automation_id="auto-1",
                                      overrides={"model": "x"}, api_user_id="api-1")
 

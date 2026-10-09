@@ -1314,6 +1314,13 @@ class ApiUserResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     last_used_at: Optional[datetime] = None
+    # Set when this key's runs would use the owner's subscription sign-in and
+    # are therefore refused (``api_user_scope.subscription_warning``).
+    subscription_warning: Optional[str] = None
+    # Runs a connector that knows the owner's own account
+    # (``api_user_scope.owner_sender_connector``): its model may be a
+    # subscription, used only for the owner's own messages.
+    owner_sender_connector: bool = False
 
 
 class ApiUserCreateResponse(ApiUserResponse):

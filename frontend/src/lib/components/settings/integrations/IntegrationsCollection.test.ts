@@ -237,6 +237,31 @@ describe('one API user', () => {
 		await waitFor(() => expect(apiUsers.updateApiUser).toHaveBeenLastCalledWith('u1', { is_active: false }));
 	});
 
+	it('warns when a saved setup runs on the owner\'s subscription, and only then', async () => {
+		const warning = "This API user's model uses your personal subscription, so its runs are refused. Pick a model on an API-key provider.";
+		apiUsers.getApiUsers.mockResolvedValue([user({ model: 'sonnet', subscription_warning: warning })]);
+		await open('u1', 'Run');
+		expect(screen.getByText(warning)).toBeTruthy();
+		cleanup();
+		apiUsers.getApiUsers.mockResolvedValue([user()]);
+		await open('u1', 'Run');
+		expect(screen.queryByText(/personal subscription, so its runs are refused/)).toBeNull();
+	});
+
+	it('lets a connection\'s key pick a subscription model for the owner\'s own messages', async () => {
+		const modelHelp = async () => {
+			await fireEvent.click(screen.getByRole('button', { name: 'About Model' }));
+			return (await screen.findByRole('tooltip')).textContent;
+		};
+		apiUsers.getApiUsers.mockResolvedValue([user({ owner_sender_connector: true })]);
+		await open('u1', 'Run');
+		expect(await modelHelp()).toContain("answer only your own account on this key's connection");
+		cleanup();
+		apiUsers.getApiUsers.mockResolvedValue([user()]);
+		await open('u1', 'Run');
+		expect(await modelHelp()).toContain("can't run for other people");
+	});
+
 	it('says permissions always ask', async () => {
 		await open('u1', 'Run');
 		expect(screen.getByText('Ask, always')).toBeTruthy();

@@ -6,6 +6,7 @@
 	 */
 	import { Bot, Copy, Lock, RefreshCw } from 'lucide-svelte';
 	import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
+	import { SUBSCRIPTION_OWNER_ONLY_REASON } from '$lib/constants/model-picker';
 	import { appData, apiUserSessions } from '$lib/stores/app-data.svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -42,9 +43,11 @@
 
 	const PERMS_HELP =
 		'Connector sessions never inherit bypass. Tool approval requests go to the connected platform, such as Discord, for the user to approve or deny.';
-	// Compliance review 2026-10-09: provider subscription terms cover one person's own use.
-	const MODEL_HELP =
-		'Subscription sign-ins (Claude, ChatGPT, SuperGrok) are for your own use. If someone else uses this key, pick a model on an API-key provider.';
+	/** Subscription models are left out of this picker; the server refuses them for API users. */
+	const MODEL_HELP = SUBSCRIPTION_OWNER_ONLY_REASON;
+	/** A connector's key: only the owner's own account on it uses a subscription. */
+	const OWNER_CONNECTOR_MODEL_HELP =
+		"Subscription models answer only your own account on this key's connection; everyone else's messages are refused.";
 
 	const isDraft = $derived(id === DRAFT_ID);
 	const user = $derived(isDraft ? undefined : model.userById(id));
@@ -235,6 +238,9 @@
 					{/snippet}
 				</InlineBanner>
 			{/if}
+			{#if user.subscription_warning}
+				<InlineBanner tone="warn"><span role="alert">{user.subscription_warning}</span></InlineBanner>
+			{/if}
 			{@render errors()}
 		{/snippet}
 		{#snippet children(tab)}
@@ -318,9 +324,9 @@
 
 {#snippet runRows(current: string, effort: string, onModel: (m: string) => void, onEffort: (e: string) => void)}
 	<RowGroup title="Runs with">
-		<SettingRow label="Model" help={MODEL_HELP}>
+		<SettingRow label="Model" help={user?.owner_sender_connector ? OWNER_CONNECTOR_MODEL_HELP : MODEL_HELP}>
 			<span class="picker">
-				<ModelPicker id="api-user-model" value={current} allowEmpty emptyLabel="Agent default" onSelect={onModel} />
+				<ModelPicker id="api-user-model" value={current} allowEmpty apiKeyOnly={!user?.owner_sender_connector} emptyLabel="Agent default" onSelect={onModel} />
 			</span>
 		</SettingRow>
 		<SettingRow label="Effort">

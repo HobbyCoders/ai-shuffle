@@ -38,11 +38,15 @@
 		getConnectorLogs,
 		discoverDiscord,
 		connectorNeedsAgent,
-		buildConnectorCreate
+		buildConnectorCreate,
+		getConnectorSenders,
+		parseOwnerSenderIds,
+		type ConnectorSender
 	} from '$lib/api/connectors';
 	import { api, type Profile } from '$lib/api/client';
 	import type { ApiUser } from '$lib/api/apiUsers';
 	import { getApiUsers } from '$lib/api/apiUsers';
+	import { SUBSCRIPTION_OWNER_ONLY_REASON, selectionUsesSubscription } from '$lib/constants/model-picker';
 	import { openSettings } from '$lib/settings/navigation.svelte';
 	import { listInstalls } from '$lib/api/installs';
 	import { formatDateTime } from '$lib/utils/dateFormatting';
@@ -322,6 +326,67 @@
 	onDestroy(() => {
 		if (pollInterval) clearInterval(pollInterval);
 	});
+
+	/**
+	 * Why this connector's runs are refused: its API user (or that user's
+	 * agent) is on the owner's subscription sign-in. Messages from other
+	 * people never run on a subscription.
+	 */
+	function subscriptionWarning(connector: Connector): string | null {
+		if (!connector.api_user_id) return null;
+		return apiUsers.find((u) => u.id === connector.api_user_id)?.subscription_warning ?? null;
+	}
+
+	// The owner's own account on a chat connection (config.owner_sender_ids):
+	// messages from those platform user ids may use the owner's subscriptions.
+	let ownerIdsDraft: Record<string, string> = $state({});
+	let savingOwnerIds: string | null = $state(null);
+	let recentSenders: Record<string, ConnectorSender[]> = $state({});
+
+	function savedOwnerIds(connector: Connector): string[] {
+		const ids = connector.config?.owner_sender_ids;
+		return Array.isArray(ids) ? ids.map(String) : [];
+	}
+
+	function ownerIdsText(connector: Connector): string {
+		return ownerIdsDraft[connector.id] ?? savedOwnerIds(connector).join(', ');
+	}
+
+	/** Shown where the type can recognise a sender and it matters: the
+	 * connection is refused for a subscription, or an account is saved. */
+	function showOwnerAccount(connector: Connector, typeInfo?: ConnectorTypeInfo): boolean {
+		return !!typeInfo?.owner_sender && (!!subscriptionWarning(connector) || savedOwnerIds(connector).length > 0);
+	}
+
+	async function saveOwnerIds(connector: Connector) {
+		savingOwnerIds = connector.id;
+		try {
+			await updateConnector(connector.id, {
+				config: { owner_sender_ids: parseOwnerSenderIds(ownerIdsText(connector)) }
+			});
+			delete ownerIdsDraft[connector.id];
+			notify('Your account is saved', { severity: 'success' });
+			await loadData(true);
+		} catch (e: any) {
+			notify(e.detail || 'Failed to save your account', { severity: 'error' });
+		} finally {
+			savingOwnerIds = null;
+		}
+	}
+
+	async function loadRecentSenders(connector: Connector) {
+		try {
+			recentSenders[connector.id] = await getConnectorSenders(connector.id);
+		} catch (e: any) {
+			notify(e.detail || 'Failed to load recent senders', { severity: 'error' });
+		}
+	}
+
+	function useSender(connector: Connector, id: string) {
+		const ids = parseOwnerSenderIds(ownerIdsText(connector));
+		if (!ids.includes(id)) ids.push(id);
+		ownerIdsDraft[connector.id] = ids.join(', ');
+	}
 
 	async function loadData(quiet = false) {
 		if (!quiet) loading = true;
@@ -786,6 +851,69 @@
 													>
 												{/if}
 											</div>
+											{#if subscriptionWarning(connector)}
+												<p
+													class="text-xs text-warning mt-2"
+													role="alert"
+													title={subscriptionWarning(connector)}
+													data-testid="connector-subscription-warning"
+												>
+													{#if typeInfo?.owner_sender}
+														Incoming messages are refused: this connection runs on your personal subscription. Add your own account below, or pick a model on an API-key provider for its API user in Settings &gt; Integrations.
+													{:else}
+														Incoming messages are refused: this connection runs on your personal subscription. Pick a model on an API-key provider for its API user in Settings &gt; Integrations.
+													{/if}
+												</p>
+											{/if}
+											{#if showOwnerAccount(connector, typeInfo)}
+												<div class="mt-2" data-testid="connector-owner-account">
+													<label class="block text-xs font-medium text-muted-foreground mb-1" for="owner-ids-{connector.id}">
+														Your account
+													</label>
+													<div class="flex items-center gap-2 flex-wrap">
+														<input
+															id="owner-ids-{connector.id}"
+															type="text"
+															value={ownerIdsText(connector)}
+															oninput={(e) => (ownerIdsDraft[connector.id] = e.currentTarget.value)}
+															placeholder="Your user id on {typeInfo?.name ?? connector.type}"
+															class="owner-ids-input px-2 py-1 bg-input border border-border rounded-md text-xs text-foreground placeholder:text-muted-foreground focus:outline-hidden focus:border-primary"
+														/>
+														<button
+															type="button"
+															class="text-xs text-primary disabled:opacity-50"
+															disabled={savingOwnerIds === connector.id}
+															onclick={() => saveOwnerIds(connector)}
+														>
+															Save
+														</button>
+														<button type="button" class="text-xs text-primary" onclick={() => loadRecentSenders(connector)}>
+															Recent senders
+														</button>
+													</div>
+													<p class="text-xs text-muted-foreground mt-1">
+														Your own account on this platform. Messages from it can use your subscriptions; everyone else's are refused. Use your user id, not your name.
+													</p>
+													{#if recentSenders[connector.id]}
+														{#if recentSenders[connector.id].length}
+															<div class="flex items-center gap-1.5 flex-wrap mt-1" data-testid="connector-recent-senders">
+																{#each recentSenders[connector.id] as sender (sender.platform_user_id)}
+																	<button
+																		type="button"
+																		class="event-chip"
+																		title="Add this id"
+																		onclick={() => useSender(connector, sender.platform_user_id)}
+																	>
+																		{sender.platform_user_name ? `${sender.platform_user_name} · ` : ''}{sender.platform_user_id}
+																	</button>
+																{/each}
+															</div>
+														{:else}
+															<p class="text-xs text-muted-foreground mt-1">No messages yet. Message the bot once, then check again.</p>
+														{/if}
+													{/if}
+												</div>
+											{/if}
 										</div>
 
 										<!-- Actions -->
@@ -1154,11 +1282,21 @@
 							>
 								<option value="" disabled>Choose an agent</option>
 								{#each agents as agent (agent.id)}
-									<option value={agent.id}>{agent.name}</option>
+									{@const ownerOnly = selectionUsesSubscription(agent.config?.model, agent.config?.provider)}
+									<option value={agent.id} disabled={ownerOnly && !selectedType?.owner_sender}>
+										{agent.name}{ownerOnly ? (selectedType?.owner_sender ? ' (your subscription: your messages only)' : ' (your subscription)') : ''}
+									</option>
 								{/each}
 							</select>
 							<p class="text-xs text-muted-foreground mt-1">
 								Runs incoming messages. Without an agent, every incoming message is refused.
+							</p>
+							<p class="text-xs text-muted-foreground mt-1" data-testid="connector-agent-subscription-reason">
+								{#if selectedType?.owner_sender}
+									An agent on your personal subscription answers only your own account. Add it on the connection after setup; everyone else's messages are refused.
+								{:else}
+									{SUBSCRIPTION_OWNER_ONLY_REASON}
+								{/if}
 							</p>
 						</div>
 					{/if}
@@ -1902,6 +2040,11 @@
 		align-items: center;
 		gap: 6px;
 		margin-top: 6px;
+	}
+
+	.owner-ids-input {
+		width: 16rem;
+		max-width: 100%;
 	}
 
 	.event-chip {

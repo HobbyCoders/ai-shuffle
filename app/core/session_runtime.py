@@ -1460,6 +1460,12 @@ class SessionRuntime:
                 # keeps the row when it holds the turn for confirmation.
                 turn_source=self.source,
                 loop_guard_turn=self.turn,
+                # Who sent a connector message, for the owner's-subscription
+                # check. Only a connector turn carries one.
+                connector_sender=(
+                    (self.turn.get("payload") or {}).get("connector_sender")
+                    if self.source == "connector" else None
+                ),
             ):
                 if held_peer and not engine_started:
                     # Same point the store counts them delivered (see the

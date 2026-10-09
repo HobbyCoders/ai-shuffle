@@ -353,6 +353,25 @@ def get_connector_sessions_for_ai_session(ai_session_id: str) -> List[ConnectorS
         return rows_to_list(cursor.fetchall())
 
 
+def list_connector_senders(connector_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """The newest distinct senders that started a chat with a connector:
+    ``[{"platform_user_id", "platform_user_name", "last_seen"}]``."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """SELECT platform_user_id, MAX(platform_user_name) AS platform_user_name,
+                      MAX(updated_at) AS last_seen
+               FROM connector_sessions
+               WHERE connector_id = %s AND platform_user_id IS NOT NULL
+                     AND platform_user_id <> ''
+               GROUP BY platform_user_id
+               ORDER BY last_seen DESC
+               LIMIT %s""",
+            (connector_id, limit),
+        )
+        return rows_to_list(cursor.fetchall())
+
+
 def update_connector_session_ai_session(
     session_id: str, ai_session_id: Optional[str]
 ) -> None:

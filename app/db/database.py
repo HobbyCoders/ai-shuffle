@@ -3693,6 +3693,7 @@ from app.db.connectors import (  # noqa: F401
     create_connector_session,
     get_connector_session,
     get_connector_sessions_for_ai_session,
+    list_connector_senders,
     update_connector_session_ai_session,
 )
 

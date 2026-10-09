@@ -334,7 +334,12 @@ async def test_connector_turn_runs_as_the_connectors_key(seeded, monkeypatch):
     ))
 
     assert captured["source"] == "connector"
-    assert captured["payload"] == {"api_user_id": "u1"}
+    # The connector's key is the principal; the sender (by platform id only)
+    # rides along for the owner's-subscription check.
+    assert captured["payload"] == {
+        "api_user_id": "u1",
+        "connector_sender": {"connector_id": "c1", "platform_user_id": "p1"},
+    }
     ai_session = captured["session_id"]
     assert database.get_session(ai_session)["api_user_id"] == "u1"
     principal = await _engine_principal(ai_session, "connector", captured["payload"])

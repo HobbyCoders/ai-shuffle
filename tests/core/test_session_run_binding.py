@@ -276,7 +276,7 @@ class TestTurnResolution:
         db.create_session("s-api", profile_id="agent", model="opus", context_window=200_000)
         built = []
 
-        async def capture(options):
+        async def capture(options, api_user_id=None):
             built.append(options)
             return "stop before spawn"
 
@@ -727,7 +727,7 @@ class TestUnofferedWindowIsIgnored:
         db.create_session("s-stream", profile_id="agent", model="sonnet", context_window=pin)
         built = []
 
-        async def capture(options):
+        async def capture(options, api_user_id=None):
             built.append(options)
             return "stop before spawn"
 
@@ -752,7 +752,7 @@ class TestUnofferedWindowIsIgnored:
         assert db.get_session("s-prov")["provider_id"] == "op"
         built = []
 
-        async def capture(options):
+        async def capture(options, api_user_id=None):
             built.append(options)
             return "stop before spawn"
 

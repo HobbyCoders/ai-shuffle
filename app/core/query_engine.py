@@ -635,7 +635,7 @@ async def execute_query(
     # message rather than spawn a CLI that has no credential.
     from app.core import credential_gate
 
-    _refusal = await credential_gate.refusal_for_options_async(options)
+    _refusal = await credential_gate.refusal_for_options_async(options, api_user_id)
     if _refusal:
         logger.warning(f"[Query] Turn refused for session {session_id}: {_refusal}")
         raise credential_gate.AgentSetupRequired(_refusal)
@@ -1123,7 +1123,7 @@ async def stream_query(
     # Credential gate (see _stream_to_websocket_impl).
     from app.core import credential_gate
 
-    _refusal = await credential_gate.refusal_for_options_async(options)
+    _refusal = await credential_gate.refusal_for_options_async(options, api_user_id)
     if _refusal:
         logger.warning(f"[Query] Turn refused for session {session_id}: {_refusal}")
         yield credential_gate.refusal_event(_refusal)
@@ -1683,6 +1683,7 @@ async def _stream_to_websocket_impl(
     resume: bool = False,
     turn_source: Optional[str] = None,
     loop_guard_turn: Optional[Dict[str, Any]] = None,
+    connector_sender: Optional[Dict[str, Any]] = None,
 ) -> AsyncGenerator[Dict[str, Any], None]:
     """
     Stream Claude response directly to WebSocket.
@@ -1867,8 +1868,19 @@ async def _stream_to_websocket_impl(
     # refuses the turn with a setup message; nothing falls back.
     from app.core import credential_gate, loop_guard
 
+    # A run for anyone but the owner (an API user, or a connector message,
+    # which runs as its connector's API user) never uses the owner's
+    # subscription sign-ins (credential_gate.requester_refusal). A connector
+    # message from one of the owner's own accounts on that platform is the
+    # owner's (credential_gate.connector_sender_is_owner).
     _leg = await asyncio.to_thread(credential_gate.leg_for_options, options)
-    _refusal = await credential_gate.turn_refusal_async(_leg)
+    _requester = api_user_id
+    if _requester and turn_source == "connector" and await asyncio.to_thread(
+        credential_gate.connector_sender_is_owner, connector_sender, _requester
+    ):
+        _requester = None
+    _refusal = await asyncio.to_thread(credential_gate.requester_refusal, options, _requester)
+    _refusal = _refusal or await credential_gate.turn_refusal_async(_leg)
     if _refusal:
         logger.warning(f"[WS] Turn refused for session {session_id}: {_refusal}")
         yield credential_gate.refusal_event(_refusal)

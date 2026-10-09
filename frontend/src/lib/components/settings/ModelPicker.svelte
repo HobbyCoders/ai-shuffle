@@ -50,6 +50,8 @@
 		 * provider sublines). Used by subagent assignment pickers.
 		 */
 		startOnAll?: boolean;
+		/** List only API-key providers (see `BuildCatalogOptions.apiKeyOnly`). */
+		apiKeyOnly?: boolean;
 	}
 
 	let {
@@ -61,10 +63,11 @@
 		allowEmpty = false,
 		emptyLabel = 'Unavailable as subagent',
 		allowCustom = true,
-		startOnAll = false
+		startOnAll = false,
+		apiKeyOnly = false
 	}: Props = $props();
 
-	const catalog = $derived(buildModelPickerCatalog({ providerModelsOnly, providerScope }));
+	const catalog = $derived(buildModelPickerCatalog({ providerModelsOnly, providerScope, apiKeyOnly }));
 
 	const leadingRows = $derived(allowEmpty ? [{ value: '', label: emptyLabel }] : []);
 	const trailingRows = $derived(

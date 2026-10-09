@@ -21,6 +21,14 @@ export interface ApiUser {
 	created_at: string;
 	updated_at: string;
 	last_used_at: string | null;
+	/**
+	 * Set when this user's saved model (or an assigned agent's) runs on the
+	 * owner's subscription sign-in: its runs are refused until it is changed.
+	 */
+	subscription_warning?: string | null;
+	/** Runs a connector that knows the owner's own account: the owner's
+	 * messages on it may use a subscription model, nobody else's. */
+	owner_sender_connector?: boolean;
 }
 
 export interface ApiUserCreate {
