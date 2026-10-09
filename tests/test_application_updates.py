@@ -207,6 +207,27 @@ def test_runtime_mismatch_requires_image_and_older_source_is_ignored(feed):
     assert updater.state == {}
 
 
+def test_withdrawn_release_fallback_is_never_applied_backwards(feed):
+    # When the hub withdraws a stable release it serves the previous one
+    # (android/hub/src/desktop-updates.ts servedRelease). A container already
+    # running the withdrawn release must read that as up to date, not as an
+    # update, and must not download it.
+    updater, publish, _, requests, _ = feed
+    publish(revision=C, sequence=3)
+    updater.check(download=True)
+    updater.launch({}, activate=True)
+    updater.activating()
+    updater.healthy()
+    assert updater.state == {"active": C}
+    publish(revision=B, sequence=2)
+    requests.clear()
+    updater.check(download=True)
+    assert updater.state == {"active": C} and not updater.directory(B).exists()
+    assert [request.url.path for request in requests] == ["/v1/desktop/manifest"]
+    status = json.loads((updater.root / "status.json").read_text())
+    assert status["phase"] == "idle" and status["message"] == "You are up to date."
+
+
 def test_cleanup_retains_active_previous_staged_and_failed_revisions(feed):
     updater, _, _, _, _ = feed
     for revision in (A, B, C, "e" * 40, "f" * 40):

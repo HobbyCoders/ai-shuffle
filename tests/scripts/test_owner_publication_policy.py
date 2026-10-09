@@ -25,6 +25,7 @@ JOBS = [(name, "deploy", "main") for name in DEPLOY] + [
     ("android-play.yml", "publish", "release"),
     ("android-play-enrollment.yml", "export", "main"),
     ("android.yml", "publish", "release"),
+    ("withdraw-release.yml", "withdraw", "main"),
 ]
 
 

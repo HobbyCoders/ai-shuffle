@@ -239,6 +239,120 @@ notes for any worker whose status carries them: container workers today, and
 desktop workers once `DesktopUpdateState` in `app/api/internal.py` accepts
 `release` and `notes` (it currently drops fields it does not declare).
 
+## A bad stable release
+
+Stable workers are offered the newest stable release the hub has. A release
+cannot be rolled back on a worker: its database migrations have already run,
+and they do not run backwards. So a bad release is never undone by sending
+workers an older version. You **withdraw** it, so that nobody else is offered
+it, and then ship a **forward fix**, a new patch release.
+
+### 1. Stop the spread: withdraw it
+
+Run **Actions → Withdraw stable release** on `main` with the version (`0.9.2`,
+no `v`), action `withdraw` and a one-line reason. Owner only. The job summary
+says what the feed serves now. Without GitHub Actions, the same call:
+
+```sh
+curl -s -X POST https://hobbycoders.com/v1/releases/stable/0.9.2 \
+  -H "Authorization: Bearer $RELEASE_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"withdrawn":true,"reason":"Sessions fail to load after the migration"}'
+```
+
+Check it with `GET https://hobbycoders.com/v1/releases/stable` (same header).
+It lists the stable releases with their `withdrawn` state, plus `serving`, the
+release the feed offers now, and `held`, which says why the feed offers
+nothing. The call works while the hub is read-only (`HUB_MODE=readonly`). If
+the hub itself is down, run the same change directly on D1 with the publish
+path's Cloudflare token:
+
+```sh
+npx wrangler d1 execute DB --remote --config <deploy config> --command \
+  "UPDATE source_releases SET withdrawn_at=strftime('%s','now')*1000, withdrawn_reason='...' WHERE channel='stable' AND version='0.9.2'"
+```
+
+What the hub does (`android/hub/src/release-admin.ts`, `servedRelease` in
+`android/hub/src/desktop-updates.ts`, migration 0027):
+
+- `/v1/desktop/manifest` stops serving the withdrawn release. Its source
+  archive is no longer served, and installers of that version are hidden from
+  `/v1/desktop/installers` and the website's download page. Their download
+  links return 404.
+- A worker on an **older** version is offered the newest release that is not
+  withdrawn, which is a release it already has or one before the bad one. It
+  is never offered the bad one.
+- A worker **already on** the bad release is offered that older release too,
+  but it never installs it. Docker workers compare the signed main commit
+  count and desktop workers the signed sequence, and both treat a lower one as
+  "You are up to date" (`tests/test_application_updates.py`,
+  `test_withdrawn_release_fallback_is_never_applied_backwards`). It stays on
+  the bad release until the fix ships.
+- There is one exception. A desktop installed from the bad release's own
+  installer compares against the installer's build time, not a signing time,
+  so an older release signed after it would look newer. So while any desktop
+  installer newer than the fallback is published, the feed serves **nothing**.
+  The manifest returns 404 "The newest release was withdrawn", workers keep
+  what they run, and `held` names the installer. This is the usual case,
+  because every release publishes installers.
+- Edge is not affected.
+- Re-running `release.yml` for a withdrawn tag does not bring it back. The
+  publisher's upsert leaves the withdrawal as it is.
+
+What it cannot do: a worker that **already downloaded** the bad release shows
+"Update ready" and installs it when someone chooses **Update and restart**.
+Nothing on the hub can recall that download. Tell users not to choose it
+(step 3).
+
+### 2. Ship the forward fix
+
+1. Fix it on a branch and merge the PR the usual way, with CI green.
+   Typically 30 to 90 minutes, depending on the fix and CI queue.
+2. Cut the next patch tag (`v0.9.3`) from that merge commit
+   ([Cutting a release](#cutting-a-release)). `release.yml` has taken 10 to
+   15 minutes, and the optional installer run another 10 to 15.
+3. The fix replaces the withdrawn release in the feed at once, because it is
+   the newest. Workers on the bad release and on older ones are both offered
+   it. Docker and desktop workers check about once a day, or at once from the
+   update button.
+
+Realistically: withdraw within minutes of the report, and the fix is
+available one to two hours later. Leave the bad release withdrawn after that.
+There is no reason to un-withdraw it.
+
+### 3. Meanwhile, for users
+
+- **Docker, not yet updated:** keep `AI_SHUFFLE_VERSION` in `.env` at the
+  version you run, and do not choose **Update and restart** while the update
+  button shows the bad version. **Settings → General → Allow updates** turns
+  in-app updates off entirely until the fix ships.
+- **Docker, already on the bad release:** wait for the fix. Never set
+  `AI_SHUFFLE_VERSION` back to an older image after a newer one has run,
+  because the database has already migrated. If the image itself is bad (not
+  just the in-app update), the fix ships as a new image tag, and `X.Y`, `X`
+  and `latest` move to it with the release.
+- **Desktop:** the same. Do not choose **Update and restart** for the bad
+  version. A desktop already on it waits for the fix. Do not reinstall an
+  older installer over it.
+- **Android (Play internal testing):** the app loads its UI from the worker
+  it connects to, so a bad worker release reaches phones only through the
+  worker, and the worker steps above cover it. A bad Play build cannot go
+  back, because Play refuses a lower `versionCode`. Ship a fixed build with a
+  higher `versionCode` (`android-play.yml`); until then, tell testers not to
+  update the app from Play.
+- **Telling users:** post in Discord and email the affected testers with what
+  is wrong, "do not choose Update and restart for 0.9.2", and when the fix is
+  expected. If the bug produces a support fingerprint, mark it with
+  `SUPPORT_ADMIN_TOKEN` (`android/hub/README.md`, "Support reports") so
+  everyone who hits it sees the note in the app. Name the withdrawn version in
+  the fix's release notes.
+
+### Un-withdraw
+
+Withdrawing by mistake is undone with the same workflow and action `restore`,
+or `{"withdrawn":false}` in the POST. The release keeps its original signed
+sequence, so if it is still the newest, the feed serves it again at once; if
+a fix has shipped since, the fix stays served.
+
 ## One-time steps for the owner
 
 1. **Protect `main`.** Settings → Rules → Rulesets → New branch ruleset for
@@ -271,3 +385,10 @@ desktop workers once `DesktopUpdateState` in `app/api/internal.py` accepts
    see `docs/install/registry.md`.
 6. **Deploy the hub** so migration 0018 runs. Until the first stable release
    is signed, installed apps get a 404 from the update check.
+7. **Set up withdrawal** ([A bad stable release](#a-bad-stable-release))
+   before you need it. Generate a token (`openssl rand -hex 32`) and set it
+   as the Worker secret `RELEASE_ADMIN_TOKEN`
+   (`npx wrangler secret put RELEASE_ADMIN_TOKEN` in `android/hub`) and as an
+   `account-hub-production` environment secret of the same name. Then deploy
+   the hub so migration 0027 runs. Until then the endpoint answers 503 and the
+   workflow fails.
