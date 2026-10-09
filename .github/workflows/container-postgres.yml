@@ -60,6 +60,13 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
             APPLICATION_SEQUENCE=${{ steps.source.outputs.sequence }}
+      # This job shares the "Dockerfile" layer cache disk with docker-publish.yml
+      # and build-branch.yml and runs more often than either. The disk is billed
+      # by the blocks its snapshot holds, so trim the blocks buildkit GC freed
+      # before the post step commits it (see docker-publish.yml). Without this
+      # freed blocks remained allocated in the snapshot.
+      - name: Discard freed blocks on the layer cache disk
+        run: sudo fstrim -v /var/lib/buildkit || echo "fstrim skipped"
       - name: Validate embedded-only Compose configuration
         run: docker compose config --quiet
       - name: Verify actual container lifecycle and UI

@@ -15,13 +15,22 @@ usual. Agents should open PRs as drafts, push as often as they like, and mark
 the PR ready once the targeted local tests pass
 (`gh pr ready <number>`). Converting a PR back to draft stops new runs.
 
+When a check fails on a ready PR, reproduce it locally (the failing test file,
+or the job's command) and push only once it passes there. Pushing guesses
+reruns every paid job each time, and repeatedly pushing the same failure
+wastes CI resources on one
+branch. If the fix needs several tries, convert the PR back to draft first
+(`gh pr ready --undo <number>`).
+
 ## On every pull request (path-filtered)
 
 - CI Backend: the backend tests the change can reach. A manual full run on
   `main` records which functions each test file runs; a PR compares its
   changed Python files with the base, function by function, and runs the test
   files that ran a changed function, plus changed test files
-  (`scripts/ci/backend_test_map.py`). It runs the whole fast subset when no
+  (`scripts/ci/backend_test_map.py`). A changed non-Python file selects the
+  tests of the code that names it in a string literal; a comment, docstring
+  or message that mentions it selects nothing. It runs the whole fast subset when no
   map exists yet, when dependencies, pytest settings or `conftest.py` change,
   when the change touches code a session-wide fixture runs, or when most of
   the suite is affected anyway. The job summary lists the selected files and
