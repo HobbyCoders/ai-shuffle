@@ -46,6 +46,8 @@ class MarketplaceResponse(BaseModel):
     url: str
     install_location: str
     last_updated: Optional[datetime] = None
+    display_name: Optional[str] = None
+    error: Optional[str] = None
     # Catalog entries this app does not offer, each with the reason, so the
     # owner sees them instead of them vanishing from Explore.
     skipped: List[SkippedEntryResponse] = Field(default_factory=list)
@@ -230,7 +232,7 @@ async def list_marketplaces(token: str = Depends(require_auth)):
         from app.core.plugin_marketplace import skipped_entries
 
         service = get_plugin_service()
-        marketplaces = service.get_marketplaces()
+        marketplaces = await run_sync(service.get_marketplaces)
         return [
             MarketplaceResponse(
                 id=mp.id,
@@ -238,6 +240,8 @@ async def list_marketplaces(token: str = Depends(require_auth)):
                 url=mp.url,
                 install_location=mp.install_location,
                 last_updated=mp.last_updated,
+                display_name=mp.display_name,
+                error=mp.error,
                 skipped=(
                     await run_sync(skipped_entries, Path(mp.install_location))
                     if mp.install_location else []
@@ -327,7 +331,7 @@ async def list_available_plugins(
     """List all available plugins from marketplaces"""
     async with api_error_handler("load available plugins"):
         service = get_plugin_service()
-        plugins = service.get_available_plugins(marketplace)
+        plugins = await run_sync(service.get_available_plugins, marketplace)
         return [
             AvailablePluginResponse(
                 id=p.id,

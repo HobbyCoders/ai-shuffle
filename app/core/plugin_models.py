@@ -76,6 +76,8 @@ class MarketplaceInfo(DictMixin):
     url: str
     install_location: str
     last_updated: Optional[datetime] = None
+    display_name: Optional[str] = None
+    error: Optional[str] = None
 
 
 @dataclass

@@ -102,6 +102,9 @@
 {/snippet}
 
 {#snippet banner()}
+	{#each model.marketplaces.filter((source) => source.error) as source (source.id)}
+		<InlineBanner tone="warn"><span role="alert">{source.error}</span></InlineBanner>
+	{/each}
 	{#if model.actionError}
 		<InlineBanner tone="warn"><span role="alert">{model.actionError}</span></InlineBanner>
 	{/if}
@@ -172,7 +175,7 @@
 	<div data-setting-anchor="plugins.sources">
 		<RowGroup title="Sources" count={model.marketplaces.length}>
 			{#each model.marketplaces as m (m.id)}
-				<SettingRow label={m.id} hint={m.url} hintMono>
+				<SettingRow label={m.display_name ?? m.id} hint={m.url} hintMono>
 					{#if m.skipped?.length}
 						<button
 							type="button"
