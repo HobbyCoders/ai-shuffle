@@ -11,7 +11,7 @@ Three content paths, in order of dispatch:
   garbage that then rides every subsequent provider request.
 * **Other binaries** are refused with a short diagnostic instead of garbage.
 * **Text** is read lazily (never the whole file for a windowed read) with a
-  2000-line default window and per-line length cap, so a giant log can't blow
+  200-line default window, page budget and per-line cap, so a giant log can't blow
   up the context either.
 """
 
@@ -50,7 +50,8 @@ IMAGE_MEDIA_TYPES = {
 # Providers cap a base64 image around 5MB; 3.75MB of raw bytes encodes to 5MB.
 MAX_IMAGE_BYTES = 3_750_000
 
-DEFAULT_LINE_LIMIT = 2_000  # lines returned when no explicit limit is given
+DEFAULT_LINE_LIMIT = 200  # lines returned when no explicit limit is given
+MAX_TEXT_CHARS = 16_000  # page body; stop on a line boundary, then name the next offset
 MAX_LINE_CHARS = 2_000  # longer lines are cut with a marker
 
 def describe(tools: frozenset[str] | None = None) -> str:
@@ -78,7 +79,8 @@ def describe(tools: frozenset[str] | None = None) -> str:
         "\n"
         "Usage notes:\n"
         f"- Reads up to {DEFAULT_LINE_LIMIT} lines from the start by default. "
-        "When you only need part of a large file, pass offset/limit — a "
+        f"Each page is also bounded to {MAX_TEXT_CHARS:,} characters. "
+        "For a larger file, pass offset/limit — a "
         "truncation marker tells you the offset to continue from.\n"
         f"- Lines longer than {MAX_LINE_CHARS} characters are cut with a "
         "marker. A missing path or a non-image binary file returns a short "
@@ -130,31 +132,38 @@ def _read_image(path: Path, media_type: str) -> ToolOutcome:
     )
 
 
-def _read_text(path: Path, offset: int, limit: int | None) -> tuple[str, bool]:
-    """Windowed, lazy line read — the file is consumed only up to the window
-    end, so a Read with offset/limit on a huge file stays cheap.
+def _read_text(path: Path, offset: int, limit: int | None) -> tuple[str, bool, int]:
+    """Read a bounded page, returning text, whether more remains, and line count.
 
-    Returns the numbered text and whether lines were left beyond the window;
-    ``offset == 1`` with nothing left over is the whole file, which is what
-    lets a later windowed read be answered as a slice of this payload.
+    The character budget stops before a whole numbered line, never midway
+    through one. The caller must use the delivered count for continuation,
+    Edit coverage and ResultRef slicing, not the requested window length.
     """
     window_len = int(limit) if limit else DEFAULT_LINE_LIMIT
     out: list[str] = []
+    chars = 0
     more = False
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         lines = (line.rstrip("\r\n") for line in fh)
         for i, line in enumerate(islice(lines, offset - 1, offset - 1 + window_len)):
             if len(line) > MAX_LINE_CHARS:
                 line = line[:MAX_LINE_CHARS] + "… [line truncated]"
-            out.append(f"{offset + i}\t{line}")
-        more = next(lines, None) is not None
+            numbered_line = f"{offset + i}\t{line}"
+            size = len(numbered_line) + bool(out)
+            if out and chars + size > MAX_TEXT_CHARS:
+                more = True
+                break
+            out.append(numbered_line)
+            chars += size
+        else:
+            more = next(lines, None) is not None
     numbered = "\n".join(out)
     if more:
         numbered += (
-            f"\n... [output limited to {window_len} lines — "
-            f"continue with offset={offset + window_len}]"
+            f"\n... [output limited to {len(out)} lines — "
+            f"continue with offset={offset + len(out)}]"
         )
-    return numbered, more
+    return numbered, more, len(out)
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
@@ -185,12 +194,11 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
 
     offset = max(1, int(input.get("offset", 1)))
     limit = input.get("limit")
-    numbered, more = _read_text(path, offset, limit)
+    numbered, more, window_len = _read_text(path, offset, limit)
     ctx.read_files.add(str(path))
     # The lines actually delivered, for Edit's window check: a windowed read
     # that stopped short owns exactly its window; one that reached the end of
     # the file owns everything from its offset down.
-    window_len = int(limit) if limit else DEFAULT_LINE_LIMIT
     read_window.record(ctx, str(path), offset, offset + window_len - 1 if more else None)
 
     # Same path, same window, same bytes on disk → the content is already in
