@@ -46,8 +46,7 @@ concurrency:
 
 jobs:
   android-build:
-    # The reusable workflow classifies PR paths with read-only metadata access.
-    # It always builds on releases; callers must still allow its declared scope.
+    # Callers must allow the reusable workflow's declared scope.
     permissions:
       contents: write
       actions: read

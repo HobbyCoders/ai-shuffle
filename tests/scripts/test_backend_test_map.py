@@ -1,4 +1,4 @@
-"""CI Backend's PR test selection picks the tests a change reaches and fails safe."""
+"""Backend test selection picks the tests a change reaches and fails safe."""
 import gzip
 import importlib.util
 import json
