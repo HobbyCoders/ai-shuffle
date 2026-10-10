@@ -647,7 +647,7 @@
 	<!-- One right group at every width. Only model/effort hide in the phone shell;
 	     the context producer stays mounted, preserving its fetch and open popover. -->
 	<div class="dock-group dock-right">
-		<div class="dock-pop-wrap desktop-controls" bind:this={modelWrapRef}>
+		<div class="dock-pop-wrap desktop-controls model-wrap" bind:this={modelWrapRef}>
 			<button
 				type="button"
 				class="dock-txt model-btn"
@@ -972,6 +972,21 @@
 		--mpp-width: 100%;
 		/* The list scrolls above the pinned context footer in short viewports. */
 		--mpp-height: min(400px, calc(var(--dock-pop-max, 454px) - 14px));
+	}
+
+	/* On a narrow screen the model button sits mid-row, so a 380px menu hung
+	   off its right edge spills past the left of the screen. Anchor it to the
+	   dock row instead and let it span the composer. */
+	@media (max-width: 520px) {
+		.model-wrap {
+			position: static;
+		}
+
+		.model-menu {
+			left: 0;
+			right: 0;
+			width: auto;
+		}
 	}
 
 	.effort-menu {

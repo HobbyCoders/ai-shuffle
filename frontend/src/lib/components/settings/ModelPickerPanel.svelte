@@ -1210,6 +1210,7 @@
 		border-radius: 10px;
 		background: var(--popover);
 		animation: mpp-cap-in 0.16s ease-out;
+		container: mpp-cap / inline-size;
 	}
 	@keyframes mpp-cap-in {
 		from {
@@ -1352,6 +1353,24 @@
 	.mpp-cap-chip:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: 1px;
+	}
+	/* Too narrow for chips and the field on one line (phones): the chips share
+	   a full line evenly and the field sits under them at the right. */
+	@container mpp-cap (max-width: 330px) {
+		.mpp-cap-row {
+			flex-wrap: wrap;
+		}
+		.mpp-cap-presets {
+			flex: 1 1 100%;
+			flex-wrap: nowrap;
+		}
+		.mpp-cap-chip {
+			flex: 1 1 0;
+			min-width: 0;
+		}
+		.mpp-cap-field {
+			margin-left: auto;
+		}
 	}
 
 	.mpp-cap-field {
