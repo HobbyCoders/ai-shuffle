@@ -487,7 +487,19 @@ class PluginService:
         Returns:
             True if successful
         """
-        return _mp_mod.sync_marketplace(self, marketplace_id)
+        try:
+            result = _mp_mod.sync_marketplace(self, marketplace_id)
+        except (RuntimeError, OSError):
+            data = self._read_json_file(self.MARKETPLACES_FILE, {}, for_update=True)
+            if marketplace_id in data:
+                # Do not persist git stderr: it may contain private remote details.
+                data[marketplace_id]["syncError"] = "the download failed; check your connection and source URL"
+                self._write_json_file(self.MARKETPLACES_FILE, data)
+            raise
+        data = self._read_json_file(self.MARKETPLACES_FILE, {}, for_update=True)
+        if marketplace_id in data and data[marketplace_id].pop("syncError", None):
+            self._write_json_file(self.MARKETPLACES_FILE, data)
+        return result
 
     def sync_all_marketplaces(self) -> Dict[str, bool]:
         """
@@ -611,6 +623,7 @@ class PluginService:
         Returns:
             List of available plugins
         """
+        _mp_mod.fetch_pending_sources(self)
         marketplaces = self.get_marketplaces()
         installed_data = self._read_json_file(self.INSTALLED_FILE, {"version": 2, "plugins": {}})
         installed_plugins = set(installed_data.get("plugins", {}).keys())
@@ -1326,7 +1339,9 @@ def get_plugin_service(project_dir: Optional[Path] = None) -> PluginService:
 
     with _plugin_services_lock:
         if cache_key not in _plugin_services:
-            _plugin_services[cache_key] = PluginService(project_dir=project_dir)
+            service = PluginService(project_dir=project_dir)
+            _mp_mod.ensure_default_source(service)
+            _plugin_services[cache_key] = service
         return _plugin_services[cache_key]
 
 

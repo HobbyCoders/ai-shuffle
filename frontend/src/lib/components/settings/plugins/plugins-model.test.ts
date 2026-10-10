@@ -177,7 +177,10 @@ describe('PluginsModel', () => {
 		await model.load();
 		expect(m.getConnectorTypes).not.toHaveBeenCalled();
 		expect(m.getConnectors).not.toHaveBeenCalled();
-		expect(m.getMarketplaces).not.toHaveBeenCalled();
+		// Source health is readable by authenticated viewers; management stays owner-only.
+		expect(m.getMarketplaces).toHaveBeenCalledOnce();
+		expect(m.checkForUpdates).not.toHaveBeenCalled();
+		expect(m.getAutoUpdateSettings).not.toHaveBeenCalled();
 		expect(model.connectionEntries).toEqual([]);
 		expect(model.packageEntries).toHaveLength(3);
 	});

@@ -8,6 +8,7 @@ import logging
 import re
 import shutil
 import subprocess
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -17,6 +18,74 @@ from app.core.process_tree import child_env
 from app.core.scrub import redact_url_credentials
 
 logger = logging.getLogger(__name__)
+
+# Public catalog already used by Claude Code; registering it never enables plugins.
+DEFAULT_SOURCE_ID = "claude-plugins-official"
+DEFAULT_SOURCE_URL = "https://github.com/anthropics/claude-plugins-official.git"
+_DEFAULTS_LOCK = threading.Lock()
+_FETCH_LOCK = threading.Lock()
+
+
+def ensure_default_source(svc) -> None:
+    """Apply once to fresh and upgraded installs; removal must survive restarts.
+
+    Register before marking applied, without network I/O. A failed first fetch
+    leaves a removable source that discovery or the Sync action can retry.
+    """
+    marker = svc.PLUGINS_DIR / "source_defaults.json"
+    with _DEFAULTS_LOCK:
+        defaults = svc._read_json_file(marker, {}, for_update=True)
+        if defaults.get("anthropic_source_applied"):
+            return
+        data = svc._read_json_file(svc.MARKETPLACES_FILE, {}, for_update=True)
+        svc._check_files_replaceable(marker, svc.MARKETPLACES_FILE)
+
+        def same_source(entry):
+            url = entry.get("source", {}).get("url", "").rstrip("/")
+            return url.removesuffix(".git") in (
+                DEFAULT_SOURCE_URL.removesuffix(".git"),
+                "anthropics/claude-plugins-official",
+                "git@github.com:anthropics/claude-plugins-official",
+            )
+
+        if DEFAULT_SOURCE_ID not in data and not any(same_source(v) for v in data.values()):
+            data[DEFAULT_SOURCE_ID] = {
+                "source": {"source": "git", "url": DEFAULT_SOURCE_URL},
+                "displayName": "Anthropic official plugins",
+                "installLocation": str(svc.MARKETPLACES_DIR / DEFAULT_SOURCE_ID),
+                "fetchOnDiscovery": True,
+            }
+            svc._write_json_file(svc.MARKETPLACES_FILE, data)
+        defaults["anthropic_source_applied"] = True
+        svc._write_json_file(marker, defaults)
+
+
+def source_error(svc, mp_id: str, data: dict) -> Optional[str]:
+    """A missing/unreadable source is not an empty search result."""
+    reason = data.get("syncError")
+    location = data.get("installLocation")
+    if not reason:
+        if not location or not Path(location).is_dir():
+            reason = "its catalog has not been downloaded or is missing"
+        elif not svc._get_marketplace_manifest(Path(location)):
+            if not svc._discover_implicit_components(Path(location))["any"]:
+                reason = "no readable plugin catalog or skills were found"
+    if reason:
+        return f"Plugin source {mp_id} is unavailable: {reason}. Retry Sync in Settings > Plugins > Sources and updates."
+    return None
+
+
+def fetch_pending_sources(svc) -> None:
+    # Only the shipped, never-fetched source needs automatic I/O on discovery.
+    with _FETCH_LOCK:
+        data = svc._read_json_file(svc.MARKETPLACES_FILE, {})
+        for mp_id, entry in data.items():
+            # A failed first fetch waits for explicit Sync, not another offline stall.
+            if entry.get("fetchOnDiscovery") and not entry.get("lastUpdated") and not entry.get("syncError"):
+                try:
+                    svc.sync_marketplace(mp_id)
+                except (RuntimeError, OSError):
+                    logger.warning("Could not fetch plugin source %s", mp_id)
 
 
 def _git_error(e: subprocess.CalledProcessError) -> str:
@@ -48,7 +117,9 @@ def get_marketplaces(svc) -> List[MarketplaceInfo]:
             source=source_info.get("source", "git"),
             url=source_info.get("url", ""),
             install_location=mp_data.get("installLocation", ""),
-            last_updated=last_updated
+            last_updated=last_updated,
+            display_name=mp_data.get("displayName"),
+            error=source_error(svc, mp_id, mp_data),
         ))
 
     return marketplaces
@@ -235,7 +306,8 @@ def sync_marketplace(svc, marketplace_id: str) -> bool:
                 ["git", "clone", "--depth", "1", "--", source_url, install_location],
                 check=True,
                 capture_output=True,
-                timeout=120, env=child_env(),
+                timeout=30 if data[marketplace_id].get("fetchOnDiscovery") else 120,
+                env={**child_env(), "GIT_TERMINAL_PROMPT": "0"},
             )
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to re-clone marketplace: {_git_error(e)}")

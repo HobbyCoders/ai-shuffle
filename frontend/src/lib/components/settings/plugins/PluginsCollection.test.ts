@@ -124,6 +124,25 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('the list (from PluginsHub)', () => {
+	it.each(['explore', 'sources'])('explains unavailable sources in %s without hiding cached plugins', async (item) => {
+		const error = 'Plugin source claude-plugins-official is unavailable: download failed. Retry Sync.';
+		m.getMarketplaces.mockResolvedValue([{
+			id: 'claude-plugins-official', display_name: 'Anthropic official plugins',
+			url: 'https://github.com/anthropics/claude-plugins-official.git',
+			source: 'git', install_location: '/plugins/official', last_updated: null, error
+		}]);
+		await show(item);
+		await waitFor(() => expect(within(detail()).getByRole('alert').textContent).toBe(error));
+		if (item === 'sources') expect(within(detail()).getByText('Anthropic official plugins')).toBeTruthy();
+		else expect(within(detail()).getByText('toolkit')).toBeTruthy();
+	});
+
+	it('shows source failures to read-only viewers too', async () => {
+		m.getMarketplaces.mockResolvedValue([{ id: 'offline', error: 'Source offline; retry Sync.' }]);
+		await show('explore', { readOnly: true });
+		await waitFor(() => expect(within(detail()).getByRole('alert').textContent).toContain('Source offline'));
+	});
+
 	it('groups apps with accounts and installed plugins, then the catalog', async () => {
 		hub();
 		await show();
