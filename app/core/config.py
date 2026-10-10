@@ -1087,7 +1087,7 @@ class Settings(BaseSettings):
 
             with service_files():
                 fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-                owner = owner_uid()
+                owner = owner_uid() if os.name != "nt" else None
             with os.fdopen(fd, "r", encoding="utf-8") as stream:
                 info = os.fstat(stream.fileno())
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 16384:
