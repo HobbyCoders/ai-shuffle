@@ -23,7 +23,10 @@ reach check. It runs at low CPU priority with at most two test workers
 and, on Unraid, with everything else the server runs.
 
 A pass on a clean checkout is recorded against the commit's tree in
-`.git/local-ci/passes.json`. The pre-push hook (`.githooks/pre-push`) lets a
+`.git/local-ci/passes.json`. The pre-push hook (`.githooks/pre-push`, which
+`install` copies into the directory git runs hooks from, next to AI Shuffle's
+managed hooks; an older `pre-push` there is kept as `pre-push.user` and still
+runs afterwards) lets a
 recorded commit through at once. For an unrecorded commit that is the clean
 `HEAD`, it runs the checks and pushes only if they pass. Anything else (a
 commit other than `HEAD`, or uncommitted changes) is refused, because the

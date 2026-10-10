@@ -10,7 +10,8 @@ change was made, at low CPU priority so the machine stays usable.
     python scripts/local_ci.py list            # what each suite runs and when
 
 A pass on a clean checkout is recorded against the commit's tree, so the
-pre-push hook (.githooks/pre-push) lets that commit through without running
+pre-push hook (.githooks/pre-push, copied into git's hooks directory by
+install) lets that commit through without running
 anything again. Suites that need hardware this machine lacks (macOS, iOS, a
 Windows install when run elsewhere) are printed as not covered; the pass says
 so instead of claiming them.
@@ -534,7 +535,7 @@ def cmd_check(args) -> int:
 
 
 def cmd_pre_push(args) -> int:
-    """Called by .githooks/pre-push with git's ref lines on stdin."""
+    """Called by the pre-push hook with git's ref lines on stdin."""
     zero = "0" * 40
     records = load_records()
     head = git("rev-parse", "HEAD")
@@ -559,9 +560,35 @@ def cmd_pre_push(args) -> int:
     return 0
 
 
+HOOK_SOURCE = ROOT / ".githooks" / "pre-push"
+HOOK_MARKER = "# LOCAL-CI-PRE-PUSH"
+
+
+def hooks_dir() -> Path:
+    """The directory git runs hooks from, honouring core.hooksPath.
+
+    AI Shuffle points core.hooksPath at the main clone's .git/hooks and keeps
+    its own managed hooks there, so install adds a file to that directory
+    instead of redirecting core.hooksPath and switching those hooks off.
+    """
+    path = Path(git("rev-parse", "--git-path", "hooks"))
+    return path if path.is_absolute() else (ROOT / path).resolve()
+
+
+def install_hook(directory: Path) -> str:
+    directory.mkdir(parents=True, exist_ok=True)
+    target, kept = directory / "pre-push", directory / "pre-push.user"
+    if target.exists() and HOOK_MARKER not in target.read_text(encoding="utf-8", errors="replace"):
+        if kept.exists():
+            raise Failure(f"{target} is someone else's hook and {kept.name} already exists; merge them by hand.")
+        target.replace(kept)
+    target.write_bytes(HOOK_SOURCE.read_bytes().replace(b"\r\n", b"\n"))
+    target.chmod(0o755)
+    return f"Pre-push checks are on: {target}" + (f" (the earlier hook still runs as {kept.name})" if kept.exists() else "")
+
+
 def cmd_install(args) -> int:
-    subprocess.run(["git", "config", "core.hooksPath", ".githooks"], cwd=ROOT, check=True)
-    print("Pre-push checks are on for every checkout of this clone (core.hooksPath=.githooks).")
+    print(install_hook(hooks_dir()))
     return 0
 
 

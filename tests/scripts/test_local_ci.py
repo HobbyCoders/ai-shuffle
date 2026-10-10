@@ -95,7 +95,39 @@ def test_pre_push_ignores_deletions_and_tags(records, monkeypatch):
     assert push(monkeypatch, lines) == (0, [])
 
 
-def test_hook_finds_the_script():
+def test_hook_finds_the_script_and_chains():
     hook = (ROOT / ".githooks/pre-push").read_text(encoding="utf-8")
     assert hook.startswith("#!/bin/sh")
+    assert local_ci.HOOK_MARKER in hook
     assert 'scripts/local_ci.py" pre-push' in hook
+    assert "pre-push.user" in hook
+
+
+def test_install_adds_a_hook_without_touching_hooks_path(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(local_ci.subprocess, "run", lambda *a, **k: calls.append(a))
+    message = local_ci.install_hook(tmp_path)
+    installed = (tmp_path / "pre-push").read_bytes()
+    assert installed == (ROOT / ".githooks/pre-push").read_bytes().replace(b"\r\n", b"\n")
+    assert not (tmp_path / "pre-push.user").exists()
+    assert "pre-push.user" not in message
+    assert calls == []  # core.hooksPath is left alone
+    # Installing again replaces our own hook in place.
+    local_ci.install_hook(tmp_path)
+    assert not (tmp_path / "pre-push.user").exists()
+
+
+def test_install_keeps_an_earlier_hook_as_user(tmp_path):
+    (tmp_path / "pre-push").write_text("#!/bin/sh\necho theirs\n", encoding="utf-8")
+    message = local_ci.install_hook(tmp_path)
+    assert (tmp_path / "pre-push.user").read_text(encoding="utf-8") == "#!/bin/sh\necho theirs\n"
+    assert local_ci.HOOK_MARKER in (tmp_path / "pre-push").read_text(encoding="utf-8")
+    assert "pre-push.user" in message
+
+
+def test_install_refuses_to_overwrite_two_foreign_hooks(tmp_path):
+    (tmp_path / "pre-push").write_text("theirs", encoding="utf-8")
+    (tmp_path / "pre-push.user").write_text("older", encoding="utf-8")
+    with pytest.raises(local_ci.Failure):
+        local_ci.install_hook(tmp_path)
+    assert (tmp_path / "pre-push").read_text(encoding="utf-8") == "theirs"
