@@ -393,15 +393,17 @@ def assess(rows: List[Dict[str, Any]], *, pr: Optional[int] = None, commit: Opti
             item["action"] = f"{item['behind']} behind; {action}"
         workers.append(item)
 
-    # Edge publishes only origin/main: say why the gate refused it and how to unblock it.
-    if main and any("publish edge first" in item["action"] for item in workers):
+    # An older published update can be offered while main is held. Keep that
+    # actionable offer, but expose the current-main refusal independently of it.
+    held_candidates = [item for item in workers if item["online"] and item["channel"] == "edge"
+                       and (item["behind"] or 0) > 0]
+    if main and held_candidates:
         refusal = edge_refusal(repo, main)
         if refusal:
-            for item in workers:
-                if "publish edge first" in item["action"]:
-                    evidence: EdgePublicationRefusal = {"revision": main[:9], "reason": refusal}
-                    item["edge_publication_refusal"] = evidence
-                    item["action"] += f". Edge refused {main[:9]}: {refusal}"
+            for item in held_candidates:
+                evidence: EdgePublicationRefusal = {"revision": main[:9], "reason": refusal}
+                item["edge_publication_refusal"] = evidence
+                item["action"] += f". Edge refused {main[:9]}: {refusal}"
 
     android = None
     if change is not None:
