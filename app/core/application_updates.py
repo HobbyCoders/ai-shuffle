@@ -100,6 +100,29 @@ def desktop_exchange(state):
     return request
 
 
+_write_lock = threading.Lock()
+# Windows refuses a rename onto a file another process has open (the desktop
+# shell reads allow-updates.json while the settings page polls), with
+# PermissionError (WinError 5). The reader holds it for milliseconds.
+_REPLACE_ATTEMPTS = 8
+_WINDOWS = os.name == "nt"
+_REPLACE_BACKOFF_SECONDS = 0.025
+
+
+def _replace(temporary, path):
+    # Writers in this process take turns, so two requests never race the
+    # same rename; another process's brief open is waited out.
+    with _write_lock:
+        for attempt in range(_REPLACE_ATTEMPTS):
+            try:
+                os.replace(temporary, path)
+                return
+            except PermissionError:
+                if not _WINDOWS or attempt == _REPLACE_ATTEMPTS - 1:
+                    raise
+                time.sleep(_REPLACE_BACKOFF_SECONDS * (attempt + 1))
+
+
 def atomic_json(path, value):
     path = Path(path)
     # The container's update directory belongs to the service account under
@@ -115,7 +138,7 @@ def atomic_json(path, value):
                 # that keeps the container from starting.
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, path)
+            _replace(temporary, path)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
@@ -136,6 +159,17 @@ def allowed():
     return value is None or value == "true"
 
 
+def _mirrored(path):
+    """The value the desktop shell reads now, or None when it needs writing.
+    Every settings poll calls mirror_policy, so an unchanged policy is not
+    rewritten."""
+    try:
+        value = json.loads(Path(path).read_text()).get("allow_updates")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, bool) else None
+
+
 def mirror_policy():
     global _desktop_request, _desktop_followup
     enabled = allowed()
@@ -143,7 +177,7 @@ def mirror_policy():
         with _bridge_lock:
             _desktop_request = _desktop_followup = None
     path = os.environ.get("SHUFFLE_UPDATE_POLICY_FILE")
-    if path:
+    if path and _mirrored(path) != enabled:
         atomic_json(path, {"allow_updates": enabled})
     if not enabled and control_root():
         with service_files():
