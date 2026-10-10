@@ -13,12 +13,14 @@
 		step?: number;
 		/** Text shown beside the slider; defaults to the number. */
 		format?: (value: number) => string;
+		/** What a screen reader says for the value, e.g. "250% (boosted)"; defaults to the number. */
+		valueText?: (value: number) => string;
 		oninput?: (value: number) => void;
 		disabled?: boolean;
 		label?: string;
 	}
 
-	let { value, min, max, step = 1, format = String, oninput, disabled = false, label }: Props = $props();
+	let { value, min, max, step = 1, format = String, valueText, oninput, disabled = false, label }: Props = $props();
 
 	const access = getSettingsAccess();
 	const row = getRowContext();
@@ -33,6 +35,7 @@
 		{value}
 		disabled={disabled || access.readOnly}
 		{...controlAria(row, label)}
+		aria-valuetext={valueText?.(value)}
 		oninput={(e) => oninput?.(Number(e.currentTarget.value))}
 	/>
 	<output class="st-mono">{format(value)}</output>

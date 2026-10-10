@@ -2,7 +2,6 @@
 	/** Session-scoped call status and controls. Compact mode sits beside the
 	 * persistent text composer; unmounting this view never ends the call. */
 	import { onDestroy, untrack } from 'svelte';
-	import VoiceVolume from './VoiceVolume.svelte';
 	import { Mic, MicOff, PhoneOff, Volume2, VolumeX } from 'lucide-svelte';
 	import { voiceCallState, hangup, toggleAgent, toggleMic, MIC_PROBLEM_LABEL } from '$lib/services/voiceCall';
 	import { getVoiceCallState, voiceModelLabel, usesDelegation, usesAudioStream } from '$lib/api/voice';
@@ -153,7 +152,6 @@
 		</div>
 	</div>
 	<p class="vp-status" class:speaking={live && call.agentSpeaking && !micProblem} class:mic-problem={micProblem} role="status">{statusLabel}</p>
-	{#if mine && (live || status === 'connecting')}<VoiceVolume />{/if}
 	{#if realtime && live && workingLabel}<p class="vp-working">{workingLabel}</p>{/if}
 	{#if realtime && costLabel}<span class="vp-cost" title="Estimated OpenAI spend for this call">{costLabel}</span>{/if}
 </div>

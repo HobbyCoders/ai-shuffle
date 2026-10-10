@@ -74,6 +74,16 @@ export const entries: SettingEntry[] = [
 		default: 'marin'
 	},
 	{
+		id: 'voice.volume',
+		category: 'voice',
+		section: 'Voice calls',
+		label: 'Voice volume',
+		hint: 'This device only',
+		help: 'How loud the voice agent plays on this device. Above 100% boosts quiet speakers; lower it if the voice distorts. Changes apply to a call in progress.',
+		keywords: ['playback volume', 'loudness', 'boost', 'speaker', 'louder', 'quieter'],
+		default: 100
+	},
+	{
 		id: 'voice.callsRunOn',
 		category: 'voice',
 		section: 'Voice calls',

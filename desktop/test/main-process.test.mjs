@@ -96,6 +96,7 @@ async function launch({ stop = async () => {}, acknowledge = async () => true, r
 	const replacements = {
 		electron: electronFake(app, errors, messageBox),
 		'./close-dialog': { showCloseDialog: async () => true },
+		'./call-popout': { CallPopout: class { register() {} } },
 		'./managed-context': { managedContext: () => managed, setManagedContext: context => { managed = context; } },
 		'./installed-entry': { installedContext: () => installed },
 		'./installed-host': { installedLaunchArgs: () => [] },

@@ -38,7 +38,12 @@ function setup({ workerUrl = WORKER } = {}) {
 		openUi: async () => { calls.push('open-ui'); }
 	};
 	const updater = { current: { phase: 'idle' }, check: async () => calls.push('check'), install: async () => calls.push('install') };
-	module.exports.registerIpc({ window, updater, worker });
+	const callPopout = {
+		open: async (state) => { calls.push(['popout-open', state]); return true; },
+		update: (state) => calls.push(['popout-update', state]),
+		close: () => calls.push('popout-close')
+	};
+	module.exports.registerIpc({ window, updater, worker, callPopout });
 
 	const main = { url: '', processId: 3, routingId: 1 };
 	/** An event from the main window's main frame showing `url`, or from a subframe / another window. */
@@ -101,6 +106,24 @@ test('NC-15: the bridge has no download channel, and the preload has no download
 	assert.equal(handlers.has('desktop:update-download'), false);
 	const preload = readFileSync(new URL('../dist/preload/index.js', import.meta.url), 'utf8');
 	assert.doesNotMatch(preload, /update-download/);
+});
+
+test('the voice call pop-out is for the worker UI only, where calls happen', async () => {
+	const { invoke, calls } = setup();
+	const CHANNELS = ['desktop:call-popout-open', 'desktop:call-popout-update', 'desktop:call-popout-close'];
+	for (const url of [PAGE, `${PAGE}?mode=status`, 'https://peer.example.com/', 'http://127.0.0.1:8001/', 'about:blank']) {
+		for (const channel of CHANNELS) await assert.rejects(invoke(channel, url, undefined, {}), /not allowed/, `${channel} from ${url}`);
+	}
+	for (const channel of CHANNELS) await assert.rejects(invoke(channel, `${WORKER}/`, { subframe: true }, {}), /not allowed/);
+	assert.deepEqual(calls, []);
+	const state = { label: 'Voice call · live', title: 'Trip', micMuted: false, agentMuted: false, micProblem: false };
+	assert.equal(await invoke('desktop:call-popout-open', `${WORKER}/chat`, undefined, state), true);
+	await invoke('desktop:call-popout-update', `${WORKER}/chat`, undefined, state);
+	await invoke('desktop:call-popout-close', `${WORKER}/chat`);
+	assert.deepEqual(calls, [['popout-open', state], ['popout-update', state], 'popout-close']);
+	const preload = readFileSync(new URL('../dist/preload/index.js', import.meta.url), 'utf8');
+	assert.match(preload, /voiceCall:/);
+	assert.match(preload, /desktop:call-popout-command/);
 });
 
 test('window actions and the title-bar theme take only what they expect from a trusted page', async () => {

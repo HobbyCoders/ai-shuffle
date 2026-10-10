@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const transport = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), post: vi.fn(), delete: vi.fn(), patch: vi.fn() }));
@@ -20,6 +20,8 @@ import { resourceSync } from '$lib/services/resource-sync';
 import { hotkeyPreferences } from '$lib/stores/hotkeyPreferences.svelte';
 import { settingsNav } from '$lib/settings/navigation.svelte';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
+import { createVoiceOutput, setVoiceVolume, voiceVolume } from '$lib/services/voiceVolume';
+import { get } from 'svelte/store';
 
 const settings = (voice = 'marin', minutes = 60) => ({
 	voice_mode_enabled: true,
@@ -100,6 +102,44 @@ async function mountPage() {
 const field = (name: string) => screen.getByLabelText(name) as HTMLInputElement;
 
 describe('Voice page', () => {
+	describe('voice volume', () => {
+		afterEach(() => {
+			setVoiceVolume(100);
+			localStorage.removeItem('voice-playback-volume');
+		});
+
+		it('saves on this device, boosts past 100%, and reaches a call already playing', async () => {
+			setVoiceVolume(100);
+			// A call in progress: its output gain follows the same store.
+			const gain = { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() };
+			const limiter = { threshold: { value: 0 }, knee: { value: 0 }, ratio: { value: 0 }, attack: { value: 0 }, release: { value: 0 }, connect: vi.fn(), disconnect: vi.fn() };
+			const output = createVoiceOutput({ createGain: () => gain, createDynamicsCompressor: () => limiter, destination: {} } as unknown as AudioContext);
+			await mountPage();
+			const slider = screen.getByRole('slider', { name: 'Voice volume' }) as HTMLInputElement;
+			expect(slider.max).toBe('300');
+			expect(slider.value).toBe('100');
+			await fireEvent.input(slider, { target: { value: '250' } });
+			expect(get(voiceVolume)).toBe(250);
+			expect(localStorage.getItem('voice-playback-volume')).toBe('250');
+			expect(gain.gain.value).toBe(2.5);
+			expect(slider.getAttribute('aria-valuetext')).toBe('250% (boosted)');
+			const row = slider.closest('[data-setting-anchor]') as HTMLElement;
+			expect(row.textContent).toContain('250%');
+			expect(row.textContent).toContain('Boosted');
+			// A device preference: the worker's voice settings are untouched.
+			expect(transport.put).not.toHaveBeenCalled();
+			output.close();
+		});
+
+		it('resets to 100%', async () => {
+			setVoiceVolume(40);
+			await mountPage();
+			const row = screen.getByRole('slider', { name: 'Voice volume' }).closest('[data-setting-anchor]') as HTMLElement;
+			await fireEvent.click(within(row).getByRole('button', { name: /reset/i }));
+			expect(get(voiceVolume)).toBe(100);
+		});
+	});
+
 	it('renders a row for every Voice entry once global input is on', async () => {
 		hotkeyPreferences.setGlobalSttEnabled(true);
 		await assertCategoryCoverage('voice', () => render(VoicePage).container);
@@ -113,11 +153,11 @@ describe('Voice page', () => {
 		expect(screen.getByText('Voice input hotkey')).toBeTruthy();
 	});
 
-	it('marks the per-device dictation rows, and only those, as this device only', async () => {
+	it('marks the per-device rows, and only those, as this device only', async () => {
 		hotkeyPreferences.setGlobalSttEnabled(true);
 		await mountPage();
 		const rowOf = (label: string) => screen.getByText(label).closest('[data-setting-anchor]') as HTMLElement;
-		for (const label of ['Global voice input', 'Voice input hotkey', 'Sound cues']) {
+		for (const label of ['Global voice input', 'Voice input hotkey', 'Sound cues', 'Voice volume']) {
 			expect(rowOf(label).textContent, label).toContain('This device only');
 		}
 		// Worker settings follow the account to every device.
@@ -306,7 +346,8 @@ describe('voice preview playback', () => {
 		try {
 			await mountPage();
 			await fireEvent.click(screen.getByRole('button', { name: 'Play marin sample' }));
-			expect(screen.getByRole('status').textContent).toContain('Generating');
+			// The volume slider's <output> is a status too; this is the preview's.
+			expect(screen.getAllByRole('status').some((node) => node.textContent?.includes('Generating'))).toBe(true);
 			await fireEvent.click(screen.getByRole('button', { name: 'Stop marin sample' }));
 			expect(signal?.aborted).toBe(true);
 			expect(screen.queryByRole('alert')).toBeNull();

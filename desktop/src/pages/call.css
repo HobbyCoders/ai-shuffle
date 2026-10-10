@@ -1,0 +1,94 @@
+/* The call pop-out: the in-app call bar, in the web UI's Studio Noir palette. */
+:root {
+ color-scheme: light dark;
+ --background: #131617;
+ --foreground: #f2f4f4;
+ --muted: #ffffff12;
+ --muted-foreground: #a1a9ac;
+ --primary: #00c4ad;
+ --destructive: #ff6b6b;
+ --warning: #f5b84a;
+ --border: #00c4ad66;
+ --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+@media (prefers-color-scheme: light) {
+ :root {
+  --background: #ffffff;
+  --foreground: #1d1d1f;
+  --muted: #0000000d;
+  --muted-foreground: #5f686c;
+  --primary: #00897a;
+  --destructive: #d93636;
+  --warning: #a86500;
+  --border: #00897a59;
+ }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; overflow: hidden; }
+body {
+ font: 12px/1.35 var(--font-sans);
+ color: var(--foreground);
+ background: var(--background);
+ -webkit-font-smoothing: antialiased;
+ user-select: none;
+ /* The whole window drags; the buttons opt out below. */
+ -webkit-app-region: drag;
+ app-region: drag;
+}
+.bar {
+ height: 100%;
+ display: flex;
+ align-items: center;
+ gap: 2px;
+ padding: 6px 8px 6px 4px;
+ border: 1px solid var(--border);
+ border-radius: 8px;
+ opacity: 0;
+ transition: opacity 0.18s ease-out;
+}
+body.ready .bar { opacity: 1; }
+svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.grip { display: flex; align-items: center; width: 22px; justify-content: center; color: var(--muted-foreground); cursor: grab; }
+.grip svg { width: 16px; height: 16px; }
+.grip circle { fill: currentColor; }
+button {
+ -webkit-app-region: no-drag;
+ app-region: no-drag;
+ display: flex;
+ align-items: center;
+ justify-content: center;
+ flex-shrink: 0;
+ min-width: 40px;
+ height: 40px;
+ padding: 8px;
+ border: 0;
+ border-radius: 8px;
+ background: transparent;
+ color: inherit;
+ font: inherit;
+ cursor: pointer;
+ transition: background-color 0.15s ease-out, color 0.15s ease-out;
+}
+button:hover, button[aria-pressed='true'] { background: var(--muted); }
+button:active { background: color-mix(in oklab, var(--muted) 100%, var(--foreground) 6%); }
+button:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.return { flex: 1; min-width: 0; gap: 10px; justify-content: flex-start; padding: 6px 8px; text-align: left; }
+.text { min-width: 0; display: flex; flex-direction: column; }
+strong, .owner { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+strong { font-weight: 600; }
+.owner { color: var(--muted-foreground); }
+.mic-problem { color: var(--warning); }
+/* The live dot: breathes while the call is up, amber when the microphone is not heard. */
+.pulse { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 55%, transparent); animation: breathe 2.4s ease-out infinite; }
+.return:has(.mic-problem) .pulse { background: var(--warning); box-shadow: none; animation: none; }
+@keyframes breathe { 0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--primary) 55%, transparent); } 70%, 100% { box-shadow: 0 0 0 7px transparent; } }
+.ctl .when-off, .ctl[aria-pressed='true'] .when-on { display: none; }
+.ctl[aria-pressed='true'] .when-off { display: block; }
+.quiet { color: var(--muted-foreground); }
+.quiet:hover { color: var(--foreground); }
+.end { color: var(--destructive); }
+.end:hover { background: color-mix(in oklab, var(--destructive) 16%, transparent); }
+@media (prefers-reduced-motion: reduce) {
+ .pulse { animation: none; }
+ .bar, button { transition: none; }
+}

@@ -28,6 +28,10 @@ During a call, the call dock shows whether it is connected and who is speaking, 
 
 You can still type messages and attach files during a call. They go to the same chat.
 
+If you open another chat or page during a call, a small call bar keeps the controls in reach. Drag it by its handle to anywhere in the window, or focus the handle and use the arrow keys. It stays where you put it on that device. Double-click the handle, press Escape on it, or use its put-back button to return it to its usual place. In the desktop app, the pop-out button moves the call bar into a small window that stays on top of other apps; its put-back button returns it to the app.
+
+**Voice volume** under **Settings → Voice** sets how loud the assistant plays on this device, up to 300% for quiet speakers. Changes apply to a call in progress.
+
 Hanging up ends the audio. Work already handed to the chat keeps running. Stop it separately if you want to cancel it.
 
 ## Handing work to the chat

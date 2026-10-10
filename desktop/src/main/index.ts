@@ -27,6 +27,7 @@ import { installTray } from './tray';
 import { Updater } from './updater';
 import { InstallerUpdates, installerPlatform } from './installer-updates';
 import { MainWindow, PARTITION } from './window';
+import { CallPopout } from './call-popout';
 import { resolveRuntime, WorkerSupervisor, type WorkerState } from './worker';
 
 // Packaged previews use metadata; source tests require an explicit isolated profile.
@@ -264,7 +265,10 @@ async function main(): Promise<void> {
 			console.error('Installer update checks are unavailable', error);
 		}
 	}
-	registerIpc({ window, updater, worker });
+	// The voice call's always-on-top controls; the main window keeps the call.
+	const callPopout = new CallPopout(userData, window);
+	callPopout.register();
+	registerIpc({ window, updater, worker, callPopout });
 	updater.subscribe((state) => window.send('desktop:update-state', state));
 
 	/** An older installed launcher than this release needs is replaced from this verified source (desktop/LAUNCHER.md). */

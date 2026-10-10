@@ -60,6 +60,19 @@ const bridge = {
 		onState: (listener: Listener<unknown>) => subscribe('desktop:update-state', listener),
 		check: () => ipcRenderer.invoke('desktop:update-check'),
 		install: () => ipcRenderer.invoke('desktop:update-install') as Promise<void>
+	},
+
+	/**
+	 * The away call bar in its own always-on-top window (main/call-popout.ts).
+	 * The page keeps the call: it sends what to show and runs the commands the
+	 * window sends back (`toggle-mic`, `toggle-agent`, `hangup`, `return`).
+	 */
+	voiceCall: {
+		open: (state: unknown) => ipcRenderer.invoke('desktop:call-popout-open', state) as Promise<boolean>,
+		update: (state: unknown) => void ipcRenderer.invoke('desktop:call-popout-update', state).catch(() => {}),
+		close: () => void ipcRenderer.invoke('desktop:call-popout-close').catch(() => {}),
+		onCommand: (listener: Listener<string>) => subscribe('desktop:call-popout-command', listener),
+		onClosed: (listener: Listener<void>) => subscribe('desktop:call-popout-closed', listener)
 	}
 };
 

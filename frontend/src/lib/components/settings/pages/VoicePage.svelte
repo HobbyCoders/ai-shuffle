@@ -3,7 +3,9 @@
 	 * Voice: Dictation and Voice calls.
 	 *
 	 * Dictation's global input, hotkey and sound cues are per-device
-	 * preferences (hotkeyPreferences). Microphone mode, silence and everything
+	 * preferences (hotkeyPreferences), and so is Voice volume (voiceVolume.ts:
+	 * phone speakers and headphones need different levels; a change reaches a
+	 * call in progress through the same store). Microphone mode, silence and everything
 	 * under Voice calls are worker settings (`GET/PUT /settings/voice`, see
 	 * voice-state.svelte.ts). The dictation model itself lives in Default
 	 * models; this page links to it.
@@ -29,9 +31,11 @@
 	import LinkValue from '../rows/LinkValue.svelte';
 	import ValueText from '../rows/ValueText.svelte';
 	import HotkeyField from '../rows/HotkeyField.svelte';
+	import RangeField from '../rows/RangeField.svelte';
 	import ExpandToggle from '../rows/ExpandToggle.svelte';
 	import CallPromptsEditor from './editors/CallPromptsEditor.svelte';
 	import { VoicePreview, VoiceState } from './voice-state.svelte';
+	import { voiceVolume, setVoiceVolume, MAX_VOICE_VOLUME } from '$lib/services/voiceVolume';
 	import './editors/editors.css';
 
 	type MicMode = 'auto' | 'toggle';
@@ -219,6 +223,28 @@
 			{:else}
 				<ValueText value={unavailable} />
 			{/if}
+		</SettingRow>
+		<SettingRow
+			id="voice.volume"
+			hint={$voiceVolume > 100 ? 'Boosted · this device only' : undefined}
+			value={$voiceVolume}
+			onReset={() => {
+				setVoiceVolume(defaultOf<number>('voice.volume'));
+				flashSaved();
+			}}
+		>
+			<RangeField
+				value={$voiceVolume}
+				min={0}
+				max={MAX_VOICE_VOLUME}
+				step={10}
+				format={(v) => `${v}%`}
+				valueText={(v) => `${v}%${v > 100 ? ' (boosted)' : ''}`}
+				oninput={(v) => {
+					setVoiceVolume(v);
+					flashSaved();
+				}}
+			/>
 		</SettingRow>
 		<SettingRow id="voice.callsRunOn" dim={!callsOn} hint={s?.voice_model} hintMono>
 			{#if providers === null}

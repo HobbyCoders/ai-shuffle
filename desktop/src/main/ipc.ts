@@ -17,6 +17,7 @@ import { managedContext } from './managed-context';
 import type { MainWindow, TitleBarTheme } from './window';
 import type { WorkerState } from './worker';
 import { AGENT_ACCESS } from './disclosure';
+import type { CallPopout } from './call-popout';
 
 /** The database behind the worker, as the status page shows it. */
 export interface PostgresStatus {
@@ -45,11 +46,13 @@ interface Deps {
 	window: Pick<MainWindow, 'isOwnSender' | 'currentWorkerUrl' | 'bundledPageUrl' | 'browserWindow' | 'windowState' | 'setTitleBarTheme'>;
 	updater: Updater;
 	worker: WorkerControl;
+	/** The voice call pop-out; it validates the state it is given. */
+	callPopout?: Pick<CallPopout, 'open' | 'update' | 'close'>;
 }
 
 type Handler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
 
-export function registerIpc({ window, updater, worker }: Deps): void {
+export function registerIpc({ window, updater, worker, callPopout }: Deps): void {
 	const senderPage = (event: IpcMainInvokeEvent | IpcMainEvent): TrustedPage | null => {
 		if (!window.isOwnSender(event.sender.id)) return null;
 		const frame = event.senderFrame;
@@ -60,6 +63,7 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 	};
 	const fromTrustedPage = (event: IpcMainInvokeEvent | IpcMainEvent) => senderPage(event) !== null;
 	const fromBundledPage = (event: IpcMainInvokeEvent | IpcMainEvent) => senderPage(event) === 'bundled';
+	const fromWorkerPage = (event: IpcMainInvokeEvent | IpcMainEvent) => senderPage(event) === 'worker';
 
 	const handle = (channel: string, guard: (event: IpcMainInvokeEvent) => boolean, fn: Handler) => {
 		ipcMain.handle(channel, (event, ...args) => {
@@ -106,6 +110,12 @@ export function registerIpc({ window, updater, worker }: Deps): void {
 	handle('desktop:worker-open-logs', fromBundledPage, () => void shell.showItemInFolder(worker.state().logPath));
 	handle('desktop:worker-tail', fromBundledPage, () => worker.tail());
 	handle('desktop:worker-open-ui', fromBundledPage, () => worker.openUi());
+
+	// Worker UI only (voice calls happen there): the call pop-out. The page
+	// keeps the call; the pop-out shows the state it sends (call-popout.ts).
+	handle('desktop:call-popout-open', fromWorkerPage, (_e, state) => callPopout?.open(state) ?? false);
+	handle('desktop:call-popout-update', fromWorkerPage, (_e, state) => void callPopout?.update(state));
+	handle('desktop:call-popout-close', fromWorkerPage, () => void callPopout?.close());
 }
 
 function isTitleBarTheme(value: unknown): value is TitleBarTheme {

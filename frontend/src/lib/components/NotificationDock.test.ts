@@ -230,12 +230,16 @@ describe('dock position and drag regions (source)', () => {
 	});
 
 	it('leaves no notice positioning itself over the page', () => {
+		// The voice call bar floats only after the user drags it out of the dock;
+		// those two rules are the only fixed positioning it may have.
+		const userMoved = (src: string) => src.replace(/\t\.call-bounds \{[^}]*\}/, '').replace(/\t\.call-float \{[^}]*\}/, '');
 		for (const file of ['./ComputerUseBanner.svelte', './voice/ActiveVoiceCallBar.svelte', './InstallPrompt.svelte',
 			'./CredentialStorageBanner.svelte', './LicenseBanner.svelte', './ClaudeReloginBanner.svelte', './layout/ChatView.svelte']) {
 			const src = read(file);
 			expect(src, file).toContain('<NotificationSlot');
-			if (file !== './layout/ChatView.svelte') expect(src, file).not.toMatch(/position:\s*fixed|class="fixed/);
+			if (file !== './layout/ChatView.svelte') expect(userMoved(src), file).not.toMatch(/position:\s*fixed|class="fixed/);
 		}
+		expect(read('./voice/ActiveVoiceCallBar.svelte')).toMatch(/\{#if position\}[\s\S]*class="call-float"[\s\S]*\{:else\}\s*<NotificationSlot order=\{DOCK_ORDER\.voiceCall\}>/);
 		const update = read('./layout/sidebar/DesktopUpdateButton.svelte');
 		expect(update).toContain('<NotificationSlot order={DOCK_ORDER.restart}>');
 		expect(update.slice(update.indexOf('.update-panel {'))).not.toMatch(/^[^}]*position:\s*fixed/);

@@ -71,6 +71,20 @@ export interface DesktopAgentAccess {
 	footer: string;
 }
 
+/** What the popped-out call window shows (desktop/src/main/call-popout.ts validates it). */
+export interface DesktopCallState {
+	/** "Voice call · live", or the microphone problem. */
+	label: string;
+	/** The owner session's title. */
+	title: string;
+	micMuted: boolean;
+	agentMuted: boolean;
+	micProblem: boolean;
+}
+
+/** Buttons pressed in the popped-out call window, run by this page against its own call. */
+export type DesktopCallCommand = 'toggle-mic' | 'toggle-agent' | 'hangup' | 'return';
+
 /**
  * The part of the preload bridge (desktop/src/preload/index.ts) the web UI
  * uses. The preload has a few more members for the desktop CI scripts.
@@ -97,6 +111,21 @@ export interface ShuffleDesktopBridge {
 		getState(): Promise<DesktopUpdateState>;
 		onState(listener: (state: DesktopUpdateState) => void): () => void;
 		install(): Promise<void>;
+	};
+	/**
+	 * The away call bar in its own small always-on-top window, so the call
+	 * controls stay visible over other apps. This page keeps the call and its
+	 * audio; the window only shows `DesktopCallState` and sends commands back.
+	 * Older shells lack it.
+	 */
+	voiceCall?: {
+		/** Opens (or refreshes) the window; false when the shell refused. */
+		open(state: DesktopCallState): Promise<boolean>;
+		update(state: DesktopCallState): void;
+		close(): void;
+		onCommand(listener: (command: DesktopCallCommand) => void): () => void;
+		/** The window closed: its dock button, or the shell closed it. */
+		onClosed(listener: () => void): () => void;
 	};
 }
 
