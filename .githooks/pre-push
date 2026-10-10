@@ -1,0 +1,14 @@
+#!/bin/sh
+# Local checks before anything leaves this machine (scripts/local_ci.py).
+# CI does not test pull requests; this hook is where tests run.
+root=$(git rev-parse --show-toplevel) || exit 1
+[ -f "$root/scripts/local_ci.py" ] || exit 0
+# The first interpreter that can run the backend tests wins.
+for candidate in "$LOCAL_CI_PYTHON" python3.12 python3 python "py -3.12"; do
+  [ -n "$candidate" ] || continue
+  if $candidate -c "import pytest, yaml" >/dev/null 2>&1; then
+    exec $candidate "$root/scripts/local_ci.py" pre-push
+  fi
+done
+echo "pre-push: no Python with pytest and PyYAML found. Install requirements-dev.txt or set LOCAL_CI_PYTHON." >&2
+exit 1

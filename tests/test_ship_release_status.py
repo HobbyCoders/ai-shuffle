@@ -50,17 +50,29 @@ def test_android_changes_need_play_build():
     assert builds["android"] == {"needed": True, "example_paths": ["android/app/build.gradle.kts"]}
 
 
-def test_ci_state_uses_newest_run_per_workflow_on_sha():
-    runs = [
-        {"workflowName": "CI Backend", "status": "completed", "conclusion": "success", "headSha": "abc"},
-        {"workflowName": "CI Backend", "status": "completed", "conclusion": "failure", "headSha": "abc"},
-        {"workflowName": "CI fluid", "status": "in_progress", "conclusion": None, "headSha": "abc"},
-        {"workflowName": "CI JavaScript", "status": "completed", "conclusion": "success", "headSha": "old"},
+def _status(context, state="success", creator=srs.OWNER_ID):
+    return {"context": context, "state": state, "creator": {"id": int(creator)}}
+
+
+def test_local_state_uses_the_newest_owner_status_per_suite():
+    statuses = [
+        _status("local/full-suite", creator="7"),  # a stranger's newer success never counts
+        _status("local/full-suite", "failure"),
+        _status("local/full-suite"),
+        _status("local/windows-suite", "pending"),
     ]
-    state = srs.ci_state(runs, "abc")
-    assert state["CI Backend"] == "success"
-    assert state["CI fluid"] == "pending"
-    assert state["CI JavaScript"] == "missing"
+    assert srs.local_state(statuses) == {"local/full-suite": "failure", "local/windows-suite": "pending"}
+    assert srs.local_state([]) == {"local/full-suite": "missing", "local/windows-suite": "missing"}
+
+
+def test_edge_state_uses_the_newest_run_on_sha():
+    runs = [
+        {"workflowName": srs.EDGE_WORKFLOW, "status": "completed", "conclusion": "success", "headSha": "abc"},
+        {"workflowName": srs.EDGE_WORKFLOW, "status": "completed", "conclusion": "failure", "headSha": "abc"},
+    ]
+    assert srs.edge_state(runs, "abc") == "success"
+    assert srs.edge_state(runs, "old") == "missing"
+    assert srs.edge_state([{**runs[0], "status": "in_progress"}], "abc") == "pending"
 
 
 # -- live smoke gate ------------------------------------------------------------
@@ -146,11 +158,7 @@ def test_smoke_gate_without_a_candidate_blocks(tmp_path):
     assert _gate(tmp_path, revision="", skip="offline")["verdict"] == "skipped"
 
 
-@pytest.mark.parametrize("skip, ready, notes", [
-    (None, False, []),
-    ("away", True, ["Live smoke skipped (--skip-smoke): away"]),
-])
-def test_collect_folds_the_smoke_gate_into_blockers(tmp_path, monkeypatch, skip, ready, notes):
+def _fake_collect(monkeypatch, statuses):
     def fake_try(*args):
         if args[:2] == ("git", "rev-parse"):
             return CANDIDATE
@@ -159,12 +167,21 @@ def test_collect_folds_the_smoke_gate_into_blockers(tmp_path, monkeypatch, skip,
         if args[:2] == ("git", "log"):
             return "abc change"
         return ""
-    success = [{"workflowName": n, "status": "completed", "conclusion": "success", "headSha": CANDIDATE}
-               for n in srs.REQUIRED_CI]
+    runs = [{"workflowName": srs.EDGE_WORKFLOW, "status": "completed", "conclusion": "success",
+             "headSha": CANDIDATE}]
     monkeypatch.setattr(srs, "_try", fake_try)
-    monkeypatch.setattr(srs, "_gh_json", lambda *a: success)
+    monkeypatch.setattr(srs, "_gh_json", lambda *a: statuses if a[0] == "api" else runs)
     monkeypatch.setattr(srs, "_variable", lambda *a, **k: None)
+
+
+@pytest.mark.parametrize("skip, ready, notes", [
+    (None, False, []),
+    ("away", True, ["Live smoke skipped (--skip-smoke): away"]),
+])
+def test_collect_folds_the_smoke_gate_into_blockers(tmp_path, monkeypatch, skip, ready, notes):
+    _fake_collect(monkeypatch, [_status(c) for c in srs.REQUIRED_LOCAL])
     report = srs.collect(["Unraid"], skip, str(tmp_path))
+    assert report["edge_published"] is True
     assert report["ready"] is ready
     assert report["release_notes_lines"] == notes
     if skip is None:
@@ -174,3 +191,26 @@ def test_collect_folds_the_smoke_gate_into_blockers(tmp_path, monkeypatch, skip,
     assert "Live smoke: " + ("skipped (away)" if skip else "block") in text
     if skip:
         assert "release notes must say: Live smoke skipped (--skip-smoke): away" in text
+
+
+def test_collect_waits_for_both_local_suites(tmp_path, monkeypatch):
+    _fake_collect(monkeypatch, [_status("local/full-suite")])
+    report = srs.collect(["Unraid"], "away", str(tmp_path))
+    assert not report["ready"]
+    assert len(report["blockers"]) == 1
+    assert "local/windows-suite" in report["blockers"][0] and "DesktopWorker" in report["blockers"][0]
+    assert "local/windows-suite=missing" in srs.render(report)
+
+
+def test_skip_windows_releases_with_a_note(tmp_path, monkeypatch):
+    _fake_collect(monkeypatch, [_status("local/full-suite")])
+    report = srs.collect(["Unraid"], "away", str(tmp_path), skip_windows="DesktopWorker off")
+    assert report["ready"]
+    assert "Windows full suite not run on this release (--skip-windows): DesktopWorker off" in report["release_notes_lines"]
+
+
+def test_linux_suite_cannot_be_skipped(tmp_path, monkeypatch):
+    _fake_collect(monkeypatch, [_status("local/windows-suite")])
+    report = srs.collect(["Unraid"], "away", str(tmp_path), skip_windows="x")
+    assert not report["ready"]
+    assert report["blockers"][0].startswith("local/full-suite")

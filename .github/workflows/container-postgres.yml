@@ -2,24 +2,13 @@ name: Container PostgreSQL
 
 # Builds the production image and exercises a real container: PostgreSQL
 # bootstrap, lifecycle, the buyer Compose install and the UI through a browser.
-# That is a full image build on a paid runner, so pull requests run it only
-# when they change container packaging, this check or the first-run setup
-# wizard (#1941); otherwise run it by hand
+# That is a full image build on a paid runner, so it runs only by hand, where
+# Docker is not available locally
 # (`gh workflow run container-postgres.yml --ref <branch>`). Every release runs
 # the same container verification in docker-publish.yml before the image is pushed.
 #
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'Dockerfile'
-      - 'docker/**'
-      - 'entrypoint.sh'
-      - 'scripts/verify_container_postgres.py'
-      - 'tests/integration/container_ui_smoke.mjs'
-      - 'frontend/src/routes/setup/**'
-      - 'frontend/src/lib/components/setup/**'
   workflow_dispatch:
 
 permissions:
@@ -32,8 +21,6 @@ concurrency:
 jobs:
   container-postgres:
     name: Single-container PostgreSQL and browser
-    # Drafts run no paid CI; marking the PR ready starts it.
-    if: github.event.pull_request.draft != true
     # Use the smaller image-build runner with the sticky layer cache; retain the full container verification.
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 40
