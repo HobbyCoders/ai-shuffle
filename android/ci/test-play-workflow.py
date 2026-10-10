@@ -18,7 +18,7 @@ class PlayWorkflowTests(unittest.TestCase):
         cls.jobs = cls.workflow["jobs"]
 
     def test_only_manual_main_or_called_tag_can_release(self):
-        self.assertEqual(set(self.workflow["on"]), {"pull_request", "workflow_dispatch", "workflow_call"})
+        self.assertEqual(set(self.workflow["on"]), {"workflow_dispatch", "workflow_call"})
         for name in ("bundle", "publish"):
             condition = self.jobs[name]["if"]
             self.assertIn("github.event_name == 'workflow_dispatch'", condition)

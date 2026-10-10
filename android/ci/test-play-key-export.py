@@ -134,7 +134,7 @@ class ExportTests(unittest.TestCase):
 class WorkflowTests(unittest.TestCase):
     def test_manual_private_main_only_and_narrow_artifact(self):
         workflow = yaml.load((ROOT / ".github/workflows/android-play-enrollment.yml").read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual(set(workflow["on"]), {"pull_request", "workflow_dispatch"})
+        self.assertEqual(set(workflow["on"]), {"workflow_dispatch"})
         self.assertEqual(workflow["permissions"], {"contents": "read"})
         inputs = workflow["on"]["workflow_dispatch"]["inputs"]
         self.assertEqual(list(inputs), ["confirm_existing_key_export"])

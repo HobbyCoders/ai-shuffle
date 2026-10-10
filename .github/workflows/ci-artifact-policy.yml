@@ -1,12 +1,6 @@
 name: CI artifact storage policy
 
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/**'
-      - 'scripts/ci/*.py'
-      - 'tests/scripts/test_owner_publication_policy.py'
-      - 'tests/scripts/test_edge_publication_gate.py'
   workflow_dispatch:
 
 permissions:

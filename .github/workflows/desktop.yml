@@ -1,18 +1,24 @@
 name: Desktop CI
-run-name: "${{ github.workflow }}${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}"
 
-# Validate native desktop packaging and the preview installer; ordinary application checks have separate
-# coverage.
+# Desktop app (desktop/). Manual only: pull requests run no CI, and
+# scripts/local_ci.py runs the desktop typecheck and tests before a push. The
+# release build that publishes installers lives in release.yml.
+#
+# Default packaging is Windows-only. Cheap typechecks/unit tests run on Linux;
+# full Linux desktop-runtime assembly requires an explicit manual opt-in.
+# Windows installs an isolated preview and exercises its real worker/PostgreSQL
+# before publishing a CI artifact, never a stable release/update.
+#
+# Dispatch it when a Windows install must be verified on a clean machine
+# and no Windows worker is available.
+#
+# Blacksmith runners are PAID per minute; every trigger below is deliberate.
+#
+# Nothing here is code signed: this workflow never sees the signing secrets. Release builds come from desktop-installer.yml (Windows,
+# signed), desktop-macos-artifact.yml (signed and notarized) and
+# desktop-linux-artifact.yml (unsigned, with checksums); see desktop/RELEASING.md.
 
 on:
-  pull_request:
-    # Platform jobs are deferred on PRs. Add ci:full to run them on every push
-    # (for PRs that really change this platform); removing it cancels them.
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-    paths:
-      - 'desktop/**'
-      - '.github/workflows/desktop.yml'
-      - 'scripts/ci/require-full-ci.py'
   workflow_dispatch:
     inputs:
       upload_preview:
@@ -29,14 +35,12 @@ permissions:
   contents: read
 
 concurrency:
-  # Unrelated label events must not replace a running OR pending validation.
-  group: desktop-${{ github.ref }}-${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && github.run_id || 'validation' }}
+  group: desktop-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   check:
-    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')
-    name: Typecheck and unit tests${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
+    name: Typecheck and unit tests
     timeout-minutes: 10
     runs-on: blacksmith-2vcpu-ubuntu-2404
     defaults:
@@ -54,9 +58,8 @@ jobs:
       - run: npm test
 
   package:
-    name: Package Windows shell${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
+    name: Package Windows shell
     timeout-minutes: 15
-    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     needs: check
     runs-on: blacksmith-2vcpu-windows-2025
     defaults:
@@ -78,7 +81,7 @@ jobs:
         run: npm run pack
 
   runtime:
-    name: Assemble worker runtime (linux-x64)${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
+    name: Assemble worker runtime (linux-x64)
     timeout-minutes: 20
     if: github.event_name == 'workflow_dispatch' && inputs.build_linux_runtime == true
     needs: check
@@ -120,8 +123,7 @@ jobs:
 
 
   windows-preview:
-    name: Windows preview installer and fresh database${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
-    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
+    name: Windows preview installer and fresh database
     needs: check
     runs-on: blacksmith-2vcpu-windows-2025
     timeout-minutes: 35
@@ -130,11 +132,11 @@ jobs:
         working-directory: desktop
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      PREVIEW_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+      PREVIEW_SOURCE_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -200,17 +202,3 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  readiness:
-    name: Desktop merge readiness${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
-    needs: ['check', 'package', 'windows-preview']
-    if: ${{ !cancelled() && (github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - uses: actions/checkout@v4
-      - name: Require successful checks for this revision
-        env:
-          CI_FULL_REQUESTED: ${{ github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
-          CI_REQUIRED_RESULTS: ${{ toJSON(needs) }}
-          CI_DEFERRABLE_JOBS: '["package", "windows-preview"]'
-        run: python3 scripts/ci/require-full-ci.py

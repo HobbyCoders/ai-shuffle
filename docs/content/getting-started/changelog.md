@@ -8,7 +8,34 @@ order: 14
 
 Newest release first. Each release lists what changes for you, grouped by area. The same notes appear next to the in-app update button. How to install a release: [Updates](/docs/getting-started/updates).
 
-## Next release
+## 0.9.3
+
+### Voice
+
+- Voice calls read whole replies aloud, including question cards.
+- The call bar can be moved, and on desktop it can pop out into its own window.
+- Call volume is in Settings.
+
+### Beta and accounts
+
+- Beta invites are automatic: approving someone on the waitlist emails them a key and download links.
+- Fixes to sign-in handling for compliance.
+
+### Workers and data
+
+- Workers on the same network sync with each other directly over the LAN.
+- Export all of your data as one ZIP file.
+- Clone a project straight from your GitHub repositories.
+
+### Plugins and connectors
+
+- Plugins can use Google sign-in.
+- The Signal, iMessage and BlueBubbles connectors work again.
+
+### Fixes
+
+- Windows: the app starts reliably, and the Updates settings no longer fail with "access denied".
+- Docker: updates install correctly.
 
 ### Action needed
 
