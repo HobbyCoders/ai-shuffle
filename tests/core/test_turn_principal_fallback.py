@@ -291,7 +291,9 @@ async def test_voice_delegation_on_an_owner_session_is_unchanged(seeded, monkeyp
     captured = _capture_submit(monkeypatch)
     await voice_stream.delegate_to_selected_model(
         OWNER_SESSION, "do it", on_submitted=AsyncMock())
-    assert captured["payload"] == {"user_message_already_recorded": True, "voice_delegation": True}
+    from app.core.voice_prompts import DELEGATION_INSTRUCTIONS
+    assert captured["payload"] == {"user_message_already_recorded": True, "voice_delegation": True,
+                                   "voice_instructions": DELEGATION_INSTRUCTIONS}
 
 
 async def test_voice_follow_up_to_a_worker_runs_as_the_key(seeded, monkeypatch):

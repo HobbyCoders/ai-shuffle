@@ -1495,12 +1495,16 @@ async def test_recorded_agents_status_is_context_not_a_second_voice_write(mock_d
     await consume_new_rows()
 
     sent = [json.loads(c.args[0]) for c in call.upstream.send.await_args_list]
-    assert [note["type"] for note in sent] == [
-        "session.thinking.append", "session.commentary.append",
-    ]
+    # The whole final reply is spoken, so on GPT Live it arrives as several
+    # commentary appends that each stay under the per-append cap.
+    types = [note["type"] for note in sent]
+    assert types[0] == "session.thinking.append"
+    assert len(types) > 1 and set(types[1:]) == {"session.commentary.append"}
     assert progress_text[:60] in sent[0]["content"]
-    assert final_text[:60] in sent[1]["content"]
-    assert progress_text[:60] not in sent[1]["content"]
+    spoken = "".join(note["content"] for note in sent[1:])
+    assert final_text[:60] in spoken
+    assert "I'll send you the three to pick from." in spoken
+    assert progress_text[:60] not in spoken
     assert sessions_db.get_session_messages(SID) == []  # Notes never write voice messages.
 
     # Only the provider's spoken transcript enters durable voice storage. A
@@ -1518,7 +1522,7 @@ async def test_recorded_agents_status_is_context_not_a_second_voice_write(mock_d
     assert [(m["role"], m["content"]) for m in sessions_db.get_session_messages(SID)] == [
         ("assistant", spoken_text),
     ]
-    assert call.upstream.send.await_count == 2
+    assert call.upstream.send.await_count == len(sent)
 
 
 async def test_record_voice_exchange_tolerates_missing_user_text(mock_db):

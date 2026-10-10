@@ -476,6 +476,25 @@ _REDELIVERY_NOTE = (
 )
 
 
+def _with_voice_note(prompt: str, payload: Optional[Dict[str, Any]]) -> str:
+    """The engine-facing text of a turn the caller started in a voice call.
+
+    The voice guidance is appended to that turn's own message, the way the
+    per-turn environment note is, so the system prompt (the provider's cached
+    prefix) is byte-identical for typed and spoken turns. Only the engine sees
+    it: the stores and the transcript keep the row's prompt.
+    """
+    payload = payload or {}
+    if not prompt or not payload.get("voice_delegation"):
+        return prompt
+    instructions = payload.get("voice_instructions")
+    if not isinstance(instructions, str) or not instructions.strip():
+        return prompt
+    from app.core.voice_prompts import voice_turn_note
+
+    return f"{prompt}\n\n{voice_turn_note(instructions)}"
+
+
 def _cap_ws_tool_input(event: Dict[str, Any]) -> Dict[str, Any]:
     """Return ``event`` with an oversized tool ``input`` replaced by a marker.
 
@@ -1351,6 +1370,7 @@ class SessionRuntime:
         engine_prompt = prompt
         if (self.turn.get("payload") or {}).get("steer_already_delivered"):
             engine_prompt = f"{_REDELIVERY_NOTE}\n\n{prompt}" if prompt else prompt
+        engine_prompt = _with_voice_note(engine_prompt, self.turn.get("payload"))
         held_peer = ""
         engine_started = False
         if (
@@ -1754,7 +1774,7 @@ class SessionRuntime:
                         payload["peer_message_content"], sender=sender_id, id=row_id,
                     )
                 else:
-                    await adapter.steer(prompt, id=row_id)
+                    await adapter.steer(_with_voice_note(prompt, row.get("payload")), id=row_id)
             except NotImplementedError:
                 # A backend with no mid-turn channel at all — stop asking for
                 # the rest of this turn. Nothing was sent, so the row is not

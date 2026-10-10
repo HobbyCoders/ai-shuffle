@@ -768,6 +768,11 @@ CONVERSATION_WORK_RULES = (
     "when you have it, otherwise answer from the latest work updates; never start "
     "chat work just to check status. "
     "When an update says a job finished, mention it in one short sentence. "
+    "When an update carries a chat result, read it to the user in full in plain "
+    "speech, including any question, next step or request at its end; do not "
+    "shorten it to one line. "
+    "When an update says the chat agent asked a question on screen, read the "
+    "question and its options to the user, then say they answer it on screen. "
     "When an update asks for an approval, ask the user in one plain sentence and "
     "wait. The app takes the yes or no from the user's own voice: never decide it "
     "yourself, never submit the answer to chat, and never say it was approved or "
@@ -1013,8 +1018,11 @@ class VoiceBridge:
             from app.core.voice_progress import VoiceProgress
             approvals = SpokenApprovals(self.session_id, api_user_id=self._api_user_id,
                                         marker=lambda: self._audio_count)
+            # append_bytes=None: each note is one conversation item here, so a
+            # long chat result must not become several spoken responses.
             self._conversation_progress = VoiceProgress(
                 self.session_id, self._progress_note, quiet=self._is_quiet, approvals=approvals,
+                append_bytes=None,
             )
             await self._conversation_progress.open()
             self._conversation_progress_task = asyncio.create_task(self._conversation_progress.run())
@@ -1605,7 +1613,11 @@ class VoiceBridge:
                     # Read-only status from the app's task state; no chat turn.
                     from app.core import voice_status
                     status = await run_sync(voice_status.work_status, self.session_id)
-                    result = {"ok": True, "summary": voice_status.status_sentence(status), "status": status}
+                    summary = voice_status.status_sentence(status)
+                    progress = getattr(self, "_conversation_progress", None)
+                    if progress is not None:
+                        summary = progress.with_last_reply(summary, status)
+                    result = {"ok": True, "summary": summary, "status": status}
                 elif name != "submit_to_chat":
                     result = {"ok": False, "error": "Conversation calls only submit through the normal chat ceiling."}
                 elif self._approval_waiting():

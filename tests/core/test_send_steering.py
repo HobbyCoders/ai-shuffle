@@ -1222,6 +1222,76 @@ async def test_the_flagged_re_run_tells_the_model_about_the_duplicate(mock_db):
     )
 
 
+_VOICE = {"user_message_already_recorded": True, "voice_delegation": True,
+          "voice_instructions": "The caller is listening."}
+
+
+async def test_a_voice_turn_carries_the_voice_note_on_its_message_only(mock_db):
+    """The voice guidance rides the turn's message, not the system prompt, so
+    the cached prefix is the same for typed and spoken turns. The stores keep
+    the row's own prompt."""
+    from app.core.voice_prompts import voice_turn_note
+    _seed_session("s24")
+    turn = turns_db.enqueue_turn("s24", "user", prompt="Live conversation context:\nuser: fix it\n",
+                                 payload=_VOICE)
+    seen = {}
+
+    async def _impl(**kwargs):
+        seen.update(kwargs)
+        yield {"type": "done", "metadata": {}}
+
+    with _pump_env(_impl) as env:
+        assert await session_runtime.SessionRuntime(turn).execute() == "completed"
+
+    assert seen["prompt"] == turn["prompt"] + "\n\n" + voice_turn_note("The caller is listening.")
+    assert env["recorder"].start.await_args.args[0] == turn["prompt"]
+
+
+async def test_a_typed_turn_gets_no_voice_note(mock_db):
+    _seed_session("s25")
+    turn = turns_db.enqueue_turn("s25", "user", prompt="fix it",
+                                 payload={"voice_instructions": "The caller is listening."})
+    seen = {}
+
+    async def _impl(**kwargs):
+        seen["prompt"] = kwargs.get("prompt")
+        yield {"type": "done", "metadata": {}}
+
+    with _pump_env(_impl):
+        assert await session_runtime.SessionRuntime(turn).execute() == "completed"
+    assert seen["prompt"] == "fix it"
+
+
+async def test_a_steered_voice_handoff_carries_the_voice_note(mock_db):
+    from app.core.voice_prompts import voice_turn_note
+    live = _start_live("s26")
+    _live_runtime("s26", live)
+    voice = turns_db.enqueue_turn("s26", "user", prompt="user: also check the logs", payload=_VOICE)
+    typed = turns_db.enqueue_turn("s26", "user", prompt="and the tests")
+
+    adapter = _Adapter()
+    with _pooled(adapter):
+        assert await session_runtime.try_steer_pending("s26") == 2
+
+    assert adapter.calls == [
+        ("user: also check the logs\n\n" + voice_turn_note("The caller is listening."), voice["id"]),
+        ("and the tests", typed["id"]),
+    ]
+    # The row keeps the caller's words; only the engine saw the note.
+    assert turns_db.get_turn(voice["id"])["prompt"] == "user: also check the logs"
+
+
+def test_the_voice_note_is_static_text():
+    from app.core.voice_prompts import DELEGATION_INSTRUCTIONS, voice_turn_note
+    assert voice_turn_note(DELEGATION_INSTRUCTIONS) == voice_turn_note(DELEGATION_INSTRUCTIONS)
+    assert voice_turn_note("").startswith("<system-reminder>\n# Voice call\n")
+    assert DELEGATION_INSTRUCTIONS in voice_turn_note("")
+    for guidance in ("listening, not reading", "Never end a turn silently",
+                     "say aloud what you are waiting on", "not only in a question card",
+                     "Keep code, tables"):
+        assert guidance in DELEGATION_INSTRUCTIONS
+
+
 # ---------------------------------------------------------------------------
 # 5. The steering prompt block
 # ---------------------------------------------------------------------------

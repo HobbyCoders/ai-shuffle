@@ -174,10 +174,12 @@ def has_news(status: Dict[str, Any]) -> bool:
 
 # A pure status question, said on its own. Anything longer, or joined to
 # another request ("and also…"), goes to the chat agent as before.
+# "What's left" is not one: it asks about the plan's remaining steps, which only
+# the chat agent knows, not about running jobs.
 _LEADING_FILLER = re.compile(r"^(?:(?:hey|so|okay|ok|um|uh|well|and|alright|quick question)\b[\s,]*)+")
 _STATUS_PATTERNS = tuple(re.compile(p) for p in (
     r"^what(?:'s| is| are)? (?:are )?you (?:working on|doing|up to|busy with)(?: right now| now| at the moment)?$",
-    r"^what(?:'s| is) (?:going on|happening|running|the status|the progress|left)(?: right now| now)?$",
+    r"^what(?:'s| is) (?:going on|happening|running|the status|the progress)(?: right now| now)?$",
     r"^(?:is|are) (?:it|that|they|those|this|these|everything|the (?:job|jobs|task|tasks|work|agent|agents))(?: all)? "
     r"(?:done|finished|ready|complete|completed|still running|still going)(?: yet| now)?$",
     r"^(?:are you|is the agent|is the chat agent) (?:done|finished|still working|still busy)(?: yet| now)?$",

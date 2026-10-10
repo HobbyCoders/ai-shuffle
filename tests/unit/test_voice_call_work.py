@@ -396,6 +396,8 @@ def test_status_questions_are_recognised(text):
 @pytest.mark.parametrize("text", [
     "Fix the login test", "Is it done yet? And then push the branch", "What is the capital of France",
     "Are the tests passing on main and can you rerun them", "", "Work on the docs",
+    # The plan's remaining steps: only the chat agent knows them (2026-10-10).
+    "Okay, so what's left?", "What is left",
 ])
 def test_requests_are_not_status_questions(text):
     assert not voice_status.is_status_question(text)
@@ -433,6 +435,23 @@ async def test_live_status_question_is_answered_from_task_state_without_a_chat_t
     (sent,) = [c.args[0] for c in call.send.await_args_list]
     assert sent["type"] == "session.commentary.append" and sent["delegation_id"] == "d1"
     assert "Fix login" in sent["content"] and "working on a request" in sent["content"]
+
+
+@pytest.mark.asyncio
+async def test_live_status_after_a_reply_repeats_what_the_reply_asked(monkeypatch):
+    """"Nothing is running" alone read as finished work when the reply had
+    ended on a question for the caller."""
+    delegate = AsyncMock(return_value="")
+    monkeypatch.setattr(voice_stream, "delegate_to_selected_model", delegate)
+    monkeypatch.setattr(voice_status, "work_status", lambda sid: {"chat": "idle"})
+    call = _live_call(monkeypatch)
+    call.progress.last_result = "The fix is ready. Should I push it?"
+    await call.caption("user", "Any updates?")
+    call.settling = ["d1"]
+    await call.dispatch_when_settled()
+    delegate.assert_not_awaited()
+    spoken = "".join(c.args[0]["content"] for c in call.send.await_args_list)
+    assert "Nothing is running" in spoken and "Should I push it?" in spoken
 
 
 @pytest.mark.asyncio

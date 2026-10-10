@@ -96,8 +96,10 @@ async def test_handoff_reuses_same_session_and_composer_binding(monkeypatch, sel
     monkeypatch.setattr(voice_stream, "_turn_reply", lambda session, turn: "Done" if (session, turn) == ("s1", "turn-1") else "wrong turn")
     assert await voice_stream.delegate_to_selected_model("s1", "user: test") == "Done"
     assert submit.await_args.args == ("s1", "user")
-    assert submit.await_args.kwargs["payload"] == {"user_message_already_recorded": True, "voice_delegation": True}
+    assert submit.await_args.kwargs["payload"] == {"user_message_already_recorded": True, "voice_delegation": True,
+                                                   "voice_instructions": voice_stream.DELEGATION_INSTRUCTIONS}
     overrides = submit.await_args.kwargs["overrides"]
+    assert "system_prompt_append" not in overrides
     assert (overrides["provider"], overrides["model"], overrides["effort"]) == (provider, selected, "high")
     assert overrides["permission_mode"] == "default" and overrides["fast"] is True
     dispatch.assert_not_called()
@@ -413,7 +415,11 @@ async def test_attached_webrtc_binding_delegates_with_realtime_options(monkeypat
     assert await voice_stream.delegate_to_selected_model("home", "Spoken request", on_submitted=AsyncMock()) == ""
     overrides = submit.await_args.kwargs["overrides"]
     assert overrides["model"] == "haiku"
-    assert overrides["system_prompt_append"] == voice_stream.DELEGATION_INSTRUCTIONS
+    # The guidance rides the turn's message, never the cached system prompt.
+    assert "system_prompt_append" not in overrides
+    payload = submit.await_args.kwargs["payload"]
+    assert payload["voice_delegation"] is True
+    assert payload["voice_instructions"] == voice_stream.DELEGATION_INSTRUCTIONS
 
 
 def test_live_prompt_forbids_backchannels_and_waiting_filler():

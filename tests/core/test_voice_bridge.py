@@ -2815,6 +2815,18 @@ async def test_check_work_answers_from_task_state_without_a_chat_turn(mock_db, f
     await bridge.stop()
 
 
+async def test_check_work_repeats_the_last_reply_when_chat_is_idle(mock_db, fake_sockets, monkeypatch):
+    from app.core import voice_status
+    bridge, sock = await _attached(fake_sockets, monkeypatch)
+    monkeypatch.setattr(voice_status, "work_status", lambda sid: {"chat": "idle"})
+    bridge._conversation_progress.last_result = "The icons match. Should I open the PR?"
+    await bridge._service_call("c1", "check_work", "{}")
+    (result,) = _outputs(sock)
+    assert result["summary"].startswith("Nothing is running")
+    assert result["summary"].endswith("Should I open the PR?")
+    await bridge.stop()
+
+
 async def test_attached_call_keeps_its_transcript_while_the_chat_works(mock_db, fake_sockets, monkeypatch):
     """The legacy live-turn skip would drop every word said during work."""
     from app.db import turns as turns_db
