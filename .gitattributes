@@ -21,3 +21,5 @@ android/site/wrangler.toml text eol=lf
 # two docs copies; keep both LF on Windows checkouts too.
 android/site/src/content/docs.json text eol=lf
 frontend/src/lib/docs/content/** text eol=lf
+# Tests import these scripts; Vitest on Windows fails on a CRLF after the #! line.
+frontend/scripts/*.mjs text eol=lf
