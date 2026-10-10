@@ -527,6 +527,52 @@ def test_default_enabled_policy_and_desktop_mirror(tmp_path, monkeypatch, value,
     assert json.loads(mirror.read_text()) == {"allow_updates": expected}
 
 
+def test_unchanged_policy_is_not_rewritten(tmp_path, monkeypatch):
+    monkeypatch.setattr(policy.database, "get_system_setting", lambda key: "true")
+    mirror = tmp_path / "allow-updates.json"
+    mirror.write_text(json.dumps({"allow_updates": True}))
+    monkeypatch.setenv("SHUFFLE_UPDATE_POLICY_FILE", str(mirror))
+    writes = []
+    monkeypatch.setattr(policy, "atomic_json", lambda *a: writes.append(a))
+    assert policy.mirror_policy() is True
+    assert writes == []
+    mirror.write_text("{not json")
+    policy.mirror_policy()
+    assert writes == [(str(mirror), {"allow_updates": True})]
+
+
+def test_policy_write_waits_out_a_windows_sharing_violation(tmp_path, monkeypatch):
+    target = tmp_path / "allow-updates.json"
+    real_replace = os.replace
+    calls = []
+
+    def flaky_replace(source, destination):
+        calls.append(destination)
+        if len(calls) < 3:
+            raise PermissionError(5, "Access is denied")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(policy.os, "name", "nt")
+    monkeypatch.setattr(policy.os, "replace", flaky_replace)
+    monkeypatch.setattr(policy.time, "sleep", lambda seconds: None)
+    policy.atomic_json(target, {"allow_updates": False})
+    assert len(calls) == 3
+    assert json.loads(target.read_text()) == {"allow_updates": False}
+    assert [p.name for p in tmp_path.iterdir()] == ["allow-updates.json"]
+
+
+def test_policy_write_gives_up_after_repeated_denials(tmp_path, monkeypatch):
+    def denied(source, destination):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(policy.os, "name", "nt")
+    monkeypatch.setattr(policy.os, "replace", denied)
+    monkeypatch.setattr(policy.time, "sleep", lambda seconds: None)
+    with pytest.raises(PermissionError):
+        policy.atomic_json(tmp_path / "allow-updates.json", {"allow_updates": True})
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_account_policy_is_shared():
     from app.network.policy import is_shared_setting_key
     assert is_shared_setting_key(policy.KEY)
