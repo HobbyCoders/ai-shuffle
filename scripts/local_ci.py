@@ -472,8 +472,17 @@ def tree_of(revision: str) -> str:
 
 # --- commands --------------------------------------------------------------
 
+PYTHON_CONFIG = "local-ci.python"
+
+
+def saved_python() -> str:
+    """The interpreter `install` recorded in git config, shared by every worktree."""
+    found = subprocess.run(["git", "config", "--get", PYTHON_CONFIG], cwd=ROOT, capture_output=True, text=True)
+    return found.stdout.strip() if found.returncode == 0 else ""
+
+
 def choose_python() -> str:
-    return os.environ.get("LOCAL_CI_PYTHON") or sys.executable
+    return os.environ.get("LOCAL_CI_PYTHON") or saved_python() or sys.executable
 
 
 def changed_files(base: str) -> list[str]:
@@ -611,8 +620,38 @@ def install_hook(directory: Path) -> str:
     return f"Pre-push checks are on: {target}" + (f" (the earlier hook still runs as {kept.name})" if kept.exists() else "")
 
 
+def can_run_tests(python: str) -> bool:
+    return subprocess.run([python, "-c", "import pytest, yaml"], capture_output=True).returncode == 0
+
+
+def find_test_python(explicit: str | None = None) -> str:
+    """The first interpreter that has pytest and PyYAML.
+
+    The python3 on PATH is often an app or project venv without test tools
+    (on the Unraid image it is the AI Shuffle runtime), so the system
+    interpreters are tried too.
+    """
+    names = [explicit, os.environ.get("LOCAL_CI_PYTHON"), saved_python(), sys.executable]
+    names += [shutil.which(name) for name in ("python3.12", "python3", "python")]
+    names += ["/usr/local/bin/python3", "/usr/bin/python3"]
+    tried = []
+    for name in names:
+        if not name or name in tried:
+            continue
+        tried.append(name)
+        if Path(name).exists() and can_run_tests(name):
+            return str(Path(name).absolute())
+        if explicit and name == explicit:
+            raise Failure(f"{explicit} cannot import pytest and yaml. Install requirements-dev.txt into it.")
+    raise Failure("No Python with pytest and PyYAML found (tried " + ", ".join(tried) + "). "
+                  "Install requirements-dev.txt, then run install again, or pass --python PATH.")
+
+
 def cmd_install(args) -> int:
+    python = find_test_python(args.python)
+    git("config", PYTHON_CONFIG, python)
     print(install_hook(hooks_dir()))
+    print(f"Tests run with {python} (git config {PYTHON_CONFIG}).")
     return 0
 
 
@@ -632,6 +671,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", nargs="?", default="check", choices=["check", "full", "install", "list", "pre-push"])
     parser.add_argument("--only", nargs="+", metavar="SUITE", help="run just these suites (not recorded as a pass)")
     parser.add_argument("--attest", action="store_true", help=f"with full on main: post {ATTEST_CONTEXT}")
+    parser.add_argument("--python", metavar="PATH", help="with install: the interpreter that runs the tests")
     args = parser.parse_args(argv)
     if args.only:
         unknown = set(args.only) - {s.name for s in SUITES}

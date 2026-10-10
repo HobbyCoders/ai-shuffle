@@ -136,6 +136,33 @@ def test_install_adds_a_hook_without_touching_hooks_path(tmp_path, monkeypatch):
     assert not (tmp_path / "pre-push.user").exists()
 
 
+def test_install_skips_a_python_without_pytest(tmp_path, monkeypatch):
+    # Unraid: python3 on PATH is the app venv (no pytest); /usr/local/bin/python3 has it.
+    venv, system = tmp_path / "venv-python", tmp_path / "system-python"
+    venv.write_text("")
+    system.write_text("")
+    monkeypatch.delenv("LOCAL_CI_PYTHON", raising=False)
+    monkeypatch.setattr(local_ci, "saved_python", lambda: "")
+    monkeypatch.setattr(local_ci.sys, "executable", str(venv))
+    monkeypatch.setattr(local_ci, "can_run_tests", lambda python: python == str(system))
+    with pytest.raises(local_ci.Failure):
+        local_ci.find_test_python(str(venv))
+    monkeypatch.setattr(local_ci.shutil, "which", lambda name: str(system) if name == "python3" else None)
+    assert local_ci.find_test_python() == str(system)
+
+    configured = []
+    monkeypatch.setattr(local_ci, "git", lambda *args: configured.append(args) or "")
+    monkeypatch.setattr(local_ci, "hooks_dir", lambda: tmp_path / "hooks")
+    assert local_ci.cmd_install(local_ci.argparse.Namespace(python=None)) == 0
+    assert configured == [("config", local_ci.PYTHON_CONFIG, str(system))]
+
+
+def test_hook_prefers_the_saved_python():
+    hook = (ROOT / ".githooks/pre-push").read_text(encoding="utf-8")
+    assert "git config --get local-ci.python" in hook
+    assert '"$python" "$root/scripts/local_ci.py" pre-push' in hook
+
+
 def test_install_keeps_an_earlier_hook_as_user(tmp_path):
     (tmp_path / "pre-push").write_text("#!/bin/sh\necho theirs\n", encoding="utf-8")
     message = local_ci.install_hook(tmp_path)
