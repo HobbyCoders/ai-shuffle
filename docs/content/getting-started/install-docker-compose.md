@@ -303,7 +303,7 @@ docker run -d \
 - Add `-e LICENSE_KEY=...` or `-e OWNER_PASSWORD=...` to set them on the first start.
 - Keep `--stop-timeout 90`. AI Shuffle needs up to 90 seconds to shut down cleanly.
 - Set `PUID` and `PGID` to the owner of your workspace folder.
-- Keep `--restart unless-stopped`. When AI Shuffle stops answering, the container restarts it on its own. If that keeps failing, the container exits so that Docker can start it again. Without a restart policy it stays stopped until you start it.
+- Keep `--restart unless-stopped`. If the application exits, its supervisor restarts it inside the container. After repeated crashes the container exits so Docker can start it again. A failed readiness probe only reports degradation: it does not kill a live process whose in-flight work cannot be confirmed safe to restart. Without a restart policy an exited container stays stopped until you start it.
 
 ### Unraid, Portainer and other container managers
 
@@ -311,6 +311,8 @@ If you create the container in a web interface instead of a terminal, set the sa
 
 - **Unraid:** in **Add Container**, switch to **Advanced View** and put the options without their own field into **Extra Parameters**: `--restart unless-stopped --stop-timeout 90 --shm-size 1g --pids-limit 8192 --security-opt seccomp=unconfined --security-opt systempaths=unconfined --security-opt apparmor=unconfined`. Add the ports, volumes and variables from the command with **Add another Path, Port, Variable, Label or Device**.
 - **Portainer:** under **Restart policy**, choose **Unless stopped**.
+
+For an existing hand-created install, change the policy on the **Docker host**, not inside the container: `docker update --restart=unless-stopped <container-name>`. This does not restart it. Verify with `docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' <container-name>`; it must print `unless-stopped`. Save the same policy in Unraid's template or Portainer's configuration so recreating the container preserves it. In-app source updates restart the application, not the Docker container, and cannot change its host restart policy.
 
 ## Where your data lives
 

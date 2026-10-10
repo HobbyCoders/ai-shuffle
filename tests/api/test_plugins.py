@@ -29,6 +29,28 @@ from app.api.auth import require_auth, require_admin
 # Fixtures
 # =============================================================================
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint,method", [
+    ("list_available_plugins", "get_available_plugins"),
+    ("list_installed_plugins", "get_installed_plugins"),
+    ("list_file_based_agents", "get_file_based_agents"),
+])
+async def test_plugin_scans_run_off_event_loop(monkeypatch, endpoint, method):
+    import threading
+    from app.api import plugins
+    loop_thread = threading.get_ident()
+    calls = []
+    service = MagicMock()
+    def scan(*args):
+        calls.append(threading.get_ident())
+        assert calls[-1] != loop_thread
+        return []
+    getattr(service, method).side_effect = scan
+    monkeypatch.setattr(plugins, "get_plugin_service", lambda: service)
+    assert await getattr(plugins, endpoint)(token="test") == []
+    assert len(calls) == 1
+
+
 @pytest.fixture
 def mock_plugin_service():
     """Create a mock plugin service."""

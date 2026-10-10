@@ -47,6 +47,47 @@ def _record(level: int, message: str = "poll failed: HTTP 403") -> logging.LogRe
     )
 
 
+@pytest.mark.asyncio
+async def test_installed_handler_never_waits_for_database(monkeypatch):
+    import asyncio
+    import threading
+    from app.db import error_logs
+    from app.core.session_context import current_session_id
+
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+    loop_thread = threading.get_ident()
+    def persist(**kwargs):
+        assert threading.get_ident() != loop_thread
+        entered.set()
+        assert release.wait(5)
+        calls.append(kwargs)
+
+    monkeypatch.setattr(error_logs, "record_error", persist)
+    monkeypatch.setattr(elh, "_handler", None)
+    token = current_session_id.set("owner-session")
+    elh.install_error_log_handler()
+    handler = elh._handler
+    try:
+        record = _record(logging.ERROR)
+        record.stack_info = "trace detail"
+        handler.handle(record)
+        assert await asyncio.to_thread(entered.wait, 2)
+        # This executes while persistence is still blocked.
+        await asyncio.sleep(0)
+        assert not calls
+        for _ in range(1100):
+            handler.handle(record)
+        assert handler.queue.qsize() == 1024
+        assert handler.dropped == 76
+    finally:
+        current_session_id.reset(token)
+        release.set()
+        await asyncio.to_thread(elh.uninstall_error_log_handler)
+    assert calls[0]["session_id"] == "owner-session"
+    assert calls[0]["detail"] == "trace detail"
+
+
 def test_warning_is_persisted_by_default(recorded):
     elh.ErrorLogDBHandler().emit(_record(logging.WARNING))
 
