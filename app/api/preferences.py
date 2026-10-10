@@ -50,6 +50,12 @@ def get_user_identity(request: Request) -> tuple[str, str]:
     return request_preference_identity(request)
 
 
+def _with_user_identity(request, operation, *args, **kwargs):
+    # Identity resolution may perform synchronous account-hub requests. Keep
+    # it and the DB operation in one worker hop, never on the request loop.
+    return operation(*get_user_identity(request), *args, **kwargs)
+
+
 def require_preference_write(request: Request, token: str = Depends(require_auth)) -> str:
     # Preview UI interactions must not broadcast an agent's temporary layout
     # choices to the owner's other windows/workers. Check the cookie even when
@@ -69,11 +75,9 @@ async def get_all_preferences(
     Returns a dictionary mapping preference keys to their values.
     This is more efficient than fetching preferences individually on app startup.
     """
-    user_type, user_id = await run_sync(get_user_identity, request)
-
     # Both identity resolution (which can contact the account hub) and the
     # synchronous psycopg2 read must stay off the event loop.
-    prefs = await run_sync(database.get_all_user_preferences, user_type, user_id)
+    prefs = await run_sync(_with_user_identity, request, database.get_all_user_preferences)
     # Convert list of preference objects to a key->value dictionary
     preferences_dict = {p["key"]: p["value"] for p in prefs}
 
@@ -88,9 +92,7 @@ async def get_preference(
     token: str = Depends(require_auth)
 ) -> Optional[PreferenceResponse]:
     """Get a specific preference by key"""
-    user_type, user_id = await run_sync(get_user_identity, request)
-
-    pref = await run_sync(database.get_user_preference, user_type, user_id, key)
+    pref = await run_sync(_with_user_identity, request, database.get_user_preference, key)
     if pref:
         return PreferenceResponse(
             key=pref["key"],
@@ -110,11 +112,9 @@ async def set_preference(
     token: str = Depends(require_preference_write)
 ) -> PreferenceResponse:
     """Set a preference value"""
-    user_type, user_id = await run_sync(get_user_identity, request)
-
     options = {'expected_version': body.expected_version} if 'expected_version' in body.model_fields_set else {}
     try:
-        result = await run_sync(database.set_user_preference, user_type, user_id, key, body.value,
+        result = await run_sync(_with_user_identity, request, database.set_user_preference, key, body.value,
                                 only_if_missing=only_if_missing, **options)
     except PreferenceConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -140,11 +140,9 @@ async def set_preference_post(
     Needed for navigator.sendBeacon() which only supports POST method.
     sendBeacon is used for reliable preference saves during page unload.
     """
-    user_type, user_id = await run_sync(get_user_identity, request)
-
     options = {'expected_version': body.expected_version} if 'expected_version' in body.model_fields_set else {}
     try:
-        result = await run_sync(database.set_user_preference, user_type, user_id, key, body.value,
+        result = await run_sync(_with_user_identity, request, database.set_user_preference, key, body.value,
                                 only_if_missing=only_if_missing, **options)
     except PreferenceConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -163,7 +161,5 @@ async def delete_preference(
     token: str = Depends(require_preference_write)
 ) -> dict:
     """Delete a preference"""
-    user_type, user_id = await run_sync(get_user_identity, request)
-
-    deleted = await run_sync(database.delete_user_preference, user_type, user_id, key)
+    deleted = await run_sync(_with_user_identity, request, database.delete_user_preference, key)
     return {"deleted": deleted}
