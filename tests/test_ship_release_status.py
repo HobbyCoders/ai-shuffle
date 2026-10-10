@@ -17,6 +17,23 @@ def test_latest_final_tag_ignores_prereleases_and_sorts_numerically():
     assert srs.latest_final_tag([]) is None
 
 
+def test_release_tags_reads_origin_and_ignores_local_only_tags(monkeypatch):
+    def fake_try(*args):
+        if args[:2] == ("git", "ls-remote"):
+            return "a1\trefs/tags/v0.9.1\nb2\trefs/tags/android-latest"
+        if args[:2] == ("git", "tag"):
+            return "v5.0.0\nv0.9.1"
+        return None
+    monkeypatch.setattr(srs, "_try", fake_try)
+    assert srs.release_tags() == ["v0.9.1", "android-latest"]
+    assert srs.latest_final_tag(srs.release_tags()) == "v0.9.1"
+
+
+def test_release_tags_falls_back_to_local_tags_offline(monkeypatch):
+    monkeypatch.setattr(srs, "_try", lambda *a: "v0.9.1" if a[:2] == ("git", "tag") else None)
+    assert srs.release_tags() == ["v0.9.1"]
+
+
 def test_next_patch():
     assert srs.next_patch("v0.8.22") == "v0.8.23"
     assert srs.next_patch(None) == "v0.1.0"
@@ -137,8 +154,8 @@ def test_collect_folds_the_smoke_gate_into_blockers(tmp_path, monkeypatch, skip,
     def fake_try(*args):
         if args[:2] == ("git", "rev-parse"):
             return CANDIDATE
-        if args[:2] == ("git", "tag"):
-            return "v0.1.0"
+        if args[:2] == ("git", "ls-remote"):
+            return "abc\trefs/tags/v0.1.0"
         if args[:2] == ("git", "log"):
             return "abc change"
         return ""

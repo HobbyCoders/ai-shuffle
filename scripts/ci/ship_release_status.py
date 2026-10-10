@@ -67,6 +67,16 @@ def latest_final_tag(tags: Iterable[str]) -> Optional[str]:
     return max(finals, key=lambda t: tuple(int(p) for p in t[1:].split(".")))
 
 
+def release_tags() -> list:
+    """Tags on origin. A checkout can carry local-only tags (an old v5.0.0 on
+    DesktopWorker once made the preflight suggest v5.0.1), so local tags are read
+    only when origin cannot be reached."""
+    remote = _try("git", "ls-remote", "--tags", "--refs", "origin")
+    if remote is None:
+        return (_try("git", "tag", "--list") or "").splitlines()
+    return [line.split("refs/tags/", 1)[1] for line in remote.splitlines() if "refs/tags/" in line]
+
+
 def next_patch(tag: Optional[str]) -> str:
     if not tag:
         return "v0.1.0"
@@ -131,7 +141,7 @@ def collect(smoke_workers: Optional[list] = None, skip_smoke: Optional[str] = No
             smoke_dir: Optional[str] = None) -> dict:
     _try("git", "fetch", "--quiet", "--tags", "origin", "main")
     head = _try("git", "rev-parse", "origin/main") or ""
-    tag = latest_final_tag((_try("git", "tag", "--list") or "").splitlines())
+    tag = latest_final_tag(release_tags())
     tag_sha = _try("git", "rev-list", "-n", "1", tag) if tag else None
     commits = []
     changed: list = []
