@@ -68,10 +68,13 @@ describe('mirrored session freshness', () => {
 		expect(onCaughtUp).toHaveBeenCalledOnce();
 		expect(fetch).toHaveBeenCalledTimes(4);
 		expect(screen.getByText('2 running tasks, 2 agents')).toBeTruthy();
-		// A later, real backlog may reload once more, but never for the reload itself.
+		// A later backlog may reload once more, but never unmount the conversation.
+		const conversation = screen.getByText('2 running tasks, 2 agents');
 		fetch.mockResolvedValueOnce(status('syncing', 3));
 		await vi.advanceTimersByTimeAsync(2000);
-		expect(screen.getByText('3 updates remaining')).toBeTruthy();
+		expect(screen.getByRole('status').textContent).toContain('3 updates remaining');
+		expect(screen.getByText('2 running tasks, 2 agents')).toBe(conversation);
+		expect(screen.queryByText('Catching up before showing the current conversation, tasks and agents.')).toBeNull();
 		await vi.advanceTimersByTimeAsync(2000);
 		expect(onCaughtUp).toHaveBeenCalledTimes(2);
 		expect(screen.queryByRole('status')).toBeNull();

@@ -332,6 +332,23 @@ def test_a_queued_turn_keeps_the_session_busy():
         assert sh._busy("s1") is True
 
 
+@pytest.mark.parametrize("status", ["pending", "running"])
+def test_background_idle_gate_matches_transfer_gate_after_registry_loss(status):
+    from app.core.task_registry import task_registry
+    from app.db import background_tasks, database
+
+    database.create_session("remote-task-chat", "default")
+    snapshot = {"task_id": "remote-child", "session_id": "remote-task-chat", "kind": "agent",
+                "status": status, "remote_device_id": "dev-gaming"}
+    background_tasks.upsert_background_task(snapshot)
+    with patch.object(task_registry, "get_active", return_value=[]), \
+            patch("app.core.streaming_status.has_active_run", return_value=False):
+        assert sh.busy_state("remote-task-chat")["tasks"] == ["Background work"]
+        assert sh._busy("remote-task-chat") is True
+        background_tasks.upsert_background_task({**snapshot, "status": "completed"})
+        assert sh._busy("remote-task-chat") is False
+
+
 def test_an_unreadable_turn_queue_does_not_hold_the_hand_off_forever():
     from app.core.task_registry import task_registry
     with patch("app.core.streaming_status.has_active_run", return_value=False), \

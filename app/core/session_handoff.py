@@ -765,6 +765,16 @@ def busy_state(session_id: str) -> Dict[str, Any]:
 
     tasks = [str(task.get("subject") or task.get("agent") or "Background task")
              for task in task_registry.get_active(session_id)]
+    if not tasks:
+        # Match the transfer's idle gate: pending local launches and durable
+        # remote tasks are work too, even when get_active's running-only view
+        # is empty (notably after a restart). Wait rather than start and fail.
+        from app.db.base import get_db
+        from app.network.handoff import _has_live_tasks
+
+        with get_db() as conn:
+            if _has_live_tasks(conn.cursor(), session_id):
+                tasks = ["Background work"]
     try:
         # One SELECT over queued/running/interrupting/draining, so a turn
         # flipping from queued to running is never missed between two reads.
