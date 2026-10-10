@@ -11,8 +11,8 @@ Three content paths, in order of dispatch:
   garbage that then rides every subsequent provider request.
 * **Other binaries** are refused with a short diagnostic instead of garbage.
 * **Text** is read lazily (never the whole file for a windowed read) with a
-  200-line default window, page budget and per-line cap, so a giant log can't blow
-  up the context either.
+  2,000-line default window, 40,000-character page budget and per-line cap,
+  so a giant log can't blow up the context either.
 """
 
 from __future__ import annotations
@@ -50,8 +50,8 @@ IMAGE_MEDIA_TYPES = {
 # Providers cap a base64 image around 5MB; 3.75MB of raw bytes encodes to 5MB.
 MAX_IMAGE_BYTES = 3_750_000
 
-DEFAULT_LINE_LIMIT = 200  # lines returned when no explicit limit is given
-MAX_TEXT_CHARS = 16_000  # page body; stop on a line boundary, then name the next offset
+DEFAULT_LINE_LIMIT = 2_000  # lines returned when no explicit limit is given
+MAX_TEXT_CHARS = 40_000  # page body; stop on a line boundary, then name the next offset
 MAX_LINE_CHARS = 2_000  # longer lines are cut with a marker
 
 def describe(tools: frozenset[str] | None = None) -> str:

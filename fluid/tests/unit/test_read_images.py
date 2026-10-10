@@ -67,15 +67,15 @@ async def test_read_text_default_line_limit_and_continuation(tmp_path) -> None:
 
 async def test_read_explicit_limit_can_exceed_default(tmp_path) -> None:
     f = tmp_path / "short-lines.txt"
-    f.write_text("\n".join(f"line{i}" for i in range(1, 401)))
-    assert DEFAULT_LINE_LIMIT == 200
+    f.write_text("\n".join(f"line{i}" for i in range(1, 2201)))
+    assert DEFAULT_LINE_LIMIT == 2_000
 
     out = await _registry().dispatch(
-        "Read", {"file_path": str(f), "limit": 300}, ToolCtx(cwd=str(tmp_path))
+        "Read", {"file_path": str(f), "limit": 2100}, ToolCtx(cwd=str(tmp_path))
     )
 
-    assert out.text.splitlines()[299] == "300\tline300"
-    assert "offset=301" in out.text
+    assert out.text.splitlines()[2099] == "2100\tline2100"
+    assert "offset=2101" in out.text
 
 
 async def test_read_wide_pages_recover_every_line_and_bound_edit_coverage(tmp_path) -> None:
@@ -85,7 +85,10 @@ async def test_read_wide_pages_recover_every_line_and_bound_edit_coverage(tmp_pa
     from fluid.tools.builtins.read import MAX_TEXT_CHARS
 
     f = tmp_path / "wide-pages.txt"
-    source = [f"row{i}: " + "é" * 990 for i in range(1, 61)]
+    source = [
+        f"row{i}: " + "é" * 990
+        for i in range(1, 2 * MAX_TEXT_CHARS // 990 + 2)
+    ]
     f.write_text("\n".join(source), encoding="utf-8")
     ctx = ToolCtx(cwd=str(tmp_path))
     registry = _registry()

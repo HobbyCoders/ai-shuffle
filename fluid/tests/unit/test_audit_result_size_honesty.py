@@ -276,11 +276,7 @@ async def test_a_truncated_cell_points_at_its_own_result_ref(tmp_path) -> None:
     path = repr(str(target))
 
     async with _Kernel(tmp_path) as k:
-        # One bounded Read page now fits the stdout budget; printing its
-        # held ref twice still exercises cell-level truncation and recovery.
-        result = await k.run(
-            f"{_IMPORT}value = Read(file_path={path})\nprint(value)\nprint(value)"
-        )
+        result = await k.run(f"{_IMPORT}print(Read(file_path={path}))")
         assert result.error is None
         assert "stdout truncated" in result.stdout
         # The full payload never left the kernel, so the recovery is a slice.
