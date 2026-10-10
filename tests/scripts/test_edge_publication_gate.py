@@ -103,6 +103,21 @@ def status_event(**changes):
     return event
 
 
+@pytest.mark.parametrize("kind", ["push", "workflow_dispatch", "status"])
+@pytest.mark.parametrize("passed", [False, True])
+def test_trigger_cannot_add_workflow_requirements(kind, passed):
+    # #2202: dispatching suites used to turn a same-tree PR into a combined
+    # tree and demand more Actions runs. Only the local attestation counts now,
+    # regardless of what triggered publication; no PR/tree/run reads are needed.
+    assert gate.event_allowed(env(GITHUB_EVENT_NAME=kind), status_event())
+    api = FakeGitHub([status()] if passed else [])
+    ready, reason = gate.publication_readiness(api, REVISION)
+    assert ready is passed
+    if not passed:
+        assert gate.COMMAND in reason
+    assert set(api.calls) == {"branches/main", f"commits/{REVISION}/statuses?per_page=100&page=1"}
+
+
 def test_event_predicate():
     assert gate.event_allowed(env(), status_event())
     assert gate.event_allowed(env(GITHUB_EVENT_NAME="push"), {})
