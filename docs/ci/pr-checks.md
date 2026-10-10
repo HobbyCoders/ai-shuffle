@@ -48,7 +48,9 @@ The last lines of each run list what this machine did not cover:
   [#2215](https://github.com/HobbyCoders/ai-shuffle/issues/2215). Linux
   workers still run them, and a Windows failure that is not on the list
   still fails the run. Remove lines as the tests are fixed; never add one to
-  get a push through.
+  get a push through. The desktop unit tests do not run on Windows yet
+  ([#2214](https://github.com/HobbyCoders/ai-shuffle/issues/2214)); Windows
+  typechecks and builds desktop, and a Linux worker runs its tests.
 - macOS folder confinement and the iOS app: no Mac. The owner dispatches
   `ci-folder-confinement.yml` or `ios.yml` when a change needs them, usually
   before a release.

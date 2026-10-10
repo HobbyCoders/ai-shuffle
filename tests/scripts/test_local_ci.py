@@ -107,6 +107,12 @@ def test_windows_known_failures_list_is_well_formed():
         assert (ROOT / path).is_file(), f"{entry}: the file is gone; drop the line"
     assert known.base_id("fluid\\tests\\unit\\test_x.py::test_y[a-b]") == "fluid/tests/unit/test_x.py::test_y"
 
+    # fluid's rootdir is fluid/, so its ids lack the prefix; the path restores it.
+    class Item:
+        path = ROOT / "fluid/tests/unit/test_x.py"
+        nodeid = "tests/unit/test_x.py::TestA::test_y[1]"
+    assert known.repo_id(Item()) == "fluid/tests/unit/test_x.py::TestA::test_y"
+
 
 def test_hook_finds_the_script_and_chains():
     hook = (ROOT / ".githooks/pre-push").read_text(encoding="utf-8")

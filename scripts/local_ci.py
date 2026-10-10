@@ -326,6 +326,12 @@ def docs(ctx: Context) -> None:
 
 
 def desktop(ctx: Context) -> None:
+    if os.name == "nt":
+        # The unit tests assume POSIX modes and symlinks (issue #2214); Linux
+        # workers run them. Windows still typechecks and builds.
+        node_package("desktop", "typecheck", "build")(ctx)
+        ctx.notes.append("Desktop unit tests not run on Windows (#2214); a Linux worker runs them.")
+        return
     node_package("desktop", "typecheck", "test")(ctx)
 
 

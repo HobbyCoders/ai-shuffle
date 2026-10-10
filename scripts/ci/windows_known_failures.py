@@ -46,8 +46,22 @@ def pytest_ignore_collect(collection_path, config):
 def pytest_collection_modifyitems(config, items):
     marker = pytest.mark.skip(reason=f"known Windows failure, {ISSUE}")
     for item in items:
-        if base_id(item.nodeid) in TESTS:
+        if repo_id(item) in TESTS:
             item.add_marker(marker)
+
+
+def repo_id(item) -> str:
+    """The item's id relative to the repository root.
+
+    pytest ids are relative to the rootdir, which is fluid/ for the fluid
+    suite, so the file part is rebuilt from the item's path.
+    """
+    try:
+        relative = Path(item.path).resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return base_id(item.nodeid)
+    name = item.nodeid.split("::", 1)[1] if "::" in item.nodeid else ""
+    return base_id(f"{relative}::{name}")
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
