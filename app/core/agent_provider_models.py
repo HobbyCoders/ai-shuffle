@@ -671,8 +671,13 @@ def build_task_contract(
     caller_profile_id: str | None,
     provider_id: str | None,
     additional_targets: Sequence[SubagentTarget] = (),
+    *, workflow_guidance: bool = False,
 ) -> TaskContract:
-    """Build the provider-scoped model-facing Task contract."""
+    """Build Task's contract; omit shared rules only when the host supplies them.
+
+    Standalone callers retain the full rules. App native and CLI sessions set
+    workflow_guidance when parent_subagent_guidance is compiled into the prompt.
+    """
     from fluid.tools.fragments import SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
 
     targets = list(available_subagents(caller_profile_id, provider_id))
@@ -826,9 +831,11 @@ def build_task_contract(
         "and tools; it does not see the parent conversation. Use delegation "
         "for independent or context-heavy work, not a quick lookup or single "
         "tool call. "
-        f"{SWARM_ROUTING}" + (f" {limits}" if limits else "")
-        + f"\n\n{SUBAGENT_WORKTREE_GUIDANCE}"
-        f"\n\n{mode_text}\n\n{sync_shape}\n\n" + availability
+        + ("Follow the system prompt's delegation and checkout rules."
+           if workflow_guidance else SWARM_ROUTING)
+        + (f" {limits}" if limits else "")
+        + ("" if workflow_guidance else f"\n\n{SUBAGENT_WORKTREE_GUIDANCE}")
+        + f"\n\n{mode_text}\n\n{sync_shape}\n\n" + availability
     )
 
     agent_property: dict[str, Any] = {
@@ -962,33 +969,27 @@ def parent_subagent_guidance(
     ``delegate_by_default`` is for the assistant's home only: it replaces the
     authorize-first delegation line.
     """
-    from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_SUMMARY, SWARM_ROUTING
+    from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
 
     parts = []
     if task_available:
         parts.append(
             "# Subagent delegation\n"
             "Use only the roster IDs exposed by the current provider. "
-            "Defaults may run on another provider. Pass Task's model only "
-            "when the user named a model for that work, otherwise omit it; "
-            "the host checks the user asked (or asks the owner) and may run "
-            "the worker on that model's provider. "
-            "Never invent a subagent ID or provider. For model, do not fabricate an id; "
-            "pass the name the user used, even if it is not shown in the roster. "
-            "The host validates it against enabled model registries and refuses unknown or "
-            "ambiguous names without starting a worker; never silently use the default instead. "
+            "Defaults may run on another provider. Never invent a subagent ID or provider. "
+            "For model, do not fabricate an id; pass the name the user used even if absent "
+            "from the roster, following Task.model's user-request and host-validation rules. "
+            "Never silently use the default after a model refusal. "
             "If the roster is empty, do not delegate. Give an isolated worker "
             "a self-contained brief, verified checkout/prerequisites, allowed "
             "scope and expected result. Choose the role that matches the work: "
             "rendered UI belongs to the frontend role when present, not a "
             "backend-only worker. Handle quick direct work yourself. "
             + (DELEGATE_BY_DEFAULT if delegate_by_default else DELEGATE_WHEN_AUTHORIZED)
-            # The full checkout contract rides the Task/Swarm descriptions;
-            # repeating it here would resend it every turn.
-            + SUBAGENT_WORKTREE_SUMMARY + "\n"
-            + (SWARM_ROUTING if swarm_available else
-               "Use Task for independent or adaptive assignments; do not "
-               "invent an unavailable workflow tool.")
+            + SUBAGENT_WORKTREE_GUIDANCE + "\n"
+            + SWARM_ROUTING
+            + ("" if swarm_available else
+               " Swarm is unavailable on this surface; use Task, never invent a workflow tool.")
         )
     if task_available or monitor_available:
         parts.append(

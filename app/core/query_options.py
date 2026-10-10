@@ -1713,6 +1713,7 @@ def build_options_from_profile(
             # file/plugin agent definitions a native leg gets from fluid — the
             # delegated (CLI) leg has no engine to publish them (ruling CE6).
             cwd=working_dir,
+            workflow_guidance=True,  # aih_automatic_workflows below supplies it
         )
         if builtins_srv:
             mcp_servers_dict["builtins"] = builtins_srv

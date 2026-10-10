@@ -76,16 +76,13 @@ _START_DESCRIPTION = (
 # Shared by StartSession, Task and Swarm: the host enforces it, so the text
 # says so rather than asking the model to police itself.
 MODEL_OVERRIDE_RULE = (
-    "Only for when the user named a model for this work; leaving it out is the normal case. "
-    "The host checks that the user asked: a model other than the one this would run on anyway "
-    "is used only when the user named it in this chat, otherwise the owner is asked to approve "
-    "the switch, and a refusal starts nothing. Pass the model exactly as the user named it; "
-    "the host matches model IDs and display names against enabled providers' lists, ignoring "
-    "case, spaces and dashes. Trying the user's wording is safe: unknown or unavailable names "
-    "are refused with a bounded list of real choices and start nothing; ambiguous names require "
-    "an exact model id. Claude names (opus) and prov:<providerId>:<modelId> still work; an explicit "
-    "provider stays scoped. It may run on another provider, for this start only. Remote starts "
-    "are also validated against the receiving worker's own eligibility, not just the local list."
+    "Omit unless the user named a model for this work. The host checks this chat's request "
+    "or asks the owner to approve a switch; refusal starts nothing. Pass the user's exact "
+    "wording: enabled model IDs/display names match ignoring case, spaces and dashes. "
+    "Unknown/unavailable names start nothing and return bounded real choices; ambiguous "
+    "names need an exact model id. Claude names (opus) and prov:<providerId>:<modelId> work; "
+    "explicit providers stay scoped. A switch may cross providers for this start only. "
+    "Remote starts also validate the receiving worker's eligibility, not just the local list."
 )
 
 
@@ -112,7 +109,7 @@ def start_session_spec(model_examples=()) -> ToolSpec:
             "yours. " + MODEL_OVERRIDE_RULE + " Effort, context window and fast mode the new "
             "model does not support fall back to its defaults."
             + (f" Examples: {', '.join(examples[:8])}." if examples else ""))}}
-    return ToolSpec(name="StartSession", description=(_START_DESCRIPTION + _COMMON),
+    return ToolSpec(name="StartSession", description=(_START_DESCRIPTION + "Follow MessageSession's peer-coordination rules."),
         input_schema={"type": "object", "properties": properties,
                       "required": ["title", "prompt", "request_id"], "additionalProperties": False},
         risk="write", requires_extra=("session_orchestration",))
@@ -131,7 +128,7 @@ SPECS = (
         "Follow next_offset when present; an empty filtered page may have more pages. "
         "To settle, unsettle or archive several chats, pass their IDs together in one session_ids "
         "call; to archive every settled chat, use ArchiveSession all_settled=true without listing. "
-        + _COMMON), input_schema={"type": "object", "properties": {
+        "Follow MessageSession's peer-coordination rules."), input_schema={"type": "object", "properties": {
             "scope": {"type": "string", "enum": ["project", "all"]},
             "state": {"type": "string", "enum": ["active", "settled", "archived", "all"]},
             "offset": {"type": "integer", "minimum": 0}}, "additionalProperties": False},

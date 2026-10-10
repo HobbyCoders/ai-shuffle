@@ -172,11 +172,12 @@ def test_task_contract_is_roster_bound_and_offers_claude_models_natively(mock_db
 
     assert SWARM_ROUTING in guidance
     assert SWARM_ROUTING in contract.description
-    # The full checkout contract rides the tool description once; the system
-    # prompt carries only the summary.
-    assert SUBAGENT_WORKTREE_SUMMARY in guidance
-    assert SUBAGENT_WORKTREE_GUIDANCE not in guidance
-    assert contract.description.count(SUBAGENT_WORKTREE_GUIDANCE) == 1
+    # Standalone contracts retain the rules; app workflow prompts own them once.
+    assert SUBAGENT_WORKTREE_GUIDANCE in guidance
+    app_contract = build_task_contract("caller", None, workflow_guidance=True)
+    for rule in (SWARM_ROUTING, SUBAGENT_WORKTREE_GUIDANCE):
+        assert (guidance + app_contract.description).count(rule) == 1
+        assert contract.description.count(rule) == 1
     assert SUBAGENT_WORKTREE_SUMMARY not in parent_subagent_guidance(task_available=False)
 
 
