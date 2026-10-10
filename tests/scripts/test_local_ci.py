@@ -95,6 +95,19 @@ def test_pre_push_ignores_deletions_and_tags(records, monkeypatch):
     assert push(monkeypatch, lines) == (0, [])
 
 
+def test_windows_known_failures_list_is_well_formed():
+    sys.path.insert(0, str(ROOT / "scripts" / "ci"))
+    import windows_known_failures as known  # noqa: E402  pyright: ignore[reportMissingImports]
+
+    tests, files = known.load()
+    assert tests or files
+    for entry in tests | files:
+        path = entry.split("::", 1)[0]
+        assert "\\" not in entry and "[" not in entry, entry
+        assert (ROOT / path).is_file(), f"{entry}: the file is gone; drop the line"
+    assert known.base_id("fluid\\tests\\unit\\test_x.py::test_y[a-b]") == "fluid/tests/unit/test_x.py::test_y"
+
+
 def test_hook_finds_the_script_and_chains():
     hook = (ROOT / ".githooks/pre-push").read_text(encoding="utf-8")
     assert hook.startswith("#!/bin/sh")

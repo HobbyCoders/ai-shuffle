@@ -42,6 +42,13 @@ The last lines of each run list what this machine did not cover:
   wait for Windows; a stable release does (below). When DesktopWorker is off,
   Windows-only changes still merge and reach edge, and the gap shows in the
   pass record and in the ship-release preflight.
+- On Windows, the tests in `scripts/ci/windows_known_failures.txt`. They fail
+  there for reasons unrelated to the change (fake `gh` shell scripts,
+  symlinks, POSIX modules), so a Windows run skips them and names
+  [#2215](https://github.com/HobbyCoders/ai-shuffle/issues/2215). Linux
+  workers still run them, and a Windows failure that is not on the list
+  still fails the run. Remove lines as the tests are fixed; never add one to
+  get a push through.
 - macOS folder confinement and the iOS app: no Mac. The owner dispatches
   `ci-folder-confinement.yml` or `ios.yml` when a change needs them, usually
   before a release.
@@ -77,7 +84,9 @@ Run it when an edge update is wanted, not after every merge.
 - A full pass on Linux (`local/full-suite`, above) and on Windows: the same
   command on DesktopWorker also posts `local/windows-suite`. The ship-release
   skill checks both statuses on the release commit. If DesktopWorker is off, the
-  stable release waits; edge does not.
+  release waits, or the owner ships it with
+  `ship_release_status.py --skip-windows "<reason>"`, which puts the reason in
+  the release notes. Edge never waits for Windows.
 - Mac-only checks, when the release changes them: `ios.yml` and
   `ci-folder-confinement.yml`.
 - The real-PostgreSQL and container contracts that only run in the paid

@@ -132,6 +132,8 @@ def npm_ready(directory: str) -> Path:
 def python_env() -> dict:
     # fluid is imported from the checkout, never an installed copy.
     paths = [str(ROOT), str(ROOT / "fluid"), os.environ.get("PYTHONPATH", "")]
+    if os.name == "nt":
+        paths.insert(2, str(ROOT / "scripts" / "ci"))  # the windows_known_failures plugin
     return {"PYTHONPATH": os.pathsep.join(p for p in paths if p)}
 
 
@@ -149,7 +151,18 @@ def pytest_args(python: str, timeout: int = 120, parallel: bool = True) -> list[
         args += ["-n", WORKERS]
     if has_module(python, "pytest_timeout"):
         args += [f"--timeout={timeout}"]
+    if os.name == "nt":
+        # Skips the tests in scripts/ci/windows_known_failures.txt (issue #2215).
+        args += ["-p", "windows_known_failures"]
     return args
+
+
+def windows_known_files() -> set[str]:
+    """Whole test files listed as failing on Windows; empty elsewhere."""
+    if os.name != "nt":
+        return set()
+    lines = (ROOT / "scripts/ci/windows_known_failures.txt").read_text(encoding="utf-8").splitlines()
+    return {entry for line in lines if (entry := line.split("#", 1)[0].strip()) and "::" not in entry}
 
 
 # --- backend test selection ------------------------------------------------
@@ -213,6 +226,10 @@ def backend(ctx: Context) -> None:
         extra = ["--deselect=tests/test_scan_blocking_db.py", *[f"--ignore={p}" for p in FAST_SUBSET_EXCLUDED]]
     else:
         targets, extra = selection, []
+    # pytest collects a file named on the command line even when a plugin
+    # would ignore it, so listed Windows-only failures are dropped here.
+    known = windows_known_files()
+    targets = [t for t in targets if t not in known]
     if not targets:
         print("No backend tests reach this change.")
         return
@@ -529,7 +546,8 @@ def cmd_check(args) -> int:
     elif not clean:
         print("Uncommitted changes: this pass is not recorded. Commit, then the pre-push hook re-runs it.")
     if args.attest:
-        attest("success", f"{', '.join(ran)} passed on {machine()}", revision)
+        known = " (known Windows failures skipped, #2215)" if os.name == "nt" else ""
+        attest("success", f"{', '.join(ran)} passed on {machine()}{known}", revision)
         print(f"Posted {ATTEST_CONTEXT} on {revision[:9]}; edge publication can proceed.")
     return 0
 
