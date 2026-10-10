@@ -105,6 +105,7 @@ _write_lock = threading.Lock()
 # shell reads allow-updates.json while the settings page polls), with
 # PermissionError (WinError 5). The reader holds it for milliseconds.
 _REPLACE_ATTEMPTS = 8
+_WINDOWS = os.name == "nt"
 _REPLACE_BACKOFF_SECONDS = 0.025
 
 
@@ -117,7 +118,7 @@ def _replace(temporary, path):
                 os.replace(temporary, path)
                 return
             except PermissionError:
-                if os.name != "nt" or attempt == _REPLACE_ATTEMPTS - 1:
+                if not _WINDOWS or attempt == _REPLACE_ATTEMPTS - 1:
                     raise
                 time.sleep(_REPLACE_BACKOFF_SECONDS * (attempt + 1))
 

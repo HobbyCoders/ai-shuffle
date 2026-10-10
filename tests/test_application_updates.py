@@ -552,7 +552,7 @@ def test_policy_write_waits_out_a_windows_sharing_violation(tmp_path, monkeypatc
             raise PermissionError(5, "Access is denied")
         real_replace(source, destination)
 
-    monkeypatch.setattr(policy.os, "name", "nt")
+    monkeypatch.setattr(policy, "_WINDOWS", True)
     monkeypatch.setattr(policy.os, "replace", flaky_replace)
     monkeypatch.setattr(policy.time, "sleep", lambda seconds: None)
     policy.atomic_json(target, {"allow_updates": False})
@@ -565,7 +565,7 @@ def test_policy_write_gives_up_after_repeated_denials(tmp_path, monkeypatch):
     def denied(source, destination):
         raise PermissionError(5, "Access is denied")
 
-    monkeypatch.setattr(policy.os, "name", "nt")
+    monkeypatch.setattr(policy, "_WINDOWS", True)
     monkeypatch.setattr(policy.os, "replace", denied)
     monkeypatch.setattr(policy.time, "sleep", lambda seconds: None)
     with pytest.raises(PermissionError):
