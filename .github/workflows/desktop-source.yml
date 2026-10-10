@@ -4,35 +4,13 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-  # PR CI may finish before or after its merge. A completion after the merge
-  # re-evaluates the current main revision; one before it is covered by the
-  # merge's push event (see the gate's if). No PR checkout, artifacts or caches
-  # enter this job.
-  workflow_run:
-    types: [completed]
-    workflows:
-      - "Android Play signing enrollment"
-      - "Android Play internal release"
-      - "Android CI"
-      - "CI artifact storage policy"
-      - "CI Backend"
-      - "Container PostgreSQL"
-      - "CI Browser Workspace"
-      - "CI fluid"
-      - "CI JavaScript"
-      - "License server CI"
-      - "Registry CI"
-      - "Uptime monitor CI"
-      - "Desktop source update checks"
-      - "Desktop CI"
-      - "iOS CI"
-      - "Folder confinement (macOS)"
-      - "In-app update reach"
+  # A worker posts local/full-suite on main after running every suite
+  # (scripts/local_ci.py full --attest). That status is the publication signal.
+  status:
 
 permissions:
   contents: read
-  actions: read
-  pull-requests: read
+  statuses: read
 
 jobs:
   gate:
@@ -41,13 +19,9 @@ jobs:
       github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' ||
        (github.event_name == 'workflow_dispatch' && github.actor_id == '76577322' && github.triggering_actor == github.actor) ||
-       (github.event_name == 'workflow_run' &&
-        ((github.event.workflow_run.event == 'pull_request' &&
-          !contains(github.event.workflow_run.pull_requests.*.head.sha, github.event.workflow_run.head_sha)) ||
-         (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_branch == 'main' &&
-          github.event.workflow_run.head_sha == github.sha &&
-          github.event.workflow_run.actor.id == 76577322 && github.event.workflow_run.triggering_actor.id == 76577322)) &&
-        github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == 'HobbyCoders/ai-shuffle'))
+       (github.event_name == 'status' && github.event.context == 'local/full-suite' &&
+        github.event.state == 'success' && github.event.sender.id == 76577322 &&
+        github.event.sha == github.sha))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -60,8 +34,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install PyYAML==6.0.3
-      - name: Require CI for the exact merged tree
+      - name: Require a local full-suite pass on this revision
         id: ci
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,7 +43,7 @@ jobs:
   publish:
     needs: gate
     if: needs.gate.outputs.ready == 'true'
-    # Unrelated PR completion events must not evict a ready main publication
+    # Unrelated status events must not evict a ready main publication
     # from GitHub's single pending slot. Serialize only authorized publishers.
     concurrency:
       group: desktop-source-publish
@@ -80,8 +53,7 @@ jobs:
     environment: account-hub-production
     permissions:
       contents: write
-      actions: read
-      pull-requests: read
+      statuses: read
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -92,7 +64,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install PyYAML==6.0.3
       # Coalesce a burst of merges without interrupting a signing/database write.
       # Superseded jobs exit before installing the publication dependencies.
       - name: Allow rapid merges to settle
@@ -111,7 +82,7 @@ jobs:
       - run: npm ci --no-audit --no-fund
         if: steps.settled.outputs.ready == 'true'
         working-directory: android/hub
-      - name: Recheck CI and main immediately before signing
+      - name: Recheck the pass and main immediately before signing
         if: steps.settled.outputs.ready == 'true'
         id: ci
         env:

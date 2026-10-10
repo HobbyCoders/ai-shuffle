@@ -1,25 +1,19 @@
 name: CI fluid
 
-# Unit suite for the fluid harness (fluid/). Paths-filtered like the other CI
-# workflows: only a PR that touches fluid/ runs it. The app's own backend CI
-# (ci-backend.yml) also triggers on fluid/** because the app imports the
-# harness, so a fluid change gets both suites.
+# Unit suite for the fluid harness (fluid/). Manual only: pull requests run no CI;
+# scripts/local_ci.py runs this suite before a push.
 #
 # fluid is developed on Windows; this Linux run is the one that catches
 # POSIX-only failures (path separators, os.fork, unix sockets). Before the
 # monorepo merge it ran inside the vendor-sync workflow, once a day plus on
-# every fluid push. PRs that touch fluid/ run it; there is no daily canary.
+# every fluid push. Dispatch it when a fluid change needs a POSIX check and no Linux worker
+# is available.
 #
 # It stays a separate workflow because fluid's dev extras need mcp>=2 while
 # the app pins mcp 1.x; the two suites cannot share one environment.
 #
 # Blacksmith runners are PAID per minute; every trigger below is deliberate.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - 'fluid/**'
-      - '.github/workflows/ci-fluid.yml'
   workflow_dispatch:
 
 permissions:
@@ -32,8 +26,6 @@ concurrency:
 jobs:
   unit:
     name: fluid unit tests
-    # Drafts run no paid CI; marking the PR ready starts it.
-    if: github.event.pull_request.draft != true
     timeout-minutes: 20
     # Use a smaller runner for the single-process Fluid test suite.
     runs-on: blacksmith-2vcpu-ubuntu-2404

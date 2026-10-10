@@ -7,8 +7,8 @@ or installer to take effect, and some changes stop the update for older
 installs altogether. See docs/reviews/in-app-update-coverage-2026-10.md.
 
 Groups that fail the check (each can be acknowledged with --allow GROUP, or
-in CI with a pull request label named update-reach:GROUP and a re-run of the
-check, .github/workflows/ci-update-reach.yml):
+with a pull request label named update-reach:GROUP, which scripts/local_ci.py
+reads when it runs this check before a push):
 
   docker-image      The runtime string the release publishes
                     (docker/update_contract.py: REQUIRES) differs between base
@@ -45,7 +45,7 @@ Usage::
     python scripts/ci/update_reach.py                      # newest final tag .. HEAD
     python scripts/ci/update_reach.py --base v0.9.0 --head origin/main
     python scripts/ci/update_reach.py --allow docker-image # owner accepted a new base
-    python scripts/ci/update_reach.py --base origin/main --labels "$LABELS"  # CI
+    python scripts/ci/update_reach.py --base origin/main --labels "$LABELS"  # local_ci.py
     python scripts/ci/update_reach.py --json
 
 Exit status: 0 when nothing unacknowledged is out of reach, 1 otherwise.

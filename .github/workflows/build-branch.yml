@@ -4,11 +4,8 @@ name: Build Branch Image (Lab)
 # pushes it to ghcr.io tagged with the branch name, so an agent can pull a
 # disposable test image without waiting on a full multi-arch main/tag build.
 #
-# Two ways to trigger:
-#   - workflow_dispatch: build any ref on demand (`gh workflow run
-#     build-branch.yml --ref <branch>`), regardless of name.
-#   - push: auto-build branches under the `lab/**` prefix, so ad-hoc branches
-#     don't silently double the CI/Docker bill on every push.
+# Manual only: `gh workflow run build-branch.yml --ref <branch>`. Pushes
+# never build an image; every build is a paid run someone asked for.
 on:
   workflow_dispatch:
     inputs:
@@ -17,9 +14,6 @@ on:
         required: false
         type: boolean
         default: false
-  push:
-    branches:
-      - 'lab/**'
 
 concurrency:
   group: docker-build-branch-${{ github.ref }}

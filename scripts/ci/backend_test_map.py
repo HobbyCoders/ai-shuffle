@@ -1,11 +1,12 @@
-"""Select the backend tests a pull request can affect from a recorded test map.
+"""Select the backend tests a change can affect from a recorded test map.
 
-The full CI Backend run on main records which repository functions each test
-file runs (``tests/_test_map.py``) and ``merge`` turns those records into a
-map. On a pull request, ``select`` compares every changed Python file with its
-base version, function by function, and picks the test files that ran a
-changed function. Edge publication still waits for a full run on main, so a
-test this misses is caught before an installed app updates.
+A full local run (``python scripts/local_ci.py full``) records which
+repository functions each test file runs (``tests/_test_map.py``) and
+``merge`` turns those records into a map. Before a push, ``select`` compares
+every changed Python file with its base version, function by function, and
+picks the test files that ran a changed function. Edge publication still waits
+for a full local pass on main, so a test this misses is caught before an
+installed app updates.
 
 Fails safe: a missing or unreadable map, a dependency or pytest config change,
 a change to code that session-wide fixtures run, a function the map cannot
@@ -39,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[2]
 VERSION = 1
 SHARED = "<shared>"
 
-# The CI Backend fast subset. Keep in step with .github/workflows/ci-backend.yml.
+# The backend fast subset. Keep in step with .github/workflows/ci-backend.yml and scripts/local_ci.py.
 FAST_SUBSET_DIRS = (
     "tests/api", "tests/core", "tests/db", "tests/middleware", "tests/contract",
     "tests/performance", "tests/mcp", "tests/services", "tests/unit", "tests/scripts",

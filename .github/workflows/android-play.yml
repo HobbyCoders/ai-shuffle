@@ -22,18 +22,6 @@ name: Android Play internal release
 # migrate targetSdk. Internal testing is not managed enterprise private apps.
 # Never publish before compatible workers are deployed and verified.
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/android-play.yml'
-      - '.github/workflows/release.yml'
-      - '.github/workflows/docker-publish.yml'
-      - 'tests/core/test_release_download_instructions.py'
-      - 'tests/core/test_android_release_gate.py'
-      - 'android/ci/test-play-workflow.py'
-      - 'android/ci/resolve-version-name.py'
-      - 'android/ci/test-version-name.py'
-      - 'android/ci/verify-mobile-apk.py'
-      - 'android/ci/test-mobile-apk.py'
   workflow_dispatch:
     inputs:
       publish_to_play:

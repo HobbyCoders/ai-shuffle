@@ -103,49 +103,36 @@ def test_owner_gate_covers_direct_and_reusable_publish_paths(name, job, kind):
         assert permits(condition, ref=TAG, event="push")
 
 
-@pytest.mark.parametrize("name,job,required_paths,commands", [
-    ("ci-license.yml", "license-server", ["android/license/**"],
-     ["npm run typecheck", "npm test"]),
-    ("ci-registry.yml", "registry", ["android/registry/**"],
-     ["npm run typecheck", "npm test"]),
-    ("ci-uptime.yml", "uptime", ["android/uptime/**", ".github/workflows/deploy-uptime.yml"],
-     ["npm run typecheck", "npm test"]),
-    ("ci-browser-workspace.yml", "smoke", ["browser-mcp/**", "app/core/browser*.py"],
+@pytest.mark.parametrize("name,job,commands", [
+    ("ci-license.yml", "license-server", ["npm run typecheck", "npm test"]),
+    ("ci-registry.yml", "registry", ["npm run typecheck", "npm test"]),
+    ("ci-uptime.yml", "uptime", ["npm run typecheck", "npm test"]),
+    ("ci-browser-workspace.yml", "smoke",
      ["npm run build --prefix browser-mcp", "npm test --prefix browser-mcp -- test/editors.test.ts"]),
 ])
-def test_zero_failure_paid_checks_keep_automatic_coverage_on_standard_runners(
-        name, job, required_paths, commands):
+def test_manual_checks_stay_on_standard_runners_and_fail_loudly(name, job, commands):
     config = workflow(name)
-    assert "workflow_dispatch" in config["on"]
-    for path in required_paths:
-        assert path in config["on"]["pull_request"]["paths"]
+    assert set(config["on"]) == {"workflow_dispatch"}
     check = config["jobs"][job]
     assert check["runs-on"] == "ubuntu-24.04"
     assert "continue-on-error" not in check
     assert all("continue-on-error" not in step for step in check["steps"])
     for command in commands:
         assert any(step.get("run") == command for step in check["steps"])
-    if name == "ci-browser-workspace.yml":
-        assert "ci:full" not in check["if"].replace("github.event.label.name == 'ci:full'", "")
-        workspace = config["jobs"]["workspace"]
-        assert workspace["needs"] == "smoke"
-        assert workspace["runs-on"] == "blacksmith-2vcpu-ubuntu-2404"
-        assert "contains(github.event.pull_request.labels.*.name, 'ci:full')" in workspace["if"]
 
 
-def test_no_automatic_production_site_publication_but_ci_still_automatic():
+def test_nothing_publishes_or_tests_automatically_except_release_and_edge():
     for name in DEPLOY:
         assert set(workflow(name)["on"]) == {"workflow_dispatch"}
-    for name in ["ci-backend.yml", "ci-frontend.yml", "android.yml"]:
-        assert "pull_request" in workflow(name)["on"]
-    assert "pull_request" in workflow("android-play.yml")["on"]
-    assert "pull_request" in workflow("android-play-enrollment.yml")["on"]
+    # Pull requests start no workflow: tests run locally (scripts/local_ci.py).
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        assert "pull_request" not in workflow(path.name)["on"], path.name
+        assert "pull_request_target" not in workflow(path.name)["on"], path.name
 
 
 def test_android_signing_steps_are_owner_gated_without_gating_unsigned_ci():
     build = workflow("android.yml")["jobs"]["build"]
-    assert build["if"] == "needs.changes.outputs.apk == 'true'"
-    assert build["needs"] == "changes"
+    assert "if" not in build and "needs" not in build
     guarded = [step for step in build["steps"] if "secrets." in str(step)]
     assert len(guarded) >= 2
     for step in guarded:
