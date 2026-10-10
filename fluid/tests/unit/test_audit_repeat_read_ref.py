@@ -185,9 +185,11 @@ async def test_changed_file_reads_in_full_again(tmp_path) -> None:
     path = repr(str(target))
 
     async with _Kernel(tmp_path) as k:
-        await k.run(f"{_IMPORT}Read(file_path={path})")
+        # Request both versions whole: the appended line is beyond Read's
+        # default page. This test is about stale-ref invalidation, not paging.
+        await k.run(f"{_IMPORT}Read(file_path={path}, limit=300)")
         target.write_text(_BIG + "line 200 tail\n", encoding="utf-8")
-        again = await k.run(f"{_IMPORT}Read(file_path={path})")
+        again = await k.run(f"{_IMPORT}Read(file_path={path}, limit=300)")
 
         assert again.error is None
         # A second, distinct ref — not a pointer at the stale first one.
