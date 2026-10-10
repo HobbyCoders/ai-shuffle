@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Run only the Vitest files a change can reach. CI JavaScript uses this on
-// pull requests (`node scripts/vitest-changed.mjs HEAD^1`) in frontend/ and
-// mobile/; manual runs on main still run every test.
+// Run only the Vitest files a change can reach
+// (`node scripts/vitest-changed.mjs <base>`) in frontend/ and mobile/.
+// A full run (`scripts/local_ci.py full`) still runs every test.
 //
 // Vitest's own `--changed` follows imports only. Many tests here read a
 // component's source as text (readFileSync of MessageArea.svelte, app.html,

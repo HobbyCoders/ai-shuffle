@@ -46,7 +46,7 @@ services:
   ai-shuffle:
     # A pinned release, pulled through your licensed registry path. The pull
     # token is read-only and is not your license key.
-    image: ${AI_SHUFFLE_REGISTRY:-registry.hobbycoders.com}/${AI_SHUFFLE_PULL_TOKEN:?Set AI_SHUFFLE_PULL_TOKEN in .env (see env.example)}/ai-shuffle:${AI_SHUFFLE_VERSION:-0.9.1}
+    image: ${AI_SHUFFLE_REGISTRY:-registry.hobbycoders.com}/${AI_SHUFFLE_PULL_TOKEN:?Set AI_SHUFFLE_PULL_TOKEN in .env (see env.example)}/ai-shuffle:${AI_SHUFFLE_VERSION:-0.9.3}
     container_name: ai-shuffle
     restart: unless-stopped
 
@@ -163,7 +163,7 @@ AI_SHUFFLE_PULL_TOKEN=
 
 # The release to run. Pinned on purpose: nothing changes until you change it.
 # To update: set the new version here, then run `docker compose up -d`.
-AI_SHUFFLE_VERSION=0.9.1
+AI_SHUFFLE_VERSION=0.9.3
 
 # --- Where and how it is reachable -------------------------------------------
 
@@ -296,7 +296,7 @@ docker run -d \
   -v ai-shuffle_local-home:/home/appuser/.local \
   -v ai-shuffle_gh-auth:/home/appuser/.config/gh \
   -v ai-shuffle_browser-profile:/home/appuser/chrome-profile \
-  registry.hobbycoders.com/YOUR_PULL_TOKEN/ai-shuffle:0.9.1
+  registry.hobbycoders.com/YOUR_PULL_TOKEN/ai-shuffle:0.9.3
 ```
 
 - Change `127.0.0.1` in `-p` to one address of the machine to reach it from other devices, as in [step 3](#3-choose-who-can-reach-it).

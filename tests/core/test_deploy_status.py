@@ -211,12 +211,11 @@ def _gate_api(main, annotations, *, published=False):
     return run_gh, calls
 
 
-def test_publish_edge_first_names_the_refused_gate_and_dispatch_commands(repo, monkeypatch):
+def test_publish_edge_first_names_the_refused_gate_and_local_command(repo, monkeypatch):
     root, shas = repo
     monkeypatch.setattr(ds, "_edge_refusals", {})
-    message = ("Combined main tree was not tested by PR CI; edge publication needs owner-dispatched CI on main. "
-               "CI missing, pending, or unsuccessful: .github/workflows/ci-backend.yml\n"
-               "Dispatch on main:\ngh workflow run ci-backend.yml --ref main")
+    message = ("Edge publication waits for a local full-suite pass on main. Run on a clean checkout of main:\n"
+               "python scripts/local_ci.py full --attest")
     run_gh, calls = _gate_api(shas["c"], [{"annotation_level": "warning", "title": ds.EDGE_REFUSAL_TITLE,
                                            "message": message}])
     with patch("app.core.github_service.github_service._run_gh", side_effect=run_gh):
@@ -225,9 +224,8 @@ def test_publish_edge_first_names_the_refused_gate_and_dispatch_commands(repo, m
         unraid, gaming = report["workers"]
         assert unraid["action"] == (
             "publish edge first (merged after the latest published build). Edge refused "
-            f"{shas['c'][:9]}: Combined main tree was not tested by PR CI; edge publication needs "
-            "owner-dispatched CI on main. CI missing, pending, or unsuccessful: .github/workflows/ci-backend.yml; "
-            "Dispatch on main: gh workflow run ci-backend.yml --ref main")
+            f"{shas['c'][:9]}: Edge publication waits for a local full-suite pass on main. "
+            "Run on a clean checkout of main: python scripts/local_ci.py full --attest")
         assert unraid["edge_publication_refusal"] == {
             "revision": report["origin_main"],
             "reason": message.strip().replace(":\n", ": ").replace("\n", "; "),
@@ -236,7 +234,7 @@ def test_publish_edge_first_names_the_refused_gate_and_dispatch_commands(repo, m
         assert gaming["edge_publication_refusal"] is None
         # Drift without a change carries the same next step; the lookup is cached.
         drift = ds.assess([_row("Unraid", shas["a"])], repo=root, refresh=False)
-        assert drift["workers"][0]["action"].endswith("gh workflow run ci-backend.yml --ref main")
+        assert drift["workers"][0]["action"].endswith("python scripts/local_ci.py full --attest")
         assert drift["workers"][0]["edge_publication_refusal"] == unraid["edge_publication_refusal"]
     assert len(calls) == 3
 
