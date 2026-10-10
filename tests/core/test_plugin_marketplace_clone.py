@@ -215,7 +215,10 @@ def test_discovery_fetches_default_and_tools_can_find_it(first_boot, monkeypatch
 def test_unreachable_source_is_reported_then_retry_recovers(first_boot, monkeypatch):
     from app.mcp.plugin_tools import find_plugins
 
+    calls = []
+
     def fail(cmd, **kwargs):
+        calls.append(cmd)
         raise subprocess.CalledProcessError(128, cmd, stderr=b"offline secret-not-for-display")
 
     monkeypatch.setattr(plugin_marketplace.subprocess, "run", fail)
@@ -227,8 +230,19 @@ def test_unreachable_source_is_reported_then_retry_recovers(first_boot, monkeypa
     assert "secret-not-for-display" not in text
     assert "Build one" not in text
     assert service.get_marketplaces()[0].error
-    monkeypatch.setattr(plugin_marketplace.subprocess, "run", _clone_catalog)
+    service.get_available_plugins()
+    assert find_plugins("design") == text
+    assert len(calls) == 1  # Reopening Explore/FindPlugins does not retry offline.
+
+    def recover(cmd, **kwargs):
+        calls.append(cmd)
+        return _clone_catalog(cmd, **kwargs)
+
+    monkeypatch.setattr(plugin_marketplace.subprocess, "run", recover)
+    service.sync_marketplace(plugin_marketplace.DEFAULT_SOURCE_ID)
+    assert len(calls) == 2  # The owner's explicit Sync retries and clears the error.
     assert "design@claude-plugins-official (available)" in find_plugins("design")
+    assert len(calls) == 2
     assert service.get_marketplaces()[0].error is None
 
 
