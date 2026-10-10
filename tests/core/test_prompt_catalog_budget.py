@@ -6,8 +6,8 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 
 # Measured with scripts/measure_prompt_catalog.py; chars/4 is only an estimate.
 # origin/main da6b00497: full=141166, eager=107085 characters.
-MEASURED_FULL = 128_645
-MEASURED_EAGER = 94_564
+MEASURED_FULL = 128_752
+MEASURED_EAGER = 94_671
 
 
 def test_prompt_catalog_budget():
@@ -23,7 +23,7 @@ def test_prompt_catalog_budget():
 
 @pytest.mark.parametrize("native", [True, False], ids=["native-code", "delegated-cli"])
 def test_workflow_duplicates_have_one_owner(native):
-    from fluid.tools.fragments import SWARM_ROUTING, SUBAGENT_WORKTREE_GUIDANCE
+    from fluid.tools.fragments import SWARM_ROUTING, DELEGATION_SIZING, SUBAGENT_WORKTREE_GUIDANCE
     from fluid.tools.builtins.session_orchestration import _COMMON
 
     compiled, catalog, specs = compile_fixture(native=native)
@@ -31,10 +31,13 @@ def test_workflow_duplicates_have_one_owner(native):
     system = ("\n\n".join(s.text for s in compiled.sections if s.kind != "tools")
               if native else compiled.text)
     combined = system + "\n\n" + "\n\n".join(text for text, _ in catalog)
-    for paragraph in (SWARM_ROUTING, SUBAGENT_WORKTREE_GUIDANCE, _COMMON.strip()):
+    routing = SWARM_ROUTING if native else DELEGATION_SIZING
+    for paragraph in (routing, SUBAGENT_WORKTREE_GUIDANCE, _COMMON.strip()):
         assert combined.count(paragraph) == 1, paragraph
     assert combined.count("Host safety ceilings (from configuration):") == 1
-    assert system.count(SWARM_ROUTING) == 1
+    assert system.count(routing) == 1
+    if not native:
+        assert "Swarm" not in system
     assert system.count(SUBAGENT_WORKTREE_GUIDANCE) == 1
     assert "never override a restriction on delegation" in combined
     assert "Never run `git worktree remove`" in combined

@@ -98,7 +98,7 @@ def describe(
     )
     budget_note = (
         f" The host stops a Monitor command after {budget} seconds and wakes you with "
-        "a timeout; bound the command below that budget."
+        "a timeout; bound your command below that budget."
         if budget else ""
     )
     pipe_note = (

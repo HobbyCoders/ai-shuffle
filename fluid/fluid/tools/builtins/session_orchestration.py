@@ -76,13 +76,14 @@ _START_DESCRIPTION = (
 # Shared by StartSession, Task and Swarm: the host enforces it, so the text
 # says so rather than asking the model to police itself.
 MODEL_OVERRIDE_RULE = (
-    "Omit unless the user named a model for this work. The host checks this chat's request "
-    "or asks the owner to approve a switch; refusal starts nothing. Pass the user's exact "
-    "wording: enabled model IDs/display names match ignoring case, spaces and dashes. "
+    "Only for when the user named a model for this work; otherwise omit. The host checks that the user asked "
+    "in this chat or asks the owner to approve a switch; refusal starts nothing. "
+    "Pass the model exactly as the user named it: enabled model IDs and display names match "
+    "ignoring case, spaces and dashes. "
     "Unknown/unavailable names start nothing and return bounded real choices; ambiguous "
     "names need an exact model id. Claude names (opus) and prov:<providerId>:<modelId> work; "
     "explicit providers stay scoped. A switch may cross providers for this start only. "
-    "Remote starts also validate the receiving worker's eligibility, not just the local list."
+    "Remote starts also validate the receiving worker's own eligibility, not just the local list."
 )
 
 

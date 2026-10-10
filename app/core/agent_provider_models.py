@@ -969,7 +969,7 @@ def parent_subagent_guidance(
     ``delegate_by_default`` is for the assistant's home only: it replaces the
     authorize-first delegation line.
     """
-    from fluid.tools.fragments import END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
+    from fluid.tools.fragments import DELEGATION_SIZING, END_TURN_ON_BACKGROUND, SUBAGENT_WORKTREE_GUIDANCE, SWARM_ROUTING
 
     parts = []
     if task_available:
@@ -987,9 +987,9 @@ def parent_subagent_guidance(
             "backend-only worker. Handle quick direct work yourself. "
             + (DELEGATE_BY_DEFAULT if delegate_by_default else DELEGATE_WHEN_AUTHORIZED)
             + SUBAGENT_WORKTREE_GUIDANCE + "\n"
-            + SWARM_ROUTING
-            + ("" if swarm_available else
-               " Swarm is unavailable on this surface; use Task, never invent a workflow tool.")
+            + (SWARM_ROUTING if swarm_available else
+               DELEGATION_SIZING + " Use Task for independent or adaptive assignments; "
+               "do not invent an unavailable workflow tool; never override a restriction on delegation.")
         )
     if task_available or monitor_available:
         parts.append(
