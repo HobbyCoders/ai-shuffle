@@ -25,6 +25,8 @@ export interface MarketplaceInfo {
 	url: string;
 	install_location: string;
 	last_updated: string | null;
+	display_name?: string | null;
+	error?: string | null;
 	/** Catalog entries this app does not offer, each with the reason. */
 	skipped?: SkippedEntry[];
 }

@@ -24,6 +24,7 @@ Shape::
         "provider_kinds": ["openai", ...],
         "remote_task": int,
         "move_wakes": int,
+        "handoff_poll": int,  # short HTTP requests for long Git/history transfers
         "terminal": int,
     }
 
@@ -224,5 +225,6 @@ def detect_capabilities() -> Dict[str, Any]:
         "provider_kinds": _detect_provider_kinds(),
         "remote_task": REMOTE_TASK_VERSION,
         "move_wakes": MOVE_WAKES_VERSION,
+        "handoff_poll": 1,
         "terminal": _detect_terminal(),
     }

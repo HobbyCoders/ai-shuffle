@@ -13,11 +13,14 @@
 	let syncState = $state<'checking' | 'syncing' | 'current' | 'offline'>('checking');
 	let pending = $state(0);
 	let checkedSession = $state<string | null>(null);
+	let revealedSession = $state<string | null>(null);
 	// Props may be getters over whole stores (ChatView's $activeSession/$sessions).
 	// Equal primitive values must not restart polling when those stores reload.
 	const pollingSessionId = $derived(sessionId);
 	const pollingRemote = $derived(remote);
-	const waiting = $derived(!!sessionId && remote && (checkedSession !== sessionId || syncState === 'checking' || syncState === 'syncing'));
+	// Owner-wide watermarks advance for unrelated chats too. Gate the initial
+	// catch-up, then keep the conversation mounted during incremental sync.
+	const waiting = $derived(!!sessionId && remote && revealedSession !== sessionId);
 
 	$effect(() => {
 		const id = pollingSessionId;
@@ -26,6 +29,7 @@
 		let timer: ReturnType<typeof setTimeout>;
 		let wasBehind = false;
 		checkedSession = null;
+		revealedSession = null;
 		syncState = 'checking';
 		pending = 0;
 		async function poll() {
@@ -40,6 +44,7 @@
 				syncState = status.state;
 				pending = status.pending_updates ?? 0;
 				checkedSession = id;
+				if (status.state === 'current' || status.state === 'offline') revealedSession = id;
 				if (caughtUp) untrack(onCaughtUp);
 			} catch {
 				// Keep a known backlog visible on a failed poll; never call it current.
@@ -62,6 +67,8 @@
 {:else}
 	{#if remote && syncState === 'offline'}
 		<div class="mirror-offline" role="status">Owning worker offline. Showing the last saved conversation.</div>
+	{:else if sessionId && remote && (syncState === 'syncing' || syncState === 'checking')}
+		<div class="mirror-offline" role="status">Syncing updates from {deviceName || 'the owning worker'}…{#if pending > 0}{' '}{pending} updates remaining{/if}</div>
 	{/if}
 	{@render children()}
 {/if}

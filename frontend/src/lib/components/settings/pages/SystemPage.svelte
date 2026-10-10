@@ -129,6 +129,7 @@
 	function runCheck() {
 		resultsOpen = true;
 		void updates.check();
+		void refreshDeploy();
 	}
 
 	/* ---------- running revisions (deploy status) ---------- */
@@ -142,11 +143,11 @@
 	// backends safely omit it. Successful publication supersedes that evidence.
 	const unpublishedEdgeMain = $derived.by(() => {
 		const report = deploy;
-		if (deployLoading || deployError || !report?.origin_main) return false;
-		return report.workers.some((worker) =>
+		if (deployLoading || deployError || !report?.origin_main) return null;
+		return report.workers.find((worker) =>
 			worker.online && worker.channel === 'edge' && (worker.behind ?? 0) > 0 &&
 			worker.edge_publication_refusal?.revision === report.origin_main
-		);
+		)?.edge_publication_refusal ?? null;
 	});
 
 	async function refreshDeploy() {
@@ -519,6 +520,9 @@
 
 {#snippet results()}
 	<UpdateCheckResults rows={updates.rows ?? []} running={updates.checking} error={updates.checkError} />
+	{#if unpublishedEdgeMain}
+		<p class="st-msg" role="status">“Up to date” means the last published update. Main is at {unpublishedEdgeMain.revision}, not published to edge yet: {unpublishedEdgeMain.reason}</p>
+	{/if}
 {/snippet}
 
 {#snippet deployList()}

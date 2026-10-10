@@ -57,6 +57,119 @@ def pair(tmp_path, repositories, monkeypatch):
     transport.reset_for_tests()
 
 
+
+@pytest.mark.asyncio
+async def test_deferred_handoff_returns_before_work_finishes_and_scopes_receipt(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    member = SimpleNamespace(kind="worker", status="active")
+    monkeypatch.setattr(engine, "require_context", lambda: SimpleNamespace(member=lambda peer: member))
+    monkeypatch.setattr(handoff, "_operations", {})
+    monkeypatch.setattr(handoff, "_POLL_WAIT_S", 0.01)
+    ready = asyncio.Event()
+
+    async def work(payload, peer):
+        await ready.wait()
+        return {"moved": True}
+
+    handler = AsyncMock(side_effect=work)
+    monkeypatch.setattr(handoff, "_handle", handler)
+    payload = {"session_id": "s1", "phase": "receive", "deferred": True}
+    receipt = await asyncio.wait_for(handoff.handle(payload, "source"), 0.1)
+    status = {"session_id": "s1", "phase": "status", **receipt}
+    assert await handoff.handle(status, "source") == receipt
+    for peer, sid in [("other-worker", "s1"), ("source", "other-session")]:
+        with pytest.raises(ValueError, match="receipt expired"):
+            await handoff.handle({**status, "session_id": sid}, peer)
+    monkeypatch.setattr(handoff, "_POLL_WAIT_S", 10)
+    waiter = asyncio.create_task(handoff.handle(status, "source"))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert not handoff._operations[("source", "s1", receipt["operation"])].done()
+    ready.set()
+    await handoff._operations[("source", "s1", receipt["operation"])]
+    for _ in range(2):  # Lost result replies can be read again, never re-executed.
+        assert await handoff.handle(status, "source") == {"moved": True}
+    handler.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_deferred_client_retries_only_status_and_surfaces_terminal_failure(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.network import runners
+
+    monkeypatch.setattr(runners, "find", lambda device: {"capabilities": {"handoff_poll": 1}})
+    call = AsyncMock(side_effect=[{"operation": "op"}, control.MaybeApplied("lost status reply"),
+                                 {"operation": "op"}, {"error": "dirty receiving checkout"}])
+    monkeypatch.setattr(control, "call", call)
+    monkeypatch.setattr(handoff.asyncio, "sleep", AsyncMock())
+    with pytest.raises(ValueError, match="dirty receiving checkout"):
+        await handoff._call("target", {"session_id": "s1", "phase": "receive"}, timeout=900)
+    assert [c.args[2]["phase"] for c in call.await_args_list] == ["receive", "status", "status", "status"]
+    assert call.await_args_list[0].args[2]["deferred"] is True
+
+
+@pytest.mark.asyncio
+async def test_deferred_client_never_retries_unknown_start(monkeypatch):
+    from unittest.mock import AsyncMock
+    from app.network import runners
+
+    monkeypatch.setattr(runners, "find", lambda device: {"capabilities": {"handoff_poll": 1}})
+    call = AsyncMock(side_effect=control.MaybeApplied("lost start reply"))
+    monkeypatch.setattr(control, "call", call)
+    with pytest.raises(control.MaybeApplied, match="lost start reply"):
+        await handoff._call("target", {"session_id": "s1", "phase": "begin"}, timeout=600)
+    call.assert_awaited_once()
+
+
+def test_history_import_batches_rows_and_tolerates_an_event_mirrored_after_delete(mock_db, monkeypatch):
+    from app.db import session_events
+
+    sid = "bulk-handoff"
+    database.create_session(sid, "default")
+    session_events.append_events(sid, [{"type": "message.user", "payload": {"content": str(i)}}
+                                      for i in range(1000)])
+    data = {"sdk_session_id": None, "history": handoff._history(database.get_session(sid))}
+    original_db = handoff.get_db
+    inserts = []
+
+    class Cursor:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def execute(self, sql, params=()):
+            if sql.startswith("INSERT INTO session_events "):
+                if not inserts:
+                    # Exactly the row the live mirror may insert between the
+                    # DELETE and import. The old plain INSERT raises here.
+                    self.cursor.execute(sql, params)
+                inserts.append(sql)
+            return self.cursor.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self.cursor, name)
+
+    @contextlib.contextmanager
+    def importing_db():
+        with original_db() as conn:
+            class Connection:
+                def cursor(self):
+                    return Cursor(conn.cursor())
+            yield Connection()
+
+    monkeypatch.setattr(handoff, "get_db", importing_db)
+    handoff.install_history(sid, data, ".")
+    assert len(inserts) == 5  # Was 1,000 round trips; bounded to 200 rows each.
+    events = session_events.get_events(sid, 0, limit=2000)
+    assert len(events) == 1000
+    assert events[-1]["payload"]["content"] == "999"
+    assert session_events.get_max_seq(sid) == 1000
+
+
 @pytest.mark.asyncio
 async def test_model_receipts_move_under_the_handoff_lease_but_stale_prompts_do_not(pair, monkeypatch):
     from app.core import model_override as mo
@@ -119,6 +232,13 @@ async def test_model_receipts_move_under_the_handoff_lease_but_stale_prompts_do_
 
 @pytest.mark.asyncio
 async def test_receive_transfers_unpushed_dirty_branch_and_native_history(pair, monkeypatch):
+    from unittest.mock import Mock
+    from app.core import streaming_status
+    from app.core.global_events import global_events
+
+    busy_changed, sessions_changed = Mock(), Mock()
+    monkeypatch.setattr(streaming_status, "notify", busy_changed)
+    monkeypatch.setattr(global_events, "resources_changed", sessions_changed)
     a,b,source,target = pair
     (source / "file.txt").write_text("local staged change")
     git(source,"add",".")
@@ -133,8 +253,14 @@ async def test_receive_transfers_unpushed_dirty_branch_and_native_history(pair, 
         assert device == a.device_id and action == "handoff"
         phases.append(body["phase"])
         with a.active():
+            if body["phase"] == "commit":
+                busy_changed.reset_mock()
+                sessions_changed.reset_mock()
             result = await control.handle(action, body, from_device=b.device_id)
             if body["phase"] == "commit":
+                # Ownership refresh cannot depend on the outer receive reply.
+                busy_changed.assert_called_once_with("handoff-test")
+                sessions_changed.assert_called_once_with("sessions")
                 commits.append(body)
             return result
     monkeypatch.setattr(control, "call", call)
@@ -1263,8 +1389,14 @@ async def test_move_endpoint_produces_git_and_native_context_handoff(pair, monke
     phases = []
     exported = []
 
-    # Exercise actual peer challenge/signature tokens and HTTP control routing;
-    # only transport is in-process, so no real user worker or remote is touched.
+    # Exercise the legacy synchronous peer as well as actual challenge/signature
+    # tokens and HTTP control routing. ServedBy swaps process-wide identities
+    # per request and cannot host tasks spanning requests. The deferred protocol
+    # is exercised above with one stable server identity.
+    from app.core import runner_capabilities
+    detect = runner_capabilities.detect_capabilities
+    monkeypatch.setattr(runner_capabilities, "detect_capabilities",
+                        lambda: {**detect(), "handoff_poll": 0})
     import httpx
     from app.core import cluster
     from app.db import network as network_store

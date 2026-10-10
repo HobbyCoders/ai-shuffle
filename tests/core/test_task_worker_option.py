@@ -171,6 +171,65 @@ def test_non_owner_principal_cannot_name_another_worker(caller, network, monkeyp
     assert payload["error"] == "Only the owner's chats can run a subagent on another worker."
 
 
+def _remote_ok(monkeypatch):
+    from app.core import remote_task
+    seen = []
+
+    async def fake_remote(**kwargs):
+        seen.append(kwargs)
+        return {"ok": True, "mode": "remote", "task_id": "w-remote"}
+    monkeypatch.setattr(remote_task, "dispatch_remote", fake_remote)
+    return seen
+
+
+def test_the_owners_paired_device_can_name_another_worker(caller, network, monkeypatch):
+    """A chat the owner runs from a signed-in phone or browser is a paired
+    principal with owner authority, not the admin; it is still the owner (#2218)."""
+    from app.core import mobile_tool_identity as identity
+    from app.db import mobile_tool_identity
+    paired = {"kind": "paired", "owner": "account:owner-1", "principal_id": "pcl-1",
+              "account_id": "owner-1"}
+    monkeypatch.setattr(mobile_tool_identity, "read", lambda sid: paired)
+    monkeypatch.setattr(identity, "_owner_authority", lambda value: value is paired)
+    seen = _remote_ok(monkeypatch)
+    payload, calls = _dispatch({"worker": "Unraid"})
+    assert payload == {"ok": True, "mode": "remote", "task_id": "w-remote"}
+    assert calls == [] and len(seen) == 1
+
+
+def test_a_paired_device_without_owner_authority_is_refused(caller, network, monkeypatch):
+    from app.core import mobile_tool_identity as identity
+    from app.db import mobile_tool_identity
+    paired = {"kind": "paired", "owner": "account:other-1", "principal_id": "pcl-2",
+              "account_id": "other-1"}
+    monkeypatch.setattr(mobile_tool_identity, "read", lambda sid: paired)
+    monkeypatch.setattr(identity, "_owner_authority", lambda value: False)
+    seen = _remote_ok(monkeypatch)
+    payload, _ = _dispatch({"worker": "Unraid"})
+    assert payload["error"] == "Only the owner's chats can run a subagent on another worker."
+    assert seen == []
+
+
+def test_a_mirrored_owner_label_counts_as_the_owner_only_for_the_owners_account(
+        caller, network, monkeypatch):
+    """A chat moved here from another worker carries a synced label with no
+    local principal; its account decides, as the transcript checks do."""
+    from app.core import preference_identity
+    from app.db import mobile_tool_identity
+    label = {"kind": "paired", "owner": "account:owner-1", "principal_id": None,
+             "account_id": "owner-1"}
+    monkeypatch.setattr(mobile_tool_identity, "read", lambda sid: label)
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "owner-1")
+    seen = _remote_ok(monkeypatch)
+    payload, _ = _dispatch({"worker": "Unraid"})
+    assert payload["ok"] is True and len(seen) == 1
+
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "someone-else")
+    payload, _ = _dispatch({"worker": "Unraid"})
+    assert payload["error"] == "Only the owner's chats can run a subagent on another worker."
+    assert len(seen) == 1
+
+
 def test_background_observation_cannot_name_another_worker(caller, network):
     from app.db import turns
     turns.enqueue_turn("s-root", "assistant_proactive", prompt="look",

@@ -308,11 +308,12 @@ class TestControllableAnnotation:
 
     def _annotate(self, sessions, installs_map, me="me-install"):
         from app.api import sessions_helpers
+        from app.core.config import settings
 
-        mock_settings = MagicMock()
-        mock_settings.effective_instance_id = me
+        # Keep the settings singleton: placement is imported lazily here and
+        # would retain a replacement mock after this fixture exits.
         with patch("app.api.sessions_helpers.database") as mock_db, \
-                patch("app.core.config.settings", mock_settings), \
+                patch.object(type(settings), "effective_instance_id", property(lambda _: me)), \
                 patch("app.db.projects_v2.list_projects_v2", return_value=[]):
             mock_db.get_installs_map.return_value = installs_map
             mock_db.get_project.return_value = None

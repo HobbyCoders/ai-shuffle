@@ -254,7 +254,7 @@ def test_publish_edge_first_without_a_refusal_stays_plain(repo, monkeypatch, pub
     assert report["workers"][0]["edge_publication_refusal"] is None
 
 
-@pytest.mark.parametrize("scenario", ["refused", "published", "no refusal", "stable", "current", "offline", "unknown"])
+@pytest.mark.parametrize("scenario", ["refused", "offered", "published", "no refusal", "stable", "current", "offline", "unknown"])
 def test_api_serializes_real_current_main_refusal(repo, monkeypatch, scenario):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -266,7 +266,9 @@ def test_api_serializes_real_current_main_refusal(repo, monkeypatch, scenario):
     monkeypatch.setattr(ds, "find_repo", lambda: root)
     monkeypatch.setattr(ds, "_refresh", lambda repo: None)
     row = _row("Unraid", shas["a"], is_self=True)
-    if scenario == "stable":
+    if scenario == "offered":
+        row["offered"] = shas["b"]
+    elif scenario == "stable":
         row["channel"] = "stable"
     elif scenario == "current":
         row["revision"] = shas["c"]
@@ -275,7 +277,8 @@ def test_api_serializes_real_current_main_refusal(repo, monkeypatch, scenario):
     elif scenario == "unknown":
         row["revision"] = None
     monkeypatch.setattr(ds, "collect_workers", AsyncMock(return_value=[row]))
-    notes = [] if scenario == "no refusal" else [{"title": ds.EDGE_REFUSAL_TITLE, "message": "Dispatch CI on main."}]
+    reason = "Edge publication waits for a local full-suite pass on main. python scripts/local_ci.py full --attest"
+    notes = [] if scenario == "no refusal" else [{"title": ds.EDGE_REFUSAL_TITLE, "message": reason}]
     run_gh, calls = _gate_api(shas["c"], notes, published=scenario == "published")
     app = FastAPI()
     app.include_router(updates_router, prefix="/settings")
@@ -286,9 +289,11 @@ def test_api_serializes_real_current_main_refusal(repo, monkeypatch, scenario):
     report = response.json()
     worker = report["workers"][0]
     assert report["origin_main"] == shas["c"][:9]
-    if scenario == "refused":
-        assert worker["edge_publication_refusal"] == {"revision": report["origin_main"], "reason": "Dispatch CI on main."}
-        assert worker["action"].endswith(f". Edge refused {shas['c'][:9]}: Dispatch CI on main.")
+    if scenario in ("refused", "offered"):
+        assert worker["edge_publication_refusal"] == {"revision": report["origin_main"], "reason": reason}
+        assert worker["action"].endswith(f". Edge refused {shas['c'][:9]}: {reason}")
+        if scenario == "offered":
+            assert "update this worker" in worker["action"]
         assert calls[0][1].startswith(f"repos/HobbyCoders/ai-shuffle/commits/{shas['c']}/")
     else:
         assert worker["edge_publication_refusal"] is None

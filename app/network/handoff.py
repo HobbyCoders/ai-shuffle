@@ -640,6 +640,9 @@ def finish(sid, target, payload):
             run = _lease(cur, sid, target, token)
             cur.execute("UPDATE runs SET state='released' WHERE id=%s", (run["id"],))
             _release_holds(cur, HOLD + run["id"])
+        from app.core import streaming_status
+
+        streaming_status.notify(sid)
         return {"cancelled": True}
     try:
         return _commit(sid, target, payload, token)
@@ -719,8 +722,57 @@ def _commit(sid, target, payload, token):
         from app.core import wakeup_service
 
         wakeup_service._disarm(moved_wakes)
+    # The hand-off lease may have lit the source's busy indicator. Its SQL
+    # transition bypasses TurnRecorder.release, so explicitly reconcile it.
+    from app.core import streaming_status
+
+    streaming_status.notify(sid)
+    # record() feeds peers, not this worker's open clients. Announce the owner
+    # change locally even when the outer receive reply times out or is lost.
+    from app.core.global_events import global_events
+
+    global_events.resources_changed("sessions")
     engine.kick()
     return {"committed": True}
+
+
+# Long Git/history operations must not occupy a single HTTP response: tunnel
+# proxies cut it off at 120s even when the caller's timeout is 900s. Results
+# stay scoped to the authenticated requester and session; status never replays
+# a mutation. Restart loses the receipt, not the protocol's durable leases.
+_operations: dict[tuple[str, str, str], asyncio.Task] = {}
+_OPERATION_LIMIT = 32
+_POLL_WAIT_S = 10.0  # Long-poll below every proxy deadline, return as soon as ready.
+
+
+async def _call(device, payload, *, timeout):
+    from app.network import runners
+
+    runner = await run_sync(runners.find, device) or {}
+    deferred = (runner.get("capabilities") or {}).get("handoff_poll") == 1
+    result = await control.call(device, "handoff", {**payload, **({"deferred": True} if deferred else {})}, timeout=timeout)
+    # Older workers ignore the extra field and return the ordinary result.
+    operation = result.get("operation")
+    if not operation:
+        return result
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while operation:
+        if loop.time() >= deadline:
+            raise control.MaybeApplied("Hand-off is still unconfirmed. Check the owning worker before retrying.")
+        try:
+            result = await control.call(device, "handoff", {
+                "session_id": payload["session_id"], "phase": "status", "operation": operation,
+            })
+        except control.RunnerUnreachable:
+            # A status read is safe to retry; the original mutation never is.
+            await asyncio.sleep(1)
+            continue
+        if result.get("error"):
+            raise ValueError(result["error"])
+        if not result.get("operation"):
+            return result
+    return result
 
 
 async def handle(payload, peer_device_id):
@@ -728,6 +780,40 @@ async def handle(payload, peer_device_id):
     member = engine.require_context().member(peer_device_id)
     if not member or member.kind != "worker" or member.status != "active":
         raise PermissionError("A handoff requires an authenticated receiving worker.")
+    if payload.get("phase") == "status":
+        key = (peer_device_id, sid, str(payload.get("operation") or ""))
+        task = _operations.get(key)
+        if task is None:
+            raise ValueError("Hand-off receipt expired or worker restarted. Check ownership before retrying.")
+        if not task.done():
+            # A cancelled HTTP waiter must not cancel the leased transfer.
+            await asyncio.wait({task}, timeout=_POLL_WAIT_S)
+        if not task.done():
+            return {"operation": key[2]}
+        if task.cancelled():
+            return {"error": "Hand-off was interrupted. Check ownership before retrying."}
+        error = task.exception()
+        return {"error": str(error)} if error is not None else task.result()
+    if payload.get("deferred") is True and payload.get("phase") in ("receive", "begin"):
+        if len(_operations) >= _OPERATION_LIMIT:
+            raise ValueError("Too many hand-offs are pending. Try again later.")
+        key = (peer_device_id, sid, str(uuid.uuid4()))
+        task = asyncio.create_task(_handle(payload, peer_device_id))
+        _operations[key] = task
+        loop = asyncio.get_running_loop()
+
+        def completed(done):
+            if not done.cancelled():
+                done.exception()  # Retrieve errors even if the requester went away.
+            loop.call_later(TTL, _operations.pop, key, None)
+
+        task.add_done_callback(completed)
+        return {"operation": key[2]}
+    return await _handle(payload, peer_device_id)
+
+
+async def _handle(payload, peer_device_id):
+    sid = str(payload.get("session_id") or "")
     if payload.get("phase") == "finalize-wakes":
         rows = await run_sync(_finalize_wakes, sid, peer_device_id, payload)
         from app.core import wakeup_service
@@ -827,6 +913,7 @@ def install_history(sid, data, cwd):
             cur.execute(f"DELETE FROM {table} WHERE session_id=%s" + receipt_filter, (sid,))
         for table, columns in TABLES.items():
             destination_id = sid if table in APP_TABLES else sdk
+            rows = []
             for row in data["history"].get(table, []):
                 if table == "pending_interactions":
                     from app.core.model_override import RECEIPT_KINDS
@@ -855,9 +942,18 @@ def install_history(sid, data, cwd):
                                 value["cwd"] = cwd
                         value = Json(value)
                     values.append(value)
-                names = ("session_id", *columns)
-                cur.execute(f"INSERT INTO {table} ({', '.join(names)}) VALUES ({', '.join(['%s'] * len(names))})",
-                            (destination_id, *values))
+                rows.append((destination_id, *values))
+            # A long conversation has tens of thousands of rows. Use bounded
+            # multi-row statements rather than one database round trip per row.
+            # The live mirror can insert events after our DELETE; the leased
+            # owner's snapshot wins at the same (session_id, seq), without
+            # swallowing unrelated primary-key collisions or losing history.
+            from app.db.network import _insert_rows
+
+            conflict = ("ON CONFLICT (session_id, seq) DO UPDATE SET " +
+                        ", ".join(f"{name}=EXCLUDED.{name}" for name in columns if name != "seq")
+                        if table == "session_events" else "")
+            _insert_rows(cur, table, ("session_id", *columns), rows, conflict, batch=200)
         cur.execute("SELECT COALESCE(MAX(seq), 0) AS seq FROM session_events WHERE session_id=%s", (sid,))
         ceiling = cur.fetchone()["seq"]
         cur.execute("INSERT INTO session_event_counters (session_id,next_seq) VALUES (%s,%s) "
@@ -902,7 +998,7 @@ async def move(session, target):
     else:
         # The destination may spend 600s publishing and 180s confirming with
         # the owner. Never retry a timed-out mutation or fall back to a DB pin.
-        result = await control.call(device, "handoff", payload, timeout=900)
+        result = await _call(device, payload, timeout=900)
     if not isinstance(result.get("moved"), bool):
         raise ValueError("The destination did not confirm the session transfer.")
     return result["moved"]
@@ -970,7 +1066,7 @@ async def _pull(session, owner, ctx, project, base, remote, held, holder):
         # Refuse a busy receiving checkout before the owner commits or pushes.
         _, path = await run_sync(_receiving_path, base, expected_branch)
         await run_sync(_hold_checkout, session, project, str(path), expected_branch, holder, held)
-    reply = await control.call(owner, "handoff", {"session_id": sid, "phase": "begin", "remote": remote, "wake_barrier": True}, timeout=600)
+    reply = await _call(owner, {"session_id": sid, "phase": "begin", "remote": remote, "wake_barrier": True}, timeout=600)
     blob = reply.get("payload", "")
     raw = crypto.decrypt_payload(ctx.keyring[int(reply["key_version"])], blob, _aad(sid, ctx.device_id))
     data = json.loads(raw)

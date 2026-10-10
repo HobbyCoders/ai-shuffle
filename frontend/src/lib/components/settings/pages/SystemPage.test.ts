@@ -84,7 +84,7 @@ const sw = (name: string) => screen.getByRole('switch', { name }) as HTMLButtonE
 
 const mainRevision = '02e97673a';
 const publicationRefusal = `2 behind; check for updates; publish edge first if none is offered. Edge refused ${mainRevision}: dispatch CI and Build worker source on main.`;
-const refusalEvidence = { revision: mainRevision, reason: 'dispatch CI and Build worker source on main.' };
+const refusalEvidence = { revision: mainRevision, reason: 'Edge publication waits for a local full-suite pass on main. Run on a clean checkout of main: python scripts/local_ci.py full --attest' };
 const unpublishedExplanation = /The newest main revision is not published as an edge worker update yet/;
 
 async function openDeployReport(worker: Record<string, unknown>, originMain: string | null = mainRevision) {
@@ -129,6 +129,51 @@ it.each([
 it('does not infer unpublished main when the main revision is unknown', async () => {
 	await openDeployReport({ online: true, channel: 'edge', behind: 2, action: publicationRefusal, edge_publication_refusal: refusalEvidence }, null);
 	expect(screen.queryByText(unpublishedExplanation)).toBeNull();
+});
+
+describe('held main in check results', () => {
+	it('shows the SHA, gate reason and next step without expanding Running revisions, and refreshes each check', async () => {
+		const get = transport.get.getMockImplementation()!;
+		let refusal: typeof refusalEvidence | null = refusalEvidence;
+		transport.get.mockImplementation(async (path: string) => path === '/settings/application-updates/deploy-status'
+			? { origin_main: mainRevision, workers: [{ online: true, channel: 'edge', behind: 2, edge_publication_refusal: refusal }] }
+			: get(path));
+		transport.post.mockResolvedValue({ workers: [] });
+		// The updater found the same published revision it already runs.
+		Object.assign(workers[0], { phase: 'ready', version: '83e64013c', running_version: '83e64013c' });
+		render(SystemPage);
+		const check = screen.getByRole('button', { name: 'Check now' });
+		await waitFor(() => expect((check as HTMLButtonElement).disabled).toBe(false));
+		await fireEvent.click(check);
+		const notice = await screen.findByText(/Main is at .*not published to edge yet/);
+		expect(notice.textContent).toContain(mainRevision);
+		expect(notice.textContent).toContain(refusalEvidence.reason);
+		expect(screen.getByText('Up to date')).toBeTruthy();
+		expect(screen.queryByText(/Running revisions compares/)).toBeNull();
+		refusal = null;
+		await waitFor(() => expect((check as HTMLButtonElement).disabled).toBe(false));
+		await fireEvent.click(check);
+		await waitFor(() => expect(screen.queryByText(/Main is at .*not published to edge yet/)).toBeNull());
+	});
+
+	it.each(['stale', 'stable', 'offline', 'unavailable'])('does not claim a hold for %s evidence', async (scenario) => {
+		const get = transport.get.getMockImplementation()!;
+		transport.get.mockImplementation(async (path: string) => {
+			if (path !== '/settings/application-updates/deploy-status') return get(path);
+			if (scenario === 'unavailable') throw new Error('GitHub unavailable');
+			return { origin_main: mainRevision, workers: [{
+				online: scenario !== 'offline', channel: scenario === 'stable' ? 'stable' : 'edge', behind: 2,
+				edge_publication_refusal: { ...refusalEvidence, revision: scenario === 'stale' ? 'old123456' : mainRevision }
+			}] };
+		});
+		transport.post.mockResolvedValue({ workers: [] });
+		render(SystemPage);
+		const check = screen.getByRole('button', { name: 'Check now' });
+		await waitFor(() => expect((check as HTMLButtonElement).disabled).toBe(false));
+		await fireEvent.click(check);
+		await waitFor(() => expect(transport.get).toHaveBeenCalledWith('/settings/application-updates/deploy-status'));
+		expect(screen.queryByText(/Main is at .*not published to edge yet/)).toBeNull();
+	});
 });
 
 describe('coverage', () => {
