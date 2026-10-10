@@ -599,7 +599,7 @@
 					<span class="mpp-context-option-copy">
 						<span class="mpp-context-value">{formatContextTokens(shownCap)}</span>
 						<span class="mpp-context-caption">
-							Standard{#if capRaised}<span class="mpp-context-raised"> · raised</span>{/if}
+							Standard{#if capRaised}<span class="mpp-context-raised">{' · raised'}</span>{/if}
 						</span>
 					</span>
 					<Check size={14} class="mpp-context-check" aria-hidden="true" />
@@ -630,7 +630,7 @@
 					{#if contextChoice === '1m'}
 						Uses the full <strong>{contextControl.extendedLabel}</strong> window before compacting
 					{:else}
-						Compacts near <strong>~{formatContextTokens(shownCap)}</strong> tokens{#if capRaised}<span class="mpp-cap-default"> · default {contextControl.standardLabel}</span>{/if}
+						Compacts near <strong>~{formatContextTokens(shownCap)}</strong> tokens{#if capRaised}<span class="mpp-cap-default">{` · default ${contextControl.standardLabel}`}</span>{/if}
 					{/if}
 				</p>
 				{#if capEditable && contextChoice === 'standard'}
