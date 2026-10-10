@@ -329,7 +329,7 @@ def test_peer_apply_rolls_back_records_and_frontier_together(pg, monkeypatch, tm
 
     monkeypatch.setattr(store, 'get_db', get_db)
     monkeypatch.setattr(engine, 'require_context', lambda: receiver)
-    monkeypatch.setattr(engine, 'load_context', lambda conn=None: receiver)
+    monkeypatch.setattr(engine, 'load_context', lambda conn=None, **_: receiver)
     monkeypatch.setattr(engine, '_notify', lambda _: None)
     original = engine.apply_snapshot_chunk
 

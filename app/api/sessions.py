@@ -2160,7 +2160,11 @@ async def get_session_sync_status(
 ):
     """Freshness of a mirrored owner's committed sync stream."""
     session = await require_session(request, session_id)
+    from app.network import transcripts
     from app.network.transport import owner_sync_status
+    if await run_sync(transcripts.prioritise, session_id):
+        # A worker that just joined has not copied this transcript yet; it is next.
+        return {"state": "syncing", "pending_updates": 0, "transcript": "downloading"}
     return await run_sync(owner_sync_status, session.get("owner_device_id"))
 
 

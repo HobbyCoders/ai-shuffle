@@ -28,7 +28,29 @@ _last_result: dict | None = None
 def status() -> dict | None:
     if _task is not None and not _task.done():
         return {"status": "syncing"}
+    if _last_result and _last_result.get("first_copy"):
+        ctx = engine.context()
+        if ctx is not None and ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+            # The copy outlives the launch: report where it is now.
+            return {**_last_result, "reason": first_copy_reason()}
     return _last_result
+
+
+def first_copy_reason() -> str:
+    """One line on a joining worker's first copy, for the launch screen and Devices."""
+    copy = transport.state_copy_status()
+    if not copy:
+        return "Waiting for another worker to copy your data to this one."
+    peer = copy.get("peer_name") or "another worker"
+    phase = copy.get("phase")
+    if phase == "downloading" and copy.get("pages_total"):
+        return (f"Copying your data from {peer}: {copy['pages_done']:,} of {copy['pages_total']:,} pages. "
+                "The copy continues in the background.")
+    if phase in ("applying", "done"):
+        return f"Saving the data copied from {peer}. This continues in the background."
+    if phase == "failed":
+        return f"Copying your data from {peer} stopped and will retry: {copy.get('error') or 'unknown error'}"
+    return f"Waiting for {peer} to prepare a copy of your data."
 
 
 async def synchronize() -> dict:
@@ -85,10 +107,14 @@ async def _sync() -> dict:
         # The durable enrollment task owns its resume record; never cancel it.
         await asyncio.shield(enrollment._task)
     ctx = engine.context()
-    if ctx is None or ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+    if ctx is not None and ctx.bootstrap_state != engine.BOOTSTRAP_READY:
+        # Enrolled, still receiving the first copy. It goes on in the
+        # background and the app shows its progress.
+        return {"status": "partial", "first_copy": True, "reason": first_copy_reason()}
+    if ctx is None:
         linked = await run_sync(hub._binding)
-        return {"status": "partial" if linked or ctx else "not_enrolled",
-                "reason": "Waiting for network enrollment." if linked or ctx else None}
+        return {"status": "partial" if linked else "not_enrolled",
+                "reason": "Waiting for network enrollment." if linked else None}
     await run_sync(engine.scan_all, strict=True)
     await transport._refresh_links(ctx)
     links = list(transport._links.values())

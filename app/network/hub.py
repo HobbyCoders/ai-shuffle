@@ -158,6 +158,7 @@ def _ensure_hub_scope() -> str:
 
 
 def status() -> dict:
+    from app.network import transcripts, transport
     binding = _binding()
     hub_state = _hub_state() if store.get_state() else {}
     return {
@@ -171,6 +172,10 @@ def status() -> dict:
         "account_network": _state.get("account_network"),
         "adoption_required": bool(_state.get("adoption_required")),
         "revocations_due": list(hub_state.get("revocations_due") or []),
+        # A joining worker's first copy from a peer, while it runs or after it stopped.
+        "first_copy": transport.state_copy_status(),
+        # Transcripts that copy left out, while they are still on their way.
+        "transcripts": transcripts.status(),
     }
 
 
@@ -751,6 +756,12 @@ async def _bootstrap_from_peers(admission: dict) -> None:
     for device_id, local in lan.open_admission_addresses(admission, ctx).items():
         if device_id in candidates:
             candidates[device_id] = list(candidates[device_id]) + [u for u in local if u not in candidates[device_id]]
+    # A partial copy saved before a restart resumes only from the peer that
+    # published it: ask that peer first.
+    from app.network import peer_snapshot
+    for device_id in reversed(await asyncio.to_thread(peer_snapshot.saved_publishers)):
+        if device_id in candidates:
+            candidates = {device_id: candidates.pop(device_id), **candidates}
     errors = []
 
     def waiting(reason: str) -> None:

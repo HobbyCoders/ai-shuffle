@@ -113,7 +113,8 @@ class ServedBy:
                 from app.network import peer_snapshot
                 recipient = tokens.verify_token(request.headers["authorization"].removeprefix("Bearer "))
                 ctx = engine.require_context()
-                job = peer_snapshot._jobs[(str(self.server.data_dir), recipient, ctx.network_id, ctx.generation)]
+                fmt = peer_snapshot.requested_format(request.url.params.get("format", 1))
+                job = peer_snapshot._jobs[(str(self.server.data_dir), recipient, ctx.network_id, ctx.generation, fmt)]
                 try:
                     job.result()
                 except ValueError:

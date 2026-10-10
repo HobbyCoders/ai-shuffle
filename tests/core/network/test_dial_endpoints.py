@@ -35,7 +35,7 @@ class ServedAt(ServedBy):
 
     def handler(self, request):
         url = str(request.url)
-        self.urls.append(url)
+        self.urls.append(url.split("?")[0])
         base = next((b for b in self.bases if url.startswith(b)), None)
         if base is None or base not in self.reachable:
             return httpx.Response(502, json={"detail": "unreachable"})

@@ -32,6 +32,7 @@ import json
 import logging
 import secrets
 import threading
+import zlib
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -374,7 +375,8 @@ def leave_network() -> dict:
         store.lock_state(cursor)  # State lock first, like the other network-state writers.
         for table in ("sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
                       "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
-                      "network_joins", "network_member_names", "network_instance_aliases", "network_members"):
+                      "network_joins", "network_member_names", "network_instance_aliases", "network_members",
+                      "network_transcript_backfill", "network_transcript_backfill_state"):
             cursor.execute(f"DELETE FROM {table}")
         cursor.execute("DELETE FROM sync_blobs WHERE present = FALSE")
         store.delete_state(_conn=conn)
@@ -385,6 +387,17 @@ def leave_network() -> dict:
         transport.forget_peers()
     except Exception:  # noqa: BLE001
         pass
+    try:
+        from app.network import transcripts
+        transcripts.forget()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        # A partial state copy from the old network is of no use (gigabytes).
+        from app.network import peer_snapshot
+        peer_snapshot.discard_received()
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not delete a partial state copy", exc_info=True)
     try:
         from app.network import hub
         hub.forget_network()
@@ -1843,17 +1856,73 @@ def snapshot_chunk(collection: str, offset: int = 0, *, ctx: Optional[NetworkCon
 
 
 def snapshot_page(collection: str, offset: int = 0, *, after_record_id: Optional[str] = None,
-                  ctx: Optional[NetworkContext] = None, limit: int = SNAPSHOT_CHUNK, _conn=None):
+                  ctx: Optional[NetworkContext] = None, limit: int = SNAPSHOT_CHUNK, _conn=None,
+                  encoding: Optional[str] = None):
     """Seek through one repeatable-read export without rescanning earlier pages.
 
     The record cursor stays local; the signed/encrypted page still uses the
-    numeric offset understood by older workers.
+    numeric offset understood by older workers. ``encoding="zlib"``
+    compresses the page body before it is encrypted (only for a recipient
+    that asked for it: an older worker cannot open such a page).
     """
     return _snapshot_page(collection, offset, ctx=ctx, limit=limit, _conn=_conn,
-                          keyset=True, after_record_id=after_record_id)
+                          keyset=True, after_record_id=after_record_id, encoding=encoding)
 
 
-def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after_record_id=None):
+#: Largest page body accepted after decompression.
+MAX_SNAPSHOT_BODY = 64 * 1024 * 1024
+#: Largest page body a sender compresses into one page: half of what a
+#: recipient accepts, so a page that compresses very well still opens there.
+MAX_SEALED_BODY = MAX_SNAPSHOT_BODY // 2
+
+
+class SnapshotBodyTooLarge(ValueError):
+    """A page body is over ``MAX_SEALED_BODY`` before compression: send fewer items per page."""
+
+
+def seal_snapshot_chunk(collection: str, offset: int, items: list, more: bool, *, ctx: NetworkContext,
+                        encoding: Optional[str] = None) -> dict:
+    """Encrypt and sign one page of snapshot items (the wire format of ``snapshot_page``)."""
+    body = {"collection": collection, "offset": offset, "items": items, "more": more,
+            "network_id": ctx.network_id, "device_id": ctx.device_id, "generation": ctx.generation}
+    plaintext = envelope_mod.record_bytes(body)
+    sealed = plaintext
+    if encoding == "zlib":
+        if len(plaintext) > MAX_SEALED_BODY:
+            raise SnapshotBodyTooLarge("Snapshot page body is too large")
+        # Compress before encrypting: ciphertext does not compress.
+        sealed = zlib.compress(plaintext, 6)
+    elif encoding is not None:
+        raise ValueError("Unknown snapshot encoding")
+    aad = crypto.canonical_json({"collection": collection, "offset": offset, "network_id": ctx.network_id})
+    ciphertext = crypto.encrypt_payload(ctx.network_key, sealed, aad)
+    signed = {"collection": collection, "offset": offset, "network_id": ctx.network_id,
+              "key_version": ctx.key_version, "device_id": ctx.device_id, "ciphertext": ciphertext,
+              "content_hash": crypto.sha256_hex(plaintext), "more": more, "count": len(items)}
+    if encoding is not None:
+        # Signed with the rest, so a page cannot be passed off as uncompressed.
+        signed["encoding"] = encoding
+    signed["signature"] = crypto.b64u_encode(crypto.sign(ctx.identity.signing_private, crypto.canonical_json(
+        {k: v for k, v in signed.items() if k != "signature"})))
+    return signed
+
+
+def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *,
+                  row: Optional[Mapping[str, Any]] = None, row_known: bool = False) -> dict:
+    """One record as a snapshot carries it: its sync version and its row (None when deleted)."""
+    item = {"record_id": version["record_id"], "clock": int(version["clock"]),
+            "origin_device_id": version["origin_device_id"], "deleted": bool(version["deleted"]),
+            "order_seq": version.get("order_seq"), "record": None}
+    if not item["deleted"]:
+        if not row_known:
+            row = _read_row(cursor, coll, version["record_id"])
+        item["record"] = serialize_row(coll, row) if row is not None else None
+        if item["record"] is None:
+            item["deleted"] = True
+    return item
+
+
+def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after_record_id=None, encoding=None):
     """Build a page and return its private continuation cursor."""
     ctx = ctx or require_context()
     retired = collection in policy.RETIRED_COLLECTIONS
@@ -1876,27 +1945,8 @@ def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after
             versions = [dict(r) for r in cursor.fetchall()]
         more = len(versions) > limit
         versions = versions[:limit]
-        items = []
-        for version in versions:
-            item = {"record_id": version["record_id"], "clock": int(version["clock"]),
-                    "origin_device_id": version["origin_device_id"], "deleted": bool(version["deleted"]),
-                    "order_seq": version.get("order_seq"), "record": None}
-            if not item["deleted"]:
-                row = _read_row(cursor, coll, version["record_id"])
-                item["record"] = serialize_row(coll, row) if row is not None else None
-                if item["record"] is None:
-                    item["deleted"] = True
-            items.append(item)
-    body = {"collection": collection, "offset": offset, "items": items, "more": more,
-            "network_id": ctx.network_id, "device_id": ctx.device_id, "generation": ctx.generation}
-    plaintext = envelope_mod.record_bytes(body)
-    aad = crypto.canonical_json({"collection": collection, "offset": offset, "network_id": ctx.network_id})
-    ciphertext = crypto.encrypt_payload(ctx.network_key, plaintext, aad)
-    signed = {"collection": collection, "offset": offset, "network_id": ctx.network_id,
-              "key_version": ctx.key_version, "device_id": ctx.device_id, "ciphertext": ciphertext,
-              "content_hash": crypto.sha256_hex(plaintext), "more": more, "count": len(items)}
-    signed["signature"] = crypto.b64u_encode(crypto.sign(ctx.identity.signing_private, crypto.canonical_json(
-        {k: v for k, v in signed.items() if k != "signature"})))
+        items = [snapshot_item(cursor, coll, version) for version in versions]
+    signed = seal_snapshot_chunk(collection, offset, items, more, ctx=ctx, encoding=encoding)
     return signed, versions[-1]["record_id"] if versions else after_record_id
 
 
@@ -1913,105 +1963,227 @@ def open_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext) -> dic
         from app.network.keyring import open_payload
         aad = crypto.canonical_json({"collection": chunk["collection"], "offset": chunk["offset"], "network_id": ctx.network_id})
         plaintext = open_payload(ctx, int(chunk["key_version"]), chunk["ciphertext"], aad)
+        encoding = chunk.get("encoding")
+        if encoding == "zlib":
+            inflate = zlib.decompressobj()
+            plaintext = inflate.decompress(plaintext, MAX_SNAPSHOT_BODY)
+            if inflate.unconsumed_tail or not inflate.eof:
+                raise ApplyError("snapshot page is too large or truncated")
+        elif encoding is not None:
+            raise ApplyError("snapshot page uses an unknown encoding")
         if crypto.sha256_hex(plaintext) != chunk["content_hash"]:
             raise ApplyError("snapshot hash mismatch")
         return json.loads(plaintext.decode("utf-8"))
     except ApplyError:
         raise
-    except (KeyError, TypeError, ValueError, crypto.CryptoError) as exc:
+    except (KeyError, TypeError, ValueError, zlib.error, crypto.CryptoError) as exc:
         raise ApplyError("malformed snapshot chunk") from exc
 
 
 def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None = None,
-                         _conn=None, validated_membership: bool = False) -> int:
+                         _conn=None, validated_membership: bool = False,
+                         body: Optional[Mapping[str, Any]] = None) -> int:
     """Apply a chunk: records newer than what we hold replace ours (LWW by clock).
 
     A page for a collection this build does not know (retired here, or added
-    by a newer peer) is verified and skipped: it applies nothing.
+    by a newer peer) is verified and skipped: it applies nothing. ``body`` is
+    the chunk already opened by ``open_snapshot_chunk`` (it is not opened twice).
     """
     ctx = ctx or require_context()
-    body = open_snapshot_chunk(chunk, ctx=ctx)
+    if body is None:
+        body = open_snapshot_chunk(chunk, ctx=ctx)
     if body["collection"] not in policy.COLLECTIONS:
         return 0
     coll = policy.collection(body["collection"])
-    applied = 0
-    touched: list[tuple[str, str, str]] = []
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
-        cursor = conn.cursor()
-        for item in body["items"]:
-            if not _incoming_row_is_shared(coll, item["record_id"],
-                                           None if item["deleted"] else item["record"]):
-                continue
-            if (coll.name == "agents" and item["record_id"] == "Explore" and not item["deleted"]
-                    and (item["record"] or {}).get("is_builtin")):
-                continue
-            existing = store.get_record(cursor, coll.name, item["record_id"])
-            if existing is not None and existing["origin_device_id"] != item["origin_device_id"] and coll.name != "membership":
-                comparison = envelope_mod.compare(int(item["clock"]), item["origin_device_id"],
-                                                  int(existing["clock"]), existing["origin_device_id"])
-                incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
-                if incoming_hash != existing["content_hash"]:
-                    loser, winner = (existing, item) if comparison > 0 else (item, existing)
-                    if loser["deleted"]:
-                        losing_record = {"_deleted": True}
-                    elif comparison > 0:
-                        local_row = _read_row(cursor, coll, item["record_id"])
-                        losing_record = serialize_row(coll, local_row) if local_row else {}
-                    else:
-                        losing_record = dict(item["record"] or {})
-                    losing_record = redact_secrets(losing_record)
-                    store.add_conflict(cursor, collection=coll.name, record_id=item["record_id"],
-                                       losing_clock=int(loser["clock"]), losing_device_id=loser["origin_device_id"],
-                                       losing_record=losing_record, winning_clock=int(winner["clock"]),
-                                       winning_device_id=winner["origin_device_id"])
-            if existing is not None and envelope_mod.compare(
-                    int(item["clock"]), item["origin_device_id"], int(existing["clock"]), existing["origin_device_id"]) <= 0:
-                continue
-            store.observe_clock(cursor, int(item["clock"]))
-            if coll.name == "membership" and not item["deleted"] and not validated_membership:
-                record_data = _parse_json((item["record"] or {}).get("record"))
-                if isinstance(record_data, dict):
-                    try:
-                        _apply_membership(cursor, ctx, {"record": record_data})
-                    except ApplyError as exc:
-                        logger.warning("Snapshot membership record skipped: %s", exc)
-                        continue
-            if item["deleted"] and _grant_deletion_widens_key(cursor, coll, item["record_id"]):
-                store.add_conflict(cursor, collection=coll.name, record_id=item["record_id"],
-                                   losing_clock=int(item["clock"]), losing_device_id=item["origin_device_id"],
-                                   losing_record={"_deleted": True},
-                                   winning_clock=int(existing["clock"]) if existing else int(item["clock"]),
-                                   winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
-                continue
-            if item["deleted"]:
-                materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
-                local_hash = ""
-            else:
-                prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],
-                                           ctx=ctx)
-                row = materialize(cursor, coll, item["record_id"], prepared,
-                                  origin_device_id=item["origin_device_id"])
-                _after_mirror(cursor, coll, prepared)
-                # Snapshot items have no per-item signature. In particular,
-                # their claimed origin is not evidence for an instance alias.
-                local_hash = content_hash(coll, item["record"])
-                if row is not None:
-                    try:
-                        reserialized = serialize_row(coll, row)
-                        if reserialized is not None:
-                            local_hash = content_hash(coll, reserialized)
-                    except ApplyError:
-                        pass
-            store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
-                             origin_device_id=item["origin_device_id"], content_hash=local_hash,
-                             deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))
-            applied += 1
-            touched.append((coll.name, item["record_id"], OP_DELETE if item["deleted"] else OP_UPSERT))
+        applied, touched = apply_snapshot_items(conn.cursor(), coll, body["items"], ctx=ctx,
+                                                validated_membership=validated_membership)
     if touched and _conn is None:
         if coll.name in ("membership", "member_names"):
             load_context()
         _notify(touched)
     return applied
+
+
+# Rows per multi-row INSERT and ids per IN (...) lookup while applying a page.
+SNAPSHOT_SQL_BATCH = 500
+
+
+def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mapping[str, Any]], *,
+                         ctx: NetworkContext, validated_membership: bool = False
+                         ) -> Tuple[int, List[Tuple[str, str, str]]]:
+    """Apply one page of opened snapshot items in the caller's transaction.
+
+    The Lamport clock is observed once for the page, before any record lock
+    (the order ``engine.record`` and ``_apply_chunk`` use), not once per item:
+    millions of updates of the one ``network_state`` row inside a single
+    transaction made a large first copy crawl. Transcript events this worker
+    has never held are inserted in bulk; everything else goes through the
+    per-record path (last writer wins, conflicts, hooks).
+    """
+    items = list(items)
+    touched: List[Tuple[str, str, str]] = []
+    if not items:
+        return 0, touched
+    store.observe_clock(cursor, max(int(item["clock"]) for item in items))
+    ids = [item["record_id"] for item in items]
+    # A page names each record once; anything else is read one by one.
+    known = _records_by_id(cursor, coll.name, ids) if len(set(ids)) == len(ids) else None
+    applied = 0
+    bulk: set = set()
+    if coll.name == "session_events" and known is not None:
+        bulk = _insert_fresh_events(cursor, coll, items, known, touched)
+        applied += len(bulk)
+    for index, item in enumerate(items):
+        if index in bulk:
+            continue
+        if not _incoming_row_is_shared(coll, item["record_id"],
+                                       None if item["deleted"] else item["record"]):
+            continue
+        if (coll.name == "agents" and item["record_id"] == "Explore" and not item["deleted"]
+                and (item["record"] or {}).get("is_builtin")):
+            continue
+        existing = known.get(item["record_id"]) if known is not None else store.get_record(
+            cursor, coll.name, item["record_id"])
+        if existing is not None and existing["origin_device_id"] != item["origin_device_id"] and coll.name != "membership":
+            comparison = envelope_mod.compare(int(item["clock"]), item["origin_device_id"],
+                                              int(existing["clock"]), existing["origin_device_id"])
+            incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
+            if incoming_hash != existing["content_hash"]:
+                loser, winner = (existing, item) if comparison > 0 else (item, existing)
+                if loser["deleted"]:
+                    losing_record = {"_deleted": True}
+                elif comparison > 0:
+                    local_row = _read_row(cursor, coll, item["record_id"])
+                    losing_record = serialize_row(coll, local_row) if local_row else {}
+                else:
+                    losing_record = dict(item["record"] or {})
+                losing_record = redact_secrets(losing_record)
+                store.add_conflict(cursor, collection=coll.name, record_id=item["record_id"],
+                                   losing_clock=int(loser["clock"]), losing_device_id=loser["origin_device_id"],
+                                   losing_record=losing_record, winning_clock=int(winner["clock"]),
+                                   winning_device_id=winner["origin_device_id"])
+        if existing is not None and envelope_mod.compare(
+                int(item["clock"]), item["origin_device_id"], int(existing["clock"]), existing["origin_device_id"]) <= 0:
+            continue
+        if coll.name == "membership" and not item["deleted"] and not validated_membership:
+            record_data = _parse_json((item["record"] or {}).get("record"))
+            if isinstance(record_data, dict):
+                try:
+                    _apply_membership(cursor, ctx, {"record": record_data})
+                except ApplyError as exc:
+                    logger.warning("Snapshot membership record skipped: %s", exc)
+                    continue
+        if item["deleted"] and _grant_deletion_widens_key(cursor, coll, item["record_id"]):
+            store.add_conflict(cursor, collection=coll.name, record_id=item["record_id"],
+                               losing_clock=int(item["clock"]), losing_device_id=item["origin_device_id"],
+                               losing_record={"_deleted": True},
+                               winning_clock=int(existing["clock"]) if existing else int(item["clock"]),
+                               winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
+            continue
+        if item["deleted"]:
+            materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
+            local_hash = ""
+        else:
+            prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],
+                                       ctx=ctx)
+            row = materialize(cursor, coll, item["record_id"], prepared,
+                              origin_device_id=item["origin_device_id"])
+            _after_mirror(cursor, coll, prepared)
+            # Snapshot items have no per-item signature. In particular,
+            # their claimed origin is not evidence for an instance alias.
+            local_hash = content_hash(coll, item["record"])
+            if row is not None:
+                try:
+                    reserialized = serialize_row(coll, row)
+                    if reserialized is not None:
+                        local_hash = content_hash(coll, reserialized)
+                except ApplyError:
+                    pass
+        store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
+                         origin_device_id=item["origin_device_id"], content_hash=local_hash,
+                         deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))
+        applied += 1
+        touched.append((coll.name, item["record_id"], OP_DELETE if item["deleted"] else OP_UPSERT))
+    return applied, touched
+
+
+def _records_by_id(cursor, collection: str, record_ids: Sequence[str]) -> Dict[str, dict]:
+    found: Dict[str, dict] = {}
+    for start in range(0, len(record_ids), SNAPSHOT_SQL_BATCH):
+        found.update(store.records_for_ids(cursor, collection, list(record_ids[start:start + SNAPSHOT_SQL_BATCH])))
+    return found
+
+
+def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mapping[str, Any]],
+                         known: Mapping[str, dict], touched: List[Tuple[str, str, str]]) -> set:
+    """Insert, in bulk, the transcript events of a page this worker holds no trace of.
+
+    Only an event with no sync record and no journal row (by ``(session_id,
+    seq)`` or by ``id``) qualifies: for those, last writer wins has nothing
+    to compare and the per-record path would insert exactly this row. The
+    rest take that path. Returns the indexes of the items inserted.
+    """
+    fields = set(coll.fields)
+    candidates: Dict[int, Mapping[str, Any]] = {}
+    seen_ids: set = set()
+    for index, item in enumerate(items):
+        record = item.get("record")
+        if item.get("deleted") or item["record_id"] in known or not isinstance(record, dict):
+            continue
+        if (set(record) != fields or not isinstance(record.get("session_id"), str)
+                or not isinstance(record.get("id"), str) or not isinstance(record.get("event_type"), str)
+                or type(record.get("seq")) is not int or record["seq"] < 1
+                or record["id"] in seen_ids):
+            continue
+        try:
+            if coll.record_id(record) != item["record_id"]:
+                continue
+        except (KeyError, TypeError):
+            continue
+        seen_ids.add(record["id"])
+        candidates[index] = record
+    if not candidates:
+        return set()
+    by_session: Dict[str, List[int]] = {}
+    for index, record in candidates.items():
+        by_session.setdefault(record["session_id"], []).append(index)
+    for session_id, indexes in by_session.items():
+        seqs = [candidates[index]["seq"] for index in indexes]
+        cursor.execute("SELECT seq FROM session_events WHERE session_id = %s AND seq >= %s AND seq <= %s",
+                       (session_id, min(seqs), max(seqs)))
+        held = {int(row["seq"]) for row in cursor.fetchall()}
+        for index in indexes:
+            if candidates[index]["seq"] in held:
+                del candidates[index]
+    event_ids = [record["id"] for record in candidates.values()]
+    taken: set = set()
+    for start in range(0, len(event_ids), SNAPSHOT_SQL_BATCH):
+        part = event_ids[start:start + SNAPSHOT_SQL_BATCH]
+        cursor.execute(f"SELECT id FROM session_events WHERE id IN ({', '.join(['%s'] * len(part))})", tuple(part))
+        taken.update(row["id"] for row in cursor.fetchall())
+    for index in [i for i, record in candidates.items() if record["id"] in taken]:
+        del candidates[index]
+    if not candidates:
+        return set()
+    order = sorted(candidates)
+    rows = [[_column_value(coll, name, candidates[index].get(name), ()) for name in coll.fields] for index in order]
+    versions = [(items[index]["record_id"], int(items[index]["clock"]), items[index]["origin_device_id"],
+                 content_hash(coll, candidates[index]), items[index].get("order_seq")) for index in order]
+    inserted = store.insert_snapshot_events(cursor, coll.fields, rows, versions, batch=SNAPSHOT_SQL_BATCH)
+    # A row a local writer added meanwhile takes the per-record path instead.
+    order = [index for index in order if candidates[index]["id"] in inserted]
+    newest: Dict[str, Mapping[str, Any]] = {}
+    for index in order:
+        record = candidates[index]
+        top = newest.get(record["session_id"])
+        if top is None or record["seq"] > top["seq"]:
+            newest[record["session_id"]] = record
+    from app.network import catalog
+    for record in newest.values():
+        catalog.after_event_mirrored(cursor, dict(record))
+    touched.extend((coll.name, items[index]["record_id"], OP_UPSERT) for index in order)
+    return set(order)
 
 
 def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: NetworkContext | None = None, _conn=None) -> None:
@@ -2033,6 +2205,9 @@ def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: Networ
 def finish_bootstrap(*, ctx: Optional[NetworkContext] = None) -> NetworkContext:
     store.update_state(bootstrap_state=BOOTSTRAP_READY)
     ctx = context(refresh=True)
+    # Transcripts a format 2 copy left out start downloading now.
+    from app.network import transcripts
+    transcripts.kick()
     # A device admitted through recovery certified itself; nobody else has
     # published that certificate, so it must be this device's first operation
     # (peers learn the new member from it before anything else arrives).

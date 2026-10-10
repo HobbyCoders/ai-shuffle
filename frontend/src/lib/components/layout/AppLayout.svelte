@@ -24,6 +24,7 @@
 	import CredentialStorageBanner from '../CredentialStorageBanner.svelte';
 	import LicenseBanner from '../LicenseBanner.svelte';
 	import ClaudeReloginBanner from '../ClaudeReloginBanner.svelte';
+	import FirstCopyBanner from '../FirstCopyBanner.svelte';
 
 	interface Props {
 		isAdmin?: boolean;
@@ -122,6 +123,7 @@
 	<CredentialStorageBanner />
 	<LicenseBanner />
 	<ClaudeReloginBanner />
+	<FirstCopyBanner />
 
 	<div class="app-body">
 		{#if sidebarFloating}

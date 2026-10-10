@@ -52,6 +52,109 @@ export function deriveNetworkState(status: NetworkStatus | null | undefined, sta
 	return 'ready';
 }
 
+// ─── First copy ──────────────────────────────────────────────────────────────
+
+export interface FirstCopyNotice {
+	title: string;
+	message: string;
+	severity: 'info' | 'warning';
+	/** 0..1 while pages download; null when there is no count to show. */
+	fraction: number | null;
+}
+
+/** `4.7 of 8.5 GB`: both sizes in the total's unit. */
+export function copySize(done: number, total: number): string {
+	const gb = 1024 ** 3;
+	const mb = 1024 ** 2;
+	const [unit, label] = total >= gb ? [gb, 'GB'] : [mb, 'MB'];
+	return `${(done / unit).toFixed(1)} of ${(total / unit).toFixed(1)} ${label}`;
+}
+
+/**
+ * What to tell the user while this worker receives its first copy of the
+ * network's data. Until it finishes there are no sessions and no other
+ * workers to show, so the app must say the copy is running. Null once the
+ * worker is ready (or it is not in a network).
+ */
+export function firstCopyNotice(status: NetworkStatus | null | undefined): FirstCopyNotice | null {
+	if (!status?.enrolled || !status.network || status.network.bootstrap_state === 'ready') return null;
+	const copy = status.hub?.first_copy;
+	const title = 'Copying your data to this worker';
+	if (!copy) {
+		return {
+			title,
+			message: status.hub?.last_error || 'Waiting for another worker to copy your data to this one.',
+			severity: 'info',
+			fraction: null
+		};
+	}
+	const peer = copy.peer_name || 'another worker';
+	switch (copy.phase) {
+		case 'downloading': {
+			const total = copy.pages_total;
+			if (!total) break;
+			const size = copy.bytes_total ? ` (${copySize(copy.bytes_done, copy.bytes_total)})` : '';
+			return {
+				title,
+				message: `Copying your data from ${peer}: ${copy.pages_done.toLocaleString('en-US')} of ${total.toLocaleString('en-US')} pages${size}.`,
+				severity: 'info',
+				fraction: Math.min(1, copy.pages_done / total)
+			};
+		}
+		case 'applying':
+		case 'done': {
+			const total = copy.apply_total ?? 0;
+			const done = Math.min(copy.apply_done ?? 0, total);
+			return {
+				title,
+				message: `Saving the data copied from ${peer}. Sessions and workers appear when this finishes.`,
+				severity: 'info',
+				fraction: total ? done / total : null
+			};
+		}
+		case 'failed':
+			return {
+				title,
+				message:
+					`Copying from ${peer} stopped: ${(copy.error || 'unknown error').replace(/[.\s]+$/, '')}. ` +
+					(copy.pages_done > 0
+						? `It will retry on its own and keep the ${copy.pages_done.toLocaleString('en-US')} pages already copied.`
+						: 'It will retry on its own.'),
+				severity: 'warning',
+				fraction: null
+			};
+	}
+	return { title, message: `Waiting for ${peer} to prepare a copy of your data.`, severity: 'info', fraction: null };
+}
+
+/**
+ * A worker that just joined is usable before its transcripts arrive: they
+ * download in the background, newest chats first, and a chat the user opens
+ * goes to the front. Null when nothing is left to download.
+ */
+export function transcriptNotice(status: NetworkStatus | null | undefined): FirstCopyNotice | null {
+	if (!status?.enrolled || status.network?.bootstrap_state !== 'ready') return null;
+	const copy = status.hub?.transcripts;
+	if (!copy || !copy.sessions_total) return null;
+	const peer = copy.peer_name || 'another worker';
+	const count = `${copy.sessions_done.toLocaleString('en-US')} of ${copy.sessions_total.toLocaleString('en-US')} sessions`;
+	const fraction = Math.min(1, copy.sessions_done / copy.sessions_total);
+	if (copy.error) {
+		return {
+			title: 'Downloading transcripts',
+			message: `Downloading transcripts from ${peer} paused at ${count}: ${copy.error.replace(/[.\s]+$/, '')}. It will retry on its own.`,
+			severity: 'warning',
+			fraction
+		};
+	}
+	return {
+		title: 'Downloading transcripts',
+		message: `Downloading transcripts from ${peer}: ${count}. Older chats fill in as they arrive; a chat you open is fetched first.`,
+		severity: 'info',
+		fraction
+	};
+}
+
 /** Devices this worker is admitting right now: joins parked here plus devices arriving through the account. */
 export function joiningDeviceCount(status: NetworkStatus | null | undefined): number {
 	if (!status?.enrolled) return 0;

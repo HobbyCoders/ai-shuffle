@@ -25,15 +25,13 @@ import logging
 import random
 import threading
 import time
-import tempfile
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
 
 from app.core.config import settings
 from app.db import network as store
-from app.network import catalog, engine, identity as identity_mod, lan, membership, policy, tokens
+from app.network import catalog, engine, identity as identity_mod, lan, membership, policy, tokens, transcripts
 from app.network.crypto import CryptoError
 from app.network.endpoints import dial_endpoints, known_endpoints, peer_endpoints, validate_endpoints
 from app.network.envelope import Envelope
@@ -97,11 +95,54 @@ _last_contact: Dict[str, float] = {}
 _peer_watermarks: Dict[str, dict] = {}
 _snapshot_peers: set[str] = set()
 _peer_catalog_backlog: Dict[str, bool] = {}
+# Progress of the latest full state copy this worker received (a new worker's
+# first copy, or a re-copy a peer asked for). Status and the launch screen
+# read it; a first copy can run for many minutes with nothing else to show.
+_state_copy: Optional[dict] = None
+# A state copy's apply, by publisher, until a caller has taken its result.
+_applying: Dict[str, asyncio.Future] = {}
 
 
 def note_watermarks(device_id: str, watermarks: dict, *, catalog_backlog: bool = False) -> None:
     _peer_watermarks[device_id] = {origin: dict(streams) for origin, streams in watermarks.items()}
     _peer_catalog_backlog[device_id] = catalog_backlog
+
+
+def state_copy_status() -> Optional[dict]:
+    """The latest state copy's progress, or None when none ran in this process.
+
+    ``phase`` is preparing (the peer is capturing), downloading, applying,
+    done or failed (``error`` says why; the caller retries).
+    """
+    return dict(_state_copy) if _state_copy else None
+
+
+def _copy_begin(device_id: str, ctx: Any) -> None:
+    global _state_copy
+    try:
+        member = ctx.member(device_id)
+    except Exception:  # noqa: BLE001
+        member = None
+    _state_copy = {"peer": device_id, "peer_name": getattr(member, "name", None) or None,
+                   "phase": "preparing", "pages_done": 0, "pages_total": 0, "bytes_done": 0,
+                   "bytes_total": 0, "resumed_pages": 0, "error": None, "started_at": time.time(),
+                   "updated_at": time.time()}
+
+
+def _apply_received(manifest: dict, publisher: str) -> tuple[dict, int]:
+    from app.network import peer_snapshot
+
+    def applied(done: int, total: int) -> None:
+        _copy_progress(apply_done=done, apply_total=total)
+
+    return manifest, peer_snapshot.apply_received(manifest, publisher, on_progress=applied)
+
+
+def _copy_progress(**fields) -> None:
+    global _state_copy
+    current = dict(_state_copy or {})
+    current.update(fields, updated_at=time.time())
+    _state_copy = current
 
 
 def owner_sync_status(owner_device_id: str | None) -> dict:
@@ -156,6 +197,21 @@ class PeerConnectFailed(PeerError):
 
 class PeerResponseTooLarge(PeerError):
     """A peer's answer exceeded the size the caller accepts."""
+
+
+class PeerStateUnavailable(PeerError):
+    """The peer cannot hand out a state copy now: it is still receiving its own."""
+
+
+def _peer_error(status: int, detail: str) -> PeerError:
+    message = f"HTTP {status} {detail}".strip()
+    if status == 409 and "still receiving" in detail:
+        return PeerStateUnavailable(message)
+    return PeerError(message)
+
+
+class _TransferGone(PeerError):
+    """The peer no longer serves a state transfer (it expired or was deleted)."""
 
 
 # Longest detail kept from a peer's error response. Refusals pass through a
@@ -396,7 +452,7 @@ class PeerLink:
                 detail = str(response.json().get("detail", ""))[:ERROR_DETAIL_LIMIT]
             except Exception:  # noqa: BLE001
                 pass
-            raise PeerError(f"HTTP {response.status_code} {detail}".strip())
+            raise _peer_error(response.status_code, detail)
         return response.json()
 
     def routes(self) -> list[str]:
@@ -496,8 +552,14 @@ class PeerLink:
                 # Catch up to a fixed frontier, not a continuously moving writer.
                 target = {origin: dict(streams) for origin, streams in theirs.items() if origin != ctx.device_id}
             if exchange.get("snapshot_required"):
-                summary["received"] += await self.receive_state(client, ctx)
                 summary["snapshot_required"] = True
+                try:
+                    summary["received"] += await self.receive_state(client, ctx)
+                except PeerStateUnavailable as exc:
+                    # The peer is still filling its own copy (its transcripts,
+                    # say). Keep exchanging operations; ask again next pass.
+                    logger.info("Peer %s cannot hand out a state copy yet: %s", self.device_id, exc)
+                    summary["snapshot_deferred"] = True
                 ctx = engine.require_context()
             ops = exchange.get("ops") or []
             if ops:
@@ -585,8 +647,60 @@ class PeerLink:
 
     async def receive_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
                             *, on_wait=None) -> int:
+        """Copy the peer's full state and apply it; progress shows in ``state_copy_status``."""
+        _copy_begin(self.device_id, ctx)
+        try:
+            applied = await self._receive_state(client, ctx, on_wait=on_wait)
+        except Exception as exc:
+            reason = f"{exc}".strip() or type(exc).__name__
+            _copy_progress(phase="failed", error=reason[:ERROR_DETAIL_LIMIT])
+            raise
+        _copy_progress(phase="done", error=None)
+        return applied
+
+    async def _receive_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
+                             *, on_wait=None) -> int:
         from app.network import peer_snapshot
         _snapshot_peers.add(self.device_id)
+        running = _applying.get(self.device_id)
+        if running is not None:
+            # An earlier attempt was cancelled (the launch barrier's time
+            # limit) while its copy was being applied in a thread. Take that
+            # result instead of copying again.
+            _copy_progress(phase="applying")
+            try:
+                manifest, applied = await asyncio.shield(running)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — the apply failed; copy again below
+                logger.info("Earlier state copy from %s failed to apply; copying again", self.device_id)
+            else:
+                return self._received_state(manifest, applied)
+            finally:
+                if running.done() and _applying.get(self.device_id) is running:
+                    del _applying[self.device_id]
+        saved = await asyncio.to_thread(peer_snapshot.saved_transfer, self.device_id)
+        if saved is not None:
+            # Resume the saved transfer: the peer serves it until its signed
+            # expiry, and a new request would usually start a new capture.
+            try:
+                return await self._download_state(client, ctx, saved)
+            except _TransferGone:
+                await asyncio.to_thread(peer_snapshot.discard_received, saved["transfer"])
+                logger.info("Peer %s no longer serves the saved state copy; requesting a new one", self.device_id)
+                _copy_progress(phase="preparing", pages_done=0, pages_total=0, bytes_done=0, bytes_total=0,
+                               resumed_pages=0)
+        manifest = await self._request_state(client, ctx, on_wait=on_wait)
+        await asyncio.to_thread(peer_snapshot.verify_manifest, manifest, self.device_id)
+        try:
+            return await self._download_state(client, ctx, manifest)
+        except _TransferGone as exc:
+            await asyncio.to_thread(peer_snapshot.discard_received, manifest["transfer"])
+            raise PeerError("Peer transfer interrupted; retrying from a verified state") from exc
+
+    async def _request_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, *, on_wait=None) -> dict:
+        """Ask the peer for a state manifest, polling while it captures one."""
+        from app.network import peer_snapshot
         deadline = time.monotonic() + STATE_PREPARE_SECONDS
         delay = STATE_POLL_SECONDS
         try:
@@ -599,25 +713,36 @@ class PeerLink:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise PeerError("Timed out waiting for peer state capture")
-                    # Older inviters ignore the query parameter and return a
-                    # manifest directly. Keep their 120s request allowance.
+                    # Older inviters ignore the query parameters and return a
+                    # format 1 manifest directly. Keep their 120s request
+                    # allowance. Format 2 leaves transcripts for later.
                     manifest = await self.call(
                         client, ctx, "POST", "/api/v1/network/peer/state", json_body={},
-                        params={"prepare": "true"}, timeout=min(STATE_REQUEST_TIMEOUT, remaining))
+                        params={"prepare": "true", "format": str(peer_snapshot.FORMAT_DEFERRED)},
+                        timeout=min(STATE_REQUEST_TIMEOUT, remaining))
                     if time.monotonic() >= deadline:
                         raise PeerError("Timed out waiting for peer state capture")
                     if manifest.get("status") != "preparing":
-                        break
+                        return manifest
                     if on_wait:
                         on_wait(f"Waiting for peer {self.device_id} to prepare your settings copy")
                     await asyncio.sleep(min(delay, max(0, deadline - time.monotonic())))
                     delay = min(delay * 2, STATE_POLL_MAX_SECONDS)
         except TimeoutError as exc:
             raise PeerError("Timed out waiting for peer state capture") from exc
-        await asyncio.to_thread(peer_snapshot.verify_manifest, manifest, self.device_id)
-        with tempfile.TemporaryDirectory(prefix="shuffle-peer-") as temporary:
-            directory = Path(temporary)
-            for index, expected in enumerate(manifest["pages"]):
+
+    async def _download_state(self, client: httpx.AsyncClient, ctx: engine.NetworkContext, manifest: dict) -> int:
+        """Download the pages missing on disk, then apply the whole copy."""
+        from app.network import peer_snapshot
+        pages = manifest["pages"]
+        directory = await asyncio.to_thread(peer_snapshot.begin_received, manifest)
+        _copy_progress(phase="downloading", pages_total=len(pages), pages_done=0, bytes_done=0,
+                       bytes_total=sum(int(page["bytes"]) for page in pages), resumed_pages=0)
+        done_bytes = kept = 0
+        for index, expected in enumerate(pages):
+            if await asyncio.to_thread(peer_snapshot.has_page, directory, index, expected):
+                kept += 1
+            else:
                 await self.open(client, ctx)
                 try:
                     status, raw = await self.fetch_bytes(
@@ -625,26 +750,47 @@ class PeerLink:
                         limit=peer_snapshot.MAX_PAGE, timeout=60)
                 except PeerResponseTooLarge as exc:
                     raise PeerError("Peer state page exceeds transfer limit") from exc
+                if status in (404, 409, 410):
+                    # Expired or deleted on the peer: these pages can never complete.
+                    raise _TransferGone("Peer transfer expired")
                 if status != 200:
                     raise PeerError("Peer transfer interrupted; retrying from a verified state")
                 if len(raw) != expected["bytes"]:
                     raise PeerError("Peer state page was truncated")
-                await asyncio.to_thread((directory / f"{index}.json").write_bytes, raw)
-            applied = await asyncio.to_thread(peer_snapshot.apply, manifest, directory, self.device_id)
-            # A reused snapshot can predate the frontier just advertised by
-            # exchange. Adopt only its committed frontier locally, but do not
-            # hide a known backlog in owner_sync_status by lowering the peer's
-            # observed head. The following exchange tails from local_watermarks;
-            # _check_rollback still uses the live exchange's own-stream proof.
-            observed = {origin: dict(streams) for origin, streams in manifest["watermarks"].items()}
-            for origin, streams in _peer_watermarks.get(self.device_id, {}).items():
-                bucket = observed.setdefault(origin, {})
-                for incarnation, seq in streams.items():
-                    bucket[incarnation] = max(int(bucket.get(incarnation, 0)), int(seq))
-            note_watermarks(self.device_id, observed,
-                            catalog_backlog=_peer_catalog_backlog.get(self.device_id, False))
-            _snapshot_peers.discard(self.device_id)
-            return applied
+                try:
+                    await asyncio.to_thread(peer_snapshot.save_page, directory, index, raw, expected)
+                except ValueError as exc:
+                    raise PeerError("Peer state page did not verify") from exc
+            done_bytes += int(expected["bytes"])
+            _copy_progress(pages_done=index + 1, bytes_done=done_bytes, resumed_pages=kept)
+        _copy_progress(phase="applying")
+        # The apply runs on in its thread when this task is cancelled; a
+        # later attempt then takes its result (see ``_receive_state``).
+        job = asyncio.ensure_future(asyncio.to_thread(_apply_received, manifest, self.device_id))
+        job.add_done_callback(lambda done: done.cancelled() or done.exception())
+        _applying[self.device_id] = job
+        try:
+            _, applied = await asyncio.shield(job)
+        finally:
+            if job.done() and _applying.get(self.device_id) is job:
+                del _applying[self.device_id]
+        return self._received_state(manifest, applied)
+
+    def _received_state(self, manifest: dict, applied: int) -> int:
+        # A reused snapshot can predate the frontier just advertised by
+        # exchange. Adopt only its committed frontier locally, but do not
+        # hide a known backlog in owner_sync_status by lowering the peer's
+        # observed head. The following exchange tails from local_watermarks;
+        # _check_rollback still uses the live exchange's own-stream proof.
+        observed = {origin: dict(streams) for origin, streams in manifest["watermarks"].items()}
+        for origin, streams in _peer_watermarks.get(self.device_id, {}).items():
+            bucket = observed.setdefault(origin, {})
+            for incarnation, seq in streams.items():
+                bucket[incarnation] = max(int(bucket.get(incarnation, 0)), int(seq))
+        note_watermarks(self.device_id, observed,
+                        catalog_backlog=_peer_catalog_backlog.get(self.device_id, False))
+        _snapshot_peers.discard(self.device_id)
+        return applied
 
     async def _check_rollback(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
                               theirs: Dict[str, Dict[str, int]]) -> bool:
@@ -702,7 +848,7 @@ def _decode_answer(status: int, raw: bytes) -> Any:
             detail = str(json.loads(raw).get("detail", ""))[:ERROR_DETAIL_LIMIT]
         except Exception:  # noqa: BLE001
             pass
-        raise PeerError(f"HTTP {status} {detail}".strip())
+        raise _peer_error(status, detail)
     try:
         return json.loads(raw)
     except ValueError as exc:
@@ -1233,6 +1379,7 @@ def start() -> List[asyncio.Task]:
         asyncio.create_task(scan_loop(), name="network-scan"),
         asyncio.create_task(presence_loop(), name="network-presence"),
         asyncio.create_task(liveness_loop(), name="network-liveness"),
+        asyncio.create_task(transcripts.loop(), name="network-transcripts"),
     ]
     return list(_tasks)
 
@@ -1254,7 +1401,9 @@ async def stop() -> None:
 
 def forget_peers() -> None:
     """Drop every peer link and contact record (the worker left its network)."""
-    global _links_generation
+    global _links_generation, _state_copy
+    _state_copy = None
+    _applying.clear()
     _links.clear()
     _links_generation = None
     _last_contact.clear()

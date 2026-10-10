@@ -262,6 +262,32 @@ def create_schema(cursor) -> None:
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )
     """)
+    # Transcripts still to copy after a first copy that left them out (see
+    # ``app.network.transcripts``): one row per session, newest first, with
+    # the last event seq copied so an interrupted copy resumes there.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS network_transcript_backfill (
+            session_id TEXT PRIMARY KEY,
+            priority BIGINT NOT NULL DEFAULT 0,
+            after_seq BIGINT NOT NULL DEFAULT 0,
+            done BOOLEAN NOT NULL DEFAULT FALSE,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        )
+    """)
+    # The copy those rows belong to: who sent it and the watermarks it was
+    # taken at. A source must hold at least these before it may fill a gap.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS network_transcript_backfill_state (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            publisher TEXT NOT NULL,
+            floor JSONB NOT NULL DEFAULT '{}',
+            generation BIGINT NOT NULL DEFAULT 1,
+            stalled_since BIGINT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            CHECK (id = 1)
+        )
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_blobs (
             hash TEXT PRIMARY KEY,
@@ -283,7 +309,9 @@ def _ensure_columns(cursor) -> None:
     """
     additive = (("network_members", "last_incarnation_accepted", "INTEGER"),
                 ("network_presence", "instance_id", "TEXT"),
-                ("network_presence", "source_revision", "TEXT"))
+                ("network_presence", "source_revision", "TEXT"),
+                ("network_transcript_backfill_state", "generation", "BIGINT NOT NULL DEFAULT 1"),
+                ("network_transcript_backfill_state", "stalled_since", "BIGINT"))
     if type(cursor).__module__.startswith("psycopg2"):
         for table, column, kind in additive:
             cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {kind}")
@@ -754,14 +782,53 @@ def prune_ops(*, keep_days: int = 30, _conn=None) -> int:
 # Record versions
 # ---------------------------------------------------------------------------
 
+def _insert_rows(cursor, table: str, columns, values: List, conflict: str = "", *, batch: int = 0) -> None:
+    """Multi-row INSERT, ``batch`` rows per statement (0: all in one)."""
+    step = batch or max(1, len(values))
+    for start in range(0, len(values), step):
+        part = values[start:start + step]
+        placeholders = ", ".join(["(" + ", ".join(["%s"] * len(columns)) + ")"] * len(part))
+        cursor.execute(f"INSERT INTO {table} ({', '.join(columns)}) VALUES {placeholders} {conflict}",
+                       tuple(value for row in part for value in row))
+
+
+def insert_snapshot_events(cursor, fields, rows: List[List[Any]], versions: List[tuple], *,
+                           batch: int = 500) -> set:
+    """Transcript rows from a state copy, with their sync records, in multi-row INSERTs.
+
+    ``versions`` holds ``(record_id, clock, origin_device_id, content_hash,
+    order_seq)`` per row; ``fields`` must include ``id``. The caller
+    checked that neither the rows nor the records existed. A row a local
+    writer inserted since then is left alone (``ON CONFLICT DO NOTHING``) and
+    gets no record here; the ids of the rows inserted come back, and the
+    caller applies the others the per-record way. Nothing goes to
+    ``sync_ops``: a copy carries records, not operations.
+    """
+    now = _now()
+    inserted: set = set()
+    step = max(1, batch)
+    for start in range(0, len(rows), step):
+        part = rows[start:start + step]
+        placeholders = ", ".join(["(" + ", ".join(["%s"] * len(fields)) + ")"] * len(part))
+        cursor.execute(f"INSERT INTO session_events ({', '.join(fields)}) VALUES {placeholders} "
+                       "ON CONFLICT DO NOTHING RETURNING id", tuple(value for row in part for value in row))
+        inserted.update(row["id"] for row in cursor.fetchall())
+    position = list(fields).index("id")
+    ids = [row[position] for row in rows]
+    _insert_rows(cursor, "sync_records", ("collection", "record_id", "clock", "origin_device_id", "content_hash",
+                                          "deleted", "order_seq", "updated_at"),
+                 [("session_events", record_id, clock, origin, digest, False, order_seq, now)
+                  for event_id, (record_id, clock, origin, digest, order_seq) in zip(ids, versions)
+                  if event_id in inserted], "ON CONFLICT (collection, record_id) DO NOTHING", batch=batch)
+    return inserted
+
+
 def insert_event_batch(cursor, coll, rows: List[dict], envelopes: List[dict], hashes: List[str]) -> None:
     """The append-only transcript fast path; caller verified ordering and ownership."""
     now = _now()
 
     def insert(table, columns, values, conflict):
-        placeholders = ", ".join(["(" + ", ".join(["%s"] * len(columns)) + ")"] * len(values))
-        cursor.execute(f"INSERT INTO {table} ({', '.join(columns)}) VALUES {placeholders} {conflict}",
-                       tuple(value for row in values for value in row))
+        _insert_rows(cursor, table, columns, values, conflict)
 
     insert("session_events", coll.fields,
            [[_json(row.get(name)) if name in coll.json_fields else row.get(name) for name in coll.fields]
@@ -1152,6 +1219,177 @@ def set_catalog_cursor(cursor, session_id: str, published_seq: int) -> None:
         """INSERT INTO network_catalog_cursors (session_id, published_seq, updated_at) VALUES (%s, %s, %s)
            ON CONFLICT (session_id) DO UPDATE SET published_seq = EXCLUDED.published_seq, updated_at = EXCLUDED.updated_at""",
         (session_id, published_seq, _now()))
+
+
+# ---------------------------------------------------------------------------
+# Transcript backfill (receiving side of a copy that left transcripts out)
+# ---------------------------------------------------------------------------
+
+def merge_watermarks(*maps: Dict[str, Dict[str, int]]) -> Dict[str, Dict[str, int]]:
+    """Element-wise maximum of ``{origin: {incarnation: seq}}`` maps."""
+    out: Dict[str, Dict[str, int]] = {}
+    for marks in maps:
+        for origin, streams in (marks or {}).items():
+            bucket = out.setdefault(origin, {})
+            for incarnation, seq in (streams or {}).items():
+                bucket[str(incarnation)] = max(int(bucket.get(str(incarnation), 0)), int(seq))
+    return out
+
+
+def backfill_state(_conn=None) -> Optional[dict]:
+    def _query(cursor):
+        cursor.execute("SELECT * FROM network_transcript_backfill_state WHERE id = 1")
+        row = cursor.fetchone()
+        if not row:
+            return None
+        state = row_to_dict(row)
+        state["floor"] = _load(state.get("floor"), {})
+        state["generation"] = int(state.get("generation") or 1)
+        return state
+    if _conn is not None:
+        return _query(_conn.cursor())
+    with get_db() as conn:
+        return _query(conn.cursor())
+
+
+def lock_backfill(cursor, *, exclusive: bool = False) -> Optional[dict]:
+    """Lock the backfill state row (shared, or for update) and return it.
+
+    Lock order everywhere: ``network_state`` first, then this row, then the
+    per-session rows. A registration (``start_backfill``) takes it for update;
+    applying a reply takes it shared, so the two never interleave.
+    """
+    cursor.execute("SELECT * FROM network_transcript_backfill_state WHERE id = 1 "
+                   + ("FOR UPDATE" if exclusive else "FOR SHARE"))
+    row = cursor.fetchone()
+    if not row:
+        return None
+    state = row_to_dict(row)
+    state["floor"] = _load(state.get("floor"), {})
+    state["generation"] = int(state.get("generation") or 1)
+    return state
+
+
+def start_backfill(cursor, *, publisher: str, floor: Dict[str, Dict[str, int]], session_ids: List[str]) -> int:
+    """Record the transcripts a copy left out, every session from the start. Returns the generation.
+
+    A copy registered on top of an unfinished one keeps the higher floor,
+    starts every session over and bumps the generation: the new copy was
+    taken because operations were missing, so a session finished earlier may
+    lack events again, and a reply fetched for the old floor must not count.
+    The caller holds the ``network_state`` lock (the copy's last transaction).
+    """
+    current = lock_backfill(cursor, exclusive=True)
+    merged = merge_watermarks(current["floor"] if current else {}, floor)
+    generation = (current["generation"] + 1) if current else 1
+    now = _now()
+    cursor.execute(
+        """INSERT INTO network_transcript_backfill_state (id, publisher, floor, generation, stalled_since,
+                                                          created_at, updated_at)
+           VALUES (1, %s, %s, %s, NULL, %s, %s)
+           ON CONFLICT (id) DO UPDATE SET publisher = EXCLUDED.publisher, floor = EXCLUDED.floor,
+               generation = EXCLUDED.generation, stalled_since = NULL, updated_at = EXCLUDED.updated_at""",
+        (publisher, _json(merged), generation, now, now))
+    cursor.execute("DELETE FROM network_transcript_backfill")
+    _insert_rows(cursor, "network_transcript_backfill", ("session_id", "priority", "after_seq", "done", "updated_at"),
+                 [(session_id, priority, 0, False, now) for priority, session_id in enumerate(session_ids)], batch=500)
+    return generation
+
+
+def backfill_stalled(generation: int, *, stalled: bool, now: int) -> Optional[int]:
+    """Note whether no source could serve (``stalled``); returns since when it has been stalled."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        state = lock_backfill(cursor, exclusive=True)
+        if state is None or state["generation"] != generation:
+            return None
+        since = state.get("stalled_since")
+        if not stalled:
+            if since is not None:
+                cursor.execute("UPDATE network_transcript_backfill_state SET stalled_since = NULL WHERE id = 1")
+            return None
+        if since is None:
+            cursor.execute("UPDATE network_transcript_backfill_state SET stalled_since = %s WHERE id = 1", (now,))
+            return now
+        return int(since)
+
+
+def backfill_next(cursor, *, limit: int, first: Optional[List[str]] = None) -> List[dict]:
+    """Sessions still to copy: those named in ``first`` (in that order), then newest first."""
+    picked: List[dict] = []
+    wanted = [sid for sid in dict.fromkeys(first or []) if isinstance(sid, str)][:limit]
+    if wanted:
+        cursor.execute("SELECT session_id, after_seq FROM network_transcript_backfill WHERE done = FALSE "
+                       f"AND session_id IN ({', '.join(['%s'] * len(wanted))})", tuple(wanted))
+        found = {r["session_id"]: int(r["after_seq"]) for r in cursor.fetchall()}
+        picked = [{"id": sid, "after": found[sid]} for sid in wanted if sid in found]
+    if len(picked) < limit:
+        cursor.execute("SELECT session_id, after_seq FROM network_transcript_backfill WHERE done = FALSE "
+                       "ORDER BY priority LIMIT %s", (limit + len(picked),))
+        chosen = {p["id"] for p in picked}
+        for r in cursor.fetchall():
+            if len(picked) >= limit:
+                break
+            if r["session_id"] not in chosen:
+                picked.append({"id": r["session_id"], "after": int(r["after_seq"])})
+    return picked
+
+
+def backfill_position(cursor, session_id: str) -> Optional[dict]:
+    """The session's row, locked for its update (the shim ignores FOR UPDATE)."""
+    cursor.execute("SELECT session_id, after_seq, done FROM network_transcript_backfill WHERE session_id = %s "
+                   "FOR UPDATE", (session_id,))
+    row = cursor.fetchone()
+    return row_to_dict(row) if row else None
+
+
+def backfill_advance(cursor, session_id: str, *, after_seq: int, done: bool) -> None:
+    cursor.execute("UPDATE network_transcript_backfill SET after_seq = %s, done = %s, updated_at = %s "
+                   "WHERE session_id = %s", (after_seq, bool(done), _now(), session_id))
+
+
+def backfill_counts(_conn=None) -> Tuple[int, int]:
+    """``(sessions done, sessions in all)`` of the pending backfill."""
+    def _query(cursor):
+        cursor.execute("SELECT COUNT(*) AS total, SUM(CASE WHEN done THEN 1 ELSE 0 END) AS done "
+                       "FROM network_transcript_backfill")
+        row = cursor.fetchone()
+        return int(row["done"] or 0), int(row["total"] or 0)
+    if _conn is not None:
+        return _query(_conn.cursor())
+    with get_db() as conn:
+        return _query(conn.cursor())
+
+
+def backfill_session_pending(session_id: str) -> bool:
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM network_transcript_backfill WHERE session_id = %s AND done = FALSE",
+                       (session_id,))
+        return cursor.fetchone() is not None
+
+
+def finish_backfill(generation: int, _conn=None) -> bool:
+    """Forget the backfill once every session of ``generation`` is done; True when it was finished.
+
+    The state row is locked for update first, so a registration committing
+    meanwhile is either seen (another generation: nothing is deleted) or
+    waits until this transaction ends.
+    """
+    def _query(cursor):
+        state = lock_backfill(cursor, exclusive=True)
+        if state is None or state["generation"] != generation:
+            return False
+        cursor.execute("SELECT 1 FROM network_transcript_backfill WHERE done = FALSE LIMIT 1")
+        if cursor.fetchone() is not None:
+            return False
+        cursor.execute("DELETE FROM network_transcript_backfill")
+        cursor.execute("DELETE FROM network_transcript_backfill_state WHERE id = 1 AND generation = %s", (generation,))
+        return True
+    if _conn is not None:
+        return _query(_conn.cursor())
+    with get_db() as conn:
+        return _query(conn.cursor())
 
 
 def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = None,

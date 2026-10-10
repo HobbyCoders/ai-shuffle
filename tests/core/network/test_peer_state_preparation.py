@@ -43,16 +43,16 @@ async def test_slow_capture_survives_request_timeout_and_bootstraps(workers, mon
     capture = peer_snapshot.capture
     verify, apply = peer_snapshot.verify_manifest, peer_snapshot.apply
     calls = []
-    def slow(recipient):
+    def slow(recipient, *args, **kwargs):
         calls.append(recipient)
         time.sleep(0.15)  # Longer than the per-request budget, not the polling budget.
-        return capture(recipient)
+        return capture(recipient, *args, **kwargs)
     def verify_as_joiner(*args):
         with b.active():
             return verify(*args)
-    def apply_as_joiner(*args):
+    def apply_as_joiner(*args, **kwargs):
         with b.active():
-            return apply(*args)
+            return apply(*args, **kwargs)
     async def authenticated(*args):
         pass
     monkeypatch.setattr(peer_snapshot, "capture", slow)
@@ -96,11 +96,11 @@ def test_concurrent_legacy_and_poll_requests_share_job(workers, monkeypatch):
     started, release = threading.Event(), threading.Event()
     calls = []
     capture = peer_snapshot.capture
-    def blocked(recipient):
+    def blocked(recipient, *args, **kwargs):
         calls.append(recipient)
         started.set()
         assert release.wait(5)
-        return capture(recipient)
+        return capture(recipient, *args, **kwargs)
     monkeypatch.setattr(peer_snapshot, "capture", blocked)
     with a.active():
         try:
@@ -353,7 +353,7 @@ def test_waiting_recipient_revocation_rechecks_replaced_context(workers, monkeyp
     join(a, b)
     captured, release = threading.Event(), threading.Event()
     capture = peer_snapshot.capture
-    def blocked(recipient):
+    def blocked(recipient, *args, **kwargs):
         manifest = capture(recipient)
         captured.set()
         assert release.wait(5)

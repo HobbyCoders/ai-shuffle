@@ -158,6 +158,34 @@ export interface HubStatus {
 	pending_devices?: HubPendingDevice[];
 	/** Present while this worker waits on the account (status pending) or clashes with it (conflict). */
 	account_network?: AccountNetworkInfo | null;
+	/** The latest full copy this worker received from a peer (a new worker's first copy). */
+	first_copy?: FirstCopyStatus | null;
+	/** Transcripts the first copy left out, while they are still on their way. */
+	transcripts?: TranscriptCopyStatus | null;
+}
+
+export interface FirstCopyStatus {
+	peer: string;
+	peer_name: string | null;
+	phase: 'preparing' | 'downloading' | 'applying' | 'done' | 'failed';
+	pages_done: number;
+	pages_total: number;
+	bytes_done: number;
+	bytes_total: number;
+	/** Pages saved so far while applying (absent from older workers). */
+	apply_done?: number;
+	apply_total?: number;
+	error: string | null;
+}
+
+export interface TranscriptCopyStatus {
+	phase: 'transcripts';
+	peer: string;
+	peer_name: string | null;
+	sessions_done: number;
+	sessions_total: number;
+	events_copied: number;
+	error: string | null;
 }
 
 export interface HandoffTransferRecovery {

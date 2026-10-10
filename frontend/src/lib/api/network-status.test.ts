@@ -8,9 +8,11 @@ import type { NetworkStatus } from './network';
 import {
 	b64uDecode,
 	contactAge,
+	copySize,
 	deriveNetworkState,
 	fingerprintFromPublicKey,
 	fingerprintsMatch,
+	firstCopyNotice,
 	formatCountdown,
 	formatFingerprint,
 	isCompleteFingerprint,
@@ -19,7 +21,8 @@ import {
 	normalizeFingerprint,
 	parseJoinLink,
 	relativeTime,
-	secondsUntil
+	secondsUntil,
+	transcriptNotice
 } from './network-status';
 
 function status(overrides: Partial<NetworkStatus> = {}): NetworkStatus {
@@ -179,5 +182,85 @@ describe('time helpers', () => {
 		expect(contactAge(42)).toBe('42s ago');
 		expect(contactAge(600)).toBe('10m ago');
 		expect(contactAge(7200)).toBe('2h ago');
+	});
+});
+
+describe('firstCopyNotice', () => {
+	const syncing = (hub: Partial<NonNullable<NetworkStatus['hub']>> = {}) =>
+		status({ network: { ...status().network!, bootstrap_state: 'syncing' }, hub: { linked: true, ...hub } });
+	const copy = (fields: object) => ({
+		peer: 'peer-a', peer_name: 'Unraid', phase: 'downloading' as const, pages_done: 0, pages_total: 0,
+		bytes_done: 0, bytes_total: 0, error: null, ...fields
+	});
+
+	it('says nothing once the worker is ready or outside a network', () => {
+		expect(firstCopyNotice(status())).toBeNull();
+		expect(firstCopyNotice(status({ enrolled: false, network: undefined }))).toBeNull();
+		expect(firstCopyNotice(null)).toBeNull();
+	});
+
+	it('counts pages and size while downloading', () => {
+		const notice = firstCopyNotice(syncing({ first_copy: copy({
+			pages_done: 12458, pages_total: 22362, bytes_done: 4.7 * 1024 ** 3, bytes_total: 8.5 * 1024 ** 3
+		}) }));
+		expect(notice?.message).toBe('Copying your data from Unraid: 12,458 of 22,362 pages (4.7 of 8.5 GB).');
+		expect(notice?.fraction).toBeCloseTo(12458 / 22362);
+		expect(notice?.severity).toBe('info');
+	});
+
+	it('names the applying and failed phases, and the wait before a copy starts', () => {
+		expect(firstCopyNotice(syncing({ first_copy: copy({ phase: 'applying' }) }))?.message)
+			.toBe('Saving the data copied from Unraid. Sessions and workers appear when this finishes.');
+		const failed = firstCopyNotice(syncing({ first_copy: copy({ phase: 'failed', error: 'Peer transfer interrupted.' }) }));
+		expect(failed?.message).toBe('Copying from Unraid stopped: Peer transfer interrupted. It will retry on its own.');
+		expect(failed?.severity).toBe('warning');
+		expect(firstCopyNotice(syncing({ first_copy: copy({ phase: 'failed', error: 'Timed out', pages_done: 1200 }) }))?.message)
+			.toBe('Copying from Unraid stopped: Timed out. It will retry on its own and keep the 1,200 pages already copied.');
+		expect(firstCopyNotice(syncing({ first_copy: copy({ phase: 'preparing', peer_name: null }) }))?.message)
+			.toBe('Waiting for another worker to prepare a copy of your data.');
+		expect(firstCopyNotice(syncing({ last_error: 'Waiting for another worker to come online to copy your data' }))?.message)
+			.toBe('Waiting for another worker to come online to copy your data');
+	});
+
+	it('sizes small copies in MB', () => {
+		expect(copySize(1.5 * 1024 ** 2, 20 * 1024 ** 2)).toBe('1.5 of 20.0 MB');
+	});
+});
+
+describe('transcriptNotice', () => {
+	const ready = (transcripts: object | null) =>
+		status({ hub: { linked: true, transcripts: transcripts as never } });
+	const copy = (fields: object = {}) => ({
+		phase: 'transcripts', peer: 'peer-a', peer_name: 'Unraid', sessions_done: 312, sessions_total: 1152,
+		events_copied: 40000, error: null, ...fields
+	});
+
+	it('counts sessions while transcripts download on a ready worker', () => {
+		const notice = transcriptNotice(ready(copy()));
+		expect(notice?.title).toBe('Downloading transcripts');
+		expect(notice?.message).toBe(
+			'Downloading transcripts from Unraid: 312 of 1,152 sessions. Older chats fill in as they arrive; ' +
+				'a chat you open is fetched first.'
+		);
+		expect(notice?.fraction).toBeCloseTo(312 / 1152);
+		expect(notice?.severity).toBe('info');
+	});
+
+	it('says why it paused, and nothing when there is nothing left or the first copy still runs', () => {
+		const paused = transcriptNotice(ready(copy({ error: 'HTTP 503.' })));
+		expect(paused?.message).toBe(
+			'Downloading transcripts from Unraid paused at 312 of 1,152 sessions: HTTP 503. It will retry on its own.'
+		);
+		expect(paused?.severity).toBe('warning');
+		expect(transcriptNotice(ready(null))).toBeNull();
+		expect(transcriptNotice(status({ network: { ...status().network!, bootstrap_state: 'syncing' },
+			hub: { linked: true, transcripts: copy() as never } }))).toBeNull();
+	});
+
+	it('shows how far saving the first copy got', () => {
+		const notice = firstCopyNotice(status({ network: { ...status().network!, bootstrap_state: 'syncing' },
+			hub: { linked: true, first_copy: { peer: 'peer-a', peer_name: 'Unraid', phase: 'applying', pages_done: 60,
+				pages_total: 60, bytes_done: 0, bytes_total: 0, apply_done: 15, apply_total: 60, error: null } } }));
+		expect(notice?.fraction).toBeCloseTo(0.25);
 	});
 });

@@ -445,12 +445,16 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpo
                 if token_response.status_code >= 400:
                     raise EnrollmentError(f"token HTTP {token_response.status_code}")
                 headers = {"Authorization": "Bearer " + token_response.json()["token"]}
-                state_response = client.post(base + "/api/v1/network/peer/state", headers=headers, json={})
+                from app.network import peer_snapshot
+                # Format 2 leaves transcripts out: this worker is ready once the
+                # rest applies and fetches them afterwards. An older inviter
+                # ignores the query and answers in format 1.
+                state_response = client.post(base + "/api/v1/network/peer/state", headers=headers, json={},
+                                             params={"format": str(peer_snapshot.FORMAT_DEFERRED)})
                 if state_response.status_code != 404:
                     import tempfile
                     from pathlib import Path
 
-                    from app.network import peer_snapshot
                     state_response.raise_for_status()
                     state_manifest = state_response.json()
                     peer_snapshot.verify_manifest(state_manifest, issuer_id)

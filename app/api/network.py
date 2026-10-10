@@ -719,10 +719,36 @@ async def desktop_startup_sync(_: str = Depends(require_admin)) -> dict:
 
 
 @router.post("/peer/state")
-async def peer_state(prepare: bool = False, device_id: str = Depends(tokens.require_device)) -> dict:
+async def peer_state(prepare: bool = False, format: int = 1, device_id: str = Depends(tokens.require_device)) -> dict:
+    """A state copy for ``device_id``. ``format`` 2 leaves transcripts out (see ``peer_snapshot``)."""
     from app.network import peer_snapshot
     try:
-        return await run_sync(peer_snapshot.state, device_id, prepare=prepare)
+        return await run_sync(peer_snapshot.state, device_id, prepare=prepare,
+                              fmt=peer_snapshot.requested_format(format))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@router.post("/peer/transcripts")
+async def peer_transcripts(request: Request, device_id: str = Depends(tokens.require_device)) -> dict:
+    """Transcript events a worker still needs after a first copy that left them out."""
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    return await _peer_transcripts(body, device_id)
+
+
+async def _peer_transcripts(body: Any, device_id: str) -> dict:
+    from app.network import transcripts
+    transport.note_contact(device_id)
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Body must be an object")
+    max_bytes = body.get("max_bytes", transcripts.REPLY_BYTES)
+    if type(max_bytes) is not int:
+        raise HTTPException(400, "Invalid max_bytes")
+    try:
+        return await run_sync(transcripts.serve, device_id, body.get("sessions"), max_bytes)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -800,6 +826,13 @@ def _flag(value: Any) -> bool:
     return str(value).lower() in ("1", "true", "yes")
 
 
+def _int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 1
+
+
 _LAN_PREFIX = "/api/v1/network/peer"
 # The sync subset of the peer plane: every one is safe to repeat over the
 # tunnel when a LAN answer is lost. Control, workspace, browser and usage
@@ -810,7 +843,9 @@ _LAN_ROUTES = (
     ("POST", re.compile(r"/ops"), lambda m, q, b, d: peer_ops(OpsRequest.model_validate(b or {}), d)),
     ("GET", re.compile(r"/ops/([^/]{1,64})/(\d{1,18})/(\d{1,18})"),
      lambda m, q, b, d: peer_op(m[1], int(m[2]), int(m[3]), _flag(q.get("at_or_after", False)), d)),
-    ("POST", re.compile(r"/state"), lambda m, q, b, d: peer_state(_flag(q.get("prepare", False)), d)),
+    ("POST", re.compile(r"/state"), lambda m, q, b, d: peer_state(_flag(q.get("prepare", False)),
+                                                                  _int(q.get("format", 1)), d)),
+    ("POST", re.compile(r"/transcripts"), lambda m, q, b, d: _peer_transcripts(b, d)),
     ("GET", re.compile(r"/state/([A-Za-z0-9_-]{1,128})/(\d{1,9})"),
      lambda m, q, b, d: peer_state_page(m[1], int(m[2]), d)),
     ("GET", re.compile(r"/blob/([0-9a-f]{64})/parts/(\d{1,9})"),

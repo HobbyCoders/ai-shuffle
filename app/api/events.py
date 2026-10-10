@@ -988,6 +988,10 @@ async def stream_session_events(
     whose epoch is stale gets ``event: reset`` and a full reload.
     """
     await require_transcript_session(request, session_id)
+    from app.network import transcripts
+    # Opened before its transcript arrived on a worker that just joined a
+    # network: copy it next. Its events stream in as they are applied.
+    await asyncio.to_thread(transcripts.prioritise, session_id)
     return StreamingResponse(
         _batch_backfill(event_stream(session_id, from_seq, epoch)),
         media_type="text/event-stream",
