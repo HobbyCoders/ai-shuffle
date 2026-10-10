@@ -320,6 +320,33 @@ async def test_only_owner_chats_may_start_remotely(workers, monkeypatch, kicks):
         assert receipts() == []
 
 
+async def test_the_owners_paired_device_may_start_remotely(workers, monkeypatch, kicks):
+    """The owner's signed-in phone or browser is a paired principal that holds
+    owner authority; it is the owner's chat (#2218)."""
+    from app.core import mobile_tool_identity as identity, preference_identity
+    from app.db import mobile_tool_identity as store
+    a, b, _ = network(workers, monkeypatch)
+    paired = {"kind": "paired", "owner": "account:owner-1", "principal_id": "pcl-1",
+              "account_id": "owner-1", "credential_hash": "h"}
+    with b.active():
+        # The record the owner's phone or browser leaves on the caller's chat.
+        store.bind("caller", paired, new=True)
+    monkeypatch.setattr(orch, "_principal", store.read)  # the module default fakes none
+    monkeypatch.setattr("app.core.mobile_tool_identity.validate", lambda principal: None)
+    monkeypatch.setattr(identity, "_owner_authority",
+                        lambda value: value.get("principal_id") == "pcl-1")
+    monkeypatch.setattr(preference_identity, "local_owner_account", lambda: "owner-1")
+    with b.active():
+        outcome = await start(ARGS)
+        assert not outcome.is_error, outcome.text
+        assert json.loads(outcome.text)["worker"]["device_id"] == a.device_id
+
+    monkeypatch.setattr(identity, "_owner_authority", lambda value: False)
+    with b.active():
+        outcome = await start({**ARGS, "request_id": "again"})
+        assert outcome.is_error and "Only the owner's chats" in outcome.text
+
+
 async def test_destination_refuses_non_worker_devices(workers):
     a, b = workers("unraid"), workers("windows")
     with a.active():

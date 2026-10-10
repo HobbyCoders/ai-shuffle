@@ -1139,10 +1139,11 @@ def _queue(sender_id, data, action, placement=None, model_plan=None):
     assistant = action == "start" and is_primary_session(sender_id)
     project_v2_id = placement["project"]["id"] if placement is not None else None
     if remote is not None:
-        principal = _principal(sender_id)
+        from app.core.mobile_tool_identity import owner_principal
         # A tool identity is a credential of THIS install and cannot travel; the
         # destination runs the chat as its owner, so only owner chats may ask.
-        if sender.get("api_user_id") or (principal and principal.get("kind") != "admin"):
+        # The owner's own paired phone or browser is the owner (#2218).
+        if sender.get("api_user_id") or not owner_principal(_principal(sender_id)):
             raise PermissionError("Only the owner's chats can start chats on another worker.")
     command_id = "orchestration:" + action + ":" + hashlib.sha256(
         (sender_id + ":" + request_id).encode()).hexdigest()

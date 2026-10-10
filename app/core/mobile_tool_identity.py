@@ -185,6 +185,33 @@ def admit_unrecorded(value, session):
         raise PermissionError('Session principal mismatch')
 
 
+def owner_principal(value):
+    """True when the chat's principal is the install owner acting.
+
+    No record (a legacy install-local chat) and the admin count; so does a
+    paired device that holds this install's owner authority, the owner's own
+    signed-in phone or browser (#2218). A synced label without a local
+    principal counts when its account is the owner's, as ``same_install_owner``
+    decides. Anything else, or a check that cannot be made, fails closed.
+    """
+    if not value or value.get('kind') == 'admin':
+        return True
+    if value.get('kind') != 'paired':
+        return False
+    if value.get('principal_id') is None:
+        if not value.get('account_id'):
+            return False
+        from app.core.preference_identity import local_owner_account
+        try:
+            return value['account_id'] == local_owner_account()
+        except Exception:  # noqa: BLE001 - an unreadable owner account fails closed
+            return False
+    try:
+        return _owner_authority(value)
+    except Exception:  # noqa: BLE001 - a revoked or expired device fails closed
+        return False
+
+
 def _owner_authority(value):
     """True when a paired principal's device holds this install's owner authority."""
     client = pairing.get_paired_client(value['principal_id'])
