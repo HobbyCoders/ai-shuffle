@@ -33,6 +33,8 @@
 	 */
 	import { onDestroy, tick, type Snippet } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { standardContextCap } from '$lib/stores/session/context-window';
+	import { contextCapRevision } from '$lib/stores/composer-preferences';
 	import { notify } from '$lib/stores/notifications';
 	import { getVoiceSessionConfig, loadVoiceSettings, usesDelegation, voiceModelLabel, type VoiceOptions } from '$lib/api/voice';
 	import { watchResources } from '$lib/services/watch-resources';
@@ -178,6 +180,12 @@
 	// seeded from whatever they picked last — and may change it mid-session;
 	// every send carries it, and the backend stores it on the session row.
 	const effortValue = $derived($activeSession.effortLevelOverride);
+	// The Standard cap shown in the model picker: the chat's pin, else the
+	// owner's per-model default (synced preferences bump the revision).
+	const contextStandardTokens = $derived.by(() => {
+		void $contextCapRevision;
+		return standardContextCap($activeSession);
+	});
 	const autoPermission = $derived(supportsAutoPermission($activeSession.modelOverride || $activeSession.liveRequestedModel || $activeSession.liveModel || getDefaultModel()));
 	const permissionValue = $derived($activeSession.permissionModeOverride === 'auto' && !autoPermission ? 'default' : $activeSession.permissionModeOverride ?? 'default');
 	// Chat and voice are projectless, web-only lanes with a fixed tool surface
@@ -667,6 +675,8 @@
 						notice={modelNotice}
 						contextChoice={$activeSession.contextWindowChoice}
 						onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
+						contextStandardTokens={contextStandardTokens}
+						onContextStandardChange={(tokens) => activeSession.setContextStandardCap(tokens)}
 						onSelect={(v) => {
 							// Stay open so context-window controls remain reachable.
 							activeSession.setModelOverride(v);
@@ -740,6 +750,8 @@
 	onModelSelect={(value) => activeSession.setModelOverride(value)}
 	contextChoice={$activeSession.contextWindowChoice}
 	onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
+	contextStandardTokens={contextStandardTokens}
+	onContextStandardChange={(tokens) => activeSession.setContextStandardCap(tokens)}
 	effortOptions={effortLevels}
 	effortExplanation={effortCapability.explanation}
 	effortKnown={effortCapability.known}

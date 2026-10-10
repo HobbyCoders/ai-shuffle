@@ -804,12 +804,12 @@ def settings_for_model(model: str, provider_id: Optional[str], *, effort: Any = 
 
     Effort is fitted to the nearest supported level. Unsupported context
     windows and fast mode are dropped instead of sending a setting the
-    provider would reject. The context window is the user's
-    standard-or-1M choice, so it is first fitted to the new model the way a
-    Task worker's is (a GPT 272K "standard" becomes Claude's 200K).
+    provider would reject. The context window is the user's Standard cap or
+    Extended choice, so it is first fitted to the new model the way a Task
+    worker's is (a GPT 272K "standard" becomes Claude's 200K).
     """
     from app.core.model_effort import clamp_effort
-    from app.core.model_registry import context_window_choices
+    from app.core.model_registry import is_offered_context_window
     from app.core.provider_agent import worker_context_window
     from app.core.provider.harness_adapter import _decide_provider_kind
     from app.core.provider.types import SessionOptions
@@ -825,7 +825,7 @@ def settings_for_model(model: str, provider_id: Optional[str], *, effort: Any = 
     return {
         "effort": clamp_effort(effort, bare, provider, route=route),
         "context_window": (window if window
-                           and window in context_window_choices(bare, provider) else None),
+                           and is_offered_context_window(window, bare, provider) else None),
         "fast": fast if not fast or route in ("delegated", "openai_responses") else None,
     }
 

@@ -1,4 +1,5 @@
 /** Account-scoped defaults. Session transcripts and existing run bindings stay local to their session. */
+import { writable } from 'svelte/store';
 import { preferenceSync } from '$lib/services/preferences';
 import { startupDedupeEnabled } from '$lib/api/client';
 import type { ClusterProject } from '$lib/api/installs';
@@ -200,7 +201,61 @@ preferenceSync.registerPrefix(MODEL_FAST_PREFIX, key => {
 });
 for (const model of Object.keys(modelFast)) registerFast(model);
 
+// The raised Standard context cap per model (tokens), one account-synced record
+// each. A model without one runs Standard at its family default. A chat's own
+// saved window still wins over this for that chat.
+export const MODEL_CONTEXT_CAP_PREFIX = 'composer.modelContextCap.';
+export const contextCapPreferenceKey = (model: string | null) => MODEL_CONTEXT_CAP_PREFIX + encodeURIComponent(effortModelKey(model));
+const CONTEXT_CAP_CACHE_KEY = 'ai-shuffle-composer:modelContextCap';
+let modelContextCaps: Record<string, number> = {};
+/** Bumps whenever a per-model cap changes, so components re-derive the cap they show. */
+export const contextCapRevision = writable(0);
+const registeredContextCaps = new Set<string>();
+const validCap = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value > 0;
+function applyContextCap(model: string, value: unknown) {
+ const next = {...modelContextCaps};
+ if (validCap(value)) next[model] = value; else delete next[model];
+ modelContextCaps = next;
+ contextCapRevision.update(n => n + 1);
+ try { localStorage.setItem(CONTEXT_CAP_CACHE_KEY, JSON.stringify(modelContextCaps)); } catch { /* memory still works */ }
+}
+function contextCapAdapter(model: string) {
+ registeredContextCaps.add(model);
+ return {
+  read: () => modelContextCaps[model] ?? null,
+  apply(value: unknown) { applyContextCap(model, value); notifyRemote(); }
+ };
+}
+function registerContextCap(model: string) {
+ if (!registeredContextCaps.has(model)) preferenceSync.register(contextCapPreferenceKey(model), contextCapAdapter(model));
+}
+try {
+ const cached = localStorage.getItem(CONTEXT_CAP_CACHE_KEY);
+ const parsed: unknown = cached === null ? null : JSON.parse(cached);
+ if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+  for (const [model, cap] of Object.entries(parsed)) if (model && validCap(cap)) modelContextCaps[effortModelKey(model)] = cap;
+ }
+} catch { /* SSR or unavailable storage */ }
+preferenceSync.registerPrefix(MODEL_CONTEXT_CAP_PREFIX, key => {
+ try {
+  const model = decodeURIComponent(key.slice(MODEL_CONTEXT_CAP_PREFIX.length));
+  return model && contextCapPreferenceKey(model) === key ? contextCapAdapter(model) : null;
+ } catch { return null; }
+});
+for (const model of Object.keys(modelContextCaps)) registerContextCap(model);
+
 export const composerPreferences = {
+ /** The owner's raised Standard context cap for this model; null when never raised. */
+ contextCapForModel(model: string | null): number | null {
+  return modelContextCaps[effortModelKey(model)] ?? null;
+ },
+ /** Remember (or, with null, forget) the Standard cap new chats on this model start with. */
+ rememberContextCap(model: string | null, tokens: number | null) {
+  const key = effortModelKey(model);
+  registerContextCap(key);
+  applyContextCap(key, tokens);
+  preferenceSync.save(contextCapPreferenceKey(key), validCap(tokens) ? tokens : null);
+ },
  /** The owner's last fast-mode pick for this model; null when never picked. */
  fastForModel(model: string | null): boolean | null {
   return modelFast[effortModelKey(model)] ?? null;

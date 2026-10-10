@@ -51,7 +51,9 @@
 	import { creditNumber as creditsNum, creditText } from './provider-credit';
 	import { activeSession } from '$lib/stores/active-session';
 	import { getContextMaxForModel } from '$lib/constants/chat';
-	import { contextWindowForChoice, isContextWindowChoice } from '$lib/constants/model-context';
+	import { isContextWindowChoice } from '$lib/constants/model-context';
+	import { selectedContextWindow } from '$lib/stores/session/context-window';
+	import { contextCapRevision } from '$lib/stores/composer-preferences';
 	import {
 		getDefaultModel,
 		getModelLabel,
@@ -147,13 +149,14 @@
 		return !$activeSession.modelOverride && defaultComposite ? defaultComposite.providerId : null;
 	});
 	const modelCapacity = $derived(getContextMaxForModel(effectiveModel, effectiveProviderId));
-	// The chat's picked window (200k / 1M), resolved exactly as the next send
+	// The chat's picked window (its Standard cap or Extended), resolved exactly as the next send
 	// resolves it, so the meter shows what that turn will run with. Null when
 	// this model offers no choice: its own window applies.
 	const selectedWindow = $derived.by(() => {
 		const choice = $activeSession.contextWindowChoice;
 		if (!isContextWindowChoice(choice)) return null;
-		return contextWindowForChoice($activeSession.modelOverride || getDefaultModel(), choice);
+		void $contextCapRevision;
+		return selectedContextWindow($activeSession);
 	});
 
 	// Context usage from activeSession — set by onPollApplied after each poll.

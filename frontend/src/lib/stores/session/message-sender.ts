@@ -18,7 +18,7 @@ import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-dis
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
 import { pendingQueue, newLocalPendingId } from './pending-queue';
-import { contextWindowForChoice } from '$lib/constants/model-context';
+import { selectedContextWindow } from './context-window';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { effortToSend } from '../assistant';
@@ -181,10 +181,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 	 * would silently produce no override.
 	 */
 	function contextWindowOverride(state: ActiveSessionState): number | null {
-		return contextWindowForChoice(
-			state.modelOverride || getDefaultModel(),
-			state.contextWindowChoice
-		);
+		return selectedContextWindow(state);
 	}
 
 	function buildOverrides(): Record<string, string | string[] | number | boolean> | undefined {

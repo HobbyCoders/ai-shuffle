@@ -5,9 +5,12 @@ vi.mock('$lib/api/client', () => ({ api: { get: mocks.get } }));
 
 import { encodeProviderModel, hydrateModelRegistry } from './models';
 import {
+	clampStandardCap,
 	contextChoiceFromWindow,
 	contextWindowForChoice,
-	getModelContextControl
+	formatContextTokens,
+	getModelContextControl,
+	standardCapPresets
 } from './model-context';
 
 beforeAll(async () => {
@@ -27,7 +30,8 @@ beforeAll(async () => {
 					{ id: 'gpt-6-astra', label: 'GPT-6 Astra', context_window: 272_000, context_window_choices: [256_000, 1_000_000] },
 					{ id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', context_window: 272_000, context_window_choices: [272_000, 1_000_000] },
 					{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', context_window: 1_000_000 },
-					{ id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', context_window: 256_000 }
+					{ id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', context_window: 256_000 },
+					{ id: 'gpt-7-nova', label: 'GPT-7 Nova', context_window: 2_000_000, context_window_choices: [272_000, 2_000_000] }
 				],
 				default_model: 'gpt-5.6-sol'
 			},
@@ -101,5 +105,66 @@ describe('model context choices', () => {
 		expect(contextChoiceFromWindow(256_000)).toBe('standard');
 		expect(contextChoiceFromWindow(1_000_000)).toBe('1m');
 		expect(contextChoiceFromWindow(null)).toBeNull();
+	});
+
+	it('formats compact K and M labels', () => {
+		expect(formatContextTokens(200_000)).toBe('200K');
+		expect(formatContextTokens(272_000)).toBe('272K');
+		expect(formatContextTokens(990_000)).toBe('990K');
+		expect(formatContextTokens(1_000_000)).toBe('1M');
+		expect(formatContextTokens(1_500_000)).toBe('1.5M');
+	});
+});
+
+describe('the Standard cap', () => {
+	it('runs from the family default to one step below the full window', () => {
+		const sonnet = getModelContextControl('sonnet')!;
+		expect(sonnet.standardTokens).toBe(200_000);
+		expect(sonnet.standardMaxTokens).toBe(990_000);
+		expect(sonnet.extendedTokens).toBe(1_000_000);
+		const sol = getModelContextControl(encodeProviderModel('openai-row', 'gpt-6.1-sol'))!;
+		expect([sol.standardTokens, sol.standardMaxTokens]).toEqual([272_000, 990_000]);
+	});
+
+	it('locks Extended to the model\'s full window, past 1M when the registry says so', () => {
+		const nova = encodeProviderModel('openai-row', 'gpt-7-nova');
+		const control = getModelContextControl(nova)!;
+		expect(control.extendedTokens).toBe(2_000_000);
+		expect(control.extendedLabel).toBe('2M');
+		expect(control.standardMaxTokens).toBe(1_990_000);
+		expect(contextWindowForChoice(nova, '1m')).toBe(2_000_000);
+		// The extended pick ignores any Standard cap.
+		expect(contextWindowForChoice(nova, '1m', 600_000)).toBe(2_000_000);
+	});
+
+	it('clamps a cap into range in whole K tokens', () => {
+		const sonnet = getModelContextControl('sonnet')!;
+		expect(clampStandardCap(sonnet, 450_400)).toBe(450_000);
+		expect(clampStandardCap(sonnet, 100_000)).toBe(200_000);
+		expect(clampStandardCap(sonnet, 1_000_000)).toBe(990_000);
+		expect(clampStandardCap(sonnet, Number.NaN)).toBe(200_000);
+	});
+
+	it('offers the default plus up to three round presets that fit', () => {
+		expect(standardCapPresets(getModelContextControl('sonnet')!)).toEqual([200_000, 400_000, 600_000, 800_000]);
+		expect(standardCapPresets(getModelContextControl(encodeProviderModel('openai-row', 'gpt-6.1-sol'))!))
+			.toEqual([272_000, 400_000, 600_000, 800_000]);
+	});
+
+	it('sends the raised cap for Standard, clamped to the model', () => {
+		expect(contextWindowForChoice('sonnet', 'standard', 450_000)).toBe(450_000);
+		expect(contextWindowForChoice('sonnet', 'standard', 5_000_000)).toBe(990_000);
+		expect(contextWindowForChoice('sonnet', 'standard', null)).toBe(200_000);
+		expect(contextWindowForChoice(encodeProviderModel('openai-row', 'gpt-6.1-sol'), 'standard', 240_000)).toBe(272_000);
+	});
+
+	it('reads a saved window as Extended only at the model\'s full window', () => {
+		const nova = encodeProviderModel('openai-row', 'gpt-7-nova');
+		expect(contextChoiceFromWindow(450_000, 'sonnet')).toBe('standard');
+		expect(contextChoiceFromWindow(1_000_000, 'sonnet')).toBe('1m');
+		expect(contextChoiceFromWindow(1_200_000, nova)).toBe('standard');
+		expect(contextChoiceFromWindow(2_000_000, nova)).toBe('1m');
+		// Without a model the 1M opt-in threshold decides.
+		expect(contextChoiceFromWindow(1_200_000)).toBe('1m');
 	});
 });

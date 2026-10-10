@@ -58,7 +58,8 @@ import { git } from './git.svelte';
 import { untrack } from 'svelte';
 import { createStore, createSubscribers, shallowEqual } from './store-utils';
 import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
-import { contextWindowForChoice, contextChoiceFromWindow, type ContextWindowChoice } from '$lib/constants/model-context';
+import { clampStandardCap, contextWindowForChoice, contextChoiceFromWindow, getModelContextControl, type ContextWindowChoice } from '$lib/constants/model-context';
+import { standardContextCap } from './session/context-window';
 import { getDefaultModel, isFastModeCapable } from '$lib/constants/models';
 // Shared types
 import type {
@@ -791,7 +792,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		try {
 			const saved = await pending;
 			if (!saved || sessionOwnerEpoch() !== ownerEpoch) return;
-			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window) : saved[field];
+			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window, selectedModel) : saved[field];
 			if (field === 'context_window' && selected) {
 				savedWindow = saved.context_window;
 				// Navigation reads the sidebar row before its /live refresh. Keep
@@ -812,7 +813,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 	}
 	if (generation !== runSettingGenerations[field] || sessionOwnerEpoch() !== ownerEpoch) return;
 	if (field === 'context_window') {
-		selected = sessionId ? selected : contextChoiceFromWindow(value as number);
+		selected = sessionId ? selected : contextChoiceFromWindow(value as number, selectedModel);
 		setPersistedRunBinding('contextWindowChoice', selected as ContextWindowChoice);
 	} else {
 		if (field === 'effort' && remember) composerPreferences.rememberEffort(selectedModel, selected as string | null);
@@ -1120,8 +1121,28 @@ export const activeSession = {
 			persistSession();
 			return;
 		}
-		const window = contextWindowForChoice(_state.modelOverride || getDefaultModel(), choice);
+		const window = contextWindowForChoice(_state.modelOverride || getDefaultModel(), choice, standardContextCap(_state));
 		if (window != null) return setLiveRunSetting('context_window', window);
+	},
+	/**
+	 * Raise (or lower) the Standard cap — the window a Standard chat compacts
+	 * near — and select Standard. Clamped to the model's range: the family
+	 * default up to just below its full (Extended) window. Remembered per model
+	 * for new chats; an open chat also saves it as its own pin.
+	 */
+	setContextStandardCap(tokens: number) {
+		const model = _state.modelOverride || getDefaultModel();
+		const control = getModelContextControl(model);
+		if (!control) return;
+		const cap = clampStandardCap(control, tokens);
+		composerPreferences.rememberContextCap(model, cap === control.standardTokens ? null : cap);
+		if (!_state.sessionId) {
+			_update(s => ({ ...s, contextWindowChoice: 'standard' }));
+			setPersistedRunBinding('contextWindowChoice', 'standard');
+			persistSession();
+			return;
+		}
+		return setLiveRunSetting('context_window', cap);
 	},
 
 	// ── Ephemeral UI State (delegated to draft-manager) ─────────────

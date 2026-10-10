@@ -26,6 +26,7 @@ import { composerSuggestion } from './composer-suggestion';
 import { swarms } from '../swarms';
 import { setPrivateAccessPending } from '../chat-access';
 import { contextChoiceFromWindow } from '$lib/constants/model-context';
+import { getDefaultModel } from '$lib/constants/models';
 import { markChatUnavailable } from '../unavailable-chat';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
@@ -490,7 +491,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				// A context-window pick saved from another tab, device or worker:
 				// adopt it, so this composer neither shows nor sends the older one.
-				const pickedChoice = contextChoiceFromWindow(updates.context_window as number | null | undefined);
+				const pickedChoice = contextChoiceFromWindow(
+					updates.context_window as number | null | undefined,
+					getState().modelOverride || getDefaultModel()
+				);
 				if (pickedChoice && updatedSessionId && updatedSessionId === getState().sessionId) {
 					update(s => ({
 						...s, contextWindowChoice: pickedChoice,
