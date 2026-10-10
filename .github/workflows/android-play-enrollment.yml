@@ -7,12 +7,6 @@ name: Android Play signing enrollment
 # the runner. Import it in Play Console and compare APP signing fingerprints
 # before uploading any release. This workflow never uploads or publishes apps.
 on:
-  pull_request:
-    paths:
-      - '.github/workflows/android-play-enrollment.yml'
-      - 'android/ci/export-play-key.py'
-      - 'android/ci/test-play-key-export.py'
-      - 'android/ci/play-encryption-public-key.pem'
   workflow_dispatch:
     inputs:
       confirm_existing_key_export:

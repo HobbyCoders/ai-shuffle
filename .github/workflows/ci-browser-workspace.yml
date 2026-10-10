@@ -1,44 +1,10 @@
 name: CI Browser Workspace
-run-name: "${{ github.workflow }}${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}"
 
 on:
-  pull_request:
-    # Platform jobs are deferred on PRs. Add ci:full to run them on every push
-    # (for PRs that really change this platform); removing it cancels them.
-    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
-    paths:
-      - 'app/api/browser_panel.py'
-      - 'app/api/openai_billing.py'
-      - 'app/core/openai_admin_usage.py'
-      - 'app/core/usage_polling.py'
-      - 'frontend/src/lib/api/openai-billing*'
-      - 'app/api/ws_auth.py'
-      - 'app/core/browser*.py'
-      - 'app/core/native_chrome.py'
-      - 'app/core/mcp_config.py'
-      - 'app/core/builtin_mcp_servers.py'
-      - 'browser-mcp/**'
-      - 'frontend/src/lib/api/browser-panel*'
-      - 'frontend/src/lib/browser-panel/**'
-      - 'frontend/src/lib/components/browser/**'
-      - 'frontend/src/lib/stores/browser-panel*'
-      - 'frontend/tests/*browser-workspace*'
-      - 'frontend/tests/BrowserWorkspaceParent.svelte'
-      - 'frontend/tests/verify-provider-login.mjs'
-      - 'frontend/tests/verify-browser-cold-start.mjs'
-      - 'frontend/tests/*crumb-strip*'
-      - 'frontend/tests/CrumbStripFixture.svelte'
-      - 'frontend/src/lib/components/settings/providers/tabs/KeyUsage.svelte'
-      - 'frontend/package*.json'
-      - 'tests/test_browser_workspace_integration.py'
-      - 'requirements*.txt'
-      - '.github/workflows/ci-browser-workspace.yml'
-      - 'scripts/ci/require-full-ci.py'
   workflow_dispatch:
 
 concurrency:
-  # Unrelated label events must not replace a running OR pending validation.
-  group: ci-browser-workspace-${{ github.ref }}-${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && github.run_id || 'validation' }}
+  group: ci-browser-workspace-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -46,8 +12,7 @@ permissions:
 
 jobs:
   smoke:
-    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')
-    name: Browser editor smoke checks${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
+    name: Browser editor smoke checks
     # Keep every browser smoke check on a standard GitHub runner rather than a separately billed runner.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -63,9 +28,8 @@ jobs:
       - run: npm test --prefix browser-mcp -- test/editors.test.ts
 
   workspace:
-    name: Real browser workspace${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
+    name: Real browser workspace
     needs: smoke
-    if: github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))
     timeout-minutes: 10
     runs-on: blacksmith-2vcpu-ubuntu-2404
     permissions:
@@ -128,17 +92,3 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  readiness:
-    name: Browser merge readiness${{ github.event_name == 'pull_request' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && github.event.label.name != 'ci:full' && ' (unrelated label event)' || '' }}
-    needs: ['smoke', 'workspace']
-    if: ${{ !cancelled() && (github.event.pull_request.draft != true && (github.event_name != 'pull_request' || (github.event.action != 'labeled' && github.event.action != 'unlabeled') || github.event.label.name == 'ci:full')) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - uses: actions/checkout@v4
-      - name: Require successful checks for this revision
-        env:
-          CI_FULL_REQUESTED: ${{ github.event.pull_request.draft != true && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')) }}
-          CI_REQUIRED_RESULTS: ${{ toJSON(needs) }}
-          CI_DEFERRABLE_JOBS: '["workspace"]'
-        run: python3 scripts/ci/require-full-ci.py

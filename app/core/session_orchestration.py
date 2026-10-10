@@ -81,10 +81,31 @@ def _local_top_level(row, *, allow_settled=False):
                 and row.get("owner_device_id") in (None, self_device_id()))
 
 
+def _as_owner_chat(owner):
+    """``owner`` with the install owner's own account counted as the owner.
+
+    A chat the owner starts from a signed-in phone or browser is labelled
+    ``account:<their account>``. Every worker of the network belongs to that
+    account, so the chat is the owner's chat on each of them, as the image and
+    transcript checks already decide (``same_install_owner``). Without this a
+    worker that mirrors such a chat refused it as a peer (#2218).
+    """
+    api_user_id, label = owner
+    if api_user_id is None and label.startswith("account:"):
+        from app.core.preference_identity import local_owner_account
+        try:
+            account = local_owner_account()
+        except Exception:  # noqa: BLE001 - an unreadable owner account fails closed
+            account = None
+        if account and label == "account:" + account:
+            return _OWNER_CHAT
+    return owner
+
+
 def _mirror_owner(row):
     """``_owner()`` of a chat another worker runs, from its synced label."""
     from app.db.mobile_tool_identity import mirrored
-    return (row.get("api_user_id"), (mirrored(row) or {}).get("owner", "install-admin"))
+    return _as_owner_chat((row.get("api_user_id"), (mirrored(row) or {}).get("owner", "install-admin")))
 
 
 def _list_entry(row):
@@ -103,7 +124,7 @@ def _principal(session_id):
 def _owner(row):
     principal = _principal(row["id"])
     # Legacy install-local chats remain usable without acquiring mobile grants.
-    return (row.get("api_user_id"), (principal or {}).get("owner", "install-admin"))
+    return _as_owner_chat((row.get("api_user_id"), (principal or {}).get("owner", "install-admin")))
 
 
 def _caller(session_id, *, allow_settled=False):

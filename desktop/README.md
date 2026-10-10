@@ -320,10 +320,10 @@ for the bundled file; missing or invalid downloads fail the build.
 Both installer configurations also verify the copied cloudflared binary in
 their final resources directory before producing an installer.
 `npm run pack` builds an unpacked app in `release/`; `npm run dist` builds the
-installers. Pull-request CI (`desktop.yml`) runs the typecheck and unit tests;
-with the `ci:full` label it also packages a Windows shell around a stub runtime
-and installs and exercises a Windows preview with a real runtime. Assembling
-the Linux runtime is a manual `workflow_dispatch` opt-in.
+installers. `python scripts/local_ci.py` runs the typecheck and unit tests
+before a push. `desktop.yml` is a manual `workflow_dispatch`: it packages a
+Windows shell around a stub runtime and installs and exercises a Windows
+preview with a real runtime, and can also assemble the Linux runtime.
 
 ## Release
 
