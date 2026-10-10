@@ -37,6 +37,7 @@ class FakeWorker:
         self.sent, self.archived, self.stopped, self.compacted = [], [], [], []
         self.raise_on_send = None
         self.calls = 0
+        self.compact_note = None
 
     def deploy_status(self):
         workers = [{"label": "Unraid", "device_id": "dev_self", "is_self": True, "online": True,
@@ -111,9 +112,17 @@ class FakeWorker:
     def compact(self, sid):
         self.compacted.append(sid)
         s = self.sessions[sid]
+        if self.compact_note is not None:
+            # Native leg: the outcome is a system.note in the event log only.
+            s.setdefault("notes", []).append(
+                {"type": "system.note", "subtype": "compact_failed", "data": {"reason": self.compact_note}})
+            return {}
         s["messages"].append({"id": len(s["messages"]), "role": "system", "type": "system",
                               "content": "", "systemSubtype": "compact_boundary"})
         return {}
+
+    def system_notes(self, sid):
+        return list(self.sessions[sid].get("notes", []))
 
     def stop(self, sid):
         self.stopped.append(sid)
@@ -304,6 +313,51 @@ def test_message_as_turn_ends_and_compact(tmp_path):
     result, _ = _run(worker, _data(turn_end, compact), tmp_path)
     assert [r["status"] for r in result["rows"]] == ["pass", "pass"], result["rows"]
     assert worker.compacted == ["s2"]
+    assert result["rows"][1]["evidence"]["compact"] == "boundary recorded"
+
+
+def _compact_row():
+    return {"id": "t.1", "check": "c", "kind": "script", "steps": [
+        {"op": "start", "as": "a", "prompt": "reply OK", "expect_reply": "OK"},
+        {"op": "compact", "session": "a", "within_s": 0},
+        {"op": "message", "session": "a", "prompt": "reply OK", "expect_reply": "OK"}]}
+
+
+def test_native_compact_with_nothing_to_compact_passes(tmp_path):
+    # A native chat this short has nothing to reclaim; the engine says so in
+    # a compact_failed note that only the event log carries.
+    worker = FakeWorker()
+    worker.compact_note = ("nothing could be compacted: the context is already as small "
+                           "as compaction makes it without touching the most recent work")
+    result, _ = _run(worker, _data(_compact_row()), tmp_path)
+    row = result["rows"][0]
+    assert row["status"] == "pass", row
+    assert row["evidence"]["compact"].startswith("native engine: nothing could be compacted")
+
+
+def test_native_compact_failure_fails_the_row(tmp_path):
+    worker = FakeWorker()
+    worker.compact_note = "compaction failed: RuntimeError"
+    result, _ = _run(worker, _data(_compact_row()), tmp_path)
+    row = result["rows"][0]
+    assert row["status"] == "fail"
+    assert row["reason"] == "compact_failed recorded: compaction failed: RuntimeError"
+
+
+def test_code_mode_subagent_counts_as_task(tmp_path):
+    # Native code mode launches Task inside run_python; the history stores a
+    # "subagent" card, not a Task tool_use.
+    worker = FakeWorker(answer=lambda p: ("OK", ["run_python"]))
+    real = worker._advance
+
+    def advance(s):
+        before = len(s["messages"])
+        real(s)
+        if len(s["messages"]) > before:
+            s["messages"].insert(-1, {"id": 99, "role": "assistant", "type": "subagent", "content": ""})
+    worker._advance = advance
+    result, _ = _run(worker, _data(_script("t.1", expect_tool=["Task"])), tmp_path)
+    assert result["rows"][0]["status"] == "pass", result["rows"][0]
 
 
 def _two_message_row(rid="t.1"):
@@ -591,6 +645,24 @@ def test_http_client_maps_errors():
     client = HttpWorkerClient(transport=httpx.MockTransport(lambda r: httpx.Response(409, text="busy")))
     with pytest.raises(ClientError, match="409"):
         client.compact("s1")
+
+
+def test_http_client_reads_system_notes_up_to_caught_up():
+    note = {"type": "system.note", "subtype": "compact_failed", "data": {"reason": "nothing"}}
+    body = (
+        'id: 1\nevent: turn.started\ndata: {"type": "turn.started"}\n\n'
+        f"id: 2\nevent: system.note\ndata: {json.dumps(note)}\n\n"
+        'event: caught_up\ndata: {"seq": 2}\n\n'
+        'id: 3\nevent: system.note\ndata: {"subtype": "after"}\n\n'
+    )
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+    client = HttpWorkerClient(transport=httpx.MockTransport(handler))
+    assert client.system_notes("s1") == [note]
+    assert seen[0].url.path == "/api/v1/sessions/s1/events"
 
 
 def _real_routes():
