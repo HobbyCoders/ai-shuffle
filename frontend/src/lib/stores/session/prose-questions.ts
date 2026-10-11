@@ -47,7 +47,11 @@
  *           || (user.epoch === question.epoch && question.seq > user.seq))
  *
  * using the latest user pair delivered and the highest user seq seen in the
- * question's epoch, so a delayed revision cannot un-answer a question. This
+ * question's epoch, so a delayed revision cannot un-answer a question. A
+ * revision whose question seq is below one already seen in the same epoch,
+ * and whose user seq is not newer than the one seen there, is superseded and
+ * ignored, so a delayed row cannot replace a re-ask. Null (non-question prose)
+ * always applies. This
  * replaces the transcript-derived mark for that session, including sessions
  * this tab never opened. An explicit null seq in a known epoch clears it.
  * When the fields are absent (an older worker) or both null (an older peer's
@@ -119,6 +123,14 @@ const _rowQuestions = new Map<string, Position | null>();
 
 /** The latest user-message pair delivered per session (null: none known). */
 const _lastUser = new Map<string, Position | null>();
+
+/**
+ * Every question epoch delivered per session, with the highest question seq
+ * seen in it (null while only "no question" was seen). Keeps the epoch of an
+ * explicit null so a clear can retire it, and lets a superseded revision be
+ * recognised as stale.
+ */
+const _questionSeen = new Map<string, Map<string, number | null>>();
 
 /** Epochs of logs cleared since load, per session: never re-marked from. */
 const _retired = new Map<string, Set<string>>();
@@ -205,8 +217,40 @@ function observeQuestion(sessionId: string, revision: UserMessageRevision): void
 		_rowQuestions.delete(sessionId);
 		return;
 	}
-	// A malformed pair says no question: never mark from it.
-	_rowQuestions.set(sessionId, toPosition(seq, epoch));
+	if (typeof epoch !== 'string' || !epoch) {
+		// A malformed pair says no question: never mark from it.
+		_rowQuestions.set(sessionId, null);
+		return;
+	}
+	let seen = _questionSeen.get(sessionId);
+	if (!seen) {
+		seen = new Map();
+		_questionSeen.set(sessionId, seen);
+	}
+	const pos = toPosition(seq, epoch);
+	const high = seen.get(epoch);
+	if (pos && high !== undefined && high !== null && pos.seq < high && !userIsNewer(sessionId, epoch, revision)) {
+		// Superseded: a later question of this log was already seen, and this
+		// revision carries no newer user message (a delayed row or snapshot).
+		// Non-question prose (null) and a lower question that arrives with a
+		// newer user message still replace it.
+		return;
+	}
+	if (!seen.has(epoch) && seen.size >= EPOCHS_KEPT) {
+		const oldest = seen.keys().next().value;
+		if (oldest !== undefined) seen.delete(oldest);
+	}
+	if (pos && (high === undefined || high === null || pos.seq > high)) seen.set(epoch, pos.seq);
+	else if (high === undefined) seen.set(epoch, null);
+	_rowQuestions.set(sessionId, pos);
+}
+
+/** Whether the revision's user message is newer than any seen in `epoch`. */
+function userIsNewer(sessionId: string, epoch: string, revision: UserMessageRevision): boolean {
+	const user = toPosition(revision.last_user_message_seq, revision.last_user_message_epoch);
+	if (!user || user.epoch !== epoch) return false;
+	const seen = latestIn(sessionId, epoch);
+	return seen === undefined || user.seq > seen;
 }
 
 /** Record the latest user pair of a revision that carries one. */
@@ -329,6 +373,7 @@ export function forgetProseQuestion(sessionId: string, opts: { cleared?: boolean
 	if (opts.cleared) {
 		const retired = _retired.get(sessionId) ?? new Set<string>();
 		for (const epoch of _latest.get(sessionId)?.keys() ?? []) retired.add(epoch);
+		for (const epoch of _questionSeen.get(sessionId)?.keys() ?? []) retired.add(epoch);
 		for (const pos of [_questions.get(sessionId), _rowQuestions.get(sessionId), _lastUser.get(sessionId)]) {
 			if (pos) retired.add(pos.epoch);
 		}
@@ -338,6 +383,7 @@ export function forgetProseQuestion(sessionId: string, opts: { cleared?: boolean
 	}
 	_questions.delete(sessionId);
 	_rowQuestions.delete(sessionId);
+	_questionSeen.delete(sessionId);
 	_lastUser.delete(sessionId);
 	_latest.delete(sessionId);
 	_rowRaw.delete(sessionId);
@@ -352,6 +398,7 @@ export function _resetProseQuestions(): void {
 	_claims.clear();
 	_rowRaw.clear();
 	_rowQuestions.clear();
+	_questionSeen.clear();
 	_lastUser.clear();
 	_retired.clear();
 	_store.set(new Set());

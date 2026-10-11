@@ -316,6 +316,18 @@ describe('row-derived assistant question (#2263)', () => {
 		observeLastUserMessage('A', { last_user_message_seq: 13, last_user_message_epoch: E });
 		observeLastUserMessage('A', row(16, 13));
 		expect(has('A')).toBe(true);
+		// A delayed pre-answer row (and a delayed /live snapshot) is superseded.
+		observeSessionRows([{ id: 'A', ...row(12, 9) }]);
+		finishUserMessageRevisionSeed('A', beginUserMessageRevisionSeed('A'), row(12, 13));
+		expect(has('A')).toBe(true);
+		// Non-question prose still clears it, and a lower question with a newer
+		// user message (a retry projection) still replaces it.
+		observeLastUserMessage('A', { last_assistant_question_seq: null, last_assistant_question_epoch: E });
+		expect(has('A')).toBe(false);
+		observeLastUserMessage('A', row(16, 13));
+		expect(has('A')).toBe(true);
+		observeLastUserMessage('A', row(15, 14));
+		expect(has('A')).toBe(true);
 	});
 
 	it('does not compare positions across epochs', () => {
@@ -368,6 +380,13 @@ describe('row-derived assistant question (#2263)', () => {
 		// The new log asks: marked again.
 		observeLastUserMessage('A', row(2, null, E2));
 		expect(has('A')).toBe(true);
+	});
+
+	it('a clear retires an epoch only seen with an explicit null question', () => {
+		observeLastUserMessage('A', row(null, null));
+		forgetProseQuestion('A', { cleared: true });
+		observeLastUserMessage('A', row(2, null));
+		expect(has('A')).toBe(false);
 	});
 
 	it('deleting the session drops the row-derived mark', () => {
