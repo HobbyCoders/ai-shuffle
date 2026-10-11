@@ -16,6 +16,7 @@ from app.api.auth import require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
 from app.api.sessions_helpers import (
     require_transcript_session,
+    refuse_assistant_home_mutation,
     ForkSessionRequest,
     ForkSessionResponse,
 )
@@ -250,6 +251,7 @@ async def fork_session(
 
     # Get the original session
     original_session = await require_transcript_session(request, session_id)
+    await refuse_assistant_home_mutation(session_id, "forked")
 
     sdk_session_id = original_session.get("sdk_session_id")
     if not sdk_session_id:

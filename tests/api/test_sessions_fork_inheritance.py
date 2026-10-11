@@ -12,6 +12,7 @@ import pytest
 from psycopg2.extras import Json
 
 from app.db import sessions as sessions_db
+from tests.db.test_assistant_store import assistant_fixture  # noqa: F401
 
 
 PARENT_SID = "sess-fork-parent"
@@ -93,7 +94,32 @@ def fork_client(mock_db):
         yield c
 
 
-def test_fork_inherits_worktree_and_run_binding(fork_client):
+@pytest.mark.parametrize("body", [{}, {"message_index": 0}])
+def test_assistant_home_fork_refused(fork_client, assistant_fixture, body, monkeypatch):
+    from unittest.mock import MagicMock
+    from app.core import assistant_service as service
+    from app.db import assistant as store, database
+
+    # Use a real home produced by configure/open_home, with a populated transcript
+    # that an ordinary session can fork (the success test below uses the same seed).
+    _seed_parent()
+    sid = assistant_fixture["id"]
+    sessions_db.update_session(sid, sdk_session_id=PARENT_SDK)
+    before = sessions_db.get_session(sid)
+    create = MagicMock(wraps=database.create_session)
+    monkeypatch.setattr(database, "create_session", create)
+
+    response = fork_client.post(f"/{sid}/fork", json=body)
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Your personal assistant is a persistent conversation and cannot be forked"
+    }
+    assert sessions_db.get_session(sid) == before
+    assert store.get_state(service.assistant_id())["home_session_id"] == sid
+    create.assert_not_called()
+
+
+def test_fork_inherits_worktree_and_run_binding(fork_client, assistant_fixture):
     _seed_parent()
 
     resp = fork_client.post(f"/{PARENT_SID}/fork", json={})
@@ -102,6 +128,9 @@ def test_fork_inherits_worktree_and_run_binding(fork_client):
 
     row = sessions_db.get_session(fork_sid)
     assert row["parent_session_id"] == PARENT_SID
+    from app.core import assistant_service as service
+    from app.db import assistant as store
+    assert store.get_state(service.assistant_id())["home_session_id"] == assistant_fixture["id"]
 
     # Worktree binding: cwd resolution follows these, not the base checkout.
     assert row["worktree_id"] == "wt-1"
