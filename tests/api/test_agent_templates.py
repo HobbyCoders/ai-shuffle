@@ -83,6 +83,28 @@ def test_retired_automation_still_loads_and_requires_reassignment(authenticated_
     response = authenticated_client.post("/api/v1/automations/retired-auto/enable")
     assert response.status_code == 400
     assert "Choose an agent" in response.json()["detail"]
+    response = authenticated_client.patch("/api/v1/automations/retired-auto", json={"is_enabled": True})
+    assert response.status_code == 400
+    assert "Choose an agent" in response.json()["detail"]
+    assert not database.get_automation("retired-auto")["is_enabled"]
+
+
+@pytest.mark.parametrize("profile_id", [None, ""])
+def test_cannot_unlink_enabled_automation(authenticated_client, profile_id):
+    database.create_profile("chosen", "Chosen", None, {})
+    database.create_automation("linked-auto", "Saved work", "interval", {"seconds": 300},
+                               "chosen", prompt="Do work", enabled=True)
+    response = authenticated_client.patch("/api/v1/automations/linked-auto", json={"profile_id": profile_id})
+    assert response.status_code == 400
+    assert database.get_automation("linked-auto")["profile_id"] == "chosen"
+    response = authenticated_client.patch("/api/v1/automations/linked-auto",
+                                          json={"profile_id": profile_id, "is_enabled": False})
+    assert response.status_code == 200, response.text
+    assert response.json()["profile_id"] is None
+    response = authenticated_client.patch("/api/v1/automations/linked-auto",
+                                          json={"profile_id": "chosen", "is_enabled": True})
+    assert response.status_code == 200, response.text
+    assert response.json()["is_enabled"]
 
 
 @pytest.mark.parametrize("method,path", [("get", "/team-templates"), ("post", "/templates/starter-team/install")])

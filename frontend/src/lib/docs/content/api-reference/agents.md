@@ -182,7 +182,7 @@ Get the full nested-agent objects enabled for this agent.
 ```json
 [
   {
-    "id": "general-purpose",
+    "id": "agent_installed_uuid",
     "name": "General Purpose",
     "description": "Coding agent for backend and general implementation work",
     "prompt": "You are a coding subagent for AI Shuffle...",
@@ -272,7 +272,7 @@ Replace the entire enabled agents list.
 curl -X PUT http://localhost:8000/api/v1/agents/agent_abc123/enabled-agents \
   -H "Authorization: Bearer $OWNER_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"enabled_agents": ["general-purpose", "my-custom-agent"]}'
+  -d '{"enabled_agents": ["agent_installed_uuid", "my-custom-agent"]}'
 ```
 
 ### POST /api/v1/agents/{agent_id}/enabled-agents/{subagent_id}

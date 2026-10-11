@@ -8,6 +8,8 @@ order: 2
 
 Endpoints for managing chat sessions — listing, searching, creating, updating, deleting, exporting, and importing.
 
+AI Shuffle no longer ships a default built-in agent. For ordinary session creation, supply an existing agent ID or configure a project default. Without either, the API selects the first configured agent; with no agents it returns `409` and asks you to create one. Install the optional starter team or create an agent first. Starter-team IDs are newly generated, not fixed IDs such as `general-purpose`.
+
 An API key sees and acts only on the sessions it started (see [Own Sessions](/docs/api-reference/api-users#own-sessions)). A route that takes a `session_id` returns `403` for the owner's session, another key's, or one outside the key's project or agents, and `404` for an id that does not exist. The owner can use every session.
 
 ## Read the Suggested Next Reply
@@ -477,7 +479,7 @@ A swarm is a set of tasks an agent hands to other agents, some waiting on others
       "created_at": "...",
       "updated_at": "...",
       "tasks": [
-        { "id": "scan", "title": "Scan routes", "agent": "general-purpose", "depends_on": [], "status": "completed", "worker_session_id": "...", "result": "...", "error": null, "started_at": "...", "finished_at": "..." }
+        { "id": "scan", "title": "Scan routes", "agent": "agent_installed_uuid", "depends_on": [], "status": "completed", "worker_session_id": "...", "result": "...", "error": null, "started_at": "...", "finished_at": "..." }
       ]
     }
   ]

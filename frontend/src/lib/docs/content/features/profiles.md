@@ -23,7 +23,7 @@ The starter team is opt-in. Its agents are ordinary owner-owned agents: you can 
 
 Choose a subagent default model or a model assignment before delegating. With no available agents, Task and Swarm refuse delegation instead of inventing a built-in fallback.
 
-On upgrade, the old built-in General Purpose and Frontend Designer agents are retired, like Explore and Plan before them. Owner-created agents are preserved. Historical chats remain, with the retired agent reference cleared. Affected automations are preserved but disabled and unlinked: choose an agent before enabling them again. Existing API-key restrictions are not transferred to the new starter agents.
+On upgrade, the old built-in General Purpose and Frontend Designer agents are retired, like Explore and Plan before them. Owner-created agents are preserved. Historical chats remain, with the retired agent reference cleared. Affected automations are preserved but disabled and unlinked: choose an agent before enabling them again. Existing API-key restrictions are not transferred to the new starter agents. Explicit nested-agent selections are not relinked either: select the newly installed agents again where needed. Edited legacy built-in rows are retired too; export any prompts or settings you want to keep before upgrading. Older workers may show stale linked automations until they also upgrade.
 
 ## Create an agent
 
