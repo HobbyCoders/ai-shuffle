@@ -731,10 +731,14 @@ def start_turn(
                 cursor.execute(
                     "SELECT * FROM turns WHERE session_id=%s AND state <> 'queued' "
                     "AND COALESCE(stop_reason, '') <> 'steered' "
-                    # A withdrawn queued message never replaced the parked
-                    # logical turn; skip its terminal bookkeeping on unpark.
+                    # Skip only withdrawals that never executed. Crash recovery
+                    # clears started_at, but a durable start receipt must still
+                    # prevent resuming across a turn that actually ran.
                     "AND NOT (state='aborted' AND started_at IS NULL "
-                    "AND COALESCE(stop_reason, '')='removed_from_queue') "
+                    "AND COALESCE(stop_reason, '')='removed_from_queue' "
+                    "AND NOT EXISTS (SELECT 1 FROM session_events e "
+                    "WHERE e.session_id=turns.session_id AND e.turn_id=turns.id "
+                    "AND e.event_type='turn.started')) "
                     "ORDER BY position DESC, created_at DESC, id DESC LIMIT 1 FOR UPDATE",
                     (candidate["session_id"],),
                 )
