@@ -426,6 +426,7 @@ describe('message.user reconcile', () => {
 		const s = fold([ev('message.user', { id: 'srv-1', content: 'hello', command_id: null })]);
 		expect(s.messages).toHaveLength(1);
 		expect(s.messages[0]).toMatchObject({ id: 'srv-1', role: 'user', type: 'text', content: 'hello' });
+		expect(s.messages[0].serverId).toBeUndefined();
 	});
 
 	it('reconciles onto an optimistic message by command_id, keeping the optimistic id', () => {
@@ -442,6 +443,8 @@ describe('message.user reconcile', () => {
 		expect(s.messages).toHaveLength(1);
 		expect(s.messages[0].id).toBe('local-abc'); // kept for stable keying
 		expect(s.messages[0].commandId).toBe('req-xyz');
+		// The server id rides along so the row's fold state can follow it.
+		expect(s.messages[0].serverId).toBe('srv-9');
 	});
 
 	it('reconciles by content + recency when no command_id matches', () => {

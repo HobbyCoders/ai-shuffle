@@ -3,10 +3,22 @@
 	 * WorkLogGroup — the fold that hides a turn's routine steps.
 	 *
 	 * Two modes, both rendered as flat rows with no card chrome:
-	 *  - live: the newest tool row stays on screen and the earlier ones hide
-	 *    behind "+N previous tool calls".
+	 *  - live: the turn so far, cut into runs at its protected rows. Each earlier
+	 *    run hides behind its own live label ("Read 3 files and ran 2 commands");
+	 *    the protected row that ended it stays visible below, and the current run
+	 *    shows every row (transcript-organization spec §2).
 	 *  - settled: the whole run — tool rows plus the turn's non-final commentary
 	 *    — hides behind one "Worked for {duration}" row.
+	 *
+	 * Live and settled render the SAME keyed row list, so when the turn settles
+	 * only `mode` flips: every row that stays on screen keeps its component, and
+	 * with it any tool, thinking or worker card the reader expanded (spec §6). A
+	 * row the reader clicked into stays mounted (hidden) while a fold hides it,
+	 * so reopening the fold shows it as they left it.
+	 *
+	 * Open/closed folds live in the fold-state store, keyed by `foldKey`, so they
+	 * survive a remount, a session switch and a reload. Without a key (tests,
+	 * legacy callers) the group keeps them locally.
 	 *
 	 * The rows themselves are rendered by the caller through the `row` snippet,
 	 * so this component owns the fold and nothing else; MessageArea keeps the one
@@ -18,7 +30,8 @@
 	import type { ChatMessage } from '$lib/stores/types';
 	import MediaGallery from './MediaGallery.svelte';
 	import type { GalleryMedia } from '$lib/utils/media-gallery';
-	import type { WorkLogEntry, WorkLogSequenceEntry } from '$lib/utils/work-log';
+	import type { WorkLogEntry, WorkLogRun, WorkLogSequenceEntry } from '$lib/utils/work-log';
+	import { foldState, type FoldState } from '$lib/stores/session/fold-state';
 
 	interface Props {
 		mode: 'live' | 'settled';
@@ -26,8 +39,16 @@
 		folded: WorkLogEntry[];
 		/** Rows always visible (live mode's newest row). */
 		tail: WorkLogEntry[];
-		/** Ordered settled turn; protected/final rows stay visible while collapsed. */
+		/** Ordered turn; protected/final rows stay visible while collapsed. */
 		sequence?: WorkLogSequenceEntry[];
+		/** Live turn: the earlier runs, each folded on its own. */
+		runs?: WorkLogRun[];
+		/** Fold-state key of the turn (server id of its opening row). */
+		foldKey?: string | null;
+		/** Optimistic id `foldKey` replaced: its folds move onto `foldKey`. */
+		foldAlias?: string | null;
+		/** Injected in tests; the app uses the shared store. */
+		folds?: FoldState;
 		/** "Worked for 2m 14s" / "You stopped after 12s"; null when unknown. */
 		durationLabel?: string | null;
 		/** Action-specific description of the folded work. */
@@ -44,6 +65,10 @@
 		folded,
 		tail,
 		sequence = [],
+		runs = [],
+		foldKey = null,
+		foldAlias = null,
+		folds = foldState,
 		gallery = [],
 		durationLabel = null,
 		summary = null,
@@ -51,10 +76,33 @@
 		row,
 		observeTurnAnchor = () => {}
 	}: Props = $props();
-	const retainedSequence = $derived(sequence.filter((entry) => !entry.hiddenWhenCollapsed));
 	const gallerySources = $derived(new Set(gallery.map(item => item.src)));
 
-	let open = $state(false);
+	// ── Fold state ─────────────────────────────────────────────────────────
+	let stored = $state<Readonly<Record<string, true>>>({});
+	$effect(() => folds.subscribe((value) => { stored = value; }));
+	// An optimistic send keeps its id as the row key (no remount); once the
+	// server id is known, folds recorded under the optimistic id move onto it.
+	$effect.pre(() => {
+		if (foldKey && foldAlias && foldAlias !== foldKey) folds.remap(foldAlias, foldKey);
+	});
+
+	let localOpen = $state(false);
+	let localRuns = $state<Record<number, boolean>>({});
+	const turnFold = $derived(foldKey ? `${foldKey}:turn` : null);
+	const open = $derived(turnFold ? stored[turnFold] === true : localOpen);
+	function setOpen(next: boolean) {
+		if (turnFold) folds.setOpen(turnFold, next);
+		else localOpen = next;
+	}
+	function runOpen(run: number): boolean {
+		return foldKey ? stored[`${foldKey}:${run}`] === true : localRuns[run] === true;
+	}
+	function setRunOpen(run: number, next: boolean) {
+		if (foldKey) folds.setOpen(`${foldKey}:${run}`, next);
+		else localRuns = { ...localRuns, [run]: next };
+	}
+
 	let previousMode = $state<'live' | 'settled' | null>(null);
 
 	// Reserve space below the live group: the active tool row is replaced every
@@ -70,6 +118,9 @@
 	// tail row shrinks (the user collapsed a tool or worker), drop the
 	// floor to the new content height. A shorter successor with a new id
 	// still keeps the peak, which is the swap-jitter case.
+	//
+	// A live turn rendered as runs keeps every row in place (nothing is
+	// swapped), so it reserves nothing.
 	let sectionEl = $state<HTMLElement | null>(null);
 	let contentEl = $state<HTMLElement | null>(null);
 	let reservedPx = $state(0);
@@ -83,7 +134,7 @@
 		if (!contentEl || typeof ResizeObserver === 'undefined') return;
 		const el = contentEl;
 		const apply = () => {
-			if (mode !== 'live' || open) return;
+			if (mode !== 'live' || open || sequence.length > 0) return;
 			const height = el.getBoundingClientRect().height;
 			const key = tailIdentity(tail);
 			if (height > reservedPx) {
@@ -100,17 +151,18 @@
 	});
 
 	$effect(() => {
-		if (mode !== 'live') {
+		if (mode !== 'live' || sequence.length > 0) {
 			reservedPx = 0;
 			reservedTailKey = '';
 		}
 	});
 
-	// A live run may be open while the user inspects it. Once the turn settles,
-	// deliberately return to the compact finished presentation.
+	// Without a fold key, an inspected live group returns to the compact
+	// finished presentation when the turn settles. With one, the reader's
+	// choice is stored state and survives the settle (spec §6).
 	$effect(() => {
 		const currentMode = mode;
-		if (previousMode === 'live' && currentMode === 'settled') open = false;
+		if (previousMode === 'live' && currentMode === 'settled' && !turnFold) localOpen = false;
 		previousMode = currentMode;
 	});
 
@@ -122,6 +174,46 @@
 	const disclosureLabel = $derived(
 		open ? 'Hide work details' : `Show work details: ${collapsedLabel}${summary && mode === 'settled' ? `, ${summary}` : ''}`
 	);
+
+	// ── Live runs ──────────────────────────────────────────────────────────
+	const runByIndex = $derived(new Map(runs.map((run) => [run.index, run])));
+	/** Sequence positions of each folded run's first and last hidden row. */
+	const runEdges = $derived.by(() => {
+		const first = new Map<number, number>();
+		const last = new Map<number, number>();
+		if (mode !== 'live') return { first, last };
+		sequence.forEach((entry, position) => {
+			if (!entry.foldsInRun || entry.run === undefined || !runByIndex.has(entry.run)) return;
+			if (!first.has(entry.run)) first.set(entry.run, position);
+			last.set(entry.run, position);
+		});
+		return { first, last };
+	});
+	function runLabel(run: WorkLogRun): string {
+		return run.summary ?? `+${run.folded.length} previous tool ${run.folded.length === 1 ? 'call' : 'calls'}`;
+	}
+
+	// ── Row visibility ─────────────────────────────────────────────────────
+	function rowKey(entry: WorkLogEntry): string {
+		return entry.message.id ?? String(entry.index);
+	}
+	function rowVisible(entry: WorkLogSequenceEntry): boolean {
+		if (mode === 'settled') return open || !entry.hiddenWhenCollapsed;
+		return !entry.foldsInRun || entry.run === undefined || !runByIndex.has(entry.run) || runOpen(entry.run);
+	}
+	// Rows the reader clicked into (expanded a tool, a thought, a worker card).
+	let touched = $state<Record<string, true>>({});
+	const trackTouch: Action<HTMLElement, string> = (node, key) => {
+		let current = key;
+		const mark = () => {
+			if (!touched[current]) touched = { ...touched, [current]: true };
+		};
+		node.addEventListener('click', mark, true);
+		return {
+			update(next: string) { current = next; },
+			destroy() { node.removeEventListener('click', mark, true); }
+		};
+	};
 
 	function isAssistantProse(entry: WorkLogSequenceEntry): boolean {
 		return entry.message.role === 'assistant' && (entry.message.type === 'text' || !entry.message.type);
@@ -137,31 +229,100 @@
 	data-work-log-mode={mode}
 >
 	<div class="worklog-measure" bind:this={contentEl}>
-	{#if open}
-		<div class="wlhead">Work log{#if summary}<span> · {summary}</span>{/if}</div>
-		{#if mode === 'settled' && sequence.length > 0}
-			<div class="work-sequence is-expanded">
-				{#each sequence as entry (entry.message.id ?? entry.index)}
+	{#if sequence.length > 0}
+		<!-- One keyed row list for live and settled: settling must not remount rows. -->
+		{#if mode === 'settled'}
+			{#if open}
+				<div class="wlhead">Work log{#if summary}<span> · {summary}</span>{/if}</div>
+			{:else}
+				<button
+					type="button"
+					class="wlrow fold hairline"
+					onclick={() => setOpen(true)}
+					aria-expanded="false"
+					aria-label={disclosureLabel}
+				>
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<path d="m6 9 6 6 6-6" />
+					</svg>
+					<span class="fold-label">{collapsedLabel}</span>
+					{#if summary}
+						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
+					{/if}
+				</button>
+			{/if}
+		{/if}
+		<div class="work-sequence" class:is-expanded={mode === 'settled' && open} class:is-collapsed={!(mode === 'settled' && open)}>
+			{#if mode === 'settled' && !open && gallery.length > 1}<MediaGallery items={gallery} />{/if}
+			{#each sequence as entry, position (rowKey(entry))}
+				{@const run = mode === 'live' && entry.run !== undefined ? runByIndex.get(entry.run) : undefined}
+				{@const visible = rowVisible(entry)}
+				{#if run && runEdges.first.get(run.index) === position}
+					{#if runOpen(run.index)}
+						<div class="wlhead">Work log{#if run.summary}<span> · {run.summary}</span>{/if}</div>
+					{:else}
+						<button
+							type="button"
+							class="wlrow fold"
+							onclick={() => setRunOpen(run.index, true)}
+							aria-expanded="false"
+							aria-label={`Show work details: ${runLabel(run)}`}
+						>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<path d="m6 9 6 6 6-6" />
+							</svg>
+							<span class="fold-label">
+								{#if run.summary && run.compactSummary}
+									<span class="fold-prose" title={run.summary}>{run.summary}</span>
+									<span class="fold-compact">{run.compactSummary}</span>
+								{:else}
+									{runLabel(run)}
+								{/if}
+							</span>
+						</button>
+					{/if}
+				{/if}
+				{#if visible || touched[rowKey(entry)]}
 					<div
 						class="sequence-row"
 						class:is-prose={isAssistantProse(entry)}
+						hidden={!visible}
 						id={entry.message.id && isNavigableUserTurn(entry.message) ? turnAnchorId(entry.message.id) : undefined}
 						data-user-turn-id={entry.message.id && isNavigableUserTurn(entry.message) ? entry.message.id : undefined}
 						use:observeTurnAnchor
+						use:trackTouch={rowKey(entry)}
 					>
-						{@render row(entry.message, entry.index)}
+						{@render row(entry.message, entry.index, mode === 'settled' && !open && entry.inGallery ? gallerySources : undefined)}
 					</div>
-				{/each}
-			</div>
-		{:else}
-			{#each folded as entry (entry.message.id ?? entry.index)}
-				{@render row(entry.message, entry.index)}
+				{/if}
+				{#if run && runEdges.last.get(run.index) === position && runOpen(run.index)}
+					<button type="button" class="wlrow fold" onclick={() => setRunOpen(run.index, false)} aria-expanded="true" aria-label="Hide work details">
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+							<path d="m18 15-6-6-6 6" />
+						</svg>
+						Show fewer log entries
+					</button>
+				{/if}
 			{/each}
-			{#each tail as entry (entry.message.id ?? entry.index)}
-				{@render row(entry.message, entry.index)}
-			{/each}
+		</div>
+		{#if mode === 'settled' && open}
+			<button type="button" class="wlrow fold" onclick={() => setOpen(false)} aria-expanded="true" aria-label={disclosureLabel}>
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<path d="m18 15-6-6-6 6" />
+				</svg>
+				Show fewer log entries
+			</button>
 		{/if}
-		<button type="button" class="wlrow fold" onclick={() => (open = false)} aria-expanded="true" aria-label={disclosureLabel}>
+	{:else if open}
+		<!-- Legacy shape (folded rows + visible tail, no ordered sequence). -->
+		<div class="wlhead">Work log{#if summary}<span> · {summary}</span>{/if}</div>
+		{#each folded as entry (entry.message.id ?? entry.index)}
+			{@render row(entry.message, entry.index)}
+		{/each}
+		{#each tail as entry (entry.message.id ?? entry.index)}
+			{@render row(entry.message, entry.index)}
+		{/each}
+		<button type="button" class="wlrow fold" onclick={() => setOpen(false)} aria-expanded="true" aria-label={disclosureLabel}>
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 				<path d="m18 15-6-6-6 6" />
 			</svg>
@@ -172,7 +333,7 @@
 			type="button"
 			class="wlrow fold"
 			class:hairline={mode === 'settled'}
-			onclick={() => (open = true)}
+			onclick={() => setOpen(true)}
 			aria-expanded="false"
 			aria-label={disclosureLabel}
 		>
@@ -193,26 +354,9 @@
 				<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
 			{/if}
 		</button>
-		{#if mode === 'settled' && sequence.length > 0}
-			<div class="work-sequence is-collapsed">
-				{#if gallery.length > 1}<MediaGallery items={gallery} />{/if}
-				{#each retainedSequence as entry (entry.message.id ?? entry.index)}
-					<div
-						class="sequence-row"
-						class:is-prose={isAssistantProse(entry)}
-						id={entry.message.id && isNavigableUserTurn(entry.message) ? turnAnchorId(entry.message.id) : undefined}
-						data-user-turn-id={entry.message.id && isNavigableUserTurn(entry.message) ? entry.message.id : undefined}
-						use:observeTurnAnchor
-					>
-						{@render row(entry.message, entry.index, entry.inGallery ? gallerySources : undefined)}
-					</div>
-				{/each}
-			</div>
-		{:else}
-			{#each tail as entry (entry.message.id ?? entry.index)}
-				{@render row(entry.message, entry.index)}
-			{/each}
-		{/if}
+		{#each tail as entry (entry.message.id ?? entry.index)}
+			{@render row(entry.message, entry.index)}
+		{/each}
 	{/if}
 	</div>
 </section>

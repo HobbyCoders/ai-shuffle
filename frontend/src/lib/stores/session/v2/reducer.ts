@@ -1521,7 +1521,9 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				// pending optimistic message), so it participates in rewinds.
 				const keepId = state.messages[idx].id;
 				const messages = [...state.messages];
-				messages[idx] = userMsg(keepId);
+				// Remember the server id the row carries after a reload, so state
+				// keyed by it (transcript folds) can be remapped onto it.
+				messages[idx] = keepId === event.id ? userMsg(keepId) : { ...userMsg(keepId), serverId: event.id };
 				return {
 					...state,
 					messages,

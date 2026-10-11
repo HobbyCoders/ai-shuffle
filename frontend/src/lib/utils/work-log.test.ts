@@ -143,11 +143,22 @@ function collapsedVisibleMessages(items: DisplayItem[]): ChatMessage[] {
 		if (item.kind === 'system_group') return item.messages;
 		if (item.sequence.length > 0) {
 			return item.sequence
-				.filter((entry) => !entry.hiddenWhenCollapsed)
+				.filter((entry) => !entry.hiddenWhenCollapsed && !entry.foldsInRun)
 				.map((entry) => entry.message);
 		}
 		return item.tail.map((entry) => entry.message);
 	});
+}
+
+/** Settled folds only: a live turn is one work log in live mode, never settled. */
+function settledFolds(items: DisplayItem[]) {
+	return items.filter((item) => item.kind === 'work_log' && item.mode === 'settled');
+}
+
+/** The live turn's one work log, or undefined when the turn emitted none. */
+function liveLog(items: DisplayItem[]) {
+	return items.find((item): item is Extract<DisplayItem, { kind: 'work_log' }> =>
+		item.kind === 'work_log' && item.mode === 'live');
 }
 
 const SETTLED = { isStreaming: false, groupingEnabled: true };
@@ -662,7 +673,7 @@ describe('buildDisplayItems — live turn', () => {
 	it('keeps every completed and running tool visible', () => {
 		const messages = [user('go'), tool(), tool(), tool({ toolStatus: 'running', streaming: true })];
 		const items = buildDisplayItems(messages, LIVE);
-		expect(items.every((item) => item.kind === 'message')).toBe(true);
+		expect(settledFolds(items)).toEqual([]);
 		expect(collapsedVisibleMessages(items)).toEqual(messages);
 	});
 
@@ -670,17 +681,17 @@ describe('buildDisplayItems — live turn', () => {
 		const prose = text('working on it');
 		const thinking = msg({ type: 'thinking', content: 'active thought', streaming: true });
 		const items = buildDisplayItems([user('go'), tool(), prose, thinking], LIVE);
-		expect(items.some((item) => item.kind === 'message' && item.message.id === prose.id)).toBe(true);
-		expect(items.some((item) => item.kind === 'message' && item.message.id === thinking.id)).toBe(true);
+		expect(collapsedVisibleMessages(items)).toContain(prose);
+		expect(collapsedVisibleMessages(items)).toContain(thinking);
 	});
 
 
 	it('renders a single active tool plainly', () => {
-		const items = buildDisplayItems(
-			[user('go'), tool({ toolStatus: 'running', streaming: true })],
-			LIVE
-		);
-		expect(items.map((item) => item.kind)).toEqual(['message', 'message']);
+		const messages = [user('go'), tool({ toolStatus: 'running', streaming: true })];
+		const items = buildDisplayItems(messages, LIVE);
+		expect(items.map((item) => item.kind)).toEqual(['message', 'work_log']);
+		expect(liveLog(items)!.runs).toEqual([]);
+		expect(collapsedVisibleMessages(items)).toEqual(messages);
 	});
 
 	it('ignores an empty assistant phantom without hiding completed tools', () => {
@@ -693,23 +704,23 @@ describe('buildDisplayItems — live turn', () => {
 		expect(collapsedVisibleMessages(buildDisplayItems(messages, LIVE))).toEqual(messages);
 	});
 
-	it('keeps completed subagent cards visible alongside tools', () => {
+	it('keeps completed subagent cards visible, folding the run they end', () => {
 		const messages = [user('go'), tool(), subagent(), tool()];
-		expect(collapsedVisibleMessages(buildDisplayItems(messages, LIVE))).toEqual(messages);
+		expect(collapsedVisibleMessages(buildDisplayItems(messages, LIVE))).toEqual([messages[0], messages[2], messages[3]]);
 	});
 
 	it('shows a streaming code-mode cell as the live tail instead of going silent', () => {
 		const cell = tool({ toolName: 'run_python', toolStatus: 'running', streaming: true });
 		// A turn whose only work is the streaming cell keeps the cell itself visible.
 		const lone = buildDisplayItems([user('go'), cell], LIVE);
-		expect(lone.some((item) => item.kind === 'message' && item.message.id === cell.id)).toBe(true);
+		expect(collapsedVisibleMessages(lone)).toContain(cell);
 
 		// Once the cell executes inner calls, only those calls need visible rows.
 		const executing = tool({ toolName: 'run_python', toolStatus: 'running', streaming: false });
 		const inner = tool({ toolName: 'Read', toolStatus: 'running', streaming: true });
 		const prompt = user('go');
 		const items = buildDisplayItems([prompt, executing, inner], LIVE);
-		expect(items.some((item) => item.kind === 'work_log')).toBe(false);
+		expect(settledFolds(items)).toEqual([]);
 		expect(collapsedVisibleMessages(items)).toEqual([prompt, inner]);
 	});
 
@@ -744,9 +755,7 @@ describe('buildDisplayItems — live turn', () => {
 	it('settles earlier turns while the final turn streams', () => {
 		const messages = [user('one'), tool(), text('answer'), user('two'), tool({ toolStatus: 'running' })];
 		const folds = buildDisplayItems(messages, LIVE).filter((item) => item.kind === 'work_log');
-		expect(folds).toHaveLength(1);
-		if (folds[0].kind !== 'work_log') throw new Error('expected a work_log');
-		expect(folds[0].mode).toBe('settled');
+		expect(folds.map((fold) => fold.kind === 'work_log' && fold.mode)).toEqual(['settled', 'live']);
 	});
 
 	it('does not fold a parked or otherwise unsettled latest turn', () => {
@@ -755,8 +764,8 @@ describe('buildDisplayItems — live turn', () => {
 			latestTurnUnsettled: true,
 			groupingEnabled: true
 		});
-		expect(items.some((item) => item.kind === 'work_log')).toBe(false);
-		expect(items.some((item) => item.kind === 'message' && item.message.content === 'waiting on background work')).toBe(true);
+		expect(settledFolds(items)).toEqual([]);
+		expect(collapsedVisibleMessages(items).some((message) => message.content === 'waiting on background work')).toBe(true);
 	});
 
 	it('omits settled retry cards while the turn is live', () => {
@@ -788,7 +797,7 @@ describe('buildDisplayItems — live turn', () => {
 		for (let length = 1; length <= messages.length; length++) {
 			const prefix = messages.slice(0, length);
 			const live = buildDisplayItems(prefix, LIVE);
-			expect(live.every((item) => item.kind === 'message')).toBe(true);
+			expect(settledFolds(live)).toEqual([]);
 			expect(collapsedVisibleMessages(live)).toEqual(prefix);
 		}
 		const settled = buildDisplayItems(messages, SETTLED);
@@ -865,8 +874,12 @@ describe('work folds from wire events', () => {
 		};
 		for (const [type, fields] of events) {
 			const items = apply(type, fields);
-			expect(items.every((item) => item.kind === 'message')).toBe(true);
-			expect(collapsedVisibleMessages(items)).toEqual(state.messages);
+			expect(settledFolds(items)).toEqual([]);
+			// Every prompt and the latest prose stay; earlier work folds per run.
+			const visible = collapsedVisibleMessages(items);
+			for (const m of state.messages.filter((m) => m.role === 'user')) expect(visible).toContain(m);
+			const latestProse = state.messages.findLast((m) => m.role === 'assistant' && m.type === 'text');
+			if (latestProse) expect(visible).toContain(latestProse);
 		}
 		const settled = apply('turn.completed');
 		expect(settled.map((item) => item.kind)).toEqual(['message', 'work_log']);
@@ -874,8 +887,12 @@ describe('work folds from wire events', () => {
 			.toEqual(['Check two files', 'Checking the first file.', 'Also check the second file', 'And summarize it', 'Both files checked.']);
 		expect(buildDisplayItems(structuredClone(state.messages), SETTLED)).toEqual(settled);
 		const parked = buildDisplayItems(state.messages, { ...SETTLED, latestTurnUnsettled: true });
-		expect(parked.every((item) => item.kind === 'message')).toBe(true);
-		expect(collapsedVisibleMessages(parked)).toEqual(state.messages);
+		expect(settledFolds(parked)).toEqual([]);
+		// Parked again, the turn is live: each steer ends a run and the answer it
+		// replied to stays on screen as it does settled. Only the first Read folds;
+		// the run after the last steer is the current one and stays open.
+		const firstRead = state.messages.find((m) => m.toolId === 'read-1');
+		expect(collapsedVisibleMessages(parked)).toEqual(state.messages.filter((m) => m !== firstRead));
 	});
 });
 
@@ -1031,7 +1048,7 @@ describe('buildDisplayItems — misc', () => {
 			text('done')
 		];
 		const items = buildDisplayItems(messages, { isStreaming: false, groupingEnabled: false });
-		expect(items.some((item) => item.kind === 'work_log')).toBe(false);
+		expect(settledFolds(items)).toEqual([]);
 		expect(items.some((item) => item.kind === 'system_group')).toBe(true);
 	});
 
@@ -1101,8 +1118,10 @@ describe('transcript model lookups', () => {
 				expect(entry).toBeDefined();
 				expect(entry!.message).toBe(prompt);
 				expect(entry!.index).toBe(messages.indexOf(prompt));
-				const settledSteer = groupingEnabled && !isStreaming && prompt === steer;
-				expect(item.kind).toBe(settledSteer ? 'work_log' : 'message');
+				// Grouping on, a steer rides inside the turn's one work log, live
+				// (as a run boundary) and settled (as a protected row).
+				const groupedSteer = groupingEnabled && prompt === steer;
+				expect(item.kind).toBe(groupedSteer ? 'work_log' : 'message');
 			}
 		}
 	});
@@ -1309,7 +1328,7 @@ describe('context compaction inside a turn', () => {
 		const card = compacted();
 		const messages = [user('go'), tool(), card, tool({ toolStatus: 'running' })];
 		const items = buildDisplayItems(messages, { ...SETTLED, latestTurnUnsettled: true });
-		expect(items.every((item) => item.kind === 'message')).toBe(true);
+		expect(settledFolds(items)).toEqual([]);
 		expect(collapsedVisibleMessages(items)).toContain(card);
 	});
 });
@@ -1370,11 +1389,33 @@ describe('turn unity', () => {
 		return { messages, prompt, read, finding, grep, interim, monitor, worker, question, steer, ack, report, final };
 	}
 
-	it('renders the live long turn flat, steer in place', () => {
+	it('renders the live long turn as runs, steer in place', () => {
 		const t = longTurn();
 		const items = buildDisplayItems(t.messages, { ...SETTLED, latestTurnUnsettled: true, runningToolIds: new Set(['monitor-1']) });
-		expect(items.every((item) => item.kind === 'message')).toBe(true);
-		expect(collapsedVisibleMessages(items)).toEqual(t.messages);
+		expect(settledFolds(items)).toEqual([]);
+		expect(items.map((item) => item.kind)).toEqual(['message', 'work_log']);
+		const log = liveLog(items)!;
+		// Same key the settled fold will have, so settling flips mode in place.
+		expect(log.key).toBe(`wl-turn-${t.prompt.id}`);
+		expect(log.sequence.map((entry) => entry.message)).toEqual(t.messages.slice(1));
+		// Each earlier run folds; the protected row that ended it stays below it:
+		// the finding, the question's lead-in, the worker card. The question and
+		// the steer end runs with nothing left to fold. The current run is open.
+		expect(log.runs!.map((run) => [run.index, run.folded.map((entry) => entry.message)]))
+			.toEqual([[0, [t.read]], [1, [t.grep]], [2, [t.monitor]]]);
+		expect(collapsedVisibleMessages(items)).toEqual([
+			t.prompt, t.finding, t.interim, t.worker, t.question, t.steer, t.ack, t.report, t.final
+		]);
+	});
+
+	it('shows fewer rows once the long turn settles into its one fold', () => {
+		const t = longTurn();
+		const live = buildDisplayItems(t.messages, { ...SETTLED, latestTurnUnsettled: true });
+		const settled = buildDisplayItems(t.messages, SETTLED);
+		expect(liveLog(live)!.key).toBe((settledFolds(settled)[0] as Extract<DisplayItem, { kind: 'work_log' }>).key);
+		expect(collapsedVisibleMessages(settled)).toEqual([
+			t.prompt, t.finding, t.interim, t.worker, t.question, t.steer, t.final
+		]);
 	});
 
 	it('settles the long turn into one fold with the steer retained inside', () => {
@@ -1403,7 +1444,7 @@ describe('turn unity', () => {
 		const next = user('Thanks, now the docs', '2026-10-10T20:40:00.000Z', 'turn-2');
 		const messages = [...t.messages, next, text('Docs next.')];
 		const running = buildDisplayItems(messages, { ...SETTLED, latestTurnUnsettled: false, runningToolIds: new Set(['monitor-1']) });
-		expect(running.some((item) => item.kind === 'work_log')).toBe(false);
+		expect(settledFolds(running)).toEqual([]);
 		const done = buildDisplayItems(messages, { ...SETTLED, latestTurnUnsettled: false, runningToolIds: new Set() });
 		const folds = done.filter((item) => item.kind === 'work_log') as Extract<DisplayItem, { kind: 'work_log' }>[];
 		expect(folds.map((fold) => fold.key)).toEqual([`wl-turn-${t.prompt.id}`]);
@@ -1437,7 +1478,7 @@ describe('turn unity', () => {
 		state = { ...state, messages: [...state.messages, steer] };
 		const options = { ...SETTLED, latestTurnUnsettled: true, runningToolIds: new Set(['monitor-1']) };
 		const optimistic = buildTranscriptModel(state.messages, options);
-		expect(optimistic.items.every((item) => item.kind === 'message')).toBe(true);
+		expect(settledFolds(optimistic.items)).toEqual([]);
 		expect(optimistic.midTurnUserIds.has('user-optimistic')).toBe(true);
 		const turnsBefore = deriveUserTurnNavigationItems(state.messages).length;
 
@@ -1453,7 +1494,7 @@ describe('turn unity', () => {
 		expect(deriveUserTurnNavigationItems(state.messages).length).toBe(turnsBefore);
 		// The parked turn's Monitor still runs: nothing above the steer folds.
 		const after = buildDisplayItems(state.messages, options);
-		expect(after.every((item) => item.kind === 'message')).toBe(true);
+		expect(settledFolds(after)).toEqual([]);
 	});
 
 	it('a send during the settle hold does not fold the turn it interrupted, with no background work', () => {
@@ -1468,18 +1509,19 @@ describe('turn unity', () => {
 			const view = (messages: ChatMessage[], rawUnsettled: boolean) => {
 				const latestTurnUnsettled = settle.update({ sessionId: 's', unsettled: rawUnsettled, parked: false });
 				const heldTurnKeys = handoff.update({ sessionId: 's', latestTurnKey: latestTurnKey(messages), unsettled: latestTurnUnsettled, parked: false });
-				return buildDisplayItems(messages, { ...SETTLED, latestTurnUnsettled, heldTurnKeys, runningToolIds: new Set() }).map((item) => item.kind);
+				return buildDisplayItems(messages, { ...SETTLED, latestTurnUnsettled, heldTurnKeys, runningToolIds: new Set() })
+					.map((item) => (item.kind === 'work_log' ? `work_log:${item.mode}` : item.kind));
 			};
-			expect(view(before, true)).toEqual(['message', 'message', 'message']);
-			// turn.completed: the hold keeps it flat.
-			expect(view(before, false)).toEqual(['message', 'message', 'message']);
+			expect(view(before, true)).toEqual(['message', 'work_log:live']);
+			// turn.completed: the hold keeps it live.
+			expect(view(before, false)).toEqual(['message', 'work_log:live']);
 			// The user sends inside the hold: the optimistic row opens a new turn.
 			const after = [...before, user('And the errors?')];
 			expect(latestTurnKey(after)).toBe(after[3].id);
-			expect(view(after, false)).toEqual(['message', 'message', 'message', 'message']);
-			// Once the hold runs out, the earlier turn folds exactly once.
+			expect(view(after, false)).toEqual(['message', 'work_log:live', 'message']);
+			// Once the hold runs out, the earlier turn settles exactly once.
 			vi.advanceTimersByTime(SETTLE_HOLD_MS);
-			expect(view(after, true)).toEqual(['message', 'work_log', 'message']);
+			expect(view(after, true)).toEqual(['message', 'work_log:settled', 'message']);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -1492,7 +1534,7 @@ describe('turn unity', () => {
 		expect(latestTurnKey(t.messages)).toBe(t.prompt.id);
 		expect(latestTurnKey(messages)).toBe(next.id);
 		const folds = buildDisplayItems(messages, { ...SETTLED, heldTurnKeys: new Set([t.prompt.id!]) });
-		expect(folds.filter((item) => item.kind === 'work_log')).toHaveLength(0);
+		expect(settledFolds(folds)).toHaveLength(0);
 		expect(latestTurnKey([])).toBeNull();
 	});
 
@@ -1583,5 +1625,107 @@ describe('protected prose', () => {
 		const read = tool({ toolName: 'Read' });
 		const items = buildDisplayItems([user('go'), read, text('Line one.\nLine two.'), tool(), text('Done.')], SETTLED);
 		expect(collapsedVisibleMessages(items).some((m) => m.id === read.id)).toBe(false);
+	});
+});
+
+/**
+ * Progressive live folding (transcript-organization spec §2): the live turn is
+ * one work log cut into runs at each protected row. Earlier runs fold, the row
+ * that ended each stays visible, and the current run is open.
+ */
+describe('live runs', () => {
+	type WorkLog = Extract<DisplayItem, { kind: 'work_log' }>;
+	const runsOf = (log: WorkLog) => log.runs!.map((run) => [run.index, run.folded.map((entry) => entry.message)]);
+
+	it.each([
+		['a finding in prose', () => text('Found it:\n- the token is shared')],
+		['a question', () => tool({ toolName: 'AskUserQuestion', toolInput: { questions: [] } })],
+		['a steer', () => user('also check prod', undefined, 'turn-1')],
+		['a worker card', () => subagent({ agentStatus: 'running' })],
+		['a failed tool', () => tool({ toolStatus: 'error', toolResult: 'boom' })],
+		['a special tool', () => tool({ toolName: 'TodoWrite', toolInput: { todos: [] } })]
+	])('ends a run at %s, which stays visible below its fold', (_label, boundary) => {
+		const prompt = user('go', undefined, 'turn-1');
+		const [a, b, edge, c, d] = [tool(), tool(), boundary(), tool(), tool({ toolStatus: 'running', streaming: true })];
+		const items = buildDisplayItems([prompt, a, b, edge, c, d], LIVE);
+		const log = liveLog(items)!;
+		expect(runsOf(log)).toEqual([[0, [a, b]]]);
+		expect(log.runs![0].summary).toBe(summarizeWork(workEntries([a, b])));
+		// Earlier run folded; the boundary and the whole current run stay open.
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, edge, c, d]);
+		expect(log.sequence.map((entry) => entry.run)).toEqual([0, 0, 0, 1, 1]);
+		expect(log.sequence.filter((entry) => entry.foldsInRun).map((entry) => entry.message)).toEqual([a, b]);
+	});
+
+	it('keeps every row of the current run open, with no fold before the first boundary', () => {
+		const messages = [user('go'), tool(), text('Now the workflow.'), tool(), tool({ toolStatus: 'running', streaming: true })];
+		const items = buildDisplayItems(messages, LIVE);
+		expect(liveLog(items)!.runs).toEqual([]);
+		expect(collapsedVisibleMessages(items)).toEqual(messages);
+	});
+
+	it('folds each earlier run on its own and leaves the current one open', () => {
+		const prompt = user('go');
+		const [a, b] = [tool(), tool()];
+		const first = text('First finding:\n- one');
+		const [c, narration] = [tool(), text('Checking more.')];
+		const second = text('Second finding:\n- two');
+		const [d, e] = [tool(), tool({ toolStatus: 'running', streaming: true })];
+		const items = buildDisplayItems([prompt, a, b, first, c, narration, second, d, e], LIVE);
+		expect(runsOf(liveLog(items)!)).toEqual([[0, [a, b]], [1, [c, narration]]]);
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, first, second, d, e]);
+	});
+
+	it('starts a new run at a steer mid-run and keeps the answer it replied to', () => {
+		const prompt = user('go', undefined, 'turn-1');
+		const [a, answer] = [tool(), text('Looks fine.')];
+		const steer = user('check prod too', undefined, 'turn-1');
+		const b = tool({ toolStatus: 'running', streaming: true });
+		const items = buildDisplayItems([prompt, a, answer, steer, b], LIVE);
+		const log = liveLog(items)!;
+		expect(runsOf(log)).toEqual([[0, [a]]]);
+		expect(log.sequence.find((entry) => entry.message === b)!.run).toBe(1);
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, answer, steer, b]);
+	});
+
+	it('does not end a run at prose that is still streaming', () => {
+		const prompt = user('go');
+		const a = tool();
+		const streaming = msg({ type: 'text', content: 'Found it:\n- partial', streaming: true });
+		const items = buildDisplayItems([prompt, a, streaming], LIVE);
+		expect(liveLog(items)!.runs).toEqual([]);
+		const done = buildDisplayItems([prompt, a, { ...streaming, streaming: false }], LIVE);
+		expect(runsOf(liveLog(done)!)).toEqual([[0, [a]]]);
+	});
+
+	it('emits no runs and no work log when grouping is off', () => {
+		const messages = [user('go'), tool(), text('Found it:\n- x'), tool()];
+		const items = buildDisplayItems(messages, { isStreaming: true, groupingEnabled: false });
+		expect(items.every((item) => item.kind === 'message')).toBe(true);
+		expect(collapsedVisibleMessages(items)).toEqual(messages);
+	});
+
+	it('keys the live log exactly as the settled fold, and by server id for a reconciled send', () => {
+		const prompt = { ...user('go'), serverId: 'srv-1' };
+		const messages = [prompt, tool(), text('Found it:\n- x'), tool(), text('done')];
+		const live = liveLog(buildDisplayItems(messages, LIVE))!;
+		const settled = settledFolds(buildDisplayItems(messages, SETTLED))[0] as WorkLog;
+		expect(live.key).toBe(`wl-turn-${prompt.id}`);
+		expect(settled.key).toBe(live.key);
+		expect(live.foldKey).toBe('srv-1');
+		expect(live.foldAlias).toBe(prompt.id);
+		expect(settled.foldKey).toBe('srv-1');
+	});
+
+	it('reuses the model on the fast path while the current run streams', () => {
+		const build = createTranscriptModelBuilder();
+		const prompt = user('go');
+		const head = [prompt, tool(), text('Found it:\n- x'), tool()];
+		const tail = msg({ type: 'text', content: 'Writing', streaming: true });
+		const before = build([...head, tail], LIVE);
+		const next = [...head, { ...tail, content: 'Writing more' }];
+		const after = build(next, LIVE);
+		expect(after.items[0]).toBe(before.items[0]);
+		expect(after).toEqual(buildTranscriptModel(next, LIVE));
 	});
 });
