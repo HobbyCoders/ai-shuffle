@@ -1,11 +1,19 @@
 #!/bin/sh
-# LOCAL-CI-PRE-PUSH v1
+# LOCAL-CI-PRE-PUSH v3
+# Every outgoing ref gets an offline secret scan, even with a cached test pass.
 # Local checks before anything leaves this machine (scripts/local_ci.py).
 # CI does not test pull requests; this hook is where tests run.
 # `python scripts/local_ci.py install` copies it into the clone's hooks
 # directory and keeps any earlier pre-push hook as pre-push.user.
 refs=$(cat)
 root=$(git rev-parse --show-toplevel) || exit 1
+# This installed hook survives branch switches. Never delegate to an older
+# checkout whose local_ci.py can accept a pre-security cached pass.
+if [ ! -f "$root/scripts/secret_scan.py" ] || [ ! -f "$root/.gitleaks.toml" ] ||
+   ! grep -q '^SECURITY_GATE_VERSION = 2[[:space:]]*$' "$root/scripts/local_ci.py" 2>/dev/null; then
+  echo "pre-push: checkout lacks the required security gate; update this branch before pushing." >&2
+  exit 1
+fi
 if [ -f "$root/scripts/local_ci.py" ]; then
   python=""
   # The interpreter install recorded (git config local-ci.python), else the

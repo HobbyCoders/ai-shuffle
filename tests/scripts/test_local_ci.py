@@ -63,6 +63,7 @@ def push(monkeypatch, lines, *, head="h" * 40, clean=True, trees=None, check=0):
     monkeypatch.setattr(sys, "stdin", io.StringIO("\n".join(lines)))
     monkeypatch.setattr(local_ci, "git", lambda *args: head)
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: clean)
+    monkeypatch.setattr(local_ci, "scan_push", lambda *args: None)
     monkeypatch.setattr(local_ci, "tree_of", lambda sha: (trees or {}).get(sha, "t-" + sha))
     ran = []
     monkeypatch.setattr(local_ci, "cmd_check", lambda args: ran.append(args.command) or check)
@@ -75,7 +76,7 @@ def ref_line(sha, ref="refs/heads/topic"):
 
 
 def test_pre_push_trusts_a_recorded_tree(records, monkeypatch):
-    local_ci.save_record("t-" + "h" * 40, {"at": 1})
+    local_ci.save_record("t-" + "h" * 40, {"at": 1, "security_gate": local_ci.SECURITY_GATE_VERSION})
     assert push(monkeypatch, [ref_line("h" * 40)]) == (0, [])
 
 

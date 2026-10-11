@@ -12,7 +12,8 @@ change was made, at low CPU priority so the machine stays usable.
 A pass on a clean checkout is recorded against the commit's tree, so the
 pre-push hook (.githooks/pre-push, copied into git's hooks directory by
 install) lets that commit through without running
-anything again. Suites that need hardware this machine lacks (macOS, iOS, a
+the test suites again. The offline secret scan still runs on every push.
+Suites that need hardware this machine lacks (macOS, iOS, a
 Windows install when run elsewhere) are printed as not covered; the pass says
 so instead of claiming them.
 """
@@ -36,6 +37,7 @@ from typing import Callable, Iterable
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "HobbyCoders/ai-shuffle"
 BASE = "origin/main"
+SECURITY_GATE_VERSION = 2
 # Edge publication waits for this commit status on the exact main revision
 # (scripts/ci/edge_publication_gate.py).
 ATTEST_CONTEXT = "local/full-suite"
@@ -106,13 +108,18 @@ def low_priority_kwargs() -> dict:
     return {"preexec_fn": lower}
 
 
-def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None) -> None:
+def run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
+        timeout: float | None = None) -> None:
     exe = shutil.which(argv[0]) or argv[0]
     shown = " ".join(argv)
     rel = cwd.relative_to(ROOT).as_posix() if cwd != ROOT else "."
     print(f"\n$ ({rel}) {shown}", flush=True)
     merged = {**os.environ, **(env or {})}
-    result = subprocess.run([exe, *argv[1:]], cwd=cwd, env=merged, **low_priority_kwargs())
+    try:
+        result = subprocess.run([exe, *argv[1:]], cwd=cwd, env=merged, timeout=timeout,
+                                **low_priority_kwargs())
+    except subprocess.TimeoutExpired:
+        raise Failure("local check timed out; push blocked") from None
     if result.returncode:
         raise Failure(f"{shown} (in {rel}) exited {result.returncode}")
 
@@ -353,7 +360,7 @@ def workflows(ctx: Context) -> None:
     run([ctx.python, "scripts/ci/test-cost-policy.py"])
     run([ctx.python, "-m", "pytest", "-q", "-o", "addopts=", "-p", "no:cacheprovider", "--confcutdir=tests/scripts",
          "tests/scripts/test_owner_publication_policy.py", "tests/scripts/test_edge_publication_gate.py",
-         "tests/scripts/test_local_ci.py"])
+         "tests/scripts/test_local_ci.py", "tests/scripts/test_security_gate.py"])
 
 
 def android_play(ctx: Context) -> None:
@@ -417,7 +424,8 @@ SUITES = [
           android_app, "Android unit tests (Gradle)", android_unavailable),
     Suite("workflows", [".github/workflows/*", "scripts/ci/*", "tests/scripts/test_owner_publication_policy.py",
                         "tests/scripts/test_edge_publication_gate.py", "tests/scripts/test_local_ci.py", "scripts/local_ci.py",
-                        ".githooks/*"], workflows, "Workflow and publication policy tests"),
+                        ".githooks/*", ".gitleaks.toml", "scripts/secret_scan.py", "scripts/dependency_audit.py",
+                        "tests/scripts/test_security_gate.py"], workflows, "Workflow and publication policy tests"),
     Suite("update-reach", ["Dockerfile", "entrypoint.sh", "docker/*", "requirements*", "desktop/src/main/*",
                            "desktop/scripts/*", "desktop/build/*", "desktop/electron-builder.yml",
                            "scripts/source_archive.py", "scripts/ci/update_reach.py"],
@@ -536,6 +544,20 @@ def attest(state: str, description: str, revision: str) -> None:
                        cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
 
 
+def security_check(python: str, strict: bool = False, *, audit: bool = True) -> None:
+    run([python, "scripts/secret_scan.py"], timeout=120)
+    if audit:
+        run([python, "scripts/dependency_audit.py", *(["--strict-audit"] if strict else [])])
+    else:
+        print("Dependency audit: not run on automatic push; run `python scripts/local_ci.py check` to refresh.")
+
+
+def scan_push(local_sha: str, remote_sha: str) -> None:
+    # Always runs, even for a cached tree: a secret added then deleted in the
+    # outgoing history must not slip through a clean final-tree pass.
+    run([choose_python(), "scripts/secret_scan.py", "--local", local_sha, "--remote", remote_sha], timeout=120)
+
+
 def cmd_check(args) -> int:
     mode = "full" if args.command == "full" else "changed"
     python = choose_python()
@@ -549,6 +571,7 @@ def cmd_check(args) -> int:
         attest("pending", f"Full suite running on {machine()}", revision)
     clean = clean_checkout()
     try:
+        security_check(python, getattr(args, "strict_audit", False), audit=not getattr(args, "_from_push", False))
         ran, skipped, _ = run_suites(mode, args.only, python)
     except Failure as error:
         print(f"\nFAILED: {error}", file=sys.stderr)
@@ -556,7 +579,9 @@ def cmd_check(args) -> int:
             attest("failure", f"Failed on {machine()}: {error}", revision)
         return 1
     if clean and not args.only:
-        save_record(tree_of("HEAD"), {"mode": mode, "suites": ran, "not_covered": skipped,
+        save_record(tree_of("HEAD"), {"security_gate": SECURITY_GATE_VERSION,
+                                      "audit_refreshed": not getattr(args, "_from_push", False),
+                                      "mode": mode, "suites": ran, "not_covered": skipped,
                                       "machine": machine(), "commit": revision, "at": time.time()})
     elif not clean:
         print("Uncommitted changes: this pass is not recorded. Commit, then the pre-push hook re-runs it.")
@@ -576,10 +601,13 @@ def cmd_pre_push(args) -> int:
         parts = line.split()
         if len(parts) != 4:
             continue
-        _, local_sha, remote_ref, _ = parts
-        if local_sha == zero or not remote_ref.startswith("refs/heads/"):
-            continue  # deletions and tags
-        if tree_of(local_sha) in records:
+        _, local_sha, remote_ref, remote_sha = parts
+        if local_sha == zero:
+            continue  # ref deletions introduce no objects
+        scan_push(local_sha, remote_sha)
+        if not remote_ref.startswith("refs/heads/"):
+            continue  # tags get the secret scan, but not the test suites
+        if records.get(tree_of(local_sha), {}).get("security_gate") == SECURITY_GATE_VERSION:
             continue
         if local_sha != head or not clean_checkout():
             print(f"pre-push: {local_sha[:9]} has no local check pass. Check out that commit with a clean "
@@ -587,6 +615,7 @@ def cmd_pre_push(args) -> int:
             return 1
         print(f"pre-push: running local checks for {local_sha[:9]} before it leaves this machine.")
         args.command, args.attest, args.only = "check", False, None
+        args._from_push = True
         if cmd_check(args):
             print("pre-push: checks failed; nothing was pushed.", file=sys.stderr)
             return 1
@@ -672,6 +701,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--only", nargs="+", metavar="SUITE", help="run just these suites (not recorded as a pass)")
     parser.add_argument("--attest", action="store_true", help=f"with full on main: post {ATTEST_CONTEXT}")
     parser.add_argument("--python", metavar="PATH", help="with install: the interpreter that runs the tests")
+    parser.add_argument("--strict-audit", action="store_true",
+                        help="fail on Python advisories, npm high/critical findings, or unavailable audits")
     args = parser.parse_args(argv)
     if args.only:
         unknown = set(args.only) - {s.name for s in SUITES}

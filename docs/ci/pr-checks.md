@@ -28,7 +28,7 @@ A pass on a clean checkout is recorded against the commit's tree in
 managed hooks; an older `pre-push` there is kept as `pre-push.user` and still
 runs afterwards; `install` also saves a Python that has pytest and PyYAML
 in git config `local-ci.python`, which the hook and later runs use) lets a
-recorded commit through at once. For an unrecorded commit that is the clean
+recorded commit through after the offline outgoing-commit secret scan. For an unrecorded commit that is the clean
 `HEAD`, it runs the checks and pushes only if they pass. Anything else (a
 commit other than `HEAD`, or uncommitted changes) is refused, because the
 checks would not test what is being pushed. Never skip the hook with
@@ -61,6 +61,70 @@ The last lines of each run list what this machine did not cover:
 An update-reach failure is acknowledged as before, with a pull request label
 `update-reach:GROUP` (`local_ci.py` reads the PR's labels) or
 `--allow GROUP` when running `scripts/ci/update_reach.py` directly.
+
+
+## Local security checks
+
+Every `check` (including `--only`) and `full` first scans the whole working tree
+(tracked files plus non-ignored untracked files) for leaked credentials. The
+pre-push hook also scans the changed blobs in **every outgoing commit**, before
+consulting its cached test pass. A token added and removed in separate commits
+still blocks the push. Existing refs use the remote tip through the pushed tip;
+new branches/tags exclude commits already on local `origin/main` (or scan all
+reachable history if it is unavailable). Tags are scanned; deletions need no scan.
+The hook uses local Git objects only: it never downloads a scanner or contacts a
+provider. Fetch `origin/main` before starting a branch so that baseline is current.
+The installed hook refuses a checkout missing the scanner/config or the required
+security-gate version, including branches that predate these checks: update that
+branch before pushing. Re-run `python scripts/local_ci.py install` to upgrade an
+older installed hook. Each scanner invocation has a 120-second deadline and its
+Git subprocesses have 15-second deadlines; timeouts block rather than pass.
+
+The vendored stdlib fallback, `scripts/secret_scan.py`, reads the deliberately
+small gitleaks-compatible `.gitleaks.toml` ruleset. Gitleaks is not bundled or
+available offline on all workers, so the gate needs no binary installation. It
+matches AWS, GitHub, OpenAI/Anthropic/OpenRouter, Google, Cloudflare scoped-token
+assignments, Telegram/Discord bot tokens, Slack bot/app tokens, Stripe live keys
+and webhook signing secrets, password-bearing PostgreSQL URLs and PEM key
+material. It is **not** gitleaks' full default/entropy ruleset or a proof that no
+secret exists. Diagnostics show only rule, file, line and revision, never the
+matching value: metadata is redacted too and control characters are escaped. Ignored local credential files are not whole-tree scan
+inputs, but force-adding one makes it tracked and scanned.
+
+For a false positive, add a `[[rules.allowlists]]` entry to the relevant rule in
+`.gitleaks.toml`, with a reason, `condition = "AND"`, `regexTarget = "match"`, an
+anchored `paths` regex for the specific fixture file and anchored `regexes` for
+only the known fake value. Do not exclude entire test/docs directories or use a
+real token as an allowlist. Spell the first character as a character class (for
+example `[s]k-...`) so the config does not itself contain the matching token.
+Short `sk-test`, malformed AWS placeholders and documentation preview tokens
+(`v1.<uuid>.<ts>.<hex>`) do not match provider patterns. Add a regression test and
+run `python scripts/secret_scan.py`; `--revision origin/main` scans the baseline.
+If it is a real credential, revoke/rotate it and remove it from **all outgoing
+commits**, not just the latest tree; do not print it in an issue or PR.
+
+The dependency step is the networked part: `scripts/dependency_audit.py` installs
+pinned `pip-audit==2.9.0` in checkout-local, ignored `venv/local-audit/` on first
+use. It audits `requirements.txt`, any Fluid requirements files, and Fluid's
+runtime dependencies from `fluid/pyproject.toml`. These are newly resolved
+requirements, not an inventory of an existing worker. It also runs
+`npm audit --audit-level=high --package-lock-only --ignore-scripts` for frontend,
+android/hub, browser-mcp, desktop and tools when their lockfiles exist, including
+dev dependencies, without installing node_modules or changing lockfiles. Each
+manifest prints one summary; PyPI advisory severity is reported as unknown
+because pip-audit does not provide it. No dependency is upgraded automatically.
+
+Findings and unavailable/timed-out audits **warn by default** until triaged.
+`python scripts/local_ci.py check --strict-audit` fails on any Python advisory,
+any npm high/critical finding, skipped Python packages or an unavailable audit.
+Every explicit `check`/`full` refreshes the audit. Automatic pre-push checks never
+run dependency audits, even without a cached test pass or when manifests changed:
+they print a reminder to run `python scripts/local_ci.py check` for a fresh audit.
+This prevents advisory-service/resolver stalls during an otherwise offline push;
+the existing test suites may still need their own tools/dependencies. Secret
+scanning is never skipped. Pass records record whether an audit was refreshed;
+records from older security-gate versions are invalidated. This is local
+protection, not GitHub push protection; the hook must be installed on each clone.
 
 ## Full suite on main, and edge publication
 
