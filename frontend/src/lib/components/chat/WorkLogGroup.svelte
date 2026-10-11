@@ -219,12 +219,33 @@
 		const stuckAt = header.getBoundingClientRect().top;
 		const stuck = !!section && stuckAt - section.getBoundingClientRect().top > 1;
 		close();
-		const scroller = stuck && section ? scrollParent(section) : null;
-		if (scroller && section) {
-			requestAnimationFrame(() => {
-				scroller.scrollTop += section.getBoundingClientRect().top - stuckAt;
-			});
-		}
+		if (stuck && section) landAt(section, () => section, stuckAt);
+	}
+
+	/**
+	 * Collapse an open live run from its header. When the header was stuck
+	 * (or being pushed off by the run's end), the collapsed run's fold row is
+	 * brought back to where the header was, so a long earlier run does not
+	 * collapse to a row far above the view. The origin is the run's own fold
+	 * row, not the section top.
+	 */
+	function collapseRunFromHeader(event: MouseEvent, run: WorkLogRun) {
+		const header = event.currentTarget as HTMLElement;
+		const stuckAt = header.getBoundingClientRect().top;
+		const line = scrollParent(header)?.getBoundingClientRect().top;
+		const stuck = line !== undefined && stuckAt - line < 1;
+		setRunOpen(run, false);
+		if (stuck) landAt(header, () => sectionEl?.querySelector<HTMLElement>(`[data-run-fold="${run.index}"]`), stuckAt);
+	}
+
+	/** Scroll only the nearest scroller so `target()` lands at viewport y `at`. */
+	function landAt(from: HTMLElement, target: () => HTMLElement | null | undefined, at: number) {
+		const scroller = scrollParent(from);
+		if (!scroller) return;
+		requestAnimationFrame(() => {
+			const el = target();
+			if (el) scroller.scrollTop += el.getBoundingClientRect().top - at;
+		});
 	}
 
 	function scrollParent(el: HTMLElement): HTMLElement | null {
@@ -261,6 +282,12 @@
 	 * the header's bottom edge, the header is translated up with it, the way
 	 * section headers hand over in a list; when it is fully off the line it
 	 * is marked `data-run-header-off`.
+	 *
+	 * The placement depends on geometry as well as scroll position, so it is
+	 * recalculated (once per frame) on scroll, when the header or the work
+	 * log's content resizes (a breakpoint changes the header height, a row
+	 * expands or folds inside the run), after any click in the group, and on
+	 * window resize.
 	 */
 	const stickWithinRun: Action<HTMLElement, number> = (node, runIndex) => {
 		let current = runIndex;
@@ -284,12 +311,21 @@
 			if (!frame) frame = requestAnimationFrame(place);
 		};
 		scroller = scrollParent(node);
+		const group = sectionEl;
 		scroller?.addEventListener('scroll', schedule, { passive: true });
+		group?.addEventListener('click', schedule);
+		window.addEventListener('resize', schedule);
+		const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule);
+		observer?.observe(node);
+		if (contentEl) observer?.observe(contentEl);
 		schedule();
 		return {
 			update(next: number) { current = next; schedule(); },
 			destroy() {
 				scroller?.removeEventListener('scroll', schedule);
+				group?.removeEventListener('click', schedule);
+				window.removeEventListener('resize', schedule);
+				observer?.disconnect();
 				if (frame) cancelAnimationFrame(frame);
 			}
 		};
@@ -386,7 +422,7 @@
 							class="wlrow fold"
 							data-run-header={run.index}
 							use:stickWithinRun={run.index}
-							onclick={() => setRunOpen(run, false)}
+							onclick={(event) => collapseRunFromHeader(event, run)}
 							aria-expanded="true"
 							aria-label={`Hide work details: ${runLabel(run)}`}
 						>
@@ -406,6 +442,7 @@
 						<button
 							type="button"
 							class="wlrow fold"
+							data-run-fold={run.index}
 							onclick={() => setRunOpen(run, true)}
 							aria-expanded="false"
 							aria-label={`Show work details: ${runLabel(run)}`}

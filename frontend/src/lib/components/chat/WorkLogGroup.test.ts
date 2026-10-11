@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { createRawSnippet, tick } from 'svelte';
 import type { ChatMessage } from '$lib/stores/types';
@@ -575,6 +575,134 @@ describe('WorkLogGroup', () => {
 			} finally {
 				globalThis.requestAnimationFrame = raf;
 			}
+		});
+
+		describe('run header geometry without scrolling', () => {
+			const twoRuns: ChatMessage[] = [turn[0], ...turn.slice(1, 3), { ...message, id: 'read-c', content: 'Read C' },
+				{ id: 'worker', type: 'subagent', role: 'assistant', agentName: 'Reviewer', agentStatus: 'running', toolId: 'task-1' } as ChatMessage,
+				{ ...message, id: 'tail', content: 'Tail', toolStatus: 'running' as const, streaming: true }];
+			const rect = (el: Element, top: number, bottom = top) =>
+				Object.defineProperty(el, 'getBoundingClientRect', { value: () => ({ top, bottom, height: bottom - top }), configurable: true });
+			let frames: FrameRequestCallback[] = [];
+			let raf: typeof globalThis.requestAnimationFrame;
+			let observers: Array<() => void> = [];
+			let previousRO: unknown;
+			const flush = () => frames.splice(0).forEach((cb) => cb(0));
+			/** Fire every ResizeObserver the component made, as a layout change would. */
+			const resized = () => observers.forEach((fire) => fire());
+			const g = globalThis as unknown as { ResizeObserver?: unknown };
+
+			beforeEach(() => {
+				frames = [];
+				observers = [];
+				raf = globalThis.requestAnimationFrame;
+				globalThis.requestAnimationFrame = (cb) => { frames.push(cb); return frames.length; };
+				previousRO = g.ResizeObserver;
+				g.ResizeObserver = class {
+					fire: () => void;
+					constructor(cb: ResizeObserverCallback) {
+						this.fire = () => cb([], this as unknown as ResizeObserver);
+						observers.push(() => this.fire());
+					}
+					observe() {}
+					unobserve() {}
+					disconnect() { this.fire = () => {}; }
+				};
+			});
+			afterEach(() => {
+				globalThis.requestAnimationFrame = raf;
+				if (previousRO) g.ResizeObserver = previousRO;
+				else delete g.ResizeObserver;
+				document.body.querySelectorAll('[data-test-scroller]').forEach((el) => el.remove());
+			});
+
+			async function mountOpen() {
+				const column = document.createElement('div');
+				column.dataset.testScroller = '';
+				column.style.overflowY = 'hidden';
+				const scroller = document.createElement('div');
+				scroller.style.overflowY = 'auto';
+				column.appendChild(scroller);
+				document.body.appendChild(column);
+				const view = render(WorkLogGroup, { props: { ...logOf(true, twoRuns), folds: createFoldState(memoryStorage()) }, target: scroller });
+				for (const button of screen.getAllByRole('button', { name: /^Show work details/ })) await fireEvent.click(button);
+				flush();
+				const heads = [...view.container.querySelectorAll<HTMLElement>('[data-run-header]')];
+				const ends = [...view.container.querySelectorAll<HTMLElement>('[data-run-end]')];
+				rect(scroller, 0, 600);
+				return { view, scroller, column, heads, ends };
+			}
+
+			it('re-places a pushed-off header when its height changes at a breakpoint', async () => {
+				const { heads, ends } = await mountOpen();
+				let height = 32;
+				Object.defineProperty(heads[0], 'offsetHeight', { get: () => height, configurable: true });
+				rect(ends[0], 0, -200);
+				resized();
+				flush();
+				expect(heads[0].style.transform).toBe('translateY(-32px)');
+
+				// Phone breakpoint: the header grows to 44px. No scroll event.
+				height = 44;
+				resized();
+				flush();
+				expect(heads[0].style.transform).toBe('translateY(-44px)');
+				expect(heads[0].hasAttribute('data-run-header-off')).toBe(true);
+			});
+
+			it('re-places the header when a row inside the run expands and moves the run end', async () => {
+				const { heads, ends } = await mountOpen();
+				Object.defineProperty(heads[0], 'offsetHeight', { value: 32, configurable: true });
+				rect(ends[0], 0, 20);
+				resized();
+				flush();
+				expect(heads[0].style.transform).toBe('translateY(-12px)');
+
+				// The reader expands a row in the run: its end moves down, no scroll.
+				rect(ends[0], 0, 240);
+				await fireEvent.click(rowEl('read-a')!.querySelector('button')!);
+				flush();
+				expect(heads[0].style.transform).toBe('');
+
+				// Folding it back up (a content resize) brings the push-off back.
+				rect(ends[0], 0, 10);
+				resized();
+				flush();
+				expect(heads[0].style.transform).toBe('translateY(-22px)');
+			});
+
+			it('lands a long later run, collapsed from its stuck header, where the header was', async () => {
+				const { heads, scroller, column } = await mountOpen();
+				expect(heads).toHaveLength(2);
+				let scrollerTop = 2000;
+				Object.defineProperty(scroller, 'scrollTop', { get: () => scrollerTop, set: (v: number) => { scrollerTop = v; }, configurable: true });
+				Object.defineProperty(column, 'scrollTop', { get: () => 0, set: () => { throw new Error('chat column scrolled'); }, configurable: true });
+				// Run 2's header is stuck at the scroller's top, deep inside its run.
+				const head = heads[1];
+				const index = head.dataset.runHeader!;
+				rect(head, 0, 32);
+				await fireEvent.click(head);
+				// Collapsed, run 2's fold row sits 700px above the view at this scroll
+				// position; its viewport top follows the scroller.
+				const fold = document.querySelector<HTMLElement>(`[data-run-fold="${index}"]`)!;
+				expect(fold).toBeTruthy();
+				Object.defineProperty(fold, 'getBoundingClientRect', { value: () => ({ top: 1300 - scrollerTop }), configurable: true });
+				expect(fold.getBoundingClientRect().top).toBe(-700);
+				flush();
+				expect(scrollerTop).toBe(1300);
+				expect(fold.getBoundingClientRect().top).toBe(0);
+				expect(column.scrollTop).toBe(0);
+			});
+
+			it('leaves the scroll alone when a run header that was not stuck collapses', async () => {
+				const { heads, scroller } = await mountOpen();
+				let scrollerTop = 500;
+				Object.defineProperty(scroller, 'scrollTop', { get: () => scrollerTop, set: (v: number) => { scrollerTop = v; }, configurable: true });
+				rect(heads[1], 240, 272);
+				await fireEvent.click(heads[1]);
+				flush();
+				expect(scrollerTop).toBe(500);
+			});
 		});
 
 		it('collapses an open live run from its header', async () => {
