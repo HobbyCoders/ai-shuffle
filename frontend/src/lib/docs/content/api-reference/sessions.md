@@ -88,7 +88,13 @@ preserved. `scope` identifies the comparison:
   do not make this chat `syncing`. Across epochs, the state is `syncing` and the
   pending count is the new owner's sequence ceiling, even if that is zero after
   a clear. Epoch identities are never numerically ordered. Sequence gaps are
-  positions, not message counts (compaction can leave gaps).
+  positions, not message counts (compaction can leave gaps). During multi-batch
+  replacement, the new first-row epoch can coexist with an old tail. The mirror
+  must also hold the owner's tail event identity at `owner_seq` before reporting
+  `current`; until then the pending count is at least one even if the sequence
+  gap is zero. The peer-only `tail_id` witness is read atomically with the epoch
+  and ceiling and follows ordered replication; no in-memory replacement flag is
+  required, so disconnects and restarts do not falsely complete the replacement.
 - `owner`: the conservative owner-wide fallback until per-session data is
   available, including older peers and a missing local copy. Initial transcript
   downloads still return `state: syncing`, `transcript: downloading` and

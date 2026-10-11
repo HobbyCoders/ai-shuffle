@@ -2178,8 +2178,12 @@ async def get_session_sync_status(
     ``scope=session`` compares the local ``seq``/``epoch`` with the owner's
     last authenticated ``owner_seq``/``owner_epoch``. ``pending_updates`` is
     the sequence gap in the same epoch, or the new owner's log length across
-    an epoch change (which is syncing even for an empty cleared log). Unrelated
-    sessions, catalog work and snapshot backlog do not affect this comparison.
+    an epoch change (which is syncing even for an empty cleared log). A matching
+    first-row epoch alone cannot prove a multi-batch replacement finished: the
+    mirror must also hold the owner's tail event identity at ``owner_seq``.
+    While that identity differs, the pending count is at least one even if the
+    sequence gap is zero. Unrelated sessions, catalog work and snapshot backlog
+    do not affect this comparison.
     These are observed watermarks, not a guarantee that the owner is online.
 
     Initial transcript downloads remain syncing. Until a local copy and an

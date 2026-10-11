@@ -180,8 +180,10 @@ def note_session_watermarks(owner_device_id: str, requested: list[str], heads: A
                 continue
             head = heads.get(session_id) if isinstance(heads, dict) else None
             if (isinstance(head, dict) and type(head.get("seq")) is int
-                    and head["seq"] >= 0 and isinstance(head.get("epoch"), str) and head["epoch"]):
-                _session_watermarks[key] = {"seq": head["seq"], "epoch": head["epoch"]}
+                    and head["seq"] >= 0 and isinstance(head.get("epoch"), str) and head["epoch"]
+                    and isinstance(head.get("tail_id"), str) and head["tail_id"]):
+                _session_watermarks[key] = {"seq": head["seq"], "epoch": head["epoch"],
+                                            "tail_id": head["tail_id"]}
             else:
                 _session_watermarks.pop(key, None)
 
@@ -205,13 +207,23 @@ def session_sync_status(session_id: str, owner_device_id: str | None) -> dict:
         head = _session_watermarks.get(key)
     if new:
         _kick_from_thread()
-    local = get_watermark(session_id)
+    local = get_watermark(session_id, at_seq=head["seq"] if head else None)
     if local is None or head is None:
         return {**owner_sync_status(owner_device_id), "scope": "owner"}
     same_epoch = local["epoch"] == head["epoch"]
     pending = max(0, head["seq"] - local["seq"]) if same_epoch else head["seq"]
-    return {"state": "current" if same_epoch and not pending else "syncing",
-            "pending_updates": pending, "scope": "session", **local,
+    # A clear/reseed replaces low seqs first: the first row can already name
+    # the new epoch while MAX(seq) still names an old tail. The publisher emits
+    # retractions then replacements in seq order; require the observed final
+    # event's identity as evidence that this replacement reached its ceiling.
+    # Read that identity together with seq/epoch, even when local appends have
+    # since advanced beyond the observed ceiling. No ephemeral progress flag
+    # is needed, so this also holds across disconnects and process restarts.
+    tail_applied = local["tail_id"] == head["tail_id"]
+    if same_epoch and not tail_applied:
+        pending = max(1, pending)  # at least one replacement remains; not a message count
+    return {"state": "current" if same_epoch and tail_applied and not pending else "syncing",
+            "pending_updates": pending, "scope": "session", "seq": local["seq"], "epoch": local["epoch"],
             "owner_seq": head["seq"], "owner_epoch": head["epoch"]}
 
 

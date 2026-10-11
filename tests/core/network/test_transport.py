@@ -382,6 +382,60 @@ async def test_session_freshness_tracks_clear_epoch_even_when_seq_drops(workers,
             assert status["epoch"] == status["owner_epoch"]
 
 
+async def test_session_freshness_waits_for_multibatch_epoch_replacement(workers, monkeypatch):
+    from app.db import session_events
+    from app.db.sessions import clear_session_conversation
+    from app.network import catalog
+    from tests.core.network.harness import join
+
+    a, b = workers("replacement-owner"), workers("replacement-mirror")
+    with a.active():
+        engine.create_network("Home")
+        database.create_session("replaced", "default", title="Replaced")
+        session_events.append_events("replaced", [
+            {"type": "message.user", "payload": {"content": f"old-{i}"}} for i in range(502)
+        ])
+        catalog.publish_owned()
+    join(a, b)
+    served = ServedBy(a, "https://replacement-owner.example.com")
+    monkeypatch.setattr(transport, "BATCH_LIMIT", 500)
+    monkeypatch.setattr(transport, "SYNC_PULL_SECONDS", 0)
+    async with httpx.AsyncClient(transport=served.transport()) as client:
+        with b.active():
+            transport.session_sync_status("replaced", a.device_id)
+            link = transport.PeerLink(a.device_id, [served.base_url])
+            await link.sync_once(client, engine.context())
+            assert transport.session_sync_status("replaced", a.device_id)["state"] == "current"
+        with a.active():
+            clear_session_conversation("replaced")
+            session_events.append_events("replaced", [
+                {"type": "message.user", "payload": {"content": f"new-{i}"}} for i in range(501)
+            ])
+            catalog.publish_owned()
+        with b.active():
+            await link.sync_once(client, engine.context())
+            rows = session_events.get_events("replaced", limit=1000)
+            assert any(row["payload"]["content"].startswith("old-") for row in rows)
+            behind = transport.session_sync_status("replaced", a.device_id)
+            # The first row is new, but max(seq) still belongs to the old tail.
+            assert behind["epoch"] == behind["owner_epoch"]
+            assert behind["seq"] == behind["owner_seq"] == 501
+            assert behind["state"] == "syncing"
+            assert behind["pending_updates"] > 0
+            transport._last_contact.clear()
+            assert transport.session_sync_status("replaced", a.device_id) == behind
+            # Even losing the in-memory witness cannot produce a false current
+            # when this partial copy is revisited on the next exchange.
+            transport.forget_peers()
+            transport.session_sync_status("replaced", a.device_id)
+            await link.sync_once(client, engine.context())
+            rows = session_events.get_events("replaced", limit=1000)
+            assert all(row["payload"]["content"].startswith("new-") for row in rows)
+            status = transport.session_sync_status("replaced", a.device_id)
+            assert status["state"] == "current"
+            assert status["pending_updates"] == 0
+
+
 async def test_session_freshness_without_local_copy_uses_owner_backlog(workers):
     from app.db import session_events
     from app.network import catalog
@@ -409,6 +463,26 @@ async def test_session_freshness_without_local_copy_uses_owner_backlog(workers):
             assert transport.session_sync_status("not-copied", a.device_id)["state"] == "syncing"
 
 
+def test_session_freshness_checks_witness_at_owner_seq_not_newer_local_tail(workers):
+    from app.db import session_events
+
+    worker = workers("ahead-mirror")
+    with worker.active():
+        engine.create_network("Home")
+        database.create_session("viewed", "default", title="Viewed")
+        session_events.append_events("viewed", [{"type": "message.user", "payload": {"content": "one"}}])
+        head = session_events.get_watermark("viewed")
+        transport.session_sync_status("viewed", "owner")
+        transport.note_session_watermarks("owner", ["viewed"], {"viewed": head})
+        session_events.append_events("viewed", [{"type": "message.user", "payload": {"content": "two"}}])
+        status = transport.session_sync_status("viewed", "owner")
+        assert status["seq"] == 2
+        assert status["owner_seq"] == 1
+        assert status["state"] == "current"
+        assert status["pending_updates"] == 0
+        assert "tail_id" not in status  # witness stays on the peer protocol
+
+
 def test_session_watermark_interest_is_bounded_expires_and_resets(workers, monkeypatch):
     worker = workers("interest")
     now = [100.0]
@@ -420,7 +494,8 @@ def test_session_watermark_interest_is_bounded_expires_and_resets(workers, monke
             transport.session_sync_status(session_id, "remote-owner")
             now[0] += 1
         assert transport.requested_session_watermarks("remote-owner") == ["two", "three"]
-        transport.note_session_watermarks("remote-owner", ["two"], {"two": {"seq": 4, "epoch": "e"}})
+        transport.note_session_watermarks("remote-owner", ["two"], {"two": {"seq": 4, "epoch": "e", "tail_id": "t"}})
+        assert transport._session_watermarks
         now[0] += transport.SESSION_WATERMARK_TTL
         assert transport.requested_session_watermarks("remote-owner") == []
         assert not transport._session_watermarks
@@ -429,7 +504,8 @@ def test_session_watermark_interest_is_bounded_expires_and_resets(workers, monke
         assert transport.requested_session_watermarks("remote-owner") == []
 
 
-@pytest.mark.parametrize("heads", [None, {}, {"viewed": {"seq": -1, "epoch": "e"}}])
+@pytest.mark.parametrize("heads", [None, {}, {"viewed": {"seq": -1, "epoch": "e"}},
+                                   {"viewed": {"seq": 2, "epoch": "e"}}])
 def test_session_freshness_unavailable_peer_head_falls_back(workers, heads):
     worker = workers("old-peer-mirror")
     with worker.active():
@@ -437,7 +513,7 @@ def test_session_freshness_unavailable_peer_head_falls_back(workers, heads):
         database.create_session("viewed", "default", title="Viewed")
         transport.note_watermarks("owner", {"owner": {"1": 12}})
         transport.session_sync_status("viewed", "owner")
-        transport.note_session_watermarks("owner", ["viewed"], {"viewed": {"seq": 2, "epoch": "e"}})
+        transport.note_session_watermarks("owner", ["viewed"], {"viewed": {"seq": 2, "epoch": "e", "tail_id": "t"}})
         transport.note_session_watermarks("owner", ["viewed"], heads)
         assert transport.session_sync_status("viewed", "owner") == {
             "state": "syncing", "pending_updates": 12, "scope": "owner",

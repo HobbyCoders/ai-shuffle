@@ -86,8 +86,9 @@ def test_transcript_watermarks_only_report_requested_authoritative_sessions(work
         session_events.append_events("own", [{"type": "message.user", "payload": {"content": "hello"}}])
         heads = catalog.transcript_watermarks([*layouts, "missing"], ctx=engine.context())
         assert heads == {
-            "own": {"seq": 1, "epoch": session_events.get_log_epoch("own")},
-            "legacy": {"seq": 0, "epoch": "0"},
+            "own": {"seq": 1, "epoch": session_events.get_log_epoch("own"),
+                    "tail_id": session_events.get_log_epoch("own")},
+            "legacy": {"seq": 0, "epoch": "0", "tail_id": "0"},
         }
         assert catalog.transcript_watermarks(["legacy"], ctx=engine.context()) == {"legacy": heads["legacy"]}
         assert catalog.transcript_watermarks([], ctx=engine.context()) == {}
