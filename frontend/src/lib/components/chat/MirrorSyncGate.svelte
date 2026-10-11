@@ -106,7 +106,7 @@
 	.mirror-sync { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 2rem 1.25rem; text-align: center; color: var(--muted-foreground); }
 	.mirror-sync strong { color: var(--foreground); font-size: 1rem; }
 	.mirror-sync p { margin: 0; max-width: 42ch; font-size: 0.875rem; }
-	/* Positioned against ChatView's .chat-column; zero-size when empty. */
+	/* Positioned against ChatView's .chat-column; spans the column top; empty when current. */
 	.mirror-status-slot {
 		position: absolute;
 		top: 0.5rem;
@@ -116,7 +116,8 @@
 		display: flex;
 		justify-content: center;
 		pointer-events: none;
-	}	.mirror-pill {
+	}
+	.mirror-pill {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.5rem;
