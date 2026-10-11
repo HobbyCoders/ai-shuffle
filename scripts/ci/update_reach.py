@@ -108,10 +108,18 @@ def git(*args: str, root: Path = ROOT) -> str:
 
 
 def reader(revision: str, root: Path = ROOT) -> Reader:
-    """Bytes of a path at a revision, or None when it does not exist there."""
+    """Bytes at a revision; None only for a proven absent path, never unreadable objects."""
     def read(path: str) -> Optional[bytes]:
         result = subprocess.run(["git", "show", f"{revision}:{path}"], cwd=root, capture_output=True)
-        return result.stdout if result.returncode == 0 else None
+        if result.returncode == 0:
+            return result.stdout
+        # A partial clone can have the tree but lack a promised blob. A failed
+        # lazy fetch must not erase that file from the launcher's import closure.
+        listing = subprocess.run(["git", "--literal-pathspecs", "ls-tree", "-z", revision, "--", path],
+                                 cwd=root, capture_output=True)
+        if listing.returncode == 0 and not listing.stdout:
+            return None
+        raise RuntimeError(f"Cannot read historical update-reach content: {revision}:{path}")
     return read
 
 

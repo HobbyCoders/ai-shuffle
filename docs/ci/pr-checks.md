@@ -166,7 +166,10 @@ With neither live nor cached publication evidence, the check warns and examines
 all first-parent changes since repository bootstrap, rather than guessing an
 unpublished range. This fallback requires complete Git history: a shallow clone
 refuses with `git fetch --unshallow origin` as the recovery instruction, because
-its oldest visible commit is not proof of repository bootstrap.
+its oldest visible commit is not proof of repository bootstrap. Partial clones
+also need readable historical content: a failed lazy blob fetch refuses
+classification, rather than treating a file as absent. Restore access to the
+promisor remote or use a complete clone before retrying.
 An entirely in-reach history passes without PR API calls;
 out-of-reach changes still need their own acceptance labels. This cold-cache
 case can conservatively recheck older history, but never skips an unpublished

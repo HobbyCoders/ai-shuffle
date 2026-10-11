@@ -431,6 +431,61 @@ def test_cold_cache_depth_one_clone_cannot_skip_launcher_change(reach_history, s
     assert calls == [f"commits/{head}/pulls?per_page=100"]
 
 
+def test_filtered_clone_cannot_treat_unavailable_blobs_as_absent(reach_history, monkeypatch, tmp_path):
+    base, commit = reach_history
+    path = "desktop/src/main/managed-entry.ts"
+    unlabeled = commit(path, "export const version = 2;")
+    head = commit(path, "export const version = 3;")
+    source_reach = gate.load_update_reach()
+    source = Path(source_reach.git("rev-parse", "--show-toplevel"))
+    source_reach.git("config", "uploadpack.allowFilter", "true")
+    filtered = tmp_path / "filtered"
+    subprocess.run(["git", "clone", "--quiet", "--filter=blob:none", "--no-checkout",
+                    source.as_uri(), str(filtered)], check=True)
+    def git(*args, **kwargs):
+        return subprocess.check_output(["git", *args], cwd=filtered, text=True).strip()
+    assert git("rev-parse", "--is-shallow-repository") == "false"
+    historical_blob = source_reach.git("rev-parse", f"{unlabeled}:{path}")
+    assert "?" + historical_blob in git("rev-list", "--objects", "--all", "--missing=print").splitlines()
+    # Only the latest labeled change's blob is materialized before the outage.
+    assert "version = 3" in git("show", f"{head}:{path}")
+    git("config", "remote.origin.url", str(tmp_path / "unavailable-promisor"))
+    failed_fetch = subprocess.run(["git", "show", f"{unlabeled}:{path}"], cwd=filtered, capture_output=True)
+    assert failed_fetch.returncode != 0
+
+    spec = importlib.util.spec_from_file_location("filtered_reach", ROOT / "scripts/ci/update_reach.py")
+    reach = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reach)
+    original_reader = reach.reader
+    monkeypatch.setattr(reach, "git", git)
+    monkeypatch.setattr(reach, "reader", lambda rev: original_reader(rev, root=filtered))
+    monkeypatch.setattr(gate, "load_update_reach", lambda: reach)
+    # Tree evidence still distinguishes absent files from unavailable content.
+    assert reach.reader(base)("genuinely-absent.py") is None
+    assert b"version = 3" in reach.reader(head)(path)
+    with pytest.raises(RuntimeError, match="Cannot read historical update-reach content"):
+        reach.reader(unlabeled)(path)
+    with pytest.raises(RuntimeError, match="Cannot read historical update-reach content"):
+        reach.reader("f" * 40)(path)
+    calls = []
+    def api(endpoint):
+        calls.append(endpoint)
+        sha = endpoint.split("/")[1]
+        return [merged_pr(sha, ["update-reach:windows-launcher"] if sha == head else [],
+                          number=43 if sha == head else 42)]
+    ready, reason = gate.update_reach_readiness(head, api=api)
+    assert not ready and "could not verify" in reason
+    assert calls == []  # classification refuses before it can silently skip a PR
+
+    # Restoring the promisor makes lazy reads work, but never accepts the
+    # earlier unlabeled change on the strength of the latest PR's label.
+    git("config", "remote.origin.url", source.as_uri())
+    ready, reason = gate.update_reach_readiness(head, api=api)
+    assert not ready and "PR #42" in reason and "update-reach:windows-launcher" in reason
+    assert "PR #43" not in reason
+    assert calls == [f"commits/{unlabeled}/pulls?per_page=100", f"commits/{head}/pulls?per_page=100"]
+
+
 @pytest.mark.parametrize("accepted", [False, True])
 @pytest.mark.parametrize("cached", [False, True])
 def test_outage_still_requires_labels(reach_history, signed_feed, monkeypatch, accepted, cached):
