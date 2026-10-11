@@ -1559,6 +1559,7 @@ def create_builtin_tools_server(
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
     cwd: Optional[str] = None,
+    workflow_guidance: bool = False,
 ) -> Optional[Any]:
     """
     Build the ``mcp__builtins__*`` MCP server for a session.
@@ -1581,6 +1582,8 @@ def create_builtin_tools_server(
             the file/plugin agent definitions this session can delegate to —
             the delegated (CLI) leg has no fluid engine to publish them, so
             without it those agents are advertised but not dispatchable.
+        workflow_guidance: The host prompt supplies delegation/checkout rules;
+            omit those duplicates from Task. False keeps standalone callers safe.
 
     Returns:
         In-process MCP server config, or ``None`` if the tool helpers are
@@ -1749,6 +1752,7 @@ def create_builtin_tools_server(
         profile_id,
         provider_id,
         file_subagent_targets(agent_registry, model),
+        workflow_guidance=workflow_guidance,
     )
 
     @tool("Task", task_contract.description, task_contract.input_schema)

@@ -5334,11 +5334,12 @@ def test_amend_native_task_spec_installs_provider_scoped_roster(monkeypatch):
 
     seen = {}
 
-    def _contract(profile_id, provider_id, additional_targets=()):
+    def _contract(profile_id, provider_id, additional_targets=(), *, workflow_guidance=False):
         seen.update(
             profile_id=profile_id,
             provider_id=provider_id,
             additional_targets=additional_targets,
+            workflow_guidance=workflow_guidance,
         )
         return _stub_task_contract()
 
@@ -5367,6 +5368,7 @@ def test_amend_native_task_spec_installs_provider_scoped_roster(monkeypatch):
     task = registry.get("Task")
     assert seen["profile_id"] == "caller"
     assert seen["provider_id"] == "prov1"
+    assert seen["workflow_guidance"] is False
     assert [(target.id, target.model) for target in seen["additional_targets"]] == [
         ("file-reviewer", "gpt-5.6-sol")
     ]
@@ -5387,11 +5389,12 @@ def test_delegated_task_tool_shares_provider_scoped_subagent_schema(monkeypatch)
 
     seen = {}
 
-    def _contract(profile_id, provider_id, additional_targets=()):
+    def _contract(profile_id, provider_id, additional_targets=(), *, workflow_guidance=False):
         seen.update(
             profile_id=profile_id,
             provider_id=provider_id,
             additional_targets=additional_targets,
+            workflow_guidance=workflow_guidance,
         )
         return _stub_task_contract()
 
@@ -5412,6 +5415,7 @@ def test_delegated_task_tool_shares_provider_scoped_subagent_schema(monkeypatch)
     assert seen["profile_id"] == "p"
     assert seen["provider_id"] == "or-1"
     assert seen["additional_targets"] == ()
+    assert seen["workflow_guidance"] is False
     assert task.input_schema["properties"]["agent"]["enum"] == ["reviewer"]
     assert "model" not in task.input_schema["properties"]
 
@@ -5425,11 +5429,12 @@ def test_amend_native_task_spec_scopes_native_claude_sessions(monkeypatch):
 
     seen = {}
 
-    def _contract(profile_id, provider_id, additional_targets=()):
+    def _contract(profile_id, provider_id, additional_targets=(), *, workflow_guidance=False):
         seen.update(
             profile_id=profile_id,
             provider_id=provider_id,
             additional_targets=additional_targets,
+            workflow_guidance=workflow_guidance,
         )
         return _stub_task_contract()
 
@@ -5444,6 +5449,7 @@ def test_amend_native_task_spec_scopes_native_claude_sessions(monkeypatch):
     task = registry.get("Task")
     assert seen["profile_id"] == "caller"
     assert seen["provider_id"] is None
+    assert seen["workflow_guidance"] is False
     assert task.input_schema["properties"]["agent"]["enum"] == ["reviewer"]
     assert "model" not in task.input_schema["properties"]
 

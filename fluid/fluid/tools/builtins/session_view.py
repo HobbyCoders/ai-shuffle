@@ -39,22 +39,12 @@ def describe(tools: frozenset[str] | None = None) -> str:
         else ""
     )
     return (
-        "Open a stored past session: its title, date, and a window of its "
-        "messages, with tool activity compacted to one line per call. By "
-        "default the window is the session's TAIL — the final exchange, "
-        "where what was delivered and what was left open live. Use it to "
-        "pick work back up (\"continue where we left off\") or to see how "
-        "something was done before redoing it.\n"
-        "\n"
-        "Page with offset/count: offset is a 0-based message index, negative "
-        "counts from the end (default -10); count goes up to "
-        f"{_MAX_COUNT} and what does not fit the output budget is named in "
-        "a footer with the offset to continue from. show=\"conversation\" "
-        "prints only user/assistant text, show=\"tools\" only tool activity. "
-        "session_id takes either the store id or the app's session id, and "
-        "opens sessions any of the owner's workers runs. The window is "
-        "recall, not live state — verify anything you act on against the "
-        "current files."
+        "Open a past session's title, date and message window (one line per tool call). "
+        "Defaults to the TAIL: final delivery and open work. Use for 'continue where we "
+        "left off' or to check how something was done before redoing it. Page with "
+        "offset/count (see parameters); a budget-truncation footer gives the next offset. "
+        "Accepts store or app session IDs across the owner's workers. This is recall, "
+        "not live state: verify against current files before acting."
         + find_route
     )
 
