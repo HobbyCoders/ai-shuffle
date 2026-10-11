@@ -195,7 +195,7 @@ def test_old_worker_cannot_sync_retired_builtin_back(workers, retired_id):
         engine.create_network("Mixed versions")
         seed_builtin_subagents()
         # Emulate the previous build's startup producer (not the new defaults).
-        database.create_profile(retired_id, retired_id, None, {"model": "haiku"}, is_builtin=True)
+        old_default = create_unchanged_builtin(retired_id)
         database.create_api_user("search-key", "Restricted key", "synthetic-key-hash", profile_ids=[retired_id])
         database.create_api_user("mixed-key", "Mixed key", "synthetic-mixed-hash", profile_ids=[retired_id, "owner-helper"])
         database.create_api_user("open-key", "Unrestricted key", "synthetic-open-hash")
@@ -216,9 +216,7 @@ def test_old_worker_cannot_sync_retired_builtin_back(workers, retired_id):
         assert f"{retired_id} was removed" in job["last_error"]
         # Bootstrap snapshots also materialize through this seam.
         with database.get_db() as conn:
-            assert engine.materialize(conn.cursor(), policy.collection("agents"), retired_id, {
-                "id": retired_id, "name": retired_id, "is_builtin": True, "config": {},
-            }) is None
+            assert engine.materialize(conn.cursor(), policy.collection("agents"), retired_id, old_default) is None
         engine.scan_all()
     result = exchange(updated, old)
     assert result.retry == result.rejected == result.pending == 0
@@ -229,7 +227,9 @@ def test_old_worker_cannot_sync_retired_builtin_back(workers, retired_id):
         assert database.get_profile(retired_id) is not None
         assert database.get_automation("search-job")["profile_id"] == retired_id
         assert database.get_automation("search-job")["is_enabled"]
-        database.update_profile(retired_id, description="Re-seeded on the old build", allow_builtin=True)
+        # Republishing unchanged defaults is blocked even at a higher clock.
+        with database.get_db() as conn:
+            engine.record(conn.cursor(), "agents", retired_id, old_default, force=True)
         engine.scan_all()
     result = exchange(old, updated)
     assert result.retry == result.rejected == result.pending == 0
@@ -272,7 +272,10 @@ def test_retired_agent_session_mirrors_preserve_history(workers, retired_id, tra
     with old.active():
         # Drive the old worker's producers, including the signed session and
         # transcript records, not just a hand-written materialize payload.
-        database.create_profile(retired_id, retired_id, None, {}, is_builtin=is_builtin)
+        if is_builtin:
+            create_unchanged_builtin(retired_id)
+        else:
+            database.create_profile(retired_id, retired_id, None, {})
         database.create_session("old-chat", retired_id, title="Preserved history")
         database.update_session("old-chat", status="completed", cost_increment=0.25,
                                 tokens_in_increment=12, turn_increment=1)
@@ -373,14 +376,13 @@ def test_sync_keeps_custom_agent_with_retired_id(workers, retired_id):
 
 
 @pytest.mark.parametrize("role", ["general-purpose", "frontend-designer"])
-def test_old_peer_cannot_revert_preserved_builtin(workers, role):
+def test_old_peer_defaults_cannot_revert_preserved_builtin(workers, role):
     from app.core.builtin_subagents import seed_builtin_subagents
 
     old, updated = workers("old-build"), workers("updated-build")
     with old.active():
         engine.create_network("Preserved role")
-        create_unchanged_builtin(role)
-        database.update_profile(role, name="Old replica", allow_builtin=True)
+        defaults = create_unchanged_builtin(role)
         engine.scan_all()
     with updated.active():
         create_unchanged_builtin(role)
@@ -398,10 +400,11 @@ def test_old_peer_cannot_revert_preserved_builtin(workers, role):
     exchange(updated, old)
     with old.active():
         assert not database.get_profile(role)["is_builtin"]
-        # An old release's startup promotes the built-in ID again. Its
-        # subsequent higher-clock update must not undo local preservation.
+        # An old release restoring shipped defaults must not undo preservation,
+        # even with a higher clock. Actual owner edits must still synchronize.
         database.set_profile_builtin(role, True)
-        database.update_profile(role, name="Stale promoted builtin", allow_builtin=True)
+        database.update_profile(role, name=defaults["name"], description=defaults["description"],
+                                config=defaults["config"], allow_builtin=True)
         engine.scan_all()
     result = exchange(old, updated)
     assert result.retry == result.rejected == result.pending == 0

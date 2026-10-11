@@ -203,3 +203,41 @@ def test_preserved_renamed_role_install_on_postgres(role):
 @pytest.mark.parametrize("role", preservation.ROLES)
 def test_old_builtin_snapshot_preserves_customized_role_on_postgres(role):
     preservation.test_old_builtin_snapshot_cannot_overwrite_preserved_role(None, role)
+
+
+@pytest.mark.parametrize("role", preservation.ROLES)
+@pytest.mark.parametrize("incoming_clock", [5, 15], ids=["stale", "newer"])
+def test_legacy_owner_snapshot_keeps_original_order_on_postgres(role, incoming_clock):
+    from app.core.builtin_subagents import seed_builtin_subagents
+    from app.db import database, network as store
+    from app.network import engine, policy
+
+    defaults = create_unchanged_builtin(role)
+    database.update_profile(role, name="Existing owner edit", allow_builtin=True)
+    seed_builtin_subagents()
+    coll = policy.collection("agents")
+    incoming = engine.serialize_row(coll, {**defaults, "name": "Legacy peer owner edit"})
+    item = {"record_id": role, "clock": incoming_clock, "origin_device_id": "legacy-peer",
+            "deleted": False, "record": incoming}
+    with database.get_db() as conn:
+        cursor = conn.cursor()
+        try:
+            current = engine.serialize_row(coll, engine._read_row(cursor, coll, role))
+            store.put_record(cursor, "agents", role, clock=10, origin_device_id="upgraded-peer",
+                             content_hash=engine.content_hash(coll, current), deleted=False)
+            applied, _ = engine.apply_snapshot_items(cursor, coll, [item], ctx=None)
+            assert applied == int(incoming_clock > 10)
+            row = engine._read_row(cursor, coll, role)
+            assert row["name"] == ("Legacy peer owner edit" if incoming_clock > 10 else "Existing owner edit")
+            assert not row["is_builtin"]
+            synced = store.get_record(cursor, "agents", role)
+            assert synced["clock"] == max(10, incoming_clock)
+            assert synced["origin_device_id"] == ("legacy-peer" if incoming_clock > 10 else "upgraded-peer")
+            assert synced["content_hash"] == engine.content_hash(coll, engine.serialize_row(coll, row))
+            assert item["record"]["is_builtin"]  # no mutation of incoming wire data
+            # Even a later default cannot replace the retained owner edit.
+            untouched = {**item, "clock": 100, "record": engine.serialize_row(coll, defaults)}
+            assert engine.apply_snapshot_items(cursor, coll, [untouched], ctx=None)[0] == 0
+            assert engine._read_row(cursor, coll, role) == row
+        finally:
+            conn.rollback()  # Keep shared real-PG sync tables unchanged.
