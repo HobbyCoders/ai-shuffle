@@ -1403,12 +1403,31 @@ def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = 
         return ops, heads, snapshot
 
 
+def preserved_builtin_ids(_conn=None) -> List[str]:
+    """Local agent projections that can change without advancing the sync log."""
+    def _query(conn):
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM agents WHERE id IN (%s, %s) AND is_builtin = FALSE ORDER BY id",
+                       ("general-purpose", "frontend-designer"))
+        return [row["id"] for row in cursor.fetchall()]
+    if _conn is not None:
+        return _query(_conn)
+    with get_db() as conn:
+        return _query(conn)
+
+
 def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None, _conn=None,
                       _heads: Optional[Dict[str, Dict[str, int]]] = None) -> bool:
     """A state-copy recipient can forward state even without original log rows."""
     def _query(conn):
         cursor = conn.cursor()
         heads = local_watermarks(conn) if _heads is None else _heads
+        # An upgrade can preserve a starter role solely because it has permission
+        # rules. Its ordinary-agent projection is local upkeep at the original
+        # clock, so no agent op precedes the pending permission op. A peer that
+        # retired its unchanged copy needs a state copy, not an endless FK retry.
+        # Use the existing signed snapshot protocol; never mint a winning clock.
+        permission_only_projection = None
         for origin, streams in heads.items():
             if origin == exclude_origin:
                 continue
@@ -1421,6 +1440,22 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None, _c
                                (origin, int(incarnation), last, head))
                 if int(cursor.fetchone()["n"]) != head - last:
                     return True
+                if permission_only_projection is None:
+                    cursor.execute("SELECT * FROM agents WHERE id IN (%s, %s) AND is_builtin = FALSE",
+                                   ("general-purpose", "frontend-designer"))
+                    from app.core.builtin_retirement import is_untouched_builtin
+                    permission_only_projection = any(is_untouched_builtin(dict(row)) for row in cursor.fetchall())
+                if permission_only_projection:
+                    # The rule may already be deleted locally, so joining its
+                    # current row would miss an earlier upsert still owed to the
+                    # peer. Conservatively copy for any lagging permission op.
+                    # Once the copy advances its frontier this is false again.
+                    cursor.execute("""SELECT 1 FROM sync_ops WHERE origin_device_id=%s
+                                      AND incarnation=%s AND seq>%s AND seq<=%s
+                                      AND collection='permission_rules' LIMIT 1""",
+                                   (origin, int(incarnation), last, head))
+                    if cursor.fetchone() is not None:
+                        return True
         return False
     if _conn is not None:
         return _query(_conn)

@@ -241,3 +241,59 @@ def test_legacy_owner_snapshot_keeps_original_order_on_postgres(role, incoming_c
             assert engine._read_row(cursor, coll, role) == row
         finally:
             conn.rollback()  # Keep shared real-PG sync tables unchanged.
+
+
+@pytest.mark.parametrize("role", preservation.ROLES)
+@pytest.mark.parametrize("delete_rule", [False, True])
+def test_permission_preservation_snapshot_frontier_on_postgres(role, delete_rule):
+    from app.core.builtin_subagents import seed_builtin_subagents
+    from app.db import database, network as store
+    from app.network import engine, policy
+
+    engine.reset_for_tests()
+    assert store.get_state() is None
+    ctx = engine.create_network("Disposable permission-only preservation")
+    try:
+        create_unchanged_builtin(role)
+        engine.scan_collection("agents")
+        before_permission = store.local_watermarks()
+        with database.get_db() as conn:
+            original = store.get_record(conn.cursor(), "agents", role)
+        rule = database.add_permission_rule(role, "Bash", "*", "deny")
+        engine.scan_collection("permission_rules")
+        assert not store.requires_snapshot(before_permission)
+        seed_builtin_subagents()
+        engine.scan_collection("agents")
+        if delete_rule:
+            database.delete_permission_rule(rule["id"])
+            engine.scan_collection("permission_rules")
+        assert store.exchange_batch(before_permission)[2]
+        assert not store.requires_snapshot(before_permission, exclude_origin=ctx.device_id)
+        assert not store.exchange_batch(store.local_watermarks())[2]
+        agent_items = engine.open_snapshot_chunk(engine.snapshot_chunk("agents"), ctx=ctx)["items"]
+        permission_items = engine.open_snapshot_chunk(engine.snapshot_chunk("permission_rules"), ctx=ctx)["items"]
+        agent_item = next(item for item in agent_items if item["record_id"] == role)
+        assert not agent_item["record"]["is_builtin"]
+        assert (agent_item["clock"], agent_item["origin_device_id"]) == (
+            original["clock"], original["origin_device_id"])
+        # Model the retired receiver, applying the real producer's signed copy
+        # in dependency order, without leaving fixtures in shared sync tables.
+        with database.get_db() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute("DELETE FROM permission_rules WHERE profile_id=%s", (role,))
+                cursor.execute("DELETE FROM agents WHERE id=%s", (role,))
+                cursor.execute("DELETE FROM sync_records WHERE collection='agents' AND record_id=%s", (role,))
+                cursor.execute("DELETE FROM sync_records WHERE collection='permission_rules' AND record_id=%s", (rule["id"],))
+                engine.apply_snapshot_items(cursor, policy.collection("agents"), agent_items, ctx=ctx)
+                engine.apply_snapshot_items(cursor, policy.collection("permission_rules"), permission_items, ctx=ctx)
+                assert not engine._read_row(cursor, policy.collection("agents"), role)["is_builtin"]
+                cursor.execute("SELECT decision FROM permission_rules WHERE profile_id=%s", (role,))
+                assert [row["decision"] for row in cursor.fetchall()] == ([] if delete_rule else ["deny"])
+                held = store.get_record(cursor, "agents", role)
+                assert (held["clock"], held["origin_device_id"]) == (original["clock"], original["origin_device_id"])
+            finally:
+                conn.rollback()
+    finally:
+        engine.leave_network()
+        engine.reset_for_tests()
