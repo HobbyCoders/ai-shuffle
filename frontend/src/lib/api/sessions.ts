@@ -88,6 +88,12 @@ export interface Session {
 	last_user_message_seq?: number | null;
 	/** Opaque identity of the event log `last_user_message_seq` belongs to. */
 	last_user_message_epoch?: string | null;
+	/** Event-log seq of the newest nonempty assistant prose when it asks a
+	 *  question; null when it does not (or nothing is known). Absent from older
+	 *  workers. Compare only within an equal epoch (#2263). */
+	last_assistant_question_seq?: number | null;
+	/** Opaque identity of the event log `last_assistant_question_seq` belongs to. */
+	last_assistant_question_epoch?: string | null;
 	created_at: string;
 	updated_at: string;
 	// Cross-install (cluster) annotation — populated server-side when sessions

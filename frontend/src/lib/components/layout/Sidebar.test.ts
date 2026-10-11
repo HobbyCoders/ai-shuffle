@@ -687,6 +687,26 @@ describe('Sidebar Needs you lane', () => {
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 	});
 
+	it('marks a never-opened session from its row question and clears it on the answer (#2263)', async () => {
+		onTestFinished(_resetProseQuestions);
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+
+		const pair = { last_assistant_question_seq: 12, last_assistant_question_epoch: 'evt-1' };
+		observeLastUserMessage('settled', { ...pair, last_user_message_seq: 9, last_user_message_epoch: 'evt-1' });
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+
+		observeLastUserMessage('settled', { last_user_message_seq: 13, last_user_message_epoch: 'evt-1' });
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+
+		// A question position from another log is never compared: unmarked.
+		observeLastUserMessage('settled', { ...pair, last_assistant_question_epoch: 'evt-2' });
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+	});
+
 	it('takes a remote session from its owner state, not the local map', () => {
 		mocks.sessions.set([
 			session('remote', 'Remote chat', 'visible-project', true, false, { is_remote: true, instance_id: 'laptop', device_name: 'Laptop', remote_runtime_state: 'question' }),

@@ -12,7 +12,7 @@
  * - Session history loads via the feed's from_seq=0 replay, not WS.
  */
 
-import { forgetProseQuestion, observeLastUserMessage } from './prose-questions';
+import { forgetProseQuestion, noteLocalRowStamp, observeLastUserMessage } from './prose-questions';
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import type { ActiveSessionState, StreamingSessionInfo } from '../active-session';
 import { notify, type NotificationAction, type NotificationSeverity, type NotificationSurface } from '../notifications';
@@ -187,6 +187,10 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'last_user_message_at',
 	'last_user_message_seq',
 	'last_user_message_epoch',
+	// The trailing prose question changed (#2263): marks or clears Needs you on
+	// a row this tab has not opened.
+	'last_assistant_question_seq',
+	'last_assistant_question_epoch',
 ]);
 
 /**
@@ -250,6 +254,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	function applyRowUpdates(sessionId: string | undefined, updates: Record<string, unknown>): void {
 		const keys = Object.keys(updates);
 		// Also for rows not loaded here: the remembered question is per session.
+		// Ordered by its `updated_at` when the server sent one, else in arrival
+		// order; a stamp from this tab's clock is excluded (noteLocalRowStamp).
 		observeLastUserMessage(sessionId, updates);
 		const patch: Record<string, unknown> = {};
 		let needsReload = false;
@@ -380,7 +386,10 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		// (paged out, or created elsewhere) does change the list, so that case
 		// falls back to a debounced reload.
 		if (doneSessionId) {
-			const patched = mergeSessionPatch(doneSessionId, { updated_at: new Date().toISOString() });
+			// This tab's clock: sorts the row, never orders revisions (#2263).
+			const stamp = new Date().toISOString();
+			noteLocalRowStamp(doneSessionId, stamp);
+			const patched = mergeSessionPatch(doneSessionId, { updated_at: stamp });
 			if (!patched) scheduleSessionsReload();
 		}
 	}
@@ -601,13 +610,21 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 			// A cleared conversation has nothing left awaiting the user's input.
 			setNeedsAttention(sessionId, 0);
-			forgetProseQuestion(sessionId);
-			// Sidebar row: the server zeroed the counters as part of the clear —
-			// mirror that on the row (all patchable fields) instead of re-paging.
+			forgetProseQuestion(sessionId, { cleared: true });
+			// This tab's clock: sorts the row, never orders revisions (#2263).
+			const clearedAt = new Date().toISOString();
+			noteLocalRowStamp(sessionId, clearedAt);
+			// Sidebar row: the server zeroed the counters and both revision pairs
+			// as part of the clear — mirror that on the row (all patchable fields)
+			// instead of re-paging.
 			applyRowUpdates(sessionId, {
 				turn_count: 0,
 				total_cost_usd: 0,
-				updated_at: new Date().toISOString(),
+				updated_at: clearedAt,
+				last_user_message_seq: null,
+				last_user_message_epoch: null,
+				last_assistant_question_seq: null,
+				last_assistant_question_epoch: null,
 			});
 			return;
 		}

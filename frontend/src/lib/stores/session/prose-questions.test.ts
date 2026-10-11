@@ -8,7 +8,9 @@ import {
 	observeLastUserMessage,
 	observeSessionRows,
 	proseQuestionSessions,
+	noteLocalRowStamp,
 	rememberLeavingProseQuestion,
+	versionKey,
 	withoutSession
 } from './prose-questions';
 import type { ChatMessage } from '../types';
@@ -267,5 +269,222 @@ describe('cleared by a later user message in the question\'s log (#2249)', () =>
 			finishUserMessageRevisionSeed('A', claim, rev(4));
 			expect(has('A')).toBe(true);
 		});
+	});
+});
+
+describe('row-derived assistant question (#2263)', () => {
+	const E = 'evt-epoch-1';
+	const E2 = 'evt-epoch-2';
+	const has = (id: string) => get(proseQuestionSessions).has(id);
+	const row = (
+		question: number | null,
+		user: number | null,
+		qEpoch: string | null = E,
+		uEpoch: string | null = user === null ? null : E
+	) => ({
+		last_assistant_question_seq: question,
+		last_assistant_question_epoch: qEpoch,
+		last_user_message_seq: user,
+		last_user_message_epoch: uEpoch
+	});
+
+	it('marks a session this tab never opened when its row asks after the last user message', () => {
+		observeSessionRows([{ id: 'A', ...row(12, 9) }]);
+		expect(has('A')).toBe(true);
+	});
+
+	it('marks when no user message is known yet', () => {
+		observeLastUserMessage('A', row(3, null));
+		expect(has('A')).toBe(true);
+	});
+
+	it('is cleared by later non-question prose (null seq, same epoch)', () => {
+		observeLastUserMessage('A', row(12, 9));
+		observeLastUserMessage('A', { last_assistant_question_seq: null, last_assistant_question_epoch: E });
+		expect(has('A')).toBe(false);
+	});
+
+	it('is cleared by a user answer in the same epoch, including a user-only frame', () => {
+		observeLastUserMessage('A', row(12, 9));
+		observeLastUserMessage('A', { last_user_message_seq: 13, last_user_message_epoch: E });
+		expect(has('A')).toBe(false);
+		// A delayed revision from before the answer cannot un-answer it.
+		observeLastUserMessage('A', row(12, 9));
+		expect(has('A')).toBe(false);
+	});
+
+	/** A list row written at minute `m` (its `updated_at`). */
+	const at = (m: number) => `2026-10-11T10:${String(m).padStart(2, '0')}:00+00:00`;
+	const listRow = (m: number, ...args: Parameters<typeof row>) => ({ id: 'A', ...row(...args), updated_at: at(m) });
+
+	it('re-marks when the agent asks again; delayed rows and snapshots do not replace it', () => {
+		observeSessionRows([listRow(1, 12, 9)]);
+		observeSessionRows([listRow(2, 12, 13)]);
+		expect(has('A')).toBe(false);
+		observeSessionRows([listRow(3, 16, 13)]);
+		expect(has('A')).toBe(true);
+		// A delayed pre-answer row (older updated_at) is ignored…
+		observeSessionRows([listRow(1, 12, 9)]);
+		expect(has('A')).toBe(true);
+		// …and so is a delayed /live snapshot, which carries no updated_at.
+		finishUserMessageRevisionSeed('A', beginUserMessageRevisionSeed('A'), row(12, 13));
+		expect(has('A')).toBe(true);
+		// A later write of non-question prose still clears it…
+		observeSessionRows([listRow(4, null, 13)]);
+		expect(has('A')).toBe(false);
+		// …and a later question after a newer user message marks it.
+		observeSessionRows([listRow(5, 15, 14)]);
+		expect(has('A')).toBe(true);
+	});
+
+	it('a retry that restores an earlier question marks again (rows and frames)', () => {
+		// user 1 → "First?" 2 → tools 3–4 → "Second?" 5 → streaming 6 → retry 7 restores 2.
+		const steps: (number | null)[] = [null, 2, 2, 2, 5, null, 2];
+		steps.forEach((q, i) => observeSessionRows([listRow(i + 1, q, 1)]));
+		expect(has('A')).toBe(true);
+		steps.forEach((q) => observeLastUserMessage('B', row(q, 1)));
+		expect(has('B')).toBe(true);
+	});
+
+	it('a row equal to a pushed frame\'s base version does not undo the frame', () => {
+		observeSessionRows([listRow(3, 16, 13)]);
+		observeLastUserMessage('A', row(null, 13)); // pushed: non-question prose
+		expect(has('A')).toBe(false);
+		// An in-flight list row from before the frame (observeSessionRows would
+		// skip it as unchanged; a leaving/visit row lookup would not).
+		observeLastUserMessage('A', listRow(3, 16, 13));
+		expect(has('A')).toBe(false);
+		observeSessionRows([listRow(4, 18, 13)]);
+		expect(has('A')).toBe(true);
+	});
+
+	it('compares server timestamps to the microsecond', () => {
+		const us = (f: string) => `2026-10-11T10:00:00.${f}Z`;
+		// A delayed row 0.8 ms older, within the same millisecond, is ignored.
+		observeSessionRows([{ id: 'A', ...row(16, 13), updated_at: us('123900') }]);
+		observeSessionRows([{ id: 'A', ...row(12, 13), updated_at: us('123100') }]);
+		expect(has('A')).toBe(true);
+		// A genuinely newer row within the same millisecond after a frame applies.
+		observeSessionRows([{ id: 'B', ...row(null, 13), updated_at: us('123100') }]);
+		observeLastUserMessage('B', row(null, 13));
+		observeSessionRows([{ id: 'B', ...row(16, 13), updated_at: us('123900') }]);
+		expect(has('B')).toBe(true);
+	});
+
+	it('versionKey normalises the suffix and a missing fraction, and keeps microseconds', () => {
+		expect(versionKey('2026-10-11T10:00:00Z')).toBe(versionKey('2026-10-11T10:00:00.000000+00:00'));
+		expect(versionKey('2026-10-11T12:00:00.5+02:00')).toBe(versionKey('2026-10-11 10:00:00.500000'));
+		expect(versionKey('2026-10-11T10:00:00.123100Z')! < versionKey('2026-10-11T10:00:00.123900Z')!).toBe(true);
+		expect(versionKey('2026-10-11T10:00:00.999999Z')! < versionKey('2026-10-11T10:00:01Z')!).toBe(true);
+		expect(versionKey('not a time')).toBeNull();
+		expect(versionKey(undefined)).toBeNull();
+	});
+
+	it('orders frames by updated_at when they carry it, else by arrival', () => {
+		observeSessionRows([listRow(3, 16, 13)]);
+		// An older versioned frame is ignored; a newer one applies.
+		observeLastUserMessage('A', { ...row(null, 13), updated_at: at(2) });
+		expect(has('A')).toBe(true);
+		observeLastUserMessage('A', { ...row(null, 13), updated_at: at(4) });
+		expect(has('A')).toBe(false);
+		// Without updated_at it applies in arrival order.
+		observeLastUserMessage('A', row(18, 13));
+		expect(has('A')).toBe(true);
+	});
+
+	it('orders a /live snapshot by updated_at when it carries it', () => {
+		observeSessionRows([listRow(3, 16, 13)]);
+		finishUserMessageRevisionSeed('A', beginUserMessageRevisionSeed('A'), { ...row(null, 13), updated_at: at(2) });
+		expect(has('A')).toBe(true);
+		finishUserMessageRevisionSeed('A', beginUserMessageRevisionSeed('A'), { ...row(null, 13), updated_at: at(4) });
+		expect(has('A')).toBe(false);
+		// Without it, a snapshot of a session with row state is ignored.
+		finishUserMessageRevisionSeed('A', beginUserMessageRevisionSeed('A'), row(20, 13));
+		expect(has('A')).toBe(false);
+	});
+
+	it('never orders by an updated_at this tab synthesised', () => {
+		observeSessionRows([listRow(3, 16, 13)]);
+		noteLocalRowStamp('A', at(59)); // e.g. a done patch from a clock running ahead
+		observeSessionRows([{ id: 'A', ...row(16, 13), updated_at: at(59) }]);
+		observeSessionRows([listRow(4, null, 13)]);
+		expect(has('A')).toBe(false);
+	});
+
+	it('a /live snapshot seeds a session no row has set', () => {
+		finishUserMessageRevisionSeed('A', beginUserMessageRevisionSeed('A'), row(4, 2));
+		expect(has('A')).toBe(true);
+	});
+
+	it('does not compare positions across epochs', () => {
+		observeLastUserMessage('A', row(12, 2, E, E2));
+		expect(has('A')).toBe(false);
+		observeLastUserMessage('B', row(5, 40, E2, E));
+		expect(has('B')).toBe(false);
+	});
+
+	it('explicit null seq unmarks even a transcript-remembered question', () => {
+		rememberLeavingProseQuestion('A', [
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Prod only?', seq: 4, epoch: E }
+		]);
+		expect(has('A')).toBe(true);
+		observeLastUserMessage('A', row(null, 3));
+		expect(has('A')).toBe(false);
+	});
+
+	it('falls back to the transcript when the fields are absent (older worker)', () => {
+		rememberLeavingProseQuestion('A', [
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Prod only?', seq: 4, epoch: E }
+		]);
+		observeSessionRows([{ id: 'A', last_user_message_seq: 3, last_user_message_epoch: E }]);
+		expect(has('A')).toBe(true);
+		// And an older row without a question never marks on its own.
+		observeSessionRows([{ id: 'B', last_user_message_seq: 3, last_user_message_epoch: E }]);
+		expect(has('B')).toBe(false);
+	});
+
+	it('falls back to the transcript when both question fields are null', () => {
+		rememberLeavingProseQuestion('A', [
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Prod only?', seq: 4, epoch: E }
+		]);
+		observeLastUserMessage('A', row(null, 3, null));
+		expect(has('A')).toBe(true);
+	});
+
+	it('the row wins over the transcript when leaving the session', () => {
+		observeLastUserMessage('A', row(8, 5));
+		rememberLeavingProseQuestion('A', [{ id: 'a1', role: 'assistant', type: 'text', content: 'Done.' }]);
+		expect(has('A')).toBe(true);
+	});
+
+	it('a clear retires the old log: a delayed pre-clear row does not re-mark', () => {
+		observeLastUserMessage('A', row(12, 9));
+		forgetProseQuestion('A', { cleared: true });
+		expect(has('A')).toBe(false);
+		observeSessionRows([{ id: 'A', ...row(12, 9) }]);
+		expect(has('A')).toBe(false);
+		// The new log asks: marked again.
+		observeLastUserMessage('A', row(2, null, E2));
+		expect(has('A')).toBe(true);
+	});
+
+	it('a clear retires an epoch only seen with an explicit null question', () => {
+		observeLastUserMessage('A', row(null, null));
+		forgetProseQuestion('A', { cleared: true });
+		observeLastUserMessage('A', row(2, null));
+		expect(has('A')).toBe(false);
+	});
+
+	it('deleting the session drops the row-derived mark', () => {
+		observeLastUserMessage('A', row(12, 9));
+		forgetProseQuestion('A');
+		expect(has('A')).toBe(false);
+	});
+
+	it('re-observes a row whose question fields changed', () => {
+		observeSessionRows([{ id: 'A', ...row(null, 9) }]);
+		expect(has('A')).toBe(false);
+		observeSessionRows([{ id: 'A', ...row(12, 9) }]);
+		expect(has('A')).toBe(true);
 	});
 });

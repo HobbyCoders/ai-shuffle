@@ -37,9 +37,29 @@
  * peer-agent notes and autonomous wakes do not advance the revision, so none
  * of them clear an entry.
  *
- * Known limit: a question this tab never saw (a session not opened here since
- * page load) is not known, because the row does not say whether its last
- * prose asks a question.
+ * Row-derived question (#2263): a worker that stamps the row also delivers
+ * `last_assistant_question_seq`/`_epoch` with the revision — the position of
+ * the newest nonempty assistant prose when it asks a question, null when it
+ * does not. A session is then marked iff
+ *
+ *     question.seq !== null && question.epoch !== null
+ *       && (no user position is known
+ *           || (user.epoch === question.epoch && question.seq > user.seq))
+ *
+ * using the latest user pair delivered and the highest user seq seen in the
+ * question's epoch, so a delayed revision cannot un-answer a question.
+ * Revisions are ordered by the row's `updated_at`, not by position: a list
+ * row older than the one applied is ignored, so a delayed row cannot replace a
+ * re-ask, while a retry that restores an earlier question (a newer write)
+ * applies. Pushed frames apply in arrival order; a `/live` snapshot, which has
+ * no `updated_at`, only seeds a session no row or frame has set (see
+ * `isCurrent`). This
+ * replaces the transcript-derived mark for that session, including sessions
+ * this tab never opened. An explicit null seq in a known epoch clears it.
+ * When the fields are absent (an older worker) or both null (an older peer's
+ * replicated row, or a cleared log), the transcript-derived mark above stays
+ * the fallback. A clear retires the log's epochs here, so a delayed pre-clear
+ * row cannot bring its question back.
  */
 
 import { createStore } from '../store-utils';
@@ -63,6 +83,21 @@ export interface UserMessageRevision {
 	last_user_message_seq?: unknown;
 	/** Opaque epoch string, or null/absent when unknown. Validated here. */
 	last_user_message_epoch?: unknown;
+	/** Trailing prose question seq; null: no question; absent: older worker. */
+	last_assistant_question_seq?: unknown;
+	/** Opaque epoch of `last_assistant_question_seq`. */
+	last_assistant_question_epoch?: unknown;
+	/** The row's write time: orders list rows (#2263). Frames and `/live` lack it. */
+	updated_at?: unknown;
+}
+
+/**
+ * Where a revision came from, when it carries no `updated_at`: a pushed
+ * `user_session_updated` frame (applied in arrival order) or a fetched `/live`
+ * snapshot (no order at all, so it only seeds a session without row state).
+ */
+export interface RevisionSource {
+	snapshot?: boolean;
 }
 
 /**
@@ -91,6 +126,70 @@ let _nextClaim = 0;
 
 /** Raw row positions last seen per session, so an unchanged row is skipped. */
 const _rowRaw = new Map<string, string>();
+
+/**
+ * The row-derived trailing prose question per session (#2263): its position,
+ * or null when the row says the newest prose asks nothing. Absent: the row
+ * says nothing (older worker or peer), so the transcript-derived mark applies.
+ */
+const _rowQuestions = new Map<string, Position | null>();
+
+/** The latest user-message pair delivered per session (null: none known). */
+const _lastUser = new Map<string, Position | null>();
+
+/**
+ * Every question epoch delivered per session, including one only seen with a
+ * null seq, so a clear can retire it.
+ */
+const _questionEpochs = new Map<string, Set<string>>();
+
+/**
+ * Which revision of the row the row-derived state comes from, per session:
+ * `at` is the newest applied row `updated_at` (ms; null when none), and
+ * `pushedSince` says a pushed frame (which carries no `updated_at`) was
+ * applied after it.
+ */
+const _applied = new Map<string, { at: string | null; pushedSince: boolean }>();
+
+/**
+ * `updated_at` values this tab synthesised from its own clock (a turn's `done`,
+ * a clear), per session. They order the sidebar but are not server versions,
+ * so a row carrying one is not used to order revisions.
+ */
+const _localStamps = new Map<string, string[]>();
+const LOCAL_STAMPS_KEPT = 8;
+
+/** Record an `updated_at` this tab wrote onto a row from its own clock. */
+export function noteLocalRowStamp(sessionId: string, stamp: string): void {
+	const stamps = _localStamps.get(sessionId) ?? [];
+	stamps.push(stamp);
+	if (stamps.length > LOCAL_STAMPS_KEPT) stamps.shift();
+	_localStamps.set(sessionId, stamps);
+}
+
+const STAMP = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}(?::?\d{2})?)?$/i;
+
+/**
+ * A server `updated_at` as a key that sorts in time order without losing the
+ * microseconds PostgreSQL keeps (Date.parse stops at milliseconds): whole UTC
+ * seconds, then the fraction to 9 digits. Accepts `Z` or a numeric offset (a
+ * missing one is UTC) and a space or `T` separator. Null when unparseable.
+ */
+export function versionKey(value: unknown): string | null {
+	if (typeof value !== 'string') return null;
+	const m = STAMP.exec(value.trim());
+	if (!m) return null;
+	let offset = (m[4] ?? 'Z').toUpperCase();
+	if (/^[+-]\d{2}$/.test(offset)) offset += ':00';
+	else if (/^[+-]\d{4}$/.test(offset)) offset = `${offset.slice(0, 3)}:${offset.slice(3)}`;
+	const ms = Date.parse(`${m[1]}T${m[2]}${offset}`);
+	if (Number.isNaN(ms)) return null;
+	const seconds = Math.floor(ms / 1000) + 1e11; // positive, fixed width
+	return `${String(seconds).padStart(13, '0')}.${(m[3] ?? '').padEnd(9, '0')}`;
+}
+
+/** Epochs of logs cleared since load, per session: never re-marked from. */
+const _retired = new Map<string, Set<string>>();
 
 export const proseQuestionSessions = {
 	get current() { return _store.current; },
@@ -130,12 +229,117 @@ function answers(seen: number | undefined, question: Position): boolean {
 	return seen !== undefined && seen > question.seq;
 }
 
+/**
+ * Whether the row-derived question marks the session; undefined when the row
+ * says nothing, so the transcript-derived mark decides.
+ */
+function rowMarked(sessionId: string): boolean | undefined {
+	if (!_rowQuestions.has(sessionId)) return undefined;
+	const question = _rowQuestions.get(sessionId);
+	if (!question) return false;
+	// Marked only while the question follows every user message of its log.
+	const seen = latestIn(sessionId, question.epoch);
+	if (seen !== undefined && seen >= question.seq) return false;
+	const user = _lastUser.get(sessionId);
+	// Never compare positions across epochs: a user pair from another log
+	// leaves the question's state unknown, so it is not marked.
+	return !user || user.epoch === question.epoch;
+}
+
+/** Publish the session's mark: the row's when it has one, else the transcript's. */
+function refresh(sessionId: string): void {
+	const marked = rowMarked(sessionId) ?? _questions.has(sessionId);
+	if (marked === _store.current.has(sessionId)) return;
+	const next = new Set(_store.current);
+	if (marked) next.add(sessionId);
+	else next.delete(sessionId);
+	_store.set(next);
+}
+
 function drop(sessionId: string): void {
 	_questions.delete(sessionId);
-	if (!_store.current.has(sessionId)) return;
-	const next = new Set(_store.current);
-	next.delete(sessionId);
-	_store.set(next);
+	refresh(sessionId);
+}
+
+/** Record the row-derived question pair of a revision that carries one. */
+function observeQuestion(sessionId: string, revision: UserMessageRevision): void {
+	if (revision.last_assistant_question_seq === undefined) return;
+	const seq = revision.last_assistant_question_seq;
+	const epoch = revision.last_assistant_question_epoch;
+	const retired = _retired.get(sessionId);
+	if (typeof epoch === 'string' && retired?.has(epoch)) return;
+	if (seq === null && (epoch === null || epoch === undefined)) {
+		// Nothing known (older peer, cleared log): the transcript decides.
+		_rowQuestions.delete(sessionId);
+		return;
+	}
+	if (typeof epoch !== 'string' || !epoch) {
+		// A malformed pair says no question: never mark from it.
+		_rowQuestions.set(sessionId, null);
+		return;
+	}
+	let epochs = _questionEpochs.get(sessionId);
+	if (!epochs) {
+		epochs = new Set();
+		_questionEpochs.set(sessionId, epochs);
+	}
+	if (!epochs.has(epoch) && epochs.size >= EPOCHS_KEPT) {
+		const oldest = epochs.values().next().value;
+		if (oldest !== undefined) epochs.delete(oldest);
+	}
+	epochs.add(epoch);
+	const pos = toPosition(seq, epoch);
+	_rowQuestions.set(sessionId, pos);
+}
+
+/** Whether the revision carries either revision pair. */
+function carriesPairs(revision: UserMessageRevision): boolean {
+	return revision.last_assistant_question_seq !== undefined
+		|| revision.last_user_message_seq !== undefined
+		|| revision.last_user_message_epoch !== undefined;
+}
+
+/**
+ * Whether the revision's pairs are current, so they may replace the row-derived
+ * state. Positions cannot order revisions (a retry restores an earlier
+ * question with the same user pair a delayed snapshot has), so they are ordered
+ * by the row's own write time, which moves whenever either pair does:
+ * - a row is applied when its `updated_at` is at least the last applied one
+ *   (ties accept), and must be strictly newer after a pushed frame, which
+ *   reflects a write later than the last applied row;
+ * - a pushed frame or `/live` snapshot that carries `updated_at` is ordered
+ *   the same way;
+ * - without it, a pushed frame is applied in arrival order and a `/live`
+ *   snapshot only seeds a session no row or frame has set yet;
+ * - an `updated_at` this tab synthesised (`noteLocalRowStamp`) never orders.
+ * Timestamps compare at full (microsecond) precision (`versionKey`).
+ * Records the applied version.
+ */
+function isCurrent(sessionId: string, revision: UserMessageRevision, source: RevisionSource): boolean {
+	if (!carriesPairs(revision)) return false;
+	// This tab's own clock is not a server version: not ordered, not applied.
+	// (Every pair change also reaches here as a list row or a frame.)
+	if (typeof revision.updated_at === 'string' && _localStamps.get(sessionId)?.includes(revision.updated_at)) {
+		return false;
+	}
+	const known = _applied.get(sessionId);
+	const at = versionKey(revision.updated_at);
+	if (at === null) {
+		if (source.snapshot) return !known;
+		_applied.set(sessionId, { at: known?.at ?? null, pushedSince: true });
+		return true;
+	}
+	if (known && known.at !== null && (at < known.at || (known.pushedSince && at === known.at))) return false;
+	_applied.set(sessionId, { at, pushedSince: false });
+	return true;
+}
+
+/** Record the latest user pair of a revision that carries one. */
+function observeUser(sessionId: string, revision: UserMessageRevision): void {
+	if (revision.last_user_message_seq === undefined && revision.last_user_message_epoch === undefined) return;
+	const pos = toPosition(revision.last_user_message_seq, revision.last_user_message_epoch);
+	if (pos && _retired.get(sessionId)?.has(pos.epoch)) return;
+	_lastUser.set(sessionId, pos);
 }
 
 /** The trailing assistant prose message (the one `lastProseAsksQuestion` reads). */
@@ -171,10 +375,7 @@ export function rememberLeavingProseQuestion(
 		return;
 	}
 	_questions.set(sessionId, pos);
-	if (_store.current.has(sessionId)) return;
-	const next = new Set(_store.current);
-	next.add(sessionId);
-	_store.set(next);
+	refresh(sessionId);
 }
 
 /**
@@ -200,26 +401,34 @@ export function finishUserMessageRevisionSeed(
 	meta: UserMessageRevision | null | undefined
 ): void {
 	if (_claims.get(sessionId) === token) _claims.delete(sessionId);
-	if (meta) observeLastUserMessage(sessionId, meta);
+	if (meta) observeLastUserMessage(sessionId, meta, { snapshot: true });
 }
 
 /**
- * A session's user-message revision as delivered by a row, a
- * `user_session_updated` frame or a `/live` snapshot. Drops the remembered
- * question when the revision is a later user message in the question's log.
+ * A session's revision as delivered by a row, a `user_session_updated` frame
+ * or a `/live` snapshot: its user-message pair and, from a worker that stamps
+ * it, its trailing prose question pair (#2263). Drops the remembered question
+ * when the revision is a later user message in the question's log.
  */
 export function observeLastUserMessage(
 	sessionId: string | null | undefined,
-	revision: UserMessageRevision | null | undefined
+	revision: UserMessageRevision | null | undefined,
+	source: RevisionSource = {}
 ): void {
 	if (!sessionId || !revision) return;
-	const pos = toPosition(revision.last_user_message_seq, revision.last_user_message_epoch);
-	if (!pos) return;
-	remember(sessionId, pos);
-	const question = _questions.get(sessionId);
-	if (question && question.epoch === pos.epoch && answers(latestIn(sessionId, pos.epoch), question)) {
-		drop(sessionId);
+	if (isCurrent(sessionId, revision, source)) {
+		observeQuestion(sessionId, revision);
+		observeUser(sessionId, revision);
 	}
+	const pos = toPosition(revision.last_user_message_seq, revision.last_user_message_epoch);
+	if (pos) {
+		remember(sessionId, pos);
+		const question = _questions.get(sessionId);
+		if (question && question.epoch === pos.epoch && answers(latestIn(sessionId, pos.epoch), question)) {
+			_questions.delete(sessionId);
+		}
+	}
+	refresh(sessionId);
 }
 
 /**
@@ -229,19 +438,43 @@ export function observeLastUserMessage(
  */
 export function observeSessionRows(rows: readonly ({ id: string } & UserMessageRevision)[]): void {
 	for (const row of rows) {
-		const raw = `${row.last_user_message_seq ?? ''}@${row.last_user_message_epoch ?? ''}`;
+		const raw = [
+			row.last_user_message_seq, row.last_user_message_epoch,
+			row.last_assistant_question_seq, row.last_assistant_question_epoch, row.updated_at
+		].map((v) => (v === undefined ? '~' : String(v))).join('@');
 		if (_rowRaw.get(row.id) === raw) continue;
 		_rowRaw.set(row.id, raw);
 		observeLastUserMessage(row.id, row);
 	}
 }
 
-/** Drop a session's entry (the session was deleted). */
-export function forgetProseQuestion(sessionId: string): void {
-	drop(sessionId);
+/**
+ * Drop a session's entry: the session was deleted, or (`cleared`) its log was
+ * wiped in place. A clear retires every epoch known for it, so a delayed
+ * pre-clear row or snapshot cannot mark or answer anything again.
+ */
+export function forgetProseQuestion(sessionId: string, opts: { cleared?: boolean } = {}): void {
+	if (opts.cleared) {
+		const retired = _retired.get(sessionId) ?? new Set<string>();
+		for (const epoch of _latest.get(sessionId)?.keys() ?? []) retired.add(epoch);
+		for (const epoch of _questionEpochs.get(sessionId) ?? []) retired.add(epoch);
+		for (const pos of [_questions.get(sessionId), _rowQuestions.get(sessionId), _lastUser.get(sessionId)]) {
+			if (pos) retired.add(pos.epoch);
+		}
+		if (retired.size) _retired.set(sessionId, retired);
+	} else {
+		_retired.delete(sessionId);
+	}
+	_questions.delete(sessionId);
+	_rowQuestions.delete(sessionId);
+	_questionEpochs.delete(sessionId);
+	_applied.delete(sessionId);
+	if (!opts.cleared) _localStamps.delete(sessionId);
+	_lastUser.delete(sessionId);
 	_latest.delete(sessionId);
 	_rowRaw.delete(sessionId);
 	_claims.delete(sessionId);
+	refresh(sessionId);
 }
 
 /** Test seam: forget everything. */
@@ -250,6 +483,12 @@ export function _resetProseQuestions(): void {
 	_latest.clear();
 	_claims.clear();
 	_rowRaw.clear();
+	_rowQuestions.clear();
+	_questionEpochs.clear();
+	_applied.clear();
+	_localStamps.clear();
+	_lastUser.clear();
+	_retired.clear();
 	_store.set(new Set());
 }
 
