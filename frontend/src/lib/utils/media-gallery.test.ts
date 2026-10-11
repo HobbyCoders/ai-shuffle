@@ -65,9 +65,12 @@ describe('settled turn media gallery', () => {
 	});
 	it('settles an earlier turn when the next user message arrives, without mixing turns', () => {
 		const items = buildDisplayItems([user, tool, answer, message('u2', { role: 'user', content: 'Next' }), message('a2', { content: `![single](${image2})` })], { ...options, isStreaming: true });
-		const groups = items.filter(item => item.kind === 'work_log');
+		// The live turn is one live work log; only the earlier turn is settled with a gallery.
+		const logs = items.filter(item => item.kind === 'work_log');
+		const groups = logs.filter(item => item.mode === 'settled');
 		expect(groups).toHaveLength(1);
 		expect(groups[0].gallery).toHaveLength(2);
+		expect(logs.filter(item => item.mode === 'live').every(item => !item.gallery?.length)).toBe(true);
 	});
 	it('splits galleries at same-turn steers only after the entire turn settles', () => {
 		const steer = message('steer', { role: 'user', turnId: 'turn-1', content: 'Try a different style' });
@@ -76,7 +79,8 @@ describe('settled turn media gallery', () => {
 		for (let length = 1; length <= messages.length; length++) {
 			for (const liveOptions of [{ ...options, isStreaming: true }, { ...options, latestTurnUnsettled: true }]) {
 				const items = buildDisplayItems(messages.slice(0, length), liveOptions);
-				expect(items.every(item => item.kind === 'message')).toBe(true);
+				// Live: at most the turn's one live work log, never a settled fold or a gallery.
+				expect(items.some(item => item.kind === 'work_log' && (item.mode === 'settled' || item.gallery?.length))).toBe(false);
 			}
 		}
 		const items = buildDisplayItems(messages, options);
