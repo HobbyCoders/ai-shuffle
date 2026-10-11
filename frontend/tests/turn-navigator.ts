@@ -55,6 +55,9 @@ Object.assign(activeSession.current, {
 	sessionId: 'fixture',
 	mode: 'code',
 	liveTurnId: null,
+	// A local chat: an unset isRemote reads as remote, and MirrorSyncGate would
+	// hold the transcript waiting on a sync-status the fixture never answers.
+	isRemote: false,
 	isStreaming: false,
 	profile: 'fixture-profile',
 	project: 'fixture-project',
