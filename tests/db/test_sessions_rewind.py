@@ -56,6 +56,8 @@ def _create_schema(cursor: sqlite3.Cursor) -> None:
             last_user_message_at TIMESTAMP,
             last_user_message_seq BIGINT,
             last_user_message_epoch TEXT,
+            last_assistant_question_seq BIGINT,
+            last_assistant_question_epoch TEXT,
             api_user_id TEXT,
             title TEXT,
             status TEXT DEFAULT 'active',

@@ -172,21 +172,18 @@ def append_events(
                 and is_user_message("user", event.get("payload"))
             ) else other_params
             target.append(values)
-        # Track genuinely inserted starts too: replaying a stable event id must
-        # not clear a hint generated after that original activity.
-        activity_seq = 0
-        completion_seq = 0
-        lifecycle_params = [values for values in other_params if values[5] in ("turn.started", "turn.completed")]
-        other_params = [values for values in other_params if values[5] not in ("turn.started", "turn.completed")]
-        if other_params:
-            cursor.executemany(insert_sql, other_params)
-        for values in lifecycle_params:
+        # Only genuinely inserted events may project a question or invalidate
+        # a suggestion: a stable-id replay is not fresh activity/completion.
+        inserted_other = False
+        activity_seq = completion_seq = 0
+        for values in other_params:
             cursor.execute(insert_sql + " RETURNING seq", values)
             inserted = cursor.fetchone()
             if inserted is not None:
+                inserted_other = True
                 if values[5] == "turn.started":
                     activity_seq = max(activity_seq, int(inserted["seq"]))
-                else:
+                elif values[5] == "turn.completed":
                     completion_seq = max(completion_seq, int(inserted["seq"]))
         # The event log is authoritative on the EXECUTING worker. API, relay,
         # connector and automation turns need not have a legacy message row.
@@ -198,14 +195,43 @@ def append_events(
             inserted = cursor.fetchone()
             if inserted is not None:
                 user_seq = int(inserted["seq"])
+        question_notify = None
+        if inserted_other or user_seq is not None:
+            from app.db.session_questions import record_question
+
+            # Rewinds retain the log epoch but remove causal user anchors in
+            # the discarded branch. The question projection reads surviving
+            # prose only. Both writes share the append transaction.
+            cursor.execute(
+                "SELECT seq, payload FROM session_events WHERE session_id = %s "
+                "AND seq >= %s AND seq <= %s AND event_type = 'transcript.rewound' ORDER BY seq",
+                (session_id, first_seq, last_seq),
+            )
+            rewinds = cursor.fetchall()
+            for rewind in rewinds:
+                cut = _parse_payload(rewind["payload"]).get("from_seq")
+                if isinstance(cut, int) and not isinstance(cut, bool):
+                    cursor.execute(
+                        "UPDATE sessions SET last_user_message_seq = NULL, last_user_message_epoch = NULL "
+                        "WHERE id = %s AND last_user_message_seq >= %s AND last_user_message_seq < %s",
+                        (session_id, cut, rewind["seq"]),
+                    )
+                    if user_seq is not None and cut <= user_seq < rewind["seq"]:
+                        user_seq = None
+            if user_seq is None:
+                question_notify = record_question(cursor, session_id, force_notify=bool(rewinds))
+            # Otherwise _record_user_message projects it while writing the row,
+            # then captures both pairs in the single user-activity broadcast.
         if user_seq is not None:
             now = datetime.now(timezone.utc).isoformat()
             notify = _record_user_message(cursor, session_id, "user", now, seq=user_seq)
             if notify:
                 after_commit(conn, notify)
             activity_seq = max(activity_seq, user_seq)
-        # Match legacy writes: session-row update BEFORE suggestion lock. Nothing
-        # below may update the session row while holding that advisory lock.
+        elif question_notify:
+            after_commit(conn, question_notify)
+        # Both user and question session-row updates precede the suggestion
+        # advisory lock. Nothing below may update the session row under it.
         if activity_seq or completion_seq:
             from app.db import composer_suggestions
 

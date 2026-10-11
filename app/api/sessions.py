@@ -1256,6 +1256,8 @@ async def get_live_session(
         "last_user_message_at": _serialize_last_user_message_at(session.get("last_user_message_at")),
         "last_user_message_seq": session.get("last_user_message_seq"),
         "last_user_message_epoch": session.get("last_user_message_epoch"),
+        "last_assistant_question_seq": session.get("last_assistant_question_seq"),
+        "last_assistant_question_epoch": session.get("last_assistant_question_epoch"),
         # Away mode (app/core/away_mode.py); null is a flag never set (off).
         "away_mode": session.get("away_mode"),
     }
@@ -2232,6 +2234,8 @@ async def get_session_state(
         "last_user_message_at": _serialize_last_user_message_at(session.get("last_user_message_at")),
         "last_user_message_seq": session.get("last_user_message_seq"),
         "last_user_message_epoch": session.get("last_user_message_epoch"),
+        "last_assistant_question_seq": session.get("last_assistant_question_seq"),
+        "last_assistant_question_epoch": session.get("last_assistant_question_epoch"),
         "is_streaming": sync_state["is_streaming"],
         "connected_devices": sync_state["connected_devices"],
     }

@@ -1,0 +1,425 @@
+[
+  {
+    "name": "peer delivery does not close or split streaming prose",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Why?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "[agent message from='worker-a' — a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\nFound the failing path.\n[/agent message]",
+          "source": "agent_message"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": " Done."
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": 4
+      }
+    ]
+  },
+  {
+    "name": "owner steer answers an earlier bubble even if its position advances",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Why?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Proceed"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": " Done."
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "new prose after a real boundary can ask after a steer",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Why?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Proceed"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": " Done."
+        },
+        "question_seq": null
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "name": "Read",
+          "tool_use_id": "read-1",
+          "input": {}
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Anything else?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": 6
+      }
+    ]
+  },
+  {
+    "name": "dropped attempt does not become a question while retrying",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "provider_retry",
+          "data": {
+            "cause": "connection_dropped",
+            "attempt": 1
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Done."
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "retry can produce a new actionable question",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Should I?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "provider_retry",
+          "data": {
+            "cause": "connection_dropped",
+            "attempt": 1
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Try again?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": 4
+      }
+    ]
+  },
+  {
+    "name": "retry hides closed prose from the dropped attempt too",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "Should I?"
+        },
+        "question_seq": 2
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "provider_retry",
+          "data": {
+            "cause": "connection_dropped",
+            "attempt": 1
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Done."
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "retry preserves prose before the last tool result",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.assistant",
+        "payload": {
+          "content": "First?"
+        },
+        "question_seq": 2
+      },
+      {
+        "type": "tool.use",
+        "payload": {
+          "name": "Read",
+          "tool_use_id": "read-1",
+          "input": {}
+        },
+        "question_seq": 2
+      },
+      {
+        "type": "tool.result",
+        "payload": {
+          "tool_use_id": "read-1"
+        },
+        "question_seq": 2
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Discard me?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "provider_retry",
+          "data": {
+            "cause": "connection_dropped",
+            "attempt": 1
+          }
+        },
+        "question_seq": 2
+      }
+    ]
+  },
+  {
+    "name": "retry preserves a bubble originating before the peer boundary",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Why?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "[agent message from='worker-a' — a message from another agent in this session, delivered once at this position; not part of the tool output, and not a new message when re-read from history]\nFound the failing path.\n[/agent message]",
+          "source": "agent_message"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": " Done."
+        },
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "provider_retry",
+          "data": {
+            "cause": "connection_dropped",
+            "attempt": 1
+          }
+        },
+        "question_seq": 4
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Finished."
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  },
+  {
+    "name": "retry with owner steer still leaves the earlier bubble answered",
+    "events": [
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Start"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Why?"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "message.user",
+        "payload": {
+          "content": "Proceed"
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": " Done."
+        },
+        "question_seq": null
+      },
+      {
+        "type": "system.note",
+        "payload": {
+          "subtype": "provider_retry",
+          "data": {
+            "cause": "connection_dropped",
+            "attempt": 1
+          }
+        },
+        "question_seq": null
+      },
+      {
+        "type": "assistant.text_delta",
+        "payload": {
+          "text": "Finished."
+        },
+        "question_seq": null
+      },
+      {
+        "type": "turn.completed",
+        "payload": {},
+        "question_seq": null
+      }
+    ]
+  }
+]

@@ -168,6 +168,7 @@ def test_state_route_carries_no_transcript_and_stays_open(client):
     assert set(response.json()) == {
         "session_id", "title", "status", "last_user_message_at", "last_user_message_seq", "last_user_message_epoch",
         "is_streaming", "connected_devices",
+        "last_assistant_question_seq", "last_assistant_question_epoch",
     }
     assert response.json()["last_user_message_at"] is None
 

@@ -32,6 +32,8 @@ def test_upgrade_nullable_timestamp_and_transactional_write():
         cursor.execute("ALTER TABLE sessions DROP COLUMN last_user_message_at")
         cursor.execute("ALTER TABLE sessions DROP COLUMN last_user_message_seq")
         cursor.execute("ALTER TABLE sessions DROP COLUMN last_user_message_epoch")
+        cursor.execute("ALTER TABLE sessions DROP COLUMN last_assistant_question_seq")
+        cursor.execute("ALTER TABLE sessions DROP COLUMN last_assistant_question_epoch")
         cursor.execute("ALTER TABLE composer_suggestions DROP COLUMN activity_revision")
         cursor.execute("DROP TABLE composer_suggestion_revisions")
     database.init_database()
@@ -39,6 +41,8 @@ def test_upgrade_nullable_timestamp_and_transactional_write():
     assert database.get_session("revision-old")["last_user_message_at"] is None
     assert database.get_session("revision-old")["last_user_message_seq"] is None
     assert database.get_session("revision-old")["last_user_message_epoch"] is None
+    assert database.get_session("revision-old")["last_assistant_question_seq"] is None
+    assert database.get_session("revision-old")["last_assistant_question_epoch"] is None
     with base.get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT data_type, is_nullable FROM information_schema.columns "
@@ -50,6 +54,10 @@ def test_upgrade_nullable_timestamp_and_transactional_write():
         cursor.execute("SELECT data_type, is_nullable FROM information_schema.columns "
                        "WHERE table_name='sessions' AND column_name='last_user_message_epoch'")
         assert dict(cursor.fetchone()) == {"data_type": "text", "is_nullable": "YES"}
+        for field, kind in (("last_assistant_question_seq", "bigint"), ("last_assistant_question_epoch", "text")):
+            cursor.execute("SELECT data_type, is_nullable FROM information_schema.columns "
+                           "WHERE table_name='sessions' AND column_name=%s", (field,))
+            assert dict(cursor.fetchone()) == {"data_type": kind, "is_nullable": "YES"}
         cursor.execute("SELECT column_default FROM information_schema.columns "
                        "WHERE table_name='composer_suggestions' AND column_name='activity_revision'")
         assert "-1" in cursor.fetchone()["column_default"]
@@ -126,6 +134,15 @@ async def test_authoritative_recorder_delivery_dedup_and_provenance():
     assert reset["last_user_message_seq"] == 1
     assert reset["last_user_message_epoch"] == session_events.get_log_epoch("pg-events")
     assert reset["last_user_message_epoch"] != epoch
+    assert reset["last_assistant_question_seq"] == 2
+    assert reset["last_assistant_question_epoch"] == reset["last_user_message_epoch"]
+    # Reopen the pool as on process restart; no Python cache supplies the mark.
+    base.close_pool()
+    base.init_pool(min_conn=1, max_conn=2)
+    assert database.get_session("pg-events")["last_assistant_question_seq"] == 2
+    session_events.append_events("pg-events", [{"type": "message.assistant", "payload": {"content": "Done."}}])
+    assert database.get_session("pg-events")["last_assistant_question_seq"] is None
+    assert database.get_session("pg-events")["last_assistant_question_epoch"] == reset["last_user_message_epoch"]
 
 
 @pytest.mark.parametrize("batch", [False, True])
