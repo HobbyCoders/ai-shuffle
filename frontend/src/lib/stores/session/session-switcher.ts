@@ -524,6 +524,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	/** Keep the leaving session's unanswered prose question counting (spec §5). */
 	function rememberLeaving(state: ActiveSessionState) {
 		if (!state.sessionId) return;
+		// An empty or partial transcript mid-hydration says nothing about the
+		// question: keep whatever was remembered until history has loaded.
+		if (state.isLoadingSession || state.isRestoringSession) return;
 		const row = appData.current.sessions.find((s) => s.id === state.sessionId);
 		rememberLeavingProseQuestion(state.sessionId, state.messages, {
 			workStartedAt: row?.work_started_at ?? null,

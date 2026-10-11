@@ -1367,8 +1367,24 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 		await switcher.switchSession('session-A');
 		// Leaving B (no question) records nothing for it and keeps A.
 		expect([...get(proseQuestionSessions).keys()]).toEqual(['session-A']);
-		deps.update((s) => ({ ...s, messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }] }));
+		// History hydrated, then the user answered.
+		deps.update((s) => ({ ...s, isLoadingSession: false, messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }] }));
 		switcher.newChat();
 		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+	});
+
+	it('leaving A while its uncached history is still loading keeps the remembered question', async () => {
+		_mockSessions.current = [{ id: 'session-A', work_started_at: 'T1' }];
+		const { switcher, deps } = makeSwitcher(fullState({ messages: asked }));
+		await switcher.switchSession('session-B');
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		// Reopen A with no cache: the switch starts it empty and loading.
+		deps.update((s) => ({ ...s, sessionId: 'session-A', messages: [], isLoadingSession: true }));
+		await switcher.switchSession('session-B');
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		// A partial replay is not authoritative either.
+		deps.update((s) => ({ ...s, sessionId: 'session-A', messages: [asked[0]], isLoadingSession: true }));
+		switcher.newChat();
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
 	});
 });
