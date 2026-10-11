@@ -15,6 +15,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
+from contextvars import ContextVar
 
 import psycopg2
 import psycopg2.pool
@@ -573,6 +574,20 @@ def _rollback_quietly(conn) -> None:
         )
 
 
+_commit_callbacks = ContextVar("db_commit_callbacks", default=())
+
+
+def after_commit(conn, callback):
+    """Queue a notification for the owning get_db/transaction, never a rollback."""
+    # resource_sync's observing connection delegates to the physical connection.
+    connection = getattr(conn, "_connection", conn)
+    for owner, callbacks in reversed(_commit_callbacks.get()):
+        if owner is connection:
+            callbacks.append(callback)
+            return
+    raise RuntimeError("after_commit requires an app-managed transaction")
+
+
 @contextmanager
 def get_db():
     """Context manager for database connections.
@@ -581,6 +596,8 @@ def get_db():
     and always returns the connection to the pool.
     """
     conn = get_connection()
+    callbacks = []
+    token = _commit_callbacks.set((*_commit_callbacks.get(), (conn, callbacks)))
     try:
         yield conn
         conn.commit()
@@ -588,7 +605,13 @@ def get_db():
         _rollback_quietly(conn)
         raise
     finally:
+        _commit_callbacks.reset(token)
         _close_connection(conn)
+    for callback in callbacks:
+        try:
+            callback()
+        except Exception:
+            logger.warning("Post-commit notification failed", exc_info=True)
 
 
 @contextmanager
@@ -613,6 +636,8 @@ def transaction():
     their own ``get_db()`` connection when provided.
     """
     conn = get_connection()
+    callbacks = []
+    token = _commit_callbacks.set((*_commit_callbacks.get(), (conn, callbacks)))
     try:
         yield conn
         conn.commit()
@@ -620,7 +645,13 @@ def transaction():
         _rollback_quietly(conn)
         raise
     finally:
+        _commit_callbacks.reset(token)
         _close_connection(conn)
+    for callback in callbacks:
+        try:
+            callback()
+        except Exception:
+            logger.warning("Post-commit notification failed", exc_info=True)
 
 
 # =============================================================================

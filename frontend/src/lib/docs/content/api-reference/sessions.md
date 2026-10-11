@@ -10,6 +10,26 @@ Endpoints for managing chat sessions — listing, searching, creating, updating,
 
 An API key sees and acts only on the sessions it started (see [Own Sessions](/docs/api-reference/api-users#own-sessions)). A route that takes a `session_id` returns `403` for the owner's session, another key's, or one outside the key's project or agents, and `404` for an id that does not exist. The owner can use every session.
 
+## User-message revision
+
+Session list (including paginated/cursor lists) and detail responses include
+`last_user_message_at`: a nullable, timezone-aware UTC timestamp. It advances
+when a user message is persisted, including the initial prompt, a delivered
+mid-turn steer, a command, or a voice utterance. Queuing alone does not advance
+it. Existing sessions keep `null` until their next user message; it is not
+backfilled from turn counts or working time.
+
+After commit, the global WebSocket feed emits `user_session_updated` with
+`session_id` and `updates.last_user_message_at`, even when that session is not
+open on the receiving tab. The value represents the same instant as the row's
+`last_user_message_at`. Account/paired subscribers and other workers receive a
+session-list invalidation and reload their authorized rows. Consumers should
+compare timestamps, not string representations, and ignore older revisions.
+
+`last_prose_is_question` is not provided: deciding whether the last prose asks
+a question still requires the replayed conversation, including tool questions,
+agent-delivery metadata, and streaming state.
+
 ## Read the Suggested Next Reply
 
 ### GET /api/v1/sessions/{session_id}/composer-suggestion
