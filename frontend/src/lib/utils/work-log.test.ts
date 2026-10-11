@@ -9,6 +9,7 @@ import producer from './__fixtures__/agent-delivery-producer.json';
 import { deriveUserTurnNavigationItems } from './transcript-navigation';
 import { deriveStatus, needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
 import { initialState, reduce, type WireEvent } from '$lib/stores/session/v2/reducer';
+import { longTurn } from '$lib/components/chat/test-fixtures/long-turn';
 import {
 	buildDisplayItems,
 	buildTranscriptModel,
@@ -1389,35 +1390,6 @@ describe('settled work log identity', () => {
  * work is still in flight.
  */
 describe('turn unity', () => {
-	function longTurn() {
-		const prompt = user('Audit the deploy pipeline', '2026-10-10T20:00:00.000Z', 'turn-1');
-		const read = tool({ toolName: 'Read', toolInput: { file_path: 'deploy.yml' }, timestamp: '2026-10-10T20:00:10.000Z' });
-		const finding = text('Staging and prod share one token:\n- `CF_API_TOKEN` in both jobs', '2026-10-10T20:00:15.000Z');
-		const grep = tool({ toolName: 'Grep', toolInput: { pattern: 'wrangler' }, timestamp: '2026-10-10T20:00:20.000Z' });
-		const interim = text('Now checking the workflow.', '2026-10-10T20:01:00.000Z');
-		const monitor = tool({ toolName: 'Monitor', toolId: 'monitor-1', toolInput: { command: 'tail -f deploy.log' }, timestamp: '2026-10-10T20:01:30.000Z' });
-		const worker = subagent({ toolId: 'task-1', agentStatus: 'running', timestamp: '2026-10-10T20:02:00.000Z' });
-		const question = tool({ toolName: 'AskUserQuestion', toolId: 'ask-1', toolInput: { questions: [] }, timestamp: '2026-10-10T20:03:00.000Z' });
-		const steer = user('Skip staging, prod only', '2026-10-10T20:19:00.000Z', 'turn-1');
-		const ack = text('Understood, prod only.', '2026-10-10T20:19:05.000Z');
-		const report = msg({
-			role: 'system', type: 'system', systemSubtype: 'agent_message',
-			content: 'Worker report', systemData: { sender: 'worker', content: 'Pipeline uses wrangler 3.' },
-			timestamp: '2026-10-10T20:25:00.000Z'
-		});
-		const build = tool({ toolName: 'Bash', toolInput: { command: 'npm run build' }, timestamp: '2026-10-10T20:20:00.000Z' });
-		const failed = tool({ toolName: 'Edit', toolStatus: 'error', toolInput: { file_path: 'deploy.yml' }, timestamp: '2026-10-10T20:21:00.000Z' });
-		const retry = tool({ toolName: 'Edit', toolInput: { file_path: 'deploy.yml' }, timestamp: '2026-10-10T20:21:30.000Z' });
-		const worker2 = subagent({ toolId: 'task-2', agentName: 'Reviewer', agentStatus: 'running', timestamp: '2026-10-10T20:22:00.000Z' });
-		const steer2 = user('Also note the token rotation date', '2026-10-10T20:23:00.000Z', 'turn-1');
-		const grep2 = tool({ toolName: 'Grep', toolInput: { pattern: 'rotate' }, timestamp: '2026-10-10T20:23:30.000Z' });
-		const final = text('Prod deploy is wired through wrangler 3.', '2026-10-10T20:30:00.000Z');
-		// The spec §2 scenario: two steers, two workers, one question, one failed
-		// tool and a Monitor that keeps running while the turn is live.
-		const messages = [prompt, read, finding, grep, interim, monitor, worker, question, steer, ack, build, failed, retry, worker2, steer2, grep2, report, final];
-		return { messages, prompt, read, finding, grep, interim, monitor, worker, question, steer, ack, build, failed, retry, worker2, steer2, grep2, report, final };
-	}
-
 	it('renders the live long turn as runs, steer in place', () => {
 		const t = longTurn();
 		const items = buildDisplayItems(t.messages, { ...SETTLED, latestTurnUnsettled: true, runningToolIds: new Set(['monitor-1']) });

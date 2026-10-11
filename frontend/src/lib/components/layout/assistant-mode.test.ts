@@ -4,8 +4,9 @@
  *
  * MainPanel, ChatView, ChatInput and MessageArea pull in the whole session
  * graph when mounted (see chatview-mode-lanes.test.ts), so the gates are pinned
- * at the source level; ControlsDock, the strip and Details are mounted in their
- * own tests, and the integrated view is checked in a browser.
+ * at the source level; ControlsDock and the strip are mounted in their own
+ * tests, the shared transcript in assistant-transcript-parity.test.ts, and the
+ * integrated view is checked in a browser.
  */
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -60,10 +61,18 @@ describe('assistant mode flag', () => {
 		expect(chatView).toMatch(/\{#if assistantMode\}\s*<BackgroundWorkStrip /);
 	});
 
-	it('folds the transcript only in the home', () => {
-		expect(messageArea).toContain('const assistantView = $derived(assistantMode ? foldAssistantTranscript(transcript.items, latestTurnUnsettled) : null);');
-		expect(messageArea).toContain('const displayItems: AssistantViewItem[] = $derived(assistantView?.items ?? transcript.items);');
-		expect(messageArea).toContain("{:else if item.kind === 'details'}");
+	it('organizes the home transcript exactly like any chat (spec §10.5)', () => {
+		// One presentation model and one fold component: no second fold path.
+		expect(messageArea).toContain('const displayItems: DisplayItem[] = $derived(transcript.items);');
+		expect(messageArea).toContain('const itemIndexByTurnId: ReadonlyMap<string, number> = $derived(transcript.itemIndexByTurnId);');
+		expect(messageArea).not.toMatch(/foldAssistantTranscript|AssistantDetails|item\.kind === 'details'/);
+		// The model is built from the same pref and lifecycle in both modes.
+		const build = messageArea.slice(messageArea.indexOf('const transcript: TranscriptModel'), messageArea.indexOf('const displayItems'));
+		expect(build).toContain('const groupingEnabled = chatPrefs?.groupToolCalls !== false;');
+		expect(build).not.toContain('assistantMode');
+		const loop = messageArea.slice(messageArea.indexOf('{#each visibleItems as item'), messageArea.indexOf('{/each}', messageArea.indexOf('{#each visibleItems as item')));
+		expect(loop).toContain('<WorkLogGroup');
+		expect(loop).not.toContain('assistantMode');
 	});
 
 	it('asks marked approvals in words and keeps the dialog for every other request', () => {

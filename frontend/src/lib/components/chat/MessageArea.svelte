@@ -66,6 +66,7 @@
 		createTranscriptModelBuilder,
 		latestTurnKey,
 		hasLinkedSubagent as hasLinkedSubagentIn,
+		type DisplayItem,
 		type TranscriptModel
 	} from '$lib/utils/work-log';
 	import { createSettleHold, createTurnHandoffHold } from '$lib/utils/settle-hold';
@@ -112,8 +113,6 @@
 	import PendingMessages from './PendingMessages.svelte';
 	import PendingPeerMessages from './PendingPeerMessages.svelte';
 	import RunningTasksList from './RunningTasksList.svelte';
-	import AssistantDetails from './AssistantDetails.svelte';
-	import { foldAssistantTranscript, isStreamingProse, type AssistantViewItem } from '$lib/utils/assistant-transcript';
 	import { currentAssistantQuestion } from '$lib/utils/assistant-confirm';
 
 	// How many trailing messages are kept OUT of content-visibility virtualization.
@@ -125,17 +124,20 @@
 	const LIVE_TAIL = 8;
 
 	interface Props {
-		/** The assistant's home: prose first, everything else behind "Details". */
+		/**
+		 * The assistant's home. Its transcript is organized exactly like any chat
+		 * (same model, same WorkLogGroup folds, same `groupToolCalls` pref); only
+		 * the surroundings differ: running work sits beside the composer and
+		 * approvals are asked in words.
+		 */
 		assistantMode?: boolean;
 	}
 
 	let { assistantMode = false }: Props = $props();
 
 	/** Exhaustive keyed identity for every presentation-model variant. */
-	function displayItemKey(item: AssistantViewItem): string {
+	function displayItemKey(item: DisplayItem): string {
 		switch (item.kind) {
-			case 'details':
-				return item.key;
 			case 'message':
 				return `message-${item.message.id || item.index}`;
 			case 'system_group':
@@ -372,14 +374,10 @@
 	// The approval the assistant is asking in words, if any (assistant_confirm).
 	const assistantQuestion = $derived(currentAssistantQuestion($activeSession.pendingPermissions ?? []));
 
+	// The assistant's question in words stands in for the dots while it waits.
 	const showGapIndicator = $derived(
-		assistantMode
-			// Its work rows are folded away, so the dots stand in for them until
-			// the assistant's own words are streaming.
-			? $activeSession.isStreaming
-				&& !assistantQuestion
-				&& !isStreamingProse($activeSession.messages[lastStreamingMessageIndex])
-			: shouldShowGapIndicator(
+		!(assistantMode && assistantQuestion)
+		&& shouldShowGapIndicator(
 			$activeSession.messages,
 			$activeSession.isStreaming,
 			chatPrefs?.showThinkingBlocks !== false
@@ -554,10 +552,10 @@
 		return model;
 	});
 
-	// Assistant mode folds the same model; ordinary chats use it as built.
-	const assistantView = $derived(assistantMode ? foldAssistantTranscript(transcript.items, latestTurnUnsettled) : null);
-	const displayItems: AssistantViewItem[] = $derived(assistantView?.items ?? transcript.items);
-	const itemIndexByTurnId: ReadonlyMap<string, number> = $derived(assistantView?.itemIndexByTurnId ?? transcript.itemIndexByTurnId);
+	// One presentation model for every chat, the assistant's home included
+	// (transcript-organization spec §10.5): no second fold path.
+	const displayItems: DisplayItem[] = $derived(transcript.items);
+	const itemIndexByTurnId: ReadonlyMap<string, number> = $derived(transcript.itemIndexByTurnId);
 	// Per-row reads go through these rather than `transcript` (#1282). The
 	// streaming fast path in createTranscriptModelBuilder keeps both arrays by
 	// identity while only the tail text grows, so these deriveds do not notify and
@@ -1972,8 +1970,6 @@
 						row={messageBody}
 						{observeTurnAnchor}
 					/>
-				{:else if item.kind === 'details'}
-					<AssistantDetails entries={item.entries} live={item.live} row={messageBody} />
 				{:else if item.kind === 'system_group'}
 					<!-- Grouped system/hook messages (2+ consecutive low-signal events) -->
 					<SystemMessageGroup messages={item.messages} />

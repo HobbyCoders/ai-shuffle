@@ -20,6 +20,10 @@
 	 * survive a remount, a session switch and a reload. Without a key (tests,
 	 * legacy callers) the group keeps them locally.
 	 *
+	 * An open fold repeats its fold row as the group's header (spec §7): it sticks
+	 * to the top of the transcript while the group is on screen, and clicking it
+	 * collapses the group, the same as "Show fewer log entries" at the bottom.
+	 *
 	 * The rows themselves are rendered by the caller through the `row` snippet,
 	 * so this component owns the fold and nothing else; MessageArea keeps the one
 	 * dispatch table that decides which component a message becomes.
@@ -194,6 +198,43 @@
 		open ? 'Hide work details' : `Show work details: ${collapsedLabel}${summary && mode === 'settled' ? `, ${summary}` : ''}`
 	);
 
+	// ── Header (spec §7) ───────────────────────────────────────────────────
+	const headerLabel = $derived(
+		`Hide work details: ${collapsedLabel}${summary && mode === 'settled' ? `, ${summary}` : ''}`
+	);
+	/**
+	 * Collapse from the header. When the header was stuck (the group's top had
+	 * scrolled away), bring the collapsed group back to the top of the view so
+	 * the reader stays where they were rather than wherever the rows below
+	 * happen to land.
+	 *
+	 * Only the nearest scrolling ancestor moves, and only by the distance the
+	 * group's top sits above the line the header was stuck to. `scrollIntoView`
+	 * would also scroll overflow-hidden layout boxes around the transcript
+	 * (the chat column), shifting the whole conversation under the top bar.
+	 */
+	function collapseFromHeader(event: MouseEvent, close: () => void) {
+		const header = event.currentTarget as HTMLElement;
+		const section = sectionEl;
+		const stuckAt = header.getBoundingClientRect().top;
+		const stuck = !!section && stuckAt - section.getBoundingClientRect().top > 1;
+		close();
+		const scroller = stuck && section ? scrollParent(section) : null;
+		if (scroller && section) {
+			requestAnimationFrame(() => {
+				scroller.scrollTop += section.getBoundingClientRect().top - stuckAt;
+			});
+		}
+	}
+
+	function scrollParent(el: HTMLElement): HTMLElement | null {
+		for (let node = el.parentElement; node; node = node.parentElement) {
+			const overflow = getComputedStyle(node).overflowY;
+			if (overflow === 'auto' || overflow === 'scroll') return node;
+		}
+		return null;
+	}
+
 	// ── Live runs ──────────────────────────────────────────────────────────
 	const runByIndex = $derived(new Map(runs.map((run) => [run.index, run])));
 	/** Sequence positions of each folded run's first and last hidden row. */
@@ -253,7 +294,22 @@
 		<!-- One keyed row list for live and settled: settling must not remount rows. -->
 		{#if mode === 'settled' && foldable}
 			{#if open}
-				<div class="wlhead">Work log{#if summary}<span> · {summary}</span>{/if}</div>
+				<button
+					type="button"
+					class="wlrow fold hairline"
+					data-fold-header
+					onclick={(event) => collapseFromHeader(event, () => setOpen(false))}
+					aria-expanded="true"
+					aria-label={headerLabel}
+				>
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+						<path d="m18 15-6-6-6 6" />
+					</svg>
+					<span class="fold-label">{collapsedLabel}</span>
+					{#if summary}
+						<span class="fold-summary" title={summary}>· {#if compactSummary}<span class="fold-prose">{summary}</span><span class="fold-compact">{compactSummary}</span>{:else}{summary}{/if}</span>
+					{/if}
+				</button>
 			{:else}
 				<button
 					type="button"
@@ -279,7 +335,28 @@
 				{@const visible = rowVisible(entry)}
 				{#if run && runEdges.first.get(run.index) === position}
 					{#if runOpen(run)}
-						<div class="wlhead">Work log{#if run.summary}<span> · {run.summary}</span>{/if}</div>
+						<!-- The run's fold row heads it while open. Not sticky: a run's
+						     rows share the turn's container, so a stuck run header would
+						     ride over the rows after the run. -->
+						<button
+							type="button"
+							class="wlrow fold"
+							onclick={() => setRunOpen(run, false)}
+							aria-expanded="true"
+							aria-label={`Hide work details: ${runLabel(run)}`}
+						>
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								<path d="m18 15-6-6-6 6" />
+							</svg>
+							<span class="fold-label">
+								{#if run.summary && run.compactSummary}
+									<span class="fold-prose" title={run.summary}>{run.summary}</span>
+									<span class="fold-compact">{run.compactSummary}</span>
+								{:else}
+									{runLabel(run)}
+								{/if}
+							</span>
+						</button>
 					{:else}
 						<button
 							type="button"
@@ -335,7 +412,23 @@
 		{/if}
 	{:else if open}
 		<!-- Legacy shape (folded rows + visible tail, no ordered sequence). -->
-		<div class="wlhead">Work log{#if summary}<span> · {summary}</span>{/if}</div>
+		<button
+			type="button"
+			class="wlrow fold"
+			class:hairline={mode === 'settled'}
+			data-fold-header
+			onclick={(event) => collapseFromHeader(event, () => setOpen(false))}
+			aria-expanded="true"
+			aria-label={headerLabel}
+		>
+			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+				<path d="m18 15-6-6-6 6" />
+			</svg>
+			<span class="fold-label">{collapsedLabel}</span>
+			{#if mode === 'settled' && summary}
+				<span class="fold-summary" title={summary}>· {summary}</span>
+			{/if}
+		</button>
 		{#each folded as entry (entry.message.id ?? entry.index)}
 			{@render row(entry.message, entry.index)}
 		{/each}
@@ -396,20 +489,6 @@
 
 	.worklog.is-settled {
 		animation: worklog-settle 180ms ease-out both;
-	}
-
-	.wlhead {
-		padding: 10px 8px 5px;
-		font-size: 10.5px;
-		font-weight: 600;
-		letter-spacing: 0.045em;
-		color: var(--subtle-foreground);
-	}
-
-	.wlhead span {
-		font-weight: 400;
-		letter-spacing: 0;
-		text-transform: none;
 	}
 
 	.work-sequence {
@@ -498,6 +577,24 @@
 
 	.wlrow.fold:active {
 		background: var(--active-overlay, var(--scrim));
+	}
+
+	/* Spec §7: the open group's fold row is its header and stays at the top of
+	   the transcript while the group is on screen. The page background keeps
+	   rows from showing through it; hover lays the usual scrim over that. */
+	.wlrow.fold[data-fold-header] {
+		position: sticky;
+		top: 0;
+		z-index: 1;
+		background: var(--background);
+	}
+
+	.wlrow.fold[data-fold-header]:hover {
+		background: linear-gradient(var(--scrim), var(--scrim)), var(--background);
+	}
+
+	.wlrow.fold[data-fold-header]:active {
+		background: linear-gradient(var(--active-overlay, var(--scrim)), var(--active-overlay, var(--scrim))), var(--background);
 	}
 
 	.wlrow.fold:focus-visible {

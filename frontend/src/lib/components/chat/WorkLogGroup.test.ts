@@ -7,6 +7,8 @@ import TranscriptItems from './test-fixtures/TranscriptItems.svelte';
 import { buildTranscriptModel, type DisplayItem } from '$lib/utils/work-log';
 import { createFoldState } from '$lib/stores/session/fold-state';
 import { deriveUserTurnNavigationItems, turnAnchorId } from '$lib/utils/transcript-navigation';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 /** jsdom has no ResizeObserver. Drive reserved height from the stub. */
 function installFakeRO(initialHeight = 80) {
@@ -98,7 +100,8 @@ describe('WorkLogGroup', () => {
 		expect(screen.getAllByTestId('work-row').map(el => el.textContent)).toEqual([
 			'First delivery', 'Read the source', 'Second delivery', 'Final answer'
 		]);
-		await fireEvent.click(screen.getByRole('button', { expanded: true }));
+		// The bottom "Show fewer log entries" row (the header is covered below).
+		await fireEvent.click(screen.getByRole('button', { name: 'Hide work details' }));
 		expect(screen.getAllByTestId('work-row').map(el => el.textContent)).toEqual(['Final answer']);
 	});
 
@@ -162,7 +165,7 @@ describe('WorkLogGroup', () => {
 		expectAnchors();
 		await fireEvent.click(screen.getByRole('button', { name: /Show work details/i }));
 		expectAnchors();
-		await fireEvent.click(screen.getByRole('button', { name: /Hide work details/i }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Hide work details' }));
 		expectAnchors();
 		view.unmount();
 		expect(observed.size).toBe(0);
@@ -204,7 +207,7 @@ describe('WorkLogGroup', () => {
 		await ro.setHeight(240);
 		expect(section.style.minHeight).toBe('80px');
 
-		await fireEvent.click(screen.getByRole('button', { name: /Hide work details/i }));
+		await fireEvent.click(screen.getByRole('button', { name: 'Hide work details' }));
 		await ro.setHeight(80);
 		expect(section.style.minHeight).toBe('80px');
 		ro.restore();
@@ -271,6 +274,111 @@ describe('WorkLogGroup', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /Show work details/i }));
 		expect(screen.getByText('Read')).toBeTruthy();
 		expect(screen.getByText('Final answer')).toBeTruthy();
+	});
+
+	describe('sticky fold header (spec §7)', () => {
+		const answer = { id: 'answer-1', role: 'assistant', type: 'text', content: 'Final answer' } as ChatMessage;
+		const settledProps = {
+			...baseProps,
+			mode: 'settled' as const,
+			durationLabel: 'Worked for 4s',
+			sequence: [
+				{ message, index: 0, hiddenWhenCollapsed: true },
+				{ message: answer, index: 1, hiddenWhenCollapsed: false }
+			]
+		};
+		const header = () => document.querySelector<HTMLButtonElement>('[data-fold-header]');
+		const source = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/WorkLogGroup.svelte'), 'utf8');
+
+		it('renders no header while the group is closed', () => {
+			render(WorkLogGroup, { props: settledProps });
+			expect(header()).toBeNull();
+			expect(screen.getByRole('button', { expanded: false }).textContent).toContain('Worked for 4s');
+		});
+
+		it('repeats the fold row as the sticky header of an open group', async () => {
+			const view = render(WorkLogGroup, { props: settledProps });
+			await fireEvent.click(screen.getByRole('button', { expanded: false }));
+			const head = header()!;
+			expect(head).toBeTruthy();
+			// The existing fold row: same element, classes and label, now expanded.
+			expect(head.tagName).toBe('BUTTON');
+			expect(head.className).toMatch(/\bwlrow\b/);
+			expect(head.className).toMatch(/\bfold\b/);
+			expect(head.getAttribute('aria-expanded')).toBe('true');
+			expect(head.getAttribute('aria-label')).toBe('Hide work details: Worked for 4s, Read 1 file');
+			expect(head.textContent).toContain('Worked for 4s');
+			// It heads the group: first row in the group's own box, so it sticks
+			// for exactly as long as the group is on screen.
+			expect(view.container.querySelector('.worklog-measure')!.firstElementChild).toBe(head);
+			// The bottom row stays.
+			expect(screen.getByRole('button', { name: 'Hide work details' }).textContent).toContain('Show fewer log entries');
+			// The one layout rule the spec adds, on the existing fold row.
+			expect(source).toMatch(/\.wlrow\.fold\[data-fold-header\] \{\s*position: sticky;\s*top: 0;/);
+		});
+
+		it('collapses the group when the header is clicked', async () => {
+			render(WorkLogGroup, { props: settledProps });
+			await fireEvent.click(screen.getByRole('button', { expanded: false }));
+			expect(screen.getByText('Read')).toBeTruthy();
+			await fireEvent.click(header()!);
+			expect(header()).toBeNull();
+			expect(screen.queryByText('Read')).toBeNull();
+			expect(screen.getByText('Final answer')).toBeTruthy();
+			expect(screen.getByRole('button', { expanded: false })).toBeTruthy();
+		});
+
+		it('brings the collapsed group back into view only when the header was stuck', async () => {
+			const frames: FrameRequestCallback[] = [];
+			const raf = globalThis.requestAnimationFrame;
+			globalThis.requestAnimationFrame = (cb) => { frames.push(cb); return frames.length; };
+			try {
+				// An overflow-hidden layout box around the transcript scroller, as
+				// the chat column is: it must never move.
+				const column = document.createElement('div');
+				column.style.overflowY = 'hidden';
+				const scroller = document.createElement('div');
+				scroller.style.overflowY = 'auto';
+				column.appendChild(scroller);
+				document.body.appendChild(column);
+				const view = render(WorkLogGroup, { props: settledProps, target: scroller });
+				const section = view.container.querySelector('section.worklog') as HTMLElement;
+				let scrollerTop = 1000;
+				Object.defineProperty(scroller, 'scrollTop', { get: () => scrollerTop, set: (v: number) => { scrollerTop = v; }, configurable: true });
+				Object.defineProperty(column, 'scrollTop', { get: () => 0, set: () => { throw new Error('chat column scrolled'); }, configurable: true });
+				const place = (el: Element, top: number) =>
+					Object.defineProperty(el, 'getBoundingClientRect', { value: () => ({ top }), configurable: true });
+
+				// At its natural place (the group's top is on screen): no scroll.
+				await fireEvent.click(screen.getByRole('button', { expanded: false }));
+				place(section, 120);
+				place(header()!, 120);
+				await fireEvent.click(header()!);
+				frames.splice(0).forEach((cb) => cb(0));
+				expect(scrollerTop).toBe(1000);
+
+				// Stuck 52px down the page, 600px below the group's own top: only
+				// the scroller moves, by exactly that distance.
+				await fireEvent.click(screen.getByRole('button', { expanded: false }));
+				place(section, -548);
+				place(header()!, 52);
+				await fireEvent.click(header()!);
+				frames.splice(0).forEach((cb) => cb(0));
+				expect(scrollerTop).toBe(400);
+				column.remove();
+			} finally {
+				globalThis.requestAnimationFrame = raf;
+			}
+		});
+
+		it('heads the legacy open shape too', async () => {
+			render(WorkLogGroup, { props: { ...baseProps, mode: 'settled' as const, durationLabel: 'Worked for 4s' } });
+			await fireEvent.click(screen.getByRole('button', { expanded: false }));
+			expect(header()?.getAttribute('aria-label')).toBe('Hide work details: Worked for 4s, Read 1 file');
+			await fireEvent.click(header()!);
+			expect(header()).toBeNull();
+			expect(screen.queryByTestId('work-row')).toBeNull();
+		});
 	});
 
 	describe('live runs and settle (spec §2, §6)', () => {
@@ -381,6 +489,43 @@ describe('WorkLogGroup', () => {
 			render(WorkLogGroup, { ...logOf(false), folds: createFoldState(storage) });
 			expect(shown('read-a')).toBe(true);
 			expect(screen.getByRole('button', { name: 'Hide work details' })).toBeTruthy();
+		});
+
+		it('heads an open run with its fold row, and keeps the group open under the sticky header at settle', async () => {
+			const folds = createFoldState(memoryStorage());
+			const view = render(WorkLogGroup, { ...logOf(true), folds });
+			expect(document.querySelector('[data-fold-header]')).toBeNull();
+			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
+			// Live, the open run's fold row heads it (not sticky: see the component).
+			const runHead = screen.getByRole('button', { name: 'Hide work details: Read 1 file' });
+			expect(runHead.getAttribute('aria-expanded')).toBe('true');
+			expect(runHead.hasAttribute('data-fold-header')).toBe(false);
+			const readA = rowEl('read-a');
+			const finding = rowEl('finding');
+
+			await view.rerender(logOf(false));
+			const head = document.querySelector<HTMLButtonElement>('[data-fold-header]')!;
+			expect(head.getAttribute('aria-expanded')).toBe('true');
+			expect(head.getAttribute('aria-label')).toMatch(/^Hide work details: /);
+			// Same nodes, still on screen: settling flipped the mode, not the tree.
+			expect(rowEl('read-a')).toBe(readA);
+			expect(rowEl('finding')).toBe(finding);
+			expect(['read-a', 'finding', 'read-b', 'answer'].map(shown)).toEqual([true, true, true, true]);
+
+			// The header collapses the settled turn and the store records it.
+			await fireEvent.click(head);
+			expect(shown('read-a')).toBe(false);
+			expect(document.querySelector('[data-fold-header]')).toBeNull();
+			expect(folds.isOpen('prompt:turn')).toBe(false);
+		});
+
+		it('collapses an open live run from its header', async () => {
+			render(WorkLogGroup, { ...logOf(true), folds: createFoldState(memoryStorage()) });
+			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
+			expect(shown('read-a')).toBe(true);
+			await fireEvent.click(screen.getByRole('button', { name: 'Hide work details: Read 1 file' }));
+			expect(rowEl('read-a')).toBeNull();
+			expect(screen.getByRole('button', { name: 'Show work details: Read 1 file' })).toBeTruthy();
 		});
 
 		it('settles closed when no run was open', async () => {
