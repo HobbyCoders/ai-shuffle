@@ -2014,9 +2014,18 @@ def create_postgres_schema(cursor) -> None:
         CREATE TABLE IF NOT EXISTS composer_suggestions (
             session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
             turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
-            suggestion TEXT NOT NULL
+            suggestion TEXT NOT NULL,
+            activity_revision BIGINT NOT NULL DEFAULT -1
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS composer_suggestion_revisions (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+            activity_revision BIGINT NOT NULL DEFAULT 0,
+            completed_revision BIGINT
+        )
+    """)
+
 
     # ------------------------------------------------------------------
     # 57. git_ops — the durable cross-install git-operation queue.

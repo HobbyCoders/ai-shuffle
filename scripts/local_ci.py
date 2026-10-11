@@ -641,6 +641,40 @@ def cmd_pre_push(args) -> int:
         if local_sha == zero:
             continue  # ref deletions introduce no objects
         scan_push(local_sha, remote_sha)
+        if remote_ref == "refs/heads/pr-assets" or remote_ref.startswith("refs/heads/pr-assets/"):
+            revision_range = local_sha if remote_sha == zero else f"{remote_sha}..{local_sha}"
+            # Check both sides of every change, including merge parents and
+            # deleted entries. A final-tree-only check hides transient code/links.
+            raw = subprocess.check_output(
+                ["git", "log", "--format=", "--raw", "-z", "--root", "-m",
+                 "--no-renames", revision_range, "--"], cwd=ROOT)
+            entries = []
+            if remote_sha == zero:
+                tree = subprocess.check_output(
+                    ["git", "ls-tree", "-rz", local_sha, "--"], cwd=ROOT)
+                for record in tree.split(b"\0"):
+                    if record:
+                        metadata, path = record.split(b"\t", 1)
+                        entries.append((metadata.split()[0], path))
+            else:
+                # Rewinds/divergent pushes can restore files absent from the
+                # outgoing commit range. Compare the actual tips as well.
+                raw += subprocess.check_output(
+                    ["git", "diff-tree", "-r", "--raw", "-z", "--no-renames",
+                     remote_sha, local_sha, "--"], cwd=ROOT)
+            records_raw = raw.split(b"\0")
+            for index in range(0, len(records_raw) - 1, 2):
+                old_mode, new_mode = records_raw[index].split()[:2]
+                path = records_raw[index + 1]
+                entries.extend((mode, path) for mode in (old_mode[1:], new_mode)
+                               if mode != b"000000")
+            if all(mode in {b"100644", b"100755"}
+                   and b"README.md" not in path.split(b"/")[:-1]
+                   and (path == b"README.md" or
+                        path.endswith((b".png", b".jpg", b".jpeg", b".webp", b".gif")))
+                   for mode, path in entries):
+                print("pre-push: pr-assets image-only range accepted after secret scan")
+                continue
         if not remote_ref.startswith("refs/heads/"):
             continue  # tags get the secret scan, but not the test suites
         if records.get(tree_of(local_sha), {}).get("security_gate") == SECURITY_GATE_VERSION:
