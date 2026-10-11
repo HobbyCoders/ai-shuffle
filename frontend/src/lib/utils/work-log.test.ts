@@ -1042,6 +1042,23 @@ describe('buildDisplayItems — compact summary plumbing', () => {
 });
 
 describe('buildDisplayItems — misc', () => {
+	it('draws no fold when the only hidden row is a code-mode cell', () => {
+		// Browser-found: a Python cell that dispatched a worker settled into a
+		// "Show work details" button that revealed an empty row.
+		const cell = tool({ toolName: 'run_python', toolStatus: 'complete' });
+		const worker = subagent({ agentName: 'Backend Engineer' });
+		const answer = text('done');
+		const items = buildDisplayItems([user('go'), cell, worker, answer], SETTLED);
+		expect(settledFolds(items)).toEqual([]);
+		const log = items.find((item) => item.kind === 'work_log') as Extract<DisplayItem, { kind: 'work_log' }>;
+		expect(log.sequence.map((entry) => entry.message)).toEqual([worker, answer]);
+
+		const failed = tool({ toolName: 'run_python', toolStatus: 'error' });
+		const withFailure = buildDisplayItems([user('go'), failed, worker, answer], SETTLED);
+		const failedLog = withFailure.find((item) => item.kind === 'work_log') as Extract<DisplayItem, { kind: 'work_log' }>;
+		expect(failedLog.sequence.map((entry) => entry.message)).toEqual([failed, worker, answer]);
+	});
+
 	it('renders work flat when grouping is disabled while retaining system grouping', () => {
 		const messages = [
 			user('go'),

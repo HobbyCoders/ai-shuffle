@@ -1146,7 +1146,10 @@ export function buildTranscriptModel(
 			mode: 'settled',
 			folded,
 			tail: [],
-			sequence: response.map((entry) => ({
+			// A hidden code-mode cell draws nothing, as in the live turn. Kept in
+			// the sequence it would make a turn that folds nothing look foldable,
+			// so settling drew a "Show work details" button that revealed nothing.
+			sequence: response.filter((entry) => !isHiddenCodeModeCell(entry.message)).map((entry) => ({
 				message: entry.message,
 				index: entry.index,
 				hiddenWhenCollapsed: shouldHide(entry),
