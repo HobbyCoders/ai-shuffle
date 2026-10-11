@@ -12,7 +12,7 @@
  * - Session history loads via the feed's from_seq=0 replay, not WS.
  */
 
-import { forgetProseQuestion } from './prose-questions';
+import { forgetProseQuestion, observeLastUserMessage } from './prose-questions';
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import type { ActiveSessionState, StreamingSessionInfo } from '../active-session';
 import { notify, type NotificationAction, type NotificationSeverity, type NotificationSurface } from '../notifications';
@@ -182,6 +182,9 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'work_started_at',
 	// A context-window pick made on another tab or device (#1895).
 	'context_window',
+	// A user message was persisted (any device): clears a remembered prose
+	// question (spec §5) without a list reload.
+	'last_user_message_at',
 ]);
 
 /**
@@ -235,6 +238,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	 */
 	function applyRowUpdates(sessionId: string | undefined, updates: Record<string, unknown>): void {
 		const keys = Object.keys(updates);
+		// Also for rows not loaded here: the remembered question is per session.
+		if ('last_user_message_at' in updates) observeLastUserMessage(sessionId, updates.last_user_message_at);
 		const patch: Record<string, unknown> = {};
 		let needsReload = false;
 		for (const key of keys) {
@@ -588,6 +593,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 			// A cleared conversation has nothing left awaiting the user's input.
 			setNeedsAttention(sessionId, 0);
+			forgetProseQuestion(sessionId);
 			// Sidebar row: the server zeroed the counters as part of the clear —
 			// mirror that on the row (all patchable fields) instead of re-paging.
 			applyRowUpdates(sessionId, {

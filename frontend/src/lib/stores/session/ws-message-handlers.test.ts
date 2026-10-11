@@ -60,6 +60,7 @@ import { pendingQueue } from './pending-queue';
 import { composerSuggestion } from './composer-suggestion';
 import { get } from 'svelte/store';
 import { rateLimit } from '../rate-limit';
+import { _resetProseQuestions, proseQuestionSessions, rememberLeavingProseQuestion } from './prose-questions';
 
 // ─── Test Helpers ───────────────────────────────────────────────────────────
 
@@ -1998,6 +1999,56 @@ describe('ws-message-handlers', () => {
 				expect(deps.appLoadSessions).not.toHaveBeenCalled();
 			} finally {
 				vi.useRealTimers();
+			}
+		});
+	});
+
+	describe('user_session_updated handler (user-message revision, #2249)', () => {
+		const asked = [
+			{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
+			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' },
+		];
+		const remembered = () => get(proseQuestionSessions).has('elsewhere');
+
+		it('clears a remembered prose question when another device answers, and patches the row without a reload', async () => {
+			vi.useFakeTimers();
+			try {
+				rememberLeavingProseQuestion('elsewhere', asked, '2026-10-11T10:00:00+00:00');
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+
+				const updates = { last_user_message_at: '2026-10-11T10:05:00.000001+00:00' };
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates });
+
+				expect(remembered()).toBe(false);
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('elsewhere', updates);
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+			} finally {
+				_resetProseQuestions();
+				vi.useRealTimers();
+			}
+		});
+
+		it('keeps it for an equal timestamp or a working-time-only update', () => {
+			try {
+				rememberLeavingProseQuestion('elsewhere', asked, '2026-10-11T10:00:00+00:00');
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: { last_user_message_at: '2026-10-11T10:00:00+00:00' } });
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: { work_ms: 5000, work_started_at: '2026-10-11T11:00:00+00:00' } });
+				handlers.handleMessage({ event_type: 'session_updated', session_id: 'elsewhere', data: { updates: { is_active: true } } });
+				expect(remembered()).toBe(true);
+			} finally {
+				_resetProseQuestions();
+			}
+		});
+
+		it('drops it when the conversation is cleared', () => {
+			try {
+				rememberLeavingProseQuestion('elsewhere', asked, null);
+				handlers.handleMessage({ type: 'user_session_cleared', session_id: 'elsewhere' });
+				expect(remembered()).toBe(false);
+			} finally {
+				_resetProseQuestions();
 			}
 		});
 	});

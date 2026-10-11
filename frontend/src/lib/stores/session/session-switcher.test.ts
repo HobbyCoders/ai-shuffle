@@ -16,7 +16,7 @@ import { api } from '$lib/api/client';
 import { get } from 'svelte/store';
 import { openDropdown, openHeaderDropdown } from '../header-dropdowns';
 import { getPersistedDeviceIntent, setPersistedDeviceIntent } from '../worker-selection';
-import { _resetProseQuestions, proseQuestionSessions } from './prose-questions';
+import { _resetProseQuestions, observeLastUserMessage, proseQuestionSessions } from './prose-questions';
 
 // session-switcher looks up the session row in appData to tailor the load-error
 // message for remote (cross-install) sessions (B4). Mock it so tests can seed the
@@ -1370,6 +1370,26 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 		// History hydrated, then the user answered.
 		deps.update((s) => ({ ...s, isLoadingSession: false, messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }] }));
 		switcher.newChat();
+		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+	});
+
+	it('records the row\'s last_user_message_at on leave, so only a later one clears it (#2249)', async () => {
+		_mockSessions.current = [{ id: 'session-A', last_user_message_at: '2026-10-11T10:00:00+00:00' }];
+		const { switcher } = makeSwitcher(fullState({ messages: asked }));
+		await switcher.switchSession('session-B');
+		observeLastUserMessage('session-A', '2026-10-11T10:00:00Z');
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		observeLastUserMessage('session-A', '2026-10-11T10:00:05Z');
+		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+	});
+
+	it('records a null revision as an observation: the first stamped message clears it', async () => {
+		_mockSessions.current = [{ id: 'session-A', last_user_message_at: null }];
+		const { switcher } = makeSwitcher(fullState({ messages: asked }));
+		await switcher.switchSession('session-B');
+		observeLastUserMessage('session-A', null);
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		observeLastUserMessage('session-A', '2026-10-11T10:00:05Z');
 		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 	});
 

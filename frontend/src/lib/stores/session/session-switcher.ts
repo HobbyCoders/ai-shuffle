@@ -527,7 +527,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// An empty or partial transcript mid-hydration says nothing about the
 		// question: keep whatever was remembered until history has loaded.
 		if (state.isLoadingSession || state.isRestoringSession) return;
-		rememberLeavingProseQuestion(state.sessionId, state.messages);
+		// The row's user-message revision as of now: a later one clears the
+		// remembered question without reopening (undefined: row not loaded).
+		const row = appData.current.sessions.find((s) => s.id === state.sessionId);
+		const lastUserMessageAt = row && 'last_user_message_at' in row ? row.last_user_message_at ?? null : undefined;
+		rememberLeavingProseQuestion(state.sessionId, state.messages, lastUserMessageAt);
 	}
 
 	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) {

@@ -79,6 +79,10 @@ export interface Session {
 	/** Start of the turn running now, null when none is. The card adds the
 	 *  live interval to `work_ms` while the turn runs. */
 	work_started_at?: string | null;
+	/** When the last user message (prompt, steer, command, REST/connector
+	 *  message) was persisted, UTC. Null until the first one after the column
+	 *  existed; agent notes and wakes do not move it. */
+	last_user_message_at?: string | null;
 	created_at: string;
 	updated_at: string;
 	// Cross-install (cluster) annotation — populated server-side when sessions

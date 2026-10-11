@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { privateAccessPending } from '$lib/stores/chat-access';
-import { _resetProseQuestions, rememberLeavingProseQuestion } from '$lib/stores/session/prose-questions';
+import { _resetProseQuestions, observeLastUserMessage, rememberLeavingProseQuestion } from '$lib/stores/session/prose-questions';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
 import { sidebarGroups } from '$lib/stores/expansion-preferences';
@@ -661,6 +661,27 @@ describe('Sidebar Needs you lane', () => {
 		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
 		// Reopened here with the answer loaded, then left: the switcher drops it.
 		rememberLeavingProseQuestion('settled', [...asked, { id: 'u2', role: 'user' as const, content: 'Prod only' }]);
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+	});
+
+	// #2249: an answer sent from another device clears the lane without
+	// reopening the session here.
+	it('moves a left session out of Needs you when a later user message arrives', async () => {
+		const asked = [
+			{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
+			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' }
+		];
+		rememberLeavingProseQuestion('settled', asked, '2026-10-11T10:00:00+00:00');
+		onTestFinished(_resetProseQuestions);
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+
+		observeLastUserMessage('settled', '2026-10-11T10:00:00+00:00');
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+
+		observeLastUserMessage('settled', '2026-10-11T10:03:00+00:00');
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 	});

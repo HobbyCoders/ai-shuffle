@@ -22,7 +22,7 @@
 	import { beginJourney, cancelJourney, claimNavigationOrigin, finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
-	import { proseQuestionSessions } from '$lib/stores/session/prose-questions';
+	import { observeSessionRows, proseQuestionSessions } from '$lib/stores/session/prose-questions';
 	import { privateAccessPending } from '$lib/stores/chat-access';
 	import { needsYouCount as countNeedsYou, openSessionNeeds, sessionNeedsInput, attentionTitle } from './session-card-data';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
@@ -476,6 +476,10 @@
 	// session's prose question), shown in the tab title so a backgrounded tab
 	// still says when an agent is blocked on you.
 	// Other sessions count a prose question this tab saw when it left them.
+	// A list refresh carrying a newer user-message revision than the one seen
+	// when this tab left a questioning session means the user answered from
+	// elsewhere (the WS frame path is in ws-message-handlers).
+	$effect(() => observeSessionRows($sessions));
 	const groupToolCalls = $derived(chatPreferences.current?.groupToolCalls !== false);
 	const openId = $derived($activeSession?.sessionId ?? null);
 	const openNeeds = $derived(openSessionNeeds(
