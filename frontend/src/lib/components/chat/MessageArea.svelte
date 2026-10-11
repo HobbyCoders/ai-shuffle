@@ -63,6 +63,8 @@
 		type ScrollMetrics
 	} from '$lib/stores/session/auto-scroll';
 	import ToolUseMessage from './ToolUseMessage.svelte';
+	import HandoffCard from './HandoffCard.svelte';
+	import { EMPTY_HANDOFFS } from '$lib/utils/handoff-episodes';
 	import WorkLogGroup from './WorkLogGroup.svelte';
 	import {
 		createTranscriptModelBuilder,
@@ -491,7 +493,8 @@
 				itemIndexByTurnId: new Map<string, number>(),
 				lastAssistantMetadata: null,
 				latestUserTurnId: null,
-				midTurnUserIds: new Set<string>()
+				midTurnUserIds: new Set<string>(),
+				handoffs: EMPTY_HANDOFFS
 			}
 		};
 
@@ -566,6 +569,9 @@
 	const promptOccurrence = $derived(transcript.promptOccurrence);
 	const rewindEligible = $derived(transcript.rewindEligible);
 	const midTurnUserIds = $derived(transcript.midTurnUserIds);
+	// Each hand-off renders as one row on its first record (handoff-episodes.ts);
+	// later records patch the episode, so only the anchor rows re-read this.
+	const handoffAnchors = $derived(transcript.handoffs.byAnchor);
 
 	// What this column should DRAW right now (PERFORMANCE_REVIEW §3.1 S3).
 	// ChatView already suppresses its own hero while history loads, but the
@@ -2110,7 +2116,11 @@
      folded row renders exactly as it would inline. -->
 {#snippet messageBody(message: ChatMessage, messageIndex: number, gallerySources?: ReadonlySet<string>)}
 	{@const delivery = agentDelivery(message)}
-	{#if delivery}
+	{@const handoff = handoffAnchors.get(message)}
+	{#if handoff}
+		<!-- One hand-off, one row: starting → sending → settled (the later records update it). -->
+		<HandoffCard episode={handoff} />
+	{:else if delivery}
 		{@const sender = agentSender(delivery, agentNames)}
 		<ToolUseMessage
 			name="Agent message"

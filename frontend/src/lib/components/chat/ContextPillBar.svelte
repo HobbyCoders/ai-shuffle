@@ -213,7 +213,7 @@
 		}
 		if (!handoff) return null;
 		return handoff.phase === 'moving'
-			? { label: `Moving to ${handoff.worker}…`, title: MOVE_TITLE }
+			? { label: `Sending to ${handoff.worker}…`, title: MOVE_TITLE }
 			: {
 					label: handoff.afterQueued
 						? `Moving to ${handoff.worker} after the queued messages`

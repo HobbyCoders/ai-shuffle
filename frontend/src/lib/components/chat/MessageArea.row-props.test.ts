@@ -50,6 +50,15 @@ describe('MessageArea per-row props', () => {
 	});
 });
 
+describe('MessageArea hand-off row', () => {
+	it('renders a hand-off as one card on its anchor, read through a derived that keeps identity', () => {
+		const rowBody = between('{#snippet messageBody(', '{/snippet}');
+		expect(rowBody).toContain('{@const handoff = handoffAnchors.get(message)}');
+		expect(rowBody).toContain('<HandoffCard episode={handoff} />');
+		expect(source).toContain('const handoffAnchors = $derived(transcript.handoffs.byAnchor);');
+	});
+});
+
 describe('MessageArea settle hold', () => {
 	it('groups the transcript with the held lifecycle, not the raw signals', () => {
 		expect(source).toContain("import { createSettleHold, createTurnHandoffHold } from '$lib/utils/settle-hold';");

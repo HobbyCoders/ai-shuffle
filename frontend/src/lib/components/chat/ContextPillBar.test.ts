@@ -257,7 +257,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 
 		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, handOff, note('started')] });
 		await tick();
-		expect(chip.textContent).toContain('Moving to DesktopWorker…');
+		expect(chip.textContent).toContain('Sending to DesktopWorker…');
 		expect(chip.disabled).toBe(true);
 
 		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, handOff, note('started'), note('moved')] });
