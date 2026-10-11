@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
-import { handoffEpisodes, sameHandoffs, type HandoffEpisode } from './handoff-episodes';
+import { handoffEpisodes, sameHandoffs, settleByOwner, type HandoffEpisode } from './handoff-episodes';
 import { pendingHandoff } from '$lib/components/chat/pending-handoff';
 
 let seq = 0;
@@ -175,4 +175,80 @@ describe('the chip and the row agree', () => {
 			expect(pending?.phase).toBe(open.phase === 'sending' ? 'moving' : 'queued');
 		});
 	}
+});
+
+describe('review fixes (#2304)', () => {
+	it('P1: on the source worker, the owner flipping to the target settles a sending move', () => {
+		const tool = call(queued);
+		const messages = [tool, said('Wrapping up.'), row('started', 'Handing off to DesktopWorker.')];
+		const handoffs = handoffEpisodes(messages);
+		expect(handoffs.open?.phase).toBe('sending');
+		// Still owned here: nothing changes, by identity.
+		expect(settleByOwner(handoffs, { deviceId: 'dev_unraid', deviceName: 'Unraid' })).toBe(handoffs);
+		const settled = settleByOwner(handoffs, { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' });
+		expect(settled.byAnchor.get(tool)).toMatchObject({ phase: 'done', worker: 'DesktopWorker' });
+		expect(settled.open).toBeNull();
+		expect(settleByOwner(handoffs, { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' })).toBe(settled);
+		// The chip and the composer clear too, without any local `moved` row.
+		expect(pendingHandoff(messages, { deviceName: 'Unraid' })).toEqual({ worker: 'DesktopWorker', phase: 'moving' });
+		expect(pendingHandoff(messages, { deviceName: 'DesktopWorker' })).toBeNull();
+		// A move only waiting is not settled by ownership.
+		expect(settleByOwner(handoffEpisodes([tool]), { deviceName: 'DesktopWorker' }).open?.phase).toBe('starting');
+	});
+
+	it('P1: a `sent` record settles the move on the source worker', () => {
+		const r = only([call(queued), row('started', 's'), row('sent', 'Sent to DesktopWorker.')]);
+		expect(r.episode.phase).toBe('done');
+	});
+
+	it('P1: a late cancel of a replaced move keeps the newer move pending (no id)', () => {
+		const a = row('queued', 'Move to DesktopWorker queued for when this turn ends.', { by: 'owner' });
+		const b = row('queued', 'Move to DesktopWorker queued for when this turn ends.', { by: 'owner' });
+		const lateCancel = row('cancelled', 'Queued move to DesktopWorker cancelled.', { by: 'owner' });
+		const messages = [a, b, lateCancel];
+		const result = handoffEpisodes(messages);
+		expect(result.byAnchor.get(a)?.phase).toBe('cancelled');
+		expect(result.byAnchor.get(b)?.phase).toBe('starting');
+		expect(result.open).toBe(result.byAnchor.get(b));
+		expect(result.absorbed.has(lateCancel)).toBe(true);
+		expect(pendingHandoff(messages)).toEqual({ worker: 'DesktopWorker', phase: 'queued' });
+		// B's own cancel then settles B.
+		const both = handoffEpisodes([...messages, row('cancelled', 'Queued move to DesktopWorker cancelled.', { by: 'owner' })]);
+		expect(both.byAnchor.get(b)?.phase).toBe('cancelled');
+		expect(both.open).toBeNull();
+	});
+
+	it('P1: with handoff ids, records group strictly by id', () => {
+		const a = row('queued', 'q', { by: 'owner', handoff_id: 'A' });
+		const b = row('queued', 'q', { by: 'owner', handoff_id: 'B' });
+		const cancelA = row('cancelled', 'c', { by: 'owner', handoff_id: 'A' });
+		const startedB = row('started', 's', { handoff_id: 'B' });
+		const result = handoffEpisodes([a, b, startedB, cancelA]);
+		expect(result.byAnchor.get(a)?.phase).toBe('cancelled');
+		expect(result.byAnchor.get(b)).toMatchObject({ phase: 'sending', id: 'B' });
+		expect(result.open?.id).toBe('B');
+		// The agent's call carries the id in its result too.
+		const tool = call(JSON.stringify({ queued: true, worker: 'DesktopWorker', handoff_id: 'C' }));
+		const viaTool = handoffEpisodes([tool, row('started', 's', { handoff_id: 'C' }), row('moved', 'm', { handoff_id: 'C' })]);
+		expect(viaTool.byAnchor.size).toBe(1);
+		expect(viaTool.byAnchor.get(tool)?.phase).toBe('done');
+	});
+
+	it('P2: an unresolved cancel call does not settle the move', () => {
+		const tool = call(queued);
+		const started = row('started', 's');
+		const cancelling = call(undefined, { cancel: true }, { toolStatus: 'running' });
+		let r = handoffEpisodes([tool, started, cancelling]);
+		expect(r.byAnchor.get(tool)).toMatchObject({ phase: 'sending', cancelling: true });
+		expect(r.absorbed.has(cancelling)).toBe(true);
+		expect(pendingHandoff([tool, started, cancelling])).toEqual({ worker: 'DesktopWorker', phase: 'moving' });
+		// `cancelled: false`: the move had started and goes on.
+		const refused = { ...cancelling, toolStatus: 'complete' as const, toolResult: JSON.stringify({ cancelled: false }) };
+		r = handoffEpisodes([tool, started, refused]);
+		expect(r.byAnchor.get(tool)?.phase).toBe('sending');
+		expect(r.byAnchor.get(tool)?.cancelling).toBeUndefined();
+		// Confirmed: settled.
+		const confirmed = { ...cancelling, toolStatus: 'complete' as const, toolResult: JSON.stringify({ cancelled: true }) };
+		expect(handoffEpisodes([tool, confirmed]).byAnchor.get(tool)?.phase).toBe('cancelled');
+	});
 });

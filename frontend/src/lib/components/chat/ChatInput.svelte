@@ -121,7 +121,10 @@
 	// repository; chat and voice are plain conversations with nothing to point
 	// work at, so promising "a task" there would be a lie.
 	// A queued move (#1819) holds new messages until it runs: say so.
-	const moveWait = $derived(handoffPlaceholder(pendingHandoff($activeSession.messages)));
+	const moveWait = $derived.by(() => {
+		const row = $sessions.find((session) => session.id === $activeSession.sessionId);
+		return handoffPlaceholder(pendingHandoff($activeSession.messages, row ? { deviceId: row.owner_device_id, deviceName: row.device_name } : null));
+	});
 	const composerPlaceholder = $derived(
 		moveWait ??
 			(assistantMode ? 'What can I do for you?' : composerMode !== 'chat' ? 'Describe a task or ask a question' : 'Ask anything')

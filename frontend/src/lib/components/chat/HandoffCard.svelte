@@ -58,15 +58,18 @@
 	const detail = $derived.by(() => {
 		switch (episode.phase) {
 			case 'starting':
+				if (episode.cancelling) return 'Cancelling…';
 				if (episode.requesting) return 'Queuing the move…';
 				return episode.afterQueued
 					? 'Waits for the queued messages, this turn and background work to finish.'
 					: 'Waits for this turn and its background work to finish.';
 			case 'sending':
+				if (episode.cancelling) return 'Cancelling… (a move already under way finishes)';
 				return 'Committing, pushing and moving this chat.';
 			case 'cancelled':
 				if (episode.reason === 'agent') return 'The agent cancelled it before it started.';
 				if (episode.reason === 'restart') return 'The worker restarted before it could start.';
+				if (episode.reason === 'replaced' && !episode.outcome) return 'A newer move replaced it.';
 				return detailOf(episode.outcome);
 			default:
 				return detailOf(episode.outcome);
@@ -100,7 +103,8 @@
 		return i < reached ? 'past' : i === reached ? 'broken' : 'ahead';
 	};
 	const phaseLabel = $derived(
-		episode.phase === 'starting' ? 'queued'
+		episode.cancelling ? 'cancelling'
+		: episode.phase === 'starting' ? 'queued'
 		: episode.phase === 'sending' ? 'sending'
 		: episode.phase === 'done' ? 'done'
 		: episode.phase === 'refused' ? 'refused'

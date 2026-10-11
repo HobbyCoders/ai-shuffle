@@ -64,7 +64,7 @@
 	} from '$lib/stores/session/auto-scroll';
 	import ToolUseMessage from './ToolUseMessage.svelte';
 	import HandoffCard from './HandoffCard.svelte';
-	import { EMPTY_HANDOFFS } from '$lib/utils/handoff-episodes';
+	import { EMPTY_HANDOFFS, settleByOwner } from '$lib/utils/handoff-episodes';
 	import WorkLogGroup from './WorkLogGroup.svelte';
 	import {
 		createTranscriptModelBuilder,
@@ -569,9 +569,6 @@
 	const promptOccurrence = $derived(transcript.promptOccurrence);
 	const rewindEligible = $derived(transcript.rewindEligible);
 	const midTurnUserIds = $derived(transcript.midTurnUserIds);
-	// Each hand-off renders as one row on its first record (handoff-episodes.ts);
-	// later records patch the episode, so only the anchor rows re-read this.
-	const handoffAnchors = $derived(transcript.handoffs.byAnchor);
 
 	// What this column should DRAW right now (PERFORMANCE_REVIEW §3.1 S3).
 	// ChatView already suppresses its own hero while history loads, but the
@@ -639,6 +636,15 @@
 	// the session's own queues and prose question.
 	const openSessionId = $derived($activeSession.sessionId);
 	const openRow = $derived(openSessionId ? $sessions.find((s) => s.id === openSessionId) ?? null : null);
+	// Each hand-off renders as one row on its first record (handoff-episodes.ts);
+	// later records patch the episode, so only the anchor rows re-read this.
+	// The source worker never sees `moved`: the session row naming the target as
+	// owner settles a move that is sending (settleByOwner keeps identity).
+	const handoffOwnerId = $derived(openRow?.owner_device_id ?? null);
+	const handoffOwnerName = $derived(openRow?.device_name ?? null);
+	const handoffAnchors = $derived(
+		settleByOwner(transcript.handoffs, { deviceId: handoffOwnerId, deviceName: handoffOwnerName }).byAnchor
+	);
 	const openIsRemote = $derived(!!$activeSession.isRemote);
 	const openNeeds = $derived(openSessionNeeds(
 		$activeSession,

@@ -49,4 +49,11 @@ describe('HandoffCard', () => {
 		expect(card.querySelector('.note-text')?.textContent).toBe('Finish the review');
 		expect(card.querySelector('.follow-ups')?.textContent).toContain('did not take 1 message');
 	});
+
+	it('shows a cancel on its way without settling', () => {
+		const cancelling = read({ phase: 'sending', sent: true, cancelling: true });
+		expect(cancelling.title).toBe('Sending to DesktopWorker');
+		expect(cancelling.detail).toContain('Cancelling');
+		expect(cancelling.card.querySelector('.badge')?.textContent).toBe('cancelling');
+	});
 });

@@ -267,6 +267,31 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect(chip.textContent).toContain('Unraid');
 	});
 
+	it('clears a sending hand-off once the session row names the target as owner (#2304)', async () => {
+		const handOff = {
+			id: 'tool-handoff', role: 'assistant', type: 'tool_use', content: '', toolStatus: 'complete',
+			toolName: 'mcp__builtins__HandOffSession', toolInput: { worker: 'DesktopWorker' },
+			toolResult: JSON.stringify({ queued: true, worker: 'DesktopWorker', message: 'Hand-off to DesktopWorker is queued.' })
+		};
+		const started = {
+			id: 'handoff-started', role: 'system', type: 'system', content: '',
+			systemSubtype: 'handoff', systemData: { status: 'started', worker: 'DesktopWorker' }
+		};
+		session.store.set({ ...base, sessionId: 'remote', projectV2Id: 'pv2-project', messages: [...base.messages, handOff, started] });
+		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'owner', owner_device_id: 'dev_unraid',
+			device_name: 'Unraid', device_online: true, is_remote: true, controllable: true }]);
+		const view = render(ContextPillBar, { sheetMode });
+		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
+		expect(chip.textContent).toContain('Sending to DesktopWorker…');
+
+		// The source worker never sees `moved`; the owner change is the signal.
+		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'gaming', owner_device_id: 'dev_gaming',
+			device_name: 'DesktopWorker', device_online: true, is_remote: true, controllable: true }]);
+		await tick();
+		expect(chip.getAttribute('aria-busy')).toBeNull();
+		expect(chip.textContent).not.toContain('Sending');
+	});
+
 	it('shows why Continue here failed and restores the chip', async () => {
 		const reason = "Branch main in the receiving worker's checkout C:/repo has 1 commit (newest: abc1234 fix) that is not on origin. Push them from that worker, or move them to another branch there, then try again. Nothing was changed.";
 		vi.mocked(adoptSession).mockRejectedValueOnce({ status: 409, detail: reason });

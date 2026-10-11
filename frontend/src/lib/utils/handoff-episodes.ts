@@ -18,8 +18,11 @@
  * per chat at a time (`request` and `queue_move` refuse a second one), so a
  * record belongs to the episode that is open when it arrives, and its worker
  * must match. Rows without any open episode start their own (an anchor that is
- * not loaded, a worker restart that resumed a move). The rows carry no
- * hand-off id yet; when they do, matching on it replaces the worker check.
+ * not loaded, a worker restart that resumed a move). Records that carry a
+ * `handoff_id` are grouped strictly by it; without one, a late `cancelled`
+ * settles the move a newer one replaced, never the newer move. On the source
+ * worker the move settles when the chat's owner becomes the target
+ * (`settleByOwner`), or on a `sent` record.
  */
 import type { ChatMessage } from '$lib/stores/types';
 
@@ -57,6 +60,12 @@ export interface HandoffEpisode {
 	reason?: string;
 	/** Later notes from the new worker (messages it could not take). */
 	followUps: string[];
+	/** The backend's hand-off id, once its records carry one. */
+	id?: string;
+	/** The target worker's device id, when a record names it. */
+	targetId?: string;
+	/** A cancel call is on its way; the move stands until it is confirmed. */
+	cancelling?: boolean;
 	/** The move itself began (`started`): a failure after this broke mid-send. */
 	sent?: boolean;
 	/** Number of records folded into this row, the anchor included. */
@@ -113,32 +122,86 @@ function anchorKey(message: ChatMessage, index: number): string {
 	return message.serverId ?? message.id ?? `handoff-${index}`;
 }
 
+/** The hand-off id a record carries, once the backend sends one. */
+function idOf(value: Record<string, unknown> | null | undefined): string | undefined {
+	return text(value?.handoff_id) || undefined;
+}
+
+/** The HandOffSession result says the same move was asked for again. */
+function isRepeat(result: Record<string, unknown> | null): boolean {
+	return /already queued/i.test(text(result?.message));
+}
+
 /** Read every hand-off in `messages` as one episode per hand-off. */
 export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisodes {
 	let byAnchor: Map<ChatMessage, HandoffEpisode> | null = null;
 	let absorbed: Set<ChatMessage> | null = null;
-	/** The episode still waiting or running; null once it settled. */
-	let open: HandoffEpisode | null = null;
+	/** Episodes still waiting or running, oldest first (two only in a cancel race). */
+	let open: HandoffEpisode[] = [];
 	/** The latest episode, open or settled: the new worker's notes attach to it. */
 	let last: HandoffEpisode | null = null;
+	const byId = new Map<string, HandoffEpisode>();
+	/**
+	 * Moves a newer move replaced before their own `cancelled` record arrived.
+	 * `cancel_move` drops the queued move before it records the cancel, so a new
+	 * `queued` can land first; that late record settles the older move, never
+	 * the newer one. Only needed while records carry no id.
+	 */
+	let replaced: HandoffEpisode[] = [];
 
+	const absorbOnly = (message: ChatMessage, into: HandoffEpisode) => {
+		(absorbed ??= new Set()).add(message);
+		into.records++;
+	};
+	const settle = (episode: HandoffEpisode) => {
+		open = open.filter((e) => e !== episode);
+	};
 	const start = (anchor: ChatMessage, index: number, episode: Omit<HandoffEpisode, 'key' | 'followUps' | 'records'>) => {
 		const made: HandoffEpisode = { key: anchorKey(anchor, index), followUps: [], records: 1, ...episode };
 		(byAnchor ??= new Map()).set(anchor, made);
-		last = made;
-		open = isSettledPhase(made.phase) ? null : made;
+		if (made.id) byId.set(made.id, made);
+		if (made.phase !== 'refused') last = made;
+		if (!isSettledPhase(made.phase)) {
+			// The backend runs one move at a time: a new one means the open one
+			// for the same chat was dropped, even if its record is still to come.
+			for (const older of open) {
+				Object.assign(older, { phase: 'cancelled', reason: 'replaced', requesting: undefined, cancelling: undefined });
+				if (!older.id) replaced.push(older);
+			}
+			open = [made];
+		}
 		return made;
 	};
 	const absorb = (message: ChatMessage, into: HandoffEpisode, patch: Partial<HandoffEpisode>) => {
-		(absorbed ??= new Set()).add(message);
-		Object.assign(into, patch, { records: into.records + 1 });
-		if (isSettledPhase(into.phase)) open = null;
+		absorbOnly(message, into);
+		Object.assign(into, patch);
+		if (into.id) byId.set(into.id, into);
+		if (isSettledPhase(into.phase)) settle(into);
 	};
-	/** The open episode this record belongs to: same worker, or the record names none. */
-	const owning = (worker: string): HandoffEpisode | null => {
-		const current = open as HandoffEpisode | null;
-		if (!current) return null;
-		return !worker || !current.worker || current.worker === worker ? current : null;
+	const matches = (episode: HandoffEpisode, worker: string) =>
+		!worker || !episode.worker || episode.worker === worker;
+	/**
+	 * The episode a record belongs to. With an id, only that episode. Without
+	 * one, the newest open move for the same worker; a late `cancelled` first
+	 * settles a move a newer one replaced.
+	 */
+	const owning = (id: string | undefined, worker: string, lateCancel = false): HandoffEpisode | null => {
+		if (id) {
+			const known = byId.get(id);
+			if (known) return known;
+			// Records from before the id existed: adopt the open id-less move.
+			const legacy = open.at(-1);
+			return legacy && !legacy.id && matches(legacy, worker) ? legacy : null;
+		}
+		if (lateCancel) {
+			const stale = replaced.find((e) => matches(e, worker));
+			if (stale) {
+				replaced = replaced.filter((e) => e !== stale);
+				return stale;
+			}
+		}
+		const current = open.at(-1);
+		return current && matches(current, worker) ? current : null;
 	};
 
 	messages.forEach((message, index) => {
@@ -149,41 +212,39 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 			if (message.toolStatus === 'error') {
 				// A refused call changed nothing: an open hand-off still stands, and the
 				// refusal is its own settled row so the reason stays readable.
-				const [stillOpen, latest] = [open, last];
+				const stillOpen = open;
 				start(message, index, {
 					worker: asked, by: 'agent', phase: 'refused',
 					outcome: text(message.toolResult) || undefined
 				});
 				open = stillOpen;
-				last = latest ?? last;
 				return;
 			}
 			const result = handoffResult(message.toolResult);
+			const id = idOf(result);
 			if (input.cancel || (result && 'cancelled' in result)) {
-				const current = open as HandoffEpisode | null;
-				if (current && (!result || result.cancelled !== false)) {
-					absorb(message, current, { phase: 'cancelled', reason: 'agent' });
-				} else if (!current) {
-					start(message, index, {
-						worker: asked, by: 'agent', phase: 'cancelled', reason: 'agent',
-						requesting: !result && message.toolStatus !== 'complete' ? true : undefined
-					});
-				} else {
-					// `cancelled: false`: the move had already started; it goes on.
-					(absorbed ??= new Set()).add(message);
-					current.records++;
+				const current = (id && byId.get(id)) || open.at(-1) || null;
+				const confirmed = result?.cancelled === true;
+				if (current && !isSettledPhase(current.phase)) {
+					// Only a confirmed cancel settles the move. Until the call returns
+					// it is "cancelling"; `cancelled: false` means it had already started.
+					if (confirmed) absorb(message, current, { phase: 'cancelled', reason: 'agent', cancelling: undefined });
+					else absorb(message, current, { cancelling: result ? undefined : true });
+				} else if (confirmed) {
+					start(message, index, { worker: asked, by: 'agent', phase: 'cancelled', reason: 'agent' });
 				}
+				// An unresolved or refused cancel with nothing open renders as the call itself.
 				return;
 			}
 			const worker = text(result?.worker) || asked;
-			const current = owning(worker);
-			if (current) {
-				// The same move asked again: the queued one stands.
-				absorb(message, current, note && !current.note ? { note } : {});
+			const current = id ? owning(id, worker) : (isRepeat(result) || !result ? owning(undefined, worker) : null);
+			if (current && !isSettledPhase(current.phase)) {
+				// The same move asked again (or its result still on the way): the queued one stands.
+				absorb(message, current, { ...(note && !current.note ? { note } : {}), ...(id ? { id } : {}) });
 				return;
 			}
 			start(message, index, {
-				worker, by: 'agent', phase: 'starting', note,
+				worker, by: 'agent', phase: 'starting', note, id,
 				requesting: result?.queued === true ? undefined : true
 			});
 			return;
@@ -193,49 +254,54 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 		const data = rowData(message);
 		const status = text(data.status);
 		const worker = text(data.worker);
+		const id = idOf(data);
 		const by = data.by === 'owner' ? 'owner' : undefined;
 		const outcome = text(data.content) || text(message.content) || undefined;
 		const reason = text(data.reason) || undefined;
+		const targetId = text(data.target_id) || undefined;
 
 		switch (status) {
 			case 'queued': {
-				const current = owning(worker);
+				// The owner's move API refuses a second move, so a `queued` row is a
+				// new move unless it carries the open move's id.
 				const afterQueued = data.after === 'queued' ? true : undefined;
+				const current = id ? byId.get(id) : undefined;
 				if (current) {
 					absorb(message, current, { phase: 'starting', afterQueued, by: by ?? current.by });
 					return;
 				}
-				start(message, index, { worker, by: by ?? 'owner', phase: 'starting', afterQueued });
+				start(message, index, { worker, by: by ?? 'owner', phase: 'starting', afterQueued, id, targetId });
 				return;
 			}
 			case 'started': {
 				const note = text(data.note) || undefined;
-				const current = owning(worker);
+				const current = owning(id, worker);
 				if (current) {
 					absorb(message, current, {
 						phase: 'sending', sent: true, requesting: undefined, worker: worker || current.worker,
-						...(note ? { note } : {})
+						...(note ? { note } : {}), ...(id ? { id } : {}), ...(targetId ? { targetId } : {})
 					});
 					return;
 				}
-				start(message, index, { worker, by: by ?? 'agent', phase: 'sending', sent: true, note });
+				start(message, index, { worker, by: by ?? 'agent', phase: 'sending', sent: true, note, id, targetId });
 				return;
 			}
 			case 'moved':
+			case 'sent':
 			case 'failed':
 			case 'timeout':
 			case 'cancelled': {
 				const phase: HandoffPhase =
-					status === 'moved' ? 'done'
+					status === 'moved' || status === 'sent' ? 'done'
 					: status === 'cancelled' || (status === 'failed' && reason === 'open_prompt') ? 'cancelled'
 					: 'failed';
 				// `moved` may name the worker that really took the chat, which can
 				// differ from the target when a lost reply hid a finished move.
-				const current = status === 'moved' ? (open as HandoffEpisode | null) : owning(worker);
+				const current = owning(id, phase === 'done' ? '' : worker, status === 'cancelled');
 				const patch: Partial<HandoffEpisode> = {
-					phase, outcome, requesting: undefined,
+					phase, outcome, requesting: undefined, cancelling: undefined,
 					reason: status === 'timeout' ? 'timeout' : reason,
-					...(worker ? { worker } : {})
+					...(worker ? { worker } : {}), ...(id ? { id } : {})
 				};
 				if (current) {
 					absorb(message, current, patch);
@@ -246,15 +312,17 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 					(absorbed ??= new Set()).add(message);
 					return;
 				}
+				const stillOpen = open;
 				start(message, index, {
-					worker, by: by ?? 'agent', phase, outcome,
+					worker, by: by ?? 'agent', phase, outcome, id,
 					reason: status === 'timeout' ? 'timeout' : reason
 				});
+				open = stillOpen;
 				return;
 			}
 			case 'held_failed':
 			case 'resume_failed': {
-				const into = (open as HandoffEpisode | null) ?? (last as HandoffEpisode | null);
+				const into = (id && byId.get(id)) || open.at(-1) || (last as HandoffEpisode | null);
 				if (!into || !outcome) return;
 				(absorbed ??= new Set()).add(message);
 				into.followUps = [...into.followUps, outcome];
@@ -267,7 +335,45 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 	});
 
 	if (!byAnchor && !absorbed) return EMPTY_HANDOFFS;
-	return { byAnchor: byAnchor ?? new Map(), absorbed: absorbed ?? new Set(), open };
+	return { byAnchor: byAnchor ?? new Map(), absorbed: absorbed ?? new Set(), open: open.at(-1) ?? null };
+}
+
+/**
+ * Who runs the chat now, from its session row (the sidebar's "on DesktopWorker").
+ * The source worker's transcript never sees `moved` (the new worker records
+ * it), so a confirmed change of owner to the target is what settles a move
+ * there.
+ */
+export interface HandoffOwner {
+	deviceId?: string | null;
+	deviceName?: string | null;
+}
+
+const settledByOwner = new WeakMap<HandoffEpisodes, { key: string; value: HandoffEpisodes }>();
+
+function ownedByTarget(episode: HandoffEpisode, owner: HandoffOwner): boolean {
+	if (episode.targetId && owner.deviceId) return episode.targetId === owner.deviceId;
+	const name = text(owner.deviceName).toLowerCase();
+	return !!name && !!episode.worker && name === episode.worker.toLowerCase();
+}
+
+/**
+ * Settle a move that is sending once the chat's owner is its target worker.
+ * Returns `handoffs` itself when nothing changes, and the same result for the
+ * same inputs, so rows reading it keep their identity.
+ */
+export function settleByOwner(handoffs: HandoffEpisodes, owner: HandoffOwner | null | undefined): HandoffEpisodes {
+	const current = handoffs.open;
+	if (!owner || !current || current.phase !== 'sending' || !ownedByTarget(current, owner)) return handoffs;
+	const key = `${owner.deviceId ?? ''}\0${owner.deviceName ?? ''}`;
+	const cached = settledByOwner.get(handoffs);
+	if (cached?.key === key) return cached.value;
+	const done: HandoffEpisode = { ...current, phase: 'done', cancelling: undefined, outcome: current.outcome };
+	const byAnchor = new Map(handoffs.byAnchor);
+	for (const [anchor, episode] of byAnchor) if (episode === current) byAnchor.set(anchor, done);
+	const value: HandoffEpisodes = { byAnchor, absorbed: handoffs.absorbed, open: null };
+	settledByOwner.set(handoffs, { key, value });
+	return value;
 }
 
 /** Same anchors rendering the same episodes (by value): a rebuild changed nothing here. */

@@ -20,7 +20,7 @@
  */
 import type { ChatMessage } from '$lib/stores/types';
 import type { QueuedMoveBusy } from '$lib/api/sessions';
-import { handoffEpisodes, isHandoffRow, isHandoffTool } from '$lib/utils/handoff-episodes';
+import { handoffEpisodes, isHandoffRow, isHandoffTool, settleByOwner, type HandoffOwner } from '$lib/utils/handoff-episodes';
 
 export interface PendingHandoff {
 	/** The target worker's label, as the tool reported it. */
@@ -40,10 +40,12 @@ export function handoffActivitySince(messages: readonly ChatMessage[], from: num
  * The hand-off still waiting or running. Read from the same episodes the
  * transcript row renders (handoff-episodes.ts), so the chip, the composer and
  * the row always agree: 'queued' is the row's "Starting", 'moving' its "Sending".
- * A call still waiting for its result has queued nothing yet.
+ * A call still waiting for its result has queued nothing yet. `owner` is the
+ * chat's session row: once it names the target, the move is done here even
+ * though this worker never sees the `moved` record.
  */
-export function pendingHandoff(messages: readonly ChatMessage[]): PendingHandoff | null {
-	const open = handoffEpisodes(messages).open;
+export function pendingHandoff(messages: readonly ChatMessage[], owner?: HandoffOwner | null): PendingHandoff | null {
+	const open = settleByOwner(handoffEpisodes(messages), owner).open;
 	if (!open || open.requesting || !open.worker) return null;
 	if (open.phase === 'sending') return { worker: open.worker, phase: 'moving' };
 	return open.afterQueued ? { worker: open.worker, phase: 'queued', afterQueued: true } : { worker: open.worker, phase: 'queued' };
