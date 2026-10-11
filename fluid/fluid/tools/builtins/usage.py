@@ -17,9 +17,13 @@ SPEC = ToolSpec(
     name="GetUsage",
     description=(
         "Read the latest cached subscription and provider usage observed by "
-        "the host. Reports percent left, as shown in the Usage UI "
-        "(used_percent is 100 minus left), reset timestamps, "
-        "source, freshness, and unavailable data explicitly. This is read-only "
+        "the host. Reports percent left (used_percent is 100 minus left), "
+        "reset timestamps, "
+        "source, freshness, and unavailable data explicitly. "
+        "Quote percentages as 'left': subscription rows in the Usage popover "
+        "show the same left number; other API-key provider windows and Settings "
+        "meters currently display used. "
+        "This is read-only "
         "and never refreshes a provider or reads credentials. Session token "
         "usage, when supplied by the host, is reported separately."
     ),

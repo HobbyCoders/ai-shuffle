@@ -29,16 +29,20 @@ def test_get_usage_is_registered_and_allowlisted():
     assert "GetUsage" in handlers
     assert "mcp__builtins__GetUsage" in get_builtin_tool_names()
     description = handlers["GetUsage"].description
-    assert "percent left, as shown in the Usage UI" in description
+    assert "Reports percent left (used_percent is 100 minus left)" in description
+    assert "as shown in the Usage UI" not in description
+    assert "Quote percentages as 'left'" in description
+    assert "subscription rows in the Usage popover show the same left number" in description
+    assert "other API-key provider windows and Settings meters currently display used" in description
     assert "used_percent is 100 minus left" in description
     assert "Reports used and remaining percentages" not in description
     assert "reset timestamps, source, freshness, and unavailable data explicitly" in description
     assert "Read-only: it never refreshes providers or reads credentials." in description
     # Measured description fixture plus a small allowance.
-    assert len(description) <= 289 + 20
+    assert len(description) <= 433 + 20
     paragraphs = description.split("\n\n")
     assert len(paragraphs) == len(set(paragraphs))
-    assert description.count("percent left, as shown in the Usage UI") == 1
+    assert description.count("Quote percentages as 'left'") == 1
 
 
 def test_get_usage_returns_formatted_cached_payload():

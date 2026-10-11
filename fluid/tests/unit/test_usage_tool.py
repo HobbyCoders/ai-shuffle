@@ -16,16 +16,20 @@ def test_get_usage_is_registered_for_native_and_code_mode_surfaces() -> None:
     assert spec is not None
     assert spec.risk == "safe"
     assert spec.code_mode_allowed is True
-    assert "percent left, as shown in the Usage UI" in spec.description
+    assert "Reports percent left (used_percent is 100 minus left)" in spec.description
+    assert "as shown in the Usage UI" not in spec.description
+    assert "Quote percentages as 'left'" in spec.description
+    assert "subscription rows in the Usage popover show the same left number" in spec.description
+    assert "other API-key provider windows and Settings meters currently display used" in spec.description
     assert "used_percent is 100 minus left" in spec.description
     assert "Reports used and remaining percentages" not in spec.description
     assert "reset timestamps, source, freshness, and unavailable data explicitly" in spec.description
     assert "never refreshes a provider or reads credentials" in spec.description
     # Measured description fixture plus a small allowance, not a token estimate.
-    assert len(spec.description) <= 370 + 20
+    assert len(spec.description) <= 514 + 20
     paragraphs = spec.description.split("\n\n")
     assert len(paragraphs) == len(set(paragraphs))
-    assert spec.description.count("percent left, as shown in the Usage UI") == 1
+    assert spec.description.count("Quote percentages as 'left'") == 1
 
 
 @pytest.mark.asyncio

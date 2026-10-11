@@ -2715,9 +2715,13 @@ def create_builtin_tools_server(
     @tool(
         "GetUsage",
         "Read the latest cached subscription and provider usage observed by "
-        "the host. Reports percent left, as shown in the Usage UI "
-        "(used_percent is 100 minus left), reset timestamps, "
-        "source, freshness, and unavailable data explicitly. Read-only: it "
+        "the host. Reports percent left (used_percent is 100 minus left), "
+        "reset timestamps, "
+        "source, freshness, and unavailable data explicitly. "
+        "Quote percentages as 'left': subscription rows in the Usage popover "
+        "show the same left number; other API-key provider windows and Settings "
+        "meters currently display used. "
+        "Read-only: it "
         "never refreshes providers or reads credentials.",
         {"type": "object", "properties": {}, "additionalProperties": False},
     )
