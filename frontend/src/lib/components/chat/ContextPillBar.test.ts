@@ -154,8 +154,10 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		await fireEvent.click(view.getByRole('button', { name: 'Runner: Local' }));
 		const destination = await view.findByRole('menuitem', { name: 'Other worker' });
 		expect(view.queryByRole('menuitem', { name: 'Continue here' })).toBeNull();
-		expect((view.getByRole('menuitem', { name: 'Offline worker' }) as HTMLButtonElement).disabled).toBe(true);
-		expect((view.getByRole('menuitem', { name: 'Missing checkout' }) as HTMLButtonElement).disabled).toBe(true);
+		const offline = view.getByRole('menuitem', { name: 'Offline worker offline' }) as HTMLButtonElement;
+		expect(offline.disabled).toBe(true);
+		expect(offline.getAttribute('aria-disabled')).toBe('true');
+		expect((view.getByRole('menuitem', { name: 'Missing checkout no checkout' }) as HTMLButtonElement).disabled).toBe(true);
 		await fireEvent.click(destination);
 		expect(await view.findByRole('dialog')).toBeTruthy();
 		expect(getQueuedMove).toHaveBeenCalledExactlyOnceWith(base.sessionId);
@@ -485,7 +487,7 @@ describe('worker presence dots', () => {
 		expect(dotOf(chip)).toBe('online');
 		await fireEvent.click(chip);
 		expect(dotOf(await view.findByRole('menuitem', { name: 'Unraid' }))).toBe('online');
-		const popOs = view.getByRole('menuitem', { name: 'linux-worker' }) as HTMLButtonElement;
+		const popOs = view.getByRole('menuitem', { name: 'linux-worker offline' }) as HTMLButtonElement;
 		expect(dotOf(popOs)).toBe('offline');
 		// Offline workers keep their existing disabled state.
 		expect(popOs.disabled).toBe(true);
@@ -522,7 +524,7 @@ describe('worker presence dots', () => {
 		listInstallsMock.mockResolvedValue(registry(false));
 		await refreshWorkerPresence();
 		await tick();
-		const after = view.getByRole('menuitem', { name: 'Unraid' }) as HTMLButtonElement;
+		const after = view.getByRole('menuitem', { name: 'Unraid offline' }) as HTMLButtonElement;
 		expect(dotOf(after)).toBe('offline');
 		expect(after.disabled).toBe(true);
 	});

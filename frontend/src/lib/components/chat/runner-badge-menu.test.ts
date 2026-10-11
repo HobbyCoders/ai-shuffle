@@ -108,6 +108,17 @@ describe('runnerBadgeMenuItems', () => {
 		});
 	});
 
+	it('tags offline and checkout-less runners the same way the new-chat picker does', () => {
+		const notes = Object.fromEntries(
+			runnerBadgeMenuItems(input({ eligibility: { 'inst-online': false } })).map((i) => [i.id, i.note])
+		);
+		expect(notes).toEqual({
+			'continue-here': null,
+			'move-inst-online': 'no checkout',
+			'move-inst-offline': 'offline'
+		});
+	});
+
 	it('disables an ineligible online runner when the session has a project', () => {
 		const items = runnerBadgeMenuItems(
 			input({ eligibility: { 'inst-online': false, 'inst-offline': true } })

@@ -10,6 +10,7 @@ import type { Install } from '$lib/api/installs';
 import {
 	peerRunners,
 	isBlocked,
+	isIneligible,
 	runnerTitle,
 	type EligibilityMap
 } from '$lib/components/layout/execution-mode-eligibility';
@@ -38,6 +39,15 @@ export interface RunnerBadgeMenuItem {
 	title: string;
 	/** Drives the presence dot. "Continue here" is this worker, always online. */
 	online: boolean;
+	/** Trailing tag shared with the new-chat picker: "offline" or "no checkout". */
+	note: string | null;
+}
+
+/** The tag a worker row carries in either runner picker. */
+export function workerRowNote(install: Install, eligibility: EligibilityMap): string | null {
+	if (!install.online) return 'offline';
+	if (isIneligible(eligibility, install.id)) return 'no checkout';
+	return null;
 }
 
 export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMenuItem[] {
@@ -48,6 +58,7 @@ export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMe
 			action: { kind: 'adopt' },
 			disabled: false,
 			online: true,
+			note: null,
 			title: input.hasProject
 				? 'Commit and push on the owning worker, then fetch the branch and sync context here'
 				: 'Move this chat and its history to this runner'
@@ -62,6 +73,7 @@ export function runnerBadgeMenuItems(input: RunnerBadgeMenuInput): RunnerBadgeMe
 			action: blocked ? null : { kind: 'move', targetInstanceId: install.id },
 			disabled: blocked,
 			online: install.online,
+			note: workerRowNote(install, input.eligibility),
 			title: runnerTitle(install, input.isWorktree, input.eligibility)
 		});
 	}

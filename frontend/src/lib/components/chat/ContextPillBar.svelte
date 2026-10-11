@@ -32,6 +32,7 @@
 	import { gitStateQuery, runnerBadgeMenuItems } from './runner-badge-menu';
 	import type { RunnerBadgeMenuItem } from './runner-badge-menu';
 	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
+	import WorkerMenuList from '$lib/components/ui/WorkerMenuList.svelte';
 	import { pendingHandoff, handoffActivitySince, moveBlocked } from './pending-handoff';
 	import { activeSession } from '$lib/stores/active-session';
 	import { clusterProjects, projects, sessions, appData } from '$lib/stores/app-data.svelte';
@@ -589,32 +590,18 @@
 						{#if runnerActionError}
 							<div class="runner-error" role="alert">{runnerActionError}</div>
 						{/if}
-						{#if runnerMenuLoading}
-							<div class="runner-loading">
-								<Loader2 size={14} strokeWidth={1.5} class="spin" />
-								<span>Loading…</span>
-							</div>
-						{:else if runnerMenuError}
-							<div class="runner-loading" role="alert">{runnerMenuError}</div>
-							<button type="button" class="runner-item" role="menuitem" onclick={loadRunnerMenu}>Retry</button>
-						{:else if runnerMenu.length === 0}
-							<div class="runner-loading" role="status">No other workers available.</div>
-						{:else}
-							{#each runnerMenu as item (item.id)}
-								<button
-									type="button"
-									class="runner-item"
-									class:disabled={item.disabled}
-									role="menuitem"
-									disabled={item.disabled || runnerActionPending || runnerChecking}
-									title={item.title}
-									onclick={() => runMenuAction(item)}
-								>
-									<WorkerStatusDot online={item.online} />
-									<span class="ctx-chip-label">{item.label}</span>
-								</button>
-							{/each}
-						{/if}
+						<WorkerMenuList
+							items={runnerMenuLoading || runnerMenuError ? [] : runnerMenu}
+							locked={runnerActionPending || runnerChecking}
+							loading={runnerMenuLoading}
+							error={runnerMenuError || null}
+							onRetry={loadRunnerMenu}
+							emptyText={runnerMenu.length === 0 ? 'No other workers available.' : null}
+							onSelect={(row) => {
+								const item = runnerMenu.find((i) => i.id === row.id);
+								if (item) void runMenuAction(item);
+							}}
+						/>
 						{/if}
 					</div>
 				{/if}
@@ -808,15 +795,6 @@
 		z-index: 100;
 	}
 
-	.runner-loading {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 8px 10px;
-		color: var(--muted-foreground);
-		font-size: 0.75rem;
-	}
-
 	.runner-error {
 		padding: 8px 10px;
 		color: var(--destructive);
@@ -905,18 +883,6 @@
 	.queued-cancel:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: 1px;
-	}
-
-	/* Dim the row's contents, not the row, so an offline worker's red dot
-	   stays readable next to its greyed name. */
-	.runner-item.disabled,
-	.runner-item:disabled {
-		cursor: default;
-	}
-
-	.runner-item.disabled > :global(:not(.worker-status-dot)),
-	.runner-item:disabled > :global(:not(.worker-status-dot)) {
-		opacity: 0.45;
 	}
 
 	:global(.spin) {

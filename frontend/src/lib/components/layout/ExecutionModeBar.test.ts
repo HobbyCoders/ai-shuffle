@@ -243,7 +243,6 @@ describe('worker picker persistence', () => {
 		await fireEvent.click(screen.getByText('feature/shared'));
 		expect(activeSession.current.worktreeId).toBe('legacy-worktree');
 		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Other workers' }));
 		await fireEvent.click(screen.getByRole('menuitemradio', { name: /Unraid/ }));
 		expect(activeSession.current.deviceIntent?.id).toBe('runner-1');
 		expect(activeSession.current.worktreeId).toBeNull();
@@ -265,7 +264,6 @@ describe('worker picker persistence', () => {
 		}] });
 		render(ExecutionModeBar);
 		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
-		await fireEvent.click(screen.getByRole('button', { name: 'Other workers' }));
 		await fireEvent.click(await screen.findByRole('menuitemradio', { name: 'Unraid' }));
 		expect(getPersistedDeviceIntent()).toEqual({ id: 'runner-1', name: 'Unraid' });
 		activeSession.setProject('another-project', null);
@@ -291,7 +289,6 @@ describe('worker presence dots', () => {
 			expect(dotOf(screen.getByRole('button', { name: 'Runner: Local' }))).toBe('online');
 			await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
 			expect(dotOf(screen.getByRole('menuitemradio', { name: 'Local' }))).toBe('online');
-			await fireEvent.click(screen.getByRole('button', { name: 'Other workers' }));
 			const unraid = await screen.findByRole('menuitemradio', { name: 'Unraid' });
 			expect(dotOf(unraid)).toBe('online');
 			// The offline row keeps its existing greyed, blocked state.
@@ -321,7 +318,6 @@ describe('worker presence dots', () => {
 		try {
 			render(ExecutionModeBar);
 			await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
-			await fireEvent.click(screen.getByRole('button', { name: 'Other workers' }));
 			const before = await screen.findByRole('menuitemradio', { name: 'Unraid' });
 			expect(dotOf(before)).toBe('online');
 			expect(before.getAttribute('aria-disabled')).toBe('false');
@@ -449,5 +445,72 @@ describe('ExecutionModeBar merged worktree branch chip', () => {
 		expect(screen.getByRole('button', { name: /worktree branch: auto from main/i })).toBeTruthy();
 		expect(screen.queryByRole('button', { name: /^base branch:/i })).toBeNull();
 		expect(container.querySelector('.new-wt-chip')).toBeNull();
+	});
+});
+
+describe('flat worker list (matches the active session runner menu)', () => {
+	const peer = (id: string, device_name: string, online = true) => ({
+		id, device_name, online, base_url: null, platform: 'linux', version: null, capabilities: {}, last_seen: null
+	});
+	const fixture = { self_instance_id: 'local', installs: [
+		{ ...peer('local', 'This worker'), is_self: true },
+		peer('runner-1', 'Unraid'),
+		peer('runner-2', 'linux-worker', false),
+		peer('runner-3', 'Laptop')
+	] };
+
+	afterEach(() => {
+		vi.mocked(listInstalls).mockResolvedValue({ self_instance_id: 'local', installs: [] });
+		vi.mocked(getClusterGitState).mockResolvedValue(null as never);
+	});
+
+	it('lists this worker as Local, then every peer, with no Other workers section', async () => {
+		vi.mocked(listInstalls).mockResolvedValue(fixture);
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
+		await screen.findByRole('menuitemradio', { name: 'Unraid' });
+		const menu = screen.getByRole('menu', { name: 'Runner selection' });
+		const rows = [...menu.querySelectorAll('[role="menuitemradio"]')];
+		expect(rows.map(r => r.querySelector('.worker-row-name')?.textContent)).toEqual(['Local', 'Unraid', 'linux-worker', 'Laptop']);
+		expect(screen.queryByRole('button', { name: 'Other workers' })).toBeNull();
+		expect(menu.querySelector('[aria-expanded]')).toBeNull();
+		expect(screen.getByRole('menuitemradio', { name: 'Local' }).getAttribute('aria-checked')).toBe('true');
+		expect(screen.getByRole('menuitemradio', { name: 'Unraid' }).getAttribute('aria-checked')).toBe('false');
+		expect(screen.getByRole('menuitemradio', { name: 'linux-worker offline' }).getAttribute('aria-disabled')).toBe('true');
+	});
+
+	it('keeps a peer without a checkout disabled in worktree mode with its reason', async () => {
+		vi.mocked(listInstalls).mockResolvedValue(fixture);
+		vi.mocked(getClusterGitState).mockResolvedValue({ project_v2_id: 'pv2', installs: [
+			{ id: 'runner-1', online: true, eligible: true },
+			{ id: 'runner-3', online: true, eligible: false }
+		] } as never);
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
+		const laptop = await screen.findByRole('menuitemradio', { name: 'Laptop no checkout' });
+		expect(laptop.getAttribute('aria-disabled')).toBe('true');
+		expect(laptop.getAttribute('title')).toBe("No checkout of this project on Laptop — a worktree can't be created there");
+		await fireEvent.click(laptop);
+		expect(activeSession.current.deviceIntent).toBeNull();
+	});
+
+	it('stamps the picked peer as the session runner and checks its row', async () => {
+		vi.mocked(listInstalls).mockResolvedValue(fixture);
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
+		await fireEvent.click(await screen.findByRole('menuitemradio', { name: 'Unraid' }));
+		expect(activeSession.current.deviceIntent).toEqual({ id: 'runner-1', name: 'Unraid' });
+		expect(screen.queryByRole('menu', { name: 'Runner selection' })).toBeNull();
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Unraid' }));
+		expect(screen.getByRole('menuitemradio', { name: 'Unraid' }).getAttribute('aria-checked')).toBe('true');
+		expect(screen.getByRole('menuitemradio', { name: 'Local' }).getAttribute('aria-checked')).toBe('false');
+	});
+
+	it('says so when there are no other workers, keeping Local pickable', async () => {
+		vi.mocked(listInstalls).mockResolvedValue({ self_instance_id: 'local', installs: [] });
+		render(ExecutionModeBar);
+		await fireEvent.click(screen.getByRole('button', { name: 'Runner: Local' }));
+		expect(await screen.findByText('No other workers available.')).toBeTruthy();
+		expect(screen.getByRole('menuitemradio', { name: 'Local' })).toBeTruthy();
 	});
 });
