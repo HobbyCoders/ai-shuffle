@@ -130,6 +130,16 @@ def strip_real_claude_dirs(path_value: str, allowed_roots) -> str:
     return os.pathsep.join(kept)
 
 
+def reapply_claude_guard(allowed_roots) -> bool:
+    """Strip ``claude`` directories from the live PATH again; True when one was."""
+    current = os.environ.get("PATH", "")
+    stripped = strip_real_claude_dirs(current, allowed_roots)
+    if stripped == current:
+        return False
+    os.environ["PATH"] = stripped
+    return True
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _no_real_claude_on_path():
     """Keep the machine's real ``claude`` CLI off PATH for the whole run."""
@@ -140,6 +150,21 @@ def _no_real_claude_on_path():
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("PATH", strip_real_claude_dirs(os.environ.get("PATH", ""), roots))
         yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_claude_on_path_each_test():
+    """Re-apply the session guard before every test.
+
+    ``app.core.startup.check_prerequisites`` prepends ``~/.local/bin`` to the
+    process PATH in place. A module-scoped app fixture runs it before the
+    per-test ``reset_environment`` snapshot, so that snapshot — and every
+    later test on the same xdist worker — would carry the real ``claude``
+    again (seen as a flaky ``test_the_session_guard_left_no_real_claude_on_path``).
+    """
+    if os.environ.get("AI_SHUFFLE_ALLOW_REAL_CLAUDE") != "1":
+        reapply_claude_guard((REPO_ROOT, tempfile.gettempdir()))
+    yield
 
 
 @pytest.fixture(autouse=True)
