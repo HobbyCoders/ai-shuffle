@@ -95,10 +95,7 @@
 	let localOpen = $state(false);
 	// Runs are keyed by the row they start at (`WorkLogRun.key`), not by
 	// ordinal: prose that finishes later inserts a boundary and shifts
-	// ordinals. Runs also merge (newer prose replaces the boundary between
-	// two) and split (prose inside one finishes), so a run's open state is
-	// stored under its key and every alias, and any of them reads as open:
-	// neither may close a run the reader opened.
+	// ordinals. One stored entry per open run, under that key.
 	let localRuns = $state<Record<string, boolean>>({});
 	const turnFold = $derived(foldKey ? `${foldKey}:turn` : null);
 	const runPrefix = $derived(foldKey ? `${foldKey}:run-` : null);
@@ -118,40 +115,73 @@
 		if (turnFold) folds.setOpen(turnFold, next);
 		else localOpen = next;
 	}
-	function runIds(run: WorkLogRun): string[] {
-		return [run.key, ...(run.aliases ?? [])];
-	}
 	function runOpen(run: WorkLogRun): boolean {
-		return runIds(run).some((id) => (runPrefix ? stored[`${runPrefix}${id}`] === true : localRuns[id] === true));
+		return runPrefix ? stored[`${runPrefix}${run.key}`] === true : localRuns[run.key] === true;
 	}
 	function setRunOpen(run: WorkLogRun, next: boolean) {
-		if (runPrefix) for (const id of runIds(run)) folds.setOpen(`${runPrefix}${id}`, next);
-		else localRuns = { ...localRuns, ...Object.fromEntries(runIds(run).map((id) => [id, next])) };
+		if (runPrefix) folds.setOpen(`${runPrefix}${run.key}`, next);
+		else localRuns = { ...localRuns, [run.key]: next };
 	}
-	// A run's identities change as prose finishes: newer prose replaces the
-	// boundary that ended it, a merge adds the rows after the prose it
-	// absorbed. Keep the stored open state equal to the runs' CURRENT
-	// identities: an open run records any identity it gained, and an identity
-	// no run claims any more is dropped. Otherwise closing a run would clear
-	// only its current identities, and a retired one left stored open would
-	// reopen the work log at settle (`anyRunOpen` / `promoteRuns`).
+
+	/**
+	 * Runs merge and split as prose finishes. Two runs merge when newer prose
+	 * replaces the prose between them as the latest word, and the later run's
+	 * key is gone. A run splits when prose inside it finishes, and its later
+	 * part starts a run with a new key. The reader's open state moves with the
+	 * work in ONE transfer per change, never by storing a run under several
+	 * keys:
+	 *  - a run whose rows sat in an open run with another key (the previous
+	 *    build's runs), or that contains the row of a stored key no run has
+	 *    any more (a merge while this group was unmounted), opens under its
+	 *    own key;
+	 *  - a stored key that is no run's key any more is dropped, so closing a
+	 *    run clears everything that could reopen it at settle.
+	 * Idempotent: once transferred there is nothing left to move, so the
+	 * effect writes nothing on later renders.
+	 */
+	const rowId = (entry: WorkLogSequenceEntry) => entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
+	let previousRunOfRow = new Map<string, string>();
 	$effect.pre(() => {
-		if (mode !== 'live') return;
-		const claimed = new Set(runs.flatMap(runIds));
-		const openIds = runs.filter(runOpen).flatMap(runIds);
+		if (mode !== 'live') {
+			previousRunOfRow = new Map();
+			return;
+		}
+		const isOpen = (id: string) => (runPrefix ? stored[`${runPrefix}${id}`] === true : localRuns[id] === true);
+		const keys = new Set(runs.map((run) => run.key));
+		const keyOfRun = new Map(runs.map((run) => [run.index, run.key]));
+		const runOfRow = new Map<string, string>();
+		for (const entry of sequence) {
+			const key = entry.run === undefined ? undefined : keyOfRun.get(entry.run);
+			if (key) runOfRow.set(rowId(entry), key);
+		}
+		const rows = new Set(sequence.map(rowId));
+		const opened = new Set<string>();
+		const retired = new Set<string>();
+		for (const [row, previous] of previousRunOfRow) {
+			const now = runOfRow.get(row);
+			if (now && now !== previous && isOpen(previous)) opened.add(now);
+		}
+		const storedIds = runPrefix
+			? Object.keys(stored).filter((key) => key.startsWith(runPrefix)).map((key) => key.slice(runPrefix.length))
+			: Object.keys(localRuns).filter((id) => localRuns[id]);
+		for (const id of storedIds) {
+			// Only ids that name a row of this turn: anything else is not ours to judge.
+			if (keys.has(id) || !rows.has(id)) continue;
+			retired.add(id);
+			const now = runOfRow.get(id);
+			if (now) opened.add(now);
+		}
+		previousRunOfRow = runOfRow;
+		const toOpen = [...opened].filter((id) => !isOpen(id));
+		if (toOpen.length === 0 && retired.size === 0) return;
 		if (runPrefix) {
-			const prefix = runPrefix;
-			for (const key of Object.keys(stored)) {
-				if (key.startsWith(prefix) && !claimed.has(key.slice(prefix.length))) folds.setOpen(key, false);
-			}
-			for (const id of openIds) if (stored[`${prefix}${id}`] !== true) folds.setOpen(`${prefix}${id}`, true);
+			for (const id of toOpen) folds.setOpen(`${runPrefix}${id}`, true);
+			for (const id of retired) folds.setOpen(`${runPrefix}${id}`, false);
 		} else {
-			const next: Record<string, boolean> = {};
-			for (const [id, value] of Object.entries(localRuns)) if (value && claimed.has(id)) next[id] = true;
-			for (const id of openIds) next[id] = true;
-			const same = Object.keys(next).length === Object.values(localRuns).filter(Boolean).length
-				&& Object.keys(next).every((id) => localRuns[id] === true);
-			if (!same) localRuns = next;
+			const next = { ...localRuns };
+			for (const id of toOpen) next[id] = true;
+			for (const id of retired) delete next[id];
+			localRuns = next;
 		}
 	});
 	// A settled turn with nothing to hide keeps its group (so settling does not

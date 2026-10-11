@@ -3,12 +3,10 @@
  *
  * A fold key is `<turn key>:run-<row id>` for a live run and `<turn key>:turn`
  * for the settled turn's group, where the turn key is the SERVER id of the
- * row that opened the turn and the row id is the run's first row. Opening a
- * live run records it under each of its aliases too (the row that ends it,
- * the row after each finished prose inside it), so it stays open when runs
- * merge or split as prose finishes; see `WorkLogRun.key` and `aliases`.
- * WorkLogGroup keeps those entries equal to the runs' current identities, so
- * an identity a run no longer has cannot reopen it after the reader closed it.
+ * row that opened the turn and the row id is the run's first row: one entry
+ * per open run. When runs merge or split as prose finishes, WorkLogGroup
+ * moves the entry onto the run now holding that work in one transfer and
+ * drops the key no run has any more (see `WorkLogRun.key`).
  * When the turn settles its runs become one fold: `promoteRuns` opens that
  * fold if the reader had opened any run, so settling never closes what they
  * were reading. An optimistic send has no server id until the

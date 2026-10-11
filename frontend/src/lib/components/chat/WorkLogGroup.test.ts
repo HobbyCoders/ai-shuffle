@@ -454,7 +454,7 @@ describe('WorkLogGroup', () => {
 			const first = render(WorkLogGroup, { ...logOf(true), folds });
 			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
 			expect(shown('read-a')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-read-a': true, 'prompt:run-finding': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-a': true });
 			first.unmount();
 
 			// A window remount, a session switch back or a reload (new store, same storage).
@@ -746,7 +746,7 @@ describe('WorkLogGroup', () => {
 			expect(labels).toHaveLength(2);
 			await fireEvent.click(labels[1]);
 			expect(shown('read-c')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-read-c': true, 'prompt:run-worker': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-c': true });
 
 			// prose-0 finishes: a new boundary ahead of the open run renumbers the runs.
 			const failed = base.map((m) => (m === running ? { ...m, streaming: false } : m));
@@ -799,7 +799,7 @@ describe('WorkLogGroup', () => {
 			expect(shown('read-x')).toBe(false);
 			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
 			expect(shown('read-x')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-read-x': true, 'prompt:run-prose-a': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-x': true });
 
 			// B streams: A still ends the run.
 			await view.rerender(logOf(true, [prompt, read, proseA, { ...proseB, streaming: true }]));
@@ -808,7 +808,7 @@ describe('WorkLogGroup', () => {
 			await view.rerender(logOf(true, [prompt, read, proseA, proseB]));
 			expect(shown('read-x')).toBe(true);
 			expect(shown('prose-a')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-read-x': true, 'prompt:run-prose-b': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-x': true });
 			view.unmount();
 
 			// A remount or reload reads the same stored state.
@@ -884,13 +884,12 @@ describe('WorkLogGroup', () => {
 			const proseB: ChatMessage = { id: 'prose-b', role: 'assistant', type: 'text', content: 'Config checked.' };
 			const view = render(WorkLogGroup, { ...logOf(true, [prompt, read, proseA]), folds });
 			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
-			expect(folds.current).toEqual({ 'prompt:run-read-x': true, 'prompt:run-prose-a': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-x': true });
 
-			// B finishes and takes over the boundary: the stored state follows the
-			// run's current identities, and the retired one is dropped.
+			// B finishes and takes over the boundary: the run keeps its key.
 			await view.rerender(logOf(true, [prompt, read, proseA, proseB]));
 			expect(shown('read-x')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-read-x': true, 'prompt:run-prose-b': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-x': true });
 
 			await fireEvent.click(screen.getByRole('button', { name: 'Hide work details: Read 1 file' }));
 			expect(shown('read-x')).toBe(false);
@@ -906,6 +905,55 @@ describe('WorkLogGroup', () => {
 			expect(screen.getByRole('button', { expanded: false })).toBeTruthy();
 		});
 
+		// Re-review of #2297: storing a run under every identity it carried
+		// overflowed the fold store's cap on a long run and never converged.
+		// One entry per run: opening a 400-prose run is one bounded write.
+		it('opens and keeps open a run of 800+ rows with a bounded number of storage writes', async () => {
+			const base = memoryStorage();
+			let writes = 0;
+			const counting = { ...base, get length() { return base.length; },
+				setItem: (k: string, v: string) => { writes++; base.setItem(k, v); } } as Storage;
+			const folds = createFoldState(counting);
+			const prompt = turn[0];
+			const rows: ChatMessage[] = [{ ...message, id: 'read-0', content: 'Read 0' }];
+			for (let i = 1; i <= 400; i++) {
+				rows.push({ id: `prose-${i}`, role: 'assistant', type: 'text', content: `Step ${i}.` });
+				rows.push({ ...message, id: `read-${i}`, content: `Read ${i}` });
+			}
+			const last: ChatMessage = { id: 'prose-last', role: 'assistant', type: 'text', content: 'Done.' };
+			const view = render(WorkLogGroup, { ...logOf(true, [prompt, ...rows, last]), folds });
+			const before = writes;
+			await fireEvent.click(screen.getByRole('button', { name: /^Show work details/ }));
+			expect(shown('read-400')).toBe(true);
+			expect(writes - before).toBeGreaterThanOrEqual(1);
+			expect(writes - before).toBeLessThanOrEqual(2);
+			expect(folds.current).toEqual({ 'prompt:run-read-0': true });
+			// Newer prose finishing keeps the one entry and writes nothing.
+			const after = writes;
+			await view.rerender(logOf(true, [prompt, ...rows, last, { ...message, id: 'read-z', content: 'Read Z' },
+				{ id: 'prose-z', role: 'assistant', type: 'text', content: 'Really done.' } as ChatMessage]));
+			expect(shown('read-400')).toBe(true);
+			expect(writes - after).toBeLessThanOrEqual(2);
+			expect(folds.current).toEqual({ 'prompt:run-read-0': true });
+		});
+
+		// A merge that happened while the group was unmounted: the stored key
+		// of the absorbed run names a row of the merged run, so it moves there.
+		it('moves a stored run onto the run that absorbed it while unmounted', () => {
+			const storage = memoryStorage();
+			const folds = createFoldState(storage);
+			folds.setOpen('prompt:run-read-b', true);
+			const prompt = turn[0];
+			const merged: ChatMessage[] = [prompt, { ...message, id: 'read-a', content: 'Read A' },
+				{ id: 'prose-a', role: 'assistant', type: 'text', content: 'Checking the config.' },
+				{ ...message, id: 'read-b', content: 'Read B' },
+				{ id: 'worker', type: 'subagent', role: 'assistant', agentName: 'Reviewer', agentStatus: 'running', toolId: 'task-1' } as ChatMessage,
+				{ id: 'prose-b', role: 'assistant', type: 'text', content: 'Reviewer is on it.' }];
+			render(WorkLogGroup, { ...logOf(true, merged), folds });
+			expect(shown('read-b')).toBe(true);
+			expect(folds.current).toEqual({ 'prompt:run-read-a': true });
+		});
+
 		it('moves folds opened under an optimistic id onto the server id', async () => {
 			const folds = createFoldState(memoryStorage());
 			const view = render(WorkLogGroup, { ...logOf(true), folds });
@@ -915,7 +963,7 @@ describe('WorkLogGroup', () => {
 			// The reducer reconciles the optimistic prompt in place and records its server id.
 			const reconciled = [{ ...turn[0], serverId: 'srv-1' }, ...turn.slice(1)];
 			await view.rerender(logOf(true, reconciled));
-			expect(folds.current).toEqual({ 'srv-1:run-read-a': true, 'srv-1:run-finding': true });
+			expect(folds.current).toEqual({ 'srv-1:run-read-a': true });
 			expect(shown('read-a')).toBe(true);
 		});
 	});

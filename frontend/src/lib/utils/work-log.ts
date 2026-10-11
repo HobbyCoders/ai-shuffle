@@ -66,19 +66,6 @@ export interface WorkLogRun {
 	 * same work while the turn goes on.
 	 */
 	key: string;
-	/**
-	 * Other identities the same work had or will have as the turn goes on, so
-	 * a run the reader opened stays open when runs merge or split:
-	 * - the row that ends it (a run ended by finished prose can be split off
-	 *   from a longer run that ended at the same row before that prose
-	 *   finished: its later part keeps the open state through this key);
-	 * - the row after each finished prose inside it (that prose ended a run
-	 *   of its own until newer prose replaced it as the latest word, and the
-	 *   run after it was keyed by that row).
-	 * The reader's open state is stored under the key and every alias; a run
-	 * reads as open when any of them is.
-	 */
-	aliases: string[];
 	/** Rows hidden while the run is folded. */
 	folded: WorkLogEntry[];
 	summary: string | null;
@@ -976,13 +963,7 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 		for (const row of folded) hidden.add(row);
 		if (folded.length > 0) {
 			const rows = folded.map(({ message, index }) => ({ message, index }));
-			const key = runKeyOf(open[0]);
-			const aliases = new Set([runKeyOf(entry)]);
-			for (let i = 0; i < open.length - 1; i++) {
-				if (isAssistantText(open[i].message)) aliases.add(runKeyOf(open[i + 1]));
-			}
-			aliases.delete(key);
-			runs.push({ index: runIndex, key, aliases: [...aliases], folded: rows, summary: summarizeWork(rows), compactSummary: summarizeWorkCompact(rows) });
+			runs.push({ index: runIndex, key: runKeyOf(open[0]), folded: rows, summary: summarizeWork(rows), compactSummary: summarizeWorkCompact(rows) });
 		}
 		runIndex++;
 		open = [];
