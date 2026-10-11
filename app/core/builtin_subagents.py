@@ -66,7 +66,43 @@ DEFAULTS_RECORD_KEY = "builtin_defaults"
 #: The definition fields start-up seeding may refresh.
 DEFAULT_TEXT_FIELDS = ("name", "description", "prompt")
 
-_PRE_RECORD_DEFAULTS: Dict[str, Dict[str, frozenset]] = {}
+_PRE_RECORD_DEFAULTS: Dict[str, Dict[str, frozenset]] = {
+    "general-purpose": {
+        "name": frozenset({
+            "fe9fa5778e6299904ef31d5f6e87aed494f00eb96d5aba3ab8b23beed99759c9",  # e118eec68
+        }),
+        "description": frozenset({
+            "0138b6fdaf12f08409e1b4ad09de1e6273ed0a945b2469e1e7d6a2099765d8db",  # e118eec68
+            "5d73f8e4a5b3920448ae7fa9da33c37ac43be167b08c4d54b7d2a3abab58eb63",  # a35139f4f
+            "f9356bec2757c7f31c0861ff41e9f02d8c84c9e87e07a32a1592ab60e8b25f7d",  # 4870adeab
+            "cfee2cc5fb38c8f7bf9e8281d35af699e97e21669307f094f30b7b60aaea6976",  # ee6e421a4
+        }),
+        "prompt": frozenset({
+            "cb5321c2af621df53183143ff79fcbba004fbde2cf48e141149030900817f7d1",  # e118eec68
+            "08ce19676ce38692007623e6df41b1e9fe5294a7205c8a3210fa6ea080025162",  # a35139f4f
+            "0a14d917ae27494cfece2b875ee3c1c1cf58be69f07be49350102efc6a71c979",  # 908a2999e
+            "0502c1f5f30d0d1cbd12d11e3b8cb741eb35c1cf8c1aa1c685d3c1a3be7007fd",  # 4870adeab
+            "8afc9aab8cd543ab6af037be132e41096ef04cabe8749bc202c5d003ae1d5a8a",  # 3e561728c
+            "67e3baea6ff863526dbb55f5ed9ba0182baad683d634834c809db0f180d20a8f",  # ee6e421a4
+        }),
+    },
+    "frontend-designer": {
+        "name": frozenset({
+            "41d3f28a34f2c7426e52245f950142fff0bf3e2227c7da0074ce47139797c63c",  # e118eec68
+        }),
+        "description": frozenset({
+            "09f16a8955e221e916db851147adde1fbe3a840b09e8b8b6f8f5ca6b13968d8c",  # e118eec68
+            "9169238cdbaf672377f55bcecd4883e3a0830e82cfffc9608f4ddff8df09628f",  # 3e561728c
+        }),
+        "prompt": frozenset({
+            "b225623790310d30ef2a327f9cf6906775a07f969c974a86471bb0134d7d57fe",  # e118eec68
+            "539e87b1f955e24a33e6fe9d4e9a697931758695a2236e85b9bd8ff8c14f1497",  # a35139f4f
+            "cdaf54192f93b351e2d76eb056bb0ac97f24870cf87514d26babe538c70fd80d",  # b91ec8191
+            "575bcd55879747d5c82bd4055bf9afdc94188590ace973e59e4f9d747534dc95",  # 3e561728c
+            "a30c0b784fbed4b77818e5ddd4c385af30499f1ebff8995ed96b9ebe1a4bfef3",  # ee6e421a4
+        }),
+    },
+}
 
 def _fingerprint(text: Optional[str]) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
@@ -190,7 +226,9 @@ def seed_builtin_subagents() -> Dict[str, str]:
         else:
             results[subagent_id] = "exists"
 
-    # Retire only these removed built-ins. Generic pruning would also delete
+    # Retire only these removed built-ins. Customized starter roles are
+    # converted to owner agents transactionally before any references clear;
+    # they are not reported as retired. Generic pruning would also delete
     # builtin PROFILE agents that have never been in BUILTIN_SUBAGENTS.
     for subagent_id in RETIRED_BUILTIN_IDS:
         if database.retire_builtin_subagent(subagent_id):

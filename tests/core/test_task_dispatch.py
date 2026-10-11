@@ -4,6 +4,7 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
+from tests.builtin_fixtures import create_unchanged_builtin
 
 import app.core.task_dispatch as td
 from app.core.provider_agent import WorkerOutcome
@@ -119,7 +120,7 @@ async def _dispatch(args, session_id, **kw):
 def test_task_naming_retired_agent_gets_unknown_agent_refusal(agents, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
 
-    agents.create_profile(retired_id, retired_id, None, {"model": "haiku"}, is_builtin=True)
+    create_unchanged_builtin(retired_id)
     agents.update_profile("root-agent", config={
         "model": "opus", "enabled_agents": [retired_id, "helper"],
     })

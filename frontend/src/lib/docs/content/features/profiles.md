@@ -23,7 +23,9 @@ The starter team is opt-in. Its agents are ordinary owner-owned agents: you can 
 
 Choose a subagent default model or a model assignment before delegating. With no available agents, Task and Swarm refuse delegation instead of inventing a built-in fallback.
 
-On upgrade, the old built-in General Purpose and Frontend Designer agents are retired, like Explore and Plan before them. Owner-created agents are preserved. Historical chats remain, with the retired agent reference cleared. Affected automations are preserved but disabled and unlinked: choose an agent before enabling them again. Existing API-key restrictions are not transferred to the new starter agents. Explicit nested-agent selections are not relinked either: select the newly installed agents again where needed. Edited legacy built-in rows are retired too; export any prompts or settings you want to keep before upgrading. Older workers may show stale linked automations until they also upgrade.
+On upgrade, unchanged built-in General Purpose and Frontend Designer agents are retired. **Edited legacy built-ins are kept as ordinary owner agents**, with the same IDs, names, prompts, models, tools and settings. Their chats, automations, API-key scopes and saved agent selections stay attached; even renamed roles are preserved. If the app cannot prove a row matches a known shipped default, it keeps it rather than risking owner data. Installing the starter team recognizes these preserved roles by ID and adds only missing roles without overwriting them.
+
+For unchanged agents that are retired, historical chats remain with the agent reference cleared. Affected automations are preserved but disabled and unlinked: choose an agent before enabling them again. Existing API-key restrictions and explicit nested-agent selections are not transferred to fresh starter IDs; reassign them where needed. Explore and Plan retain their earlier retirement behavior. Upgrade older workers too: stale built-in updates from them cannot overwrite a preserved owner agent, but those workers do not implement this preservation policy themselves.
 
 ## Create an agent
 

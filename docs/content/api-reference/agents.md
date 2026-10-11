@@ -76,6 +76,8 @@ Install General Purpose and Frontend Designer as ordinary editable, deletable ow
 
 Idempotent: creates only missing members. Existing team members are recognized even after renaming, and an ordinary agent with the same name is left untouched. Reinstallation does not reset prompts, model assignments or other owner edits. Removing a member allows a later install to recreate it with a new ID, without inheriting old API-key grants.
 
+On upgrade, customized legacy General Purpose and Frontend Designer rows become ordinary agents (`is_builtin: false`) without changing their IDs, config, API-key scopes or references. Only rows proven to match known historical shipped defaults are removed; unknown or unmatchable states are kept. Preserved legacy role IDs count as existing members even after renaming, without being marked as starter installations. Installation adds only the other missing role and never overwrites a preserved row.
+
 ### GET /api/v1/agents/{agent_id}
 
 Get a specific agent.

@@ -12,6 +12,7 @@ Tests cover:
 """
 
 import pytest
+from tests.builtin_fixtures import create_unchanged_builtin
 from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
 from fastapi import Request
@@ -23,11 +24,8 @@ def test_stale_retired_selection_loads_without_offering_it(authenticated_client,
     from app.core.agent_provider_models import available_subagents, available_voice_subagents
     from app.db import database
 
-    # Produce an old built-in with provider pins and a saved caller selection,
-    # then drive the real startup retirement, not just an already-empty roster.
-    database.create_profile(retired_id, retired_id, None, {
-        "provider_models": {"__native__": "haiku", "__voice__": "opus"},
-    }, is_builtin=True)
+    # Retire a real unchanged built-in, not an already-empty roster.
+    create_unchanged_builtin(retired_id)
     database.create_profile("owner-helper", "Helper", None, {"model": "opus"})
     database.create_profile("saved-caller", "Saved caller", None, {
         "model": "opus", "agent_invoke_mode": "custom", "enabled_agents": [retired_id, "owner-helper"],

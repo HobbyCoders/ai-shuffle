@@ -250,7 +250,8 @@ def _existing_agent(definition: dict, agents: list[dict]) -> dict | None:
     ordinary = [agent for agent in agents if not agent.get("is_builtin")]
     # The marker survives renames; matching a pre-existing name never overwrites it.
     return next((agent for agent in ordinary
-                 if (agent.get("config") or {}).get("starter_team_role") == definition["id"]), None) or next(
+                 if agent["id"] == definition["id"]
+                 or (agent.get("config") or {}).get("starter_team_role") == definition["id"]), None) or next(
         (agent for agent in ordinary if agent["name"] == definition["name"]), None)
 
 

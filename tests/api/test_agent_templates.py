@@ -1,5 +1,6 @@
 """Owner-only, opt-in starter team installation over the ordinary agents API."""
 import pytest
+from tests.builtin_fixtures import create_unchanged_builtin
 
 from app.db import database
 from app.core.builtin_subagents import seed_builtin_subagents
@@ -60,7 +61,7 @@ def test_install_is_opt_in_idempotent_editable_and_deletable(authenticated_clien
 
 def test_install_preserves_same_named_owner_agent_and_old_key_scope(authenticated_client):
     database.create_profile("owner-gp", "General Purpose", "Mine", {"model": "opus"})
-    database.create_profile("general-purpose", "Old built-in", None, {}, is_builtin=True)
+    create_unchanged_builtin("general-purpose")
     database.create_api_user("retired-key", "Retired scope", "synthetic-template-key", profile_ids=["general-purpose"])
     seed_builtin_subagents()
     before = database.get_profile("owner-gp")
@@ -72,7 +73,7 @@ def test_install_preserves_same_named_owner_agent_and_old_key_scope(authenticate
 
 @pytest.mark.parametrize("retired_id", ["general-purpose", "frontend-designer"])
 def test_retired_automation_still_loads_and_requires_reassignment(authenticated_client, retired_id):
-    database.create_profile(retired_id, "Old built-in", None, {}, is_builtin=True)
+    create_unchanged_builtin(retired_id)
     database.create_automation("retired-auto", "Saved work", "interval", {"seconds": 300},
                                retired_id, prompt="Do work", enabled=True)
     seed_builtin_subagents()
@@ -149,7 +150,7 @@ async def test_stale_action_only_approval_is_cancelled(mock_db, monkeypatch, que
     monkeypatch.setattr(manager, "_execute_action_steps", actions)
     monkeypatch.setattr(manager, "_deliver_output", output)
     monkeypatch.setattr(manager, "_run_prompt_as_session", prompt)
-    database.create_profile("general-purpose", "Old builtin", None, {}, is_builtin=True)
+    create_unchanged_builtin("general-purpose")
     database.create_automation(
         "retirement-job", "Saved job", "interval", {"seconds": 300},
         "general-purpose", prompt="", enabled=True, requires_approval=True,

@@ -201,9 +201,10 @@ RETIRED_BUILTIN_IDS = ("Explore", "Plan", "general-purpose", "frontend-designer"
 def retire_builtin_subagent(subagent_id: str) -> bool:
     """Retire a removed built-in, never an owner-created agent with this id.
 
-    Preserve automation definitions, but unlink and disable them rather than
-    silently run a different prompt or tool surface. Session/history references
-    are unlinked as on delete.
+    Customized legacy starter roles become ordinary owner agents in this
+    transaction, before any reference can be cleared. Only proven unchanged
+    roles (and the previously retired Explore/Plan) enter the delete path.
+    Return True only when a row was deleted.
     """
     if subagent_id not in RETIRED_BUILTIN_IDS:
         return False
@@ -212,9 +213,25 @@ def retire_builtin_subagent(subagent_id: str) -> bool:
 
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM agents WHERE id = %s AND is_builtin = TRUE FOR UPDATE", (subagent_id,))
-        if cursor.fetchone() is None:
+        cursor.execute("SELECT * FROM agents WHERE id = %s AND is_builtin = TRUE FOR UPDATE", (subagent_id,))
+        agent = row_to_dict(cursor.fetchone())
+        if agent is None:
             return False
+        if subagent_id in ("general-purpose", "frontend-designer"):
+            from app.core.builtin_retirement import is_untouched_builtin
+
+            cursor.execute("SELECT 1 FROM permission_rules WHERE profile_id = %s LIMIT 1", (subagent_id,))
+            if cursor.fetchone() is not None or not is_untouched_builtin(agent):
+                # Keep the identity and ALL references/scopes; no recreate,
+                # template defaults, or reference-clearing writes happen first.
+                cursor.execute(
+                    "UPDATE agents SET is_builtin = FALSE WHERE id = %s", (subagent_id,)
+                )
+                # This is local upgrade upkeep, not a new owner edit. Do not
+                # give a stale replica a fresh clock that beats a peer's edits.
+                from app.network.engine import keep_local_rewrite
+                keep_local_rewrite(cursor, "agents", subagent_id, agent)
+                return False
         cursor.execute(
             "UPDATE automations SET profile_id = %s, is_enabled = FALSE, last_error = %s, updated_at = %s "
             "WHERE profile_id = %s",

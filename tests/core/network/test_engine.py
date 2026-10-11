@@ -1,5 +1,6 @@
 """Two and three workers converging through the real engine."""
 import pytest
+from tests.builtin_fixtures import create_unchanged_builtin
 
 from app.db import database
 from app.db import network as store
@@ -336,7 +337,7 @@ def test_local_retirement_does_not_publish_agent_tombstone(workers, retired_id):
     a = workers("upgrading-worker")
     with a.active():
         engine.create_network("Upgrade")
-        database.create_profile(retired_id, retired_id, None, {"model": "haiku"}, is_builtin=True)
+        create_unchanged_builtin(retired_id)
         database.create_automation("before-upgrade", "Search", "interval", {"seconds": 300},
                                    retired_id, prompt="Find it", enabled=True)
         engine.scan_all()
@@ -369,6 +370,79 @@ def test_sync_keeps_custom_agent_with_retired_id(workers, retired_id):
         assert not database.get_profile(retired_id)["is_builtin"]
         assert database.get_automation("custom-job")["profile_id"] == retired_id
         assert database.get_automation("custom-job")["is_enabled"]
+
+
+@pytest.mark.parametrize("role", ["general-purpose", "frontend-designer"])
+def test_old_peer_cannot_revert_preserved_builtin(workers, role):
+    from app.core.builtin_subagents import seed_builtin_subagents
+
+    old, updated = workers("old-build"), workers("updated-build")
+    with old.active():
+        engine.create_network("Preserved role")
+        create_unchanged_builtin(role)
+        database.update_profile(role, name="Old replica", allow_builtin=True)
+        engine.scan_all()
+    with updated.active():
+        create_unchanged_builtin(role)
+        database.update_profile(role, name="Owner's edited role", allow_builtin=True)
+        database.create_automation("preserved-job", "Saved work", "interval", {"seconds": 300},
+                                   role, prompt="Keep working", enabled=True)
+        database.create_api_user("preserved-key", "Scope", "synthetic-preserved-key", profile_ids=[role])
+        seed_builtin_subagents()
+        saved = database.get_profile(role)
+    join(old, updated)
+    exchange(old, updated)  # bootstrap / old signed operations
+    with updated.active():
+        assert database.get_profile(role) == saved
+        engine.scan_all()
+    exchange(updated, old)
+    with old.active():
+        assert not database.get_profile(role)["is_builtin"]
+        # An old release's startup promotes the built-in ID again. Its
+        # subsequent higher-clock update must not undo local preservation.
+        database.set_profile_builtin(role, True)
+        database.update_profile(role, name="Stale promoted builtin", allow_builtin=True)
+        engine.scan_all()
+    result = exchange(old, updated)
+    assert result.retry == result.rejected == result.pending == 0
+    with updated.active():
+        assert database.get_profile(role) == saved
+        assert database.get_automation("preserved-job")["profile_id"] == role
+        assert database.get_automation("preserved-job")["is_enabled"]
+        assert database.get_api_user("preserved-key")["profile_ids"] == [role]
+
+
+@pytest.mark.parametrize("role", ["general-purpose", "frontend-designer"])
+def test_stale_preservation_does_not_publish_over_newer_owner_edit(workers, monkeypatch, role):
+    from app.core.builtin_subagents import seed_builtin_subagents
+
+    a, b = workers("first-upgrade"), workers("late-upgrade")
+    # Before either worker upgraded, both held the same edited builtin.
+    with monkeypatch.context() as old_build:
+        old_build.setattr(engine, "RETIRED_BUILTIN_IDS", ("Explore", "Plan"))
+        with a.active():
+            engine.create_network("Conservative upgrade")
+            create_unchanged_builtin(role)
+            database.update_profile(role, name="Original owner edit", allow_builtin=True)
+            engine.scan_all()
+        join(a, b)
+        converge([a, b])
+    with a.active():
+        seed_builtin_subagents()
+        database.update_profile(role, name="Newest owner edit")
+        engine.scan_all()
+    with b.active():
+        with database.get_db() as conn:
+            for _ in range(50):
+                store.bump_clock(conn.cursor())
+        seed_builtin_subagents()
+        engine.scan_all()
+    converge([a, b])
+    for worker in (a, b):
+        with worker.active():
+            agent = database.get_profile(role)
+            assert agent["name"] == "Newest owner edit"
+            assert not agent["is_builtin"]
 
 
 def test_observed_docker_address_is_published_to_other_workers(workers, monkeypatch):

@@ -5,6 +5,7 @@ app.core.builtin_subagents over the unified agents table)."""
 from unittest.mock import patch
 
 import pytest
+from tests.builtin_fixtures import create_unchanged_builtin
 
 
 
@@ -17,7 +18,7 @@ async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(m
     from app.core import wakeup_service, turn_scheduler
     from app.db import database, wakeups, turns, session_events
 
-    database.create_profile(retired_id, retired_id, None, {}, is_builtin=True)
+    create_unchanged_builtin(retired_id)
     database.create_profile("retirement-other", "Other", None, {})
     database.create_api_user("retirement-only", "Explore only", "only-test-hash", profile_ids=[retired_id])
     database.create_api_user("retirement-mixed", "Mixed", "mixed-test-hash", profile_ids=[retired_id, "retirement-other"])
@@ -72,7 +73,7 @@ async def test_retired_session_announces_the_cancelled_continuation_once(mock_db
     from app.core import wakeup_service, turn_scheduler
     from app.db import database, wakeups, turns, session_events
 
-    database.create_profile(retired_id, retired_id, None, {}, is_builtin=True)
+    create_unchanged_builtin(retired_id)
     database.create_session("retired-busy-chat", profile_id=retired_id)
     wakeups.create_wakeup(id="retired-busy-wake", session_id="retired-busy-chat", profile_id=retired_id,
                          prompt="continue", fire_at=9999999999)
@@ -157,10 +158,7 @@ def test_retirement_preserves_history_and_disables_automations(mock_db, retired_
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.db import database
 
-    database.create_profile(retired_id, "Renamed built-in", None, {
-        "system_prompt": {"type": "custom", "content": "Old search prompt"},
-        "provider_models": {"__native__": "haiku", "__voice__": "opus"},
-    }, is_builtin=True)
+    create_unchanged_builtin(retired_id)
     database.create_session("old-search", profile_id=retired_id)
     database.create_automation("old-search-job", "Saved search", "interval", {"seconds": 300},
                                retired_id, prompt="Find it", enabled=True)

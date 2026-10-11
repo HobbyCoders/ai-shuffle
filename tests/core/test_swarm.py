@@ -3,6 +3,7 @@ import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import pytest
+from tests.builtin_fixtures import create_unchanged_builtin
 from fluid.tools.registry import ToolCtx
 from fluid.swarm import SwarmCoordinator, Launch
 from app.core import agent_messaging, session_runtime, swarm
@@ -26,7 +27,7 @@ async def test_swarm_naming_retired_agent_fails_normally(agents, monkeypatch, re
     from app.core import task_dispatch
     from app.core.builtin_subagents import seed_builtin_subagents
 
-    agents.create_profile(retired_id, retired_id, None, {"model": "haiku"}, is_builtin=True)
+    create_unchanged_builtin(retired_id)
     seed_builtin_subagents()
     _mk_session(agents, "retired-swarm-parent", "root-agent")
     monkeypatch.setattr(swarm, "persist", AsyncMock())

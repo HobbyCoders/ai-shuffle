@@ -1,5 +1,6 @@
 """Upgrade authorization and stored-wake contracts on disposable PostgreSQL."""
 import pytest
+from tests.builtin_fixtures import create_unchanged_builtin
 
 from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401
 
@@ -62,7 +63,7 @@ def test_upgrade_unlinks_required_automation_agent(retired_id):
     from app.db import base, database
     from app.core.builtin_subagents import seed_builtin_subagents
 
-    database.create_profile(retired_id, "Old builtin", None, {}, is_builtin=True)
+    create_unchanged_builtin(retired_id)
     database.create_automation("retirement-job", "Saved job", "interval", {"seconds": 300},
                                retired_id, prompt="Keep this prompt", enabled=True)
     with base.get_db() as conn:
@@ -89,7 +90,7 @@ async def test_upgrade_keeps_restricted_key_and_cancels_stored_wakes(retired_id)
 
     # Restriction is already stored BEFORE the upgrade. Recreate the shipped
     # constraint, then drive the real startup migration and retirement.
-    database.create_profile(retired_id, "Old built-in", None, {}, is_builtin=True)
+    create_unchanged_builtin(retired_id)
     database.create_api_user("pre-upgrade-key", "Existing restricted key", "pre-upgrade-hash", profile_ids=[retired_id])
     with base.get_db() as conn:
         cursor = conn.cursor()
@@ -123,7 +124,10 @@ def test_materialize_retired_session_reference_on_postgres(retired_id, agent_sta
     from app.network import engine, policy
 
     seed_builtin_subagents()
-    database.create_profile(retired_id, retired_id, None, {}, is_builtin=agent_state != "owner-created")
+    if agent_state == "owner-created":
+        database.create_profile(retired_id, retired_id, None, {})
+    else:
+        create_unchanged_builtin(retired_id)
     record = dict(database.create_session("retirement-chat", retired_id, title="Historical session"))
     if agent_state == "missing":
         seed_builtin_subagents()
@@ -173,3 +177,29 @@ def test_starter_install_rollback_invalidation_on_postgres(monkeypatch, failure)
     from tests.api.test_agent_templates import test_failed_install_does_not_publish_agents
 
     test_failed_install_does_not_publish_agents(None, monkeypatch, failure)
+
+
+from tests.core import test_builtin_preservation as preservation
+
+
+@pytest.mark.parametrize("role", preservation.ROLES)
+@pytest.mark.parametrize("revision", [None, 1, 2])
+@pytest.mark.parametrize("migrated", [False, True])
+def test_known_defaults_retire_on_postgres(role, revision, migrated):
+    preservation.test_known_defaults_retire(None, role, revision, migrated)
+
+
+@pytest.mark.parametrize("role", preservation.ROLES)
+@pytest.mark.parametrize("edit", preservation.EDITS)
+def test_customized_builtin_preserved_on_postgres(role, edit):
+    preservation.test_customized_builtin_keeps_identity_and_references(None, role, edit)
+
+
+@pytest.mark.parametrize("role", preservation.ROLES)
+def test_preserved_renamed_role_install_on_postgres(role):
+    preservation.test_preserved_renamed_role_satisfies_template_without_overwrite(None, role)
+
+
+@pytest.mark.parametrize("role", preservation.ROLES)
+def test_old_builtin_snapshot_preserves_customized_role_on_postgres(role):
+    preservation.test_old_builtin_snapshot_cannot_overwrite_preserved_role(None, role)
