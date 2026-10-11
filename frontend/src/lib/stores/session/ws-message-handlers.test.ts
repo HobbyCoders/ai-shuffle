@@ -2539,7 +2539,7 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 	}
 
 	beforeEach(() => {
-		pendingQueue.reset('session-1');
+		pendingQueue.reset('session-1', true);
 		state = mockState();
 		deps = createMockDeps({
 			update: vi.fn((fn) => { state = fn(state); }),
@@ -2567,6 +2567,28 @@ describe('queue_updated (the pending "not seen yet" bubbles)', () => {
 		expect(state.pendingPeerMessages).toEqual([]);
 		handlers.handleMessage(peerFrame); // A stale pre-delivery snapshot must not resurrect it.
 		expect(state.pendingPeerMessages).toEqual([]);
+	});
+
+	it('retains cancellation across feed teardown and a delayed verdict for another session', () => {
+		const entry = { id: 'client-switch', clientMessageId: 'client-switch', content: 'restore only A', queuedAt: 1 };
+		pendingQueue.requestRemoval('session-1', entry);
+		pendingQueue.reset(); // A's feed is torn down
+		state = { ...state, sessionId: 'session-2', draft: 'B draft', queuedMessages: [] };
+		pendingQueue.reset('session-2');
+		expect(pendingQueue.reconcile('session-1', [])).toEqual([{ ...entry, status: 'cancelling' }]);
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
+			client_message_id: entry.id, message_id: 'turn-q', verdict: 'withdrawn' });
+		expect(state.sessionId).toBe('session-2');
+		expect(state.draft).toBe('B draft');
+		expect(state.pendingRestorePrompt).toBeNull();
+		expect(pendingQueue.takeWithdrawnDraft('session-2')).toBeNull();
+		pendingQueue.reset();
+		pendingQueue.reset('session-1');
+		expect(pendingQueue.reconcile('session-1', [])).toHaveLength(0);
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBe(entry.content);
+		handlers.handleMessage({ type: 'queued_message_removal', session_id: 'session-1',
+			client_message_id: entry.id, verdict: 'withdrawn' });
+		expect(pendingQueue.takeWithdrawnDraft('session-1')).toBeNull();
 	});
 
 	it('retains a delivered chip and does not restore its text when delivery wins', () => {

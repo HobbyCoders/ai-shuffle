@@ -1030,7 +1030,7 @@ describe('message-sender pending-bubble edges', () => {
 	}
 
 	beforeEach(() => {
-		pendingQueue.reset('ses-1');
+		pendingQueue.reset('ses-1', true);
 	});
 
 	it('skips the optimistic echo when the server already described the queue', async () => {

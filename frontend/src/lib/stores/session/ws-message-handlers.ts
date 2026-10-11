@@ -981,23 +981,26 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 
 			case 'queued_message_removal': {
 				const removalSessionId = data.session_id as string | undefined;
-				if (removalSessionId && removalSessionId !== getState().sessionId) break;
+				const sid = removalSessionId ?? getState().sessionId;
 				const key = (data.client_message_id ?? data.message_id) as string;
 				const verdict = data.verdict ?? (data.outcome === 'cancelled' ? 'withdrawn' : data.outcome);
 				const state = getState();
 				const entry = state.queuedMessages.find(m => (m.clientMessageId ?? m.id) === key);
 				if (verdict !== 'withdrawn' && verdict !== 'already_delivered') {
-					pendingQueue.removalFailed(state.sessionId, key);
+					pendingQueue.removalFailed(sid, key);
+					if (sid !== state.sessionId) break;
 					update(s => ({ ...s,
 						queuedMessages: s.queuedMessages.map(m => m === entry ? { ...m, status: undefined } : m),
 						error: 'Cancellation was not confirmed. The message has not been withdrawn.',
 					}));
 					break;
 				}
-				pendingQueue.applyRemovalVerdict(state.sessionId, key, verdict);
+				pendingQueue.applyRemovalVerdict(sid, key, verdict);
+				if (sid !== state.sessionId) break; // retain for that session's next switch-in
+				const restored = pendingQueue.takeWithdrawnDraft(sid);
 				update(s => ({ ...s,
 					queuedMessages: pendingQueue.reconcile(s.sessionId, s.queuedMessages),
-					...(verdict === 'withdrawn' && entry ? { pendingRestorePrompt: entry.content } : {}),
+					...(restored !== null ? { pendingRestorePrompt: restored } : {}),
 				}));
 				if (verdict !== 'already_delivered') break;
 				notify.warning(

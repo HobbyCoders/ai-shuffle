@@ -22,7 +22,7 @@ function authoritative(rows: PendingEntry[]): PendingEntry[] {
 }
 
 beforeEach(() => {
-	pendingQueue.reset(SID);
+	pendingQueue.reset(SID, true);
 });
 
 describe('pendingQueue — optimistic echo', () => {

@@ -31,7 +31,8 @@ export type SessionEvent =
   | InteractionExpired
   | TranscriptRewound
   | ArtifactCreated
-  | TurnProviderAlive;
+  | TurnProviderAlive
+  | QueuedMessageWithdrawn;
 export type CommandId = string | null;
 export type CreatedAt = string;
 export type Id = string;
@@ -407,6 +408,15 @@ export type SessionId31 = string;
 export type Signal = string | null;
 export type TurnId30 = string | null;
 export type Type30 = 'turn.provider_alive';
+export type CommandId31 = string | null;
+export type CreatedAt32 = string;
+export type Id33 = string;
+export type MessageId = string;
+export type RunId31 = string | null;
+export type Seq31 = number;
+export type SessionId32 = string;
+export type TurnId31 = string | null;
+export type Type31 = 'queued_message.withdrawn';
 
 export interface TurnQueued {
   command_id?: CommandId;
@@ -930,5 +940,20 @@ export interface TurnProviderAlive {
   signal?: Signal;
   turn_id?: TurnId30;
   type?: Type30;
+  [k: string]: unknown;
+}
+/**
+ * Content-free receipt for a held message withdrawn before it became a turn.
+ */
+export interface QueuedMessageWithdrawn {
+  command_id?: CommandId31;
+  created_at: CreatedAt32;
+  id: Id33;
+  message_id: MessageId;
+  run_id?: RunId31;
+  seq: Seq31;
+  session_id: SessionId32;
+  turn_id?: TurnId31;
+  type?: Type31;
   [k: string]: unknown;
 }

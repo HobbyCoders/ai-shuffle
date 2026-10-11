@@ -2667,6 +2667,15 @@ class ChatWebSocketHandler:
                         session_id, client_message_id, time.time())
             # Resolve against durable storage, never a browser's expiring map.
             # A command can only name a row in this authorized session.
+            from app.db import session_moves
+
+            withdrawn = await run_sync(session_moves.held_withdrawal, session_id,
+                                       command_id=client_message_id)
+            if withdrawn:
+                await self._send_removal_outcome(
+                    session_id, withdrawn["id"], "cancelled", client_message_id=client_message_id,
+                )
+                return
             row = await run_sync(turns_db.get_turn_by_command, session_id, client_message_id)
             if row is None:
                 from app.core import session_handoff
@@ -2696,10 +2705,15 @@ class ChatWebSocketHandler:
             from app.core import session_handoff
 
             removed = await run_sync(session_handoff.drop_held, session_id, message_id)
+            # Absence is not proof of delivery. Successful removal records a
+            # durable event, which survives deleting the move and worker restart.
+            from app.db import session_moves
+
+            withdrawal = await run_sync(session_moves.held_withdrawal, session_id, held_id=message_id)
             await self._v2_broadcast_queue(session_id)
             await self._send_removal_outcome(
-                session_id, message_id, "cancelled" if removed else "already_delivered",
-                client_message_id=client_message_id,
+                session_id, message_id, "cancelled" if removed or withdrawal else "not_found",
+                client_message_id=client_message_id or (withdrawal or {}).get("command_id"),
             )
             return
 

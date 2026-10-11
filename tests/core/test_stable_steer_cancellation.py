@@ -219,18 +219,118 @@ async def test_stable_cancel_is_session_scoped_and_legacy_commands_still_work(mo
     assert [f["client_message_id"] for f in replies] == [client_id, None]
 
 
-@pytest.mark.parametrize("removed", [True, False])
-async def test_held_cancel_uses_the_stable_identity_and_real_drop_verdict(mock_db, removed):
+@pytest.mark.parametrize("first_by_client", [True, False])
+async def test_held_cancellation_retries_survive_changing_storage(mock_db, first_by_client):
+    from app.core import session_handoff
+    from app.db import session_moves
+
     sid = _make_session("held-cancel")
     client_id = "client-" + "d" * 32
+    session_moves.save(sid, target_id="other", label="other", note="", requested_by="owner",
+                       requested_at=time.time(), expires_at=time.time() + 600)
+    with patch.object(session_handoff, "holds", return_value=True):
+        held_id = session_handoff.hold(sid, "user", {
+            "prompt": "held private text", "command_id": client_id,
+        })
+    assert held_id.startswith("held-")
     frames = []
     handler = _ws_handler(frames)
-    with _Patches(), patch("app.core.session_handoff.held_view", return_value=[{
-        "id": "held-1", "command_id": client_id, "source": "user", "prompt": "held",
-    }]), patch("app.core.session_handoff.drop_held", return_value=removed) as drop:
+    def view(session_id):
+        return (session_moves.get(session_id) or {}).get("held", [])
+
+    with _Patches(), patch.object(session_handoff, "held_view", side_effect=view):
+        await handler.handle_remove_queued_message({"session_id": sid, **(
+            {"client_message_id": client_id} if first_by_client else {"message_id": held_id}
+        )})
+        assert session_moves.get(sid)["held"] == []
+        tombstone = session_moves.held_withdrawal(sid, held_id=held_id)
+        assert tombstone == {"id": held_id, "command_id": client_id}
+        assert turns_db.get_turn(held_id) is None  # never manufacture a run/permission binding
+        from app.db import session_events
+        events = session_events.get_events(sid)
+        receipts = [e for e in events if e["event_type"] == "queued_message.withdrawn"]
+        assert len(receipts) == 1
+        assert receipts[0]["payload"] == {"message_id": held_id}  # no content retained
+        from app.contract.events import QueuedMessageWithdrawn
+        receipt = receipts[0]
+        typed = QueuedMessageWithdrawn.model_validate({
+            **receipt, **receipt["payload"], "type": receipt["event_type"],
+        })
+        assert typed.message_id == held_id and typed.command_id == client_id
+        assert session_moves.held_withdrawal("another-session", held_id=held_id) is None
+        assert session_moves.held_withdrawal("another-session", command_id=client_id) is None
+        # Removing the whole move (or restarting handoff state) cannot erase
+        # the withdrawal receipt. Both client-id and held-id retries agree.
+        assert session_moves.take(sid)["held"] == []
+        assert session_moves.get(sid) is None
         await handler.handle_remove_queued_message({"session_id": sid, "client_message_id": client_id})
-    drop.assert_called_once_with(sid, "held-1")
+        await handler.handle_remove_queued_message({"session_id": sid, "message_id": held_id})
+    replies = [f for f in frames if f.get("type") == "queued_message_removal"]
+    assert len(replies) == 3
+    assert [f["client_message_id"] for f in replies] == [client_id] * 3
+    assert [f["verdict"] for f in replies] == ["withdrawn"] * 3
+    assert turns_db.get_queued_turns(sid) == []
+
+
+def test_held_withdrawal_receipt_and_removal_are_atomic(mock_db):
+    from app.db import session_moves
+
+    sid = _make_session("atomic-held")
+    session_moves.save(sid, target_id="other", label="other", note="", requested_by="owner",
+                       requested_at=time.time(), expires_at=time.time() + 600)
+    entry = {"id": "held-atomic", "source": "user", "prompt": "keep until committed",
+             "command_id": "client-" + "f" * 32}
+    assert session_moves.append_held(sid, entry)
+    with patch("app.db.session_events.append_events", side_effect=RuntimeError("cannot record verdict")):
+        with pytest.raises(RuntimeError, match="cannot record verdict"):
+            session_moves.remove_held(sid, entry["id"])
+    assert session_moves.get(sid)["held"] == [entry]
+    assert session_moves.held_withdrawal(sid, held_id=entry["id"]) is None
+    assert session_moves.remove_held(sid, entry["id"]) is True
+    assert session_moves.get(sid)["held"] == []
+    assert session_moves.held_withdrawal(sid, held_id=entry["id"])["command_id"] == entry["command_id"]
+
+
+async def test_missing_held_row_is_not_proof_of_delivery(mock_db):
+    sid = _make_session("missing-held")
+    frames = []
+    with _Patches():
+        await _ws_handler(frames).handle_remove_queued_message({
+            "session_id": sid, "message_id": "held-unknown",
+        })
     replies = [f for f in frames if f.get("type") == "queued_message_removal"]
     assert len(replies) == 1
-    assert replies[0]["client_message_id"] == client_id
-    assert replies[0]["verdict"] == ("withdrawn" if removed else "already_delivered")
+    assert replies[0]["outcome"] == "not_found"
+
+
+async def test_cancel_while_parked_before_unpark_never_delivers(mock_db):
+    sid = _make_session("cancel-parked")
+    live = _start_live(sid, profile_id="default")
+    parked = turns_db.park_turn(live["id"], ["task-1"])
+    assert parked["state"] == "parked"
+    runtime = _live_runtime(sid, parked)
+    loop = _loop()
+    frames = []
+    client_id = "client-" + "e" * 32
+    with _Patches(), _pooled(_harness(loop)):
+        handler = _ws_handler(frames)
+        await handler.handle_query({"session_id": sid, "profile": "default",
+                                    "prompt": "withdraw before wake", "client_message_id": client_id})
+        rows = turns_db.get_queued_turns(sid)
+        assert len(rows) == 1
+        assert turns_db.get_turn(live["id"])["state"] == "parked"
+        await handler.handle_remove_queued_message({"session_id": sid, "client_message_id": client_id})
+        assert turns_db.get_turn(live["id"])["state"] == "parked"
+        assert turns_db.get_turn(rows[0]["id"])["state"] == "aborted"
+        wake = turns_db.enqueue_turn(sid, "unpark", prompt="task settled", profile_id="default")
+        resumed = turns_db.start_turn(wake["id"], can_resume=runtime._can_resume_parked)
+        assert resumed["id"] == live["id"]
+        assert resumed["payload"]["continued_turn"] is True
+        runtime._turn = resumed
+        assert await session_runtime.try_steer_pending(sid) == 0
+        assert await _boundary(loop) == {}
+        assert loop._emit.call_count == 0
+        assert len(loop._pending_peers) == 0
+    replies = [f for f in frames if f.get("type") == "queued_message_removal"]
+    assert len(replies) == 1
+    assert replies[0]["verdict"] == "withdrawn"
