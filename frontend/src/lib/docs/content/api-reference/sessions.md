@@ -82,9 +82,12 @@ cards are not prose. AskUser/AskUserQuestion tools suppress a prose preface so
 that a question is not counted twice.
 
 The append transaction stamps closed `message.assistant` prose and settled
-streamed prose (using the last contributing text-delta sequence). An unfinished
-stream or later non-question prose clears the sequence to `null` in the current
-epoch. Empty prose does not replace the previous nonempty prose. User answers
+streamed prose (using the last contributing text-delta sequence). Peer deliveries
+and mid-turn steers do not split an open prose bubble. A steer answers that
+earlier bubble even if subsequent deltas advance its position. Connection-drop
+retries hide only prose whose bubble originated after the last attempt boundary,
+matching the transcript's retry-card folding. An unfinished stream or later
+non-question prose clears the sequence to `null` in the current epoch. Empty prose does not replace the previous nonempty prose. User answers
 advance the user pair, not the assistant pair. The post-commit notification
 captures the persisted epoch, never the epoch at delivery time. Stable-ID
 retries and rollbacks do not publish new positions. No in-memory stream buffer

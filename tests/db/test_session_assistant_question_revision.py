@@ -24,6 +24,27 @@ def test_shared_question_predicate(case):
     assert questions.asks_question(case["content"]) is case["expected"]
 
 
+EVENT_CASES = json.loads((Path(__file__).parents[1] / "fixtures/prose_question_events.json").read_text())
+
+
+@pytest.mark.parametrize("case", EVENT_CASES, ids=lambda case: case["name"])
+def test_shared_event_sequence_parity(chat, case):
+    for index, step in enumerate(case["events"], 1):
+        session_events.append_events(chat, [{"type": step["type"], "payload": step["payload"]}])
+        saved = row()
+        question_seq = saved["last_assistant_question_seq"]
+        user_seq = saved["last_user_message_seq"]
+        active = question_seq if question_seq is not None and (
+            user_seq is None or (
+                saved["last_assistant_question_epoch"] == saved["last_user_message_epoch"]
+                and question_seq > user_seq
+            )
+        ) else None
+        assert active == step["question_seq"], f"step {index}: {step['type']}"
+        # Re-open the projection at every prefix: no process-local stream state.
+        importlib.reload(questions)
+
+
 def event(event_type="message.assistant", **payload):
     return {"type": event_type, "payload": payload}
 
