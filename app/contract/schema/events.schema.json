@@ -913,6 +913,18 @@
           "title": "Id",
           "type": "string"
         },
+        "result": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result"
+        },
         "result_preview": {
           "anyOf": [
             {
@@ -924,6 +936,11 @@
           ],
           "default": null,
           "title": "Result Preview"
+        },
+        "result_truncated": {
+          "default": false,
+          "title": "Result Truncated",
+          "type": "boolean"
         },
         "run_id": {
           "anyOf": [

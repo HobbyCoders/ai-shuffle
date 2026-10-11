@@ -287,6 +287,8 @@ async def test_subagent_done_maps_to_subagent_completed(mock_db, is_error, statu
     assert row["payload"]["task_id"] == "task_1"
     assert row["payload"]["status"] == status
     assert len(row["payload"]["result_preview"]) == tr.RESULT_TRUNCATE_CHARS
+    assert row["payload"]["result"] == big[:tr.SUBAGENT_RESULT_MAX_BYTES]
+    assert row["payload"]["result_truncated"] is True
     await rec.close()
 
 

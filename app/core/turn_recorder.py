@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -89,6 +90,35 @@ def _truncate(value: Any, limit: int = RESULT_TRUNCATE_CHARS) -> Optional[str]:
     if len(text) > limit:
         return text[:limit]
     return text
+
+
+SUBAGENT_RESULT_MAX_BYTES = 64 * 1024
+
+
+def _bound_subagent_result(value: Any) -> tuple[Optional[str], bool]:
+    """Keep complete paragraphs within 64 KiB of UTF-8, or a bounded first paragraph.
+
+    A single oversized paragraph has no safe paragraph boundary: fall back to
+    the longest UTF-8 prefix rather than losing the entire report.
+    """
+    if value is None:
+        return None, False
+    text = value if isinstance(value, str) else str(value)
+    encoded = text.encode("utf-8", errors="surrogatepass")
+    if len(encoded) <= SUBAGENT_RESULT_MAX_BYTES:
+        return text, False
+    prefix = encoded[:SUBAGENT_RESULT_MAX_BYTES].decode("utf-8", errors="ignore")
+    # Accept blank lines with spaces and Windows line endings too, including
+    # a separator just beyond the cap after a paragraph that fits exactly.
+    boundary = None
+    for match in re.finditer(r"\r?\n[ \t]*\r?\n", text):
+        if match.start() > len(prefix):
+            break
+        if match.start() > 0:
+            boundary = match.start()
+    if boundary is not None:
+        prefix = prefix[:boundary]
+    return prefix, True
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
@@ -428,12 +458,15 @@ def _translate_shared(
         )]
 
     if etype == "subagent_done":
+        result, result_truncated = _bound_subagent_result(event.get("result"))
         return [_build_event(
             contract.SubagentCompleted, session_id,
             task_id=event.get("tool_id") or event.get("agent_id") or "",
             status=("killed" if event.get("killed") is True
                     else "failed" if event.get("is_error") else "completed"),
-            result_preview=_truncate(event.get("result")),
+            result_preview=_truncate(event.get("result_preview", event.get("result"))),
+            result=result,
+            result_truncated=result_truncated,
             usage=event.get("usage") if isinstance(event.get("usage"), dict) else None,
             **kw,
         )]

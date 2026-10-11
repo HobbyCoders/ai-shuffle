@@ -12,7 +12,7 @@ that card from:
   and so see only ``task.updated`` rows (``feed-controller.ts``
   ``deriveActiveTasks``);
 * ``subagent.progress`` — assistant text / tool calls / tool results, bounded;
-* ``subagent.completed`` — the terminal status plus a bounded result preview,
+* ``subagent.completed`` — the terminal status, bounded report and preview,
   paired with the terminal ``task.updated`` that clears the running chip.
 
 Four load-bearing constraints:
@@ -358,7 +358,10 @@ class WorkerFeed:
             # A stopped worker is not a failure: the card reads "Stopped" and
             # keeps its own row (#1806).
             "killed": status == "killed",
-            "result": _clip(result_preview, MAX_RESULT_PREVIEW_CHARS),
+            # The shared recorder bounds the full report for storage AND replay.
+            # Keep the historical preview separate for existing consumers.
+            "result": result_preview,
+            "result_preview": _clip(result_preview, MAX_RESULT_PREVIEW_CHARS),
             # The worker's authoritative token counts. Without them the card's
             # usage row renders nothing for workers.
             "usage": usage if isinstance(usage, dict) and usage else None,

@@ -50,6 +50,17 @@ Assistant mode (`foldAssistantTranscript`) uses the **same** protected set inste
 
 ## 4. Worker cards carry their report
 
+**Event contract:** `subagent.completed` carries `result` (string or null) and
+`result_truncated` (boolean, default `false`) for completed, failed and stopped
+workers. `result` is bounded to 64 KiB of UTF-8, cut before the last complete
+paragraph boundary that fits; an oversized first paragraph falls back to a
+UTF-8-safe prefix. A cut sets `result_truncated: true`. Worker feeds retain the
+legacy `result_preview` unchanged (up to 2,000 characters, ending in `…` if cut). The same fields
+are persisted in `session_events` and delivered on live SSE and history replay;
+there is no separate stored card message. Clients use `result` for card content,
+falling back to `result_preview` for older events, on both live and reload paths.
+This transport does not introduce any new sanitization.
+
 **Now:** `SubagentMessage` shows identity + status + "Open transcript ↗" only; the Task tool row that holds the result is suppressed when the card exists.
 
 **Rule:** the card body (the part already inside its `<details>`) shows the **first paragraph of the worker's report** (the Task `tool_result` text, or the delivered agent message for a resumed worker) and a `Full report` disclosure for the rest, above the existing "Open transcript ↗" link. No new styling: it is the card body it already has, with content. While running, the body shows the worker's latest tool label (what `RunningTasksList` already knows). Completed cards stay in the turn, visible (§3).
