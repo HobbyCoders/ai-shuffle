@@ -53,6 +53,19 @@ describe('MessageArea reading position', () => {
 		expect(sw).toContain('evictOldest(autoScrollCache, SCROLL_CACHE_MAX)');
 	});
 
+	it('keeps the session-store write out of the per-frame scroll handler (#1282)', () => {
+		const frame = block('function handleScroll() {', '* Release stick-to-bottom');
+		// Every frame updates the non-reactive cache, never the global store.
+		expect(frame).toContain('scrollPositionCache.set(cacheKey, currentScrollTop)');
+		expect(frame).not.toContain('activeSession.setScrollTop(');
+		expect(frame).toContain('persistScrollTopSoon(cacheKey, currentScrollTop)');
+		const persist = block('function persistScrollTopSoon(', 'function handleScroll() {');
+		expect(persist).toContain("($activeSession.sessionId ?? 'new') === cacheKey");
+		// The switch and destroy paths cancel a pending write before writing.
+		expect(block('onDestroy(() => {', '// ── Session-switch scroll save/restore')).toContain('cancelScrollTopPersist()');
+		expect(block('if (currentId === prevId) return;', 'prevTrackedSessionId = currentId;')).toContain('cancelScrollTopPersist()');
+	});
+
 	it('restores a reader who had scrolled up, over the full transcript, instead of jumping to the bottom', () => {
 		const mount = block('const wasAutoScrolling = autoScrollCache.get(cacheKey);', '} else if ($activeSession.messages.length > 0) {');
 		expect(mount).toContain('const userScrolledUp = wasAutoScrolling === false;');

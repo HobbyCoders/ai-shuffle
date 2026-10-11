@@ -1174,6 +1174,23 @@
 		}
 	}
 
+	// Trailing write of the reading position into the session store once
+	// scrolling pauses. Dropped if the session changed in between, and
+	// cancelled by the session-switch and destroy paths, which write it at once.
+	const SCROLL_TOP_PERSIST_MS = 250;
+	let scrollTopPersistTimer: ReturnType<typeof setTimeout> | null = null;
+	function persistScrollTopSoon(cacheKey: string, position: number) {
+		if (scrollTopPersistTimer !== null) clearTimeout(scrollTopPersistTimer);
+		scrollTopPersistTimer = setTimeout(() => {
+			scrollTopPersistTimer = null;
+			if (($activeSession.sessionId ?? 'new') === cacheKey) activeSession.setScrollTop(position);
+		}, SCROLL_TOP_PERSIST_MS);
+	}
+	function cancelScrollTopPersist() {
+		if (scrollTopPersistTimer !== null) clearTimeout(scrollTopPersistTimer);
+		scrollTopPersistTimer = null;
+	}
+
 	function handleScroll() {
 		if (!containerRef) return;
 		if (programmaticScrollDepth > 0) {
@@ -1212,8 +1229,10 @@
 
 			// Save scroll position to non-reactive cache (doesn't trigger effects)
 			scrollPositionCache.set(cacheKey, currentScrollTop);
-			// Also save to session store for cross-session persistence
-			activeSession.setScrollTop(currentScrollTop);
+			// Also save to session store for cross-session persistence — but not
+			// per frame: every write publishes a new active-session object to all
+			// of its subscribers (#1282). Restores read the cache above first.
+			persistScrollTopSoon(cacheKey, currentScrollTop);
 
 			// Decide the next stick-to-bottom flag via the pure, unit-tested helper.
 			// It enables when the user is at/near the bottom, disables on a
@@ -1412,6 +1431,7 @@
 		clearJumpRevealTimer();
 		if (anchorMaintenanceRaf !== null) cancelAnimationFrame(anchorMaintenanceRaf);
 		const cacheKey = $activeSession.sessionId ?? 'new';
+		cancelScrollTopPersist();
 
 		if (containerRef) {
 			// eslint-disable-next-line no-console
@@ -1442,6 +1462,7 @@
 		const prevId = untrack(() => prevTrackedSessionId);
 
 		if (currentId === prevId) return;
+		cancelScrollTopPersist();
 		if (prevId) {
 			cancelCurrentTurnAnchor();
 			clearJumpRevealTimer();
