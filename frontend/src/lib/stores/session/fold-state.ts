@@ -7,6 +7,8 @@
  * live run records it under each of its aliases too (the row that ends it,
  * the row after each finished prose inside it), so it stays open when runs
  * merge or split as prose finishes; see `WorkLogRun.key` and `aliases`.
+ * WorkLogGroup keeps those entries equal to the runs' current identities, so
+ * an identity a run no longer has cannot reopen it after the reader closed it.
  * When the turn settles its runs become one fold: `promoteRuns` opens that
  * fold if the reader had opened any run, so settling never closes what they
  * were reading. An optimistic send has no server id until the

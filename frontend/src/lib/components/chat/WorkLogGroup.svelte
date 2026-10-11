@@ -128,6 +128,32 @@
 		if (runPrefix) for (const id of runIds(run)) folds.setOpen(`${runPrefix}${id}`, next);
 		else localRuns = { ...localRuns, ...Object.fromEntries(runIds(run).map((id) => [id, next])) };
 	}
+	// A run's identities change as prose finishes: newer prose replaces the
+	// boundary that ended it, a merge adds the rows after the prose it
+	// absorbed. Keep the stored open state equal to the runs' CURRENT
+	// identities: an open run records any identity it gained, and an identity
+	// no run claims any more is dropped. Otherwise closing a run would clear
+	// only its current identities, and a retired one left stored open would
+	// reopen the work log at settle (`anyRunOpen` / `promoteRuns`).
+	$effect.pre(() => {
+		if (mode !== 'live') return;
+		const claimed = new Set(runs.flatMap(runIds));
+		const openIds = runs.filter(runOpen).flatMap(runIds);
+		if (runPrefix) {
+			const prefix = runPrefix;
+			for (const key of Object.keys(stored)) {
+				if (key.startsWith(prefix) && !claimed.has(key.slice(prefix.length))) folds.setOpen(key, false);
+			}
+			for (const id of openIds) if (stored[`${prefix}${id}`] !== true) folds.setOpen(`${prefix}${id}`, true);
+		} else {
+			const next: Record<string, boolean> = {};
+			for (const [id, value] of Object.entries(localRuns)) if (value && claimed.has(id)) next[id] = true;
+			for (const id of openIds) next[id] = true;
+			const same = Object.keys(next).length === Object.values(localRuns).filter(Boolean).length
+				&& Object.keys(next).every((id) => localRuns[id] === true);
+			if (!same) localRuns = next;
+		}
+	});
 	// A settled turn with nothing to hide keeps its group (so settling does not
 	// remount its rows) but draws no disclosure.
 	const foldable = $derived(

@@ -808,7 +808,7 @@ describe('WorkLogGroup', () => {
 			await view.rerender(logOf(true, [prompt, read, proseA, proseB]));
 			expect(shown('read-x')).toBe(true);
 			expect(shown('prose-a')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-read-x': true, 'prompt:run-prose-a': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-x': true, 'prompt:run-prose-b': true });
 			view.unmount();
 
 			// A remount or reload reads the same stored state.
@@ -870,6 +870,40 @@ describe('WorkLogGroup', () => {
 
 			render(WorkLogGroup, { ...logOf(true, split), folds: createFoldState(storage) });
 			expect(['read-x', 'read-y'].map(shown)).toEqual([true, true]);
+		});
+
+		// Re-review of #2297: closing a run cleared only its current identities,
+		// so one it carried earlier (the prose that ended it before newer prose
+		// took over) stayed stored open and reopened the work log at settle.
+		it('keeps a run closed through settle and a reload after its boundary moved', async () => {
+			const storage = memoryStorage();
+			const folds = createFoldState(storage);
+			const prompt = turn[0];
+			const read = { ...message, id: 'read-x', content: 'Read X' };
+			const proseA: ChatMessage = { id: 'prose-a', role: 'assistant', type: 'text', content: 'Checking the config.' };
+			const proseB: ChatMessage = { id: 'prose-b', role: 'assistant', type: 'text', content: 'Config checked.' };
+			const view = render(WorkLogGroup, { ...logOf(true, [prompt, read, proseA]), folds });
+			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
+			expect(folds.current).toEqual({ 'prompt:run-read-x': true, 'prompt:run-prose-a': true });
+
+			// B finishes and takes over the boundary: the stored state follows the
+			// run's current identities, and the retired one is dropped.
+			await view.rerender(logOf(true, [prompt, read, proseA, proseB]));
+			expect(shown('read-x')).toBe(true);
+			expect(folds.current).toEqual({ 'prompt:run-read-x': true, 'prompt:run-prose-b': true });
+
+			await fireEvent.click(screen.getByRole('button', { name: 'Hide work details: Read 1 file' }));
+			expect(shown('read-x')).toBe(false);
+			expect(folds.current).toEqual({});
+
+			// Settled, the reader's closed log stays closed, and so after a reload.
+			await view.rerender(logOf(false, [prompt, read, proseA, proseB]));
+			expect(shown('read-x')).toBe(false);
+			expect(folds.isOpen('prompt:turn')).toBe(false);
+			view.unmount();
+			render(WorkLogGroup, { ...logOf(false, [prompt, read, proseA, proseB]), folds: createFoldState(storage) });
+			expect(shown('read-x')).toBe(false);
+			expect(screen.getByRole('button', { expanded: false })).toBeTruthy();
 		});
 
 		it('moves folds opened under an optimistic id onto the server id', async () => {
