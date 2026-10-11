@@ -1,5 +1,6 @@
 #!/bin/sh
-# LOCAL-CI-PRE-PUSH v1
+# LOCAL-CI-PRE-PUSH v2
+# Every outgoing ref gets an offline secret scan, even with a cached test pass.
 # Local checks before anything leaves this machine (scripts/local_ci.py).
 # CI does not test pull requests; this hook is where tests run.
 # `python scripts/local_ci.py install` copies it into the clone's hooks

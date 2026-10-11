@@ -1,0 +1,125 @@
+# Deliberately small, high-signal, offline ruleset shared by gitleaks and
+# scripts/secret_scan.py. No blanket test/docs exclusions or entropy heuristics.
+title = "AI Shuffle local secret gate"
+
+[[rules]]
+id = "aws-access-key"
+description = "AWS access key ID"
+regex = '''\b(?:AKIA|ASIA)[A-Z0-9]{16}\b'''
+
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_claude_cloud_auth\.py$''']
+regexes = ['''^[A]KIAFAKEFAKEFAKE0000$''']
+[[rules]]
+id = "github-token"
+description = "GitHub access token"
+regex = '''\b(?:gh[pousr]_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82})\b'''
+
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^android/registry/test/fakes\.ts$''']
+regexes = ['''^[g]hp_testcredential0000000000000000000000$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_support_report\.py$''']
+regexes = ['''^[g]hp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$''']
+[[rules]]
+id = "provider-api-key"
+description = "OpenAI, Anthropic, OpenRouter API key"
+regex = '''\bsk-(?:(?:ant-api\d+-|ant-oat\d+-|proj-|svcacct-|or-v1-)[A-Za-z0-9_-]{20,}|[A-Za-z0-9]{48})\b'''
+
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/api/test_data_export\.py$''']
+regexes = ['''^[s]k\-ant\-oat01\-oauthfile0123456789abcdef$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/api/test_fetch_models_api\.py$''']
+regexes = ['''^[s]k\-or\-v1\-abcdefghijklmnopqrstuvwxyz0123456789$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/api/test_model_providers_api\.py$''']
+regexes = ['''^[s]k\-or\-v1\-(abcdefghijklmnopqrstuvwxyz0123456789|brandnewtoken0123456789)$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/api/test_settings_core_routes\.py$''']
+regexes = ['''^[s]k\-ant\-api03\-0123456789abcdefghijklmnopqrstuvwxyz$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/api/test_voice_api\.py$''']
+regexes = ['''^[s]k\-proj\-abcdefghijklmnopqrstuvwxyz0123456789$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_compliance_section5\.py$''']
+regexes = ['''^[s]k\-ant\-api03\-users\-own\-key\-for\-this\-test\-7Q2Z$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_compliance_section5\.py$''']
+regexes = ['''^[s]k\-ant\-api03\-host\-env\-key\-must\-not\-leak\-0000$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/core/test_support_report\.py$''']
+regexes = ['''^[s]k\-ant\-api03\-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA$''']
+
+[[rules.allowlists]]
+description = "Existing synthetic test fixture, not a credential"
+condition = "AND"
+regexTarget = "match"
+paths = ['''^tests/test_support_reports_api\.py$''']
+regexes = ['''^[s]k\-ant\-api03\-ZZZZZZZZZZZZZZZZZZZZZZZZZZ$''']
+[[rules]]
+id = "google-api-key"
+description = "Google API key"
+regex = '''\bAIza[A-Za-z0-9_-]{35}\b'''
+
+[[rules]]
+id = "slack-token"
+description = "Slack token"
+regex = '''\bxox[baprs]-[A-Za-z0-9-]{20,}\b'''
+
+[[rules]]
+id = "stripe-live-key"
+description = "Stripe live secret/restricted key"
+regex = '''\b[rs]k_live_[A-Za-z0-9]{16,}\b'''
+
+[[rules]]
+id = "private-key"
+description = "Private key PEM material"
+regex = '''-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----(?:\s|\\[nr])+[A-Za-z0-9+/=]{64,}'''
+
+# Short sk-test / AKIA-* placeholders and v1.<uuid>.<ts>.<hex> preview
+# examples are not provider tokens: these rules deliberately do not match them.
