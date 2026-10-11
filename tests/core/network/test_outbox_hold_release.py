@@ -327,10 +327,11 @@ async def test_first_safe_contact_transfers_only_the_offline_delta_in_one_exchan
         return insert(cursor, coll, rows, envelopes, hashes)
     monkeypatch.setattr(store, "insert_event_batch", capture)
     result = await _dial(caller, server.device_id, served.base_url)
-    assert result["received" if direction == "inbound" else "sent"] == 400
+    # The offline user events carry one additional session revision envelope.
+    assert result["received" if direction == "inbound" else "sent"] == 401
     transfers = [request for request in served.requests if request[1].endswith(("/peer/exchange", "/peer/ops"))]
     assert len(transfers) == (1 if direction == "inbound" else 2)
-    assert bulk == [64] * 6 + [16]
+    assert bulk == [64] * 6 + [16]  # session row is outside transcript bulk chunks
     assert all(status["state"] == "syncing" for status in freshness)
     if direction == "inbound":
         assert [status["pending_updates"] for status in freshness] == list(range(400, 0, -64))

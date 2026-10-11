@@ -509,6 +509,7 @@ class Session(SessionBase):
     # The card shows ``work_ms`` plus the live interval while a turn runs.
     work_ms: int = 0
     work_started_at: Optional[datetime] = None
+    last_user_message_at: Optional[datetime] = None
 
     @field_validator("work_ms", mode="before")
     @classmethod

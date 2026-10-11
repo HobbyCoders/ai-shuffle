@@ -17,12 +17,12 @@ drive the implementation.
 """
 
 import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 
+from app.db import base
 from app.db import database as db
 from app.db import sessions as sessions_mod
 
@@ -52,6 +52,8 @@ def _create_schema(cursor: sqlite3.Cursor) -> None:
         CREATE TABLE sessions (
             id TEXT PRIMARY KEY,
             profile_id TEXT NOT NULL,
+            last_user_message_at TIMESTAMP,
+            api_user_id TEXT,
             title TEXT,
             status TEXT DEFAULT 'active',
             turn_count INTEGER DEFAULT 0,
@@ -98,14 +100,8 @@ def test_db():
 
 @pytest.fixture
 def mock_db(test_db):
-    @contextmanager
-    def mock_get_db():
-        try:
-            yield test_db
-            test_db.commit()
-        except Exception:
-            test_db.rollback()
-            raise
+    # Use the real commit boundary, including after-commit notifications.
+    mock_get_db = base.get_db
 
     def mock_get_connection():
         return test_db
@@ -115,7 +111,9 @@ def mock_db(test_db):
         # helper passes psycopg2's RealDictCursor which doesn't exist here.
         return conn.cursor()
 
-    with patch.object(sessions_mod, "get_db", mock_get_db), \
+    with patch.object(base, "get_connection", lambda: test_db), \
+         patch.object(base, "_close_connection", lambda conn: None), \
+         patch.object(sessions_mod, "get_db", mock_get_db), \
          patch.object(sessions_mod, "get_cursor", mock_get_cursor), \
          patch.object(sessions_mod, "ph", lambda: "?"), \
          patch.object(db, "get_db", mock_get_db), \

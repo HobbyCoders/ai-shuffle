@@ -810,6 +810,7 @@ class TurnRecorder:
                     contract.MessageUser,
                     content=user_message or "",
                     profile_id=profile_id,
+                    extra_payload={"source": source} if source is not None else None,
                 ))
             await self._append(events)
         except Exception:
@@ -826,6 +827,7 @@ class TurnRecorder:
         command_id: str | None = None,
         queued_turn_id: str | None = None,
         checkpoint_backed: bool | None = None,
+        source: str | None = None,
     ) -> bool:
         """Append a ``message.user`` for a message steered into the LIVE turn.
 
@@ -858,6 +860,7 @@ class TurnRecorder:
                     profile_id=profile_id,
                     queued_turn_id=queued_turn_id,
                     checkpoint_backed=False,
+                    extra_payload={"source": source} if source is not None else None,
                 ))
                 await self._append(events)
             return not (self._recording_failed or self._superseded)

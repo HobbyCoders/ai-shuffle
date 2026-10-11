@@ -81,6 +81,7 @@ class SessionRow(TypedDict):
     turn_count: int
     created_at: str
     updated_at: str
+    last_user_message_at: Optional[str]
     parent_session_id: Optional[str]
     fork_point_message_index: Optional[int]
     v2_stream: bool
@@ -2016,6 +2017,47 @@ def get_session_messages(session_id: str) -> List[SessionMessageRow]:
         return rows
 
 
+def is_user_message(role: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+    """User/owner-configured prompts count; autonomous deliveries do not."""
+    metadata = metadata or {}
+    return role in ("user", "command") and metadata.get("source") not in {
+        "agent_message", "wakeup", "unpark", "unpark_pump", "auto_continue",
+        "promotion", "voice_system_note", "task_notification",
+    } and not metadata.get("agent_wake")
+
+
+def _record_user_message(cursor, session_id: str, role: str, now: str, metadata=None):
+    """Shared revision write for authoritative events and legacy messages.
+
+    Guard against a slower transaction overwriting a newer message revision.
+    The global feed reaches tabs that have never subscribed to this chat;
+    paired/account clients and other workers receive scoped invalidations.
+    """
+    if not is_user_message(role, metadata):
+        return None
+    cursor.execute(
+        f"UPDATE sessions SET last_user_message_at = {ph()}, updated_at = {ph()} "
+        f"WHERE id = {ph()} AND (last_user_message_at IS NULL OR last_user_message_at < {ph()}) "
+        "RETURNING api_user_id",
+        (now, now, session_id, now),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    owner = row["api_user_id"]
+
+    def notify():
+        from app.core.global_events import global_events
+
+        global_events.lifecycle(owner, {
+            "type": "user_session_updated",
+            "session_id": session_id,
+            "updates": {"last_user_message_at": now},
+        }, user_type="admin" if owner is None else "api_user")
+
+    return notify
+
+
 def add_session_message(
     session_id: str,
     role: str,
@@ -2056,15 +2098,14 @@ def add_session_message(
              (session_id, role, content, tool_name, tool_input, metadata, profile_id, jsonl_uuid, created_at)
              VALUES ({_phs9}) RETURNING id"""
 
-    if _conn is not None:
-        cursor = get_cursor(_conn)
+    with nullcontext(_conn) if _conn is not None else get_db() as conn:
+        cursor = get_cursor(conn)
         cursor.execute(sql, params)
         lastrowid = cursor.fetchone()["id"]
-    else:
-        with get_db() as conn:
-            cursor = get_cursor(conn)
-            cursor.execute(sql, params)
-            lastrowid = cursor.fetchone()["id"]
+        notify = _record_user_message(cursor, session_id, role, now, metadata)
+        if notify:
+            from app.db.base import after_commit
+            after_commit(conn, notify)
 
     msg = {
         "id": lastrowid,
@@ -2115,6 +2156,7 @@ def add_session_messages_batch(
              VALUES ({_phs9}) RETURNING id"""
 
     results: List[SessionMessageRow] = []
+    notifications = []
 
     def _do_insert(conn):
         cursor = get_cursor(conn)
@@ -2135,6 +2177,9 @@ def add_session_messages_batch(
             )
             cursor.execute(sql, params)
             lastrowid = cursor.fetchone()["id"]
+            notify = _record_user_message(cursor, msg["session_id"], msg["role"], now, metadata)
+            if notify:
+                notifications.append(notify)
             results.append({
                 "id": lastrowid,
                 "session_id": msg["session_id"],
@@ -2148,11 +2193,11 @@ def add_session_messages_batch(
                 "created_at": now,
             })
 
-    if _conn is not None:
-        _do_insert(_conn)
-    else:
-        with get_db() as conn:
-            _do_insert(conn)
+    with nullcontext(_conn) if _conn is not None else get_db() as conn:
+        _do_insert(conn)
+        from app.db.base import after_commit
+        for notify in notifications:
+            after_commit(conn, notify)
 
     return results
 

@@ -361,7 +361,9 @@ def test_fresh_transcript_delta_uses_bulk_sql_and_one_mirror_wake_per_chunk(work
         _append("bulk", 400)
         catalog.publish_owned()
         ops = store.ops_since(marks, exclude_origin=b.device_id)
-    assert len(ops) == 400
+    # A user-event batch also publishes one session revision, not 400 rows.
+    assert len(ops) == 401
+    assert sum(op["collection"] == "sessions" for op in ops) == 1
     real_insert = store.insert_event_batch
     bulk = Mock(wraps=real_insert)
     mirrored = Mock(wraps=catalog.after_event_mirrored)
@@ -375,14 +377,15 @@ def test_fresh_transcript_delta_uses_bulk_sql_and_one_mirror_wake_per_chunk(work
             assert not engine.applying_batch()
     finally:
         b.raw.set_trace_callback(None)
-    assert result.applied == 400 and result.retry == result.rejected == result.pending == 0
+    assert result.applied == 401 and result.retry == result.rejected == result.pending == 0
     assert bulk.call_count == mirrored.call_count == 7  # ceil(400 / APPLY_CHUNK=64)
     assert len(statements) <= 20 * 7  # not ~19 statements * 400 envelopes
     assert [row["seq"] for row in b.sql("SELECT seq FROM session_events WHERE session_id = ? ORDER BY seq", ("bulk",))] == list(range(1, 401))
     assert b.sql("SELECT next_seq FROM session_event_counters WHERE session_id = ?", ("bulk",))[0]["next_seq"] == 400
     assert b.sql("SELECT published_seq FROM network_catalog_cursors WHERE session_id = ?", ("bulk",))[0]["published_seq"] == 400
     with b.active():
-        assert engine.apply_batch(ops).duplicate == 400
+        assert engine.apply_batch(ops).duplicate == 401
+        assert database.get_session("bulk")["last_user_message_at"] is not None
 
 
 @pytest.mark.parametrize("fault", ["signature", "hole", "rewrite", "commit"])
@@ -399,6 +402,13 @@ def test_event_bulk_fallback_preserves_order_and_retries(workers, monkeypatch, f
         _append("fallback", 5)
         catalog.publish_owned()
         ops = store.ops_since(marks, exclude_origin=b.device_id)
+    # Deliver the new session revision first; the faults below specifically
+    # exercise ordering/retry of the five transcript envelopes, not the row.
+    assert len(ops) == 6 and ops[0]["collection"] == "sessions"
+    with b.active():
+        assert engine.apply_batch(ops[:1]).applied == 1
+        assert database.get_session("fallback")["last_user_message_at"] is not None
+    ops = ops[1:]
     real_insert = store.insert_event_batch
     bulk = Mock(wraps=real_insert)
     monkeypatch.setattr(store, "insert_event_batch", bulk)
