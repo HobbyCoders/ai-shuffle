@@ -60,6 +60,41 @@ describe('transcript navigation derivation', () => {
 	});
 });
 
+describe('turn navigation stops (#2268)', () => {
+	const prompt = (id: string, turnId?: string) => message({ id, role: 'user', content: `Prompt ${id}`, turnId });
+	const reply = (id: string) => message({ id, content: 'ok' });
+
+	it('counts a steered turn once, on the prompt that opened it', () => {
+		const items = deriveUserTurnNavigationItems([
+			prompt('u1', 't1'), reply('a1'), prompt('u2', 't1'), reply('a2'), reply('a3')
+		]);
+		expect(items.map((item) => item.id)).toEqual(['u1']);
+	});
+
+	it('gives two ordinary turns a stop each', () => {
+		const items = deriveUserTurnNavigationItems([
+			prompt('u1', 't1'), reply('a1'), prompt('u2', 't2'), reply('a2')
+		]);
+		expect(items.map((item) => item.id)).toEqual(['u1', 'u2']);
+	});
+
+	it('keeps one stop per prompt when there is no real turn id', () => {
+		const items = deriveUserTurnNavigationItems([
+			prompt('u1'), reply('a1'), prompt('u2'), prompt('u3', 'backfill'), prompt('u4', 'backfill')
+		]);
+		expect(items.map((item) => item.id)).toEqual(['u1', 'u2', 'u3', 'u4']);
+	});
+
+	it('puts a question asked after a steer on the turn the steer joined', () => {
+		const messages = [
+			prompt('u1', 't1'),
+			prompt('u2', 't1'),
+			message({ id: 'q', type: 'tool_use', toolName: 'AskUserQuestion', toolId: 'ask-1' })
+		];
+		expect(turnsOwningTools(messages, ['ask-1'])).toEqual(new Map([['ask-1', 'u1']]));
+	});
+});
+
 describe('transcript navigation position', () => {
 	it('selects the last turn above the reading line', () => {
 		expect(resolveCurrentTurnIndex([], 100)).toBe(0);

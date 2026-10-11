@@ -41,11 +41,38 @@ export function isNavigableUserTurn(message: ChatMessage): boolean {
 	return message.role === 'user' && message.type !== 'command' && !agentDelivery(message);
 }
 
+/**
+ * Walks a transcript and reports, for each navigable prompt, whether it opens a
+ * turn. A prompt steered into a turn already under way carries that turn's id
+ * (the same rule `splitTurns` in work-log.ts uses) and has no rewind checkpoint
+ * of its own, so it is part of its turn, not a separate navigation stop. Any
+ * user row or idle agent wake can open a turn; prompts without a real turn id
+ * (optimistic sends, legacy transcripts) open one each.
+ */
+function createTurnOpenerTracker(): (message: ChatMessage) => boolean {
+	let currentTurnId: string | undefined;
+	let started = false;
+	return (message) => {
+		const idleAgentWake = !!agentDelivery(message) && message.metadata?.agent_wake === true;
+		const opens = idleAgentWake || (message.role === 'user' && !agentDelivery(message));
+		if (!opens) return false;
+		const turnId = message.turnId && message.turnId !== 'backfill' ? message.turnId : undefined;
+		const steered = !idleAgentWake && started && !!turnId && turnId === currentTurnId;
+		if (!steered) {
+			currentTurnId = turnId;
+			started = true;
+		}
+		return !steered && isNavigableUserTurn(message);
+	};
+}
+
+/** One navigation stop per turn, on the prompt that opened it. */
 export function deriveUserTurnNavigationItems(messages: ChatMessage[]): UserTurnNavigationItem[] {
 	const seen = new Set<string>();
 	const result: UserTurnNavigationItem[] = [];
+	const opensTurn = createTurnOpenerTracker();
 	for (const message of messages) {
-		if (!isNavigableUserTurn(message) || !message.id || seen.has(message.id)) continue;
+		if (!opensTurn(message) || !message.id || seen.has(message.id)) continue;
 		seen.add(message.id);
 		result.push({
 			id: message.id,
@@ -127,8 +154,9 @@ export function resolveTurnNavigationIndex(
 }
 
 /**
- * The user turn each tool call belongs to: the newest navigable user message
- * before it. Used to put a surviving prompt (a nonblocking AskUser can
+ * The user turn each tool call belongs to: the prompt that opened the turn
+ * it ran in (a mid-turn steer is not a turn of its own, see
+ * `deriveUserTurnNavigationItems`). Used to put a surviving prompt (a nonblocking AskUser can
  * outlive its turn) on the tick of the turn that asked it. Ids not found in
  * the transcript are left out.
  */
@@ -140,8 +168,9 @@ export function turnsOwningTools(
 	if (toolUseIds.length === 0) return owners;
 	const wanted = new Set(toolUseIds);
 	let turnId: string | null = null;
+	const opensTurn = createTurnOpenerTracker();
 	for (const message of messages) {
-		if (isNavigableUserTurn(message) && message.id) {
+		if (opensTurn(message) && message.id) {
 			turnId = message.id;
 			continue;
 		}
