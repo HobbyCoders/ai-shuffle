@@ -235,7 +235,8 @@ Get live session state for streaming. Returns current partial messages and strea
 
 The response's `session_meta.last_user_message_at` is a nullable UTC ISO 8601
 string with the same value and [user-message revision](#user-message-revision)
-semantics as the session row. It is `null` until a qualifying user message is
+semantics as the session row, serialized identically to list/detail responses
+(with a `Z` suffix for UTC). It is `null` until a qualifying user message is
 persisted. It is included both with messages (the default) and with
 `?include_messages=false`, which skips loading the transcript. Clients can use
 this metadata-only snapshot to seed the revision without fetching session detail.

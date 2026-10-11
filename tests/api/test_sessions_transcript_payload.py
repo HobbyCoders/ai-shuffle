@@ -323,10 +323,13 @@ class TestGetSessionPagination:
 
 class TestLiveEndpointPayload:
     @pytest.mark.parametrize("stamped", [False, True])
+    @pytest.mark.parametrize("row_as_datetime", [False, True])
     @pytest.mark.parametrize("endpoint", [
         "live?include_messages=false", "live?include_messages=true", "state",
     ])
-    def test_snapshot_round_trips_persisted_user_message_revision(self, endpoint, stamped):
+    def test_snapshot_round_trips_persisted_user_message_revision(
+        self, endpoint, stamped, row_as_datetime,
+    ):
         from datetime import datetime
         from app.db import database
 
@@ -342,15 +345,37 @@ class TestLiveEndpointPayload:
             row_value = row_value.isoformat()
         assert row_value == expected
 
+        # Exercise both DB driver representations without inventing a revision:
+        # every value still comes from the real persistence path above.
+        get_session = database.get_session
+
+        def session_row(*args, **kwargs):
+            row = get_session(*args, **kwargs)
+            if row and row["last_user_message_at"] is not None:
+                row["last_user_message_at"] = (
+                    datetime.fromisoformat(expected) if row_as_datetime else expected
+                )
+            return row
+
         app = FastAPI()
         app.include_router(router)
         app.dependency_overrides[require_auth] = lambda: "test-token"
-        with TestClient(app) as client:
+        with patch.object(database, "get_session", side_effect=session_row), TestClient(app) as client:
             response = client.get(f"/api/v1/sessions/{session_id}/{endpoint}")
-        assert response.status_code == 200, response.text
+            detail = client.get(f"/api/v1/sessions/{session_id}")
+            listing = client.get("/api/v1/sessions")
+        for result in (response, detail, listing):
+            assert result.status_code == 200, result.text
         body = response.json()
         snapshot = body["session_meta"] if endpoint.startswith("live") else body
-        assert snapshot["last_user_message_at"] == expected
+        listed = next(row for row in listing.json() if row["id"] == session_id)
+        wire_value = detail.json()["last_user_message_at"]
+        assert snapshot["last_user_message_at"] == listed["last_user_message_at"] == wire_value
+        if stamped:
+            assert wire_value.endswith("Z")
+            assert datetime.fromisoformat(wire_value) == datetime.fromisoformat(expected)
+        else:
+            assert wire_value is None
 
     def _live(self, api_client, query="", session_fields=None):
         client, mock_db = api_client
