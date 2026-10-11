@@ -3,6 +3,7 @@ import { get } from 'svelte/store';
 import {
 	_resetProseQuestions,
 	forgetProseQuestion,
+	noteUserMessageRevision,
 	observeLastUserMessage,
 	observeSessionRows,
 	proseQuestionSessions,
@@ -100,6 +101,60 @@ describe('cleared by a later user message from anywhere (#2249)', () => {
 		observeSessionRows([{ id: 'A', last_user_message_at: T0 }]);
 		expect(has('A')).toBe(true);
 		observeLastUserMessage('A', '2026-10-11T10:00:01Z');
+		expect(has('A')).toBe(false);
+	});
+
+	it('uses the open session\'s own revision when no row is loaded, so the first answer clears it', () => {
+		// Opened from a deep link / Spotlight: its detail said T0, no sidebar row.
+		noteUserMessageRevision('A', T0);
+		rememberLeavingProseQuestion('A', asked);
+		// The very first broadcast after leaving IS the answer.
+		observeLastUserMessage('A', '2026-10-11T10:00:00.000001Z');
+		expect(has('A')).toBe(false);
+	});
+
+	it('uses a revision broadcast while the session was open when no row is loaded', () => {
+		observeLastUserMessage('A', T0);
+		rememberLeavingProseQuestion('A', asked);
+		observeSessionRows([{ id: 'A', last_user_message_at: T0 }]);
+		expect(has('A')).toBe(true);
+		observeLastUserMessage('A', '2026-10-11T10:00:05Z');
+		expect(has('A')).toBe(false);
+	});
+
+	it('keeps the later of the row and the revision seen while open', () => {
+		// The row lags behind a message this tab saw broadcast while open.
+		observeLastUserMessage('A', '2026-10-11T10:00:30Z');
+		rememberLeavingProseQuestion('A', asked, T0);
+		observeLastUserMessage('A', '2026-10-11T10:00:30Z');
+		expect(has('A')).toBe(true);
+		observeLastUserMessage('A', '2026-10-11T10:00:31Z');
+		expect(has('A')).toBe(false);
+	});
+
+	it('a detail that arrives after leaving supplies a missing baseline but never clears', () => {
+		rememberLeavingProseQuestion('A', asked);
+		noteUserMessageRevision('A', T0);
+		expect(has('A')).toBe(true);
+		observeLastUserMessage('A', T0);
+		expect(has('A')).toBe(true);
+		observeLastUserMessage('A', '2026-10-11T10:00:01Z');
+		expect(has('A')).toBe(false);
+	});
+
+	it('clears on a strictly later revision within the same millisecond', () => {
+		rememberLeavingProseQuestion('A', asked, '2026-10-11T10:00:00.000001+00:00');
+		observeLastUserMessage('A', '2026-10-11T10:00:00.000999+00:00');
+		expect(has('A')).toBe(false);
+	});
+
+	it('keeps it for the same instant written with another offset or fraction length', () => {
+		rememberLeavingProseQuestion('A', asked, '2026-10-11T10:00:00.5+00:00');
+		observeLastUserMessage('A', '2026-10-11T06:00:00.500000-04:00');
+		observeLastUserMessage('A', '2026-10-11T10:00:00.500Z');
+		observeLastUserMessage('A', '2026-10-11T12:00:00.50000+02:00');
+		expect(has('A')).toBe(true);
+		observeLastUserMessage('A', '2026-10-11T06:00:00.500001-04:00');
 		expect(has('A')).toBe(false);
 	});
 

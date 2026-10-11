@@ -1383,6 +1383,36 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 	});
 
+	it('a session opened without a sidebar row reads its revision from its detail, so the first answer clears it', async () => {
+		// Deep link / Spotlight / tag-filtered: no row for session-A here.
+		_mockSessions.current = [];
+		vi.mocked(api.get).mockImplementation(async (url: string) =>
+			url.startsWith('/sessions/session-A?') ? { id: 'session-A', last_user_message_at: '2026-10-11T10:00:00.000001+00:00' } : null);
+		try {
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(api.get).toHaveBeenCalledWith('/sessions/session-A?message_limit=1'));
+			await Promise.resolve();
+			deps.update((st) => ({ ...st, messages: asked, isLoadingSession: false, isRestoringSession: false }));
+			await switcher.switchSession('session-B');
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			// The first broadcast after leaving is the answer.
+			observeLastUserMessage('session-A', '2026-10-11T10:00:00.000002+00:00');
+			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+		} finally {
+			vi.mocked(api.get).mockReset().mockResolvedValue(null);
+		}
+	});
+
+	it('does not fetch the detail when the sidebar row already carries the revision', async () => {
+		_mockSessions.current = [{ id: 'session-A', last_user_message_at: null }];
+		vi.mocked(api.get).mockClear();
+		const { switcher } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+		await switcher.switchSession('session-A');
+		await Promise.resolve();
+		expect(api.get).not.toHaveBeenCalledWith('/sessions/session-A?message_limit=1');
+	});
+
 	it('records a null revision as an observation: the first stamped message clears it', async () => {
 		_mockSessions.current = [{ id: 'session-A', last_user_message_at: null }];
 		const { switcher } = makeSwitcher(fullState({ messages: asked }));

@@ -17,6 +17,7 @@ import {
 	type InternalMutableState,
 } from './ws-message-handlers';
 import type { ActiveSessionState } from '../active-session';
+import { sessionTimestamp } from '$lib/components/layout/session-card-data';
 
 // Mock the side-effect services the error handlers call. Keeps this a true unit
 // test of message dispatch — isolated from the heavy active-session/layout
@@ -2010,7 +2011,7 @@ describe('ws-message-handlers', () => {
 		];
 		const remembered = () => get(proseQuestionSessions).has('elsewhere');
 
-		it('clears a remembered prose question when another device answers, and patches the row without a reload', async () => {
+		it('clears a remembered prose question when another device answers: patches the row, then refreshes the list', async () => {
 			vi.useFakeTimers();
 			try {
 				rememberLeavingProseQuestion('elsewhere', asked, '2026-10-11T10:00:00+00:00');
@@ -2020,10 +2021,50 @@ describe('ws-message-handlers', () => {
 				const updates = { last_user_message_at: '2026-10-11T10:05:00.000001+00:00' };
 				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates });
 
+				// The mark clears and the row is patched at once, before any reload…
 				expect(remembered()).toBe(false);
 				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('elsewhere', updates);
-				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
 				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+				// …and the server's companion updated_at bump arrives by the reload.
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).toHaveBeenCalledTimes(1);
+			} finally {
+				_resetProseQuestions();
+				vi.useRealTimers();
+			}
+		});
+
+		it('moves the answered session up the last-activity order after the refresh', async () => {
+			vi.useFakeTimers();
+			try {
+				// The sidebar's rows: "elsewhere" is older, so it sorts second.
+				let rows: Record<string, unknown>[] = [
+					{ id: 'recent', updated_at: '2026-10-11T10:03:00+00:00', created_at: '2026-10-11T09:00:00+00:00' },
+					{ id: 'elsewhere', updated_at: '2026-10-11T10:00:00+00:00', created_at: '2026-10-11T09:00:00+00:00' },
+				];
+				const order = () => [...rows]
+					.sort((a, b) => sessionTimestamp(b as never) - sessionTimestamp(a as never))
+					.map((r) => r.id);
+				// The server stamps updated_at with the user message but the frame
+				// carries only last_user_message_at; the list endpoint has both.
+				const server = [
+					{ id: 'recent', updated_at: '2026-10-11T10:03:00+00:00', created_at: '2026-10-11T09:00:00+00:00' },
+					{ id: 'elsewhere', updated_at: '2026-10-11T10:05:00+00:00', created_at: '2026-10-11T09:00:00+00:00', last_user_message_at: '2026-10-11T10:05:00+00:00' },
+				];
+				deps = createMockDeps({
+					mergeSessionPatch: vi.fn((id: string, patch: Record<string, unknown>) => {
+						rows = rows.map((r) => (r.id === id ? { ...r, ...patch } : r));
+						return true;
+					}),
+					appLoadSessions: vi.fn(() => { rows = server.map((r) => ({ ...r })); }),
+				});
+				handlers = createMessageHandlers(deps);
+				expect(order()).toEqual(['recent', 'elsewhere']);
+
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: { last_user_message_at: '2026-10-11T10:05:00+00:00' } });
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+
+				expect(order()).toEqual(['elsewhere', 'recent']);
 			} finally {
 				_resetProseQuestions();
 				vi.useRealTimers();

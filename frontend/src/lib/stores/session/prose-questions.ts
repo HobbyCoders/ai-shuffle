@@ -14,8 +14,14 @@
  * do not have the session open. A row update (that frame or a list refresh)
  * whose value is strictly later than the observed one, or non-null where the
  * observation was null, means the user answered from somewhere, so the entry
- * is dropped without reopening the session here. When the row was not loaded
- * at leave time the first value seen afterwards becomes the observation.
+ * is dropped without reopening the session here. The observation is the later
+ * of the sidebar row's value and the latest one this tab saw while the session
+ * was open (its detail, fetched on open when no row carries the field, and any
+ * `user_session_updated` frame), so a session opened from a deep link,
+ * Spotlight or outside the loaded or filtered list still has a baseline. Only
+ * when none of those is known does the first value seen afterwards become it.
+ * Instants are compared at the server's full (microsecond) precision with
+ * offsets applied.
  *
  * Otherwise only a loaded transcript changes an entry: reopening the session
  * in this tab re-records (or drops) it when the switcher next leaves, and
@@ -36,23 +42,67 @@ import type { ChatMessage } from '../types';
 const _store = createStore<ReadonlySet<string>>(new Set());
 
 /**
- * `last_user_message_at` observed per remembered session, as epoch ms.
- * `null`: observed with no user message stamped. `undefined`: not observed yet
- * (the row was not loaded when the switcher left).
+ * A `last_user_message_at` instant at full precision. The server stamps
+ * microseconds and `Date.parse` keeps only milliseconds, so the whole seconds
+ * (epoch ms, offset applied) and the fraction digits are kept apart.
  */
-const _observed = new Map<string, number | null | undefined>();
+interface Revision {
+	/** Epoch ms of the whole second, offset applied. */
+	s: number;
+	/** Fraction of the second as 9 digits (nanoseconds), compared as text. */
+	f: string;
+}
+
+/**
+ * Revision observed per remembered session when the switcher left it.
+ * `null`: observed with no user message stamped. `undefined`: not known then
+ * (no row loaded and no revision seen while the session was open).
+ */
+const _observed = new Map<string, Revision | null | undefined>();
+
+/**
+ * The latest revision this tab has seen per session, from the open session's
+ * own detail and from `user_session_updated` frames, independent of whether a
+ * sidebar row is loaded (a deep link, Spotlight or a tag filter can open a
+ * session the list does not hold).
+ */
+const _latest = new Map<string, Revision | null>();
 
 export const proseQuestionSessions = {
 	get current() { return _store.current; },
 	subscribe: _store.subscribe
 };
 
-/** Epoch ms of a row timestamp; null for null/absent, undefined when unparsable. */
-function toMillis(value: unknown): number | null | undefined {
+const ISO_PARTS = /^(.*T\d{2}:\d{2}:\d{2})(?:[.,](\d+))?(Z|[+-]\d{2}(?::?\d{2})?)?$/i;
+
+/** Parse a row timestamp; null for null/absent, undefined when unparsable. */
+function toRevision(value: unknown): Revision | null | undefined {
 	if (value === null || value === undefined) return null;
 	if (typeof value !== 'string' || !value) return undefined;
+	const m = ISO_PARTS.exec(value.trim());
+	if (m) {
+		const s = Date.parse(m[1] + (m[3] ?? ''));
+		if (Number.isNaN(s)) return undefined;
+		return { s, f: (m[2] ?? '').slice(0, 9).padEnd(9, '0') };
+	}
 	const ms = Date.parse(value);
-	return Number.isNaN(ms) ? undefined : ms;
+	if (Number.isNaN(ms)) return undefined;
+	const whole = Math.floor(ms / 1000) * 1000;
+	return { s: whole, f: String(ms - whole).padStart(3, '0').padEnd(9, '0') };
+}
+
+/** a > b for revisions, where null (nothing stamped) precedes every instant. */
+function isLater(a: Revision | null, b: Revision | null): boolean {
+	if (a === null) return false;
+	if (b === null) return true;
+	return a.s !== b.s ? a.s > b.s : a.f > b.f;
+}
+
+/** The later of two observations; undefined only when neither is known. */
+function later(a: Revision | null | undefined, b: Revision | null | undefined): Revision | null | undefined {
+	if (a === undefined) return b;
+	if (b === undefined) return a;
+	return isLater(b, a) ? b : a;
 }
 
 function drop(sessionId: string): void {
@@ -67,7 +117,8 @@ function drop(sessionId: string): void {
  * Record (or clear) the prose question of a session the switcher leaves, from
  * its loaded transcript. `lastUserMessageAt` is the session row's
  * `last_user_message_at` at this moment: null when none is stamped, undefined
- * when the row is not loaded here.
+ * when the row is not loaded here. The latest revision seen for the session
+ * while it was open counts too, whichever is later.
  */
 export function rememberLeavingProseQuestion(
 	sessionId: string | null,
@@ -80,11 +131,28 @@ export function rememberLeavingProseQuestion(
 		drop(sessionId);
 		return;
 	}
-	_observed.set(sessionId, lastUserMessageAt === undefined ? undefined : toMillis(lastUserMessageAt));
+	const fromRow = lastUserMessageAt === undefined ? undefined : toRevision(lastUserMessageAt);
+	_observed.set(sessionId, later(fromRow, _latest.get(sessionId)));
 	if (_store.current.has(sessionId)) return;
 	const next = new Set(_store.current);
 	next.add(sessionId);
 	_store.set(next);
+}
+
+/**
+ * The open session's own `last_user_message_at`, read from its detail when no
+ * sidebar row carries it. Keeps the later of this and what was seen before.
+ */
+export function noteUserMessageRevision(sessionId: string | null | undefined, lastUserMessageAt: unknown): void {
+	if (!sessionId) return;
+	const seen = toRevision(lastUserMessageAt);
+	if (seen === undefined) return;
+	const merged = later(_latest.get(sessionId), seen) as Revision | null;
+	_latest.set(sessionId, merged);
+	// A remembered entry with no baseline yet: this is the best one known.
+	if (_observed.has(sessionId) && _observed.get(sessionId) === undefined) {
+		_observed.set(sessionId, merged);
+	}
 }
 
 /**
@@ -94,16 +162,18 @@ export function rememberLeavingProseQuestion(
  * the update actually carries the field.
  */
 export function observeLastUserMessage(sessionId: string | null | undefined, lastUserMessageAt: unknown): void {
-	if (!sessionId || !_observed.has(sessionId)) return;
-	const seen = toMillis(lastUserMessageAt);
+	if (!sessionId) return;
+	const seen = toRevision(lastUserMessageAt);
 	if (seen === undefined) return;
+	_latest.set(sessionId, later(_latest.get(sessionId), seen) as Revision | null);
+	if (!_observed.has(sessionId)) return;
 	const baseline = _observed.get(sessionId);
 	if (baseline === undefined) {
-		// First sight of a row that was not loaded at leave time.
+		// Nothing was known when the switcher left: this value is the baseline.
 		_observed.set(sessionId, seen);
 		return;
 	}
-	if (seen !== null && (baseline === null || seen > baseline)) drop(sessionId);
+	if (isLater(seen, baseline)) drop(sessionId);
 }
 
 /** Apply `observeLastUserMessage` to loaded session rows that carry the field. */
@@ -119,11 +189,13 @@ export function observeSessionRows(rows: readonly { id: string; last_user_messag
 /** Drop a session's entry (the session was deleted). */
 export function forgetProseQuestion(sessionId: string): void {
 	drop(sessionId);
+	_latest.delete(sessionId);
 }
 
 /** Test seam: forget everything. */
 export function _resetProseQuestions(): void {
 	_observed.clear();
+	_latest.clear();
 	_store.set(new Set());
 }
 

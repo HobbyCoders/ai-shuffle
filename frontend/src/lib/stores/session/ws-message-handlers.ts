@@ -182,8 +182,8 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'work_started_at',
 	// A context-window pick made on another tab or device (#1895).
 	'context_window',
-	// A user message was persisted (any device): clears a remembered prose
-	// question (spec §5) without a list reload.
+	// A user message was persisted (any device): patched at once so a
+	// remembered prose question clears (spec §5); see STALE_COMPANION_FIELDS.
 	'last_user_message_at',
 ]);
 
@@ -193,6 +193,14 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
  * authoritative reload still has to follow — debounced.
  */
 const LIST_SHAPE_FIELDS: ReadonlySet<string> = new Set(['hidden', 'tags', 'project_id']);
+
+/**
+ * Fields the server changes together with others the frame does not carry, so
+ * the row patch lands at once and a debounced reload still follows to catch
+ * the rest. Recording a user message also bumps `updated_at`, which orders the
+ * sidebar and drives the card's last activity (#2249).
+ */
+const STALE_COMPANION_FIELDS: ReadonlySet<string> = new Set(['last_user_message_at']);
 
 // ─── Factory ─────────────────────────────────────────────────────────────────
 
@@ -234,7 +242,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	/**
 	 * Merge a metadata-update payload into the sidebar row instead of refetching
 	 * the world (W1). Schedules a debounced reload only when the row is unknown
-	 * locally or the change reshapes the list server-side.
+	 * locally, the change reshapes the list server-side, or the server changed
+	 * fields the frame does not carry (STALE_COMPANION_FIELDS).
 	 */
 	function applyRowUpdates(sessionId: string | undefined, updates: Record<string, unknown>): void {
 		const keys = Object.keys(updates);
@@ -245,7 +254,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 		for (const key of keys) {
 			if (ROW_PATCHABLE_FIELDS.has(key)) patch[key] = updates[key];
 			else needsReload = true;
-			if (LIST_SHAPE_FIELDS.has(key)) needsReload = true;
+			if (LIST_SHAPE_FIELDS.has(key) || STALE_COMPANION_FIELDS.has(key)) needsReload = true;
 		}
 		const patched =
 			!!sessionId && Object.keys(patch).length > 0 && mergeSessionPatch(sessionId, patch);

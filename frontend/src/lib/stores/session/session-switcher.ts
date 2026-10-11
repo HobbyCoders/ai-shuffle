@@ -22,7 +22,7 @@ import { openHeaderDropdown } from '../header-dropdowns';
 import { getPersistedDeviceIntent } from '../worker-selection';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
-import { rememberLeavingProseQuestion } from './prose-questions';
+import { noteUserMessageRevision, rememberLeavingProseQuestion } from './prose-questions';
 import { archivedChats } from '../archived-chats';
 import { subagentChats } from '../subagent-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
@@ -743,6 +743,30 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// flag, tasks and usage, but NOT the lifecycle metadata. Fetch it once from
 		// /live so worktree/cloud fields are correct on switch-in.
 		void applyMetadataSnapshot(sessionId, generation);
+		void seedUserMessageRevision(sessionId);
+	}
+
+	/**
+	 * A session opened without a sidebar row carrying `last_user_message_at`
+	 * (a deep link, Spotlight, or a row outside the loaded or filtered page)
+	 * reads it from its own detail, so leaving it with an unanswered prose
+	 * question records a baseline and a later answer from elsewhere clears it
+	 * (#2249). Issued after `/live`, and only when the row can't answer.
+	 */
+	async function seedUserMessageRevision(sessionId: string) {
+		const row = appData.current.sessions.find((s) => s.id === sessionId);
+		if (row && 'last_user_message_at' in row) return;
+		let detail: { last_user_message_at?: string | null } | null;
+		try {
+			detail = await api.get<{ last_user_message_at?: string | null }>(
+				`/sessions/${encodeURIComponent(sessionId)}?message_limit=1`
+			);
+		} catch {
+			return;
+		}
+		if (detail && 'last_user_message_at' in detail) {
+			noteUserMessageRevision(sessionId, detail.last_user_message_at);
+		}
 	}
 
 	/**
