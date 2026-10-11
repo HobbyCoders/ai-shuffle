@@ -141,7 +141,7 @@ class FetchModelsResponse(BaseModel):
     hits its OpenAI-compatible ``/models`` URL. ``"preset"`` is retained only
     so older clients still parse the field. The UI check-selects from
     ``models`` and PATCHes the curated subset via the normal update route —
-    this endpoint never persists anything.
+    discovery also backfills missing windows on already-curated entries.
 
     ``models`` carries TEXT-generation models only. Audio, voice, image and
     video endpoints are split into ``hidden`` (each entry keeps its shape, plus
@@ -417,6 +417,33 @@ def _upstream_context_length(entry: Dict[str, Any]) -> Optional[int]:
         if window > 0:
             return window
     return None
+
+
+def _with_context_windows(
+    row: Dict[str, Any],
+    models: Optional[List[Dict[str, Any]]],
+    catalog: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """Fill missing model bounds, never replacing a curated value or saving a
+    row-wide fallback as if it were model-specific evidence. Presets precede
+    fresh upstream evidence; unknown models remain unknown.
+    """
+    fresh = {entry["id"]: entry for entry in catalog or []}
+    kind = model_catalog_presets.preset_kind_for(row)
+    result = []
+    for entry in models or []:
+        if isinstance(entry, str):
+            entry = {"id": entry, "label": entry}
+        updated = dict(entry)
+        if _upstream_context_length(entry) is None:
+            window = (
+                model_catalog_presets.preset_context_window(kind, entry.get("id"))
+                or _upstream_context_length(fresh.get(entry.get("id"), {}))
+            )
+            if window is not None:
+                updated["context_window"] = window
+        result.append(updated)
+    return result
 
 
 def _parse_models_response(
@@ -796,7 +823,10 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
         base_url=base_url,
         api_dialect=body.api_dialect,
         auth_token=encrypted_token,
-        models=model_modality.split_media_models(body.models)[0],
+        models=_with_context_windows(
+            {"provider_type": body.provider_type},
+            model_modality.split_media_models(body.models)[0],
+        ),
         default_model=body.default_model,
         small_fast_model=body.small_fast_model,
         extra_env=body.extra_env,
@@ -846,7 +876,10 @@ async def update_provider(
         # Sanitize on write, not just on display: four provider flows persist the
         # whole fetched roster with no user picking, so an unfiltered write is
         # how media ids got into models_json in the first place.
-        updates["models_json"], _ = model_modality.split_media_models(body.models)
+        models, _ = model_modality.split_media_models(body.models)
+        updates["models_json"] = _with_context_windows(
+            {**existing, **updates}, models,
+        )
     if body.default_model is not None:
         updates["default_model"] = body.default_model
     if body.small_fast_model is not None:
@@ -980,7 +1013,9 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
         try:
             # Reuse the existing catalog/auth clients, without altering curation.
             async with _capability_semaphore:
-                response = await asyncio.wait_for(fetch_models(provider_id, token=""), timeout=_FETCH_TIMEOUT + 5)
+                response = await asyncio.wait_for(
+                    _fetch_models(provider_id, backfill_context=False), timeout=_FETCH_TIMEOUT + 5,
+                )
             fresh = {m["id"]: m for m in response.models}
             # Re-read after network I/O: preserve edits made while awaiting upstream.
             current = await run_sync(db.get_model_provider, provider_id)
@@ -1004,6 +1039,7 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
                 elif existing is not None:
                     updated["reasoning_capabilities"] = existing
                 merged.append(updated)
+            merged = _with_context_windows(current, merged, response.models)
             changed = merged != (current.get("models_json") or [])
             if changed:
                 saved = await run_sync(db.update_model_provider, provider_id,
@@ -1067,6 +1103,10 @@ async def _record_credential_check(
 
 @router.post("/{provider_id}/fetch-models", response_model=FetchModelsResponse)
 async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
+    return await _fetch_models(provider_id)
+
+
+async def _fetch_models(provider_id: str, *, backfill_context: bool = True):
     """Fetch a provider's live model catalog for the curation UI.
 
     Every provider is pulled from upstream on this call (Refresh models):
@@ -1077,9 +1117,9 @@ async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
       * OpenAI / xAI API key / OpenRouter / custom → ``GET`` the
         OpenAI-compatible ``/models`` URL with the decrypted API key.
 
-    This route RETURNS the list only — the admin check-selects and persists the
-    curated subset through the existing ``PATCH /{id}`` update route. There is no
-    second write path here.
+    Curation still belongs to ``PATCH /{id}``. Refresh only fills missing
+    context windows on already-curated entries, guarded against concurrent edits.
+    Capability hydration folds that repair into its own revision-guarded write.
     """
     row = await run_sync(db.get_model_provider, provider_id, include_token=True)
     if row is None:
@@ -1121,6 +1161,15 @@ async def fetch_models(provider_id: str, token: str = Depends(require_admin)):
     # helper is a wire-shape parser with its own unit tests, and curation is a
     # separate concern.
     models, media = model_modality.split_media_models(models)
+    models = _with_context_windows(row, models)
+    if backfill_context:
+        stored = row.get("models_json") or []
+        merged = _with_context_windows(row, stored, models)
+        if merged != stored:
+            await run_sync(
+                db.update_model_provider, provider_id, models_json=merged,
+                expected_revision=row.get("revision"),
+            )
     hidden = [
         {**entry, "media_kind": model_modality.media_kind(entry.get("id"))}
         for entry in media
