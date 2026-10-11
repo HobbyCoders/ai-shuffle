@@ -1,6 +1,7 @@
 """Write-only OpenAI Admin API configuration. Browser billing is retired."""
 
 import asyncio
+import time
 from functools import lru_cache
 from urllib.parse import urlsplit
 
@@ -13,6 +14,7 @@ from app.core.config import settings
 from app.core.provider_usage import _is_openai_platform_row
 from app.db import database as db
 from app.db.async_database import run_sync
+from app.db.analytics import get_manual_balance_credits
 
 router = APIRouter()
 
@@ -20,6 +22,10 @@ router = APIRouter()
 @lru_cache(maxsize=None)
 def operation_lock(provider_id):
     return asyncio.Lock()
+
+
+class ManualBalanceConfig(BaseModel):
+    balance_usd: float = Field(ge=0, le=1_000_000_000, allow_inf_nan=False)
 
 
 class AdminUsageConfig(BaseModel):
@@ -53,6 +59,7 @@ async def _status(row):
     configured = bool(row.get("openai_admin_key"))
     return {
         "configured": configured,
+        "manual_balance": await run_sync(get_manual_balance_credits, row),
         "organization_id": row.get("openai_billing_org_id") if configured else None,
         "source": "OpenAI organization Admin API",
         "scope": "Organization spend; completions token/request usage; current month (UTC)",
@@ -72,6 +79,31 @@ async def close_provider_billing(provider_id, *, local_only=False):
 @router.get("/{provider_id}/openai-usage")
 async def usage_status(provider_id: str, _: None = Depends(require_admin)):
     return await _status(await _provider(provider_id))
+
+
+@router.put("/{provider_id}/openai-usage/balance")
+async def set_manual_balance(provider_id: str, body: ManualBalanceConfig, _: None = Depends(require_admin)):
+    async with operation_lock(provider_id):
+        row = await _provider(provider_id)
+        saved = await run_sync(db.update_model_provider, provider_id,
+                               expected_revision=row.get("revision"),
+                               manual_balance_usd=round(body.balance_usd, 2),
+                               manual_balance_set_at=int(time.time() * 1000))
+        if saved is None:
+            raise HTTPException(409, "Provider changed while saving balance")
+        return await _status(await _provider(provider_id))
+
+
+@router.delete("/{provider_id}/openai-usage/balance")
+async def clear_manual_balance(provider_id: str, _: None = Depends(require_admin)):
+    async with operation_lock(provider_id):
+        row = await _provider(provider_id)
+        saved = await run_sync(db.update_model_provider, provider_id,
+                               expected_revision=row.get("revision"),
+                               manual_balance_usd=None, manual_balance_set_at=None)
+        if saved is None:
+            raise HTTPException(409, "Provider changed while clearing balance")
+        return await _status(await _provider(provider_id))
 
 
 @router.put("/{provider_id}/openai-usage")

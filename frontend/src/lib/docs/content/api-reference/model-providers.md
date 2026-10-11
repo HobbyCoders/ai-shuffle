@@ -336,6 +336,32 @@ curl -X PUT http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a61
 
 **Errors:** `404` provider not found. `409` on PUT when the provider is disabled, and on DELETE when the key was saved by a different server instance. `503` on PUT when secret storage is locked, or when the key was saved but polling could not resume yet (the detail says what to do; then save again).
 
+### Entered OpenAI prepaid balance
+
+An official OpenAI API key with neither Admin usage nor an entered balance is
+omitted from the usage popover. In Settings > Providers > the key > Usage,
+enter the current balance in USD (two decimals) and Save; Clear removes only
+this estimate. Open billing links to the actual provider balance.
+
+Owner-only `PUT /api/v1/model-providers/{provider_id}/openai-usage/balance`
+accepts `{"balance_usd": 20.50}` (finite, 0–1,000,000,000 USD). The server rounds
+to cents and records the current millisecond timestamp. `DELETE` at the same
+path clears it; neither operation changes the inference or Admin key.
+The existing `GET .../openai-usage` response also includes `manual_balance`:
+`balance_remaining`, `manual_balance`, `estimated_spend`, `set_at` (epoch ms),
+and `unpriced_turns`, or null when not set.
+
+The popover shows **~$N left (estimated)**, not a provider reading. The app
+subtracts Analytics' recorded `usage_log.cost_usd` for the exact provider ID
+since Save. Reported and guessed token counts use the existing pricing path;
+unpriced turns, unattributed calls and spending outside this app are omitted.
+Prices and booking times may differ from billing; an in-flight turn booked
+after Save is deducted in full. Top-ups/refunds are not detected, and the
+estimate can go negative. Save again to reset the baseline. Baselines sync
+with providers; each worker uses only its available usage ledger. If Admin
+usage is available, its organization spend stays primary with the manual
+estimate alongside it.
+
 ### OpenRouter usage key
 
 For an official OpenRouter provider only: `provider_type` `openrouter` with `base_url` on `https://openrouter.ai`. Other providers get `400` on GET and PUT. The key is an OpenRouter management key; the reading is the account credit balance in USD.

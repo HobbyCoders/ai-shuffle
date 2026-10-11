@@ -626,7 +626,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		// No guidance to act on: the credits line says what is known, and the
 		// meta line only says when it was checked.
 		expect(container.querySelector('.provider-status')).toBeNull();
-		expect(container.querySelector('.usage-credits')?.textContent).toBe(cached ? '$12.34 left' : 'Credit balance not available for this key');
+		expect(container.querySelector('.usage-credits')?.textContent).toBe(cached ? '$12.34 left' : undefined);
 		expect(container.querySelector('.usage-meta-text')?.textContent).toMatch(/^(Checked |Not checked yet$)/);
 		expect(container.textContent).not.toMatch(/Last known|Last reported|Refresh pending|Refresh timed out|Usage unavailable/);
 		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
@@ -639,7 +639,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 			expect(container.textContent).not.toContain('$0.00');
 		}
 		await fireEvent.click(getByRole('button', { name: 'OpenAI usage — collapse' }));
-		expect(container.querySelector('.sec-summary')?.textContent).toBe(cached ? '$12.34 left' : 'Balance unavailable');
+		expect(container.querySelector('.sec-summary')?.textContent).toBe(cached ? '$12.34 left' : '—');
 	});
 
 	it.each(['stale', 'unavailable', 'never_fetched'] as const)('preserves sign-in guidance for %s credentials', async (status) => {
@@ -671,6 +671,33 @@ describe('ContextUsageBar — provider refresh status', () => {
 		expect(container.textContent).not.toContain('extra credits');
 	});
 
+	it.each([12.34, 0, -2.5])('labels an entered OpenAI balance of %s as estimated with spend details', async (balance) => {
+		rateLimit.applySnapshot({ windows: [], available: true, providers: [
+			{ provider_id: 'api', provider_type: 'openai', provider_name: 'OpenAI', status: 'fresh',
+				credits: { balance_remaining: balance, manual_balance: 20, estimated_spend: 20 - balance, set_at: 1750000000000 } },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain(`~$${balance.toFixed(2)} left (estimated)`);
+		await fireEvent.click(container.querySelector('[aria-label="OpenAI usage — collapse"]')!);
+		const headline = container.querySelector('.sec-summary');
+		expect(headline?.textContent).toBe(`~$${balance.toFixed(2)} left (estimated)`);
+		expect(headline?.getAttribute('title')).toContain(`~$${(20 - balance).toFixed(2)} estimated spend since`);
+		expect(headline?.getAttribute('title')).toContain('Spending outside this app');
+	});
+
+	it('preserves the Admin reading alongside the entered balance estimate', async () => {
+		rateLimit.applySnapshot({ windows: [], available: true, providers: [
+			{ provider_id: 'api', provider_type: 'openai', status: 'fresh',
+				credits: { spend_month: 5, balance_remaining: 12, manual_balance: 20, estimated_spend: 8, set_at: 1750000000000 } },
+		] });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		expect(container.textContent).toContain('~$12.00 left (estimated)');
+		await fireEvent.click(container.querySelector('[aria-label="OpenAI usage — collapse"]')!);
+		expect(container.querySelector('.sec-summary')?.textContent).toBe('$5.00 spent this month');
+	});
+
 	it('labels official organization costs as spend rather than credit remaining', async () => {
 		rateLimit.applySnapshot({ windows: [], available: true, providers: [
 			{ provider_id: 'admin-api', provider_type: 'openai', provider_name: 'OpenAI', status: 'fresh',
@@ -694,7 +721,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		// No billing access can expose an API key's prepaid balance, so a key
 		// without one is not asked for it.
 		expect(container.querySelector('.provider-status')?.textContent ?? null).toBe(status === 'stale' ? 'Billing access required' : null);
-		expect(container.querySelector('.usage-credits')?.textContent).toBe(status === 'stale' ? '$12.34 left' : 'Credit balance not available for this key');
+		expect(container.querySelector('.usage-credits')?.textContent).toBe(status === 'stale' ? '$12.34 left' : undefined);
 		expect(container.textContent).not.toContain('Last known usage');
 		expect(container.textContent).not.toContain('Sign in');
 		expect(container.textContent).not.toContain('$0.00');
@@ -728,7 +755,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		] });
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		expect(container.textContent).toContain('Credit balance not available for this key');
+		expect(container.textContent).not.toContain('Credit balance not available for this key');
 		expect(container.textContent).not.toContain('Sign in');
 		expect(container.textContent).toContain('Balance unavailable for this key');
 		expect(container.querySelector('a[href*="platform.openai.com/settings/organization/billing"]')).toBeNull();
@@ -755,7 +782,7 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await openPopover(container);
 		expect(container.textContent).toContain('$12.34');
 		expect(container.textContent).not.toMatch(/Last known usage|Refresh timed out/);
-		expect(container.textContent).toContain('Credit balance not available for this key');
+		expect(container.textContent).not.toContain('Credit balance not available for this key');
 		expect(container.textContent).not.toContain('$0.00');
 	});
 });

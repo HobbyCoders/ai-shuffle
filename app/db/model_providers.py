@@ -66,6 +66,8 @@ class ModelProviderRow(TypedDict, total=False):
     codex_id_token_expires_at: Optional[str]
     codex_last_refresh: Optional[str]
     needs_reauth: bool
+    manual_balance_usd: Optional[float]
+    manual_balance_set_at: Optional[int]
     openai_billing_org_id: Optional[str]
     openai_billing_instance_id: Optional[str]
     created_at: str
@@ -84,6 +86,7 @@ _PUBLIC_COLUMNS = (
     "max_output_tokens, enabled, auth_mode, codex_account_id, "
     "codex_id_token_expires_at, codex_last_refresh, needs_reauth, "
     "openai_billing_org_id, openai_billing_instance_id, "
+    "manual_balance_usd, manual_balance_set_at, "
     "created_at, updated_at, revision"
 )
 
@@ -119,6 +122,8 @@ _UPDATABLE_COLUMNS = (
     "codex_id_token_expires_at",
     "codex_last_refresh",
     "needs_reauth",
+    "manual_balance_usd",
+    "manual_balance_set_at",
 )
 
 
