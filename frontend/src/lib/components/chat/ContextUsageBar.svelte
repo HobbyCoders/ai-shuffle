@@ -613,9 +613,6 @@
 	function creditsLine(pb: ProviderUsageBucket): string | null {
 		const text = creditsSummary(pb.credits, pb.providerType);
 		if (text) return text;
-		// No source can read an OpenAI API prepaid balance: the Admin API reports
-		// spend only, and the billing endpoints refuse API and Admin keys.
-		if (pb.providerType === 'openai') return 'Credit balance not available for this key';
 		if (pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal') return 'Balance unavailable for this key';
 		return null;
 	}
@@ -1004,14 +1001,14 @@
 		     it outranks the window pct (which an OpenRouter key-spend limit
 		     would otherwise produce). -->
 		{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
-			<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
+			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined} use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
 		{:else if pbSummary}
 			<span class="row-pct {pbSummary.severity} sec-summary"
 				use:usageNumber={{ key: `${resolvedKey}:${sectionId}:summary`, text: `${pbSummary.pct}%${suffix}` }}></span>
 		{:else if pbCreditsShort && pb.providerType !== 'chatgpt'}
 			<!-- ChatGPT extra credits live in the expanded rows only. -->
-			<span class="sec-summary sec-credits" use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
-		{:else if pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal' || pb.providerType === 'openai'}
+			<span class="sec-summary sec-credits" title={creditsSummary(pb.credits, pb.providerType) ?? undefined} use:usageNumber={{ key: `${resolvedKey}:${sectionId}:credits-short`, text: pbCreditsShort }}></span>
+		{:else if pb.providerType?.startsWith('openrouter') || pb.providerType === 'fal'}
 			<span class="sec-summary sec-credits">Balance unavailable</span>
 		{:else}
 			<span class="sec-summary sec-credits sec-empty">—</span>

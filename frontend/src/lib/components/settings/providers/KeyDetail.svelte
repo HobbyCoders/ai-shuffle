@@ -60,9 +60,7 @@
 	const balance = $derived(
 		openRouter && credits?.credits
 			? `$${credits.credits.balance_remaining.toFixed(2)}`
-			: openAI
-				? 'Not available for this key'
-				: null
+			: null
 	);
 
 	const facts = $derived(
@@ -203,7 +201,7 @@
 		{#if tab === 'Models'}
 			{#key row.id}<ModelCuration {row} />{/key}
 		{:else if tab === 'Usage'}
-			<KeyUsage {credits} {openRouter} {openAI} />
+			{#key row.id}<KeyUsage providerId={row.id} {credits} {openRouter} {openAI} />{/key}
 		{:else}
 			<RowGroup title="Connection" id="providers-connection">
 				<SettingRow label="Name">

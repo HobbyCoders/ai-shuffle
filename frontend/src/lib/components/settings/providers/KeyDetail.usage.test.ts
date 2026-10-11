@@ -1,7 +1,7 @@
 /**
  * An API key's Usage tab. Ported from OpenRouterCredits.test.ts and
  * OpenAICredits.test.ts: OpenRouter reads credits with the saved key (no
- * separate key, legacy management keys kept); OpenAI has no readable balance
+ * separate key, legacy management keys kept); OpenAI tracks an entered balance
  * and points at Platform billing; neither asks for another key.
  */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
@@ -56,7 +56,8 @@ async function usageOf(item: string) {
 function start(configured = false) {
 	worker = fakeWorker(
 		{ rows: [router, row()] },
-		{ 'GET /model-providers/:id/openrouter-usage': () => credits(configured) }
+		{ 'GET /model-providers/:id/openrouter-usage': () => credits(configured),
+			'GET /model-providers/:id/openai-usage': () => ({ configured: false, manual_balance: null }) }
 	);
 	vi.stubGlobal('fetch', worker.fetch);
 }
@@ -96,9 +97,11 @@ it.each([false, true])(
 	}
 );
 
-it('OpenAI: explains the missing API balance without asking for another key', async () => {
+it('OpenAI: offers an entered balance without asking for another key', async () => {
 	const panel = await usageOf('mp:p1');
-	expect(within(panel).getByText('Not available for this key')).toBeTruthy();
+	expect(within(panel).getByRole('textbox', { name: 'Current balance (USD)' })).toBeTruthy();
+	expect(within(panel).getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
+	expect(worker.sent('GET', '/model-providers/p1/openai-usage')).toHaveLength(1);
 	await fireEvent.click(within(panel).getByRole('button', { name: 'About Balance' }));
 	const tip = screen.getByRole('tooltip').textContent ?? '';
 	expect(tip).toMatch(/does not expose a prepaid balance through the model API key/);
@@ -108,9 +111,45 @@ it('OpenAI: explains the missing API balance without asking for another key', as
 	expect(billing.getAttribute('href')).toBe('https://platform.openai.com/settings/organization/billing/overview');
 	expect(billing.getAttribute('target')).toBe('_blank');
 	expect(billing.getAttribute('rel')).toContain('noopener');
-	expect(panel.querySelector('input, form')).toBeNull();
-	expect(worker.calls.filter((c) => /openai-usage|openrouter-usage/.test(c.path))).toEqual([]);
-	expect(screen.getByText('Not available for this key', { selector: 'dd' })).toBeTruthy();
+	expect(worker.sent('GET', '/model-providers/p1/openai-usage')).toHaveLength(1);
+	expect(within(panel).queryByText('Not available for this key')).toBeNull();
+	expect(panel.textContent).toContain("this worker's estimated spend only");
+	expect(panel.textContent).toContain("Paired workers' spend is not included");
+});
+
+it('OpenAI: saves, reloads and clears a two-decimal balance, including zero', async () => {
+	let manual: Record<string, number> | null = null;
+	worker = fakeWorker({ rows: [row()] }, {
+		'GET /model-providers/:id/openai-usage': () => ({ configured: false, manual_balance: manual }),
+		'PUT /model-providers/:id/openai-usage/balance': (body) => {
+			const balance = (body as { balance_usd: number }).balance_usd;
+			manual = { manual_balance: balance, balance_remaining: balance - 1.25, estimated_spend: 1.25, set_at: 1750000000000, unpriced_turns: 0 };
+			return { configured: false, manual_balance: manual };
+		},
+		'DELETE /model-providers/:id/openai-usage/balance': () => { manual = null; return {}; }
+	});
+	vi.stubGlobal('fetch', worker.fetch);
+	const panel = await usageOf('mp:p1');
+	const input = within(panel).getByRole('textbox', { name: 'Current balance (USD)' });
+	const save = within(panel).getByRole('button', { name: 'Save' });
+	for (const invalid of ['-1', 'NaN', '1.234']) {
+		await fireEvent.input(input, { target: { value: invalid } });
+		expect(save.hasAttribute('disabled')).toBe(true);
+	}
+	for (const amount of ['20.50', '0']) {
+		await fireEvent.input(input, { target: { value: amount } });
+
+		await fireEvent.click(save);
+		await flush();
+		expect(worker.sent('PUT', '/model-providers/p1/openai-usage/balance').at(-1)?.body).toEqual({ balance_usd: Number(amount) });
+		expect(panel.textContent).toContain("Only this worker's tracked spend is deducted; paired workers' spend");
+		expect(within(panel).getByText(/Tracked by this worker's cost estimates since/).textContent).toContain('~$1.25 estimated spend so far');
+	}
+	await fireEvent.click(within(panel).getByRole('button', { name: 'Clear' }));
+	await flush();
+	expect(worker.sent('DELETE', '/model-providers/p1/openai-usage/balance')).toHaveLength(1);
+	expect((input as HTMLInputElement).value).toBe('');
+	expect(within(panel).queryByText(/Tracked by this worker/)).toBeNull();
 });
 
 it('a gateway has no Usage tab', async () => {

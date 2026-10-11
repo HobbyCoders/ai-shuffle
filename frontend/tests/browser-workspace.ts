@@ -297,7 +297,7 @@ if (providerLogin) {
 	// Settings > Providers > OpenAI API key > Usage, for a key with no readable balance.
 	mount(KeyUsage, {
 		target: document.getElementById('app')!,
-		props: { credits: null, openRouter: false, openAI: true },
+		props: { providerId: 'fixture-openai', credits: null, openRouter: false, openAI: true },
 	});
 } else {
 	browserPanel.openPanel(activeSession.current.sessionId);

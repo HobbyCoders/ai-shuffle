@@ -300,8 +300,9 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
                 fetched_at = row.get("fetched_at")
                 if ptype == "openai":
                     if raw.get("source") != "openai_admin":
-                        credits = None
-                        error = error or "missing_credentials"
+                        # Rate-limit/header and retired billing snapshots are not
+                        # balances. A local estimate is attached below, if set.
+                        continue
                     if not _credits_are_displayable(credits) and error is None:
                         continue
                     fetched_at = raw.get("billing_fetched_at", fetched_at if _credits_are_displayable(credits) else None)
@@ -357,19 +358,35 @@ async def _load_provider_usage() -> list[ProviderUsageEntry] | None:
             except Exception:  # noqa: BLE001 — one unreadable row never hides the others
                 logger.debug("provider usage row %s skipped", row.get("provider_id"), exc_info=True)
 
-        seen = {entry.provider_id for entry in entries}
+        from app.db.analytics import get_manual_balance_credits
+
+        by_id = {entry.provider_id: entry for entry in entries}
         for provider in providers:
-            if (provider["id"] not in seen and provider.get("enabled", True)
-                    and usage_sources.is_openai_platform_row(provider)
-                    and provider.get("auth_mode") != "chatgpt"):
-                source_def = usage_sources.source_for_snapshot("openai")
+            if (not provider.get("enabled", True)
+                    or not usage_sources.is_openai_platform_row(provider)
+                    or provider.get("auth_mode") in {"codex", "chatgpt"}):
+                continue
+            manual = await run_sync(get_manual_balance_credits, provider)
+            existing = by_id.get(provider["id"])
+            if existing is not None:
+                if manual is not None:
+                    existing.credits = {**manual, **(existing.credits or {})}
+                continue
+            if manual is not None:
+                source_def = usage_sources.SOURCES["openai_manual"]
+                entries.append(ProviderUsageEntry(
+                    provider_id=provider["id"], provider_name=provider.get("name"),
+                    provider_type="openai", status="fresh", credits=manual,
+                    fetched_at=int(now_ms), source=source_def.label,
+                    scope=source_def.scope_label, source_info=_source_info(source_def),
+                ))
+            elif provider.get("openai_billing_org_id"):
+                source_def = usage_sources.SOURCES["openai_admin"]
                 entries.append(ProviderUsageEntry(
                     provider_id=provider["id"], provider_name=provider.get("name"),
                     provider_type="openai", status="unavailable",
-                    source=source_def.label if source_def else None,
-                    scope=source_def.scope_label if source_def else None,
-                    source_info=_source_info(source_def),
-                    last_error_kind="unsupported",
+                    source=source_def.label, scope=source_def.scope_label,
+                    source_info=_source_info(source_def), last_error_kind="unsupported",
                 ))
         return entries
     except Exception:

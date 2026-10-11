@@ -20,6 +20,13 @@ describe('remaining provider credits', () => {
   expect(creditText({ balance_remaining: 0 }, 'fal')?.short).toBe('$0.00 left');
   expect(creditText({ balance_remaining: -2 }, 'openrouter_account')?.short).toBe('$-2.00 left');
  });
+ it.each([0, 2.25])('scopes entered balance deductions to this worker even with %s spend', spent => {
+  const result = creditText({ manual_balance: 20.5, balance_remaining: 20.5 - spent, estimated_spend: spent, set_at: 1750000000000 }, 'openai');
+  expect(result?.short).toBe(`~$${(20.5 - spent).toFixed(2)} left (estimated)`);
+  expect(result?.detail).toContain('estimated spend on this worker since');
+  expect(result?.detail).toContain("paired workers' spend");
+  expect(result?.detail).toContain('are not included');
+ });
  it('never headlines organization costs as balance', () => {
   expect(creditText({ spend_month: 12 }, 'openai')).toEqual({ short: 'Balance unavailable', detail: '$12.00 organization spend this month (UTC); balance unavailable' });
  });

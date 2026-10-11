@@ -74,7 +74,7 @@ def test_every_source_has_a_complete_capability_definition():
         assert source.scope in {"api_key", "project", "organization", "account", "subscription"}
         assert source.measure in usage_sources.MEASURE_LABELS
         assert source.support in usage_sources.SUPPORT_LABELS
-        assert source.collection in {usage_sources.PASSIVE, usage_sources.POLLED}
+        assert source.collection in {usage_sources.PASSIVE, usage_sources.POLLED, usage_sources.LOCAL_ESTIMATE}
         assert source.credential and source.failure_policy and source.scope_label
         if source.collection == usage_sources.POLLED:
             assert source.endpoints and all(e.min_interval >= 300 for e in source.endpoints)

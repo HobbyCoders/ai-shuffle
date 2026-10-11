@@ -1249,6 +1249,8 @@ def _run_column_migrations(cursor):
             ("codex_refresh_lease_owner", "TEXT"),
             ("codex_refresh_lease_expires_at", "TIMESTAMP WITH TIME ZONE"),
             ("openai_admin_key", "TEXT"),
+            ("manual_balance_usd", "DOUBLE PRECISION"),
+            ("manual_balance_set_at", "BIGINT"),
             ("openai_billing_org_id", "TEXT"),
             ("openai_billing_instance_id", "TEXT"),
         )
