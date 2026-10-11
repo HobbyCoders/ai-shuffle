@@ -275,7 +275,7 @@
 			outputTokens: $activeSession.totalTokensOut ?? 0,
 			cacheCreationTokens: $activeSession.totalCacheCreationTokens ?? 0,
 			cacheReadTokens: $activeSession.totalCacheReadTokens ?? 0,
-			contextMax: contextWindow.window,
+			contextMax: contextWindow.window ?? 0,
 		})
 	);
 	const displayBreakdown = $derived<ContextBreakdown>(

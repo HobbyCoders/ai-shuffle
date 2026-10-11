@@ -14,6 +14,8 @@ import { installMobileShell } from '../src/shell/register';
  *   ?view=assistant the assistant's own chat
  *   ?turn=idle      no turn running (Runs on moves now instead of queueing)
  *   ?prompt=question|access|none  what waits above the composer
+ *   ?bound=unknown|server  an xAI model with no advertised context window, and
+ *                   its context report with no bound / a server-resolved one (#2274)
  */
 installMobileShell();
 
@@ -21,6 +23,23 @@ const params = new URLSearchParams(location.search);
 const assistant = params.get('view') === 'assistant';
 const turn = params.get('turn') ?? 'running';
 const promptKind = params.get('prompt') ?? 'permission';
+const bound = params.get('bound');
+const GROK = 'x-ai/grok-unlisted';
+const serverMax = bound === 'server' ? 131_072 : null;
+const registry = {
+	models: [{ value: 'opus', label: 'Opus', family: 'opus', context_window: 1_000_000 }],
+	default: 'opus',
+	legacy_map: {},
+	providers: [{ id: 'xai', name: 'xAI', provider_type: 'openai_compatible', default_model: GROK, models: [{ id: GROK, label: 'Grok (unlisted)' }] }]
+};
+const contextUsage = {
+	available: true, source: 'persisted', captured_at: new Date().toISOString(),
+	usage: {
+		categories: [{ name: 'Messages', tokens: 84_200, color: '#e0a13c' }],
+		totalTokens: 84_200, maxTokens: serverMax, rawMaxTokens: serverMax,
+		percentage: serverMax ? (84_200 / serverMax) * 100 : null, model: GROK, isAutoCompactEnabled: false
+	}
+};
 const SESSION = assistant ? 'fixture-assistant' : 'fixture-session';
 const TITLE = assistant ? 'Assistant' : 'How does user install ai shuffle on linux non docker for desktop app?';
 const project = { id: 'ai-shuffle', name: 'ai-shuffle', path: 'D:/Projects/ai-shuffle' };
@@ -52,7 +71,9 @@ window.fetch = async (input, init) => {
 	const method = (init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
 	calls.push({ method, path, body: typeof init?.body === 'string' ? JSON.parse(init.body) : null });
 	let data: unknown = [];
-	if (path.endsWith('/auth/status')) data = { authenticated: true, claude_authenticated: true, claude_token_valid: true, github_authenticated: true, has_any_credential: true, onboarding_complete: true };
+	if (bound && path.endsWith('/models')) data = registry;
+	else if (bound && path.endsWith(`/sessions/${SESSION}/context-usage`)) data = contextUsage;
+	else if (path.endsWith('/auth/status')) data = { authenticated: true, claude_authenticated: true, claude_token_valid: true, github_authenticated: true, has_any_credential: true, onboarding_complete: true };
 	else if (path.endsWith('/settings/voice')) data = { voice_mode_enabled: true };
 	else if (path === '/api/v1/projects') data = [project];
 	else if (path === '/api/v1/sessions/cursor' || path === '/api/v1/sessions/paginated') data = { items: sessionRows, total: sessionRows.length, has_more: false, next_cursor: null };
@@ -82,7 +103,11 @@ const { activeSession } = await import('../../frontend/src/lib/stores/active-ses
 const { chatAccessSummary } = await import('../../frontend/src/lib/stores/chat-access');
 activeSession.newChat();
 activeSession.setProject(project.id);
-activeSession.setModelOverride('opus');
+if (bound) {
+	const { hydrateModelRegistry, encodeProviderModel } = await import('../../frontend/src/lib/constants/models');
+	await hydrateModelRegistry();
+	activeSession.setModelOverride(encodeProviderModel('xai', GROK));
+} else activeSession.setModelOverride('opus');
 await activeSession.setEffortLevelOverride('high');
 // Seed an open chat the way the store holds one (as the unit tests do).
 Object.assign(activeSession.current, {
@@ -100,7 +125,8 @@ Object.assign(activeSession.current, {
 		{ id: 't1', subject: 'Fix: memory health signals and running revisions', status: 'running', kind: 'agent', summary: null, toolUseId: null, startedAt: new Date(now - 252e3).toISOString(), updatedAt: new Date().toISOString() },
 		{ id: 't2', subject: 'pytest -q tests/test_memory_health.py', status: 'running', kind: 'shell', summary: null, toolUseId: null, startedAt: new Date(now - 58e3).toISOString(), updatedAt: new Date().toISOString() }
 	],
-	totalTokensIn: 3100, totalCacheReadTokens: 71400, totalCacheCreationTokens: 6200, totalTokensOut: 3500
+	totalTokensIn: 3100, totalCacheReadTokens: 71400, totalCacheCreationTokens: 6200, totalTokensOut: 3500,
+	...(bound ? { contextUsed: 84_200, liveProvider: 'xai' } : {})
 });
 activeSession.setDraft('');
 
