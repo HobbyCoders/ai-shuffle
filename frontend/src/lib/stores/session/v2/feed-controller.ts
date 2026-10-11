@@ -59,6 +59,9 @@ export interface FeedControllerDeps {
 	 *  longer exists or this viewer may not read it. Called once, after the
 	 *  feed has stopped for good; the store leaves the session. */
 	onSessionUnavailable?: (sessionId: string, status: number) => void;
+	/** Live activity must invalidate hints before a batched reducer fold can
+	 * coalesce a continued turn's streaming transition away. Never replay history. */
+	onSessionActivity?: (event: Record<string, unknown>) => void;
 }
 
 // ─── Module state ─────────────────────────────────────────────────────────────
@@ -912,6 +915,10 @@ export const feedController: FeedController = {
 					transcriptCache.delete(sessionId);
 					feedController.restart(sessionId);
 					return;
+				}
+				if (caughtUp && !sentinelPending &&
+					(ev.type === 'turn.started' || ev.type === 'message.user')) {
+					deps?.onSessionActivity?.({ ...ev });
 				}
 				// A user message on the transcript is the answer to a pending bubble —
 				// by turn id for a drained queue row (#588), by text for one steered

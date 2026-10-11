@@ -1,4 +1,6 @@
 """One durable next-reply hint per session, separate from messages and drafts."""
+import hashlib
+
 from app.db.base import after_commit, get_db
 
 
@@ -16,12 +18,21 @@ _CURRENT_COMPLETION = (
 )
 
 
+def _lock(cursor, session_id: str) -> None:
+    # Match device_identity's namespaced advisory lock pattern. A row lock on
+    # sessions would conflict with activity inserts' foreign-key locks.
+    key = int.from_bytes(hashlib.sha256(
+        ("shuffle-composer-suggestion:" + session_id).encode("utf-8")
+    ).digest()[:8], "big", signed=True)
+    cursor.execute("SELECT pg_advisory_xact_lock(%s)", (key,))
+
+
 def save(session_id: str, turn_id: str, suggestion: str) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
         # Serialize with supersede(): its activity rows and deletion must commit
         # before a racing generation checks whether its completion is current.
-        cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        _lock(cursor, session_id)
         # A late generation must not overwrite a newer turn's saved hint or
         # revive a hint after a same-id continuation / user message.
         cursor.execute(
@@ -54,7 +65,7 @@ def get(session_id: str) -> dict | None:
 def supersede(conn, session_id: str) -> None:
     """Remove a hint in the activity transaction; notify only after its commit."""
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+    _lock(cursor, session_id)
     cursor.execute(
         "DELETE FROM composer_suggestions WHERE session_id=%s RETURNING turn_id",
         (session_id,),

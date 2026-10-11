@@ -22,6 +22,7 @@ import pytest
 from app.db import base
 from app.db import database as db
 from app.db import sessions as sessions_mod
+from tests.pg_shim import ShimConnection
 
 
 # =============================================================================
@@ -110,6 +111,11 @@ def test_db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     _create_schema(conn.cursor())
+    conn.execute(
+        "CREATE TABLE composer_suggestions (session_id TEXT PRIMARY KEY, "
+        "turn_id TEXT NOT NULL, suggestion TEXT NOT NULL, "
+        "FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE)"
+    )
     conn.commit()
     yield conn
     conn.close()
@@ -119,11 +125,12 @@ def test_db():
 def mock_db(test_db):
     # Use the real commit boundary, including after-commit notifications.
     mock_get_db = base.get_db
+    shim = ShimConnection(test_db)
 
     def mock_get_cursor(conn):
         return conn.cursor()
 
-    with patch.object(base, "get_connection", lambda: test_db), \
+    with patch.object(base, "get_connection", lambda: shim), \
          patch.object(base, "_close_connection", lambda conn: None), \
          patch.object(sessions_mod, "get_db", mock_get_db), \
          patch.object(sessions_mod, "get_cursor", mock_get_cursor), \
