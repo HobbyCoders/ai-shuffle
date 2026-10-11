@@ -4,6 +4,7 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
+from tests.builtin_fixtures import create_unchanged_builtin
 
 import app.core.task_dispatch as td
 from app.core.provider_agent import WorkerOutcome
@@ -115,11 +116,11 @@ async def _dispatch(args, session_id, **kw):
     return await td.dispatch_task_tool(args, caller_session_id=session_id, **kw)
 
 
-@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
 def test_task_naming_retired_agent_gets_unknown_agent_refusal(agents, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
 
-    agents.create_profile(retired_id, retired_id, None, {"model": "haiku"}, is_builtin=True)
+    create_unchanged_builtin(retired_id)
     agents.update_profile("root-agent", config={
         "model": "opus", "enabled_agents": [retired_id, "helper"],
     })
@@ -133,6 +134,24 @@ def test_task_naming_retired_agent_gets_unknown_agent_refusal(agents, retired_id
     from app.core.agent_provider_models import available_subagents, resolve_subagent
     assert payload["error"] == resolve_subagent(retired_id, available_subagents("root-agent", None))[1]
     assert retired_id in payload["error"]
+    dispatch.assert_not_called()
+
+
+def test_empty_roster_refuses_task_without_dispatch(bare_db):
+    from app.db import database
+    from app.core.builtin_subagents import seed_builtin_subagents
+    from app.core.agent_provider_models import build_task_contract
+
+    seed_builtin_subagents()
+    database.create_profile("only-caller", "Caller", None, {"model": "opus"})
+    database.create_session("empty-roster-parent", profile_id="only-caller")
+    contract = build_task_contract("only-caller", None)
+    assert contract.targets == ()
+    assert "No subagents are configured" in contract.description
+    with patch("app.core.provider_agent.dispatch_worker") as dispatch:
+        payload = asyncio.run(_dispatch({"agent": "general-purpose", "prompt": "Work"}, "empty-roster-parent"))
+    assert payload["ok"] is False
+    assert "Available subagent IDs: none" in payload["error"]
     dispatch.assert_not_called()
 
 
@@ -739,16 +758,13 @@ def test_read_only_tool_surface_predicate():
     assert is_read_only_tool_surface(["Read", "MultiEdit"]) is False
 
 
-def test_shipped_builtins_are_write_capable():
-    """The shipped definitions land on the side the audit expects."""
-    from app.core.builtin_subagents import (
-        get_builtin_subagent_definition,
-        is_read_only_tool_surface,
-    )
+def test_starter_team_templates_are_write_capable():
+    """The opt-in definitions keep their write-capable dispatch behaviour."""
+    from app.core.agent_templates import STARTER_TEAM_AGENTS
+    from app.core.builtin_subagents import is_read_only_tool_surface
 
-    for agent_id in ("general-purpose", "frontend-designer"):
-        tools = get_builtin_subagent_definition(agent_id)["tools"]
-        assert is_read_only_tool_surface(tools) is False, agent_id
+    for definition in STARTER_TEAM_AGENTS:
+        assert is_read_only_tool_surface(definition["tools"]) is False, definition["id"]
 
 
 def test_launch_tool_use_id_threads_to_the_worker(agents):

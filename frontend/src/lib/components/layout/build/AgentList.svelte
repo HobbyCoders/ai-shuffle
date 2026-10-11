@@ -24,6 +24,8 @@
 		loading: boolean;
 		/** No agents of your own at all (shows the "make one" card). */
 		noneOfYours: boolean;
+		/** The worker has built-in agents to start from (the "make one" card says so). */
+		hasBuiltins?: boolean;
 		/** Search or a filter narrows the list. */
 		narrowed: boolean;
 		query: string;
@@ -44,6 +46,7 @@
 		selectedId,
 		loading,
 		noneOfYours,
+		hasBuiltins = true,
 		narrowed,
 		query,
 		showYours,
@@ -124,7 +127,7 @@
 					<AgentAvatar avatar="sprout" size={30} color="emerald" />
 				</span>
 				<b>No agents of your own yet</b>
-				<span>Start blank, from a built-in, or describe one.</span>
+				<span>{hasBuiltins ? 'Start blank, from a built-in, or describe one.' : 'Start blank or describe one.'}</span>
 				<button type="button" class="st-btn sm" onclick={onNew}><Plus />New agent</button>
 			</div>
 		{/if}

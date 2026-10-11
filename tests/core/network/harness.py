@@ -92,8 +92,26 @@ def exchange(sender: Worker, receiver: Worker, *, limit: int = 500) -> engine.Ap
     with receiver.active():
         marks = store.local_watermarks()
     with sender.active():
-        ops = store.ops_since(marks, limit=limit, exclude_origin=receiver.device_id)
+        ops, _, needs_snapshot = store.exchange_batch(marks, limit=limit, exclude_origin=receiver.device_id)
+        chunks = []
+        if needs_snapshot:
+            manifest = engine.snapshot_manifest()
+            for collection in manifest["collections"]:
+                offset = 0
+                while True:
+                    chunk = engine.snapshot_chunk(collection, offset)
+                    chunks.append(chunk)
+                    if not chunk["more"]:
+                        break
+                    offset += chunk["count"]
     with receiver.active():
+        if needs_snapshot:
+            # Like PeerLink's ordinary catch-up path: apply state in dependency
+            # order and only then adopt the publisher's frontier. No re-enroll.
+            for chunk in chunks:
+                engine.apply_snapshot_chunk(chunk)
+            engine.adopt_watermarks(manifest["watermarks"])
+            return engine.ApplyResult()
         return engine.apply_batch(ops)
 
 

@@ -146,7 +146,7 @@ async def test_approve_run_rejects_a_settled_approval_from_inside_the_offload(lo
 async def test_enable_automation_writes_off_the_loop_in_one_hop(loop_thread):
     """With no scheduled trigger there is no await at all, so the check, the
     write and the response read are a single offload."""
-    db = _SpyDatabase(get_automation={"id": "auto-1", "triggers": [{"type": "webhook"}]})
+    db = _SpyDatabase(get_automation={"id": "auto-1", "profile_id": "agent-1", "triggers": [{"type": "webhook"}]})
     with patch.object(automations_api, "database", db), \
          patch("app.core.automation_manager.automation_manager", SimpleNamespace()), \
          _HopCounter(automations_api) as hops:

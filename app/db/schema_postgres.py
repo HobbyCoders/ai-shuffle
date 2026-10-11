@@ -1208,7 +1208,7 @@ def create_postgres_schema(cursor) -> None:
             trigger_type TEXT NOT NULL,
             trigger_config JSONB NOT NULL DEFAULT '{}',
             prompt TEXT NOT NULL,
-            profile_id TEXT NOT NULL,
+            profile_id TEXT,
             project_id TEXT,
             output_config JSONB NOT NULL DEFAULT '{"type": "session"}',
             max_turns INTEGER DEFAULT 1,

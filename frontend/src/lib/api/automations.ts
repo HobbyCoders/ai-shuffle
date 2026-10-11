@@ -127,7 +127,8 @@ export interface Automation {
 	trigger_config: TriggerConfig;
 	triggers: TriggerItem[] | null;
 	prompt: string | null;
-	profile_id: string;
+	/** null once its agent was deleted: the automation is disabled until another agent is picked. */
+	profile_id: string | null;
 	project_id: string | null;
 	output_config: Record<string, unknown>;
 	action_steps: ActionStep[] | null;

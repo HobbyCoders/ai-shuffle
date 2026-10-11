@@ -267,6 +267,8 @@ async def enable_automation(automation_id: str, token: str = Depends(require_adm
         if not automation:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Automation not found: {automation_id}")
 
+        if not automation.get("profile_id"):
+            raise HTTPException(status_code=400, detail="Choose an agent before re-enabling this automation")
         database.update_automation(automation_id, is_enabled=True)
 
         # Check if any trigger in the array needs scheduling

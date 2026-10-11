@@ -12,24 +12,23 @@ import pytest
 
 from app.core.builtin_subagents import (
     BUILTIN_SUBAGENTS,
-    FRONTEND_DESIGNER_PROMPT,
-    GENERAL_PURPOSE_PROMPT,
     get_builtin_subagent_definition,
 )
 
 
+from app.core.agent_templates import STARTER_TEAM_AGENTS, FRONTEND_DESIGNER_PROMPT, GENERAL_PURPOSE_PROMPT
+
+
 def _definition(agent_id):
-    definition = get_builtin_subagent_definition(agent_id)
+    definition = next((agent for agent in STARTER_TEAM_AGENTS if agent["id"] == agent_id), None)
     assert definition is not None
     return definition
 
 
-@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
 def test_retired_agents_are_not_builtins(retired_id):
     assert get_builtin_subagent_definition(retired_id) is None
-    assert {agent["id"] for agent in BUILTIN_SUBAGENTS} == {
-        "general-purpose", "frontend-designer",
-    }
+    assert BUILTIN_SUBAGENTS == []
 
 
 # ─── every worker: the first line IS the summary ─────────────────────────────
@@ -132,7 +131,8 @@ def test_the_visual_default_survives():
 # ─── the definitions still load ──────────────────────────────────────────────
 
 
-def test_every_builtin_still_has_a_prompt_and_a_description():
-    for definition in BUILTIN_SUBAGENTS:
+def test_every_starter_template_has_a_prompt_and_a_description():
+    assert len(STARTER_TEAM_AGENTS) == 2
+    for definition in STARTER_TEAM_AGENTS:
         assert definition["prompt"].strip()
         assert definition["description"].strip()

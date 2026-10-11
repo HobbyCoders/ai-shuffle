@@ -505,6 +505,24 @@ def _incoming_row_is_shared(coll: policy.Collection, record_id: str,
     return coll.shared_row(row)
 
 
+def _project_legacy_agent(coll: policy.Collection, record_id: str,
+                          record: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    """Interpret an old worker's built-in flag without rewriting its signed op.
+
+    Customized starter roles are owner data on this version. Project the flag
+    before conflict comparison/materialization, keeping the original Lamport
+    clock and origin. Discarding the op would lose edits made before that peer
+    upgrades: its local flag conversion intentionally doesn't mint a new clock.
+    Explore/Plan and proven unchanged starter defaults still cannot resurrect.
+    """
+    if coll.name != "agents" or record_id not in RETIRED_BUILTIN_IDS or not record.get("is_builtin"):
+        return record
+    from app.core.builtin_retirement import SHIPPED_AGENT_STATES, is_untouched_builtin
+    if record_id not in SHIPPED_AGENT_STATES or is_untouched_builtin({**record, "id": record_id}):
+        return None
+    return {**record, "is_builtin": False}
+
+
 def materialize(cursor, coll: policy.Collection, record_id: str, record: Optional[Mapping[str, Any]],
                 *, origin_device_id: Optional[str] = None) -> Optional[dict]:
     """Write (or delete) the domain row. Returns the row as re-read, or None.
@@ -513,11 +531,10 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     """
     keys = _local_keys(coll, record_id)
     where = " AND ".join(f"{k} = %s" for k in coll.keys)
-    # Older workers may re-seed and publish the retired built-in. Never
-    # recreate the local row, including through a bootstrap snapshot.
-    # A custom agent with this id is still a normal shared agent.
-    if coll.name == "agents" and keys[0] in RETIRED_BUILTIN_IDS and record and record.get("is_builtin"):
-        return None
+    if record is not None:
+        record = _project_legacy_agent(coll, record_id, record)
+        if record is None:
+            return None
     if coll.name == "pending_interactions":
         from app.core.model_override import RECEIPT_KINDS
         # Ordinary sync is a read mirror, not an owner consent channel. Only
@@ -562,9 +579,9 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
                 # direct callers and stale built-in rows must be safe too.
                 record["profile_id"] = None
             else:
-                # Same safe, disabled replacement as startup retirement. This
+                # Same unlinked, disabled state as startup retirement. This
                 # also covers bootstrap snapshots through materialize.
-                record["profile_id"] = "general-purpose"
+                record["profile_id"] = None
                 record["is_enabled"] = False
                 retired_automation = retired_id
     if coll.materialize_hook is not None:
@@ -607,7 +624,7 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     if retired_automation:
         # last_error is local-only: never add it to the shared field list.
         cursor.execute("UPDATE automations SET last_error = %s WHERE id = %s", (
-            f"Built-in {retired_automation} was removed; review the General Purpose agent before re-enabling.", keys[0]))
+            f"Built-in {retired_automation} was removed; choose an agent before re-enabling.", keys[0]))
     cursor.execute(f"SELECT * FROM {coll.table} WHERE {where}", keys)
     row = cursor.fetchone()
     return dict(row) if row else None
@@ -1259,12 +1276,12 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         # replace that device's reachability on every peer.
         raise ApplyError("presence for another device")
 
-    if (coll.name == "agents" and env.record_id in RETIRED_BUILTIN_IDS and env.op == OP_UPSERT
-            and plaintext.get("is_builtin")):
-        # Like retired collections, consume without storing/forwarding. In
-        # particular, no absent domain row enters scan's tombstone path, which
-        # would fail an older peer's automation FK before its rewrite arrives.
-        return "applied"
+    if env.op == OP_UPSERT:
+        plaintext = _project_legacy_agent(coll, env.record_id, plaintext)
+        if plaintext is None:
+            # No absent default row enters scan's tombstone path, which would
+            # fail an older peer's automation FK before its rewrite arrives.
+            return "applied"
 
     if coll.name == "session_active":
         if env.op == OP_UPSERT and (
@@ -2048,9 +2065,11 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         if not _incoming_row_is_shared(coll, item["record_id"],
                                        None if item["deleted"] else item["record"]):
             continue
-        if (coll.name == "agents" and item["record_id"] in RETIRED_BUILTIN_IDS and not item["deleted"]
-                and (item["record"] or {}).get("is_builtin")):
-            continue
+        if not item["deleted"]:
+            projected = _project_legacy_agent(coll, item["record_id"], item["record"])
+            if projected is None:
+                continue
+            item = {**item, "record": projected}
         existing = known.get(item["record_id"]) if known is not None else store.get_record(
             cursor, coll.name, item["record_id"])
         if existing is not None and existing["origin_device_id"] != item["origin_device_id"] and coll.name != "membership":

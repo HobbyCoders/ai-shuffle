@@ -1537,7 +1537,7 @@ class Automation(BaseModel):
     triggers: Optional[List[Dict[str, Any]]] = None
     prompt: Optional[str] = None
     action_steps: Optional[List[Dict[str, Any]]] = None
-    profile_id: str
+    profile_id: Optional[str] = None  # Retired agents leave disabled, unlinked automations.
     project_id: Optional[str] = None
     output_config: Dict[str, Any] = Field(default_factory=lambda: {"type": "session"})
     max_turns: Optional[int] = 1  # None = unlimited

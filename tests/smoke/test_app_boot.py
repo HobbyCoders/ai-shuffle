@@ -451,8 +451,22 @@ def test_owner_sessions_and_default_profile(server):
 
     profiles = c.get("/api/v1/agents", headers=auth)
     assert profiles.status_code == 200
-    profile_ids = [p["id"] for p in profiles.json()]
-    assert "general-purpose" in profile_ids  # built-ins are seeded on first boot
+    assert profiles.json() == []  # A fresh install ships no built-in agents.
+    templates = c.get("/api/v1/agents/team-templates", headers=auth)
+    assert templates.status_code == 200
+    assert all(agent["existing_agent_id"] is None for agent in templates.json()[0]["agents"])
+    installed = c.post("/api/v1/agents/templates/starter-team/install", headers=auth)
+    assert installed.status_code == 200, installed.text
+    repeated = c.post("/api/v1/agents/templates/starter-team/install", headers=auth)
+    assert repeated.json() == installed.json()
+    profiles = c.get("/api/v1/agents", headers=auth)
+    assert profiles.status_code == 200
+    rows = profiles.json()
+    assert {p["name"] for p in rows} == {"General Purpose", "Frontend Designer"}
+    assert all(p["is_builtin"] is False for p in rows)
+    profile_ids = [p["id"] for p in rows]
+    assert "general-purpose" not in profile_ids
+    assert "frontend-designer" not in profile_ids
 
     # A project is a git repository in the workspace; the UI then creates a
     # session on a new branch without a prompt (no model involved).
