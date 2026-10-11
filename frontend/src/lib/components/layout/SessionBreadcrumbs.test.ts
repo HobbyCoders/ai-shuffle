@@ -6,6 +6,8 @@ import type { Session } from '$lib/api/sessions';
 vi.mock('$lib/stores/app-data.svelte', () => ({ appData: { current: { sessions: [] } }, sessions: writable<Session[]>([]) }));
 vi.mock('$lib/stores/active-session', () => ({ activeSession: Object.assign(writable({}), { switchSession: vi.fn() }) }));
 vi.mock('$lib/api/client', () => ({ api: { get: vi.fn(), patch: vi.fn(), delete: vi.fn() }, forkSession: vi.fn() }));
+// A known non-admin: the title menu's chat identity is settled without loading the assistant.
+vi.mock('$lib/stores/auth.svelte', () => ({ auth: writable({ status: { is_admin: false } }) }));
 import { sessions } from '$lib/stores/app-data.svelte';
 import { api } from '$lib/api/client';
 import SessionBreadcrumbs from './SessionBreadcrumbs.svelte';

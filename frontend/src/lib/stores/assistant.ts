@@ -22,6 +22,24 @@ export function isAssistantHome(sessionId: string | null | undefined, state: Ass
  return !!sessionId && !!state?.home_session_id && state.home_session_id === sessionId;
 }
 /**
+ * Whether a bound chat is the built-in assistant home, for actions that must
+ * fail closed (Rename / Fork / Delete). `isAdmin` is null while the auth status
+ * is unknown. Only an admin has an assistant, so a non-admin's chat is ordinary
+ * without the assistant state; an admin's stays 'unknown' until that state
+ * loads (and while a load has failed).
+ */
+export type ChatIdentity = 'unknown' | 'assistant' | 'ordinary';
+export function chatIdentity(
+ sessionId: string | null | undefined,
+ isAdmin: boolean | null,
+ state: AssistantState | null | undefined
+): ChatIdentity {
+ if (isAdmin === null) return 'unknown';
+ if (!isAdmin) return 'ordinary';
+ if (!state) return 'unknown';
+ return isAssistantHome(sessionId, state) ? 'assistant' : 'ordinary';
+}
+/**
  * The effort a send from `sessionId` carries. The assistant's home always runs
  * at its model's default, so it sends none, whatever the composer remembers.
  */
