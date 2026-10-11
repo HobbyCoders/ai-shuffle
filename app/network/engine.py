@@ -551,16 +551,22 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
             known = store.get_record(cursor, coll.name, record_id)
             new_agent = known is not None and bool(known["deleted"])
     retired_automation = None
-    if coll.name == "automations" and record.get("profile_id") in RETIRED_BUILTIN_IDS:
+    if coll.name in ("sessions", "automations") and record.get("profile_id") in RETIRED_BUILTIN_IDS:
         retired_id = record["profile_id"]
         cursor.execute("SELECT is_builtin FROM agents WHERE id = %s", (retired_id,))
         agent = cursor.fetchone()
         if agent is None or agent["is_builtin"]:
-            # Same safe, disabled replacement as startup retirement. This also
-            # covers bootstrap snapshots, which call materialize directly.
-            record["profile_id"] = "general-purpose"
-            record["is_enabled"] = False
-            retired_automation = retired_id
+            if coll.name == "sessions":
+                # Preserve history without substituting a runnable agent. The
+                # catalog normally clears missing references before this seam;
+                # direct callers and stale built-in rows must be safe too.
+                record["profile_id"] = None
+            else:
+                # Same safe, disabled replacement as startup retirement. This
+                # also covers bootstrap snapshots through materialize.
+                record["profile_id"] = "general-purpose"
+                record["is_enabled"] = False
+                retired_automation = retired_id
     if coll.materialize_hook is not None:
         record = coll.materialize_hook(record)
     encrypted_columns = list(record.get("_enc") or [])

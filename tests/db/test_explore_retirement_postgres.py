@@ -6,7 +6,7 @@ from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401
 pytestmark = requires_real_pg
 
 # Rows this module (and the SQLite tests it drives) creates by fixed id.
-_SESSIONS = ("retirement-chat", "missing-wake-chat")
+_SESSIONS = ("retirement-chat", "missing-wake-chat", "incoming-retired-chat")
 _API_USERS = ("pre-upgrade-key", "retirement-only", "retirement-mixed", "retirement-open",
               "only-helper", "helper-and-other", "open-key")
 _AGENTS = ("Explore", "Plan", "retirement-other", "wake-fallback", "helper", "other")
@@ -73,6 +73,28 @@ async def test_upgrade_keeps_restricted_key_and_cancels_stored_wakes(retired_id)
     assert worker_refusal("pre-upgrade-key", "general-purpose") is not None
     assert worker_refusal("retirement-mixed", "general-purpose") is not None
     assert worker_refusal("retirement-mixed", "retirement-other") is None
+
+
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+@pytest.mark.parametrize("agent_state", ["missing", "builtin", "owner-created"])
+def test_materialize_retired_session_reference_on_postgres(retired_id, agent_state):
+    from app.core.builtin_subagents import seed_builtin_subagents
+    from app.db import database
+    from app.network import engine, policy
+
+    seed_builtin_subagents()
+    database.create_profile(retired_id, retired_id, None, {}, is_builtin=agent_state != "owner-created")
+    record = dict(database.create_session("retirement-chat", retired_id, title="Historical session"))
+    if agent_state == "missing":
+        seed_builtin_subagents()
+        assert database.get_profile(retired_id) is None
+    record["id"] = "incoming-retired-chat"
+    with database.get_db() as conn:
+        mirror = engine.materialize(conn.cursor(), policy.collection("sessions"), record["id"], record)
+    assert mirror["profile_id"] == (retired_id if agent_state == "owner-created" else None)
+    assert database.get_session(record["id"])["title"] == "Historical session"
+    # Normalization must not mutate the signed source record.
+    assert record["profile_id"] == retired_id
 
 
 def test_recreated_agent_id_does_not_inherit_grants_on_postgres():

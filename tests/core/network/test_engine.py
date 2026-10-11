@@ -252,6 +252,84 @@ def test_old_worker_cannot_sync_retired_builtin_back(workers, retired_id):
 
 
 @pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+@pytest.mark.parametrize("transfer", ["incremental", "bootstrap"])
+@pytest.mark.parametrize("is_builtin", [True, False], ids=["builtin", "owner-created"])
+def test_retired_agent_session_mirrors_preserve_history(workers, retired_id, transfer, is_builtin):
+    from app.core.builtin_subagents import seed_builtin_subagents
+    from app.db import session_events as events_db
+
+    old, updated = workers("old-build"), workers("updated-build")
+    with old.active():
+        engine.create_network("Mixed versions")
+        seed_builtin_subagents()
+        engine.scan_all()
+    with updated.active():
+        seed_builtin_subagents()
+    if transfer == "incremental":
+        join(old, updated)
+
+    with old.active():
+        # Drive the old worker's producers, including the signed session and
+        # transcript records, not just a hand-written materialize payload.
+        database.create_profile(retired_id, retired_id, None, {}, is_builtin=is_builtin)
+        database.create_session("old-chat", retired_id, title="Preserved history")
+        database.update_session("old-chat", status="completed", cost_increment=0.25,
+                                tokens_in_increment=12, turn_increment=1)
+        events_db.append_events("old-chat", [
+            {"type": "message.user", "payload": {"content": "Original question"}},
+            {"type": "message.assistant", "payload": {"content": "Original answer"}},
+        ])
+        engine.scan_all()
+        assert database.get_session("old-chat")["profile_id"] == retired_id
+        published_seq = store.local_watermarks()[old.device_id]
+
+    if transfer == "bootstrap":
+        join(old, updated)
+    else:
+        result = exchange(old, updated)
+        assert result.retry == result.rejected == result.pending == 0, result.reasons
+
+    with updated.active():
+        mirror = database.get_session("old-chat")
+        assert mirror["profile_id"] == (None if is_builtin else retired_id)
+        assert mirror["title"] == "Preserved history"
+        assert mirror["status"] == "completed"
+        assert mirror["total_cost_usd"] == 0.25
+        assert mirror["total_tokens_in"] == 12
+        assert mirror["turn_count"] == 1
+        assert mirror["owner_device_id"] == old.device_id
+        assert [event["payload"]["content"] for event in events_db.get_events("old-chat", 0)] == [
+            "Original question", "Original answer",
+        ]
+        assert all(store.local_watermarks()[old.device_id][incarnation] >= seq
+                   for incarnation, seq in published_seq.items())
+        if is_builtin:
+            assert database.get_profile(retired_id) is None
+        else:
+            assert not database.get_profile(retired_id)["is_builtin"]
+        engine.scan_all()
+        assert not [op for op in store.ops_since({})
+                    if op["origin_device_id"] == updated.device_id and op["collection"] == "sessions"]
+
+    # The rewrite must stay local, and a later update from the older worker
+    # must still advance the stream rather than retrying an impossible FK.
+    result = exchange(updated, old)
+    assert result.retry == result.rejected == result.pending == 0, result.reasons
+    with old.active():
+        assert database.get_session("old-chat")["profile_id"] == retired_id
+        database.update_session("old-chat", title="Later history")
+        engine.scan_all()
+        published_seq = store.local_watermarks()[old.device_id]
+    result = exchange(old, updated)
+    assert result.retry == result.rejected == result.pending == 0, result.reasons
+    with updated.active():
+        assert database.get_session("old-chat")["title"] == "Later history"
+        assert database.get_session("old-chat")["profile_id"] == (None if is_builtin else retired_id)
+        assert all(store.local_watermarks()[old.device_id][incarnation] >= seq
+                   for incarnation, seq in published_seq.items())
+
+
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
 def test_local_retirement_does_not_publish_agent_tombstone(workers, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
 
