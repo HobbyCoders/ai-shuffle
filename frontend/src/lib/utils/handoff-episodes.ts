@@ -186,13 +186,9 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 	 * settles a move a newer one replaced.
 	 */
 	const owning = (id: string | undefined, worker: string, lateCancel = false): HandoffEpisode | null => {
-		if (id) {
-			const known = byId.get(id);
-			if (known) return known;
-			// Records from before the id existed: adopt the open id-less move.
-			const legacy = open.at(-1);
-			return legacy && !legacy.id && matches(legacy, worker) ? legacy : null;
-		}
+		// An explicit id matches only the episode with that id: a record whose
+		// anchor is not loaded stands on its own, never in another move's row.
+		if (id) return byId.get(id) ?? null;
 		if (lateCancel) {
 			const stale = replaced.find((e) => matches(e, worker));
 			if (stale) {
@@ -223,7 +219,7 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 			const result = handoffResult(message.toolResult);
 			const id = idOf(result);
 			if (input.cancel || (result && 'cancelled' in result)) {
-				const current = (id && byId.get(id)) || open.at(-1) || null;
+				const current = (id ? byId.get(id) : open.at(-1)) ?? null;
 				const confirmed = result?.cancelled === true;
 				if (current && !isSettledPhase(current.phase)) {
 					// Only a confirmed cancel settles the move. Until the call returns
@@ -322,7 +318,7 @@ export function handoffEpisodes(messages: readonly ChatMessage[]): HandoffEpisod
 			}
 			case 'held_failed':
 			case 'resume_failed': {
-				const into = (id && byId.get(id)) || open.at(-1) || (last as HandoffEpisode | null);
+				const into = id ? byId.get(id) : open.at(-1) || (last as HandoffEpisode | null);
 				if (!into || !outcome) return;
 				(absorbed ??= new Set()).add(message);
 				into.followUps = [...into.followUps, outcome];
@@ -349,7 +345,11 @@ export interface HandoffOwner {
 	deviceName?: string | null;
 }
 
-const settledByOwner = new WeakMap<HandoffEpisodes, { key: string; value: HandoffEpisodes }>();
+const settledByOwner = new WeakMap<HandoffEpisodes, HandoffEpisodes>();
+/** Owner seen when each sending move was first observed, by session and episode. */
+const ownerAtSend = new Map<string, string>();
+/** Moves whose owner was seen to change to their target. */
+const ownerMoved = new Set<string>();
 
 function ownedByTarget(episode: HandoffEpisode, owner: HandoffOwner): boolean {
 	if (episode.targetId && owner.deviceId) return episode.targetId === owner.deviceId;
@@ -357,23 +357,55 @@ function ownedByTarget(episode: HandoffEpisode, owner: HandoffOwner): boolean {
 	return !!name && !!episode.worker && name === episode.worker.toLowerCase();
 }
 
+function ownerKey(owner: HandoffOwner): string {
+	return `${owner.deviceId ?? ''}\0${text(owner.deviceName).toLowerCase()}`;
+}
+
 /**
- * Settle a move that is sending once the chat's owner is its target worker.
- * Returns `handoffs` itself when nothing changes, and the same result for the
- * same inputs, so rows reading it keep their identity.
+ * Settle a sending move on the source worker once its owner is SEEN to change
+ * to the target. The source never receives `moved` (the new worker records it),
+ * and a `sent` record settles the move by itself once the backend writes one.
+ *
+ * Equality alone proves nothing: a stale session row, or the destination's own
+ * view of a move it is still receiving, already names the target. So the owner
+ * is captured when the move is first seen sending, and only a later, different
+ * owner that is the target settles it. State is shared per session, so the row,
+ * the chip and the composer agree. Returns `handoffs` itself when nothing
+ * changes, and the same result for the same inputs, so rows keep identity.
  */
-export function settleByOwner(handoffs: HandoffEpisodes, owner: HandoffOwner | null | undefined): HandoffEpisodes {
+export function settleByOwner(
+	handoffs: HandoffEpisodes,
+	owner: HandoffOwner | null | undefined,
+	sessionId: string | null | undefined = ''
+): HandoffEpisodes {
 	const current = handoffs.open;
-	if (!owner || !current || current.phase !== 'sending' || !ownedByTarget(current, owner)) return handoffs;
-	const key = `${owner.deviceId ?? ''}\0${owner.deviceName ?? ''}`;
+	if (!current || current.phase !== 'sending') return handoffs;
+	const slot = `${sessionId ?? ''}\0${current.key}`;
+	if (!ownerMoved.has(slot)) {
+		if (!owner || (!owner.deviceId && !text(owner.deviceName))) return handoffs;
+		const seen = ownerAtSend.get(slot);
+		if (seen === undefined) {
+			ownerAtSend.set(slot, ownerKey(owner));
+			return handoffs;
+		}
+		if (seen === ownerKey(owner) || !ownedByTarget(current, owner)) return handoffs;
+		ownerMoved.add(slot);
+		ownerAtSend.delete(slot);
+	}
 	const cached = settledByOwner.get(handoffs);
-	if (cached?.key === key) return cached.value;
-	const done: HandoffEpisode = { ...current, phase: 'done', cancelling: undefined, outcome: current.outcome };
+	if (cached) return cached;
+	const done: HandoffEpisode = { ...current, phase: 'done', cancelling: undefined };
 	const byAnchor = new Map(handoffs.byAnchor);
 	for (const [anchor, episode] of byAnchor) if (episode === current) byAnchor.set(anchor, done);
 	const value: HandoffEpisodes = { byAnchor, absorbed: handoffs.absorbed, open: null };
-	settledByOwner.set(handoffs, { key, value });
+	settledByOwner.set(handoffs, value);
 	return value;
+}
+
+/** Test hook: forget every observed owner. */
+export function resetOwnerTransitions(): void {
+	ownerAtSend.clear();
+	ownerMoved.clear();
 }
 
 /** Same anchors rendering the same episodes (by value): a rebuild changed nothing here. */

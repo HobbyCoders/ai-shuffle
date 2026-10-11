@@ -199,7 +199,7 @@
 		const sid = $activeSession.sessionId;
 		const messages = $activeSession.messages;
 		if (queueCancelled?.sessionId === sid && !handoffActivitySince(messages, queueCancelled.seen)) return null;
-		const fromChat = pendingHandoff(messages, sessionRow ? { deviceId: sessionRow.owner_device_id, deviceName: sessionRow.device_name } : null);
+		const fromChat = pendingHandoff(messages, sessionRow ? { deviceId: sessionRow.owner_device_id, deviceName: sessionRow.device_name } : null, sid);
 		if (fromChat) return fromChat;
 		if (ownerQueued?.sessionId === sid && !handoffActivitySince(messages, ownerQueued.seen)) {
 			return { worker: ownerQueued.worker, phase: 'queued' as const, afterQueued: ownerQueued.afterQueued };

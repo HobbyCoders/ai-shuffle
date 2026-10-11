@@ -638,12 +638,12 @@
 	const openRow = $derived(openSessionId ? $sessions.find((s) => s.id === openSessionId) ?? null : null);
 	// Each hand-off renders as one row on its first record (handoff-episodes.ts);
 	// later records patch the episode, so only the anchor rows re-read this.
-	// The source worker never sees `moved`: the session row naming the target as
-	// owner settles a move that is sending (settleByOwner keeps identity).
+	// The source worker never sees `moved`: the session row CHANGING to the
+	// target settles a move that is sending (settleByOwner keeps identity).
 	const handoffOwnerId = $derived(openRow?.owner_device_id ?? null);
 	const handoffOwnerName = $derived(openRow?.device_name ?? null);
 	const handoffAnchors = $derived(
-		settleByOwner(transcript.handoffs, { deviceId: handoffOwnerId, deviceName: handoffOwnerName }).byAnchor
+		settleByOwner(transcript.handoffs, { deviceId: handoffOwnerId, deviceName: handoffOwnerName }, openSessionId).byAnchor
 	);
 	const openIsRemote = $derived(!!$activeSession.isRemote);
 	const openNeeds = $derived(openSessionNeeds(

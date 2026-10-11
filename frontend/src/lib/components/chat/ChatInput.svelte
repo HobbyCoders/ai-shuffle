@@ -123,7 +123,7 @@
 	// A queued move (#1819) holds new messages until it runs: say so.
 	const moveWait = $derived.by(() => {
 		const row = $sessions.find((session) => session.id === $activeSession.sessionId);
-		return handoffPlaceholder(pendingHandoff($activeSession.messages, row ? { deviceId: row.owner_device_id, deviceName: row.device_name } : null));
+		return handoffPlaceholder(pendingHandoff($activeSession.messages, row ? { deviceId: row.owner_device_id, deviceName: row.device_name } : null, $activeSession.sessionId));
 	});
 	const composerPlaceholder = $derived(
 		moveWait ??

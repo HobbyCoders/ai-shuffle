@@ -6,6 +6,7 @@ import ContextPillBar from './ContextPillBar.svelte';
 import { adoptSession, moveSession, getQueuedMove, queueMove, cancelQueuedMove } from '$lib/api/sessions';
 import { notify } from '$lib/stores/notifications';
 import { refreshWorkerPresence, resetWorkerPresence } from '$lib/stores/worker-presence';
+import { resetOwnerTransitions } from '$lib/utils/handoff-episodes';
 
 const { session, execution, appSessions, listInstallsMock, getClusterGitStateMock } = vi.hoisted(() => ({
 	session: { store: null as any },
@@ -52,6 +53,8 @@ vi.mock('$lib/api/sessions', () => ({
 const IDLE = { busy: { running: false, tasks: [] as string[] }, pending: null };
 
 afterEach(() => {
+	// Observed owner changes are module state shared by the chip, row and composer.
+	resetOwnerTransitions();
 	cleanup();
 	vi.mocked(adoptSession).mockClear();
 	vi.mocked(moveSession).mockReset();
@@ -267,7 +270,8 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		expect(chip.textContent).toContain('Unraid');
 	});
 
-	it('clears a sending hand-off once the session row names the target as owner (#2304)', async () => {
+	it('clears a sending hand-off once the session row changes to the target (#2304)', async () => {
+		resetOwnerTransitions();
 		const handOff = {
 			id: 'tool-handoff', role: 'assistant', type: 'tool_use', content: '', toolStatus: 'complete',
 			toolName: 'mcp__builtins__HandOffSession', toolInput: { worker: 'DesktopWorker' },
@@ -284,6 +288,7 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		const chip = view.container.querySelector<HTMLButtonElement>('.ctx-chip.runner')!;
 		expect(chip.textContent).toContain('Sending to DesktopWorker…');
 
+		await tick();
 		// The source worker never sees `moved`; the owner change is the signal.
 		appSessions.store.set([{ id: 'remote', project_v2_id: 'pv2-project', instance_id: 'gaming', owner_device_id: 'dev_gaming',
 			device_name: 'DesktopWorker', device_online: true, is_remote: true, controllable: true }]);

@@ -55,7 +55,7 @@ describe('MessageArea hand-off row', () => {
 		const rowBody = between('{#snippet messageBody(', '{/snippet}');
 		expect(rowBody).toContain('{@const handoff = handoffAnchors.get(message)}');
 		expect(rowBody).toContain('<HandoffCard episode={handoff} />');
-		expect(source).toMatch(/const handoffAnchors = \$derived\(\s*settleByOwner\(transcript\.handoffs, \{ deviceId: handoffOwnerId, deviceName: handoffOwnerName \}\)\.byAnchor\s*\);/);
+		expect(source).toMatch(/const handoffAnchors = \$derived\(\s*settleByOwner\(transcript\.handoffs, \{ deviceId: handoffOwnerId, deviceName: handoffOwnerName \}, openSessionId\)\.byAnchor\s*\);/);
 	});
 });
 

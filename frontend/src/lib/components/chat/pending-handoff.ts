@@ -41,11 +41,15 @@ export function handoffActivitySince(messages: readonly ChatMessage[], from: num
  * transcript row renders (handoff-episodes.ts), so the chip, the composer and
  * the row always agree: 'queued' is the row's "Starting", 'moving' its "Sending".
  * A call still waiting for its result has queued nothing yet. `owner` is the
- * chat's session row: once it names the target, the move is done here even
- * though this worker never sees the `moved` record.
+ * chat's session row: once it is seen to CHANGE to the target, the move is
+ * done here even though this worker never sees the `moved` record.
  */
-export function pendingHandoff(messages: readonly ChatMessage[], owner?: HandoffOwner | null): PendingHandoff | null {
-	const open = settleByOwner(handoffEpisodes(messages), owner).open;
+export function pendingHandoff(
+	messages: readonly ChatMessage[],
+	owner?: HandoffOwner | null,
+	sessionId?: string | null
+): PendingHandoff | null {
+	const open = settleByOwner(handoffEpisodes(messages), owner, sessionId).open;
 	if (!open || open.requesting || !open.worker) return null;
 	if (open.phase === 'sending') return { worker: open.worker, phase: 'moving' };
 	return open.afterQueued ? { worker: open.worker, phase: 'queued', afterQueued: true } : { worker: open.worker, phase: 'queued' };

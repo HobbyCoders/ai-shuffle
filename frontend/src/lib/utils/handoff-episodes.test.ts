@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
-import { handoffEpisodes, sameHandoffs, settleByOwner, type HandoffEpisode } from './handoff-episodes';
+import { handoffEpisodes, resetOwnerTransitions, sameHandoffs, settleByOwner, type HandoffEpisode } from './handoff-episodes';
 import { pendingHandoff } from '$lib/components/chat/pending-handoff';
 
 let seq = 0;
@@ -178,22 +178,48 @@ describe('the chip and the row agree', () => {
 });
 
 describe('review fixes (#2304)', () => {
-	it('P1: on the source worker, the owner flipping to the target settles a sending move', () => {
+	it('P1: on the source worker, an owner CHANGE to the target settles a sending move', () => {
+		resetOwnerTransitions();
 		const tool = call(queued);
 		const messages = [tool, said('Wrapping up.'), row('started', 'Handing off to DesktopWorker.')];
 		const handoffs = handoffEpisodes(messages);
 		expect(handoffs.open?.phase).toBe('sending');
-		// Still owned here: nothing changes, by identity.
-		expect(settleByOwner(handoffs, { deviceId: 'dev_unraid', deviceName: 'Unraid' })).toBe(handoffs);
-		const settled = settleByOwner(handoffs, { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' });
+		// First seen sending while this worker owns it: the baseline, nothing changes.
+		expect(settleByOwner(handoffs, { deviceId: 'dev_unraid', deviceName: 'Unraid' }, 's1')).toBe(handoffs);
+		expect(pendingHandoff(messages, { deviceId: 'dev_unraid', deviceName: 'Unraid' }, 's1')).toEqual({ worker: 'DesktopWorker', phase: 'moving' });
+		// The session row then changes to the target: done, and the chip clears.
+		const settled = settleByOwner(handoffs, { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 's1');
 		expect(settled.byAnchor.get(tool)).toMatchObject({ phase: 'done', worker: 'DesktopWorker' });
 		expect(settled.open).toBeNull();
-		expect(settleByOwner(handoffs, { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' })).toBe(settled);
-		// The chip and the composer clear too, without any local `moved` row.
-		expect(pendingHandoff(messages, { deviceName: 'Unraid' })).toEqual({ worker: 'DesktopWorker', phase: 'moving' });
-		expect(pendingHandoff(messages, { deviceName: 'DesktopWorker' })).toBeNull();
-		// A move only waiting is not settled by ownership.
-		expect(settleByOwner(handoffEpisodes([tool]), { deviceName: 'DesktopWorker' }).open?.phase).toBe('starting');
+		expect(settleByOwner(handoffs, { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 's1')).toBe(settled);
+		expect(pendingHandoff(messages, { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' }, 's1')).toBeNull();
+		// A move only waiting is never settled by ownership.
+		expect(settleByOwner(handoffEpisodes([tool]), { deviceName: 'DesktopWorker' }, 's1').open?.phase).toBe('starting');
+	});
+
+	it('P1: a stale row that already names the target does not settle (equality is not a transfer)', () => {
+		resetOwnerTransitions();
+		const tool = call(queued);
+		const gaming = { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' };
+		// The row said DesktopWorker before the request: queued stays starting…
+		expect(settleByOwner(handoffEpisodes([tool]), gaming, 's2').open?.phase).toBe('starting');
+		// …and `started` with the same row stays sending, chip and all.
+		const messages = [tool, row('started', 's')];
+		expect(settleByOwner(handoffEpisodes(messages), gaming, 's2').open?.phase).toBe('sending');
+		expect(settleByOwner(handoffEpisodes(messages), gaming, 's2').open?.phase).toBe('sending');
+		expect(pendingHandoff(messages, gaming, 's2')).toEqual({ worker: 'DesktopWorker', phase: 'moving' });
+	});
+
+	it('P1: the destination hydrating a move without `moved` stays sending', () => {
+		resetOwnerTransitions();
+		// The destination owns the chat from the first moment it shows it.
+		const messages = [call(queued), row('started', 's')];
+		const here = { deviceId: 'dev_gaming', deviceName: 'DesktopWorker' };
+		for (let i = 0; i < 3; i++) expect(settleByOwner(handoffEpisodes(messages), here, 's3').open?.phase).toBe('sending');
+		// A row with no owner yet sets no baseline: the first real owner does.
+		resetOwnerTransitions();
+		expect(settleByOwner(handoffEpisodes(messages), null, 's4').open?.phase).toBe('sending');
+		expect(settleByOwner(handoffEpisodes(messages), here, 's4').open?.phase).toBe('sending');
 	});
 
 	it('P1: a `sent` record settles the move on the source worker', () => {
@@ -250,5 +276,29 @@ describe('review fixes (#2304)', () => {
 		// Confirmed: settled.
 		const confirmed = { ...cancelling, toolStatus: 'complete' as const, toolResult: JSON.stringify({ cancelled: true }) };
 		expect(handoffEpisodes([tool, confirmed]).byAnchor.get(tool)?.phase).toBe('cancelled');
+	});
+
+	it('P2: an id with no loaded anchor never lands in another move\'s row', () => {
+		const b = row('queued', 'q', { by: 'owner', handoff_id: 'B' });
+		const heldA = row('held_failed', 'Unraid did not take 1 message.', { worker: 'Unraid', handoff_id: 'A' });
+		let result = handoffEpisodes([b, heldA]);
+		expect(result.byAnchor.get(b)?.followUps).toEqual([]);
+		expect(result.absorbed.has(heldA)).toBe(false);
+		// An unknown-id terminal record is its own settled row; the open move stands.
+		const failedA = row('failed', 'Hand-off to DesktopWorker failed: x', { handoff_id: 'A' });
+		result = handoffEpisodes([b, failedA]);
+		expect(result.byAnchor.get(failedA)?.phase).toBe('failed');
+		expect(result.byAnchor.get(b)?.phase).toBe('starting');
+		expect(result.open).toBe(result.byAnchor.get(b));
+		// Nor does it adopt an open move that has no id (partial history).
+		const legacy = call(queued);
+		const startedA = row('started', 's', { handoff_id: 'A' });
+		result = handoffEpisodes([legacy, failedA, startedA]);
+		expect(result.byAnchor.get(legacy)?.phase).not.toBe('failed');
+		expect(result.absorbed.has(failedA)).toBe(false);
+		// An unknown-id cancel call settles nothing.
+		const cancelA = call(JSON.stringify({ cancelled: true, handoff_id: 'A' }), { cancel: true });
+		result = handoffEpisodes([b, cancelA]);
+		expect(result.byAnchor.get(b)?.phase).toBe('starting');
 	});
 });
