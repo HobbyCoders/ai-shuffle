@@ -1236,6 +1236,34 @@ class TestAssistantHomeMutations:
         assert store.get_state(service.assistant_id())["home_session_id"] == sid
         cleanup.assert_not_called()
 
+    def test_batch_delete_skips_home_and_deletes_ordinary_sessions(
+        self, stored_sessions_client, assistant_fixture, monkeypatch,
+    ):
+        from app.core import assistant_service as service
+        from app.db import assistant as store, database
+
+        sid = assistant_fixture["id"]
+        before = database.get_session(sid)
+        ordinary_ids = ["ordinary-before-home", "ordinary-after-home"]
+        for ordinary_id in ordinary_ids:
+            database.create_session(ordinary_id, "default", title="Ordinary")
+        cleanup = AsyncMock()
+        monkeypatch.setattr("app.api.sessions._cleanup_session_artifacts", cleanup)
+        response = stored_sessions_client.post(
+            "/api/v1/sessions/batch-delete",
+            json={"session_ids": [ordinary_ids[0], sid, ordinary_ids[1]]},
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "deleted_count": 2,
+            "total_requested": 3,
+            "errors": [f"Access denied for session {sid}: Your personal assistant is a persistent conversation and cannot be deleted"],
+        }
+        assert database.get_session(sid) == before
+        assert store.get_state(service.assistant_id())["home_session_id"] == sid
+        assert all(database.get_session(ordinary_id) is None for ordinary_id in ordinary_ids)
+        assert [call.args[0] for call in cleanup.await_args_list] == ordinary_ids
+
     def test_status_only_patch_still_allowed(self, stored_sessions_client, assistant_fixture):
         from app.core import assistant_service as service
         from app.db import assistant as store, database

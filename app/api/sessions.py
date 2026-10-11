@@ -2067,6 +2067,7 @@ async def batch_delete_sessions(
     for session_id in body.session_ids:
         try:
             existing = await require_session(request, session_id)
+            await refuse_assistant_home_mutation(session_id, "deleted")
             await run_sync(database.delete_session, session_id)
             from app.core import browser_runtime
             await browser_runtime.close_session(session_id)
