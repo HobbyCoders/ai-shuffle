@@ -50,8 +50,8 @@
  *
  * It also owns the two send-side edges: an optimistic echo is skipped outright
  * when the server has already spoken about the queue since the send began, and
- * an × on a local id is DEFERRED — the server has never heard of that id — and
- * re-aimed at the real row the moment it appears.
+ * an × carries the same client command id as its send. A cancellation stays
+ * visible until its verdict; queue snapshots cannot hide it before that verdict.
  */
 
 import type { ChatMessage, PendingPeerMessage } from '../types';
@@ -73,13 +73,12 @@ export interface PendingEntry {
 	id: string;
 	content: string;
 	queuedAt: number;
+	clientMessageId?: string;
+	status?: 'cancelling' | 'delivered';
 }
 
-/** Prefix of the optimistic id `message-sender` mints for a send into a live turn. */
+/** Legacy optimistic ids, retained for old snapshots/tests (new sends use client ids). */
 export const LOCAL_PENDING_PREFIX = 'queued-local-';
-
-/** How long a deferred × keeps waiting for the server row it was aimed at. */
-const REMOVAL_MAP_WINDOW_MS = 15_000;
 
 /** Recent deliveries worth keeping — older ones can no longer answer a bubble. */
 const MAX_TRACKED_DELIVERIES = 50;
@@ -88,11 +87,11 @@ export function isLocalPendingId(id: string): boolean {
 	return id.startsWith(LOCAL_PENDING_PREFIX);
 }
 
-let localIdCounter = 0;
-
-/** Id for an optimistic echo. Unique even for two sends in the same millisecond. */
+/** Stable command identity, carried by the send, queue, engine and receipt.
+ * getRandomValues also works on LAN HTTP, unlike randomUUID. */
 export function newLocalPendingId(): string {
-	return `${LOCAL_PENDING_PREFIX}${Date.now()}-${++localIdCounter}`;
+	const bytes = crypto.getRandomValues(new Uint8Array(16));
+	return `client-${Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('')}`;
 }
 
 interface Delivery {
@@ -100,13 +99,6 @@ interface Delivery {
 	seq: number;
 	/** The entry this delivery retired — a delivery answers exactly one bubble. */
 	matchedEntryId: string | null;
-}
-
-interface DeferredRemoval {
-	content: string;
-	seq: number;
-	requestedAt: number;
-	mapped: boolean;
 }
 
 let sessionId: string | null = null;
@@ -120,8 +112,10 @@ const deliveredTurnIds = new Set<string>();
 /** Entry ids already retired — sticky, so a stale snapshot cannot resurrect them. */
 const prunedIds = new Set<string>();
 let deliveries: Delivery[] = [];
-let deferredRemovals: DeferredRemoval[] = [];
-let removalRequests: string[] = [];
+// Keep an unresolved cancellation visible even if a queue-cleared frame wins
+// the race with its verdict. No text matching or expiring local-id map.
+const removals = new Map<string, PendingEntry>();
+const removalKey = (entry: PendingEntry) => entry.clientMessageId ?? entry.id;
 
 function normalize(content: string): string {
 	return content.trim();
@@ -135,8 +129,7 @@ function resetState(next: string | null): void {
 	deliveredTurnIds.clear();
 	prunedIds.clear();
 	deliveries = [];
-	deferredRemovals = [];
-	removalRequests = [];
+	removals.clear();
 }
 
 /** Bind to a session, wiping everything learned about a different one. */
@@ -215,26 +208,29 @@ export const pendingQueue = {
 		}
 	},
 
-	/**
-	 * Answer an × click. Returns the id to un-send server-side, or null when the
-	 * click landed on an optimistic echo the server has never heard of — that
-	 * removal is deferred and re-aimed at the real row by `reconcile`. Either way
-	 * the caller drops the entry from view.
-	 */
-	requestRemoval(id: string | null, entry: PendingEntry): string | null {
+	/** An × requests a verdict; it is not evidence of withdrawal. */
+	requestRemoval(id: string | null, entry: PendingEntry): string {
 		useSession(id);
-		if (!isLocalPendingId(entry.id)) {
-			prunedIds.add(entry.id);
-			return entry.id;
+		const key = removalKey(entry);
+		removals.set(key, { ...entry, status: 'cancelling' });
+		return key;
+	},
+
+	removalFailed(id: string | null, key: string): void {
+		useSession(id);
+		removals.delete(key);
+	},
+
+	applyRemovalVerdict(id: string | null, key: string, verdict: string): void {
+		useSession(id);
+		const entry = removals.get(key);
+		if (verdict === 'withdrawn') {
+			prunedIds.add(key);
+			if (entry) prunedIds.add(entry.id);
+			removals.delete(key);
+		} else if (verdict === 'already_delivered' && entry) {
+			removals.set(key, { ...entry, status: 'delivered' });
 		}
-		prunedIds.add(entry.id);
-		deferredRemovals.push({
-			content: normalize(entry.content),
-			seq: ++seq,
-			requestedAt: Date.now(),
-			mapped: false,
-		});
-		return null;
 	},
 
 	/**
@@ -244,10 +240,19 @@ export const pendingQueue = {
 	 */
 	reconcile(id: string | null, entries: PendingEntry[]): PendingEntry[] {
 		useSession(id);
-		if (entries.length === 0) return entries;
-		const now = Date.now();
 		const kept: PendingEntry[] = [];
+		const seen = new Set<string>();
 		for (const entry of entries) {
+			const key = removalKey(entry);
+			seen.add(key);
+			if (prunedIds.has(key)) continue;
+			const removal = removals.get(key);
+			if (removal) {
+				const retained = { ...entry, status: removal.status };
+				removals.set(key, retained);
+				kept.push(retained);
+				continue;
+			}
 			// #588: a drained queue row runs as the turn its id names.
 			if (deliveredTurnIds.has(entry.id) || prunedIds.has(entry.id)) continue;
 			// First sighting stamps the entry; an entry we meet for the first time
@@ -262,32 +267,11 @@ export const pendingQueue = {
 				prunedIds.add(entry.id);
 				continue;
 			}
-			const removal = deferredRemovals.find(
-				(r) =>
-					!r.mapped &&
-					r.content === text &&
-					bornAt > r.seq &&
-					now - r.requestedAt < REMOVAL_MAP_WINDOW_MS
-			);
-			if (removal && !isLocalPendingId(entry.id)) {
-				removal.mapped = true;
-				prunedIds.add(entry.id);
-				removalRequests.push(entry.id);
-				continue;
-			}
 			kept.push(entry);
 		}
-		return kept.length === entries.length ? entries : kept;
-	},
-
-	/**
-	 * Server-side ids a deferred × has since been re-aimed at. The caller sends
-	 * the `remove_queued_message` frames; the list is emptied by this call.
-	 */
-	drainRemovalRequests(): string[] {
-		if (removalRequests.length === 0) return removalRequests;
-		const out = removalRequests;
-		removalRequests = [];
-		return out;
+		for (const [key, entry] of removals) {
+			if (!seen.has(key)) kept.push(entry);
+		}
+		return kept.length === entries.length && kept.every((e, i) => e === entries[i]) ? entries : kept;
 	},
 };
