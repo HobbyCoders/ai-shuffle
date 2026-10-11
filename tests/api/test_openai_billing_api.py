@@ -64,6 +64,34 @@ def test_invalid_manual_balance(authenticated_client, provider, amount):
     assert authenticated_client.put(f"{ROOT}/{provider}/openai-usage/balance", json={"balance_usd": amount}).status_code == 422
 
 
+def test_replacing_key_clears_baseline_but_reencrypting_same_key_preserves_it(authenticated_client, provider):
+    import asyncio
+    from app.api.usage import _load_provider_usage
+
+    path = f"{ROOT}/{provider}"
+    response = authenticated_client.put(path + "/openai-usage/balance", json={"balance_usd": 20.50})
+    assert response.status_code == 200
+    baseline = response.json()["manual_balance"]
+    original_blob = db.get_model_provider(provider, include_token=True)["auth_token"]
+    for patch in [{"name": "Renamed"}, {"auth_token": ""}, {"auth_token": "model-key"}]:
+        response = authenticated_client.patch(path, json=patch)
+        assert response.status_code == 200, response.text
+        assert authenticated_client.get(path + "/openai-usage").json()["manual_balance"] == baseline
+    # The API re-encrypts even an unchanged plaintext key; that is not a new account.
+    same_key_blob = db.get_model_provider(provider, include_token=True)["auth_token"]
+    assert same_key_blob != original_blob
+    assert encryption.decrypt_value(same_key_blob) == "model-key"
+    response = authenticated_client.patch(path, json={"auth_token": "other-account-key"})
+    assert response.status_code == 200, response.text
+    row = db.get_model_provider(provider, include_token=True)
+    assert row["id"] == provider
+    assert encryption.decrypt_value(row["auth_token"]) == "other-account-key"
+    assert row["manual_balance_usd"] is None
+    assert row["manual_balance_set_at"] is None
+    assert authenticated_client.get(path + "/openai-usage").json()["manual_balance"] is None
+    assert not any(entry.provider_id == provider for entry in asyncio.run(_load_provider_usage()))
+
+
 def test_manual_balance_tracks_recorded_provider_costs_and_reset(authenticated_client, provider, monkeypatch):
     import asyncio
     from datetime import datetime, timezone

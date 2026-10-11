@@ -357,8 +357,10 @@ since Save. Reported and guessed token counts use the existing pricing path;
 unpriced turns, unattributed calls and spending outside this app are omitted.
 Prices and booking times may differ from billing; an in-flight turn booked
 after Save is deducted in full. Top-ups/refunds are not detected, and the
-estimate can go negative. Save again to reset the baseline. Baselines sync
-with providers; each worker uses only its available usage ledger. If Admin
+estimate can go negative. Save again to reset the baseline. Changing the API
+key clears the baseline; resaving or re-encrypting the same key preserves it.
+Baselines sync with providers, but deductions cover only this worker's tracked
+spend: paired workers' spend is not included, as both UI surfaces state. If Admin
 usage is available, its organization spend stays primary with the manual
 estimate alongside it.
 

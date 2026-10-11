@@ -113,6 +113,8 @@ it('OpenAI: offers an entered balance without asking for another key', async () 
 	expect(billing.getAttribute('rel')).toContain('noopener');
 	expect(worker.sent('GET', '/model-providers/p1/openai-usage')).toHaveLength(1);
 	expect(within(panel).queryByText('Not available for this key')).toBeNull();
+	expect(panel.textContent).toContain("this worker's estimated spend only");
+	expect(panel.textContent).toContain("Paired workers' spend is not included");
 });
 
 it('OpenAI: saves, reloads and clears a two-decimal balance, including zero', async () => {
@@ -136,16 +138,18 @@ it('OpenAI: saves, reloads and clears a two-decimal balance, including zero', as
 	}
 	for (const amount of ['20.50', '0']) {
 		await fireEvent.input(input, { target: { value: amount } });
+
 		await fireEvent.click(save);
 		await flush();
 		expect(worker.sent('PUT', '/model-providers/p1/openai-usage/balance').at(-1)?.body).toEqual({ balance_usd: Number(amount) });
-		expect(within(panel).getByText(/Tracked by this app's cost estimates since/).textContent).toContain('~$1.25 estimated spend so far');
+		expect(panel.textContent).toContain("Only this worker's tracked spend is deducted; paired workers' spend");
+		expect(within(panel).getByText(/Tracked by this worker's cost estimates since/).textContent).toContain('~$1.25 estimated spend so far');
 	}
 	await fireEvent.click(within(panel).getByRole('button', { name: 'Clear' }));
 	await flush();
 	expect(worker.sent('DELETE', '/model-providers/p1/openai-usage/balance')).toHaveLength(1);
 	expect((input as HTMLInputElement).value).toBe('');
-	expect(within(panel).queryByText(/Tracked by this app/)).toBeNull();
+	expect(within(panel).queryByText(/Tracked by this worker/)).toBeNull();
 });
 
 it('a gateway has no Usage tab', async () => {

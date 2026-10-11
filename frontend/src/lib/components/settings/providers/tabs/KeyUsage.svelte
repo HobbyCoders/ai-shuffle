@@ -104,11 +104,11 @@
 		</SettingRow>
 		{#if openAI}
 			{#if manual}
-				<p class="balance-note">Tracked by this app's cost estimates since {new Date(manual.set_at).toLocaleString()}; ~${manual.estimated_spend.toFixed(2)} estimated spend so far.</p>
-				<p class="balance-note">~${manual.balance_remaining.toFixed(2)} left (estimated). Spending outside this app and unpriced turns are not deducted. Enter a new balance to restart tracking.</p>
+				<p class="balance-note">Tracked by this worker's cost estimates since {new Date(manual.set_at).toLocaleString()}; ~${manual.estimated_spend.toFixed(2)} estimated spend so far.</p>
+				<p class="balance-note">~${manual.balance_remaining.toFixed(2)} left (estimated). Only this worker's tracked spend is deducted; paired workers' spend, spending outside this app and unpriced turns are not included. Enter a new balance to restart tracking.</p>
 				{#if manual.unpriced_turns}<p class="balance-note">{manual.unpriced_turns} unpriced turns excluded.</p>{/if}
 			{:else}
-				<p class="balance-note">Enter your current prepaid balance in USD to track this app's estimated spend. This is not a provider reading.</p>
+				<p class="balance-note">Enter your current prepaid balance in USD to track this worker's estimated spend only. Paired workers' spend is not included. This is not a provider reading.</p>
 			{/if}
 			{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 			<SettingRow label="OpenAI Platform">

@@ -682,8 +682,8 @@ describe('ContextUsageBar — provider refresh status', () => {
 		await fireEvent.click(container.querySelector('[aria-label="OpenAI usage — collapse"]')!);
 		const headline = container.querySelector('.sec-summary');
 		expect(headline?.textContent).toBe(`~$${balance.toFixed(2)} left (estimated)`);
-		expect(headline?.getAttribute('title')).toContain(`~$${(20 - balance).toFixed(2)} estimated spend since`);
-		expect(headline?.getAttribute('title')).toContain('Spending outside this app');
+		expect(headline?.getAttribute('title')).toContain(`~$${(20 - balance).toFixed(2)} estimated spend on this worker since`);
+		expect(headline?.getAttribute('title')).toContain("Only this worker's tracked spend is deducted; paired workers' spend");
 	});
 
 	it('preserves the Admin reading alongside the entered balance estimate', async () => {

@@ -10,6 +10,34 @@ from app.network import blobs, engine, memory_records, ownership, plugins_sync, 
 from tests.core.network.harness import converge, join
 
 
+def test_synced_manual_balance_deducts_only_serving_worker_spend(workers):
+    from app.db.analytics import get_manual_balance_credits
+
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Balance scope")
+        database.create_model_provider("openai-key", "OpenAI", "openai", "https://api.openai.com")
+        database.update_model_provider("openai-key", manual_balance_usd=20.5, manual_balance_set_at=1)
+        database.log_usage(None, None, "priced", 100, 20, 2.25, 1,
+                           provider_id="openai-key", provider_type="openai", billing="api")
+        engine.scan_all()
+        row_a = database.get_model_provider("openai-key")
+        assert get_manual_balance_credits(row_a)["balance_remaining"] == 18.25
+    join(a, b)
+    with b.active():
+        row_b = database.get_model_provider("openai-key")
+        assert row_b["manual_balance_usd"] == row_a["manual_balance_usd"]
+        assert row_b["manual_balance_set_at"] == row_a["manual_balance_set_at"]
+        credits = get_manual_balance_credits(row_b)
+        assert credits["estimated_spend"] == 0
+        assert credits["balance_remaining"] == 20.5
+        database.log_usage(None, None, "priced", 100, 20, 1, 1,
+                           provider_id="openai-key", provider_type="openai", billing="api")
+        assert get_manual_balance_credits(row_b)["balance_remaining"] == 19.5
+    with a.active():
+        assert get_manual_balance_credits(row_a)["balance_remaining"] == 18.25
+
+
 def _skills_root(worker):
     return worker.data_dir / "fluid" / "skills"
 

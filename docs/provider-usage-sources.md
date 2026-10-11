@@ -86,7 +86,10 @@ app are not deducted. Prices, estimated token counts and booking time can
 differ from provider billing; an in-flight turn booked after Save is deducted
 in full. Refunds and top-ups are not detected, and the result can go negative.
 The non-secret baseline syncs with the provider; each worker subtracts only
-ledger entries available on that worker. If an Admin reading also exists, it
+its own tracked spend. Paired workers' spend is not included, and both the
+Usage tab and popover tooltip state this scope. Replacing the API key clears
+the balance and cutoff; resaving or re-encrypting the same key preserves them.
+If an Admin reading also exists, it
 remains the primary source and the manual estimate appears alongside it.
 
 fal.ai reads its balance with the ordinary fal.ai API key the media tools use.

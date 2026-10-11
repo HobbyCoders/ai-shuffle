@@ -762,7 +762,7 @@ def _provider_display_name(key: str, name: Optional[str]) -> str:
 
 
 def get_manual_balance_credits(row: dict) -> dict | None:
-    """Entered balance less recorded app costs; not a provider balance reading."""
+    """Entered balance less this worker's costs; peer ledgers are not synced."""
     balance, set_at = row.get("manual_balance_usd"), row.get("manual_balance_set_at")
     if balance is None or set_at is None:
         return None

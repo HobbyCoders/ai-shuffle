@@ -429,30 +429,36 @@ def update_model_provider(
     """
     if "models_json" in kwargs:
         kwargs["models_json"] = _normalize_model_capabilities(kwargs["models_json"])
+    changed = False
+    if "auth_token" in kwargs or "base_url" in kwargs:
+        # A new key or endpoint has not been checked: forget the last result.
+        # Only a real change counts: an edit that resends the same endpoint,
+        # or a re-encryption of the same key, keeps it.
+        current = get_model_provider(provider_id, include_token=True) or {}
+        key_changed = (
+            "auth_token" in kwargs
+            and not _same_secret(current.get("auth_token"), kwargs["auth_token"])
+        )
+        changed = key_changed or (
+            "base_url" in kwargs
+            and (kwargs["base_url"] or None) != (current.get("base_url") or None)
+        )
+        if key_changed:
+            # A balance belongs to the credential's account, not this row ID.
+            # Re-encrypting the same key must not reset the owner's baseline.
+            kwargs["manual_balance_usd"] = None
+            kwargs["manual_balance_set_at"] = None
+
     updates: List[str] = []
     values: List[Any] = []
     for column in _UPDATABLE_COLUMNS:
         if column in kwargs:
             updates.append(f"{column} = %s")
             values.append(_dump_json_value(column, kwargs[column]))
-
     if not updates:
         return get_model_provider(provider_id)
-
-    if "auth_token" in kwargs or "base_url" in kwargs:
-        # A new key or endpoint has not been checked: forget the last result.
-        # Only a real change counts: an edit that resends the same endpoint,
-        # or a re-encryption of the same key, keeps it.
-        current = get_model_provider(provider_id, include_token=True) or {}
-        changed = (
-            "base_url" in kwargs
-            and (kwargs["base_url"] or None) != (current.get("base_url") or None)
-        ) or (
-            "auth_token" in kwargs
-            and not _same_secret(current.get("auth_token"), kwargs["auth_token"])
-        )
-        if changed:
-            updates.append("credential_status = NULL")
+    if changed:
+        updates.append("credential_status = NULL")
     updates.append("updated_at = %s")
     values.append(datetime.now(timezone.utc).isoformat())
     updates.append("revision = %s")

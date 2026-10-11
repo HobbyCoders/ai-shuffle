@@ -10,7 +10,7 @@ export function creditText(credits: Record<string, unknown> | null, type: string
   const spent = creditNumber(credits, 'estimated_spend') ?? 0;
   const setAt = creditNumber(credits, 'set_at');
   const spend = creditNumber(credits, 'spend_month');
-  const detail = `${estimate}; ~$${spent.toFixed(2)} estimated spend since ${setAt == null ? 'balance entry' : new Date(setAt).toLocaleString()}. Spending outside this app and unpriced turns are not deducted.`;
+  const detail = `${estimate}; ~$${spent.toFixed(2)} estimated spend on this worker since ${setAt == null ? 'balance entry' : new Date(setAt).toLocaleString()}. Only this worker's tracked spend is deducted; paired workers' spend, spending outside this app and unpriced turns are not included.`;
   return {
    short: spend == null ? estimate : `$${spend.toFixed(2)} spent this month`,
    detail: spend == null ? detail : `$${spend.toFixed(2)} organization spend this month (UTC); ${detail}`,
