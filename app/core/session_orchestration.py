@@ -1447,7 +1447,7 @@ def _origin_turn(session_id, settled):
         return turns._row(cursor.fetchone())
 
 
-def _turn_report(session_id, turn_id, outcome, origin_id):
+def _turn_report(session_id, turn_id, outcome, origin_id, *, bound=True):
     """``(status, report text, needs-owner items)`` for one settled turn.
 
     Needs-owner items are approvals deferred since ``origin_id`` began."""
@@ -1486,7 +1486,9 @@ def _turn_report(session_id, turn_id, outcome, origin_id):
         status = "stopped"
     else:
         status = "failed" if failed else "completed"
-    report, _ = provider_agent.bound_report(text or "The chat ended without a written report.")
+    report = text or "The chat ended without a written report."
+    if bound:
+        report, _ = provider_agent.bound_report(report)
     return status, report, list(dict.fromkeys(needs))[:MAX_NEEDS_OWNER]
 
 

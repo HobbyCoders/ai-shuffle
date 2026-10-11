@@ -391,6 +391,13 @@ async def _settle_card(record: WorkerRecord, preview: str, summary: Optional[str
     """
     feed = record.feed
     if feed is None:
+        if record.continuation_turn_id:
+            from app.core.provider_agent_feed import record_continuation_report
+
+            await record_continuation_report(
+                record.parent_session_id, record.worker_session_id,
+                record.continuation_turn_id, "killed", preview,
+            )
         return
     try:
         await feed.stop_following(final_drain=False)

@@ -201,6 +201,8 @@ class SubagentCompleted(EventBase):
     task_id: str
     status: Literal["completed", "failed", "killed"]
     result_preview: str | None = None
+    result: str | None = None
+    result_truncated: bool = False
     usage: dict | None = None
 
 

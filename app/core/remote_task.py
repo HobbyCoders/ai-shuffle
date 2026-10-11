@@ -1079,32 +1079,43 @@ def _child_report(session_id: str) -> Tuple[Optional[Dict[str, Any]], List[str]]
                            (session_id, COMMAND_PREFIX + session_id))
             origin = cursor.fetchone()
         origin_id = origin["id"] if origin else settled["id"]
-    status, report, needs = _turn_report(session_id, settled["id"], settled["_outcome"], origin_id)
+    # Keep the card's report separate from Task's head/tail report contract.
+    status, report, needs = _turn_report(
+        session_id, settled["id"], settled["_outcome"], origin_id, bound=False,
+    )
     reason = None
     lost: List[str] = []
     if status == "completed" and settled.get("_lost_wakes"):
-        from app.core.provider_agent import bound_report, lost_wake_error
+        from app.core.provider_agent import lost_wake_error
 
         lost = list(settled["_lost_wakes"])
         status = "failed"
         text = lost_wake_error(session_id, settled["_lost_wakes"])
         if report and report != _NO_REPORT:
             text += "\n\nIts last message (not a report):\n" + report
-        report = bound_report(text)[0]
+        report = text
     elif status == "failed" and settled.get("stop_reason") == LEASE_EXPIRED:
-        report = _cut_off_report(report)
+        report = _cut_off_report(report, bound=False)
         reason = WORKER_RESTART_REASON
     elif status == "failed" and _shut_down(settled):
-        report = _cut_off_report(report, shutdown=True)
+        report = _cut_off_report(report, shutdown=True, bound=False)
         reason = WORKER_SHUTDOWN_REASON
-    from app.core.provider_agent import MAX_REPORT_CHARS
+    from app.core.provider_agent import bound_report
+    from app.core.turn_recorder import _bound_subagent_result
+
+    # Use the SAME byte/paragraph bound before transport; the receiving recorder
+    # rechecks it and preserves the flag. Never put unbounded text on the wire.
+    card_result, card_result_truncated = _bound_subagent_result(report.strip())
+    report, truncated = bound_report(report)
     body = {
         "version": WIRE_VERSION,
         "worker_session_id": session_id,
         "completion_id": settled["id"],
         "status": status,
         "report": report,
-        "truncated": len(report) >= MAX_REPORT_CHARS,
+        "truncated": truncated,
+        "card_result": card_result,
+        "card_result_truncated": card_result_truncated,
         "needs_owner": needs,
     }
     if reason:
@@ -1132,7 +1143,7 @@ def _shut_down(turn: Mapping[str, Any]) -> bool:
     return payload.get("interrupt_source") == SERVER_SHUTDOWN_REASON
 
 
-def _cut_off_report(partial: str, *, shutdown: bool = False) -> str:
+def _cut_off_report(partial: str, *, shutdown: bool = False, bound: bool = True) -> str:
     """The failed report of a child whose run this worker lost (a restart).
 
     ``shutdown`` is a graceful stop of this worker (docker stop, quitting the
@@ -1151,7 +1162,7 @@ def _cut_off_report(partial: str, *, shutdown: bool = False) -> str:
                 "the worker is back.")
     if partial and partial != _NO_REPORT:
         text += "\n\nWhat it had written before it was cut off (unfinished):\n" + partial
-    return bound_report(text)[0]
+    return bound_report(text)[0] if bound else text
 
 
 def _child_stopped(session_id: str, child: Mapping[str, Any]) -> bool:
@@ -1402,6 +1413,8 @@ class _Report:
     worker_name: str
     #: Why a failed run ended, when its worker shut down or restarted.
     reason: Optional[str] = None
+    card_result: Optional[str] = None
+    card_result_truncated: bool = False
 
 
 def accept_task_report(body: Mapping[str, Any], from_device: str) -> _Report:
@@ -1428,8 +1441,18 @@ def accept_task_report(body: Mapping[str, Any], from_device: str) -> _Report:
         raise ValueError("Invalid needs_owner")
     needs = [defang_harness_markers(str(item)[:300]) for item in needs[:MAX_NEEDS_OWNER] if str(item).strip()]
     reason = body.get("reason") if body.get("reason") in _REPORT_REASONS and status == "failed" else None
+    # Older workers only send Task's report. Preserve their truncation flag
+    # rather than presenting a head/tail report as complete.
+    card_result = body.get("card_result")
+    if isinstance(card_result, str):
+        card_result = defang_harness_markers(card_result)
+        card_result_truncated = body.get("card_result_truncated") is True
+    else:
+        card_result = report
+        card_result_truncated = bool(cut or body.get("truncated") is True)
     return _Report(worker_id, completion_id, status, report, bool(cut or body.get("truncated") is True),
-                   needs, dispatch, member.name or from_device, reason)
+                   needs, dispatch, member.name or from_device, reason,
+                   card_result, card_result_truncated)
 
 
 def _wake_summary(report: _Report, report_path: Optional[str]) -> str:
@@ -1814,6 +1837,7 @@ async def _settle_tracked(dispatch: Mapping[str, Any], report: "_Report",
         feed = WorkerFeed(parent_session_id=root, worker_session_id=worker_id, task_id=worker_id,
                           label=dispatch.get("label"))
     await feed.completed(status, result_preview=report.report,
+                         result=report.card_result, result_truncated=report.card_result_truncated,
                          summary=record.get("model") or dispatch.get("label"))
     summary = _completion_summary(report.report)
     for session_id in dict.fromkeys((root, owner)):

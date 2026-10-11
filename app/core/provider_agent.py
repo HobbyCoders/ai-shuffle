@@ -2956,7 +2956,9 @@ async def dispatch_worker(
             )
 
         status = "completed"
-        preview = report
+        # The card has its own 64-KiB paragraph-aware bound. Do not feed it the
+        # Task report's independent 60,000-character head/tail truncation.
+        preview = final_text.strip()
         completion_summary = _completion_summary(report)
         if background:
             # A SYNC dispatch still returns its report inline to a live caller
