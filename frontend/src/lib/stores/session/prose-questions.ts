@@ -37,9 +37,23 @@
  * peer-agent notes and autonomous wakes do not advance the revision, so none
  * of them clear an entry.
  *
- * Known limit: a question this tab never saw (a session not opened here since
- * page load) is not known, because the row does not say whether its last
- * prose asks a question.
+ * Row-derived question (#2263): a worker that stamps the row also delivers
+ * `last_assistant_question_seq`/`_epoch` with the revision — the position of
+ * the newest nonempty assistant prose when it asks a question, null when it
+ * does not. A session is then marked iff
+ *
+ *     question.seq !== null && question.epoch !== null
+ *       && (no user position is known
+ *           || (user.epoch === question.epoch && question.seq > user.seq))
+ *
+ * using the latest user pair delivered and the highest user seq seen in the
+ * question's epoch, so a delayed revision cannot un-answer a question. This
+ * replaces the transcript-derived mark for that session, including sessions
+ * this tab never opened. An explicit null seq in a known epoch clears it.
+ * When the fields are absent (an older worker) or both null (an older peer's
+ * replicated row, or a cleared log), the transcript-derived mark above stays
+ * the fallback. A clear retires the log's epochs here, so a delayed pre-clear
+ * row cannot bring its question back.
  */
 
 import { createStore } from '../store-utils';
@@ -63,6 +77,10 @@ export interface UserMessageRevision {
 	last_user_message_seq?: unknown;
 	/** Opaque epoch string, or null/absent when unknown. Validated here. */
 	last_user_message_epoch?: unknown;
+	/** Trailing prose question seq; null: no question; absent: older worker. */
+	last_assistant_question_seq?: unknown;
+	/** Opaque epoch of `last_assistant_question_seq`. */
+	last_assistant_question_epoch?: unknown;
 }
 
 /**
@@ -91,6 +109,19 @@ let _nextClaim = 0;
 
 /** Raw row positions last seen per session, so an unchanged row is skipped. */
 const _rowRaw = new Map<string, string>();
+
+/**
+ * The row-derived trailing prose question per session (#2263): its position,
+ * or null when the row says the newest prose asks nothing. Absent: the row
+ * says nothing (older worker or peer), so the transcript-derived mark applies.
+ */
+const _rowQuestions = new Map<string, Position | null>();
+
+/** The latest user-message pair delivered per session (null: none known). */
+const _lastUser = new Map<string, Position | null>();
+
+/** Epochs of logs cleared since load, per session: never re-marked from. */
+const _retired = new Map<string, Set<string>>();
 
 export const proseQuestionSessions = {
 	get current() { return _store.current; },
@@ -130,12 +161,60 @@ function answers(seen: number | undefined, question: Position): boolean {
 	return seen !== undefined && seen > question.seq;
 }
 
+/**
+ * Whether the row-derived question marks the session; undefined when the row
+ * says nothing, so the transcript-derived mark decides.
+ */
+function rowMarked(sessionId: string): boolean | undefined {
+	if (!_rowQuestions.has(sessionId)) return undefined;
+	const question = _rowQuestions.get(sessionId);
+	if (!question) return false;
+	// Marked only while the question follows every user message of its log.
+	const seen = latestIn(sessionId, question.epoch);
+	if (seen !== undefined && seen >= question.seq) return false;
+	const user = _lastUser.get(sessionId);
+	// Never compare positions across epochs: a user pair from another log
+	// leaves the question's state unknown, so it is not marked.
+	return !user || user.epoch === question.epoch;
+}
+
+/** Publish the session's mark: the row's when it has one, else the transcript's. */
+function refresh(sessionId: string): void {
+	const marked = rowMarked(sessionId) ?? _questions.has(sessionId);
+	if (marked === _store.current.has(sessionId)) return;
+	const next = new Set(_store.current);
+	if (marked) next.add(sessionId);
+	else next.delete(sessionId);
+	_store.set(next);
+}
+
 function drop(sessionId: string): void {
 	_questions.delete(sessionId);
-	if (!_store.current.has(sessionId)) return;
-	const next = new Set(_store.current);
-	next.delete(sessionId);
-	_store.set(next);
+	refresh(sessionId);
+}
+
+/** Record the row-derived question pair of a revision that carries one. */
+function observeQuestion(sessionId: string, revision: UserMessageRevision): void {
+	if (revision.last_assistant_question_seq === undefined) return;
+	const seq = revision.last_assistant_question_seq;
+	const epoch = revision.last_assistant_question_epoch;
+	const retired = _retired.get(sessionId);
+	if (typeof epoch === 'string' && retired?.has(epoch)) return;
+	if (seq === null && (epoch === null || epoch === undefined)) {
+		// Nothing known (older peer, cleared log): the transcript decides.
+		_rowQuestions.delete(sessionId);
+		return;
+	}
+	// A malformed pair says no question: never mark from it.
+	_rowQuestions.set(sessionId, toPosition(seq, epoch));
+}
+
+/** Record the latest user pair of a revision that carries one. */
+function observeUser(sessionId: string, revision: UserMessageRevision): void {
+	if (revision.last_user_message_seq === undefined && revision.last_user_message_epoch === undefined) return;
+	const pos = toPosition(revision.last_user_message_seq, revision.last_user_message_epoch);
+	if (pos && _retired.get(sessionId)?.has(pos.epoch)) return;
+	_lastUser.set(sessionId, pos);
 }
 
 /** The trailing assistant prose message (the one `lastProseAsksQuestion` reads). */
@@ -171,10 +250,7 @@ export function rememberLeavingProseQuestion(
 		return;
 	}
 	_questions.set(sessionId, pos);
-	if (_store.current.has(sessionId)) return;
-	const next = new Set(_store.current);
-	next.add(sessionId);
-	_store.set(next);
+	refresh(sessionId);
 }
 
 /**
@@ -204,22 +280,27 @@ export function finishUserMessageRevisionSeed(
 }
 
 /**
- * A session's user-message revision as delivered by a row, a
- * `user_session_updated` frame or a `/live` snapshot. Drops the remembered
- * question when the revision is a later user message in the question's log.
+ * A session's revision as delivered by a row, a `user_session_updated` frame
+ * or a `/live` snapshot: its user-message pair and, from a worker that stamps
+ * it, its trailing prose question pair (#2263). Drops the remembered question
+ * when the revision is a later user message in the question's log.
  */
 export function observeLastUserMessage(
 	sessionId: string | null | undefined,
 	revision: UserMessageRevision | null | undefined
 ): void {
 	if (!sessionId || !revision) return;
+	observeQuestion(sessionId, revision);
+	observeUser(sessionId, revision);
 	const pos = toPosition(revision.last_user_message_seq, revision.last_user_message_epoch);
-	if (!pos) return;
-	remember(sessionId, pos);
-	const question = _questions.get(sessionId);
-	if (question && question.epoch === pos.epoch && answers(latestIn(sessionId, pos.epoch), question)) {
-		drop(sessionId);
+	if (pos) {
+		remember(sessionId, pos);
+		const question = _questions.get(sessionId);
+		if (question && question.epoch === pos.epoch && answers(latestIn(sessionId, pos.epoch), question)) {
+			_questions.delete(sessionId);
+		}
 	}
+	refresh(sessionId);
 }
 
 /**
@@ -229,19 +310,39 @@ export function observeLastUserMessage(
  */
 export function observeSessionRows(rows: readonly ({ id: string } & UserMessageRevision)[]): void {
 	for (const row of rows) {
-		const raw = `${row.last_user_message_seq ?? ''}@${row.last_user_message_epoch ?? ''}`;
+		const raw = [
+			row.last_user_message_seq, row.last_user_message_epoch,
+			row.last_assistant_question_seq, row.last_assistant_question_epoch
+		].map((v) => (v === undefined ? '~' : String(v))).join('@');
 		if (_rowRaw.get(row.id) === raw) continue;
 		_rowRaw.set(row.id, raw);
 		observeLastUserMessage(row.id, row);
 	}
 }
 
-/** Drop a session's entry (the session was deleted). */
-export function forgetProseQuestion(sessionId: string): void {
-	drop(sessionId);
+/**
+ * Drop a session's entry: the session was deleted, or (`cleared`) its log was
+ * wiped in place. A clear retires every epoch known for it, so a delayed
+ * pre-clear row or snapshot cannot mark or answer anything again.
+ */
+export function forgetProseQuestion(sessionId: string, opts: { cleared?: boolean } = {}): void {
+	if (opts.cleared) {
+		const retired = _retired.get(sessionId) ?? new Set<string>();
+		for (const epoch of _latest.get(sessionId)?.keys() ?? []) retired.add(epoch);
+		for (const pos of [_questions.get(sessionId), _rowQuestions.get(sessionId), _lastUser.get(sessionId)]) {
+			if (pos) retired.add(pos.epoch);
+		}
+		if (retired.size) _retired.set(sessionId, retired);
+	} else {
+		_retired.delete(sessionId);
+	}
+	_questions.delete(sessionId);
+	_rowQuestions.delete(sessionId);
+	_lastUser.delete(sessionId);
 	_latest.delete(sessionId);
 	_rowRaw.delete(sessionId);
 	_claims.delete(sessionId);
+	refresh(sessionId);
 }
 
 /** Test seam: forget everything. */
@@ -250,6 +351,9 @@ export function _resetProseQuestions(): void {
 	_latest.clear();
 	_claims.clear();
 	_rowRaw.clear();
+	_rowQuestions.clear();
+	_lastUser.clear();
+	_retired.clear();
 	_store.set(new Set());
 }
 

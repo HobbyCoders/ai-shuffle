@@ -269,3 +269,117 @@ describe('cleared by a later user message in the question\'s log (#2249)', () =>
 		});
 	});
 });
+
+describe('row-derived assistant question (#2263)', () => {
+	const E = 'evt-epoch-1';
+	const E2 = 'evt-epoch-2';
+	const has = (id: string) => get(proseQuestionSessions).has(id);
+	const row = (
+		question: number | null,
+		user: number | null,
+		qEpoch: string | null = E,
+		uEpoch: string | null = user === null ? null : E
+	) => ({
+		last_assistant_question_seq: question,
+		last_assistant_question_epoch: qEpoch,
+		last_user_message_seq: user,
+		last_user_message_epoch: uEpoch
+	});
+
+	it('marks a session this tab never opened when its row asks after the last user message', () => {
+		observeSessionRows([{ id: 'A', ...row(12, 9) }]);
+		expect(has('A')).toBe(true);
+	});
+
+	it('marks when no user message is known yet', () => {
+		observeLastUserMessage('A', row(3, null));
+		expect(has('A')).toBe(true);
+	});
+
+	it('is cleared by later non-question prose (null seq, same epoch)', () => {
+		observeLastUserMessage('A', row(12, 9));
+		observeLastUserMessage('A', { last_assistant_question_seq: null, last_assistant_question_epoch: E });
+		expect(has('A')).toBe(false);
+	});
+
+	it('is cleared by a user answer in the same epoch, including a user-only frame', () => {
+		observeLastUserMessage('A', row(12, 9));
+		observeLastUserMessage('A', { last_user_message_seq: 13, last_user_message_epoch: E });
+		expect(has('A')).toBe(false);
+		// A delayed revision from before the answer cannot un-answer it.
+		observeLastUserMessage('A', row(12, 9));
+		expect(has('A')).toBe(false);
+	});
+
+	it('re-marks when the agent asks again after the answer', () => {
+		observeLastUserMessage('A', row(12, 9));
+		observeLastUserMessage('A', { last_user_message_seq: 13, last_user_message_epoch: E });
+		observeLastUserMessage('A', row(16, 13));
+		expect(has('A')).toBe(true);
+	});
+
+	it('does not compare positions across epochs', () => {
+		observeLastUserMessage('A', row(12, 2, E, E2));
+		expect(has('A')).toBe(false);
+		observeLastUserMessage('B', row(5, 40, E2, E));
+		expect(has('B')).toBe(false);
+	});
+
+	it('explicit null seq unmarks even a transcript-remembered question', () => {
+		rememberLeavingProseQuestion('A', [
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Prod only?', seq: 4, epoch: E }
+		]);
+		expect(has('A')).toBe(true);
+		observeLastUserMessage('A', row(null, 3));
+		expect(has('A')).toBe(false);
+	});
+
+	it('falls back to the transcript when the fields are absent (older worker)', () => {
+		rememberLeavingProseQuestion('A', [
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Prod only?', seq: 4, epoch: E }
+		]);
+		observeSessionRows([{ id: 'A', last_user_message_seq: 3, last_user_message_epoch: E }]);
+		expect(has('A')).toBe(true);
+		// And an older row without a question never marks on its own.
+		observeSessionRows([{ id: 'B', last_user_message_seq: 3, last_user_message_epoch: E }]);
+		expect(has('B')).toBe(false);
+	});
+
+	it('falls back to the transcript when both question fields are null', () => {
+		rememberLeavingProseQuestion('A', [
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Prod only?', seq: 4, epoch: E }
+		]);
+		observeLastUserMessage('A', row(null, 3, null));
+		expect(has('A')).toBe(true);
+	});
+
+	it('the row wins over the transcript when leaving the session', () => {
+		observeLastUserMessage('A', row(8, 5));
+		rememberLeavingProseQuestion('A', [{ id: 'a1', role: 'assistant', type: 'text', content: 'Done.' }]);
+		expect(has('A')).toBe(true);
+	});
+
+	it('a clear retires the old log: a delayed pre-clear row does not re-mark', () => {
+		observeLastUserMessage('A', row(12, 9));
+		forgetProseQuestion('A', { cleared: true });
+		expect(has('A')).toBe(false);
+		observeSessionRows([{ id: 'A', ...row(12, 9) }]);
+		expect(has('A')).toBe(false);
+		// The new log asks: marked again.
+		observeLastUserMessage('A', row(2, null, E2));
+		expect(has('A')).toBe(true);
+	});
+
+	it('deleting the session drops the row-derived mark', () => {
+		observeLastUserMessage('A', row(12, 9));
+		forgetProseQuestion('A');
+		expect(has('A')).toBe(false);
+	});
+
+	it('re-observes a row whose question fields changed', () => {
+		observeSessionRows([{ id: 'A', ...row(null, 9) }]);
+		expect(has('A')).toBe(false);
+		observeSessionRows([{ id: 'A', ...row(12, 9) }]);
+		expect(has('A')).toBe(true);
+	});
+});

@@ -103,6 +103,10 @@ interface LiveSnapshot {
 		last_user_message_seq?: number | null;
 		/** Opaque log identity `last_user_message_seq` belongs to. */
 		last_user_message_epoch?: string | null;
+		/** Position of a trailing prose question (null: none; absent: older worker, #2263). */
+		last_assistant_question_seq?: number | null;
+		/** Opaque log identity `last_assistant_question_seq` belongs to. */
+		last_assistant_question_epoch?: string | null;
 	};
 	/** Durable background-task view (task registry `get_visible`), already in
 	 *  the `Task` wire shape. Used to SEED the chip strip on switch-in. */

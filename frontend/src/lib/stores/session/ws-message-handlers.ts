@@ -187,6 +187,10 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'last_user_message_at',
 	'last_user_message_seq',
 	'last_user_message_epoch',
+	// The trailing prose question changed (#2263): marks or clears Needs you on
+	// a row this tab has not opened.
+	'last_assistant_question_seq',
+	'last_assistant_question_epoch',
 ]);
 
 /**
@@ -604,13 +608,18 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			}
 			// A cleared conversation has nothing left awaiting the user's input.
 			setNeedsAttention(sessionId, 0);
-			forgetProseQuestion(sessionId);
-			// Sidebar row: the server zeroed the counters as part of the clear —
-			// mirror that on the row (all patchable fields) instead of re-paging.
+			forgetProseQuestion(sessionId, { cleared: true });
+			// Sidebar row: the server zeroed the counters and both revision pairs
+			// as part of the clear — mirror that on the row (all patchable fields)
+			// instead of re-paging.
 			applyRowUpdates(sessionId, {
 				turn_count: 0,
 				total_cost_usd: 0,
 				updated_at: new Date().toISOString(),
+				last_user_message_seq: null,
+				last_user_message_epoch: null,
+				last_assistant_question_seq: null,
+				last_assistant_question_epoch: null,
 			});
 			return;
 		}

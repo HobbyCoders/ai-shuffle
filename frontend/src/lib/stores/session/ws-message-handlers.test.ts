@@ -2112,6 +2112,54 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('user_session_updated handler (assistant-question revision, #2263)', () => {
+		const question = (seq: number | null) => ({
+			last_assistant_question_seq: seq,
+			last_assistant_question_epoch: 'evt-1',
+			last_user_message_seq: 9,
+			last_user_message_epoch: 'evt-1',
+		});
+		const marked = () => get(proseQuestionSessions).has('never-opened');
+
+		it('marks a session this tab never opened and patches the row without a reload', async () => {
+			vi.useFakeTimers();
+			try {
+				deps = createMockDeps();
+				handlers = createMessageHandlers(deps);
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(12) });
+				expect(marked()).toBe(true);
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('never-opened', question(12));
+				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
+				expect(deps.appLoadSessions).not.toHaveBeenCalled();
+
+				// Later non-question prose clears it.
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(null) });
+				expect(marked()).toBe(false);
+			} finally {
+				_resetProseQuestions();
+				vi.useRealTimers();
+			}
+		});
+
+		it('a clear nulls both pairs on the row and a delayed pre-clear frame does not re-mark', () => {
+			try {
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(12) });
+				handlers.handleMessage({ type: 'user_session_cleared', session_id: 'never-opened' });
+				expect(marked()).toBe(false);
+				expect(deps.mergeSessionPatch).toHaveBeenLastCalledWith('never-opened', expect.objectContaining({
+					last_user_message_seq: null,
+					last_user_message_epoch: null,
+					last_assistant_question_seq: null,
+					last_assistant_question_epoch: null,
+				}));
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'never-opened', updates: question(12) });
+				expect(marked()).toBe(false);
+			} finally {
+				_resetProseQuestions();
+			}
+		});
+	});
+
 	describe('user_session_updated handler (hidden flip)', () => {
 		// The voice attach backfill hides a wake-word "command" session after
 		// the row already existed visibly (create→attach window). The flip is
