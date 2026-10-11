@@ -22,7 +22,12 @@ import { openHeaderDropdown } from '../header-dropdowns';
 import { getPersistedDeviceIntent } from '../worker-selection';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
-import { noteUserMessageRevision, rememberLeavingProseQuestion } from './prose-questions';
+import {
+	beginUserMessageRevisionSeed,
+	finishUserMessageRevisionSeed,
+	observeLastUserMessage,
+	rememberLeavingProseQuestion
+} from './prose-questions';
 import { archivedChats } from '../archived-chats';
 import { subagentChats } from '../subagent-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
@@ -742,31 +747,43 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// One-shot metadata snapshot: the feed carries the transcript, streaming
 		// flag, tasks and usage, but NOT the lifecycle metadata. Fetch it once from
 		// /live so worktree/cloud fields are correct on switch-in.
-		void applyMetadataSnapshot(sessionId, generation);
-		void seedUserMessageRevision(sessionId);
+		// The user-message revision is claimed now (so revisions arriving while
+		// it is read are held, not lost) and read only after `/live` settles.
+		const seedRevision = claimUserMessageRevision(sessionId);
+		const metadata = applyMetadataSnapshot(sessionId, generation);
+		if (seedRevision) void metadata.finally(() => readUserMessageRevision(sessionId));
 	}
 
 	/**
-	 * A session opened without a sidebar row carrying `last_user_message_at`
-	 * (a deep link, Spotlight, or a row outside the loaded or filtered page)
-	 * reads it from its own detail, so leaving it with an unanswered prose
-	 * question records a baseline and a later answer from elsewhere clears it
-	 * (#2249). Issued after `/live`, and only when the row can't answer.
+	 * Make the opened session's `last_user_message_at` known, so leaving it with
+	 * an unanswered prose question records a baseline and a later answer from
+	 * elsewhere clears the mark (#2249). A loaded row that carries the field is
+	 * recorded directly. Otherwise (a deep link, Spotlight, a row outside the
+	 * loaded or filtered page) the session's detail is read once — skipped when
+	 * the revision is already known from any source or a read is in flight.
+	 * `/live` does not report the field; the detail endpoint is the only
+	 * per-session source. Returns whether the caller must read it.
 	 */
-	async function seedUserMessageRevision(sessionId: string) {
+	function claimUserMessageRevision(sessionId: string): boolean {
 		const row = appData.current.sessions.find((s) => s.id === sessionId);
-		if (row && 'last_user_message_at' in row) return;
-		let detail: { last_user_message_at?: string | null } | null;
+		if (row && 'last_user_message_at' in row) {
+			observeLastUserMessage(sessionId, row.last_user_message_at ?? null);
+			return false;
+		}
+		return beginUserMessageRevisionSeed(sessionId);
+	}
+
+	async function readUserMessageRevision(sessionId: string) {
+		let value: unknown = undefined;
 		try {
-			detail = await api.get<{ last_user_message_at?: string | null }>(
+			const detail = await api.get<{ last_user_message_at?: string | null }>(
 				`/sessions/${encodeURIComponent(sessionId)}?message_limit=1`
 			);
+			if (detail && 'last_user_message_at' in detail) value = detail.last_user_message_at;
 		} catch {
-			return;
+			// Unknown; a later switch-in tries again.
 		}
-		if (detail && 'last_user_message_at' in detail) {
-			noteUserMessageRevision(sessionId, detail.last_user_message_at);
-		}
+		finishUserMessageRevisionSeed(sessionId, value);
 	}
 
 	/**

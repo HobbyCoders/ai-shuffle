@@ -3,7 +3,8 @@ import { get } from 'svelte/store';
 import {
 	_resetProseQuestions,
 	forgetProseQuestion,
-	noteUserMessageRevision,
+	beginUserMessageRevisionSeed,
+	finishUserMessageRevisionSeed,
 	observeLastUserMessage,
 	observeSessionRows,
 	proseQuestionSessions,
@@ -96,17 +97,19 @@ describe('cleared by a later user message from anywhere (#2249)', () => {
 		expect(has('A')).toBe(false);
 	});
 
-	it('takes the first value seen as the baseline when the row was not loaded at leave time', () => {
+	it('never takes a revision that arrives after leaving as the baseline when nothing was known', () => {
 		rememberLeavingProseQuestion('A', asked);
-		observeSessionRows([{ id: 'A', last_user_message_at: T0 }]);
-		expect(has('A')).toBe(true);
+		// The first post-leave value may itself be the answer: it is not adopted…
+		observeLastUserMessage('A', T0);
 		observeLastUserMessage('A', '2026-10-11T10:00:01Z');
-		expect(has('A')).toBe(false);
+		// …so the entry waits for a reopen rather than guessing either way.
+		expect(has('A')).toBe(true);
 	});
 
 	it('uses the open session\'s own revision when no row is loaded, so the first answer clears it', () => {
 		// Opened from a deep link / Spotlight: its detail said T0, no sidebar row.
-		noteUserMessageRevision('A', T0);
+		expect(beginUserMessageRevisionSeed('A')).toBe(true);
+		finishUserMessageRevisionSeed('A', T0);
 		rememberLeavingProseQuestion('A', asked);
 		// The very first broadcast after leaving IS the answer.
 		observeLastUserMessage('A', '2026-10-11T10:00:00.000001Z');
@@ -122,6 +125,17 @@ describe('cleared by a later user message from anywhere (#2249)', () => {
 		expect(has('A')).toBe(false);
 	});
 
+	it('retains a loaded row\'s revision without a mark, so a row filtered out before leaving still has a baseline', () => {
+		// A is open and its row is loaded; then a tag filter drops the row.
+		observeSessionRows([{ id: 'A', last_user_message_at: T0 }, { id: 'B', last_user_message_at: null }]);
+		observeSessionRows([{ id: 'B', last_user_message_at: null }]);
+		rememberLeavingProseQuestion('A', asked);
+		expect(has('A')).toBe(true);
+		// The first broadcast after leaving is the answer and clears it.
+		observeLastUserMessage('A', '2026-10-11T10:00:00.000001Z');
+		expect(has('A')).toBe(false);
+	});
+
 	it('keeps the later of the row and the revision seen while open', () => {
 		// The row lags behind a message this tab saw broadcast while open.
 		observeLastUserMessage('A', '2026-10-11T10:00:30Z');
@@ -132,14 +146,60 @@ describe('cleared by a later user message from anywhere (#2249)', () => {
 		expect(has('A')).toBe(false);
 	});
 
-	it('a detail that arrives after leaving supplies a missing baseline but never clears', () => {
-		rememberLeavingProseQuestion('A', asked);
-		noteUserMessageRevision('A', T0);
-		expect(has('A')).toBe(true);
-		observeLastUserMessage('A', T0);
-		expect(has('A')).toBe(true);
-		observeLastUserMessage('A', '2026-10-11T10:00:01Z');
-		expect(has('A')).toBe(false);
+	describe('leaving while the session\'s own revision is still being read', () => {
+		const T1 = '2026-10-11T10:00:07Z';
+
+		it('read resolves, then the answer arrives: the answer clears', () => {
+			expect(beginUserMessageRevisionSeed('A')).toBe(true);
+			rememberLeavingProseQuestion('A', asked);
+			finishUserMessageRevisionSeed('A', T0);
+			expect(has('A')).toBe(true);
+			observeLastUserMessage('A', T1);
+			expect(has('A')).toBe(false);
+		});
+
+		it('answer arrives, then the read resolves with the pre-answer value: the held answer clears', () => {
+			expect(beginUserMessageRevisionSeed('A')).toBe(true);
+			rememberLeavingProseQuestion('A', asked);
+			observeLastUserMessage('A', T1);
+			expect(has('A')).toBe(true);
+			finishUserMessageRevisionSeed('A', T0);
+			expect(has('A')).toBe(false);
+		});
+
+		it('a post-leave value never redefines the observation: refreshes of it do not clear, a later one does', () => {
+			expect(beginUserMessageRevisionSeed('A')).toBe(true);
+			rememberLeavingProseQuestion('A', asked);
+			observeLastUserMessage('A', T0);
+			finishUserMessageRevisionSeed('A', T0);
+			expect(has('A')).toBe(true);
+			observeSessionRows([{ id: 'A', last_user_message_at: T0 }]);
+			expect(has('A')).toBe(true);
+			observeLastUserMessage('A', T1);
+			expect(has('A')).toBe(false);
+		});
+
+		it('a failed read leaves the entry for a reopen and lets a later switch-in read again', () => {
+			expect(beginUserMessageRevisionSeed('A')).toBe(true);
+			rememberLeavingProseQuestion('A', asked);
+			observeLastUserMessage('A', T1);
+			finishUserMessageRevisionSeed('A', undefined);
+			expect(has('A')).toBe(true);
+			// The held value is now known, so no further read is needed.
+			expect(beginUserMessageRevisionSeed('A')).toBe(false);
+			expect(beginUserMessageRevisionSeed('C')).toBe(true);
+			finishUserMessageRevisionSeed('C', undefined);
+			expect(beginUserMessageRevisionSeed('C')).toBe(true);
+		});
+
+		it('one read per session: in flight or already known skips it', () => {
+			expect(beginUserMessageRevisionSeed('A')).toBe(true);
+			expect(beginUserMessageRevisionSeed('A')).toBe(false);
+			finishUserMessageRevisionSeed('A', null);
+			expect(beginUserMessageRevisionSeed('A')).toBe(false);
+			observeSessionRows([{ id: 'B', last_user_message_at: T0 }]);
+			expect(beginUserMessageRevisionSeed('B')).toBe(false);
+		});
 	});
 
 	it('clears on a strictly later revision within the same millisecond', () => {

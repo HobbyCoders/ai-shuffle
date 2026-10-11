@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
 	createSessionSwitcher,
 	setPersistedRunBinding,
@@ -1383,34 +1383,79 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 	});
 
-	it('a session opened without a sidebar row reads its revision from its detail, so the first answer clears it', async () => {
-		// Deep link / Spotlight / tag-filtered: no row for session-A here.
-		_mockSessions.current = [];
-		vi.mocked(api.get).mockImplementation(async (url: string) =>
-			url.startsWith('/sessions/session-A?') ? { id: 'session-A', last_user_message_at: '2026-10-11T10:00:00.000001+00:00' } : null);
-		try {
-			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
-			await switcher.switchSession('session-A');
-			await vi.waitFor(() => expect(api.get).toHaveBeenCalledWith('/sessions/session-A?message_limit=1'));
-			await Promise.resolve();
+	describe('the opened session\'s own revision (#2249)', () => {
+		const detailUrl = '/sessions/session-A?message_limit=1';
+		const detailCalls = () => vi.mocked(api.get).mock.calls.filter(([url]) => url === detailUrl).length;
+		const leaveA = async (switcher: ReturnType<typeof makeSwitcher>['switcher'], deps: ReturnType<typeof makeSwitcher>['deps']) => {
 			deps.update((st) => ({ ...st, messages: asked, isLoadingSession: false, isRestoringSession: false }));
 			await switcher.switchSession('session-B');
+		};
+		beforeEach(() => { vi.mocked(api.get).mockReset().mockResolvedValue(null); });
+		afterEach(() => { vi.mocked(api.get).mockReset().mockResolvedValue(null); });
+
+		it('reads it from the detail, after /live, when no row is loaded; the first answer then clears', async () => {
+			_mockSessions.current = [];
+			vi.mocked(api.get).mockImplementation(async (url: string) =>
+				url === detailUrl ? { id: 'session-A', last_user_message_at: '2026-10-11T10:00:00.000001+00:00' } : null);
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(detailCalls()).toBe(1));
+			const urls = vi.mocked(api.get).mock.calls.map(([url]) => url);
+			expect(urls.findIndex((u) => u.startsWith('/sessions/session-A/live'))).toBeLessThan(urls.indexOf(detailUrl));
+			await Promise.resolve();
+			await leaveA(switcher, deps);
 			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
-			// The first broadcast after leaving is the answer.
 			observeLastUserMessage('session-A', '2026-10-11T10:00:00.000002+00:00');
 			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
-		} finally {
-			vi.mocked(api.get).mockReset().mockResolvedValue(null);
-		}
-	});
+		});
 
-	it('does not fetch the detail when the sidebar row already carries the revision', async () => {
-		_mockSessions.current = [{ id: 'session-A', last_user_message_at: null }];
-		vi.mocked(api.get).mockClear();
-		const { switcher } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
-		await switcher.switchSession('session-A');
-		await Promise.resolve();
-		expect(api.get).not.toHaveBeenCalledWith('/sessions/session-A?message_limit=1');
+		it('holds an answer that lands before the detail, and clears once the detail resolves', async () => {
+			_mockSessions.current = [];
+			let resolveDetail!: (v: unknown) => void;
+			vi.mocked(api.get).mockImplementation((url: string) =>
+				url === detailUrl ? new Promise((done) => { resolveDetail = done; }) : Promise.resolve(null));
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(detailCalls()).toBe(1));
+			await leaveA(switcher, deps);
+			observeLastUserMessage('session-A', '2026-10-11T10:00:09Z');
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			resolveDetail({ id: 'session-A', last_user_message_at: '2026-10-11T10:00:00Z' });
+			await vi.waitFor(() => expect(get(proseQuestionSessions).has('session-A')).toBe(false));
+		});
+
+		it('reads it once across repeated and overlapping rowless switch-ins', async () => {
+			_mockSessions.current = [];
+			let resolveDetail!: (v: unknown) => void;
+			vi.mocked(api.get).mockImplementation((url: string) =>
+				url === detailUrl ? new Promise((done) => { resolveDetail = done; }) : Promise.resolve(null));
+			const { switcher } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await switcher.switchSession('session-B');
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(detailCalls()).toBe(1));
+			resolveDetail({ id: 'session-A', last_user_message_at: null });
+			await Promise.resolve();
+			await switcher.switchSession('session-B');
+			await switcher.switchSession('session-A');
+			await new Promise((r) => setTimeout(r, 0));
+			expect(detailCalls()).toBe(1);
+		});
+
+		it('records a loaded row\'s revision on switch-in without a read, so filtering the row out before leaving keeps the baseline', async () => {
+			_mockSessions.current = [{ id: 'session-A', last_user_message_at: '2026-10-11T10:00:00Z' }];
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			// A tag filter drops A's row while A stays open.
+			_mockSessions.current = [];
+			await leaveA(switcher, deps);
+			await new Promise((r) => setTimeout(r, 0));
+			expect(detailCalls()).toBe(0);
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			// The first broadcast after leaving is the answer.
+			observeLastUserMessage('session-A', '2026-10-11T10:00:01Z');
+			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+		});
 	});
 
 	it('records a null revision as an observation: the first stamped message clears it', async () => {
