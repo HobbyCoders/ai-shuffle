@@ -17,31 +17,32 @@ from unittest.mock import patch, MagicMock
 from fastapi import Request
 
 
-def test_stale_explore_selection_loads_without_offering_it(authenticated_client):
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+def test_stale_retired_selection_loads_without_offering_it(authenticated_client, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.core.agent_provider_models import available_subagents, available_voice_subagents
     from app.db import database
 
     # Produce an old built-in with provider pins and a saved caller selection,
     # then drive the real startup retirement, not just an already-empty roster.
-    database.create_profile("Explore", "Explore", None, {
+    database.create_profile(retired_id, retired_id, None, {
         "provider_models": {"__native__": "haiku", "__voice__": "opus"},
     }, is_builtin=True)
     database.create_profile("saved-caller", "Saved caller", None, {
-        "model": "opus", "agent_invoke_mode": "custom", "enabled_agents": ["Explore", "Plan"],
+        "model": "opus", "agent_invoke_mode": "custom", "enabled_agents": [retired_id, "general-purpose"],
     })
     seed_builtin_subagents()
     caller = authenticated_client.get("/api/v1/agents/saved-caller")
     assert caller.status_code == 200
-    assert caller.json()["config"]["enabled_agents"] == ["Explore", "Plan"]
+    assert caller.json()["config"]["enabled_agents"] == [retired_id, "general-purpose"]
     nested = authenticated_client.get("/api/v1/agents/saved-caller/agents")
     assert nested.status_code == 200
-    assert [row["id"] for row in nested.json()] == ["Plan"]
+    assert [row["id"] for row in nested.json()] == ["general-purpose"]
     mentions = authenticated_client.get("/api/v1/agents/saved-caller/subagents/all")
     assert mentions.status_code == 200
-    assert "Explore" not in {row["id"] for row in mentions.json()}
-    assert [target.id for target in available_subagents("saved-caller", None)] == ["Plan"]
-    assert "Explore" not in {target.id for target in available_voice_subagents()}
+    assert retired_id not in {row["id"] for row in mentions.json()}
+    assert [target.id for target in available_subagents("saved-caller", None)] == ["general-purpose"]
+    assert retired_id not in {target.id for target in available_voice_subagents()}
 
 
 class TestProfilesModuleImports:

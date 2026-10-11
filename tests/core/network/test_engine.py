@@ -184,7 +184,8 @@ def test_grant_that_arrives_before_its_agent_is_kept(workers):
             assert both["is_active"] and sorted(both["profile_ids"]) == ["late", "other"]
 
 
-def test_old_worker_cannot_sync_retired_builtin_back(workers):
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+def test_old_worker_cannot_sync_retired_builtin_back(workers, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.network import policy
 
@@ -193,12 +194,12 @@ def test_old_worker_cannot_sync_retired_builtin_back(workers):
         engine.create_network("Mixed versions")
         seed_builtin_subagents()
         # Emulate the previous build's startup producer (not the new defaults).
-        database.create_profile("Explore", "Explore", None, {"model": "haiku"}, is_builtin=True)
-        database.create_api_user("search-key", "Restricted key", "synthetic-key-hash", profile_ids=["Explore"])
-        database.create_api_user("mixed-key", "Mixed key", "synthetic-mixed-hash", profile_ids=["Explore", "Plan"])
+        database.create_profile(retired_id, retired_id, None, {"model": "haiku"}, is_builtin=True)
+        database.create_api_user("search-key", "Restricted key", "synthetic-key-hash", profile_ids=[retired_id])
+        database.create_api_user("mixed-key", "Mixed key", "synthetic-mixed-hash", profile_ids=[retired_id, "frontend-designer"])
         database.create_api_user("open-key", "Unrestricted key", "synthetic-open-hash")
         database.create_automation("search-job", "Old search", "interval", {"seconds": 300},
-                                   "Explore", prompt="Find it", enabled=True)
+                                   retired_id, prompt="Find it", enabled=True)
         engine.scan_all()
     with updated.active():
         seed_builtin_subagents()
@@ -206,16 +207,16 @@ def test_old_worker_cannot_sync_retired_builtin_back(workers):
     result = exchange(old, updated)
     assert result.retry == result.rejected == result.pending == 0
     with updated.active():
-        assert database.get_profile("Explore") is None
-        assert "Explore" not in {a["id"] for a in database.get_all_profiles()}
+        assert database.get_profile(retired_id) is None
+        assert retired_id not in {a["id"] for a in database.get_all_profiles()}
         job = database.get_automation("search-job")
         assert job["profile_id"] == "general-purpose"
         assert not job["is_enabled"]
-        assert "Explore was removed" in job["last_error"]
+        assert f"{retired_id} was removed" in job["last_error"]
         # Bootstrap snapshots also materialize through this seam.
         with database.get_db() as conn:
-            assert engine.materialize(conn.cursor(), policy.collection("agents"), "Explore", {
-                "id": "Explore", "name": "Explore", "is_builtin": True, "config": {},
+            assert engine.materialize(conn.cursor(), policy.collection("agents"), retired_id, {
+                "id": retired_id, "name": retired_id, "is_builtin": True, "config": {},
             }) is None
         engine.scan_all()
     result = exchange(updated, old)
@@ -224,20 +225,20 @@ def test_old_worker_cannot_sync_retired_builtin_back(workers):
         # No retirement tombstone is sent to the older worker. Normalized
         # mirror hashes prevent re-publishing this peer's automation rewrite;
         # that worker keeps its old definition until it upgrades.
-        assert database.get_profile("Explore") is not None
-        assert database.get_automation("search-job")["profile_id"] == "Explore"
+        assert database.get_profile(retired_id) is not None
+        assert database.get_automation("search-job")["profile_id"] == retired_id
         assert database.get_automation("search-job")["is_enabled"]
-        database.update_profile("Explore", description="Re-seeded on the old build", allow_builtin=True)
+        database.update_profile(retired_id, description="Re-seeded on the old build", allow_builtin=True)
         engine.scan_all()
     result = exchange(old, updated)
     assert result.retry == result.rejected == result.pending == 0
     with updated.active():
-        assert database.get_profile("Explore") is None
+        assert database.get_profile(retired_id) is None
         assert database.get_automation("search-job")["profile_id"] == "general-purpose"
         from app.core.api_user_scope import worker_refusal
-        assert database.get_api_user("search-key")["profile_ids"] == ["Explore"]
+        assert database.get_api_user("search-key")["profile_ids"] == [retired_id]
         assert worker_refusal("search-key", "general-purpose") is not None
-        assert worker_refusal("mixed-key", "Plan") is None
+        assert worker_refusal("mixed-key", "frontend-designer") is None
         assert worker_refusal("mixed-key", "general-purpose") is not None
         assert worker_refusal("open-key", "general-purpose") is None
         seed_builtin_subagents()
@@ -245,48 +246,128 @@ def test_old_worker_cannot_sync_retired_builtin_back(workers):
     result = exchange(updated, old)
     assert result.retry == result.rejected == result.pending == 0
     with old.active():
-        assert database.get_api_user("search-key")["profile_ids"] == ["Explore"]
+        assert database.get_api_user("search-key")["profile_ids"] == [retired_id]
         seed_builtin_subagents()  # older worker upgrading now also stays restricted
         assert worker_refusal("search-key", "general-purpose") is not None
 
 
-def test_local_retirement_does_not_publish_agent_tombstone(workers):
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+@pytest.mark.parametrize("transfer", ["incremental", "bootstrap"])
+@pytest.mark.parametrize("is_builtin", [True, False], ids=["builtin", "owner-created"])
+def test_retired_agent_session_mirrors_preserve_history(workers, retired_id, transfer, is_builtin):
+    from app.core.builtin_subagents import seed_builtin_subagents
+    from app.db import session_events as events_db
+
+    old, updated = workers("old-build"), workers("updated-build")
+    with old.active():
+        engine.create_network("Mixed versions")
+        seed_builtin_subagents()
+        engine.scan_all()
+    with updated.active():
+        seed_builtin_subagents()
+    if transfer == "incremental":
+        join(old, updated)
+
+    with old.active():
+        # Drive the old worker's producers, including the signed session and
+        # transcript records, not just a hand-written materialize payload.
+        database.create_profile(retired_id, retired_id, None, {}, is_builtin=is_builtin)
+        database.create_session("old-chat", retired_id, title="Preserved history")
+        database.update_session("old-chat", status="completed", cost_increment=0.25,
+                                tokens_in_increment=12, turn_increment=1)
+        events_db.append_events("old-chat", [
+            {"type": "message.user", "payload": {"content": "Original question"}},
+            {"type": "message.assistant", "payload": {"content": "Original answer"}},
+        ])
+        engine.scan_all()
+        assert database.get_session("old-chat")["profile_id"] == retired_id
+        published_seq = store.local_watermarks()[old.device_id]
+
+    if transfer == "bootstrap":
+        join(old, updated)
+    else:
+        result = exchange(old, updated)
+        assert result.retry == result.rejected == result.pending == 0, result.reasons
+
+    with updated.active():
+        mirror = database.get_session("old-chat")
+        assert mirror["profile_id"] == (None if is_builtin else retired_id)
+        assert mirror["title"] == "Preserved history"
+        assert mirror["status"] == "completed"
+        assert mirror["total_cost_usd"] == 0.25
+        assert mirror["total_tokens_in"] == 12
+        assert mirror["turn_count"] == 1
+        assert mirror["owner_device_id"] == old.device_id
+        assert [event["payload"]["content"] for event in events_db.get_events("old-chat", 0)] == [
+            "Original question", "Original answer",
+        ]
+        assert all(store.local_watermarks()[old.device_id][incarnation] >= seq
+                   for incarnation, seq in published_seq.items())
+        if is_builtin:
+            assert database.get_profile(retired_id) is None
+        else:
+            assert not database.get_profile(retired_id)["is_builtin"]
+        engine.scan_all()
+        assert not [op for op in store.ops_since({})
+                    if op["origin_device_id"] == updated.device_id and op["collection"] == "sessions"]
+
+    # The rewrite must stay local, and a later update from the older worker
+    # must still advance the stream rather than retrying an impossible FK.
+    result = exchange(updated, old)
+    assert result.retry == result.rejected == result.pending == 0, result.reasons
+    with old.active():
+        assert database.get_session("old-chat")["profile_id"] == retired_id
+        database.update_session("old-chat", title="Later history")
+        engine.scan_all()
+        published_seq = store.local_watermarks()[old.device_id]
+    result = exchange(old, updated)
+    assert result.retry == result.rejected == result.pending == 0, result.reasons
+    with updated.active():
+        assert database.get_session("old-chat")["title"] == "Later history"
+        assert database.get_session("old-chat")["profile_id"] == (None if is_builtin else retired_id)
+        assert all(store.local_watermarks()[old.device_id][incarnation] >= seq
+                   for incarnation, seq in published_seq.items())
+
+
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+def test_local_retirement_does_not_publish_agent_tombstone(workers, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
 
     a = workers("upgrading-worker")
     with a.active():
         engine.create_network("Upgrade")
-        database.create_profile("Explore", "Explore", None, {"model": "haiku"}, is_builtin=True)
+        database.create_profile(retired_id, retired_id, None, {"model": "haiku"}, is_builtin=True)
         database.create_automation("before-upgrade", "Search", "interval", {"seconds": 300},
-                                   "Explore", prompt="Find it", enabled=True)
+                                   retired_id, prompt="Find it", enabled=True)
         engine.scan_all()
         with database.get_db() as conn:
-            assert store.get_record(conn.cursor(), "agents", "Explore") is not None
+            assert store.get_record(conn.cursor(), "agents", retired_id) is not None
         seed_builtin_subagents()
         with database.get_db() as conn:
-            assert store.get_record(conn.cursor(), "agents", "Explore") is None
+            assert store.get_record(conn.cursor(), "agents", retired_id) is None
         engine.scan_all()
-        assert database.get_profile("Explore") is None
+        assert database.get_profile(retired_id) is None
         with database.get_db() as conn:
-            assert store.get_record(conn.cursor(), "agents", "Explore") is None
+            assert store.get_record(conn.cursor(), "agents", retired_id) is None
 
 
-def test_sync_keeps_custom_agent_named_explore(workers):
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+def test_sync_keeps_custom_agent_with_retired_id(workers, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
 
     a, b = workers("custom-source"), workers("custom-peer")
     with a.active():
         engine.create_network("Custom agents")
-        database.create_profile("Explore", "Explore", None, {"model": "opus"})
+        database.create_profile(retired_id, retired_id, None, {"model": "opus"})
         database.create_automation("custom-job", "Custom search", "interval", {"seconds": 300},
-                                   "Explore", prompt="Find it", enabled=True)
+                                   retired_id, prompt="Find it", enabled=True)
         engine.scan_all()
     join(a, b)
     exchange(a, b)
     with b.active():
         seed_builtin_subagents()
-        assert not database.get_profile("Explore")["is_builtin"]
-        assert database.get_automation("custom-job")["profile_id"] == "Explore"
+        assert not database.get_profile(retired_id)["is_builtin"]
+        assert database.get_automation("custom-job")["profile_id"] == retired_id
         assert database.get_automation("custom-job")["is_enabled"]
 
 

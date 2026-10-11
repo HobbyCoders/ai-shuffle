@@ -115,23 +115,24 @@ async def _dispatch(args, session_id, **kw):
     return await td.dispatch_task_tool(args, caller_session_id=session_id, **kw)
 
 
-def test_task_naming_retired_explore_gets_unknown_agent_refusal(agents):
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+def test_task_naming_retired_agent_gets_unknown_agent_refusal(agents, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
 
-    agents.create_profile("Explore", "Explore", None, {"model": "haiku"}, is_builtin=True)
+    agents.create_profile(retired_id, retired_id, None, {"model": "haiku"}, is_builtin=True)
     agents.update_profile("root-agent", config={
-        "model": "opus", "enabled_agents": ["Explore", "helper"],
+        "model": "opus", "enabled_agents": [retired_id, "helper"],
     })
     _mk_session(agents, "s-retired", "root-agent")
     seed_builtin_subagents()
     with patch("app.core.provider_agent.dispatch_worker") as dispatch:
-        payload = asyncio.run(_dispatch({"agent": "Explore", "prompt": "Find it"}, "s-retired"))
+        payload = asyncio.run(_dispatch({"agent": retired_id, "prompt": "Find it"}, "s-retired"))
     assert payload["ok"] is False
-    assert td.resolve_target_agent("Explore")[1].startswith("Unknown agent:")
+    assert td.resolve_target_agent(retired_id)[1].startswith("Unknown agent:")
     # The provider-scoped Task surface uses the same refusal as any absent id.
     from app.core.agent_provider_models import available_subagents, resolve_subagent
-    assert payload["error"] == resolve_subagent("Explore", available_subagents("root-agent", None))[1]
-    assert "Explore" in payload["error"]
+    assert payload["error"] == resolve_subagent(retired_id, available_subagents("root-agent", None))[1]
+    assert retired_id in payload["error"]
     dispatch.assert_not_called()
 
 
@@ -724,8 +725,7 @@ def test_read_only_tool_surface_predicate():
     from app.core.builtin_subagents import is_read_only_tool_surface
 
     assert is_read_only_tool_surface(["Read", "Grep", "Glob"]) is True
-    # Bash rides along on the shipped Plan definition, which the app
-    # declares read-only; the predicate stays in step with them.
+    # Shell access alone does not change the research-only classification.
     assert is_read_only_tool_surface(["Read", "Grep", "Glob", "Bash", "Skill"]) is True
     assert is_read_only_tool_surface(["read", "GREP"]) is True
 
@@ -739,16 +739,12 @@ def test_read_only_tool_surface_predicate():
     assert is_read_only_tool_surface(["Read", "MultiEdit"]) is False
 
 
-def test_builtin_plan_is_read_only_but_general_purpose_is_not():
+def test_shipped_builtins_are_write_capable():
     """The shipped definitions land on the side the audit expects."""
     from app.core.builtin_subagents import (
         get_builtin_subagent_definition,
         is_read_only_tool_surface,
     )
-
-    for agent_id in ("Plan",):
-        tools = get_builtin_subagent_definition(agent_id)["tools"]
-        assert is_read_only_tool_surface(tools) is True, agent_id
 
     for agent_id in ("general-purpose", "frontend-designer"):
         tools = get_builtin_subagent_definition(agent_id)["tools"]

@@ -43,6 +43,7 @@ from uuid import uuid4
 from app.core import encryption
 from app.db import network as store
 from app.db.base import get_db
+from app.db.profiles import RETIRED_BUILTIN_IDS
 from app.network import crypto, envelope as envelope_mod, identity as identity_mod, membership, policy
 from app.network.envelope import Envelope, OP_DELETE, OP_UPSERT
 from app.network.membership import Member
@@ -515,7 +516,7 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     # Older workers may re-seed and publish the retired built-in. Never
     # recreate the local row, including through a bootstrap snapshot.
     # A custom agent with this id is still a normal shared agent.
-    if coll.name == "agents" and keys == ("Explore",) and record and record.get("is_builtin"):
+    if coll.name == "agents" and keys[0] in RETIRED_BUILTIN_IDS and record and record.get("is_builtin"):
         return None
     if coll.name == "pending_interactions":
         from app.core.model_override import RECEIPT_KINDS
@@ -549,16 +550,23 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
             # agent: streams from different origins are not causally ordered.
             known = store.get_record(cursor, coll.name, record_id)
             new_agent = known is not None and bool(known["deleted"])
-    retired_automation = False
-    if coll.name == "automations" and record.get("profile_id") == "Explore":
-        cursor.execute("SELECT is_builtin FROM agents WHERE id = %s", ("Explore",))
+    retired_automation = None
+    if coll.name in ("sessions", "automations") and record.get("profile_id") in RETIRED_BUILTIN_IDS:
+        retired_id = record["profile_id"]
+        cursor.execute("SELECT is_builtin FROM agents WHERE id = %s", (retired_id,))
         agent = cursor.fetchone()
         if agent is None or agent["is_builtin"]:
-            # Same safe, disabled replacement as startup retirement. This also
-            # covers bootstrap snapshots, which call materialize directly.
-            record["profile_id"] = "general-purpose"
-            record["is_enabled"] = False
-            retired_automation = True
+            if coll.name == "sessions":
+                # Preserve history without substituting a runnable agent. The
+                # catalog normally clears missing references before this seam;
+                # direct callers and stale built-in rows must be safe too.
+                record["profile_id"] = None
+            else:
+                # Same safe, disabled replacement as startup retirement. This
+                # also covers bootstrap snapshots through materialize.
+                record["profile_id"] = "general-purpose"
+                record["is_enabled"] = False
+                retired_automation = retired_id
     if coll.materialize_hook is not None:
         record = coll.materialize_hook(record)
     encrypted_columns = list(record.get("_enc") or [])
@@ -599,7 +607,7 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     if retired_automation:
         # last_error is local-only: never add it to the shared field list.
         cursor.execute("UPDATE automations SET last_error = %s WHERE id = %s", (
-            "Built-in Explore was removed; review the General Purpose agent before re-enabling.", keys[0]))
+            f"Built-in {retired_automation} was removed; review the General Purpose agent before re-enabling.", keys[0]))
     cursor.execute(f"SELECT * FROM {coll.table} WHERE {where}", keys)
     row = cursor.fetchone()
     return dict(row) if row else None
@@ -1251,7 +1259,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         # replace that device's reachability on every peer.
         raise ApplyError("presence for another device")
 
-    if (coll.name == "agents" and env.record_id == "Explore" and env.op == OP_UPSERT
+    if (coll.name == "agents" and env.record_id in RETIRED_BUILTIN_IDS and env.op == OP_UPSERT
             and plaintext.get("is_builtin")):
         # Like retired collections, consume without storing/forwarding. In
         # particular, no absent domain row enters scan's tombstone path, which
@@ -2040,7 +2048,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         if not _incoming_row_is_shared(coll, item["record_id"],
                                        None if item["deleted"] else item["record"]):
             continue
-        if (coll.name == "agents" and item["record_id"] == "Explore" and not item["deleted"]
+        if (coll.name == "agents" and item["record_id"] in RETIRED_BUILTIN_IDS and not item["deleted"]
                 and (item["record"] or {}).get("is_builtin")):
             continue
         existing = known.get(item["record_id"]) if known is not None else store.get_record(

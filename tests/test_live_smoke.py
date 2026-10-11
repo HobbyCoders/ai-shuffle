@@ -63,7 +63,7 @@ class FakeWorker:
 
     def agents(self):
         return [{"id": "coding", "is_builtin": False}, {"id": "general-purpose", "is_builtin": True},
-                {"id": "Plan", "is_builtin": True}]
+                {"id": "frontend-designer", "is_builtin": True}]
 
     def preference(self, key):
         return self.prefs.get(key)
@@ -395,7 +395,7 @@ def test_stale_default_agent_falls_back_like_the_ui(tmp_path):
 
 
 @pytest.mark.parametrize("kwargs, agent, msg", [
-    ({"default_agent": None}, None, r"no default agent: pick an agent .* --agent ID \(available: coding, general-purpose, Plan\)"),
+    ({"default_agent": None}, None, r"no default agent: pick an agent .* --agent ID \(available: coding, general-purpose, frontend-designer\)"),
     ({"default_agent": ""}, None, "no default agent"),
     ({}, "nope", r"agent 'nope' does not exist on this worker \(--agent; available: coding"),
 ])

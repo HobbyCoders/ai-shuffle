@@ -21,17 +21,18 @@ def clean_runtime():
     swarm._locks.clear()
 
 @pytest.mark.asyncio
-async def test_swarm_naming_retired_explore_fails_normally(agents, monkeypatch):
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+async def test_swarm_naming_retired_agent_fails_normally(agents, monkeypatch, retired_id):
     from app.core import task_dispatch
     from app.core.builtin_subagents import seed_builtin_subagents
 
-    agents.create_profile("Explore", "Explore", None, {"model": "haiku"}, is_builtin=True)
+    agents.create_profile(retired_id, retired_id, None, {"model": "haiku"}, is_builtin=True)
     seed_builtin_subagents()
     _mk_session(agents, "retired-swarm-parent", "root-agent")
     monkeypatch.setattr(swarm, "persist", AsyncMock())
     ctx = ToolCtx(extra={"task_dispatch": task_dispatch.make_fluid_dispatcher("retired-swarm-parent")})
     result = await swarm.make_handler(lambda: "retired-swarm-parent")({"action": "start", "tasks": [
-        {"id": "search", "agent": "Explore", "prompt": "Find it"},
+        {"id": "search", "agent": retired_id, "prompt": "Find it"},
     ]}, ctx)
     assert not result.is_error
     key = result.background_task.task_id
@@ -43,7 +44,7 @@ async def test_swarm_naming_retired_explore_fails_normally(agents, monkeypatch):
     from app.core.agent_provider_models import available_subagents, resolve_subagent
     error = json.loads(snapshot["tasks"][0]["error"])
     assert error["ok"] is False
-    assert error["error"] == resolve_subagent("Explore", available_subagents("root-agent", None))[1]
+    assert error["error"] == resolve_subagent(retired_id, available_subagents("root-agent", None))[1]
 
 
 @pytest.mark.asyncio

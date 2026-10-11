@@ -69,15 +69,15 @@ const researcher = (): Profile => ({
 		tool_selection_mode: 'all'
 	} as never
 });
-const plan = (): Profile => ({
-	id: 'Plan',
-	name: 'Plan',
-	description: 'Read-only planning',
+const designer = (): Profile => ({
+	id: 'frontend-designer',
+	name: 'Frontend Designer',
+	description: 'Read-only design',
 	is_builtin: true,
 	is_modified: true,
 	created_at: '',
 	updated_at: '',
-	config: { system_prompt: { type: 'custom', content: 'Plan only.' }, tool_selection_mode: 'allow', allowed_tools: ['Read'] }
+	config: { system_prompt: { type: 'custom', content: 'Design only.' }, tool_selection_mode: 'allow', allowed_tools: ['Read'] }
 });
 
 beforeEach(async () => {
@@ -89,7 +89,7 @@ beforeEach(async () => {
 	}
 	serverAvatar = 'robot';
 	subagentDefault = null;
-	agents = [researcher(), plan()];
+	agents = [researcher(), designer()];
 	assistantState.set(null);
 	agentIdentities.set([]);
 	mocks.get.mockImplementation(async (path: string) => {
@@ -145,14 +145,14 @@ describe('list', () => {
 		expect(list().getByText('Built-in')).toBeTruthy();
 		expect(row(/^Researcher/).getAttribute('aria-current')).toBe('true');
 		// A modified built-in carries the chip on its row.
-		expect(within(row(/^Plan/)).getByText('Modified')).toBeTruthy();
+		expect(within(row(/^Frontend Designer/)).getByText('Modified')).toBeTruthy();
 	});
 
 	it('searches and clears', async () => {
 		render(ProfileCard);
 		await heading('Researcher');
 		await fireEvent.input(screen.getByPlaceholderText('Search agents'), { target: { value: 'read-only' } });
-		expect(row(/^Plan/)).toBeTruthy();
+		expect(row(/^Frontend Designer/)).toBeTruthy();
 		await fireEvent.input(screen.getByPlaceholderText('Search agents'), { target: { value: 'zzz' } });
 		expect(screen.getByText(/No agents match/)).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
@@ -165,14 +165,14 @@ describe('list', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Built-in', pressed: false }));
 		// The open agent stays listed; the "Yours" section is gone.
 		expect(list().queryByText('Yours')).toBeNull();
-		expect(row(/^Plan/)).toBeTruthy();
+		expect(row(/^Frontend Designer/)).toBeTruthy();
 	});
 
 	it('opens another agent from its row', async () => {
 		render(ProfileCard);
 		await heading('Researcher');
-		await fireEvent.click(row(/^Plan/));
-		await heading('Plan');
+		await fireEvent.click(row(/^Frontend Designer/));
+		await heading('Frontend Designer');
 		expect(screen.getAllByText('Built-in').length).toBeGreaterThan(1);
 	});
 });
@@ -206,8 +206,8 @@ describe('detail', () => {
 		expect(screen.getByRole('button', { name: 'Export .json' })).toBeTruthy();
 		expect(screen.getByRole('button', { name: 'Delete agent' })).toBeTruthy();
 		expect(screen.queryByRole('button', { name: /More/ })).toBeNull();
-		await fireEvent.click(row(/^Plan/));
-		await heading('Plan');
+		await fireEvent.click(row(/^Frontend Designer/));
+		await heading('Frontend Designer');
 		expect(screen.getByRole('button', { name: 'Restore defaults' })).toBeTruthy();
 		expect(screen.queryByRole('button', { name: 'Delete agent' })).toBeNull();
 	});
@@ -218,7 +218,7 @@ describe('subagents roster', () => {
 
 	it('saves None with an empty selection and says None in the header', async () => {
 		agents = agents.map((a) =>
-			a.id === 'agent' ? { ...a, config: { ...a.config, agent_invoke_mode: 'custom', enabled_agents: ['Plan'] } as never } : a
+			a.id === 'agent' ? { ...a, config: { ...a.config, agent_invoke_mode: 'custom', enabled_agents: ['frontend-designer'] } as never } : a
 		);
 		await appData.loadProfiles();
 		render(ProfileCard, { initialSelectedId: 'agent' });
@@ -235,7 +235,7 @@ describe('subagents roster', () => {
 		// Back to Selected only: the old pick is gone, nothing is selected.
 		await fireEvent.click(screen.getByRole('button', { name: 'Selected only' }));
 		expect(fact().getAttribute('aria-label')).toMatch(/^Subagents: 0 of 1\./);
-		expect(screen.getByRole('switch', { name: 'Allow Plan' }).getAttribute('aria-checked')).toBe('false');
+		expect(screen.getByRole('switch', { name: 'Allow Frontend Designer' }).getAttribute('aria-checked')).toBe('false');
 		await waitFor(() => expect(mocks.put.mock.calls.at(-1)![1].config.agent_invoke_mode).toBe('custom'), { timeout: 2000 });
 		expect(mocks.put.mock.calls.at(-1)![1].config.enabled_agents).toEqual([]);
 	});
@@ -340,11 +340,11 @@ describe('create, duplicate, delete', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'New agent' }));
 		const dialog = screen.getByRole('dialog', { name: 'New agent' });
 		await fireEvent.click(within(dialog).getByRole('radio', { name: /From a built-in/ }));
-		expect((within(dialog).getByLabelText('Built-in') as HTMLSelectElement).value).toBe('Plan');
+		expect((within(dialog).getByLabelText('Built-in') as HTMLSelectElement).value).toBe('frontend-designer');
 		await fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
 		await heading('New agent');
 		await fireEvent.click(tab('Instructions'));
-		expect((screen.getByLabelText('System prompt') as HTMLTextAreaElement).value).toBe('Plan only.');
+		expect((screen.getByLabelText('System prompt') as HTMLTextAreaElement).value).toBe('Design only.');
 	});
 
 	it('hands "Describe it" to the AI drafting dialog with the text', async () => {
@@ -389,17 +389,17 @@ describe('create, duplicate, delete', () => {
 		await fireEvent.click(within(zone).getByRole('button', { name: 'Delete' }));
 		await waitFor(() => expect(mocks.del).toHaveBeenCalledWith('/agents/agent'));
 		// The next agent opens.
-		await heading('Plan');
+		await heading('Frontend Designer');
 	});
 
 	it('restores a modified built-in after the confirm', async () => {
-		render(ProfileCard, { initialSelectedId: 'Plan' });
-		await heading('Plan');
+		render(ProfileCard, { initialSelectedId: 'frontend-designer' });
+		await heading('Frontend Designer');
 		await fireEvent.click(screen.getByRole('button', { name: 'Restore defaults' }));
 		const zone = screen.getByRole('heading', { name: 'Danger zone' }).closest('section') as HTMLElement;
 		expect(within(zone).getByText('Drop your edits?')).toBeTruthy();
 		await fireEvent.click(within(zone).getByRole('button', { name: 'Restore' }));
-		await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/agents/Plan/restore'));
+		await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/agents/frontend-designer/restore'));
 	});
 });
 

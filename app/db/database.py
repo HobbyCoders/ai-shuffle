@@ -3511,7 +3511,7 @@ from app.db.profiles import (  # noqa: F401
     create_profile,
     update_profile,
     delete_profile,
-    retire_builtin_explore,
+    retire_builtin_subagent,
     get_profile_session_count,
     get_all_profile_session_counts,
     set_profile_builtin,
