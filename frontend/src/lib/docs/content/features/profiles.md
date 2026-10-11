@@ -14,10 +14,9 @@ An agent does not fix the model. You pick the model, reasoning effort and permis
 
 ## Built-in agents
 
-AI Shuffle comes with three agents:
+AI Shuffle comes with two agents:
 
 - **General Purpose** for most coding and research work.
-- **Plan** for writing implementation plans.
 - **Frontend Designer** for visual and UI work.
 
 You can edit them, and **Restore defaults** puts an edited one back. You cannot delete them. The setup wizard also creates a starter agent called **Assistant**, which you can rename, change or delete.

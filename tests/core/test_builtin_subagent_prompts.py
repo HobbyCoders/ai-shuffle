@@ -14,7 +14,6 @@ from app.core.builtin_subagents import (
     BUILTIN_SUBAGENTS,
     FRONTEND_DESIGNER_PROMPT,
     GENERAL_PURPOSE_PROMPT,
-    PLAN_PROMPT,
     get_builtin_subagent_definition,
 )
 
@@ -25,10 +24,11 @@ def _definition(agent_id):
     return definition
 
 
-def test_explore_is_not_a_builtin():
-    assert get_builtin_subagent_definition("Explore") is None
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+def test_retired_agents_are_not_builtins(retired_id):
+    assert get_builtin_subagent_definition(retired_id) is None
     assert {agent["id"] for agent in BUILTIN_SUBAGENTS} == {
-        "general-purpose", "Plan", "frontend-designer",
+        "general-purpose", "frontend-designer",
     }
 
 
@@ -39,7 +39,6 @@ def test_explore_is_not_a_builtin():
     "prompt",
     [
         pytest.param(GENERAL_PURPOSE_PROMPT, id="general-purpose"),
-        pytest.param(PLAN_PROMPT, id="plan"),
         pytest.param(FRONTEND_DESIGNER_PROMPT, id="frontend-designer"),
     ],
 )
@@ -99,7 +98,7 @@ def test_general_purpose_description_advises_callers_without_forbidding_work():
     assert "report-only work without edits" in description
     assert "Searches and investigations can be done by the calling agent or assigned here" in description
     assert "Explore" not in description
-    assert "implementation plans fit Plan" in description
+    assert "Plan" not in description
     assert "rendered UI work fits Frontend Designer" in description
     assert "routing advice, not a restriction on assigned work" in description
     assert "Do NOT use it" not in description

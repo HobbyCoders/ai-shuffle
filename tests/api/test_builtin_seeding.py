@@ -4,31 +4,34 @@ app.core.builtin_subagents over the unified agents table)."""
 
 from unittest.mock import patch
 
+import pytest
 
 
 
-async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(mock_db):
+
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(mock_db, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.core.api_user_scope import worker_refusal
     from app.core.config import settings
     from app.core import wakeup_service, turn_scheduler
     from app.db import database, wakeups, turns, session_events
 
-    database.create_profile("Explore", "Explore", None, {}, is_builtin=True)
+    database.create_profile(retired_id, retired_id, None, {}, is_builtin=True)
     database.create_profile("retirement-other", "Other", None, {})
-    database.create_api_user("retirement-only", "Explore only", "only-test-hash", profile_ids=["Explore"])
-    database.create_api_user("retirement-mixed", "Mixed", "mixed-test-hash", profile_ids=["Explore", "retirement-other"])
+    database.create_api_user("retirement-only", "Explore only", "only-test-hash", profile_ids=[retired_id])
+    database.create_api_user("retirement-mixed", "Mixed", "mixed-test-hash", profile_ids=[retired_id, "retirement-other"])
     database.create_api_user("retirement-open", "Open", "open-test-hash")
     assert worker_refusal("retirement-only", "general-purpose") is not None
-    database.create_session("retirement-chat", profile_id="Explore")
-    wakeups.create_wakeup(id="retirement-wake", session_id="retirement-chat", profile_id="Explore",
+    database.create_session("retirement-chat", profile_id=retired_id)
+    wakeups.create_wakeup(id="retirement-wake", session_id="retirement-chat", profile_id=retired_id,
                          prompt="continue", fire_at=9999999999)
-    turn = turns.enqueue_turn("retirement-chat", "user", profile_id="Explore", prompt="work")
+    turn = turns.enqueue_turn("retirement-chat", "user", profile_id=retired_id, prompt="work")
     with database.get_db() as conn:
         conn.cursor().execute("UPDATE turns SET state = 'parked' WHERE id = %s", (turn["id"],))
     seed_builtin_subagents()
     seed_builtin_subagents()
-    assert database.get_api_user("retirement-only")["profile_ids"] == ["Explore"]
+    assert database.get_api_user("retirement-only")["profile_ids"] == [retired_id]
     assert worker_refusal("retirement-only", "general-purpose") is not None
     assert worker_refusal("retirement-mixed", "retirement-other") is None
     assert worker_refusal("retirement-mixed", "general-purpose") is not None
@@ -51,7 +54,7 @@ async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(m
         submit.assert_not_called()
     assert not [r for r in wakeups.get_pending_wakeups() if r["session_id"] == "retirement-chat"]
     notes = session_events.get_events("retirement-chat")
-    assert any("Explore was removed" in str(n["payload"]) for n in notes)
+    assert any(f"{retired_id} was removed" in str(n["payload"]) for n in notes)
     successor = await turn_scheduler._enqueue_context_wake("retirement-chat", "unpark", [], [], "continue")
     assert successor["id"] is None
     assert not turns.get_queued_turns("retirement-chat")
@@ -61,18 +64,19 @@ async def test_retirement_preserves_key_scope_and_cancels_stored_continuations(m
     assert worker_refusal("retirement-only", "general-purpose") is not None
 
 
-async def test_retired_session_announces_the_cancelled_continuation_once(mock_db):
-    """Every background task that finishes on a cancelled Explore session asks
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+async def test_retired_session_announces_the_cancelled_continuation_once(mock_db, retired_id):
+    """Every background task that finishes on a cancelled retired-agent session asks
     for a context wake; each refusal used to post another identical notice."""
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.core import wakeup_service, turn_scheduler
     from app.db import database, wakeups, turns, session_events
 
-    database.create_profile("Explore", "Explore", None, {}, is_builtin=True)
-    database.create_session("retired-busy-chat", profile_id="Explore")
-    wakeups.create_wakeup(id="retired-busy-wake", session_id="retired-busy-chat", profile_id="Explore",
+    database.create_profile(retired_id, retired_id, None, {}, is_builtin=True)
+    database.create_session("retired-busy-chat", profile_id=retired_id)
+    wakeups.create_wakeup(id="retired-busy-wake", session_id="retired-busy-chat", profile_id=retired_id,
                          prompt="continue", fire_at=9999999999)
-    turn = turns.enqueue_turn("retired-busy-chat", "user", profile_id="Explore", prompt="work")
+    turn = turns.enqueue_turn("retired-busy-chat", "user", profile_id=retired_id, prompt="work")
     with database.get_db() as conn:
         conn.cursor().execute("UPDATE turns SET state = 'parked' WHERE id = %s", (turn["id"],))
     seed_builtin_subagents()
@@ -92,7 +96,7 @@ async def test_retired_session_announces_the_cancelled_continuation_once(mock_db
     assert not turns.get_queued_turns("retired-busy-chat")
     notes = dropped()
     assert len(notes) == 1, [n["payload"] for n in notes]
-    assert "Explore was removed" in str(notes[0]["payload"])
+    assert f"{retired_id} was removed" in str(notes[0]["payload"])
 
 
 def test_startup_seeding_keeps_keys_granted_to_built_ins(mock_db):
@@ -147,43 +151,45 @@ _CHS_DEF = {
 }
 
 
-def test_retirement_preserves_history_and_disables_automations(mock_db):
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+def test_retirement_preserves_history_and_disables_automations(mock_db, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.db import database
 
-    database.create_profile("Explore", "Renamed built-in", None, {
+    database.create_profile(retired_id, "Renamed built-in", None, {
         "system_prompt": {"type": "custom", "content": "Old search prompt"},
         "provider_models": {"__native__": "haiku", "__voice__": "opus"},
     }, is_builtin=True)
-    database.create_session("old-search", profile_id="Explore")
+    database.create_session("old-search", profile_id=retired_id)
     database.create_automation("old-search-job", "Saved search", "interval", {"seconds": 300},
-                               "Explore", prompt="Find it", enabled=True)
+                               retired_id, prompt="Find it", enabled=True)
     database.create_profile("other-builtin", "Other built-in profile", None, {}, is_builtin=True)
 
-    assert seed_builtin_subagents()["Explore"] == "retired"
-    assert database.get_profile("Explore") is None
+    assert seed_builtin_subagents()[retired_id] == "retired"
+    assert database.get_profile(retired_id) is None
     assert database.get_session("old-search")["profile_id"] is None
     assert database.get_profile("other-builtin") is not None
     automation = database.get_automation("old-search-job")
     assert automation["profile_id"] == "general-purpose"
     assert not automation["is_enabled"]
     assert automation["prompt"] == "Find it"
-    assert "Explore was removed" in automation["last_error"]
-    assert "Explore" not in seed_builtin_subagents()  # idempotent
+    assert f"{retired_id} was removed" in automation["last_error"]
+    assert retired_id not in seed_builtin_subagents()  # idempotent
 
 
-def test_retirement_keeps_owner_created_explore(mock_db):
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+def test_retirement_keeps_owner_created_agents(mock_db, retired_id):
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.db import database
 
-    database.create_profile("Explore", "Explore", None, {"model": "opus"})
-    database.create_profile("custom-search", "Explore", None, {"model": "sonnet"})
+    database.create_profile(retired_id, retired_id, None, {"model": "opus"})
+    database.create_profile("custom-search", retired_id, None, {"model": "sonnet"})
     database.create_automation("custom-job", "Custom search", "interval", {"seconds": 300},
-                               "Explore", prompt="Find it", enabled=True)
+                               retired_id, prompt="Find it", enabled=True)
     seed_builtin_subagents()
-    assert not database.get_profile("Explore")["is_builtin"]
+    assert not database.get_profile(retired_id)["is_builtin"]
     assert database.get_profile("custom-search") is not None
-    assert database.get_automation("custom-job")["profile_id"] == "Explore"
+    assert database.get_automation("custom-job")["profile_id"] == retired_id
     assert database.get_automation("custom-job")["is_enabled"]
 
 
@@ -318,7 +324,7 @@ _OWNER_SETTINGS = {
     "memory": "The owner prefers small PRs.",
     "skills": ["unslop"],
     "mcp_servers": [{"name": "docs"}],
-    "enabled_agents": ["Plan"],
+    "enabled_agents": ["frontend-designer"],
     "agent_invoke_mode": "custom",
 }
 
@@ -428,7 +434,7 @@ def test_second_startup_changes_nothing(mock_db):
     seed_builtin_subagents()
     _store_existing_row("general-purpose", description=_OLD_GP_DESCRIPTION, prompt=_old_gp_prompt())
     assert seed_builtin_subagents()["general-purpose"] == "refreshed"
-    after_first = {agent_id: _raw(agent_id) for agent_id in ("general-purpose", "Plan", "frontend-designer")}
+    after_first = {agent_id: _raw(agent_id) for agent_id in ("general-purpose", "frontend-designer")}
 
     results = seed_builtin_subagents()
 
@@ -540,6 +546,28 @@ def test_record_from_a_newer_build_is_never_downgraded(mock_db):
     assert _raw("general-purpose") == before
 
 
+def test_plan_retirement_refreshes_recorded_general_purpose_description(mock_db, monkeypatch):
+    from app.core import builtin_subagents
+    from app.db import database
+
+    previous = [dict(definition) for definition in builtin_subagents.BUILTIN_SUBAGENTS]
+    previous[0]["description"] = previous[0]["description"].replace(
+        "rendered UI work fits", "implementation plans fit Plan, and rendered UI work fits")
+    with monkeypatch.context() as old_build:
+        old_build.setattr(builtin_subagents, "BUILTIN_SUBAGENTS", previous)
+        old_build.setattr(builtin_subagents, "BUILTIN_DEFAULTS_REVISION", 1)
+        builtin_subagents.seed_builtin_subagents()
+    assert "implementation plans fit Plan" in database.get_subagent("general-purpose")["description"]
+    database.update_subagent("general-purpose", prompt="Owner prompt", model="owner-model")
+
+    assert builtin_subagents.seed_builtin_subagents()["general-purpose"] == "refreshed"
+    agent = database.get_subagent("general-purpose")
+    assert agent["description"] == builtin_subagents.BUILTIN_SUBAGENTS[0]["description"]
+    assert agent["prompt"] == "Owner prompt"
+    assert agent["model"] == "owner-model"
+    assert builtin_subagents.seed_builtin_subagents()["general-purpose"] == "exists"
+
+
 def test_future_default_change_refreshes_through_the_record(mock_db, monkeypatch):
     """A later revision needs no new fingerprints: the record written at seed
     time and kept through an owner edit in the Agents editor decides."""
@@ -548,9 +576,9 @@ def test_future_default_change_refreshes_through_the_record(mock_db, monkeypatch
     from app.db import database
 
     seed_builtin_subagents()
-    # The owner edits only the model and the Plan prompt via the agent store.
-    database.update_subagent("Plan", prompt="Owner plan prompt", model="sonnet")
-    assert _raw("Plan")["config"]["builtin_defaults"]["sha256"].get("prompt")
+    # The owner edits only the model and the Frontend Designer prompt via the agent store.
+    database.update_subagent("frontend-designer", prompt="Owner design prompt", model="sonnet")
+    assert _raw("frontend-designer")["config"]["builtin_defaults"]["sha256"].get("prompt")
 
     changed = []
     for definition in BUILTIN_SUBAGENTS:
@@ -563,14 +591,14 @@ def test_future_default_change_refreshes_through_the_record(mock_db, monkeypatch
                         builtin_subagents.BUILTIN_DEFAULTS_REVISION + 1)
 
     results = seed_builtin_subagents()
-    assert results["general-purpose"] == results["Plan"] == "refreshed"
+    assert results["general-purpose"] == results["frontend-designer"] == "refreshed"
     gp = database.get_subagent("general-purpose")
     assert gp["description"].endswith(" (v2)") and gp["prompt"].endswith("\n(v2)")
-    plan = database.get_subagent("Plan")
-    assert plan["prompt"] == "Owner plan prompt"
-    assert plan["model"] == "sonnet"
-    assert plan["description"].endswith(" (v2)")
-    assert seed_builtin_subagents()["Plan"] == "exists"
+    designer = database.get_subagent("frontend-designer")
+    assert designer["prompt"] == "Owner design prompt"
+    assert designer["model"] == "sonnet"
+    assert designer["description"].endswith(" (v2)")
+    assert seed_builtin_subagents()["frontend-designer"] == "exists"
 
 
 def test_owner_edit_in_the_agents_editor_keeps_the_record(authenticated_client, monkeypatch):
@@ -614,7 +642,7 @@ def test_restore_defaults_stamps_the_record(authenticated_client):
 
 # Bump BUILTIN_DEFAULTS_REVISION whenever a built-in's name, description or
 # prompt changes, then update this pin to (new revision, new digest).
-_DEFAULTS_PIN = (1, "f3db39f9e32860100861adadb13c3c88da32606a5f9b51f760c0db45f06a18d6")
+_DEFAULTS_PIN = (2, "bdf239de5fde40e87e8480fbdc00501a16af1eceb9621e770f10e93dbef83bc0")
 
 
 def _current_defaults_digest() -> str:

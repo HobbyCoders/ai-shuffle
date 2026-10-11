@@ -93,7 +93,7 @@ def _refuse_assistant_agent(*agent_ids: str) -> None:
 def _check_profile_modified(profile: dict) -> None:
     """Set is_modified on a built-in agent by comparing to its defaults.
 
-    Built-in subagents (general-purpose, Plan, frontend-designer)
+    Built-in subagents (general-purpose, frontend-designer)
     compare against their code definitions in BUILTIN_SUBAGENTS.
     """
     if not profile.get("is_builtin"):

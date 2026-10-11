@@ -9,7 +9,7 @@ pytestmark = requires_real_pg
 _SESSIONS = ("retirement-chat", "missing-wake-chat")
 _API_USERS = ("pre-upgrade-key", "retirement-only", "retirement-mixed", "retirement-open",
               "only-helper", "helper-and-other", "open-key")
-_AGENTS = ("Explore", "retirement-other", "wake-fallback", "helper", "other")
+_AGENTS = ("Explore", "Plan", "retirement-other", "wake-fallback", "helper", "other")
 
 
 def _forget_fixed_rows():
@@ -39,7 +39,8 @@ def _isolated_rows():
     _forget_fixed_rows()
 
 
-async def test_upgrade_keeps_restricted_key_and_cancels_stored_wakes():
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+async def test_upgrade_keeps_restricted_key_and_cancels_stored_wakes(retired_id):
     from app.db import base, database
     from tests.api.test_builtin_seeding import (
         test_retirement_preserves_key_scope_and_cancels_stored_continuations,
@@ -48,20 +49,24 @@ async def test_upgrade_keeps_restricted_key_and_cancels_stored_wakes():
 
     # Restriction is already stored BEFORE the upgrade. Recreate the shipped
     # constraint, then drive the real startup migration and retirement.
-    database.create_profile("Explore", "Old built-in", None, {}, is_builtin=True)
-    database.create_api_user("pre-upgrade-key", "Existing restricted key", "pre-upgrade-hash", profile_ids=["Explore"])
+    database.create_profile(retired_id, "Old built-in", None, {}, is_builtin=True)
+    database.create_api_user("pre-upgrade-key", "Existing restricted key", "pre-upgrade-hash", profile_ids=[retired_id])
     with base.get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("ALTER TABLE api_user_profiles ADD CONSTRAINT api_user_profiles_profile_id_fkey "
                        "FOREIGN KEY (profile_id) REFERENCES agents(id) ON DELETE CASCADE")
+        # Each parameter recreates a pre-upgrade schema; do not let the previous
+        # case's current fingerprint skip the upgrade's column migrations.
+        cursor.execute("DELETE FROM system_settings WHERE key = %s",
+                       (database.MIGRATIONS_FINGERPRINT_KEY,))
     database.init_database()
     from app.core.builtin_subagents import seed_builtin_subagents
     from app.core.api_user_scope import worker_refusal
     seed_builtin_subagents()
-    assert database.get_profile("Explore") is None
-    assert database.get_api_user("pre-upgrade-key")["profile_ids"] == ["Explore"]
+    assert database.get_profile(retired_id) is None
+    assert database.get_api_user("pre-upgrade-key")["profile_ids"] == [retired_id]
     assert worker_refusal("pre-upgrade-key", "general-purpose") is not None
-    await test_retirement_preserves_key_scope_and_cancels_stored_continuations(None)
+    await test_retirement_preserves_key_scope_and_cancels_stored_continuations(None, retired_id)
     await test_missing_stored_wake_profile_drops_once_with_visible_reason(None)
     base.close_pool()
     base.init_pool(min_conn=1, max_conn=6)

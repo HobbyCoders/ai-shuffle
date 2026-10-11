@@ -33,5 +33,7 @@ def test_refresh_contracts_on_postgres(monkeypatch):
     ):
         test(None)
     _drop_builtins()
+    seeding.test_plan_retirement_refreshes_recorded_general_purpose_description(None, monkeypatch)
+    _drop_builtins()
     with monkeypatch.context() as patched:
         seeding.test_future_default_change_refreshes_through_the_record(None, patched)

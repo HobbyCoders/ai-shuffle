@@ -1,6 +1,6 @@
 """Built-in subagents: is_modified detection and POST /agents/{id}/restore.
 
-Built-in subagents (general-purpose, Plan, frontend-designer) live in
+Built-in subagents (general-purpose, frontend-designer) live in
 the unified agents table and compare against their code definitions in
 BUILTIN_SUBAGENTS. The list endpoint and the restore endpoint both use that
 subagent comparison — otherwise the revert button never appears.

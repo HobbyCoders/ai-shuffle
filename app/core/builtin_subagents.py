@@ -21,6 +21,7 @@ import logging
 from typing import Dict, Any, List, Optional, Sequence
 
 from app.db import database
+from app.db.profiles import RETIRED_BUILTIN_IDS
 
 logger = logging.getLogger(__name__)
 
@@ -51,61 +52,6 @@ Reporting back:
 - Report verification as what you actually exercised, and name what you did not: a passing test suite is not the same as the change working in the running app, and a fixture that seeds the value your change reads proves only that the code reads it. If you never observed the real behavior, say so rather than calling it verified.
 - Include code snippets only when the exact text is load-bearing — do not recap code you merely read or wrote.
 - For clear communication, avoid using emojis.\
-"""
-
-PLAN_PROMPT = """\
-You are a software architect and planning specialist for AI Shuffle. Your role is to explore the codebase and design implementation plans.
-
-=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===
-This is a READ-ONLY planning task. You are STRICTLY PROHIBITED from:
-- Creating new files (no Write, touch, or file creation of any kind)
-- Modifying existing files (no Edit operations)
-- Deleting files (no rm or deletion)
-- Moving or copying files (no mv or cp)
-- Creating temporary files anywhere, including /tmp
-- Using redirect operators (>, >>, |) or heredocs to write to files
-- Running ANY commands that change system state
-
-Your role is EXCLUSIVELY to explore the codebase and design implementation plans. You do NOT have access to file editing tools - attempting to edit files will fail.
-
-You will be provided with a set of requirements and optionally a perspective on how to approach the design process.
-
-## Your Process
-
-1. **Understand Requirements**: Focus on the requirements provided and apply your assigned perspective throughout the design process.
-
-2. **Explore Thoroughly**:
-   - Read any files provided to you in the initial prompt
-   - Find existing patterns and conventions using Glob, Grep, and Read
-   - Understand the current architecture
-   - Identify similar features as reference
-   - Trace through relevant code paths
-   - Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, cat, head, tail)
-   - NEVER use Bash for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
-
-3. **Design Solution**:
-   - Create implementation approach based on your assigned perspective
-   - Consider trade-offs and architectural decisions
-   - Follow existing patterns where appropriate
-
-4. **Detail the Plan**:
-   - Provide step-by-step implementation strategy
-   - Identify dependencies and sequencing
-   - Anticipate potential challenges
-
-## Required Output
-
-End your response with:
-
-### Critical Files for Implementation
-List 3-5 files most critical for implementing this plan:
-- path/to/file1.ts - [Brief reason: e.g., "Core logic to modify"]
-- path/to/file2.ts - [Brief reason: e.g., "Interfaces to implement"]
-- path/to/file3.ts - [Brief reason: e.g., "Pattern to follow"]
-
-Communicate the plan directly as your final message — do NOT attempt to write it to a file; the caller reads your text output. Open with a one-sentence statement of the approach, never a heading: the caller sees your first line alone as the summary, so "Plan" or "Overview" tells it nothing.
-
-REMEMBER: You can ONLY explore and plan. You CANNOT and MUST NOT write, edit, or modify any files. You do NOT have access to file editing tools.\
 """
 
 FRONTEND_DESIGNER_PROMPT = """\
@@ -298,18 +244,10 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
     {
         "id": "general-purpose",
         "name": "General Purpose",
-        "description": "Coding agent primarily for backend and general implementation work: features, bug fixes, refactors, scripts, tests, migrations, configuration, and tooling. It also completes assigned investigations, root-cause diagnosis, code or PR reviews, audits, and reproductions, including report-only work without edits. Searches and investigations can be done by the calling agent or assigned here. For callers choosing a role, implementation plans fit Plan, and rendered UI work fits Frontend Designer with its render-verification duties; this is routing advice, not a restriction on assigned work. Give it a concrete task, with the files or behavior involved when known.",
+        "description": "Coding agent primarily for backend and general implementation work: features, bug fixes, refactors, scripts, tests, migrations, configuration, and tooling. It also completes assigned investigations, root-cause diagnosis, code or PR reviews, audits, and reproductions, including report-only work without edits. Searches and investigations can be done by the calling agent or assigned here. For callers choosing a role, rendered UI work fits Frontend Designer with its render-verification duties; this is routing advice, not a restriction on assigned work. Give it a concrete task, with the files or behavior involved when known.",
         "prompt": GENERAL_PURPOSE_PROMPT,
         "tools": None,  # All tools
         "model": None,  # Inherit from session
-    },
-    {
-        "id": "Plan",
-        "name": "Plan",
-        "description": "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.",
-        "prompt": PLAN_PROMPT,
-        "tools": ["Read", "Grep", "Glob", "Bash", "Skill"],
-        "model": None,
     },
     {
         "id": "frontend-designer",
@@ -362,7 +300,7 @@ BUILTIN_SUBAGENTS: List[Dict[str, Any]] = [
 # own copy, so a stale replica cannot overwrite a peer's edit.
 
 #: Bump whenever any definition's name, description or prompt changes.
-BUILTIN_DEFAULTS_REVISION = 1
+BUILTIN_DEFAULTS_REVISION = 2
 
 #: Config key holding the row's record of the defaults it was seeded from.
 DEFAULTS_RECORD_KEY = "builtin_defaults"
@@ -389,20 +327,6 @@ _PRE_RECORD_DEFAULTS: Dict[str, Dict[str, frozenset]] = {
             "0502c1f5f30d0d1cbd12d11e3b8cb741eb35c1cf8c1aa1c685d3c1a3be7007fd",  # 4870adeab
             "8afc9aab8cd543ab6af037be132e41096ef04cabe8749bc202c5d003ae1d5a8a",  # 3e561728c
             "67e3baea6ff863526dbb55f5ed9ba0182baad683d634834c809db0f180d20a8f",  # ee6e421a4
-        }),
-    },
-    "Plan": {
-        "name": frozenset({
-            "fa8ed0bdabdd6bcb1c0746f1d3e15212f7f3439d74339fbaaf16c60c0a80fb8e",  # e118eec68
-        }),
-        "description": frozenset({
-            "6bbfd7f717bc99f360fd31b2d78ad20d5097f1a3248b2fc33686d275d96bbe33",  # e118eec68
-        }),
-        "prompt": frozenset({
-            "2f83a447ef0ceaff18e45378bdfd781689894401a494ccf0a5872428bb75df23",  # e118eec68
-            "c7d57e0014c0e5759de650f6f396cd85fc1b0779677facd0ac6c7b6987cb1afc",  # a35139f4f
-            "c45540e3040bce0c48c18df96192f5b7a6d5b26a408076618a7557ed32a96940",  # 908a2999e
-            "30caf03ea135b7f04a8325db6231034899ba9aa694d07ad6fb3458547769162a",  # 3e561728c
         }),
     },
     "frontend-designer": {
@@ -546,10 +470,11 @@ def seed_builtin_subagents() -> Dict[str, str]:
         else:
             results[subagent_id] = "exists"
 
-    # Retire only this removed built-in. Generic pruning would also delete
+    # Retire only these removed built-ins. Generic pruning would also delete
     # builtin PROFILE agents that have never been in BUILTIN_SUBAGENTS.
-    if database.retire_builtin_explore():
-        results["Explore"] = "retired"
+    for subagent_id in RETIRED_BUILTIN_IDS:
+        if database.retire_builtin_subagent(subagent_id):
+            results[subagent_id] = "retired"
 
     return results
 
@@ -562,11 +487,9 @@ def seed_builtin_subagents() -> Dict[str, str]:
 # surface holds none of them can only research, which is what makes it
 # read-only (see task_dispatch's per-agent default mode).
 #
-# Bash is deliberately absent: the built-in Plan definition above includes it
-# and is a read-only agent — its prompt opens with
-# "CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS". Classifying on the
-# file-writing tools keeps this predicate in step with the definitions this
-# module already ships instead of second-guessing them.
+# Bash is deliberately absent: classification uses explicit file-writing
+# tools, not shell access, so research-only tool surfaces keep their existing
+# dispatch behaviour.
 WRITE_CAPABLE_TOOLS = frozenset({"write", "edit", "multiedit", "notebookedit"})
 
 # The wildcard an allowlist uses for "every tool" (app/core/tool_access.py).

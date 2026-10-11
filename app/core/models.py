@@ -337,7 +337,7 @@ class SessionMessage(BaseModel):
     created_at: Optional[datetime] = None  # Optional for JSONL messages without timestamp
     # Subagent-specific fields (for type='subagent')
     agentId: Optional[str] = None  # The subagent's unique ID
-    agentType: Optional[str] = None  # The subagent type (e.g., 'general-purpose', 'Plan')
+    agentType: Optional[str] = None  # The subagent type (e.g., 'general-purpose', 'frontend-designer')
     agentDescription: Optional[str] = None  # Task description from the Task tool
     agentPrompt: Optional[str] = None  # The initial prompt sent to the subagent
     agentStatus: Optional[str] = None  # 'pending', 'running', 'completed', 'error'
