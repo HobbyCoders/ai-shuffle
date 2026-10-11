@@ -76,6 +76,11 @@ def test_voice_reads_only_its_live_binding(monkeypatch):
     (1_000_000, "claude-haiku-4-5", 1_000_000),
     # The model is inherited, so its choices are not known here.
     (200_000, None, 200_000),
+    # A raised Standard cap the worker's range holds passes through.
+    (450_000, "sonnet", 450_000),
+    (800_000, "opus", 800_000),
+    # Out-of-range caps are clamped into the worker's range.
+    (150_000, "opus", 200_000),
 ])
 def test_native_worker_window_fit(window, model, expected):
     assert pa.worker_context_window(window, None, model) == expected
@@ -89,6 +94,9 @@ def test_provider_worker_window_fit(monkeypatch):
     monkeypatch.setattr(database, "get_model_provider", lambda *_a, **_k: row)
     assert pa.worker_context_window(200_000, "chatgpt", "gpt-6-luna") == 272_000
     assert pa.worker_context_window(1_000_000, "chatgpt", "gpt-6-luna") == 1_000_000
+    # A Claude cap below GPT-6's 272K floor is lifted to it; a raised one stays.
+    assert pa.worker_context_window(240_000, "chatgpt", "gpt-6-luna") == 272_000
+    assert pa.worker_context_window(600_000, "chatgpt", "gpt-6-luna") == 600_000
 
 
 # --- local dispatch: row and first turn ----------------------------------------

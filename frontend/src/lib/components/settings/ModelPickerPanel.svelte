@@ -23,15 +23,20 @@
 	 * trigger and no positioning — the parent owns the popover chrome and sizes
 	 * the panel via `--mpp-height` / `--mpp-width`.
 	 */
-	import { Check, LayoutGrid, Search, Star } from 'lucide-svelte';
-	import { tick } from 'svelte';
+	import { Check, LayoutGrid, Lock, Search, Star } from 'lucide-svelte';
+	import { onDestroy, tick } from 'svelte';
 	import ProviderGlyph from './ProviderGlyph.svelte';
 	import type { PickerGroup, PickerOption } from '$lib/constants/model-picker';
 	import { UNOFFICIAL_SIGN_IN_HELP } from '$lib/components/settings/providers/providers-model';
 	import { matchesPickerQuery } from '$lib/constants/model-picker';
 	import { getModelLabel } from '$lib/constants/models';
 	import {
+		CONTEXT_CAP_STEP,
+		CONTEXT_CAP_UNIT,
+		clampStandardCap,
+		formatContextTokens,
 		getModelContextControl,
+		standardCapPresets,
 		type ContextWindowChoice
 	} from '$lib/constants/model-context';
 	import {
@@ -60,6 +65,13 @@
 		/** Optional session context control. Omit both props on profile-only pickers. */
 		contextChoice?: ContextWindowChoice;
 		onContextChoiceSelect?: (choice: ContextWindowChoice) => void;
+		/**
+		 * The Standard cap in effect (tokens). With `onContextStandardChange` it
+		 * makes Standard adjustable, from the family default up to just below the
+		 * full window. Extended is always the model's full window and not editable.
+		 */
+		contextStandardTokens?: number | null;
+		onContextStandardChange?: (tokens: number) => void | Promise<void>;
 		/** Escape pressed inside the search box. */
 		onRequestClose?: () => void;
 		/**
@@ -81,6 +93,8 @@
 		ariaLabel = 'Model',
 		contextChoice,
 		onContextChoiceSelect,
+		contextStandardTokens = null,
+		onContextStandardChange,
 		onRequestClose,
 		startOnAll = false
 	}: Props = $props();
@@ -230,6 +244,193 @@
 		onContextChoiceSelect?.(next);
 		(e.currentTarget as HTMLElement)
 			.querySelector<HTMLButtonElement>(`[data-context-choice="${next}"]`)?.focus();
+	}
+
+	// ---- Standard cap editor --------------------------------------------------
+	// Standard is a cap the owner can raise: the slider snaps to a 10K grid,
+	// the field takes any whole-K value in range, and Extended stays the full
+	// window. A local draft keeps the control responsive while the chat's
+	// run-settings save is in flight; it drops back to the prop once saved.
+	const editorId = $props.id();
+	/** Arrow keys arrive in bursts; save the settled value, not every step. */
+	const KEY_COMMIT_DELAY_MS = 300;
+	const PAGE_STEP = 100_000;
+
+	const capEditable = $derived(
+		contextControl != null && onContextStandardChange != null
+			&& contextControl.standardMaxTokens > contextControl.standardTokens
+	);
+	const savedCap = $derived(
+		contextControl ? clampStandardCap(contextControl, contextStandardTokens ?? contextControl.standardTokens) : 0
+	);
+	let capDraft = $state<number | null>(null);
+	const shownCap = $derived(contextControl ? (capDraft ?? savedCap) : 0);
+	const capRaised = $derived(contextControl != null && shownCap > contextControl.standardTokens);
+	const capPresets = $derived(contextControl ? standardCapPresets(contextControl) : []);
+	const capFill = $derived.by(() => {
+		if (!contextControl) return 0;
+		const span = contextControl.standardMaxTokens - contextControl.standardTokens;
+		return span > 0 ? ((shownCap - contextControl.standardTokens) / span) * 100 : 0;
+	});
+
+	let capEditorOpen = $state(false);
+	let capText = $state('');
+	let capTextFocused = $state(false);
+	let capError = $state<string | null>(null);
+	let capTimer: ReturnType<typeof setTimeout> | null = null;
+	let pendingCap: number | null = null;
+
+	// The field mirrors the cap in effect unless the owner is typing in it.
+	$effect(() => {
+		const whole = String(Math.round(shownCap / CONTEXT_CAP_UNIT));
+		if (!capTextFocused) capText = whole;
+	});
+
+	async function commitCap(tokens: number) {
+		if (!contextControl || !onContextStandardChange) return;
+		const next = clampStandardCap(contextControl, tokens);
+		// A direct pick supersedes any arrow-key burst still waiting to save.
+		if (capTimer) clearTimeout(capTimer);
+		capTimer = null;
+		pendingCap = null;
+		capDraft = next;
+		capError = null;
+		try {
+			await onContextStandardChange(next);
+		} finally {
+			// A newer drag may have started meanwhile; only clear our own draft.
+			if (capDraft === next) capDraft = null;
+		}
+	}
+
+	function flushCapCommit() {
+		if (capTimer) clearTimeout(capTimer);
+		capTimer = null;
+		const tokens = pendingCap;
+		pendingCap = null;
+		if (tokens != null) void commitCap(tokens);
+	}
+
+	function scheduleCapCommit(tokens: number) {
+		capDraft = tokens;
+		pendingCap = tokens;
+		if (capTimer) clearTimeout(capTimer);
+		capTimer = setTimeout(flushCapCommit, KEY_COMMIT_DELAY_MS);
+	}
+
+	onDestroy(flushCapCommit);
+
+	/** Pointer positions snap to the 10K grid; the range ends stay reachable. */
+	function snapCap(tokens: number): number {
+		if (!contextControl) return tokens;
+		const { standardTokens: min, standardMaxTokens: max } = contextControl;
+		if (tokens <= min) return min;
+		if (tokens >= max) return max;
+		return clampStandardCap(contextControl, Math.round(tokens / CONTEXT_CAP_STEP) * CONTEXT_CAP_STEP);
+	}
+
+	/** One grid step up or down from `from`, landing on the grid (272K → 280K). */
+	function stepCap(from: number, direction: 1 | -1, size: number): number {
+		if (!contextControl) return from;
+		const target = direction > 0
+			? Math.floor(from / size) * size + size
+			: Math.ceil(from / size) * size - size;
+		return clampStandardCap(contextControl, target);
+	}
+
+	function onCapSliderKeydown(e: KeyboardEvent) {
+		if (!contextControl) return;
+		let next: number | null = null;
+		if (e.key === 'ArrowRight' || e.key === 'ArrowUp') next = stepCap(shownCap, 1, CONTEXT_CAP_STEP);
+		else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') next = stepCap(shownCap, -1, CONTEXT_CAP_STEP);
+		else if (e.key === 'PageUp') next = stepCap(shownCap, 1, PAGE_STEP);
+		else if (e.key === 'PageDown') next = stepCap(shownCap, -1, PAGE_STEP);
+		else if (e.key === 'Home') next = contextControl.standardTokens;
+		else if (e.key === 'End') next = contextControl.standardMaxTokens;
+		if (next == null) return;
+		e.preventDefault();
+		e.stopPropagation();
+		if (next !== shownCap) scheduleCapCommit(next);
+	}
+
+	function onCapSliderInput(e: Event) {
+		capDraft = snapCap(Number((e.currentTarget as HTMLInputElement).value));
+	}
+
+	function onCapSliderChange(e: Event) {
+		void commitCap(snapCap(Number((e.currentTarget as HTMLInputElement).value)));
+	}
+
+	/**
+	 * Free entry in K tokens: `450`, `450k`, `0.5m`, `1.2M`. A bare number of
+	 * 10,000 or more is read as raw tokens, so pasting `450000` works too.
+	 */
+	function parseCapText(text: string): number | null {
+		const match = text.trim().toLowerCase().replace(/[,_\s]/g, '')
+			.match(/^(\d+(?:\.\d+)?)(k|m)?(?:tokens?)?$/);
+		if (!match) return null;
+		const amount = Number(match[1]);
+		const tokens = match[2] === 'm' ? amount * 1_000_000
+			: match[2] === 'k' || amount < 10_000 ? amount * CONTEXT_CAP_UNIT
+			: amount;
+		return Number.isFinite(tokens) && tokens > 0 ? Math.round(tokens) : null;
+	}
+
+	function capProblem(tokens: number | null): string | null {
+		if (!contextControl) return null;
+		if (tokens == null) return 'Enter a size in K tokens, like 450.';
+		if (tokens < contextControl.standardTokens) {
+			return `Standard can't go below ${contextControl.standardLabel}.`;
+		}
+		if (tokens > contextControl.standardMaxTokens) {
+			return `Up to ${formatContextTokens(contextControl.standardMaxTokens)}. `
+				+ `For the full ${contextControl.extendedLabel}, choose Extended.`;
+		}
+		return null;
+	}
+
+	function onCapTextInput() {
+		capError = capText.trim() ? capProblem(parseCapText(capText)) : null;
+	}
+
+	function submitCapText(): boolean {
+		const tokens = parseCapText(capText);
+		const problem = capProblem(tokens);
+		capError = problem;
+		if (problem || tokens == null) return false;
+		if (!contextControl) return false;
+		const next = clampStandardCap(contextControl, tokens);
+		if (next !== shownCap) void commitCap(next);
+		capText = String(Math.round(next / CONTEXT_CAP_UNIT));
+		return true;
+	}
+
+	function onCapTextKeydown(e: KeyboardEvent) {
+		if (e.key === 'Enter') {
+			e.preventDefault();
+			e.stopPropagation();
+			submitCapText();
+		} else if (e.key === 'Escape' && (capError || capText !== String(Math.round(shownCap / CONTEXT_CAP_UNIT)))) {
+			// Revert the field first; a second Escape closes the popover as usual.
+			e.preventDefault();
+			e.stopPropagation();
+			capText = String(Math.round(shownCap / CONTEXT_CAP_UNIT));
+			capError = null;
+		}
+	}
+
+	function onCapTextBlur() {
+		capTextFocused = false;
+		// An invalid entry is dropped on blur: the field shows the cap in effect.
+		if (!submitCapText()) {
+			capError = null;
+			capText = String(Math.round(shownCap / CONTEXT_CAP_UNIT));
+		}
+	}
+
+	function pickCapPreset(tokens: number) {
+		capError = null;
+		if (tokens !== shownCap) void commitCap(tokens);
 	}
 
 </script>
@@ -389,15 +590,17 @@
 					type="button"
 					role="radio"
 					aria-checked={contextChoice === 'standard'}
-					aria-label="{contextControl.standardLabel} · Standard"
+					aria-label="{formatContextTokens(shownCap)} · Standard"
 					tabindex={contextChoice === 'standard' ? 0 : -1}
 					data-context-choice="standard"
 					class:on={contextChoice === 'standard'}
 					onclick={() => onContextChoiceSelect('standard')}
 				>
 					<span class="mpp-context-option-copy">
-						<span class="mpp-context-value">{contextControl.standardLabel}</span>
-						<span class="mpp-context-caption">Standard</span>
+						<span class="mpp-context-value">{formatContextTokens(shownCap)}</span>
+						<span class="mpp-context-caption">
+							Standard{#if capRaised}<span class="mpp-context-raised">{' · raised'}</span>{/if}
+						</span>
 					</span>
 					<Check size={14} class="mpp-context-check" aria-hidden="true" />
 				</button>
@@ -406,6 +609,7 @@
 					role="radio"
 					aria-checked={contextChoice === '1m'}
 					aria-label="{contextControl.extendedLabel} · Extended"
+					title="The model's full window. Not adjustable."
 					tabindex={contextChoice === '1m' ? 0 : -1}
 					data-context-choice="1m"
 					class:on={contextChoice === '1m'}
@@ -413,11 +617,112 @@
 				>
 					<span class="mpp-context-option-copy">
 						<span class="mpp-context-value">{contextControl.extendedLabel}</span>
-						<span class="mpp-context-caption">Extended</span>
+						<span class="mpp-context-caption">
+							<Lock size={9} class="mpp-context-lock" aria-hidden="true" />Extended · full
+						</span>
 					</span>
 					<Check size={14} class="mpp-context-check" aria-hidden="true" />
 				</button>
 			</div>
+
+			<div class="mpp-cap-summary" data-context-summary>
+				<p aria-live="polite">
+					{#if contextChoice === '1m'}
+						Uses the full <strong>{contextControl.extendedLabel}</strong> window before compacting
+					{:else}
+						Compacts near <strong>~{formatContextTokens(shownCap)}</strong> tokens{#if capRaised}<span class="mpp-cap-default">{` · default ${contextControl.standardLabel}`}</span>{/if}
+					{/if}
+				</p>
+				{#if capEditable && contextChoice === 'standard'}
+					<button
+						type="button"
+						class="mpp-cap-adjust"
+						class:open={capEditorOpen}
+						aria-expanded={capEditorOpen}
+						aria-controls="{editorId}-cap"
+						onclick={() => (capEditorOpen = !capEditorOpen)}
+					>
+						{capEditorOpen ? 'Done' : 'Adjust'}
+					</button>
+				{/if}
+			</div>
+
+			{#if capEditable && contextChoice === 'standard' && capEditorOpen}
+				<div
+					class="mpp-cap"
+					id="{editorId}-cap"
+					role="group"
+					aria-label="Standard context cap"
+					data-context-cap-editor
+				>
+					<div class="mpp-cap-track">
+						<input
+							type="range"
+							class="mpp-cap-slider"
+							min={contextControl.standardTokens}
+							max={contextControl.standardMaxTokens}
+							step={CONTEXT_CAP_UNIT}
+							value={shownCap}
+							style="--fill: {capFill}%"
+							aria-label="Standard context cap"
+							aria-valuetext="{formatContextTokens(shownCap)} tokens"
+							oninput={onCapSliderInput}
+							onchange={onCapSliderChange}
+							onkeydown={onCapSliderKeydown}
+						/>
+						<span
+							class="mpp-cap-locked"
+							title="{contextControl.extendedLabel} is Extended, the model's full window"
+							aria-hidden="true"
+						>
+							<Lock size={9} />{contextControl.extendedLabel}
+						</span>
+						<div class="mpp-cap-scale" aria-hidden="true">
+							<span>{contextControl.standardLabel}</span>
+							<span>{formatContextTokens(contextControl.standardMaxTokens)}</span>
+						</div>
+					</div>
+
+					<div class="mpp-cap-row">
+						<div class="mpp-cap-presets" role="group" aria-label="Quick sizes">
+							{#each capPresets as preset (preset)}
+								<button
+									type="button"
+									class="mpp-cap-chip"
+									class:on={preset === shownCap}
+									aria-pressed={preset === shownCap}
+									aria-label={preset === contextControl.standardTokens
+										? `${formatContextTokens(preset)}, default`
+										: formatContextTokens(preset)}
+									onclick={() => pickCapPreset(preset)}
+								>
+									{formatContextTokens(preset)}
+								</button>
+							{/each}
+						</div>
+						<label class="mpp-cap-field" class:invalid={capError}>
+							<span class="sr-only">Custom Standard cap in K tokens</span>
+							<input
+								type="text"
+								inputmode="decimal"
+								autocomplete="off"
+								spellcheck="false"
+								bind:value={capText}
+								aria-invalid={capError ? 'true' : undefined}
+								aria-describedby={capError ? `${editorId}-cap-error` : undefined}
+								onfocus={() => (capTextFocused = true)}
+								oninput={onCapTextInput}
+								onkeydown={onCapTextKeydown}
+								onblur={onCapTextBlur}
+							/>
+							<span class="mpp-cap-unit" aria-hidden="true">K</span>
+						</label>
+					</div>
+					{#if capError}
+						<p class="mpp-cap-error" id="{editorId}-cap-error" role="alert">{capError}</p>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	{/if}
 </div>
@@ -830,6 +1135,316 @@
 	.mpp-context-toggle button:focus-visible {
 		outline: 2px solid var(--ring);
 		outline-offset: 1px;
+	}
+	.mpp-context-caption {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		white-space: nowrap;
+	}
+	.mpp-context-raised {
+		color: var(--primary);
+		font-weight: 500;
+	}
+	.mpp-context-caption :global(.mpp-context-lock) {
+		flex-shrink: 0;
+		opacity: 0.75;
+	}
+
+	/* ---- Standard cap: summary line + inline editor ---------------------- */
+	.mpp-cap-summary {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 10px;
+		min-height: 24px;
+		padding: 0 2px;
+	}
+	.mpp-cap-summary p {
+		min-width: 0;
+		margin: 0;
+		color: var(--muted-foreground);
+		font-size: 11px;
+		line-height: 1.35;
+	}
+	.mpp-cap-summary strong {
+		color: var(--foreground);
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+	}
+	.mpp-cap-default {
+		white-space: nowrap;
+	}
+	.mpp-cap-adjust {
+		flex-shrink: 0;
+		height: 24px;
+		padding: 0 9px;
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		background: var(--popover);
+		color: var(--foreground);
+		font: inherit;
+		font-size: 11px;
+		font-weight: 600;
+		cursor: pointer;
+		transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+	}
+	.mpp-cap-adjust:hover {
+		background: var(--mpp-hover);
+	}
+	.mpp-cap-adjust.open {
+		border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+		color: var(--primary);
+	}
+	.mpp-cap-adjust:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+
+	.mpp-cap {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 10px 10px 8px;
+		border: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+		border-radius: 10px;
+		background: var(--popover);
+		animation: mpp-cap-in 0.16s ease-out;
+		container: mpp-cap / inline-size;
+	}
+	@keyframes mpp-cap-in {
+		from {
+			opacity: 0;
+			transform: translateY(-3px);
+		}
+	}
+
+	/* The slider covers Standard's range; the hatched stub after it is the
+	   Extended window — visibly past the end and locked. */
+	.mpp-cap-track {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		column-gap: 8px;
+	}
+	.mpp-cap-slider {
+		--thumb: 16px;
+		--rail: color-mix(in srgb, var(--muted-foreground) 22%, transparent);
+		width: 100%;
+		min-width: 0;
+		height: 24px;
+		margin: 0;
+		background: transparent;
+		cursor: pointer;
+		appearance: none;
+		-webkit-appearance: none;
+	}
+	.mpp-cap-slider::-webkit-slider-runnable-track {
+		height: 6px;
+		border-radius: 999px;
+		background: linear-gradient(to right, var(--primary) var(--fill), var(--rail) var(--fill));
+	}
+	.mpp-cap-slider::-moz-range-track {
+		height: 6px;
+		border-radius: 999px;
+		background: linear-gradient(to right, var(--primary) var(--fill), var(--rail) var(--fill));
+	}
+	.mpp-cap-slider::-webkit-slider-thumb {
+		width: var(--thumb);
+		height: var(--thumb);
+		margin-top: calc((6px - var(--thumb)) / 2);
+		border: 2px solid var(--primary);
+		border-radius: 50%;
+		background: var(--popover);
+		box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 22%, transparent);
+		appearance: none;
+		-webkit-appearance: none;
+		transition: transform 0.12s ease;
+	}
+	.mpp-cap-slider::-moz-range-thumb {
+		width: var(--thumb);
+		height: var(--thumb);
+		box-sizing: border-box;
+		border: 2px solid var(--primary);
+		border-radius: 50%;
+		background: var(--popover);
+		box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 22%, transparent);
+	}
+	.mpp-cap-slider:active::-webkit-slider-thumb {
+		transform: scale(1.12);
+	}
+	.mpp-cap-slider:focus {
+		outline: none;
+	}
+	.mpp-cap-slider:focus-visible::-webkit-slider-thumb {
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 55%, transparent);
+	}
+	.mpp-cap-slider:focus-visible::-moz-range-thumb {
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 55%, transparent);
+	}
+	.mpp-cap-locked {
+		display: inline-flex;
+		flex-shrink: 0;
+		align-items: center;
+		gap: 3px;
+		height: 18px;
+		padding: 0 6px;
+		border: 1px dashed color-mix(in srgb, var(--muted-foreground) 45%, transparent);
+		border-radius: 999px;
+		background: repeating-linear-gradient(
+			-45deg,
+			transparent 0 3px,
+			color-mix(in srgb, var(--muted-foreground) 14%, transparent) 3px 5px
+		);
+		color: var(--muted-foreground);
+		font-size: 9.5px;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+	}
+	.mpp-cap-scale {
+		display: flex;
+		justify-content: space-between;
+		/* Under the slider column only, not under the locked stub. */
+		grid-column: 1;
+		margin-top: -3px;
+		padding: 0 2px;
+		color: var(--muted-foreground);
+		font-size: 10px;
+		font-variant-numeric: tabular-nums;
+	}
+
+	.mpp-cap-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		margin-top: 2px;
+	}
+	.mpp-cap-presets {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 4px;
+		min-width: 0;
+	}
+	.mpp-cap-chip {
+		min-width: 44px;
+		height: 28px;
+		padding: 0 8px;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		background: transparent;
+		color: var(--muted-foreground);
+		font: inherit;
+		font-size: 11.5px;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+		cursor: pointer;
+		transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+	}
+	.mpp-cap-chip:hover {
+		background: var(--mpp-hover);
+		color: var(--foreground);
+	}
+	.mpp-cap-chip.on {
+		border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
+		background: color-mix(in srgb, var(--primary) 12%, var(--popover));
+		color: var(--foreground);
+	}
+	.mpp-cap-chip:focus-visible {
+		outline: 2px solid var(--ring);
+		outline-offset: 1px;
+	}
+	/* Too narrow for chips and the field on one line (phones): the chips share
+	   a full line evenly and the field sits under them at the right. */
+	@container mpp-cap (max-width: 330px) {
+		.mpp-cap-row {
+			flex-wrap: wrap;
+		}
+		.mpp-cap-presets {
+			flex: 1 1 100%;
+			flex-wrap: nowrap;
+		}
+		.mpp-cap-chip {
+			flex: 1 1 0;
+			min-width: 0;
+		}
+		.mpp-cap-field {
+			margin-left: auto;
+		}
+	}
+
+	.mpp-cap-field {
+		display: inline-flex;
+		flex-shrink: 0;
+		align-items: center;
+		height: 28px;
+		padding: 0 8px 0 2px;
+		border: 1px solid var(--border);
+		border-radius: 7px;
+		background: color-mix(in srgb, var(--muted) 35%, transparent);
+		cursor: text;
+		transition: border-color 0.12s ease, box-shadow 0.12s ease;
+	}
+	.mpp-cap-field:focus-within {
+		border-color: var(--ring);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--ring) 30%, transparent);
+	}
+	.mpp-cap-field.invalid {
+		border-color: var(--destructive);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--destructive) 22%, transparent);
+	}
+	.mpp-cap-field input {
+		width: 5ch;
+		height: 100%;
+		padding: 0 2px 0 6px;
+		border: 0;
+		outline: none;
+		background: transparent;
+		color: var(--foreground);
+		font: inherit;
+		font-size: 12.5px;
+		font-weight: 600;
+		font-variant-numeric: tabular-nums;
+		text-align: right;
+	}
+	.mpp-cap-unit {
+		color: var(--muted-foreground);
+		font-size: 11.5px;
+		font-weight: 600;
+	}
+	.mpp-cap-error {
+		margin: 0;
+		color: var(--destructive);
+		font-size: 10.5px;
+		line-height: 1.35;
+	}
+
+	/* Touch: full-size targets on phones and tablets. */
+	@media (pointer: coarse) {
+		.mpp-cap-adjust {
+			height: 32px;
+			padding: 0 12px;
+		}
+		.mpp-cap-slider {
+			--thumb: 22px;
+			height: 40px;
+		}
+		.mpp-cap-chip,
+		.mpp-cap-field {
+			height: 40px;
+		}
+		.mpp-cap-field input {
+			font-size: 16px; /* no iOS zoom on focus */
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.mpp-cap {
+			animation: none;
+		}
+		.mpp-cap-slider::-webkit-slider-thumb {
+			transition: none;
+		}
 	}
 
 	.mpp-empty {

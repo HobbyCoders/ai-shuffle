@@ -462,7 +462,9 @@ def apply_context_window_override(env: Dict[str, str], context_window: int) -> N
     window = int(context_window)
     if window <= 0:
         raise ValueError("context_window must be a positive integer")
-    env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "0" if window >= 1_000_000 else "1"
+    # A raised Standard cap (say 400K) needs the long-context window to run,
+    # just like Extended; only a window the default 200K holds can disable it.
+    env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] = "0" if window > 200_000 else "1"
     env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(window)
     env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
     env["CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE"] = str(window * 2)

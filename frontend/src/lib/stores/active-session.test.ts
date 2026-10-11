@@ -54,6 +54,7 @@ import { appData } from './app-data.svelte';
 import { auth } from '$lib/stores/auth.svelte';
 import { composerPreferences } from './composer-preferences';
 import { sessionEphemeralCache } from './session-cache';
+import { selectedContextWindow, standardContextCap } from './session/context-window';
 import { appMode } from './sessionMode.svelte';
 import { bindSessionOwner } from './session-owner';
 
@@ -312,6 +313,49 @@ describe('live effort and Fast mode selection', () => {
 			await activeSession.setContextWindowChoice('standard');
 			expect(activeSession.current.contextWindowChoice).toBe('1m');
 			expect(activeSession.current.contextWindowPin).toBe(1_000_000);
+		});
+		it('saves a raised Standard cap as the chat pin and remembers it for the model', async () => {
+			Object.assign(activeSession.current, { modelOverride: 'fable', contextWindowChoice: '1m', contextWindowPin: 1_000_000 });
+			const put = vi.spyOn(api, 'put').mockResolvedValue({ context_window: 450_000 });
+			try {
+				await activeSession.setContextStandardCap(450_400);
+				expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { context_window: 450_000 });
+				expect(activeSession.current.contextWindowChoice).toBe('standard');
+				expect(activeSession.current.contextWindowPin).toBe(450_000);
+				expect(composerPreferences.contextCapForModel('fable')).toBe(450_000);
+				expect(standardContextCap(activeSession.current)).toBe(450_000);
+				expect(selectedContextWindow(activeSession.current)).toBe(450_000);
+			} finally {
+				composerPreferences.rememberContextCap('fable', null);
+			}
+		});
+		it('switching an Extended chat to Standard uses the remembered cap', async () => {
+			composerPreferences.rememberContextCap('fable', 600_000);
+			Object.assign(activeSession.current, { modelOverride: 'fable', contextWindowChoice: '1m', contextWindowPin: 1_000_000 });
+			const put = vi.spyOn(api, 'put').mockResolvedValue({ context_window: 600_000 });
+			try {
+				await activeSession.setContextWindowChoice('standard');
+				expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { context_window: 600_000 });
+			} finally {
+				composerPreferences.rememberContextCap('fable', null);
+			}
+		});
+		it('a new chat keeps the cap as a preference and sends it on Standard', () => {
+			Object.assign(activeSession.current, { sessionId: null, modelOverride: 'fable', contextWindowChoice: '1m', contextWindowPin: null });
+			const put = vi.spyOn(api, 'put');
+			try {
+				activeSession.setContextStandardCap(5_000_000);
+				expect(put).not.toHaveBeenCalled();
+				expect(activeSession.current.contextWindowChoice).toBe('standard');
+				// Clamped one step below the full window: Standard never equals Extended.
+				expect(selectedContextWindow(activeSession.current)).toBe(990_000);
+				activeSession.setContextStandardCap(200_000);
+				// The family default is not stored as a raised cap.
+				expect(composerPreferences.contextCapForModel('fable')).toBeNull();
+				expect(selectedContextWindow(activeSession.current)).toBe(200_000);
+			} finally {
+				composerPreferences.rememberContextCap('fable', null);
+			}
 		});
 	});
 

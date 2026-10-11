@@ -46,7 +46,7 @@ curl -X POST http://localhost:8000/api/v1/query \
 | `max_turns` | integer | Maximum conversation turns |
 | `thinking_mode` | string | `default`, `disabled`, `adaptive`, `think`, `think_harder`, `ultra_think` |
 | `effort` | string | `low`, `medium`, `high`, `max`, `xhigh` |
-| `context_window` | integer | Context window for this turn. Ignored unless it is one of the windows the model offers |
+| `context_window` | integer | Context window for this turn. Ignored unless it falls within the model's range, from its Standard window up to its full Extended window |
 | `fast` | boolean | Fast mode for this turn. Omit to use the session's setting |
 | `workspace_project_ids` | string[] | Up to 50 other project ids whose folders the agent may also use. A key limited to one project cannot add others |
 

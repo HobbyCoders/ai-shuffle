@@ -105,6 +105,9 @@ export interface ComposerSheetProps {
 	onModelSelect: (value: string) => void;
 	contextChoice: ContextWindowChoice;
 	onContextChoiceSelect: (choice: ContextWindowChoice) => void;
+	/** The Standard cap in effect; with the setter, Standard is adjustable. */
+	contextStandardTokens?: number | null;
+	onContextStandardChange?: (tokens: number) => void | Promise<void>;
 	effortOptions: ComposerControlOption[];
 	effortExplanation?: string;
 	effortKnown?: boolean;

@@ -263,6 +263,38 @@ async def test_context_pick_does_not_hot_swap_or_interrupt_the_live_leg(live, mo
     assert state.connect_options.effort == "high"
 
 @pytest.mark.asyncio
+async def test_raised_standard_cap_is_saved_and_reaches_compaction(mock_db, monkeypatch):
+    from app.core.query_options import build_options_from_profile
+    from unittest.mock import patch
+
+    # Standard is a cap the user can raise: any value from the model's default
+    # standard window up to its full window is saved and pins compaction.
+    db.create_profile("cap-role", "Cap", None, {"model": "fable"})
+    db.create_session(session_id="cap", profile_id="cap-role", model="fable")
+    monkeypatch.setattr(api.control, "_require_owned", db.get_session)
+    result = await api.apply_run_settings("cap", api.RunSettingsUpdate(context_window=450_000))
+    assert result == {"context_window": 450_000}
+    assert db.get_session("cap")["context_window"] == 450_000
+    with patch("app.core.query_options.get_security_instructions", return_value=""):
+        options, _ = build_options_from_profile(db.get_profile("cap-role"), session_id="cap", overrides={})
+    assert options.aih_context_window == 450_000
+    assert options.env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "450000"
+    # Above 200K the delegated CLI needs its long-context window enabled.
+    assert options.env["CLAUDE_CODE_DISABLE_1M_CONTEXT"] == "0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("window", [150_000, 1_000_001, 2_000_000])
+async def test_cap_outside_the_models_range_is_refused(mock_db, monkeypatch, window):
+    db.create_profile("cap-role", "Cap", None, {"model": "fable"})
+    db.create_session(session_id="cap-bad", profile_id="cap-role", model="fable", context_window=1_000_000)
+    monkeypatch.setattr(api.control, "_require_owned", db.get_session)
+    with pytest.raises(ValueError, match="does not support the selected context window"):
+        await api.apply_run_settings("cap-bad", api.RunSettingsUpdate(context_window=window))
+    assert db.get_session("cap-bad")["context_window"] == 1_000_000
+
+
+@pytest.mark.asyncio
 async def test_context_pick_on_legacy_session_uses_its_launched_model(mock_db, monkeypatch):
     db.create_profile("legacy-role", "Legacy", None, {"model": "haiku"})
     db.create_session("legacy-window", "legacy-role")

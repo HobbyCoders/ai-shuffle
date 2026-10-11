@@ -45,7 +45,9 @@ beforeEach(async () => {
 			models: [{ id: 'gpt-6-astra', label: 'GPT-6 Astra', context_window: 272_000,
 				context_window_choices: [256_000, 1_000_000] },
 				{ id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', context_window: 272_000,
-					context_window_choices: [272_000, 1_000_000] }]
+					context_window_choices: [272_000, 1_000_000] },
+				{ id: 'gpt-7-nova', label: 'GPT-7 Nova', context_window: 2_000_000,
+					context_window_choices: [272_000, 2_000_000] }]
 		}]
 	});
 	await hydrateModelRegistry();
@@ -229,5 +231,134 @@ describe('ModelPickerPanel', () => {
 		const grok = within(list).getByRole('option', { name: /grok-4/ });
 		expect(within(grok).queryByTestId('model-unofficial')).toBeNull();
 		expect(screen.getByRole('tab', { name: 'OpenAI · PRO · Unofficial sign-in' })).toBeTruthy();
+	});
+});
+
+describe('ModelPickerPanel Standard cap editor', () => {
+	const settle = () => new Promise((resolve) => setTimeout(resolve, 350));
+
+	function renderCap(props: Record<string, unknown> = {}) {
+		const onContextStandardChange = vi.fn();
+		const onContextChoiceSelect = vi.fn();
+		const view = render(ModelPickerPanel, {
+			props: {
+				groups, options, value: 'sonnet', onSelect: vi.fn(),
+				contextChoice: 'standard', onContextChoiceSelect,
+				contextStandardTokens: 200_000, onContextStandardChange,
+				...props
+			}
+		});
+		return { ...view, onContextStandardChange, onContextChoiceSelect };
+	}
+
+	async function openEditor() {
+		await fireEvent.click(screen.getByRole('button', { name: 'Adjust' }));
+		return screen.getByRole('group', { name: 'Standard context cap' });
+	}
+
+	it('says where Standard compacts and opens the editor on demand', async () => {
+		renderCap();
+		expect(screen.getByText(/compacts near/i).textContent).toContain('~200K');
+		const adjust = screen.getByRole('button', { name: 'Adjust' });
+		expect(adjust.getAttribute('aria-expanded')).toBe('false');
+		expect(screen.queryByRole('group', { name: 'Standard context cap' })).toBeNull();
+		const editor = await openEditor();
+		expect(screen.getByRole('button', { name: 'Done' }).getAttribute('aria-expanded')).toBe('true');
+		const slider = within(editor).getByRole('slider', { name: 'Standard context cap' }) as HTMLInputElement;
+		expect([slider.min, slider.max, slider.value]).toEqual(['200000', '990000', '200000']);
+		expect(within(editor).getByRole('button', { name: '200K, default' }).getAttribute('aria-pressed')).toBe('true');
+	});
+
+	it('shows a raised cap on the Standard segment and in the summary', () => {
+		renderCap({ contextStandardTokens: 450_000 });
+		const standard = screen.getByRole('radio', { name: '450K · Standard' });
+		expect(standard.textContent).toContain('raised');
+		const summary = screen.getByText(/compacts near/i);
+		expect(summary.textContent).toContain('~450K');
+		expect(summary.textContent).toContain('default 200K');
+	});
+
+	it('saves a preset', async () => {
+		const { onContextStandardChange } = renderCap();
+		const editor = await openEditor();
+		await fireEvent.click(within(editor).getByRole('button', { name: '600K' }));
+		expect(onContextStandardChange).toHaveBeenCalledWith(600_000);
+	});
+
+	it('steps the slider on the 10K grid and saves the settled value once', async () => {
+		const { onContextStandardChange } = renderCap();
+		const slider = within(await openEditor()).getByRole('slider');
+		await fireEvent.keyDown(slider, { key: 'ArrowRight' });
+		await fireEvent.keyDown(slider, { key: 'ArrowRight' });
+		expect(slider.getAttribute('aria-valuetext')).toBe('220K tokens');
+		expect(onContextStandardChange).not.toHaveBeenCalled();
+		await settle();
+		expect(onContextStandardChange).toHaveBeenCalledTimes(1);
+		expect(onContextStandardChange).toHaveBeenCalledWith(220_000);
+		await fireEvent.keyDown(slider, { key: 'End' });
+		await settle();
+		expect(onContextStandardChange).toHaveBeenLastCalledWith(990_000);
+	});
+
+	it('lands GPT-6.1 steps on the grid from its 272K floor', async () => {
+		const { onContextStandardChange } = renderCap({
+			...buildModelPickerCatalog(), value: 'prov:openai:gpt-6.1-sol', contextStandardTokens: null
+		});
+		const slider = within(await openEditor()).getByRole('slider');
+		await fireEvent.keyDown(slider, { key: 'PageUp' });
+		await settle();
+		expect(onContextStandardChange).toHaveBeenCalledWith(300_000);
+	});
+
+	it('takes free entry in K tokens and refuses values outside Standard', async () => {
+		const { onContextStandardChange } = renderCap();
+		const editor = await openEditor();
+		const field = within(editor).getByRole('textbox', { name: /custom standard cap/i }) as HTMLInputElement;
+		await fireEvent.focus(field);
+		await fireEvent.input(field, { target: { value: '1000' } });
+		expect(field.getAttribute('aria-invalid')).toBe('true');
+		expect(screen.getByRole('alert').textContent).toBe('Up to 990K. For the full 1M, choose Extended.');
+		await fireEvent.keyDown(field, { key: 'Enter' });
+		expect(onContextStandardChange).not.toHaveBeenCalled();
+		await fireEvent.input(field, { target: { value: '150' } });
+		expect(screen.getByRole('alert').textContent).toContain("can't go below 200K");
+		await fireEvent.input(field, { target: { value: 'lots' } });
+		expect(screen.getByRole('alert').textContent).toContain('like 450');
+		await fireEvent.input(field, { target: { value: '450' } });
+		expect(screen.queryByRole('alert')).toBeNull();
+		await fireEvent.keyDown(field, { key: 'Enter' });
+		expect(onContextStandardChange).toHaveBeenLastCalledWith(450_000);
+		await fireEvent.input(field, { target: { value: '0.5m' } });
+		await fireEvent.keyDown(field, { key: 'Enter' });
+		expect(onContextStandardChange).toHaveBeenLastCalledWith(500_000);
+	});
+
+	it('drops an invalid entry on blur and reverts on Escape', async () => {
+		const { onContextStandardChange } = renderCap({ contextStandardTokens: 400_000 });
+		const field = within(await openEditor()).getByRole('textbox') as HTMLInputElement;
+		await fireEvent.focus(field);
+		await fireEvent.input(field, { target: { value: '5000' } });
+		await fireEvent.keyDown(field, { key: 'Escape' });
+		expect(field.value).toBe('400');
+		expect(screen.queryByRole('alert')).toBeNull();
+		await fireEvent.input(field, { target: { value: '9999' } });
+		await fireEvent.blur(field);
+		expect(field.value).toBe('400');
+		expect(onContextStandardChange).not.toHaveBeenCalled();
+	});
+
+	it('locks Extended to the full window with no editor', async () => {
+		const { rerender } = renderCap({ contextChoice: '1m' });
+		expect(screen.getByText(/uses the full/i).textContent).toContain('1M');
+		expect(screen.queryByRole('button', { name: 'Adjust' })).toBeNull();
+		await rerender({ ...buildModelPickerCatalog(), value: 'prov:openai:gpt-7-nova' });
+		expect(screen.getByRole('radio', { name: '2M · Extended' })).toBeTruthy();
+		expect(screen.getByText(/uses the full/i).textContent).toContain('2M');
+	});
+
+	it('leaves Standard fixed on hosts that do not pass a setter', () => {
+		renderCap({ onContextStandardChange: undefined });
+		expect(screen.getByRole('radio', { name: '200K · Standard' })).toBeTruthy();
+		expect(screen.queryByRole('button', { name: 'Adjust' })).toBeNull();
 	});
 });

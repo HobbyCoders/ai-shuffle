@@ -53,7 +53,7 @@
 	let {
 		open, onClose, onOpenChange, panelId = 'mobile-composer-panel', inertToolbar = false,
 		modelOptions, modelGroups, modelValue, modelLabel, modelNotice, onModelSelect, modelLocked = false,
-		contextChoice, onContextChoiceSelect, effortOptions, effortValue, onEffortSelect,
+		contextChoice, onContextChoiceSelect, contextStandardTokens, onContextStandardChange, effortOptions, effortValue, onEffortSelect,
 		effortExplanation, effortKnown = true, effortDefaultValue = null,
 		fastSupported = false, fastEnabled = false, onToggleFast, showCodeControls = true,
 		showSetup = true, permissionOptions, permissionValue, permissionUpdating = false, onPermissionSelect,
@@ -671,6 +671,8 @@
 							notice={modelNotice}
 							{contextChoice}
 							{onContextChoiceSelect}
+							{contextStandardTokens}
+							{onContextStandardChange}
 							onSelect={(value) => { onModelSelect(value); back(); }}
 							onRequestClose={back}
 						/>
