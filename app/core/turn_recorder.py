@@ -660,6 +660,8 @@ class TurnRecorder:
         self._last_append_at: float = float("-inf")
 
         self._terminal_recorded = False
+        self._defer_completion = False
+        self._deferred_completion: Optional[Dict[str, Any]] = None
         self._closed = False
         # Fence state. The first FenceViolation from append_events means the
         # run lease moved to another runner: every later append from this
@@ -775,6 +777,7 @@ class TurnRecorder:
         )
         recorder.turn_id = turn_id
         recorder._owns_lease = False
+        recorder._defer_completion = True
         return recorder
 
     async def start(
@@ -783,8 +786,12 @@ class TurnRecorder:
         profile_id: str | None = None,
         record_user: bool = True,
         source: str | None = None,
+        continued: bool = False,
     ) -> None:
         """Append ``turn.started`` then ``message.user``.
+
+        A parked continuation re-arms streaming with the SAME turn id and a
+        ``continued`` marker. It does not open a new logical transcript turn.
 
         ``record_user=False`` appends only ``turn.started`` — a resumed turn
         re-runs from the head node and adds no new user message. ``source``
@@ -794,7 +801,10 @@ class TurnRecorder:
             started: Dict[str, Any] = {"profile_id": profile_id}
             if source is not None:
                 started["source"] = source
-            events = [self._event(contract.TurnStarted, **started)]
+            events = [self._event(
+                contract.TurnStarted, **started,
+                extra_payload={"continued": True} if continued else None,
+            )]
             if record_user:
                 events.append(self._event(
                     contract.MessageUser,
@@ -937,6 +947,18 @@ class TurnRecorder:
                 self.session_id, event.get("type") if isinstance(event, dict) else None,
                 exc_info=True,
             )
+
+    async def settle(self, outcome: Optional[str], prior_usage: Dict[str, Any]) -> None:
+        """Publish completion only after the runtime's park decision, under its lease.
+
+        close() has already flushed the pump's data, but an injected recorder
+        does not release the runtime-owned lease. A parked pump is not terminal.
+        """
+        completed, self._deferred_completion = self._deferred_completion, None
+        if completed is not None and outcome == "completed":
+            completed["payload"]["usage"] = merge_turn_usage(
+                prior_usage, completed["payload"].get("usage") or {})
+            await self._append([completed])
 
     async def close(self, outcome: Optional[str] = None) -> None:
         """Flush, append crash-path terminal if needed, release lease.
@@ -1100,13 +1122,17 @@ class TurnRecorder:
             for key in ("is_error", "errors"):
                 if metadata.get(key):
                     api_error = {**(api_error or {}), key: metadata[key]}
-            events.append(self._event(
+            completed = self._event(
                 contract.TurnCompleted,
                 stop_reason=metadata.get("stop_reason"),
                 terminal_reason=metadata.get("terminal_reason"),
                 usage=usage_summary,
                 extra_payload=api_error,
-            ))
+            )
+            if self._defer_completion:
+                self._deferred_completion = completed
+            else:
+                events.append(completed)
             self._terminal_recorded = True
         elif etype == "interrupted":
             events.extend(self._flush_pending_usage())
@@ -1830,12 +1856,38 @@ async def record_task_settle_frame(
     })
 
 
-async def record_parked(session_id: str, task_ids: List[str]) -> None:
+def merge_turn_usage(previous: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
+    """Add foreground-attempt totals; context snapshots remain per model call."""
+    merged = {}
+    for key in ("tokens_in", "tokens_out", "cache_creation_tokens", "cache_read_tokens",
+                "total_cost_usd", "duration_ms", "num_turns"):
+        if key in previous or key in current:
+            merged[key] = (previous.get(key) or 0) + (current.get(key) or 0)
+    if previous.get("usage_estimated") or current.get("usage_estimated"):
+        merged["usage_estimated"] = True
+    models = {}
+    for usage in (previous.get("model_usage") or {}, current.get("model_usage") or {}):
+        for model, values in usage.items():
+            combined = models.setdefault(model, {})
+            for key, value in values.items():
+                combined[key] = (combined.get(key, 0) + value
+                                 if isinstance(value, (int, float)) and not isinstance(value, bool)
+                                 else value)
+    if models:
+        merged["model_usage"] = models
+    return merged
+
+
+async def record_parked(
+    session_id: str, task_ids: List[str], *, turn_id: Optional[str] = None,
+    usage: Optional[Dict[str, Any]] = None,
+) -> None:
     """Append ``turn.parked`` when a turn parks over active bg work."""
     try:
         await _append_unfenced(session_id, [_build_event(
-            contract.TurnParked, session_id,
+            contract.TurnParked, session_id, turn_id=turn_id,
             task_ids=[t for t in (task_ids or []) if t],
+            extra_payload={"usage": usage} if usage is not None else None,
         )])
     except Exception:
         logger.warning(

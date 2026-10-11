@@ -7,6 +7,7 @@ through::
 
     queued -> running -> interrupting -> draining -> completed | aborted
               running --------------------------> parked
+              parked ---------------------------> running (compatible send/wake)
               parked ---------------------------> completed
                   (settle_parked_turns — stale-park settlement / CLI-wake at rest)
               running ---------------------------> requeued (back to queued)
@@ -25,9 +26,9 @@ UPDATE/INSERT so concurrency is resolved by the database, never by
 read-modify-write races in Python: two racers that both try to make a turn live
 for the same session will trip the unique index, and the loser returns cleanly.
 
-This module is a PURE DB layer. It deliberately does NOT append ``turn.*``
-events to ``session_events`` — the log is the record, but that mirroring is
-wired at the runtime/command layer, not here.
+Event mirroring normally lives in the runtime/command layer. The exception is
+settling abandoned parks: every caller (Stop, boot repair, a successor) needs
+the same completion record now that parking no longer emits one prematurely.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ import logging
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Collection, Dict, List, Optional
+from typing import Any, Callable, Collection, Dict, List, Optional
 
 import psycopg2
 
@@ -666,10 +667,37 @@ def record_adhoc_turn(
 # Live-state transitions (all DB-raced via the partial unique index)
 # ---------------------------------------------------------------------------
 
+def _execution_defaults(cursor: Any, turn: Dict[str, Any]) -> Dict[str, Any]:
+    """Snapshot non-secret mutable binding defaults at claim, under its lock.
+
+    Compare defaults conservatively even if an override masks one: a changed
+    default may create a separate turn, but must never silently change a park's
+    execution identity. Do not snapshot credentials or arbitrary profile data.
+    """
+    cursor.execute("SELECT * FROM sessions WHERE id=%s", (turn["session_id"],))
+    session = cursor.fetchone()
+    cursor.execute("SELECT config FROM agents WHERE id=%s", (
+        turn.get("profile_id") or (session or {}).get("profile_id"),
+    ))
+    profile = cursor.fetchone()
+    config = _parse_json((profile or {}).get("config")) or {}
+    row = session or {}
+    return {
+        "provider": row.get("provider_id") if session is not None else config.get("provider"),
+        "model": row.get("model") or row.get("launched_model") or config.get("model"),
+        "effort": row.get("effort") or config.get("effort"),
+        "permission_mode": row.get("permission_mode") or config.get("permission_mode") or "default",
+        "workspace_project_ids": row.get("workspace_project_ids"),
+        "session_mode": row.get("session_mode"),
+    }
+
+
 def start_turn(
     turn_id: str,
     run_id: Optional[str] = None,
     instance_id: Optional[str] = None,
+    *,
+    can_resume: Optional[Callable[[Dict[str, Any], Dict[str, Any]], bool]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Transition a ``queued`` turn to ``running`` (claim the session's live
     slot).
@@ -693,14 +721,60 @@ def start_turn(
             if (_task_stop(cursor, candidate["session_id"])
                     or _cwd_blocked(cursor, candidate["session_id"])):
                 return None
+            resumed = None
+            cursor.execute("SELECT * FROM turns WHERE id=%s AND state='queued' FOR UPDATE", (turn_id,))
+            queued = _row(cursor.fetchone())
+            if queued is None:
+                return None
+            queued["payload"]["execution_defaults"] = _execution_defaults(cursor, queued)
+            if can_resume is not None:
+                cursor.execute(
+                    "SELECT * FROM turns WHERE session_id=%s AND state <> 'queued' "
+                    "AND COALESCE(stop_reason, '') <> 'steered' "
+                    "ORDER BY position DESC, created_at DESC, id DESC LIMIT 1 FOR UPDATE",
+                    (candidate["session_id"],),
+                )
+                previous = _row(cursor.fetchone())
+                if (queued and previous and previous["state"] == "parked"
+                        and can_resume(previous, queued)):
+                    # Keep the original command identity for idempotent intake;
+                    # the continuation's command is retained in its queue row.
+                    # Persist the new prompt before retiring that row so a crash
+                    # can requeue the SAME turn without losing the user's send.
+                    payload = dict(queued.get("payload") or {})
+                    reply_to = (previous.get("payload") or {}).get("agent_message_reply_to")
+                    if reply_to:
+                        payload.setdefault("agent_message_reply_to", reply_to)
+                    payload["continued_turn"] = True
+                    payload["continuation_command_id"] = queued.get("command_id")
+                    payload["parked_usage"] = (previous.get("payload") or {}).get("parked_usage", {})
+                    cursor.execute(
+                        "UPDATE turns SET state='running', run_id=%s, instance_id=%s, "
+                        "started_at=NOW(), ended_at=NULL, source=%s, prompt=%s, "
+                        "payload=%s, overrides=%s, stop_reason=NULL, error=NULL, "
+                        "interrupt_mode=NULL, stop_background=FALSE WHERE id=%s AND state='parked' "
+                        "RETURNING *",
+                        (run_id, instance_id, queued["source"], queued.get("prompt"),
+                         json.dumps(payload), json.dumps(queued.get("overrides") or {}), previous["id"]),
+                    )
+                    resumed = _row(cursor.fetchone())
+                    if resumed is not None:
+                        cursor.execute(
+                            "UPDATE turns SET state='completed', stop_reason='steered', "
+                            "parent_turn_id=%s, ended_at=NOW() WHERE id=%s AND state='queued'",
+                            (previous["id"], turn_id),
+                        )
+                        # started_at is the current active interval, not the
+                        # logical turn's start (which stays in session_events).
+                        turn_id = previous["id"]
             cursor.execute(
                 "UPDATE turns SET state='running', run_id=%s, instance_id=%s, "
-                "started_at=NOW() "
+                "started_at=NOW(), payload=%s "
                 "WHERE id=%s AND state='queued' "
                 "RETURNING *",
-                (run_id, instance_id, turn_id),
+                (run_id, instance_id, json.dumps(queued["payload"]), turn_id),
             )
-            row = _row(cursor.fetchone())
+            row = _row(cursor.fetchone()) or resumed
             if row is not None:
                 # A pick may be acknowledged, or a folder removed, after this
                 # turn was queued (or before a crash recovery retries it).
@@ -910,7 +984,7 @@ def absorb_queued_turn(turn_id: str) -> bool:
 
 
 def park_turn(
-    turn_id: str, task_ids: Optional[List[str]] = None
+    turn_id: str, task_ids: Optional[List[str]] = None, *, usage: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
     """Park a live turn (it finished the foreground stream but left background
     work running). Records the surviving ``task_ids`` in ``payload.task_ids``.
@@ -926,6 +1000,8 @@ def park_turn(
         payload = _parse_json(cur.get("payload")) if cur else None
         payload = dict(payload or {})
         payload["task_ids"] = task_ids
+        if usage is not None:
+            payload["parked_usage"] = usage
         cursor.execute(
             "UPDATE turns SET state='parked', payload=%s, ended_at=NOW() "
             "WHERE id=%s AND state IN ('running','interrupting','draining') "
@@ -1029,8 +1105,25 @@ def settle_parked_turns(
             # enqueue_turn/start_turn use this same lock. The UPDATE gets a
             # fresh snapshot after any admission/handoff we waited behind.
             cursor.execute("SELECT id FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
-        cursor.execute(sql + "RETURNING id", params)
+        cursor.execute(sql + "RETURNING id, payload", params)
         rows = cursor.fetchall()
+        # Commit the lifecycle transition and its only terminal event together.
+        # An append failure leaves the row parked, so Stop/repair can retry.
+        from app.db import session_events
+
+        events = []
+        for row in rows or []:
+            payload = _parse_json(row.get("payload")) or {}
+            if "parked_usage" in payload:
+                events.append({
+                    "id": f"parked-completed-{row['id']}",
+                    "type": "turn.completed", "turn_id": row["id"],
+                    "payload": {"stop_reason": "parked_settled", "usage": payload["parked_usage"]},
+                })
+        if events:
+            session_events.append_events(session_id, events, _conn=conn)
+    if events:
+        session_events.notify_session_write(session_id, "session_events")
     return len(rows or [])
 
 
@@ -1105,7 +1198,8 @@ def get_latest_turn(session_id: str) -> Optional[Dict[str, Any]]:
 
     Used to read the caller's most recent per-turn ``overrides`` (e.g. the
     permission mode the user picked in the composer) when a Task-dispatched
-    worker inherits its parent's effective permission level.
+    worker inherits its parent's effective permission level. A parked
+    continuation's queue row resolves to the logical turn it resumed.
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -1115,7 +1209,10 @@ def get_latest_turn(session_id: str) -> Optional[Dict[str, Any]]:
             (session_id,),
         )
         row = cursor.fetchone()
-    return _row(row)
+    latest = _row(row)
+    if latest and latest.get("stop_reason") == "steered" and latest.get("parent_turn_id"):
+        return get_turn(latest["parent_turn_id"])
+    return latest
 
 
 def get_latest_run_turn(session_id: str) -> Optional[Dict[str, Any]]:

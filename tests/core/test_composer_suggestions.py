@@ -446,15 +446,15 @@ async def test_final_unpark_generates_after_nested_owner_receipt(mock_db, owner_
             })
             assert await session_runtime.SessionRuntime(wake).execute() == "completed"
             await asyncio.gather(*cs._tasks.values())
-            assert turns.get_latest_turn("s")["id"] == wake["id"], turns.get_latest_turn("s")
-            assert cs._final_answer("s", wake["id"]) == "All requested work is finished."
-            assert await cs._eligible("s", wake["id"])
+            assert turns.get_latest_turn("s")["id"] == parked["id"], turns.get_latest_turn("s")
+            assert cs._final_answer("s", parked["id"]) == "All requested work is finished."
+            assert await cs._eligible("s", parked["id"])
             generate.assert_awaited_once()
             assert "All requested work is finished." in generate.call_args.args[0]
             suggestions = [call.args[0].data for call in broadcast.await_args_list
                            if call.args[0].data.get("type") == "composer_suggestion"]
             assert suggestions == [{
-                "type": "composer_suggestion", "session_id": "s", "turn_id": wake["id"],
+                "type": "composer_suggestion", "session_id": "s", "turn_id": parked["id"],
                 "suggestion": "Which edge case should we test next?",
             }]
             assert turns.get_turn(wake["id"])["state"] == "completed"

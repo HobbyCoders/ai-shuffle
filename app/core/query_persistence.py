@@ -400,7 +400,7 @@ async def _turn_end_booking(
         # A legacy key has no turn to scope the event log to; summing the
         # whole session's history would book earlier turns again.
         return None
-    totals = await run_sync(_partial_usage_from_events, session_id, turn_id)
+    totals = await run_sync(_partial_usage_from_events, session_id, turn_id, json.loads(settlement_key)[2])
     if totals["unindexed_records"]:
         # Unindexed records (a delegated session from before fluid indexed
         # its calls) are coalesced gauges, several per call; summing them is
@@ -449,7 +449,7 @@ KILLED_SESSION_STATUS = "failed"
 KILLED_TURN_STOP_REASON = "killed"
 
 
-def _partial_usage_from_events(session_id: str, turn_id: Optional[str]) -> dict:
+def _partial_usage_from_events(session_id: str, turn_id: Optional[str], run_id: Optional[str] = None) -> dict:
     """Sum the durable ``turn.usage`` records of ``turn_id`` into one total.
 
     A killed session never reaches its own turn-end persistence: the pool
@@ -492,6 +492,10 @@ def _partial_usage_from_events(session_id: str, turn_id: Optional[str]) -> dict:
         if event.get("event_type") != "turn.usage":
             continue
         if turn_id is not None and event.get("turn_id") != turn_id:
+            continue
+        # One logical turn can have several paid foreground attempts separated
+        # by parking. Recovery must not book an earlier attempt a second time.
+        if run_id is not None and event.get("run_id") != run_id:
             continue
         usage = (event.get("payload") or {}).get("usage")
         if not isinstance(usage, dict):
@@ -579,7 +583,7 @@ async def settle_killed_session(
 
     if claimed:
         try:
-            totals = await run_sync(_partial_usage_from_events, session_id, turn_id)
+            totals = await run_sync(_partial_usage_from_events, session_id, turn_id, run_id)
         except Exception:
             logger.warning(
                 "settle_killed_session: usage recovery failed for %s", session_id,

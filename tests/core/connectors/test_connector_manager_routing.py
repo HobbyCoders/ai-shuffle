@@ -570,6 +570,8 @@ def turns(monkeypatch):
         idle=AsyncMock(return_value=True),
         outcome=MagicMock(return_value={"error": None}),
         text=MagicMock(return_value="Here is your answer."),
+        real_outcome=turn_outcome.final_turn_outcome,
+        real_text=turn_outcome.extract_final_assistant_text,
         broadcast=AsyncMock(),
     )
     monkeypatch.setattr(turn_manager, "submit_async", t.submit)
@@ -634,6 +636,35 @@ class TestIncomingMessage:
         log = routed.create_connector_event_log.call_args.kwargs
         assert (log["direction"], log["status"]) == ("inbound", "delivered")
         routed.update_connector_event_dispatched.assert_called_once_with("c1", success=True)
+
+    async def test_completed_then_parked_reply_uses_latest_attempt(
+        self, mgr, routed, not_enrolled, turns, mock_db, monkeypatch,
+    ):
+        from app.core import turn_outcome
+        from app.db import session_events
+
+        inst = running(mgr)
+        routed.get_connector_session.return_value = {"id": "cs-1", "session_id": "ai-existing"}
+        monkeypatch.setattr(turn_outcome, "final_turn_outcome", turns.real_outcome)
+        monkeypatch.setattr(turn_outcome, "extract_final_assistant_text", turns.real_text)
+        session_events.append_events("ai-existing", [
+            {"type": "turn.started", "turn_id": "old"},
+            {"type": "assistant.text_delta", "turn_id": "old", "payload": {"text": "OLD ANSWER"}},
+            {"type": "turn.completed", "turn_id": "old", "payload": {"usage": {"tokens_out": 1}}},
+        ])
+
+        async def submit(*args, **kwargs):
+            session_events.append_events("ai-existing", [
+                {"type": "turn.started", "turn_id": "new"},
+                {"type": "assistant.text_delta", "turn_id": "new", "payload": {"text": "NEW PARKED ANSWER"}},
+                {"type": "turn.parked", "turn_id": "new", "payload": {"usage": {"tokens_out": 7}}},
+            ])
+            return "new"
+
+        turns.submit.side_effect = submit
+        await mgr.handle_incoming_message(incoming())
+        assert [m.text for m in inst.sent] == ["NEW PARKED ANSWER"]
+        assert turns.real_outcome("ai-existing")["usage"]["tokens_out"] == 7
 
     async def test_existing_linked_session_is_reused(self, mgr, routed, not_enrolled, turns):
         running(mgr)

@@ -520,6 +520,7 @@ def _real_pump_env():
     recorder.start = AsyncMock()
     recorder.on_event = AsyncMock()
     recorder.close = AsyncMock()
+    recorder.settle = AsyncMock()
 
     def _no_spawn(*_a, **_k):
         raise AssertionError("a refused turn must never build a CLI adapter")

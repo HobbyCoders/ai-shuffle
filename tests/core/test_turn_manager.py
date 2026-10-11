@@ -174,12 +174,15 @@ async def test_host_interrupt_persists_source_without_losing_remote_teardown(moc
     tid = turn_manager.submit("source-worker", "provider_agent", prompt="work",
                               payload={"api_user_id": "owner"}, no_kick=True)
     _start_live_turn(tid)
+    before = turns.get_turn(tid)["payload"]
+    assert before["api_user_id"] == "owner"
+    assert "execution_defaults" in before
     row = await turn_manager.interrupt_async("source-worker", "stop", True,
                                              source="session_closed")
     assert row["state"] == "interrupting"
     persisted = turns.get_turn(tid)
     assert persisted["stop_background"]
-    assert persisted["payload"] == {"api_user_id": "owner", "interrupt_source": "session_closed"}
+    assert persisted["payload"] == {**before, "interrupt_source": "session_closed"}
 
 
 def test_interrupt_send_now_with_stop_background(mock_db):
