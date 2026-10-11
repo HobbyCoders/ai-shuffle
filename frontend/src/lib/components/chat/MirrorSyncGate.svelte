@@ -110,13 +110,13 @@
 	.mirror-status-slot {
 		position: absolute;
 		top: 0.5rem;
-		left: 50%;
-		transform: translateX(-50%);
+		left: 0.75rem;
+		right: 0.75rem;
 		z-index: 5;
-		max-width: calc(100% - 1.5rem);
+		display: flex;
+		justify-content: center;
 		pointer-events: none;
-	}
-	.mirror-pill {
+	}	.mirror-pill {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.5rem;
@@ -139,6 +139,9 @@
 	.mirror-pill :global(.mirror-spin) { animation: mirror-spin 1s linear infinite; }
 	@keyframes mirror-spin { to { transform: rotate(360deg); } }
 	@keyframes mirror-pill-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+	@media (max-width: 480px) {
+		.mirror-pill { white-space: normal; border-radius: var(--radius); }
+	}
 	@media (prefers-reduced-motion: reduce) {
 		.mirror-pill, .mirror-pill :global(.mirror-spin) { animation: none; }
 	}
