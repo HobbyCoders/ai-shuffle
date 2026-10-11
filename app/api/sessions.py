@@ -61,6 +61,7 @@ from app.api.sessions_helpers import (  # noqa: F401 — re-exports
     check_transcript_access,
     filter_readable_sessions,
     require_session,
+    refuse_assistant_home_mutation,
     require_transcript_session,
     enrich_sessions_with_tags,
     fetch_and_enrich_sessions,
@@ -1495,6 +1496,8 @@ async def update_session(
 ):
     """Update session title or status. API users can only modify their accessible sessions."""
     existing = await require_session(request, session_id)
+    if title is not None:
+        await refuse_assistant_home_mutation(session_id, "renamed")
 
     # Sync title rename to Claude SDK session if available. Only a Claude CLI
     # conversation id (a UUID) names a transcript the CLI owns; a fluid
@@ -1722,6 +1725,7 @@ async def delete_session(
     the HTTP response on slow worktree/subprocess lock release.
     """
     existing = await require_session(request, session_id)
+    await refuse_assistant_home_mutation(session_id, "deleted")
 
     # Delete DB row first — cheap and authoritative for the UI.
     await run_sync(database.delete_session, session_id)
@@ -2064,6 +2068,7 @@ async def batch_delete_sessions(
     for session_id in body.session_ids:
         try:
             existing = await require_session(request, session_id)
+            await refuse_assistant_home_mutation(session_id, "deleted")
             await run_sync(database.delete_session, session_id)
             from app.core import browser_runtime
             await browser_runtime.close_session(session_id)
