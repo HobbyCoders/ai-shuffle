@@ -107,9 +107,9 @@ describe('cleared by a later user message from anywhere (#2249)', () => {
 	});
 
 	it('uses the open session\'s own revision when no row is loaded, so the first answer clears it', () => {
-		// Opened from a deep link / Spotlight: its detail said T0, no sidebar row.
-		expect(beginUserMessageRevisionSeed('A')).toBe(true);
-		finishUserMessageRevisionSeed('A', T0);
+		// Opened from a deep link / Spotlight: its /live snapshot said T0, no sidebar row.
+		const claim = beginUserMessageRevisionSeed('A');
+		finishUserMessageRevisionSeed('A', claim, T0);
 		rememberLeavingProseQuestion('A', asked);
 		// The very first broadcast after leaving IS the answer.
 		observeLastUserMessage('A', '2026-10-11T10:00:00.000001Z');
@@ -146,32 +146,52 @@ describe('cleared by a later user message from anywhere (#2249)', () => {
 		expect(has('A')).toBe(false);
 	});
 
-	describe('leaving while the session\'s own revision is still being read', () => {
+	describe('leaving while the visit\'s /live snapshot is still in flight', () => {
 		const T1 = '2026-10-11T10:00:07Z';
+		// The question was written at 10:00:03, after T0's prompt and before T1's answer.
+		const askedAtThree: ChatMessage[] = [
+			{ id: 'u1', role: 'user', content: 'Deploy it', timestamp: T0 },
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Staging too, or prod only?', timestamp: '2026-10-11T10:00:03Z' }
+		];
 
-		it('read resolves, then the answer arrives: the answer clears', () => {
-			expect(beginUserMessageRevisionSeed('A')).toBe(true);
+		it('snapshot resolves, then the answer arrives: the answer clears', () => {
+			const claim = beginUserMessageRevisionSeed('A');
 			rememberLeavingProseQuestion('A', asked);
-			finishUserMessageRevisionSeed('A', T0);
+			finishUserMessageRevisionSeed('A', claim, T0);
 			expect(has('A')).toBe(true);
 			observeLastUserMessage('A', T1);
 			expect(has('A')).toBe(false);
 		});
 
-		it('answer arrives, then the read resolves with the pre-answer value: the held answer clears', () => {
-			expect(beginUserMessageRevisionSeed('A')).toBe(true);
+		it('answer arrives, then the snapshot resolves with the pre-answer value: the held answer clears', () => {
+			const claim = beginUserMessageRevisionSeed('A');
 			rememberLeavingProseQuestion('A', asked);
 			observeLastUserMessage('A', T1);
 			expect(has('A')).toBe(true);
-			finishUserMessageRevisionSeed('A', T0);
+			finishUserMessageRevisionSeed('A', claim, T0);
 			expect(has('A')).toBe(false);
 		});
 
-		it('a post-leave value never redefines the observation: refreshes of it do not clear, a later one does', () => {
-			expect(beginUserMessageRevisionSeed('A')).toBe(true);
-			rememberLeavingProseQuestion('A', asked);
+		it('answer arrives, then a snapshot taken AFTER the answer resolves: it post-dates the question, so it clears', () => {
+			const claim = beginUserMessageRevisionSeed('A');
+			rememberLeavingProseQuestion('A', askedAtThree);
+			observeLastUserMessage('A', T1);
+			finishUserMessageRevisionSeed('A', claim, T1);
+			expect(has('A')).toBe(false);
+		});
+
+		it('a snapshot taken after the answer clears even when the answer\'s broadcast was missed', () => {
+			const claim = beginUserMessageRevisionSeed('A');
+			rememberLeavingProseQuestion('A', askedAtThree);
+			finishUserMessageRevisionSeed('A', claim, T1);
+			expect(has('A')).toBe(false);
+		});
+
+		it('a pre-question snapshot is the baseline: a refresh of the same value keeps the mark', () => {
+			const claim = beginUserMessageRevisionSeed('A');
+			rememberLeavingProseQuestion('A', askedAtThree);
 			observeLastUserMessage('A', T0);
-			finishUserMessageRevisionSeed('A', T0);
+			finishUserMessageRevisionSeed('A', claim, T0);
 			expect(has('A')).toBe(true);
 			observeSessionRows([{ id: 'A', last_user_message_at: T0 }]);
 			expect(has('A')).toBe(true);
@@ -179,26 +199,75 @@ describe('cleared by a later user message from anywhere (#2249)', () => {
 			expect(has('A')).toBe(false);
 		});
 
-		it('a failed read leaves the entry for a reopen and lets a later switch-in read again', () => {
-			expect(beginUserMessageRevisionSeed('A')).toBe(true);
-			rememberLeavingProseQuestion('A', asked);
-			observeLastUserMessage('A', T1);
-			finishUserMessageRevisionSeed('A', undefined);
-			expect(has('A')).toBe(true);
-			// The held value is now known, so no further read is needed.
-			expect(beginUserMessageRevisionSeed('A')).toBe(false);
-			expect(beginUserMessageRevisionSeed('C')).toBe(true);
-			finishUserMessageRevisionSeed('C', undefined);
-			expect(beginUserMessageRevisionSeed('C')).toBe(true);
+		it('an observation recorded during the visit is compared with the late snapshot (missed answer broadcast)', () => {
+			const claim = beginUserMessageRevisionSeed('A');
+			observeLastUserMessage('A', T0); // a row/broadcast while open
+			rememberLeavingProseQuestion('A', askedAtThree);
+			finishUserMessageRevisionSeed('A', claim, T1);
+			expect(has('A')).toBe(false);
 		});
 
-		it('one read per session: in flight or already known skips it', () => {
-			expect(beginUserMessageRevisionSeed('A')).toBe(true);
-			expect(beginUserMessageRevisionSeed('A')).toBe(false);
-			finishUserMessageRevisionSeed('A', null);
-			expect(beginUserMessageRevisionSeed('A')).toBe(false);
-			observeSessionRows([{ id: 'B', last_user_message_at: T0 }]);
-			expect(beginUserMessageRevisionSeed('B')).toBe(false);
+		it('a late snapshot no later than the question never clears an observation recorded during the visit', () => {
+			const claim = beginUserMessageRevisionSeed('A');
+			observeLastUserMessage('A', '2026-10-11T09:00:00Z');
+			rememberLeavingProseQuestion('A', askedAtThree);
+			// The prompt that led to the question, whose broadcast this tab missed.
+			finishUserMessageRevisionSeed('A', claim, T0);
+			expect(has('A')).toBe(true);
+		});
+
+		it('a departed visit\'s late snapshot never resolves a newer visit\'s baseline', () => {
+			const first = beginUserMessageRevisionSeed('A');
+			rememberLeavingProseQuestion('A', askedAtThree);
+			// Answered elsewhere at T1; reopened here with a NEW question at 10:00:09.
+			const second = beginUserMessageRevisionSeed('A');
+			const askedAgain: ChatMessage[] = [
+				...askedAtThree,
+				{ id: 'u2', role: 'user', content: 'Prod only', timestamp: T1 },
+				{ id: 'a2', role: 'assistant', type: 'text', content: 'Which region?', timestamp: '2026-10-11T10:00:09Z' }
+			];
+			rememberLeavingProseQuestion('A', askedAgain);
+			observeLastUserMessage('A', T1); // the answer's broadcast, after leaving again
+			finishUserMessageRevisionSeed('A', second, T1);
+			finishUserMessageRevisionSeed('A', first, T0);
+			expect(has('A')).toBe(true);
+			observeLastUserMessage('A', '2026-10-11T10:00:12Z');
+			expect(has('A')).toBe(false);
+		});
+
+		it('a departed visit\'s snapshot resolving first is ignored as a baseline too', () => {
+			const first = beginUserMessageRevisionSeed('A');
+			rememberLeavingProseQuestion('A', asked);
+			const second = beginUserMessageRevisionSeed('A');
+			rememberLeavingProseQuestion('A', asked);
+			finishUserMessageRevisionSeed('A', first, T0);
+			// Still waiting on the current visit: a post-leave value is held, not adopted.
+			observeLastUserMessage('A', T1);
+			expect(has('A')).toBe(true);
+			finishUserMessageRevisionSeed('A', second, T1);
+			expect(has('A')).toBe(true);
+			observeLastUserMessage('A', '2026-10-11T10:00:08Z');
+			expect(has('A')).toBe(false);
+		});
+
+		it('a failed snapshot leaves the entry waiting for a reopen', () => {
+			const claim = beginUserMessageRevisionSeed('A');
+			rememberLeavingProseQuestion('A', asked);
+			observeLastUserMessage('A', T1);
+			finishUserMessageRevisionSeed('A', claim, undefined);
+			expect(has('A')).toBe(true);
+			observeLastUserMessage('A', '2026-10-11T10:00:08Z');
+			expect(has('A')).toBe(true);
+		});
+
+		it('forgetting the session (cleared or deleted) drops its claim', () => {
+			const claim = beginUserMessageRevisionSeed('A');
+			forgetProseQuestion('A');
+			rememberLeavingProseQuestion('A', asked);
+			finishUserMessageRevisionSeed('A', claim, T0);
+			// No claim: the late snapshot is not adopted as the baseline.
+			observeLastUserMessage('A', T1);
+			expect(has('A')).toBe(true);
 		});
 	});
 

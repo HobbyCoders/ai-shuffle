@@ -10,6 +10,7 @@ import { feedController } from './v2/feed-controller';
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
+import type { ChatMessage } from '../types';
 import { appMode } from '../sessionMode.svelte';
 import { composerPreferences } from '../composer-preferences';
 import { api } from '$lib/api/client';
@@ -1387,6 +1388,10 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 		const T0 = '2026-10-11T10:00:00.000001Z';
 		const isLive = (url: string) => url.startsWith('/sessions/session-A/live');
 		const detailCalls = () => vi.mocked(api.get).mock.calls.filter(([url]) => /^\/sessions\/session-A(\?|$)/.test(url)).length;
+		const stamped = (askedAt: string): ChatMessage[] => [
+			{ id: 'u1', role: 'user', content: 'Deploy it', timestamp: T0 },
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Staging too, or prod only?', timestamp: askedAt }
+		];
 		const liveCalls = () => vi.mocked(api.get).mock.calls.filter(([url]) => isLive(url)).length;
 		const leaveA = async (switcher: ReturnType<typeof makeSwitcher>['switcher'], deps: ReturnType<typeof makeSwitcher>['deps']) => {
 			deps.update((st) => ({ ...st, messages: asked, isLoadingSession: false, isRestoringSession: false }));
@@ -1438,6 +1443,55 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
 			resolveLive({ session_meta: { last_user_message_at: '2026-10-11T10:00:00Z' } });
 			await vi.waitFor(() => expect(get(proseQuestionSessions).has('session-A')).toBe(false));
+		});
+
+		it('a /live snapshot taken after the answer clears the mark instead of becoming its baseline', async () => {
+			_mockSessions.current = [];
+			let resolveLive!: (v: unknown) => void;
+			vi.mocked(api.get).mockImplementation((url: string) =>
+				isLive(url) && !resolveLive ? new Promise((done) => { resolveLive = done; }) : Promise.resolve(null));
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(resolveLive).toBeDefined());
+			deps.update((st) => ({ ...st, messages: stamped('2026-10-11T10:00:03Z'), isLoadingSession: false, isRestoringSession: false }));
+			await switcher.switchSession('session-B');
+			observeLastUserMessage('session-A', '2026-10-11T10:00:07Z');
+			resolveLive({ session_meta: { last_user_message_at: '2026-10-11T10:00:07Z' } });
+			await vi.waitFor(() => expect(get(proseQuestionSessions).has('session-A')).toBe(false));
+		});
+
+		it('an earlier visit\'s late snapshot cannot resolve a reopened visit\'s baseline', async () => {
+			_mockSessions.current = [];
+			const pending: Array<(v: unknown) => void> = [];
+			vi.mocked(api.get).mockImplementation((url: string) =>
+				isLive(url) ? new Promise((done) => { pending.push(done); }) : Promise.resolve(null));
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			// Visit 1 leaves with a question while its snapshot is pending.
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(pending.length).toBe(1));
+			deps.update((st) => ({ ...st, messages: stamped('2026-10-11T10:00:03Z'), isLoadingSession: false, isRestoringSession: false }));
+			await switcher.switchSession('session-B');
+			// Answered elsewhere at 10:00:07; visit 2 hydrates a NEW question and leaves.
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(pending.length).toBe(2));
+			deps.update((st) => ({
+				...st,
+				messages: [
+					...stamped('2026-10-11T10:00:03Z'),
+					{ id: 'u2', role: 'user', content: 'Prod only', timestamp: '2026-10-11T10:00:07Z' },
+					{ id: 'a2', role: 'assistant', type: 'text', content: 'Which region?', timestamp: '2026-10-11T10:00:09Z' }
+				],
+				isLoadingSession: false,
+				isRestoringSession: false
+			}));
+			await switcher.switchSession('session-B');
+			observeLastUserMessage('session-A', '2026-10-11T10:00:07Z');
+			pending[1]({ session_meta: { last_user_message_at: '2026-10-11T10:00:07Z' } });
+			pending[0]({ session_meta: { last_user_message_at: T0 } });
+			await new Promise((r) => setTimeout(r, 0));
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			observeLastUserMessage('session-A', '2026-10-11T10:00:12Z');
+			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 		});
 
 		it('records a loaded row\'s revision on switch-in, so filtering the row out before leaving keeps the baseline', async () => {

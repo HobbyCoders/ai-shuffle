@@ -21,10 +21,13 @@
  * whatever its mark — from every loaded sidebar row, every
  * `user_session_updated` frame and, for a session opened with no row carrying
  * the field (a deep link, Spotlight, a row outside the loaded or filtered
- * page), the `/live` snapshot the session opened with. When that snapshot is
- * still in flight at leave time, revisions arriving afterwards are held until it
- * resolves: its value becomes the observation and a held revision later than it
- * clears the entry.
+ * page), the `/live` snapshot of that visit. When the snapshot is still in
+ * flight at leave time, revisions arriving afterwards are held until it
+ * resolves: its value becomes the observation, unless it is later than the
+ * question message's own server time (the snapshot was taken after the answer),
+ * and a held revision later than it clears the entry. Claims belong to one
+ * visit: a reopen supersedes them, so a departed visit's late snapshot never
+ * becomes a later visit's observation.
  * A revision that arrives after leaving never becomes the observation itself;
  * when nothing is known at all the entry waits for a reopen. Instants are
  * compared at the server's full (microsecond) precision with offsets applied.
@@ -62,15 +65,28 @@ interface Revision {
 /**
  * Revision observed per remembered session when the switcher left it.
  * `null`: observed with no user message stamped. `undefined`: nothing was
- * known then (see `_seeding` and `_afterLeave`).
+ * known then (see `_claims` and `_afterLeave`).
  */
 const _observed = new Map<string, Revision | null | undefined>();
 
 /** The latest revision this tab has seen per session, marked or not. */
 const _latest = new Map<string, Revision | null>();
 
-/** Sessions whose own revision is awaited from their `/live` snapshot. */
-const _seeding = new Set<string>();
+/**
+ * The open visit's claim per session: a token for the `/live` snapshot it
+ * awaits. A newer visit replaces it, so a departed visit's late response only
+ * counts as an ordinary observation, never as the current visit's baseline.
+ */
+const _claims = new Map<string, number>();
+let _nextClaim = 0;
+
+/**
+ * Server time of the remembered question message (the trailing assistant
+ * prose), when the transcript carries it. Any user message stamped after it is
+ * the answer, which settles a snapshot whose timing relative to the answer is
+ * otherwise unknown.
+ */
+const _questionAt = new Map<string, Revision>();
 
 /**
  * The latest revision seen after leaving, per remembered session whose
@@ -119,6 +135,7 @@ function later(a: Revision | null | undefined, b: Revision | null): Revision | n
 function drop(sessionId: string): void {
 	_observed.delete(sessionId);
 	_afterLeave.delete(sessionId);
+	_questionAt.delete(sessionId);
 	if (!_store.current.has(sessionId)) return;
 	const next = new Set(_store.current);
 	next.delete(sessionId);
@@ -143,6 +160,10 @@ export function rememberLeavingProseQuestion(
 		drop(sessionId);
 		return;
 	}
+	const question = [...messages].reverse().find((m) => m.role === 'assistant' && (m.type === 'text' || !m.type) && !!m.content?.trim());
+	const askedAt = question?.timestamp ? toRevision(question.timestamp) : undefined;
+	if (askedAt) _questionAt.set(sessionId, askedAt);
+	else _questionAt.delete(sessionId);
 	const fromRow = lastUserMessageAt === undefined ? undefined : toRevision(lastUserMessageAt);
 	const known = _latest.get(sessionId);
 	const observed = fromRow === undefined ? known : later(known, fromRow);
@@ -155,33 +176,61 @@ export function rememberLeavingProseQuestion(
 }
 
 /**
- * Start reading an opened session's own revision, when it is not known from
- * any source and none is awaited. Returns whether a claim was opened; the
- * caller must then call `finishUserMessageRevisionSeed`.
+ * A visit to the session starts: claim its revision from the `/live` snapshot
+ * that visit fetches. Replaces any earlier visit's claim (and what was held
+ * for it). Returns the token to pass to `finishUserMessageRevisionSeed`.
  */
-export function beginUserMessageRevisionSeed(sessionId: string | null | undefined): boolean {
-	if (!sessionId || _latest.has(sessionId) || _seeding.has(sessionId)) return false;
-	_seeding.add(sessionId);
-	return true;
+export function beginUserMessageRevisionSeed(sessionId: string): number {
+	const token = ++_nextClaim;
+	_claims.set(sessionId, token);
+	_afterLeave.delete(sessionId);
+	return token;
+}
+
+/** A revision later than the remembered question's time is its answer. */
+function postdatesQuestion(sessionId: string, seen: Revision | null): boolean {
+	const askedAt = _questionAt.get(sessionId);
+	return askedAt !== undefined && isLater(seen, askedAt);
 }
 
 /**
- * The snapshot claimed by `beginUserMessageRevisionSeed` resolved. `value` is the
- * session's `last_user_message_at`, or undefined when the request failed or the
- * worker does not report it. A remembered entry left while it was in
- * flight takes it as its observation; a revision seen after leaving that is
- * later than it means the user answered, so the entry is dropped.
+ * The `/live` snapshot of the visit holding `token` resolved. `value` is the
+ * session's `last_user_message_at`, or undefined when the request failed or
+ * the worker does not report it.
+ *
+ * - A superseded visit's snapshot, or one whose entry already has an
+ *   observation (recorded at leave from a row or broadcast), is an ordinary
+ *   observation: later than the observation and than the question means the
+ *   user answered.
+ * - An entry left before its own snapshot returned takes the snapshot's value
+ *   as its observation, unless that value already post-dates the question (the
+ *   snapshot was taken after the answer) — then the entry is dropped. A
+ *   revision held since leaving that is later than the snapshot's value also
+ *   means the user answered.
  */
-export function finishUserMessageRevisionSeed(sessionId: string, value: unknown): void {
-	_seeding.delete(sessionId);
+export function finishUserMessageRevisionSeed(sessionId: string, token: number, value: unknown): void {
+	const current = _claims.get(sessionId) === token;
+	if (current) _claims.delete(sessionId);
 	const seen = value === undefined ? undefined : toRevision(value);
-	if (seen !== undefined) _latest.set(sessionId, later(_latest.get(sessionId), seen));
-	if (!_observed.has(sessionId) || _observed.get(sessionId) !== undefined) return;
+	if (seen === undefined) {
+		if (current) _afterLeave.delete(sessionId);
+		return;
+	}
+	_latest.set(sessionId, later(_latest.get(sessionId), seen));
+	if (!_observed.has(sessionId)) return;
+	const baseline = _observed.get(sessionId);
+	if (baseline !== undefined) {
+		if (isLater(seen, baseline) && (!_questionAt.has(sessionId) || postdatesQuestion(sessionId, seen))) drop(sessionId);
+		return;
+	}
+	if (!current) return;
 	const heldBack = _afterLeave.get(sessionId);
 	_afterLeave.delete(sessionId);
-	if (seen === undefined) return;
+	if (postdatesQuestion(sessionId, seen) || (heldBack !== undefined && isLater(heldBack, seen))) {
+		drop(sessionId);
+		return;
+	}
 	_observed.set(sessionId, seen);
-	if (heldBack !== undefined && isLater(heldBack, seen)) drop(sessionId);
 }
 
 /**
@@ -199,7 +248,7 @@ export function observeLastUserMessage(sessionId: string | null | undefined, las
 	const baseline = _observed.get(sessionId);
 	if (baseline === undefined) {
 		// Never the observation itself: hold it for the awaited snapshot, if any.
-		if (_seeding.has(sessionId)) _afterLeave.set(sessionId, later(_afterLeave.get(sessionId), seen));
+		if (_claims.has(sessionId)) _afterLeave.set(sessionId, later(_afterLeave.get(sessionId), seen));
 		return;
 	}
 	if (isLater(seen, baseline)) drop(sessionId);
@@ -225,13 +274,15 @@ export function forgetProseQuestion(sessionId: string): void {
 	drop(sessionId);
 	_latest.delete(sessionId);
 	_rowRaw.delete(sessionId);
+	_claims.delete(sessionId);
 }
 
 /** Test seam: forget everything. */
 export function _resetProseQuestions(): void {
 	_observed.clear();
 	_latest.clear();
-	_seeding.clear();
+	_claims.clear();
+	_questionAt.clear();
 	_afterLeave.clear();
 	_rowRaw.clear();
 	_store.set(new Set());
