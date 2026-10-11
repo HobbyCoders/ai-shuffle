@@ -8,6 +8,8 @@ import {
 	needsYouCount,
 	openSessionNeeds,
 	NO_OPEN_NEEDS,
+	REMEMBERED_PROSE_NEEDS,
+	sessionNeedsInput,
 	attentionTitle,
 	deriveGitStage,
 	deriveStatus,
@@ -37,6 +39,7 @@ import {
 	STATUS_LABELS,
 	type GitStage,
 } from './session-card-data';
+import { needsYouTurnIds } from '$lib/utils/transcript-navigation';
 
 function session(over: Partial<Session> = {}): Session {
 	return {
@@ -740,5 +743,89 @@ describe('withinTapTarget', () => {
 		expect(withinTapTarget(chip, 181, 48)).toBe(false);
 		expect(withinTapTarget({ left: 0, top: 0, width: 10, height: 10 }, 27, 5)).toBe(true);
 		expect(withinTapTarget({ left: 0, top: 0, width: 10, height: 10 }, 28, 5)).toBe(false);
+	});
+});
+
+describe('openSessionNeeds scan cost (spec §5)', () => {
+	const asked: ChatMessage[] = [
+		{ id: 'u1', role: 'user', content: 'Deploy it' },
+		...Array.from({ length: 50 }, (_, i): ChatMessage => ({ id: `t${i}`, role: 'assistant', type: 'tool_use', toolName: 'Bash', toolId: `b${i}`, content: '' })),
+		{ id: 'a1', role: 'assistant', type: 'text', content: 'Staging too, or prod only?' }
+	];
+	function counted(messages: ChatMessage[]) {
+		const reads = { n: 0 };
+		const proxy = new Proxy(messages, {
+			get(target, key, receiver) {
+				if (typeof key === 'string' && /^\d+$/.test(key)) reads.n++;
+				return Reflect.get(target, key, receiver);
+			}
+		});
+		return { proxy, reads };
+	}
+
+	it('scans a transcript once, however often the session object is replaced around it', () => {
+		const { proxy, reads } = counted(asked);
+		const first = openSessionNeeds({ messages: proxy, pendingPermissions: [], pendingQuestions: [] }, true);
+		const scanned = reads.n;
+		expect(scanned).toBeGreaterThan(0);
+		// Draft typing / scroll: a new state object, same messages and queues.
+		for (let i = 0; i < 20; i++) {
+			const again = openSessionNeeds({ messages: proxy, pendingPermissions: [], pendingQuestions: [] }, true);
+			expect(again).toBe(first);
+		}
+		expect(reads.n).toBe(scanned);
+		expect(first.proseQuestion).toBe(true);
+	});
+
+	it('rescans when the transcript array changes', () => {
+		const { proxy, reads } = counted(asked);
+		openSessionNeeds({ messages: proxy }, true);
+		const before = reads.n;
+		const next = counted([...asked, { id: 'u2', role: 'user', content: 'Prod only' }]);
+		expect(openSessionNeeds({ messages: next.proxy }, true).proseQuestion).toBe(false);
+		expect(next.reads.n).toBeGreaterThan(0);
+		expect(reads.n).toBe(before);
+	});
+
+	it('uses the remembered question while the history loads', () => {
+		expect(openSessionNeeds({ messages: [], isLoadingSession: true }, true, true).proseQuestion).toBe(true);
+		expect(openSessionNeeds({ messages: [], isLoadingSession: true }, false, true).proseQuestion).toBe(false);
+		expect(sessionNeedsInput(false, NO_OPEN_NEEDS, true)).toBe(REMEMBERED_PROSE_NEEDS);
+		expect(sessionNeedsInput(false, NO_OPEN_NEEDS, false)).toBeNull();
+	});
+});
+
+describe('the three Needs-you consumers agree (spec §5)', () => {
+	const messages: ChatMessage[] = [{ id: 'u1', role: 'user', content: 'Ship it' }];
+	const noQueues = openSessionNeeds({ messages, pendingPermissions: [], pendingQuestions: [] }, true);
+	// What each consumer computes for the open session: the sidebar row's
+	// status, the tab title's count and the rail's dotted ticks.
+	function consumers(row: { status: string; is_remote: boolean; remote_runtime_state: Session['remote_runtime_state'] }, attention: { count: number; kind: 'permission' | 'question' } | null) {
+		const status = deriveStatus({
+			remoteRuntimeState: row.is_remote ? row.remote_runtime_state ?? 'unknown' : null,
+			streaming: true, attention, isActive: true, open: noQueues
+		});
+		const title = needsYouCount(row, attention, 0, noQueues);
+		const rail = needsYouTurnIds(needsYouCount(row, attention, 0, noQueues), messages, [], 'u1');
+		return { sidebar: isAttentionStatus(status), title, rail };
+	}
+
+	it('a remote session asking a question before its queue loads', () => {
+		expect(consumers({ status: 'active', is_remote: true, remote_runtime_state: 'question' }, null))
+			.toEqual({ sidebar: true, title: 1, rail: ['u1'] });
+		expect(consumers({ status: 'active', is_remote: true, remote_runtime_state: 'working' }, null))
+			.toEqual({ sidebar: false, title: 0, rail: [] });
+	});
+
+	it('a reconnect snapshot restoring the open session\'s attention entry', () => {
+		expect(consumers({ status: 'active', is_remote: false, remote_runtime_state: null }, { count: 1, kind: 'permission' }))
+			.toEqual({ sidebar: true, title: 1, rail: ['u1'] });
+	});
+
+	it('a remembered prose question on a background session outranks Working but not a prompt', () => {
+		const base = { remoteRuntimeState: null, streaming: true, isActive: true, open: REMEMBERED_PROSE_NEEDS };
+		expect(deriveStatus({ ...base, attention: null })).toBe('await');
+		expect(deriveStatus({ ...base, attention: { count: 1, kind: 'permission' } })).toBe('needs_permission');
+		expect(deriveStatus({ ...base, remoteRuntimeState: 'working', attention: null })).toBe('await');
 	});
 });

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '$lib/stores/types';
 import {
+	needsYouTurnIds,
+	turnsOwningTools,
 	compactTurnLabel,
 	deriveUserTurnNavigationItems,
 	isNavigableUserTurn,
@@ -127,5 +129,31 @@ describe('live turn anchor', () => {
 	it('falls back to the first message when there is no user prompt', () => {
 		expect(resolveLiveTurnStartedAt([message({ id: 'a1', timestamp: started })], 'turn-1')).toBe(started);
 		expect(resolveLiveTurnStartedAt([], 'turn-1')).toBeNull();
+	});
+});
+
+describe('needsYouTurnIds (spec §5 rail dot)', () => {
+	const older: ChatMessage[] = [
+		{ id: 'u1', role: 'user', content: 'Plan the release' },
+		{ id: 't1', role: 'assistant', type: 'tool_use', toolName: 'AskUserQuestion', toolId: 'ask-1', content: '' },
+		{ id: 'a1', role: 'assistant', type: 'text', content: 'Asked; carrying on meanwhile.' },
+		{ id: 'u2', role: 'user', content: 'Also bump the version' },
+		{ id: 'a2', role: 'assistant', type: 'text', content: 'Bumped.' }
+	];
+
+	it('keeps a surviving question on the turn that asked it after another user message', () => {
+		expect(turnsOwningTools(older, ['ask-1'])).toEqual(new Map([['ask-1', 'u1']]));
+		expect(needsYouTurnIds(1, older, ['ask-1'], 'u2')).toEqual(['u1']);
+	});
+
+	it('puts what no tool call explains on the newest turn, beside the older question', () => {
+		// The question plus a permission prompt in the newest turn.
+		expect(needsYouTurnIds(2, older, ['ask-1'], 'u2')).toEqual(['u1', 'u2']);
+		// A question whose call is not in the transcript (queue loaded first).
+		expect(needsYouTurnIds(1, older, ['ask-missing'], 'u2')).toEqual(['u2']);
+	});
+
+	it('marks nothing when nothing waits', () => {
+		expect(needsYouTurnIds(0, older, ['ask-1'], 'u2')).toEqual([]);
 	});
 });

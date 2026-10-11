@@ -116,24 +116,70 @@ export interface OpenSessionNeeds {
 
 export const NO_OPEN_NEEDS: OpenSessionNeeds = Object.freeze({ permissions: 0, questions: 0, proseQuestion: false });
 
+/** A session that is not open but whose remembered prose question waits (spec §5). */
+export const REMEMBERED_PROSE_NEEDS: OpenSessionNeeds = Object.freeze({ permissions: 0, questions: 0, proseQuestion: true });
+
+// Published transcripts are immutable (the reducer copies before it writes to
+// an array it has handed out), so the backwards scan runs once per array: a
+// draft, scroll or header update that replaces the session object but not its
+// messages reuses the answer.
+const proseScan = new WeakMap<readonly ChatMessage[], boolean>();
+
+function scanProseQuestion(messages: readonly ChatMessage[]): boolean {
+	let asks = proseScan.get(messages);
+	if (asks === undefined) {
+		asks = lastProseAsksQuestion(messages);
+		proseScan.set(messages, asks);
+	}
+	return asks;
+}
+
+let lastNeeds: OpenSessionNeeds = NO_OPEN_NEEDS;
+
 /**
  * Read the open session's needs. The prose-question part follows the
  * `groupToolCalls` preference (it is where folding protects questions); the
- * prompt queues count regardless.
+ * prompt queues count regardless. While the session's history is still
+ * loading, `rememberedProse` (what the tab saw when it last left the
+ * session) stands in for the transcript. Equal answers return the same
+ * object, so consumers that compare by identity do no further work.
  */
 export function openSessionNeeds(
 	state: {
 		pendingPermissions?: readonly unknown[] | null;
 		pendingQuestions?: readonly unknown[] | null;
 		messages?: readonly ChatMessage[] | null;
+		isLoadingSession?: boolean;
 	},
-	groupToolCalls: boolean
+	groupToolCalls: boolean,
+	rememberedProse = false
 ): OpenSessionNeeds {
-	return {
-		permissions: state.pendingPermissions?.length ?? 0,
-		questions: state.pendingQuestions?.length ?? 0,
-		proseQuestion: groupToolCalls && !!state.messages && lastProseAsksQuestion(state.messages)
-	};
+	const permissions = state.pendingPermissions?.length ?? 0;
+	const questions = state.pendingQuestions?.length ?? 0;
+	const proseQuestion = groupToolCalls && (
+		state.isLoadingSession
+			? rememberedProse
+			: !!state.messages && scanProseQuestion(state.messages)
+	);
+	if (permissions === lastNeeds.permissions && questions === lastNeeds.questions && proseQuestion === lastNeeds.proseQuestion) {
+		return lastNeeds;
+	}
+	lastNeeds = Object.freeze({ permissions, questions, proseQuestion });
+	return lastNeeds;
+}
+
+/**
+ * The `open` input of `deriveStatus` / `needsYouCount` for one session: the
+ * open session reads its own state, any other one only a remembered prose
+ * question (its transcript is not loaded).
+ */
+export function sessionNeedsInput(
+	isOpen: boolean,
+	openNeeds: OpenSessionNeeds,
+	rememberedProse: boolean
+): OpenSessionNeeds | null {
+	if (isOpen) return openNeeds;
+	return rememberedProse ? REMEMBERED_PROSE_NEEDS : null;
 }
 
 /**
@@ -179,14 +225,14 @@ export function deriveStatus(input: {
 	if (input.open) {
 		if (input.open.permissions > 0) return 'needs_permission';
 		if (input.open.questions > 0) return 'has_question';
-		if (input.open.proseQuestion) return 'await';
 	}
+	const proseQuestion = !!input.open?.proseQuestion;
 	// A mirror has no local leases/jobs. Owner state also clears stale local
 	// streaming/attention maps when the remote turn settles.
 	if (input.remoteRuntimeState) {
 		switch (input.remoteRuntimeState) {
-			case 'working': return 'working';
-			case 'parked': return 'parked';
+			case 'working': return proseQuestion ? 'await' : 'working';
+			case 'parked': return proseQuestion ? 'await' : 'parked';
 			case 'permission': return 'needs_permission';
 			case 'question': return 'has_question';
 			case 'offline': return 'offline';
@@ -202,6 +248,9 @@ export function deriveStatus(input: {
 	if (input.attention && input.attention.count > 0) {
 		return input.attention.kind === 'question' ? 'has_question' : 'needs_permission';
 	}
+	// A prose question parks the session as Awaiting input until the next
+	// user message; a prompt card outranks it, Working does not.
+	if (proseQuestion) return 'await';
 	// Working means a turn is actually running. A turn that ended with live
 	// background work (a Monitor shell, a sub-agent) is parked even when the
 	// durable marker is missing: some park paths never write it (durable agent

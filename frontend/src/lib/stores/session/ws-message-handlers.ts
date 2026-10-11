@@ -12,6 +12,7 @@
  * - Session history loads via the feed's from_seq=0 replay, not WS.
  */
 
+import { forgetProseQuestion } from './prose-questions';
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest } from '$lib/api/client';
 import type { ActiveSessionState, StreamingSessionInfo } from '../active-session';
 import { notify, type NotificationAction, type NotificationSeverity, type NotificationSurface } from '../notifications';
@@ -617,6 +618,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			if (getState().sessionId === sessionId) {
 				onNewChat();
 			}
+			// After the switch away, which records the leaving session.
+			forgetProseQuestion(sessionId);
 			return;
 		}
 

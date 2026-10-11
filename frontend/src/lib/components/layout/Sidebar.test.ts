@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { privateAccessPending } from '$lib/stores/chat-access';
+import { _resetProseQuestions, rememberLeavingProseQuestion } from '$lib/stores/session/prose-questions';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
 import { sidebarGroups } from '$lib/stores/expansion-preferences';
@@ -636,6 +637,28 @@ describe('Sidebar Needs you lane', () => {
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 		expect(cardFrame('Active chat').textContent).toContain('Working');
+	});
+
+	// Spec §5: a question this tab saw before leaving a session keeps that row
+	// in Needs you until the session's next turn, and the open row ignores it.
+	it('keeps a left session with an unanswered prose question in the lane until its next turn', async () => {
+		const asked = [
+			{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
+			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' }
+		];
+		rememberLeavingProseQuestion('settled', asked, { workStartedAt: null, streaming: false });
+		onTestFinished(_resetProseQuestions);
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+		expect(cardFrame('Settled chat').textContent).toContain('Awaiting input');
+
+		mocks.sessions.set([
+			session('active', 'Active chat', 'visible-project', true),
+			session('settled', 'Settled chat', 'visible-project', false, false, { work_started_at: '2026-10-11T00:00:00Z' }),
+			session('worker', 'Hidden worker', 'hidden-project', true, true),
+		]);
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 	});
 
 	it('takes a remote session from its owner state, not the local map', () => {

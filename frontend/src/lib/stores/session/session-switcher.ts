@@ -22,6 +22,7 @@ import { openHeaderDropdown } from '../header-dropdowns';
 import { getPersistedDeviceIntent } from '../worker-selection';
 import { getOrCreateDeviceId, TAB_ACTIVE_SESSION_KEY } from '../device-id';
 import { appData } from '../app-data.svelte';
+import { rememberLeavingProseQuestion } from './prose-questions';
 import { archivedChats } from '../archived-chats';
 import { subagentChats } from '../subagent-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
@@ -520,6 +521,16 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 	// ── Session Navigation ──────────────────────────────────────────────
 
+	/** Keep the leaving session's unanswered prose question counting (spec §5). */
+	function rememberLeaving(state: ActiveSessionState) {
+		if (!state.sessionId) return;
+		const row = appData.current.sessions.find((s) => s.id === state.sessionId);
+		rememberLeavingProseQuestion(state.sessionId, state.messages, {
+			workStartedAt: row?.work_started_at ?? null,
+			streaming: !!state.isStreaming
+		});
+	}
+
 	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) {
 		beginJourney('chat.open', sessionId);
 		const generation = ++_switchGeneration;
@@ -549,6 +560,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// Save ephemeral for session we're leaving
 		const leavingKey = state.sessionId || '__new_chat__';
 		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state));
+		if (state.sessionId !== sessionId) rememberLeaving(state);
 
 		const ephemeral = sessionEphemeralCache.restore(sessionId);
 		const row = appData.current.sessions.find((s) => s.id === sessionId);
@@ -879,6 +891,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// Save ephemeral for the session we're leaving
 		const leavingKey = leavingSessionId || '__new_chat__';
 		sessionEphemeralCache.save(leavingKey, buildLeavingEphemeral(state));
+		rememberLeaving(state);
 
 		// Tell backend to release session lock
 		if (leavingSessionId) {

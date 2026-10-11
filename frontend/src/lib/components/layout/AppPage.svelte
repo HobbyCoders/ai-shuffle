@@ -21,9 +21,10 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { beginJourney, cancelJourney, claimNavigationOrigin, finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
-	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
+	import { activeSession, backgroundPermissions, streamingSessions } from '$lib/stores/active-session';
+	import { proseQuestionSessions, proseQuestionPending, reconcileProseQuestions } from '$lib/stores/session/prose-questions';
 	import { privateAccessPending } from '$lib/stores/chat-access';
-	import { needsYouCount as countNeedsYou, openSessionNeeds, attentionTitle } from './session-card-data';
+	import { needsYouCount as countNeedsYou, openSessionNeeds, sessionNeedsInput, attentionTitle } from './session-card-data';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
@@ -474,15 +475,29 @@
 	// Everything waiting on you (spec §5: prompts, private access and the open
 	// session's prose question), shown in the tab title so a backgrounded tab
 	// still says when an agent is blocked on you.
-	const openNeeds = $derived(openSessionNeeds($activeSession ?? {}, chatPreferences.current?.groupToolCalls !== false));
+	// Other sessions count a prose question this tab saw when it left them.
+	const groupToolCalls = $derived(chatPreferences.current?.groupToolCalls !== false);
+	const openId = $derived($activeSession?.sessionId ?? null);
+	const openNeeds = $derived(openSessionNeeds(
+		$activeSession ?? {},
+		groupToolCalls,
+		!!openId && $proseQuestionSessions.has(openId)
+	));
 	const needsYouCount = $derived(
 		$sessions.reduce((total, s) => total + (s.hidden ? 0 : countNeedsYou(
 			s,
 			$backgroundPermissions.get(s.id),
 			$privateAccessPending.get(s.id),
-			s.id === $activeSession?.sessionId ? openNeeds : null
+			sessionNeedsInput(
+				s.id === openId,
+				openNeeds,
+				groupToolCalls && proseQuestionPending($proseQuestionSessions.get(s.id), s, $streamingSessions.has(s.id))
+			)
 		)), 0)
 	);
+	// A remembered question stops counting at that session's next user message
+	// (a new turn in the session list); drop it then.
+	$effect(() => reconcileProseQuestions($sessions, $streamingSessions));
 </script>
 
 <svelte:head>

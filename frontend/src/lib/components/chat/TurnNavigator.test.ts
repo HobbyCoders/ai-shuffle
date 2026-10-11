@@ -17,14 +17,14 @@ afterEach(cleanup);
 
 describe('TurnNavigator', () => {
 	it('puts the amber Needs-you dot on the waiting turn only (spec §5)', async () => {
-		const view = render(TurnNavigator, { props: { items, currentIndex: 0, onSelect: vi.fn(), needsYouId: 'three' } });
+		const view = render(TurnNavigator, { props: { items, currentIndex: 0, onSelect: vi.fn(), needsYouIds: ['three'] } });
 		const dots = () => view.container.querySelectorAll('[data-needs-you]');
 		expect(dots()).toHaveLength(1);
 		const waiting = screen.getByRole('button', { name: 'User message 3 of 3: Run verification (needs you)' });
 		expect(waiting.querySelector('[data-needs-you]')?.classList.contains('bg-warning')).toBe(true);
 		expect(screen.getByRole('button', { name: 'User message 1 of 3: Set up the project' }).querySelector('[data-needs-you]')).toBeNull();
 		expect(screen.getByRole('button', { name: 'User message 2 of 3: Fix the transcript' }).querySelector('[data-needs-you]')).toBeNull();
-		await view.rerender({ items, currentIndex: 0, onSelect: vi.fn(), needsYouId: null });
+		await view.rerender({ items, currentIndex: 0, onSelect: vi.fn(), needsYouIds: [] });
 		expect(dots()).toHaveLength(0);
 	});
 
