@@ -9,7 +9,11 @@
  * `leave(prevId, position)`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render } from '@testing-library/svelte';
+import { tick } from 'svelte';
+import { get, writable } from 'svelte/store';
 import { createScrollTopPersist } from './scroll-top-persist';
+import ScrollSwitchHarness from '$lib/test-stubs/ScrollSwitchHarness.svelte';
 import { sessionEphemeralCache } from '$lib/stores/session-cache';
 import { createSessionSwitcher, type SessionSwitcherDeps } from '$lib/stores/session/session-switcher';
 import type { ActiveSessionState } from '$lib/stores/active-session';
@@ -70,14 +74,27 @@ describe('createScrollTopPersist', () => {
 		expect(writeCurrent).not.toHaveBeenCalled();
 	});
 
-	it('files a leaving position under the leaving key and never into the current store', () => {
+	it('files the captured leaving position under the leaving key and never into the current store', () => {
 		const { key, persist, writeCurrent, writeLeft } = harness();
 		persist.schedule('A', 100);
 		key.current = 'B';
-		persist.leave('A', 140);
+		// `known` (e.g. a clamped read after the switch) never beats the capture.
+		expect(persist.leave('A', 0)).toBe(100);
 		vi.advanceTimersByTime(DELAY * 4);
-		expect(writeLeft).toHaveBeenCalledWith('A', 140);
+		expect(writeLeft).toHaveBeenCalledWith('A', 100);
 		expect(writeCurrent).not.toHaveBeenCalled();
+	});
+
+	it('falls back to the known position, and writes nothing without one', () => {
+		const { persist, writeLeft } = harness();
+		expect(persist.leave('A', 70)).toBe(70);
+		expect(writeLeft).toHaveBeenLastCalledWith('A', 70);
+		writeLeft.mockClear();
+		expect(persist.leave('A')).toBeUndefined();
+		// A capture for another session is not used for this one.
+		persist.schedule('C', 300);
+		expect(persist.leave('A')).toBeUndefined();
+		expect(writeLeft).not.toHaveBeenCalled();
 	});
 
 	it('writes immediately on destroy, only for the session still on screen', () => {
@@ -139,18 +156,21 @@ describe('reading position across a quick A → B → A switch (#1282)', () => {
 			writeLeft: (key, position) => sessionEphemeralCache.patchScrollTop(key, position)
 		});
 		let tracked = store.sessionId;
-		let domScrollTop = 40;
+		const scrollPositionCache = new Map<string, number>();
+		// MessageArea's switch effect: no DOM read, the captured position wins.
 		const switchEffect = () => {
 			const prevId = tracked;
 			if (store.sessionId === prevId) return;
-			persist.cancel();
-			if (prevId) persist.leave(prevId, domScrollTop);
+			if (prevId) {
+				const leftAt = persist.leave(prevId, scrollPositionCache.get(prevId));
+				if (leftAt !== undefined) scrollPositionCache.set(prevId, leftAt);
+			} else persist.cancel();
 			tracked = store.sessionId;
 		};
 
 		try {
 			// Read A up to 400; the trailing write has not fired yet.
-			domScrollTop = 400;
+			scrollPositionCache.set('session-A', 400);
 			persist.schedule('session-A', 400);
 			vi.advanceTimersByTime(DELAY - 50);
 			expect(store.scrollTop).toBe(40);
@@ -165,7 +185,6 @@ describe('reading position across a quick A → B → A switch (#1282)', () => {
 			expect(sessionEphemeralCache.restore('session-A')?.scrollTop).toBe(400);
 
 			// Back to A: its own fresh position comes back, B keeps its own.
-			domScrollTop = 900;
 			await switcher.switchSession('session-A');
 			switchEffect();
 			expect(store.sessionId).toBe('session-A');
@@ -174,6 +193,66 @@ describe('reading position across a quick A → B → A switch (#1282)', () => {
 		} finally {
 			switcher.destroy();
 		}
+	});
+});
+
+describe('switching to a short session that clamps the scroller (#1282)', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		sessionEphemeralCache.clear();
+	});
+	afterEach(() => {
+		cleanup();
+		vi.useRealTimers();
+		sessionEphemeralCache.clear();
+	});
+
+	/**
+	 * jsdom has no layout, so give the scroller a browser's geometry: 100 px per
+	 * mounted row, a 100 px viewport, and a scrollTop that clamps to what the
+	 * CURRENT content allows — so replacing a long transcript with a short one
+	 * drops it to 0, exactly what Chromium does before the switch effect runs.
+	 */
+	function layout(el: HTMLElement) {
+		let raw = 0;
+		const max = () => Math.max(0, el.querySelectorAll('.row').length * 100 - 100);
+		Object.defineProperty(el, 'clientHeight', { configurable: true, get: () => 100 });
+		Object.defineProperty(el, 'scrollHeight', { configurable: true, get: () => el.querySelectorAll('.row').length * 100 });
+		Object.defineProperty(el, 'scrollTop', {
+			configurable: true,
+			get: () => Math.min(raw, max()),
+			set: (v: number) => { raw = Math.max(0, Math.min(v, max())); }
+		});
+	}
+
+	it('saves the captured position, not the clamped scrollTop read after the switch', async () => {
+		const longRows = Array.from({ length: 60 }, (_, i) => `a-${i}`);
+		const session = writable({ sessionId: 'A', rows: longRows, scrollTop: 40 });
+		const scrollPositionCache = new Map<string, number>();
+		let scroller: HTMLDivElement | null = null;
+		const { component } = render(ScrollSwitchHarness, {
+			props: { session, scrollPositionCache, onContainer: (el: HTMLDivElement) => { scroller = el; layout(el); } }
+		});
+		await tick();
+		expect(scroller).not.toBeNull();
+		sessionEphemeralCache.save('A', { ...switcherEphemeral({ profile: 'p', project: 'x' } as ActiveSessionState), scrollTop: 40 });
+
+		// The reader scrolls A to 400; the deferred write is still pending.
+		scroller!.scrollTop = 400;
+		(component as unknown as { scrollFrame(): void }).scrollFrame();
+		vi.advanceTimersByTime(100);
+		expect(get(session).scrollTop).toBe(40);
+
+		// Switch to an uncached B whose transcript has not loaded: the DOM
+		// replacement clamps the scroller to 0 before the switch effect runs.
+		session.set({ sessionId: 'B', rows: [], scrollTop: 0 });
+		await tick();
+		expect(scroller!.scrollTop).toBe(0);
+		vi.advanceTimersByTime(1000);
+
+		expect(sessionEphemeralCache.restore('A')?.scrollTop).toBe(400);
+		expect(scrollPositionCache.get('A')).toBe(400);
+		expect(get(session).scrollTop).toBe(0);
 	});
 });
 

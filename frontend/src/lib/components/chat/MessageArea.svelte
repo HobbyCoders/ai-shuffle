@@ -1457,9 +1457,6 @@
 		const prevId = untrack(() => prevTrackedSessionId);
 
 		if (currentId === prevId) return;
-		// Drop a trailing write captured for the leaving session; the save below
-		// files its position under its own id.
-		scrollTopPersist.cancel();
 		if (prevId) {
 			cancelCurrentTurnAnchor();
 			clearJumpRevealTimer();
@@ -1472,16 +1469,23 @@
 		// eslint-disable-next-line no-console
 		if (STREAM_DEBUG) console.log(`[AS] session-switch effect from=${prevId} to=${currentId} msgLen=${$activeSession.messages.length} lastId=${$activeSession.messages[$activeSession.messages.length - 1]?.id} lastRole=${$activeSession.messages[$activeSession.messages.length - 1]?.role} SH=${containerRef?.scrollHeight} ST=${containerRef?.scrollTop} CH=${containerRef?.clientHeight}`);
 
-		// Save scroll state for the old session (if any)
-		if (prevId && containerRef) {
-			scrollPositionCache.set(prevId, containerRef.scrollTop);
+		// Save scroll state for the old session (if any). This effect runs after
+		// the DOM already shows the session entered, so the container's
+		// scrollTop is NOT the leaving session's: a short or still-loading
+		// transcript has clamped it, often to 0. Save the position captured from
+		// the reader's last scroll frame instead (the per-frame cache holds the
+		// same value when no deferred write is pending).
+		if (prevId) {
+			// The store already holds the session being entered: the position goes
+			// into the snapshot the switcher saved for the leaving session.
+			const leftAt = scrollTopPersist.leave(prevId, scrollPositionCache.get(prevId));
+			if (leftAt !== undefined) scrollPositionCache.set(prevId, leftAt);
 			autoScrollCache.set(prevId, shouldAutoScroll);
-			// The store already holds the session being entered: write the leaving
-			// session's position into the snapshot the switcher saved for it.
-			scrollTopPersist.leave(prevId, containerRef.scrollTop);
 			// Prevent unbounded growth over long usage
 			evictOldest(scrollPositionCache, SCROLL_CACHE_MAX);
 			evictOldest(autoScrollCache, SCROLL_CACHE_MAX);
+		} else {
+			scrollTopPersist.cancel();
 		}
 
 		prevTrackedSessionId = currentId;

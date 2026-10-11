@@ -47,7 +47,11 @@ describe('MessageArea reading position', () => {
 
 	it('saves the outgoing session on a switch, with the cache capped', () => {
 		const sw = block('// Save scroll state for the old session', 'prevTrackedSessionId = currentId;');
-		expect(sw).toContain('scrollPositionCache.set(prevId, containerRef.scrollTop)');
+		// The effect runs after the DOM shows the entered session, so it must not
+		// read the container's (clamped) scrollTop for the leaving one.
+		expect(sw).not.toContain('containerRef.scrollTop');
+		expect(sw).toContain('const leftAt = scrollTopPersist.leave(prevId, scrollPositionCache.get(prevId));');
+		expect(sw).toContain('if (leftAt !== undefined) scrollPositionCache.set(prevId, leftAt);');
 		expect(sw).toContain('autoScrollCache.set(prevId, shouldAutoScroll)');
 		expect(sw).toContain('evictOldest(scrollPositionCache, SCROLL_CACHE_MAX)');
 		expect(sw).toContain('evictOldest(autoScrollCache, SCROLL_CACHE_MAX)');
@@ -68,8 +72,12 @@ describe('MessageArea reading position', () => {
 		// A switch files the leaving position under the LEAVING id, never into the
 		// store, which already belongs to the session entered.
 		const sw = block('if (currentId === prevId) return;', 'prevTrackedSessionId = currentId;');
-		expect(sw).toContain('scrollTopPersist.leave(prevId, containerRef.scrollTop)');
 		expect(sw).not.toContain('activeSession.setScrollTop(');
+		// The captured position is not discarded before it is saved.
+		expect(sw.indexOf('scrollTopPersist.cancel()')).toBeGreaterThan(sw.indexOf('scrollTopPersist.leave('));
+		// Same lines as the jsdom harness that reproduces the post-switch clamp.
+		const harness = readFileSync(resolve(process.cwd(), 'src/lib/test-stubs/ScrollSwitchHarness.svelte'), 'utf8');
+		expect(harness).toContain('const leftAt = scrollTopPersist.leave(prevId, scrollPositionCache.get(prevId));');
 	});
 
 	it('restores a reader who had scrolled up, over the full transcript, instead of jumping to the bottom', () => {
