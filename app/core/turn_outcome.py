@@ -92,7 +92,10 @@ def final_turn_outcome(session_id: str) -> Dict[str, Any]:
         usage = payload.get("usage")
         result["usage"] = usage if isinstance(usage, dict) else {}
     elif etype == "turn.parked":
-        # Runtime appends an unfenced park marker AFTER the recorder's done
+        if isinstance(payload.get("usage"), dict):
+            result["usage"] = payload["usage"]
+            return result
+        # Legacy logs: runtime appended an unfenced park marker AFTER the recorder's done
         # event. The marker has no turn_id or usage, but must not erase the
         # completed model call's accounting in automation/connector/REST intake.
         # Only the immediately preceding terminal can belong to this park;

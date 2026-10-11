@@ -2544,7 +2544,9 @@ async def test_missing_cwd_runtime_cycle_records_one_failure_and_finishes_resume
             })
             await turn_scheduler.on_task_terminal(sibling, {
                 "task_id": broken, "status": "error", "summary": "missing checkout",
-                "agent_message_turn_id": wake["id"],
+                # The resumed attempt belongs to the parked logical turn;
+                # finish_message_resume publishes that id, not the queue row.
+                "agent_message_turn_id": parked["id"],
             })
             await turn_scheduler._kick_impl(broken)
         assert se_db.get_events(broken, 0, 100) == before
@@ -2557,7 +2559,7 @@ async def test_missing_cwd_runtime_cycle_records_one_failure_and_finishes_resume
         if report_to_parent:
             (report,) = turns_db.get_queued_turns(recipient)
             assert str(missing) in report["prompt"]
-            assert report["payload"]["pending_frames"][0]["agent_message_turn_id"] == wake["id"]
+            assert report["payload"]["pending_frames"][0]["agent_message_turn_id"] == parked["id"]
             await turn_scheduler.on_task_terminal(recipient, report["payload"]["pending_frames"][0])
             assert len(turns_db.get_queued_turns(recipient)) == 1
 

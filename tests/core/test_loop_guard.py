@@ -276,6 +276,7 @@ async def _run_turn(tmp_path, sid, source, payload=None):
     recorder.start = AsyncMock()
     recorder.on_event = AsyncMock()
     recorder.close = AsyncMock()
+    recorder.settle = AsyncMock()
     turn = turns_db.enqueue_turn(sid, source, prompt="loop", profile_id="guard-profile", payload=payload)
 
     def _spawn(*_a, **_k):

@@ -8,6 +8,30 @@ order: 3
 
 Endpoints for sending prompts to an agent and receiving responses. Supports one-shot queries, stateful conversations, streaming, and background execution.
 
+## Messages during unfinished turns
+
+A turn waiting on background tasks is **parked**, not completed. An ordinary
+send with compatible execution settings resumes that turn: the user message
+and subsequent assistant events keep its `turn_id`. A `turn.started` with
+`continued: true` re-arms streaming for that **same id**; only the final
+settlement emits `turn.completed`. Background-completion wakes also resume it.
+A send after a genuinely completed turn starts a new id.
+
+Input still enters the durable queue before it is claimed. `/compact`, replay,
+attachments requiring setup, a different agent/model/permission/workspace
+binding, and other incompatible inputs retain their separate queued turn.
+Streaming peer-message receipts retain `queued_turn_id` with
+`checkpoint_backed: false` to identify their durable queue row, as before;
+ordinary user steers do not use that peer-message marker. Compatible parked
+sends are claimed under the existing run-lease and Stop/placement gates, not
+injected into a disconnected provider. They do not report `queued_turn_id`.
+
+Active work time excludes the parked wait. Each foreground attempt has its own
+usage-settlement identity; the final turn summary adds those attempts without
+billing them twice. Compaction still uses Fluid's history boundaries (a manual
+`/compact` is its own turn). Handoff still refuses live background work; normal
+transcript export and event replay retain the shared turn identity.
+
 ## One-Shot Query
 
 ### POST /api/v1/query

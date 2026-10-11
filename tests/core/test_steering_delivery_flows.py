@@ -172,6 +172,7 @@ def _pump_env(pump, *, background_work=(), broadcaster=None):
     recorder.start = AsyncMock()
     recorder.on_event = AsyncMock(side_effect=_on_event)
     recorder.close = AsyncMock()
+    recorder.settle = AsyncMock()
     recorder.record_steered_user_message = AsyncMock(side_effect=_record_steered)
     recorder.record_task_terminal = AsyncMock()
     recorder.recording_failed = False

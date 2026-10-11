@@ -387,6 +387,7 @@ def _pump_env(pump):
     recorder.start = AsyncMock()
     recorder.on_event = AsyncMock()
     recorder.close = AsyncMock()
+    recorder.settle = AsyncMock()
     recorder.record_steered_user_message = AsyncMock(return_value=True)
 
     broadcaster = AsyncMock(name="broadcaster")
