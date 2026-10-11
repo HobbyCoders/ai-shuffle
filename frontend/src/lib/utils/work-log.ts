@@ -40,6 +40,31 @@ export interface WorkLogSequenceEntry extends WorkLogEntry {
 	 * every image even when it repeats one shown in the gallery.
 	 */
 	inGallery?: boolean;
+	/** Live turn only: the run this row belongs to (see `WorkLogRun`). */
+	run?: number;
+	/** Live turn only: the row hides while its run is folded. */
+	foldsInRun?: boolean;
+}
+
+/**
+ * One earlier run of a live turn (spec §2): the routine rows between two
+ * protected rows. It renders as one live fold; the protected row that ended it
+ * stays visible below. The current run (still receiving rows) has no entry.
+ */
+export interface WorkLogRun {
+	/** Position among all runs of the turn, counting runs with nothing to fold. */
+	index: number;
+	/**
+	 * Stable fold-state key: the id of the protected row that ended the run.
+	 * The ordinal shifts when a new boundary appears earlier in the turn (a
+	 * running tool that later fails); the row that ended a run does not, so a
+	 * run the reader opened stays open on the same work.
+	 */
+	key: string;
+	/** Rows hidden while the run is folded. */
+	folded: WorkLogEntry[];
+	summary: string | null;
+	compactSummary: string | null;
 }
 
 export type DisplayItem =
@@ -63,6 +88,15 @@ export type DisplayItem =
 			summary: string | null;
 			/** Token-condensed variant ("Read 3 · Ran 2") for narrow screens. */
 			compactSummary: string | null;
+			/** Live turn: its earlier runs, each folded on its own (spec §2). */
+			runs?: WorkLogRun[];
+			/**
+			 * Fold-state key of the turn (spec §6): the server id of the row that
+			 * opened it. Run folds are `<foldKey>:run-<run.key>`, the settled group `<foldKey>:turn`.
+			 */
+			foldKey?: string;
+			/** The optimistic id `foldKey` replaced, if any: its folds are remapped. */
+			foldAlias?: string;
 	  };
 
 /**
@@ -565,6 +599,17 @@ function turnKeyOf(turn: Positioned[]): string {
 }
 
 /**
+ * Display key and fold-state keys of a turn's work log. The display key uses
+ * the row's own id, which an optimistic send keeps after reconcile, so the
+ * group never remounts; the fold key prefers the server id a reload will see.
+ */
+function workLogKeys(anchor: Positioned): Pick<Extract<DisplayItem, { kind: 'work_log' }>, 'key' | 'foldKey' | 'foldAlias'> {
+	const own = anchor.message.id ?? String(anchor.index);
+	const foldKey = anchor.message.serverId ?? own;
+	return { key: `wl-turn-${own}`, foldKey, ...(foldKey !== own ? { foldAlias: own } : {}) };
+}
+
+/**
  * Identity of the latest turn by the same rule as `splitTurns` and `turnKeyOf`,
  * without building the transcript. The settle hand-off (settle-hold.ts) tracks
  * it to notice the moment a send or wake opens a newer turn.
@@ -731,6 +776,56 @@ function swarmOwnedMessages(messages: ChatMessage[], options: BuildOptions): Set
 	return hidden;
 }
 
+const isPromptRow = (entry: Positioned) => entry.message.role === 'user' && !agentDelivery(entry.message);
+
+/**
+ * Prose the reader must see while it is the latest word, or because it asks:
+ * a lead-in followed by a question tool (before the next prose or steer) asks
+ * too. Shared by the live runs and the settled turn so both keep the same rows.
+ */
+function askingLeadIns(response: Positioned[]): Set<Positioned> {
+	const asking = new Set<Positioned>();
+	let pendingLeadIn: Positioned | null = null;
+	for (const entry of response) {
+		if (isPromptRow(entry)) pendingLeadIn = null;
+		else if (isAssistantText(entry.message)) pendingLeadIn = entry;
+		else if (pendingLeadIn && isAskingTool(entry.message)) asking.add(pendingLeadIn);
+	}
+	return asking;
+}
+
+/**
+ * The live turn (spec §2). Grouping on, it becomes the opening prompt plus ONE
+ * work log in live mode, keyed exactly as the settled group of the same turn
+ * will be, so settling flips `mode` on the same component instead of mounting
+ * a new one (spec §6). Inside it the turn is cut into runs at every protected
+ * row: earlier runs fold behind the live label, the protected row that ended
+ * each stays visible below it, and the current run shows every row.
+ */
+/**
+ * The last prose before each steer is the answer the steer replied to, and the
+ * last prose of the turn is its answer: both stay on screen, live and settled.
+ */
+function terminalProse(response: Positioned[]): Set<Positioned> {
+	const terminal = new Set<Positioned>();
+	let lastProse: Positioned | null = null;
+	for (const entry of response) {
+		if (entry.message.role === 'user' && !agentDelivery(entry.message)) {
+			if (lastProse) terminal.add(lastProse);
+			lastProse = null;
+		} else if (isAssistantText(entry.message)) {
+			lastProse = entry;
+		}
+	}
+	if (lastProse) terminal.add(lastProse);
+	return terminal;
+}
+
+/** Fold-state key of a run, from the protected row that ended it (see `WorkLogRun.key`). */
+function runKeyOf(entry: Positioned): string {
+	return entry.message.serverId ?? entry.message.id ?? `at-${entry.index}`;
+}
+
 function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 	// Code-mode wrappers are not transcript rows: their dispatched tools are.
 	// Keep a streaming cell visible only until its first visible inner call arrives.
@@ -738,14 +833,86 @@ function emitLiveTurn(turn: Positioned[], items: DisplayItem[]): void {
 	const streamingCell = turn.findLast(
 		(entry) => isHiddenCodeModeCell(entry.message) && entry.message.streaming === true
 	);
-	for (const [index, entry] of turn.entries()) {
-		if (
-			isHiddenCodeModeCell(entry.message) &&
-			!(entry === streamingCell && index > lastVisibleIndex)
-		) continue;
-		// Nothing in the current turn folds, even between tool runs or while parked.
-		items.push({ kind: 'message', message: entry.message, index: entry.index });
+	const shown = turn.filter((entry, index) =>
+		!isHiddenCodeModeCell(entry.message) || (entry === streamingCell && index > lastVisibleIndex)
+	);
+
+	// Same opening-row rule as the settled turn, so both pick the same anchor.
+	const userIndex = turn.findIndex(isPromptRow);
+	if (userIndex < 0 && !turn.some((entry) => agentDelivery(entry.message))) {
+		for (const entry of shown) items.push({ kind: 'message', message: entry.message, index: entry.index });
+		return;
 	}
+	const prefix = userIndex < 0 ? [] : turn.slice(0, 1);
+	const response = shown.filter((entry) => entry !== prefix[0]);
+	emitWithSystemGroups(prefix, items);
+	if (response.length === 0) return;
+
+	const asking = askingLeadIns(response);
+	// The latest prose and the prose each steer replied to stay on screen
+	// whatever they say, exactly as the settled turn keeps them.
+	const terminal = terminalProse(response);
+	// Rows that end a run and stay visible. Streaming prose is still arriving,
+	// so it only becomes a finding once it is complete. A steer does NOT end a
+	// run: a turn never folds because the user sent something (spec §1.3). It
+	// stays a visible row in place inside whatever run is current.
+	const endsRun = (entry: Positioned) =>
+		isProtectedRow(entry.message) ||
+		asking.has(entry) ||
+		(isAssistantText(entry.message) && !entry.message.streaming && isProtectedProse(entry.message.content)) ||
+		(entry.message.type === 'tool_use' && entry.message.toolStatus === 'error');
+	// Rows a folded run hides; anything else (a tool still running, a
+	// screenshot, streaming thinking) keeps its place between the folds.
+	const foldsWithRun = (entry: Positioned) =>
+		!terminal.has(entry) && (
+			isCompletedRoutineWork(entry.message) ||
+			isGroupableSystem(entry.message) ||
+			entry.message.type === 'tool_result' ||
+			(isAssistantText(entry.message) && !entry.message.streaming)
+		);
+
+	const runs: WorkLogRun[] = [];
+	const runOf = new Map<Positioned, number>();
+	const hidden = new Set<Positioned>();
+	let runIndex = 0;
+	let open: Positioned[] = [];
+	for (const entry of response) {
+		runOf.set(entry, runIndex);
+		if (!endsRun(entry)) {
+			open.push(entry);
+			continue;
+		}
+		const folded = open.filter(foldsWithRun);
+		for (const row of folded) hidden.add(row);
+		if (folded.length > 0) {
+			const rows = folded.map(({ message, index }) => ({ message, index }));
+			runs.push({ index: runIndex, key: runKeyOf(entry), folded: rows, summary: summarizeWork(rows), compactSummary: summarizeWorkCompact(rows) });
+		}
+		runIndex++;
+		open = [];
+	}
+
+	const folded = response.filter((entry) => hidden.has(entry)).map(({ message, index }) => ({ message, index }));
+	items.push({
+		kind: 'work_log',
+		...workLogKeys(prefix[0] ?? response[0]),
+		mode: 'live',
+		folded,
+		tail: [],
+		// `hiddenWhenCollapsed` describes the settled fold; a live turn hides
+		// nothing there (assistant mode reads it), only inside its folded runs.
+		sequence: response.map((entry) => ({
+			message: entry.message,
+			index: entry.index,
+			hiddenWhenCollapsed: false,
+			run: runOf.get(entry),
+			...(hidden.has(entry) ? { foldsInRun: true } : {})
+		})),
+		runs,
+		durationLabel: null,
+		summary: summarizeWork(folded),
+		compactSummary: summarizeWorkCompact(folded)
+	});
 }
 
 /**
@@ -795,20 +962,30 @@ export function createTranscriptModelBuilder() {
 			&& options.groupingEnabled === old.options.groupingEnabled
 			&& swarms.length === oldSwarms.length && swarms.every((s, i) => s === oldSwarms[i]);
 		let model: TranscriptModel;
-		if (sameOptions && (options.latestTurnUnsettled ?? options.isStreaming)
-			&& tail && oldTail && tail.streaming && oldTail.streaming
+		const onlyTailTextGrew = !!sameOptions && (options.latestTurnUnsettled ?? options.isStreaming)
+			&& !!tail && !!oldTail && !!tail.streaming && !!oldTail.streaming
 			&& tail.role === 'assistant' && ['text', 'thinking'].includes(tail.type ?? '')
-			&& tail.content && oldTail.content && !isAssistantPhantom(tail)
-			&& lastItem?.kind === 'message' && lastItem.message === oldTail
-			&& lastItem.index === messages.length - 1
+			&& !!tail.content && !!oldTail.content && !isAssistantPhantom(tail)
 			&& messages.length === old.messages.length
 			&& messages.every((message, i) => i === messages.length - 1 || message === old.messages[i])
 			&& Object.keys(tail).length === Object.keys(oldTail).length
 			&& Object.keys(tail).every(key => key === 'content'
-				|| tail[key as keyof ChatMessage] === oldTail[key as keyof ChatMessage])) {
-			const items = old.model.items.slice();
-			items[items.length - 1] = { ...lastItem, message: tail };
-			model = { ...old.model, items };
+				|| tail[key as keyof ChatMessage] === oldTail[key as keyof ChatMessage]);
+		// A streaming row never ends a live run and never folds, so its growing
+		// text cannot change the runs: only the row itself is swapped.
+		const lastRow = lastItem?.kind === 'work_log' && lastItem.mode === 'live' ? lastItem.sequence.at(-1) : undefined;
+		if (onlyTailTextGrew && lastItem?.kind === 'message' && lastItem.message === oldTail
+			&& lastItem.index === messages.length - 1) {
+			const items = old!.model.items.slice();
+			items[items.length - 1] = { ...lastItem, message: tail! };
+			model = { ...old!.model, items };
+		} else if (onlyTailTextGrew && lastItem?.kind === 'work_log' && lastRow
+			&& lastRow.message === oldTail && lastRow.index === messages.length - 1 && !lastRow.foldsInRun) {
+			const sequence = lastItem.sequence.slice();
+			sequence[sequence.length - 1] = { ...lastRow, message: tail! };
+			const items = old!.model.items.slice();
+			items[items.length - 1] = { ...lastItem, sequence };
+			model = { ...old!.model, items };
 		} else {
 			model = buildTranscriptModel(messages, options);
 		}
@@ -920,27 +1097,10 @@ export function buildTranscriptModel(
 		const galleryRows = firstSteer < 0 ? response : response.slice(0, firstSteer);
 		const gallery = galleryMediaForTurn(galleryRows.map((entry) => entry.message), options.sessionId);
 		const galleryEntries = new Set(gallery.length > 1 ? galleryRows : []);
-		// The last prose before each steer is the answer the steer replied to, and
-		// the last prose of the turn is its answer: both stay on screen.
-		const terminalAssistants = new Set<Positioned>();
+		const terminalAssistants = terminalProse(response);
 		// Prose followed by a question tool before the next prose or steer is
 		// the question's lead-in: it asks too, so it stays.
-		const askingProse = new Set<Positioned>();
-		let lastProse: Positioned | null = null;
-		let pendingLeadIn: Positioned | null = null;
-		for (const entry of response) {
-			if (isSteer(entry)) {
-				if (lastProse) terminalAssistants.add(lastProse);
-				lastProse = null;
-				pendingLeadIn = null;
-			} else if (isAssistantText(entry.message)) {
-				lastProse = entry;
-				pendingLeadIn = entry;
-			} else if (pendingLeadIn && isAskingTool(entry.message)) {
-				askingProse.add(pendingLeadIn);
-			}
-		}
-		if (lastProse) terminalAssistants.add(lastProse);
+		const askingProse = askingLeadIns(response);
 		// A compaction card the turn worked past is mid-turn; one trailing the
 		// answer (an idle or manual /compact) keeps its own row.
 		const lastWork = response.findLastIndex((entry) => isTurnWork(entry.message));
@@ -963,7 +1123,10 @@ export function buildTranscriptModel(
 			.filter(shouldHide)
 			.map((entry) => ({ message: entry.message, index: entry.index }));
 
-		if (folded.length === 0 && gallery.length === 0) {
+		// A turn with nothing to fold still keeps its group: the live turn
+		// rendered inside it, so settling must not unmount a worker card or a
+		// report the reader expanded. WorkLogGroup draws no disclosure for it.
+		if (response.length === 0) {
 			emitWithSystemGroups(turn, items);
 			return;
 		}
@@ -974,16 +1137,19 @@ export function buildTranscriptModel(
 		// Keyed by the prompt that opens the turn, which never changes. Keying by
 		// the first folded row remounted the group (collapsing an open log and
 		// replaying its settle animation) whenever a late tool result or a
-		// finished delegation folded an earlier row.
-		const anchor = prefix[0] ?? folded[0] ?? response[0];
+		// finished delegation folded an earlier row. The live turn uses the same
+		// key, so settling flips this group's mode instead of mounting a new one.
 		items.push({
 			kind: 'work_log',
-			key: `wl-turn-${anchor.message.id ?? anchor.index}`,
+			...workLogKeys(prefix[0] ?? response[0]),
 			gallery,
 			mode: 'settled',
 			folded,
 			tail: [],
-			sequence: response.map((entry) => ({
+			// A hidden code-mode cell draws nothing, as in the live turn. Kept in
+			// the sequence it would make a turn that folds nothing look foldable,
+			// so settling drew a "Show work details" button that revealed nothing.
+			sequence: response.filter((entry) => !isHiddenCodeModeCell(entry.message)).map((entry) => ({
 				message: entry.message,
 				index: entry.index,
 				hiddenWhenCollapsed: shouldHide(entry),

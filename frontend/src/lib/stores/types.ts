@@ -140,6 +140,7 @@ export interface ChatMessage {
 	teammateStatus?: TeammateStatus;
 	// Command-specific fields (for slash commands like /commit, /ralph-loop)
 	commandId?: string; // Internal command identifier (e.g., 'commit-commands:commit')
+	serverId?: string; // Server id of an optimistic row reconciled in place (its `id` stays the optimistic one so Svelte does not remount it; a reload uses this id)
 	commandName?: string; // Display name with slash (e.g., '/commit')
 	commandArgs?: string; // Arguments passed to the command
 }

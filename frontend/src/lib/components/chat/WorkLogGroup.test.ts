@@ -3,7 +3,9 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { createRawSnippet, tick } from 'svelte';
 import type { ChatMessage } from '$lib/stores/types';
 import WorkLogGroup from './WorkLogGroup.svelte';
-import { buildTranscriptModel } from '$lib/utils/work-log';
+import TranscriptItems from './test-fixtures/TranscriptItems.svelte';
+import { buildTranscriptModel, type DisplayItem } from '$lib/utils/work-log';
+import { createFoldState } from '$lib/stores/session/fold-state';
 import { deriveUserTurnNavigationItems, turnAnchorId } from '$lib/utils/transcript-navigation';
 
 /** jsdom has no ResizeObserver. Drive reserved height from the stub. */
@@ -269,5 +271,197 @@ describe('WorkLogGroup', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /Show work details/i }));
 		expect(screen.getByText('Read')).toBeTruthy();
 		expect(screen.getByText('Final answer')).toBeTruthy();
+	});
+
+	describe('live runs and settle (spec §2, §6)', () => {
+		type WorkLog = Extract<DisplayItem, { kind: 'work_log' }>;
+		const turn: ChatMessage[] = [
+			{ id: 'prompt', role: 'user', content: 'Audit it', turnId: 'turn-1' },
+			{ ...message, id: 'read-a', content: 'Read A' },
+			{ id: 'finding', role: 'assistant', type: 'text', content: 'Found:\n- a shared token' },
+			{ ...message, id: 'read-b', content: 'Read B' },
+			{ id: 'answer', role: 'assistant', type: 'text', content: 'Done.' }
+		];
+		const logOf = (isStreaming: boolean, messages = turn) => {
+			const item = buildTranscriptModel(messages, { isStreaming, groupingEnabled: true }).items
+				.find((entry) => entry.kind === 'work_log') as WorkLog;
+			return { ...item, row: expandableRow };
+		};
+		/** A row with its own expansion state, kept on its DOM node: a remount loses it. */
+		const expandableRow = createRawSnippet<[ChatMessage, number]>((getMessage) => ({
+			render: () => `<div data-testid="work-row" data-id="${getMessage().id}"><button type="button">${getMessage().content}</button></div>`,
+			setup: (node) => {
+				node.querySelector('button')!.addEventListener('click', () => { (node as HTMLElement).dataset.expanded = 'true'; });
+			}
+		}));
+		const rowEl = (id: string) => document.querySelector(`[data-testid="work-row"][data-id="${id}"]`) as HTMLElement | null;
+		/** On screen: mounted and its sequence row not hidden. */
+		const shown = (id: string) => {
+			const wrapper = rowEl(id)?.closest<HTMLElement>('.sequence-row');
+			return !!wrapper && !wrapper.hidden;
+		};
+		const memoryStorage = (): Storage => {
+			const data = new Map<string, string>();
+			return {
+				get length() { return data.size; }, clear: () => data.clear(),
+				getItem: (k) => data.get(k) ?? null, key: (i) => [...data.keys()][i] ?? null,
+				removeItem: (k) => { data.delete(k); }, setItem: (k, v) => { data.set(k, String(v)); }
+			};
+		};
+
+		it('folds the earlier run behind the live label and keeps the boundary and current run open', () => {
+			render(WorkLogGroup, { ...logOf(true), folds: createFoldState(memoryStorage()) });
+			expect(screen.getByRole('button', { name: 'Show work details: Read 1 file' })).toBeTruthy();
+			expect(rowEl('read-a')).toBeNull();
+			expect(['finding', 'read-b', 'answer'].map(shown)).toEqual([true, true, true]);
+		});
+
+		it('keeps a row expanded live still expanded after the turn settles', async () => {
+			const view = render(WorkLogGroup, { ...logOf(true), folds: createFoldState(memoryStorage()) });
+			const live = rowEl('read-b')!;
+			await fireEvent.click(live.querySelector('button')!);
+			expect(live.dataset.expanded).toBe('true');
+			const finding = rowEl('finding');
+
+			await view.rerender(logOf(false));
+			// No row remounts at settle: the same nodes carry on.
+			expect(rowEl('finding')).toBe(finding);
+			expect(view.container.querySelector('section')!.dataset.workLogMode).toBe('settled');
+			// Settled, the Read folds into the turn: same node, kept but hidden.
+			expect(rowEl('read-b')).toBe(live);
+			expect(shown('read-b')).toBe(false);
+			expect(shown('finding')).toBe(true);
+			await fireEvent.click(screen.getByRole('button', { expanded: false }));
+			expect(rowEl('read-b')).toBe(live);
+			expect(shown('read-b')).toBe(true);
+			expect(live.dataset.expanded).toBe('true');
+		});
+
+		it('stores run and turn folds by turn key, so a remount restores them', async () => {
+			const storage = memoryStorage();
+			const folds = createFoldState(storage);
+			const first = render(WorkLogGroup, { ...logOf(true), folds });
+			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
+			expect(shown('read-a')).toBe(true);
+			expect(folds.current).toEqual({ 'prompt:run-finding': true });
+			first.unmount();
+
+			// A window remount, a session switch back or a reload (new store, same storage).
+			const reloaded = createFoldState(storage);
+			render(WorkLogGroup, { ...logOf(true), folds: reloaded });
+			expect(shown('read-a')).toBe(true);
+			await fireEvent.click(screen.getByRole('button', { name: 'Hide work details' }));
+			expect(shown('read-a')).toBe(false);
+			expect(reloaded.current).toEqual({});
+			cleanup();
+
+			const settled = render(WorkLogGroup, { ...logOf(false), folds: reloaded });
+			await fireEvent.click(screen.getByRole('button', { expanded: false }));
+			expect(reloaded.isOpen('prompt:turn')).toBe(true);
+			settled.unmount();
+			render(WorkLogGroup, { ...logOf(false), folds: createFoldState(storage) });
+			expect(screen.getByRole('button', { name: 'Hide work details' })).toBeTruthy();
+		});
+
+		it('opens the settled fold when the reader had an earlier run open, and keeps it through a reload', async () => {
+			const storage = memoryStorage();
+			const folds = createFoldState(storage);
+			const view = render(WorkLogGroup, { ...logOf(true), folds });
+			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
+			expect(shown('read-a')).toBe(true);
+
+			await view.rerender(logOf(false));
+			// The run merged into the turn's fold, which opened: nothing the reader
+			// was reading closes at settle, and the promotion is stored.
+			expect(shown('read-a')).toBe(true);
+			expect(screen.getByRole('button', { name: 'Hide work details' })).toBeTruthy();
+			expect(folds.current).toEqual({ 'prompt:turn': true });
+			view.unmount();
+
+			render(WorkLogGroup, { ...logOf(false), folds: createFoldState(storage) });
+			expect(shown('read-a')).toBe(true);
+			expect(screen.getByRole('button', { name: 'Hide work details' })).toBeTruthy();
+		});
+
+		it('settles closed when no run was open', async () => {
+			const folds = createFoldState(memoryStorage());
+			const view = render(WorkLogGroup, { ...logOf(true), folds });
+			await view.rerender(logOf(false));
+			expect(rowEl('read-a')).toBeNull();
+			expect(screen.getByRole('button', { expanded: false })).toBeTruthy();
+			expect(folds.current).toEqual({});
+		});
+
+		it('carries an open run into the settled fold without a fold key too', async () => {
+			const view = render(WorkLogGroup, { ...logOf(true), foldKey: null });
+			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
+			await view.rerender({ ...logOf(false), foldKey: null });
+			expect(shown('read-a')).toBe(true);
+			expect(screen.getByRole('button', { name: 'Hide work details' })).toBeTruthy();
+		});
+
+		it('keeps an open run open when a mid-run tool fails later and shifts the run ordinals', async () => {
+			const running = { ...message, id: 'read-0', content: 'Read 0', toolStatus: 'running' as const };
+			const base = [turn[0], running, ...turn.slice(1, 3), { ...message, id: 'read-c', content: 'Read C' },
+				{ id: 'worker', type: 'subagent', role: 'assistant', agentName: 'Reviewer', agentStatus: 'running', toolId: 'task-1' } as ChatMessage,
+				{ ...message, id: 'tail', content: 'Tail', toolStatus: 'running' as const, streaming: true }];
+			const folds = createFoldState(memoryStorage());
+			const view = render(WorkLogGroup, { ...logOf(true, base), folds });
+			// Runs: [read-0, read-a] ended by the finding, [read-c] ended by the worker.
+			const labels = screen.getAllByRole('button', { name: /^Show work details/ });
+			expect(labels).toHaveLength(2);
+			await fireEvent.click(labels[1]);
+			expect(shown('read-c')).toBe(true);
+			expect(folds.current).toEqual({ 'prompt:run-worker': true });
+
+			// read-0 fails: a new boundary ahead of the open run renumbers the runs.
+			const failed = base.map((m) => (m === running ? { ...m, toolStatus: 'error' as const } : m));
+			await view.rerender(logOf(true, failed));
+			expect(shown('read-c')).toBe(true);
+			expect(rowEl('read-a')).toBeNull();
+		});
+
+		it('keeps a settled turn with nothing to fold in its group: worker card identity and expansion survive', async () => {
+			const quiet: ChatMessage[] = [
+				{ id: 'q-prompt', role: 'user', content: 'Review it', turnId: 'turn-q' },
+				{ id: 'q-worker', type: 'subagent', role: 'assistant', agentName: 'Reviewer', agentStatus: 'running', toolId: 'task-q' } as ChatMessage,
+				{ id: 'q-answer', role: 'assistant', type: 'text', content: 'Reviewer is on it.' }
+			];
+			const itemsOf = (isStreaming: boolean, messages = quiet) =>
+				buildTranscriptModel(messages, { isStreaming, groupingEnabled: true }).items;
+			const folds = createFoldState(memoryStorage());
+			const view = render(TranscriptItems, { items: itemsOf(true), folds });
+			const worker = rowEl('q-worker')!;
+			expect(worker).toBeTruthy();
+			await fireEvent.click(worker.querySelector('button')!);
+			expect(worker.dataset.expanded).toBe('true');
+			const answer = rowEl('q-answer');
+
+			const done = quiet.map((m) => (m.id === 'q-worker' ? { ...m, agentStatus: 'completed' as const } : m));
+			const settled = itemsOf(false, done);
+			expect(settled.map((item) => item.kind)).toEqual(['message', 'work_log']);
+			await view.rerender({ items: settled, folds });
+			expect(view.container.querySelector('section')!.dataset.workLogMode).toBe('settled');
+			// Same nodes, same expansion, every row still on screen and no disclosure drawn.
+			expect(rowEl('q-worker')).toBe(worker);
+			expect(worker.dataset.expanded).toBe('true');
+			expect(rowEl('q-answer')).toBe(answer);
+			expect(['q-worker', 'q-answer'].map(shown)).toEqual([true, true]);
+			expect(screen.queryByRole('button', { name: /work details/i })).toBeNull();
+			expect(screen.queryByText('Show fewer log entries')).toBeNull();
+		});
+
+		it('moves folds opened under an optimistic id onto the server id', async () => {
+			const folds = createFoldState(memoryStorage());
+			const view = render(WorkLogGroup, { ...logOf(true), folds });
+			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
+			expect(folds.isOpen('prompt:run-finding')).toBe(true);
+
+			// The reducer reconciles the optimistic prompt in place and records its server id.
+			const reconciled = [{ ...turn[0], serverId: 'srv-1' }, ...turn.slice(1)];
+			await view.rerender(logOf(true, reconciled));
+			expect(folds.current).toEqual({ 'srv-1:run-finding': true });
+			expect(shown('read-a')).toBe(true);
+		});
 	});
 });

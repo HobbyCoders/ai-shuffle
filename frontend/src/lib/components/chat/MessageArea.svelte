@@ -1918,12 +1918,16 @@
 					data-user-turn-id={item.kind === 'message' && item.message.id && isNavigableUserTurn(item.message) ? item.message.id : undefined}
 				>
 				{#if item.kind === 'work_log'}
-					<!-- Routine steps of one turn, folded (see $lib/utils/work-log) -->
+					<!-- Routine steps of one turn, folded (see $lib/utils/work-log).
+					     Live and settled share the item key: settling only flips `mode`. -->
 					<WorkLogGroup
 						mode={item.mode}
 						folded={item.folded}
 						tail={item.tail}
 						sequence={item.sequence}
+						runs={item.runs}
+						foldKey={item.foldKey}
+						foldAlias={item.foldAlias}
 						gallery={item.gallery}
 						durationLabel={item.durationLabel}
 						summary={item.summary}
