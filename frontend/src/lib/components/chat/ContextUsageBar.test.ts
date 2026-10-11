@@ -2230,6 +2230,85 @@ describe('ContextUsageBar — live per-call breakdown', () => {
 	});
 });
 
+describe('ContextUsageBar — unknown context window (#2274)', () => {
+	// An OpenRouter/xAI model the registry knows no window for, with no
+	// server-resolved bound: the meter must not measure it against 200k.
+	const UNKNOWN = 'prov:prov-xai:x-ai/grok-unlisted';
+	const report = (totalTokens: number, maxTokens: number | null) => ({
+		categories: [{ name: 'Messages', tokens: totalTokens, color: '#333' }],
+		totalTokens,
+		maxTokens,
+		rawMaxTokens: maxTokens,
+		percentage: maxTokens ? (totalTokens / maxTokens) * 100 : null,
+		model: 'x-ai/grok-unlisted',
+		isAutoCompactEnabled: false,
+	});
+
+	function unknownSession(extra: Partial<typeof mocks.DEFAULT> = {}) {
+		mocks.activeSession.set({
+			...mocks.DEFAULT,
+			sessionId: 's-grok',
+			modelOverride: UNKNOWN,
+			contextUsed: 12_345,
+			totalTokensIn: 2_345,
+			totalCacheReadTokens: 10_000,
+			...extra,
+		});
+	}
+
+	it('the pill shows tokens used with no ring fill and no percentage', async () => {
+		unknownSession();
+		const { container } = render(ContextUsageBar, { props: { showPercent: true } });
+		const pill = container.querySelector('.usage-indicator')!;
+		await waitFor(() =>
+			expect(pill.getAttribute('aria-label')).toBe(
+				'Context and usage — 12.3k tokens used, context window unknown'
+			)
+		);
+		expect(pill.getAttribute('title')).toContain('context window unknown');
+		expect(container.querySelector('.usage-ring')?.classList.contains('unknown')).toBe(true);
+		expect(container.querySelector('.ring-progress')).toBeNull();
+		expect(container.querySelector('.usage-percent')?.textContent).toBe('12.3k');
+	});
+
+	it('the popover states the window is unknown and where to set it', async () => {
+		unknownSession();
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const value = container.querySelector('.ctx-value')?.textContent ?? '';
+		expect(value).toContain('12.3k used');
+		expect(value).toContain('window unknown');
+		expect(value).not.toMatch(/%|200k/);
+		expect(container.querySelector('.ctx-unknown')?.textContent).toContain('Settings → Providers');
+		// No bar and no per-row share of a window nobody declared.
+		expect(container.querySelector('.ctx-segbar')).toBeNull();
+		expect(container.querySelector('.cat-pct')).toBeNull();
+		const labels = Array.from(container.querySelectorAll('.breakdown-row:not(.model-row) .breakdown-label'))
+			.map((n) => n.textContent?.trim());
+		expect(labels).not.toContain('Free space');
+	});
+
+	it('a null report keeps the unknown state rather than a fallback', async () => {
+		unknownSession();
+		mocks.getContextUsage.mockResolvedValue({ available: true, source: 'persisted', usage: report(9_000, null) });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		await waitFor(() => expect(container.querySelector('.ctx-value')?.textContent).toContain('9k used'));
+		expect(container.querySelector('.ctx-unknown')).not.toBeNull();
+	});
+
+	it('the server-resolved bound gives the same model its percentage back', async () => {
+		unknownSession();
+		mocks.getContextUsage.mockResolvedValue({ available: true, source: 'persisted', usage: report(65_536, 131_072) });
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		await waitFor(() => expect(container.querySelector('.ctx-pct')?.textContent).toContain('50%'));
+		expect(container.querySelector('.ctx-value')?.textContent).toContain('65.5k / 131.1k');
+		expect(container.querySelector('.ctx-unknown')).toBeNull();
+		expect(container.querySelector('.ring-progress')).not.toBeNull();
+	});
+});
+
 describe('ContextUsageBar — usage source details', () => {
 	const grokSource = {
 		id: 'grok_subscription', label: 'SuperGrok subscription billing endpoint', scope: 'subscription',
