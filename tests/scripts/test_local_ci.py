@@ -64,6 +64,7 @@ def push(monkeypatch, lines, *, head="h" * 40, clean=True, trees=None, check=0):
     monkeypatch.setattr(local_ci, "git", lambda *args: head)
     monkeypatch.setattr(local_ci, "clean_checkout", lambda: clean)
     monkeypatch.setattr(local_ci, "scan_push", lambda *args: None)
+    monkeypatch.setattr(local_ci, "push_update_reach", lambda *args: None)
     monkeypatch.setattr(local_ci, "tree_of", lambda sha: (trees or {}).get(sha, "t-" + sha))
     ran = []
     monkeypatch.setattr(local_ci, "cmd_check", lambda args: ran.append(args.command) or check)
@@ -178,3 +179,123 @@ def test_install_refuses_to_overwrite_two_foreign_hooks(tmp_path):
     with pytest.raises(local_ci.Failure):
         local_ci.install_hook(tmp_path)
     assert (tmp_path / "pre-push").read_text(encoding="utf-8") == "theirs"
+
+@pytest.mark.parametrize("state,labels,gh_error,expected,note", [
+    (None, [], "no pull requests found for branch", 0, "no PR exists"),
+    (True, [], "", 0, "PR is a draft"),
+    (False, [], "", 1, ""),
+    (False, ["update-reach:windows-launcher"], "", 0, ""),
+    (None, [], "authentication required", 0, "authentication or API failure"),
+])
+def test_update_reach_pr_policy(monkeypatch, capsys, state, labels, gh_error, expected, note):
+    import importlib.util
+    import json
+    import subprocess
+
+    spec = importlib.util.spec_from_file_location("reach_policy", ROOT / "scripts/ci/update_reach.py")
+    reach = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reach)
+    # Drive the real classifier and CLI verdict using a changed launcher entry.
+    monkeypatch.setattr(reach, "git", lambda *a: "desktop/src/main/managed-entry.ts")
+    monkeypatch.setattr(reach, "reader", lambda rev: lambda path:
+                        b"export const version = 2;" if path == reach.LAUNCHER_ENTRY else None)
+    monkeypatch.setattr(local_ci.shutil, "which", lambda name: "/bin/gh")
+    calls = []
+
+    def gh(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 1 if gh_error else 0,
+                                           json.dumps({"isDraft": state, "labels": [{"name": x} for x in labels]}),
+                                           gh_error)
+
+    def run(argv):
+        assert argv[1] == "scripts/ci/update_reach.py"
+        if reach.main(argv[2:]):
+            raise local_ci.Failure("update-reach failed")
+
+    monkeypatch.setattr(local_ci.subprocess, "run", gh)
+    monkeypatch.setattr(local_ci, "run", run)
+    monkeypatch.setattr(local_ci, "run_suites", lambda *a: (local_ci.update_reach(context([])), [], []))
+    monkeypatch.setattr(local_ci, "security_check", lambda *a, **kw: None)
+    monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
+    monkeypatch.setattr(local_ci, "git", lambda *a: "head")
+    monkeypatch.setattr(local_ci, "clean_checkout", lambda: False)
+    assert local_ci.main(["check"]) == expected
+    assert calls == [["gh", "pr", "view", "--json", "isDraft,labels"]]
+    output = capsys.readouterr().out
+    if note:
+        assert note in output
+        assert "NOTE — OUT OF REACH: windows-launcher" in output
+        assert "update-reach:windows-launcher" in output
+        assert "FAILED:" not in output
+    elif expected:
+        assert "FAILED:" in output and "update-reach:windows-launcher" in output
+    else:
+        assert "ACKNOWLEDGED: windows-launcher" in output
+
+
+@pytest.mark.parametrize("failure", ["missing", "timeout", "invalid"])
+def test_unavailable_gh_is_explained(monkeypatch, capsys, failure):
+    import subprocess
+
+    monkeypatch.setattr(local_ci.shutil, "which", lambda name: None if failure == "missing" else "/bin/gh")
+    def gh(*args, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired("gh", 20)
+        return subprocess.CompletedProcess([], 0, "not JSON", "")
+    monkeypatch.setattr(local_ci.subprocess, "run", gh)
+    commands = []
+    monkeypatch.setattr(local_ci, "run", commands.append)
+    local_ci.update_reach(context([]))
+    assert "--draft" in commands[0]
+    assert "unavailable" in capsys.readouterr().out
+
+
+def test_cached_draft_pass_rechecks_reach_on_push(records, monkeypatch):
+    local_ci.save_record("tree", {"security_gate": local_ci.SECURITY_GATE_VERSION})
+    monkeypatch.setattr(local_ci, "git", lambda *a: "head")
+    monkeypatch.setattr(local_ci, "tree_of", lambda *a: "tree")
+    monkeypatch.setattr(local_ci, "scan_push", lambda *a: None)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(ref_line("head")))
+    calls = []
+    def refuse(sha, ref):
+        calls.append((sha, ref))
+        raise local_ci.Failure("ready PR lacks update-reach:windows-launcher")
+    monkeypatch.setattr(local_ci, "push_update_reach", refuse)
+    assert local_ci.main(["pre-push"]) == 1
+    assert calls == [("head", "refs/heads/topic")]
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_attestation_requires_reach_acceptance(monkeypatch, accepted):
+    from ci import edge_publication_gate
+
+    monkeypatch.setattr(edge_publication_gate, "update_reach_readiness", lambda sha: (accepted, "PR #42 needs label"))
+    monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
+    monkeypatch.setattr(local_ci, "git", lambda *a: "head")
+    monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
+    monkeypatch.setattr(local_ci.subprocess, "run", lambda *a, **kw: None)
+    monkeypatch.setattr(local_ci, "security_check", lambda *a, **kw: None)
+    monkeypatch.setattr(local_ci, "run_suites", lambda *a: ([], [], []))
+    monkeypatch.setattr(local_ci, "save_record", lambda *a: None)
+    posted = []
+    monkeypatch.setattr(local_ci, "attest", lambda state, *a: posted.append(state))
+    assert local_ci.main(["full", "--attest"]) == (0 if accepted else 1)
+    assert posted == (["pending", "success"] if accepted else [])
+
+
+def test_attestation_rechecks_labels_before_success(monkeypatch):
+    from ci import edge_publication_gate
+
+    decisions = iter([(True, "accepted"), (False, "PR #42 label removed")])
+    monkeypatch.setattr(edge_publication_gate, "update_reach_readiness", lambda sha: next(decisions))
+    monkeypatch.setattr(local_ci, "choose_python", lambda: sys.executable)
+    monkeypatch.setattr(local_ci, "git", lambda *a: "head")
+    monkeypatch.setattr(local_ci, "clean_checkout", lambda: True)
+    monkeypatch.setattr(local_ci.subprocess, "run", lambda *a, **kw: None)
+    monkeypatch.setattr(local_ci, "security_check", lambda *a, **kw: None)
+    monkeypatch.setattr(local_ci, "run_suites", lambda *a: ([], [], []))
+    posted = []
+    monkeypatch.setattr(local_ci, "attest", lambda state, *a: posted.append(state))
+    assert local_ci.main(["full", "--attest"]) == 1
+    assert posted == ["pending", "failure"]

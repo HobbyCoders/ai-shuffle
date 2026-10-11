@@ -171,3 +171,170 @@ def test_workflow_wiring_matches_the_gate():
     text = (ROOT / "scripts/local_ci.py").read_text(encoding="utf-8")
     assert f'ATTEST_CONTEXT = "{gate.CONTEXT}"' in text
     assert "local_ci.py full --attest" in gate.COMMAND
+
+
+@pytest.fixture
+def reach_history(tmp_path, monkeypatch):
+    """Real commits/trees: exercise classification, not a pre-seeded failing group."""
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=tmp_path, text=True).strip()
+    git("init", "-q")
+    git("config", "user.name", "Reach test")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "commit.gpgsign", "false")
+    git("config", "core.hooksPath", str(tmp_path / "disabled-hooks"))
+    def commit(path, text):
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+        git("add", ".")
+        git("commit", "-qm", "Reach fixture\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>")
+        return git("rev-parse", "HEAD")
+    base = commit("desktop/src/main/managed-entry.ts", "export const version = 1;")
+    reach = gate.load_update_reach()
+    original_git, original_reader = reach.git, reach.reader
+    monkeypatch.setattr(reach, "git", lambda *a, **kw: original_git(*a, root=tmp_path))
+    monkeypatch.setattr(reach, "reader", lambda rev: original_reader(rev, root=tmp_path))
+    monkeypatch.setattr(gate, "load_update_reach", lambda: reach)
+    monkeypatch.setattr(gate, "published_edge_revision", lambda: base)
+    return base, commit
+
+
+def merged_pr(sha, labels=(), number=42):
+    return {"number": number, "merged_at": "2026-10-11T00:00:00Z",
+            "base": {"ref": "main", "repo": {"full_name": gate.REPOSITORY}},
+            "merge_commit_sha": sha, "labels": [{"name": name} for name in labels]}
+
+
+@pytest.mark.parametrize("labels,accepted", [([], False), (["update-reach:windows-launcher"], True),
+                                            (["update-reach:docker-image"], False)])
+def test_main_reach_requires_label_on_merged_pr(reach_history, labels, accepted):
+    base, commit = reach_history
+    head = commit("desktop/src/main/managed-entry.ts", "export const version = 2;")
+    calls = []
+    def api(endpoint):
+        calls.append(endpoint)
+        return [merged_pr(head, labels)]
+    ready, reason = gate.update_reach_readiness(head, api=api)
+    assert ready is accepted
+    assert calls == [f"commits/{head}/pulls?per_page=100"]
+    if not accepted:
+        assert "PR #42" in reason and "update-reach:windows-launcher" in reason
+        assert "OUT OF REACH" in reason
+
+
+def test_in_reach_main_needs_no_pr_api(reach_history):
+    base, commit = reach_history
+    head = commit("app/example.py", "version = 2")
+    def unavailable(endpoint):
+        raise AssertionError("In-reach changes must not query gh")
+    ready, reason = gate.update_reach_readiness(head, api=unavailable)
+    assert ready, reason
+
+
+@pytest.mark.parametrize("evidence", ["unavailable", "missing", "unrelated", "unmerged", "wrong-base", "foreign-repo", "incomplete"])
+def test_out_of_reach_missing_or_unrelated_evidence_refuses(reach_history, evidence):
+    base, commit = reach_history
+    head = commit("desktop/src/main/managed-entry.ts", "export const version = 2;")
+    def api(endpoint):
+        pr = merged_pr(head, ["update-reach:windows-launcher"])
+        if evidence == "unavailable":
+            raise subprocess.CalledProcessError(1, "gh")
+        if evidence == "missing":
+            return []
+        if evidence == "unrelated":
+            pr["merge_commit_sha"] = base
+        if evidence == "unmerged":
+            pr["merged_at"] = None
+        if evidence == "wrong-base":
+            pr["base"]["ref"] = "other"
+        if evidence == "foreign-repo":
+            pr["base"]["repo"]["full_name"] = "someone/ai-shuffle"
+        return [pr] * (100 if evidence == "incomplete" else 1)
+    ready, reason = gate.update_reach_readiness(head, api=api)
+    assert not ready
+    assert "refused" in reason
+
+
+def test_each_unpublished_main_change_needs_its_own_acceptance(reach_history):
+    base, commit = reach_history
+    first = commit("desktop/src/main/managed-entry.ts", "export const version = 2;")
+    second = commit("desktop/src/main/managed-entry.ts", "export const version = 3;")
+    def api(endpoint):
+        sha = endpoint.split("/")[1]
+        return [merged_pr(sha, ["update-reach:windows-launcher"] if sha == second else [],
+                          number=42 if sha == first else 43)]
+    ready, reason = gate.update_reach_readiness(second, api=api)
+    assert not ready and "PR #42" in reason
+    assert "PR #43" not in reason
+
+
+def test_unverifiable_edge_pointer_refuses(reach_history, monkeypatch):
+    base, commit = reach_history
+    head = commit("app/example.py", "version = 2")
+    def unavailable():
+        raise OSError("offline")
+    monkeypatch.setattr(gate, "published_edge_revision", unavailable)
+    assert not gate.update_reach_readiness(head)[0]
+    assert not gate.update_reach_readiness(head, base="f" * 40)[0]
+
+
+@pytest.mark.parametrize("out_of_reach,accepted", [(False, True), (True, False), (True, True)])
+def test_edge_outage_uses_release_baseline_and_still_requires_labels(reach_history, monkeypatch,
+                                                                   out_of_reach, accepted):
+    base, commit = reach_history
+    gate.load_update_reach().git("tag", "v0.0.1", base)
+    path = "desktop/src/main/managed-entry.ts" if out_of_reach else "app/example.py"
+    head = commit(path, "version = 2")
+    def unavailable():
+        raise OSError("offline")
+    monkeypatch.setattr(gate, "published_edge_revision", unavailable)
+    calls = []
+    def api(endpoint):
+        calls.append(endpoint)
+        return [merged_pr(head, ["update-reach:windows-launcher"] if accepted else [])]
+    ready, reason = gate.update_reach_readiness(head, api=api)
+    assert ready is accepted
+    assert "WARNING: published edge pointer unavailable" in reason
+    assert "latest final release" in reason
+    assert len(calls) == (1 if out_of_reach else 0)
+    if not accepted:
+        assert "PR #42" in reason and "update-reach:windows-launcher" in reason
+
+
+@pytest.mark.parametrize("fault", [None, "signature", "channel", "revision", "oversize"])
+def test_published_pointer_is_signature_verified(monkeypatch, fault):
+    import base64
+    import httpx
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+
+    key = Ed25519PrivateKey.generate()
+    manifest = {"revision": "invalid" if fault == "revision" else REVISION,
+                "channel": "stable" if fault == "channel" else "edge"}
+    payload = json.dumps(manifest).encode()
+    signature = key.sign(payload)
+    if fault == "signature":
+        payload += b" "
+    raw = json.dumps({"payload": base64.b64encode(payload).decode(),
+                      "signature": base64.b64encode(signature).decode()}).encode()
+    if fault == "oversize":
+        raw = b"x" * 32769
+    calls = []
+    def fetch(request):
+        calls.append((request.method, str(request.url)))
+        return httpx.Response(200, content=raw)
+    client = httpx.Client
+    def make_client(**kwargs):
+        assert kwargs == {"trust_env": False, "follow_redirects": False, "timeout": 20}
+        return client(transport=httpx.MockTransport(fetch), **kwargs)
+    monkeypatch.setattr(httpx, "Client", make_client)
+    monkeypatch.setattr(serialization, "load_pem_public_key", lambda raw: key.public_key())
+    if fault:
+        from cryptography.exceptions import InvalidSignature
+        with pytest.raises((ValueError, InvalidSignature)):
+            gate.published_edge_revision()
+    else:
+        assert gate.published_edge_revision() == REVISION
+    assert calls == [("GET", "https://hobbycoders.com/v1/desktop/manifest/edge")]

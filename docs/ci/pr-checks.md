@@ -126,6 +126,42 @@ scanning is never skipped. Pass records record whether an audit was refreshed;
 records from older security-gate versions are invalidated. This is local
 protection, not GitHub push protection; the hook must be installed on each clone.
 
+## Out-of-reach changes: draft first, owner acceptance before readiness
+
+The pre-push update-reach check reads `gh pr view --json isDraft,labels`.
+When the branch has no PR yet or its PR is a draft, an unreachable change is a
+prominent **NOTE — OUT OF REACH**, not a push failure. The note names each group
+and its required `update-reach:<group>` label. If `gh` is missing, unauthenticated
+or cannot read the PR, the check says so and treats it as no PR for this local
+push only. Other check failures still fail the push.
+
+1. Push with the hook enabled and open a **draft** PR (`gh pr create --draft`).
+2. Move the change into updated source/add a migration path, or ask the owner
+   to accept each reported group by adding its `update-reach:<group>` label.
+   An agent must not add the acceptance label on the owner's behalf.
+3. Re-run `python scripts/local_ci.py check` and, only after acceptance and
+   review, have the owner/release agent mark it ready. A ready PR without the
+   required labels fails update-reach on subsequent checks/pushes. Cached test
+   passes do not cache PR state or labels: pre-push reads them again.
+
+**`gh pr ready` and `gh pr merge` themselves are not blocked; edge publication
+is.** There is no GitHub-required PR check (PR CI remains off). The strict
+backstop is `scripts/ci/edge_publication_gate.py::update_reach_readiness`, called
+by `local_ci.py full --attest` before starting and again before posting success.
+It verifies the signed published edge pointer, checks each first-parent main
+change since that revision, and requires the matching labels on **that change's
+merged main PR**, not a label on an unrelated PR. An unlabeled out-of-reach merge
+cannot obtain a new `local/full-suite` success through this path; the error names
+the PR and missing labels. In-reach commits need no PR API lookup. Missing,
+incomplete or unavailable evidence for an out-of-reach commit refuses the
+attestation. If the signed pointer cannot be read/verified, a warning explains
+that the latest final release tag is used as a conservative baseline instead:
+all main changes since that tag are checked, so an in-reach range can still pass
+without any PR API calls. This may recheck already-published changes. If neither
+a verified pointer nor an ancestor release tag is available, attestation refuses.
+This does not revoke an already-posted status
+if labels are removed later; the existing publisher consumes the owner's status.
+
 ## Full suite on main, and edge publication
 
 Edge publication waits for a full local pass on the exact `main` revision.

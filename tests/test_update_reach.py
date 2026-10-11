@@ -191,3 +191,17 @@ def test_archive_membership_honours_exclusions():
     assert not reach.in_archive("frontend/tests/x.spec.ts", archive.RUNTIME_PATHS, archive.EXCLUDED)
     assert not reach.in_archive("frontend/src/x.test.ts", archive.RUNTIME_PATHS, archive.EXCLUDED)
     assert not reach.in_archive("docs/reviews/x.md", archive.RUNTIME_PATHS, archive.EXCLUDED)
+
+
+def test_draft_note_keeps_groups_and_owner_labels_visible():
+    groups = groups_for({reach.LAUNCHER_ENTRY: "export const changed = true;"})
+    failing = reach.verdict(groups)
+    assert failing == ["windows-launcher"]
+    note = reach.render("base", "head", groups, failing, [], draft=True)
+    assert "NOTE — OUT OF REACH: windows-launcher" in note
+    assert "update-reach:windows-launcher" in note
+    assert "DRAFT PR only" in note
+    assert "FAILED:" not in note
+    # Advisory reporting never changes the strict verdict used for publication.
+    assert reach.verdict(groups) == ["windows-launcher"]
+    assert "FAILED:" in reach.render("base", "head", groups, failing, [])

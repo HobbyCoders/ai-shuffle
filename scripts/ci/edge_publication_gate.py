@@ -29,9 +29,110 @@ COMMAND = "python scripts/local_ci.py full --attest"
 class GitHub:
     def __call__(self, endpoint):
         raw = subprocess.check_output(
-            ["gh", "api", f"repos/{REPOSITORY}/{endpoint}"], text=True, encoding="utf-8"
+            ["gh", "api", f"repos/{REPOSITORY}/{endpoint}"], text=True, encoding="utf-8", timeout=20
         )
         return json.loads(raw)
+
+
+def published_edge_revision() -> str:
+    """Read the real signed edge pointer, never a successful-but-skipped Actions run."""
+    import base64
+    import httpx
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+    root = Path(__file__).resolve().parents[2]
+    # Match docker/application_updates.py::ContainerUpdates.fetch: no environment proxy,
+    # no redirects, bounded streaming. Edge is public and needs no license lease.
+    raw = bytearray()
+    with httpx.Client(trust_env=False, follow_redirects=False, timeout=20) as client:
+        with client.stream("GET", "https://hobbycoders.com/v1/desktop/manifest/edge") as response:
+            response.raise_for_status()
+            for chunk in response.iter_bytes():
+                raw.extend(chunk)
+                if len(raw) > 32768:
+                    raise ValueError("Edge manifest exceeds limits")
+    envelope = json.loads(raw)
+    payload = base64.b64decode(envelope["payload"], validate=True)
+    key = load_pem_public_key((root / "desktop/build/application-update-key.pem").read_bytes())
+    if not isinstance(key, Ed25519PublicKey):
+        raise ValueError("Invalid edge signing key")
+    key.verify(base64.b64decode(envelope["signature"], validate=True), payload)
+    manifest = json.loads(payload)
+    if manifest.get("channel") != "edge" or not re.fullmatch(r"[a-f0-9]{40}", manifest.get("revision", "")):
+        raise ValueError("Invalid edge revision/channel")
+    return manifest["revision"]
+
+
+def load_update_reach():
+    import importlib.util
+
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("publication_update_reach", root / "scripts/ci/update_reach.py")
+    reach = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(reach)
+    return reach
+
+
+def update_reach_readiness(revision, *, api=None, base=None):
+    """Strict backstop before local/full-suite is posted, independent of PR draft state.
+
+    Inspect each first-parent main change since the *published* edge pointer.
+    A label on an unrelated PR cannot accept another PR's unreachable change.
+    In-reach changes do not need GitHub PR lookups at all.
+    """
+    reach = load_update_reach()
+    api = api or GitHub()
+    try:
+        warning = ""
+        if base is None:
+            try:
+                base = published_edge_revision()
+            except Exception as error:
+                # A feed outage need not block an in-reach attestation. A release
+                # tag is a conservative baseline, never a guess at the published SHA.
+                base = reach.latest_final_tag()
+                if not base:
+                    return False, "Update reach refused: edge pointer unavailable and no final release tag for fallback."
+                base = reach.git("rev-parse", f"{base}^{{commit}}")
+                warning = (f"WARNING: published edge pointer unavailable ({type(error).__name__}); "
+                           f"checking all main changes since the latest final release ({base[:9]}).\n")
+        # Refuse unknown/non-ancestor pointers instead of silently checking an empty range.
+        if base not in reach.git("rev-list", "--first-parent", revision).splitlines():
+            return False, "Update reach refused: published edge is not on this main history; fetch origin/main."
+        commits = reach.git("rev-list", "--first-parent", "--reverse", f"{base}..{revision}").splitlines()
+        refusals = []
+        for commit in commits:
+            parent = reach.git("rev-parse", f"{commit}^1")
+            changed = reach.git("diff", "--name-only", parent, commit).splitlines()
+            groups = reach.classify(changed, reach.reader(parent), reach.reader(commit))
+            failing = reach.verdict(groups)
+            if not failing:
+                continue
+            # One request per offending commit, regardless of how many groups fail.
+            prs = api(f"commits/{commit}/pulls?per_page=100")
+            if not isinstance(prs, list) or len(prs) >= 100:
+                raise ValueError("Incomplete PR evidence")
+            merged = [pr for pr in prs if pr.get("merged_at") and pr.get("base", {}).get("ref") == "main"
+                      and pr.get("base", {}).get("repo", {}).get("full_name") == REPOSITORY
+                      and pr.get("merge_commit_sha") == commit]
+            if not merged:
+                refusals.append(f"{commit[:9]}: no merged main PR; needs "
+                                + ", ".join(reach.LABEL + name for name in failing))
+            for pr in merged:
+                labels = ",".join(label["name"] for label in pr["labels"])
+                missing = reach.verdict(groups, reach.allowed_by_labels(labels))
+                if missing:
+                    refusals.append(f"PR #{pr['number']} ({commit[:9]}): owner must add "
+                                    + ", ".join(reach.LABEL + name for name in missing))
+        if refusals:
+            return False, warning + "OUT OF REACH — edge publication refused:\n" + "\n".join(refusals)
+        return True, warning + f"Update reach accepted for {base[:9]}..{revision[:9]}."
+    except Exception as error:
+        # Network/auth/malformed evidence never authorizes an unreachable publication.
+        # Do not echo subprocess output or response bodies (they may contain credentials).
+        return False, f"Update reach refused: could not verify published edge/merged PR evidence ({type(error).__name__})."
 
 
 def owner_status(api, revision):
