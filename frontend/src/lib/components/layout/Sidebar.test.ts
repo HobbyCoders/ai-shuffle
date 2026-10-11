@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { privateAccessPending } from '$lib/stores/chat-access';
+import { _resetProseQuestions, rememberLeavingProseQuestion } from '$lib/stores/session/prose-questions';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import type { PreferenceAdapter } from '$lib/services/preference-sync';
 import { sidebarGroups } from '$lib/stores/expansion-preferences';
@@ -608,6 +609,60 @@ describe('Sidebar Needs you lane', () => {
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 		expect(lane()).toBeNull();
+	});
+
+	// Spec §5: the open session's own queues and a prose question count, and
+	// Needs you beats Working while its turn streams on.
+	it('lifts the open, still-working session while it waits on you, until the next user message', async () => {
+		type OpenState = Parameters<typeof mocks.activeSession.set>[0] & Record<string, unknown>;
+		const set = (state: Record<string, unknown>) => mocks.activeSession.set({
+			sessionId: 'active', isStreaming: true, optimisticStreaming: true, activeTasks: [], ...state
+		} as OpenState);
+		const asked = [
+			{ id: 'u1', role: 'user', content: 'Deploy it' },
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Staging too, or prod only?' }
+		];
+		render(Sidebar, { props: sidebarProps });
+		set({ messages: asked, pendingPermissions: [], pendingQuestions: [] });
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
+		expect(cardFrame('Active chat').textContent).toContain('Awaiting input');
+		expect(cardFrame('Active chat').textContent).not.toContain('Working');
+
+		set({ messages: asked, pendingPermissions: [], pendingQuestions: [{ request_id: 'q1' }] });
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Has question');
+
+		set({ messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }], pendingPermissions: [], pendingQuestions: [] });
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+		expect(cardFrame('Active chat').textContent).toContain('Working');
+	});
+
+	// Spec §5: a question this tab saw before leaving a session keeps that row
+	// in Needs you; working-time changes on its row never clear it.
+	it('keeps a left session with an unanswered prose question in the lane through row updates', async () => {
+		const asked = [
+			{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
+			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' }
+		];
+		rememberLeavingProseQuestion('settled', asked);
+		onTestFinished(_resetProseQuestions);
+		render(Sidebar, { props: sidebarProps });
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+		expect(cardFrame('Settled chat').textContent).toContain('Awaiting input');
+
+		mocks.sessions.set([
+			session('active', 'Active chat', 'visible-project', true),
+			session('settled', 'Settled chat', 'visible-project', false, false, { work_started_at: '2026-10-11T00:00:00Z' }),
+			session('worker', 'Hidden worker', 'hidden-project', true, true),
+		]);
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+		// Reopened here with the answer loaded, then left: the switcher drops it.
+		rememberLeavingProseQuestion('settled', [...asked, { id: 'u2', role: 'user' as const, content: 'Prod only' }]);
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 	});
 
 	it('takes a remote session from its owner state, not the local map', () => {

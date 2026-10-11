@@ -16,6 +16,7 @@ import { api } from '$lib/api/client';
 import { get } from 'svelte/store';
 import { openDropdown, openHeaderDropdown } from '../header-dropdowns';
 import { getPersistedDeviceIntent, setPersistedDeviceIntent } from '../worker-selection';
+import { _resetProseQuestions, proseQuestionSessions } from './prose-questions';
 
 // session-switcher looks up the session row in appData to tailor the load-error
 // message for remote (cross-install) sessions (B4). Mock it so tests can seed the
@@ -1348,5 +1349,42 @@ describe('session-switcher · reconciledSessionMode', () => {
 		// missing from the list (foreign, filtered, deleted) has no row to read.
 		expect(reconciledSessionMode(null, rows)).toBeNull();
 		expect(reconciledSessionMode('not-in-list', rows)).toBeNull();
+	});
+});
+
+describe('leaving a session with an unanswered prose question (spec §5)', () => {
+	const asked = [
+		{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
+		{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' },
+	];
+	beforeEach(() => { _resetProseQuestions(); _mockSessions.current = []; });
+
+	it('A -> B -> A keeps the question remembered, and answering it clears it on the next leave', async () => {
+		_mockSessions.current = [{ id: 'session-A', work_started_at: 'T1' }];
+		const { switcher, deps } = makeSwitcher(fullState({ messages: asked, isStreaming: true }));
+		await switcher.switchSession('session-B');
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		await switcher.switchSession('session-A');
+		// Leaving B (no question) records nothing for it and keeps A.
+		expect([...get(proseQuestionSessions).keys()]).toEqual(['session-A']);
+		// History hydrated, then the user answered.
+		deps.update((s) => ({ ...s, isLoadingSession: false, messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }] }));
+		switcher.newChat();
+		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+	});
+
+	it('leaving A while its uncached history is still loading keeps the remembered question', async () => {
+		_mockSessions.current = [{ id: 'session-A', work_started_at: 'T1' }];
+		const { switcher, deps } = makeSwitcher(fullState({ messages: asked }));
+		await switcher.switchSession('session-B');
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		// Reopen A with no cache: the switch starts it empty and loading.
+		deps.update((s) => ({ ...s, sessionId: 'session-A', messages: [], isLoadingSession: true }));
+		await switcher.switchSession('session-B');
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		// A partial replay is not authoritative either.
+		deps.update((s) => ({ ...s, sessionId: 'session-A', messages: [asked[0]], isLoadingSession: true }));
+		switcher.newChat();
+		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
 	});
 });

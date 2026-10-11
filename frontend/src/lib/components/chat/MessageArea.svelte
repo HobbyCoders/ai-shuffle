@@ -30,7 +30,10 @@
 	 */
 	import { tick, untrack, onMount, onDestroy } from 'svelte';
 	import { derived as derivedStore } from 'svelte/store';
-	import { activeSession } from '$lib/stores/active-session';
+	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
+	import { privateAccessPending } from '$lib/stores/chat-access';
+	import { proseQuestionSessions } from '$lib/stores/session/prose-questions';
+	import { needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
 	import { swarms } from '$lib/stores/swarms';
 	import type { SwarmSnapshot } from '$lib/utils/swarm';
 	import { forkOfferedSessionHere } from './fork-here';
@@ -90,7 +93,8 @@
 		isNavigableUserTurn,
 		resolveCurrentTurnIndex,
 		resolveLiveTurnStartedAt,
-		turnAnchorId
+		turnAnchorId,
+		needsYouTurnIds
 	} from '$lib/utils/transcript-navigation';
 	import { getModelLabel } from '$lib/constants/models.svelte';
 	import SystemMessageGroup from './SystemMessageGroup.svelte';
@@ -618,6 +622,39 @@
 
 	/** Stable id vector for the observer-driven rail index (no per-call allocation). */
 	const turnNavigationIds = $derived(turnNavigationItems.map((item) => item.id));
+
+	// The open session's "Needs you" count (spec §5), through the same
+	// derivation and signals as its sidebar row and the tab title: the real
+	// row (a mirror's owner state counts before its queues load), the
+	// background attention entry a reconnect can restore, private access and
+	// the session's own queues and prose question.
+	const openSessionId = $derived($activeSession.sessionId);
+	const openRow = $derived(openSessionId ? $sessions.find((s) => s.id === openSessionId) ?? null : null);
+	const openIsRemote = $derived(!!$activeSession.isRemote);
+	const openNeeds = $derived(openSessionNeeds(
+		$activeSession,
+		chatPrefs?.groupToolCalls !== false,
+		!!openSessionId && $proseQuestionSessions.has(openSessionId)
+	));
+	const openNeedsYou = $derived(
+		openSessionId
+			? needsYouCount(
+				openRow ?? { status: 'active', is_remote: openIsRemote, remote_runtime_state: null },
+				$backgroundPermissions.get(openSessionId),
+				$privateAccessPending.get(openSessionId) ?? 0,
+				openNeeds
+			)
+			: 0
+	);
+	// Reference-stable between folds that leave them alone, so the tick
+	// lookup below reruns only when the transcript or the questions change.
+	const openMessages = $derived($activeSession.messages);
+	const openPendingQuestions = $derived($activeSession.pendingQuestions);
+	const pendingQuestionToolIds = $derived((openPendingQuestions ?? []).map((q) => q.tool_use_id).filter(Boolean));
+	const newestTurnId = $derived(turnNavigationItems.at(-1)?.id ?? null);
+	// The ticks carrying the amber dot: a pending question on the turn that
+	// asked it, everything else on the newest turn.
+	const needsYouTurns = $derived(needsYouTurnIds(openNeedsYou, openMessages, pendingQuestionToolIds, newestTurnId));
 
 	// ── Windowed mounting (PERFORMANCE_REVIEW §3.2 R4) ─────────────────────
 	// Only a trailing window of display items is mounted. Everything below is
@@ -2039,6 +2076,7 @@
 			items={turnNavigationItems}
 			currentIndex={currentTurnIndex}
 			onSelect={navigateToTurn}
+			needsYouIds={needsYouTurns}
 		/>
 	{/if}
 </div>

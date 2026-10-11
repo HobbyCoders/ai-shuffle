@@ -7,6 +7,7 @@ import type { ChatMessage } from '$lib/stores/types';
 import type { SwarmSnapshot } from './swarm';
 import producer from './__fixtures__/agent-delivery-producer.json';
 import { deriveUserTurnNavigationItems } from './transcript-navigation';
+import { deriveStatus, needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
 import { initialState, reduce, type WireEvent } from '$lib/stores/session/v2/reducer';
 import {
 	buildDisplayItems,
@@ -1483,6 +1484,29 @@ describe('turn unity', () => {
 		expect(model.itemIndexByTurnId.get(t.steer.id!)).toBe(1);
 		expect(model.itemIndexByTurnId.get(t.steer2.id!)).toBe(1);
 		expect(model.midTurnUserIds).toEqual(new Set([t.steer.id, t.steer2.id]));
+	});
+
+	it('needs you while the question waits for the steer that answers it, and not once settled (spec §5)', () => {
+		const LOCAL = { status: 'active', is_remote: false, remote_runtime_state: null } as const;
+		const t = longTurn();
+		const until = (row: ChatMessage) => t.messages.slice(0, t.messages.indexOf(row) + 1);
+		const pending = [{ request_id: 'ask-1' }];
+		// Live, the turn has asked: its QuestionTray item counts, and its lead-in
+		// prose is that question rather than a second one.
+		const asking = openSessionNeeds({ messages: until(t.question), pendingQuestions: pending }, true);
+		expect(asking).toEqual({ permissions: 0, questions: 1, proseQuestion: false });
+		expect(needsYouCount(LOCAL, null, 0, asking)).toBe(1);
+		expect(deriveStatus({ streaming: true, attention: null, isActive: true, open: asking })).toBe('has_question');
+		// Asked in prose instead of the tool, the same turn still needs you...
+		const prose = text('Staging too, or prod only?', '2026-10-10T20:03:00.000Z');
+		const proseAsk = [...until(t.worker), prose];
+		expect(needsYouCount(LOCAL, null, 0, openSessionNeeds({ messages: proseAsk }, true))).toBe(1);
+		// ...and the steer that answers it clears both forms.
+		const answered = [...proseAsk, t.steer, t.ack];
+		expect(needsYouCount(LOCAL, null, 0, openSessionNeeds({ messages: answered, pendingQuestions: [] }, true))).toBe(0);
+		expect(needsYouCount(LOCAL, null, 0, openSessionNeeds({ messages: until(t.steer), pendingQuestions: [] }, true))).toBe(0);
+		// Settled, nothing waits.
+		expect(needsYouCount(LOCAL, null, 0, openSessionNeeds({ messages: t.messages, pendingQuestions: [] }, true))).toBe(0);
 	});
 
 	it('keeps a turn flat while its background work runs, even after a later turn opened', () => {

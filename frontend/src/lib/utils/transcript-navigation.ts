@@ -125,3 +125,49 @@ export function resolveTurnNavigationIndex(
 	if (itemCount <= 0) return 0;
 	return Math.max(0, Math.min(itemCount - 1, currentIndex + delta));
 }
+
+/**
+ * The user turn each tool call belongs to: the newest navigable user message
+ * before it. Used to put a surviving prompt (a nonblocking AskUser can
+ * outlive its turn) on the tick of the turn that asked it. Ids not found in
+ * the transcript are left out.
+ */
+export function turnsOwningTools(
+	messages: readonly ChatMessage[],
+	toolUseIds: readonly string[]
+): Map<string, string> {
+	const owners = new Map<string, string>();
+	if (toolUseIds.length === 0) return owners;
+	const wanted = new Set(toolUseIds);
+	let turnId: string | null = null;
+	for (const message of messages) {
+		if (isNavigableUserTurn(message) && message.id) {
+			turnId = message.id;
+			continue;
+		}
+		if (turnId && message.toolId && wanted.has(message.toolId) && !owners.has(message.toolId)) {
+			owners.set(message.toolId, turnId);
+			if (owners.size === wanted.size) break;
+		}
+	}
+	return owners;
+}
+
+/**
+ * The ticks that carry the amber "Needs you" dot (spec §5), given the open
+ * session's count. A pending question sits on the turn that asked it;
+ * everything else waiting (a permission, private access, a prose question,
+ * an owner state whose queue has not loaded) belongs to the newest turn.
+ */
+export function needsYouTurnIds(
+	count: number,
+	messages: readonly ChatMessage[],
+	pendingQuestionToolIds: readonly string[],
+	newestTurnId: string | null
+): string[] {
+	if (count <= 0) return [];
+	const owners = turnsOwningTools(messages, pendingQuestionToolIds);
+	const ids = new Set(owners.values());
+	if (newestTurnId && count > owners.size) ids.add(newestTurnId);
+	return [...ids];
+}
