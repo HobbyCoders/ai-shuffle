@@ -121,10 +121,14 @@ def record_question(cursor, session_id, *, force_notify=False):
         return None
     from datetime import datetime, timezone
 
+    # A first, still-streaming delta only establishes a null projection's
+    # epoch. It must not turn a backfilled/idle session into recent activity.
+    # Actual question changes do refresh the catalog's incremental scan key.
+    changed = row["last_assistant_question_seq"] != seq
     cursor.execute(
         "UPDATE sessions SET last_assistant_question_seq = %s, last_assistant_question_epoch = %s, "
-        "updated_at = %s WHERE id = %s",
-        (seq, epoch, datetime.now(timezone.utc).isoformat(), session_id),
+        "updated_at = CASE WHEN %s THEN %s ELSE updated_at END WHERE id = %s",
+        (seq, epoch, changed, datetime.now(timezone.utc).isoformat(), session_id),
     )
     owner = row["api_user_id"]
     updates = {
