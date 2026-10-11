@@ -16,6 +16,16 @@ def test_get_usage_is_registered_for_native_and_code_mode_surfaces() -> None:
     assert spec is not None
     assert spec.risk == "safe"
     assert spec.code_mode_allowed is True
+    assert "percent left, as shown in the Usage UI" in spec.description
+    assert "used_percent is 100 minus left" in spec.description
+    assert "Reports used and remaining percentages" not in spec.description
+    assert "reset timestamps, source, freshness, and unavailable data explicitly" in spec.description
+    assert "never refreshes a provider or reads credentials" in spec.description
+    # Measured description fixture plus a small allowance, not a token estimate.
+    assert len(spec.description) <= 370 + 20
+    paragraphs = spec.description.split("\n\n")
+    assert len(paragraphs) == len(set(paragraphs))
+    assert spec.description.count("percent left, as shown in the Usage UI") == 1
 
 
 @pytest.mark.asyncio
@@ -50,6 +60,32 @@ async def test_get_usage_reports_used_and_remaining_for_claude_and_provider() ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["subscription", "account", "provider"])
+@pytest.mark.parametrize("utilization,expected", [
+    (0, 0.0), (100, 100.0), (-10, 0.0), (130, 100.0), (25.126, 25.13),
+])
+async def test_percentage_order_and_aliases_on_the_wire(scope, utilization, expected) -> None:
+    raw_window = {"type": "five_hour", "utilization": utilization}
+    snapshot = {"available": True, "providers": []}
+    if scope == "subscription":
+        snapshot["windows"] = [raw_window]
+    elif scope == "account":
+        snapshot["snapshots"] = [{"available": True, "windows": [raw_window]}]
+    else:
+        snapshot["providers"] = [{"provider_id": "test", "windows": [raw_window]}]
+        expected = round(100 - expected, 2)
+    body = json.loads((await handler(
+        {}, ToolCtx(extra={"usage_snapshot": lambda: snapshot})
+    )).text)
+    container = (body if scope == "subscription" else
+                 body["accounts" if scope == "account" else "providers"][0])
+    window = container["windows"][0]
+    assert list(window)[:4] == ["type", "left_percent", "remaining_percent", "used_percent"]
+    assert window["left_percent"] == window["remaining_percent"] == expected
+    assert window["used_percent"] == round(100 - expected, 2)
+
+
+@pytest.mark.asyncio
 async def test_provider_snapshot_can_be_available_when_claude_is_unavailable() -> None:
     snapshot = {
         "available": False,
@@ -81,6 +117,8 @@ def test_rolled_over_window_reports_fresh_quota(resets_at) -> None:
     rolled, live = out["windows"]
     assert rolled["remaining_percent"] == 100.0 and rolled["used_percent"] == 0.0
     assert rolled["rolled_over"] is True
+    assert rolled["left_percent"] == rolled["remaining_percent"] == 100.0
+    assert list(rolled)[:4] == ["type", "left_percent", "remaining_percent", "used_percent"]
     assert live["remaining_percent"] == 3.0 and "rolled_over" not in live
 
 
@@ -290,3 +328,5 @@ def test_provider_credits_carry_the_figures_the_panel_shows(monkeypatch) -> None
     assert out["providers"][0]["credits"] == {
         "balance_remaining": 4.5, "total_usage": 5.5, "total_credits": 10, "currency": "USD",
     }
+    # Credit amounts stay amounts; the tool does not invent a percentage.
+    assert not any(key.endswith("_percent") for key in out["providers"][0]["credits"])
