@@ -254,7 +254,9 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	function applyRowUpdates(sessionId: string | undefined, updates: Record<string, unknown>): void {
 		const keys = Object.keys(updates);
 		// Also for rows not loaded here: the remembered question is per session.
-		observeLastUserMessage(sessionId, updates);
+		// A pushed frame applies in arrival order; an `updated_at` here is this
+		// tab's own clock (the clear patch), never a server row version.
+		observeLastUserMessage(sessionId, { ...updates, updated_at: undefined });
 		const patch: Record<string, unknown> = {};
 		let needsReload = false;
 		for (const key of keys) {

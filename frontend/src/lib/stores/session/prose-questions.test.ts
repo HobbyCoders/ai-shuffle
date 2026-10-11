@@ -311,22 +311,53 @@ describe('row-derived assistant question (#2263)', () => {
 		expect(has('A')).toBe(false);
 	});
 
-	it('re-marks when the agent asks again after the answer', () => {
-		observeLastUserMessage('A', row(12, 9));
-		observeLastUserMessage('A', { last_user_message_seq: 13, last_user_message_epoch: E });
-		observeLastUserMessage('A', row(16, 13));
+	/** A list row written at minute `m` (its `updated_at`). */
+	const at = (m: number) => `2026-10-11T10:${String(m).padStart(2, '0')}:00+00:00`;
+	const listRow = (m: number, ...args: Parameters<typeof row>) => ({ id: 'A', ...row(...args), updated_at: at(m) });
+
+	it('re-marks when the agent asks again; delayed rows and snapshots do not replace it', () => {
+		observeSessionRows([listRow(1, 12, 9)]);
+		observeSessionRows([listRow(2, 12, 13)]);
+		expect(has('A')).toBe(false);
+		observeSessionRows([listRow(3, 16, 13)]);
 		expect(has('A')).toBe(true);
-		// A delayed pre-answer row (and a delayed /live snapshot) is superseded.
-		observeSessionRows([{ id: 'A', ...row(12, 9) }]);
+		// A delayed pre-answer row (older updated_at) is ignored…
+		observeSessionRows([listRow(1, 12, 9)]);
+		expect(has('A')).toBe(true);
+		// …and so is a delayed /live snapshot, which carries no updated_at.
 		finishUserMessageRevisionSeed('A', beginUserMessageRevisionSeed('A'), row(12, 13));
 		expect(has('A')).toBe(true);
-		// Non-question prose still clears it, and a lower question with a newer
-		// user message (a retry projection) still replaces it.
-		observeLastUserMessage('A', { last_assistant_question_seq: null, last_assistant_question_epoch: E });
+		// A later write of non-question prose still clears it…
+		observeSessionRows([listRow(4, null, 13)]);
 		expect(has('A')).toBe(false);
-		observeLastUserMessage('A', row(16, 13));
+		// …and a later question after a newer user message marks it.
+		observeSessionRows([listRow(5, 15, 14)]);
 		expect(has('A')).toBe(true);
-		observeLastUserMessage('A', row(15, 14));
+	});
+
+	it('a retry that restores an earlier question marks again (rows and frames)', () => {
+		// user 1 → "First?" 2 → tools 3–4 → "Second?" 5 → streaming 6 → retry 7 restores 2.
+		const steps: (number | null)[] = [null, 2, 2, 2, 5, null, 2];
+		steps.forEach((q, i) => observeSessionRows([listRow(i + 1, q, 1)]));
+		expect(has('A')).toBe(true);
+		steps.forEach((q) => observeLastUserMessage('B', row(q, 1)));
+		expect(has('B')).toBe(true);
+	});
+
+	it('a row equal to a pushed frame\'s base version does not undo the frame', () => {
+		observeSessionRows([listRow(3, 16, 13)]);
+		observeLastUserMessage('A', row(null, 13)); // pushed: non-question prose
+		expect(has('A')).toBe(false);
+		// An in-flight list row from before the frame (observeSessionRows would
+		// skip it as unchanged; a leaving/visit row lookup would not).
+		observeLastUserMessage('A', listRow(3, 16, 13));
+		expect(has('A')).toBe(false);
+		observeSessionRows([listRow(4, 18, 13)]);
+		expect(has('A')).toBe(true);
+	});
+
+	it('a /live snapshot seeds a session no row has set', () => {
+		finishUserMessageRevisionSeed('A', beginUserMessageRevisionSeed('A'), row(4, 2));
 		expect(has('A')).toBe(true);
 	});
 

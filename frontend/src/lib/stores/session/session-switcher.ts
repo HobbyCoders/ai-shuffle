@@ -813,7 +813,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// whether it answers a question, so a late snapshot cannot clear early.
 		const revisionMeta = snap?.session_meta;
 		if (revisionClaim !== null) finishUserMessageRevisionSeed(sessionId, revisionClaim, revisionMeta);
-		else observeLastUserMessage(sessionId, revisionMeta);
+		else observeLastUserMessage(sessionId, revisionMeta, { snapshot: true });
 		if (!snap) return;
 		if (generation !== _switchGeneration) return;
 		if (getState().sessionId !== sessionId) return;
