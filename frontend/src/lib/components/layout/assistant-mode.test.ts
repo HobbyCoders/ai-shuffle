@@ -11,7 +11,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { isAssistantHome } from '$lib/stores/assistant';
+import { chatIdentity, isAssistantHome } from '$lib/stores/assistant';
 import type { AssistantState } from '$lib/api/assistant';
 
 // HTML comments only: a block-comment pattern would also eat `accept="image/*"`.
@@ -31,6 +31,22 @@ describe('isAssistantHome', () => {
 		expect(isAssistantHome(null, state)).toBe(false);
 		expect(isAssistantHome('home', null)).toBe(false);
 		expect(isAssistantHome('', { home_session_id: '' } as unknown as AssistantState)).toBe(false);
+	});
+});
+
+describe('chatIdentity (fails closed for Rename / Fork / Delete)', () => {
+	const state = { home_session_id: 'home' } as AssistantState;
+	it('is unknown until the auth status and, for an admin, the assistant state are loaded', () => {
+		expect(chatIdentity('home', null, state)).toBe('unknown');
+		expect(chatIdentity('other', true, null)).toBe('unknown');
+	});
+	it('names the home and ordinary chats once known', () => {
+		expect(chatIdentity('home', true, state)).toBe('assistant');
+		expect(chatIdentity('other', true, state)).toBe('ordinary');
+		expect(chatIdentity('other', true, { home_session_id: null } as AssistantState)).toBe('ordinary');
+	});
+	it('treats a non-admin chat as ordinary without the assistant state', () => {
+		expect(chatIdentity('other', false, null)).toBe('ordinary');
 	});
 });
 
