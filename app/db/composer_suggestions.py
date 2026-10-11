@@ -8,7 +8,9 @@ def save(session_id: str, turn_id: str, suggestion: str) -> bool:
         # A late generation must not overwrite a newer turn's saved hint.
         cursor.execute(
             "INSERT INTO composer_suggestions (session_id, turn_id, suggestion) "
-            "SELECT %s, %s, %s WHERE %s = (SELECT id FROM turns WHERE session_id=%s "
+            "SELECT %s, %s, %s WHERE %s = (SELECT CASE "
+            "WHEN stop_reason='steered' THEN COALESCE(parent_turn_id, id) ELSE id END "
+            "FROM turns WHERE session_id=%s "
             "ORDER BY created_at DESC, id DESC LIMIT 1) "
             "ON CONFLICT (session_id) DO UPDATE SET "
             "turn_id=excluded.turn_id, suggestion=excluded.suggestion",

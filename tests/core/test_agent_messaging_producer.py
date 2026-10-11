@@ -942,7 +942,9 @@ async def test_dispatched_worker_native_continuation_lifecycle(
                 (continuation,) = turns_db.get_queued_turns("native-child")
                 assert continuation["source"] == "unpark"
                 assert continuation["payload"]["agent_message_reply_to"] == "root"
-                outcome = await session_runtime.execute(continuation)
+                runtime = session_runtime.SessionRuntime(continuation)
+                outcome = await runtime.execute()
+                continuation = runtime.turn
             assert outcome == ("completed" if ending in {"completed", "parked_report"} else "aborted")
             assert len(provider.requests) == (3 if ending == "parked_report" else 2)
             # The native engine resumed its own stored conversation, not a fresh loop.

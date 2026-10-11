@@ -703,7 +703,7 @@ def start_turn(
                 cursor.execute(
                     "SELECT * FROM turns WHERE session_id=%s AND state <> 'queued' "
                     "AND COALESCE(stop_reason, '') <> 'steered' "
-                    "ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE",
+                    "ORDER BY position DESC, created_at DESC, id DESC LIMIT 1 FOR UPDATE",
                     (candidate["session_id"],),
                 )
                 previous = _row(cursor.fetchone())
@@ -1165,7 +1165,8 @@ def get_latest_turn(session_id: str) -> Optional[Dict[str, Any]]:
 
     Used to read the caller's most recent per-turn ``overrides`` (e.g. the
     permission mode the user picked in the composer) when a Task-dispatched
-    worker inherits its parent's effective permission level.
+    worker inherits its parent's effective permission level. A parked
+    continuation's queue row resolves to the logical turn it resumed.
     """
     with get_db() as conn:
         cursor = conn.cursor()
@@ -1175,7 +1176,10 @@ def get_latest_turn(session_id: str) -> Optional[Dict[str, Any]]:
             (session_id,),
         )
         row = cursor.fetchone()
-    return _row(row)
+    latest = _row(row)
+    if latest and latest.get("stop_reason") == "steered" and latest.get("parent_turn_id"):
+        return get_turn(latest["parent_turn_id"])
+    return latest
 
 
 def get_latest_run_turn(session_id: str) -> Optional[Dict[str, Any]]:
