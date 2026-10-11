@@ -123,6 +123,8 @@
 	/** Context used, read back from the shared ring for the panel's usage row. */
 	let usagePercent = $state(0);
 	let usageOverLimit = $state(false);
+	/** Tokens used when the model's context window is unknown (no percentage then). */
+	let usageUnknownUsed = $state<string | null>(null);
 	const RING_C = 2 * Math.PI * 6;
 	const usageSeverity = $derived(usagePercent > 90 ? 'danger' : usagePercent >= 70 ? 'warning' : 'ok');
 
@@ -558,7 +560,7 @@
 		{/if}
 
 		<div class="qcell usage" data-cell="usage">
-			<ContextUsageBar bind:this={usageBar} bind:percent={usagePercent} bind:overLimit={usageOverLimit} onOpenChange={onUsageOpenChange} showPercent />
+			<ContextUsageBar bind:this={usageBar} bind:percent={usagePercent} bind:overLimit={usageOverLimit} bind:unknownWindowUsed={usageUnknownUsed} onOpenChange={onUsageOpenChange} showPercent />
 		</div>
 
 		<button
@@ -702,13 +704,15 @@
 							</button>
 							{#if modelNotice}<p class="mcp-warn">{modelNotice}</p>{/if}
 							<button type="button" class="tile usage-row" onclick={openUsage}>
-								<svg class="usage-ring {usageSeverity}" width="22" height="22" viewBox="0 0 16 16" aria-hidden="true">
+								<svg class="usage-ring {usageSeverity}" class:unknown={usageUnknownUsed != null} width="22" height="22" viewBox="0 0 16 16" aria-hidden="true">
 									<circle class="ring-track" cx="8" cy="8" r="6" fill="none" stroke-width="2.4" />
-									<circle class="ring-progress" cx="8" cy="8" r="6" fill="none" stroke-width="2.4" stroke-linecap="round"
-										stroke-dasharray={RING_C} stroke-dashoffset={RING_C * (1 - Math.min(100, Math.max(0, usagePercent)) / 100)} />
+									{#if usageUnknownUsed == null}
+										<circle class="ring-progress" cx="8" cy="8" r="6" fill="none" stroke-width="2.4" stroke-linecap="round"
+											stroke-dasharray={RING_C} stroke-dashoffset={RING_C * (1 - Math.min(100, Math.max(0, usagePercent)) / 100)} />
+									{/if}
 								</svg>
 								<b>Context and usage</b>
-								<span class="pct">{usageOverLimit ? 'Over limit' : `${usagePercent}%`}</span>
+								<span class="pct">{usageUnknownUsed != null ? `${usageUnknownUsed} used` : usageOverLimit ? 'Over limit' : `${usagePercent}%`}</span>
 								<ChevronRight size={20} class="mcp-chev" aria-hidden="true" />
 							</button>
 							{#if showSetupTiles && rendered}
@@ -1083,6 +1087,7 @@
 	.usage-ring .ring-progress { stroke: var(--primary); transition: stroke-dashoffset 0.3s ease; }
 	.usage-ring.warning .ring-progress { stroke: var(--warning); }
 	.usage-ring.danger .ring-progress { stroke: var(--destructive); }
+	.usage-ring.unknown .ring-track { stroke-dasharray: 2.4 2.31; }
 
 	.toggles { display: grid; grid-template-columns: repeat(var(--n, 2), minmax(0, 1fr)); gap: 8px; }
 	.toggle { min-height: 80px; display: flex; flex-direction: column; justify-content: space-between; gap: 6px; }

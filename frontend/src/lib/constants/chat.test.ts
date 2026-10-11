@@ -16,13 +16,17 @@ vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.get }
 }));
 
-import { CONTEXT_MAX, CONTEXT_MAX_1M, getContextMaxForModel } from './chat';
+import { CONTEXT_MAX_1M, getContextMaxForModel } from './chat';
 import { hydrateModelRegistry } from './models';
 
 describe('getContextMaxForModel — before hydration (static registry)', () => {
-	it('returns the default 200k for an unknown model', () => {
-		expect(getContextMaxForModel('openai/gpt-x')).toBe(CONTEXT_MAX);
-		expect(CONTEXT_MAX).toBe(200_000);
+	it('returns null for an unknown model — never an invented 200k (#2274)', () => {
+		expect(getContextMaxForModel('openai/gpt-x')).toBeNull();
+		expect(getContextMaxForModel('x-ai/grok-4', 'prov-xai')).toBeNull();
+	});
+
+	it('uses a built-in Claude table entry with a 200k window as is', () => {
+		expect(getContextMaxForModel('claude-haiku-4-5')).toBe(200_000);
 	});
 
 	it('uses the static Claude windows (sonnet/opus/fable are natively 1M)', () => {
@@ -39,13 +43,13 @@ describe('getContextMaxForModel — before hydration (static registry)', () => {
 
 	it('no longer guesses 1M from an id that merely contains "1m"', () => {
 		// The /1m/i heuristic is gone — the registry is the only source now.
-		expect(getContextMaxForModel('claude-sonnet-4-1m')).toBe(CONTEXT_MAX);
-		expect(getContextMaxForModel('some-other-1m-model')).toBe(CONTEXT_MAX);
+		expect(getContextMaxForModel('claude-sonnet-4-1m')).toBeNull();
+		expect(getContextMaxForModel('some-other-1m-model')).toBeNull();
 	});
 
-	it('returns the default 200k for a null/undefined model', () => {
-		expect(getContextMaxForModel(null)).toBe(CONTEXT_MAX);
-		expect(getContextMaxForModel(undefined)).toBe(CONTEXT_MAX);
+	it('returns null for a null/undefined model', () => {
+		expect(getContextMaxForModel(null)).toBeNull();
+		expect(getContextMaxForModel(undefined)).toBeNull();
 	});
 });
 
@@ -86,15 +90,19 @@ describe('getContextMaxForModel — after hydration (registry-aware)', () => {
 		// Two models on one provider row can now disagree.
 		expect(getContextMaxForModel('vendor/big', 'prov-1')).toBe(CONTEXT_MAX_1M);
 
-		// A provider model with no declared window falls back to the default.
-		expect(getContextMaxForModel('vendor/plain', 'prov-1')).toBe(CONTEXT_MAX);
+		// A provider model with no declared window is unknown, not 200k.
+		expect(getContextMaxForModel('vendor/plain', 'prov-1')).toBeNull();
+
+		// The curated entry's window is scoped to its provider: another
+		// provider offering the same id does not borrow it.
+		expect(getContextMaxForModel('openai/gpt-x', 'prov-2')).toBeNull();
 
 		// Claude slugs come from the hydrated Claude side of the registry.
 		expect(getContextMaxForModel('sonnet')).toBe(CONTEXT_MAX_1M);
 		expect(getContextMaxForModel('haiku')).toBe(CONTEXT_MAX_1M);
 
-		// Unknown-to-registry id → default 200k (no "1m" guessing).
-		expect(getContextMaxForModel('some-other-1m-model')).toBe(CONTEXT_MAX);
-		expect(getContextMaxForModel('unknown-model')).toBe(CONTEXT_MAX);
+		// Unknown-to-registry id → null (no "1m" guessing, no 200k default).
+		expect(getContextMaxForModel('some-other-1m-model')).toBeNull();
+		expect(getContextMaxForModel('unknown-model')).toBeNull();
 	});
 });
