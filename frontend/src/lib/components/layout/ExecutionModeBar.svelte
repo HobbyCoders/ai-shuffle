@@ -4,8 +4,8 @@
 	 *
 	 * Positioned below the chat input island. Shows a single dropdown
 	 * pill for execution mode (the current mode's icon + label + chevron;
-	 * clicking opens an upward menu with Local as the base mode and an
-	 * orthogonal Worktree checkbox) with an inline branch selector when
+	 * clicking opens an upward flat list of workers, Local first) and an
+	 * orthogonal worktree checkbox chip, with an inline branch selector when
 	 * worktree mode is active. Includes "New Branch" creation modal. In Auto
 	 * mode the branch chip reads "Auto from {base}" and the base-branch picker
 	 * lives in that same dropdown.
@@ -22,14 +22,17 @@
 	import {
 		peerRunners,
 		checkoutEligibility,
-		isIneligible,
 		isBlocked,
-		runnerTitle,
-		emptyRunnersCopy
+		runnerTitle
 	} from './execution-mode-eligibility';
+	import { workerRowNote } from '$lib/components/chat/runner-badge-menu';
 	import WorkerStatusDot from '$lib/components/ui/WorkerStatusDot.svelte';
+	import WorkerMenuList, { type WorkerMenuRow } from '$lib/components/ui/WorkerMenuList.svelte';
+
+	// Local's row id; install ids are UUID-like, so this never collides.
+	const LOCAL_ROW_ID = '__local__';
 	import { worktrees as worktreeStore, branches as branchStore, git, currentBranch as gitCurrentBranch } from '$lib/stores/git.svelte';
-	import { ChevronDown, ChevronRight, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
+	import { ChevronDown, Server, GitBranch, Monitor, GitFork, Plus, Loader2, Check } from 'lucide-svelte';
 	import { untrack, type Snippet } from 'svelte';
 
 	function keepInViewport(node: HTMLElement) {
@@ -212,7 +215,6 @@
 		// Local is the base mode; picking it drops any runner choice so the
 		// session is created on (and owned by) this install.
 		activeSession.setDeviceIntent(null);
-		cloudExpanded = false;
 		showModeDropdown = false;
 	}
 
@@ -221,13 +223,11 @@
 		// Leave the menu open so the user sees the checkbox flip and can keep going.
 	}
 
-	// --- Cloud (other runners) section ---
+	// --- Runner list ---
 	//
-	// An inline accordion INSIDE the mode menu, not a flyout submenu: this
-	// codebase has no submenu primitive, and a nested floating panel would need
-	// its own outside-click/placement handling on mobile. The list is `installs`
-	// (full processes that can host a session), not `mobile_devices` (phones).
-	let cloudExpanded = $state(false);
+	// One flat list, matching the active session's runner menu: this worker
+	// ("Local") first, then every other install. The list is `installs` (full
+	// processes that can host a session), not `mobile_devices` (phones).
 	let installsLoading = $state(false);
 	// The last open's load failed: list nothing, as before, until a later load
 	// succeeds.
@@ -300,8 +300,32 @@
 		eligibility = checkoutEligibility(gitState);
 	}
 
-	function toggleCloud() {
-		cloudExpanded = !cloudExpanded;
+	// Rows for the shared worker list. Local is this worker: always online,
+	// never blocked. Peers keep their blocked state and tooltip.
+	const runnerRows = $derived<WorkerMenuRow[]>([
+		{
+			id: LOCAL_ROW_ID,
+			label: 'Local',
+			online: true,
+			disabled: false,
+			title: 'Run this session on this device',
+			checked: !deviceIntent
+		},
+		...peers.map((install): WorkerMenuRow => ({
+			id: install.id,
+			label: install.device_name,
+			online: install.online,
+			disabled: isBlocked(install, worktreeOn, eligibility),
+			title: runnerTitle(install, worktreeOn, eligibility),
+			note: workerRowNote(install, eligibility),
+			checked: deviceIntent?.id === install.id
+		}))
+	]);
+
+	function selectRunnerRow(row: WorkerMenuRow) {
+		if (row.id === LOCAL_ROW_ID) return selectBaseMode();
+		const install = peers.find((i) => i.id === row.id);
+		if (install) selectDevice(install);
 	}
 
 	function selectDevice(install: Install) {
@@ -392,9 +416,10 @@
 
 <div class="execution-mode-bar" class:sheet-mode={sheetMode}>
 	<div class="mode-bar-row">
-		<!-- Runner chip: this device or a cloud runner. Opens an upward menu with
-		     Local as a radio plus the Cloud accordion. The worktree modifier is
-		     its own checkbox chip further along the row. -->
+		<!-- Runner chip: this device or another worker. Opens an upward menu
+		     listing every worker as a radio row (WorkerMenuList, shared with the
+		     active session's runner menu). The worktree modifier is its own
+		     checkbox chip further along the row. -->
 		<div class="mode-selector" bind:this={modeDropdownRef}>
 			<button
 				type="button"
@@ -421,71 +446,19 @@
 			</button>
 
 			{#if showModeDropdown}
+				<!-- One flat list of workers, the same rows the active session's
+				     runner menu shows: this worker first, then every peer. Picking
+				     a peer stamps the new session with that runner's ownership. -->
 				<div use:keepInViewport class="mode-dropdown branch-dropdown" role="menu" aria-label="Runner selection">
-					<!-- Base mode: Local -->
-					<button
-						type="button"
-						class="branch-item"
-						class:active={!deviceIntent}
-						onclick={() => selectBaseMode()}
-						title="Run this session on this device"
+					<WorkerMenuList
+						items={runnerRows}
 						role="menuitemradio"
-						aria-checked={!deviceIntent}
-					>
-						<Monitor size={13} strokeWidth={1.5} />
-						<WorkerStatusDot online />
-						<span class="branch-item-name">Local</span>
-					</button>
-
-					<!-- Cloud: inline accordion listing the other runners. Creating
-					     the session there stamps it with that runner's ownership. -->
-					<button
-						type="button"
-						class="branch-item cloud-item"
-						onclick={toggleCloud}
-						title="Run this session on another runner"
-						aria-expanded={cloudExpanded}
-					>
-						<Server size={13} strokeWidth={1.5} />
-						<span class="branch-item-name">Other workers</span>
-						<ChevronRight size={12} strokeWidth={1.5} class={cloudExpanded ? 'cloud-caret open' : 'cloud-caret'} />
-					</button>
-
-					{#if cloudExpanded}
-						<div class="cloud-section">
-							{#if installsLoading}
-								<div class="branch-loading">
-									<Loader2 size={14} class="animate-spin" />
-									<span>Loading...</span>
-								</div>
-							{:else if peers.length === 0}
-								<p class="branch-empty">{emptyRunnersCopy}</p>
-							{:else}
-								{#each peers as install (install.id)}
-									<button
-										type="button"
-										class="branch-item device-item"
-										class:active={deviceIntent?.id === install.id}
-										class:disabled={isBlocked(install, worktreeOn, eligibility)}
-										onclick={() => selectDevice(install)}
-										title={runnerTitle(install, worktreeOn, eligibility)}
-										role="menuitemradio"
-										aria-checked={deviceIntent?.id === install.id}
-										aria-disabled={isBlocked(install, worktreeOn, eligibility)}
-									>
-										<Server size={13} strokeWidth={1.5} />
-										<WorkerStatusDot online={install.online} />
-										<span class="branch-item-name">{install.device_name}</span>
-										{#if !install.online}
-											<span class="device-nocheckout">offline</span>
-										{:else if isIneligible(eligibility, install.id)}
-											<span class="device-nocheckout">no checkout</span>
-										{/if}
-									</button>
-								{/each}
-							{/if}
-						</div>
-					{/if}
+						loading={installsLoading && peers.length === 0 && !installsFailed}
+						error={installsFailed ? 'Could not load workers. Try again.' : null}
+						onRetry={loadInstalls}
+						emptyText={!installsLoading && peers.length === 0 ? 'No other workers available.' : null}
+						onSelect={selectRunnerRow}
+					/>
 				</div>
 			{/if}
 		</div>
@@ -808,66 +781,12 @@
 		color: var(--primary-foreground);
 	}
 
-	/* Cloud accordion: an inline section inside the mode menu (no flyout). */
-	.cloud-section {
-		padding-left: 12px;
-		border-left: 1px solid var(--border);
-		margin-left: 10px;
-	}
-
-	.cloud-item :global(svg.cloud-caret) {
-		transition: transform 120ms ease;
-	}
-
-	.cloud-item :global(svg.cloud-caret.open) {
-		transform: rotate(90deg);
-	}
-
-	/* Unavailable rows stay in the menu (so the reason is visible via title)
-	   but read and behave as inert. */
-	.branch-item.disabled {
-		opacity: 0.45;
-		cursor: not-allowed;
-	}
-
-	/* Worker rows dim their contents instead, so an offline worker's red dot
-	   stays readable next to its greyed name. */
-	.branch-item.device-item.disabled {
-		opacity: 1;
-	}
-
-	.branch-item.device-item.disabled > :global(:not(.worker-status-dot)) {
-		opacity: 0.45;
-	}
-
-	.branch-item.disabled:hover {
-		background: transparent;
-	}
-
-	/* The device is reachable but has no checkout of this project. The outline is
-	   deliberately subtle because the row stays selectable in plain mode. */
-	.device-nocheckout {
-		font-size: 0.5625rem;
-		font-weight: 500;
-		padding: 1px 5px;
-		border-radius: 4px;
-		border: 1px solid color-mix(in oklch, var(--muted-foreground) 25%, transparent);
-		color: var(--muted-foreground);
-		opacity: 0.75;
-	}
-
 	.mode-trigger-label {
 		max-width: min(160px, 40vw);
 	}
 
 	/* Mode dropdown — reuses .branch-dropdown visuals; anchored to the pill's left
 	   edge (it's the leftmost pill) and opens upward like the branch dropdown. */
-	.mode-dropdown {
-		left: 0;
-		right: auto;
-		min-width: 160px;
-	}
-
 	/* Branch selector */
 	.branch-selector {
 		position: relative;
@@ -905,6 +824,21 @@
 		padding: 4px;
 		z-index: 100;
 		animation: branchDropdown 120ms cubic-bezier(0.16, 1, 0.3, 1);
+	}
+
+	/* Runner menu: the same surface as the active session's runner menu
+	   (ContextPillBar `.runner-dropdown`), so the two pickers read as one
+	   control. It must come AFTER `.branch-dropdown`: the menu carries both
+	   classes at equal specificity, so source order decides. The sheet-mode
+	   and phone rules further down still win (higher specificity / later). */
+	.mode-dropdown {
+		left: 0;
+		right: auto;
+		min-width: 220px;
+		max-width: min(320px, calc(100vw - 24px));
+		max-height: 320px;
+		background: var(--popover);
+		border-radius: calc(var(--radius, 0.75rem) * 0.83);
 	}
 
 	@keyframes branchDropdown {
@@ -1110,19 +1044,17 @@
 			max-width: none;
 		}
 
-		/* Mode menu: keep it anchored to its OWN trigger (.mode-selector stays
-		   position: relative). The shared .branch-dropdown rule above anchors to
-		   .execution-mode-bar, but that container is shrink-wrapped to the pills —
-		   in local mode it's just the narrow "Local" pill, so left/right:12px
-		   collapsed this menu to a sliver and truncated the mode labels. Anchor to
-		   the trigger's right edge instead (the mode pill always sits right of the
-		   profile pill, so the menu grows leftward and stays on screen), sized to
-		   its short fixed labels and clamped to the viewport. */
+		/* Runner menu: keep it anchored to its OWN trigger (.mode-selector stays
+		   position: relative), not the shrink-wrapped .execution-mode-bar the
+		   shared .branch-dropdown rule above uses — that collapsed it to a
+		   sliver. Same anchoring and width as the active session's runner menu
+		   (left edge of the chip, 220px floor); keepInViewport shifts it back on
+		   screen if it would overflow. */
 		.mode-dropdown {
-			left: auto;
-			right: 0;
-			width: max-content;
-			min-width: 0;
+			left: 0;
+			right: auto;
+			width: auto;
+			min-width: 220px;
 			max-width: calc(100vw - 24px);
 		}
 	}
@@ -1132,10 +1064,6 @@
 		.branch-dropdown,
 		:global(.animate-spin) {
 			animation: none;
-		}
-
-		.cloud-item :global(svg.cloud-caret) {
-			transition: none;
 		}
 	}
 </style>
