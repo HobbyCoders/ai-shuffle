@@ -164,7 +164,10 @@ tags are never publication evidence and cannot advance this baseline.
 
 With neither live nor cached publication evidence, the check warns and examines
 all first-parent changes since repository bootstrap, rather than guessing an
-unpublished range. An entirely in-reach history passes without PR API calls;
+unpublished range. This fallback requires complete Git history: a shallow clone
+refuses with `git fetch --unshallow origin` as the recovery instruction, because
+its oldest visible commit is not proof of repository bootstrap.
+An entirely in-reach history passes without PR API calls;
 out-of-reach changes still need their own acceptance labels. This cold-cache
 case can conservatively recheck older history, but never skips an unpublished
 out-of-reach merge. A pointer outside the candidate's first-parent history

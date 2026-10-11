@@ -399,6 +399,38 @@ def test_network_outage_does_not_block_in_reach_history(reach_history, signed_fe
     assert ("reverified cached signed publication" if cached else "no verified cached publication") in reason
 
 
+def test_cold_cache_depth_one_clone_cannot_skip_launcher_change(reach_history, signed_feed,
+                                                               monkeypatch, tmp_path):
+    base, commit = reach_history
+    head = commit("desktop/src/main/managed-entry.ts", "export const version = 2;")
+    source = Path(gate.load_update_reach().git("rev-parse", "--show-toplevel"))
+    shallow = tmp_path / "shallow"
+    subprocess.run(["git", "clone", "--quiet", "--depth=1", source.as_uri(), str(shallow)], check=True)
+    reach = gate.load_update_reach()
+    def git(*args, **kwargs):
+        return subprocess.check_output(["git", *args], cwd=shallow, text=True).strip()
+    monkeypatch.setattr(reach, "git", git)
+    monkeypatch.setattr(gate, "published_edge_revision", REAL_PUBLISHED_EDGE_REVISION)
+    signed_feed[1]["offline"] = True
+    calls = []
+    def api(endpoint):
+        calls.append(endpoint)
+        return [merged_pr(head)]
+    assert git("rev-parse", "--is-shallow-repository") == "true"
+    assert git("rev-list", "--first-parent", head) == head  # truncated, not bootstrap
+    ready, reason = gate.update_reach_readiness(head, api=api)
+    assert not ready
+    assert "incomplete Git history" in reason
+    assert "git fetch --unshallow origin" in reason
+    assert calls == []
+    # The prescribed recovery exposes the unpublished launcher change again.
+    git("fetch", "--unshallow", "origin")
+    assert git("rev-parse", "--is-shallow-repository") == "false"
+    ready, reason = gate.update_reach_readiness(head, api=api)
+    assert not ready and "PR #42" in reason and "update-reach:windows-launcher" in reason
+    assert calls == [f"commits/{head}/pulls?per_page=100"]
+
+
 @pytest.mark.parametrize("accepted", [False, True])
 @pytest.mark.parametrize("cached", [False, True])
 def test_outage_still_requires_labels(reach_history, signed_feed, monkeypatch, accepted, cached):

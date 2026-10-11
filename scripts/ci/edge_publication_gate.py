@@ -127,6 +127,10 @@ def update_reach_readiness(revision, *, api=None, base=None):
                 except Exception:
                     # No publication evidence at all: never skip an unpublished
                     # change by guessing a baseline from local tags or HEAD^.
+                    # A shallow boundary is not repository bootstrap.
+                    if reach.git("rev-parse", "--is-shallow-repository") != "false":
+                        return False, warning + ("no verified cached publication and incomplete Git history; "
+                                                 "run `git fetch --unshallow origin` and retry attestation.")
                     base = reach.git("rev-list", "--first-parent", revision).splitlines()[-1]
                     warning += ("no verified cached publication; checking all first-parent changes "
                                 "since repository bootstrap. Local tags are not publication evidence.\n")
