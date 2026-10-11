@@ -96,4 +96,70 @@ describe('PendingMessages', () => {
 		const { container } = renderPending([makeMessage({ content: 'x'.repeat(900) })]);
 		expect(container.querySelector('.bubble-text.is-clamped')).not.toBeNull();
 	});
+
+	describe('unsend verdict states (#2275)', () => {
+		it('shows "Cancelling…" and disables the last chip\'s unsend and Interrupt', async () => {
+			const { container, onRemove, onInterrupt } = renderPending([
+				makeMessage({ id: 'q-1', status: 'cancelling' })
+			]);
+
+			const status = screen.getByRole('status');
+			expect(status.textContent).toBe('Cancelling…');
+			expect(screen.queryByText('Not seen yet')).toBeNull();
+			const interrupt = screen.getByRole('button', { name: 'Interrupt' }) as HTMLButtonElement;
+			const remove = container.querySelector('.pending-remove') as HTMLButtonElement;
+			expect(interrupt.disabled).toBe(true);
+			expect(remove.disabled).toBe(true);
+			expect(container.querySelector('[role="article"]')?.getAttribute('aria-busy')).toBe('true');
+
+			await fireEvent.click(interrupt);
+			await fireEvent.click(remove);
+			expect(onInterrupt).not.toHaveBeenCalled();
+			expect(onRemove).not.toHaveBeenCalled();
+		});
+
+		it('disables an earlier chip\'s hover "×" while it is cancelling', async () => {
+			const { container, onRemove } = renderPending([
+				makeMessage({ id: 'q-1', content: 'first', status: 'cancelling' }),
+				makeMessage({ id: 'q-2', content: 'second' })
+			]);
+
+			const hover = container.querySelector('.hover-remove') as HTMLButtonElement;
+			expect(hover.disabled).toBe(true);
+			await fireEvent.click(hover);
+			expect(onRemove).not.toHaveBeenCalled();
+			// The earlier chip carries its own status line; the last chip is untouched.
+			const firstCol = container.querySelectorAll('.usercol')[0];
+			expect(firstCol.querySelector('[role="status"]')?.textContent).toBe('Cancelling…');
+			expect(screen.getByText('Not seen yet')).toBeTruthy();
+			expect((screen.getByRole('button', { name: 'Interrupt' }) as HTMLButtonElement).disabled).toBe(false);
+		});
+
+		it('shows "Already sent" with no unsend or Interrupt controls', () => {
+			const { container } = renderPending([
+				makeMessage({ id: 'q-1', content: 'first', status: 'delivered' }),
+				makeMessage({ id: 'q-2', content: 'second', status: 'delivered' })
+			]);
+
+			const statuses = screen.getAllByRole('status');
+			expect(statuses.map((s) => s.textContent)).toEqual(['Already sent', 'Already sent']);
+			expect(statuses.every((s) => s.classList.contains('is-delivered'))).toBe(true);
+			expect(container.querySelector('.hover-remove')).toBeNull();
+			expect(container.querySelector('.pending-remove')).toBeNull();
+			expect(screen.queryByRole('button', { name: 'Interrupt' })).toBeNull();
+		});
+
+		it('leaves chips without a status unchanged', () => {
+			const { container } = renderPending([
+				makeMessage({ id: 'q-1', content: 'first' }),
+				makeMessage({ id: 'q-2', content: 'second' })
+			]);
+
+			expect(screen.queryByRole('status')).toBeNull();
+			expect(container.querySelectorAll('.pending-actions')).toHaveLength(1);
+			for (const b of container.querySelectorAll('button')) {
+				expect((b as HTMLButtonElement).disabled).toBe(false);
+			}
+		});
+	});
 });
