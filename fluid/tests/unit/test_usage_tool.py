@@ -20,7 +20,7 @@ def test_get_usage_is_registered_for_native_and_code_mode_surfaces() -> None:
     assert "as shown in the Usage UI" not in spec.description
     assert "Quote percentages as 'left'" in spec.description
     assert "subscription rows in the Usage popover show the same left number" in spec.description
-    assert "other API-key provider windows and Settings meters currently display used" in spec.description
+    assert "some API-key provider windows and Settings meters currently display used" in spec.description
     assert "used_percent is 100 minus left" in spec.description
     assert "Reports used and remaining percentages" not in spec.description
     assert "reset timestamps, source, freshness, and unavailable data explicitly" in spec.description

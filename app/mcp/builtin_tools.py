@@ -2719,7 +2719,7 @@ def create_builtin_tools_server(
         "reset timestamps, "
         "source, freshness, and unavailable data explicitly. "
         "Quote percentages as 'left': subscription rows in the Usage popover "
-        "show the same left number; other API-key provider windows and Settings "
+        "show the same left number; some API-key provider windows and Settings "
         "meters currently display used. "
         "Read-only: it "
         "never refreshes providers or reads credentials.",

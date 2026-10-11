@@ -33,7 +33,7 @@ def test_get_usage_is_registered_and_allowlisted():
     assert "as shown in the Usage UI" not in description
     assert "Quote percentages as 'left'" in description
     assert "subscription rows in the Usage popover show the same left number" in description
-    assert "other API-key provider windows and Settings meters currently display used" in description
+    assert "some API-key provider windows and Settings meters currently display used" in description
     assert "used_percent is 100 minus left" in description
     assert "Reports used and remaining percentages" not in description
     assert "reset timestamps, source, freshness, and unavailable data explicitly" in description

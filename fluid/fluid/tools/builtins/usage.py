@@ -21,7 +21,7 @@ SPEC = ToolSpec(
         "reset timestamps, "
         "source, freshness, and unavailable data explicitly. "
         "Quote percentages as 'left': subscription rows in the Usage popover "
-        "show the same left number; other API-key provider windows and Settings "
+        "show the same left number; some API-key provider windows and Settings "
         "meters currently display used. "
         "This is read-only "
         "and never refreshes a provider or reads credentials. Session token "
