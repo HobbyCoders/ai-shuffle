@@ -162,10 +162,14 @@ def test_search_returns_only_chats_the_caller_may_read(client, path):
 
 
 def test_state_route_carries_no_transcript_and_stays_open(client):
-    """Left open on purpose: title and status only, like the session list."""
+    """Left open on purpose: metadata only, like the session list."""
     response = _get(client, "GET", "/api/v1/sessions/owner-chat/state", "member-phone")
     assert response.status_code == 200
-    assert set(response.json()) == {"session_id", "title", "status", "is_streaming", "connected_devices"}
+    assert set(response.json()) == {
+        "session_id", "title", "status", "last_user_message_at",
+        "is_streaming", "connected_devices",
+    }
+    assert response.json()["last_user_message_at"] is None
 
 
 def test_session_sync_socket_follows_the_image_rule(client, monkeypatch):
