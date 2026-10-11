@@ -1041,19 +1041,17 @@
 			max-width: none;
 		}
 
-		/* Mode menu: keep it anchored to its OWN trigger (.mode-selector stays
-		   position: relative). The shared .branch-dropdown rule above anchors to
-		   .execution-mode-bar, but that container is shrink-wrapped to the pills —
-		   in local mode it's just the narrow "Local" pill, so left/right:12px
-		   collapsed this menu to a sliver and truncated the mode labels. Anchor to
-		   the trigger's right edge instead (the mode pill always sits right of the
-		   profile pill, so the menu grows leftward and stays on screen), sized to
-		   its short fixed labels and clamped to the viewport. */
+		/* Runner menu: keep it anchored to its OWN trigger (.mode-selector stays
+		   position: relative), not the shrink-wrapped .execution-mode-bar the
+		   shared .branch-dropdown rule above uses — that collapsed it to a
+		   sliver. Same anchoring and width as the active session's runner menu
+		   (left edge of the chip, 220px floor); keepInViewport shifts it back on
+		   screen if it would overflow. */
 		.mode-dropdown {
-			left: auto;
-			right: 0;
-			width: max-content;
-			min-width: 0;
+			left: 0;
+			right: auto;
+			width: auto;
+			min-width: 220px;
 			max-width: calc(100vw - 24px);
 		}
 	}
