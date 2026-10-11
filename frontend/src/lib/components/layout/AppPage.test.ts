@@ -291,19 +291,20 @@ describe('AppPage tab title', () => {
  });
 
  it('drops a remembered prose question when a list refresh shows a later user message (#2249)', async () => {
-  const at = '2026-10-11T10:00:00+00:00';
-  list.set([{ id: 'work', status: 'active', last_user_message_at: at }, { id: 'other', status: 'active' }]);
+  const rev = (seq: number) => ({ last_user_message_seq: seq, last_user_message_epoch: 'evt-1' });
+  const positioned = asked.map((m, i) => ({ ...m, seq: 4 + i, epoch: 'evt-1' }));
+  list.set([{ id: 'work', status: 'active', ...rev(4) }, { id: 'other', status: 'active' }]);
   views.set({ type: 'session', sessionId: 'other' });
   active.set({ sessionId: 'other', messages: [], draft: '', project: null, pendingPermissions: [], pendingQuestions: [] } as never);
-  rememberLeavingProseQuestion('work', asked as never, at);
+  rememberLeavingProseQuestion('work', positioned as never, rev(4));
   await boot();
   await waitFor(() => expect(document.title).toBe('(1) AI Shuffle'));
-  // Working time and a same-instant revision are not an answer.
-  list.set([{ id: 'work', status: 'active', last_user_message_at: '2026-10-11T10:00:00Z', work_started_at: '2026-10-11T10:01:00Z' }, { id: 'other', status: 'active' }]);
+  // Working time and a revision at or before the question are not an answer.
+  list.set([{ id: 'work', status: 'active', ...rev(5), work_started_at: '2026-10-11T10:01:00Z' }, { id: 'other', status: 'active' }]);
   await tick();
   expect(document.title).toBe('(1) AI Shuffle');
-  // Answered from another device: the refreshed row carries the later revision.
-  list.set([{ id: 'work', status: 'active', last_user_message_at: '2026-10-11T10:02:00Z' }, { id: 'other', status: 'active' }]);
+  // Answered from another device: the refreshed row carries a later seq.
+  list.set([{ id: 'work', status: 'active', ...rev(6) }, { id: 'other', status: 'active' }]);
   await waitFor(() => expect(document.title).toBe('AI Shuffle'));
   expect(get(proseQuestionSessions).has('work')).toBe(false);
  });

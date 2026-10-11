@@ -669,19 +669,20 @@ describe('Sidebar Needs you lane', () => {
 	// reopening the session here.
 	it('moves a left session out of Needs you when a later user message arrives', async () => {
 		const asked = [
-			{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
-			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' }
+			{ id: 'u1', role: 'user' as const, content: 'Deploy it', seq: 4, epoch: 'evt-1' },
+			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?', seq: 5, epoch: 'evt-1' }
 		];
-		rememberLeavingProseQuestion('settled', asked, '2026-10-11T10:00:00+00:00');
+		const rev = (seq: number) => ({ last_user_message_seq: seq, last_user_message_epoch: 'evt-1' });
+		rememberLeavingProseQuestion('settled', asked, rev(4));
 		onTestFinished(_resetProseQuestions);
 		render(Sidebar, { props: sidebarProps });
 		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
 
-		observeLastUserMessage('settled', '2026-10-11T10:00:00+00:00');
+		observeLastUserMessage('settled', rev(5));
 		await tick();
 		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
 
-		observeLastUserMessage('settled', '2026-10-11T10:03:00+00:00');
+		observeLastUserMessage('settled', rev(6));
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 	});

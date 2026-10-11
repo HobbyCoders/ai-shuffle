@@ -185,6 +185,8 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	// A user message was persisted (any device): patched at once so a
 	// remembered prose question clears (spec §5); see STALE_COMPANION_FIELDS.
 	'last_user_message_at',
+	'last_user_message_seq',
+	'last_user_message_epoch',
 ]);
 
 /**
@@ -248,7 +250,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 	function applyRowUpdates(sessionId: string | undefined, updates: Record<string, unknown>): void {
 		const keys = Object.keys(updates);
 		// Also for rows not loaded here: the remembered question is per session.
-		if ('last_user_message_at' in updates) observeLastUserMessage(sessionId, updates.last_user_message_at);
+		observeLastUserMessage(sessionId, updates);
 		const patch: Record<string, unknown> = {};
 		let needsReload = false;
 		for (const key of keys) {

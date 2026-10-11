@@ -106,6 +106,7 @@ import { get } from 'svelte/store';
 import { browserPanel } from '../../browser-panel.svelte';
 import { sidePanel, sessionPanelKey } from '../../side-panel.svelte';
 import type { ActiveSessionState } from '../../active-session';
+import type { ChatMessage } from '../../types';
 
 // ─── rAF stub: capture callbacks, flush on demand (never auto-fires) ──────────
 
@@ -1553,6 +1554,27 @@ describe('feedController log epoch (resume verification)', () => {
 		expect(hoisted.fromSeq).toBe(3);
 		expect(hoisted.epochs.at(-1)).toBe('ep-1');
 		expect(feedController.hasLogEpoch('s1')).toBe(true);
+	});
+
+	it('rendered assistant texts take the log epoch the feed learns at caught_up (#2249)', () => {
+		const deps = makeDeps();
+		feedController.attach(deps);
+		feedController.start('s1');
+		// Backfill: the fake feed does not know its epoch until the sentinel.
+		hoisted.onEvent!({ ...textDelta('d1', 'Staging '), seq: 4 });
+		hoisted.onEvent!({ ...textDelta('d2', 'or prod?'), seq: 6 });
+		hoisted.feedEpoch = 'ep-7';
+		hoisted.onEvent!(caughtUp(6));
+		flushRaf();
+		const msg = (deps.state.messages as ChatMessage[]).find((m) => m.role === 'assistant');
+		expect(msg).toMatchObject({ content: 'Staging or prod?', seq: 6, epoch: 'ep-7' });
+		// Live deltas stamp it directly.
+		hoisted.onEvent!({ ...textDelta('d3', ' Now.'), seq: 9 });
+		flushRaf();
+		vi.advanceTimersByTime(500);
+		const live = (deps.state.messages as ChatMessage[]).find((m) => m.role === 'assistant');
+		expect(live).toMatchObject({ seq: 9, epoch: 'ep-7' });
+		hoisted.feedEpoch = null;
 	});
 
 	it('a fresh load sends no epoch, and a feed without one reports none', () => {

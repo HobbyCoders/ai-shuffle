@@ -1374,63 +1374,97 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 	});
 
-	it('records the row\'s last_user_message_at on leave, so only a later one clears it (#2249)', async () => {
-		_mockSessions.current = [{ id: 'session-A', last_user_message_at: '2026-10-11T10:00:00+00:00' }];
-		const { switcher } = makeSwitcher(fullState({ messages: asked }));
+	const E = 'evt-epoch-1';
+	const rev = (seq: number | null, epoch: string | null = E) => ({
+		last_user_message_seq: seq,
+		last_user_message_epoch: epoch
+	});
+	/** A transcript whose trailing question was rendered from event `seq`. */
+	const positioned = (seq: number, epoch = E): ChatMessage[] => [
+		{ id: 'u1', role: 'user', content: 'Deploy it', seq: seq - 1, epoch },
+		{ id: 'a1', role: 'assistant', type: 'text', content: 'Staging too, or prod only?', seq, epoch }
+	];
+
+	it('only a later seq in the question\'s log clears it after leaving (#2249)', async () => {
+		_mockSessions.current = [{ id: 'session-A', ...rev(4) }];
+		const { switcher } = makeSwitcher(fullState({ messages: positioned(5) }));
 		await switcher.switchSession('session-B');
-		observeLastUserMessage('session-A', '2026-10-11T10:00:00Z');
+		observeLastUserMessage('session-A', rev(4));
+		observeLastUserMessage('session-A', rev(9, 'evt-other'));
 		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
-		observeLastUserMessage('session-A', '2026-10-11T10:00:05Z');
+		observeLastUserMessage('session-A', rev(6));
+		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
+	});
+
+	it('does not mark a question whose answer the loaded row already carries', async () => {
+		_mockSessions.current = [{ id: 'session-A', ...rev(6) }];
+		const { switcher } = makeSwitcher(fullState({ messages: positioned(5) }));
+		await switcher.switchSession('session-B');
 		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 	});
 
 	describe('the opened session\'s own revision comes from its /live snapshot (#2249)', () => {
-		const T0 = '2026-10-11T10:00:00.000001Z';
 		const isLive = (url: string) => url.startsWith('/sessions/session-A/live');
 		const detailCalls = () => vi.mocked(api.get).mock.calls.filter(([url]) => /^\/sessions\/session-A(\?|$)/.test(url)).length;
-		const stamped = (askedAt: string): ChatMessage[] => [
-			{ id: 'u1', role: 'user', content: 'Deploy it', timestamp: T0 },
-			{ id: 'a1', role: 'assistant', type: 'text', content: 'Staging too, or prod only?', timestamp: askedAt }
-		];
 		const liveCalls = () => vi.mocked(api.get).mock.calls.filter(([url]) => isLive(url)).length;
-		const leaveA = async (switcher: ReturnType<typeof makeSwitcher>['switcher'], deps: ReturnType<typeof makeSwitcher>['deps']) => {
-			deps.update((st) => ({ ...st, messages: asked, isLoadingSession: false, isRestoringSession: false }));
+		const leaveA = async (
+			switcher: ReturnType<typeof makeSwitcher>['switcher'],
+			deps: ReturnType<typeof makeSwitcher>['deps'],
+			messages: ChatMessage[] = positioned(5)
+		) => {
+			deps.update((st) => ({ ...st, messages, isLoadingSession: false, isRestoringSession: false }));
 			await switcher.switchSession('session-B');
 		};
 		beforeEach(() => { vi.mocked(api.get).mockReset().mockResolvedValue(null); });
 		afterEach(() => { vi.mocked(api.get).mockReset().mockResolvedValue(null); });
 
-		it('takes the snapshot\'s value as the baseline when no row is loaded, without a detail request', async () => {
+		it('reads the revision from /live session_meta when no row is loaded, without a detail request', async () => {
 			_mockSessions.current = [];
 			vi.mocked(api.get).mockImplementation(async (url: string) =>
-				isLive(url) ? { session_meta: { last_user_message_at: T0 } } : null);
+				isLive(url) ? { session_meta: rev(6) } : null);
 			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
 			await switcher.switchSession('session-A');
 			await vi.waitFor(() => expect(liveCalls()).toBe(1));
 			await new Promise((r) => setTimeout(r, 0));
+			// The transcript lags: the answer at seq 6 was already seen via /live.
 			await leaveA(switcher, deps);
-			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
-			// A refresh of the same instant is not an answer.
-			observeLastUserMessage('session-A', T0);
-			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 			expect(detailCalls()).toBe(0);
 		});
 
-		it('a cross-device answer broadcast after /live returned clears the mark once the session is left', async () => {
+		it('a pre-question /live value keeps the mark; a cross-device answer afterwards clears it', async () => {
 			_mockSessions.current = [];
 			vi.mocked(api.get).mockImplementation(async (url: string) =>
-				isLive(url) ? { session_meta: { last_user_message_at: T0 } } : null);
+				isLive(url) ? { session_meta: rev(4) } : null);
 			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
 			await switcher.switchSession('session-A');
 			await vi.waitFor(() => expect(liveCalls()).toBe(1));
 			await new Promise((r) => setTimeout(r, 0));
 			await leaveA(switcher, deps);
-			// The very first broadcast after leaving IS the answer.
-			observeLastUserMessage('session-A', '2026-10-11T10:00:00.000002Z');
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			observeLastUserMessage('session-A', rev(4));
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+			observeLastUserMessage('session-A', rev(6));
 			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 		});
 
-		it('holds an answer that lands before /live returns, and clears once the snapshot resolves', async () => {
+		it('a late /live snapshot carrying the pre-question value never clears, nor does a refresh of it', async () => {
+			_mockSessions.current = [];
+			let resolveLive!: (v: unknown) => void;
+			vi.mocked(api.get).mockImplementation((url: string) =>
+				isLive(url) && !resolveLive ? new Promise((done) => { resolveLive = done; }) : Promise.resolve(null));
+			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
+			await switcher.switchSession('session-A');
+			await vi.waitFor(() => expect(resolveLive).toBeDefined());
+			observeLastUserMessage('session-A', rev(4));
+			await leaveA(switcher, deps);
+			resolveLive({ session_meta: rev(4) });
+			await new Promise((r) => setTimeout(r, 0));
+			observeLastUserMessage('session-A', rev(4));
+			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+		});
+
+		it('a /live snapshot taken after the answer clears the mark when it lands after leaving', async () => {
 			_mockSessions.current = [];
 			let resolveLive!: (v: unknown) => void;
 			vi.mocked(api.get).mockImplementation((url: string) =>
@@ -1439,63 +1473,38 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 			await switcher.switchSession('session-A');
 			await vi.waitFor(() => expect(resolveLive).toBeDefined());
 			await leaveA(switcher, deps);
-			observeLastUserMessage('session-A', '2026-10-11T10:00:09Z');
 			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
-			resolveLive({ session_meta: { last_user_message_at: '2026-10-11T10:00:00Z' } });
+			resolveLive({ session_meta: rev(7) });
 			await vi.waitFor(() => expect(get(proseQuestionSessions).has('session-A')).toBe(false));
 		});
 
-		it('a /live snapshot taken after the answer clears the mark instead of becoming its baseline', async () => {
-			_mockSessions.current = [];
-			let resolveLive!: (v: unknown) => void;
-			vi.mocked(api.get).mockImplementation((url: string) =>
-				isLive(url) && !resolveLive ? new Promise((done) => { resolveLive = done; }) : Promise.resolve(null));
-			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
-			await switcher.switchSession('session-A');
-			await vi.waitFor(() => expect(resolveLive).toBeDefined());
-			deps.update((st) => ({ ...st, messages: stamped('2026-10-11T10:00:03Z'), isLoadingSession: false, isRestoringSession: false }));
-			await switcher.switchSession('session-B');
-			observeLastUserMessage('session-A', '2026-10-11T10:00:07Z');
-			resolveLive({ session_meta: { last_user_message_at: '2026-10-11T10:00:07Z' } });
-			await vi.waitFor(() => expect(get(proseQuestionSessions).has('session-A')).toBe(false));
-		});
-
-		it('an earlier visit\'s late snapshot cannot resolve a reopened visit\'s baseline', async () => {
+		it('overlapping visits: an earlier visit\'s late snapshot cannot clear a newer question', async () => {
 			_mockSessions.current = [];
 			const pending: Array<(v: unknown) => void> = [];
 			vi.mocked(api.get).mockImplementation((url: string) =>
 				isLive(url) ? new Promise((done) => { pending.push(done); }) : Promise.resolve(null));
 			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
-			// Visit 1 leaves with a question while its snapshot is pending.
 			await switcher.switchSession('session-A');
 			await vi.waitFor(() => expect(pending.length).toBe(1));
-			deps.update((st) => ({ ...st, messages: stamped('2026-10-11T10:00:03Z'), isLoadingSession: false, isRestoringSession: false }));
-			await switcher.switchSession('session-B');
-			// Answered elsewhere at 10:00:07; visit 2 hydrates a NEW question and leaves.
+			await leaveA(switcher, deps, positioned(3));
+			// Answered elsewhere at seq 7; visit 2 hydrates a NEW question (seq 9) and leaves.
 			await switcher.switchSession('session-A');
 			await vi.waitFor(() => expect(pending.length).toBe(2));
-			deps.update((st) => ({
-				...st,
-				messages: [
-					...stamped('2026-10-11T10:00:03Z'),
-					{ id: 'u2', role: 'user', content: 'Prod only', timestamp: '2026-10-11T10:00:07Z' },
-					{ id: 'a2', role: 'assistant', type: 'text', content: 'Which region?', timestamp: '2026-10-11T10:00:09Z' }
-				],
-				isLoadingSession: false,
-				isRestoringSession: false
-			}));
-			await switcher.switchSession('session-B');
-			observeLastUserMessage('session-A', '2026-10-11T10:00:07Z');
-			pending[1]({ session_meta: { last_user_message_at: '2026-10-11T10:00:07Z' } });
-			pending[0]({ session_meta: { last_user_message_at: T0 } });
+			await leaveA(switcher, deps, [
+				...positioned(3),
+				{ id: 'u2', role: 'user', content: 'Prod only', seq: 7, epoch: E },
+				{ id: 'a2', role: 'assistant', type: 'text', content: 'Which region?', seq: 9, epoch: E }
+			]);
+			pending[1]({ session_meta: rev(7) });
+			pending[0]({ session_meta: rev(2) });
 			await new Promise((r) => setTimeout(r, 0));
 			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
-			observeLastUserMessage('session-A', '2026-10-11T10:00:12Z');
+			observeLastUserMessage('session-A', rev(10));
 			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 		});
 
-		it('records a loaded row\'s revision on switch-in, so filtering the row out before leaving keeps the baseline', async () => {
-			_mockSessions.current = [{ id: 'session-A', last_user_message_at: '2026-10-11T10:00:00Z' }];
+		it('records a loaded row\'s revision on switch-in, so filtering the row out before leaving keeps it', async () => {
+			_mockSessions.current = [{ id: 'session-A', ...rev(6) }];
 			const { switcher, deps } = makeSwitcher(fullState({ sessionId: 'session-B', messages: [] }));
 			await switcher.switchSession('session-A');
 			// A tag filter drops A's row while A stays open.
@@ -1503,21 +1512,17 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 			await leaveA(switcher, deps);
 			await new Promise((r) => setTimeout(r, 0));
 			expect(detailCalls()).toBe(0);
-			expect(get(proseQuestionSessions).has('session-A')).toBe(true);
-			// The first broadcast after leaving is the answer.
-			observeLastUserMessage('session-A', '2026-10-11T10:00:01Z');
+			// The answer (seq 6) was already seen on the row: no mark.
 			expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 		});
 	});
 
-	it('records a null revision as an observation: the first stamped message clears it', async () => {
-		_mockSessions.current = [{ id: 'session-A', last_user_message_at: null }];
+	it('a question without a position never clears on a revision alone', async () => {
+		_mockSessions.current = [{ id: 'session-A', ...rev(null, null) }];
 		const { switcher } = makeSwitcher(fullState({ messages: asked }));
 		await switcher.switchSession('session-B');
-		observeLastUserMessage('session-A', null);
+		observeLastUserMessage('session-A', rev(50));
 		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
-		observeLastUserMessage('session-A', '2026-10-11T10:00:05Z');
-		expect(get(proseQuestionSessions).has('session-A')).toBe(false);
 	});
 
 	it('leaving A while its uncached history is still loading keeps the remembered question', async () => {

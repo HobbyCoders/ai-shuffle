@@ -74,6 +74,10 @@ export interface V2SessionState {
 	 *  streaming and coalesced, so they cannot be summed. */
 	outputTokensTotal: number;
 	lastSeq: number;
+	/** Server log epoch the event `seq`s belong to, from the SSE feed's
+	 *  caught-up/reset protocol (set by the feed controller through
+	 *  `withLogEpoch`, never by an event). Null until the feed knows it. */
+	logEpoch: string | null;
 	/** Deterministic bookkeeping: id of the currently-open streaming text /
 	 *  thinking message for the active turn (null = none open). Derived purely
 	 *  from the event order, so replay is idempotent. */
@@ -212,6 +216,7 @@ export function initialState(): V2SessionState {
 		contextUsage: null,
 		outputTokensTotal: 0,
 		lastSeq: 0,
+		logEpoch: null,
 		openTextId: null,
 		openThinkingId: null,
 		liveTurnId: null,
@@ -745,6 +750,38 @@ function withMessageOrigin(
 		: own(new Map(state.messageOriginSeq));
 	next.set(id, seq);
 	return next;
+}
+
+/**
+ * The event-log position a rendered assistant text carries (#2249): the
+ * envelope `seq` of the LAST event that contributed to it, and the log epoch
+ * that seq belongs to. Prose-question marks compare it with the session's
+ * `last_user_message_seq`/`_epoch`. Absent when the event has no seq.
+ */
+function logPosition(state: V2SessionState, event: WireEvent): Pick<ChatMessage, 'seq' | 'epoch'> {
+	if (typeof event.seq !== 'number') return {};
+	return state.logEpoch ? { seq: event.seq, epoch: state.logEpoch } : { seq: event.seq };
+}
+
+/**
+ * Adopt the server log epoch the feed reports. Messages reduced before the
+ * epoch was known (a from-zero backfill learns it at `caught_up`; an empty
+ * log learns it from its first row) take it now: one log has one epoch, and
+ * a changed log restarts the feed from a fresh state instead of arriving
+ * here. Returns `state` unchanged when nothing moves.
+ */
+export function withLogEpoch(state: V2SessionState, epoch: string | null): V2SessionState {
+	if (!epoch || epoch === state.logEpoch) return state;
+	let messages = state.messages;
+	for (let i = 0; i < messages.length; i++) {
+		const m = messages[i];
+		if (typeof m.seq !== 'number' || m.epoch) continue;
+		if (messages === state.messages) {
+			messages = ownedMessages.has(state.messages) ? state.messages : own(state.messages.slice());
+		}
+		messages[i] = { ...m, epoch };
+	}
+	return { ...state, logEpoch: epoch, messages };
 }
 
 /** Prefer an event payload `timestamp` over the envelope `created_at`. */
@@ -1560,6 +1597,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					content: buffer,
 					streaming: true,
 					timestamp: createdAt || undefined,
+					...logPosition(next, event),
 					...(next.liveTurnProfileId ? { profileId: next.liveTurnProfileId } : {}),
 				};
 				return {
@@ -1571,8 +1609,11 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				const open = next.messages.findLast((m) => m.id === next.openTextId);
 				return {
 					...next,
+					// The folded text's position advances to THIS delta: the
+					// last contributing event, not the first (messageOriginSeq).
 					messages: replaceById(next.messages, next.openTextId, {
 						content: (open?.content ?? '') + text,
+						...logPosition(next, event),
 					}),
 				};
 			}
@@ -1584,6 +1625,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content: text,
 				streaming: true,
 				timestamp: createdAt || undefined,
+				...logPosition(next, event),
 				...(next.liveTurnProfileId ? { profileId: next.liveTurnProfileId } : {}),
 			};
 			return { ...appendMessage(next, msg, seq), openTextId: id };
@@ -1599,6 +1641,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 					id: event.id, role: 'assistant', type: 'text', content,
 					streaming: false, turnId: str(event.turn_id),
 					timestamp: stampTs(event, createdAt) || undefined,
+					...logPosition(state, event),
 					...(str(event.model) ? { metadata: { model: str(event.model) } } : {}),
 				}, seq);
 			}
@@ -1635,6 +1678,7 @@ export function reduce(state: V2SessionState, event: WireEvent): V2SessionState 
 				content,
 				streaming: false,
 				timestamp: stampTs(event, createdAt) || undefined,
+				...(kind === 'text' ? logPosition(next, event) : {}),
 				...(kind === 'thinking' && str(event.subtype) ? { thinkingSubtype: str(event.subtype) } : {}),
 				...(str(event.uuid) ? { jsonlUuid: str(event.uuid) } : {}),
 				...(str(event.profile_id) ? { profileId: str(event.profile_id) } : {}),

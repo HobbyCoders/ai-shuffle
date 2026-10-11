@@ -13,6 +13,7 @@ import {
 	initialState,
 	releaseMessages,
 	sealState,
+	withLogEpoch,
 	type WireEvent,
 } from './reducer';
 import type { ChatMessage } from '../../types';
@@ -2911,5 +2912,75 @@ describe('replay allocation (copy-on-publish ownership)', () => {
 		const elapsed = Date.now() - t0;
 		expect(state.messages).toHaveLength(20_000);
 		expect(elapsed).toBeLessThan(3_000);
+	});
+});
+
+
+describe('event-log position on rendered assistant text (#2249)', () => {
+	const text = (state: ReturnType<typeof reduceAll>) => state.messages.filter((m) => m.role === 'assistant' && m.type === 'text');
+
+	it('folded deltas carry the LAST contributing seq, not the first', () => {
+		const state = reduceAll([
+			ev('turn.started', { seq: 1, turn_id: 't1' }),
+			ev('assistant.text_delta', { seq: 2, turn_id: 't1', text: 'Staging ' }),
+			ev('assistant.text_delta', { seq: 3, turn_id: 't1', text: 'or prod?' }),
+			ev('assistant.text_delta', { seq: 7, turn_id: 't1', text: '' }),
+		], withLogEpoch(initialState(), 'evt-1'));
+		const [msg] = text(state);
+		expect(msg.content).toBe('Staging or prod?');
+		expect(msg.seq).toBe(7);
+		expect(msg.epoch).toBe('evt-1');
+		// The rewind origin stays the first delta.
+		expect(state.messageOriginSeq.get(msg.id)).toBe(2);
+	});
+
+	it('a closed assistant text and a voice reply carry their own seq', () => {
+		const state = reduceAll([
+			ev('message.user', { seq: 1, turn_id: 'voice-1', content: 'Deploy it' }),
+			ev('message.assistant', { seq: 2, turn_id: 'voice-1', content: 'Staging or prod?' }),
+			ev('turn.started', { seq: 3, turn_id: 't2' }),
+			ev('message.assistant', { seq: 4, turn_id: 't2', content: 'Which region?' }),
+		], withLogEpoch(initialState(), 'evt-1'));
+		expect(text(state).map((m) => [m.content, m.seq, m.epoch])).toEqual([
+			['Staging or prod?', 2, 'evt-1'],
+			['Which region?', 4, 'evt-1'],
+		]);
+	});
+
+	it('messages reduced before the epoch is known take it when the feed reports it', () => {
+		const before = reduceAll([
+			ev('turn.started', { seq: 1, turn_id: 't1' }),
+			ev('assistant.text_delta', { seq: 2, turn_id: 't1', text: 'Staging or prod?' }),
+		]);
+		expect(text(before)[0].seq).toBe(2);
+		expect(text(before)[0].epoch).toBeUndefined();
+		const after = withLogEpoch(before, 'evt-9');
+		expect(text(after)[0].epoch).toBe('evt-9');
+		expect(after.logEpoch).toBe('evt-9');
+		// Later deltas stamp it directly.
+		const more = reduce(after, ev('assistant.text_delta', { seq: 3, turn_id: 't1', text: ' Now.' }));
+		expect(text(more)[0]).toMatchObject({ seq: 3, epoch: 'evt-9' });
+		// Adopting the same (or no) epoch again is a no-op.
+		expect(withLogEpoch(after, 'evt-9')).toBe(after);
+		expect(withLogEpoch(after, null)).toBe(after);
+	});
+
+	it('withLogEpoch does not mutate a released transcript', () => {
+		const state = reduceAll([
+			ev('turn.started', { seq: 1, turn_id: 't1' }),
+			ev('assistant.text_delta', { seq: 2, turn_id: 't1', text: 'Hi?' }),
+		]);
+		const held = releaseMessages(state);
+		const snapshot = held.map((m) => ({ ...m }));
+		withLogEpoch(state, 'evt-2');
+		expect(held).toEqual(snapshot);
+	});
+
+	it('an event without a seq leaves the position absent', () => {
+		const state = reduce(withLogEpoch(initialState(), 'evt-1'), {
+			type: 'message.assistant', id: 'x', session_id: 's1', content: 'Hello?'
+		} as unknown as WireEvent);
+		expect(text(state)[0].seq).toBeUndefined();
+		expect(text(state)[0].epoch).toBeUndefined();
 	});
 });

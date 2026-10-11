@@ -110,6 +110,8 @@ export interface ChatMessage {
 	server_side?: boolean; // Snake-case alias emitted by backend on some paths
 	metadata?: Record<string, unknown>;
 	timestamp?: string; // ISO-8601 creation time — from server metadata.timestamp on load, stamped client-side on send; without it the UI falls back to "now"
+	seq?: number | null; // Event-log position: seq of the LAST event that contributed (folded deltas advance it); null/absent when unknown (#2249)
+	epoch?: string | null; // Opaque event-log identity `seq` belongs to; compare seqs only within an equal epoch
 	turnId?: string; // Turn this message belongs to (user messages, from the wire event). Two user messages sharing one turn id means the later one was steered into a turn already running — see work-log's splitTurns.
 	queuedTurnId?: string; // Queued row absorbed into an already-running turn.
 	streaming?: boolean;

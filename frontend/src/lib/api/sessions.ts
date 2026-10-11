@@ -83,6 +83,11 @@ export interface Session {
 	 *  message) was persisted, UTC. Null until the first one after the column
 	 *  existed; agent notes and wakes do not move it. */
 	last_user_message_at?: string | null;
+	/** Event-log seq of that user message; null when unknown or cleared.
+	 *  Compare only within an equal `last_user_message_epoch` (#2249). */
+	last_user_message_seq?: number | null;
+	/** Opaque identity of the event log `last_user_message_seq` belongs to. */
+	last_user_message_epoch?: string | null;
 	created_at: string;
 	updated_at: string;
 	// Cross-install (cluster) annotation — populated server-side when sessions

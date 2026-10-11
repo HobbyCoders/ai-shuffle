@@ -2005,20 +2005,26 @@ describe('ws-message-handlers', () => {
 	});
 
 	describe('user_session_updated handler (user-message revision, #2249)', () => {
+		// The question was rendered from event seq 5 of log `evt-1`.
 		const asked = [
-			{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
-			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' },
+			{ id: 'u1', role: 'user' as const, content: 'Deploy it', seq: 4, epoch: 'evt-1' },
+			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?', seq: 5, epoch: 'evt-1' },
 		];
+		const at = (seq: number | null, epoch: string | null = 'evt-1') => ({
+			last_user_message_at: '2026-10-11T10:05:00.000001+00:00',
+			last_user_message_seq: seq,
+			last_user_message_epoch: epoch,
+		});
 		const remembered = () => get(proseQuestionSessions).has('elsewhere');
 
 		it('clears a remembered prose question when another device answers: patches the row, then refreshes the list', async () => {
 			vi.useFakeTimers();
 			try {
-				rememberLeavingProseQuestion('elsewhere', asked, '2026-10-11T10:00:00+00:00');
+				rememberLeavingProseQuestion('elsewhere', asked, at(4));
 				deps = createMockDeps();
 				handlers = createMessageHandlers(deps);
 
-				const updates = { last_user_message_at: '2026-10-11T10:05:00.000001+00:00' };
+				const updates = at(6);
 				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates });
 
 				// The mark clears and the row is patched at once, before any reload…
@@ -2061,7 +2067,7 @@ describe('ws-message-handlers', () => {
 				handlers = createMessageHandlers(deps);
 				expect(order()).toEqual(['recent', 'elsewhere']);
 
-				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: { last_user_message_at: '2026-10-11T10:05:00+00:00' } });
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: at(6) });
 				await vi.advanceTimersByTimeAsync(SESSION_LIST_RELOAD_DEBOUNCE_MS + 10);
 
 				expect(order()).toEqual(['elsewhere', 'recent']);
@@ -2071,10 +2077,13 @@ describe('ws-message-handlers', () => {
 			}
 		});
 
-		it('keeps it for an equal timestamp or a working-time-only update', () => {
+		it('keeps it for a pre-question seq, another epoch, a null position or a working-time-only update', () => {
 			try {
-				rememberLeavingProseQuestion('elsewhere', asked, '2026-10-11T10:00:00+00:00');
-				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: { last_user_message_at: '2026-10-11T10:00:00+00:00' } });
+				rememberLeavingProseQuestion('elsewhere', asked, at(4));
+				// Same transaction as the question (voice): seq at or below it.
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: at(5) });
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: at(20, 'evt-0') });
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: at(null, null) });
 				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: { work_ms: 5000, work_started_at: '2026-10-11T11:00:00+00:00' } });
 				handlers.handleMessage({ event_type: 'session_updated', session_id: 'elsewhere', data: { updates: { is_active: true } } });
 				expect(remembered()).toBe(true);
@@ -2083,9 +2092,18 @@ describe('ws-message-handlers', () => {
 			}
 		});
 
+		it('patches all three revision fields onto the row', () => {
+			try {
+				handlers.handleMessage({ type: 'user_session_updated', session_id: 'elsewhere', updates: at(6) });
+				expect(deps.mergeSessionPatch).toHaveBeenCalledWith('elsewhere', at(6));
+			} finally {
+				_resetProseQuestions();
+			}
+		});
+
 		it('drops it when the conversation is cleared', () => {
 			try {
-				rememberLeavingProseQuestion('elsewhere', asked, null);
+				rememberLeavingProseQuestion('elsewhere', asked);
 				handlers.handleMessage({ type: 'user_session_cleared', session_id: 'elsewhere' });
 				expect(remembered()).toBe(false);
 			} finally {

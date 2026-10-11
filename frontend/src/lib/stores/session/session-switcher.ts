@@ -99,6 +99,10 @@ interface LiveSnapshot {
 		device_name?: string | null;
 		/** Latest persisted user message, or null when none is stamped (#2249). */
 		last_user_message_at?: string | null;
+		/** Event-log position of that message (null when unknown or cleared). */
+		last_user_message_seq?: number | null;
+		/** Opaque log identity `last_user_message_seq` belongs to. */
+		last_user_message_epoch?: string | null;
 	};
 	/** Durable background-task view (task registry `get_visible`), already in
 	 *  the `Task` wire shape. Used to SEED the chip strip on switch-in. */
@@ -534,11 +538,10 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// An empty or partial transcript mid-hydration says nothing about the
 		// question: keep whatever was remembered until history has loaded.
 		if (state.isLoadingSession || state.isRestoringSession) return;
-		// The row's user-message revision as of now: a later one clears the
-		// remembered question without reopening (undefined: row not loaded).
+		// The row's user-message revision as of now: a later one in the
+		// question's log clears the remembered question without reopening.
 		const row = appData.current.sessions.find((s) => s.id === state.sessionId);
-		const lastUserMessageAt = row && 'last_user_message_at' in row ? row.last_user_message_at ?? null : undefined;
-		rememberLeavingProseQuestion(state.sessionId, state.messages, lastUserMessageAt);
+		rememberLeavingProseQuestion(state.sessionId, state.messages, row);
 	}
 
 	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) {
@@ -749,25 +752,22 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// One-shot metadata snapshot: the feed carries the transcript, streaming
 		// flag, tasks and usage, but NOT the lifecycle metadata. Fetch it once from
 		// /live so worktree/cloud fields are correct on switch-in.
-		// The session's user-message revision comes from that same snapshot. This
-		// visit claims it now, so revisions arriving before `/live` returns (after
-		// a quick leave) are held rather than taken as the baseline, and an earlier
-		// visit's late snapshot cannot resolve this visit's baseline.
+		// The session's user-message revision also comes from that snapshot, for
+		// a session opened without a loaded row (deep link, Spotlight, a row
+		// outside the loaded or filtered page). The claim scopes it to this visit.
 		applyMetadataSnapshot(sessionId, generation, claimUserMessageRevision(sessionId));
 	}
 
 	/**
-	 * Start this visit's claim on the opened session's `last_user_message_at`, so
-	 * leaving it with an unanswered prose question records a baseline and a later
-	 * answer from elsewhere clears the mark (#2249). A loaded row that carries the
-	 * field is recorded at once; the `/live` snapshot resolves the claim (and
-	 * supplies the value for a deep link, Spotlight, or a row outside the loaded
-	 * or filtered page).
+	 * Start this visit's claim on the opened session's user-message revision
+	 * (`last_user_message_seq`/`_epoch`), so a question left unanswered here
+	 * clears once a later user message in its log is seen (#2249). A loaded row
+	 * is observed at once; the `/live` snapshot resolves the claim.
 	 */
 	function claimUserMessageRevision(sessionId: string): number {
 		const claim = beginUserMessageRevisionSeed(sessionId);
 		const row = appData.current.sessions.find((s) => s.id === sessionId);
-		if (row && 'last_user_message_at' in row) observeLastUserMessage(sessionId, row.last_user_message_at ?? null);
+		if (row) observeLastUserMessage(sessionId, row);
 		return claim;
 	}
 
@@ -803,14 +803,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			if (revisionClaim !== null) finishUserMessageRevisionSeed(sessionId, revisionClaim, undefined);
 			return;
 		}
-		// The revision is server truth whether or not the session is still open:
-		// it resolves this visit's claim (or, unclaimed, is observed like a row
-		// update). It is handled before the generation guard on purpose; the
-		// claim token, not the generation, says which visit it belongs to.
-		const lastUserMessage = snap?.session_meta && 'last_user_message_at' in snap.session_meta
-			? snap.session_meta.last_user_message_at : undefined;
-		if (revisionClaim !== null) finishUserMessageRevisionSeed(sessionId, revisionClaim, lastUserMessage);
-		else if (lastUserMessage !== undefined) observeLastUserMessage(sessionId, lastUserMessage);
+		// The revision is server truth whether or not the session is still open,
+		// so it is observed before the generation guard. Its seq/epoch decide
+		// whether it answers a question, so a late snapshot cannot clear early.
+		const revisionMeta = snap?.session_meta;
+		if (revisionClaim !== null) finishUserMessageRevisionSeed(sessionId, revisionClaim, revisionMeta);
+		else observeLastUserMessage(sessionId, revisionMeta);
 		if (!snap) return;
 		if (generation !== _switchGeneration) return;
 		if (getState().sessionId !== sessionId) return;

@@ -23,6 +23,7 @@ import {
 	releaseMessages,
 	sealState,
 	type V2SessionState,
+	withLogEpoch,
 } from './reducer';
 import { createSseFeed, type SseFeed } from './sse-feed';
 import type { ActiveSessionState } from '../../active-session';
@@ -844,12 +845,20 @@ export const feedController: FeedController = {
 				}
 			},
 			onEvent: (e) => {
+				// Rendered assistant texts carry the log epoch their seq belongs to
+				// (#2249). The feed learns it at `caught_up` (or, for an empty log,
+				// from the first row); '0' is the empty-log placeholder, not an epoch.
+				const adoptLogEpoch = () => {
+					const epoch = feed?.epoch ?? null;
+					if (epoch && epoch !== '0') reducerState = withLogEpoch(reducerState, epoch);
+				};
 				// Only the feed generation that owns this hydration may mutate it.
 				if (generation !== feedGeneration || currentSessionId !== sessionId) return;
 				const type = (e as { type?: string }).type;
 				// History/live boundary sentinel: fold the whole backfill in one
 				// batch, then switch to the per-frame live cadence below.
 				if (type === 'caught_up') {
+					adoptLogEpoch();
 					caughtUp = true;
 					everCaughtUp = true;
 					sentinelPending = false;
@@ -924,6 +933,8 @@ export const feedController: FeedController = {
 				if (caughtUp && sentinelPending) caughtUp = false;
 				if (ev.type === 'swarm.updated') swarms.receive(ev.swarm, sessionId);
 				reducerState = reduce(reducerState, ev);
+				// An empty log learns its epoch from this first row (sse-feed).
+				adoptLogEpoch();
 				eventsReduced++;
 				if (
 					ev.type === 'interaction.requested' &&
