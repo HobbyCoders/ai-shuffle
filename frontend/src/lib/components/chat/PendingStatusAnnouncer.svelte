@@ -17,6 +17,10 @@
 	 * A cancelling entry that drops back to no status (the store could not
 	 * confirm the cancel) is announced by the error path, not here. Switching
 	 * sessions resets what was seen so another chat's queue is never announced.
+	 *
+	 * Entries are keyed by their stable client identity (`clientMessageId`),
+	 * falling back to the row id: an optimistic echo that becomes its server row
+	 * changes `id` but is the same message, and must not read as withdrawn.
 	 */
 	import type { QueuedMessage } from '$lib/stores/types';
 
@@ -30,20 +34,23 @@
 
 	let announcement = $state('');
 	let seen = new Map<string, QueuedMessage['status']>();
+	const keyOf = (msg: QueuedMessage) => msg.clientMessageId ?? msg.id;
+	const snapshot = (list: QueuedMessage[]) => new Map(list.map((m) => [keyOf(m), m.status]));
 	let seenSession: string | null | undefined = undefined;
 
 	function describe(prev: Map<string, QueuedMessage['status']>, next: QueuedMessage[]): string | null {
-		const nextIds = new Set<string>();
+		const nextKeys = new Set<string>();
 		let text: string | null = null;
 		for (const msg of next) {
-			nextIds.add(msg.id);
-			const before = prev.get(msg.id);
+			const key = keyOf(msg);
+			nextKeys.add(key);
+			const before = prev.get(key);
 			if (msg.status === before) continue;
 			if (msg.status === 'cancelling') text = 'Cancelling message…';
 			else if (msg.status === 'delivered') text = 'Message already sent';
 		}
-		for (const [id, status] of prev) {
-			if (status === 'cancelling' && !nextIds.has(id)) text = 'Message withdrawn';
+		for (const [key, status] of prev) {
+			if (status === 'cancelling' && !nextKeys.has(key)) text = 'Message withdrawn';
 		}
 		return text;
 	}
@@ -52,12 +59,12 @@
 		const next = messages;
 		if (sessionId !== seenSession) {
 			seenSession = sessionId;
-			seen = new Map(next.map((m) => [m.id, m.status]));
+			seen = snapshot(next);
 			announcement = '';
 			return;
 		}
 		const text = describe(seen, next);
-		seen = new Map(next.map((m) => [m.id, m.status]));
+		seen = snapshot(next);
 		if (text) {
 			// The same words twice in a row must still be spoken: a trailing
 			// no-break space changes the node's text without changing the speech.

@@ -7,6 +7,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
 import PendingStatusAnnouncer from './PendingStatusAnnouncer.svelte';
 import type { QueuedMessage } from '$lib/stores/types';
+import { pendingQueue } from '$lib/stores/session/pending-queue';
 
 const msg = (id: string, status?: QueuedMessage['status']): QueuedMessage => ({
 	id,
@@ -66,5 +67,42 @@ describe('PendingStatusAnnouncer', () => {
 		expect(text()).toBe('');
 		await rerender({ messages: [], sessionId: 's2' });
 		expect(text()).toBe('');
+	});
+
+	describe('optimistic → authoritative rename through the real store', () => {
+		const SID = 'announcer-rename';
+
+		for (const [verdict, words] of [
+			['withdrawn', 'Message withdrawn'],
+			['already_delivered', 'Message already sent']
+		] as const) {
+			it(`stays silent across the rename, then announces ${verdict}`, async () => {
+				pendingQueue.reset(SID, true);
+				try {
+					const local = { ...msg('client-c'), clientMessageId: 'client-c' };
+					pendingQueue.noteOptimistic(SID, local.id);
+					const view = setup(pendingQueue.reconcile(SID, [local]), SID);
+
+					const key = pendingQueue.requestRemoval(SID, local);
+					await view.rerender({ messages: pendingQueue.reconcile(SID, [local]), sessionId: SID });
+					expect(view.text()).toBe('Cancelling message…');
+					const beforeRename = view.region.textContent;
+
+					// The server row arrives: new id, same client identity, still cancelling.
+					const server = { ...local, id: 'turn-c' };
+					pendingQueue.noteAuthoritative(SID, [server]);
+					const renamed = pendingQueue.reconcile(SID, [server]);
+					expect(renamed).toEqual([{ ...server, status: 'cancelling' }]);
+					await view.rerender({ messages: renamed, sessionId: SID });
+					expect(view.region.textContent).toBe(beforeRename);
+
+					pendingQueue.applyRemovalVerdict(SID, key, verdict);
+					await view.rerender({ messages: pendingQueue.reconcile(SID, [server]), sessionId: SID });
+					expect(view.text()).toBe(words);
+				} finally {
+					pendingQueue.reset(SID, true);
+				}
+			});
+		}
 	});
 });
