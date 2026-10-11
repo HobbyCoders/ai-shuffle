@@ -163,7 +163,7 @@ A provider error carries the HTTP status and the provider's own short message (`
 
 ### POST /api/v1/model-providers/{provider_id}/fetch-models
 
-Fetch the provider's live model list from upstream so you can pick which ones to offer. Nothing is saved: send the models you want back through [PATCH](#patch-apiv1model-providersprovider_id) as `models`.
+Fetch the provider's live model list from upstream so you can pick which ones to offer. Send the models you want back through [PATCH](#patch-apiv1model-providersprovider_id) as `models`; refresh never adds or removes curated models. Known per-model context windows are included in the result and missing windows on already-curated models are backfilled from presets or the upstream catalog. Existing per-model windows, including owner edits, are kept. Concurrent provider edits take precedence over the backfill.
 
 **Auth:** Owner only
 

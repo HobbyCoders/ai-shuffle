@@ -32,6 +32,8 @@ def test_upgrade_nullable_timestamp_and_transactional_write():
         cursor.execute("ALTER TABLE sessions DROP COLUMN last_user_message_at")
         cursor.execute("ALTER TABLE sessions DROP COLUMN last_user_message_seq")
         cursor.execute("ALTER TABLE sessions DROP COLUMN last_user_message_epoch")
+        cursor.execute("ALTER TABLE composer_suggestions DROP COLUMN activity_revision")
+        cursor.execute("DROP TABLE composer_suggestion_revisions")
     database.init_database()
     database.init_database()
     assert database.get_session("revision-old")["last_user_message_at"] is None
@@ -48,6 +50,11 @@ def test_upgrade_nullable_timestamp_and_transactional_write():
         cursor.execute("SELECT data_type, is_nullable FROM information_schema.columns "
                        "WHERE table_name='sessions' AND column_name='last_user_message_epoch'")
         assert dict(cursor.fetchone()) == {"data_type": "text", "is_nullable": "YES"}
+        cursor.execute("SELECT column_default FROM information_schema.columns "
+                       "WHERE table_name='composer_suggestions' AND column_name='activity_revision'")
+        assert "-1" in cursor.fetchone()["column_default"]
+        cursor.execute("SELECT COUNT(*) AS count FROM composer_suggestion_revisions")
+        assert cursor.fetchone()["count"] == 0
     prompt = sessions.add_session_message("revision-old", "user", "initial")
     initial = database.get_session("revision-old")["last_user_message_at"]
     if isinstance(initial, str):
@@ -119,3 +126,66 @@ async def test_authoritative_recorder_delivery_dedup_and_provenance():
     assert reset["last_user_message_seq"] == 1
     assert reset["last_user_message_epoch"] == session_events.get_log_epoch("pg-events")
     assert reset["last_user_message_epoch"] != epoch
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_composer_invalidation_lock_order_two_connections(monkeypatch, batch):
+    """Legacy holds the session row while event activity reaches its row update.
+
+    The former advisory-before-row event path formed a deadlock here. Both
+    transactions must commit on distinct physical PostgreSQL connections.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    from uuid import uuid4
+    from app.db import composer_suggestions, session_events
+
+    sid = "composer-lock-" + uuid4().hex
+    database.create_session(sid, None)
+    legacy_at_hint = threading.Event()
+    event_at_session = threading.Event()
+    role = threading.local()
+    original_supersede = composer_suggestions.supersede
+    original_record = sessions._record_user_message
+    pids = []
+
+    def supersede(conn, session_id):
+        if getattr(role, "kind", None) == "legacy":
+            legacy_at_hint.set()
+            assert event_at_session.wait(5), "event never reached the session-row update"
+        return original_supersede(conn, session_id)
+
+    def record(*args, **kwargs):
+        if getattr(role, "kind", None) == "event":
+            event_at_session.set()
+        return original_record(*args, **kwargs)
+
+    monkeypatch.setattr(composer_suggestions, "supersede", supersede)
+    monkeypatch.setattr(sessions, "_record_user_message", record)
+
+    def write(kind):
+        role.kind = kind
+        with base.transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SET LOCAL statement_timeout = '8s'")
+            cursor.execute("SELECT pg_backend_pid() AS pid")
+            pids.append(cursor.fetchone()["pid"])
+            if kind == "event":
+                session_events.append_events(sid, [{"type": "message.user", "payload": {"content": "Event"}}],
+                                             _conn=conn)
+            elif batch:
+                sessions.add_session_messages_batch([{"session_id": sid, "role": "user", "content": "Legacy"}],
+                                                    _conn=conn)
+            else:
+                sessions.add_session_message(sid, "user", "Legacy", _conn=conn)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        legacy = pool.submit(write, "legacy")
+        assert legacy_at_hint.wait(5), "legacy never acquired its session-row lock"
+        event = pool.submit(write, "event")
+        legacy.result(timeout=12)
+        event.result(timeout=12)
+    assert len(set(pids)) == 2
+    assert [row["content"] for row in sessions.get_session_messages(sid)] == ["Legacy"]
+    assert [row["payload"]["content"] for row in session_events.get_events(sid)] == ["Event"]
+    assert composer_suggestions.revision(sid) == 2

@@ -303,9 +303,59 @@ async def test_missing_held_row_is_not_proof_of_delivery(mock_db):
     assert replies[0]["outcome"] == "not_found"
 
 
+async def test_crash_requeued_then_removed_turn_blocks_older_parked_continuation(mock_db):
+    from app.core.turn_recorder import TurnRecorder
+    from app.db import session_events
+
+    sid = _make_session("crashed-before-unpark")
+    original = _start_live(sid, profile_id="default")
+    assert turns_db.park_turn(original["id"], ["task-A"])["state"] == "parked"
+    # Attachments require a distinct turn, rather than continuation of A.
+    second = turns_db.enqueue_turn(sid, "user", prompt="B ran", profile_id="default",
+                                   payload={"upload_blob_ids": ["attachment-B"]})
+    started = turns_db.start_turn(second["id"], can_resume=session_runtime.SessionRuntime._can_resume_parked)
+    assert started["id"] == second["id"]
+    assert started["started_at"] is not None
+    recorder = TurnRecorder(sid, None, None, None, "test-runner")
+    recorder.turn_id = second["id"]
+    await recorder.start("B ran", profile_id="default", source="user")
+    receipts = [e for e in session_events.get_events(sid)
+                if e["event_type"] == "turn.started" and e["turn_id"] == second["id"]]
+    assert len(receipts) == 1  # produced by the real recorder, not a seeded fixture
+
+    reaped = turns_db.reap_expired()  # a missing run lease models the dead runner
+    assert [row["id"] for row in reaped] == [second["id"]]
+    requeued = turns_db.get_turn(second["id"])
+    assert requeued["state"] == "queued"
+    assert requeued["started_at"] is None  # this reset is NOT proof B never ran
+    frames = []
+    with _Patches():
+        await _ws_handler(frames).handle_remove_queued_message({
+            "session_id": sid, "message_id": second["id"],
+        })
+    assert turns_db.get_turn(second["id"])["stop_reason"] == "removed_from_queue"
+    replies = [f for f in frames if f.get("type") == "queued_message_removal"]
+    assert len(replies) == 1
+    assert replies[0]["verdict"] == "withdrawn"
+
+    wake = turns_db.enqueue_turn(sid, "unpark", prompt="A task settled", profile_id="default")
+    resumed = turns_db.start_turn(wake["id"], can_resume=session_runtime.SessionRuntime._can_resume_parked)
+    assert resumed["id"] == wake["id"]  # B actually ran: never resume across it into A
+    assert not resumed["payload"].get("continued_turn")
+    assert turns_db.get_turn(original["id"])["state"] == "parked"
+
+
 async def test_cancel_while_parked_before_unpark_never_delivers(mock_db):
+    from app.core.turn_recorder import TurnRecorder
+    from app.db import session_events
+
     sid = _make_session("cancel-parked")
     live = _start_live(sid, profile_id="default")
+    recorder = TurnRecorder(sid, None, None, None, "test-runner")
+    recorder.turn_id = live["id"]
+    await recorder.start("A ran", profile_id="default", source="user")
+    assert len([e for e in session_events.get_events(sid) if e["event_type"] == "turn.started"]) == 1
+    # A's receipt must not be mistaken for proof that the cancelled row ran.
     parked = turns_db.park_turn(live["id"], ["task-1"])
     assert parked["state"] == "parked"
     runtime = _live_runtime(sid, parked)

@@ -286,6 +286,21 @@ afterEach(() => {
 	vi.unstubAllGlobals();
 });
 
+describe('feedController live composer activity', () => {
+	it.each(['turn.started', 'message.user'])('forwards live %s before folding, but not replayed history', type => {
+		const onSessionActivity = vi.fn();
+		feedController.attach({ ...makeDeps(), onSessionActivity });
+		feedController.start('s1');
+		const activity = { ...userMessage('activity', 't'), type, continued: true };
+		hoisted.onEvent!(activity);
+		expect(onSessionActivity).not.toHaveBeenCalled();
+		hoisted.onEvent!(caughtUp(1));
+		const live = { ...activity, id: 'live', seq: 2 };
+		hoisted.onEvent!(live);
+		expect(onSessionActivity).toHaveBeenCalledExactlyOnceWith(expect.objectContaining(live));
+	});
+});
+
 describe('feedController history-batch hydration', () => {
 	it('(a) batches backfill: no intermediate folds, one fold on caught_up with full list', () => {
 		const deps = makeDeps();

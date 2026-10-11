@@ -20,7 +20,7 @@ export interface ContextUsageInput {
 	outputTokens: number;
 	cacheCreationTokens: number;
 	cacheReadTokens: number;
-	/** Model context window (200k standard / 1M extended). */
+	/** Model context window in tokens; 0 when the window is unknown. */
 	contextMax: number;
 }
 
@@ -71,6 +71,7 @@ export interface ContextBreakdownRow {
 export interface ContextBreakdown {
 	/** Conversation tokens — the pill's number. Excludes the autocompact buffer. */
 	totalUsed: number;
+	/** The window in tokens; 0 when it is unknown (see `isWindowKnown`). */
 	contextMax: number;
 	/** Clamped 0–100. */
 	totalPercent: number;
@@ -223,8 +224,10 @@ export function computeContextBreakdown(input: ContextUsageInput): ContextBreakd
 		},
 	];
 
-	// Grayed "Free space" row (always last) — only once real usage has landed.
-	if (!noUsageYet) {
+	// Grayed "Free space" row (always last) — only once real usage has landed,
+	// and only against a known window: with none there is no free space to
+	// report, only what is used.
+	if (!noUsageYet && contextMax > 0) {
 		const freeTokens = Math.max(contextMax - totalUsed, 0);
 		rows.push({
 			key: 'freeSpace',
@@ -346,9 +349,10 @@ export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 			? Math.min(Math.max(usage.percentage, 0), 100)
 			: barPercent(totalUsed, max);
 
+	// Free space is only meaningful against a known window.
 	const kept = usage.categories
 		.filter((c) => !isAutocompact(c.name))
-		.filter((c) => c.tokens > 0 || isFreeSpace(c.name));
+		.filter((c) => (isFreeSpace(c.name) ? max > 0 : c.tokens > 0));
 	// Non-free, non-deferred categories descending by tokens, then Free space,
 	// then deferred categories (also descending by tokens) last.
 	const nonFree = kept
@@ -394,9 +398,15 @@ export function mapSdkContextUsage(usage: SdkContextUsage): ContextBreakdown {
 	};
 }
 
+/** True when a breakdown is measured against a real window (not the 0 "unknown" sentinel). */
+export function isWindowKnown(breakdown: Pick<ContextBreakdown, 'contextMax'>): boolean {
+	return breakdown.contextMax > 0;
+}
+
 /** The window the meter measures against, and the one the next turn uses when that differs. */
 export interface ContextWindowResolution {
-	window: number;
+	/** null when nothing declares a window: the meter shows tokens used, no percentage. */
+	window: number | null;
 	/** Set only while a running turn still uses a window other than the picked one. */
 	nextWindow: number | null;
 }
@@ -409,7 +419,9 @@ export interface ContextWindowResolution {
  *   it wins over an older report — a pick shows as soon as it is acknowledged.
  * - `reported`: the window the backend measured the current numbers against
  *   (the SDK/persisted breakdown's `maxTokens`), or null/0 when unknown.
- * - `capacity`: the model's own window from the local registry, the last resort.
+ * - `capacity`: the model's own window from the local registry (the curated
+ *   provider entry, then the built-in Claude table), or null when unknown.
+ *   Never a guessed default: with nothing known the window stays null.
  *
  * A pick applies from the next turn. While a turn is still running on another
  * window (`reportedIsCurrentTurn`), its numbers are measured against that
@@ -418,11 +430,12 @@ export interface ContextWindowResolution {
 export function resolveContextWindow(input: {
 	selected: number | null;
 	reported: number | null;
-	capacity: number;
+	capacity: number | null;
 	reportedIsCurrentTurn: boolean;
 }): ContextWindowResolution {
-	const reported = input.reported != null && input.reported > 0 ? input.reported : null;
-	const next = input.selected ?? reported ?? input.capacity;
+	const positive = (n: number | null) => (n != null && n > 0 ? n : null);
+	const reported = positive(input.reported);
+	const next = positive(input.selected) ?? reported ?? positive(input.capacity);
 	if (input.reportedIsCurrentTurn && reported != null && reported !== next) {
 		return { window: reported, nextWindow: next };
 	}
@@ -434,8 +447,8 @@ export function resolveContextWindow(input: {
  * row's share, the Free space row and the severity. Token counts other than
  * Free space are facts about the conversation and stay as they are.
  */
-export function fitBreakdownToWindow(breakdown: ContextBreakdown, contextMax: number): ContextBreakdown {
-	if (contextMax <= 0 || breakdown.contextMax === contextMax) return breakdown;
+export function fitBreakdownToWindow(breakdown: ContextBreakdown, contextMax: number | null): ContextBreakdown {
+	if (contextMax == null || contextMax <= 0 || breakdown.contextMax === contextMax) return breakdown;
 	const totalPercent = barPercent(breakdown.totalUsed, contextMax);
 	const freeTokens = Math.max(contextMax - breakdown.totalUsed, 0);
 	return {
@@ -444,9 +457,38 @@ export function fitBreakdownToWindow(breakdown: ContextBreakdown, contextMax: nu
 		totalPercent,
 		overLimit: breakdown.totalUsed > contextMax,
 		severity: usageSeverity(totalPercent),
-		rows: breakdown.rows.map((row) => {
-			const tokens = row.key === 'freeSpace' || row.key === 'Free space' ? freeTokens : row.tokens;
+		rows: withFreeSpaceRow(breakdown.rows).map((row) => {
+			const tokens = isFreeSpaceRow(row) ? freeTokens : row.tokens;
 			return { ...row, tokens, barPercent: barPercent(tokens, contextMax) };
 		}),
 	};
+}
+
+function isFreeSpaceRow(row: ContextBreakdownRow): boolean {
+	return row.key === 'freeSpace' || row.key === 'Free space';
+}
+
+/**
+ * A breakdown measured without a window has no Free space row. Once a window
+ * is known locally, add one (before any deferred rows, as the report orders it)
+ * so the rows still account for the whole window. Fresh-chat placeholder rows
+ * get none, same as the estimate path.
+ */
+function withFreeSpaceRow(rows: ContextBreakdownRow[]): ContextBreakdownRow[] {
+	if (rows.length === 0 || rows.some(isFreeSpaceRow) || rows.every((r) => r.empty)) return rows;
+	const free: ContextBreakdownRow = {
+		key: 'Free space',
+		label: 'Free space',
+		tokens: 0,
+		barPercent: 0,
+		subline: null,
+		empty: false,
+		color: MUTED_SWATCH,
+		muted: true,
+		inBar: false,
+		showPercent: true,
+	};
+	const firstDeferred = rows.findIndex((r) => !r.showPercent);
+	if (firstDeferred < 0) return [...rows, free];
+	return [...rows.slice(0, firstDeferred), free, ...rows.slice(firstDeferred)];
 }

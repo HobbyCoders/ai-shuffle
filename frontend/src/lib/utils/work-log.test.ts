@@ -891,7 +891,8 @@ describe('work folds from wire events', () => {
 		const settled = apply('turn.completed');
 		expect(settled.map((item) => item.kind)).toEqual(['message', 'work_log']);
 		expect(collapsedVisibleMessages(settled).map((message) => message.content))
-			.toEqual(['Check two files', 'Checking the first file.', 'Also check the second file', 'And summarize it', 'Both files checked.']);
+			// The first prose after the steers is their reply and stays (#2267).
+			.toEqual(['Check two files', 'Checking the first file.', 'Also check the second file', 'And summarize it', 'Now the second file.', 'Both files checked.']);
 		expect(buildDisplayItems(structuredClone(state.messages), SETTLED)).toEqual(settled);
 		const parked = buildDisplayItems(state.messages, { ...SETTLED, latestTurnUnsettled: true });
 		expect(settledFolds(parked)).toEqual([]);
@@ -1382,6 +1383,30 @@ describe('settled work log identity', () => {
 		// The answer the steer replied to and the final answer both stay visible.
 		expect(collapsedVisibleMessages(items)).toEqual([messages[0], messages[2], messages[3], messages[5]]);
 	});
+
+	// #2267: the steer's own reply used to fold, so the steer looked ignored.
+	it('keeps the prose that answers a mid-turn steer visible when collapsed', () => {
+		const prompt = user('Run the checks', undefined, 't1');
+		const first = text('Starting the checks in the background.');
+		const park = tool({ toolName: 'Monitor' });
+		const steer = user('While that runs: reply with the single word steered.', undefined, 't1');
+		const reply = text('steered');
+		const final = text('Checks passed.');
+		const items = buildDisplayItems([prompt, first, park, steer, reply, tool(), final], SETTLED);
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, first, steer, reply, final]);
+		// The reply still lives in the expanded log, in time order.
+		const log = items.find((item) => item.kind === 'work_log') as Extract<DisplayItem, { kind: 'work_log' }>;
+		expect(log.sequence.map((entry) => entry.message)).toEqual([first, park, steer, reply, log.sequence[4].message, final]);
+	});
+
+	it('lets the final prose answer a steer followed only by tools, shown once', () => {
+		const prompt = user('Run the checks', undefined, 't1');
+		const first = text('Starting the checks.');
+		const steer = user('Also lint it.', undefined, 't1');
+		const final = text('Checks and lint passed.');
+		const items = buildDisplayItems([prompt, first, tool(), steer, tool(), tool(), final], SETTLED);
+		expect(collapsedVisibleMessages(items)).toEqual([prompt, first, steer, final]);
+	});
 });
 
 /**
@@ -1522,7 +1547,8 @@ describe('turn unity', () => {
 		const optimistic = buildTranscriptModel(state.messages, options);
 		expect(settledFolds(optimistic.items)).toEqual([]);
 		expect(optimistic.midTurnUserIds.has('user-optimistic')).toBe(true);
-		const turnsBefore = deriveUserTurnNavigationItems(state.messages).length;
+		// A steer is part of its turn, not a navigation stop of its own (#2268).
+		expect(deriveUserTurnNavigationItems(state.messages).map((item) => item.id)).toEqual([state.messages[0].id]);
 
 		// The backend starts the next turn; only its message.user re-homes the row.
 		apply('turn.started', { turn_id: 'turn-2' });
@@ -1533,7 +1559,9 @@ describe('turn unity', () => {
 		const rehomed = state.messages.find((m) => m.id === 'user-optimistic');
 		expect(rehomed?.turnId).toBe('turn-2');
 		expect(rehomed?.queuedTurnId).toBe('turn-1');
-		expect(deriveUserTurnNavigationItems(state.messages).length).toBe(turnsBefore);
+		// Re-homed, the send opens turn-2, so it becomes that turn's stop.
+		expect(deriveUserTurnNavigationItems(state.messages).map((item) => item.id).at(-1)).toBe('user-optimistic');
+		expect(deriveUserTurnNavigationItems(state.messages)).toHaveLength(2);
 		// The parked turn's Monitor still runs: nothing above the steer folds.
 		const after = buildDisplayItems(state.messages, options);
 		expect(settledFolds(after)).toEqual([]);

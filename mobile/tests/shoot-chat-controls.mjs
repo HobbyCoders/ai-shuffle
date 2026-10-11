@@ -129,6 +129,24 @@ const scenarios = {
 		const step = await page.getByRole('button', { name: /^Close chat controls/ }).isVisible();
 		console.log('panel open after drag:', step);
 		await page.close();
+	},
+	// #2274: the context meter on a provider model, unknown window vs a server-resolved one.
+	async contextBound(theme) {
+		for (const bound of ['unknown', 'server']) {
+			const page = await open(`?theme=${theme}&prompt=none&bound=${bound}`);
+			const label = await page.locator('.qcell.usage .usage-indicator').getAttribute('aria-label');
+			const quick = await page.locator('.qcell.usage .usage-percent').textContent();
+			console.log(`${bound}: quick bar "${quick}", label "${label}"`);
+			await shot(page, `${theme}-21-context-${bound}-bar`);
+			await page.getByRole('button', { name: /^All chat controls/ }).click();
+			await page.waitForTimeout(500);
+			console.log(`${bound}: panel row "${await page.locator('.mcp .usage-row .pct').textContent()}"`);
+			await shot(page, `${theme}-22-context-${bound}-panel`);
+			await page.locator('.mcp .usage-row').click();
+			await page.waitForTimeout(800);
+			await shot(page, `${theme}-23-context-${bound}-details`);
+			await page.close();
+		}
 	}
 };
 

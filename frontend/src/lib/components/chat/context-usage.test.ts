@@ -5,6 +5,7 @@ import {
 	fitBreakdownToWindow,
 	formatTokenCount,
 	resolveContextWindow,
+	isWindowKnown,
 	mapSdkContextUsage,
 	resolveCategoryColor,
 	usageSeverity,
@@ -655,6 +656,26 @@ describe('resolveContextWindow', () => {
 		expect(resolveContextWindow({ ...base, selected: 200_000, reported: 0, reportedIsCurrentTurn: true }))
 			.toEqual({ window: 200_000, nextWindow: null });
 	});
+
+	// #2274: server-resolved bound → curated catalog / built-in table → null.
+	it('prefers the server-resolved bound over the local catalog window', () => {
+		expect(resolveContextWindow({ ...base, reported: 131_072, capacity: 400_000 }).window).toBe(131_072);
+	});
+
+	it('falls back to the local catalog window when the server reports none', () => {
+		expect(resolveContextWindow({ ...base, reported: null, capacity: 256_000 }).window).toBe(256_000);
+		expect(resolveContextWindow({ ...base, reported: 0, capacity: 256_000 }).window).toBe(256_000);
+	});
+
+	it('uses the server bound when the model is unknown locally', () => {
+		expect(resolveContextWindow({ ...base, reported: 2_000_000, capacity: null }).window).toBe(2_000_000);
+	});
+
+	it('resolves to null — not 200k — when nothing declares a window', () => {
+		expect(resolveContextWindow({ ...base, capacity: null })).toEqual({ window: null, nextWindow: null });
+		expect(resolveContextWindow({ ...base, reported: 0, capacity: null, reportedIsCurrentTurn: true }))
+			.toEqual({ window: null, nextWindow: null });
+	});
 });
 
 describe('fitBreakdownToWindow', () => {
@@ -712,5 +733,44 @@ describe('fitBreakdownToWindow', () => {
 		const fitted = fitBreakdownToWindow(mapSdkContextUsage(sdk(20_000, null)), 200_000);
 		expect(fitted.contextMax).toBe(200_000);
 		expect(fitted.totalPercent).toBe(10);
+		// The free space the report could not state is filled in for the local window.
+		const free = fitted.rows.find((r) => r.key === 'Free space')!;
+		expect(free.tokens).toBe(180_000);
+		expect(free.muted).toBe(true);
+		expect(free.inBar).toBe(false);
+	});
+
+	it('leaves a breakdown alone when the window is still unknown (null)', () => {
+		const breakdown = mapSdkContextUsage(sdk(20_000, null));
+		expect(fitBreakdownToWindow(breakdown, null)).toBe(breakdown);
+		expect(isWindowKnown(breakdown)).toBe(false);
+	});
+});
+
+describe('unknown context window (#2274)', () => {
+	it('the estimate keeps the used total but invents no free space or percentage', () => {
+		const b = computeContextBreakdown({
+			rawContextUsed: 12_345, inputTokens: 2_345, outputTokens: 900,
+			cacheCreationTokens: 0, cacheReadTokens: 10_000, contextMax: 0,
+		});
+		expect(b.totalUsed).toBe(12_345);
+		expect(b.totalPercent).toBe(0);
+		expect(b.overLimit).toBe(false);
+		expect(b.severity).toBe('neutral');
+		expect(b.rows.some((r) => r.key === 'freeSpace')).toBe(false);
+		expect(isWindowKnown(b)).toBe(false);
+	});
+
+	it('the report drops its zero Free space row when the window is null', () => {
+		const b = mapSdkContextUsage({
+			categories: [
+				{ name: 'Messages', tokens: 9_000, color: '#333' },
+				{ name: 'Free space', tokens: 0, color: '#444' },
+			],
+			totalTokens: 9_000, maxTokens: null, rawMaxTokens: null, percentage: null,
+			model: 'x-ai/grok-4', isAutoCompactEnabled: false,
+		});
+		expect(b.rows.map((r) => r.key)).toEqual(['Messages']);
+		expect(isWindowKnown(b)).toBe(false);
 	});
 });

@@ -1,5 +1,6 @@
 <script lang="ts">
-	/** Left-rail user-turn minimap. Each tick is a prompt; hover reveals the
+	/** Left-rail user-turn minimap. Each tick is a turn, on the prompt that
+	 *  opened it (a mid-turn steer is not a stop of its own); hover reveals the
 	 *  message. Stays in the transcript gutter and never touches the composer.
 	 *  One rail at every history length: when the ticks outgrow the rail it
 	 *  scrolls (wheel, touch, keyboard) instead of switching to another UI. */
@@ -145,7 +146,7 @@
 				class:is-current={index === resolvedIndex}
 				class:is-hovered={hoveredIndex === index}
 				style="--proximity: {hoveredIndex === null ? 0 : Math.max(0, 1 - Math.abs(index - hoveredIndex) / 3)}"
-				aria-label="User message {index + 1} of {items.length}: {item.label}{needsYouIds.includes(item.id) ? ' (needs you)' : ''}"
+				aria-label="Turn {index + 1} of {items.length}: {item.label}{needsYouIds.includes(item.id) ? ' (needs you)' : ''}"
 				aria-current={index === resolvedIndex ? 'true' : undefined}
 				tabindex={index === (focusedTick ?? resolvedIndex) ? 0 : -1}
 				onclick={(event) => {
