@@ -53,6 +53,7 @@ def _create_schema(cursor: sqlite3.Cursor) -> None:
             id TEXT PRIMARY KEY,
             profile_id TEXT NOT NULL,
             last_user_message_at TIMESTAMP,
+            last_user_message_seq BIGINT,
             api_user_id TEXT,
             title TEXT,
             status TEXT DEFAULT 'active',

@@ -321,6 +321,37 @@ class TestGetSessionPagination:
         assert transcript[0]["toolScreenshot"] == PNG_DATA_URI
 
 
+def test_projected_delta_sequence_and_stream_frame_match():
+    from app.api.events import _wire
+    from app.db import database, session_events
+
+    sid = "delta-sequence"
+    database.create_session(sid, "default")
+    session_events.append_events(sid, [
+        {"type": "message.user", "payload": {"content": "Hello"}},
+        {"type": "assistant.text_delta", "payload": {"text": "Which "}},
+        {"type": "assistant.text_delta", "payload": {"text": "one?"}},
+    ])
+    messages, present = sessions_helpers.load_event_messages(sid)
+    assert present
+    assert [(m["content"], m["seq"]) for m in messages] == [("Hello", 1), ("Which one?", 3)]
+    events = session_events.get_events(sid, 0)
+    assert [_wire(event)["seq"] for event in events] == [1, 2, 3]
+    assert database.get_session(sid)["last_user_message_seq"] < messages[-1]["seq"]
+
+
+@pytest.mark.parametrize("builder", [sessions_helpers.build_detail_messages, sessions_helpers.build_live_messages])
+def test_message_shaping_preserves_sequence_and_legacy_null(builder):
+    from app.db import database
+
+    database.create_session("shaping-seq", "default")
+    messages = builder("shaping-seq", [
+        {"id": "event", "role": "assistant", "content": "Question?", "seq": 7},
+        {"id": "legacy", "role": "user", "content": "Old"},
+    ])
+    assert [m["seq"] for m in messages] == [7, None]
+
+
 class TestLiveEndpointPayload:
     @pytest.mark.parametrize("stamped", [False, True])
     @pytest.mark.parametrize("row_as_datetime", [False, True])
@@ -331,14 +362,19 @@ class TestLiveEndpointPayload:
         self, endpoint, stamped, row_as_datetime,
     ):
         from datetime import datetime
-        from app.db import database
+        from app.db import database, session_events
 
         session_id = "revision-snapshot"
         database.create_session(session_id, "default")
         expected = None
         if stamped:
-            message = database.add_session_message(session_id, "user", "Hello")
-            expected = message["created_at"]
+            session_events.append_events(session_id, [
+                {"type": "message.user", "payload": {"content": "Hello"}},
+                {"type": "message.assistant", "payload": {"content": "Which one?"}},
+            ])
+            expected = database.get_session(session_id)["last_user_message_at"]
+            if isinstance(expected, datetime):
+                expected = expected.isoformat()
             assert datetime.fromisoformat(expected).utcoffset().total_seconds() == 0
         row_value = database.get_session(session_id)["last_user_message_at"]
         if isinstance(row_value, datetime):
@@ -369,6 +405,13 @@ class TestLiveEndpointPayload:
         body = response.json()
         snapshot = body["session_meta"] if endpoint.startswith("live") else body
         listed = next(row for row in listing.json() if row["id"] == session_id)
+        wire_seq = detail.json()["last_user_message_seq"]
+        assert snapshot["last_user_message_seq"] == listed["last_user_message_seq"] == wire_seq
+        assert wire_seq == (1 if stamped else None)
+        if stamped:
+            assert [m["seq"] for m in detail.json()["messages"]] == [1, 2]
+            if endpoint == "live?include_messages=true":
+                assert [m["seq"] for m in body["messages"]] == [1, 2]
         wire_value = detail.json()["last_user_message_at"]
         assert snapshot["last_user_message_at"] == listed["last_user_message_at"] == wire_value
         if stamped:

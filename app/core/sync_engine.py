@@ -659,7 +659,7 @@ class SyncEngine:
         event = SyncEvent(
             event_type="message_added",
             session_id=session_id,
-            data={"message": message},
+            data={"message": {"seq": None, **message}},
             source_device_id=source_device_id
         )
         await self.broadcast_event(event, exclude_device_id=source_device_id)

@@ -38,6 +38,28 @@ def test_synced_manual_balance_deducts_only_serving_worker_spend(workers):
         assert get_manual_balance_credits(row_a)["balance_remaining"] == 18.25
 
 
+def test_authoritative_user_revision_and_event_sequences_replicate(workers):
+    from app.db import session_events
+
+    a, b = workers("a"), workers("b")
+    with a.active():
+        engine.create_network("Revision test")
+        database.create_session("revision-sync", "default")
+        session_events.append_events("revision-sync", [
+            {"type": "message.user", "payload": {"content": "Prompt"}},
+            {"type": "message.assistant", "payload": {"content": "Which one?"}},
+        ])
+        original = database.get_session("revision-sync")
+        engine.scan_all()
+    join(a, b)
+    converge([a, b])
+    with b.active():
+        mirrored = database.get_session("revision-sync")
+        assert mirrored["last_user_message_seq"] == original["last_user_message_seq"] == 1
+        assert mirrored["last_user_message_at"] == original["last_user_message_at"]
+        assert [e["seq"] for e in session_events.get_events("revision-sync", 0)] == [1, 2]
+
+
 def _skills_root(worker):
     return worker.data_dir / "fluid" / "skills"
 

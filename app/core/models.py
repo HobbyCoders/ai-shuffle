@@ -309,6 +309,7 @@ class SubagentChildMessage(BaseModel):
 class SessionMessage(BaseModel):
     """A message in a session"""
     id: Union[int, str]  # int from DB, string from JSONL
+    seq: Optional[int] = None  # Authoritative event position; absent for legacy transcripts
     role: str  # user, assistant, system, tool
     content: str
     type: Optional[str] = None  # text, tool_use, tool_result, subagent, system - critical for rendering
@@ -510,6 +511,7 @@ class Session(SessionBase):
     work_ms: int = 0
     work_started_at: Optional[datetime] = None
     last_user_message_at: Optional[datetime] = None
+    last_user_message_seq: Optional[int] = None
 
     @field_validator("work_ms", mode="before")
     @classmethod

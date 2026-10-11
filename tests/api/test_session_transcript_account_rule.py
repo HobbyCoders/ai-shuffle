@@ -166,7 +166,7 @@ def test_state_route_carries_no_transcript_and_stays_open(client):
     response = _get(client, "GET", "/api/v1/sessions/owner-chat/state", "member-phone")
     assert response.status_code == 200
     assert set(response.json()) == {
-        "session_id", "title", "status", "last_user_message_at",
+        "session_id", "title", "status", "last_user_message_at", "last_user_message_seq",
         "is_streaming", "connected_devices",
     }
     assert response.json()["last_user_message_at"] is None
@@ -196,6 +196,7 @@ def test_session_sync_socket_follows_the_image_rule(client, monkeypatch):
                     frame = socket.receive_json()
                     assert frame["event_type"] == "state", (who, sid)
                     assert [m["content"] for m in frame["data"]["messages"]] == ["secret words"]
+                    assert [m["seq"] for m in frame["data"]["messages"]] == [None]
                 else:
                     with pytest.raises(WebSocketDisconnect) as closed:
                         socket.receive_json()

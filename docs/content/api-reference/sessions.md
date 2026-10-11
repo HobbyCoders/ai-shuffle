@@ -15,7 +15,9 @@ An API key sees and acts only on the sessions it started (see [Own Sessions](/do
 ## User-message revision
 
 Session list (including paginated/cursor lists) and detail responses include
-`last_user_message_at`: a nullable, timezone-aware UTC timestamp. It advances
+`last_user_message_at`: a nullable, timezone-aware UTC timestamp, and
+`last_user_message_seq`: the nullable integer event sequence of the latest
+qualifying authoritative `message.user` event. The timestamp advances
 when a user message is persisted, including the initial prompt, a delivered
 mid-turn steer, a command, or a voice utterance. REST conversations, connector
 messages, forwarded prompts on the executing worker, and delivered
@@ -28,14 +30,29 @@ the legacy message insertion both update the session revision in their own
 transaction. Retrying an already committed stable event ID does not advance
 it or rebroadcast an answer. Event-log backfill/copy paths do not advance it.
 Existing sessions keep `null` until their next user message; it is not
-backfilled from turn counts or working time.
+backfilled from turn counts or working time. Authoritative event inserts stamp
+both fields atomically, using the last newly inserted qualifying user event's
+sequence (not the batch's final event). Stable-ID retries retain the original
+sequence; rollbacks change neither field. Legacy-only message writes update the
+timestamp but preserve the event sequence, which remains `null` if never stamped.
 
 After commit, the global WebSocket feed emits `user_session_updated` with
-`session_id` and `updates.last_user_message_at`, even when that session is not
-open on the receiving tab. The value represents the same instant as the row's
-`last_user_message_at`. Account/paired subscribers and other workers receive a
-session-list invalidation and reload their authorized rows. Consumers should
-compare timestamps, not string representations, and ignore older revisions.
+`session_id`, `updates.last_user_message_at`, and `updates.last_user_message_seq`,
+even when that session is not open on the receiving tab. These match the persisted
+revision. Account/paired subscribers and other workers receive a session-list
+invalidation and reload their authorized rows; worker replication carries both fields.
+
+Use event order, not wall-clock timestamps, for causal comparisons: a user answer
+is later than a question only when `last_user_message_seq > question.seq` (both
+non-null). This remains correct for a prompt and question committed in one batch
+and for delayed snapshots. Ignore lower sequences from stale deliveries.
+Event-backed detail and `/live` transcript messages carry their event `seq`;
+a folded assistant delta message uses the last delta's sequence. Legacy messages
+without an event position have nullable `seq`; pagination offsets are not event
+sequences. The authoritative SSE event stream retains its `seq`; legacy WebSocket message
+frames expose nullable `seq` without inventing an event position. Clearing a
+conversation resets `last_user_message_seq` to `null` along with its event log;
+sequences are comparable only within the same session and log epoch.
 
 `last_prose_is_question` is not provided: deciding whether the last prose asks
 a question still requires the replayed conversation, including tool questions,
@@ -240,11 +257,14 @@ semantics as the session row, serialized identically to list/detail responses
 persisted. It is included both with messages (the default) and with
 `?include_messages=false`, which skips loading the transcript. Clients can use
 this metadata-only snapshot to seed the revision without fetching session detail.
+`session_meta.last_user_message_seq` accompanies it in both forms, with the same
+nullable integer value as list/detail and the session row.
 
 ### GET /api/v1/sessions/{session_id}/state
 
 Get session state for client reconnection. The response includes the same
-nullable UTC ISO 8601 `last_user_message_at` at the top level.
+nullable UTC ISO 8601 `last_user_message_at` and nullable integer
+`last_user_message_seq` at the top level. This metadata-only route has no transcript.
 
 ### GET /api/v1/sessions/{session_id}/context-usage
 

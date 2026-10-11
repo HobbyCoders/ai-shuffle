@@ -33,6 +33,7 @@ def drain(monkeypatch):
 
     async def run(sid, **kwargs):
         assert database.get_session(sid)["last_user_message_at"] is None
+        assert database.get_session(sid)["last_user_message_seq"] is None
         queued = turns.get_queued_turns(sid)
         assert len(queued) == 1
         assert not (queued[0].get("payload") or {}).get("deferred_user_record")
@@ -45,6 +46,7 @@ def drain(monkeypatch):
         assert database.get_session_messages(sid) == []  # event-only path
         users = [e for e in session_events.get_events(sid, 0) if e["event_type"] == "message.user"]
         assert len(users) == 1
+        assert database.get_session(sid)["last_user_message_seq"] == users[0]["seq"]
         delivered.append(sid)
         return True
 
@@ -94,9 +96,11 @@ async def test_idle_relay_stamps_executing_worker_and_deduplicates(drain):
     assert result["turn_id"]
     await drain[0]("relay-revision")
     timestamp = database.get_session("relay-revision")["last_user_message_at"]
+    seq = database.get_session("relay-revision")["last_user_message_seq"]
     assert (await control._turns(body, "sending-worker"))["duplicate"] is True
     assert not turns.get_queued_turns("relay-revision")
     assert database.get_session("relay-revision")["last_user_message_at"] == timestamp
+    assert database.get_session("relay-revision")["last_user_message_seq"] == seq
 
 
 async def test_owner_configured_automation_delivery(drain):
@@ -146,6 +150,7 @@ async def test_autonomous_start_is_not_a_user_answer(source):
     try:
         await recorder.start("Agent generated work", source=source)
         assert database.get_session(sid)["last_user_message_at"] is None
+        assert database.get_session(sid)["last_user_message_seq"] is None
     finally:
         await recorder.close()
 
@@ -158,3 +163,9 @@ async def test_voice_system_note_does_not_count_but_utterance_does():
     assert database.get_session("voice-revision")["last_user_message_at"] is None
     await record_voice_exchange("voice-revision", "Yes please", "Okay")
     assert database.get_session("voice-revision")["last_user_message_at"] is not None
+    events = session_events.get_events("voice-revision", 0)
+    utterance = next(e for e in events if e["event_type"] == "message.user"
+                     and e["payload"].get("content") == "Yes please")
+    question = events[-1]
+    assert database.get_session("voice-revision")["last_user_message_seq"] == utterance["seq"]
+    assert utterance["seq"] < question["seq"]

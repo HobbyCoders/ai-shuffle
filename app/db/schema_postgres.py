@@ -342,6 +342,7 @@ def create_postgres_schema(cursor) -> None:
             work_ms BIGINT DEFAULT 0,
             work_started_at TIMESTAMP WITH TIME ZONE,
             last_user_message_at TIMESTAMP WITH TIME ZONE,
+            last_user_message_seq BIGINT,
             -- Worker network: the device this session executes on. Replaces
             -- instance_id as the owner; NULL means "this worker" until the
             -- startup backfill stamps it.

@@ -30,14 +30,19 @@ def test_upgrade_nullable_timestamp_and_transactional_write():
         cursor = conn.cursor()
         cursor.execute("INSERT INTO sessions (id, title) VALUES ('revision-old', 'kept')")
         cursor.execute("ALTER TABLE sessions DROP COLUMN last_user_message_at")
+        cursor.execute("ALTER TABLE sessions DROP COLUMN last_user_message_seq")
     database.init_database()
     database.init_database()
     assert database.get_session("revision-old")["last_user_message_at"] is None
+    assert database.get_session("revision-old")["last_user_message_seq"] is None
     with base.get_db() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT data_type, is_nullable FROM information_schema.columns "
                        "WHERE table_name='sessions' AND column_name='last_user_message_at'")
         assert dict(cursor.fetchone()) == {"data_type": "timestamp with time zone", "is_nullable": "YES"}
+        cursor.execute("SELECT data_type, is_nullable FROM information_schema.columns "
+                       "WHERE table_name='sessions' AND column_name='last_user_message_seq'")
+        assert dict(cursor.fetchone()) == {"data_type": "bigint", "is_nullable": "YES"}
     prompt = sessions.add_session_message("revision-old", "user", "initial")
     initial = database.get_session("revision-old")["last_user_message_at"]
     if isinstance(initial, str):
@@ -69,22 +74,28 @@ async def test_authoritative_recorder_delivery_dedup_and_provenance():
         await recorder.start("API/connector/relay prompt", source="user")
         first = database.get_session("pg-events")["last_user_message_at"]
         assert first is not None
+        first_seq = database.get_session("pg-events")["last_user_message_seq"]
+        assert first_seq is not None
         assert database.get_session_messages("pg-events") == []
         assert await recorder.record_steered_user_message("Peer note", source="agent_message")
         assert database.get_session("pg-events")["last_user_message_at"] == first
         assert await recorder.record_steered_user_message("Owner answer", source="user")
         latest = database.get_session("pg-events")["last_user_message_at"]
         assert latest > first
+        latest_seq = database.get_session("pg-events")["last_user_message_seq"]
+        assert latest_seq > first_seq
         event = next(e for e in session_events.get_events("pg-events", 0)
                      if e["event_type"] == "message.user")
         # Retrying an already committed stable event cannot look like an answer.
         session_events.append_events("pg-events", [{"id": event["id"], "type": "message.user",
                                                      "payload": event["payload"]}])
         assert database.get_session("pg-events")["last_user_message_at"] == latest
+        assert database.get_session("pg-events")["last_user_message_seq"] == latest_seq
         with pytest.raises(ValueError):
             with base.transaction() as conn:
                 session_events.append_events("pg-events", [{"type": "message.user", "payload": {}}], _conn=conn)
                 raise ValueError("abort")
         assert database.get_session("pg-events")["last_user_message_at"] == latest
+        assert database.get_session("pg-events")["last_user_message_seq"] == latest_seq
     finally:
         await recorder.close()

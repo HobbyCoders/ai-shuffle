@@ -30,6 +30,63 @@ def test_prompt_then_steer_and_non_user_messages():
     assert stamp("revision") > first
 
 
+def test_event_batch_stamps_latest_inserted_user_not_batch_end():
+    from app.db import session_events
+
+    sid = "batch-seq"
+    database.create_session(sid, "default")
+    events = [
+        {"id": "u1", "type": "message.user", "payload": {}},
+        {"id": "u2", "type": "message.user", "payload": {}},
+        {"type": "message.user", "payload": {"source": "agent_message"}},
+        {"type": "message.assistant", "payload": {"content": "Which one?"}},
+    ]
+    with patch.object(global_events, "lifecycle") as publish:
+        assert session_events.append_events(sid, events) == (1, 4)
+        assert database.get_session(sid)["last_user_message_seq"] == 2
+        assert publish.call_count == 1
+        assert publish.call_args.args[1]["updates"]["last_user_message_seq"] == 2
+        # A duplicate after a new user in the same allocation must not win.
+        session_events.append_events(sid, [
+            {"type": "message.user", "payload": {}}, events[1],
+        ])
+        assert database.get_session(sid)["last_user_message_seq"] == 5
+        assert publish.call_args.args[1]["updates"]["last_user_message_seq"] == 5
+        # Legacy-only delivery has no event position, so must preserve it.
+        database.add_session_message(sid, "user", "Legacy")
+        assert database.get_session(sid)["last_user_message_seq"] == 5
+        assert publish.call_args.args[1]["updates"]["last_user_message_seq"] == 5
+
+
+def test_clear_resets_event_revision_for_new_log_epoch():
+    from app.db import session_events
+
+    sid = "clear-seq"
+    database.create_session(sid, "default")
+    event = {"type": "message.user", "payload": {}}
+    session_events.append_events(sid, [event, event])
+    assert database.get_session(sid)["last_user_message_seq"] == 2
+    sessions.clear_session_conversation(sid)
+    assert database.get_session(sid)["last_user_message_seq"] is None
+    session_events.append_events(sid, [event])
+    assert database.get_session(sid)["last_user_message_seq"] == 1
+
+
+def test_event_sequence_wins_over_wall_clock():
+    from app.db import session_events
+
+    sid = "clock-seq"
+    database.create_session(sid, "default")
+    with base.get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE sessions SET last_user_message_at = %s WHERE id = %s",
+            ("2099-01-01T00:00:00+00:00", sid),
+        )
+    session_events.append_events(sid, [{"type": "message.user", "payload": {}}])
+    assert database.get_session(sid)["last_user_message_seq"] == 1
+    assert stamp(sid).year != 2099
+
+
 def test_batch_and_command():
     for sid in ("one", "two"):
         database.create_session(sid, "default")
@@ -62,6 +119,20 @@ def test_notification_waits_for_outer_commit(batch, rollback):
         assert publish.call_count == (0 if rollback else 1)
     assert (stamp("transaction") is None) == rollback
     assert bool(database.get_session_messages("transaction")) != rollback
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seq", [None, 17])
+async def test_message_added_frame_preserves_optional_event_sequence(seq):
+    from app.core.sync_engine import sync_engine
+
+    message = {"id": "message", "content": "Hello"}
+    if seq is not None:
+        message["seq"] = seq
+    with patch.object(sync_engine, "broadcast_event", new_callable=AsyncMock) as broadcast:
+        await sync_engine.broadcast_message_added("session", message)
+    assert broadcast.call_args.args[0].data["message"]["seq"] == seq
+    assert ("seq" in message) == (seq is not None)  # no caller mutation
 
 
 @pytest.mark.asyncio
@@ -101,6 +172,7 @@ def test_list_and_detail_payload_models():
         assert datetime.fromisoformat(payload["last_user_message_at"].replace("Z", "+00:00")) == stamp("api-revision")
     from app.network import policy
     assert "last_user_message_at" in policy.COLLECTIONS["sessions"].fields
+    assert "last_user_message_seq" in policy.COLLECTIONS["sessions"].fields
 
 
 def test_schema_upgrade_preserves_old_sessions_as_null(tmp_path):
@@ -109,12 +181,13 @@ def test_schema_upgrade_preserves_old_sessions_as_null(tmp_path):
         lifecycle.boot(raw)
         raw.execute("INSERT INTO sessions (id, title) VALUES ('old', 'preserved')")
         raw.execute("ALTER TABLE sessions DROP COLUMN last_user_message_at")
+        raw.execute("ALTER TABLE sessions DROP COLUMN last_user_message_seq")
         raw.execute("DELETE FROM system_settings WHERE key = ?", (database.MIGRATIONS_FINGERPRINT_KEY,))
         raw.commit()
         lifecycle.boot(raw)
         lifecycle.boot(raw)
-        row = raw.execute("SELECT title, last_user_message_at FROM sessions WHERE id='old'").fetchone()
-        assert tuple(row) == ("preserved", None)
+        row = raw.execute("SELECT title, last_user_message_at, last_user_message_seq FROM sessions WHERE id='old'").fetchone()
+        assert tuple(row) == ("preserved", None, None)
     finally:
         raw.close()
 
@@ -197,12 +270,14 @@ def test_event_revision_is_atomic_and_stable_id_retry_is_silent(rollback):
             assert rollback
         assert publish.call_count == (0 if rollback else 1)
         assert (stamp(sid) is None) == rollback
+        assert database.get_session(sid)["last_user_message_seq"] == (None if rollback else 1)
         if not rollback:
             timestamp = stamp(sid)
             publish.reset_mock()
             session_events.append_events(sid, [event])
             publish.assert_not_called()
             assert stamp(sid) == timestamp
+            assert database.get_session(sid)["last_user_message_seq"] == 1
             assert len(session_events.get_events(sid, 0)) == 1
 
 

@@ -178,13 +178,15 @@ def append_events(
         # connector and automation turns need not have a legacy message row.
         # RETURNING distinguishes delivery from a retry of a stable event id;
         # backfills/copies use separate helpers and never advance the revision.
-        inserted_user = False
+        user_seq = None
         for values in user_params:
-            cursor.execute(insert_sql + " RETURNING id", values)
-            inserted_user = cursor.fetchone() is not None or inserted_user
-        if inserted_user:
+            cursor.execute(insert_sql + " RETURNING seq", values)
+            inserted = cursor.fetchone()
+            if inserted is not None:
+                user_seq = int(inserted["seq"])
+        if user_seq is not None:
             now = datetime.now(timezone.utc).isoformat()
-            notify = _record_user_message(cursor, session_id, "user", now)
+            notify = _record_user_message(cursor, session_id, "user", now, seq=user_seq)
             if notify:
                 after_commit(conn, notify)
 

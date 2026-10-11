@@ -1244,6 +1244,8 @@ def finalize_transcript(
 
     page, pagination = paginate_messages(messages, limit, before_seq)
     compact_messages_for_display(page)
+    for message in page:
+        message.setdefault("seq", None)
     return page, pagination
 
 
@@ -1276,7 +1278,7 @@ def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
 
     def append(event: dict, **fields) -> dict:
         msg = {
-            "id": event["id"], "role": "assistant", "type": "text",
+            "id": event["id"], "seq": event["seq"], "role": "assistant", "type": "text",
             "content": "", "streaming": False, **fields,
         }
         timestamp = event.get("timestamp") or event.get("created_at")
@@ -1322,6 +1324,7 @@ def load_event_messages(session_id: str) -> tuple[list[dict], bool]:
                     open_message = append(event, id=f"{msg_type}-{event['id']}", type=msg_type)
                     if subtype:
                         open_message["thinkingSubtype"] = subtype
+                open_message["seq"] = event["seq"]
                 previous, piece = open_message["content"], event.get("text") or ""
                 if msg_type == "thinking" and previous.rstrip().endswith("**") and piece.lstrip().startswith("**"):
                     open_message["content"] = previous.rstrip() + "\n\n" + piece.lstrip()
@@ -1431,6 +1434,7 @@ def build_detail_messages(session_id: str, jsonl_messages: List[dict]) -> List[d
         # frontend reads them directly from metadata for display.
         msg_data = {
             "id": m.get("id", i),
+            "seq": m.get("seq"),
             "role": m.get("role", "user"),
             "content": m.get("content", ""),
             "type": m.get("type"),  # Critical for tool_use/tool_result rendering
@@ -1486,6 +1490,7 @@ def build_live_messages(session_id: str, jsonl_messages: List[dict]) -> List[dic
     for m in jsonl_messages:
         msg = {
             "id": m.get("id", ""),
+            "seq": m.get("seq"),
             "role": m.get("role", "user"),
             "type": m.get("type", "text"),
             "content": m.get("content", ""),
