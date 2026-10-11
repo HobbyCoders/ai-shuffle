@@ -150,8 +150,18 @@ regex = '''\bwhsec_[A-Za-z0-9]{16,}\b'''
 [[rules]]
 id = "postgres-password-url"
 description = "PostgreSQL URL containing a literal password (not interpolation/redaction)"
-regex = '''\bpostgres(?:ql)?(?:\+asyncpg|\+psycopg2?)?://[A-Za-z0-9_.%+-]+:([^\s@/\\"'`<>${}\[\]*]+)@[^\s/\\"'`<>${}]+(?:/[^\s\\"'`<>${}]*)?'''
+regex = '''\bpostgres(?:ql)?(?:\+asyncpg|\+psycopg2?)?://[A-Za-z0-9_.%+-]+:([^\s@/\\"`]+)@[^\s/\\"'`<>${}]+(?:/[^\s\\"'`<>${}]*)?'''
 
+
+# These are complete placeholder passwords, not fixture or character exclusions.
+# Anchoring the whole URL keeps mixed passwords (including $, *, braces or
+# angle brackets) scannable. All other exceptions below remain file-specific.
+[[rules.allowlists]]
+description = "Complete interpolation/redaction password fields only"
+condition = "AND"
+regexTarget = "match"
+paths = ['''(?s)^.*$''']
+regexes = ['''^[p]ostgres(?:ql)?(?:\+asyncpg|\+psycopg2?)?://[A-Za-z0-9_.%+-]+:(?:\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\*{3,}|<[A-Za-z_][A-Za-z0-9_-]*>|\{[A-Za-z_][A-Za-z0-9_]*\}|\[(?:REDACTED|redacted)\])@[^\s/\\"'`<>${}]+(?:/[^\s\\"'`<>${}]*)?$''']
 
 [[rules.allowlists]]
 description = "Existing synthetic PostgreSQL fixture or documentation example"
@@ -270,7 +280,7 @@ description = "Existing synthetic PostgreSQL fixture or documentation example"
 condition = "AND"
 regexTarget = "match"
 paths = ['''^tests/core/test_scrub_url_credentials\.py$''']
-regexes = ['''^[p]ostgres://a:one@h1/db$''', '''^[p]ostgres://appuser:s3cr3t@db\.internal:5432/appdb$''', '''^[p]ostgres://b:two@h2/db$''', '''^[p]ostgres://svc_acct:Tr0ub4dor@pg\-primary\.prod:5432/shuffle\?sslmode=require$''', '''^[p]ostgres://u:hunter2@db/app$''', '''^[p]ostgres://u:p@h$''', '''^[p]ostgres://u:pw@h:5432/d$''', '''^[p]ostgresql\+psycopg2://u:p@h/db$''', '''^[p]ostgresql://appuser:s3cr3t@db\.internal:5432/appdb$''']
+regexes = ['''^[p]ostgres://a:one@h1/db$''', '''^[p]ostgres://appuser:s3cr3t@db\.internal:5432/appdb$''', '''^[p]ostgres://b:two@h2/db$''', '''^[p]ostgres://svc_acct:Tr0ub4dor@pg\-primary\.prod:5432/shuffle\?sslmode=require$''', '''^[p]ostgres://u:hunter2@db/app$''', '''^[p]ostgres://u:p@h$''', '''^[p]ostgres://u:p!\$a\-b_c\.d~9@h/db$''', '''^[p]ostgres://u:pw@h:5432/d$''', '''^[p]ostgresql\+psycopg2://u:p@h/db$''', '''^[p]ostgresql://appuser:s3cr3t@db\.internal:5432/appdb$''']
 
 [[rules.allowlists]]
 description = "Existing synthetic PostgreSQL fixture or documentation example"

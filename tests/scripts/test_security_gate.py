@@ -226,6 +226,43 @@ def test_provider_context_and_placeholders_do_not_match(text):
     assert not list(secret_scan.findings(secret_scan.load_rules(ROOT), "new.py", text))
 
 
+
+@pytest.mark.parametrize("password", [
+    "mix$ed!", "mix*ed!", "$mixed!", "*mixed!", "mixed$", "mixed*",
+    "mix$ed*123!", "${PASSWORD}literal", "literal${PASSWORD}",
+    "***literal", "literal***", "<password>literal", "literal<password>",
+    "it's-mixed!", "mix{ed}!", "mix[ed]!",
+])
+def test_postgres_password_symbols_are_scanned(password):
+    text = 'postgresql://' + f'user:{password}@host/db'
+    assert ('postgres-password-url', 1) in list(secret_scan.findings(secret_scan.load_rules(ROOT), 'new.py', text))
+
+
+@pytest.mark.parametrize("password", [
+    "${PASSWORD}", "$PASSWORD", "***", "********", "<password>",
+    "{password}", "[REDACTED]", "[redacted]",
+])
+def test_postgres_only_whole_password_placeholders_are_ignored(password):
+    text = 'postgresql://' + f'user:{password}@host/db'
+    assert not list(secret_scan.findings(secret_scan.load_rules(ROOT), 'new.py', text))
+
+
+
+@pytest.mark.parametrize("password", ["synthetic$p4ss!", "synthetic*p4ss!"])
+def test_committed_postgres_password_symbols_block(password, capsys):
+    with tempfile.TemporaryDirectory(prefix="postgres-secret-symbols-") as directory:
+        root = Path(directory)
+        init(root)
+        base = commit(root)
+        value = 'postgresql://' + f'user:{password}@host/db'
+        (root / 'runtime.py').write_text(value)
+        tip = commit(root)
+        assert secret_scan.scan(root, local=tip, remote=base) == 1
+        output = capsys.readouterr().out
+        assert 'postgres-password-url' in output
+        assert value not in output and password not in output
+
+
 def test_postgres_fixture_allowlist_does_not_hide_new_password_or_path():
     rules = secret_scan.load_rules(ROOT)
     path = 'tests/api/test_health_ready.py'
