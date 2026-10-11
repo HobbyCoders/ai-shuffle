@@ -725,6 +725,7 @@ const messageSender = createMessageSender({
 feedController.attach({
 	update: _update,
 	getState: () => _state,
+	onSessionActivity: handleMessage,
 	// Durable interaction.requested events are recovery hints. Let the existing
 	// authoritative WS relay decide whether the row is still pending; this avoids
 	// resurrecting answered/expired requests while recovering a live card.

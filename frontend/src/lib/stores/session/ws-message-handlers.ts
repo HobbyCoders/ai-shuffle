@@ -430,6 +430,8 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 			composerSuggestion.receive(data);
 			return;
 		}
+		if (['turn.started', 'message.user'].includes(msgType || eventType) &&
+			eventSessionId === state.sessionId) composerSuggestion.receive(data);
 		if (['stopped', 'interrupted', 'error'].includes(msgType) &&
 			(!eventSessionId || eventSessionId === state.sessionId)) composerSuggestion.invalidate();
 

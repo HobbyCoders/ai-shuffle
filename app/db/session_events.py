@@ -172,8 +172,22 @@ def append_events(
                 and is_user_message("user", event.get("payload"))
             ) else other_params
             target.append(values)
+        # Track genuinely inserted starts too: replaying a stable event id must
+        # not clear a hint generated after that original activity.
+        activity_seq = 0
+        completion_seq = 0
+        lifecycle_params = [values for values in other_params if values[5] in ("turn.started", "turn.completed")]
+        other_params = [values for values in other_params if values[5] not in ("turn.started", "turn.completed")]
         if other_params:
             cursor.executemany(insert_sql, other_params)
+        for values in lifecycle_params:
+            cursor.execute(insert_sql + " RETURNING seq", values)
+            inserted = cursor.fetchone()
+            if inserted is not None:
+                if values[5] == "turn.started":
+                    activity_seq = max(activity_seq, int(inserted["seq"]))
+                else:
+                    completion_seq = max(completion_seq, int(inserted["seq"]))
         # The event log is authoritative on the EXECUTING worker. API, relay,
         # connector and automation turns need not have a legacy message row.
         # RETURNING distinguishes delivery from a retry of a stable event id;
@@ -189,6 +203,16 @@ def append_events(
             notify = _record_user_message(cursor, session_id, "user", now, seq=user_seq)
             if notify:
                 after_commit(conn, notify)
+            activity_seq = max(activity_seq, user_seq)
+        # Match legacy writes: session-row update BEFORE suggestion lock. Nothing
+        # below may update the session row while holding that advisory lock.
+        if activity_seq or completion_seq:
+            from app.db import composer_suggestions
+
+            if activity_seq:
+                composer_suggestions.supersede(conn, session_id)
+            if completion_seq > activity_seq:
+                composer_suggestions.complete(conn, session_id)
 
         # 4. Best-effort notify (guarded: pg_notify is absent on the SQLite
         # shim, and delivery must not depend on it — the gateway also polls).

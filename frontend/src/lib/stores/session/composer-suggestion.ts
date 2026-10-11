@@ -86,10 +86,21 @@ export function createComposerSuggestion(
 				void refresh();
 			}
 		},
-		receive(frame: { session_id?: unknown }) {
-			// A WS notification is only a wake for an authoritative read. Do not
-			// depend on observing turn.started (SSE folds may coalesce it away).
-			if (frame.session_id === context?.sessionId) void refresh();
+		receive(frame: { session_id?: unknown; type?: unknown; event_type?: unknown; suggestion?: unknown }) {
+			if (!context?.sessionId || frame.session_id !== context.sessionId) return;
+			const type = frame.type ?? frame.event_type;
+			if (type === 'turn.started' || type === 'message.user') {
+				// A continuation can keep the same turn id and context. Hide now,
+				// cancel any older read, then re-check the authoritative state.
+				hide();
+				void refresh();
+			} else if (frame.suggestion == null ||
+				(typeof frame.suggestion === 'string' && !frame.suggestion.trim())) {
+				hide();
+			} else {
+				// Notifications never supply trusted hint text; re-read it.
+				void refresh();
+			}
 		},
 		refresh,
 		invalidate,
