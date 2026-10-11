@@ -398,6 +398,14 @@ async def _settle_card(record: WorkerRecord, preview: str, summary: Optional[str
                 record.parent_session_id, record.worker_session_id,
                 record.continuation_turn_id, "killed", preview,
             )
+        # A resumed worker has no original WorkerFeed to emit the task terminal.
+        # subagent.completed alone settles the card, not the running-task row.
+        from app.core.turn_recorder import record_task_settle_frame
+
+        await record_task_settle_frame(
+            record.parent_session_id, record.task_id, "killed", summary,
+            tool_use_id=record.tool_use_id,
+        )
         return
     try:
         await feed.stop_following(final_drain=False)

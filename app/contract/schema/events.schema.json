@@ -1911,6 +1911,18 @@
           "title": "Session Id",
           "type": "string"
         },
+        "started_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
         "state": {
           "title": "State",
           "type": "string"

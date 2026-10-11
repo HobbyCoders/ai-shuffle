@@ -1589,6 +1589,39 @@ describe('subagent cards', () => {
 // ─── Task summaries ─────────────────────────────────────────────────────────
 
 describe('task.updated summaries', () => {
+	it.each(['completed', 'error', 'killed'])('settles a resumed id on %s without reviving it on park', (terminal) => {
+		const s = fold([
+			ev('task.updated', { task_id: 'resumed', state: 'running' }),
+			ev('task.updated', { task_id: 'resumed', state: 'completed' }),
+			ev('task.updated', { task_id: 'resumed', state: 'running' }),
+			ev('turn.completed', {}),
+			ev('task.updated', { task_id: 'resumed', state: terminal }),
+			ev('turn.parked', {}),
+		]);
+		expect(s.activeTaskSummaries.find((t) => t.id === 'resumed')?.status).toBe(terminal);
+		expect(s.activeTaskSummaries.filter((t) => t.status === 'running')).toEqual([]);
+	});
+
+	it.each([true, false])('uses the resume clock with an earlier terminal present=%s', (hasTerminal) => {
+		const original = '2026-10-09T19:00:00Z';
+		const resumed = '2026-10-11T00:26:42Z';
+		const events = [ev('task.updated', { task_id: 'resumed', state: 'running', created_at: original })];
+		if (hasTerminal) events.push(ev('task.updated', { task_id: 'resumed', state: 'completed' }));
+		events.push(ev('task.updated', { task_id: 'resumed', state: 'running', started_at: resumed }));
+		events.push(ev('task.updated', { task_id: 'resumed', state: 'running', summary: 'progress' }));
+		expect(fold(events).activeTaskSummaries[0].startedAt).toBe(resumed);
+	});
+
+	it('uses the resume event time for older logs without started_at', () => {
+		const resumed = '2026-10-11T00:26:42Z';
+		const s = fold([
+			ev('task.updated', { task_id: 'resumed', state: 'running' }),
+			ev('task.updated', { task_id: 'resumed', state: 'completed' }),
+			ev('task.updated', { task_id: 'resumed', state: 'running', created_at: resumed }),
+		]);
+		expect(s.activeTaskSummaries[0].startedAt).toBe(resumed);
+	});
+
 	it('adds then updates a running task summary (default kind agent)', () => {
 		const s = fold([
 			ev('task.updated', { task_id: 'bg-1', state: 'running', description: 'crawl' }),

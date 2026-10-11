@@ -784,6 +784,13 @@ async def event_stream(
             )
             from_seq = cursor = 0
 
+        # Historical resumes may have no terminal task frame, even though the
+        # durable registry says killed. Repair before replay/caught_up so reload
+        # cannot resurrect them. Also covers reconnects with cached stale rows.
+        from app.core.task_replay import reconcile_task_replay
+
+        await reconcile_task_replay(session_id)
+
         # Replay stats for the fresh-load log line below.
         frames_sent = 0
         bytes_sent = 0

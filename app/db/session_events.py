@@ -306,6 +306,21 @@ def get_events(
     return rows
 
 
+def get_latest_task_updates(session_id: str) -> List[Dict[str, Any]]:
+    """Latest durable task projection per id, including pre-fix stale starts."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT payload FROM ("
+            "SELECT payload, ROW_NUMBER() OVER ("
+            "PARTITION BY payload->>'task_id' ORDER BY seq DESC) AS position "
+            "FROM session_events WHERE session_id = %s AND event_type = 'task.updated'"
+            ") AS tasks WHERE position = 1",
+            (session_id,),
+        )
+        return [_parse_payload(row["payload"]) for row in cursor.fetchall()]
+
+
 def get_compaction_events_before(session_id: str, before_seq: int) -> List[Dict[str, Any]]:
     """Newest durable audit cards in an elided prefix, in transcript order.
 

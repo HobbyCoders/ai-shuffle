@@ -237,6 +237,8 @@ class TaskUpdated(EventBase):
     type: Literal["task.updated"] = "task.updated"
     task_id: str
     state: str
+    # Start of the current assignment, not the worker session's creation.
+    started_at: str | None = None
     description: str | None = None
     summary: str | None = None
     tool_use_id: str | None = None
