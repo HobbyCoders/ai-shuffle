@@ -187,6 +187,15 @@ describe('ws-message-handlers', () => {
 			expect(receive).toHaveBeenCalledWith(frame);
 			receive.mockRestore();
 		});
+		it.each(['turn.started', 'message.user'])('routes active-session %s through the suggestion reader', type => {
+			const receive = vi.spyOn(composerSuggestion, 'receive').mockImplementation(() => {});
+			const frame = { type, session_id: 'session-1', turn_id: 't', continued: true };
+			handlers.handleMessage({ ...frame, session_id: 'other' });
+			expect(receive).not.toHaveBeenCalled();
+			handlers.handleMessage({ event_type: 'stream_frame', data: frame });
+			expect(receive).toHaveBeenCalledExactlyOnceWith(frame);
+			receive.mockRestore();
+		});
 		it.each(['stopped', 'interrupted', 'error'])('invalidates current-session %s, not background events', type => {
 			const invalidate = vi.spyOn(composerSuggestion, 'invalidate');
 			handlers.handleMessage({ type, session_id: 'other', message: 'test' });

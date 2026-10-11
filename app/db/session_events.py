@@ -172,8 +172,16 @@ def append_events(
                 and is_user_message("user", event.get("payload"))
             ) else other_params
             target.append(values)
+        # Track genuinely inserted starts too: replaying a stable event id must
+        # not clear a hint generated after that original activity.
+        activity_inserted = False
+        start_params = [values for values in other_params if values[5] == "turn.started"]
+        other_params = [values for values in other_params if values[5] != "turn.started"]
         if other_params:
             cursor.executemany(insert_sql, other_params)
+        for values in start_params:
+            cursor.execute(insert_sql + " RETURNING seq", values)
+            activity_inserted |= cursor.fetchone() is not None
         # The event log is authoritative on the EXECUTING worker. API, relay,
         # connector and automation turns need not have a legacy message row.
         # RETURNING distinguishes delivery from a retry of a stable event id;
@@ -184,6 +192,10 @@ def append_events(
             inserted = cursor.fetchone()
             if inserted is not None:
                 user_seq = int(inserted["seq"])
+        if activity_inserted or user_seq is not None:
+            from app.db.composer_suggestions import supersede
+
+            supersede(conn, session_id)
         if user_seq is not None:
             now = datetime.now(timezone.utc).isoformat()
             notify = _record_user_message(cursor, session_id, "user", now, seq=user_seq)

@@ -22,6 +22,33 @@ MAX_IN_FLIGHT = 32
 MAX_SEEN = 2048
 _tasks: dict[tuple[str, str], asyncio.Task] = {}
 _seen: OrderedDict[tuple[str, str], None] = OrderedDict()
+_loop: asyncio.AbstractEventLoop | None = None
+_notifications: set[asyncio.Task] = set()
+
+
+def start() -> None:
+    """Bind post-commit DB-thread notifications to the worker's event loop."""
+    global _loop
+    _loop = asyncio.get_running_loop()
+
+
+def notify_superseded(session_id: str, turn_id: str) -> None:
+    def schedule():
+        task = asyncio.create_task(_broadcast(session_id, turn_id, None))
+        _notifications.add(task)
+        task.add_done_callback(finished)
+
+    def finished(task):
+        _notifications.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            _diagnose(session_id, turn_id, "supersede", "publish_failure", task.exception())
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = _loop
+    if loop is not None and not loop.is_closed():
+        loop.call_soon_threadsafe(schedule)
 
 
 def _json(value):
@@ -126,13 +153,18 @@ async def _eligible(session_id: str, turn_id: str) -> bool:
 
 
 async def _publish(session_id: str, turn_id: str, text: str) -> None:
-    from app.core.sync_engine import SyncEvent, sync_engine
     from app.db import composer_suggestions
 
     # Persist before notifying: watch_session only covers the open session.
     # Returning to a session (or reconnecting) reads this without another model call.
     if not await asyncio.to_thread(composer_suggestions.save, session_id, turn_id, text):
         return
+    await _broadcast(session_id, turn_id, text)
+
+
+async def _broadcast(session_id: str, turn_id: str, text: str | None) -> None:
+    from app.core.sync_engine import SyncEvent, sync_engine
+
     await sync_engine.broadcast_event(SyncEvent(
         event_type="stream_frame", session_id=session_id,
         data={"type": "composer_suggestion", "session_id": session_id,
