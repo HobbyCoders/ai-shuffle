@@ -31,6 +31,8 @@
 	import { tick, untrack, onMount, onDestroy } from 'svelte';
 	import { derived as derivedStore } from 'svelte/store';
 	import { activeSession } from '$lib/stores/active-session';
+	import { privateAccessPending } from '$lib/stores/chat-access';
+	import { needsYouCount, openSessionNeeds } from '$lib/components/layout/session-card-data';
 	import { swarms } from '$lib/stores/swarms';
 	import type { SwarmSnapshot } from '$lib/utils/swarm';
 	import { forkOfferedSessionHere } from './fork-here';
@@ -618,6 +620,19 @@
 
 	/** Stable id vector for the observer-driven rail index (no per-call allocation). */
 	const turnNavigationIds = $derived(turnNavigationItems.map((item) => item.id));
+
+	// The open session's "Needs you" count (spec §5), the same derivation the
+	// sidebar row and the tab title use. Whatever it waits on was asked after
+	// the newest user message, so the newest tick carries the amber dot.
+	const openNeedsYou = $derived(
+		needsYouCount(
+			{ status: 'active', is_remote: false, remote_runtime_state: null },
+			null,
+			$activeSession.sessionId ? $privateAccessPending.get($activeSession.sessionId) ?? 0 : 0,
+			openSessionNeeds($activeSession, chatPrefs?.groupToolCalls !== false)
+		)
+	);
+	const needsYouTurnId = $derived(openNeedsYou > 0 ? turnNavigationItems.at(-1)?.id ?? null : null);
 
 	// ── Windowed mounting (PERFORMANCE_REVIEW §3.2 R4) ─────────────────────
 	// Only a trailing window of display items is mounted. Everything below is
@@ -2039,6 +2054,7 @@
 			items={turnNavigationItems}
 			currentIndex={currentTurnIndex}
 			onSelect={navigateToTurn}
+			needsYouId={needsYouTurnId}
 		/>
 	{/if}
 </div>

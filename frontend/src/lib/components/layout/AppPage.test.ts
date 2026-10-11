@@ -17,7 +17,7 @@ vi.mock('$lib/stores/auth.svelte', async () => {
 });
 vi.mock('$lib/stores/active-session', async () => {
  const { writable } = await import('svelte/store');
- return { activeSession: { ...writable({ sessionId: null, draft: '', project: null }), ...mocks } };
+ return { activeSession: { ...writable({ sessionId: null, draft: '', project: null }), ...mocks }, backgroundPermissions: writable(new Map()) };
 });
 vi.mock('$lib/stores/app-data.svelte', async () => {
  const { writable } = await import('svelte/store');
@@ -51,6 +51,8 @@ import AppPage from './AppPage.svelte';
 import { activeView } from '$lib/stores/layout.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { isAdmin } from '$lib/stores/auth.svelte';
+import { sessions as sessionList } from '$lib/stores/app-data.svelte';
+import { backgroundPermissions } from '$lib/stores/active-session';
 const active = activeSession as unknown as Writable<{ sessionId: string | null; draft: string; project: null }>;
 const admin = isAdmin as unknown as Writable<boolean>;
 const views = activeView as unknown as Writable<ActiveView | null>;
@@ -231,5 +233,27 @@ describe('AppPage initial Assistant landing', () => {
   expect(mocks.openSession).not.toHaveBeenCalled();
   expect(mocks.openFeaturePage).not.toHaveBeenCalled();
   expect(window.location.search).toBe('');
+ });
+});
+
+// Spec §5: the tab title carries the one "Needs you" count, the open
+// session's own prompts and prose question included.
+describe('AppPage tab title', () => {
+ const list = sessionList as unknown as Writable<unknown[]>;
+ const attention = backgroundPermissions as unknown as Writable<Map<string, { count: number; kind: string }>>;
+ const asked = [{ id: 'u1', role: 'user', content: 'Deploy it' }, { id: 'a1', role: 'assistant', type: 'text', content: 'Staging too, or prod only?' }];
+ afterEach(() => { list.set([]); attention.set(new Map()); });
+ it('prefixes the count of everything waiting on you, and drops it on the next user message', async () => {
+  list.set([{ id: 'work', status: 'active' }, { id: 'other', status: 'active' }]);
+  attention.set(new Map([['other', { count: 1, kind: 'permission' }]]));
+  views.set({ type: 'session', sessionId: 'work' });
+  const open = (state: Record<string, unknown>) => active.set({ sessionId: 'work', draft: '', project: null, pendingPermissions: [], ...state } as never);
+  open({ messages: asked, pendingQuestions: [{ request_id: 'q1' }] });
+  await boot();
+  await waitFor(() => expect(document.title).toBe('(3) AI Shuffle'));
+  open({ messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }], pendingQuestions: [] });
+  await waitFor(() => expect(document.title).toBe('(1) AI Shuffle'));
+  attention.set(new Map());
+  await waitFor(() => expect(document.title).toBe('AI Shuffle'));
  });
 });

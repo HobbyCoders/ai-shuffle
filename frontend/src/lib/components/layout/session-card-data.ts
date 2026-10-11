@@ -9,6 +9,8 @@
 import type { Session } from '$lib/api/client';
 import { normalizeSessionMode, type SessionMode } from '$lib/stores/sessionMode.svelte';
 import { parseUTC } from '$lib/utils/dateFormatting';
+import { lastProseAsksQuestion } from '$lib/utils/work-log';
+import type { ChatMessage } from '$lib/stores/types';
 
 /** Status shown on a card's first line. */
 export type SessionCardStatus =
@@ -100,6 +102,41 @@ export function isLiveStatus(status: SessionCardStatus): boolean {
 }
 
 /**
+ * What the OPEN session is waiting on, read from its own state rather than
+ * the background attention map (which the open session clears: its prompts
+ * live in its own queues). Counts are distinct items: each pending
+ * permission (assistant confirms included) and question is one.
+ */
+export interface OpenSessionNeeds {
+	permissions: number;
+	questions: number;
+	/** The newest prose since the last user message asks something (spec §5). */
+	proseQuestion: boolean;
+}
+
+export const NO_OPEN_NEEDS: OpenSessionNeeds = Object.freeze({ permissions: 0, questions: 0, proseQuestion: false });
+
+/**
+ * Read the open session's needs. The prose-question part follows the
+ * `groupToolCalls` preference (it is where folding protects questions); the
+ * prompt queues count regardless.
+ */
+export function openSessionNeeds(
+	state: {
+		pendingPermissions?: readonly unknown[] | null;
+		pendingQuestions?: readonly unknown[] | null;
+		messages?: readonly ChatMessage[] | null;
+	},
+	groupToolCalls: boolean
+): OpenSessionNeeds {
+	return {
+		permissions: state.pendingPermissions?.length ?? 0,
+		questions: state.pendingQuestions?.length ?? 0,
+		proseQuestion: groupToolCalls && !!state.messages && lastProseAsksQuestion(state.messages)
+	};
+}
+
+/**
  * Resolve a card status from the signals the app already tracks:
  * - streaming (user-wide run map, or an optimistic local send)
  * - optimisticStreaming (this tab just sent to the session and the server has
@@ -111,6 +148,7 @@ export function isLiveStatus(status: SessionCardStatus): boolean {
  * - prState   (persisted session PR lifecycle: open / merged / closed)
  * - openPr    (fallback: an open pull request exists with the session's branch as head)
  * - is_active (the session is in the working set but its last turn finished)
+ * - open      (the open session's own prompt queues and prose question)
  *
  * Precedence follows what needs the user most: a parked prompt outranks an
  * in-flight turn (a blocked session can still hold an open stream), and PR
@@ -129,11 +167,20 @@ export function deriveStatus(input: {
 	openPr?: boolean;
 	prState?: 'open' | 'merged' | 'closed' | null;
 	isActive: boolean;
+	open?: OpenSessionNeeds | null;
 }): SessionCardStatus {
 	// A private-access request blocks the agent on the owner like a permission
 	// prompt. It is tracked apart from the run state, so it also outranks a
 	// mirror's owner state (which reads `working` while the tool call waits).
 	if (input.privateAccess) return 'needs_permission';
+	// The open session's own queues are authoritative for it, and anything it
+	// waits on beats Working (spec §5). A prose question parks it as Awaiting
+	// input until the next user message.
+	if (input.open) {
+		if (input.open.permissions > 0) return 'needs_permission';
+		if (input.open.questions > 0) return 'has_question';
+		if (input.open.proseQuestion) return 'await';
+	}
 	// A mirror has no local leases/jobs. Owner state also clears stale local
 	// streaming/attention maps when the remote turn settles.
 	if (input.remoteRuntimeState) {
@@ -689,22 +736,41 @@ export function cardActions(s: Pick<Session, 'is_active' | 'status'>): CardActio
 }
 
 /**
- * Whether a session is waiting on the user right now (a permission or
- * question prompt). A remote session's owner state wins over the local
- * attention map, matching `deriveStatus`. Archived rows never count.
+ * How many things a session is waiting on the user for: the single "Needs
+ * you" count (spec §5) behind the sidebar row, the TurnNavigator dot and the
+ * tab title. It unions the permission/question prompts (assistant confirms
+ * are permission prompts), private-access requests and, for the open
+ * session, a prose question. A remote session's owner state wins over the
+ * local attention map, matching `deriveStatus`. Archived rows never count.
+ *
+ * The open session clears its background attention entry but a reconnect
+ * snapshot can restore it, so its prompt count is the larger of the two
+ * views of the same queue rather than their sum.
  */
+export function needsYouCount(
+	s: Pick<Session, 'status' | 'is_remote' | 'remote_runtime_state'>,
+	attention: { count: number } | null | undefined,
+	privateAccessPending = 0,
+	open: OpenSessionNeeds | null = null
+): number {
+	if (isArchived(s as Session)) return 0;
+	const remoteWaiting = s.remote_runtime_state === 'permission' || s.remote_runtime_state === 'question' ? 1 : 0;
+	const background = s.is_remote ? remoteWaiting : Math.max(0, attention?.count ?? 0);
+	const prompts = open ? Math.max(background, open.permissions + open.questions) : background;
+	return Math.max(0, privateAccessPending) + prompts + (open?.proseQuestion ? 1 : 0);
+}
+
+/** Whether a session is waiting on the user right now (see `needsYouCount`). */
 export function sessionNeedsYou(
 	s: Pick<Session, 'status' | 'is_remote' | 'remote_runtime_state'>,
 	attention: { count: number } | null | undefined,
-	privateAccessPending = 0
+	privateAccessPending = 0,
+	open: OpenSessionNeeds | null = null
 ): boolean {
-	if (isArchived(s as Session)) return false;
-	if (privateAccessPending > 0) return true;
-	if (s.is_remote) return s.remote_runtime_state === 'permission' || s.remote_runtime_state === 'question';
-	return !!attention && attention.count > 0;
+	return needsYouCount(s, attention, privateAccessPending, open) > 0;
 }
 
-/** The tab title with the number of sessions waiting on the user in front. */
+/** The tab title with the number of things waiting on the user in front. */
 export function attentionTitle(base: string, count: number): string {
 	return count > 0 ? `(${count}) ${base}` : base;
 }

@@ -610,6 +610,34 @@ describe('Sidebar Needs you lane', () => {
 		expect(lane()).toBeNull();
 	});
 
+	// Spec §5: the open session's own queues and a prose question count, and
+	// Needs you beats Working while its turn streams on.
+	it('lifts the open, still-working session while it waits on you, until the next user message', async () => {
+		type OpenState = Parameters<typeof mocks.activeSession.set>[0] & Record<string, unknown>;
+		const set = (state: Record<string, unknown>) => mocks.activeSession.set({
+			sessionId: 'active', isStreaming: true, optimisticStreaming: true, activeTasks: [], ...state
+		} as OpenState);
+		const asked = [
+			{ id: 'u1', role: 'user', content: 'Deploy it' },
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Staging too, or prod only?' }
+		];
+		render(Sidebar, { props: sidebarProps });
+		set({ messages: asked, pendingPermissions: [], pendingQuestions: [] });
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 0', 'Settled 1']);
+		expect(cardFrame('Active chat').textContent).toContain('Awaiting input');
+		expect(cardFrame('Active chat').textContent).not.toContain('Working');
+
+		set({ messages: asked, pendingPermissions: [], pendingQuestions: [{ request_id: 'q1' }] });
+		await tick();
+		expect(cardFrame('Active chat').textContent).toContain('Has question');
+
+		set({ messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }], pendingPermissions: [], pendingQuestions: [] });
+		await tick();
+		expect(labels()).toEqual(['Active 1', 'Settled 1']);
+		expect(cardFrame('Active chat').textContent).toContain('Working');
+	});
+
 	it('takes a remote session from its owner state, not the local map', () => {
 		mocks.sessions.set([
 			session('remote', 'Remote chat', 'visible-project', true, false, { is_remote: true, instance_id: 'laptop', device_name: 'Laptop', remote_runtime_state: 'question' }),

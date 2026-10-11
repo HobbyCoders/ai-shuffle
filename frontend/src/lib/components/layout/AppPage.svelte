@@ -23,7 +23,8 @@
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
 	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
 	import { privateAccessPending } from '$lib/stores/chat-access';
-	import { sessionNeedsYou, attentionTitle } from './session-card-data';
+	import { needsYouCount as countNeedsYou, openSessionNeeds, attentionTitle } from './session-card-data';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { openSession as handleOpenSession } from '$lib/services/session-navigation';
@@ -470,10 +471,17 @@
 	}
 	watchResources(["tags"], () => loadAllTags());
 
-	// Sessions waiting on a permission or question, shown in the tab title so a
-	// backgrounded tab still says when an agent is blocked on you.
+	// Everything waiting on you (spec §5: prompts, private access and the open
+	// session's prose question), shown in the tab title so a backgrounded tab
+	// still says when an agent is blocked on you.
+	const openNeeds = $derived(openSessionNeeds($activeSession ?? {}, chatPreferences.current?.groupToolCalls !== false));
 	const needsYouCount = $derived(
-		$sessions.filter((s) => !s.hidden && sessionNeedsYou(s, $backgroundPermissions.get(s.id), $privateAccessPending.get(s.id))).length
+		$sessions.reduce((total, s) => total + (s.hidden ? 0 : countNeedsYou(
+			s,
+			$backgroundPermissions.get(s.id),
+			$privateAccessPending.get(s.id),
+			s.id === $activeSession?.sessionId ? openNeeds : null
+		)), 0)
 	);
 </script>
 

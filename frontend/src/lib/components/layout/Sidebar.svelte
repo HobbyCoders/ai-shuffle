@@ -54,6 +54,7 @@
 	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { privateAccessPending } from '$lib/stores/chat-access';
+	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { preloadPanelForView } from '$lib/components/deck/lazy/panels';
@@ -81,6 +82,7 @@
 		isVisibleSidebarSession,
 		isArchived,
 		isAttentionStatus,
+		openSessionNeeds,
 		liveProjectKeys,
 		UNGROUPED_PROJECT,
 		type SessionCardStatus
@@ -170,6 +172,15 @@
 	// A cached turn/task can be out of date when a session is selected. Only a
 	// local send bridges the wait for the server's run-start broadcast.
 	const activeStreamingId = $derived($activeSession.optimisticStreaming ? $activeSession.sessionId : null);
+	// The open session's own prompts and prose question (spec §5). Read as
+	// primitives so a streaming fold that changes none of them leaves the rows be.
+	const openNeedsNow = $derived(openSessionNeeds($activeSession, chatPreferences.current?.groupToolCalls !== false));
+	const openPermissions = $derived(openNeedsNow.permissions);
+	const openQuestions = $derived(openNeedsNow.questions);
+	const openProseQuestion = $derived(openNeedsNow.proseQuestion);
+	// Null while the open session waits on nothing, so switching sessions does
+	// not re-derive every row.
+	const openNeedsId = $derived(openPermissions > 0 || openQuestions > 0 || openProseQuestion ? activeId : null);
 	const streamingMap = $derived($streamingSessions);
 
 	function isStreaming(id: string): boolean {
@@ -358,7 +369,10 @@
 						privateAccess: ($privateAccessPending.get(s.id) ?? 0) > 0,
 						prState: sessionPrState(s),
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
-						isActive: !!s.is_active
+						isActive: !!s.is_active,
+						open: s.id === openNeedsId
+							? { permissions: openPermissions, questions: openQuestions, proseQuestion: openProseQuestion }
+							: null
 					}),
 					ts: sessionTimestamp(s)
 				};

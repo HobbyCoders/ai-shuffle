@@ -265,14 +265,42 @@ export function isProtectedProse(content: string): boolean {
 	if (!text) return false;
 	if (text.split('\n').filter((line) => line.trim()).length >= 2) return true;
 	if (/^\s{0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|\||```|~~~)/m.test(text)) return true;
-	// A question mark inside a link target, a bare URL or inline code is not a
-	// question; punctuation that ends the sentence after a URL still counts.
-	const prose = text
+	return asksQuestion(text);
+}
+
+/**
+ * Prose that asks the reader something (spec §3's question rule, shared by
+ * `isProtectedProse` and the "Needs you" count, spec §5). A question mark
+ * inside a link target, a bare URL or inline code is not a question;
+ * punctuation that ends the sentence after a URL still counts.
+ */
+export function asksQuestion(content: string): boolean {
+	const prose = content
 		.replace(/`[^`]*`/g, '')
 		.replace(/\]\([^)\s]*\)/g, ']')
 		.replace(/<https?:\/\/[^>\s]*>/g, '')
 		.replace(/\bhttps?:\/\/\S*[^\s.,;:!?)\]'"]/g, '');
 	return prose.includes('?');
+}
+
+/**
+ * Whether the conversation is waiting on the reader's answer to a prose
+ * question (spec §5): the newest assistant prose since the last user message
+ * asks something. A user message (prompt, steer or command) answers it; an
+ * agent's delivered report does not. Prose still streaming has not finished
+ * asking, so it neither counts nor lets an earlier question count. Prose that
+ * leads into a question tool is that tool's question, which the question
+ * surface already counts once.
+ */
+export function lastProseAsksQuestion(messages: readonly ChatMessage[]): boolean {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role === 'user' && !agentDelivery(message)) return false;
+		if (isAskingTool(message)) return false;
+		if (!isAssistantText(message)) continue;
+		return !message.streaming && asksQuestion(message.content.trim());
+	}
+	return false;
 }
 
 /** A terminal retry failure folds only after recovery or supersession. */

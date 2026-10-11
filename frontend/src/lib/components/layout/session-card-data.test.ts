@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { Session } from '$lib/api/client';
+import type { ChatMessage } from '$lib/stores/types';
 import {
 	cardActions,
 	withinTapTarget,
 	sessionNeedsYou,
+	needsYouCount,
+	openSessionNeeds,
+	NO_OPEN_NEEDS,
 	attentionTitle,
 	deriveGitStage,
 	deriveStatus,
@@ -586,6 +590,84 @@ describe('sessionNeedsYou / attentionTitle', () => {
 	it('prefixes the count only when something is waiting', () => {
 		expect(attentionTitle('AI Shuffle', 0)).toBe('AI Shuffle');
 		expect(attentionTitle('AI Shuffle', 3)).toBe('(3) AI Shuffle');
+	});
+});
+
+/**
+ * The single "Needs you" count (transcript-organization spec §5): five
+ * sources, one number, shared by the sidebar row, the TurnNavigator dot and
+ * the tab title.
+ */
+describe('needsYouCount (spec §5)', () => {
+	const local = { status: 'active', is_remote: false, remote_runtime_state: null } as const;
+	const msg = (role: ChatMessage['role'], content: string, extra: Partial<ChatMessage> = {}): ChatMessage =>
+		({ id: `${role}-${content}`, role, type: 'text', content, ...extra });
+	const asked = [msg('user', 'Deploy it'), msg('assistant', 'Staging too, or prod only?')];
+	const open = (over: Partial<{ pendingPermissions: unknown[]; pendingQuestions: unknown[]; messages: ChatMessage[] }>, group = true) =>
+		openSessionNeeds({ pendingPermissions: [], pendingQuestions: [], messages: [], ...over }, group);
+
+	it('counts each of the five sources alone as one', () => {
+		// QuestionTray question, PermissionQueue permission, an assistant confirm
+		// (a permission request asked in the conversation), PrivateAccessPrompt,
+		// and a prose question.
+		expect(needsYouCount(local, null, 0, open({ pendingQuestions: [{ request_id: 'q1' }] }))).toBe(1);
+		expect(needsYouCount(local, null, 0, open({ pendingPermissions: [{ request_id: 'p1' }] }))).toBe(1);
+		expect(needsYouCount(local, null, 0, open({
+			pendingPermissions: [{ request_id: 'c1', assistant_confirm: { question: 'Restart the worker?' } }]
+		}))).toBe(1);
+		expect(needsYouCount(local, null, 1, NO_OPEN_NEEDS)).toBe(1);
+		expect(needsYouCount(local, null, 0, open({ messages: asked }))).toBe(1);
+		// A background session's prompts arrive through the attention map.
+		expect(needsYouCount(local, { count: 1 }, 0, null)).toBe(1);
+	});
+
+	it('sums distinct items across sources', () => {
+		const all = open({
+			pendingQuestions: [{ request_id: 'q1' }],
+			pendingPermissions: [{ request_id: 'p1' }, { request_id: 'c1', assistant_confirm: { question: 'Go?' } }],
+			messages: asked
+		});
+		expect(needsYouCount(local, null, 2, all)).toBe(6);
+		// A reconnect snapshot can restore the open session's attention entry for
+		// the same prompts: the two views of one queue never double-count.
+		expect(needsYouCount(local, { count: 3 }, 0, all)).toBe(4);
+		expect(needsYouCount(local, { count: 4 }, 0, all)).toBe(5);
+		expect(needsYouCount({ ...local, status: 'archived' }, null, 2, all)).toBe(0);
+	});
+
+	it('clears a prose question on the next user message, and when answered', () => {
+		expect(open({ messages: asked }).proseQuestion).toBe(true);
+		expect(open({ messages: [...asked, msg('user', 'Prod only')] }).proseQuestion).toBe(false);
+		// Work after the question does not answer it; new prose that asks nothing does.
+		expect(open({ messages: [...asked, msg('assistant', '', { type: 'tool_use', toolName: 'Read', toolStatus: 'complete' })] }).proseQuestion).toBe(true);
+		expect(open({ messages: [...asked, msg('assistant', 'Deploying to prod.')] }).proseQuestion).toBe(false);
+		// Answering a surface drops it from its queue, and the count with it.
+		expect(needsYouCount(local, null, 0, open({ pendingQuestions: [] }))).toBe(0);
+	});
+
+	it('gates only the prose question on the groupToolCalls preference', () => {
+		const prefOff = open({ messages: asked, pendingQuestions: [{ request_id: 'q1' }] }, false);
+		expect(prefOff.proseQuestion).toBe(false);
+		expect(needsYouCount(local, null, 1, prefOff)).toBe(2);
+	});
+
+	it('lets Needs you beat Working, a prose question reading as Awaiting input', () => {
+		const working = { streaming: true, attention: null, isActive: true };
+		expect(deriveStatus({ ...working, open: open({ messages: asked }) })).toBe('await');
+		expect(deriveStatus({ ...working, open: open({ pendingQuestions: [{}] }) })).toBe('has_question');
+		expect(deriveStatus({ ...working, open: open({ pendingPermissions: [{}], messages: asked }) })).toBe('needs_permission');
+		expect(deriveStatus({ ...working, remoteRuntimeState: 'working', open: open({ messages: asked }) })).toBe('await');
+		expect(deriveStatus({ ...working, open: NO_OPEN_NEEDS })).toBe('working');
+		expect(isAttentionStatus('await')).toBe(true);
+	});
+
+	it('titles the tab with the summed count', () => {
+		const total = [
+			needsYouCount(local, null, 0, open({ messages: asked, pendingQuestions: [{}] })),
+			needsYouCount(local, { count: 1 }, 0, null)
+		].reduce((a, b) => a + b, 0);
+		expect(attentionTitle('AI Shuffle', total)).toBe('(3) AI Shuffle');
+		expect(attentionTitle('AI Shuffle', needsYouCount(local, null, 0, open({ messages: [...asked, msg('user', 'Prod')] })))).toBe('AI Shuffle');
 	});
 });
 
