@@ -1,6 +1,9 @@
 <script lang="ts">
 	import type { ChatMessage } from '$lib/stores/types';
-	import { isSubagentRunning } from '$lib/utils/subagent-status';
+	import { isSubagentRunning, latestWorkerTool, reportParts } from '$lib/utils/subagent-status';
+	import { liveToolLabel } from '$lib/utils/tool-preview';
+	import { renderChatMarkdown } from '$lib/utils/chat-markdown';
+	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { openSubagentLink, sessionHref } from '$lib/services/session-navigation';
 	import { taskModel } from '$lib/utils/task-model';
 
@@ -20,6 +23,21 @@
 	// The model the worker runs on, named as the model pickers name it (#1827).
 	const model = $derived(taskModel(message.agentModel));
 	const stopNote = $derived(statusInfo.isStopped && !statusInfo.isRunning ? message.agentStopNote?.trim() || '' : '');
+
+	// The worker's report (spec §4): its first paragraph on the card, the rest
+	// behind "Full report". Only a finished or failed worker has one; a running
+	// card's content is not a report yet, and a stopped one keeps its stop note.
+	const report = $derived(
+		!statusInfo.isRunning && (message.agentStatus === 'completed' || message.agentStatus === 'error')
+			? reportParts(message.content)
+			: null
+	);
+	const renderReport = (text: string) => sanitizeHtml(renderChatMarkdown(text, false));
+	// While it runs, the card names what the worker is doing now.
+	const latestTool = $derived(statusInfo.isRunning ? latestWorkerTool(message.agentChildren) : null);
+	const latestToolLabel = $derived(
+		latestTool ? liveToolLabel(latestTool.toolName ?? '', latestTool.toolInput, latestTool.partialToolInput) : ''
+	);
 
 	// Map known SDK agent types to display labels
 	const KNOWN_AGENT_LABELS: Record<string, string> = {
@@ -117,6 +135,22 @@
 	<div class="sa-body">
 		{#if stopNote}
 			<p class="stop-note">{stopNote}</p>
+		{/if}
+		{#if latestToolLabel}
+			<p class="stop-note" data-testid="worker-latest-tool">{latestToolLabel}</p>
+		{/if}
+		{#if report}
+			<div class="prose prose-sm max-w-none wrap-break-word" data-testid="worker-report-head">
+				{@html renderReport(report.head)}
+			</div>
+			{#if report.rest}
+				<details data-testid="worker-report-rest">
+					<summary class="transcript-link">Full report</summary>
+					<div class="prose prose-sm max-w-none wrap-break-word">
+						{@html renderReport(report.rest)}
+					</div>
+				</details>
+			{/if}
 		{/if}
 		{#if message.agentSessionId}
 			<a class="transcript-link" href={sessionHref(message.agentSessionId)}

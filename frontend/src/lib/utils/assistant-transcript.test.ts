@@ -18,11 +18,12 @@ const shape = (items: ReturnType<typeof fold>['items']) =>
 	items.map((item) => item.kind === 'details' ? `details(${item.entries.map(e => e.message.id).join(',')})` : item.kind === 'message' ? item.message.id : item.kind);
 
 describe('assistantRowRole', () => {
-	it('keeps prompts and prose, folds everything else', () => {
+	it('keeps prompts, prose and worker cards, folds everything else', () => {
 		expect(assistantRowRole(user('u', 'hi'))).toBe('prompt');
 		expect(assistantRowRole(msg('c', { role: 'user', type: 'command', content: '/x' }))).toBe('prompt');
 		expect(assistantRowRole(text('a', 'Done.'))).toBe('spoken');
-		for (const m of [tool('t'), thinking('k'), msg('s', { role: 'system', type: 'system', systemSubtype: 'permission_mode_changed' }), msg('sa', { type: 'subagent' }), msg('n', { type: 'tool_use', toolName: 'Task' })]) {
+		expect(assistantRowRole(msg('sa', { type: 'subagent' }))).toBe('card');
+		for (const m of [tool('t'), thinking('k'), msg('s', { role: 'system', type: 'system', systemSubtype: 'permission_mode_changed' }), msg('n', { type: 'tool_use', toolName: 'Task' })]) {
 			expect(assistantRowRole(m)).toBe('detail');
 		}
 	});
@@ -45,7 +46,28 @@ describe('assistantRowRole', () => {
 describe('foldAssistantTranscript', () => {
 	it('puts a settled turn\'s work behind one Details item after the reply', () => {
 		const { items } = fold([user('u1', 'fix it'), thinking('k1'), tool('t1'), text('a0', 'Looking.'), tool('t2'), text('a1', 'Fixed.')]);
-		expect(shape(items)).toEqual(['u1', 'a0', 'a1', 'details(k1,t1,t2)']);
+		// One-line narration goes with the work, as the ordinary fold hides it.
+		expect(shape(items)).toEqual(['u1', 'a1', 'details(k1,t1,a0,t2)']);
+	});
+
+	it('keeps the same protected set as the ordinary fold (spec §3)', () => {
+		const card = msg('sa', { type: 'subagent', agentStatus: 'completed', content: 'Report.' });
+		const messages = [
+			user('u1', 'audit it'), tool('t1'), text('n1', 'Reading the config.'), tool('t2'),
+			text('f1', 'The token is shared:\n- staging\n- prod'), tool('t3'), text('q1', 'Rotate it now?'),
+			tool('t4'), card, text('a1', 'Done.')
+		];
+		const { items } = fold(messages);
+		expect(shape(items)).toEqual(['u1', 'f1', 'q1', 'sa', 'a1', 'details(t1,n1,t2,t3,t4)']);
+		// Parity: assistant mode shows exactly the rows the ordinary fold keeps.
+		const model = buildTranscriptModel(messages, { isStreaming: false, latestTurnUnsettled: false, sessionId: 'home', swarms: [], groupingEnabled: true });
+		const kept = model.items.flatMap((item) => item.kind === 'message' ? [item.message.id] : item.kind === 'work_log' ? item.sequence.filter((e) => !e.hiddenWhenCollapsed).map((e) => e.message.id) : []);
+		expect(kept).toEqual(['u1', 'f1', 'q1', 'sa', 'a1']);
+	});
+
+	it('keeps a worker card in line while the turn runs', () => {
+		const { items } = fold([user('u1', 'go'), tool('t1'), msg('sa', { type: 'subagent', agentStatus: 'running' })], true);
+		expect(shape(items)).toEqual(['u1', 'sa', 'details(t1)']);
 	});
 
 	it('keeps each turn\'s details with that turn', () => {

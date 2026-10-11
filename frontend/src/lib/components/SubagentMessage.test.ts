@@ -82,6 +82,47 @@ describe('Subagent transcript card', () => {
   expect(screen.getByText('Stopped by user')).toBeTruthy();
   expect(screen.queryByText('Private worker result')).toBeNull();
  });
+ it('shows the first paragraph of the report on the card and the rest behind Full report (spec §4)', async () => {
+  const content = 'Found **two** stale deploy keys.\n\n## Details\n\n- key A expired\n- key B unused';
+  const { container } = render(SubagentMessage, { message: { ...message, agentStatus: 'completed', content } });
+  await fireEvent.click(container.querySelector('summary')!);
+  const head = screen.getByTestId('worker-report-head');
+  expect(head.textContent?.trim()).toBe('Found two stale deploy keys.');
+  expect(head.querySelector('strong')?.textContent).toBe('two');
+  const rest = screen.getByTestId('worker-report-rest');
+  expect(rest.tagName).toBe('DETAILS');
+  expect((rest as HTMLDetailsElement).open).toBe(false);
+  expect(rest.querySelector('summary')?.textContent).toBe('Full report');
+  expect(rest.textContent).toContain('key B unused');
+  expect(head.textContent).not.toContain('key A');
+  // The report sits above the transcript link, which is unchanged.
+  const link = screen.getByRole('link', { name: 'Open transcript' });
+  expect(head.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.queryByTestId('worker-latest-tool')).toBeNull();
+ });
+ it('omits Full report when the report is one paragraph, and shows a failure the same way', () => {
+  render(SubagentMessage, { message: { ...message, agentStatus: 'error', content: 'Worker failed: rate limited' } });
+  expect(screen.getByTestId('worker-report-head').textContent?.trim()).toBe('Worker failed: rate limited');
+  expect(screen.queryByTestId('worker-report-rest')).toBeNull();
+ });
+ it('shows the latest tool while the worker runs, not its partial output', () => {
+  const children = [
+   { id: 'c1', type: 'tool_use' as const, content: '', toolName: 'Read', toolStatus: 'complete' as const },
+   { id: 'c2', type: 'text' as const, content: 'thinking aloud' },
+   { id: 'c3', type: 'tool_use' as const, content: '', toolName: 'Bash', toolInput: { command: 'git status' }, toolStatus: 'running' as const }
+  ];
+  render(SubagentMessage, { message: { ...message, agentChildren: children } });
+  expect(screen.getByTestId('worker-latest-tool').textContent).toBe('Running git');
+  expect(screen.queryByTestId('worker-report-head')).toBeNull();
+  expect(screen.queryByText('Private worker result')).toBeNull();
+ });
+ it('leaves the body as it was when there is no report and nothing running', async () => {
+  const { container } = render(SubagentMessage, { message: { ...message, agentStatus: 'completed', content: '  ' } });
+  await fireEvent.click(container.querySelector('summary')!);
+  const body = container.querySelector('.sa-body')!;
+  expect(body.children).toHaveLength(1);
+  expect(body.querySelector('a.transcript-link')).not.toBeNull();
+ });
  it('does not invent session links from native SDK agent IDs', async () => {
   const { container } = render(SubagentMessage, { message: { ...message, agentSessionId: undefined, agentId: 'native-agent', agentStatus: 'completed' } });
   await fireEvent.click(container.querySelector('summary')!);
