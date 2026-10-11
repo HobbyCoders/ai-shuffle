@@ -641,6 +641,18 @@ def cmd_pre_push(args) -> int:
         if local_sha == zero:
             continue  # ref deletions introduce no objects
         scan_push(local_sha, remote_sha)
+        if remote_ref == "refs/heads/pr-assets" or remote_ref.startswith("refs/heads/pr-assets/"):
+            revision_range = local_sha if remote_sha == zero else f"{remote_sha}..{local_sha}"
+            # Inspect every commit (and merge parent), not just the final diff:
+            # adding then deleting or renaming code must not qualify as assets.
+            paths = subprocess.check_output(
+                ["git", "log", "--format=", "--name-only", "-z", "--root", "-m",
+                 "--no-renames", revision_range, "--"], cwd=ROOT,
+                text=True, encoding="utf-8").split("\0")
+            if all(path == "README.md" or Path(path).suffix.lower() in
+                   {".png", ".jpg", ".jpeg", ".webp", ".gif"} for path in paths if path):
+                print("pre-push: pr-assets image-only range accepted after secret scan")
+                continue
         if not remote_ref.startswith("refs/heads/"):
             continue  # tags get the secret scan, but not the test suites
         if records.get(tree_of(local_sha), {}).get("security_gate") == SECURITY_GATE_VERSION:
