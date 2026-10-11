@@ -7,18 +7,18 @@ logger = logging.getLogger(__name__)
 
 
 async def reconcile_task_replay(session_id: str) -> None:
-    """Append missing terminals from registry truth, never revive or kill work.
+    """Repair only current assignments on the authoritative local worker.
 
-    The admission lock serializes a repair with SendMessage resumes. A fresh
-    read inside it prefers live state over the durable mirror, so an old killed
-    snapshot cannot settle a newly running assignment. Only task projection
-    rows are read, not the session's potentially huge transcript.
+    The admission lock excludes local SendMessage resumes. The DB transaction
+    re-reads the projection inside that lock, fences ownership transfers and
+    deduplicates concurrent readers/processes before appending a repair.
     """
+    from app.core.config import settings
     from app.core.task_registry import task_registry
-    from app.core.turn_recorder import record_task_settle_frame
     from app.core.turn_scheduler import message_resume_lock
-    from app.db.background_tasks import TERMINAL_STATUSES
     from app.db.session_events import get_latest_task_updates
+    from app.db.task_replay import repair_task_projection
+    from app.network.runners import self_device_id
 
     try:
         updates = await asyncio.to_thread(get_latest_task_updates, session_id)
@@ -27,14 +27,14 @@ async def reconcile_task_replay(session_id: str) -> None:
             if not task_id or update.get("state") not in ("running", "started"):
                 continue
             async with message_resume_lock(task_id):
-                task = await asyncio.to_thread(
-                    task_registry.get_task, session_id, task_id, durable=True,
-                )
-                if not task or task.get("status") not in TERMINAL_STATUSES:
+                # In-memory running work wins while its durable mirror catches up.
+                task = task_registry.get_task(session_id, task_id)
+                if task and task.get("status") in ("running", "started"):
                     continue
-                await record_task_settle_frame(
-                    session_id, task_id, task["status"], task.get("summary"),
-                    tool_use_id=task.get("toolUseId") or task_id,
+                await asyncio.to_thread(
+                    repair_task_projection, session_id, task_id,
+                    instance_id=settings.effective_instance_id,
+                    device_id=self_device_id(),
                 )
     except Exception:
         # A temporarily unavailable snapshot must not prevent opening a chat.
