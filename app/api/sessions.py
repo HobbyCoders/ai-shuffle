@@ -36,7 +36,7 @@ from app.api.common import api_error_handler
 from app.api.worktree_session_meta import enrich_session_worktree_meta
 from app.api.git_owner import refuse_subagent_git
 from app.core.project_utils import get_project_working_dir
-from app.core.session_payload import client_view
+from app.core.session_payload import client_view, serialize_session_updated_at
 
 import logging
 logger = logging.getLogger(__name__)
@@ -1238,6 +1238,7 @@ async def get_live_session(
     # paths so the frontend can correct any stale state on switch.
     from app.core.workspace_folders import normalize_workspace_project_ids
     session_meta = {
+        "updated_at": serialize_session_updated_at(session.get("updated_at")),
         "mode": session.get("mode"),
         "project_id": session.get("project_id"),
         "project_v2_id": session.get("project_v2_id"),

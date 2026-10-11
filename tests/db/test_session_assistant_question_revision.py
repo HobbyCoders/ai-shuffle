@@ -67,6 +67,7 @@ def test_last_prose_only_and_non_prose_ignored(chat):
         assert saved["last_assistant_question_epoch"] == saved["last_user_message_epoch"]
         publish.assert_called_once()
         assert publish.call_args.args[1]["updates"]["last_assistant_question_seq"] == 2
+        assert publish.call_args.args[1]["updates"]["updated_at"] == Session(**saved).model_dump(mode="json")["updated_at"]
         for extra in [event(kind="thinking", content="Hmm?"), event("tool.use", name="Read"), event("system.note")]:
             session_events.append_events(chat, [extra])
             assert row()["last_assistant_question_seq"] == 2
@@ -74,6 +75,36 @@ def test_last_prose_only_and_non_prose_ignored(chat):
         assert row()["last_assistant_question_seq"] is None
         assert row()["last_assistant_question_epoch"] == saved["last_assistant_question_epoch"]
         assert publish.call_args.args[1]["updates"]["last_assistant_question_seq"] is None
+
+
+@pytest.mark.parametrize("stored_at", ["2020-01-01T00:00:00+00:00", "2020-01-01T00:00:00.123000+00:00"])
+def test_question_frames_carry_stored_row_revision_even_for_null_epoch_stamp(chat, stored_at):
+    # Establishing a streaming null projection's epoch must preserve activity.
+    with base.get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET updated_at = %s WHERE id = %s", (stored_at, chat))
+    initial = Session(**row()).model_dump(mode="json")["updated_at"]
+    with patch.object(global_events, "lifecycle") as publish:
+        session_events.append_events(chat, [event("assistant.text_delta", text="Which?")])
+        updates = publish.call_args.args[1]["updates"]
+        assert updates["last_assistant_question_seq"] is None
+        assert updates["last_assistant_question_epoch"] is not None
+        assert updates["updated_at"] == initial
+        assert updates["updated_at"] == Session(**row()).model_dump(mode="json")["updated_at"]
+        previous = initial
+        # Set, advance, and clear the question position, each in a new commit.
+        for next_event, expected_seq in [
+            (event("turn.completed"), 1),
+            (event(content="Or this?"), 3),
+            (event(content="Done."), None),
+        ]:
+            publish.reset_mock()
+            session_events.append_events(chat, [next_event])
+            publish.assert_called_once()
+            updates = publish.call_args.args[1]["updates"]
+            assert updates["last_assistant_question_seq"] == expected_seq
+            assert updates["updated_at"] == Session(**row()).model_dump(mode="json")["updated_at"]
+            assert updates["updated_at"] > previous
+            previous = updates["updated_at"]
 
 
 @pytest.mark.parametrize("name", ["AskUser", "AskUserQuestion"])
@@ -213,6 +244,8 @@ def test_http_surface_parity(chat, path, question):
     body = response.json()
     payload = body[0] if isinstance(body, list) else body.get("items", [body])[0]
     payload = payload.get("session_meta", payload)
+    if path != "/question/state":
+        assert payload["updated_at"] == Session(**row()).model_dump(mode="json")["updated_at"]
     assert payload["last_assistant_question_seq"] == (1 if question else None)
     epoch = payload["last_assistant_question_epoch"]
     assert (type(epoch) is str) if question else epoch is None

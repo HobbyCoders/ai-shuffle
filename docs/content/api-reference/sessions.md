@@ -41,9 +41,15 @@ if never stamped.
 
 After commit, the global WebSocket feed emits `user_session_updated` with
 `session_id`, `updates.last_user_message_at`, `updates.last_user_message_seq`,
-and `updates.last_user_message_epoch`,
+`updates.last_user_message_epoch`, and `updates.updated_at`,
 even when that session is not open on the receiving tab. These match the persisted
-revision. Account/paired subscribers and other workers receive a session-list
+revision. Both user-message and assistant-question stamp frames carry the row's
+`updated_at` captured in the writing transaction, not the notification's delivery
+time. It uses the same ISO 8601 serialization as the session list (including
+fractional-second precision and the `Z` suffix for UTC), so clients can order row
+snapshots consistently across delivery paths. A changed question sequence bumps
+this timestamp; a null-question epoch-only stamp does not, but still sends the
+row's current `updated_at`. Account/paired subscribers and other workers receive a session-list
 invalidation and reload their authorized rows; worker replication carries all three fields.
 
 Use event order, not wall-clock timestamps, for causal comparisons: a user answer
@@ -337,6 +343,11 @@ After the replay, the stream sends one `event: caught_up` frame (`{"seq": N}`, n
 ### GET /api/v1/sessions/{session_id}/live
 
 Get live session state for streaming. Returns current partial messages and streaming status.
+
+`session_meta.updated_at` carries the session row's current revision timestamp,
+serialized identically to the session list and the stamp frames' `updates.updated_at`.
+It is included both with messages and with `?include_messages=false`, so clients
+can order this snapshot against list rows and WebSocket updates.
 
 The response's `session_meta.last_user_message_at` is a nullable UTC ISO 8601
 string with the same value and [user-message revision](#user-message-revision)
