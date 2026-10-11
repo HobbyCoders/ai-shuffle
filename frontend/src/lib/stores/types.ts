@@ -82,6 +82,8 @@ export interface QueuedMessage {
 	id: string;
 	content: string;
 	queuedAt: number;
+	clientMessageId?: string;
+	status?: 'cancelling' | 'delivered';
 }
 
 /** Attributed peer traffic; has no user unsend/interrupt controls. */

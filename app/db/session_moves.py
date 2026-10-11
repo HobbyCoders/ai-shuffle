@@ -97,12 +97,46 @@ def remove_held(session_id: str, held_id: str) -> bool:
             return False
         held = parse_jsonb(row["held"])
         held = held if isinstance(held, list) else []
-        kept = [entry for entry in held if not (isinstance(entry, dict) and entry.get("id") == held_id)]
-        if len(kept) == len(held):
+        removed = next((entry for entry in held
+                        if isinstance(entry, dict) and entry.get("id") == held_id), None)
+        if removed is None:
             return False
+        kept = [entry for entry in held if not (isinstance(entry, dict) and entry.get("id") == held_id)]
+        # A content-free withdrawal receipt commits WITH the removal and
+        # outlives the move. Use the session event log rather than a fake turn:
+        # this message never ran and must not affect turn/permission selectors.
+        from app.db.session_events import append_events
+
+        append_events(session_id, [{
+            "id": "held-withdrawal:" + held_id,
+            "type": "queued_message.withdrawn",
+            "command_id": removed.get("command_id"),
+            "payload": {"message_id": held_id},
+        }], _conn=conn)
         cursor.execute(f"UPDATE session_moves SET held={ph()} WHERE session_id={ph()}",
                        (json.dumps(kept), session_id))
         return True
+
+
+def held_withdrawal(
+    session_id: str, *, held_id: Optional[str] = None, command_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Find a durable withdrawal by either identity, scoped to its session."""
+    if not held_id and not command_id:
+        return None
+    field, value = ("id", "held-withdrawal:" + held_id) if held_id else ("command_id", command_id)
+    with get_db() as conn:
+        cursor = get_cursor(conn)
+        cursor.execute(
+            f"SELECT payload, command_id FROM session_events WHERE session_id={ph()} "
+            f"AND event_type='queued_message.withdrawn' AND {field}={ph()} LIMIT 1",
+            (session_id, value),
+        )
+        row = cursor.fetchone()
+    if not row:
+        return None
+    payload = parse_jsonb(row["payload"]) or {}
+    return {"id": payload.get("message_id"), "command_id": row["command_id"]}
 
 
 def take(session_id: str) -> Optional[Dict[str, Any]]:

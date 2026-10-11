@@ -7,6 +7,7 @@ import {
 	type SessionSwitcherDeps,
 } from './session-switcher';
 import { feedController } from './v2/feed-controller';
+import { pendingQueue } from './pending-queue';
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
@@ -165,6 +166,24 @@ function makeSwitcher(initial: ActiveSessionState) {
 	const switcher = createSessionSwitcher(deps);
 	return { switcher, getState, ephemeralStore, deps };
 }
+
+describe('cancellation verdict across navigation', () => {
+	it('restores a delayed withdrawn message into its session, not the currently open one', async () => {
+		pendingQueue.reset(null, true);
+		const { switcher, getState } = makeSwitcher(fullState({ sessionId: 'session-A', draft: '' }));
+		pendingQueue.requestRemoval('session-A', { id: 'client-A', clientMessageId: 'client-A', content: 'unsent A', queuedAt: 1 });
+		await switcher.switchSession('session-B');
+		pendingQueue.reset('session-B'); // the real feed's start/stop calls reset
+		pendingQueue.applyRemovalVerdict('session-A', 'client-A', 'withdrawn');
+		expect(getState().pendingRestorePrompt).toBeNull();
+		await switcher.switchSession('session-A');
+		expect(getState().pendingRestorePrompt).toBe('unsent A');
+		expect(pendingQueue.takeWithdrawnDraft('session-A')).toBeNull();
+		await switcher.switchSession('session-B');
+		expect(getState().pendingRestorePrompt).toBeNull();
+		pendingQueue.reset(null, true);
+	});
+});
 
 describe('remembered new-chat worker', () => {
 	it('restores the preference after send cleared the active intent, without rerouting existing sessions', async () => {

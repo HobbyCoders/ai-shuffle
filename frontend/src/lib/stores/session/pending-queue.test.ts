@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { pendingQueue, isLocalPendingId, LOCAL_PENDING_PREFIX, type PendingEntry } from './pending-queue';
 
 /**
@@ -22,7 +22,7 @@ function authoritative(rows: PendingEntry[]): PendingEntry[] {
 }
 
 beforeEach(() => {
-	pendingQueue.reset(SID);
+	pendingQueue.reset(SID, true);
 });
 
 describe('pendingQueue — optimistic echo', () => {
@@ -119,37 +119,69 @@ describe('pendingQueue — a row the server put back', () => {
 });
 
 describe('pendingQueue — unsending', () => {
-	it('names the server row directly when the entry has a real id', () => {
-		authoritative([row('turn-q', 'nope')]);
-		expect(pendingQueue.requestRemoval(SID, row('turn-q', 'nope'))).toBe('turn-q');
-		expect(pendingQueue.drainRemovalRequests()).toEqual([]);
+	it('does not lose cancellation when the queue acknowledgement is delayed over 15 seconds', () => {
+		const clock = vi.spyOn(Date, 'now').mockReturnValue(1000);
+		try {
+			const local = { ...row('client-a', 'nope'), clientMessageId: 'client-a' };
+			pendingQueue.noteOptimistic(SID, local.id);
+			expect(pendingQueue.requestRemoval(SID, local)).toBe('client-a');
+			clock.mockReturnValue(17000);
+			const server = { ...local, id: 'turn-q' };
+			expect(authoritative([server])).toEqual([{ ...server, status: 'cancelling' }]);
+			pendingQueue.applyRemovalVerdict(SID, 'client-a', 'withdrawn');
+			expect(authoritative([server])).toEqual([]);
+		} finally {
+			clock.mockRestore();
+		}
 	});
 
-	it('defers an × on a local id and re-aims it at the server row', () => {
-		const localId = `${LOCAL_PENDING_PREFIX}1`;
-		pendingQueue.noteOptimistic(SID, localId);
-		expect(pendingQueue.requestRemoval(SID, row(localId, 'nope'))).toBeNull();
-		// The real row arrives; it must not render, and the removal is re-aimed.
-		expect(authoritative([row('turn-q', 'nope')])).toEqual([]);
-		expect(pendingQueue.drainRemovalRequests()).toEqual(['turn-q']);
-		expect(pendingQueue.drainRemovalRequests()).toEqual([]);
+	it('names a legacy server row directly and retains it until a verdict', () => {
+		const entry = row('turn-q', 'nope');
+		authoritative([entry]);
+		expect(pendingQueue.requestRemoval(SID, entry)).toBe('turn-q');
+		expect(authoritative([])).toEqual([{ ...entry, status: 'cancelling' }]);
 	});
 
-	it('re-aims a deferred × at one row only', () => {
-		const localId = `${LOCAL_PENDING_PREFIX}1`;
-		pendingQueue.noteOptimistic(SID, localId);
-		pendingQueue.requestRemoval(SID, row(localId, 'nope'));
-		authoritative([row('turn-q', 'nope')]);
-		pendingQueue.drainRemovalRequests();
-		// A later, genuinely new send of the same text is untouched.
-		expect(authoritative([row('turn-q2', 'nope')]).map((e) => e.id)).toEqual(['turn-q2']);
-		expect(pendingQueue.drainRemovalRequests()).toEqual([]);
+	it('sends the stable identity before the queue acknowledgement exists', () => {
+		const local = { ...row('client-a', 'nope'), clientMessageId: 'client-a' };
+		pendingQueue.noteOptimistic(SID, local.id);
+		expect(pendingQueue.requestRemoval(SID, local)).toBe('client-a');
+		expect(authoritative([])).toEqual([{ ...local, status: 'cancelling' }]);
+		pendingQueue.applyRemovalVerdict(SID, 'client-a', 'withdrawn');
+		expect(authoritative([])).toHaveLength(0);
 	});
 
-	it('keeps a removed row gone when a stale snapshot re-asserts it', () => {
-		authoritative([row('turn-q', 'nope')]);
-		pendingQueue.requestRemoval(SID, row('turn-q', 'nope'));
-		expect(authoritative([row('turn-q', 'nope')])).toEqual([]);
+	it('cancels one identity only even when the text is identical', () => {
+		const first = { ...row('turn-q', 'nope'), clientMessageId: 'client-a' };
+		const second = { ...row('turn-q2', 'nope'), clientMessageId: 'client-b' };
+		pendingQueue.requestRemoval(SID, first);
+		pendingQueue.applyRemovalVerdict(SID, 'client-a', 'withdrawn');
+		expect(authoritative([first, second])).toEqual([second]);
+	});
+
+	it('keeps a confirmed withdrawal gone when a stale snapshot re-asserts it', () => {
+		const entry = row('turn-q', 'nope');
+		pendingQueue.requestRemoval(SID, entry);
+		pendingQueue.applyRemovalVerdict(SID, entry.id, 'withdrawn');
+		expect(authoritative([entry])).toEqual([]);
+	});
+
+	it('keeps delivery-first visible as delivered despite receipt and empty snapshot', () => {
+		const entry = row('turn-q', 'too late');
+		pendingQueue.requestRemoval(SID, entry);
+		pendingQueue.noteDelivered(SID, entry.content, 'turn-live');
+		pendingQueue.applyRemovalVerdict(SID, entry.id, 'already_delivered');
+		expect(authoritative([])).toEqual([{ ...entry, status: 'delivered' }]);
+		expect(authoritative([entry])).toEqual([{ ...entry, status: 'delivered' }]);
+	});
+
+	it('does not claim withdrawal for an unknown id or a failed socket send', () => {
+		const entry = row('turn-q', 'nope');
+		pendingQueue.requestRemoval(SID, entry);
+		pendingQueue.applyRemovalVerdict(SID, entry.id, 'not_found');
+		expect(authoritative([entry])).toHaveLength(1);
+		pendingQueue.removalFailed(SID, entry.id);
+		expect(authoritative([entry])).toEqual([entry]);
 	});
 });
 
