@@ -18,8 +18,7 @@
 	import ClaudeCliSetup from './setup/ClaudeCliSetup.svelte';
 	import ClaudeCloudSetup from './setup/ClaudeCloudSetup.svelte';
 	import { providerDrafts, type Draft } from './drafts.svelte';
-	import UnofficialBadge from './UnofficialBadge.svelte';
-	import { rowItem, UNOFFICIAL_SIGN_IN_HELP, type ProviderView } from './providers-model';
+	import { rowItem, type ProviderView } from './providers-model';
 
 	interface Props {
 		draft: Draft;
@@ -84,9 +83,7 @@
 				<SettingRow
 					label={provider.id === 'openai' ? 'Sign in with ChatGPT' : 'Sign in with SuperGrok'}
 					hint="No key needed"
-					help={UNOFFICIAL_SIGN_IN_HELP}
 				>
-					<UnofficialBadge />
 					<button
 						type="button"
 						class="st-btn primary"

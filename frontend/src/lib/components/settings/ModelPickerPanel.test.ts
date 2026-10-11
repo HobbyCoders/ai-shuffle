@@ -204,8 +204,8 @@ describe('ModelPickerPanel', () => {
 		expect(within(list).queryByRole('option', { name: /grok 4/i })).toBeNull();
 	});
 
-	it('labels a ChatGPT or SuperGrok subscription Unofficial, an API key not', () => {
-		const chatgpt = { key: 'gpt-row', name: 'OpenAI', subtext: 'PRO', glyph: 'openai' as const, isApi: false, unofficial: true };
+	it('shows a ChatGPT or SuperGrok subscription without an Unofficial label', () => {
+		const chatgpt = { key: 'gpt-row', name: 'OpenAI', subtext: 'PRO', glyph: 'openai' as const, isApi: false };
 		const xai = { key: 'xai-row', name: 'Grok', subtext: 'API', glyph: 'grok' as const, isApi: true };
 		const option = (groupKey: string, group: string, groupSubtext: string, id: string) => ({
 			value: `prov:${groupKey}:${id}`,
@@ -226,11 +226,11 @@ describe('ModelPickerPanel', () => {
 		});
 		const list = screen.getByRole('listbox', { name: 'Model' });
 		const gpt = within(list).getByRole('option', { name: /gpt-5/ });
-		expect(within(gpt).getByTestId('model-unofficial').textContent).toContain('Unofficial');
-		expect(gpt.getAttribute('title')).toContain('unofficial sign-in. The provider may change or block it.');
+		expect(gpt.textContent).not.toContain('Unofficial');
+		expect(gpt.getAttribute('title')).toBe('gpt-5');
 		const grok = within(list).getByRole('option', { name: /grok-4/ });
-		expect(within(grok).queryByTestId('model-unofficial')).toBeNull();
-		expect(screen.getByRole('tab', { name: 'OpenAI · PRO · Unofficial sign-in' })).toBeTruthy();
+		expect(grok.textContent).not.toContain('Unofficial');
+		expect(screen.getByRole('tab', { name: 'OpenAI · PRO' })).toBeTruthy();
 	});
 });
 

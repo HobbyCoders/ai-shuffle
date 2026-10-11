@@ -20,7 +20,6 @@
 	import ModelCuration from './ModelCuration.svelte';
 	import DeviceCodeSetup from './setup/DeviceCodeSetup.svelte';
 	import SubscriptionUsage from './tabs/SubscriptionUsage.svelte';
-	import UnofficialBadge from './UnofficialBadge.svelte';
 	import { BankedResets, isGrokSubscription } from './banked-resets.svelte';
 	import { planLabel, supportsNativeImages, type CredentialView, type ProviderView } from './providers-model';
 	import { setCredentialEnabled } from './provider-actions';
@@ -98,7 +97,6 @@
 	item={credential.item}
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
-	{#snippet badges()}<UnofficialBadge help="tip" />{/snippet}
 	{#snippet primary()}
 		{#if !signedIn && !reconnecting}
 			<button type="button" class="st-btn warn" onclick={reconnect}><RefreshCw />Reconnect</button>

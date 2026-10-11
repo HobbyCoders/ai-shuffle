@@ -34,8 +34,6 @@ export interface PickerGroup {
 	glyph: ProviderGlyphKind;
 	/** Whether this provider authenticates with an API credential. */
 	isApi: boolean;
-	/** A ChatGPT or SuperGrok subscription signed in through an unofficial sign-in. */
-	unofficial?: boolean;
 }
 
 export interface PickerOption {
@@ -98,8 +96,7 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 			name: display.name,
 			subtext: display.subtext,
 			glyph: providerGlyphKind(p.provider_type),
-			isApi: p.auth_kind === 'api',
-			unofficial: p.auth_kind === 'subscription'
+			isApi: p.auth_kind === 'api'
 		});
 		for (const pm of p.models) {
 			options.push({
