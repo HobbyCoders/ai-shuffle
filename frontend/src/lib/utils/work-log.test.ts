@@ -2016,6 +2016,28 @@ describe('live runs', () => {
 		expect(keyOf([read, first, tool(), { ...next, streaming: false }])).toEqual([read.id]);
 	});
 
+	// Re-review of #2297: runs merge and split as prose finishes. Every key a
+	// run had before stays among the identities of the run that holds its rows.
+	it('carries a run\'s earlier keys as aliases when runs merge or split', () => {
+		const prompt = user('go', undefined, 'turn-1');
+		const ids = (rows: ChatMessage[]) => liveLog(buildDisplayItems([prompt, ...rows], LIVE))!.runs!
+			.map((run) => [run.key, ...run.aliases]);
+		// Merge: [a] ended by A and [b] ended by the worker become one run once B finishes.
+		const [a, proseA, b] = [tool(), text('Checking the config.'), tool()];
+		const worker = subagent({ toolId: 'task-1', agentStatus: 'running' });
+		expect(ids([a, proseA, b, worker])).toEqual([[a.id, proseA.id], [b.id, worker.id]]);
+		const merged = ids([a, proseA, b, worker, text('Reviewer is on it.')]);
+		expect(merged).toHaveLength(1);
+		expect(new Set(merged[0])).toEqual(new Set([a.id, worker.id, b.id]));
+		// Split: [x, y] ended by the worker splits at a finding that finishes inside it.
+		const [x, y] = [tool(), tool()];
+		const finding = msg({ type: 'text', content: 'Found:\n- x', streaming: true });
+		const whole = ids([x, finding, y, worker]);
+		expect(whole).toHaveLength(1);
+		expect(new Set(whole[0])).toEqual(new Set([x.id, worker.id, y.id]));
+		expect(ids([x, { ...finding, streaming: false }, y, worker])).toEqual([[x.id, finding.id], [y.id, worker.id]]);
+	});
+
 	it('keys a run started by an optimistic row by its server id once reconciled', () => {
 		const prompt = user('go', undefined, 'turn-1');
 		const a = { ...tool(), serverId: 'srv-9' };

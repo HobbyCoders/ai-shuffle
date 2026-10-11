@@ -94,9 +94,11 @@
 
 	let localOpen = $state(false);
 	// Runs are keyed by the row they start at (`WorkLogRun.key`), not by
-	// ordinal or by the row that ends them: prose that finishes later inserts
-	// a boundary and shifts ordinals, and newer prose replaces the boundary
-	// that ended a run, so neither may close a run the reader opened.
+	// ordinal: prose that finishes later inserts a boundary and shifts
+	// ordinals. Runs also merge (newer prose replaces the boundary between
+	// two) and split (prose inside one finishes), so a run's open state is
+	// stored under its key and every alias, and any of them reads as open:
+	// neither may close a run the reader opened.
 	let localRuns = $state<Record<string, boolean>>({});
 	const turnFold = $derived(foldKey ? `${foldKey}:turn` : null);
 	const runPrefix = $derived(foldKey ? `${foldKey}:run-` : null);
@@ -116,12 +118,15 @@
 		if (turnFold) folds.setOpen(turnFold, next);
 		else localOpen = next;
 	}
+	function runIds(run: WorkLogRun): string[] {
+		return [run.key, ...(run.aliases ?? [])];
+	}
 	function runOpen(run: WorkLogRun): boolean {
-		return runPrefix ? stored[`${runPrefix}${run.key}`] === true : localRuns[run.key] === true;
+		return runIds(run).some((id) => (runPrefix ? stored[`${runPrefix}${id}`] === true : localRuns[id] === true));
 	}
 	function setRunOpen(run: WorkLogRun, next: boolean) {
-		if (runPrefix) folds.setOpen(`${runPrefix}${run.key}`, next);
-		else localRuns = { ...localRuns, [run.key]: next };
+		if (runPrefix) for (const id of runIds(run)) folds.setOpen(`${runPrefix}${id}`, next);
+		else localRuns = { ...localRuns, ...Object.fromEntries(runIds(run).map((id) => [id, next])) };
 	}
 	// A settled turn with nothing to hide keeps its group (so settling does not
 	// remount its rows) but draws no disclosure.

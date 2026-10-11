@@ -454,7 +454,7 @@ describe('WorkLogGroup', () => {
 			const first = render(WorkLogGroup, { ...logOf(true), folds });
 			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
 			expect(shown('read-a')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-read-a': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-a': true, 'prompt:run-finding': true });
 			first.unmount();
 
 			// A window remount, a session switch back or a reload (new store, same storage).
@@ -746,7 +746,7 @@ describe('WorkLogGroup', () => {
 			expect(labels).toHaveLength(2);
 			await fireEvent.click(labels[1]);
 			expect(shown('read-c')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-read-c': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-c': true, 'prompt:run-worker': true });
 
 			// prose-0 finishes: a new boundary ahead of the open run renumbers the runs.
 			const failed = base.map((m) => (m === running ? { ...m, streaming: false } : m));
@@ -799,7 +799,7 @@ describe('WorkLogGroup', () => {
 			expect(shown('read-x')).toBe(false);
 			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
 			expect(shown('read-x')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-read-x': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-x': true, 'prompt:run-prose-a': true });
 
 			// B streams: A still ends the run.
 			await view.rerender(logOf(true, [prompt, read, proseA, { ...proseB, streaming: true }]));
@@ -808,13 +808,68 @@ describe('WorkLogGroup', () => {
 			await view.rerender(logOf(true, [prompt, read, proseA, proseB]));
 			expect(shown('read-x')).toBe(true);
 			expect(shown('prose-a')).toBe(true);
-			expect(folds.current).toEqual({ 'prompt:run-read-x': true });
+			expect(folds.current).toEqual({ 'prompt:run-read-x': true, 'prompt:run-prose-a': true });
 			view.unmount();
 
 			// A remount or reload reads the same stored state.
 			render(WorkLogGroup, { ...logOf(true, [prompt, read, proseA, proseB]), folds: createFoldState(storage) });
 			expect(shown('read-x')).toBe(true);
 			expect(screen.getByRole('button', { name: 'Hide work details: Read 1 file' })).toBeTruthy();
+		});
+
+		// Re-review of #2297: runs merge when newer prose replaces the prose
+		// between them as the latest word. Opening the later run must keep the
+		// merged run open, live and after a remount on the stored state.
+		it('keeps an open run open when newer prose merges it into the run before it, through a reload', async () => {
+			const storage = memoryStorage();
+			const folds = createFoldState(storage);
+			const prompt = turn[0];
+			const readA = { ...message, id: 'read-a', content: 'Read A' };
+			const proseA: ChatMessage = { id: 'prose-a', role: 'assistant', type: 'text', content: 'Checking the config.' };
+			const readB = { ...message, id: 'read-b', content: 'Read B' };
+			const worker = { id: 'worker', type: 'subagent', role: 'assistant', agentName: 'Reviewer', agentStatus: 'running', toolId: 'task-1' } as ChatMessage;
+			const proseB: ChatMessage = { id: 'prose-b', role: 'assistant', type: 'text', content: 'Reviewer is on it.' };
+			const before = [prompt, readA, proseA, readB, worker];
+			const view = render(WorkLogGroup, { ...logOf(true, before), folds });
+			const labels = screen.getAllByRole('button', { name: /^Show work details/ });
+			expect(labels).toHaveLength(2);
+			await fireEvent.click(labels[1]);
+			expect(shown('read-b')).toBe(true);
+
+			await view.rerender(logOf(true, [...before, { ...proseB, streaming: true }]));
+			expect(shown('read-b')).toBe(true);
+			// B finishes: A no longer ends a run, so the two runs merge.
+			await view.rerender(logOf(true, [...before, proseB]));
+			expect(screen.getAllByRole('button', { name: /^Hide work details:/ })).toHaveLength(1);
+			expect(shown('read-b')).toBe(true);
+			view.unmount();
+
+			render(WorkLogGroup, { ...logOf(true, [...before, proseB]), folds: createFoldState(storage) });
+			expect(shown('read-b')).toBe(true);
+		});
+
+		// Re-review of #2297: a run splits when prose inside it finishes and
+		// becomes a boundary. Both parts of a run the reader opened stay open.
+		it('keeps both parts of an open run open when prose inside it finishes and splits it, through a reload', async () => {
+			const storage = memoryStorage();
+			const folds = createFoldState(storage);
+			const prompt = turn[0];
+			const readX = { ...message, id: 'read-x', content: 'Read X' };
+			const finding: ChatMessage = { id: 'finding-p', role: 'assistant', type: 'text', content: 'Found:\n- a shared token', streaming: true };
+			const readY = { ...message, id: 'read-y', content: 'Read Y' };
+			const worker = { id: 'worker', type: 'subagent', role: 'assistant', agentName: 'Reviewer', agentStatus: 'running', toolId: 'task-1' } as ChatMessage;
+			const view = render(WorkLogGroup, { ...logOf(true, [prompt, readX, finding, readY, worker]), folds });
+			await fireEvent.click(screen.getByRole('button', { name: /^Show work details/ }));
+			expect(['read-x', 'read-y'].map(shown)).toEqual([true, true]);
+
+			const split = [prompt, readX, { ...finding, streaming: false }, readY, worker];
+			await view.rerender(logOf(true, split));
+			expect(screen.getAllByRole('button', { name: /^Hide work details:/ })).toHaveLength(2);
+			expect(['read-x', 'read-y'].map(shown)).toEqual([true, true]);
+			view.unmount();
+
+			render(WorkLogGroup, { ...logOf(true, split), folds: createFoldState(storage) });
+			expect(['read-x', 'read-y'].map(shown)).toEqual([true, true]);
 		});
 
 		it('moves folds opened under an optimistic id onto the server id', async () => {
@@ -826,7 +881,7 @@ describe('WorkLogGroup', () => {
 			// The reducer reconciles the optimistic prompt in place and records its server id.
 			const reconciled = [{ ...turn[0], serverId: 'srv-1' }, ...turn.slice(1)];
 			await view.rerender(logOf(true, reconciled));
-			expect(folds.current).toEqual({ 'srv-1:run-read-a': true });
+			expect(folds.current).toEqual({ 'srv-1:run-read-a': true, 'srv-1:run-finding': true });
 			expect(shown('read-a')).toBe(true);
 		});
 	});
