@@ -54,7 +54,7 @@
 	} from '$lib/stores/app-data.svelte';
 	import { activeSession, streamingSessions, backgroundPermissions } from '$lib/stores/active-session';
 	import { privateAccessPending } from '$lib/stores/chat-access';
-	import { proseQuestionSessions, proseQuestionPending, withoutSession } from '$lib/stores/session/prose-questions';
+	import { proseQuestionSessions, withoutSession } from '$lib/stores/session/prose-questions';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
@@ -383,7 +383,7 @@
 						open: sessionNeedsInput(
 							s.id === openNeedsId,
 							openNeedsNow,
-							groupToolCalls && proseQuestionPending(rememberedProse.get(s.id), s, isStreaming(s.id))
+							groupToolCalls && rememberedProse.has(s.id)
 						)
 					}),
 					ts: sessionTimestamp(s)

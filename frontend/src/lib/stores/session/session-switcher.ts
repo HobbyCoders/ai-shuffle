@@ -527,11 +527,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		// An empty or partial transcript mid-hydration says nothing about the
 		// question: keep whatever was remembered until history has loaded.
 		if (state.isLoadingSession || state.isRestoringSession) return;
-		const row = appData.current.sessions.find((s) => s.id === state.sessionId);
-		rememberLeavingProseQuestion(state.sessionId, state.messages, {
-			workStartedAt: row?.work_started_at ?? null,
-			streaming: !!state.isStreaming
-		});
+		rememberLeavingProseQuestion(state.sessionId, state.messages);
 	}
 
 	async function switchSession(sessionId: string, projectId?: string | null, worktreeInfo?: SessionWorktreeInfo | null, title?: string | null, projectV2Id?: string | null) {

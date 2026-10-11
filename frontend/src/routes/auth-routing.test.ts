@@ -19,7 +19,7 @@ vi.mock('$lib/stores/sessionMode.svelte', () => ({ appMode: { set: vi.fn() } }))
 vi.mock('$lib/stores/active-session', () => ({ activeSession: {
 	...writable({ sessionId: null }), init: mocks.init, destroy: mocks.destroy, newChat: vi.fn(), resolveComposerDefaultsAfterCatalog: vi.fn(),
 	validateSelectedProfile: vi.fn(), reconcileSessionMode: vi.fn()
-}, streamingSessions: writable(new Map()) }));
+} }));
 vi.mock('$lib/stores/app-data.svelte', () => ({
 	appData: { current: { profiles: [], sessions: [] }, loadProfiles: vi.fn(), loadSessions: vi.fn(), prefetchSessions: vi.fn(),
 		loadProjects: vi.fn(), loadClusterProjects: vi.fn(), loadApiUserSessions: vi.fn() },

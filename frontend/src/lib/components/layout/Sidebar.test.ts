@@ -640,13 +640,13 @@ describe('Sidebar Needs you lane', () => {
 	});
 
 	// Spec §5: a question this tab saw before leaving a session keeps that row
-	// in Needs you until the session's next turn, and the open row ignores it.
-	it('keeps a left session with an unanswered prose question in the lane until its next turn', async () => {
+	// in Needs you; working-time changes on its row never clear it.
+	it('keeps a left session with an unanswered prose question in the lane through row updates', async () => {
 		const asked = [
 			{ id: 'u1', role: 'user' as const, content: 'Deploy it' },
 			{ id: 'a1', role: 'assistant' as const, type: 'text' as const, content: 'Staging too, or prod only?' }
 		];
-		rememberLeavingProseQuestion('settled', asked, { workStartedAt: null, streaming: false });
+		rememberLeavingProseQuestion('settled', asked);
 		onTestFinished(_resetProseQuestions);
 		render(Sidebar, { props: sidebarProps });
 		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
@@ -657,6 +657,10 @@ describe('Sidebar Needs you lane', () => {
 			session('settled', 'Settled chat', 'visible-project', false, false, { work_started_at: '2026-10-11T00:00:00Z' }),
 			session('worker', 'Hidden worker', 'hidden-project', true, true),
 		]);
+		await tick();
+		expect(labels()).toEqual(['Needs you 1', 'Active 1', 'Settled 0']);
+		// Reopened here with the answer loaded, then left: the switcher drops it.
+		rememberLeavingProseQuestion('settled', [...asked, { id: 'u2', role: 'user' as const, content: 'Prod only' }]);
 		await tick();
 		expect(labels()).toEqual(['Active 1', 'Settled 1']);
 	});

@@ -21,8 +21,8 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { beginJourney, cancelJourney, claimNavigationOrigin, finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { isAuthenticated, isAdmin } from '$lib/stores/auth.svelte';
-	import { activeSession, backgroundPermissions, streamingSessions } from '$lib/stores/active-session';
-	import { proseQuestionSessions, proseQuestionPending, reconcileProseQuestions } from '$lib/stores/session/prose-questions';
+	import { activeSession, backgroundPermissions } from '$lib/stores/active-session';
+	import { proseQuestionSessions } from '$lib/stores/session/prose-questions';
 	import { privateAccessPending } from '$lib/stores/chat-access';
 	import { needsYouCount as countNeedsYou, openSessionNeeds, sessionNeedsInput, attentionTitle } from './session-card-data';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
@@ -491,13 +491,10 @@
 			sessionNeedsInput(
 				s.id === openId,
 				openNeeds,
-				groupToolCalls && proseQuestionPending($proseQuestionSessions.get(s.id), s, $streamingSessions.has(s.id))
+				groupToolCalls && $proseQuestionSessions.has(s.id)
 			)
 		)), 0)
 	);
-	// A remembered question stops counting at that session's next user message
-	// (a new turn in the session list); drop it then.
-	$effect(() => reconcileProseQuestions($sessions, $streamingSessions));
 </script>
 
 <svelte:head>

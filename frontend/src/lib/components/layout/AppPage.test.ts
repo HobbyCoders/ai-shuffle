@@ -258,7 +258,7 @@ describe('AppPage tab title', () => {
   await waitFor(() => expect(document.title).toBe('AI Shuffle'));
  });
 
- it('keeps an unanswered prose question counting across A -> B -> A until that session\'s next turn', async () => {
+ it('keeps an unanswered prose question counting across A -> B -> A until a loaded transcript answers it', async () => {
   list.set([{ id: 'work', status: 'active', work_started_at: null }, { id: 'other', status: 'active', work_started_at: null }]);
   views.set({ type: 'session', sessionId: 'work' });
   const open = (state: Record<string, unknown>) => active.set({ draft: '', project: null, pendingPermissions: [], pendingQuestions: [], ...state } as never);
@@ -266,7 +266,7 @@ describe('AppPage tab title', () => {
   await boot();
   await waitFor(() => expect(document.title).toBe('(1) AI Shuffle'));
   // What the switcher does on leaving: remember, then show B.
-  rememberLeavingProseQuestion('work', asked as never, { workStartedAt: null, streaming: false });
+  rememberLeavingProseQuestion('work', asked as never);
   open({ sessionId: 'other', messages: [] });
   await tick();
   expect(document.title).toBe('(1) AI Shuffle');
@@ -277,9 +277,15 @@ describe('AppPage tab title', () => {
   open({ sessionId: 'work', messages: asked });
   await tick();
   expect(document.title).toBe('(1) AI Shuffle');
-  // Leave again; the next user message (sent from elsewhere) starts a turn.
+  // Leave again. A permission resume moves the turn's working time: not an answer.
   open({ sessionId: 'other', messages: [] });
   list.set([{ id: 'work', status: 'active', work_started_at: '2026-10-11T00:00:00Z' }, { id: 'other', status: 'active', work_started_at: null }]);
+  await tick();
+  expect(document.title).toBe('(1) AI Shuffle');
+  // Reopened with the answer loaded and left again: the switcher drops it.
+  open({ sessionId: 'work', messages: [...asked, { id: 'u2', role: 'user', content: 'Prod only' }] });
+  rememberLeavingProseQuestion('work', [...asked, { id: 'u2', role: 'user', content: 'Prod only' }] as never);
+  open({ sessionId: 'other', messages: [] });
   await waitFor(() => expect(document.title).toBe('AI Shuffle'));
   expect(get(proseQuestionSessions).has('work')).toBe(false);
  });
