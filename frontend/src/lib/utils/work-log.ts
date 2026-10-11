@@ -203,15 +203,16 @@ function isRoutineTool(msg: ChatMessage, gallery = false): boolean {
  * A row that is not prose and never folds in a settled turn (spec §3): a worker
  * card, a decision-bearing tool (questions, todos, Task/Agent, swarm), or a
  * system notice that is not routine bookkeeping. Assistant mode keeps the same
- * rows inline. Compaction markers are excluded: they read as transcript
- * plumbing, not something the turn said.
+ * rows inline. A compaction card counts too: one trailing the answer keeps its
+ * row, and a mid-turn one is still folded by the settled turn's
+ * `hiddenWhenCollapsed`.
  */
 export function isProtectedRow(msg: ChatMessage): boolean {
 	if (agentDelivery(msg)) return false;
 	if (msg.type === 'subagent') return true;
 	if (msg.type === 'tool_use') return isSpecialTool(msg);
 	if (msg.type !== 'system' && msg.role !== 'system') return false;
-	return !isGroupableSystem(msg) && !isCompactionCard(msg) && !isFoldableRetryCard(msg);
+	return !isGroupableSystem(msg) && !isFoldableRetryCard(msg);
 }
 
 /** A tool that puts a question to the reader. */

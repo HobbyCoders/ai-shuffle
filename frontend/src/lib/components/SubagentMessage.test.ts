@@ -117,6 +117,7 @@ describe('Subagent transcript card', () => {
   expect(screen.queryByText('Private worker result')).toBeNull();
  });
  it('points to the transcript for the rest of a cut report', async () => {
+  vi.spyOn(activeSession, 'switchSession').mockImplementation(() => {});
   const content = 'Found the cause.\n\nThe first part of a long explanation';
   const { container } = render(SubagentMessage, { message: { ...message, agentStatus: 'completed', content, agentReportTruncated: true } });
   await fireEvent.click(container.querySelector('summary')!);

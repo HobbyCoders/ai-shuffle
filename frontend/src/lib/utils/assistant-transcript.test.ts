@@ -22,10 +22,10 @@ describe('assistantRowRole', () => {
 		expect(assistantRowRole(user('u', 'hi'))).toBe('prompt');
 		expect(assistantRowRole(msg('c', { role: 'user', type: 'command', content: '/x' }))).toBe('prompt');
 		expect(assistantRowRole(text('a', 'Done.'))).toBe('spoken');
-		for (const m of [msg('sa', { type: 'subagent' }), msg('n', { type: 'tool_use', toolName: 'Task' }), tool('q', 'AskUserQuestion'), tool('td', 'TodoWrite'), msg('s', { role: 'system', type: 'system', systemSubtype: 'permission_mode_changed' })]) {
+		for (const m of [msg('sa', { type: 'subagent' }), msg('n', { type: 'tool_use', toolName: 'Task' }), tool('q', 'AskUserQuestion'), tool('td', 'TodoWrite'), msg('s', { role: 'system', type: 'system', systemSubtype: 'permission_mode_changed' }), msg('cb', { role: 'system', type: 'system', systemSubtype: 'compact_boundary' })]) {
 			expect(assistantRowRole(m)).toBe('card');
 		}
-		for (const m of [tool('t'), thinking('k'), msg('h', { role: 'system', type: 'system', systemSubtype: 'hook_response' }), msg('cb', { role: 'system', type: 'system', systemSubtype: 'compact_boundary' })]) {
+		for (const m of [tool('t'), thinking('k'), msg('h', { role: 'system', type: 'system', systemSubtype: 'hook_response' })]) {
 			expect(assistantRowRole(m)).toBe('detail');
 		}
 	});
@@ -80,6 +80,19 @@ describe('foldAssistantTranscript', () => {
 		const { items } = fold(messages);
 		expect(inline(items)).toEqual(['u', 'ask', 'todo', 'task', 'final']);
 		expect(ordinaryVisible(messages)).toEqual(inline(items));
+	});
+
+	it('folds a mid-turn compaction and keeps one trailing the answer, as the ordinary view does', () => {
+		const compact = (id: string) => msg(id, { role: 'system', type: 'system', systemSubtype: 'compact_boundary', content: '', systemData: { compact_metadata: { trigger: 'auto', pre_tokens: 180_000 } } });
+		const midTurn = [user('u', 'go'), tool('t1'), compact('c'), tool('t2'), text('final', 'Done.')];
+		const mid = fold(midTurn);
+		expect(shape(mid.items)).toEqual(['u', 'final', 'details(t1,c,t2)']);
+		expect(ordinaryVisible(midTurn)).toEqual(inline(mid.items));
+
+		const trailing = [user('u', 'go'), tool('ask', 'AskUserQuestion'), tool('todo', 'TodoWrite'), tool('task', 'Task'), tool('read', 'Read'), text('final', 'Done.'), compact('c')];
+		const trail = fold(trailing);
+		expect(inline(trail.items)).toEqual(['u', 'ask', 'todo', 'task', 'final', 'c']);
+		expect(ordinaryVisible(trailing)).toEqual(inline(trail.items));
 	});
 
 	it('keeps a worker card in line while the turn runs', () => {
