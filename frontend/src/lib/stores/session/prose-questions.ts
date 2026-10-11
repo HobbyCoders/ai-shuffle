@@ -149,7 +149,44 @@ const _questionEpochs = new Map<string, Set<string>>();
  * `pushedSince` says a pushed frame (which carries no `updated_at`) was
  * applied after it.
  */
-const _applied = new Map<string, { at: number | null; pushedSince: boolean }>();
+const _applied = new Map<string, { at: string | null; pushedSince: boolean }>();
+
+/**
+ * `updated_at` values this tab synthesised from its own clock (a turn's `done`,
+ * a clear), per session. They order the sidebar but are not server versions,
+ * so a row carrying one is not used to order revisions.
+ */
+const _localStamps = new Map<string, string[]>();
+const LOCAL_STAMPS_KEPT = 8;
+
+/** Record an `updated_at` this tab wrote onto a row from its own clock. */
+export function noteLocalRowStamp(sessionId: string, stamp: string): void {
+	const stamps = _localStamps.get(sessionId) ?? [];
+	stamps.push(stamp);
+	if (stamps.length > LOCAL_STAMPS_KEPT) stamps.shift();
+	_localStamps.set(sessionId, stamps);
+}
+
+const STAMP = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}(?::?\d{2})?)?$/i;
+
+/**
+ * A server `updated_at` as a key that sorts in time order without losing the
+ * microseconds PostgreSQL keeps (Date.parse stops at milliseconds): whole UTC
+ * seconds, then the fraction to 9 digits. Accepts `Z` or a numeric offset (a
+ * missing one is UTC) and a space or `T` separator. Null when unparseable.
+ */
+export function versionKey(value: unknown): string | null {
+	if (typeof value !== 'string') return null;
+	const m = STAMP.exec(value.trim());
+	if (!m) return null;
+	let offset = (m[4] ?? 'Z').toUpperCase();
+	if (/^[+-]\d{2}$/.test(offset)) offset += ':00';
+	else if (/^[+-]\d{4}$/.test(offset)) offset = `${offset.slice(0, 3)}:${offset.slice(3)}`;
+	const ms = Date.parse(`${m[1]}T${m[2]}${offset}`);
+	if (Number.isNaN(ms)) return null;
+	const seconds = Math.floor(ms / 1000) + 1e11; // positive, fixed width
+	return `${String(seconds).padStart(13, '0')}.${(m[3] ?? '').padEnd(9, '0')}`;
+}
 
 /** Epochs of logs cleared since load, per session: never re-marked from. */
 const _retired = new Map<string, Set<string>>();
@@ -270,15 +307,24 @@ function carriesPairs(revision: UserMessageRevision): boolean {
  * - a row is applied when its `updated_at` is at least the last applied one
  *   (ties accept), and must be strictly newer after a pushed frame, which
  *   reflects a write later than the last applied row;
- * - a pushed frame is applied in arrival order;
- * - a `/live` snapshot only seeds a session no row or frame has set yet.
+ * - a pushed frame or `/live` snapshot that carries `updated_at` is ordered
+ *   the same way;
+ * - without it, a pushed frame is applied in arrival order and a `/live`
+ *   snapshot only seeds a session no row or frame has set yet;
+ * - an `updated_at` this tab synthesised (`noteLocalRowStamp`) never orders.
+ * Timestamps compare at full (microsecond) precision (`versionKey`).
  * Records the applied version.
  */
 function isCurrent(sessionId: string, revision: UserMessageRevision, source: RevisionSource): boolean {
 	if (!carriesPairs(revision)) return false;
+	// This tab's own clock is not a server version: not ordered, not applied.
+	// (Every pair change also reaches here as a list row or a frame.)
+	if (typeof revision.updated_at === 'string' && _localStamps.get(sessionId)?.includes(revision.updated_at)) {
+		return false;
+	}
 	const known = _applied.get(sessionId);
-	const at = typeof revision.updated_at === 'string' ? Date.parse(revision.updated_at) : NaN;
-	if (Number.isNaN(at)) {
+	const at = versionKey(revision.updated_at);
+	if (at === null) {
 		if (source.snapshot) return !known;
 		_applied.set(sessionId, { at: known?.at ?? null, pushedSince: true });
 		return true;
@@ -423,6 +469,7 @@ export function forgetProseQuestion(sessionId: string, opts: { cleared?: boolean
 	_rowQuestions.delete(sessionId);
 	_questionEpochs.delete(sessionId);
 	_applied.delete(sessionId);
+	if (!opts.cleared) _localStamps.delete(sessionId);
 	_lastUser.delete(sessionId);
 	_latest.delete(sessionId);
 	_rowRaw.delete(sessionId);
@@ -439,6 +486,7 @@ export function _resetProseQuestions(): void {
 	_rowQuestions.clear();
 	_questionEpochs.clear();
 	_applied.clear();
+	_localStamps.clear();
 	_lastUser.clear();
 	_retired.clear();
 	_store.set(new Set());

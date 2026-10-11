@@ -8,7 +8,9 @@ import {
 	observeLastUserMessage,
 	observeSessionRows,
 	proseQuestionSessions,
+	noteLocalRowStamp,
 	rememberLeavingProseQuestion,
+	versionKey,
 	withoutSession
 } from './prose-questions';
 import type { ChatMessage } from '../types';
@@ -354,6 +356,59 @@ describe('row-derived assistant question (#2263)', () => {
 		expect(has('A')).toBe(false);
 		observeSessionRows([listRow(4, 18, 13)]);
 		expect(has('A')).toBe(true);
+	});
+
+	it('compares server timestamps to the microsecond', () => {
+		const us = (f: string) => `2026-10-11T10:00:00.${f}Z`;
+		// A delayed row 0.8 ms older, within the same millisecond, is ignored.
+		observeSessionRows([{ id: 'A', ...row(16, 13), updated_at: us('123900') }]);
+		observeSessionRows([{ id: 'A', ...row(12, 13), updated_at: us('123100') }]);
+		expect(has('A')).toBe(true);
+		// A genuinely newer row within the same millisecond after a frame applies.
+		observeSessionRows([{ id: 'B', ...row(null, 13), updated_at: us('123100') }]);
+		observeLastUserMessage('B', row(null, 13));
+		observeSessionRows([{ id: 'B', ...row(16, 13), updated_at: us('123900') }]);
+		expect(has('B')).toBe(true);
+	});
+
+	it('versionKey normalises the suffix and a missing fraction, and keeps microseconds', () => {
+		expect(versionKey('2026-10-11T10:00:00Z')).toBe(versionKey('2026-10-11T10:00:00.000000+00:00'));
+		expect(versionKey('2026-10-11T12:00:00.5+02:00')).toBe(versionKey('2026-10-11 10:00:00.500000'));
+		expect(versionKey('2026-10-11T10:00:00.123100Z')! < versionKey('2026-10-11T10:00:00.123900Z')!).toBe(true);
+		expect(versionKey('2026-10-11T10:00:00.999999Z')! < versionKey('2026-10-11T10:00:01Z')!).toBe(true);
+		expect(versionKey('not a time')).toBeNull();
+		expect(versionKey(undefined)).toBeNull();
+	});
+
+	it('orders frames by updated_at when they carry it, else by arrival', () => {
+		observeSessionRows([listRow(3, 16, 13)]);
+		// An older versioned frame is ignored; a newer one applies.
+		observeLastUserMessage('A', { ...row(null, 13), updated_at: at(2) });
+		expect(has('A')).toBe(true);
+		observeLastUserMessage('A', { ...row(null, 13), updated_at: at(4) });
+		expect(has('A')).toBe(false);
+		// Without updated_at it applies in arrival order.
+		observeLastUserMessage('A', row(18, 13));
+		expect(has('A')).toBe(true);
+	});
+
+	it('orders a /live snapshot by updated_at when it carries it', () => {
+		observeSessionRows([listRow(3, 16, 13)]);
+		finishUserMessageRevisionSeed('A', beginUserMessageRevisionSeed('A'), { ...row(null, 13), updated_at: at(2) });
+		expect(has('A')).toBe(true);
+		finishUserMessageRevisionSeed('A', beginUserMessageRevisionSeed('A'), { ...row(null, 13), updated_at: at(4) });
+		expect(has('A')).toBe(false);
+		// Without it, a snapshot of a session with row state is ignored.
+		finishUserMessageRevisionSeed('A', beginUserMessageRevisionSeed('A'), row(20, 13));
+		expect(has('A')).toBe(false);
+	});
+
+	it('never orders by an updated_at this tab synthesised', () => {
+		observeSessionRows([listRow(3, 16, 13)]);
+		noteLocalRowStamp('A', at(59)); // e.g. a done patch from a clock running ahead
+		observeSessionRows([{ id: 'A', ...row(16, 13), updated_at: at(59) }]);
+		observeSessionRows([listRow(4, null, 13)]);
+		expect(has('A')).toBe(false);
 	});
 
 	it('a /live snapshot seeds a session no row has set', () => {
