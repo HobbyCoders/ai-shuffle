@@ -195,15 +195,15 @@ def delete_profile(profile_id: str) -> bool:
         return cursor.rowcount > 0
 
 
-RETIRED_BUILTIN_IDS = ("Explore", "Plan")
+RETIRED_BUILTIN_IDS = ("Explore", "Plan", "general-purpose", "frontend-designer")
 
 
 def retire_builtin_subagent(subagent_id: str) -> bool:
     """Retire a removed built-in, never an owner-created agent with this id.
 
-    Automations have a required/restricted agent FK. Preserve their definitions
-    on General Purpose, but disable them rather than silently run a different
-    prompt or tool surface. Session/history references are unlinked as on delete.
+    Preserve automation definitions, but unlink and disable them rather than
+    silently run a different prompt or tool surface. Session/history references
+    are unlinked as on delete.
     """
     if subagent_id not in RETIRED_BUILTIN_IDS:
         return False
@@ -218,7 +218,7 @@ def retire_builtin_subagent(subagent_id: str) -> bool:
         cursor.execute(
             "UPDATE automations SET profile_id = %s, is_enabled = FALSE, last_error = %s, updated_at = %s "
             "WHERE profile_id = %s",
-            ("general-purpose", f"Built-in {subagent_id} was removed; review the General Purpose agent before re-enabling.",
+            (None, f"Built-in {subagent_id} was removed; choose an agent before re-enabling.",
              datetime.now(timezone.utc).isoformat(), subagent_id),
         )
         # Persist cancellation notices until the wake service can record them in

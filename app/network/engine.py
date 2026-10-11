@@ -562,9 +562,9 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
                 # direct callers and stale built-in rows must be safe too.
                 record["profile_id"] = None
             else:
-                # Same safe, disabled replacement as startup retirement. This
+                # Same unlinked, disabled state as startup retirement. This
                 # also covers bootstrap snapshots through materialize.
-                record["profile_id"] = "general-purpose"
+                record["profile_id"] = None
                 record["is_enabled"] = False
                 retired_automation = retired_id
     if coll.materialize_hook is not None:
@@ -607,7 +607,7 @@ def materialize(cursor, coll: policy.Collection, record_id: str, record: Optiona
     if retired_automation:
         # last_error is local-only: never add it to the shared field list.
         cursor.execute("UPDATE automations SET last_error = %s WHERE id = %s", (
-            f"Built-in {retired_automation} was removed; review the General Purpose agent before re-enabling.", keys[0]))
+            f"Built-in {retired_automation} was removed; choose an agent before re-enabling.", keys[0]))
     cursor.execute(f"SELECT * FROM {coll.table} WHERE {where}", keys)
     row = cursor.fetchone()
     return dict(row) if row else None

@@ -21,7 +21,7 @@ def clean_runtime():
     swarm._locks.clear()
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
 async def test_swarm_naming_retired_agent_fails_normally(agents, monkeypatch, retired_id):
     from app.core import task_dispatch
     from app.core.builtin_subagents import seed_builtin_subagents
@@ -45,6 +45,28 @@ async def test_swarm_naming_retired_agent_fails_normally(agents, monkeypatch, re
     error = json.loads(snapshot["tasks"][0]["error"])
     assert error["ok"] is False
     assert error["error"] == resolve_subagent(retired_id, available_subagents("root-agent", None))[1]
+
+
+@pytest.mark.asyncio
+async def test_empty_roster_refuses_swarm_without_dispatch(bare_db, monkeypatch):
+    from app.db import database
+    from app.core import task_dispatch
+    from app.core.builtin_subagents import seed_builtin_subagents
+
+    seed_builtin_subagents()
+    database.create_profile("only-caller", "Caller", None, {"model": "opus"})
+    database.create_session("empty-swarm-parent", profile_id="only-caller")
+    monkeypatch.setattr(swarm, "persist", AsyncMock())
+    ctx = ToolCtx(extra={"task_dispatch": task_dispatch.make_fluid_dispatcher("empty-swarm-parent")})
+    result = await swarm.make_handler(lambda: "empty-swarm-parent")({"action": "start", "tasks": [
+        {"id": "work", "agent": "general-purpose", "prompt": "Work"},
+    ]}, ctx)
+    key = result.background_task.task_id
+    coordinator = swarm.coordinators["empty-swarm-parent"]
+    await coordinator.jobs[key]
+    snapshot = coordinator.snapshot(key)
+    assert snapshot["status"] == "failed"
+    assert "Available subagent IDs: none" in snapshot["tasks"][0]["error"]
 
 
 @pytest.mark.asyncio

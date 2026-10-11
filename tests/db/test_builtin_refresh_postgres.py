@@ -5,7 +5,10 @@ Runs the SQLite-shim seeding tests against a real database: JSONB config,
 """
 from tests.db.postgres_harness import pg_schema, requires_real_pg  # noqa: F401
 
-pytestmark = requires_real_pg
+import pytest
+from tests.api.test_builtin_seeding import legacy_builtin_catalog  # noqa: F401
+
+pytestmark = [requires_real_pg, pytest.mark.usefixtures("legacy_builtin_catalog")]
 
 
 def _drop_builtins():

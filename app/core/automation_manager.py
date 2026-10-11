@@ -1143,6 +1143,8 @@ class AutomationManager:
 
         automation_id = automation["id"]
         profile_id = automation["profile_id"]
+        if not profile_id:
+            raise ValueError("Choose an agent before running this automation")
         timeout_seconds = automation.get("timeout_seconds", 300)
         # The fire passed the shutdown gates before the run moved to
         # ``running``; project resolution (possibly a clone) ran since.

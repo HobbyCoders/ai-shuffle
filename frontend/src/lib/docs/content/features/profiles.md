@@ -12,14 +12,18 @@ Manage agents on the **Agents** page in the sidebar. Click an agent to edit it.
 
 An agent does not fix the model. You pick the model, reasoning effort and permission mode in the composer for each chat, and you can change them mid-conversation. The same agent can run on a cheap model in one chat and a powerful one in the next.
 
-## Built-in agents
+## Optional starter team
 
-AI Shuffle comes with two agents:
+AI Shuffle ships no built-in subagents. Create your own, install agents from plugins, or choose **Install starter team** on the **Agents** page to add:
 
 - **General Purpose** for most coding and research work.
 - **Frontend Designer** for visual and UI work.
 
-You can edit them, and **Restore defaults** puts an edited one back. You cannot delete them. The setup wizard also creates a starter agent called **Assistant**, which you can rename, change or delete.
+The starter team is opt-in. Its agents are ordinary owner-owned agents: you can rename, edit or delete them, and later updates do not reset your changes. Installing again adds only missing members; existing team members (including renamed ones) and ordinary agents with the same names are left alone. The header offers the team when neither member exists; the empty state offers it too.
+
+Choose a subagent default model or a model assignment before delegating. With no available agents, Task and Swarm refuse delegation instead of inventing a built-in fallback.
+
+On upgrade, the old built-in General Purpose and Frontend Designer agents are retired, like Explore and Plan before them. Owner-created agents are preserved. Historical chats remain, with the retired agent reference cleared. Affected automations are preserved but disabled and unlinked: choose an agent before enabling them again. Existing API-key restrictions are not transferred to the new starter agents.
 
 ## Create an agent
 

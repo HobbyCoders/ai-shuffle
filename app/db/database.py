@@ -816,6 +816,10 @@ def _run_column_migrations(cursor):
                 cursor.execute(f"ALTER TABLE usage_log ADD COLUMN {column} TEXT")
                 migrations_applied.append(f"usage_log.{column}")
 
+    # Retired agents leave disabled automations for the owner to reassign.
+    if table_exists(cursor, "automations"):
+        cursor.execute("ALTER TABLE automations ALTER COLUMN profile_id DROP NOT NULL")
+
     # Add action_steps column to automations for multi-step connector actions (v36)
     if table_exists(cursor, "automations") and not column_exists(cursor, "automations", "action_steps"):
         cursor.execute("ALTER TABLE automations ADD COLUMN action_steps TEXT DEFAULT NULL")

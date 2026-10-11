@@ -9,7 +9,7 @@ pytestmark = requires_real_pg
 _SESSIONS = ("retirement-chat", "missing-wake-chat", "incoming-retired-chat")
 _API_USERS = ("pre-upgrade-key", "retirement-only", "retirement-mixed", "retirement-open",
               "only-helper", "helper-and-other", "open-key")
-_AGENTS = ("Explore", "Plan", "retirement-other", "wake-fallback", "helper", "other")
+_AGENTS = ("Explore", "Plan", "general-purpose", "frontend-designer", "retirement-other", "wake-fallback", "helper", "other")
 
 
 def _forget_fixed_rows():
@@ -26,6 +26,7 @@ def _forget_fixed_rows():
             cursor.execute(f"DELETE FROM {table} WHERE {column} = ANY(%s)", (list(_SESSIONS),))
         cursor.execute("DELETE FROM api_user_profiles WHERE api_user_id = ANY(%s)", (list(_API_USERS),))
         cursor.execute("DELETE FROM api_users WHERE id = ANY(%s)", (list(_API_USERS),))
+        cursor.execute("DELETE FROM automations WHERE id = %s", ("retirement-job",))
         cursor.execute("DELETE FROM agents WHERE id = ANY(%s)", (list(_AGENTS),))
 
 
@@ -39,7 +40,46 @@ def _isolated_rows():
     _forget_fixed_rows()
 
 
-@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+def test_concurrent_starter_installs_are_atomic_and_idempotent():
+    from concurrent.futures import ThreadPoolExecutor
+    from app.core.agent_templates import install_starter_team
+    from app.db import database
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: install_starter_team(), range(2)))
+    ids = {agent["existing_agent_id"] for result in results for agent in result["agents"]}
+    try:
+        assert results[0] == results[1]
+        assert len(ids) == 2
+        assert all(not database.get_profile(agent_id)["is_builtin"] for agent_id in ids)
+    finally:
+        for agent_id in ids:
+            database.delete_profile(agent_id)
+
+
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
+def test_upgrade_unlinks_required_automation_agent(retired_id):
+    from app.db import base, database
+    from app.core.builtin_subagents import seed_builtin_subagents
+
+    database.create_profile(retired_id, "Old builtin", None, {}, is_builtin=True)
+    database.create_automation("retirement-job", "Saved job", "interval", {"seconds": 300},
+                               retired_id, prompt="Keep this prompt", enabled=True)
+    with base.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("ALTER TABLE automations ALTER COLUMN profile_id SET NOT NULL")
+        cursor.execute("DELETE FROM system_settings WHERE key = %s", (database.MIGRATIONS_FINGERPRINT_KEY,))
+    database.init_database()
+    seed_builtin_subagents()
+    row = database.get_automation("retirement-job")
+    assert row["profile_id"] is None
+    assert not row["is_enabled"]
+    assert row["prompt"] == "Keep this prompt"
+    assert retired_id in row["last_error"]
+    assert database.get_profile(retired_id) is None
+
+
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
 async def test_upgrade_keeps_restricted_key_and_cancels_stored_wakes(retired_id):
     from app.db import base, database
     from tests.api.test_builtin_seeding import (
@@ -65,17 +105,17 @@ async def test_upgrade_keeps_restricted_key_and_cancels_stored_wakes(retired_id)
     seed_builtin_subagents()
     assert database.get_profile(retired_id) is None
     assert database.get_api_user("pre-upgrade-key")["profile_ids"] == [retired_id]
-    assert worker_refusal("pre-upgrade-key", "general-purpose") is not None
+    assert worker_refusal("pre-upgrade-key", "unrelated-agent") is not None
     await test_retirement_preserves_key_scope_and_cancels_stored_continuations(None, retired_id)
     await test_missing_stored_wake_profile_drops_once_with_visible_reason(None)
     base.close_pool()
     base.init_pool(min_conn=1, max_conn=6)
-    assert worker_refusal("pre-upgrade-key", "general-purpose") is not None
-    assert worker_refusal("retirement-mixed", "general-purpose") is not None
+    assert worker_refusal("pre-upgrade-key", "unrelated-agent") is not None
+    assert worker_refusal("retirement-mixed", "unrelated-agent") is not None
     assert worker_refusal("retirement-mixed", "retirement-other") is None
 
 
-@pytest.mark.parametrize("retired_id", ["Explore", "Plan"])
+@pytest.mark.parametrize("retired_id", ["Explore", "Plan", "general-purpose", "frontend-designer"])
 @pytest.mark.parametrize("agent_state", ["missing", "builtin", "owner-created"])
 def test_materialize_retired_session_reference_on_postgres(retired_id, agent_state):
     from app.core.builtin_subagents import seed_builtin_subagents
