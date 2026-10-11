@@ -14,6 +14,7 @@
 		['Cancelling', group('cancelling', 'cancel')],
 		['Already sent', group('delivered', 'sent')],
 		['Mixed: earlier cancelling, last pending', [group('cancelling', 'mix')[0], group(undefined, 'mix')[1]]],
+		['Mixed: earlier pending, last already sent', [group(undefined, 'tail')[0], group('delivered', 'tail')[1]]],
 	];
 	const noop = () => {};
 </script>
@@ -28,6 +29,7 @@
 </main>
 
 <style>
+	:global(html), :global(body) { height: auto; overflow: visible; }
 	:global(body) { margin: 0; background: var(--background); color: var(--foreground); font-family: 'Inter Variable', sans-serif; }
 	.transcript { display: grid; gap: 20px; padding: 16px; max-width: 48rem; margin: 0 auto; box-sizing: border-box; }
 	h2 { margin: 0 0 8px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted-foreground); }

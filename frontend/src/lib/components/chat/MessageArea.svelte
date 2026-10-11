@@ -111,6 +111,7 @@
 	import { notesFromToolMessage } from '$lib/utils/note-tool';
 	import MediaLightbox from './MediaLightbox.svelte';
 	import PendingMessages from './PendingMessages.svelte';
+	import PendingStatusAnnouncer from './PendingStatusAnnouncer.svelte';
 	import PendingPeerMessages from './PendingPeerMessages.svelte';
 	import RunningTasksList from './RunningTasksList.svelte';
 	import { currentAssistantQuestion } from '$lib/utils/assistant-confirm';
@@ -1857,6 +1858,8 @@
 </script>
 
 <div class="transcript-shell" class:has-turn-nav={turnNavigationItems.length >= 2}>
+<!-- Unsend verdicts are announced here, outside the busy log region below. -->
+<PendingStatusAnnouncer messages={pendingMessages} sessionId={$activeSession.sessionId} />
 <!-- role="log" is a polite live region. aria-busy while a reply streams keeps
      screen readers from announcing every streamed token; the settled turn is
      read once the stream ends. -->

@@ -13,15 +13,19 @@
 	 * (same padding, radius, surface) but carries none of its machinery — a
 	 * pending prompt has no timestamp, no rewind target and no copy actions.
 	 *
-	 * Under the LAST bubble sits one quiet action row: the "Not seen yet" hint,
-	 * an Interrupt link that stops the current turn (which delivers the message
-	 * on the next one), and an "×" that unsends it and puts its text back in the
-	 * composer to edit. Earlier bubbles get the same "×" on hover.
+	 * Under the last ACTIONABLE bubble (no status) sits one quiet action row: the
+	 * "Not seen yet" hint, an Interrupt link that stops the current turn (which
+	 * delivers the message on the next one), and an "×" that unsends it and puts
+	 * its text back in the composer to edit. Other actionable bubbles get the same
+	 * "×" on hover. Interrupt is the only queue-preserving way to deliver what is
+	 * still pending, so a cancelling or already-sent tail never hides it.
 	 *
 	 * An unsend is a request, not a fact (#2275): while the server decides, the
 	 * bubble reads "Cancelling…" and its controls are disabled; if the agent had
 	 * already read it, it reads "Already sent" and loses its controls. The text
 	 * only returns to the composer on a confirmed withdrawal (store-side).
+	 * Screen-reader announcements of those verdicts live in
+	 * PendingStatusAnnouncer, outside the transcript's log region.
 	 */
 	import type { QueuedMessage } from '$lib/stores/types';
 	import { shouldCollapseUserMessage } from '$lib/utils/message-presentation';
@@ -35,6 +39,13 @@
 	}
 
 	let { messages, onRemove, onInterrupt }: Props = $props();
+
+	// The action row's bubble: the last one without a status, or — when every
+	// bubble has one — the last bubble (whose row then shows its status only).
+	const anchor = $derived.by(() => {
+		for (let i = messages.length - 1; i >= 0; i--) if (!messages[i].status) return i;
+		return messages.length - 1;
+	});
 
 	const STATUS_LABEL = { cancelling: 'Cancelling…', delivered: 'Already sent' } as const;
 
@@ -52,12 +63,12 @@
 {#if messages.length > 0}
 	<div class="pending-messages">
 		{#each messages as msg, i (msg.id)}
-			{@const isLast = i === messages.length - 1}
-			<div class="userrow" role="article" aria-busy={msg.status === 'cancelling' ? 'true' : undefined}>
+			{@const isAnchor = i === anchor}
+			<div class="userrow" role="article">
 				<div class="usercol">
 					<div class="bubble" class:is-cancelling={msg.status === 'cancelling'}>
 						<div class="bubble-text" class:is-clamped={shouldCollapseUserMessage(msg.content)}>{msg.content}</div>
-						{#if !isLast && msg.status !== 'delivered'}
+						{#if !isAnchor && msg.status !== 'delivered'}
 							<button
 								type="button"
 								class="hover-remove"
@@ -68,18 +79,17 @@
 							>×</button>
 						{/if}
 					</div>
-					{#if isLast || msg.status}
+					{#if isAnchor || msg.status}
 						<div class="pending-actions">
 							{#if msg.status}
 								<span
 									class="pending-status"
 									class:is-delivered={msg.status === 'delivered'}
-									role="status"
 								>{STATUS_LABEL[msg.status]}</span>
 							{:else}
 								<span class="pending-hint">Not seen yet</span>
 							{/if}
-							{#if isLast && msg.status !== 'delivered'}
+							{#if isAnchor && msg.status !== 'delivered'}
 								<span class="pending-sep" aria-hidden="true">·</span>
 								<button
 									type="button"
@@ -199,6 +209,12 @@
 
 	.pending-status.is-delivered {
 		color: var(--warning);
+	}
+
+	/* Light --warning is ~3.6:1 on the page at this 11px size; pulling it toward
+	   the foreground keeps the hue and clears 4.5:1. Dark --warning already does. */
+	:global(html.light) .pending-status.is-delivered {
+		color: color-mix(in oklab, var(--warning) 72%, var(--foreground));
 	}
 
 	.hover-remove:disabled,

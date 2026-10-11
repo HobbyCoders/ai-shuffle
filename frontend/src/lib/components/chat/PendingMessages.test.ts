@@ -7,6 +7,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
 import PendingMessages from './PendingMessages.svelte';
 import type { QueuedMessage } from '$lib/stores/types';
+import { pendingQueue } from '$lib/stores/session/pending-queue';
 
 function makeMessage(over: Partial<QueuedMessage> = {}): QueuedMessage {
 	return {
@@ -98,19 +99,19 @@ describe('PendingMessages', () => {
 	});
 
 	describe('unsend verdict states (#2275)', () => {
-		it('shows "Cancelling…" and disables the last chip\'s unsend and Interrupt', async () => {
+		const statusText = (col: Element) => col.querySelector('.pending-status')?.textContent;
+
+		it('shows "Cancelling…" and disables the controls when every chip is cancelling', async () => {
 			const { container, onRemove, onInterrupt } = renderPending([
 				makeMessage({ id: 'q-1', status: 'cancelling' })
 			]);
 
-			const status = screen.getByRole('status');
-			expect(status.textContent).toBe('Cancelling…');
+			expect(statusText(container)).toBe('Cancelling…');
 			expect(screen.queryByText('Not seen yet')).toBeNull();
 			const interrupt = screen.getByRole('button', { name: 'Interrupt' }) as HTMLButtonElement;
 			const remove = container.querySelector('.pending-remove') as HTMLButtonElement;
 			expect(interrupt.disabled).toBe(true);
 			expect(remove.disabled).toBe(true);
-			expect(container.querySelector('[role="article"]')?.getAttribute('aria-busy')).toBe('true');
 
 			await fireEvent.click(interrupt);
 			await fireEvent.click(remove);
@@ -128,9 +129,7 @@ describe('PendingMessages', () => {
 			expect(hover.disabled).toBe(true);
 			await fireEvent.click(hover);
 			expect(onRemove).not.toHaveBeenCalled();
-			// The earlier chip carries its own status line; the last chip is untouched.
-			const firstCol = container.querySelectorAll('.usercol')[0];
-			expect(firstCol.querySelector('[role="status"]')?.textContent).toBe('Cancelling…');
+			expect(statusText(container.querySelectorAll('.usercol')[0])).toBe('Cancelling…');
 			expect(screen.getByText('Not seen yet')).toBeTruthy();
 			expect((screen.getByRole('button', { name: 'Interrupt' }) as HTMLButtonElement).disabled).toBe(false);
 		});
@@ -141,7 +140,7 @@ describe('PendingMessages', () => {
 				makeMessage({ id: 'q-2', content: 'second', status: 'delivered' })
 			]);
 
-			const statuses = screen.getAllByRole('status');
+			const statuses = [...container.querySelectorAll('.pending-status')];
 			expect(statuses.map((s) => s.textContent)).toEqual(['Already sent', 'Already sent']);
 			expect(statuses.every((s) => s.classList.contains('is-delivered'))).toBe(true);
 			expect(container.querySelector('.hover-remove')).toBeNull();
@@ -149,15 +148,70 @@ describe('PendingMessages', () => {
 			expect(screen.queryByRole('button', { name: 'Interrupt' })).toBeNull();
 		});
 
-		it('leaves chips without a status unchanged', () => {
+		it('keeps one enabled Interrupt on the last actionable chip behind a cancelling or delivered tail', async () => {
+			for (const status of ['cancelling', 'delivered'] as const) {
+				const { container, onInterrupt, onRemove } = renderPending([
+					makeMessage({ id: 'q-1', content: 'first' }),
+					makeMessage({ id: 'q-2', content: 'second', status })
+				]);
+				const cols = container.querySelectorAll('.usercol');
+				const interrupts = screen.getAllByRole('button', { name: 'Interrupt' }) as HTMLButtonElement[];
+				expect(interrupts).toHaveLength(1);
+				expect(interrupts[0].disabled).toBe(false);
+				expect(cols[0].contains(interrupts[0])).toBe(true);
+				expect(cols[0].querySelector('.hover-remove')).toBeNull();
+				// The tail keeps only its own (disabled) hover × while cancelling; none once delivered.
+				const tailButtons = [...cols[1].querySelectorAll('button')] as HTMLButtonElement[];
+				expect(tailButtons.map((b) => [b.classList[0], b.disabled])).toEqual(
+					status === 'cancelling' ? [['hover-remove', true]] : []
+				);
+				await fireEvent.click(interrupts[0]);
+				await fireEvent.click(cols[0].querySelector('.pending-remove') as HTMLElement);
+				expect(onInterrupt).toHaveBeenCalledTimes(1);
+				expect(onRemove).toHaveBeenCalledWith('q-1');
+				cleanup();
+			}
+		});
+
+		it('follows the real store from pending → cancelling → delivered without losing Interrupt', async () => {
+			const SID = 'pending-messages-test';
+			pendingQueue.reset(SID, true);
+			const a = makeMessage({ id: 'turn-a', content: 'first' });
+			const b = makeMessage({ id: 'turn-b', content: 'second' });
+			const rows = [a, b];
+			pendingQueue.noteAuthoritative(SID, rows);
+			const view = renderPending(pendingQueue.reconcile(SID, rows));
+
+			const key = pendingQueue.requestRemoval(SID, b);
+			await view.rerender({ messages: pendingQueue.reconcile(SID, rows) });
+			expect(statusText(view.container.querySelectorAll('.usercol')[1])).toBe('Cancelling…');
+			expect((screen.getByRole('button', { name: 'Interrupt' }) as HTMLButtonElement).disabled).toBe(false);
+
+			pendingQueue.applyRemovalVerdict(SID, key, 'already_delivered');
+			await view.rerender({ messages: pendingQueue.reconcile(SID, rows) });
+			expect(statusText(view.container.querySelectorAll('.usercol')[1])).toBe('Already sent');
+			const interrupt = screen.getByRole('button', { name: 'Interrupt' }) as HTMLButtonElement;
+			expect(interrupt.disabled).toBe(false);
+			await fireEvent.click(interrupt);
+			expect(view.onInterrupt).toHaveBeenCalledTimes(1);
+			pendingQueue.reset(SID, true);
+		});
+
+		it('leaves chips without a status unchanged and puts no live region inside the log', () => {
 			const { container } = renderPending([
+				makeMessage({ id: 'q-1', content: 'first' }),
+				makeMessage({ id: 'q-2', content: 'second', status: 'cancelling' })
+			]);
+			expect(container.querySelector('[role="status"], [aria-live], [aria-busy]')).toBeNull();
+			cleanup();
+
+			const plain = renderPending([
 				makeMessage({ id: 'q-1', content: 'first' }),
 				makeMessage({ id: 'q-2', content: 'second' })
 			]);
-
-			expect(screen.queryByRole('status')).toBeNull();
-			expect(container.querySelectorAll('.pending-actions')).toHaveLength(1);
-			for (const b of container.querySelectorAll('button')) {
+			expect(plain.container.querySelectorAll('.pending-actions')).toHaveLength(1);
+			expect(plain.container.querySelectorAll('.usercol')[1].querySelector('.pending-actions')).not.toBeNull();
+			for (const b of plain.container.querySelectorAll('button')) {
 				expect((b as HTMLButtonElement).disabled).toBe(false);
 			}
 		});
