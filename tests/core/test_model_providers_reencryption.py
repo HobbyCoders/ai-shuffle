@@ -10,6 +10,8 @@ token fails the plan closed. Runs on the pg_shim DB via ``mock_db``.
 
 import base64
 
+import pytest
+
 from app.core import encryption
 from app.db import database as db
 
@@ -56,6 +58,49 @@ class TestReencryptModelProviders:
         # New key decrypts the re-encrypted blob back to the original secret.
         encryption._encryption_key = new_key
         assert encryption.decrypt_value(after["auth_token"]) == "gw-secret"
+
+    @pytest.mark.parametrize("active_key", ["old", "new", "locked"])
+    def test_master_key_rotation_preserves_manual_balance(self, mock_db, monkeypatch, active_key):
+        _seed_provider()
+        db.update_model_provider(
+            "prov-1", provider_type="openai", base_url="https://api.openai.com/v1",
+        )
+        db.update_model_provider(
+            "prov-1", manual_balance_usd=37.25, manual_balance_set_at=1700000000123,
+            credential_status="ok",
+        )
+        before = db.get_model_provider("prov-1", include_token=True)
+        old_key = encryption.derive_key_from_password("old-pw", encryption.get_or_create_salt(db))
+        new_key = encryption.derive_key_from_password("new-pw", encryption.get_or_create_salt(db))
+        assert old_key != new_key
+        plan, failures = encryption.build_reencryption_plan(old_key, new_key, db)
+        assert not failures
+        assert any(item.kind == "model_provider" and item.ref == "prov-1" for item in plan)
+
+        # Both live rotation and scripts.rekey use this shared apply path.
+        # No single active key can decrypt both ciphertexts during rotation.
+        monkeypatch.setattr(encryption, "_encryption_key", {
+            "old": old_key, "new": new_key, "locked": None,
+        }[active_key])
+        encryption.apply_reencryption_plan(plan, db)
+
+        after = db.get_model_provider("prov-1", include_token=True)
+        assert after["manual_balance_usd"] == before["manual_balance_usd"] == 37.25
+        assert after["manual_balance_set_at"] == before["manual_balance_set_at"] == 1700000000123
+        assert after["credential_status"] == "ok"
+        assert after["auth_token"] != before["auth_token"]
+        monkeypatch.setattr(encryption, "_encryption_key", new_key)
+        assert encryption.decrypt_value(after["auth_token"]) == "gw-secret"
+
+    def test_undecryptable_ordinary_key_edit_still_clears_balance(self, mock_db):
+        _seed_provider()
+        db.update_model_provider(
+            "prov-1", manual_balance_usd=37.25, manual_balance_set_at=1700000000123,
+        )
+        db.update_model_provider("prov-1", auth_token="enc:invalid")
+        row = db.get_model_provider("prov-1")
+        assert row["manual_balance_usd"] is None
+        assert row["manual_balance_set_at"] is None
 
     def test_password_change_round_trip(self, mock_db):
         """End-to-end: re_encrypt_all_secrets under a new password, provider token

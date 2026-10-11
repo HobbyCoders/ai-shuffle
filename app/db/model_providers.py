@@ -416,7 +416,8 @@ def _normalize_model_capabilities(models):
 
 
 def update_model_provider(
-    provider_id: str, *, expected_revision: Optional[str] = None, **kwargs: Any
+    provider_id: str, *, expected_revision: Optional[str] = None,
+    _auth_token_reencrypted: bool = False, **kwargs: Any
 ) -> Optional[ModelProviderRow]:
     """Partially update a provider by id and return the fresh row.
 
@@ -426,6 +427,9 @@ def update_model_provider(
     either a serialized string or a Python list/dict.
     ``expected_revision`` rejects an observation fetched before any concurrent
     binding or capability edit, including writes made by another worker.
+    ``_auth_token_reencrypted`` is internal to the verified re-encryption plan:
+    the plaintext is known unchanged, but no single active master key can
+    compare the old and new ciphertexts. Preserve credential-bound state.
     """
     if "models_json" in kwargs:
         kwargs["models_json"] = _normalize_model_capabilities(kwargs["models_json"])
@@ -437,6 +441,7 @@ def update_model_provider(
         current = get_model_provider(provider_id, include_token=True) or {}
         key_changed = (
             "auth_token" in kwargs
+            and not _auth_token_reencrypted
             and not _same_secret(current.get("auth_token"), kwargs["auth_token"])
         )
         changed = key_changed or (
