@@ -253,6 +253,48 @@
 		return run.summary ?? `+${run.folded.length} previous tool ${run.folded.length === 1 ? 'call' : 'calls'}`;
 	}
 
+	/**
+	 * Keep an open run's sticky header inside its run. A sticky element is
+	 * bounded by its parent, and a run's rows sit in the turn's container
+	 * beside other rows, so CSS alone would keep the header stuck to the end
+	 * of the turn. Once the run's last row ("Show fewer log entries") rises to
+	 * the header's bottom edge, the header is translated up with it, the way
+	 * section headers hand over in a list; when it is fully off the line it
+	 * is marked `data-run-header-off`.
+	 */
+	const stickWithinRun: Action<HTMLElement, number> = (node, runIndex) => {
+		let current = runIndex;
+		let scroller: HTMLElement | null = null;
+		let frame = 0;
+		const place = () => {
+			frame = 0;
+			const end = sectionEl?.querySelector<HTMLElement>(`[data-run-end="${current}"]`);
+			const line = scroller?.getBoundingClientRect().top;
+			if (!end || line === undefined) {
+				node.style.transform = '';
+				node.removeAttribute('data-run-header-off');
+				return;
+			}
+			const height = node.offsetHeight || node.getBoundingClientRect().height || 0;
+			const overlap = end.getBoundingClientRect().bottom - (line + height);
+			node.style.transform = overlap < 0 ? `translateY(${Math.max(overlap, -height)}px)` : '';
+			node.toggleAttribute('data-run-header-off', overlap <= -height);
+		};
+		const schedule = () => {
+			if (!frame) frame = requestAnimationFrame(place);
+		};
+		scroller = scrollParent(node);
+		scroller?.addEventListener('scroll', schedule, { passive: true });
+		schedule();
+		return {
+			update(next: number) { current = next; schedule(); },
+			destroy() {
+				scroller?.removeEventListener('scroll', schedule);
+				if (frame) cancelAnimationFrame(frame);
+			}
+		};
+	};
+
 	// ── Row visibility ─────────────────────────────────────────────────────
 	function rowKey(entry: WorkLogEntry): string {
 		return entry.message.id ?? String(entry.index);
@@ -335,12 +377,15 @@
 				{@const visible = rowVisible(entry)}
 				{#if run && runEdges.first.get(run.index) === position}
 					{#if runOpen(run)}
-						<!-- The run's fold row heads it while open. Not sticky: a run's
-						     rows share the turn's container, so a stuck run header would
-						     ride over the rows after the run. -->
+						<!-- The run's fold row heads it while open and sticks (§7). A run's
+						     rows share the turn's container, so `stickWithinRun` pushes the
+						     header off the stuck line as the run's last row passes: it
+						     never rides over later rows and hands over to the next run's. -->
 						<button
 							type="button"
 							class="wlrow fold"
+							data-run-header={run.index}
+							use:stickWithinRun={run.index}
 							onclick={() => setRunOpen(run, false)}
 							aria-expanded="true"
 							aria-label={`Hide work details: ${runLabel(run)}`}
@@ -393,7 +438,7 @@
 					</div>
 				{/if}
 				{#if run && runEdges.last.get(run.index) === position && runOpen(run)}
-					<button type="button" class="wlrow fold" onclick={() => setRunOpen(run, false)} aria-expanded="true" aria-label="Hide work details">
+					<button type="button" class="wlrow fold" data-run-end={run.index} onclick={() => setRunOpen(run, false)} aria-expanded="true" aria-label="Hide work details">
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 							<path d="m18 15-6-6-6 6" />
 						</svg>
@@ -582,18 +627,21 @@
 	/* Spec §7: the open group's fold row is its header and stays at the top of
 	   the transcript while the group is on screen. The page background keeps
 	   rows from showing through it; hover lays the usual scrim over that. */
-	.wlrow.fold[data-fold-header] {
+	.wlrow.fold[data-fold-header],
+	.wlrow.fold[data-run-header] {
 		position: sticky;
 		top: 0;
 		z-index: 1;
 		background: var(--background);
 	}
 
-	.wlrow.fold[data-fold-header]:hover {
+	.wlrow.fold[data-fold-header]:hover,
+	.wlrow.fold[data-run-header]:hover {
 		background: linear-gradient(var(--scrim), var(--scrim)), var(--background);
 	}
 
-	.wlrow.fold[data-fold-header]:active {
+	.wlrow.fold[data-fold-header]:active,
+	.wlrow.fold[data-run-header]:active {
 		background: linear-gradient(var(--active-overlay, var(--scrim)), var(--active-overlay, var(--scrim))), var(--background);
 	}
 

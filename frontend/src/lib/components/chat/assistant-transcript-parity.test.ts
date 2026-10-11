@@ -114,3 +114,23 @@ describe('assistant home transcript parity', () => {
 		expect(messageArea).toMatch(/openSessionNeeds\(\s*\$activeSession,\s*chatPrefs\?\.groupToolCalls !== false,/);
 	});
 });
+
+describe('assistant home approval outcomes', () => {
+	// Carried over from the retired assistant-transcript.test.ts: an approval
+	// outcome the reader gave in words stays in line in a folded turn, and a
+	// started chat's raw report folds with the work. The shared protected-row
+	// rule decides both, as it did for the old assistant fold.
+	it('keeps an approved assistant_confirm outcome in line and folds a started chat report', () => {
+		const sys = (id: string, patch: Partial<ChatMessage>): ChatMessage => ({ id, role: 'system', type: 'system', content: '', ...patch });
+		const messages: ChatMessage[] = [
+			{ id: 'u1', role: 'user', type: 'text', content: 'push it', turnId: 't-u1' },
+			{ id: 't1', role: 'assistant', type: 'tool_use', toolName: 'Bash', toolId: 'tool-t1', toolInput: { command: 'git push' }, toolStatus: 'complete', toolResult: 'ok', content: '' },
+			sys('o', { systemSubtype: 'assistant_confirm', content: 'Authorized: Do you authorize me to run `git push`?', systemData: { decision: 'approved' } }),
+			sys('r', { systemSubtype: 'task_notification', systemData: { kind: 'session', status: 'completed', result: 'raw output' } }),
+			{ id: 'a1', role: 'assistant', type: 'text', content: 'Pushed. Checks are green.' }
+		];
+		const view = render(TranscriptItems, { items: model(messages, false).items, folds: createFoldState(memoryStorage()) });
+		expect(view.container.querySelector('section.worklog')?.getAttribute('data-work-log-mode')).toBe('settled');
+		expect(visibleRows(view.container)).toEqual(['u1', 'o', 'a1']);
+	});
+});

@@ -314,7 +314,7 @@ describe('WorkLogGroup', () => {
 			// The bottom row stays.
 			expect(screen.getByRole('button', { name: 'Hide work details' }).textContent).toContain('Show fewer log entries');
 			// The one layout rule the spec adds, on the existing fold row.
-			expect(source).toMatch(/\.wlrow\.fold\[data-fold-header\] \{\s*position: sticky;\s*top: 0;/);
+			expect(source).toMatch(/\.wlrow\.fold\[data-fold-header\],\s*\.wlrow\.fold\[data-run-header\] \{\s*position: sticky;\s*top: 0;/);
 		});
 
 		it('collapses the group when the header is clicked', async () => {
@@ -496,10 +496,13 @@ describe('WorkLogGroup', () => {
 			const view = render(WorkLogGroup, { ...logOf(true), folds });
 			expect(document.querySelector('[data-fold-header]')).toBeNull();
 			await fireEvent.click(screen.getByRole('button', { name: 'Show work details: Read 1 file' }));
-			// Live, the open run's fold row heads it (not sticky: see the component).
+			// Live, the open run's fold row heads it and sticks within the run.
 			const runHead = screen.getByRole('button', { name: 'Hide work details: Read 1 file' });
 			expect(runHead.getAttribute('aria-expanded')).toBe('true');
+			expect(runHead.hasAttribute('data-run-header')).toBe(true);
 			expect(runHead.hasAttribute('data-fold-header')).toBe(false);
+			const source = readFileSync(resolve(__dirname, 'WorkLogGroup.svelte'), 'utf8');
+			expect(source).toMatch(/\.wlrow\.fold\[data-fold-header\],\s*\.wlrow\.fold\[data-run-header\] \{\s*position: sticky;\s*top: 0;/);
 			const readA = rowEl('read-a');
 			const finding = rowEl('finding');
 
@@ -517,6 +520,61 @@ describe('WorkLogGroup', () => {
 			expect(shown('read-a')).toBe(false);
 			expect(document.querySelector('[data-fold-header]')).toBeNull();
 			expect(folds.isOpen('prompt:turn')).toBe(false);
+		});
+
+		it('keeps each open run sticky header inside its run, handing over to the next', async () => {
+			const frames: FrameRequestCallback[] = [];
+			const raf = globalThis.requestAnimationFrame;
+			globalThis.requestAnimationFrame = (cb) => { frames.push(cb); return frames.length; };
+			const flush = () => frames.splice(0).forEach((cb) => cb(0));
+			try {
+				const twoRuns: ChatMessage[] = [turn[0], ...turn.slice(1, 3), { ...message, id: 'read-c', content: 'Read C' },
+					{ id: 'worker', type: 'subagent', role: 'assistant', agentName: 'Reviewer', agentStatus: 'running', toolId: 'task-1' } as ChatMessage,
+					{ ...message, id: 'tail', content: 'Tail', toolStatus: 'running' as const, streaming: true }];
+				const scroller = document.createElement('div');
+				scroller.style.overflowY = 'auto';
+				document.body.appendChild(scroller);
+				const view = render(WorkLogGroup, { props: { ...logOf(true, twoRuns), folds: createFoldState(memoryStorage()) }, target: scroller });
+				for (const button of screen.getAllByRole('button', { name: /^Show work details/ })) await fireEvent.click(button);
+				const heads = [...view.container.querySelectorAll<HTMLElement>('[data-run-header]')];
+				const ends = [...view.container.querySelectorAll<HTMLElement>('[data-run-end]')];
+				expect(heads).toHaveLength(2);
+				expect(ends).toHaveLength(2);
+				const rect = (el: Element, top: number, bottom: number) =>
+					Object.defineProperty(el, 'getBoundingClientRect', { value: () => ({ top, bottom, height: bottom - top }), configurable: true });
+				heads.forEach((head) => Object.defineProperty(head, 'offsetHeight', { value: 32, configurable: true }));
+				rect(scroller, 0, 600);
+
+				// Inside run 1: its header is stuck at the top, run 2 is further down.
+				rect(ends[0], 0, 300);
+				rect(ends[1], 0, 900);
+				await fireEvent.scroll(scroller);
+				flush();
+				expect(heads[0].style.transform).toBe('');
+				expect(heads[0].hasAttribute('data-run-header-off')).toBe(false);
+
+				// Run 1's last row reaches the header: the header rides up with it.
+				rect(ends[0], 0, 20);
+				await fireEvent.scroll(scroller);
+				flush();
+				expect(heads[0].style.transform).toBe('translateY(-12px)');
+				expect(heads[0].hasAttribute('data-run-header-off')).toBe(false);
+
+				// Run 1 has scrolled past and run 2's header has taken over the line:
+				// run 1's header is fully off it and run 2's sits untouched.
+				rect(ends[0], 0, -200);
+				rect(ends[1], 0, 400);
+				await fireEvent.scroll(scroller);
+				flush();
+				expect(heads[0].style.transform).toBe('translateY(-32px)');
+				expect(heads[0].hasAttribute('data-run-header-off')).toBe(true);
+				expect(heads[1].style.transform).toBe('');
+				expect(heads[1].hasAttribute('data-run-header-off')).toBe(false);
+				view.unmount();
+				scroller.remove();
+			} finally {
+				globalThis.requestAnimationFrame = raf;
+			}
 		});
 
 		it('collapses an open live run from its header', async () => {
