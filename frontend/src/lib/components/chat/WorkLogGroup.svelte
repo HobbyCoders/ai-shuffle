@@ -204,7 +204,7 @@
 						data-user-turn-id={entry.message.id && isNavigableUserTurn(entry.message) ? entry.message.id : undefined}
 						use:observeTurnAnchor
 					>
-						{@render row(entry.message, entry.index, gallerySources)}
+						{@render row(entry.message, entry.index, entry.inGallery ? gallerySources : undefined)}
 					</div>
 				{/each}
 			</div>

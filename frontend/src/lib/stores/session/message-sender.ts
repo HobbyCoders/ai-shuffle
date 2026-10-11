@@ -14,6 +14,7 @@ import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecuti
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
 import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
+import { parkedSendTurnId } from '$lib/utils/work-log';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
 import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
@@ -537,6 +538,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					const baseMessages = s.messages;
 					// eslint-disable-next-line no-console
 					if (STREAM_DEBUG) console.log(`[AS] optimistic append A id=${userMsgId} prevLen=${baseMessages.length} "${prompt.slice(0, 30)}"`);
+					// A send into a parked turn is a steer: carry that turn's id so the
+					// transcript keeps it inside the turn instead of folding the turn.
+					const steerTurnId = parkedSendTurnId(s);
 					return {
 						...s,
 						messages: [...baseMessages, {
@@ -544,6 +548,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 							role: 'user' as const,
 							content: prompt,
 							profileId: queryProfileId,
+							...(steerTurnId ? { turnId: steerTurnId } : {}),
 							// V2 Phase 1: stamp the client-generated adoption token as the
 							// commandId so the SSE reducer can reconcile the eventual
 							// `message.user` event onto THIS optimistic row (in place, no

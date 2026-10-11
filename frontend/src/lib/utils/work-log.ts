@@ -34,6 +34,12 @@ export interface WorkLogEntry {
  */
 export interface WorkLogSequenceEntry extends WorkLogEntry {
 	hiddenWhenCollapsed: boolean;
+	/**
+	 * The row's media joined the fold's gallery, so a retained copy of it may
+	 * drop the duplicate. Rows after a steer never contribute, so they keep
+	 * every image even when it repeats one shown in the gallery.
+	 */
+	inGallery?: boolean;
 }
 
 export type DisplayItem =
@@ -100,6 +106,12 @@ export interface TranscriptModel {
 	lastAssistantMetadata: Record<string, unknown> | null;
 	/** Id of the last navigable user turn — the transcript's live anchor. */
 	latestUserTurnId: string | null;
+	/**
+	 * Ids of user messages steered into a turn already under way: same turn id
+	 * as the turn's opening prompt, but not that prompt. Their time line reads
+	 * "· mid-turn".
+	 */
+	midTurnUserIds: ReadonlySet<string>;
 }
 
 /**
@@ -513,6 +525,76 @@ function splitTurns(messages: Positioned[]): Positioned[][] {
 	return turns;
 }
 
+/** Stable identity of a turn: the row that opens it (what its fold is keyed by). */
+function turnKeyOf(turn: Positioned[]): string {
+	const first = turn[0];
+	return first.message.id ?? String(first.index);
+}
+
+/**
+ * Identity of the latest turn by the same rule as `splitTurns` and `turnKeyOf`,
+ * without building the transcript. The settle hand-off (settle-hold.ts) tracks
+ * it to notice the moment a send or wake opens a newer turn.
+ */
+export function latestTurnKey(messages: readonly ChatMessage[]): string | null {
+	let key: string | null = null;
+	let currentTurnId: string | undefined;
+	messages.forEach((message, index) => {
+		const idleAgentWake = !!agentDelivery(message) && message.metadata?.agent_wake === true;
+		const opens = idleAgentWake || (message.role === 'user' && !agentDelivery(message));
+		if (key === null || (opens && !(!idleAgentWake && !!message.turnId && message.turnId === currentTurnId))) {
+			key = message.id ?? String(index);
+			if (opens) currentTurnId = message.turnId;
+		}
+	});
+	return key;
+}
+
+/**
+ * The turn id an optimistic send should carry so `splitTurns` keeps it inside
+ * the turn it interrupts.
+ *
+ * Only for a send into a PARKED turn (not streaming, but background work still
+ * running): the turn is still going, so the message is a steer and must not
+ * open a turn of its own and fold everything above it. The id is the live turn
+ * when known, otherwise the id of the message that opened the latest turn —
+ * the same rule `splitTurns` uses — and only when that turn is the parked one:
+ * the reducer says so (`turnParked` is set by the park gate for the turn that
+ * just completed and cleared by the next `turn.started`), or a running task's
+ * launch row sits inside it. Running work launched by an EARLIER turn does not
+ * make the latest, completed turn parked. The server's `message.user` replaces
+ * the id once the backend has started the turn that carries the message (it
+ * follows that turn's `turn.started`), which is the only moment the row moves.
+ */
+export function parkedSendTurnId(state: {
+	isStreaming: boolean;
+	liveTurnId?: string | null;
+	turnParked?: boolean;
+	activeTasks?: readonly { status: string; toolUseId?: string | null }[];
+	messages: readonly ChatMessage[];
+}): string | undefined {
+	if (state.isStreaming) return undefined;
+	const runningLaunches = new Set(
+		(state.activeTasks ?? [])
+			.filter((task) => task.status === 'running' && !!task.toolUseId)
+			.map((task) => task.toolUseId as string)
+	);
+	if (state.turnParked !== true && runningLaunches.size === 0) return undefined;
+	if (state.liveTurnId) return state.liveTurnId;
+	let ownsRunningWork = false;
+	for (let index = state.messages.length - 1; index >= 0; index--) {
+		const message = state.messages[index];
+		const opensTurn = (!!agentDelivery(message) && message.metadata?.agent_wake === true) ||
+			(message.role === 'user' && !agentDelivery(message));
+		if (opensTurn) {
+			if (state.turnParked !== true && !ownsRunningWork) return undefined;
+			return message.turnId && message.turnId !== 'backfill' ? message.turnId : undefined;
+		}
+		if (message.toolId && runningLaunches.has(message.toolId)) ownsRunningWork = true;
+	}
+	return undefined;
+}
+
 /** Fold consecutive low-signal system messages without disturbing order. */
 function emitWithSystemGroups(entries: Positioned[], out: DisplayItem[]) {
 	let index = 0;
@@ -551,6 +633,18 @@ export interface BuildOptions {
 	 * omitted, legacy callers fall back to `isStreaming`.
 	 */
 	latestTurnUnsettled?: boolean;
+	/**
+	 * Launch tool ids of background work still running. A turn that launched
+	 * one has something pending, so it stays unsettled (flat) even after a
+	 * later turn opened — a send or wake must not fold work still in flight.
+	 */
+	runningToolIds?: ReadonlySet<string>;
+	/**
+	 * Turns (by opening row id, see `latestTurnKey`) still inside their settle
+	 * hold after a newer turn opened. A send during the hold must not cut it
+	 * short: the turn stays flat until its own hold runs out.
+	 */
+	heldTurnKeys?: ReadonlySet<string>;
 	/** User preference: false renders work rows flat, with no folds. */
 	groupingEnabled: boolean;
 	/** Session-scoped live/hydrated workflows, including updates before tool.result. */
@@ -644,6 +738,13 @@ export function buildDisplayItems(messages: ChatMessage[], options: BuildOptions
  * Never cache by message id: completed tools and late Swarm association can
  * change earlier rows, even while the final assistant paragraph streams.
  */
+function sameIds(a: ReadonlySet<string> | undefined, b: ReadonlySet<string> | undefined): boolean {
+	if (a === b) return true;
+	if ((a?.size ?? 0) !== (b?.size ?? 0)) return false;
+	for (const id of a ?? []) if (!b?.has(id)) return false;
+	return true;
+}
+
 export function createTranscriptModelBuilder() {
 	let previous: { messages: ChatMessage[]; options: BuildOptions; model: TranscriptModel } | undefined;
 	return (messages: ChatMessage[], options: BuildOptions): TranscriptModel => {
@@ -656,6 +757,8 @@ export function createTranscriptModelBuilder() {
 		const sameOptions = old && options.sessionId === old.options.sessionId
 			&& options.isStreaming === old.options.isStreaming
 			&& options.latestTurnUnsettled === old.options.latestTurnUnsettled
+			&& sameIds(options.runningToolIds, old.options.runningToolIds)
+			&& sameIds(options.heldTurnKeys, old.options.heldTurnKeys)
 			&& options.groupingEnabled === old.options.groupingEnabled
 			&& swarms.length === oldSwarms.length && swarms.every((s, i) => s === oldSwarms[i]);
 		let model: TranscriptModel;
@@ -736,6 +839,14 @@ export function buildTranscriptModel(
 
 	const items: DisplayItem[] = [];
 	const turns = splitTurns(positioned);
+	const midTurnUserIds = new Set<string>();
+	for (const turn of turns) {
+		const openingTurnId = turn[0]?.message.turnId;
+		if (!openingTurnId) continue;
+		for (const { message } of turn.slice(1)) {
+			if (message.id && message.turnId === openingTurnId && isNavigableUserTurn(message)) midTurnUserIds.add(message.id);
+		}
+	}
 
 	turns.forEach((turn, turnIndex) => {
 		if (!groupingEnabled) {
@@ -743,7 +854,11 @@ export function buildTranscriptModel(
 			return;
 		}
 
-		const unsettledTurn = latestTurnUnsettled && turnIndex === turns.length - 1;
+		const runningToolIds = options.runningToolIds;
+		const unsettledTurn =
+			(latestTurnUnsettled && turnIndex === turns.length - 1) ||
+			!!options.heldTurnKeys?.has(turnKeyOf(turn)) ||
+			(!!runningToolIds?.size && turn.some((entry) => !!entry.message.toolId && runningToolIds.has(entry.message.toolId)));
 		if (unsettledTurn) {
 			emitLiveTurn(turn, items);
 			return;
@@ -757,66 +872,82 @@ export function buildTranscriptModel(
 			return;
 		}
 
-		// A steer does not end the running turn, but it is a presentation boundary
-		// once that turn settles. Keep its work and media on the side they arrived.
+		// One turn, one fold. A steer does not end the turn, so it does not cut the
+		// settled presentation either: it stays a visible row in time order inside
+		// the turn's sequence, and the fold label and summary describe the whole turn.
 		const turnMessages = turn.map((entry) => entry.message);
 		const durationLabel = turnFoldLabel(turnMessages, turnWasInterrupted(turnMessages));
-		const segments: Positioned[][] = [[]];
-		for (const entry of turn) {
-			if (entry.message.role === 'user' && !agentDelivery(entry.message) && segments.at(-1)!.length > 0) segments.push([]);
-			segments.at(-1)!.push(entry);
+		const prefix = userIndex < 0 ? [] : turn.slice(0, 1);
+		const response = turn.slice(prefix.length);
+		const isSteer = (entry: Positioned) => entry.message.role === 'user' && !agentDelivery(entry.message);
+		// The fold renders its gallery above the rows it keeps, so only media from
+		// before the first steer may join it; later media stays in its own rows,
+		// in time order below the steer.
+		const firstSteer = response.findIndex(isSteer);
+		const galleryRows = firstSteer < 0 ? response : response.slice(0, firstSteer);
+		const gallery = galleryMediaForTurn(galleryRows.map((entry) => entry.message), options.sessionId);
+		const galleryEntries = new Set(gallery.length > 1 ? galleryRows : []);
+		// The last prose before each steer is the answer the steer replied to, and
+		// the last prose of the turn is its answer: both stay on screen.
+		const terminalAssistants = new Set<Positioned>();
+		let lastProse: Positioned | null = null;
+		for (const entry of response) {
+			if (isSteer(entry)) {
+				if (lastProse) terminalAssistants.add(lastProse);
+				lastProse = null;
+			} else if (isAssistantText(entry.message)) {
+				lastProse = entry;
+			}
 		}
-		for (const segment of segments) {
-			const prefix = userIndex < 0 ? [] : segment.slice(0, 1);
-			const response = segment.slice(prefix.length);
-			const gallery = galleryMediaForTurn(response.map((entry) => entry.message), options.sessionId);
-			const terminalAssistant = response.findLast((entry) => isAssistantText(entry.message)) ?? null;
-			// A compaction card the turn worked past is mid-turn; one trailing the
-			// answer (an idle or manual /compact) keeps its own row.
-			const lastWork = response.findLastIndex((entry) => isTurnWork(entry.message));
-			const midTurnCompactions = new Set(
-				response.filter((entry, i) => i < lastWork && isCompactionCard(entry.message))
-			);
-			const shouldHide = (entry: Positioned) =>
-				isCompletedRoutineWork(entry.message, gallery.length > 1) ||
+		if (lastProse) terminalAssistants.add(lastProse);
+		// A compaction card the turn worked past is mid-turn; one trailing the
+		// answer (an idle or manual /compact) keeps its own row.
+		const lastWork = response.findLastIndex((entry) => isTurnWork(entry.message));
+		const midTurnCompactions = new Set(
+			response.filter((entry, i) => i < lastWork && isCompactionCard(entry.message))
+		);
+		const shouldHide = (entry: Positioned) =>
+			!isSteer(entry) && (
+				isCompletedRoutineWork(entry.message, galleryEntries.has(entry)) ||
 				isGroupableSystem(entry.message) ||
 				midTurnCompactions.has(entry) ||
 				entry.message.type === 'tool_result' ||
-				(isAssistantText(entry.message) && !entry.message.streaming && entry !== terminalAssistant);
-			const folded = response
-				.filter(shouldHide)
-				.map((entry) => ({ message: entry.message, index: entry.index }));
+				(isAssistantText(entry.message) && !entry.message.streaming && !terminalAssistants.has(entry))
+			);
+		const folded = response
+			.filter(shouldHide)
+			.map((entry) => ({ message: entry.message, index: entry.index }));
 
-			if (folded.length === 0 && gallery.length === 0) {
-				emitWithSystemGroups(segment, items);
-				continue;
-			}
-
-			// User prompts stay outside disclosures, including steers. The duration
-			// still describes the logical turn; summaries count only this segment.
-			emitWithSystemGroups(prefix, items);
-			// Keyed by the prompt that opens the segment, which never changes. Keying
-			// by the first folded row remounted the group (collapsing an open log and
-			// replaying its settle animation) whenever a late tool result or a
-			// finished delegation folded an earlier row.
-			const anchor = prefix[0] ?? folded[0] ?? response[0];
-			items.push({
-				kind: 'work_log',
-				key: `wl-turn-${anchor.message.id ?? anchor.index}`,
-				gallery,
-				mode: 'settled',
-				folded,
-				tail: [],
-				sequence: response.map((entry) => ({
-					message: entry.message,
-					index: entry.index,
-					hiddenWhenCollapsed: shouldHide(entry)
-				})),
-				durationLabel,
-				summary: summarizeWork(folded),
-				compactSummary: summarizeWorkCompact(folded)
-			});
+		if (folded.length === 0 && gallery.length === 0) {
+			emitWithSystemGroups(turn, items);
+			return;
 		}
+
+		// The opening prompt stays outside the disclosure; steers ride inside the
+		// sequence as protected rows (WorkLogGroup re-emits their turn anchors).
+		emitWithSystemGroups(prefix, items);
+		// Keyed by the prompt that opens the turn, which never changes. Keying by
+		// the first folded row remounted the group (collapsing an open log and
+		// replaying its settle animation) whenever a late tool result or a
+		// finished delegation folded an earlier row.
+		const anchor = prefix[0] ?? folded[0] ?? response[0];
+		items.push({
+			kind: 'work_log',
+			key: `wl-turn-${anchor.message.id ?? anchor.index}`,
+			gallery,
+			mode: 'settled',
+			folded,
+			tail: [],
+			sequence: response.map((entry) => ({
+				message: entry.message,
+				index: entry.index,
+				hiddenWhenCollapsed: shouldHide(entry),
+				...(galleryEntries.has(entry) ? { inGallery: true } : {})
+			})),
+			durationLabel,
+			summary: summarizeWork(folded),
+			compactSummary: summarizeWorkCompact(folded)
+		});
 	});
 
 	// Turn navigation jumps by message id; windowed mounting needs to know which
@@ -839,6 +970,7 @@ export function buildTranscriptModel(
 		subagentToolIds,
 		itemIndexByTurnId,
 		lastAssistantMetadata,
-		latestUserTurnId
+		latestUserTurnId,
+		midTurnUserIds
 	};
 }

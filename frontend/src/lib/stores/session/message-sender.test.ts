@@ -605,6 +605,54 @@ describe('message-sender send during a live turn', () => {
 		expect(getState().messages).toHaveLength(2);
 		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
 		expect(querySends).toHaveLength(1);
+		// Nothing parked: the send opens its own turn.
+		expect(getState().messages[1].turnId).toBeUndefined();
+	});
+
+	it('carries the parked turn id on a send while background work runs', async () => {
+		const { deps, getState } = makeDeps(baseState({
+			worktreeIntent: 'local',
+			sessionId: 'ses-1',
+			isStreaming: false,
+			liveTurnId: null,
+			turnParked: true,
+			activeTasks: [{ id: 'task-1', status: 'running', toolUseId: 'monitor-1' }],
+			title: 'Existing chat',
+			messages: [
+				{ id: 'u0', role: 'user', content: 'watch the deploy', turnId: 'turn-1' } as any,
+				{ id: 'a0', role: 'assistant', type: 'tool_use', toolName: 'Monitor', toolId: 'monitor-1', content: '' } as any,
+			],
+		} as Partial<ActiveSessionState>));
+		const sender = createMessageSender(deps);
+
+		expect(await sender.sendMessage('ping me when done')).toBe(true);
+
+		const appended = getState().messages.at(-1)!;
+		expect(appended.content).toBe('ping me when done');
+		expect(appended.turnId).toBe('turn-1');
+	});
+
+	it('does not attach a send to a completed turn because an earlier turn still has work running', async () => {
+		const { deps, getState } = makeDeps(baseState({
+			worktreeIntent: 'local',
+			sessionId: 'ses-1',
+			isStreaming: false,
+			liveTurnId: null,
+			turnParked: false,
+			activeTasks: [{ id: 'task-1', status: 'running', toolUseId: 'monitor-1' }],
+			title: 'Existing chat',
+			messages: [
+				{ id: 'u0', role: 'user', content: 'watch the deploy', turnId: 'turn-1' } as any,
+				{ id: 'a0', role: 'assistant', type: 'tool_use', toolName: 'Monitor', toolId: 'monitor-1', content: '' } as any,
+				{ id: 'u1', role: 'user', content: 'now the docs', turnId: 'turn-2' } as any,
+				{ id: 'a1', role: 'assistant', type: 'text', content: 'Docs done.' } as any,
+			],
+		} as Partial<ActiveSessionState>));
+		const sender = createMessageSender(deps);
+
+		expect(await sender.sendMessage('next thing')).toBe(true);
+
+		expect(getState().messages.at(-1)!.turnId).toBeUndefined();
 	});
 });
 

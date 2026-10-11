@@ -52,7 +52,11 @@ describe('MessageArea per-row props', () => {
 
 describe('MessageArea settle hold', () => {
 	it('groups the transcript with the held lifecycle, not the raw signals', () => {
-		expect(source).toContain("import { createSettleHold } from '$lib/utils/settle-hold';");
+		expect(source).toContain("import { createSettleHold, createTurnHandoffHold } from '$lib/utils/settle-hold';");
+		// A send during the hold opens a new turn; the interrupted turn keeps
+		// its hold through the hand-off set instead of folding at once.
+		expect(source).toContain('onDestroy(() => turnHandoff.dispose());');
+		expect(source).toContain('heldTurnKeys: heldKeys,');
 		expect(source).toMatch(/const latestTurnUnsettled = \$derived\.by\(\(\) => \{\s*void settleHoldTick;\s*return settleHold\.update\(\{/);
 		expect(source).toContain('unsettled: rawLatestTurnUnsettled,');
 		expect(source).toContain("parked: $activeSession.turnParked === true");
